@@ -104,6 +104,16 @@ class MplCanvas(QWidget):
     _TICK_LENGTH = 5.5
     _TICK_WIDTH = 1.4
 
+    #: Max pixel movement between a click and its release still counted
+    #: as a click (row-select in a "Stacked" Compare view -- see
+    #: _on_release) rather than a pan drag.
+    _CLICK_DRAG_TOLERANCE_PX = 3
+
+    #: Background tint for the selected row in a "Stacked" Compare view
+    #: (see _apply_compare_selection_highlight) -- a light, unobtrusive
+    #: highlight against the default white axes background.
+    _COMPARE_SELECTED_FACECOLOR = "#fff3b0"
+
     #: Emitted with the clicked x-data value when pick mode is on (see
     #: :func:`set_pick_mode`) -- used by the Analysis tab's "Pick peaks
     #: by clicking" to add a peak at the clicked shift without needing
@@ -190,13 +200,22 @@ class MplCanvas(QWidget):
         # per spectrum, sharing x, each with its own independent
         # y-autoscale) -- None for every other view, including a
         # "Superimposed" Compare (one shared axes, same as any other
-        # single-ax view). Lets scroll-zoom hit whichever row the
-        # cursor is actually over via its own real event.inaxes,
-        # rather than one shared y-scale that would otherwise stretch
-        # the visual gap between every OTHER row's baseline too --
-        # see show_compare's own docstring for why that's a problem a
-        # single shared axes can't solve at all, only work around.
+        # single-ax view). Each row keeps its own baseline fixed under
+        # a y-zoom (a single shared axes can't do that at all -- see
+        # show_compare's own docstring) while still letting scroll-zoom
+        # scale every row together by default (see _on_scroll and
+        # _selected_compare_index right below).
         self._compare_axes: list | None = None
+        # Which row of a "Stacked" Compare view (an index into
+        # _compare_axes) scroll-zoom targets on its own, decoupled from
+        # the rest -- None (the default, and reset on every fresh
+        # show_compare/clear) means scroll-zoom over ANY row scales
+        # every row together instead, by the same relative factor,
+        # each still pinned at its own baseline. Set/cleared by
+        # clicking a row (see _on_release/_toggle_compare_selection);
+        # _apply_compare_selection_highlight shows which one, if any,
+        # via a tinted background.
+        self._selected_compare_index: int | None = None
         # True only while show_relaxation_fit's plot is the current
         # view -- gates the right-click "Exclude Nearest Point"/"Reset
         # Excluded Points" actions (see _on_context_menu) and the
@@ -278,6 +297,26 @@ class MplCanvas(QWidget):
 
         if event.ydata is None:
             return
+
+        if self._compare_axes:
+            # Every row together by the same relative factor (each
+            # still pinned at its own baseline) unless one row has
+            # been clicked to select it -- see _selected_compare_index's
+            # own docstring for why "together" is the right default
+            # (a quick, expected "zoom the whole stack in/out"
+            # gesture) with per-row as the opt-in exception, not the
+            # other way around.
+            target_axes = (
+                [self._compare_axes[self._selected_compare_index]]
+                if self._selected_compare_index is not None
+                else self._compare_axes
+            )
+            for row_ax in target_axes:
+                row_ymin, row_ymax = row_ax.get_ylim()
+                row_ax.set_ylim(row_ymin, row_ymin + (row_ymax - row_ymin) * factor)
+            self.canvas.draw_idle()
+            return
+
         ymin, ymax = ax.get_ylim()
         ax.set_ylim(ymin, ymin + (ymax - ymin) * factor)
         self.canvas.draw_idle()
@@ -429,7 +468,35 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def _on_release(self, event) -> None:
+        if self._pan_start is not None and self._compare_axes:
+            x0, y0, _xlim, _ylim, start_ax = self._pan_start
+            if (
+                event.x is not None and event.y is not None
+                and abs(event.x - x0) <= self._CLICK_DRAG_TOLERANCE_PX
+                and abs(event.y - y0) <= self._CLICK_DRAG_TOLERANCE_PX
+                and start_ax in self._compare_axes
+            ):
+                self._toggle_compare_selection(start_ax)
         self._pan_start = None
+
+    def _toggle_compare_selection(self, ax) -> None:
+        """Click a row of a "Stacked" Compare view to make scroll-zoom
+        target just that row from now on, decoupled from the rest (see
+        _selected_compare_index) -- click the same row again to
+        de-select and go back to zooming every row together; click a
+        different row to switch which one is selected."""
+        index = self._compare_axes.index(ax)
+        self._selected_compare_index = None if self._selected_compare_index == index else index
+        self._apply_compare_selection_highlight()
+        self.canvas.draw_idle()
+
+    def _apply_compare_selection_highlight(self) -> None:
+        """Tint whichever row is selected (if any) so it's obvious at
+        a glance which one scroll-zoom currently targets on its own."""
+        if not self._compare_axes:
+            return
+        for i, row_ax in enumerate(self._compare_axes):
+            row_ax.set_facecolor(self._COMPARE_SELECTED_FACECOLOR if i == self._selected_compare_index else "none")
 
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -702,6 +769,7 @@ class MplCanvas(QWidget):
         self._proj_axes = {"f1": None, "f2": None}
         self._compare_axes = None
         self._fit_mode = False
+        self._selected_compare_index = None
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -721,6 +789,7 @@ class MplCanvas(QWidget):
             self._proj_axes = {"f1": None, "f2": None}
             self._compare_axes = None
             self._fit_mode = False
+            self._selected_compare_index = None
             self._current_1d_spectrum = spectrum
             self._axis_unit = "ppm"  # a fresh spectrum always starts in ppm
             self.ax = self.figure.add_subplot(111)
@@ -793,6 +862,7 @@ class MplCanvas(QWidget):
         self._proj_axes = {"f1": None, "f2": None}
         self._compare_axes = None
         self._fit_mode = False
+        self._selected_compare_index = None
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -823,6 +893,70 @@ class MplCanvas(QWidget):
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
+    def show_processing_preview(self, fid, dt: float, spectrum: NMRSpectrum, *, title: str = "",
+                                 window_envelope=None, tdeff_index: int | None = None,
+                                 echo_top_index: float | None = None, fid_mode: str = "magnitude") -> None:
+        """The Processing tab's own live dual view: the FID (top,
+        exactly like :meth:`show_fid`'s own overlays) and a downsampled
+        preview of what FFT'ing it with the currently-dialed-in
+        settings would look like (bottom) -- a *speculative* preview of
+        a not-yet-applied choice, always shown here, distinct from the
+        FID and Spectrum canvas tabs (which only ever show the
+        actually-loaded spectrum, i.e. the real result of the last
+        "Apply Processing"/selection -- explicit user feedback that
+        conflating the two, by having this live-tweak preview
+        temporarily commandeer the FID tab, made those tabs unreliable
+        for their own actual job, e.g. judging a live phase drag).
+
+        Always downsampled (regardless of :attr:`_full_resolution`) --
+        this view is about responsiveness while tweaking, not final
+        inspection; the committed Spectrum tab view is unaffected and
+        stays full-resolution as normal."""
+        self._contour_spectrum = None
+        self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = False
+        self._selected_compare_index = None
+        self._current_1d_spectrum = None
+        self.figure.clear()
+        fid_ax, spec_ax = self.figure.subplots(2, 1)
+        self.ax = spec_ax
+
+        t = np.arange(len(fid)) * dt
+        if fid_mode not in ("magnitude", "real"):
+            raise ValueError("fid_mode must be 'magnitude' or 'real'")
+        y = np.real(fid) if fid_mode == "real" else np.abs(fid)
+        fid_ax.plot(t, y, color="black", linewidth=1.0)
+        if window_envelope is not None:
+            peak = np.max(np.abs(fid)) if len(fid) else 0.0
+            fid_ax.plot(t, np.asarray(window_envelope) * peak, "--", color="gray", linewidth=1.0, zorder=0)
+        if tdeff_index is not None and 0 < tdeff_index < len(fid):
+            fid_ax.axvline(tdeff_index * dt, linestyle="--", color="red")
+        if echo_top_index is not None and 0 <= echo_top_index < len(fid):
+            fid_ax.axvline(echo_top_index * dt, linestyle="--", color="green")
+        fid_ax.set_ylabel("FID", fontsize=self._AXIS_LABELSIZE)
+        if title:
+            fid_ax.set_title(title, fontsize=self._AXIS_LABELSIZE)
+        plotting.apply_spine_style(fid_ax, top=False, right=False, bottom=True, left=True,
+                                    linewidth=self._AXIS_LINEWIDTH)
+        plotting.apply_tick_style(fid_ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                   labelsize=self._AXIS_LABELSIZE)
+
+        xmin, xmax, labeltext = plotting.plot_1d(spec_ax, spectrum, full_resolution=False)
+        spec_ax.set_xlim(xmin, xmax)
+        spec_ax.invert_xaxis()
+        spec_ax.set_xlabel(labeltext, fontsize=self._AXIS_LABELSIZE)
+        spec_ax.set_yticks([])
+        plotting.apply_spine_style(spec_ax, top=False, right=False, bottom=True, left=False,
+                                    linewidth=self._AXIS_LINEWIDTH)
+        plotting.apply_tick_style(spec_ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                   labelsize=self._AXIS_LABELSIZE)
+
+        self._apply_view_options()
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
     def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack",
                       y_offset: float = 0.2, normalize: bool = False) -> None:
         """Plot several 1D spectra together for comparison.
@@ -848,16 +982,21 @@ class MplCanvas(QWidget):
         data actually moved (reported directly as "when I rescale on
         the compare plot, it should keep each baseline in place").
         Separate subplots don't have this problem: each one's own
-        y-zoom (see :meth:`_on_scroll`, unchanged -- it already zooms
-        whichever axes ``event.inaxes`` actually is) only ever touches
-        that one subplot's own range, so every other trace's baseline
-        -- literally a different axes' own y=0 -- can't move as a side
-        effect."""
+        y-zoom only ever touches that one subplot's own range, so
+        every other trace's baseline -- literally a different axes'
+        own y=0 -- can't move as a side effect. By default
+        :meth:`_on_scroll` still zooms every row *together* (each by
+        the same relative factor, still individually pinned at its own
+        baseline) -- a linked-unless-selected model, not fully
+        independent: click a row first (see
+        :meth:`_toggle_compare_selection`, wired from :meth:`_on_release`)
+        to zoom just that one on its own instead."""
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
         self._compare_axes = None
         self._fit_mode = False
+        self._selected_compare_index = None
         self._current_1d_spectrum = None
         self.figure.clear()
 
@@ -929,6 +1068,7 @@ class MplCanvas(QWidget):
         self._proj_axes = {"f1": None, "f2": None}
         self._compare_axes = None
         self._fit_mode = False
+        self._selected_compare_index = None
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -1000,6 +1140,7 @@ class MplCanvas(QWidget):
         self._proj_axes = {"f1": None, "f2": None}
         self._compare_axes = None
         self._fit_mode = True
+        self._selected_compare_index = None
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)

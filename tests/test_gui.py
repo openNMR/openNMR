@@ -4,7 +4,7 @@ import os
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QSplitter
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QPushButton, QSplitter
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.main_window import MainWindow
@@ -1286,6 +1286,109 @@ def test_main_window_fid_preview_tracks_selected_slice(qapp, tmp_path, monkeypat
 
     window.slice_spin.setValue(3)
     assert window.fid_canvas.ax.get_title() == "Slice 3"
+
+
+# ============================================================
+# Processing tab's own live dual preview (FID + downsampled spectrum)
+# ============================================================
+
+def test_main_window_apply_processing_button_has_simple_label(qapp):
+    # Explicit user feedback: "Reprocess from raw FID" was confusing
+    # wording -- renamed to something plainer.
+    window = MainWindow()
+    buttons = window.fid_processing_box.findChildren(QPushButton)
+    assert any(b.text() == "Apply Processing" for b in buttons)
+    assert not any("Reprocess" in b.text() for b in buttons)
+
+
+def test_main_window_selecting_processing_tab_shows_processing_preview(qapp, tmp_path, monkeypatch):
+    # Explicit user request: while on the Processing tab, the canvas
+    # should switch over to its own dual FID+spectrum preview
+    # automatically, unprompted.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch), vendor="bruker")
+
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+    fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    assert len(fid_ax.lines) >= 1
+    assert len(spec_ax.lines) == 1
+
+
+def test_main_window_leaving_processing_tab_switches_back_to_spectrum(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+
+    window.side_tabs.setCurrentIndex(0)  # back to Spectra
+    assert window.canvas_tabs.currentWidget() is window.canvas
+
+
+def test_main_window_leaving_processing_tab_respects_manual_canvas_choice(qapp, tmp_path, monkeypatch):
+    # If the user manually navigated elsewhere (e.g. FID) while still
+    # on the Processing tab, leaving it shouldn't yank them away from
+    # that choice -- only switch back if the preview was actually the
+    # one showing.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    window.canvas_tabs.setCurrentWidget(window.fid_canvas)
+
+    window.side_tabs.setCurrentIndex(0)
+    assert window.canvas_tabs.currentWidget() is window.fid_canvas
+
+
+def test_main_window_processing_preview_hidden_for_non_reprocessable_spectrum(qapp, tmp_path):
+    # A plain (already-processed, no raw fid/ser) Bruker spectrum has
+    # nothing for the FID-processing box to preview -- same gate as
+    # that box's own visibility.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    index = window.canvas_tabs.indexOf(window.processing_preview_canvas)
+    assert window.canvas_tabs.isTabVisible(index) is False
+
+
+def test_main_window_processing_preview_tracks_selected_slice(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+
+    window.slice_spin.setValue(3)
+    fid_ax, _spec_ax = window.processing_preview_canvas.figure.axes
+    assert fid_ax.get_title() == "Slice 3"
+
+
+def test_main_window_processing_preview_updates_live_without_committing(qapp, tmp_path, monkeypatch):
+    # The whole point of this preview -- tweaking a FID-processing
+    # control (without clicking "Apply Processing") should visibly
+    # change the preview...
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window._set_zero_fill_value(64)
+    index = window._selected_index()
+    spectrum_data_before = window.session.spectra[index].data.copy()
+    canvas_ydata_before = window.canvas.ax.lines[0].get_ydata().copy()
+
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    preview_before = spec_ax.lines[0].get_ydata().copy()
+
+    hann_row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "hann")
+    window.window_combo.setCurrentIndex(hann_row)
+
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    preview_after = spec_ax.lines[0].get_ydata()
+    assert not np.allclose(preview_before, preview_after)
+
+    # ...but must NOT have touched the actually-loaded spectrum, or
+    # the FID/Spectrum tabs -- explicit user feedback that those
+    # should only ever show "the results of the processing", never a
+    # not-yet-applied speculative preview.
+    np.testing.assert_allclose(window.session.spectra[index].data, spectrum_data_before)
+    np.testing.assert_allclose(window.canvas.ax.lines[0].get_ydata(), canvas_ydata_before)
 
 
 # ============================================================
@@ -2647,16 +2750,19 @@ def test_main_window_left_panel_has_a_usable_minimum_width(qapp):
 # Multi-canvas plot tabs (Spectrum / FID / Compare / Fit)
 # ============================================================
 
-def test_main_window_has_five_canvas_tabs(qapp):
+def test_main_window_has_six_canvas_tabs(qapp):
     window = MainWindow()
     labels = [window.canvas_tabs.tabText(i) for i in range(window.canvas_tabs.count())]
-    assert labels == ["FID", "Spectrum", "Spectral Fit", "Fit", "Compare"]
+    assert labels == ["FID", "Processing Preview", "Spectrum", "Spectral Fit", "Fit", "Compare"]
     assert window.canvas_tabs.widget(0) is window.fid_canvas
-    assert window.canvas_tabs.widget(1) is window.canvas
-    # Fit/Compare start hidden -- nothing to show until a pseudo-2D
-    # spectrum is selected, or the Compare list has an entry.
+    assert window.canvas_tabs.widget(1) is window.processing_preview_canvas
+    assert window.canvas_tabs.widget(2) is window.canvas
+    # Fit/Compare/Processing Preview start hidden -- nothing to show
+    # until a pseudo-2D spectrum is selected, the Compare list has an
+    # entry, or a FID-reprocessable spectrum is selected, respectively.
     assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.fit_canvas)) is False
     assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.compare_canvas)) is False
+    assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.processing_preview_canvas)) is False
 
 
 def test_main_window_selecting_spectrum_switches_to_spectrum_tab(qapp, tmp_path):
@@ -2670,7 +2776,7 @@ def test_main_window_selecting_spectrum_switches_to_spectrum_tab(qapp, tmp_path)
     assert window.canvas_tabs.currentWidget() is window.canvas
 
 
-def test_main_window_clear_clears_all_five_canvases(qapp, tmp_path, monkeypatch):
+def test_main_window_clear_clears_all_six_canvases(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, name="a"), vendor="bruker")
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
@@ -2680,7 +2786,8 @@ def test_main_window_clear_clears_all_five_canvases(qapp, tmp_path, monkeypatch)
     window._on_clear_clicked()
 
     for canvas in (
-        window.canvas, window.fid_canvas, window.compare_canvas, window.fit_canvas, window.spectral_fit_canvas,
+        window.canvas, window.fid_canvas, window.processing_preview_canvas,
+        window.compare_canvas, window.fit_canvas, window.spectral_fit_canvas,
     ):
         assert len(canvas.ax.lines) == 0
 
@@ -2728,17 +2835,21 @@ def test_main_window_pseudo2d_stacked_view_shows_all_slices(qapp, tmp_path):
     assert window.canvas_tabs.currentWidget() is window.canvas
 
 
-def test_main_window_pseudo2d_view_resets_to_stacked_on_reselection(qapp, tmp_path):
-    # Stacked slices is now the default view for a fresh pseudo-2D
-    # selection (explicit user request), not Contour.
+def test_main_window_pseudo2d_view_resets_to_contour_on_reselection(qapp, tmp_path):
+    # Contour is the default view for a fresh pseudo-2D selection --
+    # explicit user feedback: the Spectrum tab is also where phasing
+    # happens, which needs a plain single-slice/contour view, not the
+    # multi-axes Compare-style "Stacked slices" plot. Runs
+    # unconditionally on every reselection, so a Stacked choice left
+    # over from a previous spectrum is overridden, not carried forward.
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8, name="a"), vendor="bruker")
-    window.pseudo2d_view_combo.setCurrentIndex(0)  # Contour
+    window.pseudo2d_view_combo.setCurrentIndex(1)  # Stacked slices
 
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     window._select_single_row(0)
 
-    assert window.pseudo2d_view_combo.currentIndex() == 1
+    assert window.pseudo2d_view_combo.currentIndex() == 0
 
 
 # ============================================================

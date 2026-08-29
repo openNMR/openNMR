@@ -794,27 +794,83 @@ def test_show_compare_stack_shares_x_axis(qapp):
     assert canvas._compare_axes[2].get_xlim() == pytest.approx((1, 2))
 
 
-def test_show_compare_stack_rescale_keeps_other_baselines_fixed(qapp):
-    # The actual explicit user request: rescaling (zooming) one trace
-    # in the Compare stack must not move any OTHER trace's baseline --
-    # each row is now its own independent axes, so its own y-zoom
-    # can't touch any other row's y-range at all.
+def test_show_compare_stack_scroll_zooms_every_row_together_by_default(qapp):
+    # Explicit user request: scroll-zoom on a "Stacked" Compare view
+    # should be LINKED across every row by default (a quick "zoom the
+    # whole stack in/out" gesture) -- each row is its own independent
+    # axes (so each keeps its own baseline pinned, unaffected by the
+    # others' own heights), but scrolling over any one of them zooms
+    # all of them together unless a row has been selected first (see
+    # test_show_compare_stack_click_row_then_scroll_zooms_only_that_row).
     canvas = MplCanvas()
     specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
     canvas.show_compare(specs, mode="stack")
     canvas.canvas.draw()
     top_ax, middle_ax, bottom_ax = canvas._compare_axes
+    before = {ax: ax.get_ylim() for ax in (top_ax, middle_ax, bottom_ax)}
+
+    canvas._on_scroll(_body_scroll_event(top_ax, xdata=3.0, ydata=before[top_ax][0], button="up"))
+
+    for ax in (top_ax, middle_ax, bottom_ax):
+        ylim_before = before[ax]
+        range_before = ylim_before[1] - ylim_before[0]
+        range_after = ax.get_ylim()[1] - ax.get_ylim()[0]
+        assert range_after < range_before  # every row zoomed, not just the hovered one
+        assert ax.get_ylim()[0] == pytest.approx(ylim_before[0])  # each row's own baseline stays pinned
+
+
+def test_show_compare_stack_click_row_then_scroll_zooms_only_that_row(qapp):
+    # Clicking a row first decouples it from the linked-by-default
+    # scroll-zoom above -- the explicit "some kind of clickable thing
+    # per spectrum" request, recovering the original "keep every OTHER
+    # baseline fixed" guarantee behind an opt-in instead of it being
+    # unconditional.
+    canvas = MplCanvas()
+    specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
+    canvas.show_compare(specs, mode="stack")
+    canvas.canvas.draw()
+    canvas.toolbar.mode = ""
+    top_ax, middle_ax, bottom_ax = canvas._compare_axes
+
+    # A plain click (press+release with no real movement) on the top
+    # row selects it.
+    canvas._on_press(SimpleNamespace(inaxes=top_ax, button=1, x=100, y=100))
+    canvas._on_release(SimpleNamespace(x=100, y=100))
+    assert canvas._selected_compare_index == 0
+    assert top_ax.get_facecolor() != middle_ax.get_facecolor()  # visibly highlighted
+
     top_ylim_before = top_ax.get_ylim()
     middle_ylim_before = middle_ax.get_ylim()
     bottom_ylim_before = bottom_ax.get_ylim()
 
-    canvas._on_scroll(_body_scroll_event(top_ax, xdata=3.0, ydata=top_ylim_before[0], button="up"))
+    # Scrolling while hovering a DIFFERENT (unselected) row still
+    # targets the selected one, not whichever row the cursor is
+    # actually over.
+    canvas._on_scroll(_body_scroll_event(bottom_ax, xdata=7.0, ydata=bottom_ylim_before[0], button="up"))
 
-    top_range_before = top_ylim_before[1] - top_ylim_before[0]
-    top_range_after = top_ax.get_ylim()[1] - top_ax.get_ylim()[0]
-    assert top_range_after < top_range_before  # the scrolled-over row actually zoomed
-    assert middle_ax.get_ylim() == pytest.approx(middle_ylim_before)  # every OTHER row untouched
+    assert top_ax.get_ylim() != pytest.approx(top_ylim_before)
+    assert middle_ax.get_ylim() == pytest.approx(middle_ylim_before)
     assert bottom_ax.get_ylim() == pytest.approx(bottom_ylim_before)
+
+    # Clicking the same row again de-selects it, back to linked zoom.
+    canvas._on_press(SimpleNamespace(inaxes=top_ax, button=1, x=100, y=100))
+    canvas._on_release(SimpleNamespace(x=100, y=100))
+    assert canvas._selected_compare_index is None
+
+
+def test_show_compare_stack_drag_does_not_select_a_row(qapp):
+    # A real pan drag (press then release somewhere else) must not
+    # also be treated as a row-select click.
+    canvas = MplCanvas()
+    specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
+    canvas.show_compare(specs, mode="stack")
+    canvas.canvas.draw()
+    canvas.toolbar.mode = ""
+    top_ax = canvas._compare_axes[0]
+
+    canvas._on_press(SimpleNamespace(inaxes=top_ax, button=1, x=100, y=100))
+    canvas._on_release(SimpleNamespace(x=140, y=100))
+    assert canvas._selected_compare_index is None
 
 
 def test_show_compare_overlay_still_uses_one_shared_axes(qapp):

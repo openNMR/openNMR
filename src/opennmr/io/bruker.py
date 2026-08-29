@@ -298,7 +298,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     ``pivot_frac`` : applied (via :func:`opennmr.processing.ft.apply_phase`,
     uniformly across F2) whenever ``autophase=False`` -- lets a
     manually-dialed-in phase correction (from the GUI's Phase tab)
-    survive a "Reprocess from raw FID" instead of being silently reset
+    survive an "Apply Processing" click instead of being silently reset
     to 0/re-autophased. If both ``autophase=True`` and a nonzero
     ``phase1`` are given, ``phase0`` is still recomputed by ``apc0``
     but ``phase1``/``pivot_frac`` are applied on top of it (``apc0``

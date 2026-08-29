@@ -47,13 +47,29 @@ class Session:
         :func:`set_nucleus`) is preserved across the reload."""
         info = self._load_info[index]
         info["kwargs"] = {**info["kwargs"], **override_kwargs}
+        spectrum = self._load_with(index, info["kwargs"])
+        self.spectra[index] = spectrum
+        return spectrum
 
+    def preview(self, index: int, **override_kwargs) -> NMRSpectrum:
+        """Like :meth:`reload`, but purely a scratch re-read -- doesn't
+        replace the stored spectrum or its remembered load kwargs.
+        For a GUI live-preview of "what would committing this change
+        actually produce" (e.g. the Processing tab's own dual FID/
+        spectrum view, live as a not-yet-applied window/zero-fill/etc.
+        choice changes) that the user hasn't clicked "Apply Processing"
+        for yet -- :meth:`reload` would be the wrong tool here, since
+        it immediately commits."""
+        kwargs = {**self._load_info[index]["kwargs"], **override_kwargs}
+        return self._load_with(index, kwargs)
+
+    def _load_with(self, index: int, kwargs: dict) -> NMRSpectrum:
+        info = self._load_info[index]
         old_meta = self.spectra[index].metadata
-        spectrum = io.load(info["path"], vendor=info["vendor"], **info["kwargs"])
+        spectrum = io.load(info["path"], vendor=info["vendor"], **kwargs)
         spectrum.metadata = dataclasses.replace(
             spectrum.metadata, nucleus=old_meta.nucleus, nucleus_indirect=old_meta.nucleus_indirect,
         )
-        self.spectra[index] = spectrum
         return spectrum
 
     def get_load_kwargs(self, index: int) -> dict:

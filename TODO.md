@@ -2,6 +2,78 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Spectrum-tab stacked-view fix, linked Compare scroll-zoom, Processing-tab live preview, button wording (2026-08-29)
+
+- ~~Stacked view should only default in the Compare tab, not the
+  Spectrum tab -- it breaks phasing there~~ -- done. Last round's
+  pseudo-2D-defaults-to-Stacked change (`pseudo2d_view_combo`) was
+  scoped too broadly: it changed the *Spectrum* tab's own default too,
+  not just Compare's -- but the Spectrum tab is also where phasing
+  happens (Phase group, per-slice/whole-dataset), which needs a plain
+  single-slice/contour view, not the multi-axes Compare-style stack.
+  Reverted `_refresh_selection_display`'s default back to Contour
+  (index 0); "Stacked slices" stays available from the combo, just
+  isn't the default. Runs unconditionally on every reselection (like
+  the phase controls resetting alongside it), so it overrides a
+  Stacked choice left over from a previous spectrum rather than
+  carrying it forward, per "make sure this overrides whatever
+  selection there was."
+- ~~Y-scaling of the Compare stack via scroll wheel should be linked,
+  unless one spectrum is selected (some kind of clickable thing per
+  spectrum)~~ -- done. Scroll-zoom on a "Stacked" Compare view now
+  zooms every row together by default (same relative factor per row,
+  each still pinned at its own baseline) -- click a row (a plain
+  click, not a drag -- distinguished via press/release pixel distance,
+  see `MplCanvas._CLICK_DRAG_TOLERANCE_PX`) to select it, highlighted
+  with a light amber tint (`_apply_compare_selection_highlight`);
+  scroll then zooms only that row, regardless of which row is actually
+  hovered, until it's clicked again to de-select. `_selected_compare_index`
+  lives alongside `_compare_axes`, reset everywhere that already gets
+  reset (the same 7 sites, via the same insert-after-`_fit_mode`
+  technique as last round).
+- ~~A distinct Processing-tab live preview (FID top, downsampled
+  spectrum bottom, default first slice with a selector for
+  (pseudo-)2D), separate from the FID/Spectrum tabs which should only
+  show the results of processing~~ -- done, a real architecture
+  change. New `processing_preview_canvas` (6th canvas tab, "Processing
+  Preview"), with a new `MplCanvas.show_processing_preview` (two
+  stacked subplots, no shared x -- FID is time, spectrum is ppm).
+  Selecting the Processing (left) tab auto-switches the canvas over to
+  it (`_on_side_tab_changed`); leaving switches back to Spectrum,
+  *unless* the user had manually navigated elsewhere while still on
+  the Processing tab (only switches back if the preview was actually
+  the one showing). The pseudo-2D slice selector is the *existing*
+  `slice_spin` (already the Dimension box's own per-slice picker) --
+  reused, not duplicated, wired via a new `_on_slice_spin_changed`.
+  New `Session.preview(index, **kwargs)` -- like `reload`, but a pure
+  scratch re-read that never replaces the stored spectrum -- computes
+  exactly what "Apply Processing" would currently produce, via the
+  same kwargs-gathering the real commit uses (extracted into
+  `_current_fid_processing_kwargs`, so the two can't drift apart).
+  Every FID-processing control's live-changed signal now targets this
+  new preview instead of hijacking the real FID tab (which is what
+  broke it for its own actual job, e.g. reviewing a real result after
+  reprocessing) -- `fid_shift_spin`/`linear_predict_points_spin`/
+  `linear_predict_order_spin` gained live-preview wiring they never
+  had at all before (previously only took effect on a real "Apply
+  Processing" click). **Deliberately did not** route phase-dragging
+  into this new preview -- phase edits mutate the real spectrum's data
+  directly, in place, on every tick (no separate commit step the way
+  FID-domain reprocessing has), so they're already "the result of
+  processing," not a hypothetical -- and a live `Session.preview()`
+  (full re-read + FFT) on every phase-drag tick would be far too slow
+  regardless. Caught one real interaction bug while wiring the slice
+  selector: `_apply_phase_preview`'s pseudo2d branch unconditionally
+  force-switched `canvas_tabs` back to Spectrum whenever the phase
+  target changed (which `slice_spin` also triggers) -- silently
+  fighting the new preview's own tab-switch. Fixed by adding the same
+  "don't force-switch away" carve-out the FID tab already had.
+- ~~"Reprocess from raw FID" wording is confusing~~ -- done. Renamed to
+  "Apply Processing" (the button itself, plus the one user-facing
+  message and one docstring that named the old text).
+
+492 tests passing (up from 483). Committed and pushed.
+
 ## Fit point exclusion, Compare subplots, pseudo-2D default, rendering caps, full-resolution export (2026-08-29)
 
 - ~~Fit uncertainty is sometimes very unreliable; right-click to remove
