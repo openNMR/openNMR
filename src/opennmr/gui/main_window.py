@@ -16,6 +16,7 @@ import re
 
 import numpy as np
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
@@ -40,6 +41,11 @@ from .widgets.drag_control import DragHandle
 #: and fine control; DragHandle (a drag-to-adjust control, not a
 #: slider) and this wide spinbox range don't need one.
 _PHASE_SPIN_RANGE = 36000.0
+
+#: Phase 1's drag-sensitivity/step, relative to Phase 0's -- a linear
+#: (whole-spectrum) phase correction needs much bigger raw-degree
+#: changes than a zero-order one to have a visible effect.
+_PHASE1_STEP_MULTIPLIER = 20.0
 
 #: (display label, ``processing.ft`` window key) shown in the FID
 #: processing box's window combo -- "none" isn't a real key in
@@ -150,8 +156,16 @@ class MainWindow(QMainWindow):
         # empty.
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), False)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.compare_canvas), False)
+        # FID was added first (so it appears leftmost in the tab bar),
+        # but Spectrum is the actual default/most-used view (see
+        # self.canvas's own docstring above) -- without this, a plain
+        # QTabWidget starts on whichever tab was added first, so a
+        # fresh window (or a first load whose spectrum has no FID to
+        # preview) would show an empty FID tab instead of the spectrum
+        # that was just drawn to self.canvas.
+        self.canvas_tabs.setCurrentWidget(self.canvas)
 
-        tabs = QTabWidget()
+        self.side_tabs = tabs = QTabWidget()
         tabs.addTab(self._scrollable(self._build_spectra_tab()), "Spectra")
         tabs.addTab(self._scrollable(self._build_processing_tab()), "Processing")
         tabs.addTab(self._scrollable(self._build_analysis_tab()), "Analysis")
@@ -185,6 +199,91 @@ class MainWindow(QMainWindow):
         self.process_indirect_button.setVisible(False)
         self.pseudo2d_view_combo.setVisible(False)
         self.dimension_box.setVisible(False)
+
+        self._build_menu_bar()
+
+    def _build_menu_bar(self) -> None:
+        """A real top-level menu bar -- native on macOS (the app's own
+        menu bar at the screen top, "openNMR" auto-named as the
+        Application menu), in-window on Windows/Linux; Qt handles the
+        platform difference automatically from one QMenuBar. Every
+        action here already exists as a button/control elsewhere --
+        this adds menu/keyboard-shortcut access to the ones that make
+        sense used from anywhere, not a parallel command set."""
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("&File")
+        open_action = QAction("&Open…", self)
+        open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.triggered.connect(self._on_open_clicked)
+        file_menu.addAction(open_action)
+
+        save_figure_action = QAction("&Save Figure As…", self)
+        save_figure_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_figure_action.setToolTip("Save the currently visible canvas tab as an image.")
+        save_figure_action.triggered.connect(self._on_save_figure_clicked)
+        file_menu.addAction(save_figure_action)
+
+        file_menu.addSeparator()
+        quit_action = QAction("&Quit", self)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+        edit_menu = menu_bar.addMenu("&Edit")
+        remove_action = QAction("&Remove Selected Spectrum", self)
+        remove_action.setShortcut(QKeySequence.StandardKey.Delete)
+        remove_action.triggered.connect(self._on_remove_clicked)
+        edit_menu.addAction(remove_action)
+
+        edit_menu.addSeparator()
+        reset_phase_action = QAction("Reset &Phase", self)
+        reset_phase_action.triggered.connect(self._on_reset_phase_clicked)
+        edit_menu.addAction(reset_phase_action)
+
+        autophase_action = QAction("&Autophase", self)
+        autophase_action.triggered.connect(self._on_autophase_clicked)
+        edit_menu.addAction(autophase_action)
+
+        window_menu = menu_bar.addMenu("&Window")
+        minimize_action = QAction("&Minimize", self)
+        minimize_action.setShortcut(QKeySequence("Ctrl+M"))
+        minimize_action.triggered.connect(self.showMinimized)
+        window_menu.addAction(minimize_action)
+        window_menu.addSeparator()
+
+        window_menu.addSection("Panel")
+        shortcut_num = 1
+        for idx, label in enumerate(("Spectra", "Processing", "Analysis", "Compare")):
+            action = QAction(label, self)
+            action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
+            action.triggered.connect(lambda _checked=False, i=idx: self.side_tabs.setCurrentIndex(i))
+            window_menu.addAction(action)
+            shortcut_num += 1
+
+        # " View" suffix: the canvas tab's own name would otherwise
+        # collide with the identically-named Panel entry above it for
+        # "Compare" (a left-panel tab *and* a canvas view) -- distinct
+        # labels throughout is clearer than relying on the section
+        # headers alone to disambiguate.
+        window_menu.addSection("View")
+        for canvas_widget in (
+            self.canvas, self.fid_canvas, self.spectral_fit_canvas, self.fit_canvas, self.compare_canvas,
+        ):
+            label = self.canvas_tabs.tabText(self.canvas_tabs.indexOf(canvas_widget)) + " View"
+            action = QAction(label, self)
+            action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
+            action.triggered.connect(lambda _checked=False, w=canvas_widget: self.canvas_tabs.setCurrentWidget(w))
+            window_menu.addAction(action)
+            shortcut_num += 1
+
+    def _on_save_figure_clicked(self) -> None:
+        """File > Save Figure As… -- delegates to whichever canvas tab
+        is currently visible's own matplotlib toolbar save dialog
+        (format/location chosen there), rather than reimplementing it."""
+        current = self.canvas_tabs.currentWidget()
+        if current is not None and hasattr(current, "toolbar"):
+            current.toolbar.save_figure()
 
     @staticmethod
     def _scrollable(widget: QWidget) -> QScrollArea:
@@ -1048,8 +1147,8 @@ class MainWindow(QMainWindow):
         form = QFormLayout(box)
 
         self.fid_display_combo = QComboBox()
-        self.fid_display_combo.addItem("Magnitude", "magnitude")
         self.fid_display_combo.addItem("Real", "real")
+        self.fid_display_combo.addItem("Magnitude", "magnitude")
         self.fid_display_combo.setToolTip(
             "How the FID preview plots the (complex) time-domain data -- "
             "Magnitude (|FID|, a single clean decay/echo envelope, easiest "
@@ -1504,7 +1603,14 @@ class MainWindow(QMainWindow):
         form = QFormLayout(phase_box)
 
         self.phase0_handle, self.phase0_spin = self._make_phase_control()
-        self.phase1_handle, self.phase1_spin = self._make_phase_control()
+        # Phase 1 (linear, applied across the whole spectrum) needs a
+        # much larger per-step change than Phase 0 to have a visible
+        # effect -- one degree of phase1 barely moves anything, unlike
+        # one degree of phase0. ~20x (1-2 orders of magnitude) larger
+        # step/drag-sensitivity, per explicit user feedback.
+        self.phase1_handle, self.phase1_spin = self._make_phase_control(
+            sensitivity=0.2 * _PHASE1_STEP_MULTIPLIER, step=1.0 * _PHASE1_STEP_MULTIPLIER,
+        )
         form.addRow("Phase 0 (deg):", self._pair_widget(self.phase0_handle, self.phase0_spin))
         form.addRow("Phase 1 (deg):", self._pair_widget(self.phase1_handle, self.phase1_spin))
 
@@ -1519,6 +1625,20 @@ class MainWindow(QMainWindow):
         )
         self.pivot_spin.valueChanged.connect(lambda _v: self._apply_phase_preview())
         form.addRow("Pivot:", self.pivot_spin)
+
+        autophase_button = QPushButton("Autophase")
+        autophase_button.setToolTip(
+            "Zero-order autophase (grid-search maximizing the real "
+            "part's integral) for whatever the controls above "
+            "currently target -- a plain 1D spectrum, the pseudo-2D "
+            "slice selected below (or every slice at once, if 'Apply "
+            "this phase to every slice' is checked), or the whole 2D "
+            "dataset along the chosen dimension. Sets Phase 0 and "
+            "resets Phase 1 to 0; see 'Autophase (each slice "
+            "independently)' below for a per-slice-own-phase0 version."
+        )
+        autophase_button.clicked.connect(self._on_autophase_clicked)
+        form.addRow(autophase_button)
 
         reset_button = QPushButton("Reset")
         reset_button.clicked.connect(self._on_reset_phase_clicked)
@@ -1568,12 +1688,13 @@ class MainWindow(QMainWindow):
 
         return box
 
-    def _make_phase_control(self) -> tuple[DragHandle, QDoubleSpinBox]:
-        handle = DragHandle(sensitivity=0.2, step=1.0)
+    def _make_phase_control(self, sensitivity: float = 0.2, step: float = 1.0) -> tuple[DragHandle, QDoubleSpinBox]:
+        handle = DragHandle(sensitivity=sensitivity, step=step)
 
         spin = QDoubleSpinBox()
         spin.setRange(-_PHASE_SPIN_RANGE, _PHASE_SPIN_RANGE)
         spin.setDecimals(2)
+        spin.setSingleStep(step)
         spin.setValue(0.0)
 
         handle.valueChanged.connect(lambda v: self._on_phase_handle_changed(handle, spin, v))
@@ -1607,6 +1728,41 @@ class MainWindow(QMainWindow):
             spin.blockSignals(True)
             spin.setValue(0.0)
             spin.blockSignals(False)
+        self._apply_phase_preview()
+
+    def _on_autophase_clicked(self) -> None:
+        """Zero-order-only autophase (:func:`processing.ft.apc0`) for
+        whatever the Phase controls currently target -- unlike
+        :meth:`_on_autophase_slices_clicked` (pseudo-2D only, each
+        slice gets its own independent phase0 immediately applied),
+        this always writes ONE phase0 into the shared spin box, same
+        as dragging it by hand, so it works for a plain 1D spectrum
+        too (which otherwise had no autophase option at all)."""
+        if self._phase_mode is None or self._phase_reference_full is None:
+            return
+
+        freq_ppm = self._phase_freq_ppm
+        if self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked():
+            target = self._phase_reference_full[self.slice_spin.value() - 1, :]
+        else:
+            target = self._phase_reference_full
+        phase0 = processing_ft.apc0(target, freq_ppm)
+
+        # apc0 is zero-order-only -- a stale nonzero Phase 1 from an
+        # earlier manual drag would otherwise silently combine with
+        # the freshly computed Phase 0 in a way apc0 never accounted
+        # for, so reset it too (matches _on_autophase_slices_clicked's
+        # own phase1=0.0).
+        self.phase1_handle.setValue(0.0, emit=False)
+        self.phase1_spin.blockSignals(True)
+        self.phase1_spin.setValue(0.0)
+        self.phase1_spin.blockSignals(False)
+
+        self.phase0_handle.setValue(phase0, emit=False)
+        self.phase0_spin.blockSignals(True)
+        self.phase0_spin.setValue(phase0)
+        self.phase0_spin.blockSignals(False)
+
         self._apply_phase_preview()
 
     def _on_phase_target_changed(self) -> None:
@@ -1667,6 +1823,7 @@ class MainWindow(QMainWindow):
         # leaving them pointing at the pre-autophase snapshot.
         self._capture_phase_reference()
         self._show_pseudo2d_slice(spectrum, reset_view=False)
+        self.canvas.set_pivot_marker(self.pivot_spin.value())
 
     def _apply_phase_preview(self) -> None:
         index = self._selected_index()
@@ -1686,6 +1843,7 @@ class MainWindow(QMainWindow):
             spectrum.data = np.real(phased)
             spectrum.data_imag = np.imag(phased)
             self.canvas.update_data(spectrum)
+            self.canvas.set_pivot_marker(self.pivot_spin.value())
             self.canvas_tabs.setCurrentWidget(self.canvas)
 
         elif self._phase_mode == "pseudo2d":
@@ -1710,6 +1868,7 @@ class MainWindow(QMainWindow):
                 self._show_fid_preview(spectrum, switch_tab=False)
             else:
                 self._show_pseudo2d_slice(spectrum, reset_view=False)
+                self.canvas.set_pivot_marker(self.pivot_spin.value())
 
         elif self._phase_mode == "2d":
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"

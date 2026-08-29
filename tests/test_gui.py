@@ -357,6 +357,63 @@ def test_main_window_process_indirect_button_hidden_for_1d(qapp, tmp_path):
     assert window.process_indirect_button.isHidden() is True
 
 
+# ============================================================
+# Menu bar
+# ============================================================
+
+def test_main_window_has_file_edit_window_menus(qapp):
+    window = MainWindow()
+    titles = [action.text().replace("&", "") for action in window.menuBar().actions()]
+    assert titles == ["File", "Edit", "Window"]
+
+
+def test_main_window_menu_open_action_triggers_open_dialog(qapp, monkeypatch):
+    window = MainWindow()
+    called = []
+    monkeypatch.setattr(window, "_on_open_clicked", lambda: called.append(True))
+    file_menu = window.menuBar().actions()[0].menu()
+    open_action = next(a for a in file_menu.actions() if "Open" in a.text())
+    open_action.trigger()
+    assert called == [True]
+
+
+def test_main_window_menu_remove_action_removes_selected_spectrum(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    assert window.spectrum_list.count() == 1
+
+    edit_menu = window.menuBar().actions()[1].menu()
+    remove_action = next(a for a in edit_menu.actions() if "Remove" in a.text())
+    remove_action.trigger()
+
+    assert window.spectrum_list.count() == 0
+
+
+def test_main_window_menu_window_panel_actions_switch_side_tabs(qapp):
+    window = MainWindow()
+    window_menu = window.menuBar().actions()[2].menu()
+    analysis_action = next(a for a in window_menu.actions() if a.text() == "Analysis")
+    analysis_action.trigger()
+    assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Analysis"
+
+
+def test_main_window_menu_window_view_actions_switch_canvas_tabs(qapp):
+    window = MainWindow()
+    window_menu = window.menuBar().actions()[2].menu()
+    compare_action = next(a for a in window_menu.actions() if a.text() == "Compare View")
+    compare_action.trigger()
+    assert window.canvas_tabs.currentWidget() is window.compare_canvas
+
+
+def test_main_window_menu_save_figure_delegates_to_current_toolbar(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    called = []
+    monkeypatch.setattr(window.canvas.toolbar, "save_figure", lambda: called.append(True))
+    window._on_save_figure_clicked()
+    assert called == [True]
+
+
 def test_main_window_process_indirect_button_reflects_2d_state(qapp, tmp_path):
     # _make_2d_dataset's own vendor-recorded metadata would normally
     # auto-detect as conventional 2D, but pseudo-2D is now the default
@@ -559,6 +616,48 @@ def test_main_window_phase_range_is_wide(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path), vendor="bruker")
     window.phase1_spin.setValue(1000.0)
     assert window.phase1_spin.value() == pytest.approx(1000.0)
+
+
+def test_main_window_phase1_step_is_larger_than_phase0(qapp, tmp_path):
+    # Phase 1's per-notch/per-click increment must be much coarser than
+    # Phase 0's -- a linear (whole-spectrum) correction needs a much
+    # bigger raw-degree change than a zero-order one to visibly move
+    # anything, per explicit user feedback.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    assert window.phase1_spin.singleStep() > window.phase0_spin.singleStep()
+    assert window.phase1_handle.step > window.phase0_handle.step
+
+
+def test_main_window_pivot_marker_appears_while_dragging_phase(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    assert window.canvas._pivot_line is None  # not shown before any phase interaction
+
+    window.phase0_handle.setValue(45.0)
+
+    assert window.canvas._pivot_line is not None
+    assert window.canvas._pivot_line.get_xdata()[0] == pytest.approx(window.pivot_spin.value())
+
+    window.pivot_spin.setValue(window.pivot_spin.value() + 1.0)
+    assert window.canvas._pivot_line.get_xdata()[0] == pytest.approx(window.pivot_spin.value())
+
+
+def test_main_window_autophase_button_sets_phase0_and_resets_phase1(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+
+    window.phase1_spin.setValue(15.0)
+    window._on_autophase_clicked()  # must not raise
+
+    assert window.phase1_spin.value() == pytest.approx(0.0)
+    assert window.phase1_handle.value() == pytest.approx(0.0)
+    assert window.phase0_handle.value() == pytest.approx(window.phase0_spin.value())
+
+
+def test_main_window_autophase_button_noop_with_no_spectrum(qapp):
+    window = MainWindow()
+    window._on_autophase_clicked()  # must not raise
 
 
 def test_main_window_load_failure_shows_error_not_crash(qapp, tmp_path, monkeypatch):
@@ -972,7 +1071,7 @@ def test_main_window_clicking_fid_tab_switches_canvas_to_time_domain(qapp, tmp_p
     assert window.canvas_tabs.currentWidget() is window.fid_canvas
     assert window.fid_canvas.ax.get_xlabel() == "Time (s)"
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
-    assert "Magnitude" in labels
+    assert "Real" in labels  # default preview mode
 
     window.canvas_tabs.setCurrentWidget(window.canvas)
     assert window.canvas_tabs.currentWidget() is window.canvas
@@ -1003,17 +1102,17 @@ def test_main_window_fid_tab_shows_preview_for_pseudo_2d(qapp, tmp_path, monkeyp
     window._load(_make_raw_2d_dataset(tmp_path, monkeypatch), vendor="bruker")
     window.canvas_tabs.setCurrentWidget(window.fid_canvas)
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
-    assert "Magnitude" in labels
+    assert "Real" in labels  # default preview mode
 
 
-def test_main_window_fid_preview_toggle_shows_real_only(qapp, tmp_path, monkeypatch):
+def test_main_window_fid_preview_toggle_shows_magnitude_only(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch), vendor="bruker")
-    window.fid_display_combo.setCurrentIndex(1)  # Real
+    window.fid_display_combo.setCurrentIndex(1)  # Magnitude
     window.canvas_tabs.setCurrentWidget(window.fid_canvas)
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
-    assert "Real" in labels
-    assert "Magnitude" not in labels
+    assert "Magnitude" in labels
+    assert "Real" not in labels
 
 
 def test_main_window_fid_preview_tracks_selected_slice(qapp, tmp_path, monkeypatch):

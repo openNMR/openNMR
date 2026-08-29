@@ -39,7 +39,7 @@ CONTOUR_CMAP_NAMES = [
 
 
 def apply_tick_style(ax, direction='in', length=4.0, width=1.0, pad=4.0,
-                      num_ticks=None, axis='both', minor=True):
+                      num_ticks=None, axis='both', minor=True, labelsize=None):
     """Apply consistent tick styling to an ``ax``: direction, size,
     and (optionally) an explicit target tick count.
 
@@ -47,9 +47,14 @@ def apply_tick_style(ax, direction='in', length=4.0, width=1.0, pad=4.0,
     ``minor=True``) are drawn at 3/4 the width and half the length.
     ``num_ticks`` : if given, an approximate target major-tick count
     via ``MaxNLocator`` on the requested axis/axes.
+    ``labelsize`` : if given, sets the tick label font size directly
+    (equivalent to ``setup_plotting``'s ``xtick.labelsize``/
+    ``ytick.labelsize`` rcParams, but ax-scoped -- needed anywhere
+    ``setup_plotting`` itself can't be called, e.g. a GUI canvas).
     """
+    tick_kwargs = {} if labelsize is None else {'labelsize': labelsize}
     ax.tick_params(axis=axis, which='major', direction=direction,
-                    length=length, width=width, pad=pad)
+                    length=length, width=width, pad=pad, **tick_kwargs)
 
     if minor:
         ax.minorticks_on()
@@ -67,13 +72,23 @@ def apply_tick_style(ax, direction='in', length=4.0, width=1.0, pad=4.0,
     return ax
 
 
-def apply_spine_style(ax, top=False, right=False, bottom=True, left=True):
+def apply_spine_style(ax, top=False, right=False, bottom=True, left=True, linewidth=None):
     """Show/hide individual axis spines. Defaults match the package's
-    usual "open" plot style (top and right hidden)."""
+    usual "open" plot style (top and right hidden).
+
+    ``linewidth`` : if given, also sets every spine's line width
+    (equivalent to ``setup_plotting``'s ``axes.linewidth`` rcParam,
+    but ax-scoped) -- needed anywhere ``setup_plotting`` itself can't
+    be called, e.g. a GUI canvas, since a spine's width otherwise just
+    falls back to matplotlib's own default regardless of what
+    ``apply_tick_style`` was given."""
     ax.spines['top'].set_visible(top)
     ax.spines['right'].set_visible(right)
     ax.spines['bottom'].set_visible(bottom)
     ax.spines['left'].set_visible(left)
+    if linewidth is not None:
+        for spine in ax.spines.values():
+            spine.set_linewidth(linewidth)
     return ax
 
 

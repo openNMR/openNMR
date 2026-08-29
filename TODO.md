@@ -2,6 +2,81 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Phase-tab feedback, plot styling, menu bar (2026-08-29)
+
+- ~~Default FID preview should be Real, not Magnitude~~ -- done.
+  `fid_display_combo`'s items were just reordered (Real first) since
+  the GUI reads the mode via `currentData()`, not index.
+- ~~Phase 1's increment should be 1-2 orders of magnitude bigger than
+  Phase 0's~~ -- done. New `_PHASE1_STEP_MULTIPLIER = 20.0` scales
+  both the drag-handle sensitivity/wheel-step and the spin box's
+  `singleStep` for Phase 1 only -- a linear (whole-spectrum)
+  correction needs a much bigger raw-degree change than a zero-order
+  one to visibly move anything.
+- ~~A line showing where the pivot is while phasing~~ -- done. New
+  `MplCanvas.set_pivot_marker(ppm)` draws/moves/hides a dashed orange
+  `axvline` on the current 1D view. Deliberately *not* shown on every
+  plain spectrum selection (tried that first -- broke a dozen tests
+  asserting `len(ax.lines) == 1` after a plain load, and is genuinely
+  the wrong behaviour anyway: "while phasing" means while the user is
+  actually interacting with the Phase controls, not on every view).
+  Wired into `_apply_phase_preview` (drag/spin/pivot changes),
+  `_on_autophase_slices_clicked`, and pseudo-2D slice switching --
+  not into plain spectrum (re)selection.
+- ~~Missing autophase button/option~~ -- a plain 1D spectrum had *no*
+  autophase control at all (the only existing one,
+  `autophase_slices_button`, is pseudo-2D-only). New "Autophase"
+  button in the Phase box runs `processing.ft.apc0` on whatever the
+  Phase controls currently target (1D spectrum, the selected pseudo-2D
+  slice or all slices, or the whole 2D dataset along the chosen
+  dimension) and writes the result into the shared Phase 0 spin box
+  (resetting Phase 1 to 0, since apc0 is zero-order-only) -- same
+  live-preview path as dragging it by hand.
+- ~~Axis linewidths/font sizes too small; style the fitting plots more
+  like nmrtools2's own plotting functions~~ -- done. New shared style
+  constants on `MplCanvas` (`_AXIS_LINEWIDTH=1.4`, `_AXIS_LABELSIZE=13`,
+  `_TICK_LENGTH=5.5`, `_TICK_WIDTH=1.4` -- heavier than
+  `plotting.style.setup_plotting`'s own manuscript-figure defaults,
+  since a GUI canvas is viewed larger with more surrounding UI) applied
+  to every 1D-line view (Spectrum, FID, Compare, Spectral Fit,
+  Relaxation Fit). `apply_spine_style`/`apply_tick_style` gained
+  `linewidth`/`labelsize` parameters to make this possible without
+  `setup_plotting`'s global rcParams (never callable from GUI code --
+  see that module's own docstring). `show_relaxation_fit` previously
+  had *zero* styling calls at all (default matplotlib look, all four
+  spines shown) -- now matches the others. Plotted-line widths in
+  `show_slice_fit` bumped to match `nmrtools2`'s own
+  `NMR1dplot_with_fit` convention (Data 1.5, Fit 2.0, components 1.2).
+- ~~File/Edit/Window menu bar~~ -- done (this was already an open item
+  in "App polish / packaging" below). Native on macOS, in-window on
+  Windows/Linux, one `QMenuBar` via `MainWindow._build_menu_bar`. File:
+  Open… (Cmd+O), Save Figure As… (Cmd+S, delegates to whichever canvas
+  tab's own matplotlib toolbar `save_figure()`), Quit (Cmd+Q). Edit:
+  Remove Selected Spectrum (Delete), Reset Phase, Autophase. Window:
+  Minimize (Cmd+M), then Cmd+1-4 for the left-panel tabs
+  (Spectra/Processing/Analysis/Compare) and Cmd+5-9 for the canvas
+  tabs (labelled "... View" to disambiguate from the identically-named
+  "Compare" panel tab).
+- **Real latent bug found while testing the menu bar, fixed**:
+  `canvas_tabs` defaulted to the *FID* tab (index 0, added first) on
+  a fresh window, not Spectrum -- contradicting `self.canvas`'s own
+  docstring ("the default/most-used one"). Harmless-looking most of
+  the time since `_draw_selected_spectrum` switches to Spectrum on
+  load *unless* the FID tab was already active AND the spectrum has no
+  FID to preview (e.g. any plain processed/non-raw-FID spectrum) -- in
+  which case neither branch fires and the window is left showing an
+  empty FID tab with the actual spectrum silently drawn to the
+  Spectrum tab behind it. Surfaced as an actual test hang, not just a
+  failure: a "Save Figure As…" test mocked `canvas.toolbar.save_figure`
+  but the *real* `fid_canvas.toolbar.save_figure()` ran instead (since
+  that was the actually-current tab), popping a real native save
+  dialog that blocks forever under a headless/offscreen Qt platform.
+  Fixed with one line, `self.canvas_tabs.setCurrentWidget(self.canvas)`
+  right after the tabs are built in `__init__`.
+
+424 tests passing (410 -> 424 this round). Nothing committed yet from
+this round (not asked to).
+
 ## Packaged-app crash fix + JEOL reprocessing gap (2026-08-29)
 
 ~~App built with `packaging/build.py` crashes on launch from
@@ -346,5 +421,5 @@ Investigated 2026-08-28 (user: "much of the pfg plotting and fitting should exis
 ## App polish / packaging
 
 - ~~Custom app icon~~ -- logo added (`gui/resources/logo.png`), wired as the window icon. Still open: a real Dock/taskbar icon and custom app name needs actual packaging (see below), not just `setWindowIcon`.
-- A real top-level menu bar (native menu bar on macOS, in-window menu bar on Windows/Linux) -- straightforward via `QMainWindow.menuBar()`, Qt handles the platform difference automatically.
+- ~~A real top-level menu bar (native menu bar on macOS, in-window menu bar on Windows/Linux)~~ -- done, see "Phase-tab feedback, plot styling, menu bar" above.
 - A proper installer/distributable build for Windows, macOS, and Linux -- should be "beyond easy" to get running on any of the three, not require the user to set up a conda environment and run `pip install -e .` by hand. Needs a packaging tool (e.g. `PyInstaller`, `briefcase`, or `py2app`/`cx_Freeze`) producing a standalone app (with the icon above baked in) per platform, ideally with a one-click/one-command install path.

@@ -68,6 +68,19 @@ class MplCanvas(QWidget):
     _CONTOUR_LEVEL_MODE_DEFAULT = "power"
     _CONTOUR_POWER_DEFAULT = 1.25
 
+    #: Shared axis styling for every 1D-line view (Spectrum, FID,
+    #: Compare, Fit, Relaxation) -- applied via apply_spine_style/
+    #: apply_tick_style at every (re)plot, and to axis-label/title
+    #: fontsize directly. Deliberately heavier than
+    #: opennmr.plotting.style.setup_plotting's own manuscript-figure
+    #: defaults (axes.linewidth 1.0, fontsize 12): a GUI canvas is
+    #: viewed at a larger on-screen size with more surrounding UI, so
+    #: needs bolder axes/larger text to stay legible at a glance.
+    _AXIS_LINEWIDTH = 1.4
+    _AXIS_LABELSIZE = 13
+    _TICK_LENGTH = 5.5
+    _TICK_WIDTH = 1.4
+
     #: Emitted with the clicked x-data value when pick mode is on (see
     #: :func:`set_pick_mode`) -- used by the Analysis tab's "Pick peaks
     #: by clicking" to add a peak at the clicked shift without needing
@@ -124,6 +137,12 @@ class MplCanvas(QWidget):
         self._current_1d_spectrum: NMRSpectrum | None = None
         self._axis_unit = "ppm"
         self._ppm_label = ""
+        # The Phase 1 pivot marker (see set_pivot_marker) -- a Line2D
+        # kept around so it can be *moved* in place on every drag tick
+        # instead of removed/recreated, but figure.clear() (every
+        # show_* rebuild) invalidates it, so it's reset to None
+        # wherever that happens (see _apply_view_options).
+        self._pivot_line = None
 
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("button_press_event", self._on_press)
@@ -502,6 +521,12 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def _apply_view_options(self) -> None:
+        # Every show_* rebuild routes through here after its own
+        # figure.clear() -- any pivot marker from before is gone with
+        # it, so the stale Python-side reference must be dropped too
+        # (set_pivot_marker would otherwise try to move a Line2D no
+        # longer attached to any axes).
+        self._pivot_line = None
         if self._legend_visible and self.ax.get_legend_handles_labels()[0]:
             self.ax.legend()
         else:
@@ -509,6 +534,29 @@ class MplCanvas(QWidget):
             if existing is not None:
                 existing.remove()
         self.ax.set_box_aspect(self._aspect_ratio)
+
+    def set_pivot_marker(self, ppm: float | None) -> None:
+        """Show, move, or hide a dashed vertical line on the current
+        plain-1D-spectrum view at ``ppm`` -- the Phase 1 pivot point,
+        visible while phasing instead of only a number in a spin box.
+        ``None`` hides it. A no-op when the current view isn't a plain
+        1D spectrum (matches :attr:`_current_1d_spectrum`'s own gate,
+        e.g. a 2D contour or the FID/Compare views)."""
+        if self._current_1d_spectrum is None:
+            return
+        if ppm is None:
+            if self._pivot_line is not None:
+                self._pivot_line.remove()
+                self._pivot_line = None
+                self.canvas.draw_idle()
+            return
+        if self._pivot_line is None:
+            self._pivot_line = self.ax.axvline(
+                ppm, linestyle="--", color="darkorange", linewidth=1.2, zorder=5,
+            )
+        else:
+            self._pivot_line.set_xdata([ppm, ppm])
+        self.canvas.draw_idle()
 
     def clear(self) -> None:
         self._contour_spectrum = None
@@ -539,10 +587,12 @@ class MplCanvas(QWidget):
             self.ax.lines[0].set_label(_spectrum_label(spectrum))
             self.ax.set_xlim(xmin, xmax)
             self.ax.invert_xaxis()
-            self.ax.set_xlabel(labeltext)
+            self.ax.set_xlabel(labeltext, fontsize=self._AXIS_LABELSIZE)
             self.ax.set_yticks([])
-            plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False)
-            plotting.apply_tick_style(self.ax, axis="x")
+            plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
+                                        linewidth=self._AXIS_LINEWIDTH)
+            plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                       labelsize=self._AXIS_LABELSIZE)
         elif spectrum.ndim == 2:
             self._current_1d_spectrum = None
             self._contour_spectrum = spectrum
@@ -617,10 +667,14 @@ class MplCanvas(QWidget):
         if echo_top_index is not None and 0 <= echo_top_index < len(fid):
             self.ax.axvline(echo_top_index * dt, linestyle="--", color="green", label="Echo top")
             self._legend_visible = True
-        self.ax.set_xlabel("Time (s)")
-        self.ax.set_ylabel("Amplitude")
+        self.ax.set_xlabel("Time (s)", fontsize=self._AXIS_LABELSIZE)
+        self.ax.set_ylabel("Amplitude", fontsize=self._AXIS_LABELSIZE)
         if title:
-            self.ax.set_title(title)
+            self.ax.set_title(title, fontsize=self._AXIS_LABELSIZE)
+        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=True,
+                                    linewidth=self._AXIS_LINEWIDTH)
+        plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                   labelsize=self._AXIS_LABELSIZE)
         self._apply_view_options()
         self.figure.tight_layout()
         self.canvas.draw_idle()
@@ -643,8 +697,11 @@ class MplCanvas(QWidget):
         offset = y_offset if mode == "stack" else -1.0
         plotting.plot_1d_stack(spectra, ax=self.ax, fig=self.figure, y_offset=offset, normalize=normalize)
         self.ax.set_yticks([])
-        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False)
-        plotting.apply_tick_style(self.ax, axis="x")
+        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
+                                    linewidth=self._AXIS_LINEWIDTH)
+        plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                   labelsize=self._AXIS_LABELSIZE)
+        self.ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
         self._apply_view_options()
         self.figure.tight_layout()
         self.canvas.draw_idle()
@@ -677,14 +734,14 @@ class MplCanvas(QWidget):
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
-        self.ax.plot(x, y_data, color="black", linewidth=1.0, label="Data")
-        self.ax.plot(x, y_fit, color="red", linestyle="--", linewidth=1.2, label="Fit (total)")
+        self.ax.plot(x, y_data, color="black", linewidth=1.5, label="Data")
+        self.ax.plot(x, y_fit, color="red", linestyle="--", linewidth=2.0, label="Fit (total)")
         if components:
             n_peaks = len(components) - 1  # evaluate_fit appends the baseline last
             for i, component in enumerate(components[:n_peaks]):
                 label = peak_labels[i] if peak_labels else f"Peak {i + 1}"
-                self.ax.plot(x, component, linewidth=0.9, alpha=0.8, label=label)
-            self.ax.plot(x, components[-1], color="gray", linestyle=":", linewidth=0.8, label="Baseline")
+                self.ax.plot(x, component, linewidth=1.2, alpha=0.8, label=label)
+            self.ax.plot(x, components[-1], color="gray", linestyle=":", linewidth=1.0, label="Baseline")
 
         if spectrum is not None:
             nuclide = find_gamma(spectrum.metadata.nucleus, SFO1=spectrum.metadata.sfo1)["Nuclide"]
@@ -694,12 +751,14 @@ class MplCanvas(QWidget):
         xmin, xmax = float(np.min(x)), float(np.max(x))
         self.ax.set_xlim(xmin, xmax)
         self.ax.invert_xaxis()
-        self.ax.set_xlabel(xlabel)
+        self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
         self.ax.set_yticks([])
         if title:
-            self.ax.set_title(title)
-        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False)
-        plotting.apply_tick_style(self.ax, axis="x")
+            self.ax.set_title(title, fontsize=self._AXIS_LABELSIZE)
+        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
+                                    linewidth=self._AXIS_LINEWIDTH)
+        plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                   labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
         self._apply_view_options()
         self.figure.tight_layout()
@@ -725,10 +784,14 @@ class MplCanvas(QWidget):
         for result in results:
             t, y, y_fit = result["t"], result["y"], result["y_fit"]
             label = result.get("peak_label", result.get("model", "fit"))
-            line, = self.ax.plot(t, y, "o", label=label)
-            self.ax.plot(t, y_fit, "-", color=line.get_color(), alpha=0.8)
-        self.ax.set_xlabel("Delay (s)")
-        self.ax.set_ylabel("Intensity")
+            line, = self.ax.plot(t, y, "o", markersize=6.0, label=label)
+            self.ax.plot(t, y_fit, "-", linewidth=2.0, color=line.get_color(), alpha=0.8)
+        self.ax.set_xlabel("Delay (s)", fontsize=self._AXIS_LABELSIZE)
+        self.ax.set_ylabel("Intensity", fontsize=self._AXIS_LABELSIZE)
+        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=True,
+                                    linewidth=self._AXIS_LINEWIDTH)
+        plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                   labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
         self._apply_view_options()
         self.figure.tight_layout()
