@@ -1,4 +1,4 @@
-"""Entry point for the desktop GUI (``nmrsuite-gui`` console script)."""
+"""Entry point for the desktop GUI (``opennmr-gui`` console script)."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
 
-_LOGO_PATH = os.path.join(os.path.dirname(__file__), "resources", "logo.png")
+_LOGO_PATH = os.path.join(os.path.dirname(__file__), "resources", "logo.svg")
 
 
 def main() -> int:

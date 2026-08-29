@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from nmrsuite.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-from nmrsuite.processing import fitting, slicing
-from nmrsuite.processing.fitting import gaussian, lorentzian
+from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from opennmr.processing import fitting, slicing
+from opennmr.processing.fitting import gaussian, lorentzian
 
 
 def _make_1d(x0=5.0, fwhm=0.05, A=1.0, kind="gaussian", b0=0.02, b1=0.0,

@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from nmrsuite.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-from nmrsuite.processing import relaxation, slicing
-from nmrsuite.processing.fitting import gaussian
+from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from opennmr.processing import relaxation, slicing
+from opennmr.processing.fitting import gaussian
 
 
 def _make_pseudo2d_relaxation(delays, M0=1.0, T1=0.8, C=2.0, x0=5.0, fwhm=0.05,

@@ -1,7 +1,7 @@
 """
 Vendor-reader registry and auto-detecting ``load()``.
 
-Every vendor module (``nmrsuite.io.bruker``, ``nmrsuite.io.xpulse``, and
+Every vendor module (``opennmr.io.bruker``, ``opennmr.io.xpulse``, and
 eventually JEOL/Varian) registers a detector + reader pair here. Adding
 a new vendor later means writing one module that calls
 :func:`register`, not restructuring this dispatcher.

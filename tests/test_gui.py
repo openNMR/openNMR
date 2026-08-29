@@ -6,10 +6,10 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox
 
-from nmrsuite.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-from nmrsuite.gui.main_window import MainWindow
-from nmrsuite.gui.session import Session
-from nmrsuite.processing.fitting import gaussian
+from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from opennmr.gui.main_window import MainWindow
+from opennmr.gui.session import Session
+from opennmr.processing.fitting import gaussian
 
 
 @pytest.fixture(scope="module")
@@ -713,7 +713,7 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1"):
     `read_1d`'s real window/zero-fill/FFT code runs for real while the
     two genuinely nmrglue-owned calls (`ng.bruker.read`,
     `remove_digital_filter`) are stubbed with controlled data."""
-    from nmrsuite.io import bruker as bruker_io
+    from opennmr.io import bruker as bruker_io
 
     expt = tmp_path / name
     pdata = expt / "pdata" / "1"
@@ -731,7 +731,7 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1"):
 
 
 def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d", f1_nuc="13C"):
-    from nmrsuite.io import bruker as bruker_io
+    from opennmr.io import bruker as bruker_io
 
     expt = tmp_path / name
     pdata = expt / "pdata" / "1"
@@ -822,7 +822,7 @@ def test_main_window_change_procno_not_offered_for_xpulse(qapp, tmp_path, monkey
         def exec(self, *a, **k):
             return None
 
-    import nmrsuite.gui.main_window as main_window_module
+    import opennmr.gui.main_window as main_window_module
     monkeypatch.setattr(main_window_module, "QMenu", _FakeMenu)
 
     pos = window.spectrum_list.visualItemRect(window.spectrum_list.item(index)).center()
@@ -1599,7 +1599,7 @@ def test_main_window_clear_resets_analysis_tab(qapp, tmp_path):
 # ============================================================
 
 def test_main_window_zero_fill_defaults_to_2x_np_rounded_to_preset(qapp, tmp_path, monkeypatch):
-    from nmrsuite.gui.main_window import _ZERO_FILL_SIZES
+    from opennmr.gui.main_window import _ZERO_FILL_SIZES
 
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=600), vendor="bruker")
@@ -1629,7 +1629,7 @@ def test_main_window_zero_fill_combo_selecting_custom_shows_spin(qapp, tmp_path,
 
 
 def test_main_window_reprocess_uses_selected_preset_size(qapp, tmp_path, monkeypatch):
-    from nmrsuite.gui.main_window import _ZERO_FILL_SIZES
+    from opennmr.gui.main_window import _ZERO_FILL_SIZES
 
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
@@ -1802,7 +1802,7 @@ def test_main_window_pseudo2d_view_resets_to_contour_on_reselection(qapp, tmp_pa
 # ============================================================
 
 def test_main_window_fit_type_defaults_to_relaxation_models(qapp):
-    from nmrsuite.gui.main_window import _RELAXATION_MODEL_ITEMS
+    from opennmr.gui.main_window import _RELAXATION_MODEL_ITEMS
 
     window = MainWindow()
     keys = [window.relaxation_model_combo.itemData(i) for i in range(window.relaxation_model_combo.count())]
@@ -1810,7 +1810,7 @@ def test_main_window_fit_type_defaults_to_relaxation_models(qapp):
 
 
 def test_main_window_fit_type_diffusion_switches_model_list_and_label(qapp):
-    from nmrsuite.gui.main_window import _DIFFUSION_MODEL_ITEMS
+    from opennmr.gui.main_window import _DIFFUSION_MODEL_ITEMS
 
     window = MainWindow()
     window.fit_type_combo.setCurrentIndex(1)  # Diffusion (PFG)
@@ -1843,7 +1843,7 @@ def test_main_window_resolve_b_values_auto_falls_back_to_slice_index(qapp):
 
 
 def test_main_window_diffusion_fit_recovers_known_d(qapp):
-    from nmrsuite.processing.relaxation import stejskal_tanner_decay
+    from opennmr.processing.relaxation import stejskal_tanner_decay
 
     true_D = 2.0e-9
     b_values = np.linspace(0.0, 3.0e9, 14)

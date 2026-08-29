@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from nmrsuite.processing import ft
+from opennmr.processing import ft
 
 
 def test_roll_fid_integer_shift():

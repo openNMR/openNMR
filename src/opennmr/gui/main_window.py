@@ -83,7 +83,7 @@ _ZERO_FILL_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("nmrsuite")
+        self.setWindowTitle("openNMR")
         self.resize(1100, 700)
 
         self.session = Session()
@@ -945,7 +945,7 @@ class MainWindow(QMainWindow):
         """Whether ``spectrum`` was loaded from a raw FID this GUI can
         re-read and reprocess with different parameters -- true for any
         X-Pulse spectrum (always raw-FID), or a Bruker experiment whose
-        raw ``fid``/``ser`` is present on disk (if so, :func:`nmrsuite.
+        raw ``fid``/``ser`` is present on disk (if so, :func:`opennmr.
         io.bruker._read_auto` would have preferred it over the
         already-processed fallback in the first place)."""
         if spectrum.metadata.vendor == "xpulse":

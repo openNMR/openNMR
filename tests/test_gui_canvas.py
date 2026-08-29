@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from nmrsuite.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-from nmrsuite.gui.widgets.canvas import MplCanvas
+from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from opennmr.gui.widgets.canvas import MplCanvas
 
 
 @pytest.fixture(scope="module")
@@ -171,7 +171,7 @@ def test_aspect_ratio_persists_across_show_spectrum(qapp):
 
 
 def test_toolbar_has_no_popup_dialog_buttons():
-    from nmrsuite.gui.widgets.canvas import _Toolbar
+    from opennmr.gui.widgets.canvas import _Toolbar
 
     names = [item[0] for item in _Toolbar.toolitems if item[0]]
     assert "Subplots" not in names

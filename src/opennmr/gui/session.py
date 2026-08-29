@@ -3,7 +3,7 @@ In-memory session state for the GUI: which spectra are loaded.
 
 Deliberately has no Qt import -- this is the part of the GUI package a
 future browser-based frontend (the planned phase 2) can reuse directly,
-since it's just bookkeeping over :mod:`nmrsuite.io`/:class:`NMRSpectrum`,
+since it's just bookkeeping over :mod:`opennmr.io`/:class:`NMRSpectrum`,
 not anything Qt-specific.
 """
 
@@ -29,7 +29,7 @@ class Session:
         self._load_info: list[dict] = []
 
     def add(self, path: str, vendor: str | None = None, **kwargs) -> NMRSpectrum:
-        """Load ``path`` via :func:`nmrsuite.io.load` (auto-detecting
+        """Load ``path`` via :func:`opennmr.io.load` (auto-detecting
         the vendor unless ``vendor`` is given) and append it. Returns
         the loaded spectrum."""
         spectrum = io.load(path, vendor=vendor, **kwargs)
@@ -104,7 +104,7 @@ class Session:
         specific case of a nuclide chosen from an instrument table
         calibrated for a 500 MHz (11.75 T) console but actually run on
         a 100 MHz (2.35 T) magnet (see
-        :func:`nmrsuite.core.registry.find_gamma`'s ``field='100'``) --
+        :func:`opennmr.core.registry.find_gamma`'s ``field='100'``) --
         picks the real nuclide whose gyromagnetic ratio best matches
         the recorded SFO1 once the field mismatch is accounted for.
         Returns None if there's nothing to suggest from (no recorded

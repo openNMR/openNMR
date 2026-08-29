@@ -1,7 +1,7 @@
 """
 Vendor-agnostic NMR data model.
 
-Every importer in :mod:`nmrsuite.io`, regardless of vendor, produces an
+Every importer in :mod:`opennmr.io`, regardless of vendor, produces an
 :class:`NMRSpectrum`. A 1D spectrum, a 2D spectrum, a pseudo-2D
 relaxation/diffusion series, and a single row/column extracted from a 2D
 dataset are all the same class -- a pseudo-2D dataset's indirect axis

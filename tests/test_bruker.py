@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pytest
 
-from nmrsuite.io import bruker
+from opennmr.io import bruker
 
 
 def _write_params(path, params):

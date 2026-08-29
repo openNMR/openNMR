@@ -17,6 +17,6 @@ from importlib import metadata
 _FALLBACK_VERSION = "0.1.0"
 
 try:
-    __version__ = metadata.version("nmrsuite")
+    __version__ = metadata.version("opennmr")
 except metadata.PackageNotFoundError:
     __version__ = _FALLBACK_VERSION

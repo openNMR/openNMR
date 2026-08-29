@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from nmrsuite.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-from nmrsuite.processing import slicing
+from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from opennmr.processing import slicing
 
 
 def _make_2d(n_f1=4, n_f2=6, pseudo=False, homonuclear=False):

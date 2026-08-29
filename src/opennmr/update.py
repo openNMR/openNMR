@@ -86,15 +86,15 @@ def check_for_update(manifest_url: str, current_version: str | None = None,
           "version": "0.2.0",
           "notes": "What changed in this release.",
           "url": {
-            "darwin": "https://.../nmrsuite-0.2.0-macos.dmg",
-            "windows": "https://.../nmrsuite-0.2.0-windows.zip",
-            "linux": "https://.../nmrsuite-0.2.0-linux.tar.gz"
+            "darwin": "https://.../opennmr-0.2.0-macos.dmg",
+            "windows": "https://.../opennmr-0.2.0-windows.zip",
+            "linux": "https://.../opennmr-0.2.0-linux.tar.gz"
           }
         }
 
     Returns ``None`` if the manifest's version isn't newer than
     ``current_version`` (default: the running app's own
-    :data:`nmrsuite._version.__version__`), or if it has no download
+    :data:`opennmr._version.__version__`), or if it has no download
     URL for this platform (:func:`current_platform` by default).
 
     Raises whatever ``urllib.request.urlopen`` or ``json.loads`` raise

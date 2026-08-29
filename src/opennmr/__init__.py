@@ -1,15 +1,15 @@
 """
-nmrsuite
+openNMR
 ========
 
 Vendor-agnostic NMR import, processing, and plotting. Every vendor
-importer in :mod:`nmrsuite.io` reads raw acquisition data and produces
-the same :class:`nmrsuite.core.NMRSpectrum`, which
-:mod:`nmrsuite.processing` and :mod:`nmrsuite.plotting` then operate on
+importer in :mod:`opennmr.io` reads raw acquisition data and produces
+the same :class:`opennmr.core.NMRSpectrum`, which
+:mod:`opennmr.processing` and :mod:`opennmr.plotting` then operate on
 uniformly, regardless of vendor or dimensionality.
 
-    from nmrsuite import io, processing, plotting
-    from nmrsuite.core import NMRSpectrum
+    from opennmr import io, processing, plotting
+    from opennmr.core import NMRSpectrum
 
     spectrum = io.load("/path/to/bruker/experiment")   # or an X-Pulse .jdx
     fig, ax = plotting.plot_1d_stack([spectrum])

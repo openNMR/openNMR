@@ -1,4 +1,4 @@
-from nmrsuite.io.jcampdx import parse_jcampdx_params
+from opennmr.io.jcampdx import parse_jcampdx_params
 
 ACQUS_FIXTURE = """\
 ##TITLE= Parameter file, synthetic test fixture

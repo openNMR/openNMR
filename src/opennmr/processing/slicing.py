@@ -6,7 +6,7 @@ used everywhere else -- carrying provenance (which row/column, at what
 shift) in ``metadata.raw["slice"]`` rather than in a separate ad-hoc
 dict shape. That unification is also what removes the need for
 ``nmrtools2``'s ``prepare_trace_for_fit`` adapter: a trace can be
-handed straight to :func:`nmrsuite.processing.fitting.fit_spectrum`.
+handed straight to :func:`opennmr.processing.fitting.fit_spectrum`.
 
 Ported from ``nmrtools2``'s ``NMR2d_get_trace``/``NMR2D_get_slices``
 (``two_d.py``).

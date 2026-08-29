@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from nmrsuite.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-from nmrsuite.processing import arithmetic
+from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from opennmr.processing import arithmetic
 
 
 def _make_1d(n, lo, hi, fn):

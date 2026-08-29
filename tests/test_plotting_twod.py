@@ -2,8 +2,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from nmrsuite.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-from nmrsuite.plotting import twod
+from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from opennmr.plotting import twod
 
 
 def _make_2d(n_f1=20, n_f2=30, pseudo=False, homonuclear=False, nucleus="1H", nucleus_indirect="13C"):

@@ -2,8 +2,8 @@
   "version": "0.2.0",
   "notes": "Example manifest -- see packaging/README.md. Not hosted anywhere yet.",
   "url": {
-    "darwin": "https://example.com/nmrsuite-0.2.0-macos.zip",
-    "windows": "https://example.com/nmrsuite-0.2.0-windows.zip",
-    "linux": "https://example.com/nmrsuite-0.2.0-linux.tar.gz"
+    "darwin": "https://example.com/opennmr-0.2.0-macos.zip",
+    "windows": "https://example.com/opennmr-0.2.0-windows.zip",
+    "linux": "https://example.com/opennmr-0.2.0-linux.tar.gz"
   }
 }

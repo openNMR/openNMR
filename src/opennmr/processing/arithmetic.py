@@ -5,7 +5,7 @@ Different experiments essentially never share an identical ppm axis
 (different SW/SI, slightly different referencing), so spectra can't
 just be subtracted element-by-element. This module interpolates every
 input spectrum onto one common axis and then combines them -- the same
-approach :func:`nmrsuite.processing.vocs.vocs_sum` uses for summing
+approach :func:`opennmr.processing.vocs.vocs_sum` uses for summing
 VOCS components, extended here to signed combinations of an arbitrary
 number of spectra.
 
@@ -49,7 +49,7 @@ def combine_spectra(spectra: list[NMRSpectrum], ops: list[str] | None = None,
     spectrum outside its own original range, manufacturing spurious
     "signal" exactly where a difference spectrum is meant to reveal
     real differences, not create them. ``'union'`` matches
-    :func:`nmrsuite.processing.vocs.vocs_sum`'s convention instead.
+    :func:`opennmr.processing.vocs.vocs_sum`'s convention instead.
 
     ``npoints`` : points in the common axis; if None, uses the largest
     number of points among the inputs. ``interp_kind`` : passed to

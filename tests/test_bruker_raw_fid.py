@@ -16,7 +16,7 @@ meantime.
 import numpy as np
 import pytest
 
-from nmrsuite.io import bruker
+from opennmr.io import bruker
 
 
 def _write_procs(path, params):

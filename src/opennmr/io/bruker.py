@@ -6,7 +6,7 @@ reconstruct the spectrum in Python, using ``nmrglue`` for the
 genuinely Bruker-specific DSP that's risky to hand-roll (raw binary
 reading, digital-filter/group-delay removal, and windowing that
 matches Bruker's own ``WDW``-coded window functions) -- FFT and
-phasing go through the same :mod:`nmrsuite.processing.ft` primitives
+phasing go through the same :mod:`opennmr.processing.ft` primitives
 used for every other vendor, so there is one consistent FFT/phase
 convention across the whole package rather than a second one specific
 to Bruker.
@@ -29,7 +29,7 @@ the note below was found and confirmed against real data, not guessed.
 
 _CONJUGATE_QUADRATURE_NOTE: Bruker's raw quadrature detection encodes
 a "positive" chemical shift with the opposite sense to
-:mod:`nmrsuite.processing.ft`'s ``fft_spectrum``/axis convention (that
+:mod:`opennmr.processing.ft`'s ``fft_spectrum``/axis convention (that
 convention was validated against X-Pulse's own real,
 independently-working formula -- see ``io/xpulse.py`` -- so it's kept
 as-is there rather than "fixed" globally). Left uncorrected, this
@@ -143,14 +143,14 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     ``nmrtools2``'s ``NMR1dimport``.
 
     ``window``/``window_kwargs`` : override TopSpin's own recorded
-    ``WDW``/``LB``/``SSB`` with one of :data:`nmrsuite.processing.ft`'s
+    ``WDW``/``LB``/``SSB`` with one of :data:`opennmr.processing.ft`'s
     generic window functions instead (``None``, the default, keeps
     TopSpin's own choice). ``zero_fill`` similarly overrides the
     recorded ``SI`` (``None`` keeps it).
 
     ``fid_shift``/``align_echo``/``linear_predict_points`` : applied to
     the raw FID, in that order, before windowing -- see
-    :mod:`nmrsuite.processing.ft`'s ``roll_fid``/``align_echo``/
+    :mod:`opennmr.processing.ft`'s ``roll_fid``/``align_echo``/
     ``linear_predict`` for what each does.
     """
     # read_pulseprogram=False: we never use dic["pprog"], and reading
@@ -597,7 +597,7 @@ def read_diff_xml(path: str, nucleus: str | None = None) -> dict:
     directly.
 
     ``nucleus`` : optional -- if given, ``gamma`` (10^7 rad/s/T) is
-    looked up via :func:`nmrsuite.core.registry.find_gamma` and
+    looked up via :func:`opennmr.core.registry.find_gamma` and
     included for reference; the b-values above already have gamma
     baked in from TopSpin's own calculation, so nothing in the actual
     fit depends on this.

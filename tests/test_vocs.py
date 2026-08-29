@@ -1,7 +1,7 @@
 import numpy as np
 
-from nmrsuite.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-from nmrsuite.processing import vocs
+from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from opennmr.processing import vocs
 
 
 def test_pulse_to_w1_matches_docstring_example():

@@ -2,8 +2,8 @@
 Matplotlib canvas embedded in the Qt GUI.
 
 Plotting into this canvas always goes through the ``ax``-first
-functions in :mod:`nmrsuite.plotting` (never
-:func:`nmrsuite.plotting.style.setup_plotting`, which mutates global
+functions in :mod:`opennmr.plotting` (never
+:func:`opennmr.plotting.style.setup_plotting`, which mutates global
 matplotlib state) -- see that module's docstring for why: restyling
 one canvas must never restyle every other open one.
 """
@@ -280,8 +280,8 @@ class MplCanvas(QWidget):
 
     def show_spectrum(self, spectrum: NMRSpectrum) -> None:
         """Plot ``spectrum`` into this canvas, replacing whatever was
-        there -- 1D via :func:`nmrsuite.plotting.plot_1d`, 2D via
-        :func:`nmrsuite.plotting.plot_2d_contour`. Preserves this
+        there -- 1D via :func:`opennmr.plotting.plot_1d`, 2D via
+        :func:`opennmr.plotting.plot_2d_contour`. Preserves this
         canvas's legend-visible/aspect-lock choices across the
         rebuild."""
         self.figure.clear()
@@ -358,7 +358,7 @@ class MplCanvas(QWidget):
     def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack",
                       y_offset: float = 0.2, normalize: bool = False) -> None:
         """Plot several 1D spectra together for comparison, via
-        :func:`nmrsuite.plotting.plot_1d_stack` -- ``mode="stack"``
+        :func:`opennmr.plotting.plot_1d_stack` -- ``mode="stack"``
         (vertically offset by ``y_offset``, as a fraction of each
         spectrum's own height) or ``"overlay"`` (all at y=0): both are
         really the same call, since a large enough negative
@@ -382,7 +382,7 @@ class MplCanvas(QWidget):
         """Plot one pseudo-2D slice's spectrum alongside its fitted
         (pseudo-Voigt) curve -- the intermediate per-slice spectral
         fit that feeds a relaxation/diffusion parameter fit
-        (:func:`nmrsuite.processing.fitting.NMR2D_fit_slices`'s own
+        (:func:`opennmr.processing.fitting.NMR2D_fit_slices`'s own
         per-slice result), so it can be inspected directly instead of
         only trusting the final T1/T2/D number."""
         self._contour_spectrum = None
@@ -404,7 +404,7 @@ class MplCanvas(QWidget):
         """Plot each peak's relaxation series (points) and fitted curve
         (line), from a list of ``relaxation.fit_relaxation``-shaped
         dicts (as returned by
-        :func:`nmrsuite.processing.relaxation.NMR2D_fit_relaxation`).
+        :func:`opennmr.processing.relaxation.NMR2D_fit_relaxation`).
 
         The fit curve is drawn through ``t``/``y_fit`` (already sorted
         by delay) rather than a finely-resampled model curve -- keeps

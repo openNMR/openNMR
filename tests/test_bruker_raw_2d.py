@@ -7,7 +7,7 @@ files, which aren't available in this environment.
 
 import numpy as np
 
-from nmrsuite.io import bruker
+from opennmr.io import bruker
 
 
 def _write_procs(path, params):

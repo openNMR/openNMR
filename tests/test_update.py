@@ -1,6 +1,6 @@
 import json
 
-from nmrsuite import update
+from opennmr import update
 
 
 # ============================================================
@@ -93,7 +93,7 @@ def test_check_for_update_falls_back_to_wildcard_url(monkeypatch):
 
 
 def test_check_for_update_uses_running_version_by_default(monkeypatch):
-    from nmrsuite._version import __version__ as running_version
+    from opennmr._version import __version__ as running_version
     _patch_manifest(monkeypatch, {"version": running_version, "url": {"darwin": "https://example.com/mac.dmg"}})
     result = update.check_for_update("https://example.com/manifest.json", platform="darwin")
     assert result is None  # manifest's version matches the running one -- not newer

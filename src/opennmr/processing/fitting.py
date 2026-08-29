@@ -22,13 +22,13 @@ Provides:
 Workflow (2D)
 -------------
 
-    nmrsuite.processing.slicing.get_slices -> NMR2D_fit_slices
+    opennmr.processing.slicing.get_slices -> NMR2D_fit_slices
 
-Each extracted trace from :func:`nmrsuite.processing.slicing.get_slices`
-is already a 1D :class:`nmrsuite.core.spectrum.NMRSpectrum`, so it goes
+Each extracted trace from :func:`opennmr.processing.slicing.get_slices`
+is already a 1D :class:`opennmr.core.spectrum.NMRSpectrum`, so it goes
 straight into :func:`fit_spectrum` -- ``nmrtools2``'s
 ``prepare_trace_for_fit`` adapter is unnecessary here (see
-``nmrsuite.processing.slicing``'s module docstring for why).
+``opennmr.processing.slicing``'s module docstring for why).
 """
 
 from __future__ import annotations
@@ -408,9 +408,9 @@ def fit_spectrum(spectrum: NMRSpectrum, peak_defs, fit_regions=None, use_normali
     Parameters
     ----------
     spectrum : NMRSpectrum
-        A 1D spectrum -- e.g. from an ``nmrsuite.io`` importer, or a
+        A 1D spectrum -- e.g. from an ``opennmr.io`` importer, or a
         trace extracted with
-        :func:`nmrsuite.processing.slicing.get_trace`/``get_slices``.
+        :func:`opennmr.processing.slicing.get_trace`/``get_slices``.
 
     peak_defs : list of dict
         Each dict: ``{"type": "gaussian"|"lorentzian"|"pseudo_voigt",
@@ -446,7 +446,7 @@ def fit_spectrum(spectrum: NMRSpectrum, peak_defs, fit_regions=None, use_normali
         ``positive_intensity=False``) for genuinely negative-going data,
         e.g. an inversion-recovery slice before the null point, or a
         difference spectrum (see
-        :func:`nmrsuite.processing.arithmetic.combine_spectra`). A
+        :func:`opennmr.processing.arithmetic.combine_spectra`). A
         per-peak ``bounds`` entry in ``peak_defs`` still overrides this.
 
     Returns
@@ -589,9 +589,9 @@ def compute_integrals(x, components):
     negative, since the total can be small relative to the individual
     (partially cancelling) terms -- this is expected, not a bug.
 
-    ``x`` is not assumed to be ascending -- nmrsuite's Bruker
+    ``x`` is not assumed to be ascending -- opennmr's Bruker
     importers store ppm/Hz axes in descending order (see
-    ``nmrsuite.io.bruker``'s ``_ppm_hz_axis``), and ``np.trapz``
+    ``opennmr.io.bruker``'s ``_ppm_hz_axis``), and ``np.trapz``
     silently flips sign under a descending axis. Each component is
     integrated against ``x`` sorted ascending, so the returned sign
     reflects the data (peak vs. dip), never the axis direction.
@@ -812,14 +812,14 @@ def select_2d_traces(dataset: NMRSpectrum, axis: str = "f1", indices=None, shift
     Build a sorted, de-duplicated list of 1-based trace indices from a
     mix of selection criteria -- a convenience for building the
     ``rows``/``columns`` (or ``row_shifts``/``column_shifts``) argument
-    to :func:`nmrsuite.processing.slicing.get_slices`.
+    to :func:`opennmr.processing.slicing.get_slices`.
 
     Parameters
     ----------
     dataset : NMRSpectrum
         A 2D spectrum.
     axis : {'f1', 'f2'}, optional
-        Matches :func:`nmrsuite.processing.slicing.get_trace`'s convention.
+        Matches :func:`opennmr.processing.slicing.get_trace`'s convention.
     indices : list of int, optional
         Explicit 1-based indices.
     shifts : list of float, optional
@@ -885,7 +885,7 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
     Parameters
     ----------
     slices : dict
-        Output of :func:`nmrsuite.processing.slicing.get_slices`:
+        Output of :func:`opennmr.processing.slicing.get_slices`:
         ``{"rows": [NMRSpectrum, ...], "columns": [NMRSpectrum, ...]}``.
     peak_defs : list of dict
         See :func:`fit_spectrum`.

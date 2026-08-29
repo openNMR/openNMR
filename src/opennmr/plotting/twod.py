@@ -4,10 +4,10 @@
 ``plot_2d_contour`` is ``ax``-first (``nmrtools2``'s ``NMR2Dplotter``
 already accepted an external ``ax=``, so this ports over directly) and
 never touches global matplotlib state when embedded that way -- see
-:mod:`nmrsuite.plotting.style`'s docstring for why that matters for a
+:mod:`opennmr.plotting.style`'s docstring for why that matters for a
 GUI canvas. Unlike the original, this only ever takes an already-
 loaded :class:`NMRSpectrum` (not a raw path) -- keeping the plotting
-layer decoupled from :mod:`nmrsuite.io`; load first, plot second.
+layer decoupled from :mod:`opennmr.io`; load first, plot second.
 
 Ported from ``nmrtools2``'s ``two_d.py``.
 """
@@ -367,7 +367,7 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
     raises ``ValueError`` otherwise.
 
     ``colours`` : ``'diverging'`` (default, from
-    :func:`nmrsuite.plotting.style.get_stack_colormap`) or an explicit
+    :func:`opennmr.plotting.style.get_stack_colormap`) or an explicit
     list of matplotlib colours, one per spectrum.
 
     Returns ``fig, ax``.

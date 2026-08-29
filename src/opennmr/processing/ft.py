@@ -5,9 +5,9 @@ linear prediction) rather than one fixed pipeline function, so
 different acquisition styles (a plain decaying FID vs. a full echo that
 needs aligning first, for example) can be built from the same parts.
 
-Used directly by ``nmrsuite.io.xpulse`` (X-Pulse's raw FID needs the
+Used directly by ``opennmr.io.xpulse`` (X-Pulse's raw FID needs the
 whole pipeline) and for the shared, non-Bruker-specific finishing
-touches of ``nmrsuite.io.bruker``'s raw-FID path (``autophase01`` as a
+touches of ``opennmr.io.bruker``'s raw-FID path (``autophase01`` as a
 fallback when no interactive phase was recorded, ``baseline_correct``).
 Kept as its own module -- not folded into ``io.xpulse`` -- so future
 JEOL/Varian importers (also raw-FID formats) can reuse it too.
@@ -126,7 +126,7 @@ def apodize(fid: np.ndarray, dt: float, window: str = "exponential", **params) -
 
     These are generic textbook window formulas -- for *exactly*
     reproducing a specific vendor's own apodization (e.g. Bruker's
-    WDW-coded windows), see ``nmrsuite.io.bruker``, which uses
+    WDW-coded windows), see ``opennmr.io.bruker``, which uses
     ``nmrglue`` for that instead of this registry.
     """
     if window not in _WINDOWS:

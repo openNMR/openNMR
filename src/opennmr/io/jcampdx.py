@@ -2,7 +2,7 @@
 Generic parser for Bruker-style JCAMP-DX parameter files (``acqus``,
 ``acqu2s``, ``acqu3s``, ``procs``, ``proc2s``, ``proc3s``, ...).
 
-This is the single place ``nmrsuite.io.bruker`` goes to read a
+This is the single place ``opennmr.io.bruker`` goes to read a
 parameter file. Previously (in ``nmrtools2``) this same
 ``##$KEY=value`` format was hand-parsed inline, separately, in five
 different places (once per file/field combination needed), each

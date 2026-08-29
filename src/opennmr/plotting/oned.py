@@ -6,7 +6,7 @@
 matplotlib state, so it's safe to call from a GUI canvas as well as
 from the standalone convenience wrappers below (``plot_1d_stack``,
 ``plot_1d_heatmap``), which create their own figure and *do* call
-:func:`nmrsuite.plotting.style.setup_plotting` -- harmless for a
+:func:`opennmr.plotting.style.setup_plotting` -- harmless for a
 one-off figure, not for a GUI (see that module's docstring).
 """
 
@@ -56,12 +56,12 @@ def plot_1d_stack(spectra: list[NMRSpectrum], ax=None, fig=None, color: str = "b
                    fontsize: float = 12, output_format: str = "",
                    save_fig: bool = False, fig_name: str = "nmr_1d_plot", save_format: str = "png"):
     """Plot a stack of 1D spectra with a vertical offset between them,
-    coloured along :func:`nmrsuite.plotting.style.get_stack_colormap`.
+    coloured along :func:`opennmr.plotting.style.get_stack_colormap`.
 
     Ported from ``nmrtools2``'s ``NMR1dplot`` (its non-VOCS,
     non-heatmap path). If ``ax`` is None (default), creates a
     standalone figure and applies
-    :func:`nmrsuite.plotting.style.setup_plotting`; otherwise plots
+    :func:`opennmr.plotting.style.setup_plotting`; otherwise plots
     into the given ``ax`` without touching global style (for
     embedding, e.g. in a GUI canvas).
     """
@@ -133,7 +133,7 @@ def plot_1d_heatmap(spectra: list[NMRSpectrum], ax=None, fig=None, x_unit: str =
     :func:`plot_1d_stack`'s offset stack).
 
     Every spectrum is interpolated onto one common x-axis via
-    :func:`nmrsuite.processing.arithmetic.combine_spectra` (reusing its
+    :func:`opennmr.processing.arithmetic.combine_spectra` (reusing its
     interpolation machinery -- see that function's ``metadata.raw
     ["interpolated_spectra"]``), stacked into a ``(n_spectra,
     npoints)`` matrix, and displayed with ``pcolormesh``. Rows are

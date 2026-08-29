@@ -1,10 +1,10 @@
 """
-Relaxation-curve fitting (T1, T2, T1rho) for nmrsuite.
+Relaxation-curve fitting (T1, T2, T1rho) for opennmr.
 
 Ported from ``nmrtools2``'s ``relaxation.py``. The plotting/workflow
 functions there (``NMR2D_plot_relaxation``, ``NMR2D_relaxation_workflow``,
 and their private plot-styling helpers) are deliberately left out here,
-for the same reason as ``nmrsuite.processing.fitting``'s deferred
+for the same reason as ``opennmr.processing.fitting``'s deferred
 functions -- they're one-shot import+fit+plot+report convenience
 wrappers, deferred to a future GUI fitting panel.
 
@@ -12,7 +12,7 @@ This module is deliberately decoupled from the peak-fitting machinery
 in ``fitting.py``: it operates on plain ``(t, y[, y_err])`` arrays, so
 it can fit a relaxation curve to *any* series of intensities/integrals
 against delay time, not only ones produced by
-:func:`nmrsuite.processing.fitting.NMR2D_fit_slices`. A convenience
+:func:`opennmr.processing.fitting.NMR2D_fit_slices`. A convenience
 function, :func:`NMR2D_fit_relaxation`, is provided for the common
 case of fitting directly from that function's output (or from
 :func:`NMR2D_integrate_slices`'s -- both are shaped the same way, so
@@ -29,8 +29,8 @@ Models provided
 Workflow
 --------
 
-    nmrsuite.processing.slicing.get_slices
-        -> [nmrsuite.processing.fitting.NMR2D_fit_slices | NMR2D_integrate_slices]
+    opennmr.processing.slicing.get_slices
+        -> [opennmr.processing.fitting.NMR2D_fit_slices | NMR2D_integrate_slices]
         -> NMR2D_fit_relaxation
 
 Alternatively, fit an arbitrary (t, y) array directly with
@@ -38,7 +38,7 @@ Alternatively, fit an arbitrary (t, y) array directly with
 
 This module never reads a delay list (``vdlist``) file itself --
 :func:`NMR2D_fit_relaxation`/:func:`_get_delays` take an already-loaded
-vdlist (the dict from :func:`nmrsuite.io.bruker.read_vdlist`, or a
+vdlist (the dict from :func:`opennmr.io.bruker.read_vdlist`, or a
 plain array of delays in seconds), keeping processing/ modules IO-free.
 """
 
@@ -116,7 +116,7 @@ def stejskal_tanner_decay(b, I0, D):
     """Stejskal-Tanner PFG diffusion attenuation: ``I0*exp(-b*D)``.
 
     ``b`` : diffusion weighting (s/m^2) -- e.g. from
-    :func:`nmrsuite.io.bruker.read_diff_xml`'s own ``"B"``, which
+    :func:`opennmr.io.bruker.read_diff_xml`'s own ``"B"``, which
     already has gamma/delta/DELTA (and TopSpin's own ``DELTA-delta/3``
     correction) baked in; don't fold those in again here. Same
     functional shape as :func:`exponential_decay` with ``b``
@@ -288,7 +288,7 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
 
     y_err : array-like, optional
         Per-point uncertainty (e.g. ``integral_errors`` from
-        :func:`nmrsuite.processing.fitting.NMR2D_fit_slices`). If
+        :func:`opennmr.processing.fitting.NMR2D_fit_slices`). If
         given, used as ``sigma`` in the least-squares fit (points are
         weighted by 1/error^2) and reported back as parameter
         uncertainties that account for the measurement errors rather
@@ -506,7 +506,7 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
     """
     Integrate one or more extracted 2D NMR slices (rows and/or
     columns) over user-specified x-axis regions -- a peak-fitting-free
-    alternative to :func:`nmrsuite.processing.fitting.NMR2D_fit_slices`,
+    alternative to :func:`opennmr.processing.fitting.NMR2D_fit_slices`,
     useful when individual peaks are too poorly resolved or
     overlapping to be worth modelling, and a bulk-region integral
     (e.g. an aromatic region ``[6.5, 8.0]`` vs an aliphatic region
@@ -515,7 +515,7 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
     Parameters
     ----------
     slices : dict
-        Output of :func:`nmrsuite.processing.slicing.get_slices`:
+        Output of :func:`opennmr.processing.slicing.get_slices`:
         ``{"rows": [NMRSpectrum, ...], "columns": [NMRSpectrum, ...]}``.
     regions : list of (float, float)
         x-axis regions to integrate, e.g. ``[[3.4, 4.5], [4.5, 8.0]]``
@@ -531,17 +531,17 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
         Normalise each trace (to its own max) before integrating.
     subtract_baseline : bool, optional
         Estimate and subtract a robust linear baseline (see
-        :func:`nmrsuite.processing.fitting.estimate_baseline_robust`)
+        :func:`opennmr.processing.fitting.estimate_baseline_robust`)
         before integrating each region. Recommended: an unsubtracted
         baseline offset biases every region's integral by an amount
         that depends on the region's width, which then propagates
         directly into a distorted relaxation curve. Default True.
     baseline_regions, baseline_sigma, baseline_max_iter : optional
-        See :func:`nmrsuite.processing.fitting.estimate_baseline_robust`.
+        See :func:`opennmr.processing.fitting.estimate_baseline_robust`.
     noise_region : tuple or list of tuples, optional
         Region(s) used to estimate each slice's noise level for
         integral error propagation (see
-        :func:`nmrsuite.processing.fitting.estimate_noise_level`). If
+        :func:`opennmr.processing.fitting.estimate_noise_level`). If
         None, the first/last 5% of each slice is used. Errors are
         propagated analytically through the trapezoidal rule (exact
         for independent per-point Gaussian noise), not just assumed
@@ -550,7 +550,7 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
     Returns
     -------
     dict with keys ``"rows"`` and ``"columns"``, shaped closely enough
-    to match :func:`nmrsuite.processing.fitting.NMR2D_fit_slices`'s
+    to match :func:`opennmr.processing.fitting.NMR2D_fit_slices`'s
     output to be used interchangeably with
     :func:`NMR2D_fit_relaxation`: each entry has ``slice`` (the trace
     ``NMRSpectrum`` itself), ``slice_type``, ``index``, ``shift``,
@@ -599,8 +599,8 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
             if len(x_r) < 2:
                 raise ValueError(f"Region ({lo}, {hi}) contains fewer than 2 points.")
 
-            # x_ppm (and x_Hz) run in descending order by nmrsuite's
-            # Bruker convention (see nmrsuite.io.bruker's
+            # x_ppm (and x_Hz) run in descending order by opennmr's
+            # Bruker convention (see opennmr.io.bruker's
             # _ppm_hz_axis); sort ascending first so the integral's
             # sign reflects the data, not the axis direction (np.trapz
             # flips sign under a descending x otherwise).
@@ -652,22 +652,22 @@ def _get_delays(fits, vdlist):
     """
     Resolve delay times (seconds), sorted with the fits, for a
     ``fitted["rows"]``/``fitted["columns"]``-shaped list from
-    :func:`nmrsuite.processing.fitting.NMR2D_fit_slices` or
+    :func:`opennmr.processing.fitting.NMR2D_fit_slices` or
     :func:`NMR2D_integrate_slices`.
 
     ``vdlist`` : the dict returned by
-    :func:`nmrsuite.io.bruker.read_vdlist` (its ``"seconds"`` key is
+    :func:`opennmr.io.bruker.read_vdlist` (its ``"seconds"`` key is
     used), or a plain array of delays in seconds indexed by 1-based F1
     slice index. Unlike ``nmrtools2``, this never reads a vdlist file
     itself -- read it once with
-    :func:`nmrsuite.io.bruker.read_vdlist` and pass the result in, so
+    :func:`opennmr.io.bruker.read_vdlist` and pass the result in, so
     this processing module stays IO-free.
     """
 
     if vdlist is None:
         raise ValueError(
             "vdlist is required -- pass the dict from "
-            "nmrsuite.io.bruker.read_vdlist(), or an array of delays "
+            "opennmr.io.bruker.read_vdlist(), or an array of delays "
             "(seconds) indexed by 1-based F1 slice index."
         )
 
@@ -694,7 +694,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
                           fixed=None, show_report=True) -> list:
     """
     Fit relaxation curves to every peak's/region's integral series
-    across a :func:`nmrsuite.processing.fitting.NMR2D_fit_slices` (or
+    across a :func:`opennmr.processing.fitting.NMR2D_fit_slices` (or
     :func:`NMR2D_integrate_slices`) output (T1/T2/T1rho pseudo-2D
     series).
 
@@ -702,7 +702,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
     ----------
     fits : list
         ``fitted["rows"]`` or ``fitted["columns"]`` from
-        :func:`nmrsuite.processing.fitting.NMR2D_fit_slices`, or the
+        :func:`opennmr.processing.fitting.NMR2D_fit_slices`, or the
         equivalent from :func:`NMR2D_integrate_slices`. Every entry
         must have been fitted/integrated against the *same*
         ``peak_defs``/``regions``, in the same order, or the per-peak
@@ -710,7 +710,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
     model : str
         See :data:`RELAXATION_MODELS`.
     vdlist : dict or array-like
-        The dict from :func:`nmrsuite.io.bruker.read_vdlist`, or a
+        The dict from :func:`opennmr.io.bruker.read_vdlist`, or a
         plain array of delays (seconds) indexed by 1-based F1 slice
         index. Required -- see :func:`_get_delays`.
     peak_labels : list of str, optional

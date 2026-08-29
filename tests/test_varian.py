@@ -2,8 +2,8 @@ import numpy as np
 import nmrglue as ng
 import pytest
 
-from nmrsuite import io
-from nmrsuite.io import varian
+from opennmr import io
+from opennmr.io import varian
 
 
 # ============================================================

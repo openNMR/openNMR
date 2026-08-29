@@ -1,6 +1,6 @@
 import numpy as np
 
-from nmrsuite.io import xpulse
+from opennmr.io import xpulse
 
 FIXTURE = """\
 ##TITLE= synthetic test fixture
@@ -97,7 +97,7 @@ def test_baseline_correct_defaults_off_when_align_echo_is_on(tmp_path, monkeypat
     # skip baseline correction -- confirmed by checking whether
     # ft.baseline_correct actually got called.
     called = []
-    from nmrsuite.processing import ft as processing_ft
+    from opennmr.processing import ft as processing_ft
     monkeypatch.setattr(processing_ft, "baseline_correct", lambda *a, **k: called.append(True) or a[1])
 
     path = _write_fixture(tmp_path)

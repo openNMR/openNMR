@@ -4,17 +4,17 @@ Varian/Agilent (VnmrJ) importer.
 Like X-Pulse, Varian hands back only a raw time-domain FID -- there's
 no vendor-processed fallback the way Bruker's TopSpin ``1r``/``1i``
 are -- so every spectrum goes through this project's shared
-:mod:`nmrsuite.processing.ft` pipeline (apodize -> zero-fill -> FFT ->
+:mod:`opennmr.processing.ft` pipeline (apodize -> zero-fill -> FFT ->
 phase -> baseline) in Python.
 
 The raw binary ``fid``/``procpar`` read itself uses ``nmrglue.varian``
-(the same reasoning as :mod:`nmrsuite.io.bruker`'s use of nmrglue for
+(the same reasoning as :mod:`opennmr.io.bruker`'s use of nmrglue for
 its raw-data read: reproducing Varian's block-header binary format and
 hypercomplex-2D interleaving by hand is exactly the kind of DSP code
 where a subtle bug produces a plausible-looking but wrong result).
 
 **Axis-referencing caveat**: the ppm axis below treats Varian's ``tof``
-(transmitter offset frequency) the same way :mod:`nmrsuite.io.xpulse`
+(transmitter offset frequency) the same way :mod:`opennmr.io.xpulse`
 treats X-Pulse's ``$O1`` -- both are "how far the transmitter is
 offset from the reference frequency," the same physical quantity --
 for consistency with this project's other two vendor readers, rather
@@ -45,7 +45,7 @@ _NUCLEUS_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
 
 def _normalize_nucleus(tn: str | None) -> str | None:
     """Varian's ``tn`` ("Li7", "H1") is symbol-then-number -- every
-    other vendor here (and :func:`nmrsuite.core.registry.find_gamma`)
+    other vendor here (and :func:`opennmr.core.registry.find_gamma`)
     uses number-then-symbol ("7Li", "1H"), so swap it rather than
     silently breaking nucleus-based lookups/overrides downstream."""
     if not tn:
@@ -92,9 +92,9 @@ def read_1d(path: str, mass: float = 1.0,
     ``normalize``/``autophase``/``phase_mode``/``phase0``/``phase1``/
     ``phase0_inc``/``phase1_max``/``phase1_improvement``/
     ``phase_penalty`` : identical meaning to
-    :func:`nmrsuite.io.xpulse.read_1d`'s same-named parameters -- both
+    :func:`opennmr.io.xpulse.read_1d`'s same-named parameters -- both
     vendors hand back a raw FID and share this project's one
-    processing pipeline (:mod:`nmrsuite.processing.ft`).
+    processing pipeline (:mod:`opennmr.processing.ft`).
     """
     dic, fid = ng.varian.read(path)
     procpar = dic["procpar"]

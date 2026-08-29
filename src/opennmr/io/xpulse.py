@@ -4,7 +4,7 @@ X-Pulse importer.
 Unlike Bruker/TopSpin, X-Pulse hands back a raw time-domain FID encoded
 in a JCAMP-DX file (ASDF/AFFN pseudo-digit compressed data table) --
 apodization, zero-filling, FFT, phasing and baseline correction all
-happen here in Python, via :mod:`nmrsuite.processing.ft`.
+happen here in Python, via :mod:`opennmr.processing.ft`.
 
 The ASDF/AFFN decoding in :func:`_read_xpulse_jcamp` is ported close to
 unchanged from ``leonmr.read_xpulse_jcamp`` -- it's intricate
@@ -399,7 +399,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     :class:`NMRSpectrum`.
 
     ``window``/``window_kwargs`` : passed to
-    :func:`nmrsuite.processing.ft.apodize` (default: exponential with
+    :func:`opennmr.processing.ft.apodize` (default: exponential with
     no line broadening, i.e. no-op -- pass e.g.
     ``window_kwargs={"lb": 5.0}`` for 5 Hz line broadening, or
     ``window="hann"`` for a Hann window instead).
@@ -410,7 +410,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
 
     ``fid_shift``/``align_echo``/``linear_predict_points`` : applied to
     the raw FID, in that order, right after ``truncate`` and before
-    apodization -- see :mod:`nmrsuite.processing.ft`'s ``roll_fid``/
+    apodization -- see :mod:`opennmr.processing.ft`'s ``roll_fid``/
     ``align_echo``/``linear_predict`` for what each does. Useful for
     full-echo (rather than one-sided decaying) acquisitions, common on
     wideline/quadrupolar X-Pulse experiments.
@@ -427,7 +427,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     Pass ``True``/``False`` explicitly to override either way.
 
     ``phase_mode`` : ``"apc0"`` (default, zero-order-only autophase) or
-    ``"joint"`` (:func:`nmrsuite.processing.ft.autophase01`, zero- and
+    ``"joint"`` (:func:`opennmr.processing.ft.autophase01`, zero- and
     first-order). Only used when ``autophase=True``; ignored otherwise
     (``phase0``/``phase1`` are then applied as given).
     """
