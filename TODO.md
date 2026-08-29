@@ -2,6 +2,139 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Phase workflow round 2, WDW/contour robustness, bidirectional pseudo-2D (2026-08-29)
+
+- ~~Keep the phase information when saying reprocess~~ -- done, for
+  every case where it's actually well-defined. New
+  `MainWindow._current_phase_kwargs`/`_reapply_phase_post_reload`
+  compute the *total* current phase (whatever a vendor's `read_1d`/
+  `read_2d` already baked in via `metadata.raw["phase0"/"phase1"]`,
+  plus the live delta still showing in the Phase spin boxes -- see
+  `_capture_phase_reference`'s own docstring for why the spin boxes
+  are deltas, not the total) and forward it into `session.reload(...)`
+  as `phase0`/`phase1`/`pivot_frac`/`autophase=False`, for 1D, a whole
+  2D dataset along F2, or a pseudo-2D with "apply to every slice"
+  checked. The two cases that don't reduce to one scalar phase shared
+  across the whole dataset -- a single pseudo-2D slice's own phase, or
+  a conventional 2D's F1/indirect phase -- are instead reapplied
+  post-hoc directly onto the freshly-reloaded spectrum, since neither
+  `read_1d` nor `read_2d` has a way to phase just one row/dimension
+  from a raw-FID call. `io/bruker.py::read_2d` gained `phase0`/
+  `phase1`/`pivot_frac` params it didn't have at all before (previously
+  zero-order-only, no way to preserve a caller's phase across a
+  reload); every vendor's `read_1d` and `varian.read_2d` gained
+  `pivot_frac` (was always hardcoded to 0.5/centre, silently
+  re-pivoting away from wherever the user had actually set it).
+  Wired into both "Reprocess from raw FID" and the pseudo-2D/
+  conventional-2D toggle (`process_indirect_button`), since both
+  reload from raw FID.
+  **Real bug found while testing this, fixed**: the first version of
+  `_current_phase_kwargs` didn't check whether `spectrum` was actually
+  reprocessable from raw FID at all -- for a Bruker dataset with no
+  `fid`/`ser` on disk (routed through `read_1d_processed`/
+  `read_2d_processed`, which have no `phase0`/`phase1` concept), it
+  still tried to forward them, raising `TypeError` inside a modal
+  `QMessageBox.critical(...).exec()` call that blocks forever under a
+  headless/offscreen Qt platform -- a full test-suite run hung with no
+  error output. Same "silent hang = check for an unmocked call
+  reaching a real modal dialog" lesson as the canvas-tabs-default bug
+  two rounds ago. Fixed by gating on `_fid_reprocessable(spectrum)`.
+- ~~Autophase should support 1st-order phasing~~ -- done. New "1st-order"
+  checkbox next to the Autophase button switches it from `apc0`
+  (zero-order-only) to `processing.ft.autophase01`'s joint search.
+- ~~A revert option in case autophase was bad~~ -- done. New "Revert
+  Autophase" button, disabled until an Autophase click actually
+  happens, restores Phase 0/Phase 1 to their pre-autophase values.
+  Invalidated (disabled again) on reselection/slice/dimension change
+  (`_capture_phase_reference`) -- a stale snapshot from a *different*
+  view would restore the wrong thing.
+- ~~A slider bar for the pivot point~~ -- done. New `pivot_slider`
+  (0-1000, mapped to the spectrum's own ppm range) next to the
+  existing spin box, synced bidirectionally via `blockSignals` on
+  whichever side didn't originate the change.
+- ~~Make sure things aren't resetting when the pivot is changed~~ --
+  verified: moving the pivot (spin or slider) only calls
+  `_apply_phase_preview`, never `_capture_phase_reference` (which
+  zeroes Phase 0/Phase 1) -- covered by a new regression test setting
+  a nonzero phase, moving the pivot both ways, and asserting the phase
+  is untouched.
+- ~~Axis positioning should update to zero the baseline more
+  effectively once phased~~ -- done, for *discrete* phase actions only
+  (Autophase, Revert Autophase, Baseline Correct) -- new
+  `MplCanvas.autoscale_y()` refits the y-axis to whatever's actually
+  plotted now, computed directly from the main line's own data (not
+  `Axes.relim()`/`autoscale_view()`, which silently no-ops once this
+  canvas's own scroll-zoom/pan handlers have called `set_ylim`
+  directly -- confirmed empirically, not assumed). Deliberately *not*
+  wired into continuous dragging, which still preserves the current
+  view exactly as before (a validated, tested design choice from an
+  earlier round) -- a one-shot click and a drag gesture warrant
+  different behaviour here.
+- ~~A baseline correction option~~ -- done. New "Baseline Correct"
+  button (`processing.ft.baseline_correct`, linear fit to the real
+  part) targets whatever the Phase controls currently target -- same
+  rules as Autophase, including the pseudo-2D single-slice case.
+- ~~WDW function not found / make this more robust~~ -- done. A Bruker
+  window function this package doesn't implement (e.g. GM) used to
+  make the *whole file unopenable* (`NotImplementedError` bubbling up
+  through `_load`'s try/except into a blocking error dialog).
+  `bruker._read_auto` now catches exactly that error and falls back to
+  `read_1d_processed`/`read_2d_processed` (TopSpin's own already-
+  processed output, which needs no window-function knowledge at all)
+  when available on disk, filtering the reload kwargs down to only
+  what the processed reader actually accepts
+  (`_filter_kwargs`) so raw-FID-only kwargs like `window`/`zero_fill`
+  don't raise a second, different error. The fallback is flagged via
+  `metadata.raw["fid_reprocess_unavailable"]` -- surfaced to the user
+  as a one-time `QMessageBox.information` on load (not silent), and
+  `_fid_reprocessable` now returns `False` for a spectrum flagged this
+  way (the FID-processing box would otherwise show, appear
+  functional, and silently do nothing every time "Reprocess" is
+  clicked). Deliberately did **not** attempt to actually implement GM
+  -- this module's own docstring already documents that as a
+  deliberate choice (an unverified Bruker `LB`/`GB` -> `g1`/`g2`/`g3`
+  parameter mapping risks silently producing a wrong spectrum, worse
+  than a clear error), not an oversight to "just fix."
+- ~~Tuple error, some data from "the box" had issues~~ -- **not
+  reproduced, need more detail from the user** (a traceback, or which
+  file/vendor). Checked the obvious candidates (`_resolve_window_kwargs`,
+  `_zero_fill_value`, the jcampdx multi-value array parser, `f1p`/`f2p`
+  crop sorting) and found nothing tuple-shaped that looks wrong --
+  didn't want to guess-fix something this vague and risk masking the
+  real bug or introducing a new one.
+- ~~2D contours start out scaled way too high~~ -- **real bug, found
+  and fixed**: `_prepare_contour`'s power-law level spacing used
+  `power * i / clevels` as the exponent, which only reaches exactly
+  `power` (not 1) at the top level -- for `power > 1` (the default is
+  1.25), that *overshoots* the real data max, so the top several
+  "contour levels" sat above every real data point and were never
+  actually drawn. The levels that *did* draw were squeezed into a
+  smaller fraction of the true range than intended, several coarser
+  than they should be -- moderate, real signal often fell entirely
+  between two of them, looking like a 2D/pseudo-2D dataset "starts out
+  scaled way too high" (barely anything visible) until the threshold
+  was manually scrolled down a lot. Fixed by changing the exponent to
+  `(i / clevels) ** power`, which always reaches exactly 1 (so the top
+  level is exactly the data max, regardless of `power`) while still
+  bunching more levels toward the noise floor as `power` increases --
+  matching what the function's own docstring already claimed the old,
+  buggy formula did. Two new regression tests pin both properties
+  (top level == data max; steeper power bunches lower, not higher).
+- ~~A way to switch between pseudo-2D and processing the indirect
+  dimension in both directions~~ -- this already existed
+  (`process_indirect_button`, a checkable toggle -- checked = real F1
+  FFT, unchecked = pseudo-2D) and structurally supports both
+  directions, but **every existing test only ever exercised one
+  direction** (pseudo-2D -> conventional). Added a regression test
+  that toggles both ways twice in a row on the same spectrum, which is
+  exactly what caught the `_current_phase_kwargs` `TypeError`/hang
+  above (only reachable from the *second* toggle, once `_phase_mode`
+  had become `"2d"`).
+
+438 tests passing (this round: several new phase/pivot/autophase/
+baseline/contour/bruker-fallback tests). Nothing committed yet from
+this round (not asked to).
+
 ## Phase-tab feedback, plot styling, menu bar (2026-08-29)
 
 - ~~Default FID preview should be Real, not Magnitude~~ -- done.

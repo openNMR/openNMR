@@ -15,7 +15,15 @@ Only ``WDW`` in ``{0 (none), 1 (EM), 3 (SINE), 4 (QSINE)}`` is
 currently supported for the raw-FID path (see
 :func:`_apply_bruker_window`) -- these cover routine 1D processing;
 GM and less common windows raise ``NotImplementedError`` rather than
-silently guessing at an unverified parameter mapping.
+silently guessing at an unverified parameter mapping. ``_read_auto``
+catches exactly that error and falls back to
+``read_1d_processed``/``read_2d_processed`` (TopSpin's own already-
+processed output, which doesn't need to know the window function at
+all) when it's available on disk, so an unsupported window degrades
+the experience (no raw-FID reprocessing controls) rather than making
+the file unopenable -- the fallback is flagged via
+``metadata.raw["fid_reprocess_unavailable"]`` so callers (the GUI)
+can tell the user why, rather than it being silent.
 
 ``read_1d_processed``/``read_2d_processed`` are a fallback, and a
 cross-check: they read TopSpin's own already-processed output
@@ -128,6 +136,7 @@ def _ppm_hz_axis(o1: float, sf: float, obs: float, sw: float, si: int) -> tuple[
 
 def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p: float = 0.0,
             autophase: bool = True, phase_mode: str = "apc0", phase0: float = 0.0, phase1: float = 0.0,
+            pivot_frac: float = 0.5,
             phase0_inc: float = 0.1, phase1_max: float = 20.0, phase1_improvement: float = 0.15,
             phase_penalty: str = "magnitude",
             window: str | None = None, window_kwargs: dict | None = None, zero_fill: int | None = None,
@@ -137,6 +146,12 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     """Read the raw ``fid`` and reprocess it using the parameters
     TopSpin itself recorded in ``procs`` (window, ``SI``, and recorded
     ``PHC0``/``PHC1`` unless ``autophase=True`` overrides them).
+
+    ``pivot_frac`` : where ``phase1`` pivots (0..1 across the ppm
+    range, 0.5 = centre) -- matters whenever ``phase1`` is nonzero,
+    including a caller-supplied one with ``autophase=False`` (e.g. the
+    GUI reprocessing from raw FID with a manually-dialed-in phase, so
+    the result matches exactly rather than re-pivoting at centre).
 
     ``f1p``/``f2p`` : ppm crop window applied after processing (order
     doesn't matter; both zero imports the full spectrum), matching
@@ -208,7 +223,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
         else:
             raise ValueError("phase_mode must be 'apc0', 'joint', or 'recorded'")
 
-    spectrum = processing_ft.apply_phase(spectrum, x_ppm, phase0, phase1)
+    spectrum = processing_ft.apply_phase(spectrum, x_ppm, phase0, phase1, pivot_frac=pivot_frac)
     spectrum = spectrum / mass / ns
 
     if f1p != 0 or f2p != 0:
@@ -239,6 +254,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
 
 def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bool | None = None,
             autophase: bool = True, phase0_inc: float = 0.1,
+            phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5,
             window: str | None = None, window_kwargs: dict | None = None, zero_fill: int | None = None,
             fid_shift: float = 0.0, align_echo: bool = False,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
@@ -262,6 +278,17 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     since it depends on ``acqu2s`` being present and conventionally
     populated, which isn't guaranteed for every pulse sequence/Bruker
     software version.
+
+    ``autophase`` : zero-order-only (``apc0``, uniformly across the
+    whole F2 dimension), same as before. ``phase0``/``phase1``/
+    ``pivot_frac`` : applied (via :func:`opennmr.processing.ft.apply_phase`,
+    uniformly across F2) whenever ``autophase=False`` -- lets a
+    manually-dialed-in phase correction (from the GUI's Phase tab)
+    survive a "Reprocess from raw FID" instead of being silently reset
+    to 0/re-autophased. If both ``autophase=True`` and a nonzero
+    ``phase1`` are given, ``phase0`` is still recomputed by ``apc0``
+    but ``phase1``/``pivot_frac`` are applied on top of it (``apc0``
+    itself has no first-order component).
 
     ``window``/``window_kwargs``/``zero_fill``/``fid_shift``/
     ``align_echo``/``linear_predict_points`` : see :func:`read_1d` --
@@ -331,9 +358,14 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     fid_f2 = np.apply_along_axis(lambda row: processing_ft.zero_fill(row, si2), 1, fid_f2)
     spectrum = np.apply_along_axis(lambda row: processing_ft.fft_spectrum(row, 1.0 / sw)[1], 1, fid_f2)
 
+    # F2's ppm axis, computed now (F1 processing below only changes
+    # axis 0's length, never F2's point count) since a phase1/pivot
+    # correction needs it.
+    x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, spectrum.shape[1])
     if autophase:
-        phase0 = processing_ft.apc0(spectrum.mean(axis=0), None, phase0_inc)
-        spectrum = spectrum * np.exp(-1j * np.deg2rad(phase0))
+        phase0 = processing_ft.apc0(spectrum.mean(axis=0), x_ppm, phase0_inc)
+    if phase0 or phase1:
+        spectrum = processing_ft.apply_phase(spectrum, x_ppm, phase0, phase1, pivot_frac=pivot_frac)
 
     # ----- F1 (indirect dimension): zero-fill, FFT along axis 0 (skipped for pseudo-2D) -----
     if pseudo_2d:
@@ -345,7 +377,6 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         y_ppm, y_hz = _ppm_hz_axis(o1_1, sf_1, obs_1, sw_1, si1)
         y_axis = NMRAxis(kind="frequency", ppm=y_ppm, hz=y_hz)
 
-    x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, spectrum.shape[1])
     x_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
     spectrum = spectrum / ns  # match read_1d's convention: data is always per-scan
 
@@ -354,7 +385,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         sfo1=sf, sfo1_indirect=(None if pseudo_2d else sf_1), bf1=obs, o1=o1, ns=ns,
         source_path=path, procno=procno, pseudo_2d=pseudo_2d, homonuclear=homonuclear,
         raw={
-            "acqus": acqus, "procs": procs, "proc2s": proc2s,
+            "acqus": acqus, "procs": procs, "proc2s": proc2s, "phase0": phase0, "phase1": phase1,
             # F2's fully processed (pre-FFT) FID, one row per F1
             # position -- an optional GUI preview of FID-domain
             # processing; F1 isn't included (its own FFT, when not
@@ -644,16 +675,45 @@ def _detect(path: str) -> bool:
 def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     """Vendor-registry entry point: prefer the raw-FID path, falling
     back to already-processed data when no raw ``fid``/``ser`` is
-    present."""
+    present -- or when it *is* present but can't actually be
+    reprocessed (see below)."""
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
+    has_processed_2d = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
+    has_processed_1d = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "1r"))
+
     if has_ser:
-        return read_2d(path, **kwargs)
+        try:
+            return read_2d(path, **kwargs)
+        except NotImplementedError as exc:
+            if has_processed_2d:
+                spectrum = read_2d_processed(path, **_filter_kwargs(read_2d_processed, kwargs))
+                spectrum.metadata.raw["fid_reprocess_unavailable"] = str(exc)
+                return spectrum
+            raise
     if has_fid:
-        return read_1d(path, **kwargs)
-    if os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr")):
+        try:
+            return read_1d(path, **kwargs)
+        except NotImplementedError as exc:
+            if has_processed_1d:
+                spectrum = read_1d_processed(path, **_filter_kwargs(read_1d_processed, kwargs))
+                spectrum.metadata.raw["fid_reprocess_unavailable"] = str(exc)
+                return spectrum
+            raise
+    if has_processed_2d:
         return read_2d_processed(path, **kwargs)
     return read_1d_processed(path, **kwargs)
+
+
+def _filter_kwargs(func, kwargs: dict) -> dict:
+    """Keep only the entries of ``kwargs`` that ``func`` actually
+    accepts -- used when falling back from the raw-FID readers (which
+    take FID-domain-processing kwargs like ``window``/``phase0`` that
+    the already-processed readers below have no use for, since they
+    just read TopSpin's own output as-is)."""
+    import inspect
+    accepted = inspect.signature(func).parameters
+    return {k: v for k, v in kwargs.items() if k in accepted}
 
 
 base.register("bruker", _detect, _read_auto)

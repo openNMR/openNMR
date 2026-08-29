@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox, QSplitter,
+    QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -106,6 +106,11 @@ class MainWindow(QMainWindow):
         self._phase_mode: str | None = None
         self._phase_reference_full: np.ndarray | None = None
         self._phase_freq_ppm: np.ndarray | None = None
+        # (phase0, phase1) immediately before the last Autophase click
+        # -- lets "Revert Autophase" undo it. None before any
+        # Autophase click, or once reselection/reverting invalidates
+        # it (see _capture_phase_reference).
+        self._last_autophase_revert: tuple[float, float] | None = None
         # Which spectrum's Analysis-tab state (peak list, fit type/
         # model/values source, results) is currently reflected in the
         # tab's widgets -- saved into that spectrum's own
@@ -584,6 +589,16 @@ class MainWindow(QMainWindow):
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
 
+        fallback_reason = spectrum.metadata.raw.get("fid_reprocess_unavailable")
+        if fallback_reason:
+            QMessageBox.information(
+                self, "Showing TopSpin's own processed data",
+                f"{self.session.label(index)} couldn't be reprocessed from its raw "
+                f"FID:\n\n{fallback_reason}\n\nShowing TopSpin's own already-processed "
+                f"output instead -- FID-domain reprocessing controls (window, zero-fill, "
+                f"etc.) aren't available for this spectrum.",
+            )
+
     def _select_single_row(self, row: int) -> None:
         """Select exactly ``row``, clearing any other selection.
 
@@ -763,7 +778,8 @@ class MainWindow(QMainWindow):
         if spectrum.ndim != 2 or spectrum.is_pseudo_2d == wants_pseudo_2d:
             return
         try:
-            self.session.reload(index, pseudo_2d=wants_pseudo_2d)
+            self.session.reload(index, pseudo_2d=wants_pseudo_2d, **self._current_phase_kwargs(spectrum))
+            self._reapply_phase_post_reload(self.session.spectra[index])
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to reprocess spectrum", str(exc))
             # Revert the button to match what's actually loaded.
@@ -1315,7 +1331,13 @@ class MainWindow(QMainWindow):
         or a Bruker experiment whose raw ``fid``/``ser`` is present on
         disk (if so, :func:`opennmr.io.bruker._read_auto` would have
         preferred it over the already-processed fallback in the first
-        place)."""
+        place) *and* actually reprocessable -- ``fid_reprocess_unavailable``
+        is set instead when the raw path exists but couldn't be used
+        (e.g. an unsupported Bruker window function), meaning
+        ``_read_auto`` already silently fell back to TopSpin's own
+        processed output, and "Reprocess" has nothing left to do."""
+        if spectrum.metadata.raw.get("fid_reprocess_unavailable"):
+            return False
         if spectrum.metadata.vendor in ("xpulse", "varian", "jeol"):
             return True
         if spectrum.metadata.vendor == "bruker" and spectrum.metadata.source_path:
@@ -1498,6 +1520,7 @@ class MainWindow(QMainWindow):
         index = self._selected_index()
         if index is None:
             return
+        spectrum = self.session.spectra[index]
 
         window_kwarg, window_kwargs_kwarg = self._resolve_window_kwargs()
         kwargs = {
@@ -1512,15 +1535,107 @@ class MainWindow(QMainWindow):
             kwargs["linear_predict_order"] = self.linear_predict_order_spin.value()
         if self.tdeff_spin.isEnabled():  # X-Pulse only -- Bruker's read_1d has no `truncate` kwarg
             kwargs["truncate"] = self.tdeff_spin.value() or None
+        kwargs.update(self._current_phase_kwargs(spectrum))
 
         try:
             self.session.reload(index, **kwargs)
+            self._reapply_phase_post_reload(self.session.spectra[index])
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to reprocess spectrum", str(exc))
             return
 
         self.spectrum_list.item(index).setText(self.session.label(index))
         self._on_selection_changed(index)
+
+    def _current_phase_kwargs(self, spectrum) -> dict:
+        """The *total* current phase (whatever was already baked in
+        by the last load/reprocess, plus the live delta still showing
+        in the Phase spin boxes) as ``read_1d``/``read_2d``'s own
+        ``phase0``/``phase1``/``pivot_frac``/``autophase=False``
+        kwargs -- so a raw-FID reprocess reproduces the exact phase
+        currently on screen instead of resetting to the vendor's own
+        default (every vendor's ``read_1d``/``read_2d`` bakes its own
+        applied ``phase0``/``phase1`` into ``metadata.raw``, which is
+        exactly the "already baked in" half of this sum; the Phase
+        spin boxes are deliberately *deltas* since editing started --
+        see :meth:`_capture_phase_reference` -- not the total, so
+        adding them on their own would under-correct).
+
+        Returns ``{}`` (no override -- vendor default applies,
+        unchanged) when nothing is phase-editable, when ``spectrum``
+        isn't actually being re-read from a raw FID at all (e.g. a
+        Bruker experiment with no ``fid``/``ser`` on disk, or one
+        already flagged ``fid_reprocess_unavailable`` -- both go
+        through ``read_1d_processed``/``read_2d_processed``, which has
+        no ``phase0``/``phase1`` concept at all, unlike ``read_1d``/
+        ``read_2d``), or when the current Phase-controls target isn't
+        a single scalar phase shared across the whole dataset along F2
+        -- a pseudo-2D slice's own phase (not every slice's shared
+        one), or a conventional 2D's F1/indirect phase -- since
+        ``read_2d`` has no way to apply either of those on its own;
+        see :meth:`_reapply_phase_post_reload` for how those two cases
+        are instead carried through post-hoc."""
+        if self._phase_mode is None or self._phase_freq_ppm is None:
+            return {}
+        if not self._fid_reprocessable(spectrum):
+            return {}
+        if self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked():
+            return {}
+        if self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0:
+            return {}
+        freq_ppm = self._phase_freq_ppm
+        span = freq_ppm.max() - freq_ppm.min()
+        pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
+        baked_in = spectrum.metadata.raw
+        return {
+            "phase0": float(baked_in.get("phase0", 0.0)) + self.phase0_spin.value(),
+            "phase1": float(baked_in.get("phase1", 0.0)) + self.phase1_spin.value(),
+            "pivot_frac": pivot_frac,
+            "autophase": False,
+        }
+
+    def _reapply_phase_post_reload(self, spectrum) -> None:
+        """Companion to :meth:`_current_phase_kwargs`: for the two
+        cases it can't forward into the reload itself -- one pseudo-2D
+        slice's own phase, or a conventional 2D's F1/indirect phase --
+        reapply that same delta directly to the freshly-reloaded
+        spectrum post-hoc, so at least what's actually being looked at
+        keeps its phase instead of silently resetting. A no-op outside
+        those two cases, or if the delta is zero, or if the reload
+        changed what the phase target even means (e.g. switching to
+        pseudo-2D drops F1's frequency meaning entirely)."""
+        phase0 = self.phase0_spin.value()
+        phase1 = self.phase1_spin.value()
+        if not phase0 and not phase1:
+            return
+        if spectrum.ndim != 2 or spectrum.data_imag is None:
+            return
+
+        if self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked():
+            if not spectrum.is_pseudo_2d:
+                return
+            row = self.slice_spin.value() - 1
+            if not (0 <= row < spectrum.data.shape[0]):
+                return
+            freq_ppm = spectrum.axis_values(-1, "ppm")
+            span = freq_ppm.max() - freq_ppm.min()
+            pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
+            complex_row = spectrum.data[row] + 1j * spectrum.data_imag[row]
+            phased_row = processing_ft.apply_phase(complex_row, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
+            spectrum.data[row] = np.real(phased_row)
+            spectrum.data_imag[row] = np.imag(phased_row)
+
+        elif self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0:
+            if spectrum.is_pseudo_2d:
+                return  # F1 no longer a frequency axis -- nothing to reapply
+            freq_ppm = spectrum.axis_values(0, "ppm")
+            span = freq_ppm.max() - freq_ppm.min()
+            pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
+            phased = processing_ft.apply_phase(
+                spectrum.complex_data.T, freq_ppm, phase0, phase1, pivot_frac=pivot_frac,
+            ).T
+            spectrum.data = np.real(phased)
+            spectrum.data_imag = np.imag(phased)
 
     def _on_align_echo_toggled(self, _checked: bool) -> None:
         """Align Echo is a push button, not a passive checkbox --
@@ -1623,22 +1738,71 @@ class MainWindow(QMainWindow):
             "while Phase 1 varies linearly away from it. Defaults to the "
             "centre of the spectrum on selection."
         )
-        self.pivot_spin.valueChanged.connect(lambda _v: self._apply_phase_preview())
+        self.pivot_spin.valueChanged.connect(self._on_pivot_spin_changed)
         form.addRow("Pivot:", self.pivot_spin)
 
+        # A slider covers the spectrum's own ppm range in 1000 steps
+        # (mapped in _on_pivot_slider_changed/_sync_pivot_slider_from_spin
+        # -- QSlider itself only knows integers) -- quicker for a rough
+        # drag-to-position than typing/spinning a ppm value, with the
+        # spin box still there for precise entry. The two stay in sync
+        # via blockSignals on whichever side didn't originate the
+        # change, so moving the pivot never re-triggers
+        # _capture_phase_reference (which would zero Phase 0/Phase 1) --
+        # only _apply_phase_preview, same as the spin box alone before.
+        self.pivot_slider = QSlider(Qt.Orientation.Horizontal)
+        self.pivot_slider.setRange(0, 1000)
+        self.pivot_slider.setValue(500)
+        self.pivot_slider.setToolTip("Drag to move the Phase 1 pivot across the spectrum's own ppm range.")
+        self.pivot_slider.valueChanged.connect(self._on_pivot_slider_changed)
+        form.addRow(self.pivot_slider)
+
+        autophase_row = QHBoxLayout()
         autophase_button = QPushButton("Autophase")
         autophase_button.setToolTip(
-            "Zero-order autophase (grid-search maximizing the real "
-            "part's integral) for whatever the controls above "
-            "currently target -- a plain 1D spectrum, the pseudo-2D "
-            "slice selected below (or every slice at once, if 'Apply "
-            "this phase to every slice' is checked), or the whole 2D "
-            "dataset along the chosen dimension. Sets Phase 0 and "
-            "resets Phase 1 to 0; see 'Autophase (each slice "
-            "independently)' below for a per-slice-own-phase0 version."
+            "Autophase (grid-search maximizing the real part's "
+            "integral) for whatever the controls above currently "
+            "target -- a plain 1D spectrum, the pseudo-2D slice "
+            "selected below (or every slice at once, if 'Apply this "
+            "phase to every slice' is checked), or the whole 2D "
+            "dataset along the chosen dimension. Zero-order only "
+            "(Phase 1 reset to 0) unless '1st-order' is checked; see "
+            "'Autophase (each slice independently)' below for a "
+            "per-slice-own-phase0 version."
         )
         autophase_button.clicked.connect(self._on_autophase_clicked)
-        form.addRow(autophase_button)
+        autophase_row.addWidget(autophase_button)
+
+        self.autophase_joint_checkbox = QCheckBox("1st-order")
+        self.autophase_joint_checkbox.setToolTip(
+            "Also fit Phase 1 (processing.ft.autophase01's joint "
+            "search), not just Phase 0 -- only kept if it "
+            "demonstrably improves the lineshape over Phase 0 alone, "
+            "same significance test used everywhere else in this app "
+            "that offers joint phasing."
+        )
+        autophase_row.addWidget(self.autophase_joint_checkbox)
+        form.addRow(autophase_row)
+
+        self.revert_autophase_button = QPushButton("Revert Autophase")
+        self.revert_autophase_button.setToolTip(
+            "Undo the last Autophase click, restoring Phase 0/Phase 1 "
+            "to what they were immediately before it -- in case the "
+            "automatic result was worse than what you already had."
+        )
+        self.revert_autophase_button.setEnabled(False)
+        self.revert_autophase_button.clicked.connect(self._on_revert_autophase_clicked)
+        form.addRow(self.revert_autophase_button)
+
+        baseline_correct_button = QPushButton("Baseline Correct")
+        baseline_correct_button.setToolTip(
+            "Subtract a linear baseline fit to the real part "
+            "(processing.ft.baseline_correct) from whatever the "
+            "controls above currently target -- same targeting rules "
+            "as Autophase."
+        )
+        baseline_correct_button.clicked.connect(self._on_baseline_correct_clicked)
+        form.addRow(baseline_correct_button)
 
         reset_button = QPushButton("Reset")
         reset_button.clicked.connect(self._on_reset_phase_clicked)
@@ -1721,6 +1885,39 @@ class MainWindow(QMainWindow):
         handle.setValue(value, emit=False)
         self._apply_phase_preview()
 
+    def _on_pivot_spin_changed(self, value: float) -> None:
+        """The pivot spin box changed (typed, or the slider moving it
+        -- see :meth:`_on_pivot_slider_changed`, which sets it with
+        signals blocked so this doesn't fire back). Keeps the slider's
+        position in sync and previews the result -- deliberately
+        does *not* call :meth:`_capture_phase_reference`, which would
+        zero Phase 0/Phase 1 -- moving the pivot only changes where
+        Phase 1 is measured from, not the correction itself."""
+        self._sync_pivot_slider_from_spin(value)
+        self._apply_phase_preview()
+
+    def _sync_pivot_slider_from_spin(self, value: float) -> None:
+        if self._phase_freq_ppm is None:
+            return
+        freq_ppm = self._phase_freq_ppm
+        span = freq_ppm.max() - freq_ppm.min()
+        frac = (value - freq_ppm.min()) / span if span else 0.5
+        frac = min(max(frac, 0.0), 1.0)
+        self.pivot_slider.blockSignals(True)
+        self.pivot_slider.setValue(round(frac * 1000))
+        self.pivot_slider.blockSignals(False)
+
+    def _on_pivot_slider_changed(self, value: int) -> None:
+        if self._phase_freq_ppm is None:
+            return
+        freq_ppm = self._phase_freq_ppm
+        span = freq_ppm.max() - freq_ppm.min()
+        ppm = float(freq_ppm.min() + (value / 1000.0) * span)
+        self.pivot_spin.blockSignals(True)
+        self.pivot_spin.setValue(ppm)
+        self.pivot_spin.blockSignals(False)
+        self._apply_phase_preview()
+
     def _on_reset_phase_clicked(self) -> None:
         for handle in (self.phase0_handle, self.phase1_handle):
             handle.setValue(0.0, emit=False)
@@ -1731,13 +1928,25 @@ class MainWindow(QMainWindow):
         self._apply_phase_preview()
 
     def _on_autophase_clicked(self) -> None:
-        """Zero-order-only autophase (:func:`processing.ft.apc0`) for
-        whatever the Phase controls currently target -- unlike
-        :meth:`_on_autophase_slices_clicked` (pseudo-2D only, each
-        slice gets its own independent phase0 immediately applied),
-        this always writes ONE phase0 into the shared spin box, same
-        as dragging it by hand, so it works for a plain 1D spectrum
-        too (which otherwise had no autophase option at all)."""
+        """Autophase for whatever the Phase controls currently target
+        -- unlike :meth:`_on_autophase_slices_clicked` (pseudo-2D
+        only, each slice gets its own independent phase0 immediately
+        applied), this always writes into the shared Phase 0/Phase 1
+        spin boxes, same as dragging them by hand, so it works for a
+        plain 1D spectrum too (which otherwise had no autophase option
+        at all).
+
+        Zero-order only (:func:`processing.ft.apc0`) by default,
+        resetting Phase 1 to 0 (a stale nonzero Phase 1 from an
+        earlier manual drag would otherwise silently combine with the
+        freshly computed Phase 0 in a way apc0 never accounted for).
+        With the "1st-order" checkbox on, uses
+        :func:`processing.ft.autophase01`'s joint search instead,
+        which only actually changes Phase 1 away from 0 when doing so
+        demonstrably improves the lineshape.
+
+        Snapshots the pre-autophase Phase 0/Phase 1 first, so a bad
+        result can be undone via :meth:`_on_revert_autophase_clicked`."""
         if self._phase_mode is None or self._phase_reference_full is None:
             return
 
@@ -1746,16 +1955,21 @@ class MainWindow(QMainWindow):
             target = self._phase_reference_full[self.slice_spin.value() - 1, :]
         else:
             target = self._phase_reference_full
-        phase0 = processing_ft.apc0(target, freq_ppm)
 
-        # apc0 is zero-order-only -- a stale nonzero Phase 1 from an
-        # earlier manual drag would otherwise silently combine with
-        # the freshly computed Phase 0 in a way apc0 never accounted
-        # for, so reset it too (matches _on_autophase_slices_clicked's
-        # own phase1=0.0).
-        self.phase1_handle.setValue(0.0, emit=False)
+        span = freq_ppm.max() - freq_ppm.min()
+        pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
+        if self.autophase_joint_checkbox.isChecked():
+            phase0, phase1 = processing_ft.autophase01(target, freq_ppm, pivot_frac=pivot_frac)
+        else:
+            phase0 = processing_ft.apc0(target, freq_ppm)
+            phase1 = 0.0
+
+        self._last_autophase_revert = (self.phase0_spin.value(), self.phase1_spin.value())
+        self.revert_autophase_button.setEnabled(True)
+
+        self.phase1_handle.setValue(phase1, emit=False)
         self.phase1_spin.blockSignals(True)
-        self.phase1_spin.setValue(0.0)
+        self.phase1_spin.setValue(phase1)
         self.phase1_spin.blockSignals(False)
 
         self.phase0_handle.setValue(phase0, emit=False)
@@ -1764,6 +1978,76 @@ class MainWindow(QMainWindow):
         self.phase0_spin.blockSignals(False)
 
         self._apply_phase_preview()
+        self.canvas.autoscale_y()
+
+    def _on_revert_autophase_clicked(self) -> None:
+        """Undo the last :meth:`_on_autophase_clicked`, restoring
+        Phase 0/Phase 1 to their pre-autophase values."""
+        if self._last_autophase_revert is None:
+            return
+        phase0, phase1 = self._last_autophase_revert
+
+        self.phase0_handle.setValue(phase0, emit=False)
+        self.phase0_spin.blockSignals(True)
+        self.phase0_spin.setValue(phase0)
+        self.phase0_spin.blockSignals(False)
+
+        self.phase1_handle.setValue(phase1, emit=False)
+        self.phase1_spin.blockSignals(True)
+        self.phase1_spin.setValue(phase1)
+        self.phase1_spin.blockSignals(False)
+
+        self._apply_phase_preview()
+        self.canvas.autoscale_y()
+        self._last_autophase_revert = None
+        self.revert_autophase_button.setEnabled(False)
+
+    def _on_baseline_correct_clicked(self) -> None:
+        """Subtract a linear baseline (:func:`processing.ft.baseline_correct`)
+        from whatever the Phase controls currently target -- same
+        targeting rules as :meth:`_on_autophase_clicked` (including the
+        pseudo-2D single-slice case), applied directly to the live
+        data (not folded into the Phase 0/Phase 1 delta, since a
+        baseline subtraction isn't a phase correction)."""
+        index = self._selected_index()
+        if index is None or self._phase_mode is None or self._phase_freq_ppm is None:
+            return
+        spectrum = self.session.spectra[index]
+        freq_ppm = self._phase_freq_ppm
+
+        if self._phase_mode == "1d":
+            complex_data = spectrum.complex_data
+            corrected = processing_ft.baseline_correct(freq_ppm, complex_data)
+            spectrum.data = np.real(corrected)
+            spectrum.data_imag = np.imag(corrected)
+            self.canvas.update_data(spectrum)
+            self.canvas.autoscale_y()
+        elif self._phase_mode == "pseudo2d":
+            if self.apply_all_slices_checkbox.isChecked():
+                for row in range(spectrum.data.shape[0]):
+                    complex_row = spectrum.data[row] + 1j * spectrum.data_imag[row]
+                    corrected = processing_ft.baseline_correct(freq_ppm, complex_row)
+                    spectrum.data[row] = np.real(corrected)
+                    spectrum.data_imag[row] = np.imag(corrected)
+            else:
+                row = self.slice_spin.value() - 1
+                complex_row = spectrum.data[row] + 1j * spectrum.data_imag[row]
+                corrected = processing_ft.baseline_correct(freq_ppm, complex_row)
+                spectrum.data[row] = np.real(corrected)
+                spectrum.data_imag[row] = np.imag(corrected)
+            self._show_pseudo2d_slice(spectrum, reset_view=False)
+            self.canvas.autoscale_y()
+        elif self._phase_mode == "2d":
+            dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
+            complex_data = spectrum.complex_data
+            data_for_fit = complex_data if dim == "f2" else complex_data.T
+            corrected = np.apply_along_axis(
+                lambda row: processing_ft.baseline_correct(freq_ppm, row), 1, data_for_fit,
+            )
+            corrected = corrected if dim == "f2" else corrected.T
+            spectrum.data = np.real(corrected)
+            spectrum.data_imag = np.imag(corrected)
+            self.canvas.show_spectrum(spectrum)
 
     def _on_phase_target_changed(self) -> None:
         """The pseudo-2D slice or the 2D F1/F2 dimension picked in the
@@ -1926,6 +2210,12 @@ class MainWindow(QMainWindow):
             spin.blockSignals(True)
             spin.setValue(0.0)
             spin.blockSignals(False)
+        # A revert snapshot only makes sense against the view it was
+        # taken from -- re-anchoring to a new spectrum/slice/dimension
+        # invalidates it rather than leaving a stale "Revert" that
+        # would restore the WRONG view's phase.
+        self._last_autophase_revert = None
+        self.revert_autophase_button.setEnabled(False)
 
         index = self._selected_index()
         if index is None:
@@ -1980,9 +2270,15 @@ class MainWindow(QMainWindow):
         self.pivot_spin.blockSignals(True)
         self.pivot_spin.setValue(float((self._phase_freq_ppm.min() + self._phase_freq_ppm.max()) / 2))
         self.pivot_spin.blockSignals(False)
+        self.pivot_slider.blockSignals(True)
+        self.pivot_slider.setValue(500)  # centre, matching the ppm value just set above
+        self.pivot_slider.blockSignals(False)
 
     def _set_processing_enabled(self, enabled: bool, status: str | None = None) -> None:
-        for widget in (self.phase0_handle, self.phase0_spin, self.phase1_handle, self.phase1_spin, self.pivot_spin):
+        for widget in (
+            self.phase0_handle, self.phase0_spin, self.phase1_handle, self.phase1_spin,
+            self.pivot_spin, self.pivot_slider, self.autophase_joint_checkbox,
+        ):
             widget.setEnabled(enabled)
         if status is not None:
             self.processing_status_label.setText(status)

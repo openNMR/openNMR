@@ -171,3 +171,61 @@ def test_read_1d_linear_predict_extends_before_truncation_to_si(tmp_path, monkey
     # two are numerically close either way -- a loose default tolerance
     # would spuriously pass even without LP actually running.
     assert not np.allclose(plain.data, lp.data, atol=1e-9, rtol=1e-9)
+
+
+# ============================================================
+# _read_auto: graceful fallback on an unsupported window function
+# ============================================================
+
+def _stub_spectrum():
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    axis = NMRAxis(kind="frequency", ppm=np.linspace(10, -10, 32), hz=np.linspace(4000, -4000, 32))
+    return NMRSpectrum(
+        data=np.zeros(32), axes=[axis],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H"), data_imag=np.zeros(32),
+    )
+
+
+def test_read_auto_falls_back_to_processed_1d_on_unsupported_window(tmp_path, monkeypatch):
+    # Regression test: a Bruker WDW code this package doesn't (yet)
+    # implement (e.g. GM) used to make the whole file unopenable --
+    # _read_auto should now silently prefer TopSpin's own processed
+    # output when it's available, and flag why.
+    path = _make_experiment_dir(tmp_path, procs_overrides={"WDW": 2})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_fid()
+    _mock_ng_bruker_read(monkeypatch, acqus, fid)
+    open(bruker.os.path.join(path, "fid"), "wb").close()
+    open(bruker.os.path.join(path, "pdata", "1", "1r"), "wb").close()
+
+    seen_kwargs = {}
+
+    def fake_read_1d_processed(p, **kwargs):
+        seen_kwargs.update(kwargs)
+        return _stub_spectrum()
+
+    monkeypatch.setattr(bruker, "read_1d_processed", fake_read_1d_processed)
+
+    # zero_fill (an FID-domain kwarg the GUI's reprocess box always
+    # sends) is deliberately NOT window="..." -- passing an explicit
+    # window override would bypass the recorded WDW=2 entirely rather
+    # than actually exercising the fallback this test is checking.
+    spectrum = bruker._read_auto(path, zero_fill=2048)
+
+    assert "fid_reprocess_unavailable" in spectrum.metadata.raw
+    assert "WDW=2" in spectrum.metadata.raw["fid_reprocess_unavailable"]
+    # zero_fill is a raw-FID-only kwarg -- read_1d_processed has no
+    # use for it and must not have been called with it.
+    assert "zero_fill" not in seen_kwargs
+
+
+def test_read_auto_reraises_when_no_processed_fallback_exists(tmp_path, monkeypatch):
+    path = _make_experiment_dir(tmp_path, procs_overrides={"WDW": 2})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_fid()
+    _mock_ng_bruker_read(monkeypatch, acqus, fid)
+    open(bruker.os.path.join(path, "fid"), "wb").close()
+    # No pdata/1/1r written this time -- nothing to fall back to.
+
+    with pytest.raises(NotImplementedError):
+        bruker._read_auto(path, autophase=False)

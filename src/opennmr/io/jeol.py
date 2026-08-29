@@ -350,7 +350,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward",
             autophase: bool = True, phase_mode: str = "apc0",
-            phase0: float = 0.0, phase1: float = 0.0, phase0_inc: float = 0.1,
+            phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5, phase0_inc: float = 0.1,
             phase1_max: float = 20.0, phase1_improvement: float = 0.15,
             phase_penalty: str = "magnitude",
             baseline_correct: bool = True, normalize: bool = False) -> NMRSpectrum:
@@ -432,7 +432,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
         else:
             raise ValueError("phase_mode must be 'apc0' or 'joint'")
 
-    spectrum = processing_ft.apply_phase(spectrum, freq_ppm, phase0, phase1)
+    spectrum = processing_ft.apply_phase(spectrum, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
 
     if baseline_correct:
         spectrum = processing_ft.baseline_correct(freq_ppm, spectrum)

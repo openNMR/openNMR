@@ -811,6 +811,36 @@ class MplCanvas(QWidget):
         self.ax.lines[0].set_ydata(spectrum.normalized())
         self.canvas.draw_idle()
 
+    def autoscale_y(self) -> None:
+        """Refit the y (intensity) axis to the data actually plotted
+        right now on the main line -- for after a *discrete* phase
+        action (Autophase, Baseline Correct, Revert Autophase), not a
+        continuous drag: a big one-shot phase/baseline change can
+        leave the view's old y-limits (from before the change)
+        showing mostly empty space or clipping the now-differently-
+        scaled baseline, and there's no "current view" worth
+        preserving through a single click the way there is through a
+        drag gesture (see :meth:`update_data`'s own docstring, and the
+        test that pins the view during a drag -- this is deliberately
+        the opposite case). X stays exactly as it is; only y moves.
+
+        Computed directly from the main data line's own y-values (not
+        ``Axes.relim``/``autoscale_view``) since this canvas's own
+        scroll-zoom/pan handlers call ``set_ylim`` directly, which
+        matplotlib treats as the user having taken over the y-axis --
+        ``autoscale_view`` then silently no-ops on it forever after,
+        which isn't what a discrete "refit to what's on screen now"
+        action should do."""
+        if not self.ax.lines:
+            return
+        y = self.ax.lines[0].get_ydata()
+        if len(y) == 0:
+            return
+        ymin, ymax = float(np.min(y)), float(np.max(y))
+        pad = (ymax - ymin) * 0.05 or 1.0
+        self.ax.set_ylim(ymin - pad, ymax + pad)
+        self.canvas.draw_idle()
+
 
 def _spectrum_label(spectrum: NMRSpectrum) -> str:
     meta = spectrum.metadata

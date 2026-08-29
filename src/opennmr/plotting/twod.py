@@ -69,8 +69,25 @@ def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fra
     if level_mode == "linear":
         thresvec = list(np.linspace(thresh_min, thresh_max, clevels))
     else:
+        # Real bug, found and fixed: the exponent used to be
+        # `power * i / clevels`, which only reaches exactly `power`
+        # (not 1) at the top level (i == clevels) -- for power > 1
+        # (the default is 1.25), that overshoots thresh_max, so the
+        # top several "contour levels" sit above every real data
+        # point and are never actually drawn. The visible levels were
+        # then squeezed into the remaining lower fraction of the
+        # range, several coarser than intended -- moderate, real
+        # signal often fell entirely between two of them, looking
+        # like a 2D/pseudo-2D dataset "starts out scaled way too
+        # high" (barely anything visible) until the threshold was
+        # manually scrolled down a lot. `(i / clevels) ** power`
+        # always reaches exactly 1 at i == clevels (so the top level
+        # is exactly thresh_max, regardless of power), and for
+        # power > 1 still bunches more levels toward thresh_min first
+        # -- matching this function's own docstring ("steeper/more
+        # levels bunched near the noise floor as power increases").
         cc2 = np.linspace(1, clevels, clevels)
-        thresvec = [thresh_min * ((thresh_max / thresh_min) ** (1 / clevels)) ** (power * i) for i in cc2]
+        thresvec = [thresh_min * (thresh_max / thresh_min) ** ((i / clevels) ** power) for i in cc2]
 
     return contour_x, contour_y, contour_data, thresvec, y_axis
 

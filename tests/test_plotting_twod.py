@@ -25,6 +25,34 @@ def _make_2d(n_f1=20, n_f2=30, pseudo=False, homonuclear=False, nucleus="1H", nu
     return NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
 
 
+def test_prepare_contour_power_mode_top_level_never_exceeds_data_max():
+    # Regression test: the exponent used to be `power * i / clevels`,
+    # which only reaches exactly `power` (not 1) at the top level --
+    # for power > 1 (the default is 1.25) that overshoots the real
+    # data max, so the top several "contour levels" sat above every
+    # real data point and were never drawn, squeezing the visible
+    # ones into a smaller range than intended. This looked like a 2D
+    # dataset "starting out scaled way too high" (barely anything
+    # visible) until the threshold was manually scrolled down a lot.
+    spec = _make_2d()
+    _, _, _, thresvec, _ = twod._prepare_contour(spec, factor=1e-3, clevels=20, level_mode="power", power=1.25)
+    assert thresvec[-1] == pytest.approx(np.amax(spec.data))
+    assert all(level <= np.amax(spec.data) + 1e-6 for level in thresvec)
+
+
+def test_prepare_contour_power_mode_bunches_toward_noise_floor():
+    # power > 1 should push more levels toward thresh_min (the noise
+    # floor), not toward thresh_max -- matching this function's own
+    # docstring ("steeper/more levels bunched near the noise floor as
+    # power increases past 1").
+    spec = _make_2d()
+    _, _, _, linear_like, _ = twod._prepare_contour(spec, factor=1e-3, clevels=20, level_mode="power", power=1.0)
+    _, _, _, bunched, _ = twod._prepare_contour(spec, factor=1e-3, clevels=20, level_mode="power", power=1.25)
+    # Every level below the top one should sit lower (closer to the
+    # noise floor) with the steeper power than with power=1.
+    assert all(b <= lin for b, lin in zip(bunched[:-1], linear_like[:-1]))
+
+
 def test_plot_2d_contour_conventional_standalone():
     spec = _make_2d()
     fig, ax, proj_axes = twod.plot_2d_contour(spec)

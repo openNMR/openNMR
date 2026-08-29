@@ -444,6 +444,31 @@ def test_main_window_process_indirect_button_reprocesses_and_replots(qapp, tmp_p
     assert window.canvas.ax is not None
 
 
+def test_main_window_process_indirect_button_toggles_back_to_pseudo2d(qapp, tmp_path):
+    # Regression test: every other process_indirect_button test only
+    # ever exercises pseudo-2D -> conventional (unchecked -> checked).
+    # The reverse direction (conventional -> pseudo-2D, unchecking a
+    # previously-checked button) must work too -- explicit user ask
+    # ("a way to switch... in both directions").
+    window = MainWindow()
+    path = _make_2d_dataset(tmp_path, n_f1=4, n_f2=8)
+    window._load(path, vendor="bruker")
+    index = window._selected_index()
+
+    window.process_indirect_button.setChecked(True)
+    assert window.session.spectra[index].is_pseudo_2d is False
+    assert window.session.spectra[index].axes[0].kind == "frequency"
+
+    window.process_indirect_button.setChecked(False)
+    assert window.session.spectra[index].is_pseudo_2d is True
+    assert window.session.spectra[index].axes[0].kind == "index"
+    assert window.canvas.ax is not None
+
+    # And back again, to confirm it isn't a one-shot toggle.
+    window.process_indirect_button.setChecked(True)
+    assert window.session.spectra[index].is_pseudo_2d is False
+
+
 def test_main_window_process_indirect_button_preserves_nucleus_override(qapp, tmp_path):
     window = MainWindow()
     path = _make_2d_dataset(tmp_path, n_f1=4, n_f2=8)
@@ -658,6 +683,111 @@ def test_main_window_autophase_button_sets_phase0_and_resets_phase1(qapp, tmp_pa
 def test_main_window_autophase_button_noop_with_no_spectrum(qapp):
     window = MainWindow()
     window._on_autophase_clicked()  # must not raise
+
+
+def test_main_window_pivot_slider_moves_pivot_spin(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    freq_ppm = window._phase_freq_ppm
+
+    window.pivot_slider.setValue(0)  # far end of the range
+    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.min()))
+
+    window.pivot_slider.setValue(1000)  # other far end
+    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.max()))
+
+
+def test_main_window_pivot_spin_moves_pivot_slider(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    freq_ppm = window._phase_freq_ppm
+
+    window.pivot_spin.setValue(float(freq_ppm.min()))
+    assert window.pivot_slider.value() == 0
+
+    window.pivot_spin.setValue(float(freq_ppm.max()))
+    assert window.pivot_slider.value() == 1000
+
+
+def test_main_window_moving_pivot_does_not_reset_phase(qapp, tmp_path):
+    # Explicit user requirement: moving the pivot (spin or slider)
+    # must never zero out an in-progress Phase 0/Phase 1 correction --
+    # only _capture_phase_reference (reselection, not a pivot move)
+    # should ever do that.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+
+    window.phase0_spin.setValue(30.0)
+    window.phase1_spin.setValue(-10.0)
+
+    window.pivot_slider.setValue(750)
+    assert window.phase0_spin.value() == pytest.approx(30.0)
+    assert window.phase1_spin.value() == pytest.approx(-10.0)
+
+    window.pivot_spin.setValue(window.pivot_spin.value() + 1.0)
+    assert window.phase0_spin.value() == pytest.approx(30.0)
+    assert window.phase1_spin.value() == pytest.approx(-10.0)
+
+
+def test_main_window_autophase_joint_uses_autophase01(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    window.autophase_joint_checkbox.setChecked(True)
+
+    from opennmr.gui import main_window as mw
+    monkeypatch.setattr(mw.processing_ft, "autophase01", lambda *a, **kw: (12.0, 7.0))
+
+    window._on_autophase_clicked()
+
+    assert window.phase0_spin.value() == pytest.approx(12.0)
+    assert window.phase1_spin.value() == pytest.approx(7.0)
+
+
+def test_main_window_revert_autophase_button_disabled_until_autophase(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    assert window.revert_autophase_button.isEnabled() is False
+
+    window._on_autophase_clicked()
+    assert window.revert_autophase_button.isEnabled() is True
+
+
+def test_main_window_revert_autophase_restores_previous_phase(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+
+    window.phase0_spin.setValue(42.0)
+    window.phase1_spin.setValue(-5.0)
+    window._on_autophase_clicked()
+    assert window.phase0_spin.value() != pytest.approx(42.0)  # autophase actually changed it
+
+    window._on_revert_autophase_clicked()
+
+    assert window.phase0_spin.value() == pytest.approx(42.0)
+    assert window.phase1_spin.value() == pytest.approx(-5.0)
+    assert window.revert_autophase_button.isEnabled() is False
+
+
+def test_main_window_revert_autophase_noop_with_nothing_to_revert(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    window._on_revert_autophase_clicked()  # must not raise
+
+
+def test_main_window_baseline_correct_changes_1d_data(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    index = window._selected_index()
+    original = window.session.spectra[index].data.copy()
+
+    window._on_baseline_correct_clicked()
+
+    assert not np.allclose(original, window.session.spectra[index].data)
+
+
+def test_main_window_baseline_correct_noop_with_no_spectrum(qapp):
+    window = MainWindow()
+    window._on_baseline_correct_clicked()  # must not raise
 
 
 def test_main_window_load_failure_shows_error_not_crash(qapp, tmp_path, monkeypatch):
