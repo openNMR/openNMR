@@ -1721,7 +1721,6 @@ def test_main_window_compare_superimposed_layout_runs(qapp, tmp_path):
     _select_rows(window, [0, 1])
 
     window.layout_mode_combo.setCurrentIndex(1)  # Superimposed
-    assert window.stack_gap_spin.isEnabled() is False
     assert len(window.compare_canvas.ax.lines) == 2
 
 
@@ -1907,6 +1906,16 @@ def test_main_window_compare_auto_populates_from_pseudo2d_slices(qapp):
     for i in range(5):
         assert window.compare_list.item(i).checkState() == Qt.CheckState.Checked
     assert window.compare_status_label.text() == "Comparing 5 spectra."
+    # The list populating correctly isn't enough on its own -- the
+    # Compare canvas must actually show it, and canvas_tabs must
+    # actually be showing that canvas (a real ordering bug: this used
+    # to be populated *before* _on_selection_changed's own
+    # _draw_selected_spectrum/_silo_other_canvas_tabs ran, which
+    # unconditionally redraws the Spectrum canvas and clears
+    # compare_canvas -- silently undoing this population one line
+    # later).
+    assert window.canvas_tabs.currentWidget() is window.compare_canvas
+    assert _compare_line_count(window.compare_canvas) == 5
 
 
 def test_main_window_compare_not_populated_for_single_1d_selection(qapp, tmp_path):

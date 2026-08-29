@@ -957,8 +957,7 @@ class MplCanvas(QWidget):
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
-    def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack",
-                      y_offset: float = 0.2, normalize: bool = False) -> None:
+    def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack", normalize: bool = False) -> None:
         """Plot several 1D spectra together for comparison.
 
         ``mode="overlay"`` : every spectrum on one shared axes at y=0
@@ -990,7 +989,25 @@ class MplCanvas(QWidget):
         baseline) -- a linked-unless-selected model, not fully
         independent: click a row first (see
         :meth:`_toggle_compare_selection`, wired from :meth:`_on_release`)
-        to zoom just that one on its own instead."""
+        to zoom just that one on its own instead.
+
+        No ``y_offset``/gap parameter (there used to be one, wired to
+        a "Stack gap" spin box in the GUI) -- per-spectrum vertical
+        spacing was a meaningful, user-adjustable idea back when every
+        trace shared one axes and a manual offset was literally what
+        separated them, but once ``mode="stack"`` moved to one
+        independent, auto-scaled axes per spectrum (the redesign
+        above), that control no longer did anything for the actual
+        multi-spectrum case -- each row's height is already entirely
+        automatic (matplotlib's own equal-height subplot layout,
+        ``hspace=0.0``), and there is no shared y-axis left for a
+        numeric offset to even mean anything on. The GUI's own "Stack
+        gap" spin box only still visibly affected a degenerate case
+        (``mode="stack"`` with exactly one spectrum, via the ``else``
+        branch below) where a vertical offset is meaningless anyway
+        (nothing else to offset from) -- removed rather than kept as a
+        control with no real effect, matching the explicit ask that
+        stacked-spectrum spacing "should be automatic"."""
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
@@ -1027,7 +1044,15 @@ class MplCanvas(QWidget):
             self.ax = axes[-1]
         else:
             self.ax = self.figure.add_subplot(111)
-            offset = y_offset if mode == "stack" else -1.0
+            # -1.0 for "overlay": plot_1d_stack's own offset-collapsing
+            # trick (y_base += y_scale * (1 + y_offset)) puts every
+            # trace back at y=0 when y_offset == -1.0. 0.2 for "stack"
+            # -- only ever reached with exactly one spectrum (see the
+            # len(spectra) > 1 branch above), where a vertical offset
+            # is inherently meaningless (nothing else to offset from);
+            # kept as a fixed constant rather than exposed as a GUI
+            # control for exactly that reason.
+            offset = -1.0 if mode == "overlay" else 0.2
             plotting.plot_1d_stack(spectra, ax=self.ax, fig=self.figure, y_offset=offset, normalize=normalize,
                                     full_resolution=self._full_resolution)
             self.ax.set_yticks([])

@@ -2,48 +2,64 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Autonomous overnight round: Compare auto-population fix, Stack-gap removal (2026-08-30)
+
+Working through the "Noted for next session" list below unattended
+(user asleep, per their own explicit go-ahead to continue without
+waiting for clarification). Two items done and verified so far.
+
+- ~~Compare no longer auto-populates from a pseudo-2D's own slices~~
+  -- done, and the real cause was one layer deeper than the previous
+  session's own diagnosis. That diagnosis (reordering would fix it)
+  turned out to be *necessary but not sufficient* -- confirmed
+  empirically by tracing every handler call during a real
+  `_select_single_row(0)`: `spectrum_list` fires **two independent**
+  signals for a single-selection change (`itemSelectionChanged` ->
+  `_on_list_selection_changed`, *and* `currentRowChanged` ->
+  `_on_selection_changed` directly), and Qt genuinely fires both for
+  this exact gesture, with the direct one landing *last* regardless of
+  which order the code's own logic ran in. A pure reorder (tried
+  first) only moved the problem around: whichever handler happens to
+  run last always clobbers the Compare view, since both eventually
+  call the same "redraw Spectrum, clear Compare" logic. Real fix is
+  order-independent instead: new `_compare_shows_current_pseudo2d_stack`
+  checks whether `compare_list` already exactly matches the selected
+  spectrum's own auto-populated slice stack, and both
+  `_draw_selected_spectrum` (skip the force-switch back to Spectrum)
+  and `_silo_other_canvas_tabs` (skip clearing `compare_canvas`, via a
+  new `skip_compare` param) consult it -- so no matter how many times
+  or what order these handlers fire for the *same* selection, an
+  already-correct Compare view is left alone rather than redrawn over.
+  New regression test asserts both `canvas_tabs.currentWidget()` and
+  the actual plotted line count, not just that the list populates
+  (the list was never actually broken -- only the display was).
+- ~~Compare's "Stack gap" control does nothing~~ -- done, via removal
+  rather than a rewire, per the user's own "should also be automatic"
+  framing. Confirmed the control had **zero visible effect** for every
+  realistic use (the `mode="stack"`, >1-spectrum case plots each row
+  on its own independent, auto-scaled axes with a fixed `hspace=0.0`
+  -- no offset concept left there at all; the *only* code path that
+  still read the spin box's value was a degenerate `mode="stack"`-with-
+  exactly-1-spectrum fallback, where a vertical offset is inherently
+  meaningless since there's nothing else to offset from). Removed
+  `stack_gap_spin` entirely (widget, form row, enable/disable wiring)
+  and the now-pointless `y_offset` parameter on
+  `MplCanvas.show_compare` itself -- the two remaining internal uses
+  (overlay's `-1.0` collapse trick, the single-spectrum-stack
+  fallback's `0.2`) are now fixed constants, not user-facing settings,
+  since neither one is a "gap between multiple stacked spectra" in any
+  case a person would actually see or want to tune.
+
+492 tests passing (unchanged count -- one test gained new assertions,
+one lost an obsolete one, net zero). Committed and pushed.
+
 ## Noted for next session (2026-08-29) -- not yet implemented
 
-User feedback from trying the previous round's changes -- explicitly
-"a few pointers to note to do in the next session," not "implement
-now." Nothing below has been touched; each item includes what's
-already been diagnosed so the next session can move straight to a fix
-rather than re-investigating.
+User feedback from trying an earlier round's changes -- explicitly "a
+few pointers to note to do in the next session," not "implement now."
+The two Compare-related items from this list are done -- see the round
+above. Still open:
 
-- **Compare no longer auto-populates from a pseudo-2D's own slices --
-  root cause found, not fixed.** The list itself still populates fine
-  (`_populate_compare_list_from_pseudo2d`, unchanged), but
-  `_on_list_selection_changed` calls `_refresh_compare_view()` (which
-  ends by switching `canvas_tabs` to `compare_canvas`) and *then*
-  unconditionally calls `_on_selection_changed(...)` right after --
-  which redraws `self.canvas` and switches `canvas_tabs` straight back
-  to it (`_draw_selected_spectrum`'s `if not fid_tab_active:
-  self.canvas_tabs.setCurrentWidget(self.canvas)`, true here since the
-  current tab is now Compare, not FID). So the Compare tab silently
-  gets populated and then immediately hidden again by the very next
-  line -- this ordering bug looks pre-existing (from when this feature
-  was first built), not something the last two rounds introduced,
-  just not previously noticed. Fix is presumably reordering
-  `_on_list_selection_changed`'s single-pseudo-2D branch so the
-  Compare-tab switch is the *last* thing that happens, or having
-  `_on_selection_changed` skip its own canvas-tab switch when the
-  compare view was just explicitly shown.
-- **Compare's "Stack gap" control does nothing -- root cause found,
-  not fixed, and needs a design decision.** `stack_gap_spin`'s value
-  is still passed as `y_offset` into `show_compare(...)`, but the
-  Round D subplots redesign (one independent axes per spectrum, not a
-  single shared axes with a constant vertical offset) made
-  `y_offset`/`plot_1d_stack` apply *only* to the `mode="overlay"`/
-  single-spectrum fallback path -- the actual `mode="stack"` (>1
-  spectrum) branch plots each row via bare `plotting.plot_1d` with no
-  offset concept left at all, so the spin box is now fully
-  disconnected from what's on screen. User also wants the spacing to
-  "be automatic" -- worth deciding next session whether that means (a)
-  drop `stack_gap_spin` entirely and let matplotlib's own subplot
-  `hspace`/figure-height sizing handle it, or (b) keep a gap concept
-  but derive it automatically (e.g. from spectrum count/figure height)
-  rather than a manual value -- either way `stack_gap_spin` in its
-  current form is probably going away, not just being rewired.
 - **Processing-preview performance for (pseudo-)2D data.** Currently
   `_show_processing_preview` calls `Session.preview()`, which re-reads
   and reprocesses *every* slice via a full `io.load()` call, then

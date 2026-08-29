@@ -884,7 +884,7 @@ class MainWindow(QMainWindow):
         the same thing that method already does."""
         n_slices = spectrum.data.shape[0]
         slices = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))
-        self.canvas.show_compare(slices["rows"], mode="stack", y_offset=0.2, normalize=True)
+        self.canvas.show_compare(slices["rows"], mode="stack", normalize=True)
         self.canvas_tabs.setCurrentWidget(self.canvas)
 
     # ============================================================
@@ -943,17 +943,6 @@ class MainWindow(QMainWindow):
         self.layout_mode_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
         form.addRow("Layout:", self.layout_mode_combo)
 
-        self.stack_gap_spin = QDoubleSpinBox()
-        self.stack_gap_spin.setRange(0.0, 5.0)
-        self.stack_gap_spin.setSingleStep(0.05)
-        self.stack_gap_spin.setValue(0.2)
-        self.stack_gap_spin.setToolTip(
-            "Vertical gap between stacked spectra, as a fraction of "
-            "each spectrum's own peak height."
-        )
-        self.stack_gap_spin.valueChanged.connect(lambda _v: self._on_compare_controls_changed())
-        form.addRow("Stack gap:", self.stack_gap_spin)
-
         self.compare_normalize_combo = QComboBox()
         self.compare_normalize_combo.addItems(["None", "Max intensity", "By sample mass"])
         self.compare_normalize_combo.setToolTip(
@@ -1001,6 +990,11 @@ class MainWindow(QMainWindow):
             self._populate_compare_list(rows)
             self._refresh_compare_view()
         else:
+            # Multi- -> single-selection doesn't always change
+            # currentRow() (the item that was already current can stay
+            # current), so currentRowChanged wouldn't fire on its own
+            # -- redraw the single-spectrum view explicitly.
+            self._on_selection_changed(self.spectrum_list.currentRow())
             # Item D: selecting a single pseudo-2D spectrum fills the
             # Compare tab with its own slices automatically -- a
             # pseudo-2D series IS a stack of related 1D spectra, so it
@@ -1013,16 +1007,22 @@ class MainWindow(QMainWindow):
             # transient <=1-row state along the way, and clearing (or
             # replacing) on every such blip would wipe out check-state/
             # reordering already done in the Compare tab for no reason.
+            #
+            # Runs AFTER _on_selection_changed above, not before --
+            # _on_selection_changed's own _draw_selected_spectrum/
+            # _silo_other_canvas_tabs unconditionally redraws the
+            # Spectrum canvas and clears compare_canvas (right, for a
+            # single selection with nothing Compare-relevant to
+            # restore), so populating Compare *before* that meant this
+            # whole block's own effect -- the freshly-populated stack,
+            # and the canvas-tab switch to show it -- was silently
+            # undone one line later. Running it last instead means it's
+            # the thing left standing.
             if len(rows) == 1 and 0 <= rows[0] < len(self.session):
                 spectrum = self.session.spectra[rows[0]]
                 if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
                     self._populate_compare_list_from_pseudo2d(rows[0], spectrum)
                     self._refresh_compare_view()
-            # Multi- -> single-selection doesn't always change
-            # currentRow() (the item that was already current can stay
-            # current), so currentRowChanged wouldn't fire on its own
-            # -- redraw the single-spectrum view explicitly.
-            self._on_selection_changed(self.spectrum_list.currentRow())
 
     def _populate_compare_list(self, rows: list[int]) -> None:
         """Rebuild the Compare tab's own list from the Spectra tab's
@@ -1167,7 +1167,6 @@ class MainWindow(QMainWindow):
         self._run_curve_fit(slice_results, len(stack), stack[0], persist_to=None)
 
     def _on_compare_controls_changed(self) -> None:
-        self.stack_gap_spin.setEnabled(self.layout_mode_combo.currentIndex() == 0)
         self._refresh_compare_view_if_active()
 
     def _refresh_compare_view_if_active(self) -> None:
@@ -1214,10 +1213,7 @@ class MainWindow(QMainWindow):
 
         mode = "stack" if self.layout_mode_combo.currentIndex() == 0 else "overlay"
         try:
-            self.compare_canvas.show_compare(
-                plot_spectra, mode=mode, y_offset=self.stack_gap_spin.value(),
-                normalize=(norm_mode == "max"),
-            )
+            self.compare_canvas.show_compare(plot_spectra, mode=mode, normalize=(norm_mode == "max"))
             self.canvas_tabs.setCurrentWidget(self.compare_canvas)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
@@ -3556,27 +3552,68 @@ class MainWindow(QMainWindow):
         # which must already reflect *this* spectrum, not whatever was
         # last selected.
         self._refresh_selection_display(row)
-        self._draw_selected_spectrum(spectrum)
+        self._draw_selected_spectrum(spectrum, row=row)
         self._current_analysis_index = row
 
-    def _draw_selected_spectrum(self, spectrum) -> None:
+    def _compare_shows_current_pseudo2d_stack(self, row: int, spectrum) -> bool:
+        """True if the Compare tab's list is currently showing exactly
+        ``spectrum``'s own auto-populated slice stack (see
+        :meth:`_populate_compare_list_from_pseudo2d`) -- so a plain
+        reselection of the same spectrum doesn't clobber it.
+
+        Needed because ``spectrum_list`` fires *two* separate signals
+        for a single-selection change (``itemSelectionChanged`` ->
+        :meth:`_on_list_selection_changed`, and ``currentRowChanged``
+        -> :meth:`_on_selection_changed` directly) -- confirmed
+        empirically (not just assumed from the connect calls) to both
+        actually fire for the exact "select a fresh pseudo-2D spectrum"
+        gesture, with the direct one landing *after* whichever order
+        the code runs its own population/redraw logic in. So this
+        can't be fixed by reordering alone (tried first, didn't hold
+        up under tracing) -- checking "is Compare already correctly
+        showing this" is order-independent: no matter which handler
+        fires last, it leaves an already-correct Compare view alone
+        rather than redrawing over it."""
+        if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
+            return False
+        n = spectrum.data.shape[0]
+        if self.compare_list.count() != n:
+            return False
+        return all(
+            self.compare_list.item(i).data(Qt.ItemDataRole.UserRole) == (row, i + 1) for i in range(n)
+        )
+
+    def _draw_selected_spectrum(self, spectrum, row: int | None = None) -> None:
         """The actual draw step behind a selection change -- also used
         standalone (e.g. by the pseudo-2D view combo) when the
         selection itself hasn't changed and going through
         :func:`_refresh_selection_display` again would wrongly reset
         widgets (like that same combo) back to their per-selection
-        defaults."""
+        defaults -- ``row`` isn't known in that case, hence optional
+        (only needed for the Compare-stack check below, itself only
+        relevant right after a real selection change)."""
         is_pseudo2d_stack = (
             spectrum.ndim == 2 and spectrum.is_pseudo_2d and self.pseudo2d_view_combo.currentIndex() == 1
         )
         # The FID tab is a live view of whatever's selected, not an
         # opt-in overlay (no more checkbox) -- if it's already the
         # active tab, a reselection keeps it active and refreshes it,
-        # rather than force-switching away to the Spectrum tab.
+        # rather than force-switching away to the Spectrum tab. Same
+        # idea for the Compare tab specifically when it's already
+        # showing this exact pseudo-2D's own slice stack -- see
+        # _compare_shows_current_pseudo2d_stack's own docstring for why
+        # this check exists at all.
         fid_tab_active = self.canvas_tabs.currentWidget() is self.fid_canvas
+        compare_shows_this_stack = (
+            row is not None
+            and self.canvas_tabs.currentWidget() is self.compare_canvas
+            and self._compare_shows_current_pseudo2d_stack(row, spectrum)
+        )
         try:
             if is_pseudo2d_stack:
                 self._show_pseudo2d_stack(spectrum)
+            elif compare_shows_this_stack:
+                pass
             else:
                 self.canvas.show_spectrum(spectrum)
                 if not fid_tab_active:
@@ -3587,14 +3624,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot spectrum", str(exc))
 
-        self._silo_other_canvas_tabs(spectrum)
+        self._silo_other_canvas_tabs(spectrum, skip_compare=compare_shows_this_stack)
 
-    def _silo_other_canvas_tabs(self, spectrum) -> None:
+    def _silo_other_canvas_tabs(self, spectrum, skip_compare: bool = False) -> None:
         """Keep the Fit/Spectral Fit/Compare canvas tabs from showing a
         previously-selected spectrum's stale plot -- they aren't
         redrawn by the Spectrum/FID branches above, so without this a
         reselection would leave e.g. the Fit tab showing another
-        experiment's relaxation curve."""
+        experiment's relaxation curve. ``skip_compare`` -- see
+        :meth:`_draw_selected_spectrum` -- leaves the Compare canvas
+        alone when it's already correctly showing the just-selected
+        pseudo-2D's own slice stack, instead of clearing it out from
+        under itself."""
         fit_results = spectrum.metadata.raw.get("relaxation_fit_results")
         if fit_results:
             # matches view_relaxation_peak_spin resetting to 1 on reselect
@@ -3616,8 +3657,12 @@ class MainWindow(QMainWindow):
         # Spectra list, not this single spectrum -- it has no
         # per-spectrum state to restore, so just drop the stale plot
         # rather than show a comparison involving a spectrum that may
-        # no longer even be part of the current selection.
-        self.compare_canvas.clear()
+        # no longer even be part of the current selection. Unless
+        # skip_compare says the Compare tab is actually already
+        # showing exactly this spectrum's own auto-populated slices --
+        # then it very much is per-spectrum state worth keeping.
+        if not skip_compare:
+            self.compare_canvas.clear()
 
     def _refresh_selection_display(self, row: int) -> None:
         spectrum = self.session.spectra[row]
