@@ -6,7 +6,8 @@ Every vendor importer reads raw acquisition data (not a vendor's own
 pre-processed output) and produces the same `NMRSpectrum` object, which
 the same processing and plotting code then operates on. Currently
 supported: Bruker (TopSpin `fid`/`ser`), X-Pulse (JCAMP-DX FID, including
-arrayed/PFG experiments), Varian/Agilent (`fid`/`procpar`).
+arrayed/PFG experiments), Varian/Agilent (`fid`/`procpar`), JEOL Delta
+(`.jdf`, 1D only so far).
 
 ## Layout
 

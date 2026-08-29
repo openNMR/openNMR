@@ -2,6 +2,77 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## JEOL Delta (`.jdf`) importer -- 1D (2026-08-29)
+
+~~Find real JEOL example data (or build synthetic data from the
+manual) to build a parser~~ -- done, a new `io/jeol.py` (`read_1d`),
+registered like every other vendor. No official public spec exists for
+this binary format, so this is a Python port of
+[bjonnh/jeolconverter](https://github.com/bjonnh/jeolconverter)'s
+`parseJEOL.js` (MIT licensed) -- read directly, not guessed at, since
+its own field layout (including a real quirk: the header is always
+big-endian, but the parameter/data sections that follow switch to
+little-endian when the header's own `endian` byte says so) came from
+actually tracing that implementation, not a spec document (none
+appears to exist publicly).
+
+**Verified two ways**, not just self-consistent:
+
+1. Real data -- `test_data/jeol_1d/` (`proton.jdf`, `carbon.jdf`,
+   `fluorine.jdf`, `phosphorus.jdf`), from
+   [cheminfo/jeol-data-test](https://github.com/cheminfo/jeol-data-test)
+   (MIT licensed, published there for testing purposes; original data
+   credited to Guido Pauli's research group via Harvard Dataverse).
+   Parsed header/parameter values match **exactly** what
+   `jeolconverter`'s own test suite asserts for the same files (e.g.
+   proton.jdf: nucleus `1H`, 32768 points, frequency
+   `399782198.37825` Hz, offset `8.999999999999998` ppm) -- genuine
+   ground-truth cross-validation against an independent
+   implementation, not just internal consistency. These real files
+   aren't wired into the pytest suite itself (matching this project's
+   existing convention -- no other vendor's `test_data/` fixtures are
+   either); `tests/test_jeol.py` uses a hand-built synthetic `.jdf`
+   fixture instead, covering both endiannesses.
+2. Ran the full pipeline (apodize/FFT/autophase/baseline-correct) on
+   the real proton.jdf and confirmed the output is a plausible,
+   mostly-correctly-phased real spectrum (positive on average across
+   the actual signal region, not just noise) -- not merely "doesn't
+   crash".
+
+**Real files store a raw FID (time-domain), not a pre-computed
+spectrum** -- every file checked has `dataUnits="Second"`, even though
+the format can apparently also store an already-Fourier-transformed
+spectrum (`dataUnits="Ppm"`, unhandled -- `read_1d` doesn't check for
+this case at all yet, and will produce nonsense if ever handed one).
+Given real files, this goes through the exact same
+`processing.ft` apodize/FFT/phase/baseline pipeline X-Pulse and Varian
+already use.
+
+**Known gap, flagged not silently**: real files carry a
+`FILTER_FACTOR` parameter (an integer point count) that's a
+digital-filter group delay, analogous to Bruker's `GRPDLY`
+(`nmrglue.bruker.remove_digital_filter`) -- not corrected for yet. The
+FID's own magnitude peak lands a handful of points after index 0, not
+at it, on every real file checked, and the default `phase_mode="apc0"`
+(zero-order only) leaves at least one real peak visibly negative
+(180° off) on the real proton.jdf even though most of the spectrum's
+signal region phases correctly -- consistent with an uncorrected,
+frequency-dependent (phase1-like) error from this, not a parsing bug
+(the same peak's neighbours across the rest of the spectrum are
+positive at the same global phase0). `phase_mode="joint"`
+(`autophase01`) is available and may cope better, but its own
+significance test didn't find a nonzero phase1 worth keeping on this
+file either -- a real, proper correction (like Bruker's) is the actual
+fix, not yet built.
+
+**Not yet built**: 2D (COSY/HSQC/HMBC -- `read_1d` raises a clear
+`ValueError` for these rather than silently misreading them; the
+`jeolconverter` reference already documents the `Two_D` data-section
+layout, so this is a well-scoped follow-up, not a mystery) and the
+`dataUnits="Ppm"` (pre-FFT'd file) case mentioned above.
+
+16 new tests (`tests/test_jeol.py`), 411 tests passing overall.
+
 ## Pin-bottom intensity zoom, Analysis-tab overflow (round 2), peak-pick tuning, per-slice autophase (2026-08-29)
 
 User feedback, all done:
