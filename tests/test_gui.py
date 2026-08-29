@@ -685,6 +685,81 @@ def test_main_window_autophase_button_noop_with_no_spectrum(qapp):
     window._on_autophase_clicked()  # must not raise
 
 
+def test_main_window_autophase_stays_on_processing_preview_for_1d(qapp, tmp_path, monkeypatch):
+    # Explicit user feedback: Autophase was pulling focus out of the
+    # Processing-preview tab. A 1D spectrum's own phase update is
+    # cheap regardless of which canvas shows it, so this should also
+    # actually refresh the preview's content, not just avoid switching
+    # away from it.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window.phase0_spin.setValue(90.0)  # a deliberately wrong starting phase
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    before = spec_ax.lines[0].get_ydata().copy()
+
+    window._on_autophase_clicked()  # should correct the phase back away from 90 deg
+
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    after = spec_ax.lines[0].get_ydata()
+    assert not np.allclose(before, after)
+
+
+def test_main_window_autophase_stays_on_processing_preview_for_pseudo2d(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+
+    window._on_autophase_clicked()  # must not raise, must not switch away
+
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+
+
+def test_main_window_revert_autophase_stays_on_processing_preview(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window._on_autophase_clicked()
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+
+    window._on_revert_autophase_clicked()  # must not raise, must not switch away
+
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+
+
+def test_main_window_baseline_correct_stays_on_processing_preview_for_pseudo2d(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+
+    window._on_baseline_correct_clicked()  # must not raise, must not switch away
+
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+
+
+def test_main_window_phase_drag_finished_refreshes_processing_preview(qapp, tmp_path, monkeypatch):
+    # A continuous phase-handle drag deliberately doesn't refresh the
+    # (potentially slow) Processing-preview tab on every tick -- but
+    # letting go of the drag should trigger exactly one refresh
+    # (DragHandle.dragFinished), so the preview doesn't stay stale.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    before = spec_ax.lines[0].get_ydata().copy()
+
+    window.phase0_handle.setValue(45.0)  # a drag tick -- preview intentionally not refreshed yet
+    window.phase0_handle.dragFinished.emit()  # letting go of the drag
+
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    after = spec_ax.lines[0].get_ydata()
+    assert not np.allclose(before, after)
+
+
 def test_main_window_pivot_slider_moves_pivot_spin(qapp, tmp_path):
     # The slider is inverted relative to raw ppm value, to match the
     # spectrum's own inverted x-axis (high ppm on the left) -- dragging
@@ -1597,6 +1672,23 @@ def test_main_window_align_echo_button_immediately_reprocesses_and_shows_fid(qap
     assert window.canvas_tabs.currentWidget() is window.fid_canvas
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
     assert "Echo top" in labels
+
+
+def test_main_window_align_echo_stays_on_processing_preview_when_already_active(qapp, tmp_path):
+    # Explicit user feedback: Align Echo was pulling focus out of the
+    # Processing-preview tab -- it should stay the default context for
+    # processing steps, not force-switch to the plain FID tab when
+    # it's already what's showing.
+    window = MainWindow()
+    window._load(_make_xpulse_dataset(tmp_path), vendor="xpulse")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+
+    window.align_echo_button.setChecked(True)
+
+    assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
+    fid_ax, _spec_ax = window.processing_preview_canvas.figure.axes
+    assert fid_ax.axes.lines  # still drawing something sensible
 
 
 def test_main_window_echo_top_marker_hidden_when_align_echo_off(qapp, tmp_path):

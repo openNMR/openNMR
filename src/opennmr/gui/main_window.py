@@ -1828,16 +1828,28 @@ class MainWindow(QMainWindow):
     def _on_align_echo_toggled(self, _checked: bool) -> None:
         """Align Echo is a push button, not a passive checkbox --
         toggling it immediately reprocesses (not just remembering the
-        setting for a later "Reprocess" click) and switches to the FID
-        tab so the effect is visible right away: a dashed green marker
-        at :func:`opennmr.processing.ft.find_echo_top`'s result, which
+        setting for a later "Reprocess" click) and switches to a view
+        that shows the effect right away: a dashed green marker at
+        :func:`opennmr.processing.ft.find_echo_top`'s result, which
         should land right at t=0 once genuinely aligned. Previously
         this only took effect silently on the next "Reprocess," with
         no way to tell from the UI alone whether it had actually done
-        anything."""
+        anything.
+
+        Prefers the Processing-preview tab (already showing both FID
+        and spectrum together) if that's what's already active, rather
+        than always force-switching to the plain FID tab -- explicit
+        user feedback that Align Echo pulled focus out of the
+        Processing-preview context it should be the default view for.
+        ``_on_reprocess_fid_clicked`` below already refreshes that
+        preview as a normal side effect of the reselection it ends
+        with, so there's nothing more to do in that case."""
         if self._selected_index() is None:
             return
+        already_on_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
         self._on_reprocess_fid_clicked()
+        if already_on_preview:
+            return
         index = self._selected_index()
         if index is None:
             return
@@ -1949,6 +1961,10 @@ class MainWindow(QMainWindow):
         self.pivot_slider.setValue(500)
         self.pivot_slider.setToolTip("Drag to move the Phase 1 pivot across the spectrum's own ppm range.")
         self.pivot_slider.valueChanged.connect(self._on_pivot_slider_changed)
+        # Same reasoning as DragHandle.dragFinished (see
+        # _make_phase_control) -- refresh the Processing-preview tab
+        # once the drag ends, not on every intermediate tick.
+        self.pivot_slider.sliderReleased.connect(self._refresh_processing_preview_if_active)
         form.addRow(self.pivot_slider)
 
         autophase_row = QHBoxLayout()
@@ -2057,6 +2073,15 @@ class MainWindow(QMainWindow):
 
         handle.valueChanged.connect(lambda v: self._on_phase_handle_changed(handle, spin, v))
         spin.valueChanged.connect(lambda v: self._on_phase_spin_changed(handle, spin, v))
+        # Once per drag gesture (not per intermediate tick -- see
+        # DragHandle.dragFinished's own docstring), refresh the
+        # Processing-preview tab if that's active: pseudo2d/2d phase
+        # dragging deliberately doesn't refresh it live on every tick
+        # (too slow, a full Session.preview() re-read -- see
+        # _apply_phase_preview), so without this the preview would
+        # otherwise stay stale until some other, unrelated change
+        # happened to refresh it.
+        handle.dragFinished.connect(self._refresh_processing_preview_if_active)
         return handle, spin
 
     @staticmethod
@@ -2178,6 +2203,11 @@ class MainWindow(QMainWindow):
 
         self._apply_phase_preview()
         self.canvas.autoscale_y()
+        # A discrete, one-shot action (not a per-tick drag) -- safe to
+        # refresh the Processing-preview tab's own (potentially slow,
+        # Session.preview()-based) content here, unlike a live phase
+        # drag tick (see _apply_phase_preview's pseudo2d branch).
+        self._refresh_processing_preview_if_active()
 
     def _on_revert_autophase_clicked(self) -> None:
         """Undo the last :meth:`_on_autophase_clicked`, restoring
@@ -2198,6 +2228,7 @@ class MainWindow(QMainWindow):
 
         self._apply_phase_preview()
         self.canvas.autoscale_y()
+        self._refresh_processing_preview_if_active()
         self._last_autophase_revert = None
         self.revert_autophase_button.setEnabled(False)
 
@@ -2234,8 +2265,11 @@ class MainWindow(QMainWindow):
                 corrected = processing_ft.baseline_correct(freq_ppm, complex_row)
                 spectrum.data[row] = np.real(corrected)
                 spectrum.data_imag[row] = np.imag(corrected)
-            self._show_pseudo2d_slice(spectrum, reset_view=False)
+            on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
+            self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=not on_processing_preview)
             self.canvas.autoscale_y()
+            if on_processing_preview:
+                self._refresh_processing_preview_if_active()
         elif self._phase_mode == "2d":
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
             complex_data = spectrum.complex_data
@@ -2312,8 +2346,11 @@ class MainWindow(QMainWindow):
         # Phase controls to it (same as a fresh selection), rather than
         # leaving them pointing at the pre-autophase snapshot.
         self._capture_phase_reference()
-        self._show_pseudo2d_slice(spectrum, reset_view=False)
+        on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
+        self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=not on_processing_preview)
         self.canvas.set_pivot_marker(self.pivot_spin.value())
+        if on_processing_preview:
+            self._refresh_processing_preview_if_active()
 
     def _apply_phase_preview(self) -> None:
         index = self._selected_index()
@@ -2332,9 +2369,14 @@ class MainWindow(QMainWindow):
             phased = processing_ft.apply_phase(self._phase_reference_full, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
             spectrum.data = np.real(phased)
             spectrum.data_imag = np.imag(phased)
+            # Kept up to date regardless of which canvas tab is
+            # actually showing, so switching back to Spectrum later
+            # (from the Processing-preview tab, see below) never shows
+            # stale data -- only the tab *switch* itself is guarded.
             self.canvas.update_data(spectrum)
             self.canvas.set_pivot_marker(self.pivot_spin.value())
-            self.canvas_tabs.setCurrentWidget(self.canvas)
+            if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
+                self.canvas_tabs.setCurrentWidget(self.canvas)
 
         elif self._phase_mode == "pseudo2d":
             if self.apply_all_slices_checkbox.isChecked():
@@ -2357,16 +2399,18 @@ class MainWindow(QMainWindow):
             if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
                 self._show_fid_preview(spectrum, switch_tab=False)
             elif self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
-                # Don't force-switch away from the Processing tab's own
-                # preview, same as the FID-tab case above -- but also
-                # don't refresh it here unconditionally, since this
-                # runs on every phase-drag tick and a live-preview
-                # refresh is a full Session.preview() re-read (real
-                # I/O + FFT), too slow for that. A discrete change that
-                # also routes through here (e.g. slice_spin -- see
+                # Keep the Spectrum tab's own content correct in the
+                # background (switch_tab=False -- so switching back to
+                # it later shows the current phase), but don't force-
+                # switch away from the Processing tab's own preview,
+                # and don't refresh THAT preview here -- this runs on
+                # every phase-drag tick, and a live-preview refresh is
+                # a full Session.preview() re-read (real I/O + FFT),
+                # too slow for that. A discrete change that also routes
+                # through here (e.g. slice_spin -- see
                 # _on_slice_spin_changed) refreshes it separately,
                 # right after this call returns.
-                pass
+                self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=False)
             else:
                 self._show_pseudo2d_slice(spectrum, reset_view=False)
                 self.canvas.set_pivot_marker(self.pivot_spin.value())
@@ -2384,13 +2428,19 @@ class MainWindow(QMainWindow):
             spectrum.data = np.real(phased)
             spectrum.data_imag = np.imag(phased)
             self.canvas.show_spectrum(spectrum)
-            self.canvas_tabs.setCurrentWidget(self.canvas)
+            if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
+                self.canvas_tabs.setCurrentWidget(self.canvas)
 
-    def _show_pseudo2d_slice(self, spectrum, reset_view: bool) -> None:
+    def _show_pseudo2d_slice(self, spectrum, reset_view: bool, switch_tab: bool = True) -> None:
         """Preview a pseudo-2D spectrum as the single slice currently
         selected in the Dimension box -- a full contour redraw on every
         drag tick would be far too slow, and a line plot is what you
-        actually need to see to judge a phase correction anyway."""
+        actually need to see to judge a phase correction anyway.
+        ``switch_tab=False`` (see :meth:`_show_fid_preview`'s own
+        matching param) keeps the Spectrum tab's own content correct
+        without stealing focus from whichever canvas tab is actually
+        showing right now -- e.g. the Processing-preview tab, while
+        that's the active context for phasing."""
         slice_index = self.slice_spin.value()
         trace = get_trace(spectrum, axis="f1", index=slice_index)
         if reset_view or not self.canvas.ax.lines:
@@ -2399,7 +2449,8 @@ class MainWindow(QMainWindow):
             self.canvas.update_data(trace)
         self.canvas.ax.set_title(self._slice_label(spectrum, slice_index))
         self.canvas.canvas.draw_idle()
-        self.canvas_tabs.setCurrentWidget(self.canvas)
+        if switch_tab:
+            self.canvas_tabs.setCurrentWidget(self.canvas)
 
     @staticmethod
     def _slice_label(spectrum, slice_index: int) -> str:
@@ -3602,8 +3653,12 @@ class MainWindow(QMainWindow):
         # idea for the Compare tab specifically when it's already
         # showing this exact pseudo-2D's own slice stack -- see
         # _compare_shows_current_pseudo2d_stack's own docstring for why
-        # this check exists at all.
+        # this check exists at all -- and for the Processing-preview
+        # tab, which should be the default context for processing
+        # steps (explicit user feedback) rather than something a
+        # reselection/reprocess pulls focus away from.
         fid_tab_active = self.canvas_tabs.currentWidget() is self.fid_canvas
+        processing_preview_active = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
         compare_shows_this_stack = (
             row is not None
             and self.canvas_tabs.currentWidget() is self.compare_canvas
@@ -3615,8 +3670,13 @@ class MainWindow(QMainWindow):
             elif compare_shows_this_stack:
                 pass
             else:
+                # Kept up to date regardless of which canvas tab is
+                # actually showing (see _apply_phase_preview's "1d"
+                # branch for the same reasoning), so switching back to
+                # Spectrum later never shows stale data -- only the tab
+                # *switch* itself is guarded.
                 self.canvas.show_spectrum(spectrum)
-                if not fid_tab_active:
+                if not fid_tab_active and not processing_preview_active:
                     self.canvas_tabs.setCurrentWidget(self.canvas)
             if fid_tab_active and self._fid_preview_available(spectrum):
                 self._show_fid_preview(spectrum, switch_tab=False)

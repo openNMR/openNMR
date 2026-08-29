@@ -2,6 +2,70 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Autonomous overnight round 2: Processing-preview is now the default context for Align Echo/Autophase/phase-drag (2026-08-30)
+
+Continuing unattended. Fixed the *routing* half of the "make
+Processing-preview the default context for all processing steps"
+item -- Align Echo, Autophase, Revert Autophase, Baseline Correct,
+Autophase-each-slice-independently, and phase dragging (handle drag or
+pivot slider) all now stay on the Processing-preview tab when that's
+already active, instead of force-switching away to `fid_canvas`/
+`self.canvas`. The other half (per-slice-only loading for pseudo-2D,
+so the preview stays fast) turned out to need real vendor-level work
+once actually investigated -- see the still-open item below for
+exactly why, and what a real fix needs.
+
+- `_draw_selected_spectrum`, `_apply_phase_preview` ("1d"/"pseudo2d"/
+  "2d" branches), `_on_align_echo_toggled`, `_on_autophase_clicked`,
+  `_on_revert_autophase_clicked`, `_on_baseline_correct_clicked`, and
+  `_on_autophase_slices_clicked` all gained a "processing-preview tab
+  already active? don't force-switch away" carve-out -- the same
+  pattern the FID tab already had, applied consistently everywhere
+  else that previously assumed Spectrum/FID were the only two
+  possible "live" destinations. `_show_pseudo2d_slice` gained a
+  `switch_tab` param (matching `_show_fid_preview`'s existing one) so
+  Spectrum's own canvas can still be kept correct in the background
+  without stealing focus.
+- Discrete, one-shot actions (Autophase, Revert Autophase, Baseline
+  Correct, Autophase-each-slice, `_on_align_echo_toggled`'s real
+  commit) now also *refresh* the Processing-preview's content when
+  it's active, not just avoid switching away from it -- cheap, since
+  each only runs once per click.
+- Continuous phase dragging (the drag-handle widgets, and the pivot
+  slider) deliberately still does **not** refresh the Processing-
+  preview on every intermediate tick -- for a pseudo-2D or a large
+  conventional 2D, that would mean a full `Session.preview()` re-read
+  (real I/O + FFT) many times a second, exactly the performance trap
+  flagged when phase-dragging was first left out of the preview.
+  Instead, new `DragHandle.dragFinished` (emitted once, on mouse
+  release) and `QSlider.sliderReleased` (built into Qt already) each
+  trigger exactly one refresh at the *end* of a drag gesture -- a
+  reasonable middle ground: the preview updates once you let go,
+  rather than either staying stale indefinitely or reloading on every
+  pixel of mouse movement. For a plain 1D spectrum specifically, this
+  same one-time-per-discrete-action refresh already happens via the
+  "1d" branch's own logic (a single spectrum's own phase update was
+  never expensive regardless of which canvas shows it), so 1D phase
+  dragging refreshes correctly too, just via the same drag-finished
+  path as everything else rather than needing special-casing.
+- Real bug caught while adding the very first test for this:
+  `_draw_selected_spectrum`'s own "else" branch (used whenever the
+  selected spectrum isn't shown as a pseudo-2D stack or an
+  already-correct Compare view) *also* unconditionally switched
+  `canvas_tabs` to Spectrum, completely independently of the
+  `_apply_phase_preview`-side fixes above -- meaning `_on_reprocess_
+  fid_clicked` (which `_on_align_echo_toggled` calls for its real
+  commit, and which ends by calling `_on_selection_changed`) was
+  still yanking focus away even after the more obvious fix sites were
+  patched. Caught by a real assertion failure, not by inspection --
+  worth remembering that this kind of "canvas tab should stay put"
+  fix has more call sites than the ones a user's bug report directly
+  points at, given how many different code paths in this file
+  ultimately redraw the Spectrum tab.
+
+498 tests passing (492 -> 498, six new regression tests). Committed
+and pushed.
+
 ## Autonomous overnight round: Compare auto-population fix, Stack-gap removal (2026-08-30)
 
 Working through the "Noted for next session" list below unattended
@@ -57,46 +121,52 @@ one lost an obsolete one, net zero). Committed and pushed.
 
 User feedback from trying an earlier round's changes -- explicitly "a
 few pointers to note to do in the next session," not "implement now."
-The two Compare-related items from this list are done -- see the round
-above. Still open:
+The two Compare-related items, and the "make Processing-preview the
+default context" routing work, are done -- see the two rounds above.
+Still open:
 
-- **Processing-preview performance for (pseudo-)2D data.** Currently
-  `_show_processing_preview` calls `Session.preview()`, which re-reads
-  and reprocesses *every* slice via a full `io.load()` call, then
-  throws away everything except the one slice being previewed --
-  correct but wasteful, and slow for a many-slice pseudo-2D on every
-  live control change. User asked for it to "only load one slice at a
-  time." Needs a per-slice-only read path in the vendor `io` readers
-  (or at least Bruker/X-Pulse/the ones commonly used this way) --
-  bigger than a GUI-only change, worth scoping properly rather than a
-  quick patch.
-- **Make the Processing-preview window the actual default context for
-  *all* processing steps, phasing included** -- explicit, strong
-  request ("whatever tricks we need for this should be used"),
-  reopening a call made last round on purpose (see the 2026-08-29
-  "Spectrum-tab stacked-view fix..." entry below: phase-dragging was
-  deliberately left drawing on the real Spectrum tab, reasoned as
-  already being "the result of processing" since it mutates
-  `spectrum.data` in place with no separate commit step). The user's
-  actual complaint is concrete: Align Echo and Autophase currently
-  force-switch `canvas_tabs` to `fid_canvas`/`self.canvas`
-  respectively (see `_on_align_echo_toggled`, and the Autophase button
-  handler), pulling focus out of the Processing-preview tab they're
-  already on. Two sub-problems to solve together, not separately: (1)
-  route Align Echo/Autophase/phase-drag's live redraw into
-  `processing_preview_canvas` when it's the active tab instead of
-  force-switching away, without regressing their behavior on the
-  FID/Spectrum tabs when the Processing tab isn't active; (2) phase-
-  drag specifically fires many times per second, so whatever shows it
-  live in the new preview can't be a full `Session.preview()` re-read
-  per tick the way the rest of the preview is computed (this is
-  exactly the performance concern that motivated leaving phase out
-  last round) -- likely needs the preview's spectrum panel to update
-  via the same lightweight in-place `processing_ft.apply_phase`-on-
-  cached-reference-array approach `_apply_phase_preview` already uses
-  for the Spectrum tab, not a fresh reload each tick. Depends on (or
-  at least overlaps with) the per-slice-only preview-loading item
-  above for the pseudo-2D case.
+- **Processing-preview performance for (pseudo-)2D data -- investigated
+  in depth, deliberately not attempted, here's exactly what a real fix
+  needs.** The GUI-only optimization that looked obvious at first
+  (recompute the preview from the already-cached FID in memory,
+  skipping `Session.preview()`/`io.load()` entirely) turns out **not
+  to be safe**: read the actual vendor code rather than trusting the
+  assumption -- `spectrum.metadata.raw["fid"]` is stashed *after*
+  apodization and zero-fill (see `io/bruker.py`'s own comment on it:
+  "The exact (shift/echo-align/LP/windowed/zero-filled) FID fed into
+  the FFT"), not before. So it's the fully-processed array already
+  about to be FFT'd -- reapplying a newly-selected window or zero-fill
+  size on top of it would double-apply the old one, silently producing
+  a wrong preview. There is currently no cached "pre-window" FID
+  anywhere to safely recompute from. A real fix needs one of:
+  (a) a new caching layer -- stash the true pre-window (post digital-
+  filter/shift/align/truncate/LP) FID alongside the existing one in
+  `metadata.raw`, across every vendor reader, then do window/zero-
+  fill/phase recomputation for a live preview entirely from that, in
+  the GUI/processing layer (no disk I/O at all, not even for one
+  slice) -- probably the better fix in the long run, since it also
+  speeds up 1D previews; or (b) an opt-in `only_slice`/`slice_index`
+  parameter on `read_2d` (per vendor) that skips processing every row
+  but the one requested. Option (b) is genuinely non-trivial for at
+  least Bruker: `read_2d`'s F2 processing loop computes `apc0`'s
+  autophase from `spectrum.mean(axis=0)` -- **averaged across every
+  row** -- so a naive "only touch row N" shortcut would silently
+  change the phase result too, not just the performance. (The
+  Processing-preview's own kwargs currently pass an explicit phase via
+  `_current_phase_kwargs` rather than `autophase=True` in the common
+  case, which sidesteps this specific interaction for *that* caller --
+  but a `only_slice` parameter added to `read_2d` itself would still
+  need to define what it does under `autophase=True`, for correctness
+  and for any other future caller.) Either option touches
+  already-validated, delicate per-vendor DSP code across (at least)
+  Bruker and X-Pulse, which is exactly the category of change this
+  project has consistently required verifying against real data
+  before trusting (see the WDW=GM, Varian ppm-axis, and JEOL
+  FILTER_FACTOR entries elsewhere in this file for the established
+  pattern) -- not something to guess at unsupervised. Recommend
+  picking option (a) or (b) explicitly with the user before starting,
+  since it changes the shape of the fix (GUI/processing-layer-only vs.
+  touching every vendor's `read_1d`/`read_2d` signature).
 - **Left side panel needs better reflow at smaller window widths** --
   "the left side tab is needing scrolling too often." No diagnosis
   done yet; likely candidates given past rounds' history here (see the

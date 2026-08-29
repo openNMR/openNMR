@@ -21,6 +21,12 @@ class DragHandle(QWidget):
 
     valueChanged = Signal(float)
 
+    #: Emitted (no value) when a drag gesture ends -- lets a caller do
+    #: something only worth doing once per gesture (not on every
+    #: intermediate tick a continuous drag already fires via
+    #: valueChanged), e.g. a slower live-preview refresh.
+    dragFinished = Signal()
+
     def __init__(self, sensitivity: float = 0.5, step: float = 1.0, parent=None) -> None:
         super().__init__(parent)
         self.sensitivity = sensitivity
@@ -76,6 +82,7 @@ class DragHandle(QWidget):
         if self._drag_start_y is not None:
             self._drag_start_y = None
             self.releaseMouse()
+            self.dragFinished.emit()
 
     def wheelEvent(self, event) -> None:  # noqa: N802 -- Qt override
         direction = 1 if event.angleDelta().y() > 0 else -1
