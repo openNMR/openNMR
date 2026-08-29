@@ -140,6 +140,62 @@ def test_fit_relaxation_unknown_model_raises():
         relaxation.fit_relaxation([0, 1], [0, 1], model="not_a_model")
 
 
+def test_fit_curve_uncertainty_shape_and_positivity():
+    M0_true, T2_true = 5.0, 0.3
+    rng = np.random.default_rng(0)
+    t = np.linspace(0.01, 2.0, 25)
+    y = relaxation.exponential_decay(t, M0_true, T2_true) + rng.normal(0, 0.05, t.shape)
+    fit = relaxation.fit_relaxation(t, y, model="exponential_decay")
+
+    t_fine, y_fine, y_band = relaxation.fit_curve_uncertainty(fit, n_points=50, sigma=3.0)
+
+    assert t_fine.shape == (50,)
+    assert y_fine.shape == (50,)
+    assert y_band.shape == (50,)
+    assert t_fine[0] == pytest.approx(t.min())
+    assert t_fine[-1] == pytest.approx(t.max())
+    assert np.all(np.isfinite(y_band))
+    assert np.all(y_band >= 0)  # a width, never negative
+    # The fine curve should agree with the model evaluated directly at
+    # the same points (not some unrelated quantity).
+    np.testing.assert_allclose(
+        y_fine, relaxation.exponential_decay(t_fine, fit["params"]["M0"], fit["params"]["T2"]),
+    )
+
+
+def test_fit_curve_uncertainty_scales_with_sigma():
+    M0_true, T2_true = 5.0, 0.3
+    rng = np.random.default_rng(1)
+    t = np.linspace(0.01, 2.0, 25)
+    y = relaxation.exponential_decay(t, M0_true, T2_true) + rng.normal(0, 0.05, t.shape)
+    fit = relaxation.fit_relaxation(t, y, model="exponential_decay")
+
+    _, _, band_1sigma = relaxation.fit_curve_uncertainty(fit, n_points=30, sigma=1.0)
+    _, _, band_3sigma = relaxation.fit_curve_uncertainty(fit, n_points=30, sigma=3.0)
+
+    np.testing.assert_allclose(band_3sigma, band_1sigma * 3.0)
+
+
+def test_fit_curve_uncertainty_tighter_with_less_noise():
+    # A cleaner fit should be more tightly constrained -- the band
+    # should shrink as the data noise shrinks, not be some fixed
+    # unrelated width.
+    M0_true, T2_true = 5.0, 0.3
+    t = np.linspace(0.01, 2.0, 25)
+
+    rng_low = np.random.default_rng(2)
+    y_low_noise = relaxation.exponential_decay(t, M0_true, T2_true) + rng_low.normal(0, 0.01, t.shape)
+    fit_low = relaxation.fit_relaxation(t, y_low_noise, model="exponential_decay")
+    _, _, band_low = relaxation.fit_curve_uncertainty(fit_low, n_points=30)
+
+    rng_high = np.random.default_rng(3)
+    y_high_noise = relaxation.exponential_decay(t, M0_true, T2_true) + rng_high.normal(0, 0.5, t.shape)
+    fit_high = relaxation.fit_relaxation(t, y_high_noise, model="exponential_decay")
+    _, _, band_high = relaxation.fit_curve_uncertainty(fit_high, n_points=30)
+
+    assert np.mean(band_low) < np.mean(band_high)
+
+
 def test_fit_relaxation_recovers_stejskal_tanner_diffusion_coefficient():
     # A real b-value series (s/m^2), like io.bruker.read_diff_xml's own
     # "B" -- confirms the fit works at the actual physical scale

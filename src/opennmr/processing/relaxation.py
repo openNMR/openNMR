@@ -393,6 +393,57 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
     }
 
 
+def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 3.0):
+    """A smooth model curve over ``fit_result``'s own delay range, plus
+    a linearized (delta-method) uncertainty band at ``sigma`` standard
+    deviations -- the same idea as ``lmfit``'s ``eval_uncertainty``
+    (which the user's own PFG diffusion-fitting code uses, shaded via
+    ``ax.fill`` around the fit curve), hand-rolled here since this
+    module fits with plain ``scipy.curve_fit`` rather than ``lmfit``.
+
+    The band is propagated from :func:`fit_relaxation`'s own
+    ``pcov`` (parameter covariance) via a numerically-estimated
+    Jacobian of the model curve with respect to each free parameter,
+    evaluated on a fine grid -- standard linear error propagation
+    (var(f) = J @ pcov @ J.T), valid near the fitted optimum the same
+    way the covariance-derived parameter errors already reported by
+    :func:`fit_relaxation` are.
+
+    Returns ``(t_fine, y_fine, y_band)`` -- plot the shaded region as
+    ``y_fine - y_band`` to ``y_fine + y_band``.
+    """
+    spec = RELAXATION_MODELS[fit_result["model"]]
+    func, param_names = spec["func"], spec["params"]
+    free_names = fit_result["free_names"]
+    params = fit_result["params"]
+    popt = np.asarray(fit_result["popt"], dtype=float)
+    pcov = np.asarray(fit_result["pcov"], dtype=float)
+    t = fit_result["t"]
+
+    t_fine = np.linspace(float(np.min(t)), float(np.max(t)), n_points)
+
+    def curve(free_vals):
+        full = dict(params)
+        full.update(zip(free_names, free_vals))
+        return func(t_fine, *[full[p] for p in param_names])
+
+    y_fine = curve(popt)
+
+    n_free = len(popt)
+    jac = np.zeros((n_points, n_free))
+    for i in range(n_free):
+        step = 1e-6 * max(abs(popt[i]), 1e-12)
+        p_plus, p_minus = popt.copy(), popt.copy()
+        p_plus[i] += step
+        p_minus[i] -= step
+        jac[:, i] = (curve(p_plus) - curve(p_minus)) / (2 * step)
+
+    variance = np.einsum("ij,jk,ik->i", jac, pcov, jac)
+    y_band = sigma * np.sqrt(np.clip(variance, 0.0, None))
+
+    return t_fine, y_fine, y_band
+
+
 def format_time_value(value, error=None, sig_figs=3):
     """
     Format a time value (assumed given in seconds) with an

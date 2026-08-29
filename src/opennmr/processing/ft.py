@@ -206,18 +206,34 @@ def phase_score(spectrum: np.ndarray, penalty: str = "negarea") -> float:
         raise ValueError("penalty must be 'negarea', 'magnitude', or 'entropy'")
 
 
-def apc0(spectrum: np.ndarray, freq: np.ndarray, phase0_inc: float = 0.1) -> float:
-    """Zero-order-only autophase: grid search maximizing the real
-    part's integral. Simple and fast, but blind to first-order (phase1)
-    errors -- see :func:`autophase01` for a joint fit."""
+def apc0(spectrum: np.ndarray, freq: np.ndarray, phase0_inc: float = 0.1, penalty: str = "magnitude") -> float:
+    """Zero-order-only autophase: grid search minimizing
+    :func:`phase_score` (same criterion/default ``penalty`` as
+    :func:`autophase01`'s own stage-1 search -- see :func:`autophase01`
+    for a joint zero-/first-order fit).
+
+    Used to score by raw ``sum(real(corrected))`` (maximize) instead --
+    changed because it's unreliable on anything but a strong, clean
+    peak: that sum is dominated by whatever's biggest across the
+    *whole* array, so on a spectrum that's mostly noise/baseline with
+    only a small real peak (a late PFG gradient-step slice, a weak
+    signal generally) it easily locks onto a phase that's actually
+    fitting the noise, not the peak -- confirmed on a synthetic
+    decaying-FID test: at moderate noise, the old scoring was off by
+    11 deg from the true phase where ``phase_score``'s magnitude
+    penalty (``sum((real - |spectrum|)**2)``, phase-independent by
+    construction) was off by only 2 deg, and the gap widens further at
+    higher noise. Real bug, not just theoretical: this is what
+    "Autophase zeroes everything" on real, lower-SNR data actually
+    was."""
     phase0_values = np.arange(-180, 180, phase0_inc)
-    best_score = -np.inf
+    best_score = np.inf
     best_phase0 = 0.0
 
     for phase0 in phase0_values:
         corrected = spectrum * np.exp(1j * -np.deg2rad(phase0))
-        score = np.sum(np.real(corrected))
-        if score > best_score:
+        score = phase_score(corrected, penalty)
+        if score < best_score:
             best_score = score
             best_phase0 = phase0
 

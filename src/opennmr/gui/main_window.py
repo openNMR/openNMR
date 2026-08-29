@@ -124,6 +124,14 @@ class MainWindow(QMainWindow):
         # lets "View slice fit" browse the intermediate spectral fits
         # that fed the T1/T2/D parameter fit, not just its final number.
         self._slice_fit_results: list[dict] | None = None
+        # The per-peak relaxation/diffusion curve-fit results from the
+        # most recent Fit Curve run (NMR2D_fit_relaxation's own list
+        # output, one entry per peak) -- lets "View peak fit" browse
+        # them one at a time in the Fit tab, and its own x-axis label
+        # (Delay (s) vs. b-value (s/m^2) -- resolved once when Fit
+        # Curve runs, not re-derived per peak).
+        self._relaxation_fit_results: list[dict] | None = None
+        self._relaxation_fit_xlabel: str = "Delay (s)"
 
         # One MplCanvas per kind of plot, each keeping its own figure/
         # zoom/pan state, navigable via canvas_tabs instead of every
@@ -657,6 +665,9 @@ class MainWindow(QMainWindow):
         self._current_analysis_index = None
         self._slice_fit_results = None
         self.view_slice_fit_spin.setEnabled(False)
+        self.relaxation_fit_params_label.setText("")
+        self._relaxation_fit_results = None
+        self.view_relaxation_peak_spin.setEnabled(False)
 
     def _selected_index(self) -> int | None:
         row = self.spectrum_list.currentRow()
@@ -1677,8 +1688,28 @@ class MainWindow(QMainWindow):
             "numbering) the phase controls below act on."
         )
         self.slice_spin.valueChanged.connect(lambda _v: self._on_phase_target_changed())
+
+        # Prev/Next -- quicker than clicking the spin box's tiny arrows
+        # (or typing a number) to step through slices one at a time
+        # while phasing each on its own, e.g. Autophase -> Next ->
+        # Autophase -> Next ... setValue() clamps to the spin box's
+        # own [1, n_slices] range on its own, so these are safe no-ops
+        # at either end.
+        self.slice_prev_button = QPushButton("◀")
+        self.slice_prev_button.setFixedWidth(28)
+        self.slice_prev_button.setToolTip("Previous slice")
+        self.slice_prev_button.clicked.connect(lambda: self.slice_spin.setValue(self.slice_spin.value() - 1))
+        self.slice_next_button = QPushButton("▶")
+        self.slice_next_button.setFixedWidth(28)
+        self.slice_next_button.setToolTip("Next slice")
+        self.slice_next_button.clicked.connect(lambda: self.slice_spin.setValue(self.slice_spin.value() + 1))
+
+        slice_row = QHBoxLayout()
+        slice_row.addWidget(self.slice_prev_button)
+        slice_row.addWidget(self.slice_spin)
+        slice_row.addWidget(self.slice_next_button)
         self.slice_row_label = QLabel("Slice:")
-        dim_form.addRow(self.slice_row_label, self.slice_spin)
+        dim_form.addRow(self.slice_row_label, slice_row)
 
         self.apply_all_slices_checkbox = QCheckBox("Apply this phase to every slice")
         self.apply_all_slices_checkbox.setToolTip(
@@ -1900,8 +1931,13 @@ class MainWindow(QMainWindow):
         span = freq_ppm.max() - freq_ppm.min()
         frac = (value - freq_ppm.min()) / span if span else 0.5
         frac = min(max(frac, 0.0), 1.0)
+        # The spectrum's own x-axis is plotted inverted (high ppm on
+        # the left, per NMR convention -- see show_spectrum), so the
+        # slider is inverted here to match: dragging it right should
+        # move the pivot marker right on screen, which means *toward*
+        # freq_ppm.min() (low value = slider 1000), not away from it.
         self.pivot_slider.blockSignals(True)
-        self.pivot_slider.setValue(round(frac * 1000))
+        self.pivot_slider.setValue(round((1.0 - frac) * 1000))
         self.pivot_slider.blockSignals(False)
 
     def _on_pivot_slider_changed(self, value: int) -> None:
@@ -1909,7 +1945,7 @@ class MainWindow(QMainWindow):
             return
         freq_ppm = self._phase_freq_ppm
         span = freq_ppm.max() - freq_ppm.min()
-        ppm = float(freq_ppm.min() + (value / 1000.0) * span)
+        ppm = float(freq_ppm.max() - (value / 1000.0) * span)  # inverted -- see _sync_pivot_slider_from_spin
         self.pivot_spin.blockSignals(True)
         self.pivot_spin.setValue(ppm)
         self.pivot_spin.blockSignals(False)
@@ -2439,6 +2475,42 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.spectral_fit_params_label)
 
+        # Fit Curve (step 2) covers every peak Fit Spectrum found, but
+        # the Fit tab only ever shows one at a time -- plotting them
+        # all together got cluttered past 2-3 peaks and left no room
+        # for a per-peak uncertainty band. This browses between them,
+        # same pattern as "View slice fit" above.
+        relax_fit_row = QHBoxLayout()
+        relax_fit_row.addWidget(QLabel("View peak fit:"))
+        self.view_relaxation_peak_spin = QSpinBox()
+        self.view_relaxation_peak_spin.setMinimum(1)
+        self.view_relaxation_peak_spin.setEnabled(False)
+        self.view_relaxation_peak_spin.setToolTip(
+            "Which peak's relaxation/diffusion curve fit (from Fit "
+            "Curve) is shown in the Fit tab -- available once a curve "
+            "fit has been run."
+        )
+        self.view_relaxation_peak_spin.valueChanged.connect(self._on_view_relaxation_peak_changed)
+        relax_fit_row.addWidget(self.view_relaxation_peak_spin)
+        layout.addLayout(relax_fit_row)
+
+        self.relaxation_uncertainty_checkbox = QCheckBox("Show uncertainty band")
+        self.relaxation_uncertainty_checkbox.setToolTip(
+            "Shade a +/-3-sigma uncertainty envelope around the fit "
+            "curve (processing.relaxation.fit_curve_uncertainty, "
+            "propagated from the fit's own parameter covariance) -- "
+            "matches the shaded-region style of the user's own PFG "
+            "diffusion-fitting plots."
+        )
+        self.relaxation_uncertainty_checkbox.stateChanged.connect(
+            lambda _s: self._display_relaxation_peak(self.view_relaxation_peak_spin.value() - 1),
+        )
+        layout.addWidget(self.relaxation_uncertainty_checkbox)
+
+        self.relaxation_fit_params_label = QLabel("")
+        self.relaxation_fit_params_label.setWordWrap(True)
+        layout.addWidget(self.relaxation_fit_params_label)
+
         relax_box = QGroupBox("Fit Curve settings (relaxation / diffusion -- step 2)")
         relax_box.setToolTip(
             "Configures the Fit Curve button above, and the Spectra "
@@ -2919,9 +2991,15 @@ class MainWindow(QMainWindow):
                 lines.append(f"{result['peak_label']}: {params_str}")
         xlabel = "b-value (s/m²)" if is_diffusion else "Delay (s)"
         self.analysis_results_label.setText("\n".join(lines))
-        self.fit_canvas.show_relaxation_fit(results)
-        self.fit_canvas.ax.set_xlabel(xlabel)
-        self.fit_canvas.canvas.draw_idle()
+
+        self._relaxation_fit_results = results
+        self._relaxation_fit_xlabel = xlabel
+        self.view_relaxation_peak_spin.blockSignals(True)
+        self.view_relaxation_peak_spin.setEnabled(True)
+        self.view_relaxation_peak_spin.setMaximum(max(1, len(results)))
+        self.view_relaxation_peak_spin.setValue(1)
+        self.view_relaxation_peak_spin.blockSignals(False)
+        self._display_relaxation_peak(0)
         # Force the tab visible: a Compare-stack fit has no single
         # "owning" spectrum, so it can run while the Spectra tab's own
         # selection isn't pseudo-2D (or is empty) -- the selection-
@@ -2932,6 +3010,37 @@ class MainWindow(QMainWindow):
         if persist_to is not None:
             persist_to.metadata.raw["relaxation_fit_results"] = results
             persist_to.metadata.raw["relaxation_fit_xlabel"] = xlabel
+
+    def _on_view_relaxation_peak_changed(self, value: int) -> None:
+        self._display_relaxation_peak(value - 1)
+
+    def _display_relaxation_peak(self, index: int) -> None:
+        """Show peak ``index`` (0-based) of :attr:`_relaxation_fit_results`
+        in the Fit tab, with an uncertainty band if the checkbox for it
+        is on -- shared by the spin box, the uncertainty checkbox, and
+        anywhere else a fresh curve-fit result needs displaying."""
+        if not self._relaxation_fit_results:
+            return
+        if not (0 <= index < len(self._relaxation_fit_results)):
+            return
+        result = self._relaxation_fit_results[index]
+        uncertainty = None
+        if self.relaxation_uncertainty_checkbox.isChecked():
+            try:
+                uncertainty = processing_relaxation.fit_curve_uncertainty(result)
+            except Exception:  # noqa: BLE001 -- best-effort; fall back to the plain fit curve
+                uncertainty = None
+        self.fit_canvas.show_relaxation_fit(result, uncertainty=uncertainty, xlabel=self._relaxation_fit_xlabel)
+
+        rate_param = result["rate_param"]
+        if rate_param is not None:
+            is_diffusion = self._is_diffusion_fit()
+            formatter = processing_relaxation.format_diffusion_value if is_diffusion else processing_relaxation.format_time_value
+            value_str = formatter(result["params"][rate_param], result["errors"].get(rate_param))
+            self.relaxation_fit_params_label.setText(f"{result.get('peak_label', '')}: {rate_param} = {value_str}")
+        else:
+            params_str = ", ".join(f"{k}={v:.4g}" for k, v in result["params"].items())
+            self.relaxation_fit_params_label.setText(f"{result.get('peak_label', '')}: {params_str}")
 
     def _on_fit_curve_button_clicked(self) -> None:
         """"Fit Curve" as a real button in the Analysis tab -- the
@@ -3125,6 +3234,17 @@ class MainWindow(QMainWindow):
             self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.blockSignals(False)
 
+        self._relaxation_fit_results = spectrum.metadata.raw.get("relaxation_fit_results")
+        self._relaxation_fit_xlabel = spectrum.metadata.raw.get("relaxation_fit_xlabel", "Delay (s)")
+        self.view_relaxation_peak_spin.blockSignals(True)
+        if self._relaxation_fit_results:
+            self.view_relaxation_peak_spin.setEnabled(True)
+            self.view_relaxation_peak_spin.setMaximum(max(1, len(self._relaxation_fit_results)))
+            self.view_relaxation_peak_spin.setValue(1)
+        else:
+            self.view_relaxation_peak_spin.setEnabled(False)
+        self.view_relaxation_peak_spin.blockSignals(False)
+
     # ============================================================
     # Selection handling (shared by both tabs)
     # ============================================================
@@ -3179,9 +3299,10 @@ class MainWindow(QMainWindow):
         experiment's relaxation curve."""
         fit_results = spectrum.metadata.raw.get("relaxation_fit_results")
         if fit_results:
-            self.fit_canvas.show_relaxation_fit(fit_results)
-            self.fit_canvas.ax.set_xlabel(spectrum.metadata.raw.get("relaxation_fit_xlabel", "Delay (s)"))
-            self.fit_canvas.canvas.draw_idle()
+            # matches view_relaxation_peak_spin resetting to 1 on reselect
+            self._relaxation_fit_results = fit_results
+            self._relaxation_fit_xlabel = spectrum.metadata.raw.get("relaxation_fit_xlabel", "Delay (s)")
+            self._display_relaxation_peak(0)
         else:
             self.fit_canvas.clear()
 
@@ -3238,6 +3359,8 @@ class MainWindow(QMainWindow):
         self.dimension_box.setVisible(is_pseudo2d or is_2d)
         self.slice_row_label.setVisible(is_pseudo2d)
         self.slice_spin.setVisible(is_pseudo2d)
+        self.slice_prev_button.setVisible(is_pseudo2d)
+        self.slice_next_button.setVisible(is_pseudo2d)
         self.apply_all_slices_checkbox.setVisible(is_pseudo2d)
         self.autophase_slices_button.setVisible(is_pseudo2d)
         self.dim_row_label.setVisible(is_2d)

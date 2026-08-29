@@ -26,7 +26,7 @@ from .style import setup_plotting, get_stack_colormap, get_contour_cmap, downsam
 
 
 def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fraction_y=0.25,
-                      ncontourpts_x=16384, ncontourpts_y=1024, factor=1e-03, clevels=20,
+                      ncontourpts_x=16384, ncontourpts_y=1024, factor=0.07, clevels=7,
                       level_mode="power", power=1.25):
     """Shared contour-preparation logic: resolve the F1 axis (ppm, or
     slice index for pseudo-2D), downsample for fast rendering, and
@@ -40,6 +40,14 @@ def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fra
     out weak peaks near a strong one without saturating the display.
     ``"linear"`` spaces them evenly instead, which better reflects
     relative peak heights at a glance.
+
+    ``factor``/``clevels`` defaults (0.07, 7) are deliberately modest --
+    a much lower ``factor`` (e.g. 1e-3) combined with many levels
+    (e.g. 20) reaches so far into the noise floor, and bunches so many
+    of those levels near it, that real but weaker signal ends up
+    buried under a dense mass of near-noise-level rings rather than a
+    few clean, readable contours (reported directly as "the contours
+    seem to start out scaled up way too high").
     """
     data = spectrum.data
     x_ppm = spectrum.axes[1].ppm
@@ -94,7 +102,7 @@ def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fra
 
 def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fraction_y=0.25,
                      ncontourpts_x=16384, ncontourpts_y=1024,
-                     pl_height=7.0, pl_width=7.0, factor=1e-03, clevels=20,
+                     pl_height=7.0, pl_width=7.0, factor=0.07, clevels=7,
                      level_mode="power", power=1.25,
                      proj_scale=1.0, projection_mode="auto", show_projections=True,
                      projection_size=2.0, projection_pad=0.1,
@@ -393,7 +401,7 @@ def _check_overlay_compatible(spectra: list[NMRSpectrum]):
 
 def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fraction_y=0.25,
                   ncontourpts_x=16384, ncontourpts_y=1024,
-                  pl_height=7.0, pl_width=7.0, factor=1e-03, clevels=20,
+                  pl_height=7.0, pl_width=7.0, factor=0.07, clevels=7,
                   colours='diverging', labels=None, legend_kwargs=None,
                   field='', xlabel=None, ylabel=None, xlims=None, ylims=None,
                   font='Arial', fontsize=12, output_format='',

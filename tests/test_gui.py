@@ -686,15 +686,19 @@ def test_main_window_autophase_button_noop_with_no_spectrum(qapp):
 
 
 def test_main_window_pivot_slider_moves_pivot_spin(qapp, tmp_path):
+    # The slider is inverted relative to raw ppm value, to match the
+    # spectrum's own inverted x-axis (high ppm on the left) -- dragging
+    # the slider right should move the pivot marker right on screen,
+    # which is toward LOW ppm, not high.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
     freq_ppm = window._phase_freq_ppm
 
-    window.pivot_slider.setValue(0)  # far end of the range
-    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.min()))
-
-    window.pivot_slider.setValue(1000)  # other far end
+    window.pivot_slider.setValue(0)  # left end of the slider
     assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.max()))
+
+    window.pivot_slider.setValue(1000)  # right end of the slider
+    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.min()))
 
 
 def test_main_window_pivot_spin_moves_pivot_slider(qapp, tmp_path):
@@ -702,10 +706,10 @@ def test_main_window_pivot_spin_moves_pivot_slider(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
     freq_ppm = window._phase_freq_ppm
 
-    window.pivot_spin.setValue(float(freq_ppm.min()))
+    window.pivot_spin.setValue(float(freq_ppm.max()))
     assert window.pivot_slider.value() == 0
 
-    window.pivot_spin.setValue(float(freq_ppm.max()))
+    window.pivot_spin.setValue(float(freq_ppm.min()))
     assert window.pivot_slider.value() == 1000
 
 
@@ -977,6 +981,36 @@ def test_main_window_pseudo2d_unchecking_apply_all_reverts_other_slices(qapp, tm
             assert not np.allclose(original[row], updated[row])
         else:
             np.testing.assert_allclose(updated[row], original[row], atol=1e-6)
+
+
+def test_main_window_slice_prev_next_buttons_step_through_slices(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    assert window.slice_spin.value() == 1
+
+    window.slice_next_button.click()
+    assert window.slice_spin.value() == 2
+
+    window.slice_next_button.click()
+    window.slice_next_button.click()
+    window.slice_next_button.click()
+    window.slice_next_button.click()  # past the last slice (4) -- must clamp, not raise
+    assert window.slice_spin.value() == 4
+
+    window.slice_prev_button.click()
+    assert window.slice_spin.value() == 3
+
+    for _ in range(5):
+        window.slice_prev_button.click()  # past slice 1 -- must clamp, not raise
+    assert window.slice_spin.value() == 1
+
+
+def test_main_window_slice_prev_next_buttons_hidden_for_conventional_2d(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt out of the pseudo-2D default
+    assert window.slice_prev_button.isHidden() is True
+    assert window.slice_next_button.isHidden() is True
 
 
 def test_main_window_pseudo2d_switching_slice_resets_phase_controls(qapp, tmp_path):
@@ -1813,6 +1847,78 @@ def test_main_window_fit_curve_compare_stack_recovers_known_t2(qapp):
     assert "T2" in window.analysis_results_label.text()
     assert len(window.fit_canvas.ax.lines) == 2
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
+
+
+def test_main_window_view_relaxation_peak_spin_disabled_before_fit(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    assert window.view_relaxation_peak_spin.isEnabled() is False
+
+
+def test_main_window_view_relaxation_peak_spin_switches_between_peaks(qapp):
+    # Explicit user request: only one peak's curve fit shown at a
+    # time, with a way to switch between them -- previously every
+    # peak was plotted together on one axes.
+    delays = np.geomspace(0.001, 0.3, 10)
+    ppm = np.linspace(3.0, 7.0, 800)
+    rng = np.random.default_rng(0)
+    t2_a, t2_b = 0.02, 0.08
+    data = np.zeros((len(delays), len(ppm)))
+    for i, t in enumerate(delays):
+        data[i] = (
+            gaussian(ppm, 5.0, 0.05, np.exp(-t / t2_a))
+            + gaussian(ppm, 6.0, 0.05, np.exp(-t / t2_b))
+            + rng.normal(0, 0.002, len(ppm))
+        )
+    f1_axis = NMRAxis(kind="index", index=np.arange(1, len(delays) + 1))
+    f2_axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True)
+    spectrum = NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window._add_peak_row(shift=6.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
+
+    window._on_fit_curve_button_clicked()
+
+    assert window.view_relaxation_peak_spin.isEnabled() is True
+    assert window.view_relaxation_peak_spin.maximum() == 2
+    assert window.view_relaxation_peak_spin.value() == 1
+    label_peak1 = window.relaxation_fit_params_label.text()
+
+    window.view_relaxation_peak_spin.setValue(2)
+    label_peak2 = window.relaxation_fit_params_label.text()
+
+    assert label_peak1 != label_peak2
+    # Only one peak's data+fit ever on screen at once -- 2 lines
+    # (fit + data), never 4 (both peaks' worth).
+    assert len(window.fit_canvas.ax.lines) == 2
+
+
+def test_main_window_relaxation_uncertainty_checkbox_shows_shaded_band(qapp):
+    true_t2 = 0.05
+    delays = np.geomspace(0.001, 0.3, 12)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=true_t2)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(2)
+
+    window._on_fit_curve_button_clicked()
+    assert len(window.fit_canvas.ax.collections) == 0  # no band by default
+
+    window.relaxation_uncertainty_checkbox.setChecked(True)
+    assert len(window.fit_canvas.ax.collections) == 1  # fill_between's PolyCollection
+
+    window.relaxation_uncertainty_checkbox.setChecked(False)
+    assert len(window.fit_canvas.ax.collections) == 0
 
 
 def test_main_window_fit_curve_compare_stack_requires_two_spectra(qapp, tmp_path, monkeypatch):

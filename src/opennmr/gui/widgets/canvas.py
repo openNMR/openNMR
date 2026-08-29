@@ -60,11 +60,20 @@ class MplCanvas(QWidget):
     CONTOUR_ZOOM_FACTOR = 1.3
     _CONTOUR_FACTOR_MIN = 1e-6
     _CONTOUR_FACTOR_MAX = 0.5
-    _CONTOUR_FACTOR_DEFAULT = 1e-3
+    #: The lowest contour, as a fraction of the data's own peak --
+    #: explicit user feedback: 1e-3 (0.1%) reached so far into the
+    #: noise floor that, combined with 20 levels bunched toward it,
+    #: real (weaker) signal was buried under a dense mass of
+    #: near-noise-level rings rather than a few clean, readable ones.
+    #: 7% is a reasonable "typical spectrum" middle of the requested
+    #: 5-10% range -- still user-adjustable via the right-click "Set
+    #: Contour Levels..." dialog for a specific dataset's own dynamic
+    #: range.
+    _CONTOUR_FACTOR_DEFAULT = 0.07
 
     #: Defaults for the right-click "Set Contour Levels…" dialog -- see
     #: opennmr.plotting.twod._prepare_contour for what each controls.
-    _CONTOUR_CLEVELS_DEFAULT = 20
+    _CONTOUR_CLEVELS_DEFAULT = 7
     _CONTOUR_LEVEL_MODE_DEFAULT = "power"
     _CONTOUR_POWER_DEFAULT = 1.25
 
@@ -764,29 +773,53 @@ class MplCanvas(QWidget):
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
-    def show_relaxation_fit(self, results: list[dict]) -> None:
-        """Plot each peak's relaxation series (points) and fitted curve
-        (line), from a list of ``relaxation.fit_relaxation``-shaped
-        dicts (as returned by
-        :func:`opennmr.processing.relaxation.NMR2D_fit_relaxation`).
+    def show_relaxation_fit(self, result: dict, uncertainty: tuple | None = None,
+                             xlabel: str = "Delay (s)") -> None:
+        """Plot ONE peak's relaxation/diffusion series (data points)
+        and fitted curve, from a single ``relaxation.fit_relaxation``-
+        shaped dict (one entry of
+        :func:`opennmr.processing.relaxation.NMR2D_fit_relaxation`'s
+        own list output). Only one peak at a time -- when a fit covers
+        several, :class:`~opennmr.gui.main_window.MainWindow` browses
+        between them via a spin box, same pattern as the Spectral Fit
+        tab's own slice browser, rather than plotting them all
+        together (which got cluttered fast past 2-3 peaks, and doesn't
+        leave room for a per-peak uncertainty band anyway). Styled
+        after the user's own PFG-fitting plots: black circles for the
+        data, a dashed red fit line, and (when ``uncertainty`` is
+        given) a shaded grey uncertainty band -- not a color-per-peak
+        legend, which stops meaning anything once only one peak is
+        ever shown.
 
-        The fit curve is drawn through ``t``/``y_fit`` (already sorted
-        by delay) rather than a finely-resampled model curve -- keeps
-        this module decoupled from ``processing.relaxation``'s model
-        registry, and is visually adequate for a typical (5+ point)
-        relaxation series."""
+        ``uncertainty`` : ``(t_fine, y_fine, y_band)`` from
+        :func:`opennmr.processing.relaxation.fit_curve_uncertainty` --
+        a smooth fit curve plus a +/-``y_band`` envelope, shaded via
+        ``ax.fill_between``. When ``None`` (default), the fit curve is
+        instead drawn straight through the (coarser) experimental
+        t-points, same as this method's behaviour before it supported
+        an uncertainty band at all."""
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
-        for result in results:
-            t, y, y_fit = result["t"], result["y"], result["y_fit"]
-            label = result.get("peak_label", result.get("model", "fit"))
-            line, = self.ax.plot(t, y, "o", markersize=6.0, label=label)
-            self.ax.plot(t, y_fit, "-", linewidth=2.0, color=line.get_color(), alpha=0.8)
-        self.ax.set_xlabel("Delay (s)", fontsize=self._AXIS_LABELSIZE)
+
+        t, y, y_fit = result["t"], result["y"], result["y_fit"]
+        if uncertainty is not None:
+            t_fine, y_fine, y_band = uncertainty
+            self.ax.fill_between(
+                t_fine, y_fine - y_band, y_fine + y_band,
+                color="grey", alpha=0.4, label="Uncertainty", zorder=1,
+            )
+            self.ax.plot(t_fine, y_fine, "--", color="red", linewidth=2.0, label="Fit", zorder=3)
+        else:
+            order = np.argsort(t)
+            self.ax.plot(t[order], y_fit[order], "--", color="red", linewidth=2.0, label="Fit", zorder=3)
+        self.ax.plot(t, y, "o", color="black", markersize=8.0,
+                      label=result.get("peak_label", result.get("model", "Data")), zorder=2)
+
+        self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
         self.ax.set_ylabel("Intensity", fontsize=self._AXIS_LABELSIZE)
         plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=True,
                                     linewidth=self._AXIS_LINEWIDTH)

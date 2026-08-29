@@ -2,6 +2,71 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Contour defaults, apc0 robustness, per-peak relaxation-fit browsing, pivot direction (2026-08-29)
+
+- ~~2D/pseudo-2D contours still wrong -- too many, lowest should be
+  5-10% of max~~ -- done. `_CONTOUR_FACTOR_DEFAULT` 1e-3 -> 0.07,
+  `_CONTOUR_CLEVELS_DEFAULT` 20 -> 7 (`gui/widgets/canvas.py` and the
+  matching standalone defaults in `plotting/twod.py`'s
+  `_prepare_contour`/`plot_2d_contour`/`overlay_plot`). The earlier
+  round's level-overshoot formula fix was real and correct but didn't
+  address this -- these are separate issues (a math bug vs. a default
+  values choice) that both needed fixing for the reported symptom to
+  actually go away.
+- ~~Autophase still doesn't work, probably zeroing everything too
+  much, even basic per-slice phase~~ -- **real bug found and fixed**,
+  not just a data problem. `processing.ft.apc0` scored its grid search
+  by raw `sum(real(corrected))` over the *whole* spectrum -- on
+  anything that's mostly noise/baseline with only a small real peak
+  (a late PFG gradient-step slice with decayed SNR, exactly what's
+  being worked with right now), that sum is dominated by noise, not
+  the peak, so the "best" phase it finds is essentially arbitrary.
+  Confirmed with a direct synthetic side-by-side before touching the
+  code: at moderate noise, the old scoring recovered a known phase to
+  within 11 deg; `phase_score`'s "magnitude" penalty (already used by
+  `autophase01`, phase-independent by construction so noise
+  contributes comparably regardless of the phase tried) got within 2
+  deg, with the gap widening further at higher noise. Both the
+  Autophase button and "Autophase (each slice independently)" call
+  `apc0` directly, so both are fixed by the same change. New
+  regression test pins recovery to within 5 deg at a noise level where
+  the old scoring would have failed by a wide margin.
+- ~~Phase pivot slider direction should match the (reversed) axis~~ --
+  done. The slider was mapping low value -> low ppm / high value ->
+  high ppm, but the spectrum's own x-axis is plotted inverted (high
+  ppm on the left) -- dragging the slider right visually moved the
+  pivot marker *left*. Inverted the slider's mapping to match.
+- ~~An easy way to phase per slice and pick easily~~ -- done. New
+  Prev/Next (◀/▶) buttons next to the slice spin box -- quicker than
+  the spin box's own tiny arrows or typing a number for stepping
+  through "Autophase -> Next -> Autophase -> Next -> ..." one slice at
+  a time. `setValue` clamps to the spin box's own range on its own, so
+  these are safe no-ops at either end.
+- ~~Fitting should be based on the user's own PFG fitting code, with
+  (optionally) shaded-region error bars, one peak at a time with a way
+  to switch~~ -- done. New `processing.relaxation.fit_curve_uncertainty`
+  hand-rolls the same idea as the reference code's `lmfit`
+  `eval_uncertainty` (a linearized/delta-method uncertainty band,
+  propagated from `fit_relaxation`'s own parameter covariance via a
+  numerically-estimated Jacobian, since this module fits with plain
+  `scipy.curve_fit` rather than `lmfit`) -- returns `(t_fine, y_fine,
+  y_band)` for a smooth curve + envelope, shaded in the GUI via
+  `ax.fill_between`. `MplCanvas.show_relaxation_fit`'s signature
+  changed from a list of every peak plotted together to ONE peak +
+  optional `uncertainty` tuple, styled after the reference plots
+  (black circles for data, dashed red fit line, grey shaded band --
+  not a colour-per-peak legend, which stops meaning anything once only
+  one peak is ever shown). New "View peak fit" spin box (Analysis tab,
+  same pattern as the existing "View slice fit" one) browses between
+  peaks; new "Show uncertainty band" checkbox toggles the shading.
+  Three new GUI tests (spin box disabled before a fit, switches
+  correctly between 2 peaks with only 2 lines ever on screen, checkbox
+  toggles the shaded region on/off) plus three `processing/relaxation.py`
+  unit tests for `fit_curve_uncertainty` itself (shape/positivity,
+  scales linearly with `sigma`, tighter with less noise).
+
+448 tests passing. Nothing committed yet from this round (not asked to).
+
 ## Phase workflow round 2, WDW/contour robustness, bidirectional pseudo-2D (2026-08-29)
 
 - ~~Keep the phase information when saying reprocess~~ -- done, for
