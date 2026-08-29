@@ -4,7 +4,7 @@ import os
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QPushButton, QSplitter
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QLabel, QMessageBox, QPushButton, QSplitter
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.main_window import MainWindow
@@ -3131,6 +3131,42 @@ def test_main_window_view_slice_fit_shows_data_and_fit_curve(qapp):
     assert "Baseline" in labels
     assert "Slice 3" in window.spectral_fit_canvas.ax.get_title()
     assert "Peak 1" in window.spectral_fit_params_label.text()
+
+    # Explicit user request: left/right buttons, matching the pattern
+    # already used for View curve fit (peak #) and the phasing-tab
+    # slice picker.
+    window.slice_fit_next_button.click()
+    assert window.view_slice_fit_spin.value() == 4
+    window.slice_fit_prev_button.click()
+    window.slice_fit_prev_button.click()
+    assert window.view_slice_fit_spin.value() == 2
+
+
+def test_main_window_view_curve_fit_row_sits_below_fit_curve_settings(qapp):
+    # Explicit user feedback: "View curve fit" (formerly "View peak
+    # fit") browses Fit Curve's own result, so it should sit below the
+    # button that produces it, not above -- it used to sit between
+    # Peaks and Fit Spectrum's own result, implying (wrongly) that it
+    # was part of step 1.
+    window = MainWindow()
+    fit_curve_settings_box = window.fit_type_combo.parentWidget()
+    tab = window.relaxation_uncertainty_checkbox.parentWidget()
+    assert tab is fit_curve_settings_box.parentWidget()  # both direct children of the same tab layout
+    layout = tab.layout()
+    assert layout.indexOf(fit_curve_settings_box) < layout.indexOf(window.relaxation_uncertainty_checkbox)
+
+
+def test_main_window_analysis_tab_labels_renamed_for_clarity(qapp):
+    # Explicit user feedback: "slice fit"/"peak fit" read as
+    # confusingly similar -- renamed to make clear one is a spectral
+    # (per-slice) fit and the other a curve (per-peak) fit.
+    window = MainWindow()
+    tab = window.relaxation_uncertainty_checkbox.parentWidget()
+    labels = [
+        child.text() for child in tab.findChildren(QLabel) if child.text() in
+        ("Spectrum fit (slice #):", "View curve fit (peak #):")
+    ]
+    assert set(labels) == {"Spectrum fit (slice #):", "View curve fit (peak #):"}
 
 
 def test_main_window_fit_spectrum_updates_peak_table_starting_values(qapp):

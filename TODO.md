@@ -2,6 +2,41 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Autonomous overnight round 3: Analysis-tab reorder and renames (2026-08-30)
+
+- ~~"View peak fit" spin box should sit below the Fit Curve button/
+  section, not above it~~ -- done. It (plus the uncertainty checkbox
+  and its results label, which browse the same Fit Curve result) moved
+  from between "Fit Spectrum" and the "Fit Curve settings" box down to
+  after it -- the same "controls should follow, not precede, what they
+  configure/what's fit before them" placement the Fit Curve button
+  itself already used one round ago.
+- ~~"Slice fit"/"peak fit" are confusing names -- should be "spectrum
+  fit (slice #)" / "View curve fit (peak #)"~~ -- done, both the QLabel
+  text and every comment/docstring quoting the old label text (found
+  by grepping for the literal quoted strings, not just the two widgets
+  themselves). Also gave "Spectrum fit (slice #)" the same left/right
+  Prev/Next buttons "View curve fit (peak #)" already had (via the
+  existing `_spin_with_step_buttons` helper) -- the user's own example
+  phrasing ("this should have the left/right buttons, and then View
+  curve fit (peak #)") named that as belonging to the first one
+  specifically, and it was a real, small feature gap (a bare spin box,
+  no buttons) once actually checked rather than assumed already there.
+  Internal Python identifiers (`view_slice_fit_spin`, `_slice_fit_
+  results`, etc.) deliberately left unchanged -- purely internal, no
+  user-facing benefit to renaming them, only churn/breakage risk.
+  Verified visually (rendered the Analysis tab to a PNG, not just the
+  layout-order assertion), not just via the two new regression tests
+  (row order via `QLayout.indexOf`, label text via `findChildren`).
+
+The broader "sub tabs or some other organisational flow" part of this
+item was explicitly open-ended (not spec'd further) -- left alone,
+matching this project's own practice of not guessing at a vague design
+ask when the two concrete asks alongside it were clear and actionable
+on their own.
+
+500 tests passing (498 -> 500). Committed and pushed.
+
 ## Autonomous overnight round 2: Processing-preview is now the default context for Align Echo/Autophase/phase-drag (2026-08-30)
 
 Continuing unattended. Fixed the *routing* half of the "make
@@ -178,19 +213,10 @@ Still open:
   control instead of side-by-side below a width threshold) rather than
   just a wider floor.
 - **Analysis tab organization** -- open-ended ("sub tabs or some other
-  kind of organisational flow," not spec'd further) plus two concrete
-  asks to do regardless of the larger restructure: (1) the "View peak
-  fit" spin box should sit below the Fit Curve button/section, not
-  above it (same "controls should follow, not precede, what they
-  configure/what's fit before them" principle used to place the Fit
-  Curve button in an earlier round); (2) rename for clarity --
-  "Slice fit" -> "Spectrum fit (slice #)" (with the same left/right
-  prev/next buttons already used for `slice_spin` elsewhere), "View
-  peak fit" -> "View curve fit (peak #)". The renaming targets
-  `view_slice_fit_spin`/`view_relaxation_peak_spin` and their labels/
-  buttons in `_build_analysis_tab` -- check every place either label
-  string appears (tooltips, status text) for consistency, not just the
-  widget labels themselves.
+  kind of organisational flow," not spec'd further); the two concrete
+  asks alongside it (View peak fit's position, the slice-fit/peak-fit
+  renames) are done -- see the "Autonomous overnight round 3" section
+  above. This broader, unspec'd part is still genuinely open.
 
 ## Spectrum-tab stacked-view fix, linked Compare scroll-zoom, Processing-tab live preview, button wording (2026-08-29)
 

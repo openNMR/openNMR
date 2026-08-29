@@ -122,12 +122,12 @@ class MainWindow(QMainWindow):
         self._current_analysis_index: int | None = None
         # The per-slice pseudo-Voigt fit results from the most recent
         # Analysis-tab fit (NMR2D_fit_slices's own "rows" output) --
-        # lets "View slice fit" browse the intermediate spectral fits
-        # that fed the T1/T2/D parameter fit, not just its final number.
+        # lets "Spectrum fit (slice #)" browse the intermediate spectral
+        # fits that fed the T1/T2/D parameter fit, not just its final number.
         self._slice_fit_results: list[dict] | None = None
         # The per-peak relaxation/diffusion curve-fit results from the
         # most recent Fit Curve run (NMR2D_fit_relaxation's own list
-        # output, one entry per peak) -- lets "View peak fit" browse
+        # output, one entry per peak) -- lets "View curve fit (peak #)" browse
         # them one at a time in the Fit tab, and its own x-axis label
         # (Delay (s) vs. b-value (s/m^2) -- resolved once when Fit
         # Curve runs, not re-derived per peak).
@@ -144,8 +144,8 @@ class MainWindow(QMainWindow):
         # {peak_index: {excluded array-indices into that peak's own
         # _relaxation_fit_original[peak_index]["t"]/["y"]}} -- which
         # points the user has right-click-excluded from each peak's
-        # curve fit, siloed per peak so switching "View peak fit"
-        # doesn't lose or mix up one peak's exclusions with another's.
+        # curve fit, siloed per peak so switching "View curve fit
+        # (peak #)" doesn't lose or mix up one peak's exclusions with another's.
         self._excluded_relaxation_indices: dict[int, set[int]] = {}
 
         # One MplCanvas per kind of plot, each keeping its own figure/
@@ -163,7 +163,7 @@ class MainWindow(QMainWindow):
         self.fit_canvas.fitPointExcludeRequested.connect(self._on_fit_point_exclude_requested)
         self.fit_canvas.fitPointsResetRequested.connect(self._on_fit_points_reset_requested)
         # A single-slice pseudo-Voigt spectral fit (data + fit curve,
-        # from "View slice fit") gets its own tab rather than sharing
+        # from "Spectrum fit (slice #)") gets its own tab rather than sharing
         # the Spectrum canvas -- it used to temporarily overwrite the
         # normal spectrum view there, which meant losing your place.
         self.spectral_fit_canvas = MplCanvas()
@@ -393,7 +393,7 @@ class MainWindow(QMainWindow):
         for stepping through a series one at a time (originally built
         for the pseudo-2D slice picker while phasing each slice in
         turn; reused wherever else browsing a numbered series one step
-        at a time comes up, e.g. "View peak fit"). ``setValue`` clamps
+        at a time comes up, e.g. "View curve fit (peak #)"). ``setValue`` clamps
         to the spin box's own range on its own, so both buttons are
         safe no-ops at either end. Returns ``(row, prev_button,
         next_button)`` -- the caller stores the buttons as its own
@@ -2676,8 +2676,14 @@ class MainWindow(QMainWindow):
         self.analysis_results_label.setWordWrap(True)
         layout.addWidget(self.analysis_results_label)
 
+        # "Spectrum fit"/"curve fit" (not "slice fit"/"peak fit", the
+        # original names) -- explicit user feedback that the two read
+        # as confusingly similar, when what they actually browse is
+        # different in kind: this one is Fit Spectrum's own per-slice
+        # spectral (pseudo-Voigt) result; the "View curve fit" one
+        # below is Fit Curve's per-peak relaxation/diffusion result.
         slice_fit_row = QHBoxLayout()
-        slice_fit_row.addWidget(QLabel("View slice fit:"))
+        slice_fit_row.addWidget(QLabel("Spectrum fit (slice #):"))
         self.view_slice_fit_spin = QSpinBox()
         self.view_slice_fit_spin.setMinimum(1)
         self.view_slice_fit_spin.setEnabled(False)
@@ -2687,7 +2693,10 @@ class MainWindow(QMainWindow):
             "available once a fit has been run."
         )
         self.view_slice_fit_spin.valueChanged.connect(self._on_view_slice_fit_changed)
-        slice_fit_row.addWidget(self.view_slice_fit_spin)
+        slice_fit_spin_row, self.slice_fit_prev_button, self.slice_fit_next_button = (
+            self._spin_with_step_buttons(self.view_slice_fit_spin)
+        )
+        slice_fit_row.addLayout(slice_fit_spin_row)
         layout.addLayout(slice_fit_row)
 
         self.spectral_fit_params_label = QLabel("")
@@ -2697,45 +2706,6 @@ class MainWindow(QMainWindow):
             "slice shown above, one line per peak."
         )
         layout.addWidget(self.spectral_fit_params_label)
-
-        # Fit Curve (step 2) covers every peak Fit Spectrum found, but
-        # the Fit tab only ever shows one at a time -- plotting them
-        # all together got cluttered past 2-3 peaks and left no room
-        # for a per-peak uncertainty band. This browses between them,
-        # same pattern as "View slice fit" above.
-        relax_fit_row = QHBoxLayout()
-        relax_fit_row.addWidget(QLabel("View peak fit:"))
-        self.view_relaxation_peak_spin = QSpinBox()
-        self.view_relaxation_peak_spin.setMinimum(1)
-        self.view_relaxation_peak_spin.setEnabled(False)
-        self.view_relaxation_peak_spin.setToolTip(
-            "Which peak's relaxation/diffusion curve fit (from Fit "
-            "Curve) is shown in the Fit tab -- available once a curve "
-            "fit has been run."
-        )
-        self.view_relaxation_peak_spin.valueChanged.connect(self._on_view_relaxation_peak_changed)
-        peak_spin_row, self.relaxation_peak_prev_button, self.relaxation_peak_next_button = (
-            self._spin_with_step_buttons(self.view_relaxation_peak_spin)
-        )
-        relax_fit_row.addLayout(peak_spin_row)
-        layout.addLayout(relax_fit_row)
-
-        self.relaxation_uncertainty_checkbox = QCheckBox("Show uncertainty band")
-        self.relaxation_uncertainty_checkbox.setToolTip(
-            "Shade a +/-3-sigma uncertainty envelope around the fit "
-            "curve (processing.relaxation.fit_curve_uncertainty, "
-            "propagated from the fit's own parameter covariance) -- "
-            "matches the shaded-region style of the user's own PFG "
-            "diffusion-fitting plots."
-        )
-        self.relaxation_uncertainty_checkbox.stateChanged.connect(
-            lambda _s: self._display_relaxation_peak(self.view_relaxation_peak_spin.value() - 1),
-        )
-        layout.addWidget(self.relaxation_uncertainty_checkbox)
-
-        self.relaxation_fit_params_label = QLabel("")
-        self.relaxation_fit_params_label.setWordWrap(True)
-        layout.addWidget(self.relaxation_fit_params_label)
 
         relax_box = QGroupBox("Fit Curve settings (relaxation / diffusion -- step 2)")
         relax_box.setToolTip(
@@ -2860,6 +2830,47 @@ class MainWindow(QMainWindow):
         self._on_delay_source_changed(0)
 
         layout.addWidget(relax_box)
+
+        # Below Fit Curve (not above it, as these originally were) --
+        # explicit user feedback: these browse Fit Curve's own result,
+        # so they read as confusing/backwards sitting above the button
+        # that produces what they show, the same "controls should
+        # follow, not precede, what they configure/what's fit before
+        # them" principle the Fit Curve button's own position above
+        # already follows relative to its settings.
+        relax_fit_row = QHBoxLayout()
+        relax_fit_row.addWidget(QLabel("View curve fit (peak #):"))
+        self.view_relaxation_peak_spin = QSpinBox()
+        self.view_relaxation_peak_spin.setMinimum(1)
+        self.view_relaxation_peak_spin.setEnabled(False)
+        self.view_relaxation_peak_spin.setToolTip(
+            "Which peak's relaxation/diffusion curve fit (from Fit "
+            "Curve) is shown in the Fit tab -- available once a curve "
+            "fit has been run."
+        )
+        self.view_relaxation_peak_spin.valueChanged.connect(self._on_view_relaxation_peak_changed)
+        peak_spin_row, self.relaxation_peak_prev_button, self.relaxation_peak_next_button = (
+            self._spin_with_step_buttons(self.view_relaxation_peak_spin)
+        )
+        relax_fit_row.addLayout(peak_spin_row)
+        layout.addLayout(relax_fit_row)
+
+        self.relaxation_uncertainty_checkbox = QCheckBox("Show uncertainty band")
+        self.relaxation_uncertainty_checkbox.setToolTip(
+            "Shade a +/-3-sigma uncertainty envelope around the fit "
+            "curve (processing.relaxation.fit_curve_uncertainty, "
+            "propagated from the fit's own parameter covariance) -- "
+            "matches the shaded-region style of the user's own PFG "
+            "diffusion-fitting plots."
+        )
+        self.relaxation_uncertainty_checkbox.stateChanged.connect(
+            lambda _s: self._display_relaxation_peak(self.view_relaxation_peak_spin.value() - 1),
+        )
+        layout.addWidget(self.relaxation_uncertainty_checkbox)
+
+        self.relaxation_fit_params_label = QLabel("")
+        self.relaxation_fit_params_label.setWordWrap(True)
+        layout.addWidget(self.relaxation_fit_params_label)
 
         layout.addStretch(1)
         return tab
@@ -3148,7 +3159,7 @@ class MainWindow(QMainWindow):
     def _show_spectral_fit_results(self, spectrum, results: list[dict]) -> None:
         self._slice_fit_results = results
         # Kept per-spectrum (not just in the live _slice_fit_results
-        # attribute) so "View slice fit" survives a reselection --
+        # attribute) so "Spectrum fit (slice #)" survives a reselection --
         # analysis_state alone only remembers the *text* summary, not
         # the plotted curves.
         spectrum.metadata.raw["slice_fit_results"] = results
