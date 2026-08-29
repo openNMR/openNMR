@@ -2,6 +2,88 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Peak-fit arrows, relative +/- entry, layout fixes, uniform Compare spacing (2026-08-29)
+
+- ~~View peak fit should have arrows like the phasing style~~ -- done.
+  Factored the pseudo-2D slice picker's Prev/Next (◀/▶) buttons
+  (added last round) into a shared `MainWindow._spin_with_step_buttons`
+  helper, reused for both the slice spin box and the new "View peak
+  fit" spin box.
+- ~~Autophase isn't working for JEOL data; features should be added to
+  all input styles since after import the data has the same basic
+  structure~~ -- **investigated thoroughly, not guess-fixed**. Verified
+  directly against real `test_data/jeol_1d/proton.jdf` through the
+  actual GUI code path: Autophase computes phase0≈0 and changes
+  nothing, because JEOL's own `read_1d` already autophases at load
+  time (same as every vendor) -- the button correctly finds nothing
+  further to do. The real, underlying issue is the JEOL importer's
+  own already-documented gap (see `io/jeol.py`'s module docstring,
+  written when the importer was first built): an uncorrected
+  `FILTER_FACTOR` digital-filter delay leaves at least one peak
+  phase-flipped regardless of how well the rest is phased -- not a
+  gap in the Autophase *feature* (which is fully vendor-agnostic,
+  confirmed: `data_imag` retained, `phase0`/`phase1` stored in
+  `metadata.raw`, `pivot_frac` threaded through `jeol.read_1d` same as
+  every other vendor). Investigated whether this specific DSP gap
+  could be closed, the same way Bruker's GM window gap couldn't be
+  (see below) -- (1) re-checked the `jeolconverter` JS reference this
+  importer was ported from: it reads `FILTER_FACTOR` as metadata only,
+  never applies a correction; (2) searched for JEOL's own group-delay
+  correction algorithm -- confirmed proprietary/undisclosed, not
+  published anywhere; (3) empirically tested the most plausible
+  *generic* correction (treating `FILTER_FACTOR` like Bruker's GRPDLY
+  -- shift the FID by that many points before FFT, via the
+  already-existing `processing.ft.roll_fid`) against the real file --
+  it did **not** cleanly fix the described symptom and showed signs of
+  introducing a new, worse artifact (a large swing in the phased
+  spectrum's overall sum, consistent with the circular shift wrapping
+  significant tail energy into the front). Not shipped -- matches this
+  project's own established practice (see the Bruker WDW=2/GM
+  decision) of flagging a real, verified gap rather than guessing at
+  an unverified DSP correction that could silently produce a wrong
+  spectrum. Real, closable follow-up if this becomes a priority: get a
+  JEOL spectrum with an independently-known-correct phase (e.g. cross-
+  checked against Delta/JASON's own processed output) to calibrate
+  against, since neither a public spec nor a working reference
+  implementation exists to port from.
+- ~~Fit Curve button should come below the choice of model~~ -- done,
+  moved to the end of the "Fit Curve settings" box (below every
+  setting it actually uses -- model, value source, delay/b-value
+  source -- not just the one right above it, which is what "below the
+  model" alone would have suggested).
+- ~~Start/stop boxes hard to see, should be the same length and stack
+  vertically~~ -- done (these are actually labelled "Start"/"Step").
+  Two separate form rows now, each spin box a fixed, equal 120px wide,
+  instead of both crammed side by side in one row of this narrow
+  side panel.
+- ~~Add/subtract by typing e.g. "+90" after "45" to get "135"~~ -- done.
+  New `RelativeDoubleSpinBox` (`gui/widgets/relative_spinbox.py`)
+  recognises a self-contained typed expression (`45+90`, `100-30`) and
+  evaluates it instead of failing to parse -- swapped in for Phase
+  0/Phase 1/Pivot. Deliberately requires *both* operands spelled out
+  (not a bare `+90` alone, implicitly relative to the value before
+  editing started): a bare leading `-` (e.g. selecting all and typing
+  `-45` to set a literal negative value -- a completely normal thing
+  to do) would otherwise be ambiguous between "set to -45" and
+  "subtract 45," with no way to tell which from the committed text
+  alone. A bare `+` has no such ambiguity, but supporting only one
+  sign's bare form and not the other would be a confusing half-measure,
+  so neither is supported -- only the unambiguous, fully-spelled-out
+  expression form, which is also exactly the form the request's own
+  example described ("type +90 *after* the 45").
+- ~~Compare-tab spacing should be a uniform value, not relative to
+  each spectrum's own max~~ -- done. `plot_1d_stack`'s per-step offset
+  was `np.max(that spectrum's own y) * (1 + y_offset)` -- fine when
+  `normalize=True` (every trace's own max is 1 either way), but the
+  Compare tab's "None"/"By sample mass" modes pass `normalize=False`
+  specifically so each trace keeps its true relative height, and *that*
+  varying height was also scaling the *gap above* it, making the
+  stack look uneven. Now uses one shared step size (the tallest
+  spectrum's own height, computed once) for every gap, while each
+  trace still plots at its own true height.
+
+457 tests passing. Nothing committed yet from this round (not asked to).
+
 ## Contour defaults, apc0 robustness, per-peak relaxation-fit browsing, pivot direction (2026-08-29)
 
 - ~~2D/pseudo-2D contours still wrong -- too many, lowest should be

@@ -35,6 +35,7 @@ from ..processing.slicing import get_trace
 from .session import Session
 from .widgets.canvas import MplCanvas
 from .widgets.drag_control import DragHandle
+from .widgets.relative_spinbox import RelativeDoubleSpinBox
 
 #: Effectively-unbounded spinbox range for phase controls -- a slider's
 #: fixed pixel-to-range mapping would force a tradeoff between coarse
@@ -347,6 +348,34 @@ class MainWindow(QMainWindow):
         unaffected -- still shows every item at its own full width."""
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         combo.setMinimumContentsLength(chars)
+
+    @staticmethod
+    def _spin_with_step_buttons(spin: QSpinBox) -> tuple[QHBoxLayout, QPushButton, QPushButton]:
+        """Wrap ``spin`` with Prev/Next (◀/▶) buttons either side --
+        quicker than the spin box's own tiny arrows or typing a number
+        for stepping through a series one at a time (originally built
+        for the pseudo-2D slice picker while phasing each slice in
+        turn; reused wherever else browsing a numbered series one step
+        at a time comes up, e.g. "View peak fit"). ``setValue`` clamps
+        to the spin box's own range on its own, so both buttons are
+        safe no-ops at either end. Returns ``(row, prev_button,
+        next_button)`` -- the caller stores the buttons as its own
+        attributes if anything (e.g. a test) needs to click them
+        directly."""
+        prev_button = QPushButton("◀")
+        prev_button.setFixedWidth(28)
+        prev_button.setToolTip("Previous")
+        prev_button.clicked.connect(lambda: spin.setValue(spin.value() - 1))
+        next_button = QPushButton("▶")
+        next_button.setFixedWidth(28)
+        next_button.setToolTip("Next")
+        next_button.clicked.connect(lambda: spin.setValue(spin.value() + 1))
+
+        row = QHBoxLayout()
+        row.addWidget(prev_button)
+        row.addWidget(spin)
+        row.addWidget(next_button)
+        return row, prev_button, next_button
 
     # ============================================================
     # Spectra tab: open / list / remove / nucleus override
@@ -1688,26 +1717,11 @@ class MainWindow(QMainWindow):
             "numbering) the phase controls below act on."
         )
         self.slice_spin.valueChanged.connect(lambda _v: self._on_phase_target_changed())
-
-        # Prev/Next -- quicker than clicking the spin box's tiny arrows
-        # (or typing a number) to step through slices one at a time
-        # while phasing each on its own, e.g. Autophase -> Next ->
-        # Autophase -> Next ... setValue() clamps to the spin box's
-        # own [1, n_slices] range on its own, so these are safe no-ops
-        # at either end.
-        self.slice_prev_button = QPushButton("◀")
-        self.slice_prev_button.setFixedWidth(28)
+        slice_row, self.slice_prev_button, self.slice_next_button = (
+            self._spin_with_step_buttons(self.slice_spin)
+        )
         self.slice_prev_button.setToolTip("Previous slice")
-        self.slice_prev_button.clicked.connect(lambda: self.slice_spin.setValue(self.slice_spin.value() - 1))
-        self.slice_next_button = QPushButton("▶")
-        self.slice_next_button.setFixedWidth(28)
         self.slice_next_button.setToolTip("Next slice")
-        self.slice_next_button.clicked.connect(lambda: self.slice_spin.setValue(self.slice_spin.value() + 1))
-
-        slice_row = QHBoxLayout()
-        slice_row.addWidget(self.slice_prev_button)
-        slice_row.addWidget(self.slice_spin)
-        slice_row.addWidget(self.slice_next_button)
         self.slice_row_label = QLabel("Slice:")
         dim_form.addRow(self.slice_row_label, slice_row)
 
@@ -1757,7 +1771,7 @@ class MainWindow(QMainWindow):
         form.addRow("Phase 0 (deg):", self._pair_widget(self.phase0_handle, self.phase0_spin))
         form.addRow("Phase 1 (deg):", self._pair_widget(self.phase1_handle, self.phase1_spin))
 
-        self.pivot_spin = QDoubleSpinBox()
+        self.pivot_spin = RelativeDoubleSpinBox()
         self.pivot_spin.setRange(-1.0e5, 1.0e5)
         self.pivot_spin.setDecimals(3)
         self.pivot_spin.setSuffix(" ppm")
@@ -1883,7 +1897,7 @@ class MainWindow(QMainWindow):
     def _make_phase_control(self, sensitivity: float = 0.2, step: float = 1.0) -> tuple[DragHandle, QDoubleSpinBox]:
         handle = DragHandle(sensitivity=sensitivity, step=step)
 
-        spin = QDoubleSpinBox()
+        spin = RelativeDoubleSpinBox()
         spin.setRange(-_PHASE_SPIN_RANGE, _PHASE_SPIN_RANGE)
         spin.setDecimals(2)
         spin.setSingleStep(step)
@@ -2437,18 +2451,6 @@ class MainWindow(QMainWindow):
         fit_button.clicked.connect(self._on_fit_spectrum_clicked)
         layout.addWidget(fit_button)
 
-        fit_curve_button = QPushButton("Fit Curve…")
-        fit_curve_button.setToolTip(
-            "Step 2: fit a relaxation/diffusion model to each peak's "
-            "per-slice amplitude, across every slice of the selected "
-            "pseudo-2D series -- reuses Step 1's results if already "
-            "computed, or runs it now. For a stack of separately-loaded "
-            "1D spectra instead of one pseudo-2D series, use the "
-            "Compare tab's own Fit Curve button/context-menu item."
-        )
-        fit_curve_button.clicked.connect(self._on_fit_curve_button_clicked)
-        layout.addWidget(fit_curve_button)
-
         self.analysis_results_label = QLabel("")
         self.analysis_results_label.setWordWrap(True)
         layout.addWidget(self.analysis_results_label)
@@ -2491,7 +2493,10 @@ class MainWindow(QMainWindow):
             "fit has been run."
         )
         self.view_relaxation_peak_spin.valueChanged.connect(self._on_view_relaxation_peak_changed)
-        relax_fit_row.addWidget(self.view_relaxation_peak_spin)
+        peak_spin_row, self.relaxation_peak_prev_button, self.relaxation_peak_next_button = (
+            self._spin_with_step_buttons(self.view_relaxation_peak_spin)
+        )
+        relax_fit_row.addLayout(peak_spin_row)
         layout.addLayout(relax_fit_row)
 
         self.relaxation_uncertainty_checkbox = QCheckBox("Show uncertainty band")
@@ -2582,22 +2587,25 @@ class MainWindow(QMainWindow):
         self.manual_delays_edit.setPlaceholderText("e.g. 0.001, 0.01, 0.1, 1.0")
         relax_form.addRow("List:", self.manual_delays_edit)
 
-        self.start_end_step_row = QWidget()
-        start_end_step_layout = QHBoxLayout(self.start_end_step_row)
-        start_end_step_layout.setContentsMargins(0, 0, 0, 0)
+        # Stacked (one per row), not side by side -- crammed into one
+        # row in this narrow side panel, the two boxes were too
+        # cramped to read either value properly. Same fixed width so
+        # neither looks arbitrarily bigger/smaller than the other.
         self.delay_start_spin = QDoubleSpinBox()
         self.delay_start_spin.setRange(-1.0e12, 1.0e12)
         self.delay_start_spin.setDecimals(6)
+        self.delay_start_spin.setFixedWidth(120)
+        self.delay_start_spin.setToolTip("Start")
         self.delay_step_spin = QDoubleSpinBox()
         self.delay_step_spin.setRange(-1.0e12, 1.0e12)
         self.delay_step_spin.setDecimals(6)
+        self.delay_step_spin.setFixedWidth(120)
         self.delay_step_spin.setValue(0.1)
-        for widget, label in ((self.delay_start_spin, "Start"), (self.delay_step_spin, "Step")):
-            widget.setToolTip(label)
-            start_end_step_layout.addWidget(QLabel(f"{label}:"))
-            start_end_step_layout.addWidget(widget)
-        self.start_end_step_row_label = QLabel("Start / step:")
-        relax_form.addRow(self.start_end_step_row_label, self.start_end_step_row)
+        self.delay_step_spin.setToolTip("Step")
+        self.delay_start_row_label = QLabel("Start:")
+        self.delay_step_row_label = QLabel("Step:")
+        relax_form.addRow(self.delay_start_row_label, self.delay_start_spin)
+        relax_form.addRow(self.delay_step_row_label, self.delay_step_spin)
 
         self.vclist_factor_spin = QDoubleSpinBox()
         self.vclist_factor_spin.setRange(-1.0e12, 1.0e12)
@@ -2610,6 +2618,22 @@ class MainWindow(QMainWindow):
         )
         self.vclist_factor_row_label = QLabel("Factor:")
         relax_form.addRow(self.vclist_factor_row_label, self.vclist_factor_spin)
+
+        # Below every setting it actually depends on (model, value
+        # source, delay/b-value source) -- it used to sit above this
+        # whole box, reading as if it only depended on the model
+        # choice right below it, when it really uses everything here.
+        fit_curve_button = QPushButton("Fit Curve…")
+        fit_curve_button.setToolTip(
+            "Step 2: fit a relaxation/diffusion model to each peak's "
+            "per-slice amplitude, across every slice of the selected "
+            "pseudo-2D series -- reuses Step 1's results if already "
+            "computed, or runs it now. For a stack of separately-loaded "
+            "1D spectra instead of one pseudo-2D series, use the "
+            "Compare tab's own Fit Curve button/context-menu item."
+        )
+        fit_curve_button.clicked.connect(self._on_fit_curve_button_clicked)
+        relax_form.addRow(fit_curve_button)
 
         self._populate_fit_model_combo()
         self._on_delay_source_changed(0)
@@ -2795,8 +2819,10 @@ class MainWindow(QMainWindow):
 
     def _on_delay_source_changed(self, index: int) -> None:
         self.manual_delays_edit.setVisible(index == 1)
-        self.start_end_step_row_label.setVisible(index == 2)
-        self.start_end_step_row.setVisible(index == 2)
+        self.delay_start_row_label.setVisible(index == 2)
+        self.delay_start_spin.setVisible(index == 2)
+        self.delay_step_row_label.setVisible(index == 2)
+        self.delay_step_spin.setVisible(index == 2)
         self.vclist_factor_row_label.setVisible(index == 3)
         self.vclist_factor_spin.setVisible(index == 3)
 

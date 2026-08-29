@@ -1898,6 +1898,17 @@ def test_main_window_view_relaxation_peak_spin_switches_between_peaks(qapp):
     # (fit + data), never 4 (both peaks' worth).
     assert len(window.fit_canvas.ax.lines) == 2
 
+    # Explicit user request: arrows like the phasing-tab slice picker.
+    window.view_relaxation_peak_spin.setValue(1)
+    window.relaxation_peak_next_button.click()
+    assert window.view_relaxation_peak_spin.value() == 2
+    window.relaxation_peak_next_button.click()  # past the last peak -- must clamp, not raise
+    assert window.view_relaxation_peak_spin.value() == 2
+    window.relaxation_peak_prev_button.click()
+    assert window.view_relaxation_peak_spin.value() == 1
+    window.relaxation_peak_prev_button.click()  # past the first peak -- must clamp, not raise
+    assert window.view_relaxation_peak_spin.value() == 1
+
 
 def test_main_window_relaxation_uncertainty_checkbox_shows_shaded_band(qapp):
     true_t2 = 0.05
@@ -2950,3 +2961,64 @@ def test_main_window_reference_shift_from_plot_cancelled_is_noop(qapp, tmp_path,
     window._on_reference_shift_from_plot()
 
     np.testing.assert_allclose(window.session.spectra[index].axes[-1].hz, original_hz)
+
+
+# ============================================================
+# RelativeDoubleSpinBox: typed arithmetic deltas ("45+90" -> 135)
+# ============================================================
+
+def test_relative_spinbox_addition_expression(qapp):
+    from opennmr.gui.widgets.relative_spinbox import RelativeDoubleSpinBox
+    spin = RelativeDoubleSpinBox()
+    assert spin.valueFromText("45+90") == pytest.approx(135.0)
+
+
+def test_relative_spinbox_subtraction_expression(qapp):
+    from opennmr.gui.widgets.relative_spinbox import RelativeDoubleSpinBox
+    spin = RelativeDoubleSpinBox()
+    assert spin.valueFromText("100-30") == pytest.approx(70.0)
+
+
+def test_relative_spinbox_negative_operands(qapp):
+    from opennmr.gui.widgets.relative_spinbox import RelativeDoubleSpinBox
+    spin = RelativeDoubleSpinBox()
+    assert spin.valueFromText("-45+90") == pytest.approx(45.0)
+    assert spin.valueFromText("45+-90") == pytest.approx(-45.0)
+
+
+def test_relative_spinbox_plain_number_still_works(qapp):
+    from opennmr.gui.widgets.relative_spinbox import RelativeDoubleSpinBox
+    spin = RelativeDoubleSpinBox()
+    assert spin.valueFromText("45") == pytest.approx(45.0)
+
+
+def test_relative_spinbox_bare_negative_is_literal_not_relative(qapp):
+    # A bare "-45" (no second operand) must set the literal value -45,
+    # not be misread as a relative delta -- selecting all and typing a
+    # negative number is completely normal and must not be ambiguous.
+    from opennmr.gui.widgets.relative_spinbox import RelativeDoubleSpinBox
+    spin = RelativeDoubleSpinBox()
+    spin.setRange(-180.0, 180.0)
+    assert spin.valueFromText("-45") == pytest.approx(-45.0)
+
+
+def test_relative_spinbox_strips_suffix_before_parsing(qapp):
+    from opennmr.gui.widgets.relative_spinbox import RelativeDoubleSpinBox
+    spin = RelativeDoubleSpinBox()
+    spin.setSuffix(" ppm")
+    assert spin.valueFromText("5+2.5 ppm") == pytest.approx(7.5)
+
+
+def test_main_window_phase0_spin_accepts_relative_expression(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    window.phase0_spin.setValue(45.0)
+    window.phase0_spin.setValue(window.phase0_spin.valueFromText("45+90"))
+    assert window.phase0_spin.value() == pytest.approx(135.0)
+
+
+def test_main_window_pivot_spin_accepts_relative_expression(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    window.pivot_spin.setValue(window.pivot_spin.valueFromText("1+2"))
+    assert window.pivot_spin.value() == pytest.approx(3.0)

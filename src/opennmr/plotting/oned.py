@@ -81,6 +81,15 @@ def plot_1d_stack(spectra: list[NMRSpectrum], ax=None, fig=None, color: str = "b
     cmap = get_stack_colormap(color)
     scalar_map = cmx.ScalarMappable(norm=norm, cmap=cmap)
 
+    # One shared step size for every gap in the stack, from the
+    # tallest spectrum in it -- not each spectrum's own max, which
+    # made the gaps themselves uneven (a spectrum with a much smaller
+    # peak got a much smaller gap above it) whenever normalize=False
+    # (the Compare tab's "None"/"By sample mass" modes, where seeing
+    # each spectrum's true relative height is the whole point, so
+    # per-spectrum renormalizing the gap on top of that isn't wanted).
+    y_scale = max((float(np.max(s.normalized() if normalize else s.data)) for s in spectra), default=0.0)
+
     y_base = 0.0
     xmin = xmax = labeltext = None
 
@@ -91,8 +100,7 @@ def plot_1d_stack(spectra: list[NMRSpectrum], ax=None, fig=None, color: str = "b
         )
         xmin = this_xmin if xmin is None else min(xmin, this_xmin)
         xmax = this_xmax if xmax is None else max(xmax, this_xmax)
-        y = spectrum.normalized() if normalize else spectrum.data
-        y_base += float(np.max(y)) * (1 + y_offset)
+        y_base += y_scale * (1 + y_offset)
 
     if xlims == "default":
         ax.set_xlim(xmin, xmax)
