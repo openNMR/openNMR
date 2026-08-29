@@ -1,0 +1,230 @@
+"""
+Plotting style helpers shared by ``oned``/``twod``.
+
+``apply_tick_style``/``apply_spine_style``/``get_stack_colormap``/
+``get_contour_cmap``/``downsample_2d``/``save_figure`` are ``ax``-
+scoped (they only ever touch the ``Axes``/data passed to them), so
+they're safe to call from GUI code embedding a canvas -- ported from
+``nmrtools2``'s ``plotting.py`` unchanged.
+
+``setup_plotting`` is the one exception: it calls
+``plt.rcParams.update(...)``, a *global* matplotlib style change. That
+is harmless for a one-off standalone figure (a script or notebook cell
+calling one of ``plotting.oned``/``plotting.twod``'s convenience
+wrappers), which is the only place this package still calls it -- but
+it must never be called from GUI code, since restyling one embedded
+canvas would silently restyle every other open canvas/tab sharing the
+same matplotlib process.
+"""
+
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.colors as cl
+from matplotlib import cm
+from matplotlib.ticker import MaxNLocator
+
+VALID_SAVE_FORMATS = ("png", "pdf", "svg")
+
+CONTOUR_CMAP_NAMES = [
+    'magma', 'coolwarm', 'cividis', 'viridis', 'plasma', 'inferno',
+    'PiYG', 'PRGn', 'BrBG', 'PuOr', 'RdGy', 'RdBu', 'RdYlBu', 'RdYlGn',
+    'Spectral', 'bwr', 'seismic', 'Greys', 'Purples', 'Blues', 'Greens',
+    'Oranges', 'Reds', 'YlOrBr', 'YlOrRd', 'OrRd', 'PuRd', 'RdPu',
+    'BuPu', 'GnBu', 'PuBu', 'YlGnBu', 'PuBuGn', 'BuGn', 'YlGn',
+]
+
+
+def apply_tick_style(ax, direction='in', length=4.0, width=1.0, pad=4.0,
+                      num_ticks=None, axis='both', minor=True):
+    """Apply consistent tick styling to an ``ax``: direction, size,
+    and (optionally) an explicit target tick count.
+
+    ``length``/``width`` : major tick length/width. Minor ticks (when
+    ``minor=True``) are drawn at 3/4 the width and half the length.
+    ``num_ticks`` : if given, an approximate target major-tick count
+    via ``MaxNLocator`` on the requested axis/axes.
+    """
+    ax.tick_params(axis=axis, which='major', direction=direction,
+                    length=length, width=width, pad=pad)
+
+    if minor:
+        ax.minorticks_on()
+        ax.tick_params(axis=axis, which='minor', direction=direction,
+                        length=length / 2, width=0.75 * width)
+    else:
+        ax.minorticks_off()
+
+    if num_ticks is not None:
+        if axis in ('x', 'both'):
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=num_ticks))
+        if axis in ('y', 'both'):
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=num_ticks))
+
+    return ax
+
+
+def apply_spine_style(ax, top=False, right=False, bottom=True, left=True):
+    """Show/hide individual axis spines. Defaults match the package's
+    usual "open" plot style (top and right hidden)."""
+    ax.spines['top'].set_visible(top)
+    ax.spines['right'].set_visible(right)
+    ax.spines['bottom'].set_visible(bottom)
+    ax.spines['left'].set_visible(left)
+    return ax
+
+
+def setup_plotting(font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
+                    output_format=''):
+    """Apply the shared matplotlib style and resolve figure dimensions
+    for a standalone (non-GUI) figure -- see the module docstring for
+    why this must not be called from GUI code.
+
+    ``output_format`` : ``''``, ``'manuscript'`` (3.375x3.375in,
+    fontsize 12), or ``'presentation'`` (10x10in, fontsize 24).
+
+    Returns a dict with the resolved ``fontsize``, ``pl_width``,
+    ``pl_height``, ``lw`` (line width, scaled to figure width), and
+    ``ticklen``.
+    """
+    if output_format == 'manuscript':
+        fontsize = 12
+        pl_height = 3.375
+        pl_width = 3.375
+    elif output_format == 'presentation':
+        fontsize = 24
+        pl_height = 10
+        pl_width = 10
+
+    lw = pl_width / 3.375
+    ticklen = lw * 5
+
+    plt.rcParams['font.sans-serif'] = [
+        'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif',
+        'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica',
+        'Avant Garde', 'sans-serif', 'Tahoma',
+    ]
+
+    params = {
+        'legend.fontsize': 'large',
+        'font.family': 'sans-serif',
+        'font.sans-serif': font,
+        'font.weight': 'regular',
+        'axes.labelsize': fontsize,
+        'axes.titlesize': fontsize,
+        'xtick.labelsize': fontsize,
+        'xtick.major.width': lw,
+        'xtick.major.size': ticklen,
+        'xtick.minor.visible': True,
+        'xtick.minor.width': 3 / 4 * lw,
+        'xtick.minor.size': ticklen / 2,
+        'ytick.labelsize': fontsize,
+        'ytick.major.width': lw,
+        'ytick.major.size': ticklen,
+        'ytick.minor.visible': True,
+        'ytick.minor.width': 3 / 4 * lw,
+        'ytick.minor.size': ticklen / 2,
+        'axes.labelweight': 'regular',
+        'axes.linewidth': lw,
+        'axes.titlepad': 25,
+        'xtick.direction': 'in',
+        'ytick.direction': 'in',
+    }
+
+    plt.rcParams.update(params)
+
+    return {
+        'fontsize': fontsize,
+        'pl_width': pl_width,
+        'pl_height': pl_height,
+        'lw': lw,
+        'ticklen': ticklen,
+    }
+
+
+def get_stack_colormap(color='black'):
+    """Colour map used to distinguish a stack of traces (multiple 1D
+    spectra, or extracted 2D row/column slices).
+
+    ``color`` : ``'black'`` (every trace black), ``'diverging'`` (a
+    four-stop brown/teal diverging map), or any matplotlib colormap
+    name (falls back to black if not recognised).
+    """
+    if color == 'diverging':
+        return cl.LinearSegmentedColormap.from_list(
+            "", ["#a6611a", "#dfc27d", "#80cdc1", "#018571"]
+        )
+
+    if color == 'black':
+        return cl.LinearSegmentedColormap.from_list(
+            "", ["#000000", "#000000", "#000000", "#000000"]
+        )
+
+    try:
+        return plt.get_cmap(color)
+    except (ValueError, KeyError):
+        print(f"Colour scheme '{color}' not recognised; defaulting to black.")
+        return cl.LinearSegmentedColormap.from_list(
+            "", ["#000000", "#000000", "#000000", "#000000"]
+        )
+
+
+def get_contour_cmap(name):
+    """Look up a named colormap for 2D contour plots, restricted to
+    :data:`CONTOUR_CMAP_NAMES`."""
+    if name not in CONTOUR_CMAP_NAMES:
+        raise ValueError(
+            f"Unknown contour colour scheme '{name}'. "
+            f"Available options: {sorted(CONTOUR_CMAP_NAMES)}"
+        )
+    try:
+        return plt.get_cmap(name)
+    except AttributeError:  # pragma: no cover - very old matplotlib
+        return cm.get_cmap(name)
+
+
+def save_figure(fig, fig_name='nmr_plot', save_format='png', dpi=300):
+    """Save a figure using the package's shared saving convention.
+
+    ``fig_name`` : output path/filename, with or without an
+    extension. If it already ends in ``.png``/``.pdf``/``.svg``, that
+    extension is used as-is and ``save_format`` is ignored; otherwise
+    ``.{save_format}`` is appended.
+
+    Returns the path the figure was actually saved to.
+    """
+    if save_format not in VALID_SAVE_FORMATS:
+        raise ValueError(
+            f"save_format must be one of {VALID_SAVE_FORMATS}, got '{save_format}'."
+        )
+
+    root, ext = os.path.splitext(fig_name)
+    path = fig_name if ext.lower().lstrip('.') in VALID_SAVE_FORMATS else f"{fig_name}.{save_format}"
+
+    fig.savefig(path, dpi=dpi)
+    return path
+
+
+def downsample_2d(data, x, y, max_points_x=2000, max_points_y=500):
+    """Evenly downsample a 2D array (and its axes) for fast contour
+    rendering.
+
+    ``data`` : shape ``(len(y), len(x))``. Returns ``data_ds, x_ds,
+    y_ds`` unchanged if already within the point-count limits.
+    """
+    n_y, n_x = data.shape
+
+    max_points_x = max(2, min(max_points_x, n_x))
+    max_points_y = max(2, min(max_points_y, n_y))
+
+    x_idx = np.linspace(0, n_x - 1, max_points_x, dtype=int)
+    y_idx = np.linspace(0, n_y - 1, max_points_y, dtype=int)
+
+    data_ds = data[np.ix_(y_idx, x_idx)]
+    x_ds = x[x_idx]
+    y_ds = y[y_idx]
+
+    return data_ds, x_ds, y_ds
