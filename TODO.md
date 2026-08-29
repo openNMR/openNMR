@@ -2,6 +2,73 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Fit point exclusion, Compare subplots, pseudo-2D default, rendering caps, full-resolution export (2026-08-29)
+
+- ~~Fit uncertainty is sometimes very unreliable; right-click to remove
+  data points from the fit (and reset)~~ -- done. New
+  `MplCanvas.fitPointExcludeRequested`/`fitPointsResetRequested` signals,
+  captured from real matplotlib `event.xdata`/`event.ydata` at
+  `button_press_event` time (button==3) rather than converting a Qt
+  `QPoint` from `customContextMenuRequested` -- avoids the Qt-vs-
+  matplotlib coordinate/HiDPI conversion entirely. Nearest-point search
+  is axis-range-normalized so the delay/b-value and intensity axes
+  (very different numeric scales) don't let one dominate. New
+  `MainWindow` state, siloed per peak (`_relaxation_fit_original`,
+  `_excluded_relaxation_indices: dict[int, set[int]]`) so excluding a
+  point on one peak doesn't touch another's fit; `_refit_relaxation_peak`
+  rolls back (returns `bool`, caller un-excludes on failure) rather than
+  leaving a peak in a half-fit state if too few points remain. Excluded
+  points still drawn (grey 'x') so it's clear what was removed, not just
+  silently gone.
+- ~~Rescaling the Compare plot should keep each baseline in place --
+  maybe subplots with a linked x axis~~ -- done, and the "maybe" was
+  right: a single shared linear y-axis genuinely *cannot* keep multiple
+  stacked baselines fixed under a rescale (any y-zoom multiplies every
+  distance from the pin point by the same factor, including the gaps
+  *between* different traces' own baselines -- not fixable within one
+  shared axes, confirmed mathematically before implementing, not just
+  by trial and error). `show_compare`'s "Stacked" mode now builds one
+  subplot per spectrum via `self.figure.subplots(n, 1, sharex=True)`,
+  each independently y-autoscaled; the existing scroll-zoom pin-bottom
+  logic already keyed off `event.inaxes` needed no changes at all to
+  work per-row. Non-"Stacked" Compare modes (single overlay) unchanged.
+- ~~In a pseudo-2D, stacked spectra should be plotted by default~~ --
+  done, one-line change (`_pseudo2d_view_combo`'s default index 0 -> 1).
+- ~~Some limit on how many points render at once, especially 2D/many
+  stacked spectra, for dynamic-processing speed~~ -- done for 1D/stack
+  (2D contour rendering was already downsampled via
+  `plotting.style.downsample_2d`, pre-existing). New
+  `DOWNSAMPLE_1D_MAX_POINTS = 8000` + `downsample_indices(n, max_points)`
+  in `plotting/style.py`; `plot_1d` renders at most that many points
+  (evenly-spaced indices) unless told not to. `xmin`/`xmax` returned are
+  always the true full-resolution range regardless -- display-only,
+  `spectrum` itself never touched.
+- ~~Make sure exports are fully sampled, with an option to view at full
+  resolution too~~ -- done, prompted directly by the downsampling change
+  above (a real risk it introduced: silently downsampling with no way
+  back would undercut a tool whose whole point is showing the actual
+  data). `plot_1d` now always stashes the true-resolution arrays on the
+  line itself (`line._opennmr_full_res`) whenever downsampling *would*
+  apply, regardless of whether it's currently in effect -- so a later
+  toggle or export never needs to re-plot from the spectrum object.
+  `MplCanvas` gained a persistent `_full_resolution` flag (survives
+  rebuilds, like the legend/aspect-lock flags already do), a checkable
+  "Full Resolution" right-click action (only shown when
+  `has_downsampled_data()`), and `export_full_resolution(save_fn)`
+  (swaps every visible line to its full-res data, calls `save_fn`,
+  restores the view afterward -- even if `save_fn` raises). Wired in at
+  the toolbar level, not just the menu action: `_Toolbar.save_figure` is
+  overridden so *both* the toolbar's own Save icon and the File menu's
+  "Save Figure As…" always route through this, and can't be bypassed by
+  using one path but not the other.
+- ~~Scrolling to scale axes should also work for the y axis in 2D and
+  pseudo-2D~~ -- done. New `_hovering_y_axis`/`_data_y_at` helpers mirror
+  the existing x-axis-strip scroll-zoom logic (hovering past the right
+  spine, matching `tick_right()`), gated to contour views only
+  (`self._contour_factor is not None`).
+
+483 tests passing (up from 457). Committed and pushed.
+
 ## Peak-fit arrows, relative +/- entry, layout fixes, uniform Compare spacing (2026-08-29)
 
 - ~~View peak fit should have arrows like the phasing style~~ -- done.

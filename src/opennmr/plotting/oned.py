@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cmx
 from matplotlib.ticker import MaxNLocator
 
 from ..core.registry import find_gamma, NUC_label
@@ -25,13 +24,36 @@ from .style import setup_plotting, apply_tick_style, apply_spine_style, get_cont
 
 def plot_1d(ax, spectrum: NMRSpectrum, x_unit: str = "ppm", normalize: bool = True,
             color: str = "black", y_offset: float = 0.0, linewidth: float = 1.5,
-            field: str = "") -> tuple[float, float, str]:
+            field: str = "", full_resolution: bool = False) -> tuple[float, float, str]:
     """Plot one 1D :class:`NMRSpectrum` onto an existing ``ax``.
 
     Returns ``(xmin, xmax, labeltext)`` -- the spectrum's x-range
     (sorted ascending) and its nucleus-based axis label, both handy
     for a caller plotting a stack of these (see :func:`plot_1d_stack`).
+
+    Rendered at no more than :data:`opennmr.plotting.style.DOWNSAMPLE_1D_MAX_POINTS`
+    points (evenly, via :func:`opennmr.plotting.style.downsample_indices`)
+    unless ``full_resolution=True`` -- display only, ``xmin``/``xmax``
+    are always the true full-resolution range regardless, and nothing
+    about ``spectrum`` itself is ever touched either way. Explicit user
+    feedback: with many stacked traces or a dynamically-redrawn view
+    (phase-dragging), rendering every point of a high-digital-
+    resolution or diffusion/imaging acquisition (routinely 10^5-10^6
+    points) cost real, noticeable time for no visible benefit at any
+    normal screen resolution -- but silently downsampling with no way
+    back is a real problem for a tool whose whole point is showing the
+    actual data, so this is opt-out (``full_resolution=True``), not
+    forced, and the returned line always carries the true full-
+    resolution arrays too (as ``line._opennmr_full_res``, a plain
+    ``(x, y)`` pair) whenever downsampling would apply at all --
+    whether or not it's actually in effect right now -- so a caller
+    (:class:`~opennmr.gui.widgets.canvas.MplCanvas`) can toggle between
+    the two, or guarantee a saved/exported figure is always full
+    resolution even while the live view isn't, without re-plotting
+    from ``spectrum`` again.
     """
+    from .style import downsample_indices
+
     x = spectrum.axis_values(0, unit=x_unit.lower())
     y = spectrum.normalized() if normalize else spectrum.data
 
@@ -42,7 +64,11 @@ def plot_1d(ax, spectrum: NMRSpectrum, x_unit: str = "ppm", normalize: bool = Tr
     nucgamma = find_gamma(spectrum.metadata.nucleus, field=field, SFO1=spectrum.metadata.sfo1)
     labeltext = NUC_label(nucgamma["Nuclide"], x_unit=x_unit)
 
-    ax.plot(x, y + y_offset, color=color, linewidth=linewidth)
+    idx = None if full_resolution else downsample_indices(len(y))
+    x_plot, y_plot = (x, y) if idx is None else (x[idx], y[idx])
+    line, = ax.plot(x_plot, y_plot + y_offset, color=color, linewidth=linewidth)
+    if downsample_indices(len(y)) is not None:  # would need it at the default cap, regardless of full_resolution
+        line._opennmr_full_res = (x, y + y_offset)
 
     return xmin, xmax, labeltext
 
@@ -53,7 +79,7 @@ def plot_1d_stack(spectra: list[NMRSpectrum], ax=None, fig=None, color: str = "b
                    tick_dir: str = "in", tick_length: float = 4.0, tick_width: float = 1.0,
                    tick_pad: float = 4.0, tick_number: int | None = None,
                    pl_width: float = 3.375, pl_height: float = 3.375, font: str = "Arial",
-                   fontsize: float = 12, output_format: str = "",
+                   fontsize: float = 12, output_format: str = "", full_resolution: bool = False,
                    save_fig: bool = False, fig_name: str = "nmr_1d_plot", save_format: str = "png"):
     """Plot a stack of 1D spectra with a vertical offset between them,
     coloured along :func:`opennmr.plotting.style.get_stack_colormap`.
@@ -65,7 +91,7 @@ def plot_1d_stack(spectra: list[NMRSpectrum], ax=None, fig=None, color: str = "b
     into the given ``ax`` without touching global style (for
     embedding, e.g. in a GUI canvas).
     """
-    from .style import get_stack_colormap
+    from .style import stack_colors
 
     standalone = ax is None
     if standalone:
@@ -76,10 +102,7 @@ def plot_1d_stack(spectra: list[NMRSpectrum], ax=None, fig=None, color: str = "b
     elif fig is None:
         fig = ax.figure
 
-    values = range(len(spectra))
-    norm = plt.Normalize(vmin=values[0], vmax=values[-1]) if len(spectra) > 1 else plt.Normalize(vmin=0, vmax=1)
-    cmap = get_stack_colormap(color)
-    scalar_map = cmx.ScalarMappable(norm=norm, cmap=cmap)
+    colors = stack_colors(len(spectra), color)
 
     # One shared step size for every gap in the stack, from the
     # tallest spectrum in it -- not each spectrum's own max, which
@@ -96,7 +119,7 @@ def plot_1d_stack(spectra: list[NMRSpectrum], ax=None, fig=None, color: str = "b
     for cnt, spectrum in enumerate(spectra):
         this_xmin, this_xmax, labeltext = plot_1d(
             ax, spectrum, x_unit=x_unit, normalize=normalize,
-            color=scalar_map.to_rgba(values[cnt]), y_offset=y_base, field=field,
+            color=colors[cnt], y_offset=y_base, field=field, full_resolution=full_resolution,
         )
         xmin = this_xmin if xmin is None else min(xmin, this_xmin)
         xmax = this_xmax if xmax is None else max(xmax, this_xmax)

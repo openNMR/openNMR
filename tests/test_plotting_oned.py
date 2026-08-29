@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import pytest
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.plotting import oned
@@ -20,6 +21,37 @@ def test_plot_1d_onto_existing_ax():
     assert xmin < xmax
     assert "1" in label  # nucleus-based label mentions '1' for 1H
     assert len(ax.lines) == 1
+    plt.close(fig)
+
+
+def test_plot_1d_downsamples_high_point_count_for_rendering():
+    # Explicit user request: cap how many points get rendered at once
+    # for a high-point-count spectrum (diffusion/imaging acquisitions,
+    # or just high digital resolution, routinely land in the
+    # 10^5-10^6 range) -- display only, never the underlying data.
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+
+    fig, ax = plt.subplots()
+    spec = _make_1d(n=DOWNSAMPLE_1D_MAX_POINTS * 4)
+    xmin, xmax, _ = oned.plot_1d(ax, spec)
+
+    line = ax.lines[0]
+    assert len(line.get_xdata()) == DOWNSAMPLE_1D_MAX_POINTS
+    # xmin/xmax are still the TRUE full-resolution range, not derived
+    # from whatever the downsampled subset happens to span.
+    assert xmin == pytest.approx(float(np.min(spec.axis_values(0))))
+    assert xmax == pytest.approx(float(np.max(spec.axis_values(0))))
+    plt.close(fig)
+
+
+def test_plot_1d_does_not_downsample_below_the_cap():
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+
+    fig, ax = plt.subplots()
+    spec = _make_1d(n=64)
+    assert 64 < DOWNSAMPLE_1D_MAX_POINTS
+    oned.plot_1d(ax, spec)
+    assert len(ax.lines[0].get_xdata()) == 64
     plt.close(fig)
 
 

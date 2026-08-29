@@ -133,6 +133,20 @@ class MainWindow(QMainWindow):
         # Curve runs, not re-derived per peak).
         self._relaxation_fit_results: list[dict] | None = None
         self._relaxation_fit_xlabel: str = "Delay (s)"
+        # The *original* (every point included) fit result for each
+        # peak, from the same Fit Curve run as _relaxation_fit_results
+        # -- kept separately so "Reset Excluded Points" can restore
+        # exactly what a point-exclusion re-fit (see
+        # _on_fit_point_exclude_requested) started from, without
+        # re-running Fit Curve from scratch. Same list positions as
+        # _relaxation_fit_results (one entry per peak).
+        self._relaxation_fit_original: list[dict] | None = None
+        # {peak_index: {excluded array-indices into that peak's own
+        # _relaxation_fit_original[peak_index]["t"]/["y"]}} -- which
+        # points the user has right-click-excluded from each peak's
+        # curve fit, siloed per peak so switching "View peak fit"
+        # doesn't lose or mix up one peak's exclusions with another's.
+        self._excluded_relaxation_indices: dict[int, set[int]] = {}
 
         # One MplCanvas per kind of plot, each keeping its own figure/
         # zoom/pan state, navigable via canvas_tabs instead of every
@@ -146,6 +160,8 @@ class MainWindow(QMainWindow):
         self.fid_canvas = MplCanvas()
         self.compare_canvas = MplCanvas()
         self.fit_canvas = MplCanvas()
+        self.fit_canvas.fitPointExcludeRequested.connect(self._on_fit_point_exclude_requested)
+        self.fit_canvas.fitPointsResetRequested.connect(self._on_fit_points_reset_requested)
         # A single-slice pseudo-Voigt spectral fit (data + fit curve,
         # from "View slice fit") gets its own tab rather than sharing
         # the Spectrum canvas -- it used to temporarily overwrite the
@@ -294,7 +310,11 @@ class MainWindow(QMainWindow):
     def _on_save_figure_clicked(self) -> None:
         """File > Save Figure As… -- delegates to whichever canvas tab
         is currently visible's own matplotlib toolbar save dialog
-        (format/location chosen there), rather than reimplementing it."""
+        (format/location chosen there), rather than reimplementing it.
+        That toolbar's own save_figure is itself overridden (see
+        widgets.canvas._Toolbar) to always export at full resolution
+        regardless of whether the live view is currently downsampled,
+        so nothing extra is needed here for that."""
         current = self.canvas_tabs.currentWidget()
         if current is not None and hasattr(current, "toolbar"):
             current.toolbar.save_figure()
@@ -3019,6 +3039,12 @@ class MainWindow(QMainWindow):
         self.analysis_results_label.setText("\n".join(lines))
 
         self._relaxation_fit_results = results
+        # A shallow copy of the list (each dict is still shared) is
+        # enough -- _refit_relaxation_peak only ever reads from
+        # _relaxation_fit_original, never mutates a dict in place, and
+        # replaces _relaxation_fit_results[idx] wholesale on a refit.
+        self._relaxation_fit_original = list(results)
+        self._excluded_relaxation_indices = {}
         self._relaxation_fit_xlabel = xlabel
         self.view_relaxation_peak_spin.blockSignals(True)
         self.view_relaxation_peak_spin.setEnabled(True)
@@ -3056,7 +3082,17 @@ class MainWindow(QMainWindow):
                 uncertainty = processing_relaxation.fit_curve_uncertainty(result)
             except Exception:  # noqa: BLE001 -- best-effort; fall back to the plain fit curve
                 uncertainty = None
-        self.fit_canvas.show_relaxation_fit(result, uncertainty=uncertainty, xlabel=self._relaxation_fit_xlabel)
+
+        excluded_points = None
+        excluded_idx = self._excluded_relaxation_indices.get(index)
+        if excluded_idx and self._relaxation_fit_original:
+            original = self._relaxation_fit_original[index]
+            idx_array = sorted(excluded_idx)
+            excluded_points = (original["t"][idx_array], original["y"][idx_array])
+
+        self.fit_canvas.show_relaxation_fit(
+            result, uncertainty=uncertainty, xlabel=self._relaxation_fit_xlabel, excluded_points=excluded_points,
+        )
 
         rate_param = result["rate_param"]
         if rate_param is not None:
@@ -3067,6 +3103,87 @@ class MainWindow(QMainWindow):
         else:
             params_str = ", ".join(f"{k}={v:.4g}" for k, v in result["params"].items())
             self.relaxation_fit_params_label.setText(f"{result.get('peak_label', '')}: {params_str}")
+
+    def _on_fit_point_exclude_requested(self, x: float, y: float) -> None:
+        """Right-click "Exclude Nearest Point" on the Fit tab -- finds
+        the currently-included point of the currently-viewed peak
+        closest to ``(x, y)`` (in axis-range-normalised distance, so
+        the delay/b-value and intensity axes -- usually on very
+        different numeric scales -- don't let one dominate "nearest"),
+        excludes it, and re-fits that one peak without it. Real,
+        user-reported motivation: the uncertainty band and the fit
+        itself can both be thrown off by a single bad point (e.g. a
+        slice with peak overlap or a corrupted intensity estimate),
+        and this is the direct, standard way to deal with that in NMR
+        curve fitting -- exclude the specific known-bad point, not
+        guess at a more "robust" automatic fitting method instead."""
+        if not self._relaxation_fit_original:
+            return
+        index = self.view_relaxation_peak_spin.value() - 1
+        if not (0 <= index < len(self._relaxation_fit_original)):
+            return
+        original = self._relaxation_fit_original[index]
+        t_orig, y_orig = original["t"], original["y"]
+        excluded = self._excluded_relaxation_indices.setdefault(index, set())
+        candidates = [i for i in range(len(t_orig)) if i not in excluded]
+        if not candidates:
+            return
+        t_range = float(np.ptp(t_orig)) or 1.0
+        y_range = float(np.ptp(y_orig)) or 1.0
+        distances = [
+            ((t_orig[i] - x) / t_range) ** 2 + ((y_orig[i] - y) / y_range) ** 2 for i in candidates
+        ]
+        nearest = candidates[int(np.argmin(distances))]
+        excluded.add(nearest)
+        if not self._refit_relaxation_peak(index):
+            excluded.discard(nearest)  # not enough points left -- undo
+
+    def _on_fit_points_reset_requested(self) -> None:
+        """Right-click "Reset Excluded Points" -- re-includes every
+        point of the currently-viewed peak and re-fits."""
+        if not self._relaxation_fit_original:
+            return
+        index = self.view_relaxation_peak_spin.value() - 1
+        if not (0 <= index < len(self._relaxation_fit_original)):
+            return
+        self._excluded_relaxation_indices.pop(index, None)
+        self._refit_relaxation_peak(index)
+
+    def _refit_relaxation_peak(self, index: int) -> bool:
+        """Re-run :func:`processing.relaxation.fit_relaxation` for
+        peak ``index`` alone, using :attr:`_relaxation_fit_original`'s
+        full (t, y[, y_err]) minus whatever's in
+        :attr:`_excluded_relaxation_indices` for it, and redisplay.
+        Returns whether it actually ran (``False`` if there weren't
+        enough points left, or the fit itself raised, in which case
+        the caller is responsible for any state rollback -- this
+        method only ever reads :attr:`_excluded_relaxation_indices`,
+        never mutates it). Deliberately re-fits with plain defaults
+        (``fit_relaxation``'s own automatic ``p0``/``bounds``) rather
+        than reusing whatever custom fixed/bounds the original Fit
+        Curve run might have used -- a real, accepted simplification
+        for now (Fit Curve itself doesn't currently expose fixed/
+        bounds from the GUI either, so nothing is actually lost yet)."""
+        original = self._relaxation_fit_original[index]
+        excluded = self._excluded_relaxation_indices.get(index, set())
+        keep = [i for i in range(len(original["t"])) if i not in excluded]
+        if len(keep) < 2:
+            QMessageBox.information(
+                self, "Not enough points", "At least 2 points are needed to fit -- re-include some first.",
+            )
+            return False
+        t = original["t"][keep]
+        y = original["y"][keep]
+        y_err = original["y_err"][keep] if original.get("y_err") is not None else None
+        try:
+            result = processing_relaxation.fit_relaxation(t, y, model=original["model"], y_err=y_err)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Fit failed", str(exc))
+            return False
+        result["peak_label"] = original.get("peak_label")
+        self._relaxation_fit_results[index] = result
+        self._display_relaxation_peak(index)
+        return True
 
     def _on_fit_curve_button_clicked(self) -> None:
         """"Fit Curve" as a real button in the Analysis tab -- the
@@ -3368,7 +3485,7 @@ class MainWindow(QMainWindow):
         is_pseudo2d_now = spectrum.ndim == 2 and spectrum.is_pseudo_2d
         self.pseudo2d_view_combo.setVisible(is_pseudo2d_now)
         self.pseudo2d_view_combo.blockSignals(True)
-        self.pseudo2d_view_combo.setCurrentIndex(0)  # a fresh selection always starts on Contour
+        self.pseudo2d_view_combo.setCurrentIndex(1)  # a fresh pseudo-2D selection starts on Stacked slices
         self.pseudo2d_view_combo.blockSignals(False)
         self._update_fit_tab_visibility(spectrum)
 

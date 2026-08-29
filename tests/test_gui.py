@@ -1550,6 +1550,20 @@ def _select_rows(window, rows):
         window.spectrum_list.item(row).setSelected(True)
 
 
+def _compare_line_count(canvas):
+    """Total plotted-trace count for a Compare/pseudo-2D-stack canvas
+    -- "Stacked" mode (more than one spectrum) uses one subplot per
+    spectrum (see MplCanvas.show_compare's own docstring for why:
+    a single shared y-axis can't keep every trace's baseline fixed
+    under a rescale), so the lines are spread across
+    canvas._compare_axes rather than all sitting on canvas.ax alone;
+    "Superimposed" mode (and a single-spectrum "stack") still uses
+    one shared axes, so this falls back to canvas.ax.lines there."""
+    if canvas._compare_axes is not None:
+        return sum(len(ax.lines) for ax in canvas._compare_axes)
+    return len(canvas.ax.lines)
+
+
 def test_main_window_spectrum_list_allows_multi_select(qapp, tmp_path):
     from PySide6.QtWidgets import QAbstractItemView
     window = MainWindow()
@@ -1572,7 +1586,7 @@ def test_main_window_multi_selection_shows_compare(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     _select_rows(window, [0, 1])
     assert window.compare_status_label.text() == "Comparing 2 spectra."
-    assert len(window.compare_canvas.ax.lines) == 2
+    assert _compare_line_count(window.compare_canvas) == 2
     assert window.canvas_tabs.currentWidget() is window.compare_canvas
 
 
@@ -1581,7 +1595,7 @@ def test_main_window_deselecting_back_to_single_restores_single_view(qapp, tmp_p
     window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     _select_rows(window, [0, 1])
-    assert len(window.compare_canvas.ax.lines) == 2
+    assert _compare_line_count(window.compare_canvas) == 2
 
     _select_rows(window, [0])
     assert len(window.canvas.ax.lines) == 1
@@ -1633,7 +1647,10 @@ def test_main_window_compare_normalize_by_mass_scales_data(qapp, tmp_path):
 
     assert window.compare_status_label.text() == "Comparing 2 spectra."
     original_a = window.session.spectra[0].data.copy()
-    plotted_a = window.compare_canvas.ax.lines[0].get_ydata()
+    # "Stacked" mode is one subplot per spectrum, in order -- the
+    # first spectrum's own trace is the first subplot's line, not
+    # necessarily canvas.ax (the bottom/last subplot).
+    plotted_a = window.compare_canvas._compare_axes[0].lines[0].get_ydata()
     # Plotted line reflects the /mass=2.0 scaling...
     assert not np.allclose(original_a, plotted_a)
     np.testing.assert_allclose(plotted_a * 2.0, original_a)
@@ -1930,6 +1947,87 @@ def test_main_window_relaxation_uncertainty_checkbox_shows_shaded_band(qapp):
 
     window.relaxation_uncertainty_checkbox.setChecked(False)
     assert len(window.fit_canvas.ax.collections) == 0
+
+
+def _fit_a_t2_curve(window, delays, true_t2, noise=0.0, seed=0):
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=true_t2, noise=noise, seed=seed)
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
+    window._on_fit_curve_button_clicked()
+
+
+def test_main_window_exclude_nearest_point_removes_it_and_refits(qapp):
+    delays = np.geomspace(0.001, 0.3, 10)
+    window = MainWindow()
+    _fit_a_t2_curve(window, delays, true_t2=0.05)
+    index = 0
+    original = window._relaxation_fit_original[index]
+    n_before = len(original["t"])
+
+    # Right-click exactly on the first real data point.
+    x, y = float(original["t"][0]), float(original["y"][0])
+    window._on_fit_point_exclude_requested(x, y)
+
+    assert window._excluded_relaxation_indices.get(index) == {0}
+    refit = window._relaxation_fit_results[index]
+    assert len(refit["t"]) == n_before - 1
+    assert x not in refit["t"]
+    # The original (pristine) result is untouched -- Reset can still
+    # get back to it.
+    assert len(window._relaxation_fit_original[index]["t"]) == n_before
+
+
+def test_main_window_exclude_nearest_point_shows_excluded_marker(qapp):
+    delays = np.geomspace(0.001, 0.3, 10)
+    window = MainWindow()
+    _fit_a_t2_curve(window, delays, true_t2=0.05)
+    original = window._relaxation_fit_original[0]
+
+    window._on_fit_point_exclude_requested(float(original["t"][0]), float(original["y"][0]))
+
+    labels = [line.get_label() for line in window.fit_canvas.ax.lines]
+    assert "Excluded" in labels
+
+
+def test_main_window_reset_excluded_points_restores_all(qapp):
+    delays = np.geomspace(0.001, 0.3, 10)
+    window = MainWindow()
+    _fit_a_t2_curve(window, delays, true_t2=0.05)
+    index = 0
+    original = window._relaxation_fit_original[index]
+    n_before = len(original["t"])
+
+    window._on_fit_point_exclude_requested(float(original["t"][0]), float(original["y"][0]))
+    assert len(window._relaxation_fit_results[index]["t"]) == n_before - 1
+
+    window._on_fit_points_reset_requested()
+
+    assert window._excluded_relaxation_indices.get(index, set()) == set()
+    assert len(window._relaxation_fit_results[index]["t"]) == n_before
+
+
+def test_main_window_exclude_point_refuses_below_two_remaining(qapp, monkeypatch):
+    monkeypatch.setattr("opennmr.gui.main_window.QMessageBox.information", lambda *a, **kw: None)
+    delays = np.array([0.01, 0.1])  # exactly 2 points -- the minimum
+    window = MainWindow()
+    _fit_a_t2_curve(window, delays, true_t2=0.05)
+    original = window._relaxation_fit_original[0]
+
+    window._on_fit_point_exclude_requested(float(original["t"][0]), float(original["y"][0]))
+
+    # Refused (would leave only 1 point) -- nothing actually excluded,
+    # nothing about the displayed fit changed.
+    assert window._excluded_relaxation_indices.get(0, set()) == set()
+    assert len(window._relaxation_fit_results[0]["t"]) == 2
+
+
+def test_main_window_exclude_point_noop_with_no_fit(qapp):
+    window = MainWindow()
+    window._on_fit_point_exclude_requested(0.1, 0.5)  # must not raise
+    window._on_fit_points_reset_requested()  # must not raise
 
 
 def test_main_window_fit_curve_compare_stack_requires_two_spectra(qapp, tmp_path, monkeypatch):
@@ -2577,7 +2675,7 @@ def test_main_window_clear_clears_all_five_canvases(qapp, tmp_path, monkeypatch)
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, name="a"), vendor="bruker")
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     _select_rows(window, [0, 1])
-    assert len(window.compare_canvas.ax.lines) == 2
+    assert _compare_line_count(window.compare_canvas) == 2
 
     window._on_clear_clicked()
 
@@ -2626,19 +2724,21 @@ def test_main_window_pseudo2d_stacked_view_shows_all_slices(qapp, tmp_path):
 
     window.pseudo2d_view_combo.setCurrentIndex(1)  # Stacked slices
 
-    assert len(window.canvas.ax.lines) == 5
+    assert _compare_line_count(window.canvas) == 5
     assert window.canvas_tabs.currentWidget() is window.canvas
 
 
-def test_main_window_pseudo2d_view_resets_to_contour_on_reselection(qapp, tmp_path):
+def test_main_window_pseudo2d_view_resets_to_stacked_on_reselection(qapp, tmp_path):
+    # Stacked slices is now the default view for a fresh pseudo-2D
+    # selection (explicit user request), not Contour.
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8, name="a"), vendor="bruker")
-    window.pseudo2d_view_combo.setCurrentIndex(1)
+    window.pseudo2d_view_combo.setCurrentIndex(0)  # Contour
 
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     window._select_single_row(0)
 
-    assert window.pseudo2d_view_combo.currentIndex() == 0
+    assert window.pseudo2d_view_combo.currentIndex() == 1
 
 
 # ============================================================

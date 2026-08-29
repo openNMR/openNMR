@@ -187,6 +187,19 @@ def get_stack_colormap(color='black'):
         )
 
 
+def stack_colors(n, color='black'):
+    """``n`` RGBA colours evenly spaced along :func:`get_stack_colormap`
+    -- the exact colour-resolving logic ``plot_1d_stack`` uses per
+    trace, factored out so other stacked-trace views (e.g. a GUI
+    canvas plotting each trace on its own subplot rather than
+    ``plot_1d_stack``'s own single shared axes) can match it without
+    duplicating the ``Normalize``/``ScalarMappable`` setup."""
+    values = range(n)
+    norm = plt.Normalize(vmin=values[0], vmax=values[-1]) if n > 1 else plt.Normalize(vmin=0, vmax=1)
+    scalar_map = cm.ScalarMappable(norm=norm, cmap=get_stack_colormap(color))
+    return [scalar_map.to_rgba(v) for v in values]
+
+
 def get_contour_cmap(name):
     """Look up a named colormap for 2D contour plots, restricted to
     :data:`CONTOUR_CMAP_NAMES`."""
@@ -243,3 +256,37 @@ def downsample_2d(data, x, y, max_points_x=2000, max_points_y=500):
     y_ds = y[y_idx]
 
     return data_ds, x_ds, y_ds
+
+
+#: Default cap for :func:`downsample_indices` -- rendering (not
+#: fitting/processing) more points than this per 1D line rarely adds
+#: visible detail at any normal screen resolution, but does cost real
+#: time redrawing, especially for a *dynamic* view (phase-dragging
+#: redraws on every mouse-move tick) or *many* lines at once (a
+#: Compare-tab stack of dozens of traces) -- both explicitly reported
+#: as slow for high-point-count data (diffusion/imaging acquisitions,
+#: or just a high digital resolution, routinely land in the
+#: 10^5-10^6 point range).
+DOWNSAMPLE_1D_MAX_POINTS = 8000
+
+
+def downsample_indices(n, max_points=DOWNSAMPLE_1D_MAX_POINTS):
+    """Evenly-spaced indices for downsampling a length-``n`` 1D array
+    to at most ``max_points``, for fast *display* rendering only --
+    the same idea as :func:`downsample_2d`, for a 1D line instead of a
+    2D contour. Returns ``None`` (not an index array) when ``n`` is
+    already within ``max_points``, so a caller can cheaply skip
+    indexing altogether in the (usual) case no downsampling is
+    actually needed.
+
+    Deterministic in ``n``/``max_points`` alone (no data-dependent
+    peak-preservation logic) so that re-deriving it later for a
+    same-length array -- e.g. :meth:`~opennmr.gui.widgets.canvas.MplCanvas.update_data`
+    updating a line's y-values in place after :func:`~opennmr.plotting.oned.plot_1d`
+    already downsampled its x -- reproduces the exact same indices,
+    without either function needing to remember or pass them to the
+    other.
+    """
+    if n <= max_points:
+        return None
+    return np.linspace(0, n - 1, max_points, dtype=int)

@@ -36,6 +36,20 @@ class _Toolbar(NavigationToolbar2QT):
 
     toolitems = [item for item in NavigationToolbar2QT.toolitems if item[0] not in ("Subplots", "Customize")]
 
+    def save_figure(self, *args) -> None:
+        """Overridden so a saved figure is never silently missing
+        points the live view dropped purely for faster interactive
+        rendering (see :meth:`MplCanvas.export_full_resolution`) --
+        applies no matter how this is triggered (this toolbar's own
+        Save icon, or programmatically, e.g. the File menu's Save
+        Figure As…), since both end up calling this same method."""
+        bound_save = super().save_figure
+        owner = self.parent()
+        if isinstance(owner, MplCanvas):
+            owner.export_full_resolution(lambda: bound_save(*args))
+        else:
+            bound_save(*args)
+
 
 class MplCanvas(QWidget):
     """A matplotlib figure + navigation toolbar (pan/zoom/save), ready
@@ -103,6 +117,18 @@ class MplCanvas(QWidget):
     #: asks the owner (MainWindow) to handle it.
     referenceShiftRequested = Signal()
 
+    #: Emitted with the right-clicked (x, y) data position when
+    #: "Exclude Nearest Point" is chosen from the right-click menu,
+    #: while a relaxation/diffusion curve fit (show_relaxation_fit) is
+    #: the current view -- the canvas only knows where the click
+    #: landed, not which fit-result point that's closest to or how to
+    #: re-fit without it, so it just asks the owner (MainWindow).
+    fitPointExcludeRequested = Signal(float, float)
+
+    #: Emitted (no value) when "Reset Excluded Points" is chosen --
+    #: same division of responsibility as fitPointExcludeRequested.
+    fitPointsResetRequested = Signal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
@@ -118,6 +144,14 @@ class MplCanvas(QWidget):
         self._pan_start = None  # (x_pixel, y_pixel, xlim, ylim) while dragging
         self._legend_visible = False
         self._aspect_ratio: float | None = None  # None = unlocked
+        # Persists across a rebuild the same way legend/aspect-lock do
+        # (see show_spectrum's own docstring) -- an explicit opt-out of
+        # plot_1d's default rendering-only downsampling (see
+        # opennmr.plotting.style.downsample_indices), for on-screen
+        # viewing. Exporting/saving a figure always uses full
+        # resolution regardless of this (see export_full_resolution) --
+        # this only controls what's interactively shown.
+        self._full_resolution = False
         self._pick_mode = False
         # Set only while a 2D/pseudo-2D contour is the current view --
         # scrolling then adjusts the contour threshold instead of
@@ -152,6 +186,23 @@ class MplCanvas(QWidget):
         # show_* rebuild) invalidates it, so it's reset to None
         # wherever that happens (see _apply_view_options).
         self._pivot_line = None
+        # The per-spectrum axes of a "Stacked" Compare view (one row
+        # per spectrum, sharing x, each with its own independent
+        # y-autoscale) -- None for every other view, including a
+        # "Superimposed" Compare (one shared axes, same as any other
+        # single-ax view). Lets scroll-zoom hit whichever row the
+        # cursor is actually over via its own real event.inaxes,
+        # rather than one shared y-scale that would otherwise stretch
+        # the visual gap between every OTHER row's baseline too --
+        # see show_compare's own docstring for why that's a problem a
+        # single shared axes can't solve at all, only work around.
+        self._compare_axes: list | None = None
+        # True only while show_relaxation_fit's plot is the current
+        # view -- gates the right-click "Exclude Nearest Point"/"Reset
+        # Excluded Points" actions (see _on_context_menu) and the
+        # right-click position capture in _on_press that backs them.
+        self._fit_mode = False
+        self._last_right_click_xy: tuple[float, float] | None = None
 
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("button_press_event", self._on_press)
@@ -177,11 +228,16 @@ class MplCanvas(QWidget):
         should stay put while scaling how tall a peak looks, the same
         way any NMR viewer's own intensity slider works. Decoupled
         from x entirely, so one doesn't disturb the other. For a 2D/
-        pseudo-2D contour, the x-axis behaves the same way; scrolling
-        its body instead adjusts the contour threshold (see
-        :meth:`_adjust_contour_levels`); scrolling one of its F1/F2
-        projection panels adjusts that panel's own intensity scale
-        independently, rather than either of the above."""
+        pseudo-2D contour specifically, the y-axis (F1/ppm, or slice
+        index) is a *position* axis like x, not an intensity one --
+        so it gets its own tick-label strip (on the right, matching
+        ``plot_2d_contour``'s own ``tick_right()``) with the same
+        cursor-centred zoom as the x-strip, rather than pin-bottom;
+        the x-axis behaves the same way as the 1D case above;
+        scrolling the contour's own body instead adjusts the contour
+        threshold (see :meth:`_adjust_contour_levels`); scrolling one
+        of its F1/F2 projection panels adjusts that panel's own
+        intensity scale independently, rather than any of the above."""
         if event.x is None or event.y is None:
             return
 
@@ -191,7 +247,8 @@ class MplCanvas(QWidget):
                 return
 
         on_x_strip = self._hovering_x_axis(self.ax, event)
-        ax = event.inaxes if event.inaxes is not None else (self.ax if on_x_strip else None)
+        on_y_strip = self._contour_factor is not None and self._hovering_y_axis(self.ax, event)
+        ax = event.inaxes if event.inaxes is not None else (self.ax if (on_x_strip or on_y_strip) else None)
         if ax is None:
             return
 
@@ -203,6 +260,15 @@ class MplCanvas(QWidget):
                 return
             xmin, xmax = ax.get_xlim()
             ax.set_xlim(x - (x - xmin) * factor, x + (xmax - x) * factor)
+            self.canvas.draw_idle()
+            return
+
+        if on_y_strip:
+            y = self._data_y_at(ax, event)
+            if y is None:
+                return
+            ymin, ymax = ax.get_ylim()
+            ax.set_ylim(y - (y - ymin) * factor, y + (ymax - y) * factor)
             self.canvas.draw_idle()
             return
 
@@ -262,6 +328,33 @@ class MplCanvas(QWidget):
             return None
         return float(x)
 
+    @staticmethod
+    def _hovering_y_axis(ax, event) -> bool:
+        """True if the cursor is to the right of ``ax``'s plot area,
+        within its vertical span -- its y-tick-label strip, matching
+        ``plot_2d_contour``'s own ``tick_right()`` (the main contour
+        panel's y-ticks are on the right, since the F1 projection
+        panel occupies the left side) -- rather than over the plotted
+        data itself. Only meaningful for a 2D/pseudo-2D contour (see
+        the ``_contour_factor is not None`` gate at the call site);
+        the plain 1D view has no y-ticks shown at all (intensity is
+        zoomed by hovering the body instead -- see :meth:`_on_scroll`'s
+        own docstring)."""
+        bbox = ax.get_window_extent()
+        return bbox.y0 <= event.y <= bbox.y1 and event.x > bbox.x1
+
+    @staticmethod
+    def _data_y_at(ax, event) -> float | None:
+        """The data-y value under the cursor, even when
+        ``event.ydata`` is ``None`` (cursor outside the axes' data
+        rectangle, e.g. over its y-tick-label strip) -- same reasoning
+        as :meth:`_data_x_at`."""
+        try:
+            _, y = ax.transData.inverted().transform((event.x, event.y))
+        except Exception:  # noqa: BLE001 -- e.g. a singular transform; just skip the zoom
+            return None
+        return float(y)
+
     def _adjust_contour_levels(self, event) -> None:
         """Scroll-up raises the contour floor (fewer, stronger-only
         levels -- "zoom into the peaks"); scroll-down lowers it
@@ -304,6 +397,17 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def _on_press(self, event) -> None:
+        if self._fit_mode and event.button == 3 and event.xdata is not None:
+            # Captured here (a real matplotlib event, with xdata/ydata
+            # already correctly computed) rather than re-derived from
+            # the QPoint _on_context_menu's own customContextMenuRequested
+            # signal hands over -- that's in Qt widget pixel coordinates,
+            # not matplotlib data coordinates, and converting it back
+            # correctly (accounting for the y-flip and any HiDPI scale
+            # factor between the two coordinate systems) isn't needed
+            # when the data position is already sitting right here.
+            self._last_right_click_xy = (float(event.xdata), float(event.ydata))
+            return
         if event.inaxes is None or event.button != 1 or self.toolbar.mode != "":
             return
         if self._pick_mode:
@@ -359,6 +463,24 @@ class MplCanvas(QWidget):
             contour_levels_action = menu.addAction("Set Contour Levels…")
             extract_slice_action = menu.addAction("Extract Slice…")
 
+        exclude_point_action = None
+        reset_points_action = None
+        if self._fit_mode:
+            exclude_point_action = menu.addAction("Exclude Nearest Point")
+            exclude_point_action.setEnabled(self._last_right_click_xy is not None)
+            reset_points_action = menu.addAction("Reset Excluded Points")
+
+        full_res_action = None
+        if self.has_downsampled_data():
+            full_res_action = menu.addAction("Full Resolution")
+            full_res_action.setCheckable(True)
+            full_res_action.setChecked(self._full_resolution)
+            full_res_action.setToolTip(
+                "Render every point instead of the usual display-only "
+                "cap (a saved/exported figure is always full "
+                "resolution regardless of this)."
+            )
+
         chosen = menu.exec(self.canvas.mapToGlobal(pos))
         if chosen in unit_actions:
             self.set_axis_unit(unit_actions[chosen])
@@ -378,6 +500,13 @@ class MplCanvas(QWidget):
             self._prompt_contour_levels()
         elif extract_slice_action is not None and chosen is extract_slice_action:
             self._prompt_extract_slice()
+        elif exclude_point_action is not None and chosen is exclude_point_action:
+            if self._last_right_click_xy is not None:
+                self.fitPointExcludeRequested.emit(*self._last_right_click_xy)
+        elif reset_points_action is not None and chosen is reset_points_action:
+            self.fitPointsResetRequested.emit()
+        elif full_res_action is not None and chosen is full_res_action:
+            self.set_full_resolution(not self._full_resolution)
 
     def set_legend_visible(self, visible: bool) -> None:
         self._legend_visible = visible
@@ -571,6 +700,8 @@ class MplCanvas(QWidget):
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = False
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -588,10 +719,12 @@ class MplCanvas(QWidget):
             self._contour_spectrum = None
             self._contour_factor = None
             self._proj_axes = {"f1": None, "f2": None}
+            self._compare_axes = None
+            self._fit_mode = False
             self._current_1d_spectrum = spectrum
             self._axis_unit = "ppm"  # a fresh spectrum always starts in ppm
             self.ax = self.figure.add_subplot(111)
-            xmin, xmax, labeltext = plotting.plot_1d(self.ax, spectrum)
+            xmin, xmax, labeltext = plotting.plot_1d(self.ax, spectrum, full_resolution=self._full_resolution)
             self._ppm_label = labeltext
             self.ax.lines[0].set_label(_spectrum_label(spectrum))
             self.ax.set_xlim(xmin, xmax)
@@ -658,6 +791,8 @@ class MplCanvas(QWidget):
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = False
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -690,27 +825,79 @@ class MplCanvas(QWidget):
 
     def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack",
                       y_offset: float = 0.2, normalize: bool = False) -> None:
-        """Plot several 1D spectra together for comparison, via
-        :func:`opennmr.plotting.plot_1d_stack` -- ``mode="stack"``
-        (vertically offset by ``y_offset``, as a fraction of each
-        spectrum's own height) or ``"overlay"`` (all at y=0): both are
-        really the same call, since a large enough negative
-        ``y_offset`` collapses the accumulated stack offset to zero
-        without needing a second plotting function."""
+        """Plot several 1D spectra together for comparison.
+
+        ``mode="overlay"`` : every spectrum on one shared axes at y=0
+        (via :func:`opennmr.plotting.plot_1d_stack`'s own offset-
+        collapsing trick) -- a shared y-scale is exactly what direct
+        overlay comparison needs, so a y-zoom was never a problem
+        there (there's only one baseline, always at y=0).
+
+        ``mode="stack"`` (more than one spectrum): one subplot per
+        spectrum instead, sharing only the x-axis, each with its own
+        independent y-autoscale -- *not* a single shared axes with
+        every trace's data offset by a constant (what
+        :func:`opennmr.plotting.plot_1d_stack` itself still does, and
+        what this used to do too). That single-shared-axes approach
+        has a real, structural problem a linear axis can't avoid:
+        every trace shares one y-scale, so any y-zoom multiplies
+        distances from wherever it's pinned by the same factor
+        everywhere -- including the gaps *between* different traces'
+        own baselines, which visibly spread apart or squeeze together
+        as you zoom into any one trace's own intensity, even though no
+        data actually moved (reported directly as "when I rescale on
+        the compare plot, it should keep each baseline in place").
+        Separate subplots don't have this problem: each one's own
+        y-zoom (see :meth:`_on_scroll`, unchanged -- it already zooms
+        whichever axes ``event.inaxes`` actually is) only ever touches
+        that one subplot's own range, so every other trace's baseline
+        -- literally a different axes' own y=0 -- can't move as a side
+        effect."""
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = False
         self._current_1d_spectrum = None
         self.figure.clear()
-        self.ax = self.figure.add_subplot(111)
-        offset = y_offset if mode == "stack" else -1.0
-        plotting.plot_1d_stack(spectra, ax=self.ax, fig=self.figure, y_offset=offset, normalize=normalize)
-        self.ax.set_yticks([])
-        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
-                                    linewidth=self._AXIS_LINEWIDTH)
-        plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
-                                   labelsize=self._AXIS_LABELSIZE)
-        self.ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+
+        if mode == "stack" and len(spectra) > 1:
+            axes = list(np.atleast_1d(self.figure.subplots(len(spectra), 1, sharex=True)))
+            colors = plotting.stack_colors(len(spectra), "black")
+            xmin = xmax = labeltext = None
+            for i, (row_ax, spectrum) in enumerate(zip(axes, spectra)):
+                this_xmin, this_xmax, labeltext = plotting.plot_1d(
+                    row_ax, spectrum, normalize=normalize, color=colors[i], full_resolution=self._full_resolution,
+                )
+                xmin = this_xmin if xmin is None else min(xmin, this_xmin)
+                xmax = this_xmax if xmax is None else max(xmax, this_xmax)
+                row_ax.set_yticks([])
+                is_bottom = row_ax is axes[-1]
+                plotting.apply_spine_style(row_ax, top=False, right=False, bottom=is_bottom, left=False,
+                                            linewidth=self._AXIS_LINEWIDTH)
+                if is_bottom:
+                    plotting.apply_tick_style(row_ax, axis="x", length=self._TICK_LENGTH,
+                                               width=self._TICK_WIDTH, labelsize=self._AXIS_LABELSIZE)
+                else:
+                    row_ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+            axes[0].set_xlim(xmin, xmax)
+            axes[0].invert_xaxis()
+            axes[-1].set_xlabel(labeltext, fontsize=self._AXIS_LABELSIZE)
+            self.figure.subplots_adjust(hspace=0.0)
+            self._compare_axes = axes
+            self.ax = axes[-1]
+        else:
+            self.ax = self.figure.add_subplot(111)
+            offset = y_offset if mode == "stack" else -1.0
+            plotting.plot_1d_stack(spectra, ax=self.ax, fig=self.figure, y_offset=offset, normalize=normalize,
+                                    full_resolution=self._full_resolution)
+            self.ax.set_yticks([])
+            plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
+                                        linewidth=self._AXIS_LINEWIDTH)
+            plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                       labelsize=self._AXIS_LABELSIZE)
+            self.ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+
         self._apply_view_options()
         self.figure.tight_layout()
         self.canvas.draw_idle()
@@ -740,6 +927,8 @@ class MplCanvas(QWidget):
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = False
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -774,7 +963,7 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def show_relaxation_fit(self, result: dict, uncertainty: tuple | None = None,
-                             xlabel: str = "Delay (s)") -> None:
+                             xlabel: str = "Delay (s)", excluded_points: tuple | None = None) -> None:
         """Plot ONE peak's relaxation/diffusion series (data points)
         and fitted curve, from a single ``relaxation.fit_relaxation``-
         shaped dict (one entry of
@@ -797,10 +986,20 @@ class MplCanvas(QWidget):
         ``ax.fill_between``. When ``None`` (default), the fit curve is
         instead drawn straight through the (coarser) experimental
         t-points, same as this method's behaviour before it supported
-        an uncertainty band at all."""
+        an uncertainty band at all.
+
+        ``excluded_points`` : ``(t_excluded, y_excluded)`` -- points
+        the user right-clicked out of the fit (see
+        :meth:`_on_context_menu`'s "Exclude Nearest Point"), drawn as
+        faint grey X markers instead of just disappearing, so it stays
+        visible *what* was excluded and *that* something was, not only
+        that the fit curve changed. Sets :attr:`_fit_mode`, gating the
+        right-click actions themselves."""
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = True
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -818,6 +1017,10 @@ class MplCanvas(QWidget):
             self.ax.plot(t[order], y_fit[order], "--", color="red", linewidth=2.0, label="Fit", zorder=3)
         self.ax.plot(t, y, "o", color="black", markersize=8.0,
                       label=result.get("peak_label", result.get("model", "Data")), zorder=2)
+        if excluded_points is not None and len(excluded_points[0]):
+            t_excluded, y_excluded = excluded_points
+            self.ax.plot(t_excluded, y_excluded, "x", color="grey", markersize=8.0,
+                          markeredgewidth=2.0, alpha=0.7, label="Excluded", zorder=2)
 
         self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
         self.ax.set_ylabel("Intensity", fontsize=self._AXIS_LABELSIZE)
@@ -837,11 +1040,21 @@ class MplCanvas(QWidget):
         selected spectrum. For a live preview (e.g. dragging a phase
         control) where the spectrum's identity hasn't changed, only
         its values have.
+
+        Re-derives the same rendering-only downsampling
+        :func:`opennmr.plotting.plot_1d` applied to the x-data already
+        on screen (see :func:`opennmr.plotting.style.downsample_indices`'s
+        own docstring for why this reproduces the identical indices
+        without needing to remember them) -- otherwise a high-point-
+        count spectrum's full-length new y-data wouldn't match the
+        already-downsampled x-data's length at all, let alone quickly.
         """
         if spectrum.ndim != 1 or not self.ax.lines:
             self.show_spectrum(spectrum)
             return
-        self.ax.lines[0].set_ydata(spectrum.normalized())
+        y = spectrum.normalized()
+        idx = plotting.downsample_indices(len(y))
+        self.ax.lines[0].set_ydata(y if idx is None else y[idx])
         self.canvas.draw_idle()
 
     def autoscale_y(self) -> None:
@@ -873,6 +1086,83 @@ class MplCanvas(QWidget):
         pad = (ymax - ymin) * 0.05 or 1.0
         self.ax.set_ylim(ymin - pad, ymax + pad)
         self.canvas.draw_idle()
+
+    def _lines_for_export(self) -> list:
+        """Every currently-plotted Line2D across whichever axes this
+        canvas is actually showing -- ``self.ax`` alone for every
+        ordinary view, or all of :attr:`_compare_axes` for a "Stacked"
+        Compare view (several real axes, not one shared by every
+        line)."""
+        axes = self._compare_axes if self._compare_axes is not None else [self.ax]
+        return [line for ax in axes for line in ax.lines]
+
+    def has_downsampled_data(self) -> bool:
+        """Whether anything currently plotted was (or would be, if
+        :attr:`_full_resolution` is already on) rendered below its own
+        true resolution -- gates the right-click "Full Resolution"
+        toggle, so it's not offered when there's nothing it would
+        actually change."""
+        return any(hasattr(line, "_opennmr_full_res") for line in self._lines_for_export())
+
+    def set_full_resolution(self, full: bool) -> None:
+        """Toggle between the default rendering-only downsampling
+        (see :func:`opennmr.plotting.plot_1d`) and true full
+        resolution for whatever's plotted right now -- an explicit
+        escape hatch for when the downsampling itself needs to be seen
+        through, not just its usual visually-identical result (e.g.
+        checking a specific point's exact value while zoomed in
+        close). Persists across a rebuild the same way the legend/
+        aspect-lock choices do (see :meth:`show_spectrum`'s own
+        docstring): every subsequent (re)plot on this canvas keeps
+        using whichever this was last set to, until changed again.
+
+        Swaps each line's already-plotted data in place (never
+        re-plots from a spectrum object, which this method doesn't
+        even have access to) -- full resolution from the line's own
+        stashed ``_opennmr_full_res``, or freshly re-derived
+        downsampled data from that same full-resolution array
+        (:func:`opennmr.plotting.style.downsample_indices` is
+        deterministic in array length alone, so this reproduces
+        exactly what the original plot call would have shown)."""
+        self._full_resolution = full
+        for line in self._lines_for_export():
+            full_data = getattr(line, "_opennmr_full_res", None)
+            if full_data is None:
+                continue
+            if full:
+                line.set_data(*full_data)
+            else:
+                x_full, y_full = full_data
+                idx = plotting.downsample_indices(len(y_full))
+                line.set_data((x_full, y_full) if idx is None else (x_full[idx], y_full[idx]))
+        self.canvas.draw_idle()
+
+    def export_full_resolution(self, save_fn) -> None:
+        """Call ``save_fn()`` (e.g. ``self.toolbar.save_figure``) with
+        every downsampled line's data temporarily swapped back to its
+        full resolution first -- a saved/exported figure should never
+        be silently missing points the live view dropped purely for
+        faster interactive rendering, regardless of whether
+        :attr:`_full_resolution` happens to be on already. Restores
+        the on-screen (possibly still-downsampled) view again
+        afterward either way, including if ``save_fn`` itself raises
+        or the user cancels the save dialog inside it."""
+        swapped = []
+        for line in self._lines_for_export():
+            full_data = getattr(line, "_opennmr_full_res", None)
+            if full_data is None or self._full_resolution:
+                continue  # already full resolution -- nothing to swap
+            swapped.append((line, line.get_xdata(), line.get_ydata()))
+            line.set_data(*full_data)
+        if swapped:
+            self.canvas.draw()
+        try:
+            save_fn()
+        finally:
+            if swapped:
+                for line, x, y in swapped:
+                    line.set_data(x, y)
+                self.canvas.draw_idle()
 
 
 def _spectrum_label(spectrum: NMRSpectrum) -> str:

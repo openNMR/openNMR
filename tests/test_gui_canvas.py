@@ -55,6 +55,16 @@ def _x_strip_scroll_event(ax, xdata, button="up"):
     return SimpleNamespace(inaxes=None, xdata=None, ydata=None, x=x, y=bbox.y0 - 5, button=button)
 
 
+def _y_strip_scroll_event(ax, ydata, button="up"):
+    """A scroll event over ``ax``'s y-tick-label strip -- on the
+    *right* of the plot body, matching ``plot_2d_contour``'s own
+    ``tick_right()`` for the main contour panel (see
+    ``MplCanvas._hovering_y_axis``)."""
+    bbox = ax.get_window_extent()
+    _, y = ax.transData.transform((ax.get_xlim()[0], ydata))
+    return SimpleNamespace(inaxes=None, xdata=None, ydata=None, x=bbox.x1 + 5, y=y, button=button)
+
+
 def _outside_scroll_event(ax, button="up"):
     """A scroll event well outside both ``ax``'s plot body and its
     x-axis strip -- a true no-op position."""
@@ -320,6 +330,62 @@ def test_scroll_over_contour_x_axis_zooms_x_instead(qapp):
     assert canvas.ax.get_xlim() != pytest.approx(xlim)  # x zoomed instead
 
 
+def test_scroll_over_contour_y_axis_zooms_y_instead(qapp):
+    # Explicit user request: y-axis scroll-zoom (like x already had)
+    # for the 2D/pseudo-2D contour view, not just the F1/F2 projection
+    # panels or the contour-threshold body scroll.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    ax = canvas.ax
+    ylim = ax.get_ylim()
+    original_factor = canvas._contour_factor
+
+    canvas._on_scroll(_y_strip_scroll_event(ax, ydata=95.0, button="up"))
+
+    assert canvas._contour_factor == pytest.approx(original_factor)  # levels untouched
+    assert canvas.ax.get_ylim() != pytest.approx(ylim)  # y zoomed instead
+
+
+def test_scroll_up_over_contour_y_axis_zooms_in_around_cursor(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    ax = canvas.ax
+    ax.set_ylim(90, 100)
+    canvas._on_scroll(_y_strip_scroll_event(ax, ydata=93.0, button="up"))
+    ymin, ymax = ax.get_ylim()
+    assert (ymax - ymin) < 10  # narrower than before
+    assert min(ymin, ymax) < 93.0 < max(ymin, ymax)  # cursor position still inside view
+
+
+def test_scroll_over_contour_y_axis_leaves_x_untouched(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    ax = canvas.ax
+    ax.set_xlim(0, 10)
+    ax.set_ylim(90, 100)
+    canvas._on_scroll(_y_strip_scroll_event(ax, ydata=95.0, button="up"))
+    assert ax.get_xlim() == pytest.approx((0, 10))
+
+
+def test_scroll_over_1d_right_margin_does_not_zoom_y(qapp):
+    # The new y-strip zoom is gated to 2D/pseudo-2D contours only
+    # (_contour_factor is not None) -- a plain 1D view has no y-ticks
+    # shown at all (intensity already zooms via hovering the body, see
+    # test_scroll_over_plot_body_zooms_y_intensity_only), so its right
+    # margin must stay a no-op rather than start zooming y too.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    ax = canvas.ax
+    ax.set_xlim(0, 10)
+    ax.set_ylim(-1, 1)
+    canvas._on_scroll(_y_strip_scroll_event(ax, ydata=0.0, button="up"))
+    assert ax.get_ylim() == pytest.approx((-1, 1))
+
+
 def test_contour_factor_clamped_to_bounds(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_2d())
@@ -551,3 +617,234 @@ def test_set_axis_unit_rejects_unknown_unit(qapp):
     canvas.show_spectrum(spectrum)
     canvas.set_axis_unit("mm")  # not yet supported -- silently ignored, not an error
     assert canvas._axis_unit == "ppm"
+
+
+def test_update_data_matches_downsampled_length_for_high_point_count(qapp):
+    # A phase-drag (update_data, called on every tick) must re-derive
+    # the exact same downsampling plot_1d already applied to the
+    # x-data on screen -- a length mismatch would raise inside
+    # matplotlib's own set_ydata.
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    ppm = np.linspace(0, 10, n)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    spectrum = NMRSpectrum(data=np.exp(-((ppm - 5) ** 2)), axes=[axis], metadata=metadata)
+
+    canvas = MplCanvas()
+    canvas.show_spectrum(spectrum)
+    assert len(canvas.ax.lines[0].get_xdata()) == DOWNSAMPLE_1D_MAX_POINTS
+
+    spectrum.data = spectrum.data * 2.0  # simulate a phase/data change
+    canvas.update_data(spectrum)  # must not raise (length mismatch)
+    assert len(canvas.ax.lines[0].get_ydata()) == DOWNSAMPLE_1D_MAX_POINTS
+
+
+# ============================================================
+# Full-resolution toggle and export safety
+# ============================================================
+
+def _make_1d_n(n):
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    ppm = np.linspace(0, 10, n)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    return NMRSpectrum(data=np.exp(-((ppm - 5) ** 2)), axes=[axis], metadata=metadata)
+
+
+def test_has_downsampled_data_false_for_small_spectrum(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())  # 100 points, well under the cap
+    assert canvas.has_downsampled_data() is False
+
+
+def test_has_downsampled_data_true_for_large_spectrum(qapp):
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d_n(DOWNSAMPLE_1D_MAX_POINTS * 3))
+    assert canvas.has_downsampled_data() is True
+
+
+def test_set_full_resolution_shows_every_point(qapp):
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d_n(n))
+    assert len(canvas.ax.lines[0].get_xdata()) == DOWNSAMPLE_1D_MAX_POINTS
+
+    canvas.set_full_resolution(True)
+
+    assert canvas._full_resolution is True
+    assert len(canvas.ax.lines[0].get_xdata()) == n
+
+
+def test_set_full_resolution_toggle_off_restores_downsampled(qapp):
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d_n(n))
+    canvas.set_full_resolution(True)
+    assert len(canvas.ax.lines[0].get_xdata()) == n
+
+    canvas.set_full_resolution(False)
+
+    assert len(canvas.ax.lines[0].get_xdata()) == DOWNSAMPLE_1D_MAX_POINTS
+
+
+def test_full_resolution_persists_across_a_fresh_plot(qapp):
+    # Matches how the legend-visible/aspect-lock choices already
+    # persist across a rebuild (see show_spectrum's own docstring) --
+    # this is the same kind of canvas-level preference, not reset
+    # every time a new spectrum is shown.
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d_n(n))
+    canvas.set_full_resolution(True)
+
+    canvas.show_spectrum(_make_1d_n(n))  # a fresh plot_1d call
+
+    assert len(canvas.ax.lines[0].get_xdata()) == n
+
+
+def test_export_full_resolution_uses_full_data_then_restores_view(qapp):
+    # The actual explicit user request: an export must always be
+    # fully sampled, even while the live view (deliberately) isn't.
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d_n(n))
+    assert len(canvas.ax.lines[0].get_xdata()) == DOWNSAMPLE_1D_MAX_POINTS  # still downsampled on screen
+
+    seen_lengths = []
+
+    def fake_save():
+        seen_lengths.append(len(canvas.ax.lines[0].get_xdata()))
+
+    canvas.export_full_resolution(fake_save)
+
+    assert seen_lengths == [n]  # save_fn saw the true full-resolution data
+    # ...but the live view goes right back to downsampled afterward.
+    assert len(canvas.ax.lines[0].get_xdata()) == DOWNSAMPLE_1D_MAX_POINTS
+
+
+def test_export_full_resolution_restores_view_even_if_save_fn_raises(qapp):
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d_n(n))
+
+    def raising_save():
+        raise RuntimeError("save cancelled")
+
+    with pytest.raises(RuntimeError):
+        canvas.export_full_resolution(raising_save)
+
+    assert len(canvas.ax.lines[0].get_xdata()) == DOWNSAMPLE_1D_MAX_POINTS
+
+
+def test_export_full_resolution_noop_when_already_full_resolution(qapp):
+    # No swap needed (nothing to restore afterward either) when the
+    # live view is already full resolution.
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d_n(n))
+    canvas.set_full_resolution(True)
+
+    seen_lengths = []
+    canvas.export_full_resolution(lambda: seen_lengths.append(len(canvas.ax.lines[0].get_xdata())))
+
+    assert seen_lengths == [n]
+    assert len(canvas.ax.lines[0].get_xdata()) == n  # still full resolution after
+
+
+# ============================================================
+# show_compare "Stacked" mode: one subplot per spectrum
+# ============================================================
+
+def _make_1d_at(center_ppm, amplitude=1.0):
+    ppm = np.linspace(0, 10, 100)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    return NMRSpectrum(data=amplitude * np.exp(-((ppm - center_ppm) ** 2)), axes=[axis], metadata=metadata)
+
+
+def test_show_compare_stack_creates_one_subplot_per_spectrum(qapp):
+    canvas = MplCanvas()
+    specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
+    canvas.show_compare(specs, mode="stack")
+    canvas.canvas.draw()
+    assert canvas._compare_axes is not None
+    assert len(canvas._compare_axes) == 3
+    assert all(len(ax.lines) == 1 for ax in canvas._compare_axes)
+    assert canvas.ax is canvas._compare_axes[-1]  # bottom row, where x-ticks are shown
+
+
+def test_show_compare_stack_shares_x_axis(qapp):
+    canvas = MplCanvas()
+    specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
+    canvas.show_compare(specs, mode="stack")
+    canvas.canvas.draw()
+    canvas._compare_axes[0].set_xlim(1, 2)
+    # sharex=True: changing one row's xlim moves every other row's too.
+    assert canvas._compare_axes[1].get_xlim() == pytest.approx((1, 2))
+    assert canvas._compare_axes[2].get_xlim() == pytest.approx((1, 2))
+
+
+def test_show_compare_stack_rescale_keeps_other_baselines_fixed(qapp):
+    # The actual explicit user request: rescaling (zooming) one trace
+    # in the Compare stack must not move any OTHER trace's baseline --
+    # each row is now its own independent axes, so its own y-zoom
+    # can't touch any other row's y-range at all.
+    canvas = MplCanvas()
+    specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
+    canvas.show_compare(specs, mode="stack")
+    canvas.canvas.draw()
+    top_ax, middle_ax, bottom_ax = canvas._compare_axes
+    top_ylim_before = top_ax.get_ylim()
+    middle_ylim_before = middle_ax.get_ylim()
+    bottom_ylim_before = bottom_ax.get_ylim()
+
+    canvas._on_scroll(_body_scroll_event(top_ax, xdata=3.0, ydata=top_ylim_before[0], button="up"))
+
+    top_range_before = top_ylim_before[1] - top_ylim_before[0]
+    top_range_after = top_ax.get_ylim()[1] - top_ax.get_ylim()[0]
+    assert top_range_after < top_range_before  # the scrolled-over row actually zoomed
+    assert middle_ax.get_ylim() == pytest.approx(middle_ylim_before)  # every OTHER row untouched
+    assert bottom_ax.get_ylim() == pytest.approx(bottom_ylim_before)
+
+
+def test_show_compare_overlay_still_uses_one_shared_axes(qapp):
+    # Overlay mode has only one baseline (y=0) shared by every trace,
+    # so the single-shared-axes problem this whole redesign is about
+    # doesn't apply there -- it's unchanged, still one axes.
+    canvas = MplCanvas()
+    specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
+    canvas.show_compare(specs, mode="overlay")
+    canvas.canvas.draw()
+    assert canvas._compare_axes is None
+    assert len(canvas.ax.lines) == 3
+
+
+def test_show_compare_stack_single_spectrum_uses_one_shared_axes(qapp):
+    # No "other traces" to protect a baseline from -- one shared axes
+    # (matching every other single-spectrum view) rather than a
+    # pointless one-row subplot grid.
+    canvas = MplCanvas()
+    canvas.show_compare([_make_1d_at(5.0)], mode="stack")
+    canvas.canvas.draw()
+    assert canvas._compare_axes is None
+    assert len(canvas.ax.lines) == 1
+
+
+def test_show_spectrum_after_compare_clears_compare_axes(qapp):
+    canvas = MplCanvas()
+    canvas.show_compare([_make_1d_at(c) for c in (3.0, 5.0)], mode="stack")
+    canvas.canvas.draw()
+    assert canvas._compare_axes is not None
+
+    canvas.show_spectrum(_make_1d())
+    assert canvas._compare_axes is None
