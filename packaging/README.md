@@ -51,20 +51,46 @@ PyInstaller's own `hook-PySide6.QtNetwork.py` crashed outright
 (`SIGABRT`) in its isolated OpenSSL-detection subprocess in this dev
 environment. Worth revisiting if Qt networking is ever actually needed.
 
+### CI: `.github/workflows/build.yml`
+
+Builds all three platforms on every `v*` tag push, or on demand via
+the Actions tab's "Run workflow" button (`workflow_dispatch`) — a
+matrix job per OS, each running the exact same `packaging/build.py`
+as above, then wrapping the result in a distributable package:
+
+- **macOS → `.dmg`** — a plain `hdiutil`-built disk image (no
+  `create-dmg` dependency) with the `.app` alongside an `Applications`
+  symlink, so it's a normal drag-to-install macOS package. **Verified
+  end-to-end locally** (2026-08-29, same session as the build.py
+  verification above): mounts correctly, contains the `.app` and the
+  `Applications` shortcut.
+- **Windows → `.zip`**, **Linux → `.tar.gz`** — just archives the raw
+  PyInstaller output folder; not yet a native installer (MSI/AppImage/
+  `.deb`) — see below.
+
+Artifacts land on the workflow run's own Actions page (private to the
+repo, not a public release) — attaching them to a GitHub Release
+automatically is a natural follow-up once they're trusted, not done
+yet. Only the macOS job is required to pass; Windows and Linux are
+`continue-on-error` (via the workflow's `matrix.required` flag) since
+neither has actually been run yet — tighten that once someone
+confirms a real Windows/Linux build launches correctly, not just
+builds without error.
+
 ### Not yet built
 
-- **Native installers** (a macOS DMG, a Windows MSI/installer exe, a
-  Linux AppImage/`.deb`) wrapping the raw PyInstaller output above —
-  what `build.py` produces today is a working standalone app folder,
-  not yet a polished one-click installer.
+- **Native installers for Windows/Linux** (an MSI/NSIS installer exe,
+  a Linux AppImage/`.deb`) — CI currently just zips/tars the raw
+  PyInstaller output for those two; only macOS has a real
+  double-click-to-install package (the `.dmg` above).
 - **Code signing / notarization** — the macOS build above is
   ad-hoc-signed only (PyInstaller's own `codesign -s -` step even
   half-failed with a benign "resource fork... not allowed" warning in
   this environment, worth a closer look before shipping anything).
   Unsigned/unnotarized builds will trip Gatekeeper warnings for anyone
-  else who downloads one.
-- **CI** — nothing runs `build.py` automatically; it's a manual local
-  command right now.
+  else who downloads one — including from the CI-built `.dmg` above.
+- **Publishing CI artifacts to a GitHub Release** — they currently
+  only land as private workflow-run artifacts (see above).
 
 ## Update-check: `src/opennmr/update.py`
 

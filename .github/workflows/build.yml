@@ -1,0 +1,80 @@
+name: Build
+
+# Builds a standalone opennmr app for macOS, Windows, and Linux via
+# packaging/build.py (PyInstaller), wraps each in a distributable
+# package (macOS -> .dmg, Windows -> .zip, Linux -> .tar.gz), and
+# uploads them as workflow artifacts (Actions tab -> a run -> Artifacts
+# -- private to the repo, not a public release). Publishing these to a
+# GitHub Release on tag push is a natural next step once they're
+# trusted, not done here yet -- see packaging/README.md.
+#
+# Only the macOS build has actually been run and verified (both here
+# and locally, packaging/README.md's own build log) -- Windows and
+# Linux are best-effort (continue-on-error, via matrix.required) until
+# someone confirms a real Windows/Linux build actually launches.
+# Tighten that once they're confirmed.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: opennmr-macos.dmg
+            required: true
+          - os: windows-latest
+            artifact: opennmr-windows.zip
+            required: false
+          - os: ubuntu-latest
+            artifact: opennmr-linux.tar.gz
+            required: false
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ !matrix.required }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Qt runtime deps (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 libgl1 || true
+
+      - name: Install opennmr + build tools
+        run: pip install -e ".[build]"
+
+      - name: Build standalone app
+        run: python packaging/build.py
+
+      - name: Package (macOS -> .dmg)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist/dmg
+          cp -R dist/opennmr.app dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "openNMR" -srcfolder dist/dmg -ov -format UDZO "dist/${{ matrix.artifact }}"
+
+      - name: Package (Windows -> .zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist\opennmr\* -DestinationPath "dist\${{ matrix.artifact }}"
+
+      - name: Package (Linux -> .tar.gz)
+        if: runner.os == 'Linux'
+        run: tar -czf "dist/${{ matrix.artifact }}" -C dist opennmr
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
