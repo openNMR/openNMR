@@ -2,6 +2,110 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Noted for next session (2026-08-29) -- not yet implemented
+
+User feedback from trying the previous round's changes -- explicitly
+"a few pointers to note to do in the next session," not "implement
+now." Nothing below has been touched; each item includes what's
+already been diagnosed so the next session can move straight to a fix
+rather than re-investigating.
+
+- **Compare no longer auto-populates from a pseudo-2D's own slices --
+  root cause found, not fixed.** The list itself still populates fine
+  (`_populate_compare_list_from_pseudo2d`, unchanged), but
+  `_on_list_selection_changed` calls `_refresh_compare_view()` (which
+  ends by switching `canvas_tabs` to `compare_canvas`) and *then*
+  unconditionally calls `_on_selection_changed(...)` right after --
+  which redraws `self.canvas` and switches `canvas_tabs` straight back
+  to it (`_draw_selected_spectrum`'s `if not fid_tab_active:
+  self.canvas_tabs.setCurrentWidget(self.canvas)`, true here since the
+  current tab is now Compare, not FID). So the Compare tab silently
+  gets populated and then immediately hidden again by the very next
+  line -- this ordering bug looks pre-existing (from when this feature
+  was first built), not something the last two rounds introduced,
+  just not previously noticed. Fix is presumably reordering
+  `_on_list_selection_changed`'s single-pseudo-2D branch so the
+  Compare-tab switch is the *last* thing that happens, or having
+  `_on_selection_changed` skip its own canvas-tab switch when the
+  compare view was just explicitly shown.
+- **Compare's "Stack gap" control does nothing -- root cause found,
+  not fixed, and needs a design decision.** `stack_gap_spin`'s value
+  is still passed as `y_offset` into `show_compare(...)`, but the
+  Round D subplots redesign (one independent axes per spectrum, not a
+  single shared axes with a constant vertical offset) made
+  `y_offset`/`plot_1d_stack` apply *only* to the `mode="overlay"`/
+  single-spectrum fallback path -- the actual `mode="stack"` (>1
+  spectrum) branch plots each row via bare `plotting.plot_1d` with no
+  offset concept left at all, so the spin box is now fully
+  disconnected from what's on screen. User also wants the spacing to
+  "be automatic" -- worth deciding next session whether that means (a)
+  drop `stack_gap_spin` entirely and let matplotlib's own subplot
+  `hspace`/figure-height sizing handle it, or (b) keep a gap concept
+  but derive it automatically (e.g. from spectrum count/figure height)
+  rather than a manual value -- either way `stack_gap_spin` in its
+  current form is probably going away, not just being rewired.
+- **Processing-preview performance for (pseudo-)2D data.** Currently
+  `_show_processing_preview` calls `Session.preview()`, which re-reads
+  and reprocesses *every* slice via a full `io.load()` call, then
+  throws away everything except the one slice being previewed --
+  correct but wasteful, and slow for a many-slice pseudo-2D on every
+  live control change. User asked for it to "only load one slice at a
+  time." Needs a per-slice-only read path in the vendor `io` readers
+  (or at least Bruker/X-Pulse/the ones commonly used this way) --
+  bigger than a GUI-only change, worth scoping properly rather than a
+  quick patch.
+- **Make the Processing-preview window the actual default context for
+  *all* processing steps, phasing included** -- explicit, strong
+  request ("whatever tricks we need for this should be used"),
+  reopening a call made last round on purpose (see the 2026-08-29
+  "Spectrum-tab stacked-view fix..." entry below: phase-dragging was
+  deliberately left drawing on the real Spectrum tab, reasoned as
+  already being "the result of processing" since it mutates
+  `spectrum.data` in place with no separate commit step). The user's
+  actual complaint is concrete: Align Echo and Autophase currently
+  force-switch `canvas_tabs` to `fid_canvas`/`self.canvas`
+  respectively (see `_on_align_echo_toggled`, and the Autophase button
+  handler), pulling focus out of the Processing-preview tab they're
+  already on. Two sub-problems to solve together, not separately: (1)
+  route Align Echo/Autophase/phase-drag's live redraw into
+  `processing_preview_canvas` when it's the active tab instead of
+  force-switching away, without regressing their behavior on the
+  FID/Spectrum tabs when the Processing tab isn't active; (2) phase-
+  drag specifically fires many times per second, so whatever shows it
+  live in the new preview can't be a full `Session.preview()` re-read
+  per tick the way the rest of the preview is computed (this is
+  exactly the performance concern that motivated leaving phase out
+  last round) -- likely needs the preview's spectrum panel to update
+  via the same lightweight in-place `processing_ft.apply_phase`-on-
+  cached-reference-array approach `_apply_phase_preview` already uses
+  for the Spectrum tab, not a fresh reload each tick. Depends on (or
+  at least overlaps with) the per-slice-only preview-loading item
+  above for the pseudo-2D case.
+- **Left side panel needs better reflow at smaller window widths** --
+  "the left side tab is needing scrolling too often." No diagnosis
+  done yet; likely candidates given past rounds' history here (see the
+  2026-08-29 "Pin-bottom intensity zoom..." memory entry on the last
+  panel-width investigation): specific controls with an oversized
+  natural minimum width, and/or the `QScrollArea`'s own
+  scrollbar-disabled `_scrollable()` wrapper needing a size-responsive
+  layout (e.g. collapsing some `QFormLayout` rows to stack label-above-
+  control instead of side-by-side below a width threshold) rather than
+  just a wider floor.
+- **Analysis tab organization** -- open-ended ("sub tabs or some other
+  kind of organisational flow," not spec'd further) plus two concrete
+  asks to do regardless of the larger restructure: (1) the "View peak
+  fit" spin box should sit below the Fit Curve button/section, not
+  above it (same "controls should follow, not precede, what they
+  configure/what's fit before them" principle used to place the Fit
+  Curve button in an earlier round); (2) rename for clarity --
+  "Slice fit" -> "Spectrum fit (slice #)" (with the same left/right
+  prev/next buttons already used for `slice_spin` elsewhere), "View
+  peak fit" -> "View curve fit (peak #)". The renaming targets
+  `view_slice_fit_spin`/`view_relaxation_peak_spin` and their labels/
+  buttons in `_build_analysis_tab` -- check every place either label
+  string appears (tooltips, status text) for consistency, not just the
+  widget labels themselves.
+
 ## Spectrum-tab stacked-view fix, linked Compare scroll-zoom, Processing-tab live preview, button wording (2026-08-29)
 
 - ~~Stacked view should only default in the Compare tab, not the
