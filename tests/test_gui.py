@@ -4,7 +4,7 @@ import os
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QSplitter
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.main_window import MainWindow
@@ -193,6 +193,61 @@ def test_main_window_open_clicked_no_matches_shows_error(qapp, tmp_path, monkeyp
     assert window.spectrum_list.count() == 0
 
 
+def test_main_window_accepts_drops(qapp):
+    window = MainWindow()
+    assert window.acceptDrops() is True
+
+
+def test_main_window_drop_directory_loads_single_experiment(qapp, tmp_path):
+    path = _make_1d_dataset(tmp_path)
+    window = MainWindow()
+    window._handle_dropped_paths([path])
+    assert window.spectrum_list.count() == 1
+    assert window.session.spectra[0].metadata.vendor == "bruker"
+
+
+def test_main_window_drop_directory_with_multiple_experiments_prompts(qapp, tmp_path, monkeypatch):
+    _make_1d_dataset(tmp_path, name="1")
+    _make_1d_dataset(tmp_path, name="2")
+
+    window = MainWindow()
+    prompted = {}
+
+    def fake_prompt(matches, base_dir):
+        prompted["matches"] = matches
+        return [matches[0]]
+
+    monkeypatch.setattr(window, "_prompt_select_spectra", fake_prompt)
+    window._handle_dropped_paths([str(tmp_path)])
+
+    assert len(prompted["matches"]) == 2
+    assert window.spectrum_list.count() == 1
+
+
+def test_main_window_drop_single_xpulse_file_loads_directly(qapp, tmp_path):
+    path = _make_xpulse_dataset(tmp_path)
+    window = MainWindow()
+    window._handle_dropped_paths([path])
+    assert window.spectrum_list.count() == 1
+    assert window.session.spectra[0].metadata.vendor == "xpulse"
+
+
+def test_main_window_drop_unrecognised_file_is_skipped(qapp, tmp_path):
+    junk = tmp_path / "junk.txt"
+    junk.write_text("hello")
+    window = MainWindow()
+    window._handle_dropped_paths([str(junk)])
+    assert window.spectrum_list.count() == 0
+
+
+def test_main_window_drop_multiple_paths_loads_each(qapp, tmp_path):
+    path_a = _make_1d_dataset(tmp_path, name="a")
+    path_b = _make_1d_dataset(tmp_path, name="b")
+    window = MainWindow()
+    window._handle_dropped_paths([path_a, path_b])
+    assert window.spectrum_list.count() == 2
+
+
 def test_session_add_and_label(tmp_path):
     session = Session()
     path = _make_1d_dataset(tmp_path)
@@ -296,35 +351,43 @@ def test_main_window_load_and_plot(qapp, tmp_path):
     assert len(window.canvas.ax.lines) == 1
 
 
-def test_main_window_pseudo_2d_checkbox_hidden_for_1d(qapp, tmp_path):
+def test_main_window_process_indirect_button_hidden_for_1d(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path), vendor="bruker")
-    assert window.pseudo_2d_checkbox.isHidden() is True
+    assert window.process_indirect_button.isHidden() is True
 
 
-def test_main_window_pseudo_2d_checkbox_reflects_2d_state(qapp, tmp_path):
+def test_main_window_process_indirect_button_reflects_2d_state(qapp, tmp_path):
+    # _make_2d_dataset's own vendor-recorded metadata would normally
+    # auto-detect as conventional 2D, but pseudo-2D is now the default
+    # for any 2D data regardless (see _load) -- so the button starts
+    # visible-but-unchecked (not processing the indirect dimension)
+    # and the spectrum itself is already pseudo-2D straight off _load,
+    # with no click needed.
     window = MainWindow()
     path = _make_2d_dataset(tmp_path, n_f1=4, n_f2=8)
     window._load(path, vendor="bruker")
-    assert window.pseudo_2d_checkbox.isHidden() is False
-    assert window.pseudo_2d_checkbox.isChecked() is False
+    index = window._selected_index()
+    assert window.process_indirect_button.isHidden() is False
+    assert window.process_indirect_button.isChecked() is False
+    assert window.session.spectra[index].is_pseudo_2d is True
 
 
-def test_main_window_pseudo_2d_checkbox_reprocesses_and_replots(qapp, tmp_path):
+def test_main_window_process_indirect_button_reprocesses_and_replots(qapp, tmp_path):
     window = MainWindow()
     path = _make_2d_dataset(tmp_path, n_f1=4, n_f2=8)
     window._load(path, vendor="bruker")
     index = window._selected_index()
 
-    window.pseudo_2d_checkbox.setChecked(True)
+    window.process_indirect_button.setChecked(True)
 
-    assert window.session.spectra[index].is_pseudo_2d is True
-    assert window.session.spectra[index].axes[0].kind == "index"
+    assert window.session.spectra[index].is_pseudo_2d is False
+    assert window.session.spectra[index].axes[0].kind == "frequency"
     # Canvas re-plotted with the new interpretation.
     assert window.canvas.ax is not None
 
 
-def test_main_window_pseudo_2d_checkbox_preserves_nucleus_override(qapp, tmp_path):
+def test_main_window_process_indirect_button_preserves_nucleus_override(qapp, tmp_path):
     window = MainWindow()
     path = _make_2d_dataset(tmp_path, n_f1=4, n_f2=8)
     window._load(path, vendor="bruker")
@@ -332,7 +395,7 @@ def test_main_window_pseudo_2d_checkbox_preserves_nucleus_override(qapp, tmp_pat
 
     window._set_nucleus(index, "7Li")
 
-    window.pseudo_2d_checkbox.setChecked(True)
+    window.process_indirect_button.setChecked(True)
     assert window.session.spectra[index].metadata.nucleus == "7Li"
 
 
@@ -534,6 +597,8 @@ def test_main_window_processing_disabled_for_2d_without_imag(qapp, tmp_path):
 def test_main_window_dimension_box_shows_dim_combo_for_conventional_2d(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt out of the pseudo-2D default
+
     assert window.dimension_box.isHidden() is False
     assert window.dim_combo.isHidden() is False
     assert window.slice_spin.isHidden() is True
@@ -542,7 +607,7 @@ def test_main_window_dimension_box_shows_dim_combo_for_conventional_2d(qapp, tmp
 def test_main_window_dimension_box_shows_slice_controls_for_pseudo_2d(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
+    # Pseudo-2D is already the default straight off _load -- no toggle needed.
 
     assert window.dimension_box.isHidden() is False
     assert window.slice_spin.isHidden() is False
@@ -593,6 +658,7 @@ def test_main_window_2d_dimension_toggle_resets_phase_controls(qapp, tmp_path):
 def test_main_window_2d_pivot_matches_selected_dimension(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt out of the pseudo-2D default
     index = window._selected_index()
     spectrum = window.session.spectra[index]
 
@@ -607,7 +673,6 @@ def test_main_window_2d_pivot_matches_selected_dimension(qapp, tmp_path):
 def test_main_window_pseudo2d_phase_affects_only_selected_slice(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     index = window._selected_index()
     original = _complex(window.session.spectra[index]).copy()
 
@@ -626,7 +691,6 @@ def test_main_window_pseudo2d_phase_affects_only_selected_slice(qapp, tmp_path):
 def test_main_window_pseudo2d_apply_to_all_slices(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     index = window._selected_index()
     original = _complex(window.session.spectra[index]).copy()
 
@@ -638,10 +702,39 @@ def test_main_window_pseudo2d_apply_to_all_slices(qapp, tmp_path):
     np.testing.assert_allclose(np.abs(updated), np.abs(original), atol=1e-6)
 
 
+def test_main_window_autophase_slices_button_phases_independently(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    index = window._selected_index()
+
+    # Distort every slice's phase first, so autophase has something
+    # real to correct regardless of how well-phased the synthetic
+    # fixture data already was.
+    window.apply_all_slices_checkbox.setChecked(True)
+    window.phase0_handle.setValue(65.0)
+    distorted = _complex(window.session.spectra[index]).copy()
+
+    window._on_autophase_slices_clicked()
+
+    updated = _complex(window.session.spectra[index])
+    assert not np.allclose(distorted, updated)
+    # A pure phase correction never changes magnitude, per row.
+    np.testing.assert_allclose(np.abs(updated), np.abs(distorted), atol=1e-6)
+    # Autophase (maximizing each row's own real-part integral) should
+    # improve on -- never worsen -- the distorted starting point.
+    for row in range(updated.shape[0]):
+        assert np.sum(np.real(updated[row])) >= np.sum(np.real(distorted[row])) - 1e-6
+
+
+def test_main_window_autophase_slices_button_hidden_for_1d(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    assert window.autophase_slices_button.isHidden() is True
+
+
 def test_main_window_pseudo2d_unchecking_apply_all_reverts_other_slices(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     index = window._selected_index()
     original = _complex(window.session.spectra[index]).copy()
 
@@ -660,7 +753,6 @@ def test_main_window_pseudo2d_unchecking_apply_all_reverts_other_slices(qapp, tm
 def test_main_window_pseudo2d_switching_slice_resets_phase_controls(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
 
     window.phase0_handle.setValue(45.0)
     window.slice_spin.setValue(2)
@@ -672,7 +764,6 @@ def test_main_window_pseudo2d_switching_slice_resets_phase_controls(qapp, tmp_pa
 def test_main_window_pseudo2d_phase_sets_canvas_slice_title(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     window.slice_spin.setValue(3)
 
     window.phase0_handle.setValue(10.0)
@@ -683,7 +774,6 @@ def test_main_window_pseudo2d_phase_sets_canvas_slice_title(qapp, tmp_path):
 def test_slice_label_reports_bare_position_when_index_matches_it(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     spectrum = window.session.spectra[window._selected_index()]
     assert MainWindow._slice_label(spectrum, 2) == "Slice 2"
 
@@ -882,7 +972,7 @@ def test_main_window_clicking_fid_tab_switches_canvas_to_time_domain(qapp, tmp_p
     assert window.canvas_tabs.currentWidget() is window.fid_canvas
     assert window.fid_canvas.ax.get_xlabel() == "Time (s)"
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
-    assert "Real" in labels and "Imag" in labels
+    assert "Magnitude" in labels
 
     window.canvas_tabs.setCurrentWidget(window.canvas)
     assert window.canvas_tabs.currentWidget() is window.canvas
@@ -897,9 +987,12 @@ def test_main_window_fid_tab_clears_without_raw_fid(qapp, tmp_path):
 
 def test_main_window_fid_tab_clears_for_conventional_2d(qapp, tmp_path, monkeypatch):
     window = MainWindow()
-    # acqu2s's NUC1="13C" (not "off"), so auto-detection treats this as
-    # a conventional heteronuclear 2D, not pseudo-2D.
+    # acqu2s's NUC1="13C" (not "off"), so auto-detection would treat
+    # this as a conventional heteronuclear 2D -- but pseudo-2D is now
+    # the default regardless, so opt back out explicitly to get a
+    # genuine conventional-2D spectrum for this test.
     window._load(_make_raw_2d_dataset(tmp_path, monkeypatch), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
     assert not window.session.spectra[window._selected_index()].is_pseudo_2d
     window.canvas_tabs.setCurrentWidget(window.fid_canvas)
     assert len(window.fid_canvas.ax.lines) == 0
@@ -908,16 +1001,24 @@ def test_main_window_fid_tab_clears_for_conventional_2d(qapp, tmp_path, monkeypa
 def test_main_window_fid_tab_shows_preview_for_pseudo_2d(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_raw_2d_dataset(tmp_path, monkeypatch), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     window.canvas_tabs.setCurrentWidget(window.fid_canvas)
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
-    assert "Real" in labels and "Imag" in labels
+    assert "Magnitude" in labels
+
+
+def test_main_window_fid_preview_toggle_shows_real_only(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch), vendor="bruker")
+    window.fid_display_combo.setCurrentIndex(1)  # Real
+    window.canvas_tabs.setCurrentWidget(window.fid_canvas)
+    labels = [line.get_label() for line in window.fid_canvas.ax.lines]
+    assert "Real" in labels
+    assert "Magnitude" not in labels
 
 
 def test_main_window_fid_preview_tracks_selected_slice(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     window.canvas_tabs.setCurrentWidget(window.fid_canvas)
 
     window.slice_spin.setValue(3)
@@ -978,6 +1079,57 @@ def test_main_window_tdeff_spin_disabled_for_bruker(qapp, tmp_path, monkeypatch)
     assert window.tdeff_spin.value() == 0
 
 
+def _make_varian_dataset(tmp_path, n=8, name="varian1.fid"):
+    # Minimal round-trip via nmrglue's own writer, same approach as
+    # tests/test_varian.py's _write_varian_1d -- avoids hand-fabricating
+    # Varian's binary block-header format.
+    import nmrglue as ng
+
+    def entry(field_name, values, basictype="1"):
+        return {
+            "name": field_name, "subtype": "1", "basictype": basictype, "maxvalue": "0", "minvalue": "0",
+            "stepsize": "0", "Ggroup": "0", "Dgroup": "0", "protection": "0", "active": "1",
+            "intptr": "0", "values": [str(v) for v in values], "enumerable": "0", "enumerables": [],
+        }
+
+    data = (np.arange(1, n + 1) + 1j * np.arange(1, n + 1)).astype(np.complex64)
+    dic = {
+        "nblocks": 1, "ntraces": 1, "np": 2 * n, "ebytes": 4, "tbytes": 4 * 2 * n, "bbytes": 4 * 2 * n + 28,
+        "vers_id": 0, "status": 201, "nbheaders": 1,
+        "S_DATA": 1, "S_SPEC": 0, "S_32": 0, "S_FLOAT": 1, "S_COMPLEX": 0, "S_HYPERCOMPLEX": 0,
+        "S_ACQPAR": 1, "S_SECND": 0, "S_TRANSF": 0, "S_NP": 0, "S_NF": 0, "S_NI": 0, "S_NI2": 0,
+        "procpar": {
+            "sw": entry("sw", [1000.0]), "sfrq": entry("sfrq", [100.0]), "reffrq": entry("reffrq", [100.0]),
+            "tof": entry("tof", [0.0]), "tn": entry("tn", ["H1"], basictype="2"), "nt": entry("nt", [1.0]),
+            "np": entry("np", [2 * n]), "ni": entry("ni", [1]),
+        },
+    }
+    path = str(tmp_path / name)
+    ng.varian.write(path, dic, data, overwrite=True)
+    return path
+
+
+def test_main_window_fid_processing_box_visible_for_varian(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_varian_dataset(tmp_path), vendor="varian")
+    assert window.fid_processing_box.isHidden() is False
+
+
+def test_main_window_reprocess_fid_works_for_varian(qapp, tmp_path):
+    # Regression test: before _fid_reprocessable recognised "varian",
+    # this control was simply hidden; now that it's shown, Reprocess
+    # must actually succeed (varian.read_1d/read_2d take the same
+    # fid_shift/align_echo/linear_predict kwargs the GUI always sends).
+    window = MainWindow()
+    window._load(_make_varian_dataset(tmp_path, n=8), vendor="varian")
+    index = window._selected_index()
+
+    window.fid_shift_spin.setValue(1.0)
+    window._on_reprocess_fid_clicked()  # must not raise
+
+    assert len(window.session.spectra[index].data) > 8  # zero-filled by the default preset
+
+
 def test_main_window_reprocess_applies_tdeff_truncation(qapp, tmp_path):
     # The stashed "fid" is the fully processed (windowed, zero-filled)
     # FID, so truncation doesn't show up as a shorter array -- it
@@ -1002,6 +1154,46 @@ def test_main_window_fid_plot_shows_tdeff_marker(qapp, tmp_path):
     window.canvas_tabs.setCurrentWidget(window.fid_canvas)
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
     assert "TDeff cutoff" in labels
+
+
+def test_main_window_align_echo_button_immediately_reprocesses_and_shows_fid(qapp, tmp_path):
+    # Item G from the user: "Align as full echo" should be an
+    # immediate, self-verifying action (a push button), not a
+    # checkbox whose effect is only visible after a separate
+    # "Reprocess" click with no feedback either way.
+    window = MainWindow()
+    window._load(_make_xpulse_dataset(tmp_path), vendor="xpulse")
+    window.canvas_tabs.setCurrentWidget(window.canvas)  # start on the Spectrum tab
+
+    window.align_echo_button.setChecked(True)
+
+    assert window.canvas_tabs.currentWidget() is window.fid_canvas
+    labels = [line.get_label() for line in window.fid_canvas.ax.lines]
+    assert "Echo top" in labels
+
+
+def test_main_window_echo_top_marker_hidden_when_align_echo_off(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_xpulse_dataset(tmp_path), vendor="xpulse")
+    window.canvas_tabs.setCurrentWidget(window.fid_canvas)
+    labels = [line.get_label() for line in window.fid_canvas.ax.lines]
+    assert "Echo top" not in labels
+
+
+def test_main_window_align_echo_toggled_off_reverts(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_xpulse_dataset(tmp_path), vendor="xpulse")
+    index = window._selected_index()
+
+    window.align_echo_button.setChecked(True)
+    aligned = window.session.spectra[index].data.copy()
+
+    window.align_echo_button.setChecked(False)
+    reverted = window.session.spectra[index].data
+
+    assert not np.allclose(aligned, reverted)
+    labels = [line.get_label() for line in window.fid_canvas.ax.lines]
+    assert "Echo top" not in labels
 
 
 def test_main_window_reprocess_updates_both_spectrum_and_fid_canvases(qapp, tmp_path):
@@ -1154,8 +1346,8 @@ def test_main_window_compare_list_populated_from_multi_selection(qapp, tmp_path)
     _select_rows(window, [0, 1])
 
     assert window.compare_list.count() == 2
-    rows = [window.compare_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(2)]
-    assert sorted(rows) == [0, 1]
+    entries = [window.compare_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(2)]
+    assert sorted(entries) == [(0, None), (1, None)]  # whole spectra, not slices
     for i in range(2):
         assert window.compare_list.item(i).checkState() == Qt.CheckState.Checked
 
@@ -1183,8 +1375,8 @@ def test_main_window_move_compare_item_reorders_local_plot_only(qapp, tmp_path):
     window._on_move_compare_item(1)
 
     # Local compare-list order swapped...
-    assert window.compare_list.item(0).data(Qt.ItemDataRole.UserRole) == 1
-    assert window.compare_list.item(1).data(Qt.ItemDataRole.UserRole) == 0
+    assert window.compare_list.item(0).data(Qt.ItemDataRole.UserRole) == (1, None)
+    assert window.compare_list.item(1).data(Qt.ItemDataRole.UserRole) == (0, None)
     # ...but the master session order is untouched.
     assert list(window.session.spectra) == original_session_order
 
@@ -1197,7 +1389,7 @@ def test_main_window_move_compare_item_out_of_bounds_is_noop(qapp, tmp_path):
 
     window.compare_list.setCurrentRow(0)
     window._on_move_compare_item(-1)  # already first -- no row above
-    assert window.compare_list.item(0).data(Qt.ItemDataRole.UserRole) == 0
+    assert window.compare_list.item(0).data(Qt.ItemDataRole.UserRole) == (0, None)
 
 
 def test_main_window_compare_list_preserves_unchecked_state_across_reselect(qapp, tmp_path):
@@ -1216,9 +1408,9 @@ def test_main_window_compare_list_preserves_unchecked_state_across_reselect(qapp
         window.compare_list.item(i).data(Qt.ItemDataRole.UserRole): window.compare_list.item(i).checkState()
         for i in range(window.compare_list.count())
     }
-    assert checked[0] == Qt.CheckState.Unchecked
-    assert checked[1] == Qt.CheckState.Checked
-    assert checked[2] == Qt.CheckState.Checked
+    assert checked[(0, None)] == Qt.CheckState.Unchecked
+    assert checked[(1, None)] == Qt.CheckState.Checked
+    assert checked[(2, None)] == Qt.CheckState.Checked
 
 
 def test_main_window_removing_spectrum_rebuilds_compare_list(qapp, tmp_path):
@@ -1239,8 +1431,8 @@ def test_main_window_removing_spectrum_rebuilds_compare_list(qapp, tmp_path):
 
     # b/c shifted down to indices 0/1 -- the compare list must reflect
     # that, not stale indices 1/2 (now out of range or wrong spectra).
-    rows = {window.compare_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(window.compare_list.count())}
-    assert rows == {0, 1}
+    entries = {window.compare_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(window.compare_list.count())}
+    assert entries == {(0, None), (1, None)}
 
 
 def test_main_window_clear_resets_compare_status(qapp, tmp_path):
@@ -1252,6 +1444,96 @@ def test_main_window_clear_resets_compare_status(qapp, tmp_path):
 
     window._on_clear_clicked()
     assert window.compare_status_label.text() == "Select at least two 1D spectra to compare."
+
+
+# ============================================================
+# Item D: Compare auto-populated from a pseudo-2D's own slices
+# ============================================================
+
+def test_main_window_compare_auto_populates_from_pseudo2d_slices(qapp):
+    delays = np.geomspace(0.001, 0.3, 5)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)  # a single selection -- no ctrl-click needed
+
+    assert window.compare_list.count() == 5
+    entries = [window.compare_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(5)]
+    assert entries == [(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]  # in slice order
+    for i in range(5):
+        assert window.compare_list.item(i).checkState() == Qt.CheckState.Checked
+    assert window.compare_status_label.text() == "Comparing 5 spectra."
+
+
+def test_main_window_compare_not_populated_for_single_1d_selection(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    assert window.compare_list.count() == 0
+
+
+def test_main_window_compare_list_context_menu_requires_checked_entry(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    _select_rows(window, [0, 1])
+    window.compare_list.item(0).setCheckState(Qt.CheckState.Unchecked)
+    window.compare_list.item(1).setCheckState(Qt.CheckState.Unchecked)
+
+    import opennmr.gui.main_window as main_window_module
+    captured = []
+    monkeypatch.setattr(main_window_module, "QMenu", lambda *a, **k: captured.append(_FakeMenu()) or captured[-1])
+
+    window._on_compare_list_context_menu(window.compare_list.rect().center())
+
+    assert captured == []  # menu never even built -- nothing checked to fit
+
+
+def test_main_window_compare_list_context_menu_offers_fit_curve(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    _select_rows(window, [0, 1])
+
+    import opennmr.gui.main_window as main_window_module
+    captured = []
+    monkeypatch.setattr(main_window_module, "QMenu", lambda *a, **k: captured.append(_FakeMenu()) or captured[-1])
+
+    window._on_compare_list_context_menu(window.compare_list.rect().center())
+
+    assert any("Fit Curve" in label for label in captured[0].added_labels)
+
+
+def test_main_window_fit_curve_compare_stack_recovers_known_t2(qapp):
+    # Item C+D together: a pseudo-2D's auto-populated slices, curve-fit
+    # via the Compare tab's own context menu -- not the pseudo-2D
+    # spectrum-list path -- must recover the same known T2.
+    true_t2 = 0.05
+    delays = np.geomspace(0.001, 0.3, 12)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=true_t2)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)  # also auto-populates compare_list
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
+
+    window._on_fit_curve_compare_stack_action()
+
+    assert "T2" in window.analysis_results_label.text()
+    assert len(window.fit_canvas.ax.lines) == 2
+    assert window.canvas_tabs.currentWidget() is window.fit_canvas
+
+
+def test_main_window_fit_curve_compare_stack_requires_two_spectra(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window._add_peak_row(shift=5.0, fwhm=1.0, eta=0.5)
+
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+    window._on_fit_curve_compare_stack_action()  # compare_list is empty -- nothing checked
+    assert shown.get("called") is True
 
 
 # ============================================================
@@ -1286,6 +1568,27 @@ def _load_spectrum_directly(window, spectrum):
     window._select_single_row(len(window.session) - 1)
 
 
+def _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, amplitude=1.0, n_pts=400):
+    """A real, fittable 1D peak (unlike ``_make_1d_dataset``'s tiny
+    8-point linear-ramp placeholder, which has nothing peak-shaped for
+    a spectral fit to actually converge on)."""
+    ppm = np.linspace(3.0, 7.0, n_pts)
+    data = gaussian(ppm, x0, fwhm, amplitude)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    return NMRSpectrum(data=data, axes=[axis], metadata=metadata)
+
+
+def _fit_spectrum_then_curve(window):
+    """Both steps of the analysis workflow, for the currently
+    selected (pseudo-2D) spectrum -- step 1 (Fit Spectrum, the peak
+    fit) then step 2 (Fit Curve, the relaxation/diffusion fit, a
+    context-menu action per item C -- not a button)."""
+    window._on_fit_spectrum_clicked()
+    index = window._selected_index()
+    window._on_fit_curve_pseudo2d_action(index)
+
+
 def test_main_window_analysis_status_for_non_pseudo2d(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path), vendor="bruker")
@@ -1295,7 +1598,6 @@ def test_main_window_analysis_status_for_non_pseudo2d(qapp, tmp_path):
 def test_main_window_analysis_status_for_pseudo2d(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=5, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     assert "5 slices" in window.analysis_status_label.text()
 
 
@@ -1309,6 +1611,56 @@ def test_main_window_add_and_remove_peak_row(qapp):
     window._on_remove_peak_clicked()
     assert window.peak_table.rowCount() == 1
     assert window.peak_table.item(0, 0).text() == "6"
+
+
+def test_main_window_auto_pick_peaks_populates_table(qapp):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window._add_peak_row(shift=0.0, fwhm=1.0, eta=0.5)  # a stale manual row -- should be replaced, not appended to
+    window._on_auto_pick_peaks_clicked()
+    assert window.peak_table.rowCount() == 1
+    assert float(window.peak_table.item(0, 0).text()) == pytest.approx(5.0, abs=0.02)
+
+
+def test_main_window_auto_pick_peaks_not_supported_for_conventional_2d(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt out of the pseudo-2D default
+
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+    window._on_auto_pick_peaks_clicked()
+    assert shown.get("called") is True
+
+
+def test_main_window_auto_pick_peaks_uses_prominence_spin(qapp):
+    # A strong peak (4.0) plus a much weaker one (6.5, 8% the height) --
+    # the default prominence (0.1) should drop the weak one as noise,
+    # while a lower one picks up both.
+    ppm = np.linspace(3.0, 8.0, 2000)
+    data = gaussian(ppm, 4.0, 0.05, 1.0) + gaussian(ppm, 6.5, 0.05, 0.08)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    spectrum = NMRSpectrum(data=data, axes=[axis], metadata=metadata)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    assert window.auto_pick_prominence_spin.value() == pytest.approx(0.1)  # the raised default
+    window._on_auto_pick_peaks_clicked()
+    assert window.peak_table.rowCount() == 1  # weak peak dropped at the default
+
+    window.auto_pick_prominence_spin.setValue(0.03)
+    window._on_auto_pick_peaks_clicked()
+    assert window.peak_table.rowCount() == 2  # both found at a lower threshold
+
+
+def test_main_window_clear_all_peaks_button(qapp):
+    window = MainWindow()
+    window._add_peak_row(shift=5.0, fwhm=0.1, eta=0.5)
+    window._add_peak_row(shift=6.0, fwhm=0.2, eta=0.3)
+    assert window.peak_table.rowCount() == 2
+    window.peak_table.setRowCount(0)  # what the "Clear All" button's own click handler calls
+    assert window.peak_table.rowCount() == 0
 
 
 def test_main_window_remove_peak_with_no_selection_is_noop(qapp):
@@ -1470,28 +1822,97 @@ def test_main_window_resolve_delays_relative_gradient_missing_raises(qapp):
         window._resolve_independent_values(spectrum, is_diffusion=True)
 
 
-def test_main_window_fit_relaxation_requires_pseudo2d(qapp, tmp_path, monkeypatch):
+def test_main_window_fit_spectrum_works_for_1d(qapp):
+    # Item A from the user: spectral fitting must be possible for a
+    # plain 1D spectrum directly, not just as a side effect of fitting
+    # a pseudo-2D series.
     window = MainWindow()
-    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+
+    window._on_fit_spectrum_clicked()
+
+    assert window.view_slice_fit_spin.isEnabled() is True
+    assert window.view_slice_fit_spin.maximum() == 1
+    assert window.canvas_tabs.currentWidget() is window.spectral_fit_canvas
+
+
+def test_main_window_fit_spectrum_not_supported_for_conventional_2d(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt out of the pseudo-2D default
+    assert not window.session.spectra[window._selected_index()].is_pseudo_2d
 
     shown = {}
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
-    window._on_fit_relaxation_clicked()
+    window._on_fit_spectrum_clicked()
     assert shown.get("called") is True
 
 
-def test_main_window_fit_relaxation_requires_at_least_one_peak(qapp, tmp_path, monkeypatch):
+def test_main_window_fit_spectrum_requires_at_least_one_peak(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
 
     shown = {}
     monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: shown.setdefault("text", a[2]))
-    window._on_fit_relaxation_clicked()
+    window._on_fit_spectrum_clicked()
     assert "at least one peak" in shown.get("text", "")
 
 
-def test_main_window_fit_relaxation_recovers_known_t2(qapp):
+class _FakeMenu:
+    """``QMenu.exec()`` is modal and not interceptable headlessly by
+    monkeypatching the real PySide6 class (confirmed the hard way --
+    it just hangs) -- replace the name main_window.py actually calls
+    (``QMenu(self)``) with this lightweight fake instead."""
+
+    def __init__(self, *a, **k):
+        self.added_labels = []
+
+    def addAction(self, label):
+        self.added_labels.append(label)
+        return label
+
+    def addSeparator(self):
+        pass
+
+    def exec(self, *a, **k):
+        return None
+
+
+def test_main_window_fit_curve_not_offered_for_1d_in_context_menu(qapp, tmp_path, monkeypatch):
+    # Item C: curve fitting must only be offered (via context menu)
+    # for a pseudo-2D spectrum or a Compare-tab stack -- not a plain
+    # 1D spectrum.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    index = window._selected_index()
+
+    import opennmr.gui.main_window as main_window_module
+    captured = []
+    monkeypatch.setattr(main_window_module, "QMenu", lambda *a, **k: captured.append(_FakeMenu()) or captured[-1])
+
+    pos = window.spectrum_list.visualItemRect(window.spectrum_list.item(index)).center()
+    window._on_spectrum_list_context_menu(pos)
+
+    assert not any("Fit Curve" in label for label in captured[0].added_labels)
+
+
+def test_main_window_fit_curve_offered_for_pseudo2d_in_context_menu(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    index = window._selected_index()
+
+    import opennmr.gui.main_window as main_window_module
+    captured = []
+    monkeypatch.setattr(main_window_module, "QMenu", lambda *a, **k: captured.append(_FakeMenu()) or captured[-1])
+
+    pos = window.spectrum_list.visualItemRect(window.spectrum_list.item(index)).center()
+    window._on_spectrum_list_context_menu(pos)
+
+    assert any("Fit Curve" in label for label in captured[0].added_labels)
+
+
+def test_main_window_fit_spectrum_then_curve_recovers_known_t2(qapp):
     true_t2 = 0.05
     delays = np.geomspace(0.001, 0.3, 12)
     spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=true_t2)
@@ -1503,7 +1924,7 @@ def test_main_window_fit_relaxation_recovers_known_t2(qapp):
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
 
-    window._on_fit_relaxation_clicked()
+    _fit_spectrum_then_curve(window)
 
     assert "T2" in window.analysis_results_label.text()
     assert len(window.fit_canvas.ax.lines) == 2  # data points + fit curve
@@ -1525,7 +1946,7 @@ def test_main_window_fit_canvas_siloed_per_spectrum(qapp):
     window.delay_source_combo.setCurrentIndex(1)  # Manual list
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
-    window._on_fit_relaxation_clicked()
+    _fit_spectrum_then_curve(window)
     assert len(window.fit_canvas.ax.lines) == 2
 
     _load_spectrum_directly(window, spectrum_b)
@@ -1546,15 +1967,16 @@ def test_main_window_spectral_fit_canvas_siloed_per_spectrum(qapp):
     window.delay_source_combo.setCurrentIndex(1)
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
-    window._on_fit_relaxation_clicked()  # also fits/stores per-slice spectral fits
+    window._on_fit_spectrum_clicked()  # spectral fit alone -- curve fit not needed here
     window.view_slice_fit_spin.setValue(2)  # look at one slice's spectral fit
-    assert len(window.spectral_fit_canvas.ax.lines) == 2
+    # Data + Fit (total) + one peak component + baseline, for the single peak fitted above.
+    assert len(window.spectral_fit_canvas.ax.lines) == 4
 
     _load_spectrum_directly(window, spectrum_b)
     assert len(window.spectral_fit_canvas.ax.lines) == 0
 
     window._select_single_row(0)
-    assert len(window.spectral_fit_canvas.ax.lines) == 2
+    assert len(window.spectral_fit_canvas.ax.lines) == 4
 
 
 def test_main_window_view_slice_fit_does_not_touch_spectrum_canvas(qapp):
@@ -1570,7 +1992,7 @@ def test_main_window_view_slice_fit_does_not_touch_spectrum_canvas(qapp):
     window.delay_source_combo.setCurrentIndex(1)
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
-    window._on_fit_relaxation_clicked()
+    window._on_fit_spectrum_clicked()
 
     window.canvas_tabs.setCurrentWidget(window.canvas)
     spectrum_title_before = window.canvas.ax.get_title()
@@ -1654,7 +2076,7 @@ def test_main_window_fid_processing_settings_persist_across_reselection(qapp, tm
     window._select_single_row(0)
     hann_row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "hann")
     window.window_combo.setCurrentIndex(hann_row)
-    window.align_echo_checkbox.setChecked(True)
+    window.align_echo_button.setChecked(True)
     window.fid_shift_spin.setValue(2.5)
     window._set_zero_fill_value(4096)
     window._on_reprocess_fid_clicked()
@@ -1665,7 +2087,7 @@ def test_main_window_fid_processing_settings_persist_across_reselection(qapp, tm
     window._select_single_row(0)
 
     assert window.window_combo.currentData() == "hann"
-    assert window.align_echo_checkbox.isChecked() is True
+    assert window.align_echo_button.isChecked() is True
     assert window.fid_shift_spin.value() == pytest.approx(2.5)
     assert window._zero_fill_value() == 4096
 
@@ -1705,14 +2127,31 @@ def test_main_window_unmodified_spectrum_still_gets_fresh_defaults(qapp, tmp_pat
 
 
 # ============================================================
+# Left/right splitter sizing
+# ============================================================
+
+def test_main_window_left_panel_has_a_usable_minimum_width(qapp):
+    window = MainWindow()
+    splitter = window.centralWidget()
+    assert isinstance(splitter, QSplitter)
+    tabs = splitter.widget(0)
+    assert tabs.minimumWidth() >= 250
+
+
+# ============================================================
 # Multi-canvas plot tabs (Spectrum / FID / Compare / Fit)
 # ============================================================
 
 def test_main_window_has_five_canvas_tabs(qapp):
     window = MainWindow()
     labels = [window.canvas_tabs.tabText(i) for i in range(window.canvas_tabs.count())]
-    assert labels == ["Spectrum", "FID", "Compare", "Fit", "Spectral Fit"]
-    assert window.canvas_tabs.widget(0) is window.canvas
+    assert labels == ["FID", "Spectrum", "Spectral Fit", "Fit", "Compare"]
+    assert window.canvas_tabs.widget(0) is window.fid_canvas
+    assert window.canvas_tabs.widget(1) is window.canvas
+    # Fit/Compare start hidden -- nothing to show until a pseudo-2D
+    # spectrum is selected, or the Compare list has an entry.
+    assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.fit_canvas)) is False
+    assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.compare_canvas)) is False
 
 
 def test_main_window_selecting_spectrum_switches_to_spectrum_tab(qapp, tmp_path):
@@ -1768,16 +2207,15 @@ def test_main_window_pseudo2d_view_combo_hidden_for_1d(qapp, tmp_path):
 def test_main_window_pseudo2d_view_combo_visible_only_for_pseudo2d(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    assert window.pseudo2d_view_combo.isHidden() is True  # conventional 2D, not pseudo
+    assert window.pseudo2d_view_combo.isHidden() is False  # pseudo-2D is the default
 
-    window.pseudo_2d_checkbox.setChecked(True)
-    assert window.pseudo2d_view_combo.isHidden() is False
+    window.process_indirect_button.setChecked(True)  # opt out -> conventional 2D
+    assert window.pseudo2d_view_combo.isHidden() is True
 
 
 def test_main_window_pseudo2d_stacked_view_shows_all_slices(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=5, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
 
     window.pseudo2d_view_combo.setCurrentIndex(1)  # Stacked slices
 
@@ -1788,7 +2226,6 @@ def test_main_window_pseudo2d_stacked_view_shows_all_slices(qapp, tmp_path):
 def test_main_window_pseudo2d_view_resets_to_contour_on_reselection(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8, name="a"), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     window.pseudo2d_view_combo.setCurrentIndex(1)
 
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
@@ -1868,7 +2305,7 @@ def test_main_window_diffusion_fit_recovers_known_d(qapp):
     window.manual_delays_edit.setText(", ".join(f"{b:.6g}" for b in b_values))
     window.relaxation_model_combo.setCurrentIndex(0)  # Stejskal-Tanner
 
-    window._on_fit_relaxation_clicked()
+    _fit_spectrum_then_curve(window)
 
     assert "D" in window.analysis_results_label.text()
     assert "m^2/s" in window.analysis_results_label.text() or "e-" in window.analysis_results_label.text()
@@ -1883,12 +2320,10 @@ def test_main_window_diffusion_fit_recovers_known_d(qapp):
 def test_main_window_peak_list_siloed_per_spectrum(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8, name="a"), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     window._add_peak_row(shift=5.0, fwhm=0.1, eta=0.5)
     assert window.peak_table.rowCount() == 1
 
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8, name="b"), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     assert window.peak_table.rowCount() == 0  # a fresh spectrum starts empty, not lingering
 
     window._add_peak_row(shift=6.0, fwhm=0.2, eta=0.3)
@@ -1904,13 +2339,11 @@ def test_main_window_peak_list_siloed_per_spectrum(qapp, tmp_path):
 def test_main_window_fit_type_and_delay_source_siloed_per_spectrum(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8, name="a"), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     window.fit_type_combo.setCurrentIndex(1)  # Diffusion
     window.delay_source_combo.setCurrentIndex(2)  # Start + step
     window.delay_start_spin.setValue(1.0)
 
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8, name="b"), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     assert window.fit_type_combo.currentIndex() == 0  # fresh spectrum -> back to defaults
     assert window.delay_source_combo.currentIndex() == 0
 
@@ -1934,7 +2367,7 @@ def test_main_window_analysis_results_siloed_per_spectrum(qapp):
     window.delay_source_combo.setCurrentIndex(1)
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
-    window._on_fit_relaxation_clicked()
+    _fit_spectrum_then_curve(window)
     assert window.analysis_results_label.text() != ""
 
     window._select_single_row(1)
@@ -1953,7 +2386,6 @@ def test_main_window_analysis_results_siloed_per_spectrum(qapp):
 def test_main_window_view_slice_fit_disabled_before_fit(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
-    window.pseudo_2d_checkbox.setChecked(True)
     assert window.view_slice_fit_spin.isEnabled() is False
 
 
@@ -1967,7 +2399,7 @@ def test_main_window_view_slice_fit_shows_data_and_fit_curve(qapp):
     window.delay_source_combo.setCurrentIndex(1)
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
-    window._on_fit_relaxation_clicked()
+    window._on_fit_spectrum_clicked()  # spectral fit alone -- curve fit not needed here
 
     assert window.view_slice_fit_spin.isEnabled() is True
     assert window.view_slice_fit_spin.maximum() == len(delays)
@@ -1975,8 +2407,27 @@ def test_main_window_view_slice_fit_shows_data_and_fit_curve(qapp):
     window.view_slice_fit_spin.setValue(3)
     assert window.canvas_tabs.currentWidget() is window.spectral_fit_canvas
     labels = [line.get_label() for line in window.spectral_fit_canvas.ax.lines]
-    assert "Data" in labels and "Fit" in labels
+    assert "Data" in labels and "Fit (total)" in labels
+    assert any(label.startswith("Peak 1") for label in labels)
+    assert "Baseline" in labels
     assert "Slice 3" in window.spectral_fit_canvas.ax.get_title()
+    assert "Peak 1" in window.spectral_fit_params_label.text()
+
+
+def test_main_window_fit_spectrum_updates_peak_table_starting_values(qapp):
+    delays = np.geomspace(0.001, 0.3, 8)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.2, fwhm=0.08, eta=0.3)  # deliberately off from the true 5.0/0.05
+    window.position_tolerance_spin.setValue(5.0)  # wide enough that the default +/-0.5*FWHM bound doesn't clip the fit short of 5.0
+    window._on_fit_spectrum_clicked()
+
+    shift = float(window.peak_table.item(0, 0).text())
+    fwhm = float(window.peak_table.item(0, 1).text())
+    assert abs(shift - 5.0) < 0.02
+    assert abs(fwhm - 0.05) < 0.02
 
 
 # ============================================================
@@ -2012,12 +2463,71 @@ def test_main_window_apply_sr_zero_delta_is_noop(qapp, tmp_path):
     np.testing.assert_allclose(window.session.spectra[index].axes[-1].ppm, original_ppm)
 
 
-def test_main_window_apply_sr_resets_control(qapp, tmp_path):
+def test_main_window_apply_sr_does_not_reset_control(qapp, tmp_path):
+    # SR is a persistent value, not a one-shot delta -- the control
+    # must keep showing what was applied, not snap back to 0.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path), vendor="bruker")
     window.sr_shift_spin.setValue(40.0)
     window._on_apply_sr_clicked()
-    assert window.sr_shift_spin.value() == pytest.approx(0.0)
+    assert window.sr_shift_spin.value() == pytest.approx(40.0)
+
+
+def test_main_window_apply_sr_is_idempotent(qapp, tmp_path):
+    # Applying "the same SR" a second time must be a no-op, not a
+    # second shift on top of the first (the old additive-delta design
+    # would have doubled it).
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+
+    window.sr_shift_spin.setValue(40.0)
+    window._on_apply_sr_clicked()
+    once = spectrum.axes[-1].hz.copy()
+
+    window._on_apply_sr_clicked()  # re-apply the same value
+    np.testing.assert_allclose(spectrum.axes[-1].hz, once)
+
+
+def test_main_window_apply_sr_second_value_replaces_not_compounds(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    original_hz = spectrum.axes[-1].hz.copy()
+
+    window.sr_shift_spin.setValue(40.0)
+    window._on_apply_sr_clicked()
+    window.sr_shift_spin.setValue(10.0)
+    window._on_apply_sr_clicked()
+
+    np.testing.assert_allclose(spectrum.axes[-1].hz, original_hz + 10.0)
+
+
+def test_main_window_sr_siloed_per_spectrum(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window.sr_shift_spin.setValue(40.0)
+    window._on_apply_sr_clicked()
+
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    assert window.sr_shift_spin.value() == pytest.approx(0.0)  # fresh spectrum -> no SR yet
+
+    window._select_single_row(0)
+    assert window.sr_shift_spin.value() == pytest.approx(40.0)
+
+
+def test_main_window_apply_sr_preserves_axis_unit(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window.canvas.set_axis_unit("hz")
+
+    window.sr_shift_spin.setValue(40.0)
+    window._on_apply_sr_clicked()
+
+    assert window.canvas.axis_unit == "hz"
+    assert window.canvas.ax.get_xlabel() == "Frequency / Hz"
 
 
 def test_main_window_reference_shift_from_plot_prompts_and_applies(qapp, tmp_path, monkeypatch):

@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
 
-_LOGO_PATH = os.path.join(os.path.dirname(__file__), "resources", "logo.svg")
+_LOGO_PATH = os.path.join(os.path.dirname(__file__), "resources", "logo.png")
 
 
 def main() -> int:

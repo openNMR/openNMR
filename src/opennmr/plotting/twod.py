@@ -26,11 +26,21 @@ from .style import setup_plotting, get_stack_colormap, get_contour_cmap, downsam
 
 
 def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fraction_y=0.25,
-                      ncontourpts_x=16384, ncontourpts_y=1024, factor=1e-03, clevels=20):
+                      ncontourpts_x=16384, ncontourpts_y=1024, factor=1e-03, clevels=20,
+                      level_mode="power", power=1.25):
     """Shared contour-preparation logic: resolve the F1 axis (ppm, or
     slice index for pseudo-2D), downsample for fast rendering, and
-    compute log-spaced contour levels. Internal helper used by both
-    :func:`plot_2d_contour` and :func:`overlay_plot`."""
+    compute the contour levels. Internal helper used by both
+    :func:`plot_2d_contour` and :func:`overlay_plot`.
+
+    ``level_mode`` : ``"power"`` (default) spaces ``clevels`` levels
+    between ``factor * max(data)`` and ``max(data)`` on a power-law
+    curve controlled by ``power`` (steeper/more levels bunched near
+    the noise floor as ``power`` increases past 1) -- good for picking
+    out weak peaks near a strong one without saturating the display.
+    ``"linear"`` spaces them evenly instead, which better reflects
+    relative peak heights at a glance.
+    """
     data = spectrum.data
     x_ppm = spectrum.axes[1].ppm
     pseudo2d = spectrum.is_pseudo_2d
@@ -51,10 +61,16 @@ def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fra
     else:
         contour_x, contour_y, contour_data = x_ppm, y_axis, data
 
+    if level_mode not in ("power", "linear"):
+        raise ValueError("level_mode must be 'power' or 'linear'")
+
     thresh_min = factor * np.amax(data)
     thresh_max = np.amax(data)
-    cc2 = np.linspace(1, clevels, clevels)
-    thresvec = [thresh_min * ((thresh_max / thresh_min) ** (1 / clevels)) ** (1.25 * i) for i in cc2]
+    if level_mode == "linear":
+        thresvec = list(np.linspace(thresh_min, thresh_max, clevels))
+    else:
+        cc2 = np.linspace(1, clevels, clevels)
+        thresvec = [thresh_min * ((thresh_max / thresh_min) ** (1 / clevels)) ** (power * i) for i in cc2]
 
     return contour_x, contour_y, contour_data, thresvec, y_axis
 
@@ -62,6 +78,7 @@ def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fra
 def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fraction_y=0.25,
                      ncontourpts_x=16384, ncontourpts_y=1024,
                      pl_height=7.0, pl_width=7.0, factor=1e-03, clevels=20,
+                     level_mode="power", power=1.25,
                      proj_scale=1.0, projection_mode="auto", show_projections=True,
                      projection_size=2.0, projection_pad=0.1,
                      field='', xlabel=None, ylabel=None, xlims=None, ylims=None,
@@ -82,6 +99,8 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     ``show_projections`` : ``True`` (both), ``False`` (neither, e.g.
     embedding a compact panel), or ``'f1'``/``'f2'`` (one only).
 
+    ``clevels``/``level_mode``/``power`` : see :func:`_prepare_contour`.
+
     ``ax`` : if given, plot into this axis instead of creating a new
     figure (for embedding, e.g. in a GUI canvas, or in
     :func:`multi_plot`) -- figure-level options (``pl_height``,
@@ -89,7 +108,12 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     ``save_fig``) are then ignored, since they'd affect the whole
     (shared) figure.
 
-    Returns ``fig, ax``.
+    Returns ``fig, ax, proj_axes`` -- ``proj_axes`` is
+    ``{"f1": Axes | None, "f2": Axes | None}``, the F1 (left)/F2 (top)
+    projection panels' own axes when drawn (``None`` for whichever
+    ``show_projections`` excluded), so a caller can address their
+    intensity scale independently of the main contour (e.g. its own
+    scroll-to-zoom).
     """
     data = spectrum.data
     x_ppm = spectrum.axes[1].ppm
@@ -99,6 +123,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     contour_x, contour_y, contour_data, thresvec, y_axis = _prepare_contour(
         spectrum, contour_fraction_x=contour_fraction_x, contour_fraction_y=contour_fraction_y,
         ncontourpts_x=ncontourpts_x, ncontourpts_y=ncontourpts_y, factor=factor, clevels=clevels,
+        level_mode=level_mode, power=power,
     )
 
     nuc1 = find_gamma(spectrum.metadata.nucleus, field=field, SFO1=spectrum.metadata.sfo1)['Nuclide']
@@ -198,6 +223,8 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     if show_projections not in (True, False, 'f1', 'f2'):
         raise ValueError("show_projections must be True, False, 'f1', or 'f2'")
 
+    proj_axes = {"f1": None, "f2": None}
+
     if show_f2_projection or show_f1_projection:
         spec_float = np.asarray(data, dtype=np.float64)
         mode = projection_mode
@@ -206,8 +233,6 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
         elif mode not in ("sum", "max"):
             raise ValueError("projection_mode must be 'auto', 'sum', or 'max'")
 
-        proj_axes = []
-
         if show_f2_projection:
             ax_f2 = divider.append_axes("top", projection_size, pad=projection_pad, sharex=ax)
             ax_f2.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False, labeltop=False)
@@ -215,7 +240,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             f2_projection = np.sum(spec_float, axis=0) if mode == "sum" else np.max(np.abs(spec_float), axis=0)
             ax_f2.plot(x_ppm, f2_projection + (0.02 * np.min(f2_projection)), 'k')
             ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
-            proj_axes.append(ax_f2)
+            proj_axes["f2"] = ax_f2
 
         if show_f1_projection:
             ax_f1 = divider.append_axes("left", projection_size, pad=projection_pad, sharey=ax)
@@ -224,9 +249,11 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             f1_projection = np.sum(spec_float, axis=1) if mode == "sum" else np.max(np.abs(spec_float), axis=1)
             ax_f1.plot(-f1_projection + (0.02 * np.min(-f1_projection)), y_axis, 'k')
             ax_f1.set_xlim([np.min(-f1_projection) * proj_scale, np.max(-f1_projection) * 0.99])
-            proj_axes.append(ax_f1)
+            proj_axes["f1"] = ax_f1
 
-        for proj_ax in proj_axes:
+        for proj_ax in proj_axes.values():
+            if proj_ax is None:
+                continue
             for spine in ('top', 'right', 'bottom', 'left'):
                 proj_ax.spines[spine].set_visible(False)
 
@@ -237,7 +264,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
         if save_fig:
             save_figure(fig, fig_name=fig_name, save_format=save_format)
 
-    return fig, ax
+    return fig, ax, proj_axes
 
 
 def multi_plot(spectra: list[NMRSpectrum], layout="row", panel_kwargs=None, titles=None,

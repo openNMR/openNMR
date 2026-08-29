@@ -391,6 +391,76 @@ def enforce_positive_intensity(popt, peak_defs):
 
 
 # ============================================================
+# Auto peak-picking
+# ============================================================
+
+def auto_pick_peaks(spectrum: NMRSpectrum, x_unit: str = "ppm", prominence: float = 0.05,
+                     min_distance_fwhm: float = 1.0, max_peaks: int | None = None) -> list[dict]:
+    """Detect peaks in a 1D spectrum automatically, as a fast starting
+    point for :func:`fit_spectrum`/:func:`NMR2D_fit_slices` -- a much
+    lighter-weight alternative to manually entering (or clicking) every
+    peak's approximate position first. A cleaned-up, decoupled version
+    of the peak-finding core of ``leonmr``'s ``xf2_peak_pick`` (which
+    also plotted and tracked intensities across a whole pseudo-2D
+    stack -- neither of which belongs here; this only finds peaks in
+    one spectrum).
+
+    ``prominence`` : minimum peak prominence, as a fraction of the
+    spectrum's own peak-to-peak range (0-1) -- filters out noise
+    bumps. Lower finds more (weaker) peaks; higher finds fewer.
+
+    ``min_distance_fwhm`` : minimum spacing between two detected peaks,
+    as a multiple of *each* peak's own estimated FWHM -- merges/drops
+    a peak that's really just a shoulder or noise spike right next to
+    a stronger one, rather than double-counting it. Uses each
+    detected peak's own half-prominence width as a first-pass FWHM
+    estimate for this filtering.
+
+    ``max_peaks`` : if given, keep only this many, strongest-first.
+
+    Returns a list of peak-def dicts (``{"type": "pseudo_voigt",
+    "shift": ..., "fwhm": ..., "eta": 0.5}``), sorted by position --
+    directly usable as :func:`fit_spectrum`'s ``peak_defs`` (or, in the
+    GUI, to populate the Analysis tab's peak table) as an initial
+    guess; every value here still only seeds the fit, same as a
+    manually-entered peak.
+    """
+    from scipy.signal import find_peaks, peak_widths
+
+    x = spectrum.axis_values(0, unit=x_unit.lower())
+    y = np.asarray(spectrum.normalized(), dtype=np.float64)
+
+    y_range = np.ptp(y)
+    if y_range <= 0:
+        return []
+    y_norm = (y - np.min(y)) / y_range
+
+    dx = np.abs(np.mean(np.diff(x))) if len(x) > 1 else 1.0
+
+    indices, properties = find_peaks(y_norm, prominence=prominence)
+    if len(indices) == 0:
+        return []
+
+    widths_pts, *_ = peak_widths(y_norm, indices, rel_height=0.5)
+    order = np.argsort(-properties["prominences"])  # strongest first, for max_peaks/distance filtering
+
+    kept_positions: list[float] = []
+    kept: list[dict] = []
+    for i in order:
+        shift = float(x[indices[i]])
+        fwhm = max(float(widths_pts[i]) * dx, dx)  # at least one sample wide
+        if any(abs(shift - other) < min_distance_fwhm * fwhm for other in kept_positions):
+            continue
+        kept_positions.append(shift)
+        kept.append({"type": "pseudo_voigt", "shift": shift, "fwhm": fwhm, "eta": 0.5})
+        if max_peaks is not None and len(kept) >= max_peaks:
+            break
+
+    kept.sort(key=lambda p: p["shift"])
+    return kept
+
+
+# ============================================================
 # Fitting
 # ============================================================
 

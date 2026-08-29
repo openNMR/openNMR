@@ -38,6 +38,55 @@ def _write_fixture(tmp_path):
     return str(path)
 
 
+# Echo top (magnitude 10.0) at index 2, with index 1 and index 3 given
+# equal magnitude (2.0) so find_echo_top's parabolic interpolation
+# lands exactly on that integer sample (no fractional remainder) --
+# keeps the regression test below an exact permutation check rather
+# than a fuzzy one across align_echo's FFT-based fractional roll.
+ECHO_FIXTURE = """\
+##TITLE= synthetic echo test fixture
+##$SFO1= 400.130000
+##$SF= 400.130000
+##$O1= 2400.500000
+##.OBSERVENUCLEUS= 1H
+##VARFORM= AFFN, AFFN, AFFN
+##LAST= 0.000700
+$$ SPINFLOW START
+$$NP=8
+$$Filter=10000
+$$TDEFF=4
+$$SI=8
+$$ SPINFLOW END
+##PAGE= N=1
+##DATATABLE= (X++(R..R))
+0.000000 5.0
+0.000100 2.0
+0.000200 10.0
+0.000300 2.0
+0.000400 1.0
+0.000500 0.5
+0.000600 0.25
+0.000700 0.1
+##PAGE= N=2
+##DATATABLE= (X++(R..R))
+0.000000 0.0
+0.000100 0.0
+0.000200 0.0
+0.000300 0.0
+0.000400 0.0
+0.000500 0.0
+0.000600 0.0
+0.000700 0.0
+##END=
+"""
+
+
+def _write_echo_fixture(tmp_path):
+    path = tmp_path / "echo.jdx"
+    path.write_text(ECHO_FIXTURE)
+    return str(path)
+
+
 def test_read_xpulse_jcamp_decodes_affn_fid(tmp_path):
     path = _write_fixture(tmp_path)
     fid_data = xpulse._read_xpulse_jcamp(path)
@@ -110,6 +159,66 @@ def test_baseline_correct_defaults_off_when_align_echo_is_on(tmp_path, monkeypat
     called.clear()
     xpulse.read_1d(path, autophase=False, align_echo=True, baseline_correct=True)
     assert called == [True]  # explicit override still honoured
+
+
+def test_align_echo_then_truncate_discards_wrapped_pre_echo_tail(tmp_path):
+    # Regression test: align_echo must run BEFORE truncate, not after.
+    # align_echo rolls the echo top (here, magnitude 10.0 at index 2)
+    # to index 0, which wraps the pre-echo portion (indices 0-1: 5.0,
+    # 2.0) around to the tail of the array. Truncating first, against
+    # the original unrolled timeline, does nothing to remove that
+    # wrapped portion -- get the order backwards and the "aligned" FID
+    # (10, 2, [wrapped: 5, 2] instead of the true post-echo decay 1,
+    # 0.5) has a spurious bump spliced onto its tail: the "looks like
+    # a time-reversal" artifact this ordering fixes.
+    path = _write_echo_fixture(tmp_path)
+    spectrum = xpulse.read_1d(
+        path, autophase=False, baseline_correct=False, align_echo=True, truncate=True,
+    )
+    fid = spectrum.metadata.raw["fid"]
+    assert len(fid) == 4
+    np.testing.assert_allclose(np.real(fid), [10.0, 2.0, 1.0, 0.5], atol=1e-9)
+
+
+def test_align_echo_caps_truncation_at_wrap_point_even_with_no_truncate_requested(tmp_path):
+    # Regression test for the real remaining bug: previously, with no
+    # `truncate` given at all (the actual default a user hits without
+    # manually setting TDeff), align_echo alone did nothing to exclude
+    # the wrapped pre-echo portion -- the file's own recorded TDEFF (4,
+    # in this fixture) is what excluded it in the sibling test above,
+    # not align_echo itself. Same fixture: echo top (10.0) at index 2,
+    # wrap point at len(fid) - ceil(top) = 8 - 2 = 6. With truncate
+    # left at its default (None/unset), align_echo must still cap the
+    # result there on its own, not leave the wrapped [5.0, 2.0] tail in.
+    path = _write_echo_fixture(tmp_path)
+    spectrum = xpulse.read_1d(path, autophase=False, baseline_correct=False, align_echo=True)
+    fid = spectrum.metadata.raw["fid"]
+    assert len(fid) == 6
+    np.testing.assert_allclose(np.real(fid), [10.0, 2.0, 1.0, 0.5, 0.25, 0.1], atol=1e-9)
+
+
+def test_align_echo_caps_an_explicit_truncate_past_the_wrap_point(tmp_path):
+    # An explicit truncate longer than the wrap point (here, 8 -- the
+    # full untruncated length) must still be capped down to the wrap
+    # point (6) once align_echo is on, not honoured as-is.
+    path = _write_echo_fixture(tmp_path)
+    spectrum = xpulse.read_1d(
+        path, autophase=False, baseline_correct=False, align_echo=True, truncate=8,
+    )
+    fid = spectrum.metadata.raw["fid"]
+    assert len(fid) == 6
+
+
+def test_align_echo_does_not_widen_a_shorter_explicit_truncate(tmp_path):
+    # An explicit truncate shorter than the wrap point must be
+    # honoured exactly -- the cap only ever shortens, never lengthens.
+    path = _write_echo_fixture(tmp_path)
+    spectrum = xpulse.read_1d(
+        path, autophase=False, baseline_correct=False, align_echo=True, truncate=3,
+    )
+    fid = spectrum.metadata.raw["fid"]
+    assert len(fid) == 3
+    np.testing.assert_allclose(np.real(fid), [10.0, 2.0, 1.0], atol=1e-9)
 
 
 def test_linear_predict_extends_fid_before_np_truncation(tmp_path):

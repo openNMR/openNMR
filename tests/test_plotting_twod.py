@@ -27,15 +27,17 @@ def _make_2d(n_f1=20, n_f2=30, pseudo=False, homonuclear=False, nucleus="1H", nu
 
 def test_plot_2d_contour_conventional_standalone():
     spec = _make_2d()
-    fig, ax = twod.plot_2d_contour(spec)
+    fig, ax, proj_axes = twod.plot_2d_contour(spec)
     assert fig is not None
+    assert proj_axes["f1"] is not None and proj_axes["f2"] is not None
     plt.close(fig)
 
 
 def test_plot_2d_contour_pseudo2d_no_yticks():
     spec = _make_2d(pseudo=True)
-    fig, ax = twod.plot_2d_contour(spec, show_projections=False)
+    fig, ax, proj_axes = twod.plot_2d_contour(spec, show_projections=False)
     assert list(ax.get_yticks()) == []
+    assert proj_axes == {"f1": None, "f2": None}
     plt.close(fig)
 
 

@@ -16,10 +16,15 @@ import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QInputDialog, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+    QInputDialog, QMenu, QSpinBox, QVBoxLayout, QWidget,
+)
 
+from ...core.registry import find_gamma, NUC_label
 from ...core.spectrum import NMRSpectrum
 from ... import plotting
+from ...processing import slicing as processing_slicing
 
 
 class _Toolbar(NavigationToolbar2QT):
@@ -57,6 +62,12 @@ class MplCanvas(QWidget):
     _CONTOUR_FACTOR_MAX = 0.5
     _CONTOUR_FACTOR_DEFAULT = 1e-3
 
+    #: Defaults for the right-click "Set Contour Levels…" dialog -- see
+    #: opennmr.plotting.twod._prepare_contour for what each controls.
+    _CONTOUR_CLEVELS_DEFAULT = 20
+    _CONTOUR_LEVEL_MODE_DEFAULT = "power"
+    _CONTOUR_POWER_DEFAULT = 1.25
+
     #: Emitted with the clicked x-data value when pick mode is on (see
     #: :func:`set_pick_mode`) -- used by the Analysis tab's "Pick peaks
     #: by clicking" to add a peak at the clicked shift without needing
@@ -92,6 +103,19 @@ class MplCanvas(QWidget):
         # (1D line, FID, compare, fit) is shown.
         self._contour_spectrum: NMRSpectrum | None = None
         self._contour_factor: float | None = None
+        # Number of contour levels, and how they're spaced between the
+        # noise floor (_contour_factor) and the data's own peak -- see
+        # opennmr.plotting.twod._prepare_contour. Reset to these
+        # defaults on every fresh show_spectrum, same as _contour_factor.
+        self._contour_clevels = self._CONTOUR_CLEVELS_DEFAULT
+        self._contour_level_mode = self._CONTOUR_LEVEL_MODE_DEFAULT
+        self._contour_power = self._CONTOUR_POWER_DEFAULT
+        # The F1 (left)/F2 (top) projection panels' own axes, from the
+        # current contour draw -- None (both) whenever a contour isn't
+        # the current view, or a given side wasn't drawn. Lets scroll-
+        # zoom over a projection adjust its own intensity scale
+        # independently of the main contour (see _on_scroll).
+        self._proj_axes: dict = {"f1": None, "f2": None}
         # Set only for a plain 1D spectrum/slice view -- lets the
         # right-click menu offer ppm/Hz/kHz switching by re-using the
         # spectrum's own stored axis arrays, no recomputation needed.
@@ -117,27 +141,98 @@ class MplCanvas(QWidget):
         self.canvas.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
 
     def _on_scroll(self, event) -> None:
-        if event.inaxes is None or event.xdata is None:
+        """Scroll hovering the x-axis (its tick-label strip, below the
+        plotted data) zooms x only; scrolling over the plot body
+        itself zooms y (intensity) only, pinning the bottom of the
+        current view and only moving the top -- not a cursor-centred
+        zoom, since the bottom (the spectrum's own baseline) is what
+        should stay put while scaling how tall a peak looks, the same
+        way any NMR viewer's own intensity slider works. Decoupled
+        from x entirely, so one doesn't disturb the other. For a 2D/
+        pseudo-2D contour, the x-axis behaves the same way; scrolling
+        its body instead adjusts the contour threshold (see
+        :meth:`_adjust_contour_levels`); scrolling one of its F1/F2
+        projection panels adjusts that panel's own intensity scale
+        independently, rather than either of the above."""
+        if event.x is None or event.y is None:
             return
-        if self._contour_factor is not None and event.inaxes is self.ax:
+
+        for kind, proj_ax in self._proj_axes.items():
+            if proj_ax is not None and event.inaxes is proj_ax:
+                self._zoom_projection_intensity(proj_ax, kind, event)
+                return
+
+        on_x_strip = self._hovering_x_axis(self.ax, event)
+        ax = event.inaxes if event.inaxes is not None else (self.ax if on_x_strip else None)
+        if ax is None:
+            return
+
+        factor = 1 / self.ZOOM_FACTOR if event.button == "up" else self.ZOOM_FACTOR
+
+        if on_x_strip:
+            x = self._data_x_at(ax, event)
+            if x is None:
+                return
+            xmin, xmax = ax.get_xlim()
+            ax.set_xlim(x - (x - xmin) * factor, x + (xmax - x) * factor)
+            self.canvas.draw_idle()
+            return
+
+        if self._contour_factor is not None and ax is self.ax:
             self._adjust_contour_levels(event)
             return
 
-        ax = event.inaxes
-        factor = 1 / self.ZOOM_FACTOR if event.button == "up" else self.ZOOM_FACTOR
-
-        xmin, xmax = ax.get_xlim()
-        ax.set_xlim(
-            event.xdata - (event.xdata - xmin) * factor,
-            event.xdata + (xmax - event.xdata) * factor,
-        )
-        if event.ydata is not None and ax.get_yticks().size:
-            ymin, ymax = ax.get_ylim()
-            ax.set_ylim(
-                event.ydata - (event.ydata - ymin) * factor,
-                event.ydata + (ymax - event.ydata) * factor,
-            )
+        if event.ydata is None:
+            return
+        ymin, ymax = ax.get_ylim()
+        ax.set_ylim(ymin, ymin + (ymax - ymin) * factor)
         self.canvas.draw_idle()
+
+    def _zoom_projection_intensity(self, proj_ax, kind: str, event) -> None:
+        """Zoom one F1/F2 projection panel's own intensity axis,
+        pinning its baseline end and moving only the peak end (see
+        :meth:`_on_scroll`'s own docstring for why) -- ``"f2"`` (the
+        top strip) plots intensity along y, low end is baseline
+        (shared x with the main contour); ``"f1"`` (the left strip)
+        plots it along x, but *negated* and rotated, so its baseline
+        end is the high (xmax) end instead -- see ``plot_2d_contour``'s
+        own ``-f1_projection`` plot call. Independent of the main
+        contour's own threshold/zoom (see :meth:`_on_scroll`)."""
+        factor = 1 / self.ZOOM_FACTOR if event.button == "up" else self.ZOOM_FACTOR
+        if kind == "f2":
+            if event.ydata is None:
+                return
+            ymin, ymax = proj_ax.get_ylim()
+            proj_ax.set_ylim(ymin, ymin + (ymax - ymin) * factor)
+        else:
+            if event.xdata is None:
+                return
+            xmin, xmax = proj_ax.get_xlim()
+            proj_ax.set_xlim(xmax - (xmax - xmin) * factor, xmax)
+        self.canvas.draw_idle()
+
+    @staticmethod
+    def _hovering_x_axis(ax, event) -> bool:
+        """True if the cursor is below ``ax``'s plot area, within its
+        horizontal span -- its x-tick-label strip -- rather than over
+        the plotted data itself. ``event.inaxes`` alone can't detect
+        this: matplotlib only sets it while the cursor is inside the
+        axes' own data rectangle, not its margins."""
+        bbox = ax.get_window_extent()
+        return bbox.x0 <= event.x <= bbox.x1 and event.y < bbox.y0
+
+    @staticmethod
+    def _data_x_at(ax, event) -> float | None:
+        """The data-x value under the cursor, even when
+        ``event.xdata`` is ``None`` (cursor outside the axes' data
+        rectangle, e.g. over its x-tick-label strip) -- matplotlib's
+        own ``transData`` is still a valid (affine) mapping there for
+        a standard linear axis."""
+        try:
+            x, _ = ax.transData.inverted().transform((event.x, event.y))
+        except Exception:  # noqa: BLE001 -- e.g. a singular transform; just skip the zoom
+            return None
+        return float(x)
 
     def _adjust_contour_levels(self, event) -> None:
         """Scroll-up raises the contour floor (fewer, stronger-only
@@ -149,12 +244,34 @@ class MplCanvas(QWidget):
         self._contour_factor = min(
             max(self._contour_factor * step, self._CONTOUR_FACTOR_MIN), self._CONTOUR_FACTOR_MAX,
         )
-        xlim, ylim = self.ax.get_xlim(), self.ax.get_ylim()
+        self._redraw_contour(preserve_view=True)
+
+    def set_contour_levels(self, clevels: int, level_mode: str, power: float, factor: float | None = None) -> None:
+        """Apply new contour-level settings from the right-click "Set
+        Contour Levels…" dialog and redraw -- see
+        :func:`opennmr.plotting.twod._prepare_contour` for what each
+        parameter controls. ``factor`` (the lowest level, as a
+        fraction of the data's own peak -- "start") is also normally
+        adjustable by scrolling over the contour body; ``None`` (the
+        default) leaves it at whatever that scroll last set it to."""
+        if factor is not None:
+            self._contour_factor = min(max(factor, self._CONTOUR_FACTOR_MIN), self._CONTOUR_FACTOR_MAX)
+        self._contour_clevels = clevels
+        self._contour_level_mode = level_mode
+        self._contour_power = power
+        self._redraw_contour(preserve_view=True)
+
+    def _redraw_contour(self, preserve_view: bool) -> None:
+        xlim, ylim = (self.ax.get_xlim(), self.ax.get_ylim()) if preserve_view else (None, None)
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
-        plotting.plot_2d_contour(self._contour_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor)
-        self.ax.set_xlim(xlim)
-        self.ax.set_ylim(ylim)
+        _, _, self._proj_axes = plotting.plot_2d_contour(
+            self._contour_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+            clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
+        )
+        if preserve_view:
+            self.ax.set_xlim(xlim)
+            self.ax.set_ylim(ylim)
         self._apply_view_options()
         self.canvas.draw_idle()
 
@@ -208,6 +325,12 @@ class MplCanvas(QWidget):
                 action.setChecked(self._axis_unit == key)
                 unit_actions[action] = key
 
+        contour_levels_action = None
+        extract_slice_action = None
+        if self._contour_spectrum is not None:
+            contour_levels_action = menu.addAction("Set Contour Levels…")
+            extract_slice_action = menu.addAction("Extract Slice…")
+
         chosen = menu.exec(self.canvas.mapToGlobal(pos))
         if chosen in unit_actions:
             self.set_axis_unit(unit_actions[chosen])
@@ -223,6 +346,10 @@ class MplCanvas(QWidget):
                 self.set_aspect_ratio(value)
         elif sr_action is not None and chosen is sr_action:
             self.referenceShiftRequested.emit()
+        elif contour_levels_action is not None and chosen is contour_levels_action:
+            self._prompt_contour_levels()
+        elif extract_slice_action is not None and chosen is extract_slice_action:
+            self._prompt_extract_slice()
 
     def set_legend_visible(self, visible: bool) -> None:
         self._legend_visible = visible
@@ -233,6 +360,119 @@ class MplCanvas(QWidget):
         self._aspect_ratio = ratio
         self._apply_view_options()
         self.canvas.draw_idle()
+
+    def _prompt_contour_levels(self) -> None:
+        """Right-click "Set Contour Levels…" -- lets the user directly
+        set the number of contour levels and how they're spaced
+        (power-law, with a tunable exponent, or evenly linear)
+        instead of only ever scrolling the noise floor up/down."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Contour Levels")
+        form = QFormLayout(dialog)
+
+        clevels_spin = QSpinBox()
+        clevels_spin.setRange(2, 200)
+        clevels_spin.setValue(self._contour_clevels)
+        form.addRow("Number of contours:", clevels_spin)
+
+        start_spin = QDoubleSpinBox()
+        start_spin.setRange(self._CONTOUR_FACTOR_MIN, self._CONTOUR_FACTOR_MAX)
+        start_spin.setDecimals(6)
+        start_spin.setSingleStep(0.001)
+        start_spin.setValue(self._contour_factor)
+        start_spin.setToolTip(
+            "Lowest contour level, as a fraction of the data's own peak "
+            "intensity -- the noise floor. Same value scroll-over-the-"
+            "contour adjusts; the top level is always the peak itself."
+        )
+        form.addRow("Start (fraction of peak):", start_spin)
+
+        mode_combo = QComboBox()
+        mode_combo.addItems(["Power", "Linear"])
+        mode_combo.setCurrentIndex(0 if self._contour_level_mode == "power" else 1)
+        form.addRow("Scaling:", mode_combo)
+
+        power_spin = QDoubleSpinBox()
+        power_spin.setRange(0.1, 10.0)
+        power_spin.setSingleStep(0.05)
+        power_spin.setValue(self._contour_power)
+        power_spin.setToolTip(
+            "Higher values bunch more levels near the noise floor -- "
+            "good for finding weak peaks near a strong one without "
+            "saturating the display. Only used for Power scaling."
+        )
+        power_spin.setEnabled(mode_combo.currentIndex() == 0)
+        mode_combo.currentIndexChanged.connect(lambda i: power_spin.setEnabled(i == 0))
+        form.addRow("Power exponent:", power_spin)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            level_mode = "power" if mode_combo.currentIndex() == 0 else "linear"
+            self.set_contour_levels(clevels_spin.value(), level_mode, power_spin.value(), start_spin.value())
+
+    def _prompt_extract_slice(self) -> None:
+        """Right-click "Extract Slice…" -- pulls a single row (fixed
+        F1) or column (fixed F2) out of the current 2D/pseudo-2D
+        spectrum as its own 1D trace and shows it in place of the
+        contour (the same "temporarily replace this canvas's view"
+        pattern the Processing tab's pseudo-2D "Stacked slices" view
+        already uses) -- there was previously no way to isolate and
+        look at just one row/column on its own, for either a
+        conventional 2D spectrum or a pseudo-2D series without
+        retained imaginary data (the phase-preview slice spinner needs
+        that)."""
+        spectrum = self._contour_spectrum
+        if spectrum is None:
+            return
+        n_f1, n_f2 = spectrum.data.shape
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Extract Slice")
+        form = QFormLayout(dialog)
+
+        axis_combo = QComboBox()
+        axis_combo.addItem("Row (fix F1, trace along F2)", "f1")
+        axis_combo.addItem("Column (fix F2, trace along F1)", "f2")
+        form.addRow("Axis:", axis_combo)
+
+        index_spin = QSpinBox()
+        index_spin.setRange(1, n_f1)
+        form.addRow("Index:", index_spin)
+
+        def _sync_range(i: int) -> None:
+            index_spin.setRange(1, n_f1 if axis_combo.itemData(i) == "f1" else n_f2)
+        axis_combo.currentIndexChanged.connect(_sync_range)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.extract_slice(axis_combo.currentData(), index_spin.value())
+
+    def extract_slice(self, axis: str, index: int) -> None:
+        """Pull a single row (``axis="f1"``) or column (``"f2"``) out
+        of the current 2D/pseudo-2D spectrum as its own 1D trace, via
+        :func:`opennmr.processing.slicing.get_trace`, and show it in
+        place of the contour."""
+        trace = processing_slicing.get_trace(self._contour_spectrum, axis=axis, index=index)
+        self.show_spectrum(trace)
+
+    @property
+    def axis_unit(self) -> str:
+        """The current 1D view's x-axis unit (``"ppm"``/``"hz"``/
+        ``"khz"``) -- lets a caller that needs to redraw the spectrum
+        (e.g. after an in-place axis edit like a reference shift) save
+        this first and restore it via :meth:`set_axis_unit` afterward,
+        instead of a full :meth:`show_spectrum` silently resetting the
+        view back to ppm."""
+        return self._axis_unit
 
     def set_axis_unit(self, unit: str) -> None:
         """Switch the current 1D view's x-axis between ``"ppm"``,
@@ -273,6 +513,7 @@ class MplCanvas(QWidget):
     def clear(self) -> None:
         self._contour_spectrum = None
         self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -289,6 +530,7 @@ class MplCanvas(QWidget):
         if spectrum.ndim == 1:
             self._contour_spectrum = None
             self._contour_factor = None
+            self._proj_axes = {"f1": None, "f2": None}
             self._current_1d_spectrum = spectrum
             self._axis_unit = "ppm"  # a fresh spectrum always starts in ppm
             self.ax = self.figure.add_subplot(111)
@@ -305,8 +547,14 @@ class MplCanvas(QWidget):
             self._current_1d_spectrum = None
             self._contour_spectrum = spectrum
             self._contour_factor = self._CONTOUR_FACTOR_DEFAULT
+            self._contour_clevels = self._CONTOUR_CLEVELS_DEFAULT
+            self._contour_level_mode = self._CONTOUR_LEVEL_MODE_DEFAULT
+            self._contour_power = self._CONTOUR_POWER_DEFAULT
             self.ax = self.figure.add_subplot(111)
-            plotting.plot_2d_contour(spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor)
+            _, _, self._proj_axes = plotting.plot_2d_contour(
+                spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+                clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
+            )
         else:
             raise ValueError(f"Cannot display a spectrum with ndim={spectrum.ndim}")
 
@@ -314,12 +562,19 @@ class MplCanvas(QWidget):
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
-    def show_fid(self, fid, dt: float, title: str = "", window_envelope=None, tdeff_index: int | None = None) -> None:
-        """Plot a raw/processed time-domain FID (real + imaginary vs.
-        time) -- an alternate view (the FID canvas tab) for judging
-        FID-domain processing directly, instead of only its effect
-        after FFT. The frequency-domain spectrum (:func:`show_spectrum`)
-        stays the default (Spectrum tab) view.
+    def show_fid(self, fid, dt: float, title: str = "", window_envelope=None, tdeff_index: int | None = None,
+                 echo_top_index: float | None = None, mode: str = "magnitude") -> None:
+        """Plot a raw/processed time-domain FID vs. time -- an
+        alternate view (the FID canvas tab) for judging FID-domain
+        processing directly, instead of only its effect after FFT. The
+        frequency-domain spectrum (:func:`show_spectrum`) stays the
+        default (Spectrum tab) view.
+
+        ``mode`` : ``"magnitude"`` (default, ``|fid|`` -- a single
+        clean decay/echo envelope, easiest for judging alignment/decay
+        shape) or ``"real"`` (one oscillating component, closer to
+        what phase-sensitive detection actually recorded). Plots one
+        line either way, not both real and imaginary together.
 
         ``window_envelope`` : the currently-selected apodization
         window's own shape (real-valued, same length as ``fid``, from
@@ -331,21 +586,36 @@ class MplCanvas(QWidget):
         ``tdeff_index`` : if given (and less than ``len(fid)``), draws
         a dashed vertical marker at that point in time -- where a
         TDeff truncation would cut the FID, previewed live as the
-        control changes, before "Reprocess" is clicked."""
+        control changes, before "Reprocess" is clicked.
+
+        ``echo_top_index`` : if given, draws a dashed vertical marker
+        at that point (a *fractional* sample index, from
+        :func:`opennmr.processing.ft.find_echo_top` -- can be
+        non-integer) -- visual confirmation of where "Align Echo" found
+        the echo peak. Should land right at t=0 once actually aligned;
+        if it doesn't, that's a direct, visible sign the alignment
+        isn't doing what's expected, instead of a checkbox silently
+        changing a setting with no feedback either way."""
         self._contour_spectrum = None
         self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
         t = np.arange(len(fid)) * dt
-        self.ax.plot(t, np.real(fid), label="Real")
-        self.ax.plot(t, np.imag(fid), label="Imag", alpha=0.7)
+        if mode not in ("magnitude", "real"):
+            raise ValueError("mode must be 'magnitude' or 'real'")
+        y = np.real(fid) if mode == "real" else np.abs(fid)
+        self.ax.plot(t, y, label="Real" if mode == "real" else "Magnitude")
         if window_envelope is not None:
             peak = np.max(np.abs(fid))
             self.ax.plot(t, np.asarray(window_envelope) * peak, "--", color="gray", label="Window", zorder=0)
             self._legend_visible = True
         if tdeff_index is not None and 0 < tdeff_index < len(fid):
             self.ax.axvline(tdeff_index * dt, linestyle="--", color="red", label="TDeff cutoff")
+            self._legend_visible = True
+        if echo_top_index is not None and 0 <= echo_top_index < len(fid):
+            self.ax.axvline(echo_top_index * dt, linestyle="--", color="green", label="Echo top")
             self._legend_visible = True
         self.ax.set_xlabel("Time (s)")
         self.ax.set_ylabel("Amplitude")
@@ -366,6 +636,7 @@ class MplCanvas(QWidget):
         without needing a second plotting function."""
         self._contour_spectrum = None
         self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -378,23 +649,57 @@ class MplCanvas(QWidget):
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
-    def show_slice_fit(self, x, y_data, y_fit, title: str = "") -> None:
+    def show_slice_fit(self, x, y_data, y_fit, components=None, peak_labels=None, title: str = "",
+                        spectrum: NMRSpectrum | None = None) -> None:
         """Plot one pseudo-2D slice's spectrum alongside its fitted
         (pseudo-Voigt) curve -- the intermediate per-slice spectral
         fit that feeds a relaxation/diffusion parameter fit
         (:func:`opennmr.processing.fitting.NMR2D_fit_slices`'s own
         per-slice result), so it can be inspected directly instead of
-        only trusting the final T1/T2/D number."""
+        only trusting the final T1/T2/D number.
+
+        ``components``, if given, is the per-peak curve list from
+        :func:`opennmr.processing.fitting.evaluate_fit` (last entry
+        is the baseline) -- each is drawn individually alongside the
+        total fit, so an overlapping multi-peak fit can be judged
+        peak by peak rather than only as a summed curve.
+
+        ``spectrum`` : the slice's own 1D trace (``fit_result["slice"]``
+        from :func:`opennmr.processing.fitting.NMR2D_fit_slices`), used
+        only for its nucleus/SFO1 -- to label and orient the x-axis
+        exactly like :meth:`show_spectrum` does (inverted, high-to-low
+        ppm, with a nucleus-based label) rather than the plain
+        unlabelled, un-inverted axis this used to have. ``x`` itself is
+        always ppm (:func:`NMR2D_fit_slices`'s own default)."""
         self._contour_spectrum = None
         self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
         self.ax.plot(x, y_data, color="black", linewidth=1.0, label="Data")
-        self.ax.plot(x, y_fit, color="red", linestyle="--", linewidth=1.2, label="Fit")
+        self.ax.plot(x, y_fit, color="red", linestyle="--", linewidth=1.2, label="Fit (total)")
+        if components:
+            n_peaks = len(components) - 1  # evaluate_fit appends the baseline last
+            for i, component in enumerate(components[:n_peaks]):
+                label = peak_labels[i] if peak_labels else f"Peak {i + 1}"
+                self.ax.plot(x, component, linewidth=0.9, alpha=0.8, label=label)
+            self.ax.plot(x, components[-1], color="gray", linestyle=":", linewidth=0.8, label="Baseline")
+
+        if spectrum is not None:
+            nuclide = find_gamma(spectrum.metadata.nucleus, SFO1=spectrum.metadata.sfo1)["Nuclide"]
+            xlabel = NUC_label(nuclide, x_unit="ppm")
+        else:
+            xlabel = "Shift (ppm)"
+        xmin, xmax = float(np.min(x)), float(np.max(x))
+        self.ax.set_xlim(xmin, xmax)
+        self.ax.invert_xaxis()
+        self.ax.set_xlabel(xlabel)
         self.ax.set_yticks([])
         if title:
             self.ax.set_title(title)
+        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False)
+        plotting.apply_tick_style(self.ax, axis="x")
         self._legend_visible = True
         self._apply_view_options()
         self.figure.tight_layout()
@@ -413,6 +718,7 @@ class MplCanvas(QWidget):
         relaxation series."""
         self._contour_spectrum = None
         self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)

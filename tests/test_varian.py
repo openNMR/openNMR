@@ -185,6 +185,25 @@ def test_read_2d_zero_fill(tmp_path):
     assert spectrum.data.shape == (2, 16)
 
 
+def test_read_2d_fid_shift_changes_output(tmp_path):
+    path = _write_varian_2d(tmp_path, ni=2, n_direct=4)
+    baseline = varian.read_2d(path, autophase=False)
+    shifted = varian.read_2d(path, autophase=False, fid_shift=1.0)
+    assert not np.allclose(baseline.data, shifted.data)
+
+
+def test_read_2d_align_echo_runs(tmp_path):
+    path = _write_varian_2d(tmp_path, ni=2, n_direct=4)
+    spectrum = varian.read_2d(path, autophase=False, align_echo=True)
+    assert spectrum.data.shape == (2, 4)
+
+
+def test_read_2d_linear_predict_extends_points(tmp_path):
+    path = _write_varian_2d(tmp_path, ni=2, n_direct=4)
+    spectrum = varian.read_2d(path, autophase=False, linear_predict_points=2, linear_predict_order=1)
+    assert spectrum.data.shape == (2, 6)
+
+
 # ============================================================
 # Vendor detection / registration
 # ============================================================

@@ -49,7 +49,7 @@ from math import floor, log10
 import numpy as np
 from scipy.optimize import curve_fit
 
-from .fitting import build_region_mask, estimate_baseline_robust, estimate_noise_level
+from .fitting import build_region_mask, estimate_baseline_robust, estimate_noise_level, extract_params_and_errors
 from ..core.spectrum import NMRSpectrum
 
 # numpy >= 2.0 renamed trapz -> trapezoid
@@ -690,8 +690,8 @@ def _get_delays(fits, vdlist):
 
 
 def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
-                          peak_labels=None, normalised=False, use_errors=True,
-                          fixed=None, show_report=True) -> list:
+                          peak_labels=None, normalised=False, value_source="integral",
+                          use_errors=True, fixed=None, show_report=True) -> list:
     """
     Fit relaxation curves to every peak's/region's integral series
     across a :func:`opennmr.processing.fitting.NMR2D_fit_slices` (or
@@ -715,13 +715,24 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
         index. Required -- see :func:`_get_delays`.
     peak_labels : list of str, optional
     normalised : bool, optional
-        Fit ``integrals_norm`` (percentage) rather than raw
-        integrals. Not recommended for absolute T1/T2 amplitude
-        interpretation, but harmless for the relaxation *time*
-        itself.
+        Only used when ``value_source="integral"``: fit
+        ``integrals_norm`` (percentage) rather than raw integrals. Not
+        recommended for absolute T1/T2 amplitude interpretation, but
+        harmless for the relaxation *time* itself.
+    value_source : {'integral', 'amplitude'}, optional
+        ``'integral'`` (default): each peak's integrated area (see
+        ``normalised``) -- more robust to per-slice lineshape/linewidth
+        changes than a single point estimate, since it sums over the
+        whole peak rather than reading one point off it.
+        ``'amplitude'``: the peak's own fitted pseudo-Voigt/Gaussian/
+        Lorentzian amplitude instead -- simpler "peak height" reading,
+        but more sensitive to a linewidth change across slices being
+        mistaken for an intensity change.
     use_errors : bool, optional
-        Weight the fit by each slice's ``integral_errors`` when
-        available (see ``y_err`` in :func:`fit_relaxation`).
+        Weight the fit by each slice's per-peak uncertainty when
+        available (``integral_errors`` for ``value_source="integral"``,
+        the fitted amplitude's own covariance-derived error for
+        ``"amplitude"`` -- see ``y_err`` in :func:`fit_relaxation`).
     fixed : dict, optional
         Forwarded to :func:`fit_relaxation` for every peak.
     show_report : bool, optional
@@ -734,28 +745,49 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
         ``"peak_label"`` key.
     """
 
+    if value_source not in ("integral", "amplitude"):
+        raise ValueError("value_source must be 'integral' or 'amplitude'")
+
     if not fits:
         raise ValueError("No fitted slices available.")
 
     t = _get_delays(fits, vdlist)
     order = np.argsort(t)
 
-    source = "integrals_norm" if normalised else "integrals"
-    n_peaks = max(len(fit.get(source, [])) for fit in fits)
+    if value_source == "amplitude":
+        per_fit_amplitudes = []
+        per_fit_amplitude_errors = []
+        for fit in fits:
+            per_peak = extract_params_and_errors(fit["popt"], fit["pcov"], fit["peak_defs"], fit["is_free"])
+            amp_indices = [p["names"].index("amplitude") for p in per_peak]
+            per_fit_amplitudes.append([p["params"][i] for p, i in zip(per_peak, amp_indices)])
+            per_fit_amplitude_errors.append([p["errors"][i] for p, i in zip(per_peak, amp_indices)])
+        n_peaks = max(len(v) for v in per_fit_amplitudes)
+    else:
+        source = "integrals_norm" if normalised else "integrals"
+        n_peaks = max(len(fit.get(source, [])) for fit in fits)
 
     results = []
 
     for peak_i in range(n_peaks):
 
-        y = np.array([fit[source][peak_i] if len(fit.get(source, [])) > peak_i
-                      else np.nan for fit in fits])[order]
+        if value_source == "amplitude":
+            y = np.array([vals[peak_i] if len(vals) > peak_i else np.nan
+                          for vals in per_fit_amplitudes])[order]
+        else:
+            y = np.array([fit[source][peak_i] if len(fit.get(source, [])) > peak_i
+                          else np.nan for fit in fits])[order]
         t_peak = t[order]
 
         y_err = None
         if use_errors:
-            errs = [fit.get("integral_errors", [None])[peak_i]
-                    if len(fit.get("integral_errors", [])) > peak_i else None
-                    for fit in fits]
+            if value_source == "amplitude":
+                errs = [errs_i[peak_i] if len(errs_i) > peak_i else None
+                        for errs_i in per_fit_amplitude_errors]
+            else:
+                errs = [fit.get("integral_errors", [None])[peak_i]
+                        if len(fit.get("integral_errors", [])) > peak_i else None
+                        for fit in fits]
             if all(e is not None and np.isfinite(e) for e in errs):
                 y_err = np.array(errs)[order]
 

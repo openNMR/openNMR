@@ -30,36 +30,109 @@ def _make_2d(n_f1=8, n_f2=64):
     return NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
 
 
-def test_scroll_up_zooms_in_around_cursor(qapp):
+# _on_scroll now distinguishes "hovering the x-axis tick-label strip"
+# from "hovering the plot body" using real pixel coordinates (see
+# MplCanvas._hovering_x_axis) -- these three helpers build fake scroll
+# events with realistic pixel positions for each case, rather than the
+# old bare inaxes/xdata/ydata SimpleNamespace (which had no pixel
+# position at all, since the old zoom logic never needed one).
+
+def _body_scroll_event(ax, xdata, ydata, button="up"):
+    """A scroll event over the plot body, at data position
+    (xdata, ydata) -- matches what a real matplotlib event looks like
+    while the cursor is inside the axes' own data rectangle."""
+    x, y = ax.transData.transform((xdata, ydata))
+    return SimpleNamespace(inaxes=ax, xdata=xdata, ydata=ydata, x=x, y=y, button=button)
+
+
+def _x_strip_scroll_event(ax, xdata, button="up"):
+    """A scroll event over ``ax``'s x-tick-label strip (below the
+    plot body, at data-x ``xdata``) -- matplotlib itself would report
+    ``inaxes=None``/``xdata=None`` there, since the cursor isn't over
+    the axes' own data rectangle."""
+    bbox = ax.get_window_extent()
+    x, _ = ax.transData.transform((xdata, ax.get_ylim()[0]))
+    return SimpleNamespace(inaxes=None, xdata=None, ydata=None, x=x, y=bbox.y0 - 5, button=button)
+
+
+def _outside_scroll_event(ax, button="up"):
+    """A scroll event well outside both ``ax``'s plot body and its
+    x-axis strip -- a true no-op position."""
+    bbox = ax.get_window_extent()
+    return SimpleNamespace(inaxes=None, xdata=None, ydata=None, x=bbox.x0 - 50, y=bbox.y1 + 50, button=button)
+
+
+def test_scroll_up_over_x_axis_zooms_x_in_around_cursor(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
     ax = canvas.ax
     ax.set_xlim(0, 10)
-    event = SimpleNamespace(inaxes=ax, xdata=3.0, ydata=None, button="up")
-    canvas._on_scroll(event)
+    canvas._on_scroll(_x_strip_scroll_event(ax, xdata=3.0, button="up"))
     xmin, xmax = ax.get_xlim()
     assert (xmax - xmin) < 10  # narrower than before
     assert xmin < 3.0 < xmax  # cursor position still inside view
 
 
-def test_scroll_down_zooms_out(qapp):
+def test_scroll_down_over_x_axis_zooms_x_out(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
     ax = canvas.ax
     ax.set_xlim(4, 6)
-    event = SimpleNamespace(inaxes=ax, xdata=5.0, ydata=None, button="down")
-    canvas._on_scroll(event)
+    canvas._on_scroll(_x_strip_scroll_event(ax, xdata=5.0, button="down"))
     xmin, xmax = ax.get_xlim()
     assert (xmax - xmin) > 2
+
+
+def test_scroll_over_x_axis_leaves_y_untouched(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    ax = canvas.ax
+    ax.set_xlim(0, 10)
+    ax.set_ylim(-1, 1)
+    canvas._on_scroll(_x_strip_scroll_event(ax, xdata=3.0, button="up"))
+    assert ax.get_ylim() == pytest.approx((-1, 1))
+
+
+def test_scroll_over_plot_body_zooms_y_intensity_only(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    ax = canvas.ax
+    ax.set_xlim(0, 10)
+    ax.set_ylim(-1, 1)
+    canvas._on_scroll(_body_scroll_event(ax, xdata=5.0, ydata=0.0, button="up"))
+    ymin, ymax = ax.get_ylim()
+    assert (ymax - ymin) < 2  # narrower than before
+    assert ax.get_xlim() == pytest.approx((0, 10))  # x untouched
+
+
+def test_scroll_over_plot_body_pins_the_bottom(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    ax = canvas.ax
+    ax.set_ylim(-1, 1)
+    canvas._on_scroll(_body_scroll_event(ax, xdata=5.0, ydata=0.8, button="up"))
+    ymin, ymax = ax.get_ylim()
+    assert ymin == pytest.approx(-1.0)  # bottom untouched regardless of cursor position
+    assert ymax < 1.0  # only the top moved
+
+    canvas._on_scroll(_body_scroll_event(ax, xdata=5.0, ydata=0.1, button="down"))
+    ymin2, ymax2 = ax.get_ylim()
+    assert ymin2 == pytest.approx(-1.0)
+    assert ymax2 > ymax
 
 
 def test_scroll_outside_axes_is_noop(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
     ax = canvas.ax
     ax.set_xlim(0, 10)
-    event = SimpleNamespace(inaxes=None, xdata=None, ydata=None, button="up")
-    canvas._on_scroll(event)
+    canvas._on_scroll(_outside_scroll_event(ax))
     assert ax.get_xlim() == (0, 10)
 
 
@@ -201,12 +274,12 @@ def test_show_spectrum_1d_clears_contour_state(qapp):
 def test_scroll_over_contour_adjusts_factor_not_view(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
     ax = canvas.ax
     xlim, ylim = ax.get_xlim(), ax.get_ylim()
     original_factor = canvas._contour_factor
 
-    event = SimpleNamespace(inaxes=ax, xdata=5.0, ydata=95.0, button="up")
-    canvas._on_scroll(event)
+    canvas._on_scroll(_body_scroll_event(ax, xdata=5.0, ydata=95.0, button="up"))
 
     assert canvas._contour_factor != pytest.approx(original_factor)
     # The pan/zoom view itself must be unaffected -- scrolling over a
@@ -218,57 +291,177 @@ def test_scroll_over_contour_adjusts_factor_not_view(qapp):
 def test_scroll_up_over_contour_raises_factor(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
     before = canvas._contour_factor
-    canvas._on_scroll(SimpleNamespace(inaxes=canvas.ax, xdata=5.0, ydata=95.0, button="up"))
+    canvas._on_scroll(_body_scroll_event(canvas.ax, xdata=5.0, ydata=95.0, button="up"))
     assert canvas._contour_factor > before
 
 
 def test_scroll_down_over_contour_lowers_factor(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
     before = canvas._contour_factor
-    canvas._on_scroll(SimpleNamespace(inaxes=canvas.ax, xdata=5.0, ydata=95.0, button="down"))
+    canvas._on_scroll(_body_scroll_event(canvas.ax, xdata=5.0, ydata=95.0, button="down"))
     assert canvas._contour_factor < before
+
+
+def test_scroll_over_contour_x_axis_zooms_x_instead(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    ax = canvas.ax
+    xlim = ax.get_xlim()
+    original_factor = canvas._contour_factor
+
+    canvas._on_scroll(_x_strip_scroll_event(ax, xdata=5.0, button="up"))
+
+    assert canvas._contour_factor == pytest.approx(original_factor)  # levels untouched
+    assert canvas.ax.get_xlim() != pytest.approx(xlim)  # x zoomed instead
 
 
 def test_contour_factor_clamped_to_bounds(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
     for _ in range(60):  # far more notches than needed to hit either bound
-        canvas._on_scroll(SimpleNamespace(inaxes=canvas.ax, xdata=5.0, ydata=95.0, button="up"))
+        canvas._on_scroll(_body_scroll_event(canvas.ax, xdata=5.0, ydata=95.0, button="up"))
+        canvas.canvas.draw()  # _adjust_contour_levels rebuilds canvas.ax each time
     assert canvas._contour_factor <= canvas._CONTOUR_FACTOR_MAX
     for _ in range(60):
-        canvas._on_scroll(SimpleNamespace(inaxes=canvas.ax, xdata=5.0, ydata=95.0, button="down"))
+        canvas._on_scroll(_body_scroll_event(canvas.ax, xdata=5.0, ydata=95.0, button="down"))
+        canvas.canvas.draw()
     assert canvas._contour_factor >= canvas._CONTOUR_FACTOR_MIN
 
 
 def test_scroll_over_1d_still_zooms_normally(qapp):
     canvas = MplCanvas()
-    canvas.show_spectrum(_make_1d())
+    canvas.show_spectrum(_make_2d())
+    canvas.show_spectrum(_make_1d())  # _contour_factor must reset to None
+    canvas.canvas.draw()
     ax = canvas.ax
     ax.set_xlim(0, 10)
-    canvas._on_scroll(SimpleNamespace(inaxes=ax, xdata=3.0, ydata=None, button="up"))
+    canvas._on_scroll(_x_strip_scroll_event(ax, xdata=3.0, button="up"))
     xmin, xmax = ax.get_xlim()
     assert (xmax - xmin) < 10
+
+
+# ============================================================
+# Contour levels, slice extraction, projection scroll-zoom
+# ============================================================
+
+def test_set_contour_levels_updates_state_and_redraws(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.set_contour_levels(8, "linear", 2.0)
+    assert canvas._contour_clevels == 8
+    assert canvas._contour_level_mode == "linear"
+    assert canvas._contour_power == 2.0
+    assert canvas._contour_spectrum is not None  # still a contour view
+    assert canvas.ax is not None
+
+
+def test_set_contour_levels_can_also_set_start_factor(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.set_contour_levels(8, "power", 1.25, factor=0.05)
+    assert canvas._contour_factor == pytest.approx(0.05)
+
+
+def test_set_contour_levels_preserves_current_zoom(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    canvas.ax.set_xlim(2, 8)
+    canvas.ax.set_ylim(92, 98)
+    canvas.set_contour_levels(10, "power", 1.0)
+    assert canvas.ax.get_xlim() == pytest.approx((2, 8))
+    assert canvas.ax.get_ylim() == pytest.approx((92, 98))
+
+
+def test_extract_slice_shows_1d_row(qapp):
+    canvas = MplCanvas()
+    spec = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spec)
+    canvas.extract_slice("f1", 3)
+    assert canvas._contour_spectrum is None  # now a 1D view, not the contour
+    assert canvas._current_1d_spectrum is not None
+    assert canvas._current_1d_spectrum.ndim == 1
+    assert len(canvas._current_1d_spectrum.data) == 64  # traced along F2
+
+
+def test_extract_slice_shows_1d_column(qapp):
+    canvas = MplCanvas()
+    spec = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spec)
+    canvas.extract_slice("f2", 10)
+    assert canvas._current_1d_spectrum.ndim == 1
+    assert len(canvas._current_1d_spectrum.data) == 8  # traced along F1
+
+
+def test_scroll_over_f2_projection_zooms_its_intensity_only(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    ax_f2 = canvas._proj_axes["f2"]
+    assert ax_f2 is not None
+    ylim_before = ax_f2.get_ylim()
+    xdata = sum(ax_f2.get_xlim()) / 2
+    ydata = sum(ylim_before) / 2
+    x, y = ax_f2.transData.transform((xdata, ydata))
+    event = SimpleNamespace(inaxes=ax_f2, xdata=xdata, ydata=ydata, x=x, y=y, button="up")
+    canvas._on_scroll(event)
+    ylim_after = ax_f2.get_ylim()
+    assert ylim_after != pytest.approx(ylim_before)
+    assert ylim_after[0] == pytest.approx(ylim_before[0])  # baseline (bottom) end pinned
+    # The main contour's own factor/view must be untouched.
+    assert canvas._contour_factor == pytest.approx(MplCanvas._CONTOUR_FACTOR_DEFAULT)
+
+
+def test_scroll_over_f1_projection_zooms_its_intensity_only(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    ax_f1 = canvas._proj_axes["f1"]
+    assert ax_f1 is not None
+    xlim_before = ax_f1.get_xlim()
+    xdata = sum(xlim_before) / 2
+    ydata = sum(ax_f1.get_ylim()) / 2
+    x, y = ax_f1.transData.transform((xdata, ydata))
+    event = SimpleNamespace(inaxes=ax_f1, xdata=xdata, ydata=ydata, x=x, y=y, button="up")
+    canvas._on_scroll(event)
+    xlim_after = ax_f1.get_xlim()
+    assert xlim_after != pytest.approx(xlim_before)
+    assert xlim_after[1] == pytest.approx(xlim_before[1])  # baseline (xmax) end pinned
 
 
 # ============================================================
 # FID window-function overlay
 # ============================================================
 
-def test_show_fid_without_envelope_has_two_lines(qapp):
+def test_show_fid_without_envelope_has_one_line(qapp):
     canvas = MplCanvas()
     fid = np.exp(-np.arange(50) / 10.0) * np.exp(1j * np.arange(50) * 0.3)
     canvas.show_fid(fid, dt=1e-4)
-    assert len(canvas.ax.lines) == 2  # real, imag
+    assert len(canvas.ax.lines) == 1  # magnitude only, not real+imag together
+    assert canvas.ax.lines[0].get_label() == "Magnitude"
 
 
-def test_show_fid_with_envelope_adds_third_line_and_legend(qapp):
+def test_show_fid_real_mode_plots_real_part_only(qapp):
+    canvas = MplCanvas()
+    fid = np.exp(-np.arange(50) / 10.0) * np.exp(1j * np.arange(50) * 0.3)
+    canvas.show_fid(fid, dt=1e-4, mode="real")
+    assert len(canvas.ax.lines) == 1
+    assert canvas.ax.lines[0].get_label() == "Real"
+    np.testing.assert_allclose(canvas.ax.lines[0].get_ydata(), np.real(fid))
+
+
+def test_show_fid_with_envelope_adds_second_line_and_legend(qapp):
     canvas = MplCanvas()
     fid = np.exp(-np.arange(50) / 10.0) * np.exp(1j * np.arange(50) * 0.3)
     envelope = np.exp(-np.arange(50) / 20.0)
     canvas.show_fid(fid, dt=1e-4, window_envelope=envelope)
-    assert len(canvas.ax.lines) == 3
+    assert len(canvas.ax.lines) == 2
     labels = [line.get_label() for line in canvas.ax.lines]
     assert "Window" in labels
     assert canvas.ax.get_legend() is not None

@@ -1,4 +1,4 @@
-# openNMR
+![openNMR](assets/openNMR_logo_banner.png)
 
 Vendor-agnostic NMR import, processing, plotting, and a desktop GUI.
 

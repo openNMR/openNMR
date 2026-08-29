@@ -406,14 +406,29 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
 
     ``truncate``/``zero_fill`` : ``True`` uses the value recorded in
     the file (``TDEFF``/``SI``); an ``int`` sets it explicitly; ``None``
-    (default) does neither.
+    (default) does neither -- except when ``align_echo=True``, which
+    always caps the effective truncation at the echo-top's own wrap
+    point (see ``align_echo`` below), regardless of what ``truncate``
+    (or its absence) would otherwise imply.
 
-    ``fid_shift``/``align_echo``/``linear_predict_points`` : applied to
-    the raw FID, in that order, right after ``truncate`` and before
-    apodization -- see :mod:`opennmr.processing.ft`'s ``roll_fid``/
-    ``align_echo``/``linear_predict`` for what each does. Useful for
-    full-echo (rather than one-sided decaying) acquisitions, common on
-    wideline/quadrupolar X-Pulse experiments.
+    ``fid_shift``/``align_echo`` run first (before ``truncate``, not
+    after -- see the code comment at the truncate step for why order
+    matters for a full-echo acquisition), then ``truncate``, then
+    ``linear_predict_points``, all before apodization -- see
+    :mod:`opennmr.processing.ft`'s ``roll_fid``/``align_echo``/
+    ``linear_predict`` for what each does. Useful for full-echo
+    (rather than one-sided decaying) acquisitions, common on
+    wideline/quadrupolar X-Pulse experiments. ``align_echo`` also caps
+    ``truncate`` at the echo top's own wrap point (``len(fid) -
+    ceil(echo_top)``) -- neither an unspecified ``truncate`` nor the
+    file's own recorded ``TDEFF`` reliably stop short of that point on
+    their own, which otherwise lets the wrapped pre-echo portion (a
+    mirror image of the post-echo decay, for a symmetric echo) back in
+    and produces an FID that "looks like a time-reversal" once FFT'd.
+    Pass an explicit ``truncate`` shorter than that if an even shorter
+    effective FID is wanted; a longer one is silently capped rather
+    than honoured, since including any part of the wrap is essentially
+    never desired.
 
     ``baseline_correct`` : ``None`` (default) picks ``not align_echo``
     -- ported from ``leonmr``'s ``xpulse_image_import``, which forces
@@ -450,6 +465,38 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     sf_hz = float(params.get("$SF", 1.0)) * 1e6
     o1_hz = float(params.get("$O1", 1.0))
 
+    if fid_shift:
+        fid = processing_ft.roll_fid(fid, fid_shift)
+
+    # Deliberately computed/applied BEFORE the truncate step below,
+    # not after: align_echo rolls the echo top to index 0, which wraps
+    # the pre-echo portion (dead time, then the rise up to the echo
+    # top -- roughly a mirror image of the post-echo decay, for a
+    # symmetric full echo) around to the tail of the array. Only a
+    # truncate applied to the POST-roll array, short enough to stop
+    # before reaching the wrap point, actually discards it -- get this
+    # backwards (as this used to be) and the "aligned" FID has a
+    # mirror-image copy of its own decay spliced onto its tail -- an
+    # FID that "looks like a time-reversal" once FFT'd. Matches
+    # leonmr's xpulse_image_import, which rolls the full FID first and
+    # only then hands it to process_fid()'s own TDEFF truncation.
+    echo_wrap_limit = None
+    if align_echo:
+        top = processing_ft.find_echo_top(fid)
+        fid = processing_ft.align_echo(fid)
+        # Neither the file's own recorded TDEFF nor an unspecified
+        # `truncate` reliably stops short of the wrap point on its own
+        # (confirmed on real data: TDEFF is set for the *original*,
+        # pre-roll acquisition -- e.g. "stop before the noise floor" --
+        # not recomputed relative to where the echo top ends up after
+        # rolling, so it can easily extend past the wrap point and
+        # let the mirrored tail back in). Capping here, unconditionally
+        # rather than only when a truncate was explicitly requested,
+        # is what actually fixes the artifact by default -- ceil() is
+        # deliberately conservative, so even a fractional echo-top
+        # position never leaves a single wrapped sample in.
+        echo_wrap_limit = len(fid) - int(np.ceil(top))
+
     # is True checked ahead of isinstance(..., int): bool is an int
     # subclass in Python, so isinstance(True, int) is True -- checking
     # isinstance() first would make the "use the recorded TDEFF/SI"
@@ -461,13 +508,13 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
         tdeff_points = truncate
     else:
         tdeff_points = None
+
+    if echo_wrap_limit is not None:
+        tdeff_points = echo_wrap_limit if tdeff_points is None else min(tdeff_points, echo_wrap_limit)
+
     if tdeff_points is not None and tdeff_points < len(fid):
         fid = fid[:tdeff_points]
 
-    if fid_shift:
-        fid = processing_ft.roll_fid(fid, fid_shift)
-    if align_echo:
-        fid = processing_ft.align_echo(fid)
     if linear_predict_points:
         fid = processing_ft.linear_predict(
             fid, order=linear_predict_order, n_predict=linear_predict_points,

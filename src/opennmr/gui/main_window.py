@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("openNMR")
         self.resize(1100, 700)
+        self.setAcceptDrops(True)  # drag a data folder straight in -- see dropEvent
 
         self.session = Session()
         # What the phase controls currently act on -- one of "1d",
@@ -132,30 +133,56 @@ class MainWindow(QMainWindow):
         self.spectral_fit_canvas = MplCanvas()
 
         self.canvas_tabs = QTabWidget()
-        self.canvas_tabs.addTab(self.canvas, "Spectrum")
         self.canvas_tabs.addTab(self.fid_canvas, "FID")
-        self.canvas_tabs.addTab(self.compare_canvas, "Compare")
-        self.canvas_tabs.addTab(self.fit_canvas, "Fit")
+        self.canvas_tabs.addTab(self.canvas, "Spectrum")
         self.canvas_tabs.addTab(self.spectral_fit_canvas, "Spectral Fit")
+        self.canvas_tabs.addTab(self.fit_canvas, "Fit")
+        self.canvas_tabs.addTab(self.compare_canvas, "Compare")
         # No more "Preview as FID" checkbox -- clicking the FID tab
         # itself is what shows/refreshes the current spectrum's FID.
         self.canvas_tabs.currentChanged.connect(self._on_canvas_tab_changed)
+        # Fit only ever has something to show for a pseudo-2D spectrum
+        # (or a Compare-stack fit, which force-shows it directly --
+        # see _run_curve_fit); Compare only ever has something once its
+        # own list (left-hand Compare tab) has an entry -- both start
+        # hidden and are kept in sync by _update_fit_tab_visibility/
+        # _update_compare_tab_visibility rather than always being shown
+        # empty.
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), False)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.compare_canvas), False)
 
         tabs = QTabWidget()
         tabs.addTab(self._scrollable(self._build_spectra_tab()), "Spectra")
         tabs.addTab(self._scrollable(self._build_processing_tab()), "Processing")
-        tabs.addTab(self._scrollable(self._build_compare_tab()), "Compare")
         tabs.addTab(self._scrollable(self._build_analysis_tab()), "Analysis")
+        tabs.addTab(self._scrollable(self._build_compare_tab()), "Compare")
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(tabs)
         splitter.addWidget(self.canvas_tabs)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([300, 800])
+        # Both panels now get a share of any extra space from resizing
+        # the window larger (canvas 3x the left panel's) -- previously
+        # only the canvas did (stretch factor 0 is the QSplitter
+        # default), which left the left panel pinned at its initial
+        # ~300px forever, however much the window grew: proportionally
+        # shrinking it down to a sliver on a large/maximized window,
+        # where its own content (QFormLayout rows of labels + combo/
+        # spin boxes) has nowhere to go but overflow past the
+        # scrollbar-disabled QScrollArea's viewport edge (see
+        # _scrollable's own docstring for why that scrollbar is off).
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([340, 760])
+        # A dragged-too-narrow left panel hits the same overflow --
+        # floor it at a usable width. Still fully draggable/resizable
+        # by the user (a QSplitter handle's own drag isn't affected by
+        # a child widget's minimumWidth -- Qt just won't let the user
+        # drag past it), matching "with an option still to change".
+        tabs.setMinimumWidth(280)
 
         self.setCentralWidget(splitter)
         self._set_processing_enabled(False)
-        self.pseudo_2d_checkbox.setVisible(False)
+        self.process_indirect_button.setVisible(False)
         self.pseudo2d_view_combo.setVisible(False)
         self.dimension_box.setVisible(False)
 
@@ -174,12 +201,40 @@ class MainWindow(QMainWindow):
         taller over a session and never come back (reported as "the
         window is sometimes becoming taller for no apparent reason").
         Scrolling internally instead means that size-hint growth is
-        absorbed here, not propagated up to the window."""
+        absorbed here, not propagated up to the window -- but only
+        *vertical* growth is meant to be absorbed this way. Horizontal
+        scrolling is deliberately turned off: an un-word-wrapped label
+        (or anything else with a too-wide size hint) would otherwise
+        silently make the tab horizontally scrollable instead of
+        wrapping/shrinking to the sidebar's actual width, which is a
+        worse failure mode (content quietly cut off to the side,
+        easy to miss) than the tall-window ratchet this was built to
+        fix in the first place -- forcing content to actually fit
+        within whatever width the splitter gives this side panel (see
+        __init__'s ``splitter.setSizes``) surfaces a wrapping bug
+        immediately instead of hiding it behind a scrollbar."""
         scroll = QScrollArea()
         scroll.setWidget(widget)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         return scroll
+
+    @staticmethod
+    def _narrow_combo(combo: QComboBox, chars: int = 14) -> None:
+        """Stop a long item's text (e.g. "Biexponential recovery
+        (T1a/T1b)", "Relative gradient (valueslist)") from setting this
+        combo box's own minimum width -- Qt's default
+        ``AdjustToContentsOnFirstShow`` sizes the *closed* box to fit
+        whatever the widest item happened to be the first time it was
+        shown, and never shrinks it back down again even inside a
+        narrower container, which is exactly the kind of fixed-content
+        width ``_scrollable``'s disabled horizontal scrollbar (see its
+        own docstring) can't route around -- it surfaces as clipped/
+        overflowing content instead. The dropdown popup itself is
+        unaffected -- still shows every item at its own full width."""
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        combo.setMinimumContentsLength(chars)
 
     # ============================================================
     # Spectra tab: open / list / remove / nucleus override
@@ -225,17 +280,19 @@ class MainWindow(QMainWindow):
         self.info_label.setWordWrap(True)
         info_form.addRow(self.info_label)
 
-        self.pseudo_2d_checkbox = QCheckBox("Force pseudo-2D (F1 is not a frequency dimension)")
-        self.pseudo_2d_checkbox.setToolTip(
-            "Override auto-detection of whether F1 is a real chemical-shift "
-            "dimension (gets its own FFT) or an index/slice dimension (e.g. "
-            "a relaxation delay or diffusion gradient series) -- auto-detection "
-            "relies on the vendor having recorded this conventionally, which "
-            "isn't guaranteed for every pulse sequence. Only applies to 2D "
-            "spectra; reprocesses from the original file when changed."
+        self.process_indirect_button = QPushButton("Process Indirect Dimension")
+        self.process_indirect_button.setCheckable(True)
+        self.process_indirect_button.setToolTip(
+            "Pseudo-2D (F1 is an index/slice dimension -- a relaxation "
+            "delay or diffusion gradient series, no FFT along F1) is the "
+            "default for every 2D spectrum. Click this only for a "
+            "genuine 2D-correlation experiment (COSY/HSQC-style) where "
+            "F1 really is a second chemical-shift dimension that needs "
+            "its own FFT -- reprocesses from the original file "
+            "immediately, like Align Echo does for FID processing."
         )
-        self.pseudo_2d_checkbox.stateChanged.connect(self._on_pseudo_2d_toggled)
-        info_form.addRow(self.pseudo_2d_checkbox)
+        self.process_indirect_button.toggled.connect(self._on_process_indirect_toggled)
+        info_form.addRow(self.process_indirect_button)
 
         self.pseudo2d_view_combo = QComboBox()
         self.pseudo2d_view_combo.addItems(["Contour", "Stacked slices"])
@@ -258,13 +315,18 @@ class MainWindow(QMainWindow):
         )
         if not directory:
             return
+        self._open_directory(directory)
 
+    def _open_directory(self, directory: str) -> None:
+        """Scan ``directory`` for spectra and load them -- shared by
+        the Open… dialog and drag-and-drop (see ``dropEvent``), so a
+        dropped folder behaves exactly like one picked via the dialog."""
         matches = self._scan_for_spectra(directory)
         if not matches:
             QMessageBox.critical(
                 self, "No spectra found",
-                f"Could not find a Bruker experiment or an X-Pulse spectrum "
-                f"under {directory!r}.",
+                f"Could not find a Bruker, X-Pulse, or Varian/Agilent "
+                f"experiment under {directory!r}.",
             )
             return
 
@@ -274,6 +336,36 @@ class MainWindow(QMainWindow):
 
         for path, vendor in self._prompt_select_spectra(matches, directory):
             self._load(path, vendor)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        paths = [url.toLocalFile() for url in event.mimeData().urls()]
+        self._handle_dropped_paths([p for p in paths if p])
+        event.acceptProposedAction()
+
+    def _handle_dropped_paths(self, paths: list[str]) -> None:
+        """Drag a data folder (an experiment folder itself, or a
+        parent folder holding several) straight into the window,
+        instead of needing the Open… dialog -- reuses the exact same
+        scan/prompt/load path. A dropped single file that's itself a
+        recognised spectrum (e.g. one X-Pulse/Varian file, not inside
+        a folder) loads directly; anything else unrecognised is
+        silently skipped rather than raising, since a drop can easily
+        include the OS's own clutter (a `.DS_Store`, etc.) alongside
+        the folder actually meant. Split out from ``dropEvent`` itself
+        so this is testable without constructing a real ``QDropEvent``."""
+        for path in paths:
+            if os.path.isdir(path):
+                self._open_directory(path)
+            elif os.path.isfile(path):
+                try:
+                    vendor = io.detect_vendor(path)
+                except ValueError:
+                    continue
+                self._load(path, vendor)
 
     #: X-Pulse individual-scan-repeat files, e.g.
     #: ``"...H_1_10_raw.jdx"`` -- one per scan within an averaged
@@ -347,7 +439,9 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Select spectra to open")
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel(f"Found {len(matches)} spectra under {base_dir}:"))
+        found_label = QLabel(f"Found {len(matches)} spectra under {base_dir}:")
+        found_label.setWordWrap(True)
+        layout.addWidget(found_label)
 
         list_widget = QListWidget()
         list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -369,12 +463,25 @@ class MainWindow(QMainWindow):
 
     def _load(self, path: str, vendor: str) -> None:
         try:
-            self.session.add(path, vendor=vendor)
+            spectrum = self.session.add(path, vendor=vendor)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to load spectrum", str(exc))
             return
 
         index = len(self.session) - 1
+        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
+            # Pseudo-2D is the default treatment for any 2D data,
+            # regardless of what the vendor's own (known-unreliable for
+            # at least Bruker T2/PFG data, see TODO.md) auto-detection
+            # reports -- overridden here rather than trusting it, since
+            # under-detecting pseudo-2D is the failure mode actually
+            # seen on real data. Process Indirect Dimension (unchecked
+            # by default after this) is how a genuine 2D-correlation
+            # experiment opts back into a real F1 FFT.
+            try:
+                spectrum = self.session.reload(index, pseudo_2d=True)
+            except Exception:  # noqa: BLE001 -- fall back to what actually loaded rather than failing the load
+                pass
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
 
@@ -411,6 +518,7 @@ class MainWindow(QMainWindow):
             self._refresh_compare_view()
         else:
             self.compare_list.clear()
+            self._update_compare_tab_visibility()
 
     def _on_clear_clicked(self) -> None:
         self.session.clear()
@@ -420,14 +528,17 @@ class MainWindow(QMainWindow):
         self._phase_mode = None
         self._set_processing_enabled(False)
         self.info_label.setText("—")
-        self.pseudo_2d_checkbox.setVisible(False)
+        self.process_indirect_button.setVisible(False)
         self.pseudo2d_view_combo.setVisible(False)
         self.dimension_box.setVisible(False)
         self.fid_processing_box.setVisible(False)
+        self._update_fit_tab_visibility(None)
         self.compare_status_label.setText("Select at least two 1D spectra to compare.")
         self.compare_list.clear()
+        self._update_compare_tab_visibility()
         self.peak_table.setRowCount(0)
         self.analysis_results_label.setText("")
+        self.spectral_fit_params_label.setText("")
         self.analysis_status_label.setText("Select a pseudo-2D spectrum (e.g. a T1/T2 relaxation series) to fit.")
         self._current_analysis_index = None
         self._slice_fit_results = None
@@ -443,13 +554,19 @@ class MainWindow(QMainWindow):
             return
         index = self.spectrum_list.row(item)
 
+        spectrum = self.session.spectra[index]
+
         menu = QMenu(self)
         override_action = menu.addAction("Override nucleus…")
         suggest_action = menu.addAction("Suggest nucleus (500 MHz console / 100 MHz magnet)…")
         mass_action = menu.addAction("Set sample mass…")
         procno_action = None
-        if self.session.spectra[index].metadata.vendor == "bruker":
+        if spectrum.metadata.vendor == "bruker":
             procno_action = menu.addAction("Change proc number…")
+        fit_curve_action = None
+        if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
+            menu.addSeparator()
+            fit_curve_action = menu.addAction("Fit Curve (relaxation/diffusion)…")
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
 
@@ -462,6 +579,8 @@ class MainWindow(QMainWindow):
             self._on_set_mass_action(index)
         elif procno_action is not None and chosen is procno_action:
             self._on_change_procno_action(index)
+        elif fit_curve_action is not None and chosen is fit_curve_action:
+            self._on_fit_curve_pseudo2d_action(index)
         elif chosen is remove_action:
             self.session.remove(index)
             self.spectrum_list.takeItem(index)
@@ -532,21 +651,26 @@ class MainWindow(QMainWindow):
         if index == self._selected_index():
             self._on_selection_changed(index)
 
-    def _on_pseudo_2d_toggled(self, _state: int) -> None:
+    def _on_process_indirect_toggled(self, checked: bool) -> None:
+        """Checked = process the indirect (F1) dimension as a real
+        frequency dimension (``pseudo_2d=False``); unchecked (the
+        default -- see :meth:`_load`) = pseudo-2D, F1 left as an
+        index/slice dimension with no FFT."""
         index = self._selected_index()
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        if spectrum.ndim != 2 or spectrum.is_pseudo_2d == self.pseudo_2d_checkbox.isChecked():
+        wants_pseudo_2d = not checked
+        if spectrum.ndim != 2 or spectrum.is_pseudo_2d == wants_pseudo_2d:
             return
         try:
-            self.session.reload(index, pseudo_2d=self.pseudo_2d_checkbox.isChecked())
+            self.session.reload(index, pseudo_2d=wants_pseudo_2d)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to reprocess spectrum", str(exc))
-            # Revert the checkbox to match what's actually loaded.
-            self.pseudo_2d_checkbox.blockSignals(True)
-            self.pseudo_2d_checkbox.setChecked(spectrum.is_pseudo_2d)
-            self.pseudo_2d_checkbox.blockSignals(False)
+            # Revert the button to match what's actually loaded.
+            self.process_indirect_button.blockSignals(True)
+            self.process_indirect_button.setChecked(not spectrum.is_pseudo_2d)
+            self.process_indirect_button.blockSignals(False)
             return
         self._on_selection_changed(index)
 
@@ -575,12 +699,18 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        layout.addWidget(QLabel(
-            "Ctrl/Cmd-click (or Shift-click) several spectra in the "
-            "Spectra tab's list to start a comparison, then fine-tune "
-            "it here -- check/uncheck to include or exclude, Move Up/"
-            "Down to reorder the plot."
-        ))
+        compare_intro_label = QLabel(
+            "Ctrl/Cmd-click (or Shift-click) several 1D spectra in the "
+            "Spectra tab's list to start a comparison -- or just select "
+            "a single pseudo-2D spectrum there, which fills this in "
+            "with its own slices automatically, in order. Fine-tune "
+            "either here: check/uncheck to include or exclude, Move Up/"
+            "Down to reorder the plot. Right-click for Plot (jump to "
+            "the Compare canvas tab) or Fit Curve (relaxation/"
+            "diffusion) across whatever's checked here."
+        )
+        compare_intro_label.setWordWrap(True)
+        layout.addWidget(compare_intro_label)
 
         self.compare_status_label = QLabel("Select at least two 1D spectra to compare.")
         self.compare_status_label.setWordWrap(True)
@@ -588,12 +718,15 @@ class MainWindow(QMainWindow):
 
         self.compare_list = QListWidget()
         self.compare_list.setToolTip(
-            "The spectra currently in this comparison. Uncheck one to "
-            "drop it from the plot without losing your Spectra-tab "
-            "selection; select a row and use Move Up/Down to change "
-            "the stack order."
+            "The spectra currently in this comparison -- either "
+            "manually multi-selected 1D spectra, or every slice of a "
+            "single selected pseudo-2D spectrum. Uncheck one to drop "
+            "it from the plot; select a row and use Move Up/Down to "
+            "change the stack order. Right-click for Fit Curve."
         )
         self.compare_list.itemChanged.connect(lambda _item: self._refresh_compare_view_if_active())
+        self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
         layout.addWidget(self.compare_list)
 
         reorder_row = QHBoxLayout()
@@ -640,6 +773,26 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(form)
 
+        compare_action_row = QHBoxLayout()
+        compare_plot_button = QPushButton("Plot")
+        compare_plot_button.setToolTip(
+            "(Re-)draw the comparison from whatever's checked above and "
+            "jump to the Compare canvas tab -- also happens automatically "
+            "on every checkbox/control change; this is just an explicit, "
+            "always-available way to do the same thing on demand."
+        )
+        compare_plot_button.clicked.connect(self._refresh_compare_view)
+        compare_action_row.addWidget(compare_plot_button)
+        compare_fit_curve_button = QPushButton("Fit Curve…")
+        compare_fit_curve_button.setToolTip(
+            "Fit a relaxation/diffusion model across whatever's checked "
+            "above (needs at least two 1D spectra) -- fits each checked "
+            "entry's peaks first if they haven't been already."
+        )
+        compare_fit_curve_button.clicked.connect(self._on_fit_curve_compare_stack_action)
+        compare_action_row.addWidget(compare_fit_curve_button)
+        layout.addLayout(compare_action_row)
+
         layout.addStretch(1)
         return tab
 
@@ -652,15 +805,23 @@ class MainWindow(QMainWindow):
             self._populate_compare_list(rows)
             self._refresh_compare_view()
         else:
-            # Deliberately doesn't clear compare_list here -- a
+            # Item D: selecting a single pseudo-2D spectrum fills the
+            # Compare tab with its own slices automatically -- a
+            # pseudo-2D series IS a stack of related 1D spectra, so it
+            # gets the same select/deselect/reorder/Fit-Curve context
+            # a manually multi-selected stack of separate files does,
+            # with no extra step. Anything else about a single
+            # selection deliberately doesn't touch compare_list -- a
             # multi-select gesture (e.g. clearSelection() followed by
             # several setSelected(True) calls) can pass through a
-            # transient <=1-row state along the way, and clearing on
-            # every such blip would wipe out check-state/reordering
-            # already done in the Compare tab for no reason. It's
-            # naturally rebuilt (or intentionally left as-is) next
-            # time a *sustained* multi-selection comes in.
-            #
+            # transient <=1-row state along the way, and clearing (or
+            # replacing) on every such blip would wipe out check-state/
+            # reordering already done in the Compare tab for no reason.
+            if len(rows) == 1 and 0 <= rows[0] < len(self.session):
+                spectrum = self.session.spectra[rows[0]]
+                if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
+                    self._populate_compare_list_from_pseudo2d(rows[0], spectrum)
+                    self._refresh_compare_view()
             # Multi- -> single-selection doesn't always change
             # currentRow() (the item that was already current can stay
             # current), so currentRowChanged wouldn't fire on its own
@@ -669,11 +830,13 @@ class MainWindow(QMainWindow):
 
     def _populate_compare_list(self, rows: list[int]) -> None:
         """Rebuild the Compare tab's own list from the Spectra tab's
-        current multi-selection, preserving any check-state/reorder
-        already done here for rows still selected -- so ctrl-clicking
-        one more spectrum in the Spectra tab appends it rather than
-        wiping out prior deselections/reordering, but ctrl-clicking a
-        row *out* of the selection still drops it from here too."""
+        current multi-selection (each row as a whole spectrum -- entry
+        ``(row, None)``, see :meth:`_resolve_compare_entry`),
+        preserving any check-state/reorder already done here for rows
+        still selected -- so ctrl-clicking one more spectrum in the
+        Spectra tab appends it rather than wiping out prior
+        deselections/reordering, but ctrl-clicking a row *out* of the
+        selection still drops it from here too."""
         # Filter out-of-range indices defensively -- a spectrum removal
         # can trigger this (directly, or reentrantly via the list
         # widget's own itemSelectionChanged) at a point where a stale
@@ -681,35 +844,76 @@ class MainWindow(QMainWindow):
         # shorter length.
         n = len(self.session)
         rows = [r for r in rows if 0 <= r < n]
-        previous_order = [
-            r for r in (self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
-                        for i in range(self.compare_list.count()))
-            if 0 <= r < n
-        ]
-        previous_checked = {
-            self.compare_list.item(i).data(Qt.ItemDataRole.UserRole): self.compare_list.item(i).checkState()
-            for i in range(self.compare_list.count())
-        }
-        rows_set = set(rows)
-        new_order = [r for r in previous_order if r in rows_set] + [r for r in rows if r not in previous_order]
+        entries = [(r, None) for r in rows]
+        self._rebuild_compare_list(entries)
+
+    def _populate_compare_list_from_pseudo2d(self, row: int, spectrum) -> None:
+        """Fill the Compare tab with every slice of ``spectrum`` (entry
+        ``(row, slice_index)``, 1-based), in order, all checked --
+        replaces whatever was there before (this is a fresh "look at
+        this series" action, not a merge with an unrelated prior
+        multi-select)."""
+        n_slices = spectrum.data.shape[0]
+        entries = [(row, slice_index) for slice_index in range(1, n_slices + 1)]
+        self._rebuild_compare_list(entries, preserve_previous=False)
+
+    def _rebuild_compare_list(self, entries: list[tuple[int, int | None]], preserve_previous: bool = True) -> None:
+        previous_checked = {}
+        previous_order = []
+        if preserve_previous:
+            previous_order = [self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
+                               for i in range(self.compare_list.count())]
+            previous_checked = {self.compare_list.item(i).data(Qt.ItemDataRole.UserRole):
+                                 self.compare_list.item(i).checkState()
+                                 for i in range(self.compare_list.count())}
+        entries_set = set(entries)
+        new_order = [e for e in previous_order if e in entries_set] + [e for e in entries if e not in previous_order]
 
         self.compare_list.blockSignals(True)
         self.compare_list.clear()
-        for r in new_order:
-            item = QListWidgetItem(self.session.label(r))
+        for entry in new_order:
+            item = QListWidgetItem(self._compare_entry_label(entry))
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(previous_checked.get(r, Qt.CheckState.Checked))
-            item.setData(Qt.ItemDataRole.UserRole, r)
+            item.setCheckState(previous_checked.get(entry, Qt.CheckState.Checked))
+            item.setData(Qt.ItemDataRole.UserRole, entry)
             self.compare_list.addItem(item)
         self.compare_list.blockSignals(False)
+        self._update_compare_tab_visibility()
 
-    def _compare_checked_rows(self) -> list[int]:
-        rows = []
+    def _compare_entry_label(self, entry: tuple[int, int | None]) -> str:
+        session_index, slice_index = entry
+        base = self.session.label(session_index)
+        if slice_index is None:
+            return base
+        return f"{base} · {self._slice_label(self.session.spectra[session_index], slice_index)}"
+
+    def _resolve_compare_entry(self, entry: tuple[int, int | None]):
+        """The actual 1D ``NMRSpectrum`` a Compare-list entry refers
+        to -- either a whole (already-1D) spectrum, or one extracted
+        slice of a pseudo-2D series. Returns ``None`` for anything
+        that's gone stale (a removed spectrum, a pseudo-2D reprocessed
+        down to fewer slices) or isn't actually 1D/pseudo-2D at all,
+        rather than raising -- the caller already reports a skip count
+        for non-1D entries."""
+        session_index, slice_index = entry
+        if not (0 <= session_index < len(self.session)):
+            return None
+        spectrum = self.session.spectra[session_index]
+        if slice_index is None:
+            return spectrum
+        if spectrum.ndim != 2 or not spectrum.is_pseudo_2d:
+            return None
+        if not (1 <= slice_index <= spectrum.data.shape[0]):
+            return None
+        return processing_slicing.get_trace(spectrum, axis="f1", index=slice_index)
+
+    def _compare_checked_entries(self) -> list[tuple[int, int | None]]:
+        entries = []
         for i in range(self.compare_list.count()):
             item = self.compare_list.item(i)
             if item.checkState() == Qt.CheckState.Checked:
-                rows.append(item.data(Qt.ItemDataRole.UserRole))
-        return rows
+                entries.append(item.data(Qt.ItemDataRole.UserRole))
+        return entries
 
     def _on_move_compare_item(self, delta: int) -> None:
         """Reorders rows within the Compare tab's own list -- this is
@@ -724,6 +928,48 @@ class MainWindow(QMainWindow):
         self.compare_list.setCurrentRow(new_row)
         self._refresh_compare_view_if_active()
 
+    def _on_compare_list_context_menu(self, pos) -> None:
+        """Plot (an explicit, discoverable way to (re-)draw the
+        comparison and jump to the Compare canvas tab, rather than
+        only ever happening as a side effect of toggling a checkbox)
+        and Fit Curve (relaxation/diffusion) across a "stack of 1D
+        data" -- both gated on there being at least one checked entry,
+        since neither makes sense before a stack actually exists."""
+        if not self._compare_checked_entries():
+            return
+        menu = QMenu(self)
+        plot_action = menu.addAction("Plot")
+        fit_curve_action = menu.addAction("Fit Curve (relaxation/diffusion)…")
+        chosen = menu.exec(self.compare_list.viewport().mapToGlobal(pos))
+        if chosen is plot_action:
+            self._refresh_compare_view()
+        elif chosen is fit_curve_action:
+            self._on_fit_curve_compare_stack_action()
+
+    def _on_fit_curve_compare_stack_action(self) -> None:
+        entries = self._compare_checked_entries()
+        candidates = [self._resolve_compare_entry(e) for e in entries]
+        stack = [c for c in candidates if c is not None and c.ndim == 1]
+        if len(stack) < 2:
+            QMessageBox.information(
+                self, "Not enough spectra",
+                "Fit Curve needs at least two 1D spectra checked in the Compare list.",
+            )
+            return
+        try:
+            slice_results = self._fit_peaks(stack)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Fit failed", str(exc))
+            return
+        # No single spectrum "owns" a Compare-stack fit the way a
+        # pseudo-2D's own slices do -- reference_spectrum only
+        # supplies vendor/path context for the Values-source combo
+        # (Auto/vclist/relative-gradient), and persist_to is
+        # deliberately None (see _run_curve_fit's own docstring):
+        # switching away and back loses this result, matching the
+        # Compare tab's own existing no-per-item-persistence character.
+        self._run_curve_fit(slice_results, len(stack), stack[0], persist_to=None)
+
     def _on_compare_controls_changed(self) -> None:
         self.stack_gap_spin.setEnabled(self.layout_mode_combo.currentIndex() == 0)
         self._refresh_compare_view_if_active()
@@ -733,8 +979,9 @@ class MainWindow(QMainWindow):
             self._refresh_compare_view()
 
     def _refresh_compare_view(self) -> None:
-        rows = self._compare_checked_rows()
-        candidates = [self.session.spectra[r] for r in rows]
+        entries = self._compare_checked_entries()
+        candidates = [self._resolve_compare_entry(e) for e in entries]
+        candidates = [c for c in candidates if c is not None]  # stale entries (removed/reprocessed) silently drop
         spectra = [s for s in candidates if s.ndim == 1]
         skipped_ndim = len(candidates) - len(spectra)
 
@@ -800,6 +1047,19 @@ class MainWindow(QMainWindow):
         )
         form = QFormLayout(box)
 
+        self.fid_display_combo = QComboBox()
+        self.fid_display_combo.addItem("Magnitude", "magnitude")
+        self.fid_display_combo.addItem("Real", "real")
+        self.fid_display_combo.setToolTip(
+            "How the FID preview plots the (complex) time-domain data -- "
+            "Magnitude (|FID|, a single clean decay/echo envelope, easiest "
+            "for judging alignment/decay shape) or Real (one oscillating "
+            "component, closer to what phase-sensitive detection actually "
+            "recorded). A view setting only -- doesn't affect processing."
+        )
+        self.fid_display_combo.currentIndexChanged.connect(lambda _i: self._refresh_fid_preview_if_active())
+        form.addRow("Preview:", self.fid_display_combo)
+
         self.window_combo = QComboBox()
         self.window_combo.currentIndexChanged.connect(self._on_window_combo_changed)
         form.addRow("Window:", self.window_combo)
@@ -845,13 +1105,20 @@ class MainWindow(QMainWindow):
         self.tdeff_spin.valueChanged.connect(lambda _v: self._refresh_fid_preview_if_active())
         form.addRow("TDeff:", self.tdeff_spin)
 
-        self.align_echo_checkbox = QCheckBox("Align as full echo (centre the echo top)")
-        self.align_echo_checkbox.setToolTip(
-            "For full-echo acquisitions (rising then falling) rather "
-            "than a one-sided decaying FID -- rolls the FID so its "
-            "peak is centred, before windowing."
+        self.align_echo_button = QPushButton("Align Echo")
+        self.align_echo_button.setCheckable(True)
+        self.align_echo_button.setToolTip(
+            "For full-echo acquisitions (rising then falling, e.g. "
+            "imaging profiles) rather than a one-sided decaying FID -- "
+            "rolls the FID so its peak sits at t=0, before windowing. "
+            "Clicking immediately reprocesses and switches to the FID "
+            "tab so you can see whether it actually worked (dashed "
+            "green marker at the found echo top -- should land right "
+            "at t=0 once aligned) rather than silently changing a "
+            "setting for later. Toggle off to revert."
         )
-        form.addRow(self.align_echo_checkbox)
+        self.align_echo_button.toggled.connect(self._on_align_echo_toggled)
+        form.addRow(self.align_echo_button)
 
         self.fid_shift_spin = QDoubleSpinBox()
         self.fid_shift_spin.setRange(-1.0e6, 1.0e6)
@@ -944,11 +1211,12 @@ class MainWindow(QMainWindow):
     def _fid_reprocessable(spectrum) -> bool:
         """Whether ``spectrum`` was loaded from a raw FID this GUI can
         re-read and reprocess with different parameters -- true for any
-        X-Pulse spectrum (always raw-FID), or a Bruker experiment whose
-        raw ``fid``/``ser`` is present on disk (if so, :func:`opennmr.
-        io.bruker._read_auto` would have preferred it over the
-        already-processed fallback in the first place)."""
-        if spectrum.metadata.vendor == "xpulse":
+        X-Pulse or Varian spectrum (both are always raw-FID, no
+        vendor-processed fallback exists for either), or a Bruker
+        experiment whose raw ``fid``/``ser`` is present on disk (if so,
+        :func:`opennmr.io.bruker._read_auto` would have preferred it
+        over the already-processed fallback in the first place)."""
+        if spectrum.metadata.vendor in ("xpulse", "varian"):
             return True
         if spectrum.metadata.vendor == "bruker" and spectrum.metadata.source_path:
             base = spectrum.metadata.source_path
@@ -977,7 +1245,16 @@ class MainWindow(QMainWindow):
             fid = fid[row]
         envelope = self._compute_window_envelope(dt, len(fid))
         tdeff = self.tdeff_spin.value() if self.tdeff_spin.isEnabled() else 0
-        self.fid_canvas.show_fid(fid, dt, title=title, window_envelope=envelope, tdeff_index=tdeff or None)
+        # Only worth showing while the feature is actually in play --
+        # for an ordinary one-sided decaying FID this would just mark
+        # the very first point (its magnitude peak is trivially at
+        # t=0), which is a meaningless/cluttering line, not a useful
+        # confirmation of anything.
+        echo_top = processing_ft.find_echo_top(fid) if self.align_echo_button.isChecked() else None
+        self.fid_canvas.show_fid(
+            fid, dt, title=title, window_envelope=envelope, tdeff_index=tdeff or None, echo_top_index=echo_top,
+            mode=self.fid_display_combo.currentData(),
+        )
         if switch_tab:
             self.canvas_tabs.setCurrentWidget(self.fid_canvas)
 
@@ -1028,6 +1305,24 @@ class MainWindow(QMainWindow):
             # plot from whatever was last shown here.
             self.fid_canvas.clear()
 
+    def _update_fit_tab_visibility(self, spectrum) -> None:
+        """Show the Fit canvas tab only while there's something it
+        could plausibly show: the currently selected spectrum is
+        pseudo-2D (so a right-click Fit Curve on it is available), or
+        ``spectrum`` is ``None`` (nothing selected -- hide). A
+        Compare-stack fit (which doesn't depend on what's selected in
+        the Spectra tab at all) force-shows this tab directly in
+        :meth:`_run_curve_fit` instead of going through this check."""
+        index = self.canvas_tabs.indexOf(self.fit_canvas)
+        visible = spectrum is not None and spectrum.ndim == 2 and spectrum.is_pseudo_2d
+        self.canvas_tabs.setTabVisible(index, visible)
+
+    def _update_compare_tab_visibility(self) -> None:
+        """Show the Compare canvas tab only once the (left-hand)
+        Compare tab's own list actually has something in it."""
+        index = self.canvas_tabs.indexOf(self.compare_canvas)
+        self.canvas_tabs.setTabVisible(index, self.compare_list.count() > 0)
+
     def _refresh_fid_processing_controls(self, spectrum, index: int) -> None:
         reprocessable = self._fid_reprocessable(spectrum)
         self.fid_processing_box.setVisible(reprocessable)
@@ -1076,9 +1371,9 @@ class MainWindow(QMainWindow):
         self.linear_predict_order_spin.setValue(saved.get("linear_predict_order", 20))
         self.linear_predict_order_spin.blockSignals(False)
 
-        self.align_echo_checkbox.blockSignals(True)
-        self.align_echo_checkbox.setChecked(saved.get("align_echo", False))
-        self.align_echo_checkbox.blockSignals(False)
+        self.align_echo_button.blockSignals(True)
+        self.align_echo_button.setChecked(saved.get("align_echo", False))
+        self.align_echo_button.blockSignals(False)
 
         original_length = spectrum.metadata.raw.get("fid_original_length")
         default_zero_fill = saved.get("zero_fill", self._default_zero_fill_size(original_length))
@@ -1110,7 +1405,7 @@ class MainWindow(QMainWindow):
             "window_kwargs": window_kwargs_kwarg,
             "zero_fill": self._zero_fill_value(),
             "fid_shift": self.fid_shift_spin.value(),
-            "align_echo": self.align_echo_checkbox.isChecked(),
+            "align_echo": self.align_echo_button.isChecked(),
             "linear_predict_points": self.linear_predict_points_spin.value(),
         }
         if self.linear_predict_points_spin.value():
@@ -1126,6 +1421,27 @@ class MainWindow(QMainWindow):
 
         self.spectrum_list.item(index).setText(self.session.label(index))
         self._on_selection_changed(index)
+
+    def _on_align_echo_toggled(self, _checked: bool) -> None:
+        """Align Echo is a push button, not a passive checkbox --
+        toggling it immediately reprocesses (not just remembering the
+        setting for a later "Reprocess" click) and switches to the FID
+        tab so the effect is visible right away: a dashed green marker
+        at :func:`opennmr.processing.ft.find_echo_top`'s result, which
+        should land right at t=0 once genuinely aligned. Previously
+        this only took effect silently on the next "Reprocess," with
+        no way to tell from the UI alone whether it had actually done
+        anything."""
+        if self._selected_index() is None:
+            return
+        self._on_reprocess_fid_clicked()
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        if self._fid_preview_available(spectrum):
+            self._show_fid_preview(spectrum, switch_tab=False)
+        self.canvas_tabs.setCurrentWidget(self.fid_canvas)
 
     def _build_processing_tab(self) -> QWidget:
         tab = QWidget()
@@ -1159,6 +1475,17 @@ class MainWindow(QMainWindow):
         )
         self.apply_all_slices_checkbox.stateChanged.connect(self._on_apply_all_slices_toggled)
         dim_form.addRow(self.apply_all_slices_checkbox)
+
+        self.autophase_slices_button = QPushButton("Autophase (each slice independently)")
+        self.autophase_slices_button.setToolTip(
+            "Zero-order autophase (grid-search maximizing the real "
+            "part's integral) every slice on its own -- unlike the "
+            "checkbox above, each slice gets its own phase0, not one "
+            "shared value. Immediate, in place; the Phase controls "
+            "above re-anchor to the result afterward."
+        )
+        self.autophase_slices_button.clicked.connect(self._on_autophase_slices_clicked)
+        dim_form.addRow(self.autophase_slices_button)
 
         self.dim_combo = QComboBox()
         self.dim_combo.addItems(["Direct (F2)", "Indirect (F1)"])
@@ -1202,18 +1529,29 @@ class MainWindow(QMainWindow):
         return tab
 
     def _build_reference_box(self) -> QGroupBox:
-        """Spectral reference (SR) correction -- shift the direct
-        (F2) axis by a constant Hz offset so a peak at a known
-        position reads correctly, without needing to re-import/
-        reprocess. Also available as a one-shot from the Spectrum
-        plot's right-click menu (:meth:`_on_reference_shift_from_plot`),
-        which is usually quicker than coming to this tab."""
+        """Spectral reference (SR) correction -- an absolute Hz offset
+        from the spectrum's own SFO1 base frequency, applied to the
+        direct (F2) axis so a peak at a known position reads
+        correctly, without needing to re-import/reprocess. Also
+        available as a one-shot from the Spectrum plot's right-click
+        menu (:meth:`_on_reference_shift_from_plot`), which is usually
+        quicker than coming to this tab.
+
+        This is a persistent *value*, not a one-shot delta: it shows
+        (and is siloed per spectrum, like the FID-processing controls)
+        the spectrum's current SR, and re-entering the same value is a
+        no-op -- re-applying always recomputes from the spectrum's
+        original, as-loaded axis (:meth:`_capture_original_axis`)
+        rather than compounding onto whatever the axis currently is."""
         box = QGroupBox("Reference (SR)")
         box.setToolTip(
-            "Shift the direct-dimension ppm/Hz axis by a constant Hz "
-            "offset -- e.g. the recorded SR correction from a "
-            "calibration standard. Positive moves peaks to higher "
-            "frequency/ppm."
+            "Spectral reference: an absolute Hz offset from this "
+            "spectrum's own SFO1 base frequency, applied to the "
+            "direct-dimension ppm/Hz axis -- e.g. the recorded SR "
+            "correction from a calibration standard. Positive moves "
+            "peaks to higher frequency/ppm. Persists as a value (not "
+            "a one-shot delta) -- editing it recomputes the axis from "
+            "scratch, so re-entering the same number twice is a no-op."
         )
         form = QFormLayout(box)
 
@@ -1221,7 +1559,7 @@ class MainWindow(QMainWindow):
         self.sr_shift_spin.setRange(-1.0e6, 1.0e6)
         self.sr_shift_spin.setDecimals(4)
         self.sr_shift_spin.setSuffix(" Hz")
-        form.addRow("Add:", self.sr_shift_spin)
+        form.addRow("SR:", self.sr_shift_spin)
 
         apply_button = QPushButton("Apply Reference Shift")
         apply_button.clicked.connect(self._on_apply_sr_clicked)
@@ -1296,6 +1634,38 @@ class MainWindow(QMainWindow):
                 )
                 self.processing_status_label.setText(status)
         self._apply_phase_preview()
+
+    def _on_autophase_slices_clicked(self) -> None:
+        """Zero-order autophase every slice of the selected pseudo-2D
+        spectrum independently (:func:`opennmr.processing.ft.apc0` per
+        row) -- unlike the shared phase0/phase1 controls above (even
+        with "Apply this phase to every slice" checked, which broadcasts
+        one value to every row), each slice's own phase error is found
+        and corrected on its own."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d and spectrum.data_imag is not None):
+            return
+
+        freq_ppm = spectrum.axis_values(-1, "ppm")
+        complex_data = spectrum.complex_data
+        phased = np.empty_like(complex_data)
+        for row in range(complex_data.shape[0]):
+            # A coarser grid than apc0's own 0.1 deg default -- run
+            # once per slice, so this stays quick across a series with
+            # many slices rather than needing a progress indicator.
+            phase0 = processing_ft.apc0(complex_data[row], freq_ppm, phase0_inc=0.5)
+            phased[row] = processing_ft.apply_phase(complex_data[row], freq_ppm, phase0, 0.0)
+
+        spectrum.data = np.real(phased)
+        spectrum.data_imag = np.imag(phased)
+        # The underlying data has genuinely changed -- re-anchor the
+        # Phase controls to it (same as a fresh selection), rather than
+        # leaving them pointing at the pre-autophase snapshot.
+        self._capture_phase_reference()
+        self._show_pseudo2d_slice(spectrum, reset_view=False)
 
     def _apply_phase_preview(self) -> None:
         index = self._selected_index()
@@ -1476,7 +1846,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         self.analysis_status_label = QLabel(
-            "Select a pseudo-2D spectrum (e.g. a T1/T2 relaxation series) to fit."
+            "Fit Spectrum works on any 1D spectrum, or every slice of a "
+            "pseudo-2D series. Fit Curve (relaxation/diffusion) needs a "
+            "pseudo-2D series selected here (or right-click it in the "
+            "Spectra tab), or a stack of 1D spectra in the Compare tab."
         )
         self.analysis_status_label.setWordWrap(True)
         layout.addWidget(self.analysis_status_label)
@@ -1500,6 +1873,15 @@ class MainWindow(QMainWindow):
         add_peak_button.clicked.connect(lambda: self._add_peak_row())
         remove_peak_button = QPushButton("Remove Peak")
         remove_peak_button.clicked.connect(self._on_remove_peak_clicked)
+        clear_peaks_button = QPushButton("Clear All")
+        clear_peaks_button.setToolTip("Remove every row from the peak table.")
+        clear_peaks_button.clicked.connect(lambda: self.peak_table.setRowCount(0))
+        peak_button_row.addWidget(add_peak_button)
+        peak_button_row.addWidget(remove_peak_button)
+        peak_button_row.addWidget(clear_peaks_button)
+        peak_layout.addLayout(peak_button_row)
+
+        auto_pick_row = QHBoxLayout()
         self.pick_peak_button = QPushButton("Pick from Plot")
         self.pick_peak_button.setCheckable(True)
         self.pick_peak_button.setToolTip(
@@ -1508,10 +1890,34 @@ class MainWindow(QMainWindow):
             "it in."
         )
         self.pick_peak_button.toggled.connect(self._on_pick_peak_toggled)
-        peak_button_row.addWidget(add_peak_button)
-        peak_button_row.addWidget(remove_peak_button)
-        peak_button_row.addWidget(self.pick_peak_button)
-        peak_layout.addLayout(peak_button_row)
+        auto_pick_button = QPushButton("Auto-Pick Peaks")
+        auto_pick_button.setToolTip(
+            "Detect peaks automatically (scipy find_peaks on the "
+            "current selection -- slice 1, for a pseudo-2D series) and "
+            "replace the table above with them, as a starting point -- "
+            "still just initial guesses, refined by the fit like any "
+            "other row here. Sensitivity set by Min. prominence, below."
+        )
+        auto_pick_button.clicked.connect(self._on_auto_pick_peaks_clicked)
+        auto_pick_row.addWidget(self.pick_peak_button)
+        auto_pick_row.addWidget(auto_pick_button)
+        peak_layout.addLayout(auto_pick_row)
+
+        prominence_row = QHBoxLayout()
+        prominence_row.addWidget(QLabel("Min. prominence:"))
+        self.auto_pick_prominence_spin = QDoubleSpinBox()
+        self.auto_pick_prominence_spin.setRange(0.01, 0.95)
+        self.auto_pick_prominence_spin.setDecimals(2)
+        self.auto_pick_prominence_spin.setSingleStep(0.05)
+        self.auto_pick_prominence_spin.setValue(0.1)
+        self.auto_pick_prominence_spin.setToolTip(
+            "Minimum peak prominence for Auto-Pick Peaks, as a fraction "
+            "of the spectrum's own peak-to-peak range (0-1). Raise this "
+            "if auto-pick finds too many peaks (noise bumps, shoulders); "
+            "lower it to find weaker ones."
+        )
+        prominence_row.addWidget(self.auto_pick_prominence_spin)
+        peak_layout.addLayout(prominence_row)
 
         tolerance_row = QHBoxLayout()
         tolerance_row.addWidget(QLabel("Position tolerance:"))
@@ -1534,11 +1940,65 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(peak_box)
 
-        relax_box = QGroupBox("Fit")
+        fit_button = QPushButton("Fit Spectrum")
+        fit_button.setToolTip(
+            "Step 1: fit peaks against the current selection -- a plain 1D "
+            "spectrum directly, or every slice of a pseudo-2D series."
+        )
+        fit_button.clicked.connect(self._on_fit_spectrum_clicked)
+        layout.addWidget(fit_button)
+
+        fit_curve_button = QPushButton("Fit Curve…")
+        fit_curve_button.setToolTip(
+            "Step 2: fit a relaxation/diffusion model to each peak's "
+            "per-slice amplitude, across every slice of the selected "
+            "pseudo-2D series -- reuses Step 1's results if already "
+            "computed, or runs it now. For a stack of separately-loaded "
+            "1D spectra instead of one pseudo-2D series, use the "
+            "Compare tab's own Fit Curve button/context-menu item."
+        )
+        fit_curve_button.clicked.connect(self._on_fit_curve_button_clicked)
+        layout.addWidget(fit_curve_button)
+
+        self.analysis_results_label = QLabel("")
+        self.analysis_results_label.setWordWrap(True)
+        layout.addWidget(self.analysis_results_label)
+
+        slice_fit_row = QHBoxLayout()
+        slice_fit_row.addWidget(QLabel("View slice fit:"))
+        self.view_slice_fit_spin = QSpinBox()
+        self.view_slice_fit_spin.setMinimum(1)
+        self.view_slice_fit_spin.setEnabled(False)
+        self.view_slice_fit_spin.setToolTip(
+            "Inspect any individual slice's spectral (pseudo-Voigt) "
+            "fit from Fit Spectrum, in the Spectral Fit tab -- "
+            "available once a fit has been run."
+        )
+        self.view_slice_fit_spin.valueChanged.connect(self._on_view_slice_fit_changed)
+        slice_fit_row.addWidget(self.view_slice_fit_spin)
+        layout.addLayout(slice_fit_row)
+
+        self.spectral_fit_params_label = QLabel("")
+        self.spectral_fit_params_label.setWordWrap(True)
+        self.spectral_fit_params_label.setToolTip(
+            "Fitted parameters (with 1-sigma uncertainties) for the "
+            "slice shown above, one line per peak."
+        )
+        layout.addWidget(self.spectral_fit_params_label)
+
+        relax_box = QGroupBox("Fit Curve settings (relaxation / diffusion -- step 2)")
+        relax_box.setToolTip(
+            "Configures the Fit Curve button above, and the Spectra "
+            "tab's right-click 'Fit Curve' action on a pseudo-2D row, "
+            "and the Compare tab's Fit Curve (button or right-click) "
+            "on a checked stack of 1D spectra -- not used by Fit "
+            "Spectrum, which is step 1."
+        )
         relax_form = QFormLayout(relax_box)
 
         self.fit_type_combo = QComboBox()
         self.fit_type_combo.addItems(["Relaxation (T1/T2)", "Diffusion (PFG)"])
+        self._narrow_combo(self.fit_type_combo)
         self.fit_type_combo.setToolTip(
             "Relaxation: fits a T1/T2/T1rho model against delay (s), "
             "read from this experiment's vdlist or entered manually. "
@@ -1550,13 +2010,29 @@ class MainWindow(QMainWindow):
         relax_form.addRow("Fit type:", self.fit_type_combo)
 
         self.relaxation_model_combo = QComboBox()
+        self._narrow_combo(self.relaxation_model_combo)
         relax_form.addRow("Model:", self.relaxation_model_combo)
+
+        self.value_source_combo = QComboBox()
+        self.value_source_combo.addItem("Integrated area", "integral")
+        self.value_source_combo.addItem("Peak amplitude", "amplitude")
+        self._narrow_combo(self.value_source_combo)
+        self.value_source_combo.setToolTip(
+            "What each slice's per-peak value is, for the curve fit: "
+            "Integrated area (default -- sums over the whole fitted "
+            "peak, more robust to a linewidth change across slices) or "
+            "Peak amplitude (the fitted peak height alone -- simpler, "
+            "but more sensitive to linewidth changes mimicking an "
+            "intensity change)."
+        )
+        relax_form.addRow("Value source:", self.value_source_combo)
 
         self.delays_row_label = QLabel("Values:")
         self.delay_source_combo = QComboBox()
         self.delay_source_combo.addItems([
             "Auto", "Manual list", "Start + step", "vclist × factor", "Relative gradient (valueslist)",
         ])
+        self._narrow_combo(self.delay_source_combo)
         self.delay_source_combo.setToolTip(
             "Auto: this experiment's own vdlist/diff.xml if found, "
             "otherwise plain slice index (1, 2, 3, ...). Manual list: "
@@ -1615,28 +2091,6 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(relax_box)
 
-        fit_button = QPushButton("Fit")
-        fit_button.clicked.connect(self._on_fit_relaxation_clicked)
-        layout.addWidget(fit_button)
-
-        self.analysis_results_label = QLabel("")
-        self.analysis_results_label.setWordWrap(True)
-        layout.addWidget(self.analysis_results_label)
-
-        slice_fit_row = QHBoxLayout()
-        slice_fit_row.addWidget(QLabel("View slice fit:"))
-        self.view_slice_fit_spin = QSpinBox()
-        self.view_slice_fit_spin.setMinimum(1)
-        self.view_slice_fit_spin.setEnabled(False)
-        self.view_slice_fit_spin.setToolTip(
-            "Inspect the per-slice spectral (pseudo-Voigt) fit that "
-            "feeds the parameter fit above, in the Spectrum tab -- "
-            "available once a fit has been run."
-        )
-        self.view_slice_fit_spin.valueChanged.connect(self._on_view_slice_fit_changed)
-        slice_fit_row.addWidget(self.view_slice_fit_spin)
-        layout.addLayout(slice_fit_row)
-
         layout.addStretch(1)
         return tab
 
@@ -1663,12 +2117,46 @@ class MainWindow(QMainWindow):
     def _on_pick_peak_toggled(self, checked: bool) -> None:
         self.canvas.set_pick_mode(checked)
 
-    def _on_apply_sr_clicked(self) -> None:
-        delta_hz = self.sr_shift_spin.value()
-        if delta_hz == 0:
+    def _on_auto_pick_peaks_clicked(self) -> None:
+        """Replace the peak table with automatically-detected peaks
+        (:func:`opennmr.processing.fitting.auto_pick_peaks`) from the
+        current selection -- slice 1, for a pseudo-2D series, since
+        auto-picking is a starting point, not a per-slice operation."""
+        index = self._selected_index()
+        if index is None:
             return
-        self._apply_reference_shift_hz(delta_hz)
-        self.sr_shift_spin.setValue(0.0)
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
+            QMessageBox.information(
+                self, "Not supported",
+                "Auto-pick isn't available for a conventional 2D spectrum yet -- "
+                "select a 1D spectrum or a pseudo-2D series.",
+            )
+            return
+        try:
+            target = spectrum if spectrum.ndim == 1 else processing_slicing.get_trace(spectrum, axis="f1", index=1)
+            peaks = processing_fitting.auto_pick_peaks(target, prominence=self.auto_pick_prominence_spin.value())
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Auto-pick failed", str(exc))
+            return
+        if not peaks:
+            QMessageBox.information(
+                self, "No peaks found",
+                "No peaks found automatically -- try adding peaks manually, "
+                "or check the spectrum has real signal above the noise floor.",
+            )
+            return
+        self.peak_table.setRowCount(0)
+        for peak in peaks:
+            self._add_peak_row(shift=peak["shift"], fwhm=peak["fwhm"], eta=peak["eta"])
+
+    def _restore_sr_control(self, spectrum) -> None:
+        self.sr_shift_spin.blockSignals(True)
+        self.sr_shift_spin.setValue(spectrum.metadata.raw.get("sr_shift_hz", 0.0))
+        self.sr_shift_spin.blockSignals(False)
+
+    def _on_apply_sr_clicked(self) -> None:
+        self._apply_reference_shift_hz(self.sr_shift_spin.value())
 
     def _on_reference_shift_from_plot(self) -> None:
         """Handles :attr:`MplCanvas.referenceShiftRequested`, the
@@ -1681,24 +2169,62 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         current_hz = spectrum.metadata.raw.get("sr_shift_hz", 0.0)
         value, ok = QInputDialog.getDouble(
-            self, "Reference shift", "Add (Hz):", current_hz, -1.0e6, 1.0e6, 4,
+            self, "Reference shift", "SR (Hz):", current_hz, -1.0e6, 1.0e6, 4,
         )
-        if ok and value != 0:
+        if ok:
             self._apply_reference_shift_hz(value)
 
-    def _apply_reference_shift_hz(self, delta_hz: float) -> None:
+    @staticmethod
+    def _capture_original_axis(spectrum) -> None:
+        """Stash the direct (F2) axis's hz/ppm arrays exactly as
+        loaded, the first time SR is ever touched for this spectrum
+        this session -- the stable baseline every SR value is
+        recomputed from, so applying "the same SR twice" is a no-op
+        instead of compounding, and applying "a different SR" replaces
+        rather than adds to whatever's currently displayed. Reprocessing
+        the FID naturally invalidates this (a fresh NMRSpectrum from
+        the vendor reader has no ``raw`` carried over), which is the
+        right behaviour -- SR starts over from the new axis."""
+        if "sr_original_hz" in spectrum.metadata.raw:
+            return
+        axis = spectrum.axes[-1]
+        spectrum.metadata.raw["sr_original_hz"] = axis.hz.copy() if axis.hz is not None else None
+        spectrum.metadata.raw["sr_original_ppm"] = axis.ppm.copy() if axis.ppm is not None else None
+
+    def _apply_reference_shift_hz(self, sr_hz: float) -> None:
+        """Set the spectrum's SR to the absolute value ``sr_hz`` --
+        the Hz offset from its own SFO1 base frequency -- recomputing
+        the direct-dimension axis from the original, as-loaded arrays
+        (:meth:`_capture_original_axis`) rather than adding onto
+        whatever the axis currently is, so this is idempotent (calling
+        it again with the same value is a no-op) rather than
+        cumulative."""
         index = self._selected_index()
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        axis = spectrum.axes[-1]  # direct (F2) dimension -- always frequency
-        if axis.hz is not None:
-            axis.hz = axis.hz + delta_hz
-        if axis.ppm is not None and spectrum.metadata.sfo1:
-            axis.ppm = axis.ppm + delta_hz / spectrum.metadata.sfo1
+        self._capture_original_axis(spectrum)
 
-        spectrum.metadata.raw["sr_shift_hz"] = spectrum.metadata.raw.get("sr_shift_hz", 0.0) + delta_hz
+        axis = spectrum.axes[-1]  # direct (F2) dimension -- always frequency
+        original_hz = spectrum.metadata.raw.get("sr_original_hz")
+        original_ppm = spectrum.metadata.raw.get("sr_original_ppm")
+        if original_hz is not None:
+            axis.hz = original_hz + sr_hz
+        if original_ppm is not None and spectrum.metadata.sfo1:
+            axis.ppm = original_ppm + sr_hz / spectrum.metadata.sfo1
+
+        spectrum.metadata.raw["sr_shift_hz"] = sr_hz
+        self._restore_sr_control(spectrum)
+
+        # A full show_spectrum() redraw (via _draw_selected_spectrum)
+        # always resets the view to ppm -- fine for an actual spectrum
+        # *selection*, but SR is applied to whatever's already on
+        # screen, so save/restore the axis-unit choice (ppm/Hz/kHz)
+        # around it instead of silently dropping back to ppm.
+        unit = self.canvas.axis_unit
         self._draw_selected_spectrum(spectrum)
+        if unit != "ppm":
+            self.canvas.set_axis_unit(unit)
 
     def _read_peak_defs(self) -> list[dict]:
         tolerance = self.position_tolerance_spin.value()
@@ -1749,11 +2275,18 @@ class MainWindow(QMainWindow):
         self.vclist_factor_row_label.setVisible(index == 3)
         self.vclist_factor_spin.setVisible(index == 3)
 
-    def _resolve_independent_values(self, spectrum, is_diffusion: bool) -> np.ndarray | dict:
+    def _resolve_independent_values(self, spectrum, is_diffusion: bool, n_slices: int | None = None) -> np.ndarray | dict:
         """Resolve the x-axis values (delays in seconds, or b-values in
-        s/m^2) to fit against, per the Values-row source combo."""
+        s/m^2) to fit against, per the Values-row source combo.
+
+        ``n_slices`` : overrides ``spectrum.data.shape[0]`` -- needed
+        when ``spectrum`` is only supplying vendor/path *context*
+        (Auto/vclist/relative-gradient source lookups) rather than
+        being the actual series being fit, e.g. a Compare-tab stack of
+        independently-loaded 1D spectra, whose own slice count has
+        nothing to do with any single spectrum's own dimensions."""
         source = self.delay_source_combo.currentIndex()
-        n_slices = spectrum.data.shape[0]
+        n_slices = n_slices if n_slices is not None else spectrum.data.shape[0]
 
         if source == 1:  # Manual list
             text = self.manual_delays_edit.text().strip()
@@ -1805,30 +2338,117 @@ class MainWindow(QMainWindow):
                 pass
         return np.arange(1, n_slices + 1, dtype=float)
 
-    def _on_fit_relaxation_clicked(self) -> None:
+    @staticmethod
+    def _ensure_slice_info(spectrum, index: int):
+        """``NMR2D_fit_slices`` requires ``metadata.raw["slice"]``
+        (the way ``processing.slicing.get_slices`` already tags every
+        row/column it extracts) -- a plain 1D spectrum, or a Compare-
+        tab stack entry, has no such thing yet. Injects a minimal one
+        rather than duplicating that function's fitting logic just to
+        skip the lookup. Doesn't mutate ``spectrum`` itself (a fresh
+        object, via ``dataclasses.replace``) -- this may run against
+        the live session spectrum, and slice-tagging it in place would
+        leak into every other consumer of its metadata."""
+        if "slice" in spectrum.metadata.raw:
+            return spectrum
+        return dataclasses.replace(
+            spectrum,
+            metadata=dataclasses.replace(spectrum.metadata, raw={
+                **spectrum.metadata.raw,
+                "slice": {"slice_type": "row", "index": index, "shift": None, "shift_unit": None, "width": None},
+            }),
+        )
+
+    def _fit_peaks(self, entries: list) -> list[dict]:
+        """Spectral (pseudo-Voigt peak) fit -- step 1 of the analysis
+        workflow, shared by a plain 1D spectrum (``entries`` is a
+        single-item list), a pseudo-2D series (every slice), and a
+        Compare-tab stack (every checked entry)."""
+        peak_defs = self._read_peak_defs()
+        if not peak_defs:
+            raise ValueError("Add at least one peak to fit.")
+        prepared = [self._ensure_slice_info(s, i + 1) for i, s in enumerate(entries)]
+        fitted = processing_fitting.NMR2D_fit_slices(
+            {"rows": prepared}, peak_defs, mode="rows", show_report=False, show_warnings=False,
+        )
+        return fitted["rows"]
+
+    def _show_spectral_fit_results(self, spectrum, results: list[dict]) -> None:
+        self._slice_fit_results = results
+        # Kept per-spectrum (not just in the live _slice_fit_results
+        # attribute) so "View slice fit" survives a reselection --
+        # analysis_state alone only remembers the *text* summary, not
+        # the plotted curves.
+        spectrum.metadata.raw["slice_fit_results"] = results
+        if results:
+            self._update_peak_table_from_fit(results[0])
+        self.view_slice_fit_spin.blockSignals(True)
+        self.view_slice_fit_spin.setEnabled(True)
+        self.view_slice_fit_spin.setMaximum(max(1, len(results)))
+        self.view_slice_fit_spin.setValue(1)
+        self.view_slice_fit_spin.blockSignals(False)
+        self._on_view_slice_fit_changed(1)  # show immediately, not just once the spinner is touched
+
+    def _on_fit_spectrum_clicked(self) -> None:
+        """Step 1 of the analysis workflow: fit peaks against the
+        currently selected spectrum -- directly for a plain 1D
+        spectrum, or across every slice for a pseudo-2D series.
+        Always the prerequisite for "Fit Curve" (step 2, the
+        relaxation/diffusion fit -- a spectrum-list/Compare-tab
+        context menu item, not a button here), which reuses these
+        results rather than re-fitting peaks itself when they're
+        already available."""
         index = self._selected_index()
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        if spectrum.ndim != 2 or not spectrum.is_pseudo_2d:
-            QMessageBox.information(self, "Not a pseudo-2D spectrum", "Select a pseudo-2D relaxation/diffusion series to fit.")
+        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
+            QMessageBox.information(
+                self, "Not supported",
+                "Spectral fitting isn't available for a conventional 2D spectrum yet -- "
+                "select a 1D spectrum or a pseudo-2D series.",
+            )
             return
 
+        try:
+            if spectrum.ndim == 1:
+                entries = [spectrum]
+            else:
+                n_slices = spectrum.data.shape[0]
+                entries = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))["rows"]
+            results = self._fit_peaks(entries)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Fit failed", str(exc))
+            return
+
+        self._show_spectral_fit_results(spectrum, results)
+
+    def _run_curve_fit(self, slice_results: list[dict], n_slices: int, reference_spectrum,
+                        persist_to=None) -> None:
+        """Step 2 of the analysis workflow: fit a relaxation/diffusion
+        model to each peak's per-slice amplitude series.
+
+        ``slice_results`` : from :meth:`_fit_peaks` -- the caller
+        supplies these (freshly computed, or reused from a prior "Fit
+        Spectrum") rather than this method ever re-fitting peaks
+        itself, so spectral fitting always genuinely comes first.
+        ``reference_spectrum`` : supplies vendor/path context for the
+        Values-source combo's Auto/vclist/relative-gradient options
+        (see :meth:`_resolve_independent_values`'s own ``n_slices``
+        override -- may not be the same length as this fit's actual
+        series, e.g. a Compare-tab stack of independently-loaded
+        files). ``persist_to`` : an ``NMRSpectrum`` to silo the result
+        into (``None`` for a Compare-tab stack fit, which has no
+        single natural owner to silo against -- matches the Compare
+        tab's own existing "no per-spectrum persistence" character).
+        """
         is_diffusion = self._is_diffusion_fit()
         try:
-            peak_defs = self._read_peak_defs()
-            if not peak_defs:
-                raise ValueError("Add at least one peak to fit.")
-            independent_values = self._resolve_independent_values(spectrum, is_diffusion)
-
-            n_slices = spectrum.data.shape[0]
-            slices = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))
-            fitted = processing_fitting.NMR2D_fit_slices(
-                slices, peak_defs, mode="rows", show_report=False, show_warnings=False,
-            )
+            independent_values = self._resolve_independent_values(reference_spectrum, is_diffusion, n_slices=n_slices)
             model_key = self.relaxation_model_combo.currentData()
             results = processing_relaxation.NMR2D_fit_relaxation(
-                fitted["rows"], model=model_key, vdlist=independent_values, show_report=False,
+                slice_results, model=model_key, vdlist=independent_values, show_report=False,
+                value_source=self.value_source_combo.currentData(),
             )
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Fit failed", str(exc))
@@ -1849,21 +2469,59 @@ class MainWindow(QMainWindow):
         self.fit_canvas.show_relaxation_fit(results)
         self.fit_canvas.ax.set_xlabel(xlabel)
         self.fit_canvas.canvas.draw_idle()
+        # Force the tab visible: a Compare-stack fit has no single
+        # "owning" spectrum, so it can run while the Spectra tab's own
+        # selection isn't pseudo-2D (or is empty) -- the selection-
+        # driven _update_fit_tab_visibility check alone wouldn't show it.
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
-        self._slice_fit_results = fitted["rows"]
-        # Kept per-spectrum (not just in the live _slice_fit_results
-        # attribute) so "View slice fit" and the Fit-tab plot both
-        # survive a reselection -- analysis_state alone only remembers
-        # the *text* summary, not the plotted curves.
-        spectrum.metadata.raw["slice_fit_results"] = fitted["rows"]
-        spectrum.metadata.raw["relaxation_fit_results"] = results
-        spectrum.metadata.raw["relaxation_fit_xlabel"] = xlabel
-        self.view_slice_fit_spin.blockSignals(True)
-        self.view_slice_fit_spin.setEnabled(True)
-        self.view_slice_fit_spin.setMaximum(max(1, len(self._slice_fit_results)))
-        self.view_slice_fit_spin.setValue(1)
-        self.view_slice_fit_spin.blockSignals(False)
+        if persist_to is not None:
+            persist_to.metadata.raw["relaxation_fit_results"] = results
+            persist_to.metadata.raw["relaxation_fit_xlabel"] = xlabel
+
+    def _on_fit_curve_button_clicked(self) -> None:
+        """"Fit Curve" as a real button in the Analysis tab -- the
+        currently selected spectrum stands in for the ``index`` a
+        right-click on a specific Spectra-tab row would otherwise
+        supply (see :meth:`_on_fit_curve_pseudo2d_action`, still also
+        reachable that way for a row that isn't the current selection)."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
+            QMessageBox.information(
+                self, "Not supported",
+                "Fit Curve needs a pseudo-2D series (e.g. a T1/T2/diffusion "
+                "series) selected here. For a stack of separately-loaded 1D "
+                "spectra instead, use the Compare tab's own Fit Curve button.",
+            )
+            return
+        self._on_fit_curve_pseudo2d_action(index)
+
+    def _on_fit_curve_pseudo2d_action(self, index: int) -> None:
+        """"Fit Curve" from the Spectra tab's right-click menu, only
+        offered for a pseudo-2D row (see
+        :meth:`_on_spectrum_list_context_menu`). Selects that row
+        first (so the peak table/Values-source/model shown are that
+        spectrum's own siloed Analysis-tab state, not whatever was
+        showing for a different selection), then reuses its spectral
+        fit if one already exists (from "Fit Spectrum"), or runs one
+        now with the peak_defs just brought into view."""
+        self._select_single_row(index)
+        spectrum = self.session.spectra[index]
+        try:
+            slice_results = spectrum.metadata.raw.get("slice_fit_results")
+            if not slice_results:
+                n_slices = spectrum.data.shape[0]
+                entries = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))["rows"]
+                slice_results = self._fit_peaks(entries)
+                self._show_spectral_fit_results(spectrum, slice_results)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Fit failed", str(exc))
+            return
+        self._run_curve_fit(slice_results, len(slice_results), spectrum, persist_to=spectrum)
 
     def _on_view_slice_fit_changed(self, value: int) -> None:
         if not self._slice_fit_results:
@@ -1872,23 +2530,77 @@ class MainWindow(QMainWindow):
         if not (0 <= idx < len(self._slice_fit_results)):
             return
         result = self._slice_fit_results[idx]
-        title = self._slice_label_from_fit_result(result)
-        self.spectral_fit_canvas.show_slice_fit(result["x"], result["y"], result["y_fit"], title=title)
-        self.canvas_tabs.setCurrentWidget(self.spectral_fit_canvas)
+        self._display_slice_fit(result, switch_tab=True)
+
+    @staticmethod
+    def _format_fit_params(per_peak: list[dict], peak_labels: list[str]) -> str:
+        lines = []
+        for label, peak in zip(peak_labels, per_peak):
+            parts = [
+                f"{name}={value:.4g}±{error:.2g}"
+                for name, value, error in zip(peak["names"], peak["params"], peak["errors"])
+            ]
+            lines.append(f"{label}: " + ", ".join(parts))
+        return "\n".join(lines)
+
+    def _update_peak_table_from_fit(self, result: dict) -> None:
+        """After a spectral fit, replace each peak row's starting
+        values (shift/FWHM/eta) with this result's fitted values --
+        so a re-fit, or a later Fit Curve (which reuses these same
+        peak_defs), starts from the converged position rather than
+        the original guess."""
+        per_peak = processing_fitting.extract_params_and_errors(
+            result["popt"], result["pcov"], result["peak_defs"], result["is_free"],
+        )
+        for row, peak in enumerate(per_peak):
+            if row >= self.peak_table.rowCount():
+                break
+            params = dict(zip(peak["names"], peak["params"]))
+            self.peak_table.setItem(row, 0, QTableWidgetItem(f"{params['shift']:.4g}"))
+            self.peak_table.setItem(row, 1, QTableWidgetItem(f"{params['fwhm']:.4g}"))
+            if "eta" in params:
+                self.peak_table.setItem(row, 2, QTableWidgetItem(f"{params['eta']:.4g}"))
 
     @staticmethod
     def _slice_label_from_fit_result(result: dict) -> str:
         return f"Slice {result['index']} spectral fit"
 
+    def _display_slice_fit(self, result: dict, switch_tab: bool = False) -> None:
+        """Draw one spectral-fit result (data, total fit, and each
+        peak's own component) into the Spectral Fit canvas, and its
+        numeric parameters into ``spectral_fit_params_label`` --
+        shared by browsing slices via ``view_slice_fit_spin`` and by
+        ``_silo_other_canvas_tabs`` restoring a reselected
+        spectrum's already-computed fit."""
+        title = self._slice_label_from_fit_result(result)
+        per_peak = processing_fitting.extract_params_and_errors(
+            result["popt"], result["pcov"], result["peak_defs"], result["is_free"],
+        )
+        peak_labels = [f"Peak {i + 1} ({p['params'][0]:.4g} ppm)" for i, p in enumerate(per_peak)]
+        self.spectral_fit_canvas.show_slice_fit(
+            result["x"], result["y"], result["y_fit"],
+            components=result.get("components"), peak_labels=peak_labels, title=title,
+            spectrum=result.get("slice"),
+        )
+        self.spectral_fit_params_label.setText(self._format_fit_params(per_peak, peak_labels))
+        if switch_tab:
+            self.canvas_tabs.setCurrentWidget(self.spectral_fit_canvas)
+
     def _refresh_analysis_tab(self, spectrum) -> None:
         is_pseudo2d = spectrum.ndim == 2 and spectrum.is_pseudo_2d
         if is_pseudo2d:
             self.analysis_status_label.setText(
-                f"Fit peaks across all {spectrum.data.shape[0]} slices, then a relaxation curve per peak."
+                f"Fit Spectrum: peaks across all {spectrum.data.shape[0]} slices. Then Fit Curve "
+                f"(a relaxation/diffusion curve per peak)."
+            )
+        elif spectrum.ndim == 1:
+            self.analysis_status_label.setText(
+                "Fit Spectrum: peaks in this spectrum. For a relaxation/diffusion curve, either select "
+                "a pseudo-2D series instead, or build a stack of 1D spectra in the Compare tab."
             )
         else:
             self.analysis_status_label.setText(
-                "Select a pseudo-2D spectrum (e.g. a T1/T2 relaxation series) to fit."
+                "Spectral fitting isn't available for a conventional 2D spectrum yet."
             )
         self._restore_analysis_state(spectrum)
 
@@ -1902,6 +2614,7 @@ class MainWindow(QMainWindow):
             "peaks": peaks,
             "fit_type": self.fit_type_combo.currentIndex(),
             "model": self.relaxation_model_combo.currentIndex(),
+            "value_source": self.value_source_combo.currentIndex(),
             "delay_source": self.delay_source_combo.currentIndex(),
             "manual_text": self.manual_delays_edit.text(),
             "start": self.delay_start_spin.value(),
@@ -1919,10 +2632,12 @@ class MainWindow(QMainWindow):
     def _restore_analysis_state(self, spectrum) -> None:
         self.peak_table.setRowCount(0)
         self.analysis_results_label.setText("")
+        self.spectral_fit_params_label.setText("")
 
         state = spectrum.metadata.raw.get("analysis_state")
         if state is None:
             self.fit_type_combo.setCurrentIndex(0)
+            self.value_source_combo.setCurrentIndex(0)
             self.delay_source_combo.setCurrentIndex(0)
             self.manual_delays_edit.clear()
             self.delay_start_spin.setValue(0.0)
@@ -1938,6 +2653,7 @@ class MainWindow(QMainWindow):
             self.fit_type_combo.setCurrentIndex(state["fit_type"])
             self._populate_fit_model_combo()
             self.relaxation_model_combo.setCurrentIndex(state["model"])
+            self.value_source_combo.setCurrentIndex(state.get("value_source", 0))
             self.delay_source_combo.setCurrentIndex(state["delay_source"])
             self.manual_delays_edit.setText(state["manual_text"])
             self.delay_start_spin.setValue(state["start"])
@@ -2018,11 +2734,11 @@ class MainWindow(QMainWindow):
 
         slice_fit_results = spectrum.metadata.raw.get("slice_fit_results")
         if slice_fit_results:
-            result = slice_fit_results[0]  # matches view_slice_fit_spin resetting to 1 on reselect
-            title = self._slice_label_from_fit_result(result)
-            self.spectral_fit_canvas.show_slice_fit(result["x"], result["y"], result["y_fit"], title=title)
+            # matches view_slice_fit_spin resetting to 1 on reselect
+            self._display_slice_fit(slice_fit_results[0], switch_tab=False)
         else:
             self.spectral_fit_canvas.clear()
+            self.spectral_fit_params_label.setText("")
 
         # The Compare tab plots whatever is multi-selected in the
         # Spectra list, not this single spectrum -- it has no
@@ -2044,18 +2760,20 @@ class MainWindow(QMainWindow):
             bits.append(f"Sample mass: {meta.mass:g} g")
         self.info_label.setText("\n".join(bits))
 
-        self.pseudo_2d_checkbox.setVisible(spectrum.ndim == 2)
-        self.pseudo_2d_checkbox.blockSignals(True)
-        self.pseudo_2d_checkbox.setChecked(spectrum.is_pseudo_2d)
-        self.pseudo_2d_checkbox.blockSignals(False)
+        self.process_indirect_button.setVisible(spectrum.ndim == 2)
+        self.process_indirect_button.blockSignals(True)
+        self.process_indirect_button.setChecked(not spectrum.is_pseudo_2d)
+        self.process_indirect_button.blockSignals(False)
 
         is_pseudo2d_now = spectrum.ndim == 2 and spectrum.is_pseudo_2d
         self.pseudo2d_view_combo.setVisible(is_pseudo2d_now)
         self.pseudo2d_view_combo.blockSignals(True)
         self.pseudo2d_view_combo.setCurrentIndex(0)  # a fresh selection always starts on Contour
         self.pseudo2d_view_combo.blockSignals(False)
+        self._update_fit_tab_visibility(spectrum)
 
         self._refresh_fid_processing_controls(spectrum, row)
+        self._restore_sr_control(spectrum)
         self._refresh_analysis_tab(spectrum)
 
         # Which Dimension controls apply depends on the spectrum type --
@@ -2068,6 +2786,7 @@ class MainWindow(QMainWindow):
         self.slice_row_label.setVisible(is_pseudo2d)
         self.slice_spin.setVisible(is_pseudo2d)
         self.apply_all_slices_checkbox.setVisible(is_pseudo2d)
+        self.autophase_slices_button.setVisible(is_pseudo2d)
         self.dim_row_label.setVisible(is_2d)
         self.dim_combo.setVisible(is_2d)
 

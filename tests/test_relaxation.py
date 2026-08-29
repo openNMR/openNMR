@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-from opennmr.processing import relaxation, slicing
+from opennmr.processing import fitting, relaxation, slicing
 from opennmr.processing.fitting import gaussian
 
 
@@ -210,3 +210,41 @@ def test_nmr2d_integrate_and_fit_relaxation_recovers_t1():
     assert len(fits) == 1
     assert fits[0]["params"]["T1"] == pytest.approx(T1_true, rel=0.02)
     assert fits[0]["peak_label"] == "Peak 1"
+
+
+def test_nmr2d_fit_relaxation_value_source_amplitude_recovers_t1():
+    # value_source="amplitude" reads each slice's fitted peak amplitude
+    # (from a real NMR2D_fit_slices peak fit) instead of its integrated
+    # area -- a different y-proxy for the same underlying decay, so it
+    # should recover essentially the same T1 on synthetic data with no
+    # linewidth changes across slices to confuse the two.
+    delays = np.array([0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.0])
+    M0_true, T1_true, C_true = 1.0, 0.8, 2.0
+    spec = _make_pseudo2d_relaxation(delays, M0=M0_true, T1=T1_true, C=C_true)
+
+    slices = slicing.get_slices(spec, rows=list(range(1, len(delays) + 1)))
+    peak_defs = [{"type": "gaussian", "shift": 5.0, "fwhm": 0.05}]
+    fitted = fitting.NMR2D_fit_slices(
+        slices, peak_defs, mode="rows", normalize=False, show_report=False, show_warnings=False,
+    )
+    rows = fitted["rows"]
+
+    vdlist = {"name": "vdlist", "raw": [str(d) for d in delays], "seconds": delays}
+    fits_amplitude = relaxation.NMR2D_fit_relaxation(
+        rows, model="inversion_recovery", vdlist=vdlist, value_source="amplitude", show_report=False,
+    )
+    assert len(fits_amplitude) == 1
+    assert fits_amplitude[0]["params"]["T1"] == pytest.approx(T1_true, rel=0.05)
+
+    fits_integral = relaxation.NMR2D_fit_relaxation(
+        rows, model="inversion_recovery", vdlist=vdlist, value_source="integral", show_report=False,
+    )
+    # Different y-proxy, same underlying decay -- should agree closely.
+    assert fits_amplitude[0]["params"]["T1"] == pytest.approx(fits_integral[0]["params"]["T1"], rel=0.05)
+
+
+def test_nmr2d_fit_relaxation_rejects_bad_value_source():
+    with pytest.raises(ValueError):
+        relaxation.NMR2D_fit_relaxation(
+            [{"index": 1}], vdlist={"seconds": [1.0]}, value_source="bogus", show_report=False,
+        )

@@ -188,6 +188,9 @@ def read_1d(path: str, mass: float = 1.0,
 def read_2d(path: str, mass: float = 1.0, pseudo_2d: bool | None = None,
             window: str = "exponential", window_kwargs: dict | None = None,
             zero_fill: int | None = None,
+            fid_shift: float = 0.0, align_echo: bool = False,
+            linear_predict_points: int = 0, linear_predict_order: int = 20,
+            linear_predict_direction: str = "forward",
             autophase: bool = True, phase_mode: str = "apc0",
             phase0: float = 0.0, phase1: float = 0.0, phase0_inc: float = 0.1,
             phase1_max: float = 20.0, phase1_improvement: float = 0.15,
@@ -239,6 +242,22 @@ def read_2d(path: str, mass: float = 1.0, pseudo_2d: bool | None = None,
     tof = _procpar_value(procpar, "tof", default=0.0)
     nucleus = _normalize_nucleus(_procpar_value(procpar, "tn", default=None, cast=str))
     ns = _procpar_value(procpar, "nt", default=1.0)
+
+    # fid_shift/align_echo/linear_predict are all 1D-only too -- same
+    # per-row reasoning as apodize/zero_fill/fft_spectrum below.
+    if fid_shift or align_echo or linear_predict_points:
+        def _pre_process_row(row):
+            if fid_shift:
+                row = processing_ft.roll_fid(row, fid_shift)
+            if align_echo:
+                row = processing_ft.align_echo(row)
+            if linear_predict_points:
+                row = processing_ft.linear_predict(
+                    row, order=linear_predict_order, n_predict=linear_predict_points,
+                    direction=linear_predict_direction,
+                )
+            return row
+        fid_f1 = np.array([_pre_process_row(row) for row in fid_f1])
 
     # apodize/zero_fill/fft_spectrum are all 1D-only (weights/fftfreq
     # sized off len(fid), fftshift would also reorder the row/F1 axis

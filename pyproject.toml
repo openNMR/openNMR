@@ -31,4 +31,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"opennmr.gui" = ["resources/*.svg"]
+"opennmr.gui" = ["resources/*.png"]

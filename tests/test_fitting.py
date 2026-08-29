@@ -35,6 +35,53 @@ def _make_2d_for_fitting(n_pts=1200, x0=5.0, fwhm=0.04, amps=(0.5, 1.0, 1.5), b0
 # Baseline / region mask
 # ============================================================
 
+# ============================================================
+# Auto peak-picking
+# ============================================================
+
+def test_auto_pick_peaks_finds_single_peak():
+    spec = _make_1d(x0=5.0, fwhm=0.05, A=1.0, b0=0.0)
+    peaks = fitting.auto_pick_peaks(spec, prominence=0.1)
+    assert len(peaks) == 1
+    assert peaks[0]["type"] == "pseudo_voigt"
+    assert peaks[0]["shift"] == pytest.approx(5.0, abs=0.02)
+    assert peaks[0]["fwhm"] > 0
+    assert peaks[0]["eta"] == pytest.approx(0.5)
+
+
+def _make_two_peak_1d():
+    ppm = np.linspace(3.0, 8.0, 2000)
+    y = gaussian(ppm, 4.0, 0.05, 1.0) + gaussian(ppm, 6.5, 0.05, 0.6)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    return NMRSpectrum(data=y, axes=[axis], metadata=metadata)
+
+
+def test_auto_pick_peaks_finds_two_separated_peaks_sorted_by_position():
+    peaks = fitting.auto_pick_peaks(_make_two_peak_1d(), prominence=0.1)
+    assert len(peaks) == 2
+    assert [p["shift"] for p in peaks] == sorted(p["shift"] for p in peaks)
+    assert peaks[0]["shift"] == pytest.approx(4.0, abs=0.02)
+    assert peaks[1]["shift"] == pytest.approx(6.5, abs=0.02)
+
+
+def test_auto_pick_peaks_respects_max_peaks_strongest_first():
+    peaks = fitting.auto_pick_peaks(_make_two_peak_1d(), prominence=0.1, max_peaks=1)
+    assert len(peaks) == 1
+    assert peaks[0]["shift"] == pytest.approx(4.0, abs=0.02)  # the taller peak (A=1.0 vs 0.6)
+
+
+def test_auto_pick_peaks_high_prominence_finds_nothing_in_pure_noise():
+    ppm = np.linspace(0, 10, 500)
+    rng = np.random.default_rng(0)
+    y = rng.normal(0, 0.01, size=ppm.shape)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    spec = NMRSpectrum(data=y, axes=[axis], metadata=metadata)
+
+    assert fitting.auto_pick_peaks(spec, prominence=0.9) == []
+
+
 def test_build_region_mask_union_of_regions():
     x = np.linspace(0, 10, 11)
     mask = fitting.build_region_mask(x, [(2, 4), (7, 8)])
