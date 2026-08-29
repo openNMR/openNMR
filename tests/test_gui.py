@@ -3169,6 +3169,17 @@ def test_main_window_analysis_tab_labels_renamed_for_clarity(qapp):
     assert set(labels) == {"Spectrum fit (slice #):", "View curve fit (peak #):"}
 
 
+def test_main_window_peak_table_height_is_capped(qapp):
+    # Explicit user feedback: the left side panel needs scrolling too
+    # often -- Qt's own default QTableWidget size hint reserves
+    # generous vertical space regardless of how many peaks are
+    # actually in it (typically a handful), which was the single
+    # biggest contributor to the Analysis tab needing more height than
+    # even a modest (not tiny) window comfortably provides.
+    window = MainWindow()
+    assert window.peak_table.maximumHeight() <= 160
+
+
 def test_main_window_fit_spectrum_updates_peak_table_starting_values(qapp):
     delays = np.geomspace(0.001, 0.3, 8)
     spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)

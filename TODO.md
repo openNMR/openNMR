@@ -2,6 +2,76 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Autonomous overnight round 4: left-panel reflow -- measured, one real fix shipped, the rest connects to an already-open item (2026-08-30)
+
+- ~~Left side panel needs better reflow at smaller window widths --
+  "the left side tab is needing scrolling too often"~~ -- **measured
+  precisely rather than guessed at**, one concrete fix shipped, and
+  the remaining scope turns out to already be the SAME open question
+  as the Analysis-tab sub-tabs item below -- not two separate things.
+  Rendered each side-tab panel's actual content `sizeHint()` at the
+  window's own current/default size (1100x680): Spectra 425px,
+  Processing 469px, Compare 432px -- all comfortably under 680, no
+  scrolling needed for any of them at a normal window size. Analysis
+  alone needed **812px** -- confirmed visually too (rendered to a PNG,
+  not just the number): at a perfectly ordinary 1100x680 window, the
+  Analysis tab is already cut off mid-way through "Fit type:
+  Relaxation (T1/T2)", well before reaching the Fit Curve button or
+  anything below it. So this complaint is real, precisely located (the
+  Analysis tab specifically, not a general problem across every tab),
+  and reproducible even without a small window.
+  - **One real, verified, unambiguous fix shipped**: `peak_table` (the
+    pseudo-Voigt peak-list table) had no height cap at all, so Qt's
+    own default `QTableWidget` size hint reserved generous space
+    regardless of actual row count -- capped at 160px (comfortably ~4
+    rows, scrolls internally for more), recovering ~32px (812 -> 780).
+  - **Also checked and ruled out a false lead**: the *Compare* tab's
+    own content `sizeHint()` reported 572px wide (well past the
+    panel's actual ~280-340px width) -- looked like a second real bug
+    at first (horizontal scrolling is deliberately disabled in
+    `_scrollable`, so a too-wide `sizeHint` would mean invisible,
+    silently clipped content). Rendered it to a PNG to check directly
+    rather than trusting the number: it's a known Qt quirk where a
+    word-wrapped `QLabel`'s `sizeHint()` over-reports its own "ideal"
+    unconstrained width even though `heightForWidth` makes it actually
+    reflow correctly once really constrained (which `QScrollArea`'s
+    `setWidgetResizable(True)` does) -- the tab renders with no
+    clipping at all. **Worth remembering**: a widget's raw
+    `sizeHint()` number in this codebase is not reliable evidence of a
+    real visual bug on its own, especially for word-wrapped labels --
+    render it and look, the way this session's own established
+    practice already does for canvas/plotting changes, not just for
+    those.
+  - **The remaining ~100px gap (780 vs. 680) doesn't have a further
+    "obvious" fix** -- broke down the Analysis tab's own top-level
+    layout item by item: it's dominated by two `QGroupBox`es (Peaks,
+    328px; Fit Curve settings, 208px) that are already showing only
+    their currently-relevant rows (`_on_delay_source_changed` already
+    hides the Manual/Start+step/vclist rows that don't apply to the
+    current selection) -- i.e. this height is genuinely load-bearing
+    content, not slack left over from an oversight the way the peak
+    table was. Closing the rest of this gap needs either (a) a broad,
+    taste-driven spacing/padding tightening pass across every tab (not
+    just Analysis), which is really the same thing as the still-open
+    "beautification pass" item elsewhere in this file's history, or
+    (b) a genuine structural change to the Analysis tab specifically --
+    **which is exactly what the user's own "Analysis should have sub
+    tabs or some other kind of organisational flow" ask (right below,
+    still open) would also fix**, by not showing every group at once
+    in the first place. Recommend treating these as the same item when
+    picked back up, not two independent ones -- the sub-tabs question
+    is a genuine design/taste call for the user to make, not a
+    defensible judgment call to guess at overnight, so left as-is
+    beyond the one concrete, low-risk fix above.
+
+500 tests passing (500 -> 501, one new regression test). Committed and pushed.
+
+**This closes out all five items from the "noted for next session"
+list** (see that section below, now empty of anything not already
+resolved) except the Analysis-tab sub-tabs question, which was always
+explicitly open-ended and turns out to be the real fix for this item
+too.
+
 ## Autonomous overnight round 3: Analysis-tab reorder and renames (2026-08-30)
 
 - ~~"View peak fit" spin box should sit below the Fit Curve button/
@@ -202,21 +272,20 @@ Still open:
   picking option (a) or (b) explicitly with the user before starting,
   since it changes the shape of the fix (GUI/processing-layer-only vs.
   touching every vendor's `read_1d`/`read_2d` signature).
-- **Left side panel needs better reflow at smaller window widths** --
-  "the left side tab is needing scrolling too often." No diagnosis
-  done yet; likely candidates given past rounds' history here (see the
-  2026-08-29 "Pin-bottom intensity zoom..." memory entry on the last
-  panel-width investigation): specific controls with an oversized
-  natural minimum width, and/or the `QScrollArea`'s own
-  scrollbar-disabled `_scrollable()` wrapper needing a size-responsive
-  layout (e.g. collapsing some `QFormLayout` rows to stack label-above-
-  control instead of side-by-side below a width threshold) rather than
-  just a wider floor.
 - **Analysis tab organization** -- open-ended ("sub tabs or some other
   kind of organisational flow," not spec'd further); the two concrete
   asks alongside it (View peak fit's position, the slice-fit/peak-fit
   renames) are done -- see the "Autonomous overnight round 3" section
-  above. This broader, unspec'd part is still genuinely open.
+  above. This broader, unspec'd part is still genuinely open, and (see
+  "Autonomous overnight round 4" above) turns out to be the actual fix
+  the "left side tab needs scrolling too often" item was also asking
+  for -- the Analysis tab alone needs 780px against a normal window's
+  680px-tall panel, entirely from two group boxes that are already
+  showing only their currently-relevant rows; sub-tabs (not showing
+  every group at once) is a real structural fix for that, a broad
+  spacing-tightening pass across every tab is the only other real
+  lever, and a wider window floor / other tabs' own sizing were ruled
+  out as not actually the problem (measured, not guessed).
 
 ## Spectrum-tab stacked-view fix, linked Compare scroll-zoom, Processing-tab live preview, button wording (2026-08-29)
 

@@ -2584,6 +2584,16 @@ class MainWindow(QMainWindow):
         self.peak_table = QTableWidget(0, len(self._PEAK_TABLE_COLUMNS))
         self.peak_table.setHorizontalHeaderLabels(self._PEAK_TABLE_COLUMNS)
         self.peak_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # Qt's own default QTableWidget size hint reserves generous
+        # space regardless of actual row count -- capped so an empty
+        # or few-peak table (the common case) doesn't spend more
+        # vertical space than it needs, on a side panel where that
+        # space is already tight (explicit user feedback: "the left
+        # side tab is needing scrolling too often"). Comfortably shows
+        # ~4 rows before it scrolls internally -- a typical peak count
+        # for one spectrum -- rather than a fixed height chosen to
+        # match some larger number that's rarely actually used.
+        self.peak_table.setMaximumHeight(160)
         self.peak_table.setToolTip(
             "One row per peak to fit -- shift and FWHM are initial "
             "guesses (both, and the amplitude, are refined by the fit); "
