@@ -74,27 +74,37 @@ Notes captured from real-data testing, not yet implemented. Grouped by area.
   button (`processing.ft.baseline_correct`, linear fit to the real
   part) targets whatever the Phase controls currently target -- same
   rules as Autophase, including the pseudo-2D single-slice case.
-- ~~WDW function not found / make this more robust~~ -- done. A Bruker
-  window function this package doesn't implement (e.g. GM) used to
-  make the *whole file unopenable* (`NotImplementedError` bubbling up
-  through `_load`'s try/except into a blocking error dialog).
-  `bruker._read_auto` now catches exactly that error and falls back to
-  `read_1d_processed`/`read_2d_processed` (TopSpin's own already-
-  processed output, which needs no window-function knowledge at all)
-  when available on disk, filtering the reload kwargs down to only
-  what the processed reader actually accepts
-  (`_filter_kwargs`) so raw-FID-only kwargs like `window`/`zero_fill`
-  don't raise a second, different error. The fallback is flagged via
-  `metadata.raw["fid_reprocess_unavailable"]` -- surfaced to the user
-  as a one-time `QMessageBox.information` on load (not silent), and
-  `_fid_reprocessable` now returns `False` for a spectrum flagged this
-  way (the FID-processing box would otherwise show, appear
-  functional, and silently do nothing every time "Reprocess" is
-  clicked). Deliberately did **not** attempt to actually implement GM
-  -- this module's own docstring already documents that as a
-  deliberate choice (an unverified Bruker `LB`/`GB` -> `g1`/`g2`/`g3`
-  parameter mapping risks silently producing a wrong spectrum, worse
-  than a clear error), not an oversight to "just fix."
+- ~~WDW function not found / make this more robust~~ -- done, **twice**:
+  the first version fell back to `read_1d_processed`/`read_2d_processed`
+  (TopSpin's own already-processed output) whenever the *recorded*
+  Bruker window function wasn't one of the ones this package
+  implements (e.g. GM) -- fixing the immediate crash
+  (`NotImplementedError` bubbling through `_load` into a blocking
+  error dialog) but at the cost of losing raw-FID reprocessing
+  entirely for that spectrum. **The user pushed back**: "aren't we
+  starting with unprocessed data? So why are we using the processed
+  output?" -- exactly right, and a real miss against this project's
+  own stated premise (every vendor reads the raw FID through one
+  shared pipeline, `read_1d_processed`/`read_2d_processed` are meant
+  as a last-resort *when no raw FID exists at all*, not a first
+  choice degradation when one parameter isn't understood). Reworked:
+  `read_1d`/`read_2d` now catch the `NotImplementedError` around only
+  the windowing step, leave the FID unwindowed, and continue normally
+  -- zero-fill, phase, echo-align, linear-predict, and "Reprocess"
+  itself all keep working exactly as they would for any other
+  spectrum; the user can pick a different window from the Processing
+  tab immediately. `_read_auto`'s fallback-to-processed machinery
+  (and the now-pointless `_filter_kwargs`) was reverted entirely --
+  it's still there for the genuine "no raw FID on disk at all" case,
+  unchanged from before this whole detour. Flagged via
+  `metadata.raw["window_unsupported"]`, surfaced once via
+  `QMessageBox.information` with much softer wording ("the recorded
+  window wasn't applied," not "showing TopSpin's own data instead"),
+  and `_fid_reprocessable` no longer treats this spectrum as
+  unreprocessable, since it fully still is. Deliberately still did
+  **not** attempt to actually implement GM -- see the module's own
+  docstring for why (an unverified `LB`/`GB` parameter mapping risks
+  silently producing a wrong spectrum).
 - ~~Tuple error, some data from "the box" had issues~~ -- **not
   reproduced, need more detail from the user** (a traceback, or which
   file/vendor). Checked the obvious candidates (`_resolve_window_kwargs`,
@@ -131,7 +141,7 @@ Notes captured from real-data testing, not yet implemented. Grouped by area.
   above (only reachable from the *second* toggle, once `_phase_mode`
   had become `"2d"`).
 
-438 tests passing (this round: several new phase/pivot/autophase/
+439 tests passing (this round: several new phase/pivot/autophase/
 baseline/contour/bruker-fallback tests). Nothing committed yet from
 this round (not asked to).
 

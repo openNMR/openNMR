@@ -76,14 +76,10 @@ def test_read_1d_em_window_runs(tmp_path, monkeypatch):
     assert len(spectrum.data) == 1024
 
 
-def test_read_1d_unsupported_window_raises(tmp_path, monkeypatch):
-    path = _make_experiment_dir(tmp_path, procs_overrides={"WDW": 2})
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
-    fid = _synthetic_fid()
-    _mock_ng_bruker_read(monkeypatch, acqus, fid)
-
-    with pytest.raises(NotImplementedError):
-        bruker.read_1d(path, autophase=False)
+# _apply_bruker_window itself still raises NotImplementedError for an
+# unsupported WDW code (see test_bruker.py) -- read_1d/read_2d now
+# catch that internally instead of letting it propagate; see
+# test_read_1d_unsupported_window_stays_on_raw_fid_path below.
 
 
 def test_read_1d_crop_matches_processed_axis_formula(tmp_path, monkeypatch):
@@ -174,58 +170,71 @@ def test_read_1d_linear_predict_extends_before_truncation_to_si(tmp_path, monkey
 
 
 # ============================================================
-# _read_auto: graceful fallback on an unsupported window function
+# Unsupported window function: stay on the raw-FID path
 # ============================================================
 
-def _stub_spectrum():
-    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
-    axis = NMRAxis(kind="frequency", ppm=np.linspace(10, -10, 32), hz=np.linspace(4000, -4000, 32))
-    return NMRSpectrum(
-        data=np.zeros(32), axes=[axis],
-        metadata=NMRMetadata(vendor="bruker", nucleus="1H"), data_imag=np.zeros(32),
-    )
-
-
-def test_read_auto_falls_back_to_processed_1d_on_unsupported_window(tmp_path, monkeypatch):
+def test_read_1d_unsupported_window_stays_on_raw_fid_path(tmp_path, monkeypatch):
     # Regression test: a Bruker WDW code this package doesn't (yet)
-    # implement (e.g. GM) used to make the whole file unopenable --
-    # _read_auto should now silently prefer TopSpin's own processed
-    # output when it's available, and flag why.
+    # implement (e.g. GM) used to make the whole file unopenable
+    # (read_1d itself raised NotImplementedError). It should instead
+    # stay on the raw-FID path -- full reprocessing still available --
+    # with the FID simply left unwindowed, flagged via
+    # metadata.raw["window_unsupported"] rather than silently applying
+    # no window with no explanation. The alternative of falling back
+    # to TopSpin's already-processed, non-reprocessable output was
+    # considered and rejected: this whole package's premise is reading
+    # the raw FID, so an unsupported *parameter* shouldn't force
+    # abandoning the raw-FID path entirely when everything else about
+    # it (zero-fill, phase, echo-align, ...) still works fine.
     path = _make_experiment_dir(tmp_path, procs_overrides={"WDW": 2})
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
     fid = _synthetic_fid()
     _mock_ng_bruker_read(monkeypatch, acqus, fid)
-    open(bruker.os.path.join(path, "fid"), "wb").close()
-    open(bruker.os.path.join(path, "pdata", "1", "1r"), "wb").close()
 
-    seen_kwargs = {}
+    spectrum = bruker.read_1d(path, autophase=False, zero_fill=2048)
 
-    def fake_read_1d_processed(p, **kwargs):
-        seen_kwargs.update(kwargs)
-        return _stub_spectrum()
+    assert len(spectrum.data) == 2048  # zero_fill still applied normally
+    assert "window_unsupported" in spectrum.metadata.raw
+    assert "WDW=2" in spectrum.metadata.raw["window_unsupported"]
 
-    monkeypatch.setattr(bruker, "read_1d_processed", fake_read_1d_processed)
-
-    # zero_fill (an FID-domain kwarg the GUI's reprocess box always
-    # sends) is deliberately NOT window="..." -- passing an explicit
-    # window override would bypass the recorded WDW=2 entirely rather
-    # than actually exercising the fallback this test is checking.
-    spectrum = bruker._read_auto(path, zero_fill=2048)
-
-    assert "fid_reprocess_unavailable" in spectrum.metadata.raw
-    assert "WDW=2" in spectrum.metadata.raw["fid_reprocess_unavailable"]
-    # zero_fill is a raw-FID-only kwarg -- read_1d_processed has no
-    # use for it and must not have been called with it.
-    assert "zero_fill" not in seen_kwargs
+    # The unwindowed result should match applying window="none"
+    # explicitly (both leave the FID as read, sans the recorded WDW).
+    _mock_ng_bruker_read(monkeypatch, acqus, fid)
+    unwindowed = bruker.read_1d(path, autophase=False, zero_fill=2048, window="exponential", window_kwargs={"lb": 0.0})
+    np.testing.assert_allclose(spectrum.data, unwindowed.data)
 
 
-def test_read_auto_reraises_when_no_processed_fallback_exists(tmp_path, monkeypatch):
+def test_read_1d_explicit_window_override_bypasses_unsupported_wdw(tmp_path, monkeypatch):
+    # An explicit window= override should apply normally (and not be
+    # flagged) even when the *recorded* WDW is unsupported -- the
+    # override replaces TopSpin's own choice entirely, same as for any
+    # other WDW value.
     path = _make_experiment_dir(tmp_path, procs_overrides={"WDW": 2})
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
     fid = _synthetic_fid()
     _mock_ng_bruker_read(monkeypatch, acqus, fid)
-    open(bruker.os.path.join(path, "fid"), "wb").close()
-    # No pdata/1/1r written this time -- nothing to fall back to.
 
-    with pytest.raises(NotImplementedError):
-        bruker._read_auto(path, autophase=False)
+    spectrum = bruker.read_1d(path, autophase=False, window="hann")
+
+    assert "window_unsupported" not in spectrum.metadata.raw
+
+
+def test_read_2d_unsupported_window_stays_on_raw_fid_path(tmp_path, monkeypatch):
+    expt = tmp_path / "expt2d"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    _write_procs(pdata / "procs", {"SW_p": 8000.0, "SI": 32, "SF": 400.13, "WDW": 2})
+    _write_procs(pdata / "proc2s", {"SW_p": 2000.0, "SI": 4, "SF": 100.6, "WDW": 0})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqu2s = {"NUC1": "off", "BF1": 100.6, "O1": 0.0}  # pseudo-2D
+    row = _synthetic_fid(n=32)
+    fid = np.tile(row, (4, 1)).astype(np.complex128)
+    dic = {"acqus": acqus, "acqu2s": acqu2s}
+    monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
+
+    spectrum = bruker.read_2d(str(expt), autophase=False)
+
+    assert spectrum.data.shape == (4, 32)
+    assert "window_unsupported" in spectrum.metadata.raw
+    assert "WDW=2" in spectrum.metadata.raw["window_unsupported"]

@@ -1344,6 +1344,44 @@ def test_main_window_fid_processing_box_visible_for_varian(qapp, tmp_path):
     assert window.fid_processing_box.isHidden() is False
 
 
+def test_main_window_unsupported_window_shows_notice_but_stays_reprocessable(qapp, tmp_path, monkeypatch):
+    # Regression test: a Bruker WDW code this package doesn't (yet)
+    # implement used to make the file unopenable entirely; now the FID
+    # is loaded unwindowed and the user is told once, but the FID
+    # Processing box must still be fully usable (not the earlier,
+    # over-broad fix's behaviour of falling back to non-reprocessable
+    # TopSpin-processed output and hiding the box).
+    from opennmr.io import bruker as bruker_io
+
+    expt = tmp_path / "gm_expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": 64, "SF": 400.13, "WDW": 2})
+    (expt / "fid").write_bytes(b"\x00")
+    (expt / "acqus").write_bytes(b"\x00")
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_raw_fid(n=64)
+    dic = {"acqus": acqus}
+    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+
+    shown = []
+    monkeypatch.setattr(
+        "opennmr.gui.main_window.QMessageBox.information",
+        lambda *a, **kw: shown.append(a[2] if len(a) > 2 else kw.get("text", "")),
+    )
+
+    window = MainWindow()
+    window._load(str(expt), vendor="bruker")
+
+    assert len(shown) == 1
+    assert "WDW=2" in shown[0]
+    index = window._selected_index()
+    assert "window_unsupported" in window.session.spectra[index].metadata.raw
+    assert window.fid_processing_box.isHidden() is False
+    window._on_reprocess_fid_clicked()  # must not raise -- still fully reprocessable
+
+
 def test_main_window_reprocess_fid_works_for_varian(qapp, tmp_path):
     # Regression test: before _fid_reprocessable recognised "varian",
     # this control was simply hidden; now that it's shown, Reprocess

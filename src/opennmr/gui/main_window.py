@@ -589,14 +589,14 @@ class MainWindow(QMainWindow):
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
 
-        fallback_reason = spectrum.metadata.raw.get("fid_reprocess_unavailable")
-        if fallback_reason:
+        window_note = spectrum.metadata.raw.get("window_unsupported")
+        if window_note:
             QMessageBox.information(
-                self, "Showing TopSpin's own processed data",
-                f"{self.session.label(index)} couldn't be reprocessed from its raw "
-                f"FID:\n\n{fallback_reason}\n\nShowing TopSpin's own already-processed "
-                f"output instead -- FID-domain reprocessing controls (window, zero-fill, "
-                f"etc.) aren't available for this spectrum.",
+                self, "Window function not applied",
+                f"{self.session.label(index)}:\n\n{window_note}\n\nThe FID was left "
+                f"unwindowed rather than guessing at this window's parameters -- pick "
+                f"a different one from the Processing tab and click Reprocess, or "
+                f"leave it unwindowed.",
             )
 
     def _select_single_row(self, row: int) -> None:
@@ -1331,13 +1331,11 @@ class MainWindow(QMainWindow):
         or a Bruker experiment whose raw ``fid``/``ser`` is present on
         disk (if so, :func:`opennmr.io.bruker._read_auto` would have
         preferred it over the already-processed fallback in the first
-        place) *and* actually reprocessable -- ``fid_reprocess_unavailable``
-        is set instead when the raw path exists but couldn't be used
-        (e.g. an unsupported Bruker window function), meaning
-        ``_read_auto`` already silently fell back to TopSpin's own
-        processed output, and "Reprocess" has nothing left to do."""
-        if spectrum.metadata.raw.get("fid_reprocess_unavailable"):
-            return False
+        place). Still true even if ``metadata.raw["window_unsupported"]``
+        is set -- that only means the *recorded* window wasn't applied
+        (see :mod:`opennmr.io.bruker`'s module docstring); every other
+        raw-FID reprocessing control, including picking a different
+        window, still works."""
         if spectrum.metadata.vendor in ("xpulse", "varian", "jeol"):
             return True
         if spectrum.metadata.vendor == "bruker" and spectrum.metadata.source_path:
@@ -1564,8 +1562,7 @@ class MainWindow(QMainWindow):
         Returns ``{}`` (no override -- vendor default applies,
         unchanged) when nothing is phase-editable, when ``spectrum``
         isn't actually being re-read from a raw FID at all (e.g. a
-        Bruker experiment with no ``fid``/``ser`` on disk, or one
-        already flagged ``fid_reprocess_unavailable`` -- both go
+        Bruker experiment with no ``fid``/``ser`` on disk -- routed
         through ``read_1d_processed``/``read_2d_processed``, which has
         no ``phase0``/``phase1`` concept at all, unlike ``read_1d``/
         ``read_2d``), or when the current Phase-controls target isn't

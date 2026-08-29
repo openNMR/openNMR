@@ -15,15 +15,19 @@ Only ``WDW`` in ``{0 (none), 1 (EM), 3 (SINE), 4 (QSINE)}`` is
 currently supported for the raw-FID path (see
 :func:`_apply_bruker_window`) -- these cover routine 1D processing;
 GM and less common windows raise ``NotImplementedError`` rather than
-silently guessing at an unverified parameter mapping. ``_read_auto``
-catches exactly that error and falls back to
-``read_1d_processed``/``read_2d_processed`` (TopSpin's own already-
-processed output, which doesn't need to know the window function at
-all) when it's available on disk, so an unsupported window degrades
-the experience (no raw-FID reprocessing controls) rather than making
-the file unopenable -- the fallback is flagged via
-``metadata.raw["fid_reprocess_unavailable"]`` so callers (the GUI)
-can tell the user why, rather than it being silent.
+silently guessing at an unverified parameter mapping. ``read_1d``/
+``read_2d`` catch exactly that error around the windowing step only
+and continue with the FID left unwindowed -- the point of the raw-FID
+path is to stay on it (raw FID in, full reprocessing available) even
+when one specific recorded parameter isn't understood yet, not to
+abandon it for TopSpin's already-processed, non-reprocessable output
+just because of that. The user can pick a different window from the
+Processing tab immediately (or extend :func:`_apply_bruker_window`
+once the WDW code's parameters are known) rather than losing raw-FID
+reprocessing entirely. Flagged via
+``metadata.raw["window_unsupported"]`` so callers (the GUI) can tell
+the user why the spectrum isn't windowed as recorded, rather than it
+being silent.
 
 ``read_1d_processed``/``read_2d_processed`` are a fallback, and a
 cross-check: they read TopSpin's own already-processed output
@@ -200,10 +204,19 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             direction=linear_predict_direction,
         )
 
+    window_unsupported_note = None
     if window is not None:
         fid = processing_ft.apodize(fid, dt, window=window, **(window_kwargs or {}))
     else:
-        fid = _apply_bruker_window(fid, procs, sw)
+        try:
+            fid = _apply_bruker_window(fid, procs, sw)
+        except NotImplementedError as exc:
+            # Stay on the raw-FID path (full reprocessing still
+            # available -- see the module docstring) rather than
+            # abandoning it for TopSpin's own, non-reprocessable
+            # output just because this one recorded window isn't
+            # understood yet; the FID is simply left unwindowed.
+            window_unsupported_note = str(exc)
     fid = processing_ft.zero_fill(fid, si)
 
     _, spectrum = processing_ft.fft_spectrum(fid, dt)
@@ -242,6 +255,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             # instead of) the frequency-domain result, which stays the
             # default view.
             "fid": fid, "fid_dt": dt, "fid_original_length": original_length,
+            **({"window_unsupported": window_unsupported_note} if window_unsupported_note else {}),
         },
     )
     axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
@@ -349,12 +363,20 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             ),
             1, fid_f2,
         )
+    window_unsupported_note = None
     if window is not None:
         fid_f2 = np.apply_along_axis(
             lambda row: processing_ft.apodize(row, 1.0 / sw, window=window, **(window_kwargs or {})), 1, fid_f2,
         )
     else:
-        fid_f2 = np.apply_along_axis(lambda row: _apply_bruker_window(row, procs, sw), 1, fid_f2)
+        try:
+            fid_f2 = np.apply_along_axis(lambda row: _apply_bruker_window(row, procs, sw), 1, fid_f2)
+        except NotImplementedError as exc:
+            # Same reasoning as read_1d -- stay on the raw-FID path
+            # (full reprocessing still available) rather than
+            # abandoning it; the same WDW code applies to every row,
+            # so this fails (or doesn't) on the first one either way.
+            window_unsupported_note = str(exc)
     fid_f2 = np.apply_along_axis(lambda row: processing_ft.zero_fill(row, si2), 1, fid_f2)
     spectrum = np.apply_along_axis(lambda row: processing_ft.fft_spectrum(row, 1.0 / sw)[1], 1, fid_f2)
 
@@ -392,6 +414,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # pseudo-2D, isn't overridable the way F2's is -- see
             # this function's docstring).
             "fid": fid_f2, "fid_dt": 1.0 / sw, "fid_original_length": original_length,
+            **({"window_unsupported": window_unsupported_note} if window_unsupported_note else {}),
         },
     )
     return NMRSpectrum(data=np.real(spectrum), axes=[y_axis, x_axis], metadata=metadata, data_imag=np.imag(spectrum))
@@ -674,46 +697,20 @@ def _detect(path: str) -> bool:
 
 def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     """Vendor-registry entry point: prefer the raw-FID path, falling
-    back to already-processed data when no raw ``fid``/``ser`` is
-    present -- or when it *is* present but can't actually be
-    reprocessed (see below)."""
+    back to already-processed data only when no raw ``fid``/``ser`` is
+    present at all -- see the module docstring for why an unsupported
+    window function no longer routes through here (``read_1d``/
+    ``read_2d`` handle that themselves now, staying on the raw-FID
+    path)."""
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
-    has_processed_2d = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
-    has_processed_1d = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "1r"))
-
     if has_ser:
-        try:
-            return read_2d(path, **kwargs)
-        except NotImplementedError as exc:
-            if has_processed_2d:
-                spectrum = read_2d_processed(path, **_filter_kwargs(read_2d_processed, kwargs))
-                spectrum.metadata.raw["fid_reprocess_unavailable"] = str(exc)
-                return spectrum
-            raise
+        return read_2d(path, **kwargs)
     if has_fid:
-        try:
-            return read_1d(path, **kwargs)
-        except NotImplementedError as exc:
-            if has_processed_1d:
-                spectrum = read_1d_processed(path, **_filter_kwargs(read_1d_processed, kwargs))
-                spectrum.metadata.raw["fid_reprocess_unavailable"] = str(exc)
-                return spectrum
-            raise
-    if has_processed_2d:
+        return read_1d(path, **kwargs)
+    if os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr")):
         return read_2d_processed(path, **kwargs)
     return read_1d_processed(path, **kwargs)
-
-
-def _filter_kwargs(func, kwargs: dict) -> dict:
-    """Keep only the entries of ``kwargs`` that ``func`` actually
-    accepts -- used when falling back from the raw-FID readers (which
-    take FID-domain-processing kwargs like ``window``/``phase0`` that
-    the already-processed readers below have no use for, since they
-    just read TopSpin's own output as-is)."""
-    import inspect
-    accepted = inspect.signature(func).parameters
-    return {k: v for k, v in kwargs.items() if k in accepted}
 
 
 base.register("bruker", _detect, _read_auto)
