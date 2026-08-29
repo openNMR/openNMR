@@ -1211,12 +1211,13 @@ class MainWindow(QMainWindow):
     def _fid_reprocessable(spectrum) -> bool:
         """Whether ``spectrum`` was loaded from a raw FID this GUI can
         re-read and reprocess with different parameters -- true for any
-        X-Pulse or Varian spectrum (both are always raw-FID, no
-        vendor-processed fallback exists for either), or a Bruker
-        experiment whose raw ``fid``/``ser`` is present on disk (if so,
-        :func:`opennmr.io.bruker._read_auto` would have preferred it
-        over the already-processed fallback in the first place)."""
-        if spectrum.metadata.vendor in ("xpulse", "varian"):
+        X-Pulse, Varian, or JEOL spectrum (all three are always
+        raw-FID, no vendor-processed fallback exists for any of them),
+        or a Bruker experiment whose raw ``fid``/``ser`` is present on
+        disk (if so, :func:`opennmr.io.bruker._read_auto` would have
+        preferred it over the already-processed fallback in the first
+        place)."""
+        if spectrum.metadata.vendor in ("xpulse", "varian", "jeol"):
             return True
         if spectrum.metadata.vendor == "bruker" and spectrum.metadata.source_path:
             base = spectrum.metadata.source_path

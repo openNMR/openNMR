@@ -2,6 +2,54 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Packaged-app crash fix + JEOL reprocessing gap (2026-08-29)
+
+~~App built with `packaging/build.py` crashes on launch from
+`/Applications`~~ -- fixed. User reported a real macOS crash report
+(`EXC_CRASH`/`SIGABRT` inside
+`QGuiApplicationPrivate::createPlatformIntegration()`). Root-caused via
+`QT_DEBUG_PLUGINS=1` + `otool -L` + `conda list`, not guessed at: this
+dev environment has a conda-forge `qtbase` 6.7.3 package installed
+alongside pip-installed PySide6 6.11.2 (pulled in by `qtconsole`/PyQt6,
+both also in the env) -- PyInstaller's dependency collector bundled the
+*conda* Qt's platform plugin (`libqcocoa.dylib`, flat
+`@rpath/libQt6Core.6.dylib` linkage, version 6.7.3) instead of
+PySide6's own (framework-style `@rpath/QtCore.framework/...`, version
+6.11.2), even though the core Qt libraries bundled alongside were
+correctly 6.11.2 throughout. Qt's own plugin loader refuses to load a
+mismatched-version platform plugin at all, so no window is ever shown
+and the app aborts. Fixed via a new `_fix_qt_plugins()` post-build step
+in `packaging/build.py` that wholesale-replaces every bundled
+`PySide6/Qt/plugins` directory with a fresh copy from the actually-
+installed PySide6, sidestepping the mismatch regardless of why
+PyInstaller's own collection picked the wrong source. Verified: rebuilt
+app's `libqcocoa.dylib` now links `QtCore.framework` 6.11.2
+(`otool -L`); rebuilt `.app` launches and stays running (`ps aux`);
+reinstalled to `/Applications` (replacing the old broken copy) and
+re-confirmed launching cleanly from there too; fresh
+`dist/opennmr-macos.dmg` rebuilt from the fixed `build.py` (the DMG
+opened for the user earlier in this session predated the fix and would
+still have crashed).
+
+~~New JEOL spectra don't show FID reprocessing options~~ -- two related
+bugs, fixed together. (1) `MainWindow._fid_reprocessable` (gates
+whether the Processing tab's FID-reprocessing box is shown) only
+checked for `"xpulse"`/`"varian"`, missing `"jeol"` entirely -- same bug
+class as an earlier Varian fix, now hit again because adding a new
+`io/` vendor doesn't automatically register it with every GUI-side
+whitelist. (2) Even with the box shown, clicking Reprocess would have
+raised `TypeError`: the GUI's reprocess handler unconditionally sends
+`align_echo=...` to whichever vendor's `read_1d` is active, and
+`io/jeol.py::read_1d` had no `align_echo` parameter at all (deliberately
+left out originally, since real 1D JEOL data doesn't obviously need
+it) -- every other vendor's `read_1d` already accepts it, so this broke
+the established uniform kwarg interface. Fixed by adding
+`align_echo: bool = False` to `jeol.read_1d` (applies
+`processing.ft.align_echo` when set, same as the other vendors; no
+wrap-truncation cap like X-Pulse's since there's no `truncate` concept
+for JEOL). 2 new GUI regression tests + 1 new `test_jeol.py` unit test,
+413 tests passing overall.
+
 ## JEOL Delta (`.jdf`) importer -- 1D (2026-08-29)
 
 ~~Find real JEOL example data (or build synthetic data from the

@@ -346,7 +346,7 @@ def _read_jeol_jdf(path: str) -> dict:
 # ============================================================
 
 def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | None = None,
-            zero_fill: int | bool | None = None, fid_shift: float = 0.0,
+            zero_fill: int | bool | None = None, fid_shift: float = 0.0, align_echo: bool = False,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward",
             autophase: bool = True, phase_mode: str = "apc0",
@@ -361,14 +361,22 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     uncorrected digital-filter delay).
 
     ``window``/``window_kwargs``/``zero_fill``/``fid_shift``/
-    ``linear_predict_*``/``autophase``/``phase_mode``/``phase0``/
-    ``phase1``/``baseline_correct``/``normalize`` : identical meaning
-    to :func:`opennmr.io.xpulse.read_1d`'s own same-named parameters
-    -- both go through the same :mod:`opennmr.processing.ft` pipeline.
-    No ``truncate``/``align_echo`` here (unlike X-Pulse): nothing in
-    the real data checked so far suggested either is needed for a
-    JEOL 1D FID, which -- see the FILTER_FACTOR caveat above aside --
-    already looks like an ordinary one-sided decaying acquisition.
+    ``align_echo``/``linear_predict_*``/``autophase``/``phase_mode``/
+    ``phase0``/``phase1``/``baseline_correct``/``normalize`` :
+    identical meaning to :func:`opennmr.io.xpulse.read_1d`'s own
+    same-named parameters -- both go through the same
+    :mod:`opennmr.processing.ft` pipeline. No ``truncate`` here
+    (unlike X-Pulse): nothing in the real 1D data checked so far
+    suggested it's needed -- every real file looks like an ordinary
+    one-sided decaying acquisition (see the FILTER_FACTOR caveat above
+    aside), not a full echo. ``align_echo`` is offered anyway, purely
+    for interface consistency with every other vendor's ``read_1d``
+    (the GUI's Processing tab sends it unconditionally) -- unlike
+    X-Pulse's own ``align_echo``, it does *not* also cap a wrap-point
+    truncation (there is no ``truncate`` to cap here), so if a genuine
+    full-echo JEOL acquisition ever needs this, check for the same
+    "looks like a time-reversal" wrapped-tail artifact X-Pulse had
+    before trusting it.
     """
     parsed = _read_jeol_jdf(path)
     header, params = parsed["header"], parsed["params"]
@@ -382,6 +390,8 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
 
     if fid_shift:
         fid = processing_ft.roll_fid(fid, fid_shift)
+    if align_echo:
+        fid = processing_ft.align_echo(fid)
 
     if linear_predict_points:
         fid = processing_ft.linear_predict(

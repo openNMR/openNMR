@@ -66,6 +66,43 @@ def _make_icon() -> str | None:
     return None
 
 
+def _fix_qt_plugins() -> None:
+    """Overwrite every bundled ``PySide6/Qt/plugins`` directory with a
+    fresh copy straight from the *installed* PySide6 package.
+
+    Real bug found and fixed while building/verifying this on macOS: a
+    dev environment with a conda-installed ``qtbase`` package
+    alongside pip-installed PySide6 (e.g. pulled in by ``qtconsole``/
+    ``PyQt6`` -- not something opennmr itself needs) can make
+    PyInstaller collect *that* conda Qt's platform plugins
+    (``libqcocoa.dylib`` etc., a different, older Qt version, built
+    with a completely different linkage convention -- flat
+    ``libQt6Core.6.dylib`` vs. PySide6's own ``QtCore.framework``)
+    instead of PySide6's own matching ones. The core Qt libraries
+    bundled alongside (``QtCore``/``QtGui``/...) are unaffected --
+    only the *plugins* were ever seen to be substituted -- but the
+    version mismatch is enough that Qt refuses to load the platform
+    plugin at all ("Ignoring QPA plugin due to mismatching Qt
+    versions"), and the app aborts on launch with no window ever
+    shown. Copying PySide6's own plugins directory over whatever
+    PyInstaller collected sidesteps the mismatch entirely, regardless
+    of why its own collection picked the wrong one."""
+    import PySide6
+    import shutil
+
+    source_plugins = os.path.join(os.path.dirname(PySide6.__file__), "Qt", "plugins")
+    if not os.path.isdir(source_plugins):
+        return
+
+    for root, dirs, _files in os.walk(DIST_DIR):
+        if os.path.basename(root) == "PySide6" and "Qt" in dirs:
+            bundled_plugins = os.path.join(root, "Qt", "plugins")
+            if os.path.isdir(bundled_plugins):
+                print(f"Re-syncing Qt plugins: {bundled_plugins}")
+                shutil.rmtree(bundled_plugins)
+                shutil.copytree(source_plugins, bundled_plugins)
+
+
 def main() -> int:
     try:
         import PyInstaller.__main__
@@ -107,6 +144,7 @@ def main() -> int:
 
     print(f"Building opennmr for {sys.platform}...")
     PyInstaller.__main__.run(args)
+    _fix_qt_plugins()
     print(f"Done -- see {DIST_DIR}")
     return 0
 

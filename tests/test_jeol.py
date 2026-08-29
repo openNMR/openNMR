@@ -236,3 +236,15 @@ def test_read_1d_zero_fill(tmp_path):
     path = _write_jdf(tmp_path, n_points=8)
     spectrum = jeol.read_1d(path, autophase=False, baseline_correct=False, zero_fill=32)
     assert len(spectrum.data) == 32
+
+
+def test_read_1d_accepts_align_echo_kwarg(tmp_path):
+    # Regression test: the GUI's reprocess-FID control always sends
+    # align_echo, matching every other vendor's read_1d -- jeol's
+    # initially lacked the parameter entirely and raised TypeError.
+    # align_echo's own effect on a real echo-shaped FID is exercised by
+    # processing.ft's own tests; here we're only confirming jeol.read_1d
+    # accepts and applies the kwarg without error.
+    path = _write_jdf(tmp_path, n_points=16)
+    spectrum = jeol.read_1d(path, autophase=False, baseline_correct=False, align_echo=True)
+    assert len(spectrum.data) == 16

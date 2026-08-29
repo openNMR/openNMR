@@ -1130,6 +1130,29 @@ def test_main_window_reprocess_fid_works_for_varian(qapp, tmp_path):
     assert len(window.session.spectra[index].data) > 8  # zero-filled by the default preset
 
 
+def test_main_window_fid_processing_box_visible_for_jeol(qapp, tmp_path):
+    # Regression test: before _fid_reprocessable recognised "jeol"
+    # (added alongside xpulse/varian), this box stayed hidden for
+    # every JEOL spectrum -- no way to reprocess it from the GUI at all.
+    from test_jeol import _write_jdf
+    window = MainWindow()
+    window._load(_write_jdf(tmp_path), vendor="jeol")
+    assert window.fid_processing_box.isHidden() is False
+
+
+def test_main_window_reprocess_fid_works_for_jeol(qapp, tmp_path):
+    # Regression test: jeol.read_1d must accept every kwarg the GUI
+    # always sends (window/zero_fill/fid_shift/align_echo/
+    # linear_predict_points), including align_echo, which every other
+    # vendor's read_1d already accepted but jeol's initially didn't.
+    from test_jeol import _write_jdf
+    window = MainWindow()
+    window._load(_write_jdf(tmp_path, n_points=16), vendor="jeol")
+
+    window.fid_shift_spin.setValue(1.0)
+    window.align_echo_button.setChecked(True)  # must not raise
+
+
 def test_main_window_reprocess_applies_tdeff_truncation(qapp, tmp_path):
     # The stashed "fid" is the fully processed (windowed, zero-filled)
     # FID, so truncation doesn't show up as a shorter array -- it
