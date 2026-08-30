@@ -3154,7 +3154,7 @@ class MainWindow(QMainWindow):
     # defined in each one, then fit a relaxation curve to each peak's
     # per-slice amplitude series.
 
-    _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta")
+    _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta", "Fixed")
     _REGION_TABLE_COLUMNS = ("Low (ppm)", "High (ppm)")
 
     def _build_analysis_tab(self) -> QWidget:
@@ -3208,8 +3208,12 @@ class MainWindow(QMainWindow):
             "One row per peak to fit -- shift and FWHM are initial "
             "guesses (both, and the amplitude, are refined by the fit); "
             "eta is the Gaussian/Lorentzian mixing fraction (0 = pure "
-            "Gaussian, 1 = pure Lorentzian), also refined."
+            "Gaussian, 1 = pure Lorentzian), also refined. Check Fixed "
+            "to lock a peak entirely at its current row values (fit "
+            "only the others); right-click for Set Custom Bounds…"
         )
+        self.peak_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.peak_table.customContextMenuRequested.connect(self._on_peak_table_context_menu)
         peak_layout.addWidget(self.peak_table)
 
         peak_button_row = QHBoxLayout()
@@ -3281,6 +3285,32 @@ class MainWindow(QMainWindow):
         )
         tolerance_row.addWidget(self.position_tolerance_spin)
         peak_layout.addLayout(tolerance_row)
+
+        noise_row = QHBoxLayout()
+        noise_row.addWidget(QLabel("Noise region (ppm):"))
+        self.sn_noise_region_edit = QLineEdit()
+        self.sn_noise_region_edit.setPlaceholderText("optional, e.g. 8.5, 9.5")
+        self.sn_noise_region_edit.setToolTip(
+            "A ppm range with no real signal, 'low, high' -- when set, "
+            "any peak whose fitted signal-to-noise (against this "
+            "region) falls below the S/N threshold has its amplitude "
+            "fixed to zero for that slice, instead of the fit chasing "
+            "noise once a real peak has decayed away. Leave blank to "
+            "disable (every peak fits normally regardless of S/N)."
+        )
+        noise_row.addWidget(self.sn_noise_region_edit)
+        peak_layout.addLayout(noise_row)
+
+        sn_threshold_row = QHBoxLayout()
+        sn_threshold_row.addWidget(QLabel("S/N threshold:"))
+        self.sn_threshold_spin = QDoubleSpinBox()
+        self.sn_threshold_spin.setRange(0.0, 1000.0)
+        self.sn_threshold_spin.setDecimals(1)
+        self.sn_threshold_spin.setSingleStep(0.5)
+        self.sn_threshold_spin.setValue(3.0)
+        self.sn_threshold_spin.setToolTip("Only used when Noise region above is set.")
+        sn_threshold_row.addWidget(self.sn_threshold_spin)
+        peak_layout.addLayout(sn_threshold_row)
 
         layout.addWidget(peak_box)
         layout.addWidget(self._build_region_box())
@@ -3805,16 +3835,76 @@ class MainWindow(QMainWindow):
 
         self._show_integration_results(spectrum, results, len(regions))
 
-    def _add_peak_row(self, shift: float = 0.0, fwhm: float = 1.0, eta: float = 0.5) -> None:
+    def _add_peak_row(self, shift: float = 0.0, fwhm: float = 1.0, eta: float = 0.5,
+                       fixed: bool = False, bounds: dict | None = None) -> None:
         row = self.peak_table.rowCount()
         self.peak_table.insertRow(row)
         for col, value in enumerate((shift, fwhm, eta)):
             self.peak_table.setItem(row, col, QTableWidgetItem(f"{value:.4g}"))
+        self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
+        if bounds:
+            self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, bounds)
+
+    @staticmethod
+    def _make_fixed_checkbox_item(checked: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem()
+        item.setFlags((item.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEditable)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        return item
 
     def _on_remove_peak_clicked(self) -> None:
         row = self.peak_table.currentRow()
         if row >= 0:
             self.peak_table.removeRow(row)
+
+    def _on_peak_table_context_menu(self, pos) -> None:
+        row = self.peak_table.currentRow()
+        if row < 0:
+            return
+        menu = QMenu(self)
+        bounds_action = menu.addAction("Set Custom Bounds…")
+        chosen = menu.exec(self.peak_table.viewport().mapToGlobal(pos))
+        if chosen is bounds_action:
+            self._on_set_peak_bounds(row)
+
+    #: Parameter keys a peak-fit custom-bounds dialog edits, paired
+    #: with the key ``fitting.build_bounds`` actually reads for each
+    #: (amplitude is "A" in ``fixed``, but "amplitude" in ``bounds`` --
+    #: see fitting.py's own build_bounds/initialize_params_with_map).
+    _PEAK_BOUNDS_FIELDS = (("Shift (ppm)", "shift"), ("FWHM (ppm)", "fwhm"),
+                           ("Amplitude", "amplitude"), ("Eta", "eta"))
+
+    def _on_set_peak_bounds(self, row: int) -> None:
+        existing = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole) or {}
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Custom bounds -- peak {row + 1}")
+        form = QFormLayout(dialog)
+        edits = {}
+        for label, key in self._PEAK_BOUNDS_FIELDS:
+            edit = QLineEdit()
+            if key in existing:
+                edit.setText(f"{existing[key][0]:g}, {existing[key][1]:g}")
+            edit.setPlaceholderText("optional, 'low, high'")
+            form.addRow(f"{label}:", edit)
+            edits[key] = edit
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        bounds = {}
+        for key, edit in edits.items():
+            text = edit.text().strip()
+            if not text:
+                continue
+            try:
+                lo_str, hi_str = text.split(",")
+                bounds[key] = (float(lo_str), float(hi_str))
+            except ValueError:
+                QMessageBox.critical(self, "Invalid bounds", f"{key}: expected 'low, high', got {text!r}.")
+                return
+        self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, bounds or None)
 
     def _on_peak_picked(self, shift: float) -> None:
         if self.pick_peak_button.isChecked():
@@ -3967,8 +4057,25 @@ class MainWindow(QMainWindow):
             # raising instead of just pinning it very tightly.
             margin = max(tolerance * fwhm, 1e-9)
             peak_def["bounds"] = {"shift": (shift - margin, shift + margin)}
+            fixed_item = self.peak_table.item(row, 3)
+            if fixed_item is not None and fixed_item.checkState() == Qt.CheckState.Checked:
+                peak_def["fixed"] = {"shift": True, "fwhm": True, "A": True, "eta": True}
+            custom_bounds = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if custom_bounds:
+                peak_def["bounds"] = {**peak_def["bounds"], **custom_bounds}
             peak_defs.append(peak_def)
         return peak_defs
+
+    def _read_sn_gating_kwargs(self) -> dict:
+        text = self.sn_noise_region_edit.text().strip()
+        if not text:
+            return {}
+        try:
+            lo_str, hi_str = text.split(",")
+            noise_region = (float(lo_str), float(hi_str))
+        except ValueError as exc:
+            raise ValueError("Noise region must be 'low, high' (ppm).") from exc
+        return {"noise_region": noise_region, "sn_threshold": self.sn_threshold_spin.value()}
 
     def _is_diffusion_fit(self) -> bool:
         return self.fit_type_combo.currentIndex() == 1
@@ -4126,15 +4233,21 @@ class MainWindow(QMainWindow):
         (``fit_regions`` -- restricts which part of the spectrum the
         fit itself considers, so unrelated signal elsewhere can't drag
         it off) -- entirely optional, an empty region table fits the
-        whole spectrum exactly as before."""
+        whole spectrum exactly as before. Also optionally S/N-gated
+        (:meth:`_read_sn_gating_kwargs`) -- once a peak's signal-to-
+        noise (against a user-marked noise region) falls below the
+        threshold across a series, its amplitude is fixed to zero
+        rather than the fit chasing noise once a real peak has decayed
+        away."""
         peak_defs = self._read_peak_defs()
         if not peak_defs:
             raise ValueError("Add at least one peak to fit.")
         prepared = [self._ensure_slice_info(s, i + 1) for i, s in enumerate(entries)]
         fit_regions = self._read_region_defs() or None
+        sn_kwargs = self._read_sn_gating_kwargs()
         fitted = processing_fitting.NMR2D_fit_slices(
             {"rows": prepared}, peak_defs, mode="rows", fit_regions=fit_regions,
-            show_report=False, show_warnings=False,
+            show_report=False, show_warnings=False, **sn_kwargs,
         )
         return fitted["rows"]
 
@@ -4482,7 +4595,15 @@ class MainWindow(QMainWindow):
             if row >= self.peak_table.rowCount():
                 break
             params = dict(zip(peak["names"], peak["params"]))
-            self.peak_table.setItem(row, 0, QTableWidgetItem(f"{params['shift']:.4g}"))
+            # Preserve any custom bounds already attached to this row's
+            # column-0 item (see _on_set_peak_bounds) -- a fresh
+            # QTableWidgetItem here would otherwise silently drop them.
+            custom_bounds = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole) \
+                if self.peak_table.item(row, 0) else None
+            shift_item = QTableWidgetItem(f"{params['shift']:.4g}")
+            if custom_bounds:
+                shift_item.setData(Qt.ItemDataRole.UserRole, custom_bounds)
+            self.peak_table.setItem(row, 0, shift_item)
             self.peak_table.setItem(row, 1, QTableWidgetItem(f"{params['fwhm']:.4g}"))
             if "eta" in params:
                 self.peak_table.setItem(row, 2, QTableWidgetItem(f"{params['eta']:.4g}"))
@@ -4531,11 +4652,16 @@ class MainWindow(QMainWindow):
         self._restore_analysis_state(spectrum)
 
     def _capture_analysis_state(self) -> dict:
-        peaks = [
-            [self.peak_table.item(row, col).text() if self.peak_table.item(row, col) else ""
-             for col in range(len(self._PEAK_TABLE_COLUMNS))]
-            for row in range(self.peak_table.rowCount())
-        ]
+        peaks = []
+        peak_bounds = []
+        for row in range(self.peak_table.rowCount()):
+            row_values = [self.peak_table.item(row, col).text() if self.peak_table.item(row, col) else ""
+                          for col in range(3)]  # Shift, FWHM, Eta -- plain text columns
+            fixed_item = self.peak_table.item(row, 3)
+            row_values.append("1" if fixed_item and fixed_item.checkState() == Qt.CheckState.Checked else "0")
+            peaks.append(row_values)
+            shift_item = self.peak_table.item(row, 0)
+            peak_bounds.append((shift_item.data(Qt.ItemDataRole.UserRole) if shift_item else None) or {})
         regions = [
             [self.region_table.item(row, col).text() if self.region_table.item(row, col) else ""
              for col in range(len(self._REGION_TABLE_COLUMNS))]
@@ -4543,6 +4669,7 @@ class MainWindow(QMainWindow):
         ]
         return {
             "peaks": peaks,
+            "peak_bounds": peak_bounds,
             "regions": regions,
             "fit_type": self.fit_type_combo.currentIndex(),
             "model": self.relaxation_model_combo.currentIndex(),
@@ -4554,6 +4681,8 @@ class MainWindow(QMainWindow):
             "start": self.delay_start_spin.value(),
             "step": self.delay_step_spin.value(), "vclist_factor": self.vclist_factor_spin.value(),
             "position_tolerance": self.position_tolerance_spin.value(),
+            "sn_noise_region": self.sn_noise_region_edit.text(),
+            "sn_threshold": self.sn_threshold_spin.value(),
             "results_text": self.analysis_results_label.text(),
         }
 
@@ -4581,12 +4710,20 @@ class MainWindow(QMainWindow):
             self.delay_step_spin.setValue(0.1)
             self.vclist_factor_spin.setValue(1.0)
             self.position_tolerance_spin.setValue(0.5)
+            self.sn_noise_region_edit.clear()
+            self.sn_threshold_spin.setValue(3.0)
         else:
-            for shift, fwhm, eta in state["peaks"]:
+            peak_bounds = state.get("peak_bounds", [])
+            for i, peak_row in enumerate(state["peaks"]):
+                shift, fwhm, eta = peak_row[0], peak_row[1], peak_row[2]
+                fixed = len(peak_row) > 3 and peak_row[3] == "1"
                 row = self.peak_table.rowCount()
                 self.peak_table.insertRow(row)
                 for col, value in enumerate((shift, fwhm, eta)):
                     self.peak_table.setItem(row, col, QTableWidgetItem(value))
+                self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
+                if i < len(peak_bounds) and peak_bounds[i]:
+                    self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, peak_bounds[i])
             for lo, hi in state.get("regions", []):
                 row = self.region_table.rowCount()
                 self.region_table.insertRow(row)
@@ -4604,6 +4741,8 @@ class MainWindow(QMainWindow):
             self.delay_step_spin.setValue(state["step"])
             self.vclist_factor_spin.setValue(state["vclist_factor"])
             self.position_tolerance_spin.setValue(state.get("position_tolerance", 0.5))
+            self.sn_noise_region_edit.setText(state.get("sn_noise_region", ""))
+            self.sn_threshold_spin.setValue(state.get("sn_threshold", 3.0))
             self.analysis_results_label.setText(state["results_text"])
 
         self._slice_fit_results = spectrum.metadata.raw.get("slice_fit_results")

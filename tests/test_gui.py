@@ -4,7 +4,9 @@ import os
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QLabel, QMessageBox, QPushButton, QSplitter
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QFileDialog, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter,
+)
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.main_window import MainWindow
@@ -3085,6 +3087,115 @@ def test_main_window_position_tolerance_spin_widens_bounds(qapp):
     lower, upper = window._read_peak_defs()[0]["bounds"]["shift"]
     assert lower == pytest.approx(5.1 - 0.4)
     assert upper == pytest.approx(5.1 + 0.4)
+
+
+def test_main_window_peak_table_fixed_checkbox_locks_every_parameter(qapp):
+    window = MainWindow()
+    window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5)
+    window.peak_table.item(0, 3).setCheckState(Qt.CheckState.Checked)
+
+    peak_def = window._read_peak_defs()[0]
+
+    assert peak_def["fixed"] == {"shift": True, "fwhm": True, "A": True, "eta": True}
+
+
+def test_main_window_peak_table_fixed_checkbox_unchecked_by_default(qapp):
+    window = MainWindow()
+    window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5)
+
+    peak_def = window._read_peak_defs()[0]
+
+    assert "fixed" not in peak_def
+
+
+def test_main_window_peak_custom_bounds_override_default_shift_bound(qapp):
+    window = MainWindow()
+    window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5)
+    window.peak_table.item(0, 0).setData(Qt.ItemDataRole.UserRole, {"shift": (4.0, 6.0), "eta": (0.1, 0.9)})
+
+    peak_def = window._read_peak_defs()[0]
+
+    assert peak_def["bounds"]["shift"] == (4.0, 6.0)
+    assert peak_def["bounds"]["eta"] == (0.1, 0.9)
+
+
+def test_main_window_set_peak_bounds_dialog_stores_parsed_bounds(qapp, monkeypatch):
+    window = MainWindow()
+    window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5)
+
+    def fake_exec(dialog):
+        edits = dialog.findChildren(QLineEdit)
+        edits[0].setText("4.5, 5.5")  # shift
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+    window._on_set_peak_bounds(0)
+
+    stored = window.peak_table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+    assert stored == {"shift": (4.5, 5.5)}
+
+
+def test_main_window_set_peak_bounds_dialog_cancelled_leaves_bounds_unchanged(qapp, monkeypatch):
+    window = MainWindow()
+    window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5, bounds={"shift": (4.0, 6.0)})
+
+    monkeypatch.setattr(QDialog, "exec", lambda dialog: QDialog.DialogCode.Rejected)
+    window._on_set_peak_bounds(0)
+
+    stored = window.peak_table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+    assert stored == {"shift": (4.0, 6.0)}
+
+
+def test_main_window_fit_updating_peak_table_preserves_custom_bounds(qapp):
+    window = MainWindow()
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5, bounds={"shift": (4.5, 5.5)})
+    result = {
+        "popt": np.array([5.02, 0.05, 1.0, 0.5]),
+        "pcov": np.zeros((4, 4)),
+        "peak_defs": window._read_peak_defs(),
+        "is_free": np.array([True, True, True, True]),
+    }
+
+    window._update_peak_table_from_fit(result)
+
+    stored = window.peak_table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+    assert stored == {"shift": (4.5, 5.5)}
+
+
+def test_main_window_sn_gating_kwargs_empty_when_no_noise_region(qapp):
+    window = MainWindow()
+    assert window._read_sn_gating_kwargs() == {}
+
+
+def test_main_window_sn_gating_kwargs_parses_region_and_threshold(qapp):
+    window = MainWindow()
+    window.sn_noise_region_edit.setText("8.5, 9.5")
+    window.sn_threshold_spin.setValue(5.0)
+    assert window._read_sn_gating_kwargs() == {"noise_region": (8.5, 9.5), "sn_threshold": 5.0}
+
+
+def test_main_window_sn_gating_kwargs_raises_on_bad_region(qapp):
+    window = MainWindow()
+    window.sn_noise_region_edit.setText("not a range")
+    with pytest.raises(ValueError):
+        window._read_sn_gating_kwargs()
+
+
+def test_main_window_analysis_state_round_trips_fixed_and_bounds(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._add_peak_row(shift=5.0, fwhm=0.1, eta=0.5, fixed=True, bounds={"shift": (4.5, 5.5)})
+    window.sn_noise_region_edit.setText("8, 9")
+    window.sn_threshold_spin.setValue(4.0)
+    window._save_current_analysis_state()
+
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")  # switch away
+    window._select_single_row(0)  # switch back -- triggers _restore_analysis_state
+
+    assert window.peak_table.item(0, 3).checkState() == Qt.CheckState.Checked
+    assert window.peak_table.item(0, 0).data(Qt.ItemDataRole.UserRole) == {"shift": (4.5, 5.5)}
+    assert window.sn_noise_region_edit.text() == "8, 9"
+    assert window.sn_threshold_spin.value() == pytest.approx(4.0)
 
 
 def test_main_window_position_tolerance_zero_locks_but_does_not_crash(qapp):
