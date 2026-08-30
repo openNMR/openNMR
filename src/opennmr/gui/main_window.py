@@ -16,7 +16,7 @@ import re
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
@@ -121,6 +121,13 @@ class MainWindow(QMainWindow):
         # selected spectrum, so peak lists/fit results stay siloed per
         # spectrum rather than lingering across a selection change.
         self._current_analysis_index: int | None = None
+        # Maps compare_list's own row index -> that row's position among
+        # the spectra actually plotted in compare_canvas (checked rows
+        # only, further filtered for 1D-ness/sample mass) -- lets
+        # compare_list's own current-row selection highlight the
+        # matching row directly in the plot too (see
+        # _on_compare_list_current_row_changed), not just in the list.
+        self._compare_plot_row_positions: dict[int, int] = {}
         # The per-slice pseudo-Voigt fit results from the most recent
         # Analysis-tab fit (NMR2D_fit_slices's own "rows" output) --
         # lets "Spectrum fit (slice #)" browse the intermediate spectral
@@ -1012,7 +1019,21 @@ class MainWindow(QMainWindow):
             "it from the plot; select a row and use Move Up/Down to "
             "change the stack order. Right-click for Fit Curve."
         )
+        # This list never actually holds keyboard focus (rows are set
+        # current programmatically, e.g. after a rebuild, not by the
+        # user clicking into the widget first) -- on macOS specifically,
+        # Qt's native style renders an unfocused "current" row's
+        # highlight in a much fainter inactive gray, easy to miss
+        # entirely against a list of otherwise-identical checkable rows.
+        # Forcing the inactive highlight colors to match the active ones
+        # makes the current row look the same regardless of focus.
+        compare_list_palette = self.compare_list.palette()
+        for role in (QPalette.ColorRole.Highlight, QPalette.ColorRole.HighlightedText):
+            compare_list_palette.setColor(QPalette.ColorGroup.Inactive, role,
+                                           compare_list_palette.color(QPalette.ColorGroup.Active, role))
+        self.compare_list.setPalette(compare_list_palette)
         self.compare_list.itemChanged.connect(lambda _item: self._refresh_compare_view_if_active())
+        self.compare_list.currentRowChanged.connect(self._on_compare_list_current_row_changed)
         self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
         layout.addWidget(self.compare_list)
@@ -1220,13 +1241,16 @@ class MainWindow(QMainWindow):
             return None
         return processing_slicing.get_trace(spectrum, axis="f1", index=slice_index)
 
-    def _compare_checked_entries(self) -> list[tuple[int, int | None]]:
-        entries = []
+    def _compare_checked_rows_and_entries(self) -> list[tuple[int, tuple[int, int | None]]]:
+        result = []
         for i in range(self.compare_list.count()):
             item = self.compare_list.item(i)
             if item.checkState() == Qt.CheckState.Checked:
-                entries.append(item.data(Qt.ItemDataRole.UserRole))
-        return entries
+                result.append((i, item.data(Qt.ItemDataRole.UserRole)))
+        return result
+
+    def _compare_checked_entries(self) -> list[tuple[int, int | None]]:
+        return [entry for _row, entry in self._compare_checked_rows_and_entries()]
 
     def _on_move_compare_item(self, delta: int) -> None:
         """Reorders rows within the Compare tab's own list -- this is
@@ -1291,25 +1315,37 @@ class MainWindow(QMainWindow):
             self._refresh_compare_view(switch_tab=switch_tab)
 
     def _refresh_compare_view(self, switch_tab: bool = True) -> None:
-        entries = self._compare_checked_entries()
-        candidates = [self._resolve_compare_entry(e) for e in entries]
-        candidates = [c for c in candidates if c is not None]  # stale entries (removed/reprocessed) silently drop
-        spectra = [s for s in candidates if s.ndim == 1]
-        skipped_ndim = len(candidates) - len(spectra)
+        rows_and_entries = self._compare_checked_rows_and_entries()
+        rows_and_candidates = [(row, self._resolve_compare_entry(e)) for row, e in rows_and_entries]
+        # stale entries (removed/reprocessed) silently drop
+        rows_and_candidates = [(row, c) for row, c in rows_and_candidates if c is not None]
+        rows_and_1d = [(row, c) for row, c in rows_and_candidates if c.ndim == 1]
+        skipped_ndim = len(rows_and_candidates) - len(rows_and_1d)
 
         norm_mode = ["none", "max", "mass"][self.compare_normalize_combo.currentIndex()]
-        plot_spectra = spectra
+        plot_rows: list[int] = []
+        plot_spectra: list = []
         skipped_mass: list = []
         if norm_mode == "mass":
             # Only `data` (the real part actually plotted here) needs
             # scaling -- these copies are used for this one comparison
             # plot and discarded, never stored back into the session.
-            plot_spectra = []
-            for s in spectra:
+            for row, s in rows_and_1d:
                 if not s.metadata.mass:
                     skipped_mass.append(s)
                     continue
+                plot_rows.append(row)
                 plot_spectra.append(dataclasses.replace(s, data=s.data / s.metadata.mass))
+        else:
+            plot_rows = [row for row, _s in rows_and_1d]
+            plot_spectra = [s for _row, s in rows_and_1d]
+
+        # compare_list's own row index -> position among what's actually
+        # plotted (checked rows only, minus anything just filtered out
+        # above) -- kept even on the "too few to plot" early return below,
+        # so a stale mapping doesn't linger pointing at axes that no
+        # longer exist.
+        self._compare_plot_row_positions = {row: pos for pos, row in enumerate(plot_rows)}
 
         if len(plot_spectra) < 2:
             bits = ["Select at least two 1D spectra to compare."]
@@ -1333,8 +1369,26 @@ class MainWindow(QMainWindow):
             self.compare_canvas.show_compare(plot_spectra, mode=mode, normalize=(norm_mode == "max"))
             if switch_tab:
                 self.canvas_tabs.setCurrentWidget(self.compare_canvas)
+            # show_compare always resets the canvas's own selection
+            # state -- reapply whatever compare_list's current row maps
+            # to, so the plot's own highlight doesn't silently drop out
+            # every time the comparison is rebuilt.
+            self._on_compare_list_current_row_changed(self.compare_list.currentRow())
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
+
+    def _on_compare_list_current_row_changed(self, row: int) -> None:
+        """Highlight (tint the background of) whichever row of the
+        Compare plot corresponds to compare_list's own current row --
+        the same tint :meth:`MplCanvas._toggle_compare_selection`
+        already applies on a direct canvas click, now also driven by
+        list selection so it's obvious which spectrum is "selected"
+        without needing to click the plot itself first. ``row`` can map
+        to nothing plotted (unchecked, or filtered out as non-1D/no
+        mass) -- clears the highlight in that case rather than leaving
+        a stale one from whatever was selected before."""
+        position = self._compare_plot_row_positions.get(row) if row >= 0 else None
+        self.compare_canvas.set_compare_selection(position)
 
     # ============================================================
     # Processing tab: live phase adjustment
@@ -2177,6 +2231,20 @@ class MainWindow(QMainWindow):
         form.addRow("Phase 0 (deg):", self._pair_widget(self.phase0_handle, self.phase0_spin))
         form.addRow("Phase 1 (deg):", self._pair_widget(self.phase1_handle, self.phase1_spin))
 
+        quick_phase_row = QHBoxLayout()
+        for delta in (-180.0, -90.0, 90.0, 180.0):
+            quick_button = QPushButton(f"{delta:+.0f}°")
+            quick_button.setToolTip(
+                f"Nudge Phase 0 by {delta:+.0f} degrees from its current value -- "
+                "a quick fix for a spectrum that's fully inverted (180) or "
+                "rotated a quarter-turn (90). Composes with whatever's already "
+                "there (two +90 clicks equal one +180), same as typing/dragging "
+                "Phase 0 by hand."
+            )
+            quick_button.clicked.connect(lambda _checked=False, d=delta: self._on_phase0_nudge_clicked(d))
+            quick_phase_row.addWidget(quick_button)
+        form.addRow("Quick phase:", quick_phase_row)
+
         self.pivot_spin = RelativeDoubleSpinBox()
         self.pivot_spin.setRange(-1.0e5, 1.0e5)
         self.pivot_spin.setDecimals(3)
@@ -2372,6 +2440,15 @@ class MainWindow(QMainWindow):
         self.pivot_spin.setValue(ppm)
         self.pivot_spin.blockSignals(False)
         self._apply_phase_preview()
+
+    def _on_phase0_nudge_clicked(self, delta: float) -> None:
+        """+/-90/+/-180 degree quick-flip buttons -- nudges Phase 0 by a
+        fixed amount *from its current value* (not a reset to that
+        absolute value), through the same spin box a manual drag/type
+        would change, so it composes naturally with whatever's already
+        applied (e.g. two +90 clicks equal one +180) and goes through
+        the same live-preview path as every other Phase 0 change."""
+        self.phase0_spin.setValue(self.phase0_spin.value() + delta)
 
     def _on_reset_phase_clicked(self) -> None:
         for handle in (self.phase0_handle, self.phase1_handle):

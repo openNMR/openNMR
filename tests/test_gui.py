@@ -698,6 +698,21 @@ def test_main_window_pivot_marker_appears_while_dragging_phase(qapp, tmp_path):
     assert window.canvas._pivot_line.get_xdata()[0] == pytest.approx(window.pivot_spin.value())
 
 
+def test_main_window_quick_phase_buttons_nudge_from_current_value(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+
+    window._on_phase0_nudge_clicked(90.0)
+    assert window.phase0_spin.value() == pytest.approx(90.0)
+
+    window._on_phase0_nudge_clicked(90.0)  # composes: two +90s == +180
+    assert window.phase0_spin.value() == pytest.approx(180.0)
+
+    window._on_phase0_nudge_clicked(-180.0)
+    assert window.phase0_spin.value() == pytest.approx(0.0)
+    assert window.phase0_handle.value() == pytest.approx(0.0)  # stays in sync
+
+
 def test_main_window_autophase_button_sets_phase0_and_resets_phase1(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
@@ -1956,6 +1971,51 @@ def test_main_window_compare_list_has_a_current_row_after_populating(qapp, tmp_p
     _select_rows(window, [0])
     _select_rows(window, [0, 1])  # a fresh rebuild, same two entries
     assert window.compare_list.item(window.compare_list.currentRow()).data(Qt.ItemDataRole.UserRole) == moved_entry
+
+
+def test_main_window_compare_list_selection_highlights_matching_plot_row(qapp, tmp_path):
+    # Follow-up real bug: compare_list did get a current row (previous
+    # test), and MplCanvas already had a click-to-highlight mechanism
+    # for a Compare row (_selected_compare_index/_apply_compare_
+    # selection_highlight) -- but the two were never connected, and
+    # separately, show_compare's own "let peaks bleed into neighbouring
+    # rows" fix (row_ax.patch.set_alpha(0.0)) silently made *any*
+    # facecolor tint on that patch invisible, including this one, once
+    # it *was* wired up. Both needed fixing before a highlight actually
+    # rendered anywhere.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="c"), vendor="bruker")
+    _select_rows(window, [0, 1, 2])
+    assert window.compare_list.currentRow() == 0
+    assert window.compare_canvas._selected_compare_index == 0
+    assert window.compare_canvas._compare_axes[0].patch.get_alpha() == pytest.approx(1.0)
+    assert window.compare_canvas._compare_axes[1].patch.get_alpha() == pytest.approx(0.0)
+
+    window.compare_list.setCurrentRow(2)
+    assert window.compare_canvas._selected_compare_index == 2
+    assert window.compare_canvas._compare_axes[2].patch.get_alpha() == pytest.approx(1.0)
+    assert window.compare_canvas._compare_axes[0].patch.get_alpha() == pytest.approx(0.0)
+
+
+def test_main_window_compare_list_selection_maps_around_unchecked_rows(qapp, tmp_path):
+    # compare_list row index and the canvas's own per-row axes index
+    # diverge as soon as any row is unchecked (dropped from the plot
+    # entirely) -- the mapping between the two must account for that,
+    # not just assume row N in the list is row N in the plot.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="c"), vendor="bruker")
+    _select_rows(window, [0, 1, 2])
+
+    window.compare_list.item(0).setCheckState(Qt.CheckState.Unchecked)  # drops the first plotted row
+    window.compare_list.setCurrentRow(2)  # third list row, but second *plotted* row now
+    assert window.compare_canvas._selected_compare_index == 1
+
+    window.compare_list.setCurrentRow(0)  # current row is now the unchecked one -- nothing plotted there
+    assert window.compare_canvas._selected_compare_index is None
 
 
 def test_main_window_deselecting_back_to_single_restores_single_view(qapp, tmp_path):

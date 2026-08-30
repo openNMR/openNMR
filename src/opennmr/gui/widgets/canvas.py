@@ -519,6 +519,25 @@ class MplCanvas(QWidget):
                 self._toggle_compare_selection(start_ax)
         self._pan_start = None
 
+    def set_compare_selection(self, index: int | None) -> None:
+        """Public counterpart to :meth:`_toggle_compare_selection` --
+        lets something other than a direct click on the plot itself
+        (namely, :class:`~opennmr.gui.main_window.MainWindow`'s own
+        Compare-list row selection) drive which row is tinted as
+        "selected", so the highlight stays in sync with whichever row
+        is current in the list too, not just the last row clicked
+        directly in the plot. ``index`` : position among the rows
+        currently plotted (matching :attr:`_compare_axes`'s own order),
+        or ``None`` to clear the highlight -- out-of-range values are
+        also treated as "nothing selected" rather than raising, since
+        the list and the plot can briefly disagree on row count right
+        after a rebuild."""
+        if index is not None and not (self._compare_axes and 0 <= index < len(self._compare_axes)):
+            index = None
+        self._selected_compare_index = index
+        self._apply_compare_selection_highlight()
+        self.canvas.draw_idle()
+
     def _toggle_compare_selection(self, ax) -> None:
         """Click a row of a "Stacked" Compare view to make scroll-zoom
         target just that row from now on, decoupled from the rest (see
@@ -536,7 +555,16 @@ class MplCanvas(QWidget):
         if not self._compare_axes:
             return
         for i, row_ax in enumerate(self._compare_axes):
-            row_ax.set_facecolor(self._COMPARE_SELECTED_FACECOLOR if i == self._selected_compare_index else "none")
+            selected = i == self._selected_compare_index
+            row_ax.set_facecolor(self._COMPARE_SELECTED_FACECOLOR if selected else "none")
+            # show_compare sets every row's patch alpha to 0 so a peak
+            # bleeding in from a neighbouring row isn't hidden behind an
+            # opaque background -- but set_facecolor's own color has no
+            # alpha of its own, so that persisted 0 alpha would silently
+            # swallow this tint too. Make the selected row's patch
+            # opaque just enough to actually show; every other row stays
+            # fully transparent for the bleed.
+            row_ax.patch.set_alpha(1.0 if selected else 0.0)
 
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
