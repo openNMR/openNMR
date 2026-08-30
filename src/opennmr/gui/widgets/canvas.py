@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 
 import numpy as np
+from matplotlib import colormaps
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
@@ -1178,7 +1179,14 @@ class MplCanvas(QWidget):
         :func:`opennmr.processing.fitting.evaluate_fit` (last entry
         is the baseline) -- each is drawn individually alongside the
         total fit, so an overlapping multi-peak fit can be judged
-        peak by peak rather than only as a summed curve.
+        peak by peak rather than only as a summed curve. Styled after
+        the user's own DMFit plots (``leonmr.dmfit``): each peak is a
+        shaded ``fill_between`` region (not a solid line) so its
+        visual weight tracks its actual amplitude instead of every
+        component looking equally prominent regardless of size, drawn
+        tallest-peak-first so a small peak's shading still shows on
+        top rather than being buried under a larger neighbour's fill;
+        the total fit is a dashed line drawn above every peak.
 
         ``spectrum`` : the slice's own 1D trace (``fit_result["slice"]``
         from :func:`opennmr.processing.fitting.NMR2D_fit_slices`), used
@@ -1199,14 +1207,25 @@ class MplCanvas(QWidget):
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
-        self.ax.plot(x, y_data, color="black", linewidth=1.5, label="Data")
-        self.ax.plot(x, y_fit, color="red", linestyle="--", linewidth=2.0, label="Fit (total)")
+        self.ax.plot(x, y_data, color="black", linewidth=1.5, label="Data", zorder=0)
         if components:
             n_peaks = len(components) - 1  # evaluate_fit appends the baseline last
-            for i, component in enumerate(components[:n_peaks]):
-                label = peak_labels[i] if peak_labels else f"Peak {i + 1}"
-                self.ax.plot(x, component, linewidth=1.2, alpha=0.8, label=label)
-            self.ax.plot(x, components[-1], color="gray", linestyle=":", linewidth=1.0, label="Baseline")
+            peak_curves = components[:n_peaks]
+            if peak_curves:
+                order = sorted(range(len(peak_curves)), key=lambda i: float(np.max(peak_curves[i])), reverse=True)
+                # A qualitative palette, not a diverging one -- BrBG/RdBu-style
+                # colormaps wash out to near-white at their midpoint, which made
+                # a peak of middling rank nearly invisible once shaded.
+                cmap = colormaps["tab10"]
+                edge_colors = [cmap(i % 10) for i in range(len(peak_curves))]
+                for rank, i in enumerate(order):
+                    label = peak_labels[i] if peak_labels else f"Peak {i + 1}"
+                    edge = edge_colors[rank]
+                    face = (edge[0], edge[1], edge[2], 0.4)
+                    self.ax.fill_between(x, peak_curves[i], color=face, edgecolor=edge,
+                                          linewidth=1.0, label=label, zorder=1)
+            self.ax.plot(x, components[-1], color="gray", linestyle=":", linewidth=1.0, label="Baseline", zorder=1)
+        self.ax.plot(x, y_fit, color="red", linestyle="--", linewidth=2.0, label="Fit (total)", zorder=100)
 
         if spectrum is not None:
             nuclide = find_gamma(spectrum.metadata.nucleus, SFO1=spectrum.metadata.sfo1)["Nuclide"]

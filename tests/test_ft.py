@@ -151,3 +151,58 @@ def test_align_echo_respects_explicit_target_index():
     fid[10] = 1.0
     aligned = ft.align_echo(fid, target_index=n // 2)
     assert np.argmax(np.abs(aligned)) == n // 2
+
+
+def _sloped_baseline_with_peak(n=2000):
+    freq = np.linspace(-10.0, 10.0, n)
+    true_baseline = 5.0 + 0.3 * freq
+    peak = 80.0 * np.exp(-0.5 * ((freq - 1.0) / 0.2) ** 2)
+    return freq, true_baseline, peak
+
+
+def test_baseline_correct_is_not_biased_by_a_tall_peak():
+    # A single unweighted polyfit over the whole spectrum (this
+    # function's own original implementation) gets pulled toward a
+    # tall peak, systematically under-correcting the true baseline --
+    # this is the "isn't achieving much" complaint the sigma-clipped
+    # rewrite fixes. Compare against the naive fit directly to prove
+    # the new version does substantially better, not just differently.
+    freq, true_baseline, peak = _sloped_baseline_with_peak()
+    spectrum = true_baseline + peak
+
+    naive_coeffs = np.polyfit(freq, spectrum, 1)
+    naive_corrected = spectrum - np.polyval(naive_coeffs, freq)
+
+    corrected = ft.baseline_correct(freq, spectrum)
+
+    # Away from the peak, the robust correction should sit much closer
+    # to zero (true baseline fully removed) than the naive one.
+    away_from_peak = np.abs(freq - 1.0) > 2.0
+    naive_residual = np.abs(naive_corrected[away_from_peak]).mean()
+    robust_residual = np.abs(corrected[away_from_peak]).mean()
+    assert robust_residual < naive_residual * 0.1
+
+
+def test_baseline_correct_preserves_complex_dtype():
+    freq, true_baseline, peak = _sloped_baseline_with_peak()
+    spectrum = (true_baseline + peak) + 1j * np.zeros_like(freq)
+    corrected = ft.baseline_correct(freq, spectrum)
+    assert np.iscomplexobj(corrected)
+
+
+def test_baseline_correct_handles_a_short_spectrum():
+    # A small synthetic/test-fixture-sized spectrum (far fewer points
+    # than any real acquisition) shouldn't hit estimate_baseline_robust's
+    # "not enough points" floor via frac=0.05 rounding down to nothing.
+    freq = np.linspace(-5.0, 5.0, 32)
+    spectrum = 2.0 + 0.1 * freq
+    corrected = ft.baseline_correct(freq, spectrum)
+    assert np.allclose(corrected, 0.0, atol=1e-6)
+
+
+def test_baseline_correct_respects_explicit_baseline_regions():
+    freq, true_baseline, peak = _sloped_baseline_with_peak()
+    spectrum = true_baseline + peak
+    corrected = ft.baseline_correct(freq, spectrum, baseline_regions=[(-10.0, -2.0), (4.0, 10.0)])
+    away_from_peak = np.abs(freq - 1.0) > 2.0
+    assert np.abs(corrected[away_from_peak]).mean() < 1.0

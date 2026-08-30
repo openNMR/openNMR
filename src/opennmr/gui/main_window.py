@@ -207,7 +207,7 @@ class MainWindow(QMainWindow):
         self.canvas_tabs.setCurrentWidget(self.canvas)
 
         self.side_tabs = tabs = QTabWidget()
-        tabs.addTab(self._scrollable(self._build_spectra_tab()), "Spectra")
+        tabs.addTab(self._scrollable(self._build_spectra_tab()), "Data")
         self._processing_tab_index = tabs.addTab(self._scrollable(self._build_processing_tab()), "Processing")
         tabs.addTab(self._scrollable(self._build_analysis_tab()), "Analysis")
         tabs.addTab(self._scrollable(self._build_compare_tab()), "Compare")
@@ -280,8 +280,24 @@ class MainWindow(QMainWindow):
         edit_menu = menu_bar.addMenu("&Edit")
         remove_action = QAction("&Remove Selected Spectrum", self)
         remove_action.setShortcut(QKeySequence.StandardKey.Delete)
+        # WidgetShortcut (rather than the QAction default, WindowShortcut)
+        # confines the Delete/Backspace *keyboard* accelerator to firing
+        # only while the Data tab's own list has focus -- previously it
+        # fired window-wide, so Backspace pressed anywhere (e.g. while
+        # browsing the Analysis tab) deleted the selected spectrum, easy
+        # to trigger by accident. The menu item itself still works from
+        # anywhere via a click, since that doesn't go through the
+        # shortcut-context check at all.
+        remove_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
         remove_action.triggered.connect(self._on_remove_clicked)
+        self.spectrum_list.addAction(remove_action)
         edit_menu.addAction(remove_action)
+
+        remove_peak_action = QAction("Remove &Peak", self)
+        remove_peak_action.setShortcut(QKeySequence.StandardKey.Delete)
+        remove_peak_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        remove_peak_action.triggered.connect(self._on_remove_peak_clicked)
+        self.peak_table.addAction(remove_peak_action)
 
         edit_menu.addSeparator()
         reset_phase_action = QAction("Reset &Phase", self)
@@ -301,7 +317,7 @@ class MainWindow(QMainWindow):
 
         window_menu.addSection("Panel")
         shortcut_num = 1
-        for idx, label in enumerate(("Spectra", "Processing", "Analysis", "Compare")):
+        for idx, label in enumerate(("Data", "Processing", "Analysis", "Compare")):
             action = QAction(label, self)
             action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
             action.triggered.connect(lambda _checked=False, i=idx: self.side_tabs.setCurrentIndex(i))
@@ -416,7 +432,7 @@ class MainWindow(QMainWindow):
         return row, prev_button, next_button
 
     # ============================================================
-    # Spectra tab: open / list / remove / nucleus override
+    # Data tab: open / list / remove / nucleus override
     # ============================================================
 
     def _build_spectra_tab(self) -> QWidget:
@@ -898,7 +914,7 @@ class MainWindow(QMainWindow):
 
         compare_intro_label = QLabel(
             "Ctrl/Cmd-click (or Shift-click) several 1D spectra in the "
-            "Spectra tab's list to start a comparison -- or just select "
+            "Data tab's list to start a comparison -- or just select "
             "a single pseudo-2D spectrum there, which fills this in "
             "with its own slices automatically, in order. Fine-tune "
             "either here: check/uncheck to include or exclude, Move Up/"
@@ -1033,12 +1049,12 @@ class MainWindow(QMainWindow):
                     self._refresh_compare_view(switch_tab=False)
 
     def _populate_compare_list(self, rows: list[int]) -> None:
-        """Rebuild the Compare tab's own list from the Spectra tab's
+        """Rebuild the Compare tab's own list from the Data tab's
         current multi-selection (each row as a whole spectrum -- entry
         ``(row, None)``, see :meth:`_resolve_compare_entry`),
         preserving any check-state/reorder already done here for rows
         still selected -- so ctrl-clicking one more spectrum in the
-        Spectra tab appends it rather than wiping out prior
+        Data tab appends it rather than wiping out prior
         deselections/reordering, but ctrl-clicking a row *out* of the
         selection still drops it from here too."""
         # Filter out-of-range indices defensively -- a spectrum removal
@@ -1761,7 +1777,7 @@ class MainWindow(QMainWindow):
         pseudo-2D (so a right-click Fit Curve on it is available), or
         ``spectrum`` is ``None`` (nothing selected -- hide). A
         Compare-stack fit (which doesn't depend on what's selected in
-        the Spectra tab at all) force-shows this tab directly in
+        the Data tab at all) force-shows this tab directly in
         :meth:`_run_curve_fit` instead of going through this check."""
         index = self.canvas_tabs.indexOf(self.fit_canvas)
         visible = spectrum is not None and spectrum.ndim == 2 and spectrum.is_pseudo_2d
@@ -2038,10 +2054,12 @@ class MainWindow(QMainWindow):
         self.slice_row_label = QLabel("Slice:")
         dim_form.addRow(self.slice_row_label, slice_row)
 
-        self.apply_all_slices_checkbox = QCheckBox("Apply this phase to every slice")
+        self.apply_all_slices_checkbox = QCheckBox("Apply to every slice")
         self.apply_all_slices_checkbox.setToolTip(
-            "Off: only the slice above is corrected. On: the same "
-            "phase0/phase1 is applied uniformly to every slice at once."
+            "Off: Autophase/phase drag/Baseline Correct above only act "
+            "on the slice selected above. On: the same phase0/phase1 "
+            "(or, for Baseline Correct, an independent baseline fit "
+            "per slice) is applied to every slice at once."
         )
         self.apply_all_slices_checkbox.stateChanged.connect(self._on_apply_all_slices_toggled)
         dim_form.addRow(self.apply_all_slices_checkbox)
@@ -2151,10 +2169,12 @@ class MainWindow(QMainWindow):
 
         baseline_correct_button = QPushButton("Baseline Correct")
         baseline_correct_button.setToolTip(
-            "Subtract a linear baseline fit to the real part "
-            "(processing.ft.baseline_correct) from whatever the "
-            "controls above currently target -- same targeting rules "
-            "as Autophase."
+            "Subtract a robust linear baseline fit to the real part "
+            "(processing.ft.baseline_correct -- sigma-clipped against "
+            "the spectrum's own edges so real peaks don't bias it) "
+            "from whatever the controls above currently target -- "
+            "same targeting rules as Autophase, including 'Apply to "
+            "every slice' for a pseudo-2D series."
         )
         baseline_correct_button.clicked.connect(self._on_baseline_correct_clicked)
         form.addRow(baseline_correct_button)
@@ -2369,12 +2389,15 @@ class MainWindow(QMainWindow):
         self.revert_autophase_button.setEnabled(False)
 
     def _on_baseline_correct_clicked(self) -> None:
-        """Subtract a linear baseline (:func:`processing.ft.baseline_correct`)
-        from whatever the Phase controls currently target -- same
-        targeting rules as :meth:`_on_autophase_clicked` (including the
-        pseudo-2D single-slice case), applied directly to the live
-        data (not folded into the Phase 0/Phase 1 delta, since a
-        baseline subtraction isn't a phase correction)."""
+        """Subtract a robust linear baseline
+        (:func:`processing.ft.baseline_correct`, sigma-clipped so real
+        peaks don't bias the fit) from whatever the Phase controls
+        currently target -- same targeting rules as
+        :meth:`_on_autophase_clicked` (including "Apply to every
+        slice" for a pseudo-2D series, each slice fit independently),
+        applied directly to the live data (not folded into the Phase
+        0/Phase 1 delta, since a baseline subtraction isn't a phase
+        correction)."""
         index = self._selected_index()
         if index is None or self._phase_mode is None or self._phase_freq_ppm is None:
             return
@@ -2456,7 +2479,7 @@ class MainWindow(QMainWindow):
         """Zero-order autophase every slice of the selected pseudo-2D
         spectrum independently (:func:`opennmr.processing.ft.apc0` per
         row) -- unlike the shared phase0/phase1 controls above (even
-        with "Apply this phase to every slice" checked, which broadcasts
+        with "Apply to every slice" checked, which broadcasts
         one value to every row), each slice's own phase error is found
         and corrected on its own."""
         index = self._selected_index()
@@ -2716,10 +2739,27 @@ class MainWindow(QMainWindow):
             "Fit Spectrum works on any 1D spectrum, or every slice of a "
             "pseudo-2D series. Fit Curve (relaxation/diffusion) needs a "
             "pseudo-2D series selected here (or right-click it in the "
-            "Spectra tab), or a stack of 1D spectra in the Compare tab."
+            "Data tab), or a stack of 1D spectra in the Compare tab."
         )
         self.analysis_status_label.setWordWrap(True)
         layout.addWidget(self.analysis_status_label)
+
+        # Two sub-tabs -- Spectral Fitting (peak-shape fit against one
+        # spectrum/slice) and Curve Fitting (relaxation/diffusion fit
+        # against a peak's per-slice series) -- were previously one
+        # long stacked panel; splitting them leaves room for future
+        # analysis modes (e.g. VOCS) as further sub-tabs without the
+        # panel growing without bound.
+        self.analysis_sub_tabs = QTabWidget()
+        self.analysis_sub_tabs.addTab(self._build_spectral_fitting_subtab(), "Spectral Fitting")
+        self.analysis_sub_tabs.addTab(self._build_curve_fitting_subtab(), "Curve Fitting")
+        layout.addWidget(self.analysis_sub_tabs)
+
+        return tab
+
+    def _build_spectral_fitting_subtab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
 
         peak_box = QGroupBox("Peaks (pseudo-Voigt)")
         peak_layout = QVBoxLayout(peak_box)
@@ -2860,13 +2900,20 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.spectral_fit_params_label)
 
-        relax_box = QGroupBox("Fit Curve settings (relaxation / diffusion -- step 2)")
+        layout.addStretch(1)
+        return tab
+
+    def _build_curve_fitting_subtab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        relax_box = QGroupBox("Fit Curve settings (relaxation / diffusion)")
         relax_box.setToolTip(
-            "Configures the Fit Curve button above, and the Spectra "
+            "Configures the Fit Curve button below, and the Data "
             "tab's right-click 'Fit Curve' action on a pseudo-2D row, "
             "and the Compare tab's Fit Curve (button or right-click) "
             "on a checked stack of 1D spectra -- not used by Fit "
-            "Spectrum, which is step 1."
+            "Spectrum, which lives in the Spectral Fitting sub-tab."
         )
         relax_form = QFormLayout(relax_box)
 
@@ -3427,7 +3474,7 @@ class MainWindow(QMainWindow):
         self.view_relaxation_peak_spin.blockSignals(False)
         self._display_relaxation_peak(0)
         # Force the tab visible: a Compare-stack fit has no single
-        # "owning" spectrum, so it can run while the Spectra tab's own
+        # "owning" spectrum, so it can run while the Data tab's own
         # selection isn't pseudo-2D (or is empty) -- the selection-
         # driven _update_fit_tab_visibility check alone wouldn't show it.
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
@@ -3580,7 +3627,7 @@ class MainWindow(QMainWindow):
         self._on_fit_curve_pseudo2d_action(index)
 
     def _on_fit_curve_pseudo2d_action(self, index: int) -> None:
-        """"Fit Curve" from the Spectra tab's right-click menu, only
+        """"Fit Curve" from the Data tab's right-click menu, only
         offered for a pseudo-2D row (see
         :meth:`_on_spectrum_list_context_menu`). Selects that row
         first (so the peak table/Values-source/model shown are that

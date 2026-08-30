@@ -389,6 +389,36 @@ def test_main_window_menu_remove_action_removes_selected_spectrum(qapp, tmp_path
     assert window.spectrum_list.count() == 0
 
 
+def test_main_window_remove_spectrum_shortcut_is_scoped_to_spectrum_list(qapp):
+    # Delete/Backspace used to remove the selected spectrum no matter
+    # which widget had focus (QAction's default WindowShortcut context),
+    # which made it too easy to trigger by accident from, say, the
+    # Analysis tab. It must now only fire while the Data tab's own list
+    # is focused -- the menu item itself stays clickable from anywhere.
+    window = MainWindow()
+    edit_menu = window.menuBar().actions()[1].menu()
+    remove_action = next(a for a in edit_menu.actions() if "Remove Selected Spectrum" in a.text())
+    assert remove_action.shortcutContext() == Qt.ShortcutContext.WidgetShortcut
+    assert remove_action in window.spectrum_list.actions()
+
+
+def test_main_window_remove_peak_shortcut_is_scoped_to_peak_table(qapp, tmp_path):
+    # Backspace should remove a selected row from the peak table when
+    # the Analysis tab's peak table has focus, instead of the global
+    # remove-spectrum shortcut firing.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window._add_peak_row(shift=1.0, fwhm=0.5, eta=0.5)
+    remove_peak_action = next(a for a in window.peak_table.actions() if "Peak" in a.text())
+    assert remove_peak_action.shortcutContext() == Qt.ShortcutContext.WidgetShortcut
+
+    window.peak_table.setCurrentCell(0, 0)
+    remove_peak_action.trigger()
+
+    assert window.peak_table.rowCount() == 0
+    assert window.spectrum_list.count() == 1
+
+
 def test_main_window_menu_window_panel_actions_switch_side_tabs(qapp):
     window = MainWindow()
     window_menu = window.menuBar().actions()[2].menu()
@@ -2071,7 +2101,7 @@ def test_main_window_move_compare_item_out_of_bounds_is_noop(qapp, tmp_path):
 
 
 def test_main_window_compare_list_preserves_unchecked_state_across_reselect(qapp, tmp_path):
-    # Ctrl-clicking one more spectrum in the Spectra tab shouldn't wipe
+    # Ctrl-clicking one more spectrum in the Data tab shouldn't wipe
     # out a deselection already made in the Compare tab.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
@@ -2839,14 +2869,18 @@ def test_main_window_spectral_fit_canvas_siloed_per_spectrum(qapp):
     window.relaxation_model_combo.setCurrentIndex(2)
     window._on_fit_spectrum_clicked()  # spectral fit alone -- curve fit not needed here
     window.view_slice_fit_spin.setValue(2)  # look at one slice's spectral fit
-    # Data + Fit (total) + one peak component + baseline, for the single peak fitted above.
-    assert len(window.spectral_fit_canvas.ax.lines) == 4
+    # Data + Fit (total) + baseline are lines; the single peak fitted
+    # above is a shaded fill_between region (a collection, not a line).
+    assert len(window.spectral_fit_canvas.ax.lines) == 3
+    assert len(window.spectral_fit_canvas.ax.collections) == 1
 
     _load_spectrum_directly(window, spectrum_b)
     assert len(window.spectral_fit_canvas.ax.lines) == 0
+    assert len(window.spectral_fit_canvas.ax.collections) == 0
 
     window._select_single_row(0)
-    assert len(window.spectral_fit_canvas.ax.lines) == 4
+    assert len(window.spectral_fit_canvas.ax.lines) == 3
+    assert len(window.spectral_fit_canvas.ax.collections) == 1
 
 
 def test_main_window_view_slice_fit_does_not_touch_spectrum_canvas(qapp):
@@ -3286,7 +3320,10 @@ def test_main_window_view_slice_fit_shows_data_and_fit_curve(qapp):
 
     window.view_slice_fit_spin.setValue(3)
     assert window.canvas_tabs.currentWidget() is window.spectral_fit_canvas
-    labels = [line.get_label() for line in window.spectral_fit_canvas.ax.lines]
+    ax = window.spectral_fit_canvas.ax
+    # The single peak is a shaded fill_between region (a collection),
+    # not a line -- data/baseline/total fit remain plain lines.
+    labels = [artist.get_label() for artist in (*ax.lines, *ax.collections)]
     assert "Data" in labels and "Fit (total)" in labels
     assert any(label.startswith("Peak 1") for label in labels)
     assert "Baseline" in labels
@@ -3321,10 +3358,12 @@ def test_main_window_analysis_tab_labels_renamed_for_clarity(qapp):
     # Explicit user feedback: "slice fit"/"peak fit" read as
     # confusingly similar -- renamed to make clear one is a spectral
     # (per-slice) fit and the other a curve (per-peak) fit.
+    # The two now live in separate Analysis sub-tabs (Spectral Fitting /
+    # Curve Fitting), so search the whole sub-tab widget rather than one
+    # page's own children.
     window = MainWindow()
-    tab = window.relaxation_uncertainty_checkbox.parentWidget()
     labels = [
-        child.text() for child in tab.findChildren(QLabel) if child.text() in
+        child.text() for child in window.analysis_sub_tabs.findChildren(QLabel) if child.text() in
         ("Spectrum fit (slice #):", "View curve fit (peak #):")
     ]
     assert set(labels) == {"Spectrum fit (slice #):", "View curve fit (peak #):"}
