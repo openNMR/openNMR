@@ -852,6 +852,79 @@ def test_main_window_processing_preview_matches_spectrum_tab_phase(qapp, tmp_pat
     np.testing.assert_allclose(preview_ydata, spectrum_ydata, atol=1e-6)
 
 
+def test_main_window_apply_all_slices_checked_by_default(qapp, tmp_path, monkeypatch):
+    # Explicit user feedback: a shared phase/baseline correction across
+    # the whole pseudo-2D series is the common case -- unchecked by
+    # default meant switching slices (each keeping its own, usually
+    # untouched phase) looked like "processing resets" on every switch.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    assert window.apply_all_slices_checkbox.isChecked() is True
+
+
+def test_main_window_phase_delta_commits_to_metadata_on_slice_switch(qapp, tmp_path, monkeypatch):
+    # A live phase drag already writes the correction straight into
+    # spectrum.data (verified elsewhere) -- but metadata.raw["phase0"]
+    # is what _compute_processing_preview rebuilds from when it
+    # recomputes from the raw FID, and nothing used to update it. That
+    # gap meant the Processing tab's own preview looked un-phased again
+    # after switching slices and back, even though spectrum.data itself
+    # was never actually reset.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    baseline_phase0 = float(spectrum.metadata.raw.get("phase0", 0.0))
+
+    window.phase0_spin.setValue(45.0)
+    # Still pending -- not yet committed, since nothing re-anchored.
+    assert spectrum.metadata.raw.get("phase0", 0.0) == pytest.approx(baseline_phase0)
+
+    window.slice_spin.setValue(2)  # triggers _capture_phase_reference
+
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(baseline_phase0 + 45.0)
+    assert window.phase0_spin.value() == pytest.approx(0.0)  # re-anchored, delta consumed
+
+
+def test_main_window_per_slice_phase_delta_not_committed_to_metadata(qapp, tmp_path, monkeypatch):
+    # A per-slice-only edit (apply-to-every-slice unchecked) can't be
+    # expressed as one scalar in metadata.raw, which describes the
+    # whole dataset -- _reapply_phase_post_reload already handles that
+    # case's own persistence need directly, so metadata.raw must stay
+    # untouched here rather than silently recording the wrong thing.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    window.apply_all_slices_checkbox.setChecked(False)
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    baseline_phase0 = float(spectrum.metadata.raw.get("phase0", 0.0))
+
+    window.phase0_spin.setValue(45.0)
+    window.slice_spin.setValue(2)
+
+    assert spectrum.metadata.raw.get("phase0", 0.0) == pytest.approx(baseline_phase0)
+
+
+def test_main_window_processing_preview_phase_survives_slice_switch(qapp, tmp_path, monkeypatch):
+    # The actual end-to-end symptom: phase a pseudo-2D series (apply to
+    # every slice, the default), switch away to a different slice and
+    # back, then check the Processing tab's own preview -- computed
+    # from the raw FID + metadata, not read off the live spectrum
+    # directly -- still shows the phase actually applied.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=64), vendor="bruker")
+    window._set_zero_fill_value(64)  # isolate the phase check from zero-fill shape changes
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+
+    window.phase0_spin.setValue(90.0)
+    window.slice_spin.setValue(2)
+    window.slice_spin.setValue(1)
+
+    _fid, _dt, preview_spectrum, _title = window._compute_processing_preview(spectrum)
+    np.testing.assert_allclose(preview_spectrum.data, spectrum.data[0], atol=1e-6)
+
+
 def test_main_window_pivot_slider_moves_pivot_spin(qapp, tmp_path):
     # The slider is inverted relative to raw ppm value, to match the
     # spectrum's own inverted x-axis (high ppm on the left) -- dragging
@@ -1073,6 +1146,7 @@ def test_main_window_2d_pivot_matches_selected_dimension(qapp, tmp_path):
 def test_main_window_pseudo2d_phase_affects_only_selected_slice(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.apply_all_slices_checkbox.setChecked(False)  # per-slice is what this test exercises
     index = window._selected_index()
     original = _complex(window.session.spectra[index]).copy()
 
@@ -1671,6 +1745,27 @@ def _make_xpulse_dataset(tmp_path, name="xpulse1.jdx"):
     return str(path)
 
 
+def test_main_window_linear_predict_direction_defaults_to_forward_and_threads_through(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_xpulse_dataset(tmp_path), vendor="xpulse")
+    assert window.linear_predict_direction_combo.currentData() == "forward"
+
+    window.linear_predict_points_spin.setValue(4)
+    kwargs = window._current_fid_processing_kwargs(window.session.spectra[window._selected_index()])
+    assert kwargs["linear_predict_direction"] == "forward"
+
+    backward_index = window.linear_predict_direction_combo.findData("backward")
+    window.linear_predict_direction_combo.setCurrentIndex(backward_index)
+    kwargs = window._current_fid_processing_kwargs(window.session.spectra[window._selected_index()])
+    assert kwargs["linear_predict_direction"] == "backward"
+
+    # Not sent at all while LP is off (points == 0) -- matches
+    # linear_predict_order's own existing "only when points > 0" gating.
+    window.linear_predict_points_spin.setValue(0)
+    kwargs = window._current_fid_processing_kwargs(window.session.spectra[window._selected_index()])
+    assert "linear_predict_direction" not in kwargs
+
+
 def test_main_window_tdeff_spin_enabled_and_prefilled_for_xpulse(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_xpulse_dataset(tmp_path), vendor="xpulse")
@@ -1682,7 +1777,21 @@ def test_main_window_tdeff_spin_disabled_for_bruker(qapp, tmp_path, monkeypatch)
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch), vendor="bruker")
     assert window.tdeff_spin.isEnabled() is False
-    assert window.tdeff_spin.value() == 0
+
+
+def test_main_window_tdeff_spin_defaults_to_full_raw_fid_length_when_no_tdeff_recorded(qapp, tmp_path):
+    # Explicit user feedback: counting *up* from a small number to reach
+    # a large, meaningful truncation point is painful -- the spin box
+    # should default to (and let the user step down from) the full raw
+    # FID length instead.
+    path = tmp_path / "no_tdeff.jdx"
+    path.write_text(_XPULSE_FIXTURE.replace("$$TDEFF=3\n", ""))
+    window = MainWindow()
+    window._load(str(path), vendor="xpulse")
+    index = window._selected_index()
+    raw_length = len(window.session.spectra[index].metadata.raw["fid_raw"])
+    assert window.tdeff_spin.maximum() == raw_length
+    assert window.tdeff_spin.value() == raw_length
 
 
 def _make_varian_dataset(tmp_path, n=8, name="varian1.fid"):

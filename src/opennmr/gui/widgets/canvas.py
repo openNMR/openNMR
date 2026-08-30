@@ -1022,7 +1022,7 @@ class MplCanvas(QWidget):
             fid_ax.axvline(tdeff_index * dt, linestyle="--", color="red")
         if echo_top_index is not None and 0 <= echo_top_index < len(fid):
             fid_ax.axvline(echo_top_index * dt, linestyle="--", color="green")
-        fid_ax.set_ylabel("FID", fontsize=self._AXIS_LABELSIZE)
+        fid_ax.set_ylabel("FID Intensity", fontsize=self._AXIS_LABELSIZE)
         if title:
             fid_ax.set_title(title, fontsize=self._AXIS_LABELSIZE)
         plotting.apply_spine_style(fid_ax, top=False, right=False, bottom=True, left=True,

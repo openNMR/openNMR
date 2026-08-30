@@ -200,6 +200,28 @@ def test_baseline_correct_handles_a_short_spectrum():
     assert np.allclose(corrected, 0.0, atol=1e-6)
 
 
+def test_linear_predict_backward_reconstructs_points_before_the_start():
+    # Backward LP fits the same AR model on a reversed copy of the FID,
+    # extends it, then reverses back -- reconstructing points *before*
+    # the measured start (e.g. lost to a dead-time delay) rather than
+    # extending past the measured end.
+    n = 60
+    t = np.arange(n)
+    true_signal = np.exp(-0.05 * t) * np.exp(1j * 0.3 * t)
+    fid = true_signal[10:]  # first 10 points "missing"
+
+    extended = ft.linear_predict(fid, order=15, n_predict=10, direction="backward")
+
+    assert len(extended) == len(fid) + 10
+    np.testing.assert_allclose(extended[:10], true_signal[:10], atol=1e-6)
+    np.testing.assert_allclose(extended[10:], fid)  # the real, measured points are untouched
+
+
+def test_linear_predict_rejects_unknown_direction():
+    with pytest.raises(ValueError):
+        ft.linear_predict(np.ones(20, dtype=complex), order=5, n_predict=3, direction="sideways")
+
+
 def test_baseline_correct_respects_explicit_baseline_regions():
     freq, true_baseline, peak = _sloped_baseline_with_peak()
     spectrum = true_baseline + peak

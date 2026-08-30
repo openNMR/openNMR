@@ -108,6 +108,13 @@ class MainWindow(QMainWindow):
         self._phase_mode: str | None = None
         self._phase_reference_full: np.ndarray | None = None
         self._phase_freq_ppm: np.ndarray | None = None
+        # Which session index _phase_mode/_phase_reference_full above
+        # actually belong to -- needed by _commit_pending_phase_to_metadata,
+        # called at the *start* of the next _capture_phase_reference,
+        # by which point self._selected_index() already points at the
+        # spectrum being switched *to*, not the one whose pending phase
+        # delta needs committing.
+        self._phase_target_index: int | None = None
         # (phase0, phase1) immediately before the last Autophase click
         # -- lets "Revert Autophase" undo it. None before any
         # Autophase click, or once reselection/reverting invalidates
@@ -1455,19 +1462,20 @@ class MainWindow(QMainWindow):
         form.addRow("Custom size:", self.zero_fill_custom_spin)
 
         self.tdeff_spin = QSpinBox()
-        self.tdeff_spin.setRange(0, 1 << 20)
-        self.tdeff_spin.setSpecialValueText("Off (full FID)")
+        self.tdeff_spin.setRange(1, 1 << 20)
         self.tdeff_spin.setSuffix(" pts")
         self.tdeff_spin.setToolTip(
             "Truncate the raw FID to this many points before any other "
             "processing (X-Pulse only) -- e.g. to cut off a recorded "
             "tail past the point the acquisition itself flagged as "
-            "effective (TDEFF), prefilled here when the file records "
-            "one. 'Off' keeps the full acquired FID. Shown as a dashed "
-            "red line on the FID plot."
+            "effective (TDEFF). Defaults to the full acquired FID "
+            "(no truncation); step down from there to trim points off "
+            "the end, rather than counting up from 1 to reach a large "
+            "number. Prefilled from the file's own recorded TDEFF when "
+            "it has one. Shown as a dashed red line on the FID plot."
         )
         self.tdeff_spin.valueChanged.connect(lambda _v: self._refresh_processing_preview_if_active())
-        form.addRow("TDeff:", self.tdeff_spin)
+        form.addRow("Truncate to:", self.tdeff_spin)
 
         self.align_echo_button = QPushButton("Align Echo")
         self.align_echo_button.setCheckable(True)
@@ -1499,9 +1507,12 @@ class MainWindow(QMainWindow):
         self.linear_predict_points_spin = QSpinBox()
         self.linear_predict_points_spin.setRange(0, 1 << 16)
         self.linear_predict_points_spin.setToolTip(
-            "Extend the FID by this many forward linear-prediction "
-            "points before windowing -- reduces truncation artefacts "
-            "from a short acquisition. 0 = off."
+            "Extend (Forward) or reconstruct (Backward, see the "
+            "Direction combo below) the FID by this many linear-"
+            "prediction points before windowing -- reduces truncation "
+            "artefacts from a short acquisition, or recovers points "
+            "lost to a dead-time window before acquisition began. "
+            "0 = off."
         )
         self.linear_predict_points_spin.valueChanged.connect(lambda _v: self._refresh_processing_preview_if_active())
         form.addRow("Linear-predict points:", self.linear_predict_points_spin)
@@ -1512,6 +1523,23 @@ class MainWindow(QMainWindow):
         self.linear_predict_order_spin.setToolTip("Linear-prediction model order (only used when points > 0).")
         self.linear_predict_order_spin.valueChanged.connect(lambda _v: self._refresh_processing_preview_if_active())
         form.addRow("LP order:", self.linear_predict_order_spin)
+
+        self.linear_predict_direction_combo = QComboBox()
+        self.linear_predict_direction_combo.addItem("Forward (extend past the end)", "forward")
+        self.linear_predict_direction_combo.addItem("Backward (reconstruct before the start)", "backward")
+        self._narrow_combo(self.linear_predict_direction_combo)
+        self.linear_predict_direction_combo.setToolTip(
+            "Forward: predicts points continuing past the FID's "
+            "measured end -- the usual case, for a short acquisition. "
+            "Backward: predicts points *before* the measured start "
+            "instead, reconstructing ones lost to a fixed dead-time "
+            "delay before acquisition began (only used when Linear-"
+            "predict points > 0)."
+        )
+        self.linear_predict_direction_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_processing_preview_if_active()
+        )
+        form.addRow("LP direction:", self.linear_predict_direction_combo)
 
         reprocess_button = QPushButton("Apply Processing")
         reprocess_button.clicked.connect(self._on_reprocess_fid_clicked)
@@ -1739,6 +1767,7 @@ class MainWindow(QMainWindow):
             align_echo_enabled=self.align_echo_button.isChecked(), truncate=truncate,
             linear_predict_points=self.linear_predict_points_spin.value(),
             linear_predict_order=self.linear_predict_order_spin.value(),
+            linear_predict_direction=self.linear_predict_direction_combo.currentData(),
         )
 
         window_key = self.window_combo.currentData()
@@ -1931,12 +1960,21 @@ class MainWindow(QMainWindow):
         is_xpulse = spectrum.metadata.vendor == "xpulse"
         self.tdeff_spin.setEnabled(reprocessable and is_xpulse)
         self.tdeff_spin.blockSignals(True)
+        # Max (and default, absent a saved/recorded choice) is this
+        # spectrum's own actual raw-FID length -- lets the spin box's
+        # step-down arrows/scroll trim points off the end starting from
+        # a meaningful place, rather than needing to count up from 1 to
+        # reach a large useful value first.
+        raw_fid = spectrum.metadata.raw.get("fid_raw") if is_xpulse else None
+        raw_length = len(raw_fid) if raw_fid is not None else (1 << 20)
+        self.tdeff_spin.setMaximum(raw_length)
         saved_truncate = saved.get("truncate")
         if isinstance(saved_truncate, int) and not isinstance(saved_truncate, bool):
-            default_tdeff = saved_truncate
+            default_tdeff = min(saved_truncate, raw_length)
         else:
-            default_tdeff = int(spectrum.metadata.raw.get("exp_params", {}).get("TDEFF", 0) or 0) if is_xpulse else 0
-        self.tdeff_spin.setValue(default_tdeff)
+            recorded_tdeff = int(spectrum.metadata.raw.get("exp_params", {}).get("TDEFF", 0) or 0) if is_xpulse else 0
+            default_tdeff = recorded_tdeff if recorded_tdeff else raw_length
+        self.tdeff_spin.setValue(max(1, default_tdeff))
         self.tdeff_spin.blockSignals(False)
 
         if not reprocessable:
@@ -1965,6 +2003,10 @@ class MainWindow(QMainWindow):
         self.linear_predict_order_spin.blockSignals(True)
         self.linear_predict_order_spin.setValue(saved.get("linear_predict_order", 20))
         self.linear_predict_order_spin.blockSignals(False)
+        self.linear_predict_direction_combo.blockSignals(True)
+        direction_index = self.linear_predict_direction_combo.findData(saved.get("linear_predict_direction", "forward"))
+        self.linear_predict_direction_combo.setCurrentIndex(max(0, direction_index))
+        self.linear_predict_direction_combo.blockSignals(False)
 
         self.align_echo_button.blockSignals(True)
         self.align_echo_button.setChecked(saved.get("align_echo", False))
@@ -2008,6 +2050,7 @@ class MainWindow(QMainWindow):
         }
         if self.linear_predict_points_spin.value():
             kwargs["linear_predict_order"] = self.linear_predict_order_spin.value()
+            kwargs["linear_predict_direction"] = self.linear_predict_direction_combo.currentData()
         if self.tdeff_spin.isEnabled():  # X-Pulse only -- Bruker's read_1d has no `truncate` kwarg
             kwargs["truncate"] = self.tdeff_spin.value() or None
         kwargs.update(self._current_phase_kwargs(spectrum))
@@ -2231,8 +2274,9 @@ class MainWindow(QMainWindow):
         form.addRow("Phase 0 (deg):", self._pair_widget(self.phase0_handle, self.phase0_spin))
         form.addRow("Phase 1 (deg):", self._pair_widget(self.phase1_handle, self.phase1_spin))
 
-        quick_phase_row = QHBoxLayout()
-        for delta in (-180.0, -90.0, 90.0, 180.0):
+        quick_phase_column = QVBoxLayout()
+        quick_phase_column.setSpacing(2)
+        for delta in (180.0, 90.0, -90.0, -180.0):
             quick_button = QPushButton(f"{delta:+.0f}°")
             quick_button.setToolTip(
                 f"Nudge Phase 0 by {delta:+.0f} degrees from its current value -- "
@@ -2242,8 +2286,8 @@ class MainWindow(QMainWindow):
                 "Phase 0 by hand."
             )
             quick_button.clicked.connect(lambda _checked=False, d=delta: self._on_phase0_nudge_clicked(d))
-            quick_phase_row.addWidget(quick_button)
-        form.addRow("Quick phase:", quick_phase_row)
+            quick_phase_column.addWidget(quick_button)
+        form.addRow("Quick phase:", quick_phase_column)
 
         self.pivot_spin = RelativeDoubleSpinBox()
         self.pivot_spin.setRange(-1.0e5, 1.0e5)
@@ -2783,13 +2827,70 @@ class MainWindow(QMainWindow):
                 return f"Slice {slice_index} (index {recorded:g})"
         return f"Slice {slice_index}"
 
+    def _commit_pending_phase_to_metadata(self) -> None:
+        """Fold the phase delta currently showing in the Phase 0/Phase 1
+        spin boxes into ``metadata.raw["phase0"/"phase1"]`` for whatever
+        spectrum/mode this editing session was targeting
+        (:attr:`_phase_target_index`/:attr:`_phase_mode`, both left over
+        from the *previous* :meth:`_capture_phase_reference` call --
+        this method always runs before that one re-anchors).
+
+        Every live drag already writes the actual phased data straight
+        into ``spectrum.data``/``data_imag`` (see
+        :meth:`_apply_phase_preview`) -- that part was never the
+        problem. But nothing ever updated ``metadata.raw`` to match,
+        so anything that recomputes a phase from ``metadata.raw`` +
+        the (about-to-be-zeroed) spin boxes instead of reading
+        ``spectrum.data`` directly -- namely
+        :meth:`_compute_processing_preview`, which rebuilds from the
+        raw FID -- would show the *un*-phased result again the moment
+        you switched slice/tab and came back, even though the actual
+        spectrum was correctly phased the whole time.
+
+        Skipped for the two cases ``metadata.raw["phase0"/"phase1"]``
+        can't actually represent (matches :meth:`_current_phase_kwargs`'s
+        own gating): a pseudo-2D slice's *own* phase with "Apply to
+        every slice" unchecked (metadata.raw describes the whole
+        dataset, not one row -- :meth:`_reapply_phase_post_reload`
+        already handles that case's own persistence-across-reprocess
+        need directly), and a conventional 2D's F1/indirect phase
+        (metadata.raw's phase0/phase1 mean F2 specifically)."""
+        if self._phase_mode is None or self._phase_target_index is None:
+            return
+        if self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked():
+            return
+        if self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0:
+            return
+        phase0_delta = self.phase0_spin.value()
+        phase1_delta = self.phase1_spin.value()
+        if not phase0_delta and not phase1_delta:
+            return  # nothing pending -- avoid a needless metadata write
+        index = self._phase_target_index
+        if not (0 <= index < len(self.session)):
+            return
+        spectrum = self.session.spectra[index]
+        spectrum.metadata.raw["phase0"] = float(spectrum.metadata.raw.get("phase0", 0.0)) + phase0_delta
+        spectrum.metadata.raw["phase1"] = float(spectrum.metadata.raw.get("phase1", 0.0)) + phase1_delta
+
     def _capture_phase_reference(self) -> None:
         """(Re)anchor the phase controls to whatever they're currently
         meant to act on -- a 1D spectrum, one pseudo-2D slice (or all of
         them), or a whole 2D dataset along F1/F2 -- and zero them, so
         dragging back to 0 always returns to how *that view* looked when
         you started editing it. Called on every spectrum selection and
-        every slice/dimension change; never called mid-drag."""
+        every slice/dimension change; never called mid-drag.
+
+        Commits whatever phase is currently showing (baked-in +
+        live delta) into the *previous* target's own metadata.raw
+        first (see :meth:`_commit_pending_phase_to_metadata`) -- a live
+        drag already writes the correction directly into
+        ``spectrum.data``, but never into metadata.raw itself, so
+        anything that recomputes from the raw FID + metadata instead
+        of the live spectrum data (the Processing tab's own preview)
+        would otherwise show a stale, seemingly "reset" phase the next
+        time it's shown, even though the actual spectrum was never
+        touched."""
+        self._commit_pending_phase_to_metadata()
         for handle in (self.phase0_handle, self.phase1_handle):
             handle.setValue(0.0, emit=False)
         for spin in (self.phase0_spin, self.phase1_spin):
@@ -2804,6 +2905,7 @@ class MainWindow(QMainWindow):
         self.revert_autophase_button.setEnabled(False)
 
         index = self._selected_index()
+        self._phase_target_index = index
         if index is None:
             self._phase_mode = None
             self._phase_reference_full = None
@@ -4240,7 +4342,13 @@ class MainWindow(QMainWindow):
             self.slice_spin.setValue(1)
             self.slice_spin.blockSignals(False)
             self.apply_all_slices_checkbox.blockSignals(True)
-            self.apply_all_slices_checkbox.setChecked(False)
+            # Checked by default -- explicit user feedback: a shared
+            # phase/baseline correction across the whole series is the
+            # common case (and switching slices with it unchecked looks
+            # like "processing resets" every time, since each slice
+            # then keeps its own, usually-untouched phase). Per-slice
+            # is still available by unchecking.
+            self.apply_all_slices_checkbox.setChecked(True)
             self.apply_all_slices_checkbox.blockSignals(False)
         if is_2d:
             self.dim_combo.blockSignals(True)
