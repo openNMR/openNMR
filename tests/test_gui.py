@@ -905,7 +905,7 @@ def test_main_window_baseline_correct_stays_on_processing_preview_for_pseudo2d(q
     window.side_tabs.setCurrentIndex(window._processing_tab_index)
     assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
 
-    window._on_baseline_correct_clicked()  # must not raise, must not switch away
+    window.baseline_correct_button.setChecked(True)  # must not raise, must not switch away
 
     assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
 
@@ -1070,6 +1070,60 @@ def test_main_window_processing_preview_normalizes_by_ns(qapp, tmp_path, monkeyp
     np.testing.assert_allclose(preview_spectrum.data, spectrum.data[0], atol=1e-6)
 
 
+def test_main_window_1d_phase_drag_uses_same_source_as_processing_preview(qapp, tmp_path, monkeypatch):
+    # Regression test: dragging Phase 0/1 for a 1D spectrum used to
+    # apply the correction directly to a snapshot taken back when the
+    # Phase controls were last anchored (_phase_reference_full) --
+    # completely independent of whatever window/zero-fill choice the
+    # Processing tab's own live preview (_compute_processing_preview)
+    # was *currently* showing. If that choice had changed since
+    # anchoring but not yet been "Applied", the Spectrum tab and the
+    # Processing tab's preview could show different point counts
+    # entirely, not just a numeric mismatch -- explicit user report:
+    # "a bug with phasing 1d from the processing to the spectrum tab...
+    # spectrum should be populated from the processing window data and
+    # processing metadata." Fixed: the "1d" phase-drag branch now
+    # calls _compute_processing_preview itself and writes its result
+    # straight into spectrum.data/data_imag/axes -- the same source,
+    # not a second computation of it.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    index = window._selected_index()
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+
+    hann_row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "hann")
+    window.window_combo.setCurrentIndex(hann_row)  # live on the Processing tab, not yet "Applied"
+    window._set_zero_fill_value(256)  # also live-only -- as-loaded spectrum is 64 points
+
+    window.phase0_spin.setValue(25.0)
+
+    spectrum = window.session.spectra[index]
+    assert len(spectrum.data) == 256  # picked up the live zero-fill, not stuck at the stale as-loaded length
+
+    computed = window._compute_processing_preview(spectrum)
+    _fid, _dt, preview_spectrum, _title = computed
+    np.testing.assert_allclose(spectrum.data, preview_spectrum.data, atol=1e-10)
+    np.testing.assert_allclose(spectrum.data_imag, preview_spectrum.data_imag, atol=1e-10)
+
+
+def test_main_window_1d_phase_drag_updates_spectrum_tab_canvas_on_length_change(qapp, tmp_path, monkeypatch):
+    # Companion to the "same source" test above, from the canvas side:
+    # MplCanvas.update_data assumed a phase-only change never touches
+    # length, so it kept reusing whatever x-positions were already on
+    # screen -- now that a phase drag can also pick up a live zero-fill
+    # change, it must fall back to a full rebuild instead of plotting
+    # new y-values against stale, wrong-length x-data.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+
+    window._set_zero_fill_value(256)
+    window.phase0_spin.setValue(25.0)  # must not raise, and must actually rebuild the line
+
+    assert len(window.canvas.ax.lines[0].get_ydata()) == 256
+
+
 def test_main_window_pivot_slider_moves_pivot_spin(qapp, tmp_path):
     # The slider is inverted relative to raw ppm value, to match the
     # spectrum's own inverted x-axis (high ppm on the left) -- dragging
@@ -1172,14 +1226,112 @@ def test_main_window_baseline_correct_changes_1d_data(qapp, tmp_path):
     index = window._selected_index()
     original = window.session.spectra[index].data.copy()
 
-    window._on_baseline_correct_clicked()
+    window.baseline_correct_button.setChecked(True)
 
     assert not np.allclose(original, window.session.spectra[index].data)
 
 
+def test_main_window_baseline_correct_is_a_toggle_not_one_shot(qapp, tmp_path):
+    # Explicit user feedback ("baseline correction should be applied
+    # to the processed spectrum but the correction should be able to
+    # be switched on and off") -- unchecking must restore exactly what
+    # was there before, not just leave whatever the last correction
+    # produced.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    index = window._selected_index()
+    original = window.session.spectra[index].data.copy()
+
+    window.baseline_correct_button.setChecked(True)
+    assert not np.allclose(original, window.session.spectra[index].data)
+
+    window.baseline_correct_button.setChecked(False)
+    np.testing.assert_allclose(window.session.spectra[index].data, original)
+
+
+def test_main_window_baseline_correct_pseudo2d_respects_apply_all_slices(qapp):
+    ppm = np.linspace(-10.0, 10.0, 300)
+    n_rows = 3
+    rows = [0.02 * (ppm - 3.0) ** 2 + i + 5.0 * np.exp(-((ppm - 1.0) ** 2) / (2 * 0.3 ** 2)) for i in range(n_rows)]
+    data = np.array(rows)
+    axes = [NMRAxis(kind="index", index=np.arange(1, n_rows + 1)), NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)]
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True)
+    spectrum = NMRSpectrum(data=data, axes=axes, metadata=metadata, data_imag=np.zeros_like(data))
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    assert window.apply_all_slices_checkbox.isChecked() is True  # established default
+
+    original = window.session.spectra[0].data.copy()
+    window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData("spline"))
+    window.baseline_correct_button.setChecked(True)
+    corrected = window.session.spectra[0].data
+    for row in range(n_rows):
+        assert not np.allclose(original[row], corrected[row])
+
+    # Single-slice targeting only touches the selected row.
+    window.baseline_correct_button.setChecked(False)
+    window.apply_all_slices_checkbox.setChecked(False)
+    window.slice_spin.setValue(2)
+    before = window.session.spectra[0].data.copy()
+    window.baseline_correct_button.setChecked(True)
+    after = window.session.spectra[0].data
+    assert not np.allclose(before[1], after[1])
+    assert np.allclose(before[0], after[0])
+    assert np.allclose(before[2], after[2])
+
+
+def test_main_window_baseline_correct_conventional_2d(qapp):
+    ppm = np.linspace(-10.0, 10.0, 150)
+    n_f1 = 3
+    rows = [0.02 * (ppm - 3.0) ** 2 + i + 5.0 * np.exp(-((ppm - 1.0) ** 2) / (2 * 0.3 ** 2)) for i in range(n_f1)]
+    data = np.array(rows)
+    axes = [
+        NMRAxis(kind="frequency", ppm=np.linspace(0, 1, n_f1), hz=np.linspace(0, 100, n_f1)),
+        NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0),
+    ]
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=False)
+    spectrum = NMRSpectrum(data=data, axes=axes, metadata=metadata, data_imag=np.zeros_like(data))
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    assert window._phase_mode == "2d"
+
+    original = window.session.spectra[0].data.copy()
+    window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData("spline"))
+    window.baseline_correct_button.setChecked(True)
+    corrected = window.session.spectra[0].data
+    for row in range(n_f1):
+        assert not np.allclose(original[row], corrected[row])
+
+
+def test_main_window_baseline_correct_spline_method_persists_across_reselection(qapp, tmp_path):
+    # Explicit user feedback asking for "options to spline... or
+    # something" (linear systematically under-corrects a curved
+    # baseline), plus the broader "each experiment object should have
+    # the metadata locked in for when it is called upon" ask -- the
+    # toggle/method choice must survive switching away and back.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64, name="expt_a"), vendor="bruker")
+    index_a = window._selected_index()
+    window._load(_make_1d_dataset(tmp_path, n=64, name="expt_b"), vendor="bruker")
+    index_b = window._selected_index()
+
+    window._select_single_row(index_a)
+    window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData("spline"))
+    window.baseline_correct_button.setChecked(True)
+
+    window._select_single_row(index_b)
+    assert window.baseline_correct_button.isChecked() is False  # untouched spectrum, own default
+
+    window._select_single_row(index_a)
+    assert window.baseline_correct_button.isChecked() is True
+    assert window.baseline_method_combo.currentData() == "spline"
+
+
 def test_main_window_baseline_correct_noop_with_no_spectrum(qapp):
     window = MainWindow()
-    window._on_baseline_correct_clicked()  # must not raise
+    window.baseline_correct_button.setChecked(True)  # must not raise
 
 
 def test_main_window_load_failure_shows_error_not_crash(qapp, tmp_path, monkeypatch):
@@ -2104,11 +2256,12 @@ def test_main_window_reprocess_fid_works_for_varian(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_varian_dataset(tmp_path, n=8), vendor="varian")
     index = window._selected_index()
+    original = window.session.spectra[index].data.copy()
 
     window.fid_shift_spin.setValue(1.0)
     window._on_reprocess_fid_clicked()  # must not raise
 
-    assert len(window.session.spectra[index].data) > 8  # zero-filled by the default preset
+    assert not np.allclose(window.session.spectra[index].data, original)  # fid_shift actually took effect
 
 
 def test_main_window_fid_processing_box_visible_for_jeol(qapp, tmp_path):
@@ -3159,6 +3312,22 @@ def test_main_window_auto_pick_peaks_populates_table(qapp):
     assert float(window.peak_table.item(0, 0).text()) == pytest.approx(5.0, abs=0.02)
 
 
+def test_main_window_auto_pick_peaks_shows_markers_on_spectrum(qapp):
+    # Explicit user request: "Auto peak pick should leave a visual
+    # indication on the spectrum" -- previously only the peak table
+    # was populated, nothing was drawn on the canvas itself.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window._on_auto_pick_peaks_clicked()
+    assert len(window.canvas._peak_marker_lines) == 1
+    assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([5.0], abs=0.02)
+
+    # A fresh rebuild (e.g. reselecting) clears the stale markers
+    # rather than erroring on a Line2D no longer attached to any axes.
+    window.canvas.show_spectrum(window.session.spectra[window._selected_index()])
+    assert window.canvas._peak_marker_lines == []
+
+
 def test_main_window_auto_pick_peaks_not_supported_for_conventional_2d(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
@@ -3805,23 +3974,39 @@ def test_main_window_clear_resets_analysis_tab(qapp, tmp_path):
 
 
 # ============================================================
-# Zero-fill dropdown (standard sizes, default = 2x NP)
+# Zero-fill dropdown (standard sizes, default = this spectrum's own
+# actual current length -- not a "2x NP" suggestion)
 # ============================================================
 
-def test_main_window_zero_fill_defaults_to_2x_np_rounded_to_preset(qapp, tmp_path, monkeypatch):
-    from opennmr.gui.main_window import _ZERO_FILL_SIZES
-
+def test_main_window_zero_fill_defaults_to_spectrum_actual_length(qapp, tmp_path, monkeypatch):
+    # Regression test: the combo used to default to a "2x NP, rounded
+    # to the nearest preset" *suggestion* regardless of what the
+    # vendor reader's own default zero-fill actually produced -- for
+    # this fixture (procs SI == n, i.e. no zero-fill applied at load),
+    # that meant the combo showed 2048 while the spectrum itself was
+    # actually only 600 points. Any live recompute that reads this
+    # combo (the Processing tab's own preview, and phase-dragging --
+    # see _apply_phase_preview's "1d" branch) would then silently
+    # zero-fill a freshly-loaded, never-reprocessed spectrum the
+    # moment *any* control was touched. Fixed: default to reality.
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=600), vendor="bruker")
-    # 2*600 = 1200 -- the smallest standard preset at or above that is 2048 (2k).
-    expected = next(s for s in _ZERO_FILL_SIZES if s >= 1200)
-    assert window._zero_fill_value() == expected
-    assert window.zero_fill_custom_spin.isHidden() is True
+    index = window._selected_index()
+    assert len(window.session.spectra[index].data) == 600
+    assert window._zero_fill_value() == 600
+    assert window.zero_fill_custom_spin.isHidden() is False  # 600 isn't a standard preset -- correctly shows as Custom
+
+
+def test_main_window_zero_fill_defaults_to_spectrum_actual_length_when_preset_sized(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=4096), vendor="bruker")
+    assert window._zero_fill_value() == 4096
+    assert window.zero_fill_custom_spin.isHidden() is True  # 4096 *is* a standard preset
 
 
 def test_main_window_zero_fill_falls_back_to_custom_above_largest_preset(qapp, tmp_path, monkeypatch):
     window = MainWindow()
-    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=200_000), vendor="bruker")
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=400_000), vendor="bruker")
     assert window._zero_fill_value() == 400_000
     assert window.zero_fill_custom_spin.isHidden() is False
 

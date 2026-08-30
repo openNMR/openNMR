@@ -34,6 +34,7 @@ straight into :func:`fit_spectrum` -- ``nmrtools2``'s
 from __future__ import annotations
 
 import numpy as np
+from scipy.interpolate import UnivariateSpline
 from scipy.optimize import curve_fit
 
 from ..core.spectrum import NMRSpectrum
@@ -200,6 +201,96 @@ def estimate_baseline_robust(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
         coeff, *_ = np.linalg.lstsq(A[keep], y_base[keep], rcond=None)
 
     return coeff[0], coeff[1], x_ref
+
+
+def estimate_baseline_spline(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
+                              max_iter=10, smoothing=None) -> UnivariateSpline:
+    """Robustly estimate a smooth (not necessarily linear) baseline as
+    a cubic smoothing spline through the candidate baseline points.
+
+    Same candidate-region selection as :func:`estimate_baseline_robust`
+    (``baseline_regions`` if given, else the first/last ``frac`` of the
+    spectrum), but the outlier-rejection loop scores each iteration's
+    residual against the *current spline fit* rather than a straight
+    line -- a real, curved (rolling/sloping) baseline's own points
+    would otherwise show large residuals against a forced-linear fit
+    and get wrongly sigma-clipped out as if they were peaks, which is
+    exactly the failure mode a straight line can't help with: it
+    doesn't just fit a curved baseline badly, it actively throws away
+    the points needed to fit it well at all.
+
+    ``smoothing`` : ``UnivariateSpline``'s own ``s`` parameter --
+    higher means smoother/less sensitive to point-to-point noise,
+    ``0`` interpolates exactly through every surviving point (almost
+    never wanted for a baseline: it would fit noise, not just its
+    trend). ``None`` (default) picks a data-driven value from the
+    candidate points' own residual noise (the same robust estimate the
+    rejection loop itself converges on), following the scaling
+    ``scipy`` itself recommends (``s`` on the order of the point count
+    when residuals have unit variance) -- reasonable without the user
+    needing to guess a number, but still a real, overridable knob for
+    a baseline that needs to follow more or less local curvature than
+    the default finds.
+
+    Returns the fitted ``UnivariateSpline`` itself (call it with any
+    x array, including ones outside the candidate points' own range --
+    ``ext=3`` clips to the boundary value rather than extrapolating
+    the spline's own polynomial wildly past its fitted domain)."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    if baseline_regions is not None:
+        if isinstance(baseline_regions[0], (int, float, np.integer, np.floating)):
+            baseline_regions = [baseline_regions]
+        mask = np.zeros_like(x, dtype=bool)
+        for lo, hi in baseline_regions:
+            lo, hi = sorted([lo, hi])
+            mask |= (x >= lo) & (x <= hi)
+        x_base = x[mask]
+        y_base = y[mask]
+    else:
+        n = len(x)
+        k = max(1, int(n * frac))
+        x_base = np.concatenate([x[:k], x[-k:]])
+        y_base = np.concatenate([y[:k], y[-k:]])
+
+    # UnivariateSpline requires strictly increasing x.
+    order = np.argsort(x_base)
+    x_base, y_base = x_base[order], y_base[order]
+    x_base, unique_idx = np.unique(x_base, return_index=True)
+    y_base = y_base[unique_idx]
+
+    if len(x_base) < 4:
+        raise ValueError("Not enough points available for baseline estimation.")
+
+    def _fit(xb, yb, s):
+        k = 3 if len(xb) > 3 else 1  # cubic once there are enough points, else linear
+        return UnivariateSpline(xb, yb, k=k, s=s, ext=3)
+
+    keep = np.ones(len(y_base), dtype=bool)
+    spline = _fit(x_base, y_base, smoothing if smoothing is not None else len(x_base))
+
+    for _ in range(max_iter):
+        residual = y_base - spline(x_base)
+        median = np.median(residual)
+        mad = np.median(np.abs(residual - median))
+        noise = 1.4826 * mad
+
+        if noise <= 0:
+            break
+
+        new_keep = np.abs(residual - median) <= sigma * noise
+
+        if np.sum(new_keep) < 4:
+            break
+        if np.array_equal(new_keep, keep):
+            break
+
+        keep = new_keep
+        s = smoothing if smoothing is not None else len(x_base[keep]) * noise ** 2
+        spline = _fit(x_base[keep], y_base[keep], s)
+
+    return spline
 
 
 # ============================================================

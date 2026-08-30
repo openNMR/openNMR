@@ -361,43 +361,68 @@ def autophase01(spectrum: np.ndarray, freq: np.ndarray, phase0_range: tuple[floa
 
 def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
                       baseline_regions: list[tuple[float, float]] | tuple[float, float] | None = None,
-                      frac: float = 0.05, sigma: float = 2.5, max_iter: int = 10) -> np.ndarray:
-    """Subtract a robust linear baseline fit to the real part, via
-    :func:`opennmr.processing.fitting.estimate_baseline_robust` -- the
-    same estimator ``fit_spectrum`` already uses to hold a baseline
-    fixed under a peak fit, so this and the peak-fitting workflow both
-    fit baselines the same way.
+                      frac: float = 0.05, sigma: float = 2.5, max_iter: int = 10,
+                      method: str = "linear", smoothing: float | None = None) -> np.ndarray:
+    """Subtract a robust baseline fit to the real part, via
+    :mod:`opennmr.processing.fitting`'s baseline estimators -- the same
+    ones ``fit_spectrum`` already uses to hold a baseline fixed under a
+    peak fit, so this and the peak-fitting workflow both fit baselines
+    the same way.
 
     A single unweighted fit (this function's own original
     implementation, plain ``np.polyfit`` over every point) gets pulled
     toward any real peaks included in it, which -- for anything but a
     dead-flat spectrum -- systematically under-corrects: barely moving
     the line, since the peaks it should run underneath instead drag it
-    upward. ``estimate_baseline_robust`` instead sigma-clips its way to
-    the points that are actually baseline (starting from
+    upward. Both estimators below instead sigma-clip their way to the
+    points that are actually baseline (starting from
     ``baseline_regions`` if given, otherwise the first/last ``frac`` of
     the spectrum) before fitting, so real peaks don't bias the result.
+
+    ``method`` : ``"linear"`` (default, :func:`opennmr.processing.
+    fitting.estimate_baseline_robust`) fits a single straight line --
+    fast and usually enough, but systematically under-corrects a real
+    curved/rolling baseline (common on wideline/solid-state spectra),
+    since a line simply cannot follow that shape regardless of which
+    points it's fit to. ``"spline"`` (:func:`opennmr.processing.
+    fitting.estimate_baseline_spline`) fits a smooth cubic spline
+    instead, which can -- explicit user feedback that linear-only
+    baseline correction "doesn't work so well" and asking for a spline
+    option specifically.
+
+    ``smoothing`` : ``method="spline"`` only -- see
+    :func:`estimate_baseline_spline`'s own ``smoothing`` parameter
+    (``None`` picks a data-driven default). Ignored for ``"linear"``.
 
     ``baseline_regions`` : explicit (lo, hi) ppm window(s) known to be
     peak-free -- e.g. from the Analysis tab's own peak table, expanded
     a little past each peak's FWHM -- for a spectrum where the default
     edge-only assumption doesn't hold (a peak near either end, or a
     baseline that isn't well represented by just the two edges)."""
-    from .fitting import estimate_baseline_robust
+    from .fitting import estimate_baseline_robust, estimate_baseline_spline
     freq = np.asarray(freq, dtype=float)
     if baseline_regions is None:
         # Guarantee a handful of candidate baseline points per edge even
         # for a short spectrum -- frac=0.05 alone rounds down to under 3
-        # points (estimate_baseline_robust's own minimum) well before a
-        # real (thousands-of-points) spectrum's usual size would ever
-        # need this.
+        # points (the estimators' own minimum) well before a real
+        # (thousands-of-points) spectrum's usual size would ever need
+        # this.
         min_edge_points = min(5, max(1, len(freq) // 2))
         frac = max(frac, min_edge_points / len(freq))
-    b0, b1, x_ref = estimate_baseline_robust(
-        freq, np.real(spectrum), baseline_regions=baseline_regions,
-        frac=frac, sigma=sigma, max_iter=max_iter,
-    )
-    baseline = b0 + b1 * (freq - x_ref)
+    if method == "spline":
+        spline = estimate_baseline_spline(
+            freq, np.real(spectrum), baseline_regions=baseline_regions,
+            frac=frac, sigma=sigma, max_iter=max_iter, smoothing=smoothing,
+        )
+        baseline = spline(freq)
+    elif method == "linear":
+        b0, b1, x_ref = estimate_baseline_robust(
+            freq, np.real(spectrum), baseline_regions=baseline_regions,
+            frac=frac, sigma=sigma, max_iter=max_iter,
+        )
+        baseline = b0 + b1 * (freq - x_ref)
+    else:
+        raise ValueError(f"method must be 'linear' or 'spline', got {method!r}")
     return spectrum - baseline
 
 

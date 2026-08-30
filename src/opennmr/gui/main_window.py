@@ -2002,21 +2002,6 @@ class MainWindow(QMainWindow):
         self.zero_fill_custom_spin.blockSignals(False)
 
     @staticmethod
-    def _default_zero_fill_size(original_length: int | None) -> int:
-        """The nearest standard size at or above 2x the acquired
-        points -- conventional NMR zero-filling. Falls back to a
-        middling preset when the acquired length isn't known, and to
-        the raw doubled value (handled by the caller as "Custom") when
-        it exceeds every preset."""
-        if not original_length:
-            return _ZERO_FILL_SIZES[len(_ZERO_FILL_SIZES) // 2]
-        target = 2 * original_length
-        for size in _ZERO_FILL_SIZES:
-            if size >= target:
-                return size
-        return target
-
-    @staticmethod
     def _fid_reprocessable(spectrum) -> bool:
         """Whether ``spectrum`` was loaded from a raw FID this GUI can
         re-read and reprocess with different parameters -- true for any
@@ -2250,6 +2235,16 @@ class MainWindow(QMainWindow):
         pivot_frac = (self.pivot_spin.value() - ppm.min()) / span if span else 0.5
         data = processing_ft.apply_phase(data, ppm, phase0, phase1, pivot_frac=pivot_frac)
 
+        # Same "baked-in state, not a live-only spin box" pattern as
+        # phase above, but baseline correction has no delta concept --
+        # metadata.raw["baseline_correct"] alone is the whole state
+        # (see _on_baseline_correct_toggled), so this preview and the
+        # toggle itself never need to be told apart.
+        if spectrum.metadata.raw.get("baseline_correct"):
+            method = spectrum.metadata.raw.get("baseline_method", "linear")
+            smoothing = spectrum.metadata.raw.get("baseline_smoothing")
+            data = processing_ft.baseline_correct(ppm, data, method=method, smoothing=smoothing)
+
         axis = NMRAxis(kind="frequency", ppm=ppm, hz=hz)
         preview_spectrum = NMRSpectrum(
             data=np.real(data), axes=[axis], metadata=slice_template.metadata, data_imag=np.imag(data),
@@ -2333,7 +2328,14 @@ class MainWindow(QMainWindow):
         into a small peak, without the view snapping back out on every
         tick the way a full rebuild (:meth:`_refresh_processing_preview_if_active`)
         would. Phase never touches the FID, so the FID panel above is
-        never touched either -- only the spectrum panel's data."""
+        never touched either -- only the spectrum panel's data.
+
+        Falls back to the full rebuild anyway when the in-place update
+        can't be done (:meth:`MplCanvas.update_processing_preview_spectrum`
+        returns ``False``) -- possible even here despite the "phase-only"
+        framing, since the live recompute this pulls from also picks up
+        window/zero-fill/etc. still sitting unapplied on the Processing
+        tab, not just phase."""
         if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
             return
         index = self._selected_index()
@@ -2347,7 +2349,10 @@ class MainWindow(QMainWindow):
         if computed is None:
             return
         _fid, _dt, preview_spectrum, _title = computed
-        self.processing_preview_canvas.update_processing_preview_spectrum(preview_spectrum)
+        updated = self.processing_preview_canvas.update_processing_preview_spectrum(preview_spectrum)
+        if not updated:
+            self._show_processing_preview(spectrum, index, switch_tab=False)
+            return
         self.processing_preview_canvas.set_pivot_marker(self.pivot_spin.value())
 
     def _update_processing_preview_tab_visibility(self, spectrum) -> None:
@@ -2468,8 +2473,20 @@ class MainWindow(QMainWindow):
         self.align_echo_button.setChecked(saved.get("align_echo", False))
         self.align_echo_button.blockSignals(False)
 
-        original_length = spectrum.metadata.raw.get("fid_original_length")
-        default_zero_fill = saved.get("zero_fill", self._default_zero_fill_size(original_length))
+        # Absent an explicit saved override, default the combo to this
+        # spectrum's own *actual current* length -- not the "2x NP"
+        # conventional suggestion (_default_zero_fill_size), which is
+        # a proposal for a *future* change, not necessarily what the
+        # vendor reader's own default zero-fill actually produced (it
+        # regularly doesn't -- e.g. X-Pulse's own default is no zero-
+        # fill beyond the raw length at all). Showing the suggestion
+        # here instead of reality meant every live recompute that
+        # reads this combo (window/zero-fill preview, and now phase
+        # dragging too -- see _apply_phase_preview's "1d" branch)
+        # silently zero-filled a freshly-loaded, never-reprocessed
+        # spectrum the moment *any* control was touched, even one
+        # that has nothing to do with zero-fill.
+        default_zero_fill = saved.get("zero_fill", len(spectrum.data))
         self._set_zero_fill_value(default_zero_fill)
 
     def _resolve_window_kwargs(self) -> tuple[str | None, dict | None]:
@@ -2827,17 +2844,53 @@ class MainWindow(QMainWindow):
         self.revert_autophase_button.clicked.connect(self._on_revert_autophase_clicked)
         form.addRow(self.revert_autophase_button)
 
-        baseline_correct_button = QPushButton("Baseline Correct")
-        baseline_correct_button.setToolTip(
-            "Subtract a robust linear baseline fit to the real part "
+        self.baseline_correct_button = QPushButton("Baseline Correct")
+        self.baseline_correct_button.setCheckable(True)
+        self.baseline_correct_button.setToolTip(
+            "Subtract a robust baseline fit to the real part "
             "(processing.ft.baseline_correct -- sigma-clipped against "
             "the spectrum's own edges so real peaks don't bias it) "
             "from whatever the controls above currently target -- "
             "same targeting rules as Autophase, including 'Apply to "
-            "every slice' for a pseudo-2D series."
+            "every slice' for a pseudo-2D series. A toggle, not a "
+            "one-shot action -- uncheck to remove the correction again."
         )
-        baseline_correct_button.clicked.connect(self._on_baseline_correct_clicked)
-        form.addRow(baseline_correct_button)
+        self.baseline_correct_button.toggled.connect(self._on_baseline_correct_toggled)
+        form.addRow(self.baseline_correct_button)
+
+        baseline_options_row = QHBoxLayout()
+        self.baseline_method_combo = QComboBox()
+        self.baseline_method_combo.addItem("Linear", "linear")
+        self.baseline_method_combo.addItem("Spline", "spline")
+        self.baseline_method_combo.setToolTip(
+            "Linear: a single straight-line fit -- fast, but can't "
+            "follow a curved/rolling baseline (common on wideline/"
+            "solid-state spectra), which it will under-correct no "
+            "matter which points it's fit to. Spline: a smooth cubic "
+            "spline that can follow that curvature."
+        )
+        self._narrow_combo(self.baseline_method_combo)
+        self.baseline_method_combo.currentIndexChanged.connect(self._on_baseline_correct_options_changed)
+        baseline_options_row.addWidget(self.baseline_method_combo)
+
+        self.baseline_smoothing_spin = QDoubleSpinBox()
+        self.baseline_smoothing_spin.setRange(0.0, 1.0e9)
+        self.baseline_smoothing_spin.setDecimals(3)
+        self.baseline_smoothing_spin.setSpecialValueText("Auto")  # 0.0 displays as "Auto" -- see below
+        self.baseline_smoothing_spin.setValue(0.0)
+        self.baseline_smoothing_spin.setToolTip(
+            "Spline smoothness (UnivariateSpline's own s parameter) -- "
+            "higher follows the baseline's own point-to-point noise "
+            "less, lower follows it more closely (0/\"Auto\" picks a "
+            "data-driven default from the baseline points' own noise "
+            "level, rather than exactly interpolating through them, "
+            "which would fit noise instead of the baseline's trend). "
+            "Only used when Spline is selected above."
+        )
+        self.baseline_smoothing_spin.valueChanged.connect(self._on_baseline_correct_options_changed)
+        baseline_options_row.addWidget(self.baseline_smoothing_spin)
+        form.addRow("Baseline method:", baseline_options_row)
+        self._refresh_baseline_options_visibility()
 
         reset_button = QPushButton("Reset")
         reset_button.clicked.connect(self._on_reset_phase_clicked)
@@ -3103,58 +3156,68 @@ class MainWindow(QMainWindow):
         self._last_autophase_revert = None
         self.revert_autophase_button.setEnabled(False)
 
-    def _on_baseline_correct_clicked(self) -> None:
-        """Subtract a robust linear baseline
-        (:func:`processing.ft.baseline_correct`, sigma-clipped so real
-        peaks don't bias the fit) from whatever the Phase controls
-        currently target -- same targeting rules as
-        :meth:`_on_autophase_clicked` (including "Apply to every
-        slice" for a pseudo-2D series, each slice fit independently),
-        applied directly to the live data (not folded into the Phase
-        0/Phase 1 delta, since a baseline subtraction isn't a phase
-        correction)."""
+    @staticmethod
+    def _baseline_correct_if_enabled(data, freq_ppm, spectrum):
+        """``data`` unchanged if ``spectrum.metadata.raw["baseline_
+        correct"]`` isn't set, else baseline-corrected per its own
+        recorded method/smoothing (see :meth:`_on_baseline_correct_
+        toggled`) -- metadata.raw is the single source of truth for
+        this state (not the live GUI widgets directly), matching
+        :meth:`_compute_processing_preview`'s own read of it, so every
+        phase-mode branch of :meth:`_apply_phase_preview` agrees with
+        the Processing tab's preview on whether/how baseline correction
+        is currently active."""
+        if not spectrum.metadata.raw.get("baseline_correct"):
+            return data
+        return processing_ft.baseline_correct(
+            freq_ppm, data,
+            method=spectrum.metadata.raw.get("baseline_method", "linear"),
+            smoothing=spectrum.metadata.raw.get("baseline_smoothing"),
+        )
+
+    def _refresh_baseline_options_visibility(self) -> None:
+        is_spline = self.baseline_method_combo.currentData() == "spline"
+        self.baseline_smoothing_spin.setVisible(is_spline)
+
+    def _on_baseline_correct_options_changed(self, *_args) -> None:
+        """Method/smoothing changed -- re-anchor to whatever's
+        currently displayed as this spectrum's own "before editing"
+        state doesn't change (only how a checked baseline toggle would
+        compute), then just re-show the current (already-corrected-or-
+        not) state with the new choice recorded, same idea as
+        :meth:`_on_baseline_correct_toggled`."""
+        self._refresh_baseline_options_visibility()
         index = self._selected_index()
-        if index is None or self._phase_mode is None or self._phase_freq_ppm is None:
+        if index is None:
             return
         spectrum = self.session.spectra[index]
-        freq_ppm = self._phase_freq_ppm
+        spectrum.metadata.raw["baseline_method"] = self.baseline_method_combo.currentData()
+        smoothing = self.baseline_smoothing_spin.value()
+        spectrum.metadata.raw["baseline_smoothing"] = smoothing if smoothing > 0.0 else None
+        if self.baseline_correct_button.isChecked():
+            self._apply_phase_preview()
 
-        if self._phase_mode == "1d":
-            complex_data = spectrum.complex_data
-            corrected = processing_ft.baseline_correct(freq_ppm, complex_data)
-            spectrum.data = np.real(corrected)
-            spectrum.data_imag = np.imag(corrected)
-            self.canvas.update_data(spectrum)
-            self.canvas.autoscale_y()
-        elif self._phase_mode == "pseudo2d":
-            if self.apply_all_slices_checkbox.isChecked():
-                for row in range(spectrum.data.shape[0]):
-                    complex_row = spectrum.data[row] + 1j * spectrum.data_imag[row]
-                    corrected = processing_ft.baseline_correct(freq_ppm, complex_row)
-                    spectrum.data[row] = np.real(corrected)
-                    spectrum.data_imag[row] = np.imag(corrected)
-            else:
-                row = self.slice_spin.value() - 1
-                complex_row = spectrum.data[row] + 1j * spectrum.data_imag[row]
-                corrected = processing_ft.baseline_correct(freq_ppm, complex_row)
-                spectrum.data[row] = np.real(corrected)
-                spectrum.data_imag[row] = np.imag(corrected)
-            on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-            self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=not on_processing_preview)
-            self.canvas.autoscale_y()
-            if on_processing_preview:
-                self._refresh_processing_preview_if_active()
-        elif self._phase_mode == "2d":
-            dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
-            complex_data = spectrum.complex_data
-            data_for_fit = complex_data if dim == "f2" else complex_data.T
-            corrected = np.apply_along_axis(
-                lambda row: processing_ft.baseline_correct(freq_ppm, row), 1, data_for_fit,
-            )
-            corrected = corrected if dim == "f2" else corrected.T
-            spectrum.data = np.real(corrected)
-            spectrum.data_imag = np.imag(corrected)
-            self.canvas.show_spectrum(spectrum)
+    def _on_baseline_correct_toggled(self, checked: bool) -> None:
+        """Subtract (or restore, if unchecked) a robust baseline
+        (:func:`processing.ft.baseline_correct`, sigma-clipped so real
+        peaks don't bias the fit; linear or spline, see the Baseline
+        method controls) from whatever the Phase controls currently
+        target -- same targeting rules as :meth:`_on_autophase_clicked`
+        (including "Apply to every slice" for a pseudo-2D series, each
+        slice fit independently). A toggle, not a one-shot action --
+        explicit user feedback ("baseline correction should be applied
+        to the processed spectrum but the correction should be able to
+        be switched on and off") -- recomputed via
+        :meth:`_apply_phase_preview` (same "1d" live-recompute pipeline
+        phase dragging uses, for that mode; pseudo2d/2d re-derive from
+        the same reference snapshot phase itself uses, with baseline
+        applied on top when checked)."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        spectrum.metadata.raw["baseline_correct"] = checked
+        self._apply_phase_preview()
 
     def _on_phase_target_changed(self) -> None:
         """The pseudo-2D slice or the 2D F1/F2 dimension picked in the
@@ -3240,9 +3303,30 @@ class MainWindow(QMainWindow):
         pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
 
         if self._phase_mode == "1d":
-            phased = processing_ft.apply_phase(self._phase_reference_full, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
-            spectrum.data = np.real(phased)
-            spectrum.data_imag = np.imag(phased)
+            # Same source as the Processing tab's own live preview
+            # (_compute_processing_preview), not a second, independent
+            # phase-only computation against a snapshot taken back at
+            # _capture_phase_reference time -- that snapshot predates
+            # whatever window/zero-fill/etc. choice is *currently*
+            # showing on the Processing tab but not yet "Applied",
+            # so a phase drag used to silently re-diverge the two tabs
+            # (explicit user report: could even differ in *point count*,
+            # not just value, once zero-fill was live-but-unapplied).
+            # Falls back to phasing the as-loaded snapshot directly only
+            # when there's no raw FID to recompute from at all (a
+            # processed-only fallback load -- _compute_processing_preview
+            # returns None for exactly that case).
+            computed = self._compute_processing_preview(spectrum) if self._fid_reprocessable(spectrum) else None
+            if computed is not None:
+                _fid, _dt, preview_spectrum, _title = computed
+                spectrum.data = preview_spectrum.data
+                spectrum.data_imag = preview_spectrum.data_imag
+                spectrum.axes = preview_spectrum.axes
+            else:
+                phased = processing_ft.apply_phase(self._phase_reference_full, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
+                phased = self._baseline_correct_if_enabled(phased, freq_ppm, spectrum)
+                spectrum.data = np.real(phased)
+                spectrum.data_imag = np.imag(phased)
             # Kept up to date regardless of which canvas tab is
             # actually showing, so switching back to Spectrum later
             # (from the Processing-preview tab, see below) never shows
@@ -3265,11 +3349,18 @@ class MainWindow(QMainWindow):
                 phased = processing_ft.apply_phase(
                     self._phase_reference_full, freq_ppm, phase0, phase1, pivot_frac=pivot_frac,
                 )
+                if spectrum.metadata.raw.get("baseline_correct"):
+                    phased = np.apply_along_axis(
+                        lambda row: self._baseline_correct_if_enabled(row, freq_ppm, spectrum), 1, phased,
+                    )
             else:
                 row = self.slice_spin.value() - 1
                 phased = self._phase_reference_full.copy()
-                phased[row, :] = processing_ft.apply_phase(
-                    self._phase_reference_full[row, :], freq_ppm, phase0, phase1, pivot_frac=pivot_frac,
+                phased[row, :] = self._baseline_correct_if_enabled(
+                    processing_ft.apply_phase(
+                        self._phase_reference_full[row, :], freq_ppm, phase0, phase1, pivot_frac=pivot_frac,
+                    ),
+                    freq_ppm, spectrum,
                 )
             spectrum.data = np.real(phased)
             spectrum.data_imag = np.imag(phased)
@@ -3298,14 +3389,14 @@ class MainWindow(QMainWindow):
 
         elif self._phase_mode == "2d":
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
-            if dim == "f2":
-                phased = processing_ft.apply_phase(
-                    self._phase_reference_full, freq_ppm, phase0, phase1, pivot_frac=pivot_frac,
+            data_for_dim = self._phase_reference_full if dim == "f2" else self._phase_reference_full.T
+            phased = processing_ft.apply_phase(data_for_dim, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
+            if spectrum.metadata.raw.get("baseline_correct"):
+                phased = np.apply_along_axis(
+                    lambda row: self._baseline_correct_if_enabled(row, freq_ppm, spectrum), 1, phased,
                 )
-            else:
-                phased = processing_ft.apply_phase(
-                    self._phase_reference_full.T, freq_ppm, phase0, phase1, pivot_frac=pivot_frac,
-                ).T
+            if dim == "f1":
+                phased = phased.T
             spectrum.data = np.real(phased)
             spectrum.data_imag = np.imag(phased)
             self.canvas.show_spectrum(spectrum)
@@ -3462,6 +3553,23 @@ class MainWindow(QMainWindow):
 
         spectrum = self.session.spectra[index]
 
+        # Baseline-correction state (on/off, method, smoothing) is
+        # tracked per spectrum in metadata.raw -- same "each experiment
+        # object should have its own metadata locked in for when it's
+        # called upon" reasoning as phase0/phase1, restored here rather
+        # than always resetting to "off" on every reselection.
+        self.baseline_correct_button.blockSignals(True)
+        self.baseline_correct_button.setChecked(bool(spectrum.metadata.raw.get("baseline_correct", False)))
+        self.baseline_correct_button.blockSignals(False)
+        self.baseline_method_combo.blockSignals(True)
+        method_index = self.baseline_method_combo.findData(spectrum.metadata.raw.get("baseline_method", "linear"))
+        self.baseline_method_combo.setCurrentIndex(max(0, method_index))
+        self.baseline_method_combo.blockSignals(False)
+        self.baseline_smoothing_spin.blockSignals(True)
+        self.baseline_smoothing_spin.setValue(spectrum.metadata.raw.get("baseline_smoothing") or 0.0)
+        self.baseline_smoothing_spin.blockSignals(False)
+        self._refresh_baseline_options_visibility()
+
         if spectrum.data_imag is None:
             self._phase_mode = None
             self._phase_reference_full = None
@@ -3516,6 +3624,7 @@ class MainWindow(QMainWindow):
         for widget in (
             self.phase0_handle, self.phase0_spin, self.phase1_handle, self.phase1_spin,
             self.pivot_spin, self.pivot_slider, self.autophase_joint_checkbox,
+            self.baseline_correct_button, self.baseline_method_combo, self.baseline_smoothing_spin,
         ):
             widget.setEnabled(enabled)
         if status is not None:
@@ -4448,6 +4557,10 @@ class MainWindow(QMainWindow):
         self.peak_table.setRowCount(0)
         for peak in peaks:
             self._add_peak_row(shift=peak["shift"], fwhm=peak["fwhm"], eta=peak["eta"])
+        # Explicit user request: auto-pick should leave a visual
+        # indication on the spectrum, not just fill the table -- a
+        # small marker at each detected peak's own shift.
+        self.canvas.set_peak_markers([peak["shift"] for peak in peaks])
 
     def _restore_sr_control(self, spectrum) -> None:
         self.sr_shift_spin.blockSignals(True)

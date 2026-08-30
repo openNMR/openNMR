@@ -228,3 +228,49 @@ def test_baseline_correct_respects_explicit_baseline_regions():
     corrected = ft.baseline_correct(freq, spectrum, baseline_regions=[(-10.0, -2.0), (4.0, 10.0)])
     away_from_peak = np.abs(freq - 1.0) > 2.0
     assert np.abs(corrected[away_from_peak]).mean() < 1.0
+
+
+def _curved_baseline_with_peak(n=2000):
+    freq = np.linspace(-10.0, 10.0, n)
+    true_baseline = 3.0 - 0.1 * freq + 0.02 * freq ** 2  # genuinely curved, not just sloped
+    peak = 5.0 * np.exp(-0.5 * ((freq - 1.0) / 0.3) ** 2)
+    return freq, true_baseline, peak
+
+
+def test_baseline_correct_spline_handles_curved_baseline_linear_cannot():
+    # Explicit user feedback: linear-only baseline correction "doesn't
+    # work so well" -- a straight line structurally cannot follow a
+    # curved (rolling) baseline no matter which points it's fit to,
+    # common on wideline/solid-state spectra. Spline can.
+    freq, true_baseline, peak = _curved_baseline_with_peak()
+    spectrum = true_baseline + peak
+
+    corrected_linear = ft.baseline_correct(freq, spectrum, method="linear")
+    corrected_spline = ft.baseline_correct(freq, spectrum, method="spline")
+
+    away_from_peak = np.abs(freq - 1.0) > 2.0
+    linear_residual = np.abs(corrected_linear[away_from_peak]).mean()
+    spline_residual = np.abs(corrected_spline[away_from_peak]).mean()
+    assert spline_residual < linear_residual * 0.05
+    assert spline_residual < 0.05  # genuinely removed, not just "better than linear"
+
+
+def test_baseline_correct_spline_smoothing_override_is_respected():
+    # Proof the smoothing parameter is actually threaded through (not
+    # silently ignored): a noisy baseline fit with s=0 (exact
+    # interpolation through every candidate point) must differ
+    # measurably from the same fit with a large, heavily-smoothing s.
+    rng = np.random.default_rng(3)
+    freq, true_baseline, peak = _curved_baseline_with_peak(n=500)
+    noisy_baseline = true_baseline + rng.normal(0.0, 0.05, size=freq.shape)
+    spectrum = noisy_baseline + peak
+
+    corrected_exact = ft.baseline_correct(freq, spectrum, method="spline", smoothing=0.0)
+    corrected_smooth = ft.baseline_correct(freq, spectrum, method="spline", smoothing=1.0e6)
+    assert not np.allclose(corrected_exact, corrected_smooth)
+
+
+def test_baseline_correct_rejects_unknown_method():
+    freq, true_baseline, peak = _sloped_baseline_with_peak()
+    with pytest.raises(ValueError):
+        ft.baseline_correct(freq, true_baseline + peak, method="quadratic")

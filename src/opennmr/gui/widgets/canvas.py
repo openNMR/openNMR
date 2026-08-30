@@ -253,6 +253,10 @@ class MplCanvas(QWidget):
         # _apply_view_options resets it, same reset-then-opt-back-in
         # pattern as _freeform_zoom_axes.
         self._pivot_marker_ax = None
+        # Small triangle markers left by set_peak_markers -- same
+        # reset/reattach lifecycle as the pivot line above (dropped in
+        # _apply_view_options, drawn onto _pivot_marker_ax).
+        self._peak_marker_lines: list = []
         # The per-spectrum axes of a "Stacked" Compare view (one row
         # per spectrum, sharing x, each with its own independent
         # y-autoscale) -- None for every other view, including a
@@ -1047,6 +1051,7 @@ class MplCanvas(QWidget):
         # longer attached to any axes).
         self._pivot_line = None
         self._pivot_marker_ax = None
+        self._peak_marker_lines = []
         if self._legend_visible and self.ax.get_legend_handles_labels()[0]:
             self.ax.legend(loc=self._legend_loc)
         else:
@@ -1083,7 +1088,44 @@ class MplCanvas(QWidget):
             self._pivot_line.set_xdata([ppm, ppm])
         self.canvas.draw_idle()
 
+    def set_peak_markers(self, shifts: list[float] | None) -> None:
+        """Show or clear a small downward-pointing triangle just above
+        the trace at each ppm in ``shifts`` -- visual confirmation of
+        what Auto-Pick Peaks (or the peak table generally) actually
+        found on the spectrum itself, not just as numbers in the table.
+        ``None`` or an empty list clears every marker. A no-op (markers
+        just cleared) when the current view has nowhere sensible to
+        draw them -- same gate as :meth:`set_pivot_marker` -- or when
+        there's no known 1D trace to measure peak heights against."""
+        for marker in self._peak_marker_lines:
+            marker.remove()
+        self._peak_marker_lines = []
+        if not shifts or self._pivot_marker_ax is None or self._current_1d_spectrum is None:
+            self.canvas.draw_idle()
+            return
+        ppm = self._current_1d_spectrum.axis_values(0, "ppm")
+        y_data = self._current_1d_spectrum.normalized()
+        ymin, ymax = self._pivot_marker_ax.get_ylim()
+        offset = 0.04 * (ymax - ymin)
+        for shift in shifts:
+            idx = int(np.argmin(np.abs(ppm - shift)))
+            marker = self._pivot_marker_ax.plot(
+                [shift], [y_data[idx] + offset], marker="v", color="crimson",
+                markersize=8, linestyle="none", zorder=6, clip_on=False,
+            )[0]
+            self._peak_marker_lines.append(marker)
+        self.canvas.draw_idle()
+
     def clear(self) -> None:
+        # figure.clear() below invalidates any existing pivot-line/peak-
+        # marker Line2D objects the same way every show_* rebuild's own
+        # figure.clear() does (see _apply_view_options) -- drop the
+        # stale Python-side references too, or a later set_pivot_marker/
+        # set_peak_markers call would try to .remove() an object no
+        # longer attached to any axes.
+        self._pivot_line = None
+        self._pivot_marker_ax = None
+        self._peak_marker_lines = []
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
@@ -1323,14 +1365,27 @@ class MplCanvas(QWidget):
 
         Falls back to a full :meth:`show_processing_preview`-style
         rebuild being the caller's job instead -- this method no-ops
-        (rather than guessing) if there's no processing-preview layout
-        currently up to update in place at all."""
+        and returns ``False`` (rather than guessing) if there's no
+        processing-preview layout currently up to update in place at
+        all, or if ``spectrum``'s length no longer matches what's
+        already plotted (possible even for a "phase-only" refresh,
+        since :meth:`MainWindow._compute_processing_preview` recomputes
+        the whole window/zero-fill/phase pipeline from whatever the
+        Processing tab's *live* controls currently show, not just
+        phase -- a zero-fill change sitting unapplied while phase is
+        being dragged would otherwise plot new y-values against stale,
+        wrong-length x positions). Returns ``True`` on a successful
+        in-place update."""
         if self._processing_preview_spec_ax is None or not self._processing_preview_spec_ax.lines:
-            return
+            return False
         y = spectrum.normalized()
         idx = plotting.downsample_indices(len(y))
-        self._processing_preview_spec_ax.lines[0].set_ydata(y if idx is None else y[idx])
+        new_ydata = y if idx is None else y[idx]
+        if len(new_ydata) != len(self._processing_preview_spec_ax.lines[0].get_ydata()):
+            return False
+        self._processing_preview_spec_ax.lines[0].set_ydata(new_ydata)
         self.canvas.draw_idle()
+        return True
 
     def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack", normalize: bool = False) -> None:
         """Plot several 1D spectra together for comparison.
@@ -1630,13 +1685,29 @@ class MplCanvas(QWidget):
         without needing to remember them) -- otherwise a high-point-
         count spectrum's full-length new y-data wouldn't match the
         already-downsampled x-data's length at all, let alone quickly.
+
+        Falls back to a full :meth:`show_spectrum` rebuild (preserving
+        ppm zoom across it -- the range doesn't change, only the point
+        density) when ``spectrum``'s own length has actually changed
+        since the last draw -- possible now that phase-dragging can
+        recompute from the Processing tab's live window/zero-fill
+        choice too, not just re-phase a fixed-length snapshot; the
+        in-place path above assumes an unchanged length and would
+        otherwise plot new y-values against stale, wrong-length x
+        positions.
         """
         if spectrum.ndim != 1 or not self.ax.lines:
             self.show_spectrum(spectrum)
             return
         y = spectrum.normalized()
         idx = plotting.downsample_indices(len(y))
-        self.ax.lines[0].set_ydata(y if idx is None else y[idx])
+        new_ydata = y if idx is None else y[idx]
+        if len(new_ydata) != len(self.ax.lines[0].get_ydata()):
+            xlim = self.ax.get_xlim()
+            self.show_spectrum(spectrum)
+            self.ax.set_xlim(xlim)
+            return
+        self.ax.lines[0].set_ydata(new_ydata)
         self.canvas.draw_idle()
 
     def autoscale_y(self) -> None:
