@@ -4422,3 +4422,64 @@ def test_main_window_load_figure_style_template_missing_shows_message(qapp, tmp_
     window._on_load_figure_style_template()
 
     assert shown.get("called") is True
+
+
+# ============================================================
+# Imaging Analysis sub-tab (Phase 5: gradient-to-mm axis)
+# ============================================================
+
+def test_main_window_imaging_gradient_enables_mm_axis(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")  # NUC1=1H
+
+    window.imaging_max_gradient_spin.setValue(50.0)
+
+    assert window.canvas._imaging_gamma_hz_per_t == pytest.approx(42.577e6, rel=1e-3)
+    assert window.canvas._imaging_max_gradient_g_per_cm == pytest.approx(50.0)
+    assert "Hz/mm" in window.imaging_gradient_status_label.text()
+
+
+def test_main_window_imaging_gradient_zero_disables_mm_axis(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+
+    window.imaging_max_gradient_spin.setValue(50.0)
+    window.imaging_max_gradient_spin.setValue(0.0)
+
+    assert window.canvas._imaging_max_gradient_g_per_cm is None
+    assert "Set a max gradient" in window.imaging_gradient_status_label.text()
+
+
+def test_main_window_imaging_gradient_persists_per_spectrum(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window.imaging_max_gradient_spin.setValue(50.0)
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+
+    assert window.imaging_max_gradient_spin.value() == pytest.approx(0.0)  # spectrum b has none set
+
+    window._select_single_row(0)
+    assert window.imaging_max_gradient_spin.value() == pytest.approx(50.0)
+
+
+def test_main_window_imaging_gradient_recomputes_gamma_on_reselect(qapp, tmp_path):
+    # A stale gamma from a *different* nucleus's spectrum must not
+    # leak into the mm axis for whatever's newly selected.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="proton"), vendor="bruker")  # 1H
+    window.imaging_max_gradient_spin.setValue(50.0)
+    proton_gamma = window.canvas._imaging_gamma_hz_per_t
+
+    carbon_path = _make_1d_dataset(tmp_path, name="carbon")
+    # _make_1d_dataset always writes NUC1=1H -- overwrite with a
+    # different nucleus for this test's own purpose.
+    _write_params(
+        tmp_path / "carbon" / "acqus",
+        {"NUC1": "13C", "BF1": 100.0, "SFO1": 100.03, "O1": 2000.0, "NS": 4},
+    )
+    window._load(carbon_path, vendor="bruker")
+    window.imaging_max_gradient_spin.setValue(50.0)
+
+    assert window.canvas._imaging_gamma_hz_per_t != pytest.approx(proton_gamma)
+    window._select_single_row(0)
+    assert window.canvas._imaging_gamma_hz_per_t == pytest.approx(proton_gamma)

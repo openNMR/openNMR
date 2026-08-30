@@ -644,8 +644,54 @@ def test_set_axis_unit_rejects_unknown_unit(qapp):
     canvas = MplCanvas()
     spectrum = _make_1d()
     canvas.show_spectrum(spectrum)
-    canvas.set_axis_unit("mm")  # not yet supported -- silently ignored, not an error
+    canvas.set_axis_unit("bogus_unit")
     assert canvas._axis_unit == "ppm"
+
+
+def test_set_axis_unit_mm_without_gradient_params_is_a_noop(qapp):
+    # "mm" is a recognised unit, but needs set_imaging_gradient_params
+    # to have real values first -- silently ignored otherwise, same
+    # "can't do this yet" behaviour as every other precondition here.
+    canvas = MplCanvas()
+    spectrum = _make_1d()
+    canvas.show_spectrum(spectrum)
+    canvas.set_axis_unit("mm")
+    assert canvas._axis_unit == "ppm"
+
+
+def test_set_axis_unit_mm_converts_hz_offset_to_position(qapp):
+    canvas = MplCanvas()
+    spectrum = _make_1d()
+    canvas.show_spectrum(spectrum)
+    gamma_hz_per_t = 42.577e6  # 1H
+    max_gradient_g_per_cm = 50.0
+    canvas.set_imaging_gradient_params(gamma_hz_per_t, max_gradient_g_per_cm)
+
+    canvas.set_axis_unit("mm")
+
+    hz_per_mm = gamma_hz_per_t * max_gradient_g_per_cm * 1e-5
+    expected = spectrum.axes[0].hz / hz_per_mm
+    np.testing.assert_allclose(canvas.ax.lines[0].get_xdata(), expected)
+    assert canvas.ax.get_xlabel() == "Position / mm"
+    assert canvas._axis_unit == "mm"
+
+
+def test_set_axis_unit_mm_sanity_check_known_offset(qapp):
+    # A concrete, hand-checkable case: at 50 G/cm for 1H, a 1 mm
+    # displacement should correspond to ~21.29 kHz (gamma * gradient
+    # in T/m = 42.577e6 Hz/T * 0.5 T/m = 21.29 MHz/m = 21.29 kHz/mm).
+    canvas = MplCanvas()
+    ppm = np.array([0.0, 1.0])
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=np.array([0.0, 21288.7]))
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    spectrum = NMRSpectrum(data=np.array([1.0, 1.0]), axes=[axis], metadata=metadata)
+    canvas.show_spectrum(spectrum)
+    canvas.set_imaging_gradient_params(42.577e6, 50.0)
+
+    canvas.set_axis_unit("mm")
+
+    x = canvas.ax.lines[0].get_xdata()
+    assert x[1] == pytest.approx(1.0, rel=1e-3)
 
 
 def test_update_data_matches_downsampled_length_for_high_point_count(qapp):

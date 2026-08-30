@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from .. import io
 from .. import plotting
+from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRSpectrum
 from ..io import bruker as io_bruker
 from ..processing import arithmetic as processing_arithmetic
@@ -3412,6 +3413,7 @@ class MainWindow(QMainWindow):
         self.analysis_sub_tabs.addTab(self._build_spectral_fitting_subtab(), "Spectral Fitting")
         self.analysis_sub_tabs.addTab(self._build_curve_fitting_subtab(), "Curve Fitting")
         self.analysis_sub_tabs.addTab(self._build_vocs_subtab(), "VOCS")
+        self.analysis_sub_tabs.addTab(self._build_imaging_subtab(), "Imaging")
         layout.addWidget(self.analysis_sub_tabs)
 
         return tab
@@ -3854,6 +3856,98 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         return tab
+
+    def _build_imaging_subtab(self) -> QWidget:
+        """MRI/gradient-imaging position analysis -- a single new
+        input (max gradient) turns the existing Hz axis into a real
+        position axis (right-click "Axis Units" on the Spectrum tab
+        gains "mm"), computed via
+        :func:`opennmr.core.registry.find_gamma` for whichever
+        spectrum is currently selected. No calibration table exists
+        anywhere in the acquired data itself, so this is deliberately
+        user-entered rather than looked up -- matches this project's
+        own G/cm convention already used for PFG/diffusion
+        (``io.bruker.read_diff_xml``).
+
+        T2-by-integration across a pseudo-2D imaging series needs no
+        new feature here at all: the Spectral Fitting sub-tab's
+        Integration Regions -> Fit Curve pathway already does exactly
+        this, generically -- select a pseudo-2D imaging spectrum's own
+        slices, switch the Spectrum tab to mm via the toggle this
+        gradient enables, drag out a region the same way as any other
+        integration. Time-resolved uptake/exchange tracking is
+        explicitly out of scope (not this sub-tab, not this project's
+        current session)."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        intro = QLabel(
+            "Set a max gradient to turn the Spectrum tab's Hz axis "
+            "into a real position axis (right-click -> Axis Units -> "
+            "mm). For T2-by-integration across an imaging series, "
+            "switch to mm here, then use Integration Regions on the "
+            "Spectral Fitting sub-tab as usual -- no separate workflow."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        gradient_box = QGroupBox("Gradient")
+        gradient_form = QFormLayout(gradient_box)
+
+        self.imaging_max_gradient_spin = QDoubleSpinBox()
+        self.imaging_max_gradient_spin.setRange(0.0, 10000.0)
+        self.imaging_max_gradient_spin.setDecimals(2)
+        self.imaging_max_gradient_spin.setSuffix(" G/cm")
+        self.imaging_max_gradient_spin.setToolTip(
+            "Not recorded in the acquired data -- enter the actual "
+            "gradient strength used for this experiment. 0 disables "
+            "the mm axis option."
+        )
+        self.imaging_max_gradient_spin.valueChanged.connect(self._on_imaging_gradient_changed)
+        gradient_form.addRow("Max gradient:", self.imaging_max_gradient_spin)
+
+        self.imaging_gradient_status_label = QLabel("Select a spectrum to enable the mm axis.")
+        self.imaging_gradient_status_label.setWordWrap(True)
+        gradient_form.addRow(self.imaging_gradient_status_label)
+
+        layout.addWidget(gradient_box)
+        layout.addStretch(1)
+        return tab
+
+    def _on_imaging_gradient_changed(self, _value: float) -> None:
+        index = self._selected_index()
+        if index is not None:
+            self.session.spectra[index].metadata.raw["imaging_max_gradient_g_per_cm"] = (
+                self.imaging_max_gradient_spin.value() or None
+            )
+        self._refresh_imaging_gradient()
+
+    def _refresh_imaging_gradient(self) -> None:
+        """Recompute (and hand to the canvas) the gamma/max-gradient
+        pair the ``"mm"`` axis-unit option needs, for whichever
+        spectrum is currently selected -- called on every reselection
+        (:meth:`_refresh_selection_display`) as well as every max-
+        gradient edit, so switching spectra never leaves the mm axis
+        showing a stale nucleus's conversion."""
+        index = self._selected_index()
+        max_gradient = self.imaging_max_gradient_spin.value() or None
+        gamma = None
+        if index is not None and max_gradient:
+            spectrum = self.session.spectra[index]
+            if spectrum.metadata.nucleus:
+                result = core_registry.find_gamma(spectrum.metadata.nucleus)
+                gamma = result["gamma"] if result else None
+        self.canvas.set_imaging_gradient_params(gamma, max_gradient)
+        if max_gradient and gamma:
+            self.imaging_gradient_status_label.setText(
+                f"{gamma * max_gradient * 1e-5:.4g} Hz/mm at this gradient, for {spectrum.metadata.nucleus}."
+            )
+        elif max_gradient:
+            self.imaging_gradient_status_label.setText(
+                "Selected spectrum's nucleus isn't recognised -- can't compute gamma for the mm axis."
+            )
+        else:
+            self.imaging_gradient_status_label.setText("Set a max gradient to enable the mm axis.")
 
     def _add_derived_spectrum(self, spectrum: NMRSpectrum, label: str) -> int:
         """Append a spectrum computed from already-loaded data (not
@@ -5167,6 +5261,11 @@ class MainWindow(QMainWindow):
         if meta.mass:
             bits.append(f"Sample mass: {meta.mass * 1000.0:g} mg")
         self.info_label.setText("\n".join(bits))
+
+        self.imaging_max_gradient_spin.blockSignals(True)
+        self.imaging_max_gradient_spin.setValue(meta.raw.get("imaging_max_gradient_g_per_cm") or 0.0)
+        self.imaging_max_gradient_spin.blockSignals(False)
+        self._refresh_imaging_gradient()
 
         self.process_indirect_button.setVisible(spectrum.ndim == 2)
         self.process_indirect_button.blockSignals(True)

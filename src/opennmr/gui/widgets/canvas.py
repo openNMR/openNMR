@@ -229,6 +229,10 @@ class MplCanvas(QWidget):
         self._current_1d_spectrum: NMRSpectrum | None = None
         self._axis_unit = "ppm"
         self._ppm_label = ""
+        # Imaging Analysis sub-tab's gradient-to-mm conversion inputs
+        # -- see set_imaging_gradient_params/set_axis_unit's "mm" case.
+        self._imaging_gamma_hz_per_t: float | None = None
+        self._imaging_max_gradient_g_per_cm: float | None = None
         # The Phase 1 pivot marker (see set_pivot_marker) -- a Line2D
         # kept around so it can be *moved* in place on every drag tick
         # instead of removed/recreated, but figure.clear() (every
@@ -702,6 +706,16 @@ class MplCanvas(QWidget):
                 action.setCheckable(True)
                 action.setChecked(self._axis_unit == key)
                 unit_actions[action] = key
+            mm_action = unit_menu.addAction("mm (Imaging)")
+            mm_action.setCheckable(True)
+            mm_action.setChecked(self._axis_unit == "mm")
+            mm_action.setEnabled(
+                bool(self._imaging_gamma_hz_per_t) and bool(self._imaging_max_gradient_g_per_cm)
+            )
+            mm_action.setToolTip(
+                "Needs a max gradient set on the Imaging Analysis sub-tab."
+            )
+            unit_actions[mm_action] = "mm"
 
         contour_levels_action = None
         extract_slice_action = None
@@ -945,13 +959,32 @@ class MplCanvas(QWidget):
         view back to ppm."""
         return self._axis_unit
 
+    def set_imaging_gradient_params(self, gamma_hz_per_t: float | None, max_gradient_g_per_cm: float | None) -> None:
+        """The two numbers :meth:`set_axis_unit`'s ``"mm"`` option
+        needs to convert a frequency offset into a position -- set by
+        the Imaging Analysis sub-tab (gamma from the selected
+        spectrum's own nucleus via
+        :func:`opennmr.core.registry.find_gamma`, max gradient
+        user-entered, since it isn't recorded anywhere in the acquired
+        data itself). Either ``None`` disables the ``"mm"`` menu
+        option entirely rather than silently producing a wrong result
+        from a stale/missing value."""
+        self._imaging_gamma_hz_per_t = gamma_hz_per_t
+        self._imaging_max_gradient_g_per_cm = max_gradient_g_per_cm
+
     def set_axis_unit(self, unit: str) -> None:
         """Switch the current 1D view's x-axis between ``"ppm"``,
-        ``"hz"``, and ``"khz"``, re-using the spectrum's own stored
-        axis arrays (no recomputation) -- only available while a plain
-        1D spectrum/slice (not a contour, FID, compare, or fit view)
-        is the current view (see :attr:`_current_1d_spectrum`)."""
-        if self._current_1d_spectrum is None or unit not in ("ppm", "hz", "khz") or not self.ax.lines:
+        ``"hz"``, ``"khz"``, and ``"mm"``, re-using the spectrum's own
+        stored axis arrays (no recomputation, except for ``"mm"``,
+        which is derived from the Hz axis) -- only available while a
+        plain 1D spectrum/slice (not a contour, FID, compare, or fit
+        view) is the current view (see :attr:`_current_1d_spectrum`).
+        ``"mm"`` additionally needs :meth:`set_imaging_gradient_params`
+        to have been called with real values -- silently ignored
+        (falls through to whatever unit was already showing) if not,
+        matching this method's existing "can't do this yet" behaviour
+        for every other precondition it checks."""
+        if self._current_1d_spectrum is None or unit not in ("ppm", "hz", "khz", "mm") or not self.ax.lines:
             return
         axis = self._current_1d_spectrum.axes[0]
         if unit == "ppm":
@@ -960,9 +993,23 @@ class MplCanvas(QWidget):
         elif unit == "hz":
             x = axis.values("hz")
             label = "Frequency / Hz"
-        else:
+        elif unit == "khz":
             x = axis.values("hz") / 1000.0
             label = "Frequency / kHz"
+        else:
+            gamma = self._imaging_gamma_hz_per_t
+            gradient = self._imaging_max_gradient_g_per_cm
+            if not gamma or not gradient:
+                return
+            # G/cm -> T/m (1 G = 1e-4 T, 1 cm = 1e-2 m) -> Hz/m (via
+            # gamma) -> Hz/mm -- spelled out in separate steps rather
+            # than one folded constant, so the unit conversion is
+            # checkable at a glance rather than needing to be trusted.
+            gradient_t_per_m = gradient * 1e-2
+            hz_per_m = gamma * gradient_t_per_m
+            hz_per_mm = hz_per_m * 1e-3
+            x = axis.values("hz") / hz_per_mm
+            label = "Position / mm"
 
         for line in self.ax.lines:
             line.set_xdata(x)
