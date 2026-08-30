@@ -2,6 +2,13 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Plan execution: Phase 2 done (2026-08-30)
+
+- ~~`fid_raw` caching for Varian/JEOL~~ -- done, same one-line pattern Bruker/X-Pulse already had (`fid_raw = fid` captured immediately after reading, before shift/align/LP/window/zero-fill, added to `metadata.raw`). Closes the last gap in the Processing tab's live in-memory preview -- `_compute_processing_preview` returned `None` (silently no live preview) for these two vendors before this; regression tests confirm it now returns a real preview for both.
+- ~~Phase 1's spin-box range, unbounded~~ -- done, `_PHASE_SPIN_RANGE` changed from a fixed +/-36000 to `float("inf")`. Applies to both Phase 0 and Phase 1 (they share `_make_phase_control`).
+- ~~JEOL's `FILTER_FACTOR` digital-filter correction~~ -- done and verified against real data, not just the synthetic test fixture. `FILTER_FACTOR` (JEOL's GRPDLY-equivalent group-delay point count) is now corrected via `nmrglue.bruker.rm_dig_filter` called directly (`grpdly=FILTER_FACTOR`, bypassing the Bruker-dict-specific wrapper and its decim/dspfvs table lookup, which JEOL doesn't need since the delay is already a known point count) -- reusing the same validated algorithm Bruker's own digital-filter removal uses, rather than a hand-rolled reimplementation. **Verified against all four real `test_data/jeol_1d/*.jdf` files**: every one carries `FILTER_FACTOR=16`, and correcting shifts each file's FID magnitude peak left by exactly 16 points, every time -- a clean, consistent, real-data confirmation, not just a synthetic-fixture check (which is also in the test suite, `test_read_1d_filter_factor_shortens_and_corrects_fid`).
+- 582 tests passing (576 -> 582). Committed; not yet pushed.
+
 ## Plan execution: Phase 0 + Phase 1 done, four mid-run bug reports fixed (2026-08-30)
 
 Started execution of the implementation plan below at the scheduled time. Phase 0 and Phase 1 are both done and committed; four unrelated bug reports arrived mid-run (as separate messages, not part of the plan) and were fixed in place rather than deferred, since each was small and self-contained.

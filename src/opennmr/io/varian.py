@@ -99,6 +99,7 @@ def read_1d(path: str, mass: float = 1.0,
     dic, fid = ng.varian.read(path)
     procpar = dic["procpar"]
     fid = np.asarray(fid, dtype=np.complex128)
+    fid_raw = fid  # the truly raw FID -- see metadata.raw["fid_raw"]'s own comment below
     original_length = len(fid)
 
     sw = _procpar_value(procpar, "sw")
@@ -169,6 +170,12 @@ def read_1d(path: str, mass: float = 1.0,
         raw={
             "procpar": procpar, "phase0": phase0, "phase1": phase1,
             "fid": fid, "fid_dt": dt, "fid_original_length": original_length,
+            # The *truly* raw FID -- straight off disk, before even
+            # shift/align/LP, let alone windowing/zero-fill. See
+            # opennmr.io.bruker's matching "fid_raw" comment: lets the
+            # GUI recompute a live preview of a not-yet-applied
+            # processing choice entirely in memory.
+            "fid_raw": fid_raw,
         },
     )
     axis = NMRAxis(kind="frequency", ppm=freq_ppm, hz=freq_hz)

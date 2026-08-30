@@ -766,6 +766,18 @@ def test_main_window_phase_range_is_wide(qapp, tmp_path):
     assert window.phase1_spin.value() == pytest.approx(1000.0)
 
 
+def test_main_window_phase_range_is_genuinely_unbounded(qapp, tmp_path):
+    # Previously capped at +/-36000 -- a joint-phased or heavily
+    # multi-cycle-wrapped correction can genuinely exceed that.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    for spin in (window.phase0_spin, window.phase1_spin):
+        spin.setValue(1_000_000.0)
+        assert spin.value() == pytest.approx(1_000_000.0)
+        spin.setValue(-1_000_000.0)
+        assert spin.value() == pytest.approx(-1_000_000.0)
+
+
 def test_main_window_phase1_step_is_larger_than_phase0(qapp, tmp_path):
     # Phase 1's per-notch/per-click increment must be much coarser than
     # Phase 0's -- a linear (whole-spectrum) correction needs a much
@@ -2000,6 +2012,25 @@ def test_main_window_reprocess_fid_works_for_jeol(qapp, tmp_path):
 
     window.fid_shift_spin.setValue(1.0)
     window.align_echo_button.setChecked(True)  # must not raise
+
+
+def test_main_window_processing_preview_works_for_varian(qapp, tmp_path):
+    # Regression test: before varian.read_1d cached metadata.raw
+    # ["fid_raw"], _compute_processing_preview always returned None
+    # for a Varian spectrum -- the Processing-preview tab silently
+    # never showed anything live for it.
+    window = MainWindow()
+    window._load(_make_varian_dataset(tmp_path, n=8), vendor="varian")
+    spectrum = window.session.spectra[window._selected_index()]
+    assert window._compute_processing_preview(spectrum) is not None
+
+
+def test_main_window_processing_preview_works_for_jeol(qapp, tmp_path):
+    from test_jeol import _write_jdf
+    window = MainWindow()
+    window._load(_write_jdf(tmp_path, n_points=16), vendor="jeol")
+    spectrum = window.session.spectra[window._selected_index()]
+    assert window._compute_processing_preview(spectrum) is not None
 
 
 def test_main_window_reprocess_applies_tdeff_truncation(qapp, tmp_path):

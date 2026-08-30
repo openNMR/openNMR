@@ -35,7 +35,7 @@ def _pack_param(name, value, value_type, unit_base=0, endian=BE):
 
 def _build_jdf(n_points=8, x_sweep_hz=1000.0, x_freq_hz=400_000_000.0, x_offset_ppm=5.0,
                x_domain="1H", solvent="CDCl3", title="synthetic", comment="test fixture",
-               little_endian_body=False, data_format=1, fid=None):
+               little_endian_body=False, data_format=1, fid=None, filter_factor=0):
     """A minimal, structurally-valid synthetic ``.jdf`` byte buffer --
     real field values only where ``opennmr.io.jeol`` actually reads
     them (nucleus, sweep width, frequency, offset, solvent, the data
@@ -86,6 +86,8 @@ def _build_jdf(n_points=8, x_sweep_hz=1000.0, x_freq_hz=400_000_000.0, x_offset_
         _pack_param("solvent", solvent, "String", endian=param_endian),
         _pack_param("field_strength", 9.4, "Float", unit_base=31, endian=param_endian),
     ]
+    if filter_factor:
+        params.append(_pack_param("FILTER_FACTOR", filter_factor, "Integer", endian=param_endian))
     param_section = bytearray()
     param_section += struct.pack(param_endian + "I", 0)  # parameterSize
     param_section += struct.pack(param_endian + "I", 0)  # lowIndex
@@ -236,6 +238,36 @@ def test_read_1d_zero_fill(tmp_path):
     path = _write_jdf(tmp_path, n_points=8)
     spectrum = jeol.read_1d(path, autophase=False, baseline_correct=False, zero_fill=32)
     assert len(spectrum.data) == 32
+
+
+def test_read_1d_caches_raw_fid(tmp_path):
+    # metadata.raw["fid_raw"] -- the GUI's Processing-preview live view
+    # needs this cached (see MainWindow._compute_processing_preview);
+    # zero-filled here specifically so the raw cache (pre-zero-fill) is
+    # provably distinct in length from the processed final data.
+    path = _write_jdf(tmp_path, n_points=8)
+    spectrum = jeol.read_1d(path, autophase=False, baseline_correct=False, zero_fill=32)
+    raw_fid = spectrum.metadata.raw["fid_raw"]
+    assert len(raw_fid) == 8
+    assert len(spectrum.data) == 32
+
+
+def test_read_1d_filter_factor_shortens_and_corrects_fid(tmp_path):
+    # FILTER_FACTOR=4 -> rm_dig_filter's own skip = floor(4)+2 = 6,
+    # add = max(6-6, 0) = 0 -- a clean, hand-checkable case. Verified
+    # against the real downloaded test_data/jeol_1d/*.jdf files too
+    # (not just this synthetic fixture): all four carry a real
+    # FILTER_FACTOR=16, and correcting shifts each file's FID magnitude
+    # peak left by exactly 16 points, every time.
+    corrected_path = _write_jdf(tmp_path, name="corrected.jdf", n_points=64, filter_factor=4)
+    uncorrected_path = _write_jdf(tmp_path, name="uncorrected.jdf", n_points=64, filter_factor=0)
+
+    corrected = jeol.read_1d(corrected_path, autophase=False, baseline_correct=False)
+    uncorrected = jeol.read_1d(uncorrected_path, autophase=False, baseline_correct=False)
+
+    assert len(corrected.metadata.raw["fid_raw"]) == 64 - 6
+    assert len(uncorrected.metadata.raw["fid_raw"]) == 64
+    assert not np.allclose(corrected.data[:10], uncorrected.data[:10])
 
 
 def test_read_1d_accepts_align_echo_kwarg(tmp_path):

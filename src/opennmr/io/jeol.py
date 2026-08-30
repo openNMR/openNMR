@@ -23,16 +23,15 @@ MIT licensed) reproduce the exact numeric values ``jeolconverter``'s
 own test suite asserts for the same files (nucleus, frequency,
 spectral offset, point count).
 
-**Known gap, not yet handled**: real files carry a ``FILTER_FACTOR``
-parameter (an integer point count) that's a digital-filter group delay
--- analogous to Bruker's ``GRPDLY`` (see ``nmrglue.bruker.
-remove_digital_filter``) -- which this importer does not yet correct
-for (the FID's own magnitude peak lands a handful of points after
-index 0, not at it, on every real file checked). Uncorrected, this
-shows up as a phase error correlated with frequency (a phase1-like
-term) -- ``phase_mode="joint"`` (:func:`opennmr.processing.ft.
-autophase01`) is likely to cope with this better than the default
-``"apc0"`` (zero-order only) until a proper correction is added.
+Real files carry a ``FILTER_FACTOR`` parameter (an integer point
+count) that's a digital-filter group delay -- analogous to Bruker's
+``GRPDLY``. Corrected for via ``nmrglue.bruker.rm_dig_filter`` (the
+same validated algorithm Bruker's own digital-filter removal uses,
+called directly with ``grpdly=FILTER_FACTOR`` rather than through its
+Bruker-dict-specific wrapper), immediately after reading the raw FID
+and before it's cached as ``metadata.raw["fid_raw"]`` -- matches
+:mod:`opennmr.io.bruker`'s own "post digital-filter removal only"
+convention for that cache.
 """
 
 from __future__ import annotations
@@ -41,6 +40,7 @@ import os
 import re
 import struct
 
+import nmrglue as ng
 import numpy as np
 
 from . import base
@@ -357,8 +357,8 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     """Import a JEOL Delta ``.jdf`` FID and process it (apodize,
     zero-fill, FFT, phase, baseline-correct) into an
     :class:`NMRSpectrum` -- see this module's own docstring for the
-    format itself and the one known, not-yet-handled gap (an
-    uncorrected digital-filter delay).
+    format itself and the ``FILTER_FACTOR`` digital-filter correction
+    applied before any of the steps here run.
 
     ``window``/``window_kwargs``/``zero_fill``/``fid_shift``/
     ``align_echo``/``linear_predict_*``/``autophase``/``phase_mode``/
@@ -368,8 +368,8 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     :mod:`opennmr.processing.ft` pipeline. No ``truncate`` here
     (unlike X-Pulse): nothing in the real 1D data checked so far
     suggested it's needed -- every real file looks like an ordinary
-    one-sided decaying acquisition (see the FILTER_FACTOR caveat above
-    aside), not a full echo. ``align_echo`` is offered anyway, purely
+    one-sided decaying acquisition, not a full echo. ``align_echo`` is
+    offered anyway, purely
     for interface consistency with every other vendor's ``read_1d``
     (the GUI's Processing tab sends it unconditionally) -- unlike
     X-Pulse's own ``align_echo``, it does *not* also cap a wrap-point
@@ -381,6 +381,23 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     parsed = _read_jeol_jdf(path)
     header, params = parsed["header"], parsed["params"]
     fid = parsed["data"]
+
+    # FILTER_FACTOR is JEOL's digital-filter group-delay count -- the
+    # same physical quantity as Bruker's GRPDLY (an FID whose true
+    # start has been shifted a few points into the array by the
+    # digital filter, producing a phase error that grows with
+    # frequency if left uncorrected). Reused directly via nmrglue's
+    # own Bruker digital-filter-removal algorithm (rm_dig_filter,
+    # its generic grpdly-based entry point, not the Bruker-dict-
+    # specific remove_digital_filter wrapper) rather than
+    # reimplementing the same DSP by hand -- decim/dspfvs are Bruker's
+    # own table-lookup fallback for when grpdly is 0, unused here
+    # since FILTER_FACTOR is always already a known point count.
+    filter_factor_param = _get_param(params, "FILTER_FACTOR")
+    if filter_factor_param is not None and filter_factor_param["value"]:
+        fid = ng.bruker.rm_dig_filter(fid, decim=0, dspfvs=0, grpdly=float(filter_factor_param["value"]))
+
+    fid_raw = fid  # the truly raw FID (post digital-filter removal only) -- see metadata.raw["fid_raw"]'s own comment below
     original_length = len(fid)
 
     dt = 1.0 / _get_magnitude(params, "X_SWEEP")
@@ -459,6 +476,12 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
             # The fully processed (pre-FFT) FID -- an optional GUI
             # preview of what FID-domain processing actually did.
             "fid": fid, "fid_dt": dt, "fid_original_length": original_length,
+            # The *truly* raw FID -- straight off disk, before even
+            # shift/align/LP, let alone windowing/zero-fill. See
+            # opennmr.io.bruker's matching "fid_raw" comment: lets the
+            # GUI recompute a live preview of a not-yet-applied
+            # processing choice entirely in memory.
+            "fid_raw": fid_raw,
         },
     )
     axis = NMRAxis(kind="frequency", ppm=freq_ppm, hz=freq_hz_axis + offset_ppm * freq_hz / 1e6)

@@ -130,6 +130,18 @@ def test_read_1d_zero_fill(tmp_path):
     assert len(spectrum.data) == 32
 
 
+def test_read_1d_caches_raw_fid(tmp_path):
+    # metadata.raw["fid_raw"] -- the GUI's Processing-preview live view
+    # needs this cached (see _compute_processing_preview); zero-filled
+    # here specifically so the raw cache (pre-zero-fill) is provably
+    # distinct in length from the processed "fid"/final data.
+    path = _write_varian_1d(tmp_path, n=8)
+    spectrum = varian.read_1d(path, autophase=False, zero_fill=32)
+    raw_fid = spectrum.metadata.raw["fid_raw"]
+    assert len(raw_fid) == 8
+    assert len(spectrum.data) == 32
+
+
 def test_read_1d_divides_by_ns_and_mass(tmp_path):
     path = _write_varian_1d(tmp_path, n=8, nt=4.0)
     baseline = varian.read_1d(path, autophase=False)

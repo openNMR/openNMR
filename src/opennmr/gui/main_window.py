@@ -40,11 +40,13 @@ from .widgets.canvas import MplCanvas
 from .widgets.drag_control import DragHandle
 from .widgets.relative_spinbox import RelativeDoubleSpinBox
 
-#: Effectively-unbounded spinbox range for phase controls -- a slider's
+#: Genuinely unbounded spinbox range for phase controls -- a slider's
 #: fixed pixel-to-range mapping would force a tradeoff between coarse
 #: and fine control; DragHandle (a drag-to-adjust control, not a
-#: slider) and this wide spinbox range don't need one.
-_PHASE_SPIN_RANGE = 36000.0
+#: slider) doesn't need one, so there's no reason to cap the total
+#: accumulated phase (a joint-phased or heavily-multi-cycle-wrapped
+#: correction can genuinely exceed the previous +/-36000 cap).
+_PHASE_SPIN_RANGE = float("inf")
 
 #: Phase 1's drag-sensitivity/step, relative to Phase 0's -- a linear
 #: (whole-spectrum) phase correction needs much bigger raw-degree
