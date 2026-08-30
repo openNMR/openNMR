@@ -15,6 +15,7 @@ dependencies = [
     "matplotlib",
     "nmrglue",
     "PySide6",
+    "sympy",
 ]
 
 [project.optional-dependencies]

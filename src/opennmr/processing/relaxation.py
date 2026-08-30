@@ -44,6 +44,7 @@ plain array of delays in seconds), keeping processing/ modules IO-free.
 
 from __future__ import annotations
 
+import re
 from math import floor, log10
 
 import numpy as np
@@ -256,6 +257,83 @@ RELAXATION_MODELS = {
     },
 }
 
+def build_custom_model(equation: str, independent_var: str = "x",
+                        p0_overrides: list[float] | tuple[float, ...] | None = None) -> dict:
+    """Build a :data:`RELAXATION_MODELS`-shaped spec dict from a user-
+    typed equation string (e.g. ``"A*exp(-x/T1)+C"``), for
+    :func:`fit_relaxation`'s/:func:`NMR2D_fit_relaxation`'s own
+    ``custom_model`` parameter -- an escape hatch for a functional form
+    not already in :data:`RELAXATION_MODELS`, without needing a new
+    named Python function (and p0/bounds helpers) for every one-off
+    model a user wants to try.
+
+    Parsed with sympy: every free symbol besides ``independent_var``
+    becomes a fitted parameter, in the order it first appears in
+    ``equation`` reading left to right -- also the order
+    ``p0_overrides`` (if given) is read in, so what the user typed and
+    what they set initial guesses for line up the same way.
+
+    ``p0_overrides`` : initial guesses, positionally matching the
+    detected parameter order. Any parameter beyond the given values
+    (or all of them, if omitted entirely) defaults to 1.0 -- the same
+    default ``scipy.optimize.curve_fit`` itself uses when no p0 is
+    given at all. No bounds are inferred beyond a very wide (but
+    finite -- literal +/-inf bounds push ``curve_fit`` onto a solver
+    that doesn't support ``fit_relaxation``'s own ``x_scale="jac"``)
+    range, since there's no general way to guess, e.g., that a symbol
+    named ``T1`` should be positive from the equation alone.
+
+    Raises
+    ------
+    ValueError
+        If the equation doesn't parse, doesn't reference
+        ``independent_var``, or has no free parameters to fit.
+    """
+    import sympy
+
+    try:
+        expr = sympy.sympify(equation, evaluate=True)
+    except (sympy.SympifyError, TypeError, SyntaxError) as exc:
+        raise ValueError(f"Could not parse equation '{equation}': {exc}") from exc
+
+    x_symbol = sympy.Symbol(independent_var)
+    if x_symbol not in expr.free_symbols:
+        raise ValueError(
+            f"Equation '{equation}' doesn't reference the independent variable '{independent_var}'."
+        )
+
+    seen: list[str] = []
+    for token in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", equation):
+        symbol = sympy.Symbol(token)
+        if symbol in expr.free_symbols and symbol != x_symbol and token not in seen:
+            seen.append(token)
+    param_names = seen
+
+    if not param_names:
+        raise ValueError(f"Equation '{equation}' has no free parameters to fit (only '{independent_var}').")
+
+    param_symbols = [sympy.Symbol(name) for name in param_names]
+    numeric_func = sympy.lambdify((x_symbol, *param_symbols), expr, modules="numpy")
+
+    def func(t, *params):
+        t = np.asarray(t, dtype=float)
+        result = numeric_func(t, *params)
+        # An equation that (unusually) doesn't actually vary with x --
+        # e.g. a plain constant -- lambdifies to a bare scalar rather
+        # than an array matching t; curve_fit needs the latter.
+        return np.broadcast_to(result, t.shape).astype(float) if np.ndim(result) == 0 else np.asarray(result, dtype=float)
+
+    overrides = list(p0_overrides) if p0_overrides else []
+    p0_values = [overrides[i] if i < len(overrides) else 1.0 for i in range(len(param_names))]
+
+    return {
+        "func": func, "params": param_names,
+        "p0": lambda t, y: list(p0_values),
+        "bounds": lambda t, y: ([-1.0e12] * len(param_names), [1.0e12] * len(param_names)),
+        "rate_param": None,
+    }
+
+
 # Convenience aliases: T1rho experiments use the same functional forms
 # as T2 (decay) or T1 (recovery) depending on the pulse sequence used;
 # no separate model is needed, just fit with the appropriate decay/
@@ -273,10 +351,10 @@ RELAXATION_MODELS = {
 # ============================================================
 
 def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
-                    bounds=None, fixed=None, maxfev=20000) -> dict:
+                    bounds=None, fixed=None, maxfev=20000, custom_model: dict | None = None) -> dict:
     """
     Fit a relaxation curve ``y(t)`` with a named model from
-    :data:`RELAXATION_MODELS`.
+    :data:`RELAXATION_MODELS`, or an arbitrary user-supplied one.
 
     Parameters
     ----------
@@ -284,7 +362,15 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
         Delay (seconds) and intensity/integral at each delay.
 
     model : str
-        One of :data:`RELAXATION_MODELS`.
+        One of :data:`RELAXATION_MODELS`. Ignored (only used as the
+        result's own ``"model"`` label) when ``custom_model`` is given.
+
+    custom_model : dict, optional
+        A :data:`RELAXATION_MODELS`-shaped spec (``func``, ``params``,
+        ``p0``, ``bounds``, ``rate_param``) to fit instead of looking
+        ``model`` up in :data:`RELAXATION_MODELS` -- see
+        :func:`build_custom_model` for building one from a typed
+        equation string.
 
     y_err : array-like, optional
         Per-point uncertainty (e.g. ``integral_errors`` from
@@ -320,12 +406,15 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
         ``fit_quality`` : dict with rmse, chi2, reduced_chi2.
     """
 
-    if model not in RELAXATION_MODELS:
+    if custom_model is not None:
+        spec = custom_model
+    elif model not in RELAXATION_MODELS:
         raise ValueError(
             f"Unknown relaxation model '{model}'. Available: {sorted(RELAXATION_MODELS)}"
         )
+    else:
+        spec = RELAXATION_MODELS[model]
 
-    spec = RELAXATION_MODELS[model]
     func, param_names = spec["func"], spec["params"]
 
     t = np.asarray(t, dtype=float)
@@ -742,7 +831,8 @@ def _get_delays(fits, vdlist):
 
 def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
                           peak_labels=None, normalised=False, value_source="integral",
-                          use_errors=True, fixed=None, show_report=True) -> list:
+                          use_errors=True, fixed=None, show_report=True,
+                          custom_model: dict | None = None) -> list:
     """
     Fit relaxation curves to every peak's/region's integral series
     across a :func:`opennmr.processing.fitting.NMR2D_fit_slices` (or
@@ -788,6 +878,9 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
         Forwarded to :func:`fit_relaxation` for every peak.
     show_report : bool, optional
         Print a report for each fitted peak.
+    custom_model : dict, optional
+        Forwarded to :func:`fit_relaxation` for every peak -- see its
+        own ``custom_model`` parameter and :func:`build_custom_model`.
 
     Returns
     -------
@@ -848,7 +941,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
 
         fit_result = fit_relaxation(t_peak[valid], y[valid], model=model,
                                      y_err=None if y_err is None else y_err[valid],
-                                     fixed=fixed)
+                                     fixed=fixed, custom_model=custom_model)
 
         label = (peak_labels[peak_i] if peak_labels is not None and peak_i < len(peak_labels)
                  else f"Peak {peak_i + 1}")

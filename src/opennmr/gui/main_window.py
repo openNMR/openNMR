@@ -16,7 +16,7 @@ import re
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
@@ -340,6 +340,81 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _checked=False, w=canvas_widget: self.canvas_tabs.setCurrentWidget(w))
             window_menu.addAction(action)
             shortcut_num += 1
+
+        # Quick access to the Analysis tab's own controls from anywhere
+        # -- no new capability, every action here already exists as a
+        # button/combo in the Spectral Fitting / Curve Fitting sub-tabs;
+        # this just saves switching to that side-tab first.
+        analysis_menu = menu_bar.addMenu("&Analysis")
+        fit_spectrum_menu_action = QAction("Fit &Spectrum", self)
+        fit_spectrum_menu_action.triggered.connect(self._on_fit_spectrum_clicked)
+        analysis_menu.addAction(fit_spectrum_menu_action)
+
+        auto_pick_menu_action = QAction("&Auto-Pick Peaks", self)
+        auto_pick_menu_action.triggered.connect(self._on_auto_pick_peaks_clicked)
+        analysis_menu.addAction(auto_pick_menu_action)
+
+        self.pick_peak_menu_action = QAction("Pick Pea&k from Plot", self)
+        self.pick_peak_menu_action.setCheckable(True)
+        self.pick_peak_menu_action.toggled.connect(self.pick_peak_button.setChecked)
+        self.pick_peak_button.toggled.connect(self.pick_peak_menu_action.setChecked)
+        analysis_menu.addAction(self.pick_peak_menu_action)
+
+        analysis_menu.addSeparator()
+        clear_peaks_menu_action = QAction("&Clear Peak Table", self)
+        clear_peaks_menu_action.triggered.connect(lambda: self.peak_table.setRowCount(0))
+        analysis_menu.addAction(clear_peaks_menu_action)
+
+        fitting_menu = menu_bar.addMenu("Fittin&g")
+        fit_curve_menu_action = QAction("Fit &Curve…", self)
+        fit_curve_menu_action.triggered.connect(self._on_fit_curve_button_clicked)
+        fitting_menu.addAction(fit_curve_menu_action)
+        fitting_menu.addSeparator()
+
+        # Fit type/model radio-style submenus mirror fit_type_combo/
+        # relaxation_model_combo -- picking one here just sets the
+        # combo's index and lets its existing handler do the real work,
+        # so this menu can never drift out of sync with what those
+        # handlers actually do. Checked state instead of being kept
+        # live is refreshed on demand (aboutToShow) since the model
+        # list itself changes with fit type and with which spectrum is
+        # selected (each spectrum silos its own Analysis-tab state).
+        self._fit_type_menu_group = QActionGroup(self)
+        self._fit_type_menu_group.setExclusive(True)
+        fit_type_submenu = fitting_menu.addMenu("Fit &Type")
+        for idx in range(self.fit_type_combo.count()):
+            action = QAction(self.fit_type_combo.itemText(idx), self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda _checked=False, i=idx: self.fit_type_combo.setCurrentIndex(i))
+            self._fit_type_menu_group.addAction(action)
+            fit_type_submenu.addAction(action)
+
+        self._model_menu = fitting_menu.addMenu("&Model")
+        self._model_menu_group = QActionGroup(self)
+        self._model_menu_group.setExclusive(True)
+        self._rebuild_model_menu()
+
+        fitting_menu.aboutToShow.connect(self._sync_fitting_menu_checks)
+
+    def _rebuild_model_menu(self) -> None:
+        self._model_menu.clear()
+        for action in list(self._model_menu_group.actions()):
+            self._model_menu_group.removeAction(action)
+        for idx in range(self.relaxation_model_combo.count()):
+            action = QAction(self.relaxation_model_combo.itemText(idx), self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda _checked=False, i=idx: self.relaxation_model_combo.setCurrentIndex(i))
+            self._model_menu_group.addAction(action)
+            self._model_menu.addAction(action)
+
+    def _sync_fitting_menu_checks(self) -> None:
+        self._rebuild_model_menu()
+        fit_type_actions = self._fit_type_menu_group.actions()
+        if 0 <= self.fit_type_combo.currentIndex() < len(fit_type_actions):
+            fit_type_actions[self.fit_type_combo.currentIndex()].setChecked(True)
+        model_actions = self._model_menu_group.actions()
+        if 0 <= self.relaxation_model_combo.currentIndex() < len(model_actions):
+            model_actions[self.relaxation_model_combo.currentIndex()].setChecked(True)
 
     def _on_save_figure_clicked(self) -> None:
         """File > Save Figure As… -- delegates to whichever canvas tab
@@ -2932,7 +3007,35 @@ class MainWindow(QMainWindow):
 
         self.relaxation_model_combo = QComboBox()
         self._narrow_combo(self.relaxation_model_combo)
+        self.relaxation_model_combo.currentIndexChanged.connect(self._on_relaxation_model_changed)
         relax_form.addRow("Model:", self.relaxation_model_combo)
+
+        self.custom_equation_row_label = QLabel("Equation:")
+        self.custom_equation_edit = QLineEdit()
+        self.custom_equation_edit.setPlaceholderText("e.g. A*exp(-x/T1)+C")
+        self.custom_equation_edit.setToolTip(
+            "A formula in 'x' (the delay/b-value) and any other names "
+            "you choose -- every other name becomes a fitted "
+            "parameter, in the order it first appears here. Parsed "
+            "with sympy; standard functions (exp, log, sin, sqrt, "
+            "...) are available by name."
+        )
+        self.custom_equation_edit.textChanged.connect(self._on_custom_equation_changed)
+        relax_form.addRow(self.custom_equation_row_label, self.custom_equation_edit)
+
+        self.custom_params_label = QLabel("")
+        self.custom_params_label.setWordWrap(True)
+        relax_form.addRow("", self.custom_params_label)
+
+        self.custom_p0_row_label = QLabel("Initial guesses:")
+        self.custom_p0_edit = QLineEdit()
+        self.custom_p0_edit.setPlaceholderText("optional, e.g. 10, 0.5, 0 -- defaults to 1 each")
+        self.custom_p0_edit.setToolTip(
+            "Initial guesses for the parameters above, in the same "
+            "order, comma-separated. Any left unspecified (including "
+            "leaving this whole field blank) default to 1.0."
+        )
+        relax_form.addRow(self.custom_p0_row_label, self.custom_p0_edit)
 
         self.value_source_combo = QComboBox()
         self.value_source_combo.addItem("Integrated area", "integral")
@@ -3249,7 +3352,9 @@ class MainWindow(QMainWindow):
         self.relaxation_model_combo.clear()
         for label, key in items:
             self.relaxation_model_combo.addItem(label, key)
+        self.relaxation_model_combo.addItem("Custom equation…", "custom")
         self.relaxation_model_combo.blockSignals(False)
+        self._on_relaxation_model_changed(self.relaxation_model_combo.currentIndex())
 
     def _on_fit_type_changed(self, _index: int) -> None:
         self._populate_fit_model_combo()
@@ -3257,6 +3362,40 @@ class MainWindow(QMainWindow):
         unit = "s/m²" if self._is_diffusion_fit() else "s"
         self.manual_delays_edit.setPlaceholderText(f"e.g. 1e8, 5e8, 2e9 ({unit})" if self._is_diffusion_fit()
                                                      else "e.g. 0.001, 0.01, 0.1, 1.0 (s)")
+
+    def _on_relaxation_model_changed(self, _index: int) -> None:
+        is_custom = self.relaxation_model_combo.currentData() == "custom"
+        for widget in (
+            self.custom_equation_row_label, self.custom_equation_edit,
+            self.custom_params_label, self.custom_p0_row_label, self.custom_p0_edit,
+        ):
+            widget.setVisible(is_custom)
+        if is_custom:
+            self._on_custom_equation_changed(self.custom_equation_edit.text())
+
+    def _on_custom_equation_changed(self, text: str) -> None:
+        """Live preview of the parameters :func:`_build_custom_relaxation_model`
+        would detect from the equation typed so far -- lets a typo or a
+        missing independent variable be caught before Fit Curve is
+        even clicked, rather than only surfacing as an error dialog."""
+        text = text.strip()
+        if not text:
+            self.custom_params_label.setText("")
+            return
+        try:
+            spec = processing_relaxation.build_custom_model(text)
+        except ValueError as exc:
+            self.custom_params_label.setText(f"Error: {exc}")
+            return
+        self.custom_params_label.setText(f"Parameters (in order): {', '.join(spec['params'])}")
+
+    def _build_custom_relaxation_model(self) -> dict:
+        equation = self.custom_equation_edit.text().strip()
+        if not equation:
+            raise ValueError("Enter an equation for the custom model (e.g. A*exp(-x/T1)+C).")
+        p0_text = self.custom_p0_edit.text().strip()
+        p0_overrides = [float(tok) for tok in p0_text.split(",") if tok.strip()] if p0_text else None
+        return processing_relaxation.build_custom_model(equation, p0_overrides=p0_overrides)
 
     def _on_delay_source_changed(self, index: int) -> None:
         self.manual_delays_edit.setVisible(index == 1)
@@ -3438,9 +3577,10 @@ class MainWindow(QMainWindow):
         try:
             independent_values = self._resolve_independent_values(reference_spectrum, is_diffusion, n_slices=n_slices)
             model_key = self.relaxation_model_combo.currentData()
+            custom_model = self._build_custom_relaxation_model() if model_key == "custom" else None
             results = processing_relaxation.NMR2D_fit_relaxation(
                 slice_results, model=model_key, vdlist=independent_values, show_report=False,
-                value_source=self.value_source_combo.currentData(),
+                value_source=self.value_source_combo.currentData(), custom_model=custom_model,
             )
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Fit failed", str(exc))
@@ -3740,6 +3880,8 @@ class MainWindow(QMainWindow):
             "peaks": peaks,
             "fit_type": self.fit_type_combo.currentIndex(),
             "model": self.relaxation_model_combo.currentIndex(),
+            "custom_equation": self.custom_equation_edit.text(),
+            "custom_p0": self.custom_p0_edit.text(),
             "value_source": self.value_source_combo.currentIndex(),
             "delay_source": self.delay_source_combo.currentIndex(),
             "manual_text": self.manual_delays_edit.text(),
@@ -3763,6 +3905,8 @@ class MainWindow(QMainWindow):
         state = spectrum.metadata.raw.get("analysis_state")
         if state is None:
             self.fit_type_combo.setCurrentIndex(0)
+            self.custom_equation_edit.clear()
+            self.custom_p0_edit.clear()
             self.value_source_combo.setCurrentIndex(0)
             self.delay_source_combo.setCurrentIndex(0)
             self.manual_delays_edit.clear()
@@ -3779,6 +3923,8 @@ class MainWindow(QMainWindow):
             self.fit_type_combo.setCurrentIndex(state["fit_type"])
             self._populate_fit_model_combo()
             self.relaxation_model_combo.setCurrentIndex(state["model"])
+            self.custom_equation_edit.setText(state.get("custom_equation", ""))
+            self.custom_p0_edit.setText(state.get("custom_p0", ""))
             self.value_source_combo.setCurrentIndex(state.get("value_source", 0))
             self.delay_source_combo.setCurrentIndex(state["delay_source"])
             self.manual_delays_edit.setText(state["manual_text"])

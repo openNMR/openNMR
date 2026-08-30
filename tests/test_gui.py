@@ -364,7 +364,7 @@ def test_main_window_process_indirect_button_hidden_for_1d(qapp, tmp_path):
 def test_main_window_has_file_edit_window_menus(qapp):
     window = MainWindow()
     titles = [action.text().replace("&", "") for action in window.menuBar().actions()]
-    assert titles == ["File", "Edit", "Window"]
+    assert titles == ["File", "Edit", "Window", "Analysis", "Fitting"]
 
 
 def test_main_window_menu_open_action_triggers_open_dialog(qapp, monkeypatch):
@@ -2246,6 +2246,83 @@ def test_main_window_fit_curve_compare_stack_recovers_known_t2(qapp):
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
 
 
+def test_main_window_fit_curve_custom_equation_recovers_known_t2(qapp):
+    # User-typed sympy equation, selected via "Custom equation…" in the
+    # Model combo, should fit exactly like a built-in model -- here
+    # A*exp(-x/T2) is algebraically the same curve exponential_decay
+    # already fits, so the recovered T2 should match just as well.
+    true_t2 = 0.05
+    delays = np.geomspace(0.001, 0.3, 12)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=true_t2)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
+    custom_index = window.relaxation_model_combo.findData("custom")
+    window.relaxation_model_combo.setCurrentIndex(custom_index)
+    window.custom_equation_edit.setText("A*exp(-x/T2)")
+    window.custom_p0_edit.setText("1.0, 0.03")
+
+    window._on_fit_curve_button_clicked()
+
+    result = window._relaxation_fit_results[0]
+    assert result["param_names"] == ["A", "T2"]
+    assert result["params"]["T2"] == pytest.approx(true_t2, rel=0.1)
+    assert "A=" in window.analysis_results_label.text()
+    assert "T2=" in window.analysis_results_label.text()
+
+
+def test_main_window_custom_equation_fields_hidden_unless_custom_model_selected(qapp):
+    window = MainWindow()
+    assert window.custom_equation_edit.isHidden() is True
+
+    custom_index = window.relaxation_model_combo.findData("custom")
+    window.relaxation_model_combo.setCurrentIndex(custom_index)
+    assert window.custom_equation_edit.isHidden() is False
+
+    window.relaxation_model_combo.setCurrentIndex(0)
+    assert window.custom_equation_edit.isHidden() is True
+
+
+def test_main_window_custom_equation_live_preview_shows_detected_parameters(qapp):
+    window = MainWindow()
+    custom_index = window.relaxation_model_combo.findData("custom")
+    window.relaxation_model_combo.setCurrentIndex(custom_index)
+
+    window.custom_equation_edit.setText("A*exp(-x/T1)+C")
+    assert window.custom_params_label.text() == "Parameters (in order): A, T1, C"
+
+    window.custom_equation_edit.setText("A*exp(-x/T1")  # unbalanced parens
+    assert window.custom_params_label.text().startswith("Error:")
+
+
+def test_main_window_fitting_menu_model_submenu_tracks_fit_type(qapp):
+    # Explicit design: the top menu bar's Analysis/Fitting menus are
+    # quick access to controls that already exist in the Analysis tab
+    # (not new capability) -- picking a fit type here must drive the
+    # same combo the Curve Fitting sub-tab uses, model list included.
+    from opennmr.gui.main_window import _DIFFUSION_MODEL_ITEMS
+
+    window = MainWindow()
+    fitting_menu = next(
+        a for a in window.menuBar().actions() if a.text().replace("&", "") == "Fitting"
+    ).menu()
+    fit_type_submenu = next(
+        a for a in fitting_menu.actions() if a.menu() and "Type" in a.text().replace("&", "")
+    ).menu()
+
+    fit_type_submenu.actions()[1].trigger()  # "Diffusion (PFG)"
+    assert window.fit_type_combo.currentIndex() == 1
+
+    window._sync_fitting_menu_checks()
+    assert [a.text() for a in window._model_menu.actions()] == [
+        label for label, _key in _DIFFUSION_MODEL_ITEMS
+    ] + ["Custom equation…"]
+    assert fit_type_submenu.actions()[1].isChecked() is True
+
+
 def test_main_window_view_relaxation_peak_spin_disabled_before_fit(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path), vendor="bruker")
@@ -3157,7 +3234,7 @@ def test_main_window_fit_type_defaults_to_relaxation_models(qapp):
 
     window = MainWindow()
     keys = [window.relaxation_model_combo.itemData(i) for i in range(window.relaxation_model_combo.count())]
-    assert keys == [key for _label, key in _RELAXATION_MODEL_ITEMS]
+    assert keys == [key for _label, key in _RELAXATION_MODEL_ITEMS] + ["custom"]
 
 
 def test_main_window_fit_type_diffusion_switches_model_list_and_label(qapp):
@@ -3167,7 +3244,7 @@ def test_main_window_fit_type_diffusion_switches_model_list_and_label(qapp):
     window.fit_type_combo.setCurrentIndex(1)  # Diffusion (PFG)
 
     keys = [window.relaxation_model_combo.itemData(i) for i in range(window.relaxation_model_combo.count())]
-    assert keys == [key for _label, key in _DIFFUSION_MODEL_ITEMS]
+    assert keys == [key for _label, key in _DIFFUSION_MODEL_ITEMS] + ["custom"]
     assert "b-values" in window.delays_row_label.text()
 
     window.fit_type_combo.setCurrentIndex(0)  # back to Relaxation

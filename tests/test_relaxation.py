@@ -140,6 +140,47 @@ def test_fit_relaxation_unknown_model_raises():
         relaxation.fit_relaxation([0, 1], [0, 1], model="not_a_model")
 
 
+def test_build_custom_model_detects_params_in_first_appearance_order():
+    spec = relaxation.build_custom_model("A*exp(-x/T1)+C")
+    assert spec["params"] == ["A", "T1", "C"]
+    assert spec["rate_param"] is None
+
+
+def test_build_custom_model_fits_the_same_as_the_equivalent_builtin_model():
+    # A*exp(-x/T2) is algebraically exponential_decay -- a custom
+    # equation should recover the same parameters just as precisely.
+    M0_true, T2_true = 5.0, 0.3
+    t = np.linspace(0.01, 2.0, 25)
+    y = relaxation.exponential_decay(t, M0_true, T2_true)
+
+    spec = relaxation.build_custom_model("A*exp(-x/T2)")
+    fit = relaxation.fit_relaxation(t, y, custom_model=spec)
+
+    assert fit["param_names"] == ["A", "T2"]
+    assert fit["params"]["A"] == pytest.approx(M0_true, rel=1e-3)
+    assert fit["params"]["T2"] == pytest.approx(T2_true, rel=1e-3)
+
+
+def test_build_custom_model_p0_overrides_apply_positionally():
+    spec = relaxation.build_custom_model("A*exp(-x/T1)+C", p0_overrides=[3.0, 0.7])
+    assert spec["p0"](None, None) == [3.0, 0.7, 1.0]  # C left unspecified -> default 1.0
+
+
+def test_build_custom_model_rejects_unparseable_equation():
+    with pytest.raises(ValueError):
+        relaxation.build_custom_model("A*exp(-x/T1")  # unbalanced parens
+
+
+def test_build_custom_model_rejects_missing_independent_variable():
+    with pytest.raises(ValueError):
+        relaxation.build_custom_model("A + B")  # no 'x'
+
+
+def test_build_custom_model_rejects_no_free_parameters():
+    with pytest.raises(ValueError):
+        relaxation.build_custom_model("x + 3")
+
+
 def test_fit_curve_uncertainty_shape_and_positivity():
     M0_true, T2_true = 5.0, 0.3
     rng = np.random.default_rng(0)
