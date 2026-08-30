@@ -1225,7 +1225,7 @@ class MplCanvas(QWidget):
 
         if mode == "stack" and len(spectra) > 1:
             axes = list(np.atleast_1d(self.figure.subplots(len(spectra), 1, sharex=True)))
-            colors = plotting.stack_colors(len(spectra), "black")
+            colors = plotting.stack_colors(len(spectra), "viridis")
             xmin = xmax = labeltext = None
             for i, (row_ax, spectrum) in enumerate(zip(axes, spectra)):
                 this_xmin, this_xmax, labeltext = plotting.plot_1d(
@@ -1274,7 +1274,7 @@ class MplCanvas(QWidget):
             # control for exactly that reason.
             offset = -1.0 if mode == "overlay" else 0.2
             plotting.plot_1d_stack(spectra, ax=self.ax, fig=self.figure, y_offset=offset, normalize=normalize,
-                                    full_resolution=self._full_resolution)
+                                    color="viridis", full_resolution=self._full_resolution)
             self.ax.set_yticks([])
             plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
                                         linewidth=self._AXIS_LINEWIDTH)

@@ -28,10 +28,12 @@ from PySide6.QtWidgets import (
 from .. import io
 from ..core.spectrum import NMRAxis, NMRSpectrum
 from ..io import bruker as io_bruker
+from ..processing import arithmetic as processing_arithmetic
 from ..processing import fitting as processing_fitting
 from ..processing import ft as processing_ft
 from ..processing import relaxation as processing_relaxation
 from ..processing import slicing as processing_slicing
+from ..processing import vocs as processing_vocs
 from ..processing.slicing import get_trace
 from .session import Session
 from .widgets.canvas import MplCanvas
@@ -729,6 +731,19 @@ class MainWindow(QMainWindow):
     #: "_raw.jdx" naming, not "_slice.jdx".
     _XPULSE_RAW_SCAN_RE = re.compile(r"_\d+_raw\.(jdx|dx)$", re.IGNORECASE)
 
+    _NATURAL_SORT_SPLIT_RE = re.compile(r"(\d+)")
+
+    @classmethod
+    def _natural_sort_key(cls, name: str) -> list:
+        """Sort key that orders ``"1", "2", ..., "10", "11"`` numerically
+        instead of the lexicographic ``"1", "10", "11", "2", ...`` a
+        plain string sort produces -- matches Bruker's own numbered
+        experiment-folder convention (and any other numbered-folder
+        vendor layout), which a parent-folder scan needs to walk in the
+        order a person would expect."""
+        return [int(chunk) if chunk.isdigit() else chunk.lower()
+                for chunk in cls._NATURAL_SORT_SPLIT_RE.split(name)]
+
     @classmethod
     def _scan_for_spectra(cls, directory: str, max_depth: int = 6, max_matches: int = 500) -> list[tuple[str, str]]:
         """Find every Bruker experiment and X-Pulse spectrum under
@@ -765,7 +780,7 @@ class MainWindow(QMainWindow):
             if depth >= max_depth:
                 return
             try:
-                entries = sorted(os.scandir(path), key=lambda e: e.name)
+                entries = sorted(os.scandir(path), key=lambda e: cls._natural_sort_key(e.name))
             except OSError:
                 return
             for entry in entries:
@@ -1167,6 +1182,25 @@ class MainWindow(QMainWindow):
         compare_action_row.addWidget(compare_fit_curve_button)
         layout.addLayout(compare_action_row)
 
+        combine_row = QHBoxLayout()
+        combine_row.addWidget(QLabel("Operation:"))
+        self.combine_op_combo = QComboBox()
+        self.combine_op_combo.addItem("Sum", "sum")
+        self.combine_op_combo.addItem("Average", "average")
+        self.combine_op_combo.addItem("Subtract from first", "subtract")
+        self._narrow_combo(self.combine_op_combo)
+        combine_row.addWidget(self.combine_op_combo)
+        combine_button = QPushButton("Combine (Compare stack)")
+        combine_button.setToolTip(
+            "Add/subtract/average whatever's checked above (needs at "
+            "least two 1D spectra), interpolated onto a common ppm "
+            "axis over their overlapping range -- added back into the "
+            "session as a new spectrum."
+        )
+        combine_button.clicked.connect(self._on_combine_spectra_clicked)
+        combine_row.addWidget(combine_button)
+        layout.addLayout(combine_row)
+
         layout.addStretch(1)
         return tab
 
@@ -1360,9 +1394,7 @@ class MainWindow(QMainWindow):
             self._on_fit_curve_compare_stack_action()
 
     def _on_fit_curve_compare_stack_action(self) -> None:
-        entries = self._compare_checked_entries()
-        candidates = [self._resolve_compare_entry(e) for e in entries]
-        stack = [c for c in candidates if c is not None and c.ndim == 1]
+        stack = self._compare_checked_1d_stack()
         if len(stack) < 2:
             QMessageBox.information(
                 self, "Not enough spectra",
@@ -1382,6 +1414,28 @@ class MainWindow(QMainWindow):
         # switching away and back loses this result, matching the
         # Compare tab's own existing no-per-item-persistence character.
         self._run_curve_fit(slice_results, len(stack), stack[0], persist_to=None)
+
+    def _on_combine_spectra_clicked(self) -> None:
+        stack = self._compare_checked_1d_stack()
+        if len(stack) < 2:
+            QMessageBox.information(
+                self, "Not enough spectra",
+                "Combine needs at least two 1D spectra checked in the Compare list.",
+            )
+            return
+        op = self.combine_op_combo.currentData()
+        if op == "subtract":
+            ops, scaling_factors, label_op = ["+"] + ["-"] * (len(stack) - 1), None, "diff"
+        elif op == "average":
+            ops, scaling_factors, label_op = ["+"] * len(stack), [1.0 / len(stack)] * len(stack), "avg"
+        else:
+            ops, scaling_factors, label_op = ["+"] * len(stack), None, "sum"
+        try:
+            combined = processing_arithmetic.combine_spectra(stack, ops=ops, scaling_factors=scaling_factors)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Combine failed", str(exc))
+            return
+        self._add_derived_spectrum(combined, f"{label_op}({len(stack)} spectra)")
 
     def _on_compare_controls_changed(self) -> None:
         self._refresh_compare_view_if_active()
@@ -3077,6 +3131,7 @@ class MainWindow(QMainWindow):
         self.analysis_sub_tabs = QTabWidget()
         self.analysis_sub_tabs.addTab(self._build_spectral_fitting_subtab(), "Spectral Fitting")
         self.analysis_sub_tabs.addTab(self._build_curve_fitting_subtab(), "Curve Fitting")
+        self.analysis_sub_tabs.addTab(self._build_vocs_subtab(), "VOCS")
         layout.addWidget(self.analysis_sub_tabs)
 
         return tab
@@ -3427,6 +3482,128 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         return tab
+
+    def _build_vocs_subtab(self) -> QWidget:
+        """Variable Offset Cumulative Spectroscopy -- corrects a 1D
+        spectrum's frequency-dependent excitation-profile roll-off
+        from a finite pulse width (``processing.vocs``, fully built
+        and tested; this is the first GUI wiring for it). Two
+        operations, sharing the pulse-length/window-filter controls
+        above them: correct one spectrum in place (as a new derived
+        spectrum, since ``apply_vocs`` never mutates its input), or
+        correct and sum/average several VOCS acquisitions -- offset
+        1D spectra covering different, overlapping excitation windows
+        -- from the Compare tab's checked stack into one composite."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        settings_box = QGroupBox("VOCS settings")
+        settings_form = QFormLayout(settings_box)
+
+        self.vocs_pulse_edit = QLineEdit("P1")
+        self.vocs_pulse_edit.setToolTip(
+            "The acquisition parameter (from this spectrum's recorded "
+            "acqus table, e.g. Bruker's P1) giving the 90-degree pulse "
+            "length in microseconds -- used to compute the RF "
+            "nutation frequency the VOCS correction is centred on."
+        )
+        settings_form.addRow("Pulse param:", self.vocs_pulse_edit)
+
+        self.vocs_window_filter_checkbox = QCheckBox("Limit to VOCS excitation bandwidth")
+        self.vocs_window_filter_checkbox.setChecked(True)
+        self.vocs_window_filter_checkbox.setToolTip(
+            "Zero the correction outside the pulse's useful excitation "
+            "bandwidth, instead of amplifying noise far from centre "
+            "where the correction factor blows up."
+        )
+        settings_form.addRow(self.vocs_window_filter_checkbox)
+
+        layout.addWidget(settings_box)
+
+        apply_box = QGroupBox("Apply VOCS")
+        apply_layout = QVBoxLayout(apply_box)
+        apply_layout.addWidget(QLabel("Corrects the currently selected spectrum, added as a new spectrum."))
+        apply_button = QPushButton("Apply VOCS to Selected Spectrum")
+        apply_button.clicked.connect(self._on_apply_vocs_clicked)
+        apply_layout.addWidget(apply_button)
+        layout.addWidget(apply_box)
+
+        sum_box = QGroupBox("VOCS Sum")
+        sum_layout = QVBoxLayout(sum_box)
+        sum_layout.addWidget(QLabel(
+            "Corrects and combines every spectrum checked in the "
+            "Compare tab onto one common ppm axis, added as a new "
+            "spectrum."
+        ))
+        self.vocs_average_checkbox = QCheckBox("Average instead of sum")
+        sum_layout.addWidget(self.vocs_average_checkbox)
+        sum_button = QPushButton("VOCS Sum (Compare stack)")
+        sum_button.clicked.connect(self._on_vocs_sum_clicked)
+        sum_layout.addWidget(sum_button)
+        layout.addWidget(sum_box)
+
+        layout.addStretch(1)
+        return tab
+
+    def _add_derived_spectrum(self, spectrum: NMRSpectrum, label: str) -> int:
+        """Append a spectrum computed from already-loaded data (not
+        read from a file) into the session and the Data tab's own
+        list, selecting it -- the derived-spectrum equivalent of
+        :meth:`_load`'s own tail, shared by VOCS and spectrum
+        arithmetic."""
+        index = self.session.add_derived(spectrum, label)
+        self.spectrum_list.addItem(self.session.label(index))
+        self._select_single_row(index)
+        return index
+
+    def _compare_checked_1d_stack(self) -> list[NMRSpectrum]:
+        """Every currently-checked Compare-list entry, resolved to its
+        actual 1D spectrum -- stale (removed/reprocessed) or non-1D
+        entries silently drop, matching :meth:`_refresh_compare_view`'s
+        own tolerance for a Compare list that's drifted out of sync."""
+        candidates = [self._resolve_compare_entry(e) for e in self._compare_checked_entries()]
+        return [c for c in candidates if c is not None and c.ndim == 1]
+
+    def _on_apply_vocs_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            QMessageBox.information(self, "No spectrum selected", "Select a spectrum first.")
+            return
+        spectrum = self.session.spectra[index]
+        try:
+            corrected = processing_vocs.apply_vocs(
+                spectrum, pulse=self.vocs_pulse_edit.text().strip() or "P1",
+                window_filter=self.vocs_window_filter_checkbox.isChecked(),
+            )
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "VOCS correction failed", str(exc))
+            return
+        self._add_derived_spectrum(corrected, f"VOCS({self.session.label(index)})")
+
+    def _on_vocs_sum_clicked(self) -> None:
+        stack = self._compare_checked_1d_stack()
+        if not stack:
+            QMessageBox.information(
+                self, "Nothing to combine",
+                "Check at least one 1D spectrum in the Compare tab first.",
+            )
+            return
+        try:
+            result = processing_vocs.vocs_sum(
+                stack, pulse=self.vocs_pulse_edit.text().strip() or "P1",
+                average=self.vocs_average_checkbox.isChecked(),
+                window_filter=self.vocs_window_filter_checkbox.isChecked(),
+            )
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "VOCS Sum failed", str(exc))
+            return
+        ref = stack[0]
+        axis = NMRAxis(kind="frequency", ppm=result["ppm"],
+                        hz=result["ppm"] * ref.metadata.sfo1 if ref.metadata.sfo1 else None)
+        metadata = dataclasses.replace(ref.metadata, raw={})
+        combined = NMRSpectrum(data=result["vocs_sum"], axes=[axis], metadata=metadata)
+        op = "average" if self.vocs_average_checkbox.isChecked() else "sum"
+        self._add_derived_spectrum(combined, f"VOCS {op} ({len(stack)} spectra)")
 
     def _build_region_box(self) -> QGroupBox:
         """Integration regions -- the "most basic" way to turn a

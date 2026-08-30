@@ -80,6 +80,23 @@ class Session:
         spectrum, instead of resetting them to defaults every time."""
         return dict(self._load_info[index]["kwargs"])
 
+    def add_derived(self, spectrum: NMRSpectrum, label: str) -> int:
+        """Append a spectrum computed from already-loaded data (VOCS,
+        spectrum arithmetic, ...) rather than read from a file --
+        there's no path/reload kwargs for it, so :meth:`reload`/
+        :meth:`preview` are simply not meaningful for this entry.
+        ``metadata.vendor`` is overwritten to ``"derived"`` (and
+        ``source_path`` to ``label``, used by :meth:`label` for
+        display) so GUI controls that need a raw FID to reprocess from
+        (gated via ``MainWindow._fid_reprocessable``, which only
+        recognises the real vendor names) correctly stay hidden for
+        it. Returns the new spectrum's session index."""
+        metadata = dataclasses.replace(spectrum.metadata, vendor="derived", source_path=label)
+        spectrum = dataclasses.replace(spectrum, metadata=metadata)
+        self.spectra.append(spectrum)
+        self._load_info.append({"path": None, "vendor": "derived", "kwargs": {}})
+        return len(self.spectra) - 1
+
     def remove(self, index: int) -> None:
         del self.spectra[index]
         del self._load_info[index]

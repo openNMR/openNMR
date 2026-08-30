@@ -107,6 +107,14 @@ def test_scan_for_spectra_finds_multiple_numbered_experiments(tmp_path):
     assert all(v == "bruker" for _p, v in matches)
 
 
+def test_scan_for_spectra_orders_numbered_experiments_naturally(tmp_path):
+    for name in ("2", "1", "11", "10", "3"):
+        _make_1d_dataset(tmp_path, name=name)
+    matches = MainWindow._scan_for_spectra(str(tmp_path))
+    names = [os.path.basename(p) for p, _v in matches]
+    assert names == ["1", "2", "3", "10", "11"]
+
+
 def test_scan_for_spectra_finds_xpulse_file_directly(tmp_path):
     jdx = tmp_path / "spectrum.jdx"
     jdx.write_text("##TITLE= test\n##$SFO1= 400.13\n")
@@ -3996,3 +4004,121 @@ def test_main_window_pivot_spin_accepts_relative_expression(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
     window.pivot_spin.setValue(window.pivot_spin.valueFromText("1+2"))
     assert window.pivot_spin.value() == pytest.approx(3.0)
+
+
+# ============================================================
+# VOCS and spectrum arithmetic (Phase 1 backend-exposure sweep)
+# ============================================================
+
+def _make_1d_peak_spectrum_with_pulse(x0=5.0, fwhm=0.05, amplitude=1.0, n_pts=400, p1=5.0, sfo1=400.0):
+    ppm = np.linspace(3.0, 7.0, n_pts)
+    data = gaussian(ppm, x0, fwhm, amplitude)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * sfo1)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=sfo1, raw={"acqus": {"P1": p1}})
+    return NMRSpectrum(data=data, axes=[axis], metadata=metadata)
+
+
+def test_main_window_apply_vocs_adds_derived_spectrum(qapp):
+    window = MainWindow()
+    spectrum = _make_1d_peak_spectrum_with_pulse()
+    _load_spectrum_directly(window, spectrum)
+
+    window._on_apply_vocs_clicked()
+
+    assert window.spectrum_list.count() == 2
+    derived = window.session.spectra[1]
+    assert derived.metadata.vendor == "derived"
+    assert not np.allclose(derived.data, spectrum.data)
+
+
+def test_main_window_apply_vocs_no_selection_shows_message(qapp, monkeypatch):
+    window = MainWindow()
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+
+    window._on_apply_vocs_clicked()
+
+    assert shown.get("called") is True
+    assert window.spectrum_list.count() == 0
+
+
+def test_main_window_apply_vocs_bad_pulse_shows_error(qapp, monkeypatch):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse())
+    window.vocs_pulse_edit.setText("P9")
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: shown.setdefault("called", True))
+
+    window._on_apply_vocs_clicked()
+
+    assert shown.get("called") is True
+    assert window.spectrum_list.count() == 1
+
+
+def test_main_window_vocs_sum_combines_compare_stack(qapp):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=4.8))
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=5.2))
+    _select_rows(window, [0, 1])
+
+    window._on_vocs_sum_clicked()
+
+    assert window.spectrum_list.count() == 3
+    derived = window.session.spectra[2]
+    assert derived.metadata.vendor == "derived"
+    assert derived.ndim == 1
+
+
+def test_main_window_vocs_sum_requires_checked_entries(qapp, monkeypatch):
+    window = MainWindow()
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+
+    window._on_vocs_sum_clicked()
+
+    assert shown.get("called") is True
+    assert window.spectrum_list.count() == 0
+
+
+def test_main_window_combine_spectra_sum(qapp):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=4.8))
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=5.2))
+    _select_rows(window, [0, 1])
+    window.combine_op_combo.setCurrentIndex(window.combine_op_combo.findData("sum"))
+
+    window._on_combine_spectra_clicked()
+
+    assert window.spectrum_list.count() == 3
+    derived = window.session.spectra[2]
+    assert derived.metadata.vendor == "derived"
+    assert derived.ndim == 1
+
+
+def test_main_window_combine_spectra_average_differs_from_sum(qapp):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=4.8))
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=5.2))
+    _select_rows(window, [0, 1])
+
+    window.combine_op_combo.setCurrentIndex(window.combine_op_combo.findData("sum"))
+    window._on_combine_spectra_clicked()
+    summed = window.session.spectra[2]
+
+    window.combine_op_combo.setCurrentIndex(window.combine_op_combo.findData("average"))
+    window._on_combine_spectra_clicked()
+    averaged = window.session.spectra[3]
+
+    assert np.allclose(averaged.data * 2.0, summed.data)
+
+
+def test_main_window_combine_spectra_requires_two(qapp, monkeypatch):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse())
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+
+    window._on_combine_spectra_clicked()
+
+    assert shown.get("called") is True
+    assert window.spectrum_list.count() == 1
