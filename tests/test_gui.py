@@ -1697,6 +1697,35 @@ def test_main_window_fid_preview_tracks_selected_slice(qapp, tmp_path, monkeypat
     assert window.fid_canvas.ax.get_title() == "Slice 3"
 
 
+def test_main_window_fid_x_unit_combo_switches_axis_label(qapp, tmp_path, monkeypatch):
+    # Explicit user feedback: FID intensity should be plotted against
+    # time (with units), with points as a secondary option -- the
+    # underlying x data was already time-based, but nothing ever
+    # labelled the axis at all (see show_processing_preview's own fix);
+    # this combo is the user-facing switch between the two.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window.canvas_tabs.setCurrentWidget(window.fid_canvas)
+
+    assert window.fid_x_unit_combo.currentData() == "time"
+    assert window.fid_canvas.ax.get_xlabel() == "Time (s)"
+
+    points_row = next(
+        i for i in range(window.fid_x_unit_combo.count()) if window.fid_x_unit_combo.itemData(i) == "points"
+    )
+    window.fid_x_unit_combo.setCurrentIndex(points_row)
+    assert window.fid_canvas.ax.get_xlabel() == "Points"
+
+
+def test_main_window_phase_spin_box_wide_enough_for_large_values(qapp):
+    # Explicit user feedback: the Phase 0/1 spin boxes were too narrow
+    # to read a value like "-1234.56" -- especially relevant now that
+    # their range is unbounded (see _make_phase_control's own comment).
+    window = MainWindow()
+    for spin in (window.phase0_spin, window.phase1_spin):
+        assert spin.minimumWidth() >= 80
+
+
 # ============================================================
 # Processing tab's own live dual preview (FID + downsampled spectrum)
 # ============================================================
@@ -2207,6 +2236,44 @@ def test_main_window_align_echo_toggled_off_reverts(qapp, tmp_path):
     assert "Echo top" not in labels
 
 
+def test_main_window_processing_preview_mirrors_spectrum_for_conventional_2d(qapp, tmp_path, monkeypatch):
+    # Regression test: the Processing tab's own preview used to go
+    # entirely blank (MplCanvas.clear()) for any conventional
+    # (non-pseudo) 2D, since its own from-the-raw-FID dual FID/
+    # spectrum rebuild has no way to represent a whole 2D -- explicit
+    # user feedback that "Processing figures disappear when the
+    # indirect dimension has been processed" (from clicking Process
+    # Indirect Dimension) and that "processing and spectrum should
+    # update from the same source." Fixed by mirroring the Spectrum
+    # tab's own live contour (the same spectrum object, not a second
+    # computation) instead of clearing.
+    window = MainWindow()
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="previewmirror2d")
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+
+    fig = window.processing_preview_canvas.figure
+    assert any(ax.collections or ax.lines or ax.images for ax in fig.axes)
+
+
+def test_main_window_pivot_marker_clears_when_leaving_processing_tab(qapp, tmp_path):
+    # Explicit user feedback: the dashed pivot-point line left over
+    # from phasing stayed visible even after navigating away from the
+    # Processing (left) tab entirely, e.g. to Data or Analysis --
+    # stale state with nothing left to anchor it to.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    window.phase0_spin.setValue(15.0)
+    assert window.canvas._pivot_line is not None
+
+    window.side_tabs.setCurrentIndex(0)  # Data tab
+    assert window.canvas._pivot_line is None
+    assert window.processing_preview_canvas._pivot_line is None
+
+
 def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_path, monkeypatch):
     # Regression test: Align Echo on a real (non-imaging) Bruker
     # pseudo-2D series -- rows with no genuine common echo shape, so
@@ -2260,6 +2327,68 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
     before = spectrum.data.copy()
     window.phase0_spin.setValue(30.0)
     assert not np.allclose(window.session.spectra[index].data, before)
+
+
+def test_main_window_f1_phase_persists_across_apply_processing(qapp, tmp_path, monkeypatch):
+    # Regression test: dragging the Phase controls with Dimension set
+    # to Indirect (F1) on a conventional 2D wrote the correction
+    # straight into spectrum.data (never the problem), but nothing
+    # ever recorded it anywhere durable -- unlike F2's own phase0/
+    # phase1, which read_2d bakes into metadata.raw and _current_
+    # phase_kwargs forwards into every reload. The moment the spin
+    # boxes got re-zeroed (switching dim, reselecting) and then
+    # something reloaded the spectrum (Apply Processing being the most
+    # direct case), F1's phase silently reverted to unphased with no
+    # way to tell -- explicit user feedback that F1 phasing was
+    # "impossible". Fixed via metadata.raw["phase0_f1"/"phase1_f1"],
+    # folded in by _commit_pending_phase_to_metadata and reapplied
+    # post-reload by _reapply_phase_post_reload.
+    import opennmr.processing.ft as processing_ft
+
+    window = MainWindow()
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="f1phase2d")
+    window._load(path, vendor="bruker")
+    index = window._selected_index()
+    # Pseudo-2D is the default treatment for any freshly-loaded 2D
+    # (see _load's own comment) -- opt into a real F1 FFT the same way
+    # a user would, via the Process Indirect Dimension button.
+    window.process_indirect_button.setChecked(True)
+    assert window.session.spectra[index].metadata.pseudo_2d is False
+    # Isolate the F1-phase-persistence behaviour under test from the
+    # GUI's own default (much larger) zero-fill choice -- keep F2's
+    # size matching the dataset's own SI so a plain reload reproduces
+    # the same shape.
+    window._set_zero_fill_value(32)
+
+    original = window.session.spectra[index].data.copy()
+    original_imag = window.session.spectra[index].data_imag.copy()
+    assert window._phase_mode == "2d"
+
+    window.dim_combo.setCurrentIndex(1)  # Indirect (F1)
+    assert window._phase_mode == "2d"
+
+    window.phase0_spin.setValue(40.0)
+    spectrum = window.session.spectra[index]
+    assert not np.allclose(spectrum.data, original)
+
+    # Re-anchoring (e.g. switching away and back) commits the pending
+    # delta into metadata.raw and zeroes the spin box -- exactly the
+    # state Apply Processing needs to be tested against, since a real
+    # user rarely clicks Apply Processing mid-drag.
+    window._capture_phase_reference()
+    assert spectrum.metadata.raw.get("phase0_f1") == pytest.approx(40.0)
+    assert window.phase0_spin.value() == 0.0
+
+    window._on_reprocess_fid_clicked()
+    reloaded = window.session.spectra[index]
+    assert reloaded is not spectrum  # genuinely reloaded, not the same object
+
+    freq_ppm = window.session.spectra[index].axis_values(0, "ppm")
+    expected = processing_ft.apply_phase(
+        (original + 1j * original_imag).T, freq_ppm, 40.0, 0.0, pivot_frac=0.5,
+    ).T
+    np.testing.assert_allclose(reloaded.data, np.real(expected), atol=1e-8)
+    np.testing.assert_allclose(reloaded.data_imag, np.imag(expected), atol=1e-8)
 
 
 def test_main_window_reprocess_updates_both_spectrum_and_fid_canvases(qapp, tmp_path):

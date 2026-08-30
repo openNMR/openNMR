@@ -1152,12 +1152,17 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def show_fid(self, fid, dt: float, title: str = "", window_envelope=None, tdeff_index: int | None = None,
-                 echo_top_index: float | None = None, mode: str = "magnitude") -> None:
+                 echo_top_index: float | None = None, mode: str = "magnitude", x_unit: str = "time") -> None:
         """Plot a raw/processed time-domain FID vs. time -- an
         alternate view (the FID canvas tab) for judging FID-domain
         processing directly, instead of only its effect after FFT. The
         frequency-domain spectrum (:func:`show_spectrum`) stays the
         default (Spectrum tab) view.
+
+        ``x_unit`` : ``"time"`` (default, seconds) or ``"points"``
+        (raw sample index) -- ``tdeff_index``/``echo_top_index`` are
+        always given as sample indices either way, scaled by ``dt``
+        only when ``x_unit="time"``.
 
         ``mode`` : ``"magnitude"`` (default, ``|fid|`` -- a single
         clean decay/echo envelope, easiest for judging alignment/decay
@@ -1198,7 +1203,10 @@ class MplCanvas(QWidget):
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
         self._freeform_zoom_axes = {self.ax}
-        t = np.arange(len(fid)) * dt
+        if x_unit not in ("time", "points"):
+            raise ValueError("x_unit must be 'time' or 'points'")
+        scale = dt if x_unit == "time" else 1.0
+        t = np.arange(len(fid)) * scale
         if mode not in ("magnitude", "real"):
             raise ValueError("mode must be 'magnitude' or 'real'")
         y = np.real(fid) if mode == "real" else np.abs(fid)
@@ -1208,12 +1216,12 @@ class MplCanvas(QWidget):
             self.ax.plot(t, np.asarray(window_envelope) * peak, "--", color="gray", label="Window", zorder=0)
             self._legend_visible = True
         if tdeff_index is not None and 0 < tdeff_index < len(fid):
-            self.ax.axvline(tdeff_index * dt, linestyle="--", color="red", label="TDeff cutoff")
+            self.ax.axvline(tdeff_index * scale, linestyle="--", color="red", label="TDeff cutoff")
             self._legend_visible = True
         if echo_top_index is not None and 0 <= echo_top_index < len(fid):
-            self.ax.axvline(echo_top_index * dt, linestyle="--", color="green", label="Echo top")
+            self.ax.axvline(echo_top_index * scale, linestyle="--", color="green", label="Echo top")
             self._legend_visible = True
-        self.ax.set_xlabel("Time (s)", fontsize=self._AXIS_LABELSIZE)
+        self.ax.set_xlabel("Time (s)" if x_unit == "time" else "Points", fontsize=self._AXIS_LABELSIZE)
         self.ax.set_ylabel("Amplitude", fontsize=self._AXIS_LABELSIZE)
         if title:
             self.ax.set_title(title, fontsize=self._AXIS_LABELSIZE)
@@ -1227,7 +1235,8 @@ class MplCanvas(QWidget):
 
     def show_processing_preview(self, fid, dt: float, spectrum: NMRSpectrum, *, title: str = "",
                                  window_envelope=None, tdeff_index: int | None = None,
-                                 echo_top_index: float | None = None, fid_mode: str = "magnitude") -> None:
+                                 echo_top_index: float | None = None, fid_mode: str = "magnitude",
+                                 fid_x_unit: str = "time") -> None:
         """The Processing tab's own live dual view: the FID (top,
         exactly like :meth:`show_fid`'s own overlays) and a downsampled
         preview of what FFT'ing it with the currently-dialed-in
@@ -1261,7 +1270,10 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = fid_ax
         self._processing_preview_spec_ax = spec_ax
 
-        t = np.arange(len(fid)) * dt
+        if fid_x_unit not in ("time", "points"):
+            raise ValueError("fid_x_unit must be 'time' or 'points'")
+        fid_scale = dt if fid_x_unit == "time" else 1.0
+        t = np.arange(len(fid)) * fid_scale
         if fid_mode not in ("magnitude", "real"):
             raise ValueError("fid_mode must be 'magnitude' or 'real'")
         y = np.real(fid) if fid_mode == "real" else np.abs(fid)
@@ -1270,9 +1282,10 @@ class MplCanvas(QWidget):
             peak = np.max(np.abs(fid)) if len(fid) else 0.0
             fid_ax.plot(t, np.asarray(window_envelope) * peak, "--", color="gray", linewidth=1.0, zorder=0)
         if tdeff_index is not None and 0 < tdeff_index < len(fid):
-            fid_ax.axvline(tdeff_index * dt, linestyle="--", color="red")
+            fid_ax.axvline(tdeff_index * fid_scale, linestyle="--", color="red")
         if echo_top_index is not None and 0 <= echo_top_index < len(fid):
-            fid_ax.axvline(echo_top_index * dt, linestyle="--", color="green")
+            fid_ax.axvline(echo_top_index * fid_scale, linestyle="--", color="green")
+        fid_ax.set_xlabel("Time (s)" if fid_x_unit == "time" else "Points", fontsize=self._AXIS_LABELSIZE)
         fid_ax.set_ylabel("FID Intensity", fontsize=self._AXIS_LABELSIZE)
         if title:
             fid_ax.set_title(title, fontsize=self._AXIS_LABELSIZE)

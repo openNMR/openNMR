@@ -1083,7 +1083,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.session.reload(index, pseudo_2d=wants_pseudo_2d, **self._current_phase_kwargs(spectrum))
-            self._reapply_phase_post_reload(self.session.spectra[index])
+            self._reapply_phase_post_reload(self.session.spectra[index], previous_raw=spectrum.metadata.raw)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to reprocess spectrum", str(exc))
             # Revert the button to match what's actually loaded.
@@ -1834,6 +1834,17 @@ class MainWindow(QMainWindow):
         self.fid_display_combo.currentIndexChanged.connect(lambda _i: self._refresh_fid_display_preview())
         form.addRow("Preview:", self.fid_display_combo)
 
+        self.fid_x_unit_combo = QComboBox()
+        self.fid_x_unit_combo.addItem("Time (s)", "time")
+        self.fid_x_unit_combo.addItem("Points", "points")
+        self.fid_x_unit_combo.setToolTip(
+            "FID plot's x-axis -- Time (s, the default) or raw sample "
+            "index (Points)."
+        )
+        self._narrow_combo(self.fid_x_unit_combo)
+        self.fid_x_unit_combo.currentIndexChanged.connect(lambda _i: self._refresh_fid_display_preview())
+        form.addRow("FID x-axis:", self.fid_x_unit_combo)
+
         self.window_combo = QComboBox()
         self.window_combo.currentIndexChanged.connect(self._on_window_combo_changed)
         form.addRow("Window:", self.window_combo)
@@ -2063,7 +2074,7 @@ class MainWindow(QMainWindow):
         echo_top = processing_ft.find_echo_top(fid) if self.align_echo_button.isChecked() else None
         self.fid_canvas.show_fid(
             fid, dt, title=title, window_envelope=envelope, tdeff_index=tdeff or None, echo_top_index=echo_top,
-            mode=self.fid_display_combo.currentData(),
+            mode=self.fid_display_combo.currentData(), x_unit=self.fid_x_unit_combo.currentData(),
         )
         if switch_tab:
             self.canvas_tabs.setCurrentWidget(self.fid_canvas)
@@ -2254,13 +2265,21 @@ class MainWindow(QMainWindow):
         cheap enough to call on every live control change, including a
         continuous phase-drag tick.
 
-        Clears the canvas (rather than raising) for anything it can't
-        sensibly show this way: not FID-reprocessable at all, or a
+        Falls back to plainly mirroring the Spectrum tab's own live
+        view (:meth:`MplCanvas.show_spectrum` against this same
+        ``spectrum`` object -- the same source, not a second
+        computation of it) for anything the FID+spectrum dual preview
+        can't sensibly show: not FID-reprocessable at all, or a
         conventional (non-pseudo) 2D, whose F1 FID isn't captured
         either -- same rule :func:`_fid_preview_available` already
-        uses for the real FID tab."""
+        uses for the real FID tab. Explicit user feedback: this tab
+        going entirely blank for a real, F1-processed 2D (or whenever
+        the raw-FID reprocess path itself failed) looked like the
+        figure had "disappeared," when there was a perfectly good
+        current spectrum to show all along -- just not one this
+        method's own from-the-raw-FID preview knows how to rebuild."""
         if not self._fid_reprocessable(spectrum) or (spectrum.ndim == 2 and not spectrum.is_pseudo_2d):
-            self.processing_preview_canvas.clear()
+            self.processing_preview_canvas.show_spectrum(spectrum)
         else:
             try:
                 computed = self._compute_processing_preview(spectrum)
@@ -2268,7 +2287,7 @@ class MainWindow(QMainWindow):
                 # combination of controls mid-edit shouldn't pop an error dialog
                 computed = None
             if computed is None:
-                self.processing_preview_canvas.clear()
+                self.processing_preview_canvas.show_spectrum(spectrum)
             else:
                 fid, dt, slice_spectrum, title = computed
                 envelope = self._compute_window_envelope(dt, len(fid))
@@ -2278,6 +2297,7 @@ class MainWindow(QMainWindow):
                     fid, dt, slice_spectrum, title=title, window_envelope=envelope,
                     tdeff_index=tdeff or None, echo_top_index=echo_top,
                     fid_mode=self.fid_display_combo.currentData(),
+                    fid_x_unit=self.fid_x_unit_combo.currentData(),
                 )
         if switch_tab:
             self.canvas_tabs.setCurrentWidget(self.processing_preview_canvas)
@@ -2346,8 +2366,17 @@ class MainWindow(QMainWindow):
         switches back to the plain Spectrum view, but only if the
         preview was actually the one showing; if the user had manually
         navigated to e.g. Compare or Fit while still on the Processing
-        tab, leaving shouldn't yank them away from that choice."""
+        tab, leaving shouldn't yank them away from that choice.
+
+        Also hides the pivot marker on both canvases -- it's only
+        meaningful while the Phase controls (on this same left tab)
+        are the thing being actively worked with; left lingering as a
+        stray dashed line once the user has moved on to Data/Analysis/
+        Compare, it reads as leftover state rather than the live pivot
+        point it was showing."""
         if index != self._processing_tab_index:
+            self.canvas.set_pivot_marker(None)
+            self.processing_preview_canvas.set_pivot_marker(None)
             if self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
                 self.canvas_tabs.setCurrentWidget(self.canvas)
             return
@@ -2492,7 +2521,7 @@ class MainWindow(QMainWindow):
 
         try:
             self.session.reload(index, **kwargs)
-            self._reapply_phase_post_reload(self.session.spectra[index])
+            self._reapply_phase_post_reload(self.session.spectra[index], previous_raw=spectrum.metadata.raw)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to reprocess spectrum", str(exc))
             return
@@ -2546,24 +2575,36 @@ class MainWindow(QMainWindow):
             "autophase": False,
         }
 
-    def _reapply_phase_post_reload(self, spectrum) -> None:
+    def _reapply_phase_post_reload(self, spectrum, previous_raw: dict | None = None) -> None:
         """Companion to :meth:`_current_phase_kwargs`: for the two
         cases it can't forward into the reload itself -- one pseudo-2D
         slice's own phase, or a conventional 2D's F1/indirect phase --
-        reapply that same delta directly to the freshly-reloaded
+        reapply that same phase directly to the freshly-reloaded
         spectrum post-hoc, so at least what's actually being looked at
         keeps its phase instead of silently resetting. A no-op outside
-        those two cases, or if the delta is zero, or if the reload
+        those two cases, or if the total is zero, or if the reload
         changed what the phase target even means (e.g. switching to
-        pseudo-2D drops F1's frequency meaning entirely)."""
-        phase0 = self.phase0_spin.value()
-        phase1 = self.phase1_spin.value()
-        if not phase0 and not phase1:
-            return
+        pseudo-2D drops F1's frequency meaning entirely).
+
+        ``previous_raw`` -- the *pre-reload* spectrum's own
+        ``metadata.raw`` (the caller's own local ``spectrum`` variable,
+        captured before ``session.reload`` replaced it) -- is where the
+        F1 branch's own persisted ``"phase0_f1"/"phase1_f1"`` (see
+        :meth:`_commit_pending_phase_to_metadata`) is read from: the
+        *freshly*-reloaded spectrum's own ``metadata.raw`` never has
+        these (unlike F2's ``"phase0"/"phase1"``, ``read_2d`` doesn't
+        accept or record an F1 phase kwarg at all -- see
+        :meth:`_current_phase_kwargs`'s own docstring), so without this
+        the total would silently drop back to just the live spin-box
+        delta, i.e. the exact loss this method exists to prevent."""
         if spectrum.ndim != 2 or spectrum.data_imag is None:
             return
 
         if self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked():
+            phase0 = self.phase0_spin.value()
+            phase1 = self.phase1_spin.value()
+            if not phase0 and not phase1:
+                return
             if not spectrum.is_pseudo_2d:
                 return
             row = self.slice_spin.value() - 1
@@ -2580,6 +2621,11 @@ class MainWindow(QMainWindow):
         elif self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0:
             if spectrum.is_pseudo_2d:
                 return  # F1 no longer a frequency axis -- nothing to reapply
+            baked_in = previous_raw or {}
+            phase0 = float(baked_in.get("phase0_f1", 0.0)) + self.phase0_spin.value()
+            phase1 = float(baked_in.get("phase1_f1", 0.0)) + self.phase1_spin.value()
+            if not phase0 and not phase1:
+                return
             freq_ppm = spectrum.axis_values(0, "ppm")
             span = freq_ppm.max() - freq_ppm.min()
             pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
@@ -2849,6 +2895,11 @@ class MainWindow(QMainWindow):
         spin.setDecimals(2)
         spin.setSingleStep(step)
         spin.setValue(0.0)
+        # Qt's own sizeHint for a QDoubleSpinBox doesn't account for
+        # -_PHASE_SPIN_RANGE being unbounded -- default width is too
+        # narrow to show even a 3-4 digit value (e.g. "-1234.56")
+        # without scrolling the text inside the box.
+        spin.setMinimumWidth(80)
 
         handle.valueChanged.connect(lambda v: self._on_phase_handle_changed(handle, spin, v))
         spin.valueChanged.connect(lambda v: self._on_phase_spin_changed(handle, spin, v))
@@ -3258,7 +3309,14 @@ class MainWindow(QMainWindow):
             spectrum.data = np.real(phased)
             spectrum.data_imag = np.imag(phased)
             self.canvas.show_spectrum(spectrum)
-            if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
+            # A conventional 2D's Processing-preview tab mirrors this
+            # same spectrum object directly (see _show_processing_preview's
+            # own "same source, not a second computation" reasoning) --
+            # keep it live during a drag too, rather than only catching
+            # up the next time something else refreshes it.
+            if self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
+                self.processing_preview_canvas.show_spectrum(spectrum)
+            else:
                 self.canvas_tabs.setCurrentWidget(self.canvas)
 
     def _show_pseudo2d_slice(self, spectrum, reset_view: bool, switch_tab: bool = True) -> None:
@@ -3327,19 +3385,27 @@ class MainWindow(QMainWindow):
         you switched slice/tab and came back, even though the actual
         spectrum was correctly phased the whole time.
 
-        Skipped for the two cases ``metadata.raw["phase0"/"phase1"]``
-        can't actually represent (matches :meth:`_current_phase_kwargs`'s
-        own gating): a pseudo-2D slice's *own* phase with "Apply to
-        every slice" unchecked (metadata.raw describes the whole
-        dataset, not one row -- :meth:`_reapply_phase_post_reload`
-        already handles that case's own persistence-across-reprocess
-        need directly), and a conventional 2D's F1/indirect phase
-        (metadata.raw's phase0/phase1 mean F2 specifically)."""
+        Skipped for one case ``metadata.raw`` can't actually represent
+        (matches :meth:`_current_phase_kwargs`'s own gating): a
+        pseudo-2D slice's *own* phase with "Apply to every slice"
+        unchecked (metadata.raw describes the whole dataset, not one
+        row -- :meth:`_reapply_phase_post_reload` already handles that
+        case's own persistence-across-reprocess need directly). A
+        conventional 2D's F1/indirect phase folds into its own
+        ``"phase0_f1"/"phase1_f1"`` fields instead of ``"phase0"/
+        "phase1"`` (which mean F2 specifically) -- explicit user
+        feedback that F1 phasing was otherwise "impossible": every
+        drag *did* write correctly into ``spectrum.data`` (never the
+        problem, same as every other mode here), but with nothing
+        durable ever recorded, any reload (Apply Processing, Align
+        Echo, Process Indirect Dimension, ...) that landed after the
+        spin boxes had already been re-zeroed by a later
+        :meth:`_capture_phase_reference` call -- reselecting, changing
+        slice/dimension -- silently reset F1 back to unphased, with no
+        way to tell it had ever been touched."""
         if self._phase_mode is None or self._phase_target_index is None:
             return
         if self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked():
-            return
-        if self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0:
             return
         phase0_delta = self.phase0_spin.value()
         phase1_delta = self.phase1_spin.value()
@@ -3349,8 +3415,10 @@ class MainWindow(QMainWindow):
         if not (0 <= index < len(self.session)):
             return
         spectrum = self.session.spectra[index]
-        spectrum.metadata.raw["phase0"] = float(spectrum.metadata.raw.get("phase0", 0.0)) + phase0_delta
-        spectrum.metadata.raw["phase1"] = float(spectrum.metadata.raw.get("phase1", 0.0)) + phase1_delta
+        is_f1 = self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0
+        key0, key1 = ("phase0_f1", "phase1_f1") if is_f1 else ("phase0", "phase1")
+        spectrum.metadata.raw[key0] = float(spectrum.metadata.raw.get(key0, 0.0)) + phase0_delta
+        spectrum.metadata.raw[key1] = float(spectrum.metadata.raw.get(key1, 0.0)) + phase1_delta
 
     def _capture_phase_reference(self) -> None:
         """(Re)anchor the phase controls to whatever they're currently
