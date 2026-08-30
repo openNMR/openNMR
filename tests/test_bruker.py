@@ -254,3 +254,26 @@ def test_read_auto_reraises_when_no_processed_data_available(tmp_path, monkeypat
 
     with pytest.raises(IndexError):
         bruker._read_auto(path)
+
+
+def test_read_auto_does_not_mask_unrelated_value_errors(tmp_path, monkeypatch):
+    # Regression test: _read_auto's fallback used to catch (ValueError,
+    # IndexError) -- broad enough to also silently swallow a genuine,
+    # unrelated bug inside read_2d's own FID-processing steps (found
+    # for real: align_echo's per-row auto-truncation disagreeing,
+    # raising a plain ValueError from np.apply_along_axis, fixed
+    # directly rather than via this fallback) into a fallback load that
+    # discards whatever raw-FID processing was actually requested, with
+    # no error shown to the user. Only IndexError -- what a genuine
+    # nmrglue shape-guess failure actually produces (its own reshape
+    # ValueError is already caught internally by nmrglue) -- should
+    # trigger the fallback; any other ValueError must propagate.
+    path = _make_2d_dataset_with_processed(tmp_path, n_f1=4, n_f2=8)
+
+    def fake_read_2d(_path, **_kwargs):
+        raise ValueError("could not broadcast input array from shape (4090,) into shape (4091,)")
+
+    monkeypatch.setattr(bruker, "read_2d", fake_read_2d)
+
+    with pytest.raises(ValueError):
+        bruker._read_auto(path)

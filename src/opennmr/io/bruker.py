@@ -392,9 +392,32 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # pre-shared-prepare_fid code already did (three separate `if`s,
     # one per step) -- lost when they were combined into one call.
     if fid_shift or align_echo or linear_predict_points:
+        # align_echo's own auto-truncation caps each row at its own
+        # len(row) - ceil(echo_top) (see prepare_fid's docstring) --
+        # fine for a single 1D FID, but here every row is independently
+        # capped by np.apply_along_axis's per-row prepare_fid call, and
+        # a real (non-imaging) pseudo-2D series' rows rarely have a
+        # genuine echo shape at all, so find_echo_top lands on a
+        # different, essentially noise-driven index each time. The
+        # resulting per-row lengths then disagree, which
+        # np.apply_along_axis cannot reconcile into one array (raises
+        # ValueError: could not broadcast...) -- found on real T2 data
+        # (bruker_T2/11) via Align Echo, which every Bruker 2D/pseudo-
+        # 2D spectrum offers unconditionally regardless of whether its
+        # rows are actually echo-shaped. Precompute one shared cap (the
+        # minimum across every row) and pass it in as an explicit
+        # truncate= for all of them, so every row ends up the same
+        # final length regardless of where each one's own echo top
+        # happened to land.
+        truncate_cap = None
+        if align_echo:
+            echo_wrap_limits = [
+                row.shape[0] - int(np.ceil(processing_ft.find_echo_top(row))) for row in data
+            ]
+            truncate_cap = min(echo_wrap_limits)
         fid_f2 = np.apply_along_axis(
             lambda row: processing_ft.prepare_fid(
-                row, fid_shift=fid_shift, align_echo_enabled=align_echo,
+                row, fid_shift=fid_shift, align_echo_enabled=align_echo, truncate=truncate_cap,
                 linear_predict_points=linear_predict_points, linear_predict_order=linear_predict_order,
                 linear_predict_direction=linear_predict_direction,
             ),
@@ -775,14 +798,28 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     on, so falling back is the only usable option). Flagged via
     ``metadata.raw["read_2d_shape_guess_failed"]`` so callers (the
     GUI) can tell the user why raw-FID reprocessing isn't available,
-    rather than it being silent."""
+    rather than it being silent.
+
+    Only ``IndexError`` triggers the fallback, deliberately not the
+    broader ``ValueError`` -- ``nmrglue.bruker.read_binary`` already
+    catches its own reshape ``ValueError`` internally (just returns
+    the unshaped 1D array with a warning printed), so what actually
+    propagates out of a genuine shape-guess failure is always the
+    *next* thing that trips on that 1D array, ``read_2d``'s own
+    ``data.shape[1]`` -- an ``IndexError``. A bare ``ValueError`` here
+    is something else going wrong inside ``read_2d`` (found one for
+    real: ``align_echo``'s auto-truncation disagreeing row-to-row --
+    fixed directly, not by routing it through this fallback) and
+    should surface to the caller normally instead of being silently
+    swallowed into a fallback that discards whatever raw-FID
+    processing was actually requested."""
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
     has_2rr = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
     if has_ser:
         try:
             return read_2d(path, **kwargs)
-        except (ValueError, IndexError) as exc:
+        except IndexError as exc:
             if not has_2rr:
                 raise
             # read_2d_processed has no raw-FID-reprocessing parameters

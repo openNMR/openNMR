@@ -2203,6 +2203,16 @@ class MainWindow(QMainWindow):
 
         filled = processing_ft.zero_fill(windowed, self._zero_fill_value())
         freq_hz, data = processing_ft.fft_spectrum(filled, dt)
+        # Every vendor reader's own read_1d/read_2d divides by NS
+        # (scans) at load time (data = spectrum / mass / ns) -- missing
+        # here meant this preview could show a spectrum hundreds or
+        # thousands of times the amplitude of what's actually loaded
+        # (found on real data: NS=2600, so a ~2600x mismatch), looking
+        # nothing like the same phase/lineshape even though the phase
+        # angle itself was correct throughout. mass isn't included --
+        # the GUI never sends a nonzero load-time mass= to begin with,
+        # unlike metadata.mass (a separate, Compare-only concept).
+        data = data / (spectrum.metadata.ns or 1.0)
 
         # The ppm axis's *range* is fixed by acquisition (O1/SF/SW),
         # unaffected by window/zero-fill choice -- only the point
@@ -4010,6 +4020,19 @@ class MainWindow(QMainWindow):
                 result = core_registry.find_gamma(spectrum.metadata.nucleus)
                 gamma = result["gamma"] if result else None
         self.canvas.set_imaging_gradient_params(gamma, max_gradient)
+        if self.canvas.axis_unit == "mm":
+            if gamma and max_gradient:
+                # Already showing the mm axis -- re-derive it with
+                # whatever gamma/gradient just changed, rather than
+                # leaving the plot showing a stale conversion until
+                # the user happens to toggle the unit again.
+                self.canvas.set_axis_unit("mm")
+            else:
+                # The gradient (or the selected spectrum's nucleus)
+                # is no longer valid -- mm no longer means anything,
+                # so don't leave the axis frozen on its last (now
+                # stale) conversion; ppm is always available.
+                self.canvas.set_axis_unit("ppm")
         if max_gradient and gamma:
             self.imaging_gradient_status_label.setText(
                 f"{gamma * max_gradient * 1e-5:.4g} Hz/mm at this gradient, for {spectrum.metadata.nucleus}."

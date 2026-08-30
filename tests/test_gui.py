@@ -1049,6 +1049,27 @@ def test_main_window_processing_preview_phase_survives_slice_switch(qapp, tmp_pa
     np.testing.assert_allclose(preview_spectrum.data, spectrum.data[0], atol=1e-6)
 
 
+def test_main_window_processing_preview_normalizes_by_ns(qapp, tmp_path, monkeypatch):
+    # Real bug, found on real data (NS=2600): _compute_processing_
+    # preview built its preview straight from the raw FID without ever
+    # dividing by NS (scans), unlike read_1d/read_2d's own load path
+    # (data = spectrum / mass / ns) -- looked like "phase isn't applied
+    # the same way in the Spectrum and Processing tabs" (actually an
+    # amplitude-scale mismatch of NS-to-1, not a phase bug at all,
+    # since every real acquisition has NS > 1). The previous test
+    # (`..._phase_survives_slice_switch`) didn't catch this because its
+    # fixture's default NS=1.0 makes the missing division a no-op.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=64, ns=8.0), vendor="bruker")
+    window._set_zero_fill_value(64)
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+
+    _fid, _dt, preview_spectrum, _title = window._compute_processing_preview(spectrum)
+
+    np.testing.assert_allclose(preview_spectrum.data, spectrum.data[0], atol=1e-6)
+
+
 def test_main_window_pivot_slider_moves_pivot_spin(qapp, tmp_path):
     # The slider is inverted relative to raw ppm value, to match the
     # spectrum's own inverted x-axis (high ppm on the left) -- dragging
@@ -1471,7 +1492,7 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1"):
     return str(expt)
 
 
-def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d", f1_nuc="13C"):
+def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d", f1_nuc="13C", ns=1.0):
     from opennmr.io import bruker as bruker_io
 
     expt = tmp_path / name
@@ -1482,7 +1503,7 @@ def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d
     (expt / "ser").write_bytes(b"\x00")
     (expt / "acqus").write_bytes(b"\x00")
 
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": ns}
     # `acqu2s` is read from the mocked `ng.bruker.read()` dict, not
     # parsed off disk -- matching real Bruker behaviour (nmrglue reads
     # every acqu*s/proc*s file itself as part of one `read()` call).
@@ -2184,6 +2205,61 @@ def test_main_window_align_echo_toggled_off_reverts(qapp, tmp_path):
     assert not np.allclose(aligned, reverted)
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
     assert "Echo top" not in labels
+
+
+def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_path, monkeypatch):
+    # Regression test: Align Echo on a real (non-imaging) Bruker
+    # pseudo-2D series -- rows with no genuine common echo shape, so
+    # find_echo_top's own per-row result varies -- used to crash
+    # read_2d entirely (np.apply_along_axis, mismatched per-row
+    # lengths), which _read_auto's shape-guess fallback then silently
+    # masked by loading TopSpin's own processed data instead (no
+    # error shown), which has no raw FID to reprocess from and
+    # sometimes no imaginary part at all -- "I can no longer phase
+    # anything" afterward. Fixed directly in read_2d (a shared
+    # truncation cap across every row); this confirms the whole path
+    # end to end, not just the io-level fix.
+    from opennmr.io import bruker as bruker_io
+
+    n_f1, n_f2 = 8, 64
+    expt = tmp_path / "t2expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": n_f2, "SF": 400.13, "WDW": 0})
+    _write_params(pdata / "proc2s", {"SW_p": 2000.0, "SI": n_f1, "SF": 100.6, "WDW": 0})
+    (expt / "ser").write_bytes(b"\x00")
+    (expt / "acqus").write_bytes(b"\x00")
+    (pdata / "2rr").write_bytes(b"\x00" * (n_f1 * n_f2 * 4))
+    (pdata / "2ii").write_bytes(b"\x00" * (n_f1 * n_f2 * 4))
+
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    t2 = np.arange(n_f2)
+    rows = []
+    for row_index in range(n_f1):
+        peak_at = 5 + row_index  # a different "echo top" every row -- no real shared echo
+        row = np.zeros(n_f2, dtype=np.complex128)
+        row[peak_at] = 1.0 + 0.5j
+        row += 0.01 * np.exp(-((t2 - peak_at) ** 2) / 8.0)
+        rows.append(row)
+    fid = np.array(rows)
+    dic = {"acqus": acqus, "acqu2s": {"NUC1": "off", "BF1": 400.0, "O1": 0.0}}
+    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+
+    window = MainWindow()
+    window._load(str(expt), vendor="bruker")
+    index = window._selected_index()
+
+    window.align_echo_button.setChecked(True)
+
+    spectrum = window.session.spectra[index]
+    assert spectrum.data_imag is not None
+    assert spectrum.metadata.raw.get("read_2d_shape_guess_failed") is None
+    assert window._phase_mode == "pseudo2d"
+
+    before = spectrum.data.copy()
+    window.phase0_spin.setValue(30.0)
+    assert not np.allclose(window.session.spectra[index].data, before)
 
 
 def test_main_window_reprocess_updates_both_spectrum_and_fid_canvases(qapp, tmp_path):
@@ -4499,6 +4575,40 @@ def test_main_window_imaging_gradient_zero_disables_mm_axis(qapp, tmp_path):
 
     assert window.canvas._imaging_max_gradient_g_per_cm is None
     assert "Set a max gradient" in window.imaging_gradient_status_label.text()
+
+
+def test_main_window_imaging_gradient_change_refreshes_active_mm_axis(qapp, tmp_path):
+    # Regression test: changing the gradient while the Spectrum
+    # canvas is already showing the mm axis used to leave it frozen
+    # at whatever conversion was in effect when "mm" was first
+    # selected -- looked like the plot "wasn't refreshing at all"
+    # (and, by extension, that scroll-zoom on it was broken, though
+    # zoom itself was never actually the problem).
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+
+    window.imaging_max_gradient_spin.setValue(50.0)
+    window.canvas.set_axis_unit("mm")
+    x_at_50 = window.canvas.ax.lines[0].get_xdata().copy()
+
+    window.imaging_max_gradient_spin.setValue(100.0)
+
+    assert window.canvas.axis_unit == "mm"
+    x_at_100 = window.canvas.ax.lines[0].get_xdata()
+    assert not np.allclose(x_at_50, x_at_100)
+    # Doubling the gradient should exactly halve the mm range.
+    np.testing.assert_allclose(x_at_100, x_at_50 / 2.0, atol=1e-9)
+
+
+def test_main_window_imaging_gradient_cleared_while_mm_active_falls_back_to_ppm(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    window.imaging_max_gradient_spin.setValue(50.0)
+    window.canvas.set_axis_unit("mm")
+
+    window.imaging_max_gradient_spin.setValue(0.0)
+
+    assert window.canvas.axis_unit == "ppm"
 
 
 def test_main_window_imaging_gradient_persists_per_spectrum(qapp, tmp_path):

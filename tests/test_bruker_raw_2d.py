@@ -34,6 +34,23 @@ def _synthetic_2d_fid(n_f1=16, n_f2=32, sw2=8000.0, f0_hz=1000.0):
     return np.tile(row, (n_f1, 1)).astype(np.complex128)
 
 
+def _synthetic_2d_fid_varying_peak_position(n_f1=8, n_f2=64):
+    """Each row's magnitude peak sits at a different index -- unlike
+    real imaging/echo data (one genuine, consistently-placed echo),
+    this mimics a non-echo-shaped pseudo-2D series (e.g. T2/CPMG) where
+    find_echo_top has nothing real to lock onto and lands wherever the
+    (here, deliberately shifted) maximum happens to be, row to row."""
+    t2 = np.arange(n_f2)
+    rows = []
+    for row_index in range(n_f1):
+        peak_at = 10 + row_index  # a different "echo top" every row
+        row = np.zeros(n_f2, dtype=np.complex128)
+        row[peak_at] = 1.0 + 0.5j
+        row += 0.01 * np.exp(-((t2 - peak_at) ** 2) / 8.0)  # a little width so parabolic fit is well-defined
+        rows.append(row)
+    return np.array(rows)
+
+
 def _mock_2d(monkeypatch, acqus, fid, acqu2s=None):
     dic = {"acqus": acqus}
     if acqu2s is not None:
@@ -174,3 +191,24 @@ def test_read_2d_fid_shift_and_linear_predict_run_without_error(tmp_path, monkey
         fid_shift=3.0, linear_predict_points=8, linear_predict_order=8,
     )
     assert spectrum.data.shape == (32, 64)
+
+
+def test_read_2d_align_echo_handles_per_row_echo_position_disagreement(tmp_path, monkeypatch):
+    # Regression test: align_echo's own auto-truncation caps each row
+    # at its own len(row) - ceil(echo_top) (see prepare_fid). Applied
+    # per row via np.apply_along_axis, a real (non-imaging) pseudo-2D
+    # series -- rows with no genuine common echo shape, so
+    # find_echo_top lands wherever each row's own maximum happens to
+    # be -- used to disagree row to row and crash np.apply_along_axis
+    # entirely ("could not broadcast..."), found on real Bruker T2
+    # data via Align Echo. read_2d must produce one consistent shape
+    # regardless.
+    path = _make_2d_experiment_dir(tmp_path)
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_2d_fid_varying_peak_position(n_f1=8, n_f2=64)
+    _mock_2d(monkeypatch, acqus, fid)
+
+    spectrum = bruker.read_2d(path, homonuclear=True, autophase=False, align_echo=True)
+
+    assert spectrum.data.shape[0] == 32  # F1 zero-filled to proc2s's own SI, as usual
+    assert spectrum.data_imag is not None
