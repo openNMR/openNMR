@@ -1664,8 +1664,15 @@ def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d
     row = np.exp(-t2 * 300) * np.exp(2j * np.pi * 1000.0 * t2)
     fid = np.tile(row, (n_f1, 1)).astype(np.complex128)
     dic = {"acqus": acqus, "acqu2s": acqu2s}
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    # _guess_raw_2d_shape's real-file-scale TD/DTYPA/file-size logic
+    # (see its own docstring in io/bruker.py) doesn't apply to this
+    # small synthetic fixture -- bypass it so the mocked `fid` above
+    # passes straight through `_read_raw_2d_data` at its own actual
+    # shape, unchanged.
+    monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
     return str(expt)
 
 
@@ -2036,8 +2043,10 @@ def test_main_window_processing_preview_pseudo2d_uses_only_active_slice(qapp, tm
     # A different decay rate per row -- slices are visibly distinct.
     fid = np.stack([np.exp(-t2 * 300 * (row + 1)) * np.exp(2j * np.pi * 1000.0 * t2) for row in range(n_f1)])
     dic = {"acqus": acqus, "acqu2s": acqu2s}
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
     window = MainWindow()
     window._load(str(expt), vendor="bruker")
@@ -2463,8 +2472,10 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
         rows.append(row)
     fid = np.array(rows)
     dic = {"acqus": acqus, "acqu2s": {"NUC1": "off", "BF1": 400.0, "O1": 0.0}}
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
     window = MainWindow()
     window._load(str(expt), vendor="bruker")

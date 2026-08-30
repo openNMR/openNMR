@@ -94,6 +94,90 @@ def _remove_digital_filter(dic: dict, data: np.ndarray) -> np.ndarray:
     return ng.bruker.remove_digital_filter(dic, data)
 
 
+def _guess_raw_2d_shape(dic: dict, ser_path: str) -> tuple[int, int]:
+    """The raw ``ser`` file's true shape ``(n_rows, n_complex_per_row)``,
+    determined directly from ``TD``/``DTYPA``/the file's own size --
+    not from ``nmrglue.bruker.guess_shape``, which needs the pulse
+    program's own loop/increment structure to handle anything beyond
+    the simplest case (this project deliberately skips reading it --
+    see :func:`read_2d`'s own comment) and, even with it enabled, has
+    a real bug for float64 (``DTYPA=2``) data: it rounds the per-row
+    word count using the correct 128-word convention but then converts
+    that to bytes with a hardcoded ``*4`` (int32's own size) instead
+    of ``*8``, so its own file-size-based guess is never actually
+    validated.
+
+    Row *length* (``TD`` rounded up to the block size the acquisition
+    memory actually uses -- 128 float64 words / 1024 bytes for
+    ``DTYPA=2``, 256 int32 words / 1024 bytes otherwise, matching the
+    documented convention for the direct dimension) is confirmed
+    empirically via autocorrelation on real raw ``ser`` data (a
+    genuine periodicity in the FID envelope, not just a formula) on
+    two independent real States-TPPI datasets, and matches nmrglue's
+    own current guess exactly on the two Bruker 2D datasets this
+    project's test suite already exercises successfully
+    (``bruker_T2/11``, ``bruker_PFG/150``) -- this isn't a change in
+    behaviour for data that already worked.
+
+    Row *count*: ``acqu2s``'s own ``TD`` directly -- confirmed by
+    reading a real compiled pulse program's own ``mc``-macro expansion
+    for a States-TPPI dataset directly (not guessed): the labelled
+    loop structure writes exactly ``TD`` total rows (``trunc(TD/2)``
+    t1 steps, each writing a real/imaginary States pair of 2 rows).
+    On real data this doesn't always land on the file's own exact byte
+    count -- a small, so-far-unexplained handful of extra rows beyond
+    ``TD`` even on acquisitions with a clean (non-aborted-and-restarted)
+    audit trail, see TODO.md's own write-up of this investigation.
+    Rather than fail, falls back to ``file_size // row_bytes`` (floor
+    division, always in-bounds) whenever ``TD`` itself doesn't divide
+    the file exactly, so a real acquisition with this small
+    discrepancy still loads -- capturing every genuinely-present row
+    -- instead of crashing outright the way relying on ``TD`` alone
+    (and nmrglue's own guess) both currently do."""
+    acqus = dic["acqus"]
+    td0 = int(float(acqus["TD"]))
+    td1 = int(float(dic.get("acqu2s", {}).get("TD", 0))) or None
+    dtypa = int(float(acqus.get("DTYPA", 0)))
+    word_bytes = 8 if dtypa == 2 else 4
+    block = 128 if dtypa == 2 else 256
+    per_row_words = -(-td0 // block) * block  # ceil to the nearest block
+    row_bytes = per_row_words * word_bytes
+
+    fsize = os.path.getsize(ser_path)
+    if td1 and td1 * row_bytes == fsize:
+        n_rows = td1
+    else:
+        n_rows = fsize // row_bytes  # floor -- always a valid, in-bounds reshape
+    return n_rows, per_row_words // 2
+
+
+def _read_raw_2d_data(path: str, dic: dict) -> np.ndarray:
+    """Read the raw ``ser`` file into a complex ``(n_rows,
+    n_complex_per_row)`` array, via ``nmrglue.bruker.read`` itself
+    (same call every other reader in this module uses, and the same
+    mocking seam every test in this project's suite already relies on)
+    but with the shape it reshapes to coming from
+    :func:`_guess_raw_2d_shape` instead of ``nmrglue``'s own internal
+    guess (see that function's own docstring for why).
+
+    ``ng.bruker.read``'s own ``.reshape()`` demands an *exact* fit --
+    it falls back to returning the flat, unshaped array (with its own
+    warning) otherwise, which is exactly what happens on a real
+    dataset where :func:`_guess_raw_2d_shape`'s own floor-division
+    fallback was needed (the file's byte count doesn't exactly match
+    ``TD``'s own expected total -- see that function's docstring).
+    Truncating and reshaping that flat array ourselves in that case is
+    always safe: the target shape's element count was already derived
+    from this exact array's own length, by construction."""
+    ser_path = os.path.join(path, "ser")
+    n_rows, n_complex_per_row = _guess_raw_2d_shape(dic, ser_path)
+    shape = (n_rows, n_complex_per_row)
+    _, data = ng.bruker.read(path, shape=shape, cplex=True, read_pulseprogram=False)
+    if data.shape != shape:
+        data = data[: n_rows * n_complex_per_row].reshape(shape)
+    return data
+
+
 def _apply_bruker_window(fid: np.ndarray, procs: dict, sw_hz: float) -> np.ndarray:
     """Apply the window TopSpin recorded in ``procs`` (``WDW``, with
     ``LB``/``SSB`` as needed), via ``nmrglue.proc_base``."""
@@ -300,12 +384,21 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     """Read the raw ``ser`` and reprocess it (F2 then F1) using the
     parameters TopSpin recorded in ``procs``/``proc2s``.
 
-    Handles routine complex 2D processing via ``nmrglue``'s own
-    shape-guessing and hypercomplex (States/TPPI) assembly. This is
-    the higher-risk half of the raw-FID path (more moving parts than
-    1D) -- validate against :func:`read_2d_processed` on real data
-    before trusting it for phase-sensitive work (see the project
-    plan's Verification section).
+    Raw ``ser`` shape comes from :func:`_guess_raw_2d_shape`/
+    :func:`_read_raw_2d_data` -- not ``nmrglue.bruker.read``'s own
+    shape-guessing, which needs the pulse program's own loop/increment
+    structure for anything beyond the simplest case (this project
+    deliberately skips reading it) and has a real DTYPA-related bug of
+    its own even when it is read (see :func:`_guess_raw_2d_shape`'s
+    own docstring for both, and TODO.md for the real-data investigation
+    that found them). This is the higher-risk half of the raw-FID path
+    (more moving parts than 1D) -- validate against
+    :func:`read_2d_processed` on real data before trusting it for
+    phase-sensitive work (see the project plan's Verification section).
+    Does **not** yet perform States/States-TPPI/Echo-Antiecho
+    hypercomplex row-pair decoding before the F1 FFT (flagged, not
+    silently wrong: see TODO.md) -- correctly shaped raw data is a
+    prerequisite for that, not a substitute.
 
     ``pseudo_2d`` : whether F1 is a non-frequency indirect dimension
     (no FFT along that axis -- a slice/experiment index instead), i.e.
@@ -341,14 +434,17 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     an override here, since indirect-dimension processing is normally
     fixed at acquisition rather than hand-tuned per view.
     """
-    # read_pulseprogram=False: we never use dic["pprog"], and reading
-    # it is slow to fail (and warns) whenever the pulse program can't
-    # be found/parsed (renamed/custom sequences, older datasets, ...).
-    # nmrglue's own shape-guessing (used below, since shape=None) also
-    # falls back to a simpler, purely TD/acqu2s-TD-based guess when
-    # dic["pprog"] is absent -- skipping the pulse program removes
-    # dependence on parsing it at all, not just the warning.
-    dic, data = ng.bruker.read(path, read_pulseprogram=False)
+    # Shape comes from _guess_raw_2d_shape/_read_raw_2d_data (own
+    # TD/DTYPA/file-size-based logic, see their own docstrings) rather
+    # than nmrglue's own shape-guessing -- that needs the pulse
+    # program's own loop/increment structure for anything beyond the
+    # simplest case, and even reading it doesn't resolve every real
+    # pulse program's own loop-variable naming (see TODO.md). Still
+    # uses nmrglue for the acqus/acqu2s parameter dicts themselves
+    # (read_acqus_file, no pulse-program dependency) and the actual
+    # digital-filter removal below (remove_digital_filter).
+    dic = ng.bruker.read_acqus_file(path)
+    data = _read_raw_2d_data(path, dic)
     data = _remove_digital_filter(dic, data).astype(np.complex128)
     data = np.conj(data)  # see _CONJUGATE_QUADRATURE_NOTE below
     fid_raw = data  # the truly raw FID (every row/slice) -- see metadata.raw["fid_raw"]'s own comment below
@@ -789,37 +885,35 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     window function no longer routes through here (``read_1d``/
     ``read_2d`` handle that themselves now, staying on the raw-FID
     path) -- or, for 2D specifically, when the raw ``ser``'s shape
-    can't be determined at all (found on real data: ``nmrglue``'s own
-    shape-guessing has a real bug for ``DTYPA=2``/float64 2D data with
-    a complex direct dimension when no pulse program can be read,
-    underestimating the row count by using a fixed 4-bytes-per-point
-    divisor regardless of the actual point size -- there is no raw
-    shape to "stay on" the way an unsupported window has a FID to stay
-    on, so falling back is the only usable option). Flagged via
+    genuinely can't be determined at all (``_guess_raw_2d_shape``
+    needs ``acqus["TD"]`` at minimum -- missing on a malformed/
+    incomplete parameter set; there is no raw shape to "stay on" the
+    way an unsupported window has a FID to stay on, so falling back is
+    the only usable option). Flagged via
     ``metadata.raw["read_2d_shape_guess_failed"]`` so callers (the
     GUI) can tell the user why raw-FID reprocessing isn't available,
     rather than it being silent.
 
-    Only ``IndexError`` triggers the fallback, deliberately not the
-    broader ``ValueError`` -- ``nmrglue.bruker.read_binary`` already
-    catches its own reshape ``ValueError`` internally (just returns
-    the unshaped 1D array with a warning printed), so what actually
-    propagates out of a genuine shape-guess failure is always the
-    *next* thing that trips on that 1D array, ``read_2d``'s own
-    ``data.shape[1]`` -- an ``IndexError``. A bare ``ValueError`` here
-    is something else going wrong inside ``read_2d`` (found one for
-    real: ``align_echo``'s auto-truncation disagreeing row-to-row --
-    fixed directly, not by routing it through this fallback) and
-    should surface to the caller normally instead of being silently
-    swallowed into a fallback that discards whatever raw-FID
-    processing was actually requested."""
+    Catches ``KeyError`` (``_guess_raw_2d_shape``'s own ``acqus["TD"]``
+    lookup, its only way to fail) and, defensively, ``IndexError``
+    (this project's own raw-shape resolution replaced the
+    ``nmrglue``-shape-guess-then-``.reshape()``-then-``data.shape[1]``
+    chain that used to be the real source of this -- see TODO.md's
+    Bruker raw-``ser`` investigation -- so this shouldn't actually
+    trigger any more, but costs nothing to keep). Deliberately not the
+    broader ``ValueError``: something else going wrong inside
+    ``read_2d`` should surface to the caller normally (found one for
+    real once: ``align_echo``'s auto-truncation disagreeing row-to-row
+    -- fixed directly, not by routing it through this fallback), not
+    be silently swallowed into a fallback that discards whatever
+    raw-FID processing was actually requested."""
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
     has_2rr = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
     if has_ser:
         try:
             return read_2d(path, **kwargs)
-        except IndexError as exc:
+        except (IndexError, KeyError) as exc:
             if not has_2rr:
                 raise
             # read_2d_processed has no raw-FID-reprocessing parameters

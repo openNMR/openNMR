@@ -55,8 +55,16 @@ def _mock_2d(monkeypatch, acqus, fid, acqu2s=None):
     dic = {"acqus": acqus}
     if acqu2s is not None:
         dic["acqu2s"] = acqu2s
+    monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
     monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    # _guess_raw_2d_shape's own TD/DTYPA/file-size-based block-rounding
+    # (see its own docstring) is real-file-scale logic that doesn't
+    # apply to these small synthetic fixtures -- bypass it so the mock
+    # `fid` above passes straight through `_read_raw_2d_data` at its
+    # own actual shape, unchanged, the same as before that function
+    # existed.
+    monkeypatch.setattr(bruker, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
 
 def test_read_2d_homonuclear_shape(tmp_path, monkeypatch):
@@ -212,3 +220,119 @@ def test_read_2d_align_echo_handles_per_row_echo_position_disagreement(tmp_path,
 
     assert spectrum.data.shape[0] == 32  # F1 zero-filled to proc2s's own SI, as usual
     assert spectrum.data_imag is not None
+
+
+# ============================================================
+# Raw ser shape resolution (_guess_raw_2d_shape/_read_raw_2d_data) --
+# real on-disk binary files, not mocked ng.bruker.read, since these
+# specifically replace nmrglue's own shape-guessing logic. See
+# TODO.md's write-up of the real-data investigation this came from:
+# row length confirmed via autocorrelation on real raw ser data (a
+# genuine periodicity in the FID envelope) on two independent real
+# States-TPPI datasets; row count confirmed by directly reading a real
+# compiled pulse program's own mc-macro expansion.
+# ============================================================
+
+def _write_real_ser(path, n_rows, n_complex_per_row, dtype="<f8"):
+    """A real (uninitialized-content) ``ser`` file of exactly the
+    given shape, real+imag interleaved (Bruker's own convention) --
+    content is irrelevant to shape-resolution tests, only the byte
+    count matters."""
+    n_real_words = n_rows * n_complex_per_row * 2
+    np.zeros(n_real_words, dtype=dtype).tofile(path)
+
+
+def test_guess_raw_2d_shape_dtypa_float64_block_rounds_to_128_words(tmp_path):
+    # DTYPA=2 (float64): the direct dimension is block-padded to the
+    # nearest 128-word (1024-byte) boundary -- confirmed via
+    # autocorrelation on real raw ser data (see this test's module
+    # docstring), not just derived from the acquisition-memory
+    # block-padding convention alone.
+    ser = tmp_path / "ser"
+    td2 = 20  # row count -- exact fit, isolates the row-*length* rounding
+    _write_real_ser(ser, n_rows=td2, n_complex_per_row=128, dtype="<f8")
+    dic = {"acqus": {"TD": "200", "DTYPA": "2"}, "acqu2s": {"TD": str(td2)}}
+
+    n_rows, n_complex_per_row = bruker._guess_raw_2d_shape(dic, str(ser))
+
+    assert n_complex_per_row == 128  # ceil(200/128)*128 = 256 words = 128 complex
+    assert n_rows == td2  # TD divides the file exactly
+
+
+def test_guess_raw_2d_shape_dtypa_int32_block_rounds_to_256_words(tmp_path):
+    # DTYPA absent/0 (int32): the direct dimension is block-padded to
+    # the nearest 256-word (1024-byte) boundary instead -- same 1024-
+    # byte block target, different word count for the smaller dtype.
+    ser = tmp_path / "ser"
+    td2 = 5
+    _write_real_ser(ser, n_rows=td2, n_complex_per_row=128, dtype="<i4")
+    dic = {"acqus": {"TD": "200"}, "acqu2s": {"TD": str(td2)}}
+
+    n_rows, n_complex_per_row = bruker._guess_raw_2d_shape(dic, str(ser))
+
+    assert n_complex_per_row == 128  # ceil(200/256)*256 = 256 words = 128 complex
+    assert n_rows == td2
+
+
+def test_guess_raw_2d_shape_falls_back_to_file_size_when_td_does_not_divide_exactly(tmp_path):
+    # Real-data finding (see TODO.md): TD (acqu2s) doesn't always land
+    # on the file's own exact byte count, even on a clean (non-
+    # aborted-and-restarted) acquisition, for reasons not fully
+    # resolved -- rather than fail, fall back to what the file's own
+    # size actually supports (floor division, always in-bounds) so the
+    # data still loads instead of crashing outright.
+    ser = tmp_path / "ser"
+    true_rows = 23  # file only actually holds 23 rows...
+    _write_real_ser(ser, n_rows=true_rows, n_complex_per_row=128, dtype="<f8")
+    dic = {"acqus": {"TD": "200", "DTYPA": "2"}, "acqu2s": {"TD": "500"}}  # ...but TD claims 500
+
+    n_rows, n_complex_per_row = bruker._guess_raw_2d_shape(dic, str(ser))
+
+    assert n_complex_per_row == 128
+    assert n_rows == true_rows  # not 500 -- TD didn't divide the file exactly, so file size wins
+
+
+def test_read_2d_loads_successfully_from_a_real_ser_file_td_mismatch(tmp_path):
+    # End-to-end regression test for the real bug this round fixed:
+    # every genuine (non-pseudo) 2D Bruker dataset actually available
+    # for testing failed to load via nmrglue's own shape-guessing --
+    # not just a mismatch, an outright crash/fallback with no raw data
+    # recovered at all. This reproduces that exact shape (TD doesn't
+    # exactly divide the real file) end to end through the real
+    # read_2d, not just the shape-resolution helper alone.
+    n_f1, n_f2 = 8, 32
+    expt = tmp_path / "realexpt2d"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    _write_procs(pdata / "procs", {"SW_p": 8000.0, "SI": n_f2, "SF": 400.13, "WDW": 0})
+    _write_procs(pdata / "proc2s", {"SW_p": 2000.0, "SI": n_f1, "SF": 100.6, "WDW": 0})
+    _write_procs(expt / "acqus", {
+        "NUC1": "<1H>", "BF1": 400.0, "O1": 2000.0, "NS": 1.0, "TD": n_f2 * 2, "DTYPA": 2, "BYTORDA": 0,
+    })
+    _write_procs(expt / "acqu2s", {"NUC1": "<13C>", "BF1": 100.6, "O1": 0.0, "TD": n_f1 + 5})  # +5: won't divide exactly
+
+    # A real echo-shaped FID per row, written as a genuine on-disk
+    # float64 real+imag-interleaved ser -- the file only actually holds
+    # n_f1 rows (acqu2s claims n_f1 + 5).
+    t2 = np.arange(n_f2) / 8000.0
+    row = np.exp(-t2 * 300) * np.exp(2j * np.pi * 1000.0 * t2)
+    fid = np.tile(row, (n_f1, 1)).astype(np.complex128)
+    interleaved = np.empty((n_f1, n_f2 * 2), dtype="<f8")
+    interleaved[:, 0::2] = fid.real
+    interleaved[:, 1::2] = fid.imag
+    interleaved.tofile(expt / "ser")
+
+    def _no_digital_filter(_dic, data):
+        return data
+
+    import opennmr.io.bruker as bruker_module
+    orig = bruker_module.ng.bruker.remove_digital_filter
+    bruker_module.ng.bruker.remove_digital_filter = _no_digital_filter
+    try:
+        spectrum = bruker.read_2d(str(expt), homonuclear=False, autophase=False, pseudo_2d=False)
+    finally:
+        bruker_module.ng.bruker.remove_digital_filter = orig
+
+    assert spectrum.data.shape[0] == n_f1  # zero-filled to proc2s's own SI
+    assert spectrum.data_imag is not None
+    assert spectrum.metadata.raw.get("read_2d_shape_guess_failed") is None
