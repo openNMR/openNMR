@@ -147,6 +147,12 @@ class MainWindow(QMainWindow):
         # matching row directly in the plot too (see
         # _on_compare_list_current_row_changed), not just in the list.
         self._compare_plot_row_positions: dict[int, int] = {}
+        # True when compare_list's contents no longer match what
+        # compare_canvas last actually rendered (see
+        # _refresh_compare_view's deferred-render path) -- checked by
+        # _render_compare_view_if_stale, called whenever Compare
+        # becomes the visible tab.
+        self._compare_view_stale = False
         # The per-slice pseudo-Voigt fit results from the most recent
         # Analysis-tab fit (NMR2D_fit_slices's own "rows" output) --
         # lets "Spectrum fit (slice #)" browse the intermediate spectral
@@ -1295,6 +1301,11 @@ class MainWindow(QMainWindow):
         self.output_grid_checkbox.toggled.connect(self._on_output_style_changed)
         style_form.addRow(self.output_grid_checkbox)
 
+        self.output_minor_ticks_checkbox = QCheckBox("Minor ticks")
+        self.output_minor_ticks_checkbox.setChecked(True)
+        self.output_minor_ticks_checkbox.toggled.connect(self._on_output_style_changed)
+        style_form.addRow(self.output_minor_ticks_checkbox)
+
         self.output_legend_checkbox = QCheckBox("Show legend (Spectrum tab)")
         self.output_legend_checkbox.setToolTip(
             "Same on/off state as the Spectrum canvas's own right-click "
@@ -1323,13 +1334,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(style_box)
 
         export_box = QGroupBox("Export settings")
+        export_intro = QLabel(
+            "Applies only to File > Save Figure As... -- never to the "
+            "live view here, which Qt's own window layout already "
+            "controls (changing a live figure's size out from under "
+            "Qt fights it visibly)."
+        )
+        export_intro.setWordWrap(True)
         export_form = QFormLayout(export_box)
+        export_form.addRow(export_intro)
 
         self.output_dpi_spin = QSpinBox()
         self.output_dpi_spin.setRange(50, 1200)
         self.output_dpi_spin.setValue(int(self.canvas.figure.get_dpi()))
-        self.output_dpi_spin.setToolTip("Resolution used by File > Save Figure As... (matplotlib's own save dialog).")
-        self.output_dpi_spin.valueChanged.connect(self._on_output_style_changed)
+        self.output_dpi_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("DPI:", self.output_dpi_spin)
 
         fig_w, fig_h = self.canvas.figure.get_size_inches()
@@ -1337,24 +1355,26 @@ class MainWindow(QMainWindow):
         self.output_fig_width_spin.setRange(1.0, 40.0)
         self.output_fig_width_spin.setValue(float(fig_w))
         self.output_fig_width_spin.setSuffix(" in")
-        self.output_fig_width_spin.valueChanged.connect(self._on_output_style_changed)
+        self.output_fig_width_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("Figure width:", self.output_fig_width_spin)
 
         self.output_fig_height_spin = QDoubleSpinBox()
         self.output_fig_height_spin.setRange(1.0, 40.0)
         self.output_fig_height_spin.setValue(float(fig_h))
         self.output_fig_height_spin.setSuffix(" in")
-        self.output_fig_height_spin.valueChanged.connect(self._on_output_style_changed)
+        self.output_fig_height_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("Figure height:", self.output_fig_height_spin)
 
         layout.addWidget(export_box)
 
         template_box = QGroupBox("Per-type defaults")
         template_layout = QVBoxLayout(template_box)
-        template_layout.addWidget(QLabel(
+        template_intro = QLabel(
             "Save the current styling above as the default for one "
             "spectrum type, or load a previously-saved one back in."
-        ))
+        )
+        template_intro.setWordWrap(True)
+        template_layout.addWidget(template_intro)
         self.output_type_combo = QComboBox()
         for label, key in self._FIGURE_STYLE_TYPES:
             self.output_type_combo.addItem(label, key)
@@ -1379,8 +1399,13 @@ class MainWindow(QMainWindow):
             "labelsize": self.output_fontsize_spin.value(),
             "tick_length": self.output_tick_length_spin.value(),
             "tick_width": self.output_tick_width_spin.value(),
+            "minor_ticks": self.output_minor_ticks_checkbox.isChecked(),
             "grid": self.output_grid_checkbox.isChecked(),
             "compare_colormap": self.output_colormap_combo.currentText(),
+        }
+
+    def _current_output_export_kwargs(self) -> dict:
+        return {
             "dpi": self.output_dpi_spin.value(),
             "fig_width": self.output_fig_width_spin.value(),
             "fig_height": self.output_fig_height_spin.value(),
@@ -1390,6 +1415,11 @@ class MainWindow(QMainWindow):
         kwargs = self._current_output_style_kwargs()
         for canvas in self._all_canvases():
             canvas.set_style(**kwargs)
+
+    def _on_output_export_settings_changed(self, *_args) -> None:
+        kwargs = self._current_output_export_kwargs()
+        for canvas in self._all_canvases():
+            canvas.set_export_settings(**kwargs)
 
     def _on_output_legend_changed(self, *_args) -> None:
         self.canvas.set_legend_visible(self.output_legend_checkbox.isChecked())
@@ -1405,7 +1435,7 @@ class MainWindow(QMainWindow):
     def _on_save_figure_style_template(self) -> None:
         styles = self._load_figure_styles()
         key = self.output_type_combo.currentData()
-        styles[key] = self._current_output_style_kwargs()
+        styles[key] = {**self._current_output_style_kwargs(), **self._current_output_export_kwargs()}
         os.makedirs(os.path.dirname(self._FIGURE_STYLES_PATH), exist_ok=True)
         with open(self._FIGURE_STYLES_PATH, "w") as f:
             json.dump(styles, f, indent=2)
@@ -1427,13 +1457,15 @@ class MainWindow(QMainWindow):
         self.output_fontsize_spin.setValue(style.get("labelsize", MplCanvas._AXIS_LABELSIZE))
         self.output_tick_length_spin.setValue(style.get("tick_length", MplCanvas._TICK_LENGTH))
         self.output_tick_width_spin.setValue(style.get("tick_width", MplCanvas._TICK_WIDTH))
+        self.output_minor_ticks_checkbox.setChecked(style.get("minor_ticks", True))
         self.output_grid_checkbox.setChecked(style.get("grid", False))
         self.output_colormap_combo.setCurrentText(style.get("compare_colormap", "viridis"))
         self.output_dpi_spin.setValue(style.get("dpi", 300))
         self.output_fig_width_spin.setValue(style.get("fig_width", 6.4))
         self.output_fig_height_spin.setValue(style.get("fig_height", 4.8))
         # Every spin/combo above already applies itself on change
-        # (_on_output_style_changed) -- no separate "apply" step needed.
+        # (_on_output_style_changed/_on_output_export_settings_changed)
+        # -- no separate "apply" step needed.
 
     def _selected_rows(self) -> list[int]:
         return sorted(self.spectrum_list.row(item) for item in self.spectrum_list.selectedItems())
@@ -1675,7 +1707,7 @@ class MainWindow(QMainWindow):
         if self.compare_list.count() > 0:
             self._refresh_compare_view(switch_tab=switch_tab)
 
-    def _refresh_compare_view(self, switch_tab: bool = True) -> None:
+    def _refresh_compare_view(self, switch_tab: bool = True, force_render: bool = False) -> None:
         rows_and_entries = self._compare_checked_rows_and_entries()
         rows_and_candidates = [(row, self._resolve_compare_entry(e)) for row, e in rows_and_entries]
         # stale entries (removed/reprocessed) silently drop
@@ -1726,6 +1758,23 @@ class MainWindow(QMainWindow):
         self.compare_status_label.setText(" ".join(bits))
 
         mode = "stack" if self.layout_mode_combo.currentIndex() == 0 else "overlay"
+
+        # Rendering a "Stacked" Compare view is one subplot per
+        # spectrum -- fine for a typical handful, but a pseudo-2D
+        # series can have hundreds/thousands of slices (a real
+        # microimaging/HSQC-as-pseudo-2D dataset measured at ~25s just
+        # for this render alone). Auto-populating Compare from such a
+        # series (see _populate_compare_list_from_pseudo2d) already
+        # calls this with switch_tab=False specifically so it doesn't
+        # steal focus -- if the Compare canvas isn't even the one
+        # currently showing either, there's no reason to pay that cost
+        # now; defer the actual draw until Compare is genuinely
+        # visited (see _render_compare_view_if_stale).
+        if not force_render and not switch_tab and self.canvas_tabs.currentWidget() is not self.compare_canvas:
+            self._compare_view_stale = True
+            return
+        self._compare_view_stale = False
+
         try:
             self.compare_canvas.show_compare(plot_spectra, mode=mode, normalize=(norm_mode == "max"))
             if switch_tab:
@@ -2067,9 +2116,16 @@ class MainWindow(QMainWindow):
         if self._fid_preview_available(spectrum):
             self._show_fid_preview(spectrum, switch_tab=False)
 
+    def _render_compare_view_if_stale(self) -> None:
+        if self._compare_view_stale:
+            self._refresh_compare_view(switch_tab=False, force_render=True)
+
     def _on_canvas_tab_changed(self, _index: int) -> None:
         if self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
             self._refresh_processing_preview_if_active()
+            return
+        if self.canvas_tabs.currentWidget() is self.compare_canvas:
+            self._render_compare_view_if_stale()
             return
         if self.canvas_tabs.currentWidget() is not self.fid_canvas:
             return
@@ -3208,7 +3264,19 @@ class MainWindow(QMainWindow):
         slice_index = self.slice_spin.value()
         trace = get_trace(spectrum, axis="f1", index=slice_index)
         if reset_view or not self.canvas.ax.lines:
+            # No existing Line2D for update_data to refresh in place --
+            # most commonly, phasing was just started from a pseudo-2D's
+            # default contour view. X (ppm) means the same thing on a
+            # contour and a slice line view (unlike y -- slice number
+            # vs. intensity, genuinely different), so preserve whatever
+            # ppm zoom was already there across the otherwise-
+            # unavoidable rebuild, rather than silently resetting it
+            # the moment the user's very first phase tick lands.
+            preserve_xlim = not reset_view and self.canvas._contour_spectrum is not None
+            xlim = self.canvas.ax.get_xlim() if preserve_xlim else None
             self.canvas.show_spectrum(trace)
+            if xlim is not None:
+                self.canvas.ax.set_xlim(xlim)
         else:
             self.canvas.update_data(trace)
         self.canvas.ax.set_title(self._slice_label(spectrum, slice_index))
@@ -3834,7 +3902,9 @@ class MainWindow(QMainWindow):
 
         apply_box = QGroupBox("Apply VOCS")
         apply_layout = QVBoxLayout(apply_box)
-        apply_layout.addWidget(QLabel("Corrects the currently selected spectrum, added as a new spectrum."))
+        apply_intro = QLabel("Corrects the currently selected spectrum, added as a new spectrum.")
+        apply_intro.setWordWrap(True)
+        apply_layout.addWidget(apply_intro)
         apply_button = QPushButton("Apply VOCS to Selected Spectrum")
         apply_button.clicked.connect(self._on_apply_vocs_clicked)
         apply_layout.addWidget(apply_button)
@@ -3842,11 +3912,13 @@ class MainWindow(QMainWindow):
 
         sum_box = QGroupBox("VOCS Sum")
         sum_layout = QVBoxLayout(sum_box)
-        sum_layout.addWidget(QLabel(
+        sum_intro = QLabel(
             "Corrects and combines every spectrum checked in the "
             "Compare tab onto one common ppm axis, added as a new "
             "spectrum."
-        ))
+        )
+        sum_intro.setWordWrap(True)
+        sum_layout.addWidget(sum_intro)
         self.vocs_average_checkbox = QCheckBox("Average instead of sum")
         sum_layout.addWidget(self.vocs_average_checkbox)
         sum_button = QPushButton("VOCS Sum (Compare stack)")

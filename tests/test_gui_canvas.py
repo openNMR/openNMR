@@ -1086,6 +1086,20 @@ def test_set_style_future_draw_picks_up_new_values(qapp):
     assert canvas.ax.spines["bottom"].get_linewidth() == pytest.approx(3.0)
 
 
+def test_set_style_minor_ticks_toggle(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    assert canvas._minor_ticks_visible is True  # default
+
+    canvas.set_style(minor_ticks=False)
+    assert canvas._minor_ticks_visible is False
+    assert canvas.ax.xaxis.get_minor_locator().__class__.__name__ == "NullLocator"
+
+    canvas.set_style(minor_ticks=True)
+    assert canvas._minor_ticks_visible is True
+    assert canvas.ax.xaxis.get_minor_locator().__class__.__name__ != "NullLocator"
+
+
 def test_set_style_updates_already_drawn_axes_live(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_1d())
@@ -1103,11 +1117,57 @@ def test_set_style_grid_toggle_does_not_warn(qapp, recwarn):
     assert grid_warnings == []
 
 
-def test_set_style_dpi_and_figsize(qapp):
+def test_set_export_settings_does_not_touch_live_figure(qapp):
+    # Regression test: DPI/figure size used to apply straight to the
+    # live embedded figure, which visibly fought Qt's own automatic
+    # canvas-widget resizing. Now export-only, applied (and restored)
+    # only around an actual save -- see export_full_resolution.
     canvas = MplCanvas()
-    canvas.set_style(dpi=150, fig_width=8.0, fig_height=5.0)
-    assert canvas.figure.get_dpi() == pytest.approx(150)
-    assert canvas.figure.get_size_inches() == pytest.approx([8.0, 5.0])
+    original_dpi = canvas.figure.get_dpi()
+    original_size = canvas.figure.get_size_inches()
+
+    canvas.set_export_settings(dpi=150, fig_width=8.0, fig_height=5.0)
+
+    assert canvas.figure.get_dpi() == pytest.approx(original_dpi)
+    assert canvas.figure.get_size_inches() == pytest.approx(original_size)
+    assert canvas._export_dpi == pytest.approx(150)
+    assert canvas._export_fig_width == pytest.approx(8.0)
+    assert canvas._export_fig_height == pytest.approx(5.0)
+
+
+def test_export_full_resolution_applies_export_settings_around_save_only(qapp):
+    canvas = MplCanvas()
+    original_dpi = canvas.figure.get_dpi()
+    original_size = canvas.figure.get_size_inches()
+    canvas.set_export_settings(dpi=150, fig_width=8.0, fig_height=5.0)
+
+    seen = {}
+
+    def fake_save():
+        seen["dpi"] = canvas.figure.get_dpi()
+        seen["size"] = canvas.figure.get_size_inches()
+
+    canvas.export_full_resolution(fake_save)
+
+    assert seen["dpi"] == pytest.approx(150)
+    assert tuple(seen["size"]) == pytest.approx((8.0, 5.0))
+    # Restored afterward -- the live view must not stay at export size.
+    assert canvas.figure.get_dpi() == pytest.approx(original_dpi)
+    assert canvas.figure.get_size_inches() == pytest.approx(original_size)
+
+
+def test_export_full_resolution_restores_settings_even_if_save_raises(qapp):
+    canvas = MplCanvas()
+    original_dpi = canvas.figure.get_dpi()
+    canvas.set_export_settings(dpi=150)
+
+    def failing_save():
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        canvas.export_full_resolution(failing_save)
+
+    assert canvas.figure.get_dpi() == pytest.approx(original_dpi)
 
 
 def test_set_style_compare_colormap_used_on_next_redraw(qapp):

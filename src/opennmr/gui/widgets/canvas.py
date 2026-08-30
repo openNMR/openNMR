@@ -188,7 +188,13 @@ class MplCanvas(QWidget):
         self._TICK_LENGTH = type(self)._TICK_LENGTH
         self._TICK_WIDTH = type(self)._TICK_WIDTH
         self._grid_visible = False
+        self._minor_ticks_visible = True
         self._compare_colormap = "viridis"
+        # Export-only DPI/figure-size -- see set_export_settings's own
+        # docstring for why these never touch the live figure directly.
+        self._export_dpi: float | None = None
+        self._export_fig_width: float | None = None
+        self._export_fig_height: float | None = None
         # Persists across a rebuild the same way legend/aspect-lock do
         # (see show_spectrum's own docstring) -- an explicit opt-out of
         # plot_1d's default rendering-only downsampling (see
@@ -779,8 +785,7 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
-                  grid=None, legend_loc=None, compare_colormap=None,
-                  dpi=None, fig_width=None, fig_height=None) -> None:
+                  minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None) -> None:
         """The Output tab's live style panel -- updates whichever of
         these aren't ``None``, both as the new per-instance default
         (every ``show_*`` method reads ``self._AXIS_LINEWIDTH`` etc.,
@@ -793,10 +798,9 @@ class MplCanvas(QWidget):
         unlike :meth:`_apply_view_options`'s legend/grid/aspect, which
         are inherently single-axes concepts.
 
-        ``dpi``/``fig_width``/``fig_height`` (inches) apply straight
-        to ``self.figure`` -- the existing Save Figure As... path
-        (matplotlib's own toolbar save dialog) reads the figure's own
-        current dpi/size with no further changes needed here.
+        Deliberately does **not** cover DPI/figure size -- see
+        :meth:`set_export_settings` for why those are export-only,
+        never applied to this live embedded figure directly.
         """
         if linewidth is not None:
             self._AXIS_LINEWIDTH = linewidth
@@ -806,6 +810,8 @@ class MplCanvas(QWidget):
             self._TICK_LENGTH = tick_length
         if tick_width is not None:
             self._TICK_WIDTH = tick_width
+        if minor_ticks is not None:
+            self._minor_ticks_visible = minor_ticks
         if grid is not None:
             self._grid_visible = grid
         if legend_loc is not None:
@@ -817,9 +823,13 @@ class MplCanvas(QWidget):
             if linewidth is not None:
                 for spine in ax.spines.values():
                     spine.set_linewidth(linewidth)
-            if tick_length is not None or tick_width is not None:
+            if tick_length is not None or tick_width is not None or minor_ticks is not None:
                 ax.tick_params(which="major", length=self._TICK_LENGTH, width=self._TICK_WIDTH)
-                ax.tick_params(which="minor", length=self._TICK_LENGTH * 0.5, width=self._TICK_WIDTH * 0.75)
+                if self._minor_ticks_visible:
+                    ax.minorticks_on()
+                    ax.tick_params(which="minor", length=self._TICK_LENGTH * 0.5, width=self._TICK_WIDTH * 0.75)
+                else:
+                    ax.minorticks_off()
             if labelsize is not None:
                 ax.tick_params(which="major", labelsize=labelsize)
                 ax.xaxis.label.set_fontsize(labelsize)
@@ -831,20 +841,30 @@ class MplCanvas(QWidget):
             if legend_loc is not None and ax.get_legend() is not None:
                 ax.legend(loc=legend_loc)
 
-        if dpi is not None:
-            self.figure.set_dpi(dpi)
-        if fig_width is not None or fig_height is not None:
-            width, height = self.figure.get_size_inches()
-            self.figure.set_size_inches(
-                fig_width if fig_width is not None else width,
-                fig_height if fig_height is not None else height,
-            )
-
         # compare_colormap only takes effect on the next full
         # show_compare redraw (it re-derives every trace's colour from
         # scratch) -- nothing to update on the already-drawn axes here.
 
         self.canvas.draw_idle()
+
+    def set_export_settings(self, *, dpi=None, fig_width=None, fig_height=None) -> None:
+        """DPI/figure size (inches) for **exported** figures only --
+        stored, never applied to this live embedded canvas's own
+        figure. Deliberately not part of :meth:`set_style`: matplotlib
+        figure-size handling and Qt's own automatic canvas-widget
+        resizing fight each other if the embedded figure's size is
+        changed out from under Qt (observed directly: the live plot
+        visibly misbehaves the moment a Qt resize and a matplotlib
+        ``set_size_inches`` disagree about how big the canvas is
+        supposed to be). Applied only around the actual save call, by
+        :meth:`export_full_resolution`, then restored immediately
+        after."""
+        if dpi is not None:
+            self._export_dpi = dpi
+        if fig_width is not None:
+            self._export_fig_width = fig_width
+        if fig_height is not None:
+            self._export_fig_height = fig_height
 
     def _prompt_contour_levels(self) -> None:
         """Right-click "Set Contour Levels…" -- lets the user directly
@@ -1108,7 +1128,7 @@ class MplCanvas(QWidget):
             self.ax.set_yticks([])
             plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
                                         linewidth=self._AXIS_LINEWIDTH)
-            plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+            plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                        labelsize=self._AXIS_LABELSIZE)
         elif spectrum.ndim == 2:
             self._current_1d_spectrum = None
@@ -1199,7 +1219,7 @@ class MplCanvas(QWidget):
             self.ax.set_title(title, fontsize=self._AXIS_LABELSIZE)
         plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=True,
                                     linewidth=self._AXIS_LINEWIDTH)
-        plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+        plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
         self._apply_view_options()
         self.figure.tight_layout()
@@ -1258,7 +1278,7 @@ class MplCanvas(QWidget):
             fid_ax.set_title(title, fontsize=self._AXIS_LABELSIZE)
         plotting.apply_spine_style(fid_ax, top=False, right=False, bottom=True, left=True,
                                     linewidth=self._AXIS_LINEWIDTH)
-        plotting.apply_tick_style(fid_ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+        plotting.apply_tick_style(fid_ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
 
         xmin, xmax, labeltext = plotting.plot_1d(spec_ax, spectrum, full_resolution=False)
@@ -1268,7 +1288,7 @@ class MplCanvas(QWidget):
         spec_ax.set_yticks([])
         plotting.apply_spine_style(spec_ax, top=False, right=False, bottom=True, left=False,
                                     linewidth=self._AXIS_LINEWIDTH)
-        plotting.apply_tick_style(spec_ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+        plotting.apply_tick_style(spec_ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
 
         self._apply_view_options()
@@ -1392,7 +1412,7 @@ class MplCanvas(QWidget):
                                             linewidth=self._AXIS_LINEWIDTH)
                 if is_bottom:
                     plotting.apply_tick_style(row_ax, axis="x", length=self._TICK_LENGTH,
-                                               width=self._TICK_WIDTH, labelsize=self._AXIS_LABELSIZE)
+                                               width=self._TICK_WIDTH, minor=self._minor_ticks_visible, labelsize=self._AXIS_LABELSIZE)
                 else:
                     row_ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
             axes[0].set_xlim(xmin, xmax)
@@ -1417,7 +1437,7 @@ class MplCanvas(QWidget):
             self.ax.set_yticks([])
             plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
                                         linewidth=self._AXIS_LINEWIDTH)
-            plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+            plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                        labelsize=self._AXIS_LABELSIZE)
             self.ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
 
@@ -1500,7 +1520,7 @@ class MplCanvas(QWidget):
             self.ax.set_title(title, fontsize=self._AXIS_LABELSIZE)
         plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
                                     linewidth=self._AXIS_LINEWIDTH)
-        plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+        plotting.apply_tick_style(self.ax, axis="x", length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
         self._apply_view_options()
@@ -1575,7 +1595,7 @@ class MplCanvas(QWidget):
         self.ax.set_ylabel("Intensity", fontsize=self._AXIS_LABELSIZE)
         plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=True,
                                     linewidth=self._AXIS_LINEWIDTH)
-        plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+        plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
         self._apply_view_options()
@@ -1692,10 +1712,19 @@ class MplCanvas(QWidget):
         full resolution first -- a saved/exported figure should never
         be silently missing points the live view dropped purely for
         faster interactive rendering, regardless of whether
-        :attr:`_full_resolution` happens to be on already. Restores
-        the on-screen (possibly still-downsampled) view again
-        afterward either way, including if ``save_fn`` itself raises
-        or the user cancels the save dialog inside it."""
+        :attr:`_full_resolution` happens to be on already. Also
+        applies the Output tab's own export DPI/figure-size (see
+        :meth:`set_export_settings`), if set, for the same reason a
+        saved figure shouldn't just inherit whatever size Qt's layout
+        happened to give the live embedded widget -- **not** applied
+        to the live figure at any other time (see that method's own
+        docstring for why: matplotlib's own figure-size handling and
+        Qt's automatic canvas-widget resizing fight each other if the
+        embedded figure's size is changed out from under Qt). Restores
+        the on-screen (possibly still-downsampled, still-interactive-
+        sized) view again afterward either way, including if
+        ``save_fn`` itself raises or the user cancels the save dialog
+        inside it."""
         swapped = []
         for line in self._lines_for_export():
             full_data = getattr(line, "_opennmr_full_res", None)
@@ -1705,13 +1734,26 @@ class MplCanvas(QWidget):
             line.set_data(*full_data)
         if swapped:
             self.canvas.draw()
+
+        original_dpi = self.figure.get_dpi()
+        original_size = self.figure.get_size_inches()
+        if self._export_dpi is not None:
+            self.figure.set_dpi(self._export_dpi)
+        if self._export_fig_width is not None or self._export_fig_height is not None:
+            self.figure.set_size_inches(
+                self._export_fig_width if self._export_fig_width is not None else original_size[0],
+                self._export_fig_height if self._export_fig_height is not None else original_size[1],
+            )
+
         try:
             save_fn()
         finally:
             if swapped:
                 for line, x, y in swapped:
                     line.set_data(x, y)
-                self.canvas.draw_idle()
+            self.figure.set_dpi(original_dpi)
+            self.figure.set_size_inches(original_size)
+            self.canvas.draw_idle()
 
 
 def _spectrum_label(spectrum: NMRSpectrum) -> str:

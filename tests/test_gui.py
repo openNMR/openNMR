@@ -85,6 +85,25 @@ def test_main_window_side_tabs_scroll_instead_of_growing_the_window(qapp):
         assert page.widgetResizable() is True
 
 
+def test_main_window_no_long_unwrapped_labels_in_left_tabs(qapp):
+    # Systemic guard: a QLabel with long text and no setWordWrap(True)
+    # reports its full single-line text as its sizeHint width, which
+    # propagates up through the layout and forces the whole side panel
+    # wider -- happened twice now (the Compare tab's own intro label,
+    # fixed earlier; then two labels added to the VOCS sub-tab this
+    # session, missed the same way). A short label legitimately
+    # doesn't need wrapping (e.g. "Zero-fill to:"), so this only flags
+    # long ones -- long enough that an unwrapped single line would
+    # visibly force the panel wide.
+    window = MainWindow()
+    offenders = []
+    for label in window.findChildren(QLabel):
+        text = label.text()
+        if len(text) > 60 and not label.wordWrap():
+            offenders.append(text)
+    assert offenders == []
+
+
 def test_scan_for_spectra_finds_single_bruker_experiment_picked_directly(tmp_path):
     path = _make_1d_dataset(tmp_path)
     matches = MainWindow._scan_for_spectra(path)
@@ -1268,6 +1287,26 @@ def test_main_window_pseudo2d_phase_affects_only_selected_slice(qapp, tmp_path):
             np.testing.assert_allclose(np.abs(updated[row]), np.abs(original[row]), atol=1e-6)
         else:
             np.testing.assert_allclose(updated[row], original[row], atol=1e-6)
+
+
+def test_main_window_phase_from_contour_preserves_ppm_zoom(qapp, tmp_path):
+    # Regression test: starting to phase a pseudo-2D spectrum straight
+    # from its default contour view (the common case -- a fresh
+    # selection always lands there) used to silently reset any ppm
+    # zoom the user had set on the contour, because there's no
+    # existing Line2D yet for update_data to refresh in place, so a
+    # full show_spectrum rebuild ran -- which resets the view by
+    # design. X (ppm) means the same thing on a contour and a slice
+    # line view, so it should survive that one-time rebuild.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    assert window.canvas._contour_spectrum is not None  # confirms we're really on the contour
+
+    window.canvas.ax.set_xlim(2.0, 4.0)
+
+    window.phase0_handle.setValue(10.0)
+
+    assert window.canvas.ax.get_xlim() == pytest.approx((2.0, 4.0))
 
 
 def test_main_window_pseudo2d_apply_to_all_slices(qapp, tmp_path):
@@ -2501,18 +2540,19 @@ def test_main_window_compare_auto_populates_from_pseudo2d_slices(qapp):
     for i in range(5):
         assert window.compare_list.item(i).checkState() == Qt.CheckState.Checked
     assert window.compare_status_label.text() == "Comparing 5 spectra."
-    # The list populating correctly isn't enough on its own -- the
-    # Compare canvas must actually be drawn too (a real ordering bug:
-    # this used to be populated *before* _on_selection_changed's own
-    # _draw_selected_spectrum/_silo_other_canvas_tabs ran, which
-    # unconditionally redrew the Spectrum canvas and cleared
-    # compare_canvas -- silently undoing this population one line
-    # later). But canvas_tabs itself should land on Spectrum, not
-    # Compare -- explicit user feedback that loading/selecting a
-    # pseudo-2D shouldn't jump to Compare just because its slices got
-    # listed there as a side effect; Compare is still fully drawn in
-    # the background for whenever the user actually clicks over to it.
+    # canvas_tabs itself should land on Spectrum, not Compare --
+    # explicit user feedback that loading/selecting a pseudo-2D
+    # shouldn't jump to Compare just because its slices got listed
+    # there as a side effect.
     assert window.canvas_tabs.currentWidget() is window.canvas
+    # The actual Compare canvas render is deferred until the tab is
+    # genuinely visited (see _refresh_compare_view's own docstring --
+    # rendering hundreds/thousands of subplots nobody is looking at,
+    # for a pseudo-2D series with many slices, measured at ~25s on
+    # real data) -- confirm it's marked stale, then visiting Compare
+    # actually draws it.
+    assert window._compare_view_stale is True
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
     assert _compare_line_count(window.compare_canvas) == 5
 
 
@@ -4382,13 +4422,24 @@ def test_main_window_output_compare_colormap_applies_to_all_canvases(qapp):
         assert canvas._compare_colormap == "plasma"
 
 
-def test_main_window_output_export_settings_apply_to_figure(qapp):
+def test_main_window_output_export_settings_stored_not_applied_live(qapp):
+    # Export DPI/figure size are stored for File > Save Figure As...
+    # only -- must not touch the live canvas figure at all (see
+    # MplCanvas.set_export_settings's own docstring for why).
     window = MainWindow()
+    original_dpi = window.canvas.figure.get_dpi()
+    original_size = window.canvas.figure.get_size_inches()
+
     window.output_dpi_spin.setValue(600)
     window.output_fig_width_spin.setValue(10.0)
     window.output_fig_height_spin.setValue(7.0)
-    assert window.canvas.figure.get_dpi() == pytest.approx(600)
-    assert window.canvas.figure.get_size_inches() == pytest.approx([10.0, 7.0])
+
+    assert window.canvas.figure.get_dpi() == pytest.approx(original_dpi)
+    assert window.canvas.figure.get_size_inches() == pytest.approx(original_size)
+    for canvas in window._all_canvases():
+        assert canvas._export_dpi == pytest.approx(600)
+        assert canvas._export_fig_width == pytest.approx(10.0)
+        assert canvas._export_fig_height == pytest.approx(7.0)
 
 
 def test_main_window_save_and_load_figure_style_template(qapp, tmp_path, monkeypatch):
@@ -4483,3 +4534,60 @@ def test_main_window_imaging_gradient_recomputes_gamma_on_reselect(qapp, tmp_pat
     assert window.canvas._imaging_gamma_hz_per_t != pytest.approx(proton_gamma)
     window._select_single_row(0)
     assert window.canvas._imaging_gamma_hz_per_t == pytest.approx(proton_gamma)
+
+
+# ============================================================
+# Compare deferred rendering (a pseudo-2D with many slices must not
+# eagerly render a huge "Stacked" Compare view nobody is looking at)
+# ============================================================
+
+def test_main_window_compare_auto_populate_defers_render_when_not_visible(qapp, monkeypatch):
+    # Regression test: loading a pseudo-2D series with hundreds of
+    # slices used to eagerly render a full "Stacked" Compare view
+    # (one subplot per slice) as a side effect of auto-populating the
+    # list, even though nobody asked to see Compare -- measured at
+    # ~25s for a real 1024-slice dataset. show_compare must not be
+    # called at all here; only compare_list itself gets populated.
+    delays = np.geomspace(0.001, 0.3, 50)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+
+    window = MainWindow()
+    called = []
+    monkeypatch.setattr(window.compare_canvas, "show_compare", lambda *a, **k: called.append(True))
+
+    _load_spectrum_directly(window, spectrum)  # auto-populates compare_list from its own slices
+
+    assert window.compare_list.count() == 50
+    assert called == []
+    assert window._compare_view_stale is True
+
+
+def test_main_window_compare_view_renders_once_tab_is_visited(qapp):
+    delays = np.geomspace(0.001, 0.3, 50)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    assert window._compare_view_stale is True
+
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
+
+    assert window._compare_view_stale is False
+    assert len(window.compare_canvas._compare_axes or []) == 50
+
+
+def test_main_window_compare_explicit_plot_still_renders_immediately(qapp):
+    # The user-initiated "Plot" button (switch_tab=True) must render
+    # right away regardless of which tab is currently showing -- only
+    # the silent auto-populate-from-pseudo-2D path defers.
+    delays = np.geomspace(0.001, 0.3, 10)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.canvas_tabs.setCurrentWidget(window.canvas)  # navigate away first
+
+    window._refresh_compare_view()  # the Plot button's own handler, switch_tab=True default
+
+    assert window._compare_view_stale is False
+    assert window.canvas_tabs.currentWidget() is window.compare_canvas
