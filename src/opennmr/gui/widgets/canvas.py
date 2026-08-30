@@ -100,6 +100,13 @@ class MplCanvas(QWidget):
     #: defaults (axes.linewidth 1.0, fontsize 12): a GUI canvas is
     #: viewed at a larger on-screen size with more surrounding UI, so
     #: needs bolder axes/larger text to stay legible at a glance.
+    #:
+    #: These four are class-level *defaults* only -- __init__ copies
+    #: them onto instance attributes of the same name, which is what
+    #: every show_* method actually reads (self._AXIS_LINEWIDTH etc.),
+    #: so :meth:`set_style` can override them per-instance (the
+    #: Output tab's live style panel) without touching every show_*
+    #: call site.
     _AXIS_LINEWIDTH = 1.4
     _AXIS_LABELSIZE = 13
     _TICK_LENGTH = 5.5
@@ -169,7 +176,19 @@ class MplCanvas(QWidget):
 
         self._pan_start = None  # (x_pixel, y_pixel, xlim, ylim) while dragging
         self._legend_visible = False
+        self._legend_loc = "best"
         self._aspect_ratio: float | None = None  # None = unlocked
+
+        # Per-instance style state (Output tab / MainWindow.set_style) --
+        # copied from the class-level defaults above; see their own
+        # comment for why every show_* method reading self._AXIS_* etc.
+        # already picks these up with no further changes needed.
+        self._AXIS_LINEWIDTH = type(self)._AXIS_LINEWIDTH
+        self._AXIS_LABELSIZE = type(self)._AXIS_LABELSIZE
+        self._TICK_LENGTH = type(self)._TICK_LENGTH
+        self._TICK_WIDTH = type(self)._TICK_WIDTH
+        self._grid_visible = False
+        self._compare_colormap = "viridis"
         # Persists across a rebuild the same way legend/aspect-lock do
         # (see show_spectrum's own docstring) -- an explicit opt-out of
         # plot_1d's default rendering-only downsampling (see
@@ -745,6 +764,74 @@ class MplCanvas(QWidget):
         self._apply_view_options()
         self.canvas.draw_idle()
 
+    def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
+                  grid=None, legend_loc=None, compare_colormap=None,
+                  dpi=None, fig_width=None, fig_height=None) -> None:
+        """The Output tab's live style panel -- updates whichever of
+        these aren't ``None``, both as the new per-instance default
+        (every ``show_*`` method reads ``self._AXIS_LINEWIDTH`` etc.,
+        so a future redraw picks these up automatically) and applied
+        directly to every axes already on screen right now (so the
+        change is visible immediately, not just after the next
+        reselect/redraw). Applies across every axes in the figure
+        (not just ``self.ax``), so it covers multi-axes views (a
+        "Stacked" Compare, a 2D contour's projection panels) too --
+        unlike :meth:`_apply_view_options`'s legend/grid/aspect, which
+        are inherently single-axes concepts.
+
+        ``dpi``/``fig_width``/``fig_height`` (inches) apply straight
+        to ``self.figure`` -- the existing Save Figure As... path
+        (matplotlib's own toolbar save dialog) reads the figure's own
+        current dpi/size with no further changes needed here.
+        """
+        if linewidth is not None:
+            self._AXIS_LINEWIDTH = linewidth
+        if labelsize is not None:
+            self._AXIS_LABELSIZE = labelsize
+        if tick_length is not None:
+            self._TICK_LENGTH = tick_length
+        if tick_width is not None:
+            self._TICK_WIDTH = tick_width
+        if grid is not None:
+            self._grid_visible = grid
+        if legend_loc is not None:
+            self._legend_loc = legend_loc
+        if compare_colormap is not None:
+            self._compare_colormap = compare_colormap
+
+        for ax in self.figure.get_axes():
+            if linewidth is not None:
+                for spine in ax.spines.values():
+                    spine.set_linewidth(linewidth)
+            if tick_length is not None or tick_width is not None:
+                ax.tick_params(which="major", length=self._TICK_LENGTH, width=self._TICK_WIDTH)
+                ax.tick_params(which="minor", length=self._TICK_LENGTH * 0.5, width=self._TICK_WIDTH * 0.75)
+            if labelsize is not None:
+                ax.tick_params(which="major", labelsize=labelsize)
+                ax.xaxis.label.set_fontsize(labelsize)
+                ax.yaxis.label.set_fontsize(labelsize)
+                if ax.get_title():
+                    ax.title.set_fontsize(labelsize)
+            if grid is not None:
+                ax.grid(grid, **({"alpha": 0.3} if grid else {}))
+            if legend_loc is not None and ax.get_legend() is not None:
+                ax.legend(loc=legend_loc)
+
+        if dpi is not None:
+            self.figure.set_dpi(dpi)
+        if fig_width is not None or fig_height is not None:
+            width, height = self.figure.get_size_inches()
+            self.figure.set_size_inches(
+                fig_width if fig_width is not None else width,
+                fig_height if fig_height is not None else height,
+            )
+
+        # compare_colormap only takes effect on the next full
+        # show_compare redraw (it re-derives every trace's colour from
+        # scratch) -- nothing to update on the already-drawn axes here.
+
+        self.canvas.draw_idle()
+
     def _prompt_contour_levels(self) -> None:
         """Right-click "Set Contour Levels…" -- lets the user directly
         set the number of contour levels and how they're spaced
@@ -894,12 +981,17 @@ class MplCanvas(QWidget):
         self._pivot_line = None
         self._pivot_marker_ax = None
         if self._legend_visible and self.ax.get_legend_handles_labels()[0]:
-            self.ax.legend()
+            self.ax.legend(loc=self._legend_loc)
         else:
             existing = self.ax.get_legend()
             if existing is not None:
                 existing.remove()
         self.ax.set_box_aspect(self._aspect_ratio)
+        # matplotlib's own Axes.grid(visible, **kwargs) quirk: passing
+        # any style kwarg (even alongside visible=False) is treated as
+        # an implicit "turn it on" and warns -- only pass alpha when
+        # actually enabling it.
+        self.ax.grid(self._grid_visible, **({"alpha": 0.3} if self._grid_visible else {}))
 
     def set_pivot_marker(self, ppm: float | None) -> None:
         """Show, move, or hide a dashed vertical line at ``ppm`` -- the
@@ -1225,7 +1317,7 @@ class MplCanvas(QWidget):
 
         if mode == "stack" and len(spectra) > 1:
             axes = list(np.atleast_1d(self.figure.subplots(len(spectra), 1, sharex=True)))
-            colors = plotting.stack_colors(len(spectra), "viridis")
+            colors = plotting.stack_colors(len(spectra), self._compare_colormap)
             xmin = xmax = labeltext = None
             for i, (row_ax, spectrum) in enumerate(zip(axes, spectra)):
                 this_xmin, this_xmax, labeltext = plotting.plot_1d(
@@ -1274,7 +1366,7 @@ class MplCanvas(QWidget):
             # control for exactly that reason.
             offset = -1.0 if mode == "overlay" else 0.2
             plotting.plot_1d_stack(spectra, ax=self.ax, fig=self.figure, y_offset=offset, normalize=normalize,
-                                    color="viridis", full_resolution=self._full_resolution)
+                                    color=self._compare_colormap, full_resolution=self._full_resolution)
             self.ax.set_yticks([])
             plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
                                         linewidth=self._AXIS_LINEWIDTH)

@@ -11,6 +11,7 @@ updates the canvas live.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import re
 
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import io
+from .. import plotting
 from ..core.spectrum import NMRAxis, NMRSpectrum
 from ..io import bruker as io_bruker
 from ..processing import arithmetic as processing_arithmetic
@@ -235,6 +237,7 @@ class MainWindow(QMainWindow):
         self._processing_tab_index = tabs.addTab(self._scrollable(self._build_processing_tab()), "Processing")
         tabs.addTab(self._scrollable(self._build_analysis_tab()), "Analysis")
         tabs.addTab(self._scrollable(self._build_compare_tab()), "Compare")
+        tabs.addTab(self._scrollable(self._build_output_tab()), "Output")
         # Entering the Processing tab switches the canvas to its own
         # live dual preview automatically (see _show_processing_preview);
         # leaving it switches back, so that speculative preview state
@@ -1226,6 +1229,210 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         return tab
+
+    #: Where per-type figure-style defaults are persisted -- a plain
+    #: JSON dict of {type_key: style_dict}, deliberately not tied to
+    #: this repo (a user-level dotfile, like every other desktop app's
+    #: own settings) so it survives an update/reinstall.
+    _FIGURE_STYLES_PATH = os.path.expanduser("~/.opennmr/figure_styles.json")
+    _FIGURE_STYLE_TYPES = (
+        ("1D spectrum", "1d"), ("2D contour", "2d"), ("Pseudo-2D stack", "pseudo2d"), ("Compare", "compare"),
+    )
+
+    def _all_canvases(self) -> list:
+        """Every ``MplCanvas`` instance this window owns -- core
+        styling (linewidth/fontsize/ticks/grid/colormap) applies to
+        all of them uniformly, so the app has one consistent look
+        rather than a different one per canvas tab."""
+        return [
+            self.fid_canvas, self.processing_preview_canvas, self.canvas,
+            self.spectral_fit_canvas, self.fit_canvas, self.compare_canvas,
+        ]
+
+    def _build_output_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        intro = QLabel(
+            "Live style controls -- changes apply immediately to every "
+            "plot in the app, not just a separate export preview."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        style_box = QGroupBox("Core styling")
+        style_form = QFormLayout(style_box)
+
+        self.output_linewidth_spin = QDoubleSpinBox()
+        self.output_linewidth_spin.setRange(0.1, 10.0)
+        self.output_linewidth_spin.setSingleStep(0.1)
+        self.output_linewidth_spin.setValue(MplCanvas._AXIS_LINEWIDTH)
+        self.output_linewidth_spin.valueChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Axis/spine linewidth:", self.output_linewidth_spin)
+
+        self.output_fontsize_spin = QSpinBox()
+        self.output_fontsize_spin.setRange(6, 40)
+        self.output_fontsize_spin.setValue(MplCanvas._AXIS_LABELSIZE)
+        self.output_fontsize_spin.valueChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Font size:", self.output_fontsize_spin)
+
+        self.output_tick_length_spin = QDoubleSpinBox()
+        self.output_tick_length_spin.setRange(0.0, 20.0)
+        self.output_tick_length_spin.setSingleStep(0.5)
+        self.output_tick_length_spin.setValue(MplCanvas._TICK_LENGTH)
+        self.output_tick_length_spin.valueChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Tick length:", self.output_tick_length_spin)
+
+        self.output_tick_width_spin = QDoubleSpinBox()
+        self.output_tick_width_spin.setRange(0.1, 10.0)
+        self.output_tick_width_spin.setSingleStep(0.1)
+        self.output_tick_width_spin.setValue(MplCanvas._TICK_WIDTH)
+        self.output_tick_width_spin.valueChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Tick width:", self.output_tick_width_spin)
+
+        self.output_grid_checkbox = QCheckBox("Show grid")
+        self.output_grid_checkbox.toggled.connect(self._on_output_style_changed)
+        style_form.addRow(self.output_grid_checkbox)
+
+        self.output_legend_checkbox = QCheckBox("Show legend (Spectrum tab)")
+        self.output_legend_checkbox.setToolTip(
+            "Same on/off state as the Spectrum canvas's own right-click "
+            "\"Show Legend\" -- a second, always-visible control for it, "
+            "not a separate setting."
+        )
+        self.output_legend_checkbox.toggled.connect(self._on_output_legend_changed)
+        style_form.addRow(self.output_legend_checkbox)
+
+        self.output_legend_loc_combo = QComboBox()
+        self.output_legend_loc_combo.addItems([
+            "best", "upper right", "upper left", "lower left", "lower right", "center",
+        ])
+        self._narrow_combo(self.output_legend_loc_combo)
+        self.output_legend_loc_combo.currentIndexChanged.connect(self._on_output_legend_changed)
+        style_form.addRow("Legend position:", self.output_legend_loc_combo)
+
+        self.output_colormap_combo = QComboBox()
+        self.output_colormap_combo.addItems(plotting.CONTOUR_CMAP_NAMES)
+        self.output_colormap_combo.setCurrentText("viridis")
+        self._narrow_combo(self.output_colormap_combo)
+        self.output_colormap_combo.setToolTip("Colour scheme for the Compare tab's stacked/overlaid traces.")
+        self.output_colormap_combo.currentIndexChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Compare colour map:", self.output_colormap_combo)
+
+        layout.addWidget(style_box)
+
+        export_box = QGroupBox("Export settings")
+        export_form = QFormLayout(export_box)
+
+        self.output_dpi_spin = QSpinBox()
+        self.output_dpi_spin.setRange(50, 1200)
+        self.output_dpi_spin.setValue(int(self.canvas.figure.get_dpi()))
+        self.output_dpi_spin.setToolTip("Resolution used by File > Save Figure As... (matplotlib's own save dialog).")
+        self.output_dpi_spin.valueChanged.connect(self._on_output_style_changed)
+        export_form.addRow("DPI:", self.output_dpi_spin)
+
+        fig_w, fig_h = self.canvas.figure.get_size_inches()
+        self.output_fig_width_spin = QDoubleSpinBox()
+        self.output_fig_width_spin.setRange(1.0, 40.0)
+        self.output_fig_width_spin.setValue(float(fig_w))
+        self.output_fig_width_spin.setSuffix(" in")
+        self.output_fig_width_spin.valueChanged.connect(self._on_output_style_changed)
+        export_form.addRow("Figure width:", self.output_fig_width_spin)
+
+        self.output_fig_height_spin = QDoubleSpinBox()
+        self.output_fig_height_spin.setRange(1.0, 40.0)
+        self.output_fig_height_spin.setValue(float(fig_h))
+        self.output_fig_height_spin.setSuffix(" in")
+        self.output_fig_height_spin.valueChanged.connect(self._on_output_style_changed)
+        export_form.addRow("Figure height:", self.output_fig_height_spin)
+
+        layout.addWidget(export_box)
+
+        template_box = QGroupBox("Per-type defaults")
+        template_layout = QVBoxLayout(template_box)
+        template_layout.addWidget(QLabel(
+            "Save the current styling above as the default for one "
+            "spectrum type, or load a previously-saved one back in."
+        ))
+        self.output_type_combo = QComboBox()
+        for label, key in self._FIGURE_STYLE_TYPES:
+            self.output_type_combo.addItem(label, key)
+        self._narrow_combo(self.output_type_combo)
+        template_layout.addWidget(self.output_type_combo)
+        template_button_row = QHBoxLayout()
+        save_template_button = QPushButton("Save as default")
+        save_template_button.clicked.connect(self._on_save_figure_style_template)
+        load_template_button = QPushButton("Load default")
+        load_template_button.clicked.connect(self._on_load_figure_style_template)
+        template_button_row.addWidget(save_template_button)
+        template_button_row.addWidget(load_template_button)
+        template_layout.addLayout(template_button_row)
+        layout.addWidget(template_box)
+
+        layout.addStretch(1)
+        return tab
+
+    def _current_output_style_kwargs(self) -> dict:
+        return {
+            "linewidth": self.output_linewidth_spin.value(),
+            "labelsize": self.output_fontsize_spin.value(),
+            "tick_length": self.output_tick_length_spin.value(),
+            "tick_width": self.output_tick_width_spin.value(),
+            "grid": self.output_grid_checkbox.isChecked(),
+            "compare_colormap": self.output_colormap_combo.currentText(),
+            "dpi": self.output_dpi_spin.value(),
+            "fig_width": self.output_fig_width_spin.value(),
+            "fig_height": self.output_fig_height_spin.value(),
+        }
+
+    def _on_output_style_changed(self, *_args) -> None:
+        kwargs = self._current_output_style_kwargs()
+        for canvas in self._all_canvases():
+            canvas.set_style(**kwargs)
+
+    def _on_output_legend_changed(self, *_args) -> None:
+        self.canvas.set_legend_visible(self.output_legend_checkbox.isChecked())
+        self.canvas.set_style(legend_loc=self.output_legend_loc_combo.currentText())
+
+    def _load_figure_styles(self) -> dict:
+        try:
+            with open(self._FIGURE_STYLES_PATH) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _on_save_figure_style_template(self) -> None:
+        styles = self._load_figure_styles()
+        key = self.output_type_combo.currentData()
+        styles[key] = self._current_output_style_kwargs()
+        os.makedirs(os.path.dirname(self._FIGURE_STYLES_PATH), exist_ok=True)
+        with open(self._FIGURE_STYLES_PATH, "w") as f:
+            json.dump(styles, f, indent=2)
+        QMessageBox.information(
+            self, "Saved", f"Saved current styling as the default for '{self.output_type_combo.currentText()}'.",
+        )
+
+    def _on_load_figure_style_template(self) -> None:
+        styles = self._load_figure_styles()
+        key = self.output_type_combo.currentData()
+        style = styles.get(key)
+        if style is None:
+            QMessageBox.information(
+                self, "No saved default",
+                f"No styling has been saved yet for '{self.output_type_combo.currentText()}'.",
+            )
+            return
+        self.output_linewidth_spin.setValue(style.get("linewidth", MplCanvas._AXIS_LINEWIDTH))
+        self.output_fontsize_spin.setValue(style.get("labelsize", MplCanvas._AXIS_LABELSIZE))
+        self.output_tick_length_spin.setValue(style.get("tick_length", MplCanvas._TICK_LENGTH))
+        self.output_tick_width_spin.setValue(style.get("tick_width", MplCanvas._TICK_WIDTH))
+        self.output_grid_checkbox.setChecked(style.get("grid", False))
+        self.output_colormap_combo.setCurrentText(style.get("compare_colormap", "viridis"))
+        self.output_dpi_spin.setValue(style.get("dpi", 300))
+        self.output_fig_width_spin.setValue(style.get("fig_width", 6.4))
+        self.output_fig_height_spin.setValue(style.get("fig_height", 4.8))
+        # Every spin/combo above already applies itself on change
+        # (_on_output_style_changed) -- no separate "apply" step needed.
 
     def _selected_rows(self) -> list[int]:
         return sorted(self.spectrum_list.row(item) for item in self.spectrum_list.selectedItems())

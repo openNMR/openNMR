@@ -4338,3 +4338,87 @@ def test_main_window_combine_spectra_requires_two(qapp, monkeypatch):
 
     assert shown.get("called") is True
     assert window.spectrum_list.count() == 1
+
+
+# ============================================================
+# Output tab (Phase 4: live style panel, export settings, per-type templates)
+# ============================================================
+
+def test_main_window_output_style_change_applies_to_every_canvas(qapp):
+    window = MainWindow()
+    window.output_linewidth_spin.setValue(3.0)
+    for canvas in window._all_canvases():
+        assert canvas._AXIS_LINEWIDTH == pytest.approx(3.0)
+
+
+def test_main_window_output_fontsize_and_ticks_apply(qapp):
+    window = MainWindow()
+    window.output_fontsize_spin.setValue(22)
+    window.output_tick_length_spin.setValue(9.0)
+    window.output_tick_width_spin.setValue(2.0)
+    assert window.canvas._AXIS_LABELSIZE == 22
+    assert window.canvas._TICK_LENGTH == pytest.approx(9.0)
+    assert window.canvas._TICK_WIDTH == pytest.approx(2.0)
+
+
+def test_main_window_output_legend_checkbox_controls_spectrum_canvas(qapp):
+    window = MainWindow()
+    window.output_legend_checkbox.setChecked(True)
+    assert window.canvas._legend_visible is True
+    window.output_legend_checkbox.setChecked(False)
+    assert window.canvas._legend_visible is False
+
+
+def test_main_window_output_legend_position_applies_to_spectrum_canvas(qapp):
+    window = MainWindow()
+    window.output_legend_loc_combo.setCurrentText("lower left")
+    assert window.canvas._legend_loc == "lower left"
+
+
+def test_main_window_output_compare_colormap_applies_to_all_canvases(qapp):
+    window = MainWindow()
+    window.output_colormap_combo.setCurrentText("plasma")
+    for canvas in window._all_canvases():
+        assert canvas._compare_colormap == "plasma"
+
+
+def test_main_window_output_export_settings_apply_to_figure(qapp):
+    window = MainWindow()
+    window.output_dpi_spin.setValue(600)
+    window.output_fig_width_spin.setValue(10.0)
+    window.output_fig_height_spin.setValue(7.0)
+    assert window.canvas.figure.get_dpi() == pytest.approx(600)
+    assert window.canvas.figure.get_size_inches() == pytest.approx([10.0, 7.0])
+
+
+def test_main_window_save_and_load_figure_style_template(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_FIGURE_STYLES_PATH", str(tmp_path / "figure_styles.json"))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    window = MainWindow()
+    window.output_linewidth_spin.setValue(2.5)
+    window.output_fontsize_spin.setValue(18)
+    window.output_type_combo.setCurrentIndex(window.output_type_combo.findData("compare"))
+
+    window._on_save_figure_style_template()
+    assert os.path.exists(window._FIGURE_STYLES_PATH)
+
+    # A fresh window (defaults) loading the saved "compare" template
+    # should pick the saved values back up.
+    window2 = MainWindow()
+    window2.output_type_combo.setCurrentIndex(window2.output_type_combo.findData("compare"))
+    window2._on_load_figure_style_template()
+
+    assert window2.output_linewidth_spin.value() == pytest.approx(2.5)
+    assert window2.output_fontsize_spin.value() == 18
+    assert window2.canvas._AXIS_LINEWIDTH == pytest.approx(2.5)
+
+
+def test_main_window_load_figure_style_template_missing_shows_message(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_FIGURE_STYLES_PATH", str(tmp_path / "figure_styles.json"))
+    window = MainWindow()
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+
+    window._on_load_figure_style_template()
+
+    assert shown.get("called") is True

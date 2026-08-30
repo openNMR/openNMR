@@ -1017,3 +1017,54 @@ def test_set_regions_shades_and_replaces_previous_spans(qapp):
     canvas.set_regions([])
     tagged = [p for p in canvas.ax.patches if p.get_gid() == canvas._REGION_PATCH_GID]
     assert len(tagged) == 0
+
+
+# ============================================================
+# set_style (Output tab live style panel)
+# ============================================================
+
+def test_set_style_updates_instance_attributes(qapp):
+    canvas = MplCanvas()
+    canvas.set_style(linewidth=3.0, labelsize=20, tick_length=9.0, tick_width=2.5, grid=True)
+    assert canvas._AXIS_LINEWIDTH == 3.0
+    assert canvas._AXIS_LABELSIZE == 20
+    assert canvas._TICK_LENGTH == 9.0
+    assert canvas._TICK_WIDTH == 2.5
+    assert canvas._grid_visible is True
+
+
+def test_set_style_future_draw_picks_up_new_values(qapp):
+    canvas = MplCanvas()
+    canvas.set_style(linewidth=3.0)
+    canvas.show_spectrum(_make_1d())
+    assert canvas.ax.spines["bottom"].get_linewidth() == pytest.approx(3.0)
+
+
+def test_set_style_updates_already_drawn_axes_live(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_style(linewidth=5.0, grid=True)
+    assert canvas.ax.spines["bottom"].get_linewidth() == pytest.approx(5.0)
+    assert any(line.get_visible() for line in canvas.ax.get_xgridlines())
+
+
+def test_set_style_grid_toggle_does_not_warn(qapp, recwarn):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_style(grid=True)
+    canvas.set_style(grid=False)
+    grid_warnings = [w for w in recwarn.list if "grid()" in str(w.message)]
+    assert grid_warnings == []
+
+
+def test_set_style_dpi_and_figsize(qapp):
+    canvas = MplCanvas()
+    canvas.set_style(dpi=150, fig_width=8.0, fig_height=5.0)
+    assert canvas.figure.get_dpi() == pytest.approx(150)
+    assert canvas.figure.get_size_inches() == pytest.approx([8.0, 5.0])
+
+
+def test_set_style_compare_colormap_used_on_next_redraw(qapp):
+    canvas = MplCanvas()
+    canvas.set_style(compare_colormap="plasma")
+    assert canvas._compare_colormap == "plasma"
