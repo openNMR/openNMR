@@ -140,6 +140,21 @@ class MplCanvas(QWidget):
     #: same division of responsibility as fitPointExcludeRequested.
     fitPointsResetRequested = Signal()
 
+    #: Emitted with (lo, hi) x-data values -- lo < hi -- when a drag
+    #: finishes while region-select mode is on (see
+    #: :func:`set_region_select_mode`) -- used by the Analysis tab's
+    #: integration-region picker to add a row spanning the dragged
+    #: range without needing to type it in, the drag equivalent of
+    #: peakPicked's single click.
+    regionSelected = Signal(float, float)
+
+    #: Tag applied to every persistent integration-region axvspan (see
+    #: :func:`set_regions`) so they can be found and cleared by gid on
+    #: the next call, without needing to track a separate reference
+    #: list that would go stale across a figure.clear() (a brand new
+    #: Axes each time, invalidating any previously held patch objects).
+    _REGION_PATCH_GID = "integration_region"
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
@@ -164,6 +179,10 @@ class MplCanvas(QWidget):
         # this only controls what's interactively shown.
         self._full_resolution = False
         self._pick_mode = False
+        self._region_select_mode = False
+        self._region_select_start: float | None = None  # x-data value of the drag's own start
+        self._region_select_ax = None  # axes the current region-select drag started on
+        self._region_select_patch = None  # the live rubber-band axvspan, redrawn every motion tick
         # Set only while a 2D/pseudo-2D contour is the current view --
         # scrolling then adjusts the contour threshold instead of
         # zooming (see _on_scroll). None whenever any other view
@@ -265,6 +284,50 @@ class MplCanvas(QWidget):
         starting a pan drag."""
         self._pick_mode = enabled
         self.canvas.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
+
+    def set_region_select_mode(self, enabled: bool) -> None:
+        """Toggle drag-to-select-a-region: while on, a left-click-drag
+        emits :attr:`regionSelected` with the dragged (lo, hi) x-range
+        on release, instead of starting a pan drag -- the range
+        equivalent of :func:`set_pick_mode`'s single click."""
+        self._region_select_mode = enabled
+        self.canvas.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
+        if not enabled:
+            self._clear_region_select_patch()
+            self._region_select_start = None
+            self._region_select_ax = None
+
+    def set_regions(self, regions: list[tuple[float, float]]) -> None:
+        """Persistently shade x-axis integration regions on the
+        current Spectrum plot. Self-contained -- finds and removes any
+        previously drawn region patches on ``self.ax`` by their own
+        gid tag (see :attr:`_REGION_PATCH_GID`) rather than tracking a
+        separate reference list, which would go stale the moment a
+        redraw (``figure.clear()``) replaces ``self.ax`` with a new
+        Axes and invalidates any previously held patch objects."""
+        if self.ax is None:
+            return
+        for patch in list(self.ax.patches):
+            if patch.get_gid() == self._REGION_PATCH_GID:
+                patch.remove()
+        for lo, hi in regions:
+            span = self.ax.axvspan(lo, hi, color="tab:orange", alpha=0.15, zorder=0)
+            span.set_gid(self._REGION_PATCH_GID)
+        self.canvas.draw_idle()
+
+    def _update_region_select_patch(self, x_current: float) -> None:
+        self._clear_region_select_patch()
+        lo, hi = sorted((self._region_select_start, x_current))
+        self._region_select_patch = self._region_select_ax.axvspan(
+            lo, hi, color="tab:blue", alpha=0.2, zorder=50,
+        )
+        self.canvas.draw_idle()
+
+    def _clear_region_select_patch(self) -> None:
+        if self._region_select_patch is not None:
+            self._region_select_patch.remove()
+            self._region_select_patch = None
+            self.canvas.draw_idle()
 
     def _on_scroll(self, event) -> None:
         """Scroll hovering the x-axis (its tick-label strip, below the
@@ -493,9 +556,24 @@ class MplCanvas(QWidget):
             if event.xdata is not None:
                 self.peakPicked.emit(float(event.xdata))
             return
+        if self._region_select_mode:
+            if event.xdata is not None:
+                self._region_select_start = float(event.xdata)
+                self._region_select_ax = event.inaxes
+                self._update_region_select_patch(event.xdata)
+            return
         self._pan_start = (event.x, event.y, event.inaxes.get_xlim(), event.inaxes.get_ylim(), event.inaxes)
 
     def _on_motion(self, event) -> None:
+        if self._region_select_start is not None and event.x is not None and self._region_select_ax is not None:
+            # Pixel coordinates, not event.xdata directly -- like the
+            # pan drag below, this needs to keep tracking smoothly even
+            # if the cursor briefly leaves the axes rectangle mid-drag
+            # (event.xdata is None outside it; a pixel position isn't).
+            inv = self._region_select_ax.transData.inverted()
+            x_data, _y_data = inv.transform((event.x, event.y if event.y is not None else 0))
+            self._update_region_select_patch(x_data)
+            return
         if self._pan_start is None or event.x is None:
             return
         x0, y0, xlim, ylim, ax = self._pan_start
@@ -508,6 +586,20 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def _on_release(self, event) -> None:
+        if self._region_select_start is not None:
+            end = self._region_select_start
+            if event.xdata is not None:
+                end = float(event.xdata)
+            elif event.x is not None and self._region_select_ax is not None:
+                inv = self._region_select_ax.transData.inverted()
+                end, _y_data = inv.transform((event.x, event.y if event.y is not None else 0))
+            lo, hi = sorted((self._region_select_start, end))
+            self._clear_region_select_patch()
+            self._region_select_start = None
+            self._region_select_ax = None
+            if hi > lo:
+                self.regionSelected.emit(lo, hi)
+            return
         if self._pan_start is not None and self._compare_axes:
             x0, y0, _xlim, _ylim, start_ax = self._pan_start
             if (

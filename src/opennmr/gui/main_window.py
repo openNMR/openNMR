@@ -171,6 +171,7 @@ class MainWindow(QMainWindow):
         # one and predates the other three.
         self.canvas = MplCanvas()
         self.canvas.peakPicked.connect(self._on_peak_picked)
+        self.canvas.regionSelected.connect(self._on_region_selected)
         self.canvas.referenceShiftRequested.connect(self._on_reference_shift_from_plot)
         self.fid_canvas = MplCanvas()
         self.compare_canvas = MplCanvas()
@@ -378,6 +379,22 @@ class MainWindow(QMainWindow):
         clear_peaks_menu_action = QAction("&Clear Peak Table", self)
         clear_peaks_menu_action.triggered.connect(lambda: self.peak_table.setRowCount(0))
         analysis_menu.addAction(clear_peaks_menu_action)
+
+        analysis_menu.addSeparator()
+        integrate_regions_menu_action = QAction("&Integrate Regions", self)
+        integrate_regions_menu_action.triggered.connect(self._on_integrate_regions_clicked)
+        analysis_menu.addAction(integrate_regions_menu_action)
+
+        self.select_region_menu_action = QAction("Select &Region from Plot", self)
+        self.select_region_menu_action.setCheckable(True)
+        self.select_region_menu_action.setShortcut(QKeySequence("Ctrl+I"))
+        self.select_region_menu_action.toggled.connect(self.select_region_button.setChecked)
+        self.select_region_button.toggled.connect(self.select_region_menu_action.setChecked)
+        analysis_menu.addAction(self.select_region_menu_action)
+
+        clear_regions_menu_action = QAction("Clear Re&gion Table", self)
+        clear_regions_menu_action.triggered.connect(self._on_clear_regions_clicked)
+        analysis_menu.addAction(clear_regions_menu_action)
 
         fitting_menu = menu_bar.addMenu("Fittin&g")
         fit_curve_menu_action = QAction("Fit &Curve…", self)
@@ -2984,6 +3001,7 @@ class MainWindow(QMainWindow):
     # per-slice amplitude series.
 
     _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta")
+    _REGION_TABLE_COLUMNS = ("Low (ppm)", "High (ppm)")
 
     def _build_analysis_tab(self) -> QWidget:
         tab = QWidget()
@@ -3110,6 +3128,7 @@ class MainWindow(QMainWindow):
         peak_layout.addLayout(tolerance_row)
 
         layout.addWidget(peak_box)
+        layout.addWidget(self._build_region_box())
 
         fit_button = QPushButton("Fit Spectrum")
         fit_button.setToolTip(
@@ -3356,6 +3375,158 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         return tab
+
+    def _build_region_box(self) -> QGroupBox:
+        """Integration regions -- the "most basic" way to turn a
+        pseudo-2D series into a relaxation/diffusion curve, without
+        needing a peak fit at all: pick one or more x-axis windows,
+        integrate each across every slice (:meth:`_on_integrate_regions_clicked`
+        -> :func:`opennmr.processing.relaxation.NMR2D_integrate_slices`),
+        and feed the result straight into Fit Curve exactly like a
+        peak fit's own per-slice integrals would. The same regions
+        also bound the peak fit above when any are defined (passed as
+        ``fit_regions`` -- see :meth:`_fit_peaks`), so a spectrum with
+        other, unrelated signal elsewhere doesn't drag a peak fit
+        toward it."""
+        region_box = QGroupBox("Integration Regions")
+        region_layout = QVBoxLayout(region_box)
+
+        self.region_table = QTableWidget(0, len(self._REGION_TABLE_COLUMNS))
+        self.region_table.setHorizontalHeaderLabels(self._REGION_TABLE_COLUMNS)
+        self.region_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.region_table.setMaximumHeight(120)  # same reasoning as peak_table's own cap
+        self.region_table.setToolTip(
+            "x-axis regions to integrate -- a peak-fitting-free way to "
+            "get a per-slice value for Fit Curve, and (when any are "
+            "defined) also the window the peak fit above is bounded to."
+        )
+        self.region_table.itemChanged.connect(lambda _item: self._sync_region_shading())
+        region_layout.addWidget(self.region_table)
+
+        region_button_row = QHBoxLayout()
+        add_region_button = QPushButton("Add Region")
+        add_region_button.clicked.connect(lambda: self._add_region_row())
+        remove_region_button = QPushButton("Remove Region")
+        remove_region_button.clicked.connect(self._on_remove_region_clicked)
+        clear_regions_button = QPushButton("Clear All")
+        clear_regions_button.setToolTip("Remove every row from the region table.")
+        clear_regions_button.clicked.connect(self._on_clear_regions_clicked)
+        region_button_row.addWidget(add_region_button)
+        region_button_row.addWidget(remove_region_button)
+        region_button_row.addWidget(clear_regions_button)
+        region_layout.addLayout(region_button_row)
+
+        self.select_region_button = QPushButton("Select Region from Plot (⌘I)")
+        self.select_region_button.setCheckable(True)
+        self.select_region_button.setToolTip(
+            "While active, drag across the Spectrum plot to add a row "
+            "here spanning the dragged x-range, instead of typing it "
+            "in. Toggle from anywhere with Cmd/Ctrl+I too."
+        )
+        self.select_region_button.toggled.connect(self._on_select_region_toggled)
+        region_layout.addWidget(self.select_region_button)
+
+        integrate_button = QPushButton("Integrate Regions")
+        integrate_button.setToolTip(
+            "Step 1, alternative to Fit Spectrum: integrate each "
+            "region above across the current selection -- a plain 1D "
+            "spectrum, or every slice of a pseudo-2D series -- ready "
+            "for Fit Curve without needing a peak fit at all."
+        )
+        integrate_button.clicked.connect(self._on_integrate_regions_clicked)
+        region_layout.addWidget(integrate_button)
+
+        return region_box
+
+    def _add_region_row(self, lo: float = 0.0, hi: float = 1.0) -> None:
+        row = self.region_table.rowCount()
+        self.region_table.insertRow(row)
+        for col, value in enumerate((lo, hi)):
+            self.region_table.setItem(row, col, QTableWidgetItem(f"{value:.4g}"))
+        self._sync_region_shading()
+
+    def _on_remove_region_clicked(self) -> None:
+        row = self.region_table.currentRow()
+        if row >= 0:
+            self.region_table.removeRow(row)
+        self._sync_region_shading()
+
+    def _on_clear_regions_clicked(self) -> None:
+        self.region_table.setRowCount(0)
+        self._sync_region_shading()
+
+    def _read_region_defs(self) -> list[tuple[float, float]]:
+        regions = []
+        for row in range(self.region_table.rowCount()):
+            lo_item = self.region_table.item(row, 0)
+            hi_item = self.region_table.item(row, 1)
+            if lo_item is None or hi_item is None:
+                continue
+            try:
+                lo, hi = float(lo_item.text()), float(hi_item.text())
+            except ValueError:
+                continue
+            regions.append((min(lo, hi), max(lo, hi)))
+        return regions
+
+    def _sync_region_shading(self) -> None:
+        """Reflect the region table's current contents as shaded spans
+        on the Spectrum canvas -- called whenever the table itself
+        changes (add/remove/clear/edit/drag-select) and on spectrum
+        reselection (:meth:`_restore_analysis_state`). Not hooked into
+        every possible Spectrum redraw (a phase drag, a slice switch)
+        -- an acceptable, purely cosmetic gap given how many places
+        redraw that canvas; the region *definitions* themselves are
+        unaffected and stay correct for fitting/integration regardless."""
+        self.canvas.set_regions(self._read_region_defs())
+
+    def _on_select_region_toggled(self, checked: bool) -> None:
+        # Mirrors _on_pick_peak_toggled: region-select only ever
+        # listens on self.canvas (the Spectrum tab) -- force-switch to
+        # it so turning this on always actually works, regardless of
+        # which canvas tab happened to be showing.
+        self.canvas.set_region_select_mode(checked)
+        if checked:
+            self.canvas_tabs.setCurrentWidget(self.canvas)
+
+    def _on_region_selected(self, lo: float, hi: float) -> None:
+        self._add_region_row(lo, hi)
+
+    def _on_integrate_regions_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
+            QMessageBox.information(
+                self, "Not supported",
+                "Region integration isn't available for a conventional 2D spectrum yet -- "
+                "select a 1D spectrum or a pseudo-2D series.",
+            )
+            return
+        regions = self._read_region_defs()
+        if not regions:
+            QMessageBox.critical(self, "Integrate failed", "Add at least one region to integrate.")
+            return
+
+        try:
+            if spectrum.ndim == 1:
+                entries = [spectrum]
+            else:
+                n_slices = spectrum.data.shape[0]
+                entries = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))["rows"]
+            # NMR2D_integrate_slices reads metadata.raw["slice"] off
+            # every entry (get_slices already tags it for a pseudo-2D's
+            # own slices; a plain 1D spectrum has no such thing yet --
+            # same gap _fit_peaks already works around).
+            prepared = [self._ensure_slice_info(s, i + 1) for i, s in enumerate(entries)]
+            integrated = processing_relaxation.NMR2D_integrate_slices({"rows": prepared}, regions, mode="rows")
+            results = integrated["rows"]
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Integrate failed", str(exc))
+            return
+
+        self._show_integration_results(spectrum, results, len(regions))
 
     def _add_peak_row(self, shift: float = 0.0, fwhm: float = 1.0, eta: float = 0.5) -> None:
         row = self.peak_table.rowCount()
@@ -3673,23 +3844,33 @@ class MainWindow(QMainWindow):
         """Spectral (pseudo-Voigt peak) fit -- step 1 of the analysis
         workflow, shared by a plain 1D spectrum (``entries`` is a
         single-item list), a pseudo-2D series (every slice), and a
-        Compare-tab stack (every checked entry)."""
+        Compare-tab stack (every checked entry). Bounded to the
+        Integration Regions table's own regions when any are defined
+        (``fit_regions`` -- restricts which part of the spectrum the
+        fit itself considers, so unrelated signal elsewhere can't drag
+        it off) -- entirely optional, an empty region table fits the
+        whole spectrum exactly as before."""
         peak_defs = self._read_peak_defs()
         if not peak_defs:
             raise ValueError("Add at least one peak to fit.")
         prepared = [self._ensure_slice_info(s, i + 1) for i, s in enumerate(entries)]
+        fit_regions = self._read_region_defs() or None
         fitted = processing_fitting.NMR2D_fit_slices(
-            {"rows": prepared}, peak_defs, mode="rows", show_report=False, show_warnings=False,
+            {"rows": prepared}, peak_defs, mode="rows", fit_regions=fit_regions,
+            show_report=False, show_warnings=False,
         )
         return fitted["rows"]
 
-    def _show_spectral_fit_results(self, spectrum, results: list[dict]) -> None:
+    def _store_slice_results(self, spectrum, results: list[dict]) -> None:
         self._slice_fit_results = results
         # Kept per-spectrum (not just in the live _slice_fit_results
-        # attribute) so "Spectrum fit (slice #)" survives a reselection --
-        # analysis_state alone only remembers the *text* summary, not
-        # the plotted curves.
+        # attribute) so "Spectrum fit (slice #)"/Fit Curve survive a
+        # reselection -- analysis_state alone only remembers the *text*
+        # summary, not the underlying per-slice results.
         spectrum.metadata.raw["slice_fit_results"] = results
+
+    def _show_spectral_fit_results(self, spectrum, results: list[dict]) -> None:
+        self._store_slice_results(spectrum, results)
         if results:
             self._update_peak_table_from_fit(results[0])
         self.view_slice_fit_spin.blockSignals(True)
@@ -3698,6 +3879,29 @@ class MainWindow(QMainWindow):
         self.view_slice_fit_spin.setValue(1)
         self.view_slice_fit_spin.blockSignals(False)
         self._on_view_slice_fit_changed(1)  # show immediately, not just once the spinner is touched
+
+    def _show_integration_results(self, spectrum, results: list[dict], n_regions: int) -> None:
+        """Region-integration's own counterpart to
+        :meth:`_show_spectral_fit_results` -- stored into the exact
+        same slot (:attr:`_slice_fit_results`/``metadata.raw
+        ["slice_fit_results"]``) so Fit Curve picks it up exactly like
+        a peak fit's own results, with no separate code path needed
+        there at all. Doesn't touch ``view_slice_fit_spin``/the
+        Spectral Fit canvas, though -- :meth:`_display_slice_fit`
+        needs a real peak-fit shape (``popt``/``pcov``/``peak_defs``/
+        ``y_fit``), which a plain integral has no equivalent of."""
+        self._store_slice_results(spectrum, results)
+        self.view_slice_fit_spin.blockSignals(True)
+        self.view_slice_fit_spin.setEnabled(False)
+        self.view_slice_fit_spin.blockSignals(False)
+        self.spectral_fit_params_label.setText("")
+        self.analysis_results_label.setText(
+            f"Integrated {len(results)} slice(s) across {n_regions} region(s) -- "
+            f"ready for Fit Curve (Value source: Integrated area)."
+        )
+        integral_index = self.value_source_combo.findData("integral")
+        if integral_index >= 0:
+            self.value_source_combo.setCurrentIndex(integral_index)
 
     def _on_fit_spectrum_clicked(self) -> None:
         """Step 1 of the analysis workflow: fit peaks against the
@@ -4055,8 +4259,14 @@ class MainWindow(QMainWindow):
              for col in range(len(self._PEAK_TABLE_COLUMNS))]
             for row in range(self.peak_table.rowCount())
         ]
+        regions = [
+            [self.region_table.item(row, col).text() if self.region_table.item(row, col) else ""
+             for col in range(len(self._REGION_TABLE_COLUMNS))]
+            for row in range(self.region_table.rowCount())
+        ]
         return {
             "peaks": peaks,
+            "regions": regions,
             "fit_type": self.fit_type_combo.currentIndex(),
             "model": self.relaxation_model_combo.currentIndex(),
             "custom_equation": self.custom_equation_edit.text(),
@@ -4078,6 +4288,7 @@ class MainWindow(QMainWindow):
 
     def _restore_analysis_state(self, spectrum) -> None:
         self.peak_table.setRowCount(0)
+        self.region_table.setRowCount(0)
         self.analysis_results_label.setText("")
         self.spectral_fit_params_label.setText("")
 
@@ -4099,6 +4310,11 @@ class MainWindow(QMainWindow):
                 self.peak_table.insertRow(row)
                 for col, value in enumerate((shift, fwhm, eta)):
                     self.peak_table.setItem(row, col, QTableWidgetItem(value))
+            for lo, hi in state.get("regions", []):
+                row = self.region_table.rowCount()
+                self.region_table.insertRow(row)
+                for col, value in enumerate((lo, hi)):
+                    self.region_table.setItem(row, col, QTableWidgetItem(value))
             self.fit_type_combo.setCurrentIndex(state["fit_type"])
             self._populate_fit_model_combo()
             self.relaxation_model_combo.setCurrentIndex(state["model"])
@@ -4114,14 +4330,21 @@ class MainWindow(QMainWindow):
             self.analysis_results_label.setText(state["results_text"])
 
         self._slice_fit_results = spectrum.metadata.raw.get("slice_fit_results")
+        # Only a real peak fit (popt/pcov/peak_defs/y_fit) can be shown
+        # by _display_slice_fit -- a restored Integrate Regions result
+        # (_show_integration_results, same storage slot) has none of
+        # those, and enabling the spin box for it would crash the
+        # moment it's touched.
+        is_peak_fit = bool(self._slice_fit_results) and "popt" in self._slice_fit_results[0]
         self.view_slice_fit_spin.blockSignals(True)
-        if self._slice_fit_results:
+        if is_peak_fit:
             self.view_slice_fit_spin.setEnabled(True)
             self.view_slice_fit_spin.setMaximum(max(1, len(self._slice_fit_results)))
             self.view_slice_fit_spin.setValue(1)
         else:
             self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.blockSignals(False)
+        self._sync_region_shading()
 
         self._relaxation_fit_results = spectrum.metadata.raw.get("relaxation_fit_results")
         self._relaxation_fit_xlabel = spectrum.metadata.raw.get("relaxation_fit_xlabel", "Delay (s)")
@@ -4263,8 +4486,11 @@ class MainWindow(QMainWindow):
             self.fit_canvas.clear()
 
         slice_fit_results = spectrum.metadata.raw.get("slice_fit_results")
-        if slice_fit_results:
-            # matches view_slice_fit_spin resetting to 1 on reselect
+        if slice_fit_results and "popt" in slice_fit_results[0]:
+            # matches view_slice_fit_spin resetting to 1 on reselect --
+            # guarded on shape since slice_fit_results can also hold an
+            # Integrate Regions result (_show_integration_results, same
+            # storage slot), which _display_slice_fit can't render.
             self._display_slice_fit(slice_fit_results[0], switch_tab=False)
         else:
             self.spectral_fit_canvas.clear()

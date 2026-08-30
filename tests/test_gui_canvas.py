@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
@@ -949,3 +950,70 @@ def test_show_spectrum_after_compare_clears_compare_axes(qapp):
 
     canvas.show_spectrum(_make_1d())
     assert canvas._compare_axes is None
+
+
+def _region_drag_events(ax, x_start, x_mid, x_end):
+    """Press/motion/release SimpleNamespaces for a region-select drag,
+    with real pixel positions derived from ax's own transform (like
+    the scroll-event helpers above) -- _on_press/_on_motion/_on_release
+    read pixel coordinates, not just xdata, so a realistic drag needs
+    both."""
+    def event(xdata, button=1):
+        x, y = ax.transData.transform((xdata, 0.5))
+        return SimpleNamespace(inaxes=ax, xdata=xdata, ydata=0.5, x=x, y=y, button=button)
+    return event(x_start), event(x_mid), event(x_end)
+
+
+def test_region_select_mode_sets_crosshair_cursor(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_region_select_mode(True)
+    assert canvas.canvas.cursor().shape() == Qt.CursorShape.CrossCursor
+    canvas.set_region_select_mode(False)
+    assert canvas.canvas.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+
+def test_region_select_drag_emits_sorted_region_and_does_not_pan(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_region_select_mode(True)
+    original_xlim = canvas.ax.get_xlim()
+
+    emitted = []
+    canvas.regionSelected.connect(lambda lo, hi: emitted.append((lo, hi)))
+
+    press, motion, release = _region_drag_events(canvas.ax, 7.0, 5.0, 3.0)  # dragged right-to-left
+    canvas._on_press(press)
+    assert canvas._region_select_patch is not None  # live rubber-band shown mid-drag
+    canvas._on_motion(motion)
+    canvas._on_release(release)
+
+    assert emitted == [(3.0, 7.0)]  # sorted low-to-high regardless of drag direction
+    assert canvas._region_select_patch is None  # cleared after release
+    assert canvas.ax.get_xlim() == original_xlim  # never panned while in this mode
+
+
+def test_region_select_mode_off_falls_back_to_pan(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    press = SimpleNamespace(inaxes=canvas.ax, button=1, x=100, y=100)
+    canvas._on_press(press)
+    assert canvas._pan_start is not None
+    assert canvas._region_select_start is None
+
+
+def test_set_regions_shades_and_replaces_previous_spans(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+
+    canvas.set_regions([(2.0, 4.0), (6.0, 8.0)])
+    tagged = [p for p in canvas.ax.patches if p.get_gid() == canvas._REGION_PATCH_GID]
+    assert len(tagged) == 2
+
+    canvas.set_regions([(1.0, 2.0)])
+    tagged = [p for p in canvas.ax.patches if p.get_gid() == canvas._REGION_PATCH_GID]
+    assert len(tagged) == 1
+
+    canvas.set_regions([])
+    tagged = [p for p in canvas.ax.patches if p.get_gid() == canvas._REGION_PATCH_GID]
+    assert len(tagged) == 0

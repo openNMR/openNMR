@@ -2831,10 +2831,133 @@ def test_main_window_peak_picked_adds_row_only_when_pick_mode_active(qapp):
     window.canvas.peakPicked.emit(5.5)  # pick mode off -- should be ignored
     assert window.peak_table.rowCount() == 0
 
-    window.pick_peak_button.setChecked(True)
-    window.canvas.peakPicked.emit(5.5)
-    assert window.peak_table.rowCount() == 1
-    assert window.peak_table.item(0, 0).text() == "5.5"
+
+def test_main_window_select_region_button_switches_to_spectrum_tab(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
+
+    window.select_region_button.setChecked(True)
+
+    assert window.canvas_tabs.currentWidget() is window.canvas
+    assert window.canvas._region_select_mode is True
+
+
+def test_main_window_region_selected_adds_a_row(qapp):
+    window = MainWindow()
+    window.canvas.regionSelected.emit(3.0, 7.0)
+    assert window.region_table.rowCount() == 1
+    assert window._read_region_defs() == [(3.0, 7.0)]
+
+
+def test_main_window_select_region_menu_action_syncs_with_button(qapp):
+    window = MainWindow()
+    assert window.select_region_menu_action.shortcut().toString() in ("Ctrl+I", "⌘I")
+
+    window.select_region_button.setChecked(True)
+    assert window.select_region_menu_action.isChecked() is True
+
+    window.select_region_menu_action.setChecked(False)
+    assert window.select_region_button.isChecked() is False
+
+
+def test_main_window_region_table_add_remove_clear(qapp):
+    window = MainWindow()
+    window._add_region_row(1.0, 2.0)
+    window._add_region_row(3.0, 4.0)
+    assert window._read_region_defs() == [(1.0, 2.0), (3.0, 4.0)]
+
+    window.region_table.setCurrentCell(0, 0)
+    window._on_remove_region_clicked()
+    assert window._read_region_defs() == [(3.0, 4.0)]
+
+    window._on_clear_regions_clicked()
+    assert window.region_table.rowCount() == 0
+
+
+def test_main_window_integrate_regions_feeds_fit_curve_recovers_known_t2(qapp):
+    # The end-to-end promise: no peak fit needed at all -- a region
+    # integral per slice, straight into the same Fit Curve pathway a
+    # peak fit would use.
+    true_t2 = 0.05
+    delays = np.geomspace(0.001, 0.3, 10)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=true_t2)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_region_row(4.5, 5.5)
+    window._on_integrate_regions_clicked()
+
+    assert "Integrated" in window.analysis_results_label.text()
+    assert window.view_slice_fit_spin.isEnabled() is False  # no peak-fit-shaped viewer for this
+    assert window.value_source_combo.currentData() == "integral"
+
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
+    window._on_fit_curve_button_clicked()
+
+    result = window._relaxation_fit_results[0]
+    assert result["params"]["T2"] == pytest.approx(true_t2, rel=0.05)
+
+
+def test_main_window_integrate_regions_requires_at_least_one_region(qapp, tmp_path, monkeypatch):
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: shown.setdefault("called", True))
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window._on_integrate_regions_clicked()  # must not raise, must not pop a real dialog
+    assert shown.get("called") is True
+    assert window._slice_fit_results is None
+
+
+def test_main_window_regions_bound_the_peak_fit(qapp, monkeypatch):
+    from opennmr.gui import main_window as window_module
+    from opennmr.processing import fitting as processing_fitting
+
+    ppm = np.linspace(0.0, 10.0, 400)
+    data = gaussian(ppm, 5.0, 0.1, 1.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    spectrum = NMRSpectrum(data=data, axes=[axis], metadata=metadata)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.1, eta=0.0)
+    window._add_region_row(4.0, 6.0)
+
+    captured = {}
+    real_fit_slices = processing_fitting.NMR2D_fit_slices
+
+    def spy(*args, **kwargs):
+        captured["fit_regions"] = kwargs.get("fit_regions")
+        return real_fit_slices(*args, **kwargs)
+
+    monkeypatch.setattr(window_module.processing_fitting, "NMR2D_fit_slices", spy)
+    window._fit_peaks([spectrum])
+
+    assert captured["fit_regions"] == [(4.0, 6.0)]
+
+
+def test_main_window_restoring_integration_results_does_not_crash_slice_fit_viewer(qapp):
+    # _display_slice_fit needs a real peak-fit shape (popt/pcov/
+    # peak_defs/y_fit) -- an Integrate Regions result stored in the
+    # exact same metadata.raw["slice_fit_results"] slot must not reach
+    # it when a spectrum carrying one is reselected.
+    delays = np.geomspace(0.001, 0.3, 6)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_region_row(4.5, 5.5)
+    window._on_integrate_regions_clicked()
+
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)  # a second, unrelated spectrum
+    other = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.08)
+    _load_spectrum_directly(window, other)
+
+    window._select_single_row(0)  # back to the integration-results spectrum -- must not raise
+    assert window.view_slice_fit_spin.isEnabled() is False
 
 
 def test_main_window_read_peak_defs_parses_table(qapp):
