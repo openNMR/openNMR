@@ -139,7 +139,7 @@ def _ppm_hz_axis(o1: float, sf: float, obs: float, sw: float, si: int) -> tuple[
 # ============================================================
 
 def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p: float = 0.0,
-            autophase: bool = True, phase_mode: str = "apc0", phase0: float = 0.0, phase1: float = 0.0,
+            autophase: bool = True, phase_mode: str = "recorded", phase0: float = 0.0, phase1: float = 0.0,
             pivot_frac: float = 0.5,
             phase0_inc: float = 0.1, phase1_max: float = 20.0, phase1_improvement: float = 0.15,
             phase_penalty: str = "magnitude",
@@ -148,8 +148,20 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward") -> NMRSpectrum:
     """Read the raw ``fid`` and reprocess it using the parameters
-    TopSpin itself recorded in ``procs`` (window, ``SI``, and recorded
-    ``PHC0``/``PHC1`` unless ``autophase=True`` overrides them).
+    TopSpin itself recorded in ``procs`` (window, ``SI``, and --
+    ``phase_mode="recorded"``, the default -- the phase TopSpin itself
+    already applied, ``PHC0``/``PHC1``).
+
+    ``phase_mode`` : ``"recorded"`` (default) reproduces whatever
+    phase was already showing in TopSpin for this file -- either from
+    a user's own careful manual phasing, or TopSpin's own automatic
+    processing, both real prior work this shouldn't silently discard
+    (a user who already prepared/phased their data should not have to
+    redo it just to open the file here). ``"apc0"``/``"joint"`` guess
+    a fresh phase from scratch instead (zero-order grid search, or
+    joint zero+first-order) -- useful for a raw/never-processed
+    acquisition, or to deliberately re-derive a phase independent of
+    whatever TopSpin recorded.
 
     ``pivot_frac`` : where ``phase1`` pivots (0..1 across the ppm
     range, 0.5 = centre) -- matters whenever ``phase1`` is nonzero,
@@ -279,7 +291,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
 # ============================================================
 
 def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bool | None = None,
-            autophase: bool = True, phase0_inc: float = 0.1,
+            autophase: bool = True, phase_mode: str = "recorded", phase0_inc: float = 0.1,
             phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5,
             window: str | None = None, window_kwargs: dict | None = None, zero_fill: int | None = None,
             fid_shift: float = 0.0, align_echo: bool = False,
@@ -305,16 +317,21 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     populated, which isn't guaranteed for every pulse sequence/Bruker
     software version.
 
-    ``autophase`` : zero-order-only (``apc0``, uniformly across the
-    whole F2 dimension), same as before. ``phase0``/``phase1``/
-    ``pivot_frac`` : applied (via :func:`opennmr.processing.ft.apply_phase`,
-    uniformly across F2) whenever ``autophase=False`` -- lets a
-    manually-dialed-in phase correction (from the GUI's Phase tab)
-    survive an "Apply Processing" click instead of being silently reset
-    to 0/re-autophased. If both ``autophase=True`` and a nonzero
-    ``phase1`` are given, ``phase0`` is still recomputed by ``apc0``
-    but ``phase1``/``pivot_frac`` are applied on top of it (``apc0``
-    itself has no first-order component).
+    ``autophase``/``phase_mode`` : zero-order only, uniformly across
+    the whole F2 dimension -- ``phase_mode="recorded"`` (default)
+    reproduces F2's own recorded ``PHC0`` (see :func:`read_1d`'s own
+    ``phase_mode`` docs for the full "don't discard the user's own
+    processing" rationale, identical here); ``"apc0"`` guesses fresh
+    via a grid search instead. ``phase0``/``phase1``/``pivot_frac`` :
+    applied (via :func:`opennmr.processing.ft.apply_phase`, uniformly
+    across F2) whenever ``autophase=False`` -- lets a manually-dialed-in
+    phase correction (from the GUI's Phase tab) survive an "Apply
+    Processing" click instead of being silently reset. If both
+    ``autophase=True`` and a nonzero ``phase1`` are given, ``phase0``
+    is still recomputed per ``phase_mode`` but ``phase1``/``pivot_frac``
+    are applied on top of it (neither ``recorded`` nor ``apc0`` touch
+    ``phase1`` here -- F1's own phase, when relevant, is a separate
+    concern this function doesn't otherwise address).
 
     ``window``/``window_kwargs``/``zero_fill``/``fid_shift``/
     ``align_echo``/``linear_predict_points`` : see :func:`read_1d` --
@@ -407,7 +424,12 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # correction needs it.
     x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, spectrum.shape[1])
     if autophase:
-        phase0 = processing_ft.apc0(spectrum.mean(axis=0), x_ppm, phase0_inc)
+        if phase_mode == "recorded":
+            phase0 = float(procs.get("PHC0", 0.0))
+        elif phase_mode == "apc0":
+            phase0 = processing_ft.apc0(spectrum.mean(axis=0), x_ppm, phase0_inc)
+        else:
+            raise ValueError("phase_mode must be 'apc0' or 'recorded'")
     if phase0 or phase1:
         spectrum = processing_ft.apply_phase(spectrum, x_ppm, phase0, phase1, pivot_frac=pivot_frac)
 
@@ -533,12 +555,26 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
     xdim_f2 = int(procs.get("XDIM", 0))
     grpdly = float(procs.get("GRPDLY", 0.0))
 
+    # F1's own processed-data block size (SI/XDIM) always comes from
+    # the real on-disk proc2s, regardless of homonuclear -- that flag
+    # only says whether F1's *chemical-shift-axis* parameters
+    # (nucleus/BF1/O1/SF/SW) should be looked up independently from
+    # acqu2s/proc2s or borrowed from F2's own acqus/procs. Reading
+    # proc2s only in the `else` branch (as this used to) silently
+    # discarded a real SI/XDIM whenever homonuclear=True was passed
+    # for a genuine 2D dataset that happens to observe the same
+    # nucleus on both axes -- found on real 2H EXSY data, where F1's
+    # SI (1024) was replaced by F2's own SI (65536), reshaping the
+    # 2rr block into a shape many times too large to fit the file.
+    try:
+        proc2s = _read_procs(path, procno, proc2=True)
+    except FileNotFoundError:
+        proc2s = {}
+
     if homonuclear:
         nuc2, obs_1, o1_1, sf_1, sw_1 = acqus.get("NUC1"), obs, o1, sf, sw
-        proc2s = {}
     else:
         acqu2s = parse_jcampdx_params(acqu2s_path)
-        proc2s = _read_procs(path, procno, proc2=True)
         nuc2 = acqu2s.get("NUC1")
         obs_1 = float(acqu2s.get("BF1"))
         o1_1 = float(acqu2s.get("O1"))
@@ -725,18 +761,44 @@ def _detect(path: str) -> bool:
 
 def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     """Vendor-registry entry point: prefer the raw-FID path, falling
-    back to already-processed data only when no raw ``fid``/``ser`` is
+    back to already-processed data when no raw ``fid``/``ser`` is
     present at all -- see the module docstring for why an unsupported
     window function no longer routes through here (``read_1d``/
     ``read_2d`` handle that themselves now, staying on the raw-FID
-    path)."""
+    path) -- or, for 2D specifically, when the raw ``ser``'s shape
+    can't be determined at all (found on real data: ``nmrglue``'s own
+    shape-guessing has a real bug for ``DTYPA=2``/float64 2D data with
+    a complex direct dimension when no pulse program can be read,
+    underestimating the row count by using a fixed 4-bytes-per-point
+    divisor regardless of the actual point size -- there is no raw
+    shape to "stay on" the way an unsupported window has a FID to stay
+    on, so falling back is the only usable option). Flagged via
+    ``metadata.raw["read_2d_shape_guess_failed"]`` so callers (the
+    GUI) can tell the user why raw-FID reprocessing isn't available,
+    rather than it being silent."""
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
+    has_2rr = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
     if has_ser:
-        return read_2d(path, **kwargs)
+        try:
+            return read_2d(path, **kwargs)
+        except (ValueError, IndexError) as exc:
+            if not has_2rr:
+                raise
+            # read_2d_processed has no raw-FID-reprocessing parameters
+            # (window/zero_fill/fid_shift/phase.../...) -- the GUI
+            # always sends them once it's seen `ser` on disk (the same
+            # check this function just made), so only the parameters
+            # read_2d_processed actually accepts are forwarded here.
+            processed_kwargs = {
+                k: v for k, v in kwargs.items() if k in ("procno", "homonuclear", "pseudo_2d")
+            }
+            spectrum = read_2d_processed(path, **processed_kwargs)
+            spectrum.metadata.raw["read_2d_shape_guess_failed"] = str(exc)
+            return spectrum
     if has_fid:
         return read_1d(path, **kwargs)
-    if os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr")):
+    if has_2rr:
         return read_2d_processed(path, **kwargs)
     return read_1d_processed(path, **kwargs)
 

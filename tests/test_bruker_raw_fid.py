@@ -7,10 +7,14 @@ controlled synthetic data, so everything downstream (window dispatch,
 zero-fill, FFT, phasing, cropping, metadata/axis construction -- i.e.
 the code actually written for this package) is exercised for real.
 
-Full end-to-end validation against a real raw Bruker dataset is still
-pending real data from the user (see the project plan's Verification
-section) -- this is a narrower, but honest, slice of coverage in the
-meantime.
+Real raw Bruker 2D data has since been verified against directly (not
+committed here -- test_data/ is gitignored, real instrument data) --
+see TODO.md's "Bruker 2D verification" entry for what that surfaced
+(a real nmrglue shape-guessing bug for DTYPA=2 2D data, and a real
+read_2d_processed bug, both fixed) and the regression coverage it led
+to: this file's own test_read_1d_default_phase_mode_uses_recorded_not_apc0,
+its read_2d counterpart in test_bruker_raw_2d.py, and the
+read_2d_processed/_read_auto fallback tests in test_bruker.py.
 """
 
 import numpy as np
@@ -107,6 +111,37 @@ def test_read_1d_autophase_apc0_runs(tmp_path, monkeypatch):
     spectrum = bruker.read_1d(path, autophase=True, phase_mode="apc0")
     assert "phase0" in spectrum.metadata.raw
     assert len(spectrum.data) == 1024
+
+
+def test_read_1d_default_phase_mode_uses_recorded_not_apc0(tmp_path, monkeypatch):
+    # CRITICAL per collaborator feedback (Euan Bassey, see TODO.md):
+    # a fresh load must reproduce whatever phase TopSpin itself had --
+    # a user's own careful manual phasing, or TopSpin's own automatic
+    # processing -- not silently discard it by re-guessing from
+    # scratch. phase_mode's default changed from "apc0" to "recorded".
+    path = _make_experiment_dir(tmp_path, procs_overrides={"PHC0": 37.5, "PHC1": 0.0})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_fid()
+    _mock_ng_bruker_read(monkeypatch, acqus, fid)
+
+    spectrum = bruker.read_1d(path, autophase=True)  # phase_mode not specified -- uses the default
+
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(37.5)
+
+
+def test_read_1d_recorded_phase_mode_ignores_data_entirely(tmp_path, monkeypatch):
+    # "recorded" reproduces PHC0 verbatim -- it must not fall back to
+    # apc0's own grid search even when PHC0 happens to be 0.0 (the
+    # never-manually-phased case), since that 0.0 is itself real
+    # information (TopSpin's own last-applied phase).
+    path = _make_experiment_dir(tmp_path, procs_overrides={"PHC0": 0.0, "PHC1": 0.0})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_fid()
+    _mock_ng_bruker_read(monkeypatch, acqus, fid)
+
+    spectrum = bruker.read_1d(path, autophase=True, phase_mode="recorded")
+
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(0.0)
 
 
 def test_read_1d_window_override_replaces_recorded_wdw(tmp_path, monkeypatch):

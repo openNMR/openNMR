@@ -860,6 +860,16 @@ class MainWindow(QMainWindow):
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
 
+        shape_note = spectrum.metadata.raw.get("read_2d_shape_guess_failed")
+        if shape_note:
+            QMessageBox.information(
+                self, "Loaded from processed data",
+                f"{self.session.label(index)}:\n\n{shape_note}\n\nCouldn't determine the raw "
+                f"ser file's shape, so this loaded from TopSpin's own already-processed data "
+                f"instead -- raw-FID reprocessing (window, zero-fill, phase, ...) isn't "
+                f"available for it.",
+            )
+
         window_note = spectrum.metadata.raw.get("window_unsupported")
         if window_note:
             QMessageBox.information(
@@ -1012,13 +1022,19 @@ class MainWindow(QMainWindow):
             self._set_nucleus(index, suggestion)
 
     def _on_set_mass_action(self, index: int) -> None:
-        current = self.session.spectra[index].metadata.mass or 0.0
-        value, ok = QInputDialog.getDouble(
-            self, "Set sample mass", "Mass (g) -- used for mass-normalized comparison:",
-            current, 0.0, 1.0e6, 4,
+        # Entered/displayed in mg (typical solid-state sample sizes are
+        # tens of mg -- entering "0.045" instead of "45" invites
+        # mistakes), converted to/from metadata.mass's own stored unit
+        # (grams, unchanged -- see its own docstring) right at this
+        # boundary, so nothing downstream (comparison normalization,
+        # session.set_mass) needs to know mg was ever involved.
+        current_mg = (self.session.spectra[index].metadata.mass or 0.0) * 1000.0
+        value_mg, ok = QInputDialog.getDouble(
+            self, "Set sample mass", "Mass (mg) -- used for mass-normalized comparison:",
+            current_mg, 0.0, 1.0e6, 4,
         )
-        if ok and value > 0:
-            self.session.set_mass(index, value)
+        if ok and value_mg > 0:
+            self.session.set_mass(index, value_mg / 1000.0)
             if index == self._selected_index():
                 self._refresh_selection_display(index)
             self._refresh_compare_view_if_active()
@@ -1745,7 +1761,14 @@ class MainWindow(QMainWindow):
         is set -- that only means the *recorded* window wasn't applied
         (see :mod:`opennmr.io.bruker`'s module docstring); every other
         raw-FID reprocessing control, including picking a different
-        window, still works."""
+        window, still works. False, unlike the window case, when
+        ``metadata.raw["read_2d_shape_guess_failed"]`` is set -- there
+        the raw ``ser``'s shape couldn't be determined at all, so
+        ``_read_auto`` already fell back to already-processed data (no
+        ``fid_raw`` cached to reprocess from, unlike an unsupported
+        window)."""
+        if spectrum.metadata.raw.get("read_2d_shape_guess_failed"):
+            return False
         if spectrum.metadata.vendor in ("xpulse", "varian", "jeol"):
             return True
         if spectrum.metadata.vendor == "bruker" and spectrum.metadata.source_path:
@@ -4935,7 +4958,7 @@ class MainWindow(QMainWindow):
         if meta.nucleus_indirect:
             bits.append(f"Indirect nucleus: {meta.nucleus_indirect}")
         if meta.mass:
-            bits.append(f"Sample mass: {meta.mass:g} g")
+            bits.append(f"Sample mass: {meta.mass * 1000.0:g} mg")
         self.info_label.setText("\n".join(bits))
 
         self.process_indirect_button.setVisible(spectrum.ndim == 2)

@@ -175,3 +175,82 @@ def test_read_diff_xml_includes_gamma_when_nucleus_given(tmp_path):
     result = bruker.read_diff_xml(str(expt), nucleus="1H")
     assert result["gamma"] is not None
     assert result["gamma"] > 0
+
+
+# ============================================================
+# read_2d_processed / _read_auto fallback (real-data regressions)
+# ============================================================
+#
+# Found via real data (2H solid-state EXSY/HETCOR/BABA-DQ 2D
+# experiments): (1) read_2d_processed's F1 block size silently came
+# from procs (F2's own SI) instead of proc2s (F1's real SI) whenever
+# homonuclear=True, since proc2s was skipped entirely in that branch;
+# (2) nmrglue's own no-pulse-program shape-guessing has a real bug for
+# DTYPA=2 (float64) 2D data with a complex direct dimension (a fixed
+# 4-bytes-per-point divisor regardless of the actual 8-byte point
+# size), which read_2d has no way to work around on its own -- there's
+# no raw shape to determine at all, so _read_auto falls back to
+# already-processed data instead, matching the escape-hatch role
+# read_2d_processed's own docstring already describes.
+
+def _make_2d_dataset_with_processed(tmp_path, n_f1=4, n_f2=8, name="expt2d"):
+    """A genuine (non-pseudo) 2D dataset with real procs/proc2s SI
+    values that differ from each other (n_f1 != n_f2 by default) --
+    exactly the shape the read_2d_processed homonuclear/proc2s bug
+    needs to be provable: using F2's SI for F1 too would silently
+    produce a same-on-both-axes shape instead."""
+    expt = tmp_path / name
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    _write_params(expt / "acqus", {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1})
+    _write_params(expt / "acqu2s", {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0})
+    _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": n_f2, "SF": 400.13})
+    _write_params(pdata / "proc2s", {"SW_p": 2000.0, "SI": n_f1, "SF": 400.13})
+    data = np.arange(n_f1 * n_f2, dtype="int32").reshape(n_f1, n_f2)
+    data.tofile(pdata / "2rr")
+    (-data).tofile(pdata / "2ri")
+    (expt / "ser").write_bytes(b"\x00")  # existence is all _read_auto checks; content unused (mocked)
+    return str(expt)
+
+
+def test_read_2d_processed_homonuclear_uses_real_proc2s_shape(tmp_path):
+    path = _make_2d_dataset_with_processed(tmp_path, n_f1=4, n_f2=8)
+    spectrum = bruker.read_2d_processed(path, homonuclear=True)
+    assert spectrum.data.shape == (4, 8)  # not (8, 8) -- see this section's own docstring
+
+
+def test_read_2d_processed_non_homonuclear_shape_unaffected(tmp_path):
+    path = _make_2d_dataset_with_processed(tmp_path, n_f1=4, n_f2=8)
+    spectrum = bruker.read_2d_processed(path, homonuclear=False)
+    assert spectrum.data.shape == (4, 8)
+
+
+def test_read_auto_falls_back_to_processed_when_read_2d_shape_fails(tmp_path, monkeypatch):
+    path = _make_2d_dataset_with_processed(tmp_path, n_f1=4, n_f2=8)
+
+    def fake_read_2d(_path, **_kwargs):
+        raise IndexError("tuple index out of range")
+
+    monkeypatch.setattr(bruker, "read_2d", fake_read_2d)
+
+    # read_2d_processed doesn't accept these -- confirms _read_auto
+    # filters kwargs down rather than forwarding them all and raising
+    # TypeError, since the GUI always sends raw-FID-reprocessing
+    # kwargs once it's seen `ser` on disk.
+    spectrum = bruker._read_auto(path, window="hann", zero_fill=999, fid_shift=1.0)
+
+    assert spectrum.data.shape == (4, 8)
+    assert spectrum.metadata.raw["read_2d_shape_guess_failed"] == "tuple index out of range"
+
+
+def test_read_auto_reraises_when_no_processed_data_available(tmp_path, monkeypatch):
+    path = _make_2d_dataset_with_processed(tmp_path, n_f1=4, n_f2=8)
+    os.remove(os.path.join(path, "pdata", "1", "2rr"))
+
+    def fake_read_2d(_path, **_kwargs):
+        raise IndexError("tuple index out of range")
+
+    monkeypatch.setattr(bruker, "read_2d", fake_read_2d)
+
+    with pytest.raises(IndexError):
+        bruker._read_auto(path)

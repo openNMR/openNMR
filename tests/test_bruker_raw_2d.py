@@ -6,6 +6,7 @@ files, which aren't available in this environment.
 """
 
 import numpy as np
+import pytest
 
 from opennmr.io import bruker
 
@@ -120,6 +121,22 @@ def test_read_2d_autophase_runs(tmp_path, monkeypatch):
 
     spectrum = bruker.read_2d(path, homonuclear=True, autophase=True)
     assert spectrum.data.shape == (32, 64)
+
+
+def test_read_2d_default_phase_mode_uses_recorded_not_apc0(tmp_path, monkeypatch):
+    # Same "recorded" default as read_1d (see its own test of the same
+    # name) -- read_2d previously had no phase_mode at all and always
+    # re-guessed via apc0, discarding F2's own recorded PHC0.
+    path = _make_2d_experiment_dir(tmp_path)
+    _write_procs(tmp_path / "expt2d" / "pdata" / "1" / "procs",
+                  {"SW_p": 8000.0, "SI": 64, "SF": 400.13, "WDW": 0, "PHC0": 42.0})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_2d_fid()
+    _mock_2d(monkeypatch, acqus, fid)
+
+    spectrum = bruker.read_2d(path, homonuclear=True, autophase=True)
+
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(42.0)
 
 
 def test_read_2d_f2_window_override_applies_per_row(tmp_path, monkeypatch):

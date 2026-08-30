@@ -1973,6 +1973,37 @@ def test_main_window_unsupported_window_shows_notice_but_stays_reprocessable(qap
     index = window._selected_index()
     assert "window_unsupported" in window.session.spectra[index].metadata.raw
     assert window.fid_processing_box.isHidden() is False
+
+
+def test_main_window_2d_shape_guess_failure_falls_back_and_hides_fid_box(qapp, tmp_path, monkeypatch):
+    # Regression test, found on real 2D data (see TODO.md): nmrglue's
+    # own shape-guessing can fail entirely for some real Bruker 2D
+    # datasets (a genuine nmrglue bug, not something read_2d can work
+    # around) -- io.bruker._read_auto now falls back to TopSpin's own
+    # already-processed data instead of leaving the load unopenable,
+    # and this box must correctly go from "usable" to "hidden" (unlike
+    # the unsupported-window case above, there's no fid_raw cached at
+    # all to reprocess from once this fallback happens).
+    from opennmr.io import bruker as bruker_io
+
+    path = _make_2d_dataset(tmp_path, n_f1=4, n_f2=8)
+    (tmp_path / "expt2d" / "ser").write_bytes(b"\x00")
+
+    def fake_read(_path, **_kw):
+        raise IndexError("tuple index out of range")
+
+    monkeypatch.setattr(bruker_io.ng.bruker, "read", fake_read)
+    monkeypatch.setattr("opennmr.gui.main_window.QMessageBox.information", lambda *a, **kw: None)
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+
+    assert window.spectrum_list.count() == 1
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    assert "read_2d_shape_guess_failed" in spectrum.metadata.raw
+    assert window._fid_reprocessable(spectrum) is False
+    assert window.fid_processing_box.isHidden() is True
     window._on_reprocess_fid_clicked()  # must not raise -- still fully reprocessable
 
 
@@ -2323,14 +2354,17 @@ def test_main_window_compare_normalize_by_mass_scales_data(qapp, tmp_path):
 
 
 def test_main_window_set_mass_action_via_dialog(qapp, tmp_path, monkeypatch):
+    # Entered in mg (typical sample sizes are tens of mg), stored in
+    # metadata.mass as grams -- see _on_set_mass_action's own comment.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path), vendor="bruker")
 
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (3.5, True))
+    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (35.0, True))
     window._on_set_mass_action(0)
 
-    assert window.session.spectra[0].metadata.mass == pytest.approx(3.5)
+    assert window.session.spectra[0].metadata.mass == pytest.approx(0.035)
     assert "Sample mass" in window.info_label.text()
+    assert "35" in window.info_label.text()  # displayed back in mg, not 0.035 g
 
 
 def test_main_window_set_mass_action_cancelled_is_noop(qapp, tmp_path, monkeypatch):
