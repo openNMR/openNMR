@@ -2,6 +2,78 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Bruker PFG load-speed regression, phase-drag zoom preservation, FID/Compare zoom behaviour (2026-08-30)
+
+Four items from live testing, all diagnosed and fixed in one round.
+
+- ~~Loading large Bruker PFG pseudo-2D data is slower than it was at
+  first~~ -- done, a real, measured regression from the `prepare_fid`
+  sharing work earlier tonight, not a vague slowdown. `read_2d`'s F2
+  processing loop used to skip the whole shift/echo-align/linear-
+  predict step per row entirely (three separate `if`s) whenever none
+  of them were requested -- the common case for a fresh load. Folding
+  the three into one shared `processing.ft.prepare_fid` call
+  accidentally made the `np.apply_along_axis` wrapping it
+  unconditional -- confirmed via a direct benchmark before fixing
+  (~1200x slower for a synthetic 32x16384 case just from the per-row
+  Python-level call overhead of a function that ends up doing nothing
+  for every row). Restored the original one-line fast-path guard
+  around the call; new regression test mocks `prepare_fid` to fail
+  loudly if it's ever called when `fid_shift`/`align_echo`/
+  `linear_predict_points` are all off, rather than only checking the
+  result still looks right (which a slow-but-correct regression would
+  have passed).
+- ~~Keep the axis positioning constant while phasing on the
+  Processing-preview tab, and show the pivot line there too~~ -- done.
+  New `MplCanvas.update_processing_preview_spectrum` updates the
+  preview's spectrum panel *in place* (same idea as the existing
+  `update_data` for the plain Spectrum tab) instead of the full
+  rebuild `show_processing_preview` does -- preserves whatever zoom/
+  pan is already there. Wired into `_apply_phase_preview`'s "1d"/
+  "pseudo2d" branches specifically (a new `_refresh_processing_preview_
+  phase_only`, distinct from the existing full-rebuild `_refresh_
+  processing_preview_if_active`) -- phase never touches the FID panel,
+  so only the spectrum panel needs updating, and there's finally a
+  real "current view" worth preserving through a drag the way there
+  already was for the Spectrum tab. Discrete "just fix it" actions
+  (Autophase, Revert Autophase, Baseline Correct) deliberately still
+  use the full rebuild -- matches `autoscale_y`'s own established
+  reasoning for those same three actions on the Spectrum tab (a
+  one-shot result worth re-fitting the view to, not preserving the
+  old one through). New `_pivot_marker_ax` generalizes the pivot-line
+  mechanism (previously gated on `_current_1d_spectrum`, which is
+  deliberately `None` for the Processing-preview view since it's not
+  offering unit-switching there) to work on any axes a view opts into,
+  not just the plain Spectrum tab's own. Verified with a rendered
+  before/after screenshot of an actual zoomed-in small peak being
+  phased -- the zoom held exactly, and the lineshape changed
+  correctly.
+- ~~The FID panel's scroll-zoom shouldn't have the pinned-baseline
+  behaviour -- freeform, or centred on y=0~~ -- done. New
+  `_freeform_zoom_axes` set (parallel to `_pivot_marker_ax`, same
+  reset-then-opt-in pattern): `show_fid`'s own axes and
+  `show_processing_preview`'s FID panel specifically (not its spectrum
+  panel) now get a plain cursor-centred y-zoom -- both ends of the
+  view move, matching how x-axis zoom already works -- instead of the
+  pin-the-bottom zoom that makes sense for a phased spectrum (rising
+  from a real baseline) but not an FID (oscillating around y=0, no
+  baseline to pin).
+- ~~Compare tab: let overlapping/zoomed spectra bleed into
+  neighbouring rows instead of being clipped~~ -- done,
+  `Line2D.set_clip_on(False)` on each row's plotted line in `show_
+  compare`'s "Stacked" mode. Needed a second part too, found by
+  actually rendering the result rather than assuming clip_on alone
+  was enough: each row's own axes background is opaque by default, so
+  a peak bleeding into a row drawn *after* it (rows render top-to-
+  bottom) would just get painted over by that row's own white
+  background -- `row_ax.patch.set_alpha(0.0)` makes every row
+  transparent so a bleed stays visible regardless of which direction
+  it goes or which row was drawn first. Verified with a rendered
+  screenshot showing a deliberately zoomed-in peak correctly
+  overlapping both neighbouring rows.
+
+510 tests passing (504 -> 510). Committed and pushed.
+
 ## Compare-tab landing fix, and the real per-slice-preview performance fix (2026-08-30)
 
 Two more items from live testing, addressed in the same round since the

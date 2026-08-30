@@ -196,6 +196,14 @@ class MplCanvas(QWidget):
         # show_* rebuild) invalidates it, so it's reset to None
         # wherever that happens (see _apply_view_options).
         self._pivot_line = None
+        # Which axes (if any) the pivot marker above should draw on --
+        # None wherever a pivot marker doesn't make sense (a 2D
+        # contour, FID, Compare, fit view). Set explicitly by
+        # show_spectrum (its 1D branch) and show_processing_preview
+        # (its spectrum panel specifically, not the FID one) after
+        # _apply_view_options resets it, same reset-then-opt-back-in
+        # pattern as _freeform_zoom_axes.
+        self._pivot_marker_ax = None
         # The per-spectrum axes of a "Stacked" Compare view (one row
         # per spectrum, sharing x, each with its own independent
         # y-autoscale) -- None for every other view, including a
@@ -221,6 +229,25 @@ class MplCanvas(QWidget):
         # Excluded Points" actions (see _on_context_menu) and the
         # right-click position capture in _on_press that backs them.
         self._fit_mode = False
+        # Axes whose y-zoom should be cursor-centred ("freeform")
+        # rather than pinned at the current bottom -- an FID
+        # oscillates around y=0 rather than rising from a baseline the
+        # way a phased spectrum does, so "pin the bottom" doesn't mean
+        # anything sensible there. Populated only by show_fid (the
+        # whole view) and show_processing_preview (its FID panel
+        # specifically, not the spectrum panel below it) -- empty for
+        # every other view, where pin-bottom is still correct.
+        self._freeform_zoom_axes: set = set()
+        # show_processing_preview's own two axes, kept around (only
+        # while that's the current view -- None otherwise) so
+        # update_processing_preview_spectrum can update the spectrum
+        # panel's data *in place* on a phase change, preserving
+        # whatever zoom/pan is already there -- same idea as
+        # update_data for the plain single-axes Spectrum view, and for
+        # the same reason: dragging phase shouldn't reset a deliberate
+        # zoom into a small peak on every tick.
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
         self._last_right_click_xy: tuple[float, float] | None = None
 
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
@@ -314,6 +341,18 @@ class MplCanvas(QWidget):
             for row_ax in target_axes:
                 row_ymin, row_ymax = row_ax.get_ylim()
                 row_ax.set_ylim(row_ymin, row_ymin + (row_ymax - row_ymin) * factor)
+            self.canvas.draw_idle()
+            return
+
+        if ax in self._freeform_zoom_axes:
+            # Cursor-centred, not pinned-bottom -- an FID oscillates
+            # around y=0 rather than rising from a baseline, so there's
+            # no sensible "bottom" to pin here (see
+            # _freeform_zoom_axes's own docstring). Explicit user
+            # request.
+            y = event.ydata
+            ymin, ymax = ax.get_ylim()
+            ax.set_ylim(y - (y - ymin) * factor, y + (ymax - y) * factor)
             self.canvas.draw_idle()
             return
 
@@ -732,6 +771,7 @@ class MplCanvas(QWidget):
         # (set_pivot_marker would otherwise try to move a Line2D no
         # longer attached to any axes).
         self._pivot_line = None
+        self._pivot_marker_ax = None
         if self._legend_visible and self.ax.get_legend_handles_labels()[0]:
             self.ax.legend()
         else:
@@ -741,13 +781,13 @@ class MplCanvas(QWidget):
         self.ax.set_box_aspect(self._aspect_ratio)
 
     def set_pivot_marker(self, ppm: float | None) -> None:
-        """Show, move, or hide a dashed vertical line on the current
-        plain-1D-spectrum view at ``ppm`` -- the Phase 1 pivot point,
-        visible while phasing instead of only a number in a spin box.
-        ``None`` hides it. A no-op when the current view isn't a plain
-        1D spectrum (matches :attr:`_current_1d_spectrum`'s own gate,
-        e.g. a 2D contour or the FID/Compare views)."""
-        if self._current_1d_spectrum is None:
+        """Show, move, or hide a dashed vertical line at ``ppm`` -- the
+        Phase 1 pivot point, visible while phasing instead of only a
+        number in a spin box. ``None`` hides it. A no-op when the
+        current view has nowhere sensible to draw it (see
+        :attr:`_pivot_marker_ax`'s own docstring -- a 2D contour, FID,
+        or Compare view, or the Processing-preview's own FID panel)."""
+        if self._pivot_marker_ax is None:
             return
         if ppm is None:
             if self._pivot_line is not None:
@@ -756,7 +796,7 @@ class MplCanvas(QWidget):
                 self.canvas.draw_idle()
             return
         if self._pivot_line is None:
-            self._pivot_line = self.ax.axvline(
+            self._pivot_line = self._pivot_marker_ax.axvline(
                 ppm, linestyle="--", color="darkorange", linewidth=1.2, zorder=5,
             )
         else:
@@ -770,6 +810,9 @@ class MplCanvas(QWidget):
         self._compare_axes = None
         self._fit_mode = False
         self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -790,6 +833,9 @@ class MplCanvas(QWidget):
             self._compare_axes = None
             self._fit_mode = False
             self._selected_compare_index = None
+            self._freeform_zoom_axes = set()
+            self._processing_preview_fid_ax = None
+            self._processing_preview_spec_ax = None
             self._current_1d_spectrum = spectrum
             self._axis_unit = "ppm"  # a fresh spectrum always starts in ppm
             self.ax = self.figure.add_subplot(111)
@@ -820,6 +866,8 @@ class MplCanvas(QWidget):
             raise ValueError(f"Cannot display a spectrum with ndim={spectrum.ndim}")
 
         self._apply_view_options()
+        if spectrum.ndim == 1:
+            self._pivot_marker_ax = self.ax
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
@@ -863,9 +911,13 @@ class MplCanvas(QWidget):
         self._compare_axes = None
         self._fit_mode = False
         self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
+        self._freeform_zoom_axes = {self.ax}
         t = np.arange(len(fid)) * dt
         if mode not in ("magnitude", "real"):
             raise ValueError("mode must be 'magnitude' or 'real'")
@@ -918,10 +970,16 @@ class MplCanvas(QWidget):
         self._compare_axes = None
         self._fit_mode = False
         self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self.figure.clear()
         fid_ax, spec_ax = self.figure.subplots(2, 1)
         self.ax = spec_ax
+        self._freeform_zoom_axes = {fid_ax}
+        self._processing_preview_fid_ax = fid_ax
+        self._processing_preview_spec_ax = spec_ax
 
         t = np.arange(len(fid)) * dt
         if fid_mode not in ("magnitude", "real"):
@@ -954,7 +1012,31 @@ class MplCanvas(QWidget):
                                    labelsize=self._AXIS_LABELSIZE)
 
         self._apply_view_options()
+        self._pivot_marker_ax = spec_ax
         self.figure.tight_layout()
+        self.canvas.draw_idle()
+
+    def update_processing_preview_spectrum(self, spectrum: NMRSpectrum) -> None:
+        """Refresh the Processing-preview's spectrum panel (bottom) in
+        place, preserving whatever zoom/pan is already there -- unlike
+        :meth:`show_processing_preview`, which resets both panels'
+        views from scratch. For a phase change specifically (drag,
+        spin box, autophase, pivot): phase never touches the FID, only
+        the already-FFT'd spectrum, so only this panel's y-data
+        (real part) ever needs updating -- the FID panel above is left
+        completely untouched, same reasoning as :meth:`update_data`.
+        Explicit user request: being able to zoom into a small peak
+        and phase it without the view snapping back out on every tick.
+
+        Falls back to a full :meth:`show_processing_preview`-style
+        rebuild being the caller's job instead -- this method no-ops
+        (rather than guessing) if there's no processing-preview layout
+        currently up to update in place at all."""
+        if self._processing_preview_spec_ax is None or not self._processing_preview_spec_ax.lines:
+            return
+        y = spectrum.normalized()
+        idx = plotting.downsample_indices(len(y))
+        self._processing_preview_spec_ax.lines[0].set_ydata(y if idx is None else y[idx])
         self.canvas.draw_idle()
 
     def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack", normalize: bool = False) -> None:
@@ -1014,6 +1096,9 @@ class MplCanvas(QWidget):
         self._compare_axes = None
         self._fit_mode = False
         self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self.figure.clear()
 
@@ -1025,6 +1110,20 @@ class MplCanvas(QWidget):
                 this_xmin, this_xmax, labeltext = plotting.plot_1d(
                     row_ax, spectrum, normalize=normalize, color=colors[i], full_resolution=self._full_resolution,
                 )
+                # Let a tall peak spill into a neighbouring row instead
+                # of being hard-clipped at this row's own axes edge --
+                # explicit user request, matching how a classic NMR
+                # stacked plot looks (one trace's peak visibly
+                # overlapping the next). Two parts, both needed: the
+                # line itself must not be clipped to its own axes, and
+                # every row's own background must be transparent (not
+                # opaque white) -- otherwise whichever row happens to
+                # be drawn *later* (rows are drawn top-to-bottom, so
+                # any row below the one bleeding into it) would just
+                # paint over the bleed with its own opaque background,
+                # hiding it again.
+                row_ax.lines[-1].set_clip_on(False)
+                row_ax.patch.set_alpha(0.0)
                 xmin = this_xmin if xmin is None else min(xmin, this_xmin)
                 xmax = this_xmax if xmax is None else max(xmax, this_xmax)
                 row_ax.set_yticks([])
@@ -1094,6 +1193,9 @@ class MplCanvas(QWidget):
         self._compare_axes = None
         self._fit_mode = False
         self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -1166,6 +1268,9 @@ class MplCanvas(QWidget):
         self._compare_axes = None
         self._fit_mode = True
         self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)

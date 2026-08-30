@@ -1666,13 +1666,50 @@ class MainWindow(QMainWindow):
     def _refresh_processing_preview_if_active(self) -> None:
         """Live-updates the Processing tab's own preview as a control
         changes, but only while that canvas tab is actually showing --
-        same gating pattern as :meth:`_refresh_fid_preview_if_active`."""
+        same gating pattern as :meth:`_refresh_fid_preview_if_active`.
+        A full rebuild (:meth:`_show_processing_preview`), so both
+        panels' views reset -- correct for anything that can change
+        the FID's own shape (window, zero-fill, shift, TDeff, LP,
+        slice) or that's a discrete "just fix it" action where
+        re-fitting the view to the new result makes more sense than
+        preserving the old one (Autophase, Revert Autophase, Baseline
+        Correct -- matches :meth:`MplCanvas.autoscale_y`'s own
+        established reasoning for the same three actions on the
+        Spectrum tab). For a live phase *drag*/typed-value change
+        specifically, see :meth:`_refresh_processing_preview_phase_only`
+        instead."""
         if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
             return
         index = self._selected_index()
         if index is None:
             return
         self._show_processing_preview(self.session.spectra[index], index, switch_tab=False)
+
+    def _refresh_processing_preview_phase_only(self) -> None:
+        """Live-updates the Processing tab's own preview for a phase
+        change specifically (drag, spin box, pivot) -- in place,
+        preserving whatever zoom/pan is already on the spectrum panel,
+        via :meth:`MplCanvas.update_processing_preview_spectrum`.
+        Explicit user request: phasing should be possible while zoomed
+        into a small peak, without the view snapping back out on every
+        tick the way a full rebuild (:meth:`_refresh_processing_preview_if_active`)
+        would. Phase never touches the FID, so the FID panel above is
+        never touched either -- only the spectrum panel's data."""
+        if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
+            return
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        try:
+            computed = self._compute_processing_preview(spectrum)
+        except Exception:  # noqa: BLE001 -- best-effort live preview, see _show_processing_preview
+            return
+        if computed is None:
+            return
+        _fid, _dt, preview_spectrum, _title = computed
+        self.processing_preview_canvas.update_processing_preview_spectrum(preview_spectrum)
+        self.processing_preview_canvas.set_pivot_marker(self.pivot_spin.value())
 
     def _update_processing_preview_tab_visibility(self, spectrum) -> None:
         """Show the Processing Preview canvas tab only for a spectrum
@@ -2459,11 +2496,13 @@ class MainWindow(QMainWindow):
             if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
                 self.canvas_tabs.setCurrentWidget(self.canvas)
             else:
-                # Computed entirely in memory (see
-                # _compute_processing_preview) -- cheap enough to
-                # refresh on every drag tick, unlike the disk-re-read
-                # this used to be.
-                self._refresh_processing_preview_if_active()
+                # In place, preserving whatever zoom is already on the
+                # preview's spectrum panel -- see
+                # _refresh_processing_preview_phase_only's own
+                # docstring (explicit user request: phasing while
+                # zoomed into a small peak shouldn't reset the view on
+                # every tick).
+                self._refresh_processing_preview_phase_only()
 
         elif self._phase_mode == "pseudo2d":
             if self.apply_all_slices_checkbox.isChecked():
@@ -2487,15 +2526,16 @@ class MainWindow(QMainWindow):
                 self._show_fid_preview(spectrum, switch_tab=False)
             elif self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
                 # Keep the Spectrum tab's own content correct in the
-                # background (switch_tab=False -- so switching back to
-                # it later shows the current phase), without stealing
-                # focus from the Processing tab's own preview -- which
-                # itself now also refreshes live, on every drag tick;
-                # computed entirely in memory (see
-                # _compute_processing_preview), so this is no longer
-                # the disk-re-read-per-tick concern it used to be.
+                # background (switch_tab=False, reset_view=False -- so
+                # switching back to it later shows the current phase,
+                # with whatever zoom was already there preserved),
+                # without stealing focus from the Processing tab's own
+                # preview -- which itself also refreshes in place now
+                # (see _refresh_processing_preview_phase_only), for the
+                # same "don't reset a deliberate zoom on every drag
+                # tick" reason.
                 self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=False)
-                self._refresh_processing_preview_if_active()
+                self._refresh_processing_preview_phase_only()
             else:
                 self._show_pseudo2d_slice(spectrum, reset_view=False)
                 self.canvas.set_pivot_marker(self.pivot_spin.value())

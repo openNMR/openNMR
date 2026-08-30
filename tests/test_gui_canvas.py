@@ -550,6 +550,34 @@ def test_show_fid_clears_contour_state(qapp):
     assert canvas._contour_factor is None
 
 
+def test_show_fid_scroll_zoom_is_freeform_not_pinned(qapp):
+    # Explicit user request: an FID oscillates around y=0 rather than
+    # rising from a baseline the way a phased spectrum does, so
+    # pinning "the bottom" on scroll-zoom doesn't mean anything
+    # sensible for it -- should be a plain cursor-centred zoom instead
+    # (both ends move), like the x-axis already does.
+    canvas = MplCanvas()
+    fid = np.exp(-np.arange(50) / 10.0) * np.exp(1j * np.arange(50) * 0.3)
+    canvas.show_fid(fid, dt=1e-4)
+    canvas.canvas.draw()
+    ax = canvas.ax
+    assert ax in canvas._freeform_zoom_axes
+    ax.set_ylim(-1, 1)
+    canvas._on_scroll(_body_scroll_event(ax, xdata=0.001, ydata=0.8, button="up"))
+    ymin, ymax = ax.get_ylim()
+    assert ymin > -1.0  # bottom *did* move -- not pinned
+    assert ymax < 1.0
+
+
+def test_show_spectrum_scroll_zoom_still_pins_the_bottom(qapp):
+    # The freeform behaviour above is specific to FID views -- a plain
+    # phased-spectrum view keeps the existing pin-bottom zoom.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    assert canvas.ax not in canvas._freeform_zoom_axes
+
+
 # ============================================================
 # Axis unit switching (ppm / Hz / kHz)
 # ============================================================
@@ -792,6 +820,23 @@ def test_show_compare_stack_shares_x_axis(qapp):
     # sharex=True: changing one row's xlim moves every other row's too.
     assert canvas._compare_axes[1].get_xlim() == pytest.approx((1, 2))
     assert canvas._compare_axes[2].get_xlim() == pytest.approx((1, 2))
+
+
+def test_show_compare_stack_lines_are_not_clipped_to_their_own_row(qapp):
+    # Explicit user request: a tall (e.g. zoomed-in) peak should be
+    # able to visually overlap a neighbouring row, matching a classic
+    # NMR stacked plot, instead of being hard-clipped at its own row's
+    # axes edge.
+    canvas = MplCanvas()
+    specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
+    canvas.show_compare(specs, mode="stack")
+    canvas.canvas.draw()
+    for ax in canvas._compare_axes:
+        assert ax.lines[0].get_clip_on() is False
+        # Also not opaque -- otherwise a row drawn *after* (below) one
+        # bleeding into it would just paint over the bleed with its
+        # own background.
+        assert ax.patch.get_alpha() == 0.0
 
 
 def test_show_compare_stack_scroll_zooms_every_row_together_by_default(qapp):

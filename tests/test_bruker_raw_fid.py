@@ -238,3 +238,38 @@ def test_read_2d_unsupported_window_stays_on_raw_fid_path(tmp_path, monkeypatch)
     assert spectrum.data.shape == (4, 32)
     assert "window_unsupported" in spectrum.metadata.raw
     assert "WDW=2" in spectrum.metadata.raw["window_unsupported"]
+
+
+def test_read_2d_skips_prepare_fid_when_shift_align_lp_all_off(tmp_path, monkeypatch):
+    # Real, measured regression this pins down: read_2d used to skip
+    # the whole shift/align/linear-predict step per row (three
+    # separate `if`s) whenever none of them were requested -- the
+    # common case for a fresh load. Folding them into one shared
+    # processing.ft.prepare_fid call accidentally made that call
+    # (and the np.apply_along_axis wrapping it -- real per-row
+    # Python-level overhead, ~1200x slower than skipping entirely for
+    # a synthetic 32x16384 benchmark) unconditional. Asserts the fast
+    # path by mocking prepare_fid to fail if called at all, not just
+    # that read_2d still works -- a slow-but-correct regression
+    # wouldn't fail any other test.
+    expt = tmp_path / "expt2d_fast_path"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    _write_procs(pdata / "procs", {"SW_p": 8000.0, "SI": 32, "SF": 400.13, "WDW": 0})
+    _write_procs(pdata / "proc2s", {"SW_p": 2000.0, "SI": 4, "SF": 100.6, "WDW": 0})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqu2s = {"NUC1": "off", "BF1": 100.6, "O1": 0.0}  # pseudo-2D
+    row = _synthetic_fid(n=32)
+    fid = np.tile(row, (4, 1)).astype(np.complex128)
+    dic = {"acqus": acqus, "acqu2s": acqu2s}
+    monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
+
+    def _fail_if_called(*_a, **_k):
+        raise AssertionError("prepare_fid was called even though fid_shift/align_echo/linear_predict are all off")
+
+    monkeypatch.setattr(bruker.processing_ft, "prepare_fid", _fail_if_called)
+
+    spectrum = bruker.read_2d(str(expt), autophase=False, fid_shift=0.0, align_echo=False, linear_predict_points=0)
+
+    assert spectrum.data.shape == (4, 32)

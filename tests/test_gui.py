@@ -760,6 +760,36 @@ def test_main_window_phase_drag_tick_refreshes_processing_preview_live(qapp, tmp
     assert not np.allclose(before, after)
 
 
+def test_main_window_phase_drag_preserves_processing_preview_zoom(qapp, tmp_path, monkeypatch):
+    # Explicit user request: should be able to zoom into a small peak
+    # and still phase it, without the view snapping back out on every
+    # tick.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    spec_ax.set_xlim(4.0, 6.0)
+    spec_ax.set_ylim(0.1, 0.2)
+
+    window.phase0_handle.setValue(45.0)
+    window.phase0_handle.setValue(90.0)  # a second tick, in case only the first preserved it
+
+    assert spec_ax.get_xlim() == pytest.approx((4.0, 6.0))
+    assert spec_ax.get_ylim() == pytest.approx((0.1, 0.2))
+
+
+def test_main_window_phase_drag_shows_pivot_marker_on_processing_preview(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+
+    window.phase0_handle.setValue(45.0)
+
+    assert window.processing_preview_canvas._pivot_line is not None
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    assert window.processing_preview_canvas._pivot_marker_ax is spec_ax
+
+
 def test_main_window_processing_preview_matches_spectrum_tab_phase(qapp, tmp_path, monkeypatch):
     # The bug as reported: phasing kept working on the Spectrum tab
     # but not on the Processing-preview tab -- assert the two actually
