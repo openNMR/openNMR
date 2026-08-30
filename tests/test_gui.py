@@ -193,6 +193,42 @@ def test_main_window_open_clicked_no_matches_shows_error(qapp, tmp_path, monkeyp
     assert window.spectrum_list.count() == 0
 
 
+def test_main_window_open_files_clicked_loads_each_file(qapp, tmp_path, monkeypatch):
+    path = _make_xpulse_dataset(tmp_path)
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([path], ""))
+
+    window = MainWindow()
+    window._on_open_files_clicked()
+
+    assert window.spectrum_list.count() == 1
+    assert window.session.spectra[0].metadata.vendor == "xpulse"
+
+
+def test_main_window_open_files_clicked_cancelled_does_nothing(qapp, monkeypatch):
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([], ""))
+
+    window = MainWindow()
+    window._on_open_files_clicked()
+
+    assert window.spectrum_list.count() == 0
+
+
+def test_main_window_open_files_reports_unrecognised_files(qapp, tmp_path, monkeypatch):
+    good = _make_xpulse_dataset(tmp_path)
+    junk = tmp_path / "junk.txt"
+    junk.write_text("hello")
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([good, str(junk)], ""))
+
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: shown.setdefault("called", True))
+
+    window = MainWindow()
+    window._on_open_files_clicked()
+
+    assert window.spectrum_list.count() == 1
+    assert shown.get("called") is True
+
+
 def test_main_window_accepts_drops(qapp):
     window = MainWindow()
     assert window.acceptDrops() is True
@@ -374,6 +410,16 @@ def test_main_window_menu_open_action_triggers_open_dialog(qapp, monkeypatch):
     file_menu = window.menuBar().actions()[0].menu()
     open_action = next(a for a in file_menu.actions() if "Open" in a.text())
     open_action.trigger()
+    assert called == [True]
+
+
+def test_main_window_menu_open_files_action_triggers_open_files_dialog(qapp, monkeypatch):
+    window = MainWindow()
+    called = []
+    monkeypatch.setattr(window, "_on_open_files_clicked", lambda: called.append(True))
+    file_menu = window.menuBar().actions()[0].menu()
+    open_files_action = next(a for a in file_menu.actions() if "File(s)" in a.text())
+    open_files_action.trigger()
     assert called == [True]
 
 

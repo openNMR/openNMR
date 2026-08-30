@@ -280,6 +280,16 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._on_open_clicked)
         file_menu.addAction(open_action)
 
+        open_files_action = QAction("Open &File(s)…", self)
+        open_files_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        open_files_action.setToolTip(
+            "For vendors whose data is a single file rather than a "
+            "folder (e.g. X-Pulse, JEOL) -- pick one or more files "
+            "directly."
+        )
+        open_files_action.triggered.connect(self._on_open_files_clicked)
+        file_menu.addAction(open_files_action)
+
         save_figure_action = QAction("&Save Figure As…", self)
         save_figure_action.setShortcut(QKeySequence.StandardKey.Save)
         save_figure_action.setToolTip("Save the currently visible canvas tab as an image.")
@@ -554,6 +564,15 @@ class MainWindow(QMainWindow):
         open_button.clicked.connect(self._on_open_clicked)
         layout.addWidget(open_button)
 
+        open_files_button = QPushButton("Open File(s)…")
+        open_files_button.setToolTip(
+            "For vendors whose data is a single file rather than a "
+            "folder (e.g. X-Pulse, JEOL) -- pick one or more files "
+            "directly."
+        )
+        open_files_button.clicked.connect(self._on_open_files_clicked)
+        layout.addWidget(open_files_button)
+
         self.spectrum_list = QListWidget()
         self.spectrum_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.spectrum_list.setToolTip(
@@ -617,6 +636,39 @@ class MainWindow(QMainWindow):
         if not directory:
             return
         self._open_directory(directory)
+
+    def _on_open_files_clicked(self) -> None:
+        paths, _selected_filter = QFileDialog.getOpenFileNames(
+            self, "Open one or more spectrum files",
+            filter="NMR spectrum files (*.jdx *.dx *.jdf);;All files (*)",
+        )
+        if not paths:
+            return
+        self._open_files(paths)
+
+    def _open_files(self, paths: list[str]) -> None:
+        """Load each of ``paths`` directly (no folder scan) -- shared
+        by the Open File(s)… dialog and drag-and-drop of individual
+        files. Unlike a folder drop (which silently skips anything
+        unrecognised, since OS clutter like ``.DS_Store`` can easily
+        ride along), files picked one-by-one through a dialog are an
+        explicit choice -- an unrecognised one is reported, not
+        silently dropped."""
+        unrecognised: list[str] = []
+        for path in paths:
+            try:
+                vendor = io.detect_vendor(path)
+            except ValueError:
+                unrecognised.append(path)
+                continue
+            self._load(path, vendor)
+
+        if unrecognised:
+            QMessageBox.critical(
+                self, "Some files not recognised",
+                "Could not auto-detect a vendor format for:\n\n"
+                + "\n".join(unrecognised),
+            )
 
     def _open_directory(self, directory: str) -> None:
         """Scan ``directory`` for spectra and load them -- shared by
