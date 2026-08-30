@@ -1,0 +1,13 @@
+To make data processing/interpreting more accessible and reproducible, there should be a log file running to indicate what was done, when etc. That can then even be imported to "remember" a previous session if necessary
+"Process Indirect dimension" button is not obvious
+CRITICAL: Instead of guessing at initial phases, or using the raw data, read, in the case of Bruker data, processing parameters, if available. I think this is critical; users who have carefully processed or prepared their data should not have to go back and re-process
+Buttons / menus for  controlling typeface; fontsize; tick size, direction, pad; plot width and height
+When fitting peaks, make the error calculation separate, rather than as text beneath the peak definition section
+In addition to the prominence, it may be good to have a s/n filter to indicate when users believe peaks exist - prominence can become v small when you have strong and weak peaks (e.g., decomposition products in the baseline of electrolytic solutions)
+The mass input should be in mg by default
+On zero-filling, nothing changes with the spectra: the resolution and number of points in the spectrum remain the same
+On changing any processing parameter, the GUI will reset the view automatically (e.g., clicking autophase or changing SI); this should be an option that can be switched on/off so users can maintain their "old view" 
+For fitting, users should be allowed to supply min/max values
+For fitting 2-d data, users should be allowed to skip out certain slices (especially if the data is just noise - fitting will never converge well)
+When fitting T1s, T2s etc, users should be allowed to add their fitted values to plots, and the display of fitted values needs to be clearer/more prominent
+CRITICAL: When loading dense data, the script fails entirely, saying "tuple index out of range" - no other warnings obvious
