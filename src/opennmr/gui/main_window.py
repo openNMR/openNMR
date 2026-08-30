@@ -117,6 +117,11 @@ class MainWindow(QMainWindow):
         # spectrum being switched *to*, not the one whose pending phase
         # delta needs committing.
         self._phase_target_index: int | None = None
+        # The pivot (ppm) the last-applied Phase 0/Phase 1 numbers are
+        # actually measured from -- see _on_pivot_spin_changed, which
+        # compensates Phase 0 whenever the pivot moves so the visible
+        # correction stays continuous instead of jumping.
+        self._pivot_ppm_reference: float | None = None
         # (phase0, phase1) immediately before the last Autophase click
         # -- lets "Revert Autophase" undo it. None before any
         # Autophase click, or once reselection/reverting invalidates
@@ -2577,9 +2582,43 @@ class MainWindow(QMainWindow):
         position in sync and previews the result -- deliberately
         does *not* call :meth:`_capture_phase_reference`, which would
         zero Phase 0/Phase 1 -- moving the pivot only changes where
-        Phase 1 is measured from, not the correction itself."""
+        Phase 1 is measured from, not the correction itself (see
+        :meth:`_compensate_phase0_for_pivot_change` for why Phase 0
+        still needs adjusting, even though nothing here resets it)."""
+        self._compensate_phase0_for_pivot_change(value)
+        self._pivot_ppm_reference = value
         self._sync_pivot_slider_from_spin(value)
         self._apply_phase_preview()
+
+    def _compensate_phase0_for_pivot_change(self, new_pivot_ppm: float) -> None:
+        """``apply_phase`` computes ``phase0 + phase1 * (frac(x) -
+        pivot_frac)`` -- so with Phase 1 nonzero, moving the pivot
+        while leaving Phase 0/Phase 1's *numbers* unchanged still
+        changes the correction actually applied at every point by a
+        constant ``phase1 * (old_pivot_frac - new_pivot_frac)``, i.e.
+        the whole spectrum visibly jumps even though neither spin box
+        moved -- easy to mistake for "phasing reset". Folding that
+        same offset into Phase 0 keeps the displayed correction
+        continuous: only where *future* Phase 1 drags rotate around
+        actually changes, matching what moving a pivot is supposed to
+        mean."""
+        if self._phase_freq_ppm is None or self._pivot_ppm_reference is None:
+            return
+        phase1 = self.phase1_spin.value()
+        if not phase1:
+            return
+        span = self._phase_freq_ppm.max() - self._phase_freq_ppm.min()
+        if not span:
+            return
+        old_frac = (self._pivot_ppm_reference - self._phase_freq_ppm.min()) / span
+        new_frac = (new_pivot_ppm - self._phase_freq_ppm.min()) / span
+        delta = phase1 * (new_frac - old_frac)
+        if not delta:
+            return
+        self.phase0_spin.blockSignals(True)
+        self.phase0_spin.setValue(self.phase0_spin.value() + delta)
+        self.phase0_spin.blockSignals(False)
+        self.phase0_handle.setValue(self.phase0_spin.value(), emit=False)
 
     def _sync_pivot_slider_from_spin(self, value: float) -> None:
         if self._phase_freq_ppm is None:
@@ -2606,6 +2645,13 @@ class MainWindow(QMainWindow):
         self.pivot_spin.blockSignals(True)
         self.pivot_spin.setValue(ppm)
         self.pivot_spin.blockSignals(False)
+        # Bypasses _on_pivot_spin_changed (pivot_spin's own signals are
+        # blocked above, to avoid re-entering this handler via the two
+        # controls' mutual sync) -- so the same Phase 0 compensation it
+        # would have done needs doing here too, or dragging the slider
+        # specifically would still show the "phasing reset" jump.
+        self._compensate_phase0_for_pivot_change(ppm)
+        self._pivot_ppm_reference = ppm
         self._apply_phase_preview()
 
     def _on_phase0_nudge_clicked(self, delta: float) -> None:
@@ -3078,12 +3124,14 @@ class MainWindow(QMainWindow):
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
             return
 
+        centre_ppm = float((self._phase_freq_ppm.min() + self._phase_freq_ppm.max()) / 2)
         self.pivot_spin.blockSignals(True)
-        self.pivot_spin.setValue(float((self._phase_freq_ppm.min() + self._phase_freq_ppm.max()) / 2))
+        self.pivot_spin.setValue(centre_ppm)
         self.pivot_spin.blockSignals(False)
         self.pivot_slider.blockSignals(True)
         self.pivot_slider.setValue(500)  # centre, matching the ppm value just set above
         self.pivot_slider.blockSignals(False)
+        self._pivot_ppm_reference = centre_ppm
 
     def _set_processing_enabled(self, enabled: bool, status: str | None = None) -> None:
         for widget in (

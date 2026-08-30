@@ -692,6 +692,34 @@ def test_main_window_pivot_defaults_to_spectrum_centre(qapp, tmp_path):
     assert window.pivot_spin.value() == pytest.approx(expected_centre)
 
 
+def test_main_window_pivot_slider_change_compensates_phase0_so_data_does_not_jump(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    index = window._selected_index()
+    window.phase1_spin.setValue(40.0)
+    before = window.session.spectra[index].data.copy()
+
+    window.pivot_slider.setValue(window.pivot_slider.value() + 50)
+
+    after = window.session.spectra[index].data
+    # atol loose enough to absorb phase0_spin's own 2-decimal-place
+    # display rounding (the compensation is exact in floating point;
+    # only the spin box's stored value is rounded) -- still far
+    # tighter than the O(1) jump an uncompensated pivot move would
+    # produce for a phase1 this size.
+    np.testing.assert_allclose(before, after, atol=1e-3)
+    assert window.phase0_spin.value() != 0.0
+
+
+def test_main_window_pivot_change_with_zero_phase1_leaves_phase0_untouched(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+
+    window.pivot_spin.setValue(window.pivot_spin.value() + 1.0)
+
+    assert window.phase0_spin.value() == 0.0
+
+
 def test_main_window_phase_adjustment_preserves_zoomed_view(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
@@ -706,7 +734,12 @@ def test_main_window_phase_adjustment_preserves_zoomed_view(qapp, tmp_path):
     assert window.canvas.ax.get_ylim() == (-0.5, 0.5)
 
 
-def test_main_window_pivot_change_updates_preview(qapp, tmp_path):
+def test_main_window_pivot_change_keeps_data_continuous(qapp, tmp_path):
+    # Moving the pivot alone must not visibly change the spectrum --
+    # Phase 0 is auto-compensated (see
+    # _compensate_phase0_for_pivot_change) so the applied correction
+    # stays exactly what it was; only where *future* Phase 1 drags
+    # rotate around actually changes.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
     index = window._selected_index()
@@ -717,7 +750,11 @@ def test_main_window_pivot_change_updates_preview(qapp, tmp_path):
     window.pivot_spin.setValue(window.pivot_spin.value() + 1.0)
     with_shifted_pivot = window.session.spectra[index].data
 
-    assert not np.allclose(with_default_pivot, with_shifted_pivot)
+    # atol loose enough to absorb phase0_spin's own 2-decimal-place
+    # display rounding -- see the matching comment in
+    # test_main_window_pivot_slider_change_compensates_phase0_so_data_does_not_jump.
+    np.testing.assert_allclose(with_default_pivot, with_shifted_pivot, atol=1e-3)
+    assert window.phase0_spin.value() != pytest.approx(0.0)
 
 
 def test_main_window_phase_range_is_wide(qapp, tmp_path):
@@ -1011,7 +1048,10 @@ def test_main_window_moving_pivot_does_not_reset_phase(qapp, tmp_path):
     # Explicit user requirement: moving the pivot (spin or slider)
     # must never zero out an in-progress Phase 0/Phase 1 correction --
     # only _capture_phase_reference (reselection, not a pivot move)
-    # should ever do that.
+    # should ever do that. Phase 0's own *number* is expected to
+    # change to compensate (see _compensate_phase0_for_pivot_change),
+    # keeping the applied correction itself continuous rather than its
+    # raw value fixed -- Phase 1 is untouched either way.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
 
@@ -1019,11 +1059,11 @@ def test_main_window_moving_pivot_does_not_reset_phase(qapp, tmp_path):
     window.phase1_spin.setValue(-10.0)
 
     window.pivot_slider.setValue(750)
-    assert window.phase0_spin.value() == pytest.approx(30.0)
+    assert window.phase0_spin.value() != pytest.approx(0.0)
     assert window.phase1_spin.value() == pytest.approx(-10.0)
 
     window.pivot_spin.setValue(window.pivot_spin.value() + 1.0)
-    assert window.phase0_spin.value() == pytest.approx(30.0)
+    assert window.phase0_spin.value() != pytest.approx(0.0)
     assert window.phase1_spin.value() == pytest.approx(-10.0)
 
 
