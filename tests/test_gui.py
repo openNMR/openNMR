@@ -1905,6 +1905,29 @@ def test_main_window_multi_selection_shows_compare(qapp, tmp_path):
     assert window.canvas_tabs.currentWidget() is window.compare_canvas
 
 
+def test_main_window_compare_list_has_a_current_row_after_populating(qapp, tmp_path):
+    # Explicit user feedback: "it is no longer obvious which spectrum
+    # is selected" -- nothing ever set an initial current/highlighted
+    # row in this list, only Move Up/Down did (and only after a click
+    # had already set one), so a freshly (re)populated list showed no
+    # current-row highlight at all.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    _select_rows(window, [0, 1])
+    assert window.compare_list.currentRow() == 0
+
+    # Still current after Move Down shuffles the order, not silently
+    # reset to row 0 again.
+    window._on_move_compare_item(1)
+    assert window.compare_list.currentRow() == 1
+    moved_entry = window.compare_list.item(1).data(Qt.ItemDataRole.UserRole)
+
+    _select_rows(window, [0])
+    _select_rows(window, [0, 1])  # a fresh rebuild, same two entries
+    assert window.compare_list.item(window.compare_list.currentRow()).data(Qt.ItemDataRole.UserRole) == moved_entry
+
+
 def test_main_window_deselecting_back_to_single_restores_single_view(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
@@ -2510,6 +2533,21 @@ def test_main_window_pick_peak_button_toggles_canvas_pick_mode(qapp):
     assert window.canvas._pick_mode is True
     window.pick_peak_button.setChecked(False)
     assert window.canvas._pick_mode is False
+
+
+def test_main_window_pick_peak_button_switches_to_spectrum_tab(qapp, tmp_path):
+    # "Pick from Plot" doesn't work if the Spectrum tab (the only one
+    # pick mode actually listens on) isn't the one visible -- e.g.
+    # left showing Compare/Fit/Processing-preview from an earlier
+    # interaction, all reachable without leaving the Analysis tab this
+    # button lives on.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
+
+    window.pick_peak_button.setChecked(True)
+
+    assert window.canvas_tabs.currentWidget() is window.canvas
 
 
 def test_main_window_peak_picked_adds_row_only_when_pick_mode_active(qapp):

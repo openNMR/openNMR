@@ -1064,12 +1064,16 @@ class MainWindow(QMainWindow):
     def _rebuild_compare_list(self, entries: list[tuple[int, int | None]], preserve_previous: bool = True) -> None:
         previous_checked = {}
         previous_order = []
+        previous_current_entry = None
         if preserve_previous:
             previous_order = [self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
                                for i in range(self.compare_list.count())]
             previous_checked = {self.compare_list.item(i).data(Qt.ItemDataRole.UserRole):
                                  self.compare_list.item(i).checkState()
                                  for i in range(self.compare_list.count())}
+            current_item = self.compare_list.currentItem()
+            if current_item is not None:
+                previous_current_entry = current_item.data(Qt.ItemDataRole.UserRole)
         entries_set = set(entries)
         new_order = [e for e in previous_order if e in entries_set] + [e for e in entries if e not in previous_order]
 
@@ -1081,6 +1085,20 @@ class MainWindow(QMainWindow):
             item.setCheckState(previous_checked.get(entry, Qt.CheckState.Checked))
             item.setData(Qt.ItemDataRole.UserRole, entry)
             self.compare_list.addItem(item)
+        # Always leave *something* current/highlighted -- explicit user
+        # feedback that it's "no longer obvious which spectrum is
+        # selected" in this list. Nothing ever set an initial current
+        # row before (only Move Up/Down did, and only after the user
+        # had already clicked a row to move it), so a freshly
+        # (re)populated list -- including the automatic pseudo-2D
+        # auto-populate, which needs no click at all -- showed no
+        # current-row highlight whatsoever. Keeps the same entry
+        # current across a rebuild when it's still present (e.g. after
+        # Move Up/Down or a check-state toggle), falling back to the
+        # first row otherwise.
+        if new_order:
+            current_row = new_order.index(previous_current_entry) if previous_current_entry in new_order else 0
+            self.compare_list.setCurrentRow(current_row)
         self.compare_list.blockSignals(False)
         self._update_compare_tab_visibility()
 
@@ -3031,7 +3049,16 @@ class MainWindow(QMainWindow):
             self._add_peak_row(shift=shift, fwhm=fwhm_guess, eta=0.5)
 
     def _on_pick_peak_toggled(self, checked: bool) -> None:
+        # Pick mode only ever listens on self.canvas (the Spectrum
+        # tab) -- clicking elsewhere (Compare, Fit, Spectral Fit, the
+        # Processing-preview tab, all reachable without leaving the
+        # Analysis tab this button lives on) silently did nothing,
+        # which is almost certainly why this "doesn't seem to work"
+        # was reported: nothing was wrong with picking itself, the
+        # canvas being clicked just wasn't the one listening.
         self.canvas.set_pick_mode(checked)
+        if checked:
+            self.canvas_tabs.setCurrentWidget(self.canvas)
 
     def _on_auto_pick_peaks_clicked(self) -> None:
         """Replace the peak table with automatically-detected peaks
