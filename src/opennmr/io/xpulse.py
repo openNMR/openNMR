@@ -452,6 +452,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
 
     fid_data = _read_xpulse_jcamp(path, verbose=verbose, timegrid_warning=timegrid_warning)
     fid = np.asarray(fid_data["complex"], dtype=np.complex128)
+    fid_raw = fid  # the truly raw FID -- see metadata.raw["fid_raw"]'s own comment below
     original_length = len(fid)  # NP: acquired points, before truncate/shift/align/LP/window/zero-fill
     params = fid_data["params"]
     exp_params = fid_data["exp_params"]
@@ -465,38 +466,6 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     sf_hz = float(params.get("$SF", 1.0)) * 1e6
     o1_hz = float(params.get("$O1", 1.0))
 
-    if fid_shift:
-        fid = processing_ft.roll_fid(fid, fid_shift)
-
-    # Deliberately computed/applied BEFORE the truncate step below,
-    # not after: align_echo rolls the echo top to index 0, which wraps
-    # the pre-echo portion (dead time, then the rise up to the echo
-    # top -- roughly a mirror image of the post-echo decay, for a
-    # symmetric full echo) around to the tail of the array. Only a
-    # truncate applied to the POST-roll array, short enough to stop
-    # before reaching the wrap point, actually discards it -- get this
-    # backwards (as this used to be) and the "aligned" FID has a
-    # mirror-image copy of its own decay spliced onto its tail -- an
-    # FID that "looks like a time-reversal" once FFT'd. Matches
-    # leonmr's xpulse_image_import, which rolls the full FID first and
-    # only then hands it to process_fid()'s own TDEFF truncation.
-    echo_wrap_limit = None
-    if align_echo:
-        top = processing_ft.find_echo_top(fid)
-        fid = processing_ft.align_echo(fid)
-        # Neither the file's own recorded TDEFF nor an unspecified
-        # `truncate` reliably stops short of the wrap point on its own
-        # (confirmed on real data: TDEFF is set for the *original*,
-        # pre-roll acquisition -- e.g. "stop before the noise floor" --
-        # not recomputed relative to where the echo top ends up after
-        # rolling, so it can easily extend past the wrap point and
-        # let the mirrored tail back in). Capping here, unconditionally
-        # rather than only when a truncate was explicitly requested,
-        # is what actually fixes the artifact by default -- ceil() is
-        # deliberately conservative, so even a fractional echo-top
-        # position never leaves a single wrapped sample in.
-        echo_wrap_limit = len(fid) - int(np.ceil(top))
-
     # is True checked ahead of isinstance(..., int): bool is an int
     # subclass in Python, so isinstance(True, int) is True -- checking
     # isinstance() first would make the "use the recorded TDEFF/SI"
@@ -509,17 +478,19 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     else:
         tdeff_points = None
 
-    if echo_wrap_limit is not None:
-        tdeff_points = echo_wrap_limit if tdeff_points is None else min(tdeff_points, echo_wrap_limit)
-
-    if tdeff_points is not None and tdeff_points < len(fid):
-        fid = fid[:tdeff_points]
+    # Shift -> echo-align -> truncate (capped at the echo-wrap point)
+    # -> linear-predict, in that exact order -- see
+    # processing.ft.prepare_fid's own docstring for why the order (and
+    # the wrap-point cap specifically) matters; this used to be inline
+    # here, now shared with the GUI's own live Processing-preview so
+    # there's exactly one implementation of it.
+    fid = processing_ft.prepare_fid(
+        fid, fid_shift=fid_shift, align_echo_enabled=align_echo, truncate=tdeff_points,
+        linear_predict_points=linear_predict_points, linear_predict_order=linear_predict_order,
+        linear_predict_direction=linear_predict_direction,
+    )
 
     if linear_predict_points:
-        fid = processing_ft.linear_predict(
-            fid, order=linear_predict_order, n_predict=linear_predict_points,
-            direction=linear_predict_direction,
-        )
         # The truncate-back-to-np_points fallback below exists to undo
         # zero_fill's own padding when no zero_fill was requested -- it
         # must not also undo the extension linear prediction just added.
@@ -577,6 +548,17 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
             # The fully processed (pre-FFT) FID -- an optional GUI
             # preview of what FID-domain processing actually did.
             "fid": fid, "fid_dt": dt, "fid_original_length": original_length,
+            # The *truly* raw FID -- straight out of the file, before
+            # even fid_shift/align_echo/truncate/linear-predict, let
+            # alone windowing/zero-fill. Lets the GUI recompute a live
+            # preview of a not-yet-applied processing choice entirely
+            # in memory (via processing.ft.prepare_fid + apodize/
+            # zero_fill/fft_spectrum/apply_phase, the exact same steps
+            # this function itself just ran) -- unlike "fid" above,
+            # which already has whatever was chosen at *this* load
+            # baked in, so isn't safe to reprocess with a *different*
+            # choice without double-applying the old one.
+            "fid_raw": fid_raw,
         },
     )
     axis = NMRAxis(kind="frequency", ppm=freq_ppm, hz=freq_hz)
@@ -698,6 +680,11 @@ def read_array(path: str, **kwargs) -> NMRSpectrum:
         np.stack([s.data_imag for s in slices]) if all(s.data_imag is not None for s in slices) else None
     )
     fid_stack = np.stack([s.metadata.raw["fid"] for s in slices])
+    fid_raw_stack = (
+        np.stack([s.metadata.raw["fid_raw"] for s in slices])
+        if all(len(s.metadata.raw["fid_raw"]) == len(slices[0].metadata.raw["fid_raw"]) for s in slices)
+        else None  # acquisition length genuinely differed across steps -- rare, no single-array shape to stack into
+    )
 
     f1_axis = NMRAxis(kind="index", index=np.arange(1, len(slices) + 1))
     f2_axis = first.axes[0]
@@ -709,6 +696,7 @@ def read_array(path: str, **kwargs) -> NMRSpectrum:
         raw={
             **first.metadata.raw,
             "fid": fid_stack,
+            "fid_raw": fid_raw_stack,
             "gradient_relative": _read_gradient_relative(path),
         },
     )

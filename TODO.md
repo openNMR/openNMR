@@ -2,6 +2,94 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Compare-tab landing fix, and the real per-slice-preview performance fix (2026-08-30)
+
+Two more items from live testing, addressed in the same round since the
+second directly reopened -- and this time actually resolved -- the
+per-slice-loading performance question flagged as deliberately
+unattempted a few rounds back.
+
+- ~~When a pseudo-2D loads, Compare is left showing instead of
+  Spectrum~~ -- done. `_refresh_compare_view` gained a `switch_tab`
+  parameter (default `True`, unchanged for every other call site --
+  a manual multi-select, the Compare tab's own "Plot" button/context-
+  menu action, Move Up/Down -- all genuinely deliberate "show me
+  Compare" actions); the pseudo-2D auto-populate path in
+  `_on_list_selection_changed` now passes `switch_tab=False`, and
+  `_on_set_mass_action`'s own background refresh does too. Compare's
+  *list* still auto-populates and its canvas still gets fully drawn in
+  the background either way -- only which tab ends up visible changed.
+  **A real regression surfaced while fixing this, caught by a test
+  failing, not by inspection**: the guard that stops
+  `_silo_other_canvas_tabs` from clearing a correctly-populated
+  Compare view required `canvas_tabs.currentWidget() is
+  self.compare_canvas` -- which, by design, is now never true for this
+  exact path (the whole point of the fix is that the *canvas* stays on
+  Spectrum). That guard was accidentally checking two different
+  things at once (whether the Compare canvas's own *content* is
+  correct, vs. whether the Compare *tab* is the active one) that only
+  happened to coincide before this fix -- split into
+  `compare_matches_list` (content-only, drives whether
+  `_silo_other_canvas_tabs` should leave Compare alone) and
+  `compare_tab_active_and_matches` (content AND active tab, drives
+  whether `_draw_selected_spectrum` should skip its own Spectrum
+  redraw/switch) once they actually diverged.
+- ~~Phasing doesn't update the Processing-preview tab (still works on
+  Spectrum)~~ -- done, and it directly reopened (with explicit,
+  concrete direction this time -- "you don't need to cache the live
+  fid, just the raw one, then load only the active phasing slice")
+  the per-slice-loading performance item flagged as investigated-but-
+  deliberately-not-attempted a few rounds ago. That's exactly what got
+  built:
+  - New `processing.ft.prepare_fid` -- the shift/echo-align/truncate/
+    linear-predict step sequence (order matters a lot here, see its
+    own docstring for the echo-wrap-artifact story this project has
+    hit twice before), extracted from `io.xpulse.read_1d` into one
+    shared function, now also used by `io.bruker.read_1d`/`read_2d`.
+    Not a new implementation -- literally the same one, called from
+    three places instead of duplicated across them, so there's no way
+    for the GUI's own fast preview (below) to silently drift from what
+    a real vendor reload actually does.
+  - Every vendor reader that supports these steps now also stashes the
+    *truly* raw FID (post digital-filter-removal only, before even
+    shift/align) into `metadata.raw["fid_raw"]`, alongside the
+    existing fully-processed `"fid"` -- cheap, since it's already
+    sitting in memory as part of any real load regardless.
+  - New `MainWindow._compute_processing_preview`: recomputes a preview
+    spectrum entirely from `fid_raw` (one row, for a pseudo-2D --
+    "only load the active phasing slice") via `prepare_fid` + apodize/
+    zero_fill/fft_spectrum/apply_phase, all in memory -- no disk I/O,
+    no reprocessing of any slice but the one being viewed. The ppm
+    axis's own range is reused from the already-loaded spectrum
+    (acquisition-fixed, doesn't depend on window/zero-fill choice) --
+    deliberately not re-derived from O1/SF/SW a second time, avoiding
+    a second implementation of that vendor-specific math that could
+    quietly drift from the real one.
+  - Because this is now genuinely cheap, phase-dragging (handle, spin
+    box, or the pivot slider/spin) refreshes the Processing-preview on
+    every tick, not just once a gesture finishes -- the
+    `DragHandle.dragFinished`/`QSlider.sliderReleased` throttling from
+    an earlier round is now dead code and was removed rather than left
+    in place unused, along with its own now-obsolete test (replaced
+    with one asserting live tick-level refresh, plus a new one
+    numerically comparing the preview against the Spectrum tab's own
+    phase to confirm they actually agree, not just that the preview
+    changes at all).
+  - New regression test asserts `io.load` is never called at all
+    during a live preview refresh (mocked to fail loudly if it is) --
+    checks the actual performance claim, not just that the result
+    looks plausible.
+  - **Scope, stated plainly**: Bruker and X-Pulse are covered (the
+    two vendors with a multi-slice/pseudo-2D concept and the ones this
+    round's `fid_raw` caching targeted). Varian and JEOL don't have
+    `fid_raw` cached yet, so their Processing-preview tab will show
+    correctly empty (not crash, not a stale/wrong preview) until that
+    caching is added for them too -- a small, mechanical follow-up
+    (the same two-line addition made to bruker.py/xpulse.py), not
+    flagged as risky the way the original per-slice question was.
+
+504 tests passing (501 -> 504). Committed and pushed.
+
 ## Autonomous overnight round 4: left-panel reflow -- measured, one real fix shipped, the rest connects to an already-open item (2026-08-30)
 
 - ~~Left side panel needs better reflow at smaller window widths --
@@ -226,52 +314,23 @@ one lost an obsolete one, net zero). Committed and pushed.
 
 User feedback from trying an earlier round's changes -- explicitly "a
 few pointers to note to do in the next session," not "implement now."
-The two Compare-related items, and the "make Processing-preview the
-default context" routing work, are done -- see the two rounds above.
-Still open:
+The two Compare-related items, the "make Processing-preview the
+default context" routing work, and the Processing-preview performance
+item are done -- see the rounds above (the performance one specifically
+needed the user's own direction to actually resolve, not just more
+investigation -- see the "Compare-tab landing fix, and the real
+per-slice-preview performance fix" section for the full story). Still
+open:
 
-- **Processing-preview performance for (pseudo-)2D data -- investigated
-  in depth, deliberately not attempted, here's exactly what a real fix
-  needs.** The GUI-only optimization that looked obvious at first
-  (recompute the preview from the already-cached FID in memory,
-  skipping `Session.preview()`/`io.load()` entirely) turns out **not
-  to be safe**: read the actual vendor code rather than trusting the
-  assumption -- `spectrum.metadata.raw["fid"]` is stashed *after*
-  apodization and zero-fill (see `io/bruker.py`'s own comment on it:
-  "The exact (shift/echo-align/LP/windowed/zero-filled) FID fed into
-  the FFT"), not before. So it's the fully-processed array already
-  about to be FFT'd -- reapplying a newly-selected window or zero-fill
-  size on top of it would double-apply the old one, silently producing
-  a wrong preview. There is currently no cached "pre-window" FID
-  anywhere to safely recompute from. A real fix needs one of:
-  (a) a new caching layer -- stash the true pre-window (post digital-
-  filter/shift/align/truncate/LP) FID alongside the existing one in
-  `metadata.raw`, across every vendor reader, then do window/zero-
-  fill/phase recomputation for a live preview entirely from that, in
-  the GUI/processing layer (no disk I/O at all, not even for one
-  slice) -- probably the better fix in the long run, since it also
-  speeds up 1D previews; or (b) an opt-in `only_slice`/`slice_index`
-  parameter on `read_2d` (per vendor) that skips processing every row
-  but the one requested. Option (b) is genuinely non-trivial for at
-  least Bruker: `read_2d`'s F2 processing loop computes `apc0`'s
-  autophase from `spectrum.mean(axis=0)` -- **averaged across every
-  row** -- so a naive "only touch row N" shortcut would silently
-  change the phase result too, not just the performance. (The
-  Processing-preview's own kwargs currently pass an explicit phase via
-  `_current_phase_kwargs` rather than `autophase=True` in the common
-  case, which sidesteps this specific interaction for *that* caller --
-  but a `only_slice` parameter added to `read_2d` itself would still
-  need to define what it does under `autophase=True`, for correctness
-  and for any other future caller.) Either option touches
-  already-validated, delicate per-vendor DSP code across (at least)
-  Bruker and X-Pulse, which is exactly the category of change this
-  project has consistently required verifying against real data
-  before trusting (see the WDW=GM, Varian ppm-axis, and JEOL
-  FILTER_FACTOR entries elsewhere in this file for the established
-  pattern) -- not something to guess at unsupervised. Recommend
-  picking option (a) or (b) explicitly with the user before starting,
-  since it changes the shape of the fix (GUI/processing-layer-only vs.
-  touching every vendor's `read_1d`/`read_2d` signature).
+- **`fid_raw` caching for Varian/JEOL** -- small, mechanical follow-up
+  to the Processing-preview performance fix above: Bruker and X-Pulse's
+  `read_1d`/`read_2d` now stash the true raw FID into
+  `metadata.raw["fid_raw"]` for the live in-memory preview to use;
+  Varian and JEOL don't yet, so their Processing-preview tab shows
+  correctly empty (not wrong, just unavailable) rather than a live
+  preview. Same two-line addition as the other two vendors got, once
+  someone confirms where in `read_1d` each one's own "raw, post
+  digital-filter, pre-shift/align" point is.
 - **Analysis tab organization** -- open-ended ("sub tabs or some other
   kind of organisational flow," not spec'd further); the two concrete
   asks alongside it (View peak fit's position, the slice-fit/peak-fit

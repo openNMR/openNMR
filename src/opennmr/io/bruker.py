@@ -181,6 +181,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     dic, data = ng.bruker.read(path, read_pulseprogram=False)
     fid = _remove_digital_filter(dic, data).astype(np.complex128)
     fid = np.conj(fid)  # see _CONJUGATE_QUADRATURE_NOTE below
+    fid_raw = fid  # the truly raw FID -- see metadata.raw["fid_raw"]'s own comment below
     original_length = len(fid)  # NP: acquired points, before shift/align/LP/window/zero-fill
 
     acqus = dic["acqus"]
@@ -194,15 +195,15 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     si = int(zero_fill) if zero_fill is not None else int(procs.get("SI", len(fid)))
     dt = 1.0 / sw
 
-    if fid_shift:
-        fid = processing_ft.roll_fid(fid, fid_shift)
-    if align_echo:
-        fid = processing_ft.align_echo(fid)
-    if linear_predict_points:
-        fid = processing_ft.linear_predict(
-            fid, order=linear_predict_order, n_predict=linear_predict_points,
-            direction=linear_predict_direction,
-        )
+    # Shift -> echo-align -> linear-predict (no truncate/TDeff concept
+    # for Bruker -- see processing.ft.prepare_fid's own docstring for
+    # the full step-ordering rationale, shared with X-Pulse's read_1d
+    # and the GUI's own live Processing-preview).
+    fid = processing_ft.prepare_fid(
+        fid, fid_shift=fid_shift, align_echo_enabled=align_echo,
+        linear_predict_points=linear_predict_points, linear_predict_order=linear_predict_order,
+        linear_predict_direction=linear_predict_direction,
+    )
 
     window_unsupported_note = None
     if window is not None:
@@ -255,6 +256,17 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             # instead of) the frequency-domain result, which stays the
             # default view.
             "fid": fid, "fid_dt": dt, "fid_original_length": original_length,
+            # The *truly* raw FID -- straight off disk (post digital-
+            # filter removal only), before even shift/align/LP, let
+            # alone windowing/zero-fill. Lets the GUI recompute a live
+            # preview of a not-yet-applied processing choice entirely
+            # in memory (processing.ft.prepare_fid + apodize/zero_fill/
+            # fft_spectrum/apply_phase, the same steps this function
+            # itself just ran) -- unlike "fid" above, which already has
+            # whatever was chosen at *this* load baked in, so isn't
+            # safe to reprocess with a *different* choice without
+            # double-applying the old one.
+            "fid_raw": fid_raw,
             **({"window_unsupported": window_unsupported_note} if window_unsupported_note else {}),
         },
     )
@@ -322,6 +334,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     dic, data = ng.bruker.read(path, read_pulseprogram=False)
     data = _remove_digital_filter(dic, data).astype(np.complex128)
     data = np.conj(data)  # see _CONJUGATE_QUADRATURE_NOTE below
+    fid_raw = data  # the truly raw FID (every row/slice) -- see metadata.raw["fid_raw"]'s own comment below
     original_length = data.shape[1]  # NP (F2): acquired points, before shift/align/LP/window/zero-fill
 
     acqus = dic["acqus"]
@@ -350,19 +363,16 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     si1 = int(proc2s.get("SI", data.shape[0]))
 
     # ----- F2 (direct dimension): [shift/align/LP], window, zero-fill, FFT per row -----
-    fid_f2 = data
-    if fid_shift:
-        fid_f2 = np.apply_along_axis(lambda row: processing_ft.roll_fid(row, fid_shift), 1, fid_f2)
-    if align_echo:
-        fid_f2 = np.apply_along_axis(processing_ft.align_echo, 1, fid_f2)
-    if linear_predict_points:
-        fid_f2 = np.apply_along_axis(
-            lambda row: processing_ft.linear_predict(
-                row, order=linear_predict_order, n_predict=linear_predict_points,
-                direction=linear_predict_direction,
-            ),
-            1, fid_f2,
-        )
+    # Same shared step (and step order) as read_1d/xpulse.read_1d --
+    # see processing.ft.prepare_fid's own docstring.
+    fid_f2 = np.apply_along_axis(
+        lambda row: processing_ft.prepare_fid(
+            row, fid_shift=fid_shift, align_echo_enabled=align_echo,
+            linear_predict_points=linear_predict_points, linear_predict_order=linear_predict_order,
+            linear_predict_direction=linear_predict_direction,
+        ),
+        1, data,
+    )
     window_unsupported_note = None
     if window is not None:
         fid_f2 = np.apply_along_axis(
@@ -414,6 +424,12 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # pseudo-2D, isn't overridable the way F2's is -- see
             # this function's docstring).
             "fid": fid_f2, "fid_dt": 1.0 / sw, "fid_original_length": original_length,
+            # The *truly* raw FID, every row -- see read_1d's own
+            # "fid_raw" comment for why this is cached separately from
+            # "fid" above (safe to reprocess a *different*, not-yet-
+            # committed choice from, without double-applying the one
+            # already baked into "fid").
+            "fid_raw": fid_raw,
             **({"window_unsupported": window_unsupported_note} if window_unsupported_note else {}),
         },
     )

@@ -79,6 +79,63 @@ def align_echo(fid: np.ndarray, target_index: int = 0) -> np.ndarray:
     return roll_fid(fid, target_index - top)
 
 
+def prepare_fid(fid: np.ndarray, *, fid_shift: float = 0.0, align_echo_enabled: bool = False,
+                 truncate: int | None = None, linear_predict_points: int = 0,
+                 linear_predict_order: int = 20, linear_predict_direction: str = "forward") -> np.ndarray:
+    """Shift -> echo-align -> truncate -> linear-predict, in that
+    order, on a raw time-domain FID -- everything that happens to the
+    FID *before* windowing.
+
+    Extracted from (and now shared by) ``io.xpulse.read_1d``'s own
+    step sequence -- this exact ordering was hard-won there: rolling
+    the echo top to index 0 wraps the pre-echo portion (dead time,
+    then the rise to the top -- roughly a mirror image of the
+    post-echo decay for a symmetric echo) onto the array's tail, so
+    ``truncate`` has to run *after* that roll, capped at the wrap
+    point (``len(fid) - ceil(echo_top)``), not at whatever value it
+    would otherwise be -- see :func:`align_echo`'s own docstring for
+    the full story. Getting this order (or the cap) wrong doesn't
+    crash, it silently produces an FID with a mirror-image artifact
+    spliced onto its tail once FFT'd. Having exactly one implementation
+    of this sequence (rather than each caller re-deriving it) is the
+    whole point of pulling it out here -- used by every vendor reader
+    that supports these steps *and* by the GUI's own live Processing-
+    preview (:meth:`opennmr.gui.main_window.MainWindow._compute_
+    processing_preview_spectrum`), so a fast in-memory preview can't
+    silently drift from what a real reload would actually produce.
+
+    ``truncate`` : ``None`` (no truncation) or an explicit point
+    count -- unlike the vendor readers' own ``truncate`` parameter,
+    there's no ``True`` "use the file's own recorded default" here;
+    resolve that to a concrete int before calling.
+
+    ``align_echo_enabled`` -- named this way, not ``align_echo``, so
+    it doesn't shadow the :func:`align_echo` function this same
+    function calls."""
+    if fid_shift:
+        fid = roll_fid(fid, fid_shift)
+
+    echo_wrap_limit = None
+    if align_echo_enabled:
+        top = find_echo_top(fid)
+        fid = align_echo(fid)
+        echo_wrap_limit = len(fid) - int(np.ceil(top))
+
+    tdeff_points = truncate
+    if echo_wrap_limit is not None:
+        tdeff_points = echo_wrap_limit if tdeff_points is None else min(tdeff_points, echo_wrap_limit)
+    if tdeff_points is not None and tdeff_points < len(fid):
+        fid = fid[:tdeff_points]
+
+    if linear_predict_points:
+        fid = linear_predict(
+            fid, order=linear_predict_order, n_predict=linear_predict_points,
+            direction=linear_predict_direction,
+        )
+
+    return fid
+
+
 # ============================================================
 # Apodization -- pluggable window registry
 # ============================================================

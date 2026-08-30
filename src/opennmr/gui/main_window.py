@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import io
+from ..core.spectrum import NMRAxis, NMRSpectrum
 from ..io import bruker as io_bruker
 from ..processing import fitting as processing_fitting
 from ..processing import ft as processing_ft
@@ -1014,15 +1015,22 @@ class MainWindow(QMainWindow):
             # Spectrum canvas and clears compare_canvas (right, for a
             # single selection with nothing Compare-relevant to
             # restore), so populating Compare *before* that meant this
-            # whole block's own effect -- the freshly-populated stack,
-            # and the canvas-tab switch to show it -- was silently
-            # undone one line later. Running it last instead means it's
-            # the thing left standing.
+            # whole block's own effect -- the freshly-populated stack --
+            # was silently undone one line later; running it last
+            # instead means the *list* population is the thing left
+            # standing. The canvas-tab switch is deliberately turned
+            # off here (switch_tab=False), unlike a manual multi-select
+            # (the branch above) -- explicit user feedback that loading
+            # or selecting a pseudo-2D should land on the Spectrum tab,
+            # not jump to Compare just because its slices got listed
+            # there as a side effect; Compare is still fully populated
+            # and correctly drawn in the background for whenever the
+            # user actually clicks over to it themselves.
             if len(rows) == 1 and 0 <= rows[0] < len(self.session):
                 spectrum = self.session.spectra[rows[0]]
                 if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
                     self._populate_compare_list_from_pseudo2d(rows[0], spectrum)
-                    self._refresh_compare_view()
+                    self._refresh_compare_view(switch_tab=False)
 
     def _populate_compare_list(self, rows: list[int]) -> None:
         """Rebuild the Compare tab's own list from the Spectra tab's
@@ -1169,11 +1177,11 @@ class MainWindow(QMainWindow):
     def _on_compare_controls_changed(self) -> None:
         self._refresh_compare_view_if_active()
 
-    def _refresh_compare_view_if_active(self) -> None:
+    def _refresh_compare_view_if_active(self, switch_tab: bool = True) -> None:
         if self.compare_list.count() > 0:
-            self._refresh_compare_view()
+            self._refresh_compare_view(switch_tab=switch_tab)
 
-    def _refresh_compare_view(self) -> None:
+    def _refresh_compare_view(self, switch_tab: bool = True) -> None:
         entries = self._compare_checked_entries()
         candidates = [self._resolve_compare_entry(e) for e in entries]
         candidates = [c for c in candidates if c is not None]  # stale entries (removed/reprocessed) silently drop
@@ -1214,7 +1222,8 @@ class MainWindow(QMainWindow):
         mode = "stack" if self.layout_mode_combo.currentIndex() == 0 else "overlay"
         try:
             self.compare_canvas.show_compare(plot_spectra, mode=mode, normalize=(norm_mode == "max"))
-            self.canvas_tabs.setCurrentWidget(self.compare_canvas)
+            if switch_tab:
+                self.canvas_tabs.setCurrentWidget(self.compare_canvas)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
 
@@ -1522,16 +1531,109 @@ class MainWindow(QMainWindow):
             # plot from whatever was last shown here.
             self.fid_canvas.clear()
 
+    def _compute_processing_preview(self, spectrum):
+        """Compute the Processing tab's live preview entirely from the
+        already-cached raw FID (``metadata.raw["fid_raw"]``), in
+        memory -- no disk I/O, and for a pseudo-2D, only the
+        currently-viewed slice is actually processed, not the whole
+        series. Uses :func:`opennmr.processing.ft.prepare_fid` for the
+        shift/echo-align/truncate/linear-predict step (the exact same
+        function every vendor reader's own ``read_1d``/``read_2d``
+        now calls too -- see its own docstring for why sharing this
+        one implementation matters), so this can't silently drift from
+        what a real "Apply Processing" reload would actually produce.
+
+        Cheap enough to call on every phase-drag tick, unlike the
+        ``Session.preview()``-based reload this replaces -- explicit
+        user feedback that phasing wasn't updating this preview at all
+        (only the Spectrum tab), because that reload was reserved for
+        discrete actions only, never continuous dragging.
+
+        Returns ``(fid, dt, preview_spectrum, title)``, or ``None`` if
+        a preview can't be computed this way: no raw FID cached (an
+        older on-disk session, or a vendor path that predates
+        ``fid_raw``), or an unsupported Bruker WDW code hit with
+        "Recorded" selected (mirrors ``read_1d``/``read_2d``'s own
+        "leave unwindowed, don't fail the load" behaviour rather than
+        raising)."""
+        raw_fid = spectrum.metadata.raw.get("fid_raw")
+        dt = spectrum.metadata.raw.get("fid_dt")
+        if raw_fid is None or dt is None:
+            return None
+
+        title = ""
+        slice_template = spectrum
+        if raw_fid.ndim == 2:
+            row = min(max(self.slice_spin.value() - 1, 0), raw_fid.shape[0] - 1)
+            title = self._slice_label(spectrum, row + 1)
+            raw_fid = raw_fid[row]
+            slice_template = get_trace(spectrum, axis="f1", index=row + 1)
+
+        is_xpulse = spectrum.metadata.vendor == "xpulse"
+        truncate = self.tdeff_spin.value() or None if (is_xpulse and self.tdeff_spin.isEnabled()) else None
+        fid = processing_ft.prepare_fid(
+            raw_fid.astype(complex), fid_shift=self.fid_shift_spin.value(),
+            align_echo_enabled=self.align_echo_button.isChecked(), truncate=truncate,
+            linear_predict_points=self.linear_predict_points_spin.value(),
+            linear_predict_order=self.linear_predict_order_spin.value(),
+        )
+
+        window_key = self.window_combo.currentData()
+        if window_key == "__recorded__":
+            procs = spectrum.metadata.raw.get("procs")
+            sw = float(procs["SW_p"]) if procs and "SW_p" in procs else None
+            if sw is None:
+                return None
+            try:
+                windowed = io_bruker._apply_bruker_window(fid, procs, sw)
+            except NotImplementedError:
+                windowed = fid  # matches read_1d/read_2d's own "leave unwindowed" fallback
+        else:
+            window_kwarg, window_kwargs_kwarg = self._resolve_window_kwargs()
+            windowed = processing_ft.apodize(fid, dt, window=window_kwarg, **(window_kwargs_kwarg or {}))
+
+        filled = processing_ft.zero_fill(windowed, self._zero_fill_value())
+        freq_hz, data = processing_ft.fft_spectrum(filled, dt)
+
+        # The ppm axis's *range* is fixed by acquisition (O1/SF/SW),
+        # unaffected by window/zero-fill choice -- only the point
+        # count changes with zero-fill size. Reused from the already-
+        # loaded spectrum's own axis rather than re-deriving vendor-
+        # specific O1/SF/SW axis math a second time here, which would
+        # risk a second implementation quietly drifting from the
+        # vendor's own.
+        reference_ppm = slice_template.axes[0].ppm
+        ppm = np.linspace(reference_ppm[0], reference_ppm[-1], len(data))
+        hz = ppm * (spectrum.metadata.sfo1 or 1.0)
+
+        # Total current phase: whatever was already baked in by the
+        # last load/reprocess, plus the live delta still showing in
+        # the Phase spin boxes -- same formula _current_phase_kwargs
+        # uses for the dataset-wide case. A per-slice-autophased row's
+        # own individually-different phase (from "Autophase (each
+        # slice independently)") isn't tracked back to here -- a
+        # known, minor display gap, not a correctness risk the way the
+        # FID-domain steps above are.
+        phase0 = float(spectrum.metadata.raw.get("phase0", 0.0)) + self.phase0_spin.value()
+        phase1 = float(spectrum.metadata.raw.get("phase1", 0.0)) + self.phase1_spin.value()
+        span = ppm.max() - ppm.min()
+        pivot_frac = (self.pivot_spin.value() - ppm.min()) / span if span else 0.5
+        data = processing_ft.apply_phase(data, ppm, phase0, phase1, pivot_frac=pivot_frac)
+
+        axis = NMRAxis(kind="frequency", ppm=ppm, hz=hz)
+        preview_spectrum = NMRSpectrum(
+            data=np.real(data), axes=[axis], metadata=slice_template.metadata, data_imag=np.imag(data),
+        )
+        return filled, dt, preview_spectrum, title
+
     def _show_processing_preview(self, spectrum, index: int, switch_tab: bool = False) -> None:
         """Recompute and show the Processing tab's own live dual
         preview (FID top, downsampled spectrum bottom) for ``spectrum``
-        -- exactly what "Apply Processing" would currently produce, via
-        a scratch :meth:`Session.preview` re-read (never committed to
-        ``session``). A re-read, not just reusing the already-loaded
-        FID in memory, because some of these controls (FID shift,
-        TDeff, linear prediction) don't actually take effect until
-        applied -- only a fresh read reflects their current, possibly
-        unapplied values accurately.
+        -- exactly what "Apply Processing" would currently produce.
+        Computed entirely in memory (see
+        :meth:`_compute_processing_preview`), not via a disk re-read --
+        cheap enough to call on every live control change, including a
+        continuous phase-drag tick.
 
         Clears the canvas (rather than raising) for anything it can't
         sensibly show this way: not FID-reprocessable at all, or a
@@ -1542,22 +1644,14 @@ class MainWindow(QMainWindow):
             self.processing_preview_canvas.clear()
         else:
             try:
-                preview_spectrum = self.session.preview(index, **self._current_fid_processing_kwargs(spectrum))
-                fid = preview_spectrum.metadata.raw.get("fid")
+                computed = self._compute_processing_preview(spectrum)
             except Exception:  # noqa: BLE001 -- best-effort live preview; a transiently-invalid
                 # combination of controls mid-edit shouldn't pop an error dialog
-                fid = None
-            if fid is None:
+                computed = None
+            if computed is None:
                 self.processing_preview_canvas.clear()
             else:
-                dt = preview_spectrum.metadata.raw.get("fid_dt")
-                title = ""
-                slice_spectrum = preview_spectrum
-                if fid.ndim == 2:
-                    row = min(max(self.slice_spin.value() - 1, 0), fid.shape[0] - 1)
-                    title = self._slice_label(preview_spectrum, row + 1)
-                    fid = fid[row]
-                    slice_spectrum = get_trace(preview_spectrum, axis="f1", index=row + 1)
+                fid, dt, slice_spectrum, title = computed
                 envelope = self._compute_window_envelope(dt, len(fid))
                 tdeff = self.tdeff_spin.value() if self.tdeff_spin.isEnabled() else 0
                 echo_top = processing_ft.find_echo_top(fid) if self.align_echo_button.isChecked() else None
@@ -1961,10 +2055,6 @@ class MainWindow(QMainWindow):
         self.pivot_slider.setValue(500)
         self.pivot_slider.setToolTip("Drag to move the Phase 1 pivot across the spectrum's own ppm range.")
         self.pivot_slider.valueChanged.connect(self._on_pivot_slider_changed)
-        # Same reasoning as DragHandle.dragFinished (see
-        # _make_phase_control) -- refresh the Processing-preview tab
-        # once the drag ends, not on every intermediate tick.
-        self.pivot_slider.sliderReleased.connect(self._refresh_processing_preview_if_active)
         form.addRow(self.pivot_slider)
 
         autophase_row = QHBoxLayout()
@@ -2073,15 +2163,6 @@ class MainWindow(QMainWindow):
 
         handle.valueChanged.connect(lambda v: self._on_phase_handle_changed(handle, spin, v))
         spin.valueChanged.connect(lambda v: self._on_phase_spin_changed(handle, spin, v))
-        # Once per drag gesture (not per intermediate tick -- see
-        # DragHandle.dragFinished's own docstring), refresh the
-        # Processing-preview tab if that's active: pseudo2d/2d phase
-        # dragging deliberately doesn't refresh it live on every tick
-        # (too slow, a full Session.preview() re-read -- see
-        # _apply_phase_preview), so without this the preview would
-        # otherwise stay stale until some other, unrelated change
-        # happened to refresh it.
-        handle.dragFinished.connect(self._refresh_processing_preview_if_active)
         return handle, spin
 
     @staticmethod
@@ -2377,6 +2458,12 @@ class MainWindow(QMainWindow):
             self.canvas.set_pivot_marker(self.pivot_spin.value())
             if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
                 self.canvas_tabs.setCurrentWidget(self.canvas)
+            else:
+                # Computed entirely in memory (see
+                # _compute_processing_preview) -- cheap enough to
+                # refresh on every drag tick, unlike the disk-re-read
+                # this used to be.
+                self._refresh_processing_preview_if_active()
 
         elif self._phase_mode == "pseudo2d":
             if self.apply_all_slices_checkbox.isChecked():
@@ -2401,16 +2488,14 @@ class MainWindow(QMainWindow):
             elif self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
                 # Keep the Spectrum tab's own content correct in the
                 # background (switch_tab=False -- so switching back to
-                # it later shows the current phase), but don't force-
-                # switch away from the Processing tab's own preview,
-                # and don't refresh THAT preview here -- this runs on
-                # every phase-drag tick, and a live-preview refresh is
-                # a full Session.preview() re-read (real I/O + FFT),
-                # too slow for that. A discrete change that also routes
-                # through here (e.g. slice_spin -- see
-                # _on_slice_spin_changed) refreshes it separately,
-                # right after this call returns.
+                # it later shows the current phase), without stealing
+                # focus from the Processing tab's own preview -- which
+                # itself now also refreshes live, on every drag tick;
+                # computed entirely in memory (see
+                # _compute_processing_preview), so this is no longer
+                # the disk-re-read-per-tick concern it used to be.
                 self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=False)
+                self._refresh_processing_preview_if_active()
             else:
                 self._show_pseudo2d_slice(spectrum, reset_view=False)
                 self.canvas.set_pivot_marker(self.pivot_spin.value())
@@ -3680,15 +3765,27 @@ class MainWindow(QMainWindow):
         # reselection/reprocess pulls focus away from.
         fid_tab_active = self.canvas_tabs.currentWidget() is self.fid_canvas
         processing_preview_active = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-        compare_shows_this_stack = (
-            row is not None
-            and self.canvas_tabs.currentWidget() is self.compare_canvas
-            and self._compare_shows_current_pseudo2d_stack(row, spectrum)
+        # Two separate questions, not one: whether Compare already
+        # correctly reflects this spectrum's own slices at all (used
+        # below to decide whether _silo_other_canvas_tabs should leave
+        # its content alone -- true regardless of which tab happens to
+        # be showing, since Compare is meant to stay correctly drawn
+        # in the background even while Spectrum is the visible one --
+        # see _on_list_selection_changed's own "land on Spectrum, not
+        # Compare" comment); and whether the Compare *tab* is already
+        # the one actively showing (used to decide whether it's safe
+        # to leave the canvas switch alone below, rather than
+        # force-switching to Spectrum out from under someone who
+        # deliberately navigated to Compare themselves, e.g. via a
+        # manual multi-select).
+        compare_matches_list = row is not None and self._compare_shows_current_pseudo2d_stack(row, spectrum)
+        compare_tab_active_and_matches = (
+            compare_matches_list and self.canvas_tabs.currentWidget() is self.compare_canvas
         )
         try:
             if is_pseudo2d_stack:
                 self._show_pseudo2d_stack(spectrum)
-            elif compare_shows_this_stack:
+            elif compare_tab_active_and_matches:
                 pass
             else:
                 # Kept up to date regardless of which canvas tab is
@@ -3705,7 +3802,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot spectrum", str(exc))
 
-        self._silo_other_canvas_tabs(spectrum, skip_compare=compare_shows_this_stack)
+        self._silo_other_canvas_tabs(spectrum, skip_compare=compare_matches_list)
 
     def _silo_other_canvas_tabs(self, spectrum, skip_compare: bool = False) -> None:
         """Keep the Fit/Spectral Fit/Compare canvas tabs from showing a

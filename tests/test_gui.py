@@ -741,23 +741,40 @@ def test_main_window_baseline_correct_stays_on_processing_preview_for_pseudo2d(q
     assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
 
 
-def test_main_window_phase_drag_finished_refreshes_processing_preview(qapp, tmp_path, monkeypatch):
-    # A continuous phase-handle drag deliberately doesn't refresh the
-    # (potentially slow) Processing-preview tab on every tick -- but
-    # letting go of the drag should trigger exactly one refresh
-    # (DragHandle.dragFinished), so the preview doesn't stay stale.
+def test_main_window_phase_drag_tick_refreshes_processing_preview_live(qapp, tmp_path, monkeypatch):
+    # Explicit user feedback: phasing wasn't updating the Processing-
+    # preview tab at all (only the Spectrum tab) -- computed entirely
+    # in memory now (see _compute_processing_preview, using the cached
+    # raw FID), so it's cheap enough to refresh on every single drag
+    # tick, not just once a gesture finishes.
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
     window.side_tabs.setCurrentIndex(window._processing_tab_index)
     _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
     before = spec_ax.lines[0].get_ydata().copy()
 
-    window.phase0_handle.setValue(45.0)  # a drag tick -- preview intentionally not refreshed yet
-    window.phase0_handle.dragFinished.emit()  # letting go of the drag
+    window.phase0_handle.setValue(45.0)  # one drag tick, no release
 
     _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
     after = spec_ax.lines[0].get_ydata()
     assert not np.allclose(before, after)
+
+
+def test_main_window_processing_preview_matches_spectrum_tab_phase(qapp, tmp_path, monkeypatch):
+    # The bug as reported: phasing kept working on the Spectrum tab
+    # but not on the Processing-preview tab -- assert the two actually
+    # agree, not just that the preview changed at all.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window._set_zero_fill_value(64)  # isolate the phase check from the new default-zero-fill behaviour
+    window.phase0_spin.setValue(45.0)
+    spectrum_ydata = window.canvas.ax.lines[0].get_ydata().copy()
+
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    preview_ydata = spec_ax.lines[0].get_ydata()
+
+    np.testing.assert_allclose(preview_ydata, spectrum_ydata, atol=1e-6)
 
 
 def test_main_window_pivot_slider_moves_pivot_spin(qapp, tmp_path):
@@ -1466,6 +1483,79 @@ def test_main_window_processing_preview_updates_live_without_committing(qapp, tm
     np.testing.assert_allclose(window.canvas.ax.lines[0].get_ydata(), canvas_ydata_before)
 
 
+def test_main_window_processing_preview_never_reads_from_disk(qapp, tmp_path, monkeypatch):
+    # The actual performance fix: the preview used to call
+    # Session.preview() (io.load() under the hood -- real file I/O,
+    # reprocessing every slice of a pseudo-2D just to show one) on
+    # every live control change. It's now computed entirely from the
+    # already-cached raw FID (metadata.raw["fid_raw"]) -- assert
+    # io.load is never even called for a live preview refresh, not
+    # just that the result looks plausible.
+    import opennmr.io as io_module
+
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+
+    # Recorded (not raised) -- _show_processing_preview's own
+    # best-effort try/except would otherwise silently swallow a raised
+    # assertion, defeating the point of this check.
+    calls = []
+
+    def _record_call(*a, **k):
+        calls.append((a, k))
+        raise RuntimeError("stub -- a real call would still be a bug even though this stops it")
+
+    monkeypatch.setattr(io_module, "load", _record_call)
+
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    window.slice_spin.setValue(3)
+    hann_row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "hann")
+    window.window_combo.setCurrentIndex(hann_row)
+    window.phase0_handle.setValue(30.0)
+
+    assert calls == []
+
+
+def test_main_window_processing_preview_pseudo2d_uses_only_active_slice(qapp, tmp_path, monkeypatch):
+    # _make_raw_2d_dataset tiles the same row for every slice (fine
+    # for tests that don't care about per-slice content) -- built with
+    # genuinely varying rows here instead, so the assertion below
+    # actually exercises "extracts the selected slice's own data," not
+    # just "doesn't crash."
+    from opennmr.io import bruker as bruker_io
+
+    expt = tmp_path / "rawexpt2d_varying"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    n_f1, n_f2 = 4, 32
+    _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": n_f2, "SF": 400.13, "WDW": 0})
+    _write_params(pdata / "proc2s", {"SW_p": 2000.0, "SI": n_f1, "SF": 100.6, "WDW": 0})
+    (expt / "ser").write_bytes(b"\x00")
+    (expt / "acqus").write_bytes(b"\x00")
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqu2s = {"NUC1": "off", "BF1": 100.6, "O1": 0.0}
+    t2 = np.arange(n_f2) / 8000.0
+    # A different decay rate per row -- slices are visibly distinct.
+    fid = np.stack([np.exp(-t2 * 300 * (row + 1)) * np.exp(2j * np.pi * 1000.0 * t2) for row in range(n_f1)])
+    dic = {"acqus": acqus, "acqu2s": acqu2s}
+    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+
+    window = MainWindow()
+    window._load(str(expt), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+
+    window.slice_spin.setValue(1)
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    slice1 = spec_ax.lines[0].get_ydata().copy()
+
+    window.slice_spin.setValue(3)
+    _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
+    slice3 = spec_ax.lines[0].get_ydata()
+
+    assert not np.allclose(slice1, slice3)  # genuinely tracks the selected slice, not a cached/stale one
+
+
 # ============================================================
 # TDeff (X-Pulse raw-FID truncation) control
 # ============================================================
@@ -1999,14 +2089,17 @@ def test_main_window_compare_auto_populates_from_pseudo2d_slices(qapp):
         assert window.compare_list.item(i).checkState() == Qt.CheckState.Checked
     assert window.compare_status_label.text() == "Comparing 5 spectra."
     # The list populating correctly isn't enough on its own -- the
-    # Compare canvas must actually show it, and canvas_tabs must
-    # actually be showing that canvas (a real ordering bug: this used
-    # to be populated *before* _on_selection_changed's own
+    # Compare canvas must actually be drawn too (a real ordering bug:
+    # this used to be populated *before* _on_selection_changed's own
     # _draw_selected_spectrum/_silo_other_canvas_tabs ran, which
-    # unconditionally redraws the Spectrum canvas and clears
+    # unconditionally redrew the Spectrum canvas and cleared
     # compare_canvas -- silently undoing this population one line
-    # later).
-    assert window.canvas_tabs.currentWidget() is window.compare_canvas
+    # later). But canvas_tabs itself should land on Spectrum, not
+    # Compare -- explicit user feedback that loading/selecting a
+    # pseudo-2D shouldn't jump to Compare just because its slices got
+    # listed there as a side effect; Compare is still fully drawn in
+    # the background for whenever the user actually clicks over to it.
+    assert window.canvas_tabs.currentWidget() is window.canvas
     assert _compare_line_count(window.compare_canvas) == 5
 
 
