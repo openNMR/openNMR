@@ -51,6 +51,21 @@ class Session:
         self.spectra[index] = spectrum
         return spectrum
 
+    def reset(self, index: int, **kwargs) -> NMRSpectrum:
+        """Re-load spectrum ``index`` from its original path with
+        exactly ``kwargs`` -- *replacing* the remembered load kwargs
+        entirely, unlike :meth:`reload`'s merge. For a GUI "Reset"
+        action discarding every live processing choice back to a
+        specific known-good starting point (typically what the caller
+        itself snapshotted right after the initial load), not
+        layering one more override on top of whatever's accumulated
+        since."""
+        info = self._load_info[index]
+        info["kwargs"] = dict(kwargs)
+        spectrum = self._load_with(index, info["kwargs"])
+        self.spectra[index] = spectrum
+        return spectrum
+
     def preview(self, index: int, **override_kwargs) -> NMRSpectrum:
         """Like :meth:`reload`, but purely a scratch re-read -- doesn't
         replace the stored spectrum or its remembered load kwargs.

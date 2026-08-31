@@ -1265,6 +1265,7 @@ def test_main_window_baseline_correct_pseudo2d_respects_apply_all_slices(qapp):
     original = window.session.spectra[0].data.copy()
     window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData("spline"))
     window.baseline_correct_button.setChecked(True)
+    _settle_live_reprocess(window)  # "apply to every slice" debounces the actual recompute
     corrected = window.session.spectra[0].data
     for row in range(n_rows):
         assert not np.allclose(original[row], corrected[row])
@@ -1300,6 +1301,7 @@ def test_main_window_baseline_correct_conventional_2d(qapp):
     original = window.session.spectra[0].data.copy()
     window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData("spline"))
     window.baseline_correct_button.setChecked(True)
+    _settle_live_reprocess(window)  # conventional 2D always debounces the actual recompute
     corrected = window.session.spectra[0].data
     for row in range(n_f1):
         assert not np.allclose(original[row], corrected[row])
@@ -1764,31 +1766,33 @@ def test_main_window_fid_processing_box_visible_for_raw_fid_data(qapp, tmp_path,
     assert window.fid_processing_box.isHidden() is False
 
 
-def test_main_window_reprocess_fid_with_window_override_changes_spectrum(qapp, tmp_path, monkeypatch):
+def test_main_window_window_change_updates_spectrum_live(qapp, tmp_path, monkeypatch):
+    # No more "Apply Processing" button -- every FID-processing
+    # control writes straight into spectrum.data live (explicit,
+    # repeated user feedback: a separate commit step kept resetting
+    # unrelated state).
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
     index = window._selected_index()
     original = window.session.spectra[index].data.copy()
-    window._set_zero_fill_value(64)  # isolate the window change from the new default-zero-fill behaviour
 
     hann_row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "hann")
     window.window_combo.setCurrentIndex(hann_row)
-    window._on_reprocess_fid_clicked()
 
     updated = window.session.spectra[index].data
-    assert len(updated) == 64
+    assert len(updated) == 64  # unchanged -- zero-fill wasn't touched, defaults to the as-loaded length
     assert not np.allclose(original, updated)
     assert window.session.spectra[index].metadata.raw.get("fid") is not None
 
 
-def test_main_window_reprocess_fid_zero_fill_override_changes_length(qapp, tmp_path, monkeypatch):
+def test_main_window_zero_fill_change_updates_spectrum_length_live(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
     index = window._selected_index()
     assert len(window.session.spectra[index].data) == 64
 
-    window._set_zero_fill_value(128)
-    window._on_reprocess_fid_clicked()
+    window._set_zero_fill_value(128)  # sets the widgets only, no signal (see its own docstring)
+    window._on_fid_processing_control_changed()  # the change this would trigger from a real UI interaction
 
     assert len(window.session.spectra[index].data) == 128
 
@@ -1889,13 +1893,18 @@ def test_main_window_phase_spin_box_wide_enough_for_large_values(qapp):
 # Processing tab's own live dual preview (FID + downsampled spectrum)
 # ============================================================
 
-def test_main_window_apply_processing_button_has_simple_label(qapp):
-    # Explicit user feedback: "Reprocess from raw FID" was confusing
-    # wording -- renamed to something plainer.
+def test_main_window_apply_processing_button_removed_in_favour_of_reset(qapp):
+    # Explicit, repeated user feedback: "Apply Processing is still
+    # resetting everything... remove the button, we can have a reset
+    # button" -- every FID-processing control is live now (see
+    # _on_fid_processing_control_changed), so there's no "apply" step
+    # left to have a button for; Reset (the opposite -- discard, not
+    # commit) replaces it.
     window = MainWindow()
     buttons = window.fid_processing_box.findChildren(QPushButton)
-    assert any(b.text() == "Apply Processing" for b in buttons)
+    assert not any(b.text() == "Apply Processing" for b in buttons)
     assert not any("Reprocess" in b.text() for b in buttons)
+    assert any(b.text() == "Reset" for b in buttons)
 
 
 def test_main_window_selecting_processing_tab_shows_processing_preview(qapp, tmp_path, monkeypatch):
@@ -1958,16 +1967,17 @@ def test_main_window_processing_preview_tracks_selected_slice(qapp, tmp_path, mo
     assert fid_ax.get_title() == "Slice 3"
 
 
-def test_main_window_processing_preview_updates_live_without_committing(qapp, tmp_path, monkeypatch):
-    # The whole point of this preview -- tweaking a FID-processing
-    # control (without clicking "Apply Processing") should visibly
-    # change the preview...
+def test_main_window_processing_preview_and_spectrum_update_together_live(qapp, tmp_path, monkeypatch):
+    # There's no "Apply Processing" step any more -- tweaking a FID-
+    # processing control updates the Processing-preview tab AND the
+    # actually-loaded spectrum (so the Spectrum tab too) together, from
+    # the same source, live. Explicit, repeated user feedback: a
+    # separate not-yet-applied preview vs. a stale "actual" spectrum
+    # was exactly the split that kept losing state on commit.
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
-    window._set_zero_fill_value(64)
     index = window._selected_index()
     spectrum_data_before = window.session.spectra[index].data.copy()
-    canvas_ydata_before = window.canvas.ax.lines[0].get_ydata().copy()
 
     window.side_tabs.setCurrentIndex(window._processing_tab_index)
     _fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
@@ -1980,12 +1990,13 @@ def test_main_window_processing_preview_updates_live_without_committing(qapp, tm
     preview_after = spec_ax.lines[0].get_ydata()
     assert not np.allclose(preview_before, preview_after)
 
-    # ...but must NOT have touched the actually-loaded spectrum, or
-    # the FID/Spectrum tabs -- explicit user feedback that those
-    # should only ever show "the results of the processing", never a
-    # not-yet-applied speculative preview.
-    np.testing.assert_allclose(window.session.spectra[index].data, spectrum_data_before)
-    np.testing.assert_allclose(window.canvas.ax.lines[0].get_ydata(), canvas_ydata_before)
+    spectrum_after = window.session.spectra[index]
+    assert not np.allclose(spectrum_data_before, spectrum_after.data)
+    # Same source: the preview's own (downsampled, normalized-for-
+    # display) data and the actual spectrum's own normalized() agree
+    # at every point the preview kept (no downsampling here -- 64
+    # points is under plot_1d's own downsampling threshold).
+    np.testing.assert_allclose(spectrum_after.normalized(), preview_after, atol=1e-6)
 
 
 def test_main_window_processing_preview_never_reads_from_disk(qapp, tmp_path, monkeypatch):
@@ -2104,24 +2115,23 @@ def _make_xpulse_dataset(tmp_path, name="xpulse1.jdx"):
 
 
 def test_main_window_linear_predict_direction_defaults_to_forward_and_threads_through(qapp, tmp_path):
+    # LP direction should actually change the live-recomputed spectrum
+    # (not just be recorded) -- forward extends past the FID's own
+    # measured end, backward reconstructs points before its start, so
+    # the two must diverge once linear-predict points > 0.
     window = MainWindow()
     window._load(_make_xpulse_dataset(tmp_path), vendor="xpulse")
     assert window.linear_predict_direction_combo.currentData() == "forward"
+    index = window._selected_index()
 
     window.linear_predict_points_spin.setValue(4)
-    kwargs = window._current_fid_processing_kwargs(window.session.spectra[window._selected_index()])
-    assert kwargs["linear_predict_direction"] == "forward"
+    forward_data = window.session.spectra[index].data.copy()
 
     backward_index = window.linear_predict_direction_combo.findData("backward")
     window.linear_predict_direction_combo.setCurrentIndex(backward_index)
-    kwargs = window._current_fid_processing_kwargs(window.session.spectra[window._selected_index()])
-    assert kwargs["linear_predict_direction"] == "backward"
+    backward_data = window.session.spectra[index].data.copy()
 
-    # Not sent at all while LP is off (points == 0) -- matches
-    # linear_predict_order's own existing "only when points > 0" gating.
-    window.linear_predict_points_spin.setValue(0)
-    kwargs = window._current_fid_processing_kwargs(window.session.spectra[window._selected_index()])
-    assert "linear_predict_direction" not in kwargs
+    assert not np.allclose(forward_data, backward_data)
 
 
 def test_main_window_tdeff_spin_enabled_and_prefilled_for_xpulse(qapp, tmp_path):
@@ -2254,21 +2264,20 @@ def test_main_window_2d_shape_guess_failure_falls_back_and_hides_fid_box(qapp, t
     assert "read_2d_shape_guess_failed" in spectrum.metadata.raw
     assert window._fid_reprocessable(spectrum) is False
     assert window.fid_processing_box.isHidden() is True
-    window._on_reprocess_fid_clicked()  # must not raise -- still fully reprocessable
 
 
 def test_main_window_reprocess_fid_works_for_varian(qapp, tmp_path):
     # Regression test: before _fid_reprocessable recognised "varian",
-    # this control was simply hidden; now that it's shown, Reprocess
-    # must actually succeed (varian.read_1d/read_2d take the same
-    # fid_shift/align_echo/linear_predict kwargs the GUI always sends).
+    # this control was simply hidden; now that it's shown, a live
+    # control change must actually succeed (varian.read_1d/read_2d
+    # take the same fid_shift/align_echo/linear_predict kwargs the GUI
+    # always sends).
     window = MainWindow()
     window._load(_make_varian_dataset(tmp_path, n=8), vendor="varian")
     index = window._selected_index()
     original = window.session.spectra[index].data.copy()
 
-    window.fid_shift_spin.setValue(1.0)
-    window._on_reprocess_fid_clicked()  # must not raise
+    window.fid_shift_spin.setValue(1.0)  # must not raise
 
     assert not np.allclose(window.session.spectra[index].data, original)  # fid_shift actually took effect
 
@@ -2327,7 +2336,6 @@ def test_main_window_reprocess_applies_tdeff_truncation(qapp, tmp_path):
     assert original_fid[2] != 0
 
     window.tdeff_spin.setValue(2)
-    window._on_reprocess_fid_clicked()
 
     assert window.session.spectra[index].metadata.raw["fid"][2] == 0
 
@@ -2386,16 +2394,49 @@ def test_main_window_align_echo_toggled_off_reverts(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_xpulse_dataset(tmp_path), vendor="xpulse")
     index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    # Isolate this test to align_echo's own round-trip -- baseline
+    # correction is a separate, independent concern (see
+    # test_main_window_align_echo_rolls_the_raw_fid's own docstring
+    # for why the two are decoupled now).
+    spectrum.metadata.raw["baseline_correct"] = False
+    window._commit_processing_preview_as_spectrum(spectrum)  # through the same pipeline as the round-trip below
+    original = spectrum.data.copy()
 
     window.align_echo_button.setChecked(True)
-    aligned = window.session.spectra[index].data.copy()
-
     window.align_echo_button.setChecked(False)
     reverted = window.session.spectra[index].data
 
-    assert not np.allclose(aligned, reverted)
+    np.testing.assert_allclose(original, reverted)
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
     assert "Echo top" not in labels
+
+
+def test_main_window_align_echo_rolls_the_raw_fid(qapp, tmp_path):
+    # align_echo's own direct FID-domain effect (independent of
+    # whatever else -- baseline correction, phase -- may or may not be
+    # active): rolls the FID so its own peak sits at t=0. Checked
+    # against metadata.raw["fid"] (the FID preview tab's own source,
+    # now kept live -- see _commit_processing_preview_as_spectrum),
+    # not the FFT'd spectrum, so this can't be confounded by any other
+    # step in the pipeline.
+    echo_fixture = _XPULSE_FIXTURE.replace(
+        "0.000000 1.0\n0.000100 0.9\n0.000200 0.8\n0.000300 0.7",
+        "0.000000 0.2\n0.000100 0.9\n0.000200 0.3\n0.000300 0.1",
+    )
+    assert echo_fixture != _XPULSE_FIXTURE  # the substring above must have actually matched
+    window = MainWindow()
+    path = tmp_path / "echo.jdx"
+    path.write_text(echo_fixture)
+    window._load(str(path), vendor="xpulse")
+    index = window._selected_index()
+
+    before = window.session.spectra[index].metadata.raw["fid"].copy()
+    window.align_echo_button.setChecked(True)
+    after = window.session.spectra[index].metadata.raw["fid"]
+
+    assert not np.allclose(before, after)
+    assert np.argmax(np.abs(after)) == 0  # the peak now sits at t=0
 
 
 def test_main_window_processing_preview_mirrors_spectrum_for_conventional_2d(qapp, tmp_path, monkeypatch):
@@ -2493,22 +2534,21 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
     assert not np.allclose(window.session.spectra[index].data, before)
 
 
-def test_main_window_f1_phase_persists_across_apply_processing(qapp, tmp_path, monkeypatch):
+def test_main_window_f1_phase_persists_across_live_fid_control_change(qapp, tmp_path, monkeypatch):
     # Regression test: dragging the Phase controls with Dimension set
     # to Indirect (F1) on a conventional 2D wrote the correction
     # straight into spectrum.data (never the problem), but nothing
     # ever recorded it anywhere durable -- unlike F2's own phase0/
-    # phase1, which read_2d bakes into metadata.raw and _current_
-    # phase_kwargs forwards into every reload. The moment the spin
-    # boxes got re-zeroed (switching dim, reselecting) and then
-    # something reloaded the spectrum (Apply Processing being the most
-    # direct case), F1's phase silently reverted to unphased with no
-    # way to tell -- explicit user feedback that F1 phasing was
-    # "impossible". Fixed via metadata.raw["phase0_f1"/"phase1_f1"],
-    # folded in by _commit_pending_phase_to_metadata and reapplied
-    # post-reload by _reapply_phase_post_reload.
-    import opennmr.processing.ft as processing_ft
-
+    # phase1, which read_2d bakes into metadata.raw. The moment the
+    # spin boxes got re-zeroed (switching dim, reselecting) and then
+    # something reprocessed the spectrum (a live FID-processing control
+    # change, now that there's no "Apply Processing" step at all), F1's
+    # phase silently reverted to unphased with no way to tell --
+    # explicit user feedback that F1 phasing was "impossible". Fixed
+    # via metadata.raw["phase0_f1"/"phase1_f1"], folded in by
+    # _commit_pending_phase_to_metadata and reapplied by
+    # _recompute_multi_row_data after every live recompute, not just a
+    # one-off reload.
     window = MainWindow()
     path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="f1phase2d")
     window._load(path, vendor="bruker")
@@ -2518,14 +2558,8 @@ def test_main_window_f1_phase_persists_across_apply_processing(qapp, tmp_path, m
     # a user would, via the Process Indirect Dimension button.
     window.process_indirect_button.setChecked(True)
     assert window.session.spectra[index].metadata.pseudo_2d is False
-    # Isolate the F1-phase-persistence behaviour under test from the
-    # GUI's own default (much larger) zero-fill choice -- keep F2's
-    # size matching the dataset's own SI so a plain reload reproduces
-    # the same shape.
-    window._set_zero_fill_value(32)
 
     original = window.session.spectra[index].data.copy()
-    original_imag = window.session.spectra[index].data_imag.copy()
     assert window._phase_mode == "2d"
 
     window.dim_combo.setCurrentIndex(1)  # Indirect (F1)
@@ -2537,22 +2571,31 @@ def test_main_window_f1_phase_persists_across_apply_processing(qapp, tmp_path, m
 
     # Re-anchoring (e.g. switching away and back) commits the pending
     # delta into metadata.raw and zeroes the spin box -- exactly the
-    # state Apply Processing needs to be tested against, since a real
-    # user rarely clicks Apply Processing mid-drag.
+    # state a later live recompute needs to be tested against, since a
+    # real user rarely changes another control mid-drag.
     window._capture_phase_reference()
     assert spectrum.metadata.raw.get("phase0_f1") == pytest.approx(40.0)
     assert window.phase0_spin.value() == 0.0
+    f1_phased_data = spectrum.data.copy()
 
-    window._on_reprocess_fid_clicked()
-    reloaded = window.session.spectra[index]
-    assert reloaded is not spectrum  # genuinely reloaded, not the same object
+    # Any live FID-processing control change on a conventional 2D
+    # triggers a full (debounced) recompute -- must not lose F1's own
+    # committed phase.
+    window.fid_shift_spin.setValue(0.5)
+    _settle_live_reprocess(window)
 
-    freq_ppm = window.session.spectra[index].axis_values(0, "ppm")
-    expected = processing_ft.apply_phase(
-        (original + 1j * original_imag).T, freq_ppm, 40.0, 0.0, pivot_frac=0.5,
-    ).T
-    np.testing.assert_allclose(reloaded.data, np.real(expected), atol=1e-8)
-    np.testing.assert_allclose(reloaded.data_imag, np.imag(expected), atol=1e-8)
+    recomputed = window.session.spectra[index]
+    assert recomputed is spectrum  # updated in place, not replaced
+    assert not np.allclose(recomputed.data, original)  # fid_shift took effect
+    with_f1_phase = recomputed.data.copy()
+
+    # A/B: clear F1's committed phase and recompute again -- if it was
+    # genuinely still being applied above, removing it must change the
+    # result.
+    spectrum.metadata.raw["phase0_f1"] = 0.0
+    window._recompute_multi_row_data(spectrum)
+    without_f1_phase = spectrum.data
+    assert not np.allclose(with_f1_phase, without_f1_phase)
 
 
 def test_main_window_reprocess_updates_both_spectrum_and_fid_canvases(qapp, tmp_path):
@@ -2561,11 +2604,10 @@ def test_main_window_reprocess_updates_both_spectrum_and_fid_canvases(qapp, tmp_
     window.canvas_tabs.setCurrentWidget(window.fid_canvas)
 
     window.tdeff_spin.setValue(2)
-    window._on_reprocess_fid_clicked()
 
-    # FID tab was active at reprocess time -> refreshed in place, not
-    # left showing the pre-reprocess plot (the TDeff marker moves to
-    # the newly-set cutoff).
+    # FID tab was active at the live-update -> refreshed in place, not
+    # left showing the pre-change plot (the TDeff marker moves to the
+    # newly-set cutoff).
     assert window.canvas_tabs.currentWidget() is window.fid_canvas
     labels = [line.get_label() for line in window.fid_canvas.ax.lines]
     assert "TDeff cutoff" in labels
@@ -3267,6 +3309,19 @@ def _load_spectrum_directly(window, spectrum):
     window.session._load_info.append({"path": "synthetic", "vendor": "bruker", "kwargs": {}})
     window.spectrum_list.addItem(window.session.label(len(window.session) - 1))
     window._select_single_row(len(window.session) - 1)
+
+
+def _settle_live_reprocess(window):
+    """Force a pending debounced multi-row recompute
+    (:attr:`MainWindow._live_reprocess_timer`, see its own docstring)
+    to run immediately, instead of a real test waiting out the debounce
+    interval -- multi-row baseline correction, and any FID-processing
+    control change on a pseudo-2D "apply to every slice"/conventional
+    2D spectrum, schedule one rather than recomputing inline. A no-op
+    if nothing is actually pending."""
+    if window._live_reprocess_timer.isActive():
+        window._live_reprocess_timer.stop()
+        window._run_debounced_multi_row_reprocess()
 
 
 def _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, amplitude=1.0, n_pts=400):
@@ -4042,7 +4097,7 @@ def test_main_window_reprocess_uses_selected_preset_size(qapp, tmp_path, monkeyp
     index = window._selected_index()
 
     window._set_zero_fill_value(4096)
-    window._on_reprocess_fid_clicked()
+    window._on_fid_processing_control_changed()
 
     assert len(window.session.spectra[index].data) == 4096
     assert 4096 in _ZERO_FILL_SIZES
@@ -4063,7 +4118,7 @@ def test_main_window_fid_processing_settings_persist_across_reselection(qapp, tm
     window.align_echo_button.setChecked(True)
     window.fid_shift_spin.setValue(2.5)
     window._set_zero_fill_value(4096)
-    window._on_reprocess_fid_clicked()
+    window._on_fid_processing_control_changed()
 
     # Switch away, then back -- controls must reflect what was
     # actually applied, not reset to the fresh-load defaults.
@@ -4085,7 +4140,6 @@ def test_main_window_fid_processing_lb_persists_for_exponential_window(qapp, tmp
     exp_row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "exponential")
     window.window_combo.setCurrentIndex(exp_row)
     window.lb_spin.setValue(15.0)
-    window._on_reprocess_fid_clicked()
 
     window._select_single_row(1)
     window._select_single_row(0)
@@ -4102,7 +4156,6 @@ def test_main_window_unmodified_spectrum_still_gets_fresh_defaults(qapp, tmp_pat
     window._select_single_row(0)
     hann_row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "hann")
     window.window_combo.setCurrentIndex(hann_row)
-    window._on_reprocess_fid_clicked()
 
     # Spectrum 1 was never reprocessed -- selecting it must not show
     # spectrum 0's settings.

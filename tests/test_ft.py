@@ -222,6 +222,26 @@ def test_linear_predict_rejects_unknown_direction():
         ft.linear_predict(np.ones(20, dtype=complex), order=5, n_predict=3, direction="sideways")
 
 
+def test_prepare_fid_clamps_lp_order_instead_of_raising():
+    # A UI/caller-chosen order (e.g. a fixed default of 20) can easily
+    # exceed what's valid once truncate has shrunk the FID -- prepare_fid
+    # should still produce a real LP result at the largest valid order
+    # rather than propagating linear_predict's ValueError.
+    fid = np.array([1.0, 0.9, 0.8], dtype=complex)  # len 3 -> max valid order is 1
+    extended = ft.prepare_fid(fid, linear_predict_points=4, linear_predict_order=20)
+    assert len(extended) == 7
+    np.testing.assert_allclose(extended[:3], fid)
+
+
+def test_prepare_fid_skips_lp_when_no_order_is_valid():
+    # Fewer than 3 points: even order=1 isn't < len(fid)-1, so LP can't
+    # run at all -- prepare_fid should leave the FID untouched rather
+    # than raising.
+    fid = np.array([1.0, 0.9], dtype=complex)
+    result = ft.prepare_fid(fid, linear_predict_points=4, linear_predict_order=20)
+    np.testing.assert_allclose(result, fid)
+
+
 def test_baseline_correct_respects_explicit_baseline_regions():
     freq, true_baseline, peak = _sloped_baseline_with_peak()
     spectrum = true_baseline + peak

@@ -128,10 +128,16 @@ def prepare_fid(fid: np.ndarray, *, fid_shift: float = 0.0, align_echo_enabled: 
         fid = fid[:tdeff_points]
 
     if linear_predict_points:
-        fid = linear_predict(
-            fid, order=linear_predict_order, n_predict=linear_predict_points,
-            direction=linear_predict_direction,
-        )
+        # order must be < len(fid)-1 (see linear_predict's docstring) --
+        # clamp rather than let a fixed UI/caller default (e.g. 20) raise
+        # once truncate/align_echo has shrunk fid below that, silently
+        # skipping only if even order=1 isn't valid for what's left.
+        max_valid_order = len(fid) - 2
+        if max_valid_order >= 1:
+            fid = linear_predict(
+                fid, order=min(linear_predict_order, max_valid_order),
+                n_predict=linear_predict_points, direction=linear_predict_direction,
+            )
 
     return fid
 

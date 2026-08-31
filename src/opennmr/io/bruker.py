@@ -577,6 +577,12 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # pseudo-2D, isn't overridable the way F2's is -- see
             # this function's docstring).
             "fid": fid_f2, "fid_dt": 1.0 / sw, "fid_original_length": original_length,
+            # F1's own dt -- lets a live, in-memory recompute redo F1's
+            # FFT (needed whenever F2's own reprocessing changes, since
+            # F1's FFT operates across the rows F2's own FFT just
+            # produced) without re-deriving sw_1 from the ppm axis.
+            # None for pseudo-2D, where F1 has no FFT at all.
+            "fid_dt_f1": (None if pseudo_2d else 1.0 / sw_1),
             # The *truly* raw FID, every row -- see read_1d's own
             # "fid_raw" comment for why this is cached separately from
             # "fid" above (safe to reprocess a *different*, not-yet-

@@ -16,7 +16,7 @@ import os
 import re
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -59,7 +59,7 @@ _PHASE1_STEP_MULTIPLIER = 20.0
 #: (display label, ``processing.ft`` window key) shown in the FID
 #: processing box's window combo -- "none" isn't a real key in
 #: ``ft._WINDOWS``, it's translated to a no-op exponential (lb=0) by
-#: ``MainWindow._on_reprocess_fid_clicked``.
+#: ``MainWindow._resolve_window_kwargs``.
 #: (display label, ``processing.relaxation.RELAXATION_MODELS`` key)
 #: shown in the Analysis tab's model combo.
 _RELAXATION_MODEL_ITEMS = [
@@ -153,6 +153,33 @@ class MainWindow(QMainWindow):
         # _render_compare_view_if_stale, called whenever Compare
         # becomes the visible tab.
         self._compare_view_stale = False
+        # Debounces _recompute_multi_row_data (pseudo-2D "apply to
+        # every slice" / conventional 2D -- a real per-row FID-domain
+        # recompute, genuinely slow for a real multi-hundred-row
+        # dataset, ~1-2ms/row) so a rapid run of control changes (a
+        # spin box's own repeat-on-hold, or several edits in quick
+        # succession) coalesces into one recompute a short idle period
+        # after the last one, instead of running the whole expensive
+        # recompute again on every single intermediate change and
+        # backing up the Qt event queue -- indistinguishable from a
+        # hang from the user's own perspective. Explicit user report:
+        # spline baseline correction (the single most expensive of
+        # these per-row steps) "hangs" on real multi-row data -- this
+        # is the fix, not making the per-row work itself faster (see
+        # _on_fid_processing_control_changed/_on_baseline_correct_toggled).
+        self._live_reprocess_timer = QTimer(self)
+        self._live_reprocess_timer.setSingleShot(True)
+        self._live_reprocess_timer.timeout.connect(self._run_debounced_multi_row_reprocess)
+        self._live_reprocess_pending_index: int | None = None
+        # Each spectrum's own load kwargs immediately after _load's
+        # initial pseudo-2D-default handling, before any live
+        # FID-processing/phase/baseline control ever touched it --
+        # what the Reset button (see _on_reset_processing_clicked)
+        # reverts back to. Keyed by session index (not spectrum
+        # identity: reload/reset both replace the spectrum object at
+        # that index, so the index is the stable handle here, same as
+        # Session's own _load_info).
+        self._original_load_kwargs: dict[int, dict] = {}
         # The per-slice pseudo-Voigt fit results from the most recent
         # Analysis-tab fit (NMR2D_fit_slices's own "rows" output) --
         # lets "Spectrum fit (slice #)" browse the intermediate spectral
@@ -867,6 +894,31 @@ class MainWindow(QMainWindow):
                 spectrum = self.session.reload(index, pseudo_2d=True)
             except Exception:  # noqa: BLE001 -- fall back to what actually loaded rather than failing the load
                 pass
+        # Snapshot *after* the pseudo-2D default above (its own
+        # "start pseudo-2D unless told otherwise" convention is itself
+        # the sensible "original" state to reset back to, not
+        # whatever the vendor's own raw auto-detection produced) --
+        # the Reset button's own target (see _on_reset_processing_clicked).
+        self._original_load_kwargs[index] = dict(self.session.get_load_kwargs(index))
+        if spectrum.metadata.vendor == "xpulse":
+            # io.xpulse.read_1d applies its own baseline correction by
+            # default (linear, unless align_echo is on -- see its own
+            # docstring) as a one-off effect of the initial load, with
+            # no record of that choice anywhere retrievable. Now that
+            # every later live control change recomputes from the raw
+            # FID via this GUI's own explicit baseline toggle instead
+            # of read_1d itself, that one-off effect would otherwise
+            # silently vanish the moment *any* control was touched --
+            # seed the toggle to match what the initial load actually
+            # did, so touching an unrelated control doesn't quietly
+            # undo a correction that was already baked into what's on
+            # screen.
+            # align_echo is always False for a fresh GUI load (the GUI
+            # never passes it at load time -- align_echo_button itself
+            # starts unchecked), so read_1d's own "not align_echo"
+            # default resolves to True here unconditionally.
+            spectrum.metadata.raw.setdefault("baseline_correct", True)
+            spectrum.metadata.raw.setdefault("baseline_method", "linear")
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
 
@@ -1854,7 +1906,7 @@ class MainWindow(QMainWindow):
         self.lb_spin.setDecimals(2)
         self.lb_spin.setSuffix(" Hz")
         self.lb_spin.setToolTip("Line broadening, for the Exponential window only.")
-        self.lb_spin.valueChanged.connect(lambda _v: self._refresh_processing_preview_if_active())
+        self.lb_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Line broadening:", self.lb_spin)
 
         self.zero_fill_combo = QComboBox()
@@ -1872,7 +1924,7 @@ class MainWindow(QMainWindow):
         self.zero_fill_custom_spin = QSpinBox()
         self.zero_fill_custom_spin.setRange(1, 1 << 22)
         self.zero_fill_custom_spin.setVisible(False)
-        self.zero_fill_custom_spin.valueChanged.connect(lambda _v: self._refresh_processing_preview_if_active())
+        self.zero_fill_custom_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Custom size:", self.zero_fill_custom_spin)
 
         self.tdeff_spin = QSpinBox()
@@ -1888,7 +1940,7 @@ class MainWindow(QMainWindow):
             "number. Prefilled from the file's own recorded TDEFF when "
             "it has one. Shown as a dashed red line on the FID plot."
         )
-        self.tdeff_spin.valueChanged.connect(lambda _v: self._refresh_processing_preview_if_active())
+        self.tdeff_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Truncate to:", self.tdeff_spin)
 
         self.align_echo_button = QPushButton("Align Echo")
@@ -1915,7 +1967,7 @@ class MainWindow(QMainWindow):
             "allowed), applied before windowing -- independent of "
             "(and on top of) echo alignment."
         )
-        self.fid_shift_spin.valueChanged.connect(lambda _v: self._refresh_processing_preview_if_active())
+        self.fid_shift_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("FID shift:", self.fid_shift_spin)
 
         self.linear_predict_points_spin = QSpinBox()
@@ -1928,14 +1980,14 @@ class MainWindow(QMainWindow):
             "lost to a dead-time window before acquisition began. "
             "0 = off."
         )
-        self.linear_predict_points_spin.valueChanged.connect(lambda _v: self._refresh_processing_preview_if_active())
+        self.linear_predict_points_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Linear-predict points:", self.linear_predict_points_spin)
 
         self.linear_predict_order_spin = QSpinBox()
         self.linear_predict_order_spin.setRange(1, 1000)
         self.linear_predict_order_spin.setValue(20)
         self.linear_predict_order_spin.setToolTip("Linear-prediction model order (only used when points > 0).")
-        self.linear_predict_order_spin.valueChanged.connect(lambda _v: self._refresh_processing_preview_if_active())
+        self.linear_predict_order_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("LP order:", self.linear_predict_order_spin)
 
         self.linear_predict_direction_combo = QComboBox()
@@ -1951,13 +2003,22 @@ class MainWindow(QMainWindow):
             "predict points > 0)."
         )
         self.linear_predict_direction_combo.currentIndexChanged.connect(
-            lambda _i: self._refresh_processing_preview_if_active()
+            lambda _i: self._on_fid_processing_control_changed()
         )
         form.addRow("LP direction:", self.linear_predict_direction_combo)
 
-        reprocess_button = QPushButton("Apply Processing")
-        reprocess_button.clicked.connect(self._on_reprocess_fid_clicked)
-        form.addRow(reprocess_button)
+        reset_processing_button = QPushButton("Reset")
+        reset_processing_button.setToolTip(
+            "Discard every live processing choice above (window/"
+            "zero-fill/shift/align-echo/linear-predict/truncate, "
+            "phase, baseline) and revert to exactly how this spectrum "
+            "looked right when it was first loaded. Everything above "
+            "is already live -- there's no separate 'Apply' step to "
+            "commit it, so this is the opposite: throwing it away, "
+            "not applying it."
+        )
+        reset_processing_button.clicked.connect(self._on_reset_processing_clicked)
+        form.addRow(reset_processing_button)
 
         return box
 
@@ -1974,7 +2035,7 @@ class MainWindow(QMainWindow):
 
     def _on_window_combo_changed(self, _index: int) -> None:
         self.lb_spin.setEnabled(self.window_combo.currentData() == "exponential")
-        self._refresh_processing_preview_if_active()
+        self._on_fid_processing_control_changed()
 
     def _set_window_combo_key(self, key: str) -> None:
         idx = self.window_combo.findData(key)
@@ -1985,7 +2046,7 @@ class MainWindow(QMainWindow):
 
     def _on_zero_fill_combo_changed(self, _index: int) -> None:
         self.zero_fill_custom_spin.setVisible(self.zero_fill_combo.currentData() is None)
-        self._refresh_processing_preview_if_active()
+        self._on_fid_processing_control_changed()
 
     def _zero_fill_value(self) -> int:
         data = self.zero_fill_combo.currentData()
@@ -2135,53 +2196,42 @@ class MainWindow(QMainWindow):
             # plot from whatever was last shown here.
             self.fid_canvas.clear()
 
-    def _compute_processing_preview(self, spectrum):
-        """Compute the Processing tab's live preview entirely from the
-        already-cached raw FID (``metadata.raw["fid_raw"]``), in
-        memory -- no disk I/O, and for a pseudo-2D, only the
-        currently-viewed slice is actually processed, not the whole
-        series. Uses :func:`opennmr.processing.ft.prepare_fid` for the
-        shift/echo-align/truncate/linear-predict step (the exact same
-        function every vendor reader's own ``read_1d``/``read_2d``
-        now calls too -- see its own docstring for why sharing this
-        one implementation matters), so this can't silently drift from
-        what a real "Apply Processing" reload would actually produce.
-
-        Cheap enough to call on every phase-drag tick, unlike the
-        ``Session.preview()``-based reload this replaces -- explicit
-        user feedback that phasing wasn't updating this preview at all
-        (only the Spectrum tab), because that reload was reserved for
-        discrete actions only, never continuous dragging.
-
-        Returns ``(fid, dt, preview_spectrum, title)``, or ``None`` if
-        a preview can't be computed this way: no raw FID cached (an
-        older on-disk session, or a vendor path that predates
-        ``fid_raw``), or an unsupported Bruker WDW code hit with
-        "Recorded" selected (mirrors ``read_1d``/``read_2d``'s own
-        "leave unwindowed, don't fail the load" behaviour rather than
-        raising)."""
-        raw_fid = spectrum.metadata.raw.get("fid_raw")
-        dt = spectrum.metadata.raw.get("fid_dt")
-        if raw_fid is None or dt is None:
-            return None
-
-        title = ""
-        slice_template = spectrum
-        if raw_fid.ndim == 2:
-            row = min(max(self.slice_spin.value() - 1, 0), raw_fid.shape[0] - 1)
-            title = self._slice_label(spectrum, row + 1)
-            raw_fid = raw_fid[row]
-            slice_template = get_trace(spectrum, axis="f1", index=row + 1)
-
+    def _process_raw_fid_row(self, spectrum, raw_row, dt: float):
+        """The FID-domain-through-FFT half of the live pipeline
+        (shift/echo-align/truncate/linear-predict, window, zero-fill,
+        FFT, NS-normalize) for exactly one raw FID row -- shared by
+        :meth:`_compute_processing_preview` (one row: 1D, or a
+        pseudo-2D's currently-selected slice) and
+        :meth:`_recompute_multi_row_data` (every row: pseudo-2D
+        "apply to every slice", or a conventional 2D's own F2
+        dimension), so a live multi-row recompute can't silently
+        drift from what the single-row preview (or, before this
+        existed, "Apply Processing") would show for that same row.
+        Uses :func:`opennmr.processing.ft.prepare_fid` -- the exact
+        same function every vendor reader's own ``read_1d``/
+        ``read_2d`` calls too. Returns ``(filled_fid, complex_spectrum,
+        ppm)`` given a reference ppm axis of the row's own original
+        (pre-zero-fill) length is reused for range only -- see below --
+        or ``None`` on the same "can't compute this way" conditions
+        :meth:`_compute_processing_preview` already documents (an
+        unsupported Bruker WDW code hit with "Recorded" selected)."""
         is_xpulse = spectrum.metadata.vendor == "xpulse"
         truncate = self.tdeff_spin.value() or None if (is_xpulse and self.tdeff_spin.isEnabled()) else None
-        fid = processing_ft.prepare_fid(
-            raw_fid.astype(complex), fid_shift=self.fid_shift_spin.value(),
-            align_echo_enabled=self.align_echo_button.isChecked(), truncate=truncate,
-            linear_predict_points=self.linear_predict_points_spin.value(),
-            linear_predict_order=self.linear_predict_order_spin.value(),
-            linear_predict_direction=self.linear_predict_direction_combo.currentData(),
-        )
+        try:
+            fid = processing_ft.prepare_fid(
+                raw_row.astype(complex), fid_shift=self.fid_shift_spin.value(),
+                align_echo_enabled=self.align_echo_button.isChecked(), truncate=truncate,
+                linear_predict_points=self.linear_predict_points_spin.value(),
+                linear_predict_order=self.linear_predict_order_spin.value(),
+                linear_predict_direction=self.linear_predict_direction_combo.currentData(),
+            )
+        except Exception:
+            # Best-effort, matching _baseline_correct_if_enabled: a
+            # genuinely degenerate combination of controls (e.g. LP with
+            # too few points even at the smallest valid order) shouldn't
+            # crash a live Qt signal handler -- fall back to the
+            # unmodified raw row and keep going.
+            fid = raw_row.astype(complex)
 
         window_key = self.window_combo.currentData()
         if window_key == "__recorded__":
@@ -2209,6 +2259,46 @@ class MainWindow(QMainWindow):
         # the GUI never sends a nonzero load-time mass= to begin with,
         # unlike metadata.mass (a separate, Compare-only concept).
         data = data / (spectrum.metadata.ns or 1.0)
+        return filled, data
+
+    def _compute_processing_preview(self, spectrum):
+        """Compute the Processing tab's live preview entirely from the
+        already-cached raw FID (``metadata.raw["fid_raw"]``), in
+        memory -- no disk I/O, and for a pseudo-2D, only the
+        currently-viewed slice is actually processed, not the whole
+        series (see :meth:`_recompute_multi_row_data` for "every
+        row").
+
+        Cheap enough to call on every phase-drag tick, unlike the
+        ``Session.preview()``-based reload this replaces -- explicit
+        user feedback that phasing wasn't updating this preview at all
+        (only the Spectrum tab), because that reload was reserved for
+        discrete actions only, never continuous dragging.
+
+        Returns ``(fid, dt, preview_spectrum, title)``, or ``None`` if
+        a preview can't be computed this way: no raw FID cached (an
+        older on-disk session, or a vendor path that predates
+        ``fid_raw``), or an unsupported Bruker WDW code hit with
+        "Recorded" selected (mirrors ``read_1d``/``read_2d``'s own
+        "leave unwindowed, don't fail the load" behaviour rather than
+        raising)."""
+        raw_fid = spectrum.metadata.raw.get("fid_raw")
+        dt = spectrum.metadata.raw.get("fid_dt")
+        if raw_fid is None or dt is None:
+            return None
+
+        title = ""
+        slice_template = spectrum
+        if raw_fid.ndim == 2:
+            row = min(max(self.slice_spin.value() - 1, 0), raw_fid.shape[0] - 1)
+            title = self._slice_label(spectrum, row + 1)
+            raw_fid = raw_fid[row]
+            slice_template = get_trace(spectrum, axis="f1", index=row + 1)
+
+        computed = self._process_raw_fid_row(spectrum, raw_fid, dt)
+        if computed is None:
+            return None
+        filled, data = computed
 
         # The ppm axis's *range* is fixed by acquisition (O1/SF/SW),
         # unaffected by window/zero-fill choice -- only the point
@@ -2234,22 +2324,138 @@ class MainWindow(QMainWindow):
         span = ppm.max() - ppm.min()
         pivot_frac = (self.pivot_spin.value() - ppm.min()) / span if span else 0.5
         data = processing_ft.apply_phase(data, ppm, phase0, phase1, pivot_frac=pivot_frac)
-
-        # Same "baked-in state, not a live-only spin box" pattern as
-        # phase above, but baseline correction has no delta concept --
-        # metadata.raw["baseline_correct"] alone is the whole state
-        # (see _on_baseline_correct_toggled), so this preview and the
-        # toggle itself never need to be told apart.
-        if spectrum.metadata.raw.get("baseline_correct"):
-            method = spectrum.metadata.raw.get("baseline_method", "linear")
-            smoothing = spectrum.metadata.raw.get("baseline_smoothing")
-            data = processing_ft.baseline_correct(ppm, data, method=method, smoothing=smoothing)
+        data = self._baseline_correct_if_enabled(data, ppm, spectrum)
 
         axis = NMRAxis(kind="frequency", ppm=ppm, hz=hz)
         preview_spectrum = NMRSpectrum(
             data=np.real(data), axes=[axis], metadata=slice_template.metadata, data_imag=np.imag(data),
         )
         return filled, dt, preview_spectrum, title
+
+    def _recompute_multi_row_data(self, spectrum) -> bool:
+        """The whole-dataset analogue of :meth:`_compute_processing_preview`
+        -- recomputes *every* row's FID-domain-through-phase(-through-
+        baseline) processing live, in memory, and writes the result
+        straight into ``spectrum.data``/``data_imag``/``axes``. This is
+        what makes every FID-processing control (window/zero-fill/
+        shift/align-echo/linear-predict/truncate) live for a pseudo-2D
+        with "Apply to every slice" checked, or a conventional 2D --
+        not just the phase/baseline controls, which already had their
+        own live path. Explicit, repeated user feedback: "Apply
+        Processing is still resetting everything" -- removed entirely
+        in favour of this (see :meth:`_on_fid_processing_control_changed`),
+        rather than patched again.
+
+        For a conventional 2D, also redoes the F1 FFT -- F2's own
+        reprocessing changes every row F1's FFT operates across, so F1
+        must be redone too, using ``metadata.raw["fid_dt_f1"]`` (F1's
+        own dt, stashed at load time) and F1's *own* already-loaded
+        axis length (unaffected by an F2-only control, so zero-filling
+        back to it exactly reproduces F1's own resolution) -- then
+        reapplies whatever F1 phase is already durably committed
+        (``metadata.raw["phase0_f1"/"phase1_f1"]``, see
+        :meth:`_on_baseline_correct_toggled`'s own sibling mechanism
+        for phase, :meth:`_commit_pending_phase_to_metadata`), since a
+        fresh FFT has none. F2's own committed phase
+        (``metadata.raw["phase0"/"phase1"]``) is reapplied the same
+        way, unconditionally -- both baked-in totals, not whatever the
+        Phase spin boxes happen to be showing right now (which may be
+        approxied at a wholly different target, e.g. a single pseudo-2D
+        slice) -- consistent, dimension-by-dimension.
+
+        Returns ``False`` (spectrum left untouched) on the same
+        "can't compute this way" conditions
+        :meth:`_compute_processing_preview` documents; ``True`` on
+        success."""
+        raw_fid = spectrum.metadata.raw.get("fid_raw")
+        dt = spectrum.metadata.raw.get("fid_dt")
+        if raw_fid is None or dt is None or raw_fid.ndim != 2:
+            return False
+
+        rows = []
+        filled_rows = []
+        for row in raw_fid:
+            computed = self._process_raw_fid_row(spectrum, row, dt)
+            if computed is None:
+                return False
+            filled, row_data = computed
+            filled_rows.append(filled)
+            rows.append(row_data)
+        data = np.array(rows)
+        # Same reason as _commit_processing_preview_as_spectrum's own
+        # update of this -- keep the FID preview tab's source in step,
+        # not stale from whatever was last loaded/reset.
+        spectrum.metadata.raw["fid"] = np.array(filled_rows)
+        spectrum.metadata.raw["fid_dt"] = dt
+
+        reference_ppm = spectrum.axes[-1].ppm
+        ppm2 = np.linspace(reference_ppm[0], reference_ppm[-1], data.shape[1])
+        hz2 = ppm2 * (spectrum.metadata.sfo1 or 1.0)
+
+        phase0 = float(spectrum.metadata.raw.get("phase0", 0.0))
+        phase1 = float(spectrum.metadata.raw.get("phase1", 0.0))
+        span2 = ppm2.max() - ppm2.min()
+        pivot_frac2 = (self.pivot_spin.value() - ppm2.min()) / span2 if span2 else 0.5
+        data = processing_ft.apply_phase(data, ppm2, phase0, phase1, pivot_frac=pivot_frac2)
+
+        dt_f1 = spectrum.metadata.raw.get("fid_dt_f1")
+        if not spectrum.is_pseudo_2d and dt_f1:
+            si1 = spectrum.data.shape[0]  # F1's own current length -- unaffected by F2-only controls
+            f1_filled = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, data)
+            data = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, dt_f1)[1], 0, f1_filled)
+            ppm1 = spectrum.axes[0].ppm
+            phase0_f1 = float(spectrum.metadata.raw.get("phase0_f1", 0.0))
+            phase1_f1 = float(spectrum.metadata.raw.get("phase1_f1", 0.0))
+            if phase0_f1 or phase1_f1:
+                span1 = ppm1.max() - ppm1.min()
+                pivot_frac1 = (self.pivot_spin.value() - ppm1.min()) / span1 if span1 else 0.5
+                data = processing_ft.apply_phase(data.T, ppm1, phase0_f1, phase1_f1, pivot_frac=pivot_frac1).T
+
+        data = self._baseline_correct_if_enabled_multi_row(data, ppm2, spectrum)
+        spectrum.axes = [spectrum.axes[0], NMRAxis(kind="frequency", ppm=ppm2, hz=hz2)]
+        spectrum.data = np.real(data)
+        spectrum.data_imag = np.imag(data)
+        return True
+
+    @staticmethod
+    def _baseline_correct_if_enabled_multi_row(data, freq_ppm, spectrum):
+        """:meth:`_baseline_correct_if_enabled`, applied per row --
+        baseline correction is always a per-row fit (each row's own
+        baseline, not one shared across a whole 2D dataset)."""
+        if not spectrum.metadata.raw.get("baseline_correct"):
+            return data
+        return np.apply_along_axis(
+            lambda row: MainWindow._baseline_correct_if_enabled(row, freq_ppm, spectrum), 1, data,
+        )
+
+    def _recompute_multi_row_phase_and_baseline_only(self, spectrum) -> bool:
+        """:meth:`_recompute_multi_row_data`'s fallback for a spectrum
+        with no raw FID cached at all (a processed-only fallback
+        load) -- re-derives phase+baseline from
+        :attr:`_phase_reference_full` (the untouched-since-editing-
+        started snapshot :meth:`_capture_phase_reference` took), the
+        same computation :meth:`_apply_phase_preview`'s own
+        (non-debounced) pseudo2d/2d "apply to every slice"/whole-
+        dataset branches use, just callable from the debounced timer
+        instead of inline on every tick. A no-op (returns ``False``)
+        if the phase-editing context has moved on since this was
+        scheduled (reselected, or the dimension/mode changed) --
+        conservative rather than guessing at a target that may no
+        longer be the right one."""
+        if self._phase_mode not in ("pseudo2d", "2d"):
+            return False
+        if self._phase_reference_full is None or self._phase_freq_ppm is None:
+            return False
+        freq_ppm = self._phase_freq_ppm
+        phase0 = float(spectrum.metadata.raw.get("phase0", 0.0)) + self.phase0_spin.value()
+        phase1 = float(spectrum.metadata.raw.get("phase1", 0.0)) + self.phase1_spin.value()
+        span = freq_ppm.max() - freq_ppm.min()
+        pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
+        phased = processing_ft.apply_phase(self._phase_reference_full, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
+        phased = self._baseline_correct_if_enabled_multi_row(phased, freq_ppm, spectrum)
+        spectrum.data = np.real(phased)
+        spectrum.data_imag = np.imag(phased)
+        return True
 
     def _show_processing_preview(self, spectrum, index: int, switch_tab: bool = False) -> None:
         """Recompute and show the Processing tab's own live dual
@@ -2413,10 +2619,17 @@ class MainWindow(QMainWindow):
         self.fid_processing_box.setVisible(reprocessable)
 
         # Restore this spectrum's own last-used FID-processing settings
-        # (Session remembers the kwargs behind every load/reload)
-        # rather than always resetting to defaults, so switching away
-        # and back doesn't lose an in-progress reprocessing choice.
-        saved = self.session.get_load_kwargs(index) if reprocessable else {}
+        # from its own metadata.raw (see
+        # _persist_fid_processing_controls_to_metadata) rather than
+        # always resetting to defaults, so switching away and back
+        # doesn't lose an in-progress choice. Not session.get_load_
+        # kwargs any more -- that only ever updated on an actual
+        # session.reload call, which no longer happens for a live
+        # control change now that there's no separate "Apply
+        # Processing" step (explicit user report that processing was
+        # "still reset when changing between experiments" once these
+        # became live without this).
+        raw = spectrum.metadata.raw if reprocessable else {}
 
         is_xpulse = spectrum.metadata.vendor == "xpulse"
         self.tdeff_spin.setEnabled(reprocessable and is_xpulse)
@@ -2429,7 +2642,7 @@ class MainWindow(QMainWindow):
         raw_fid = spectrum.metadata.raw.get("fid_raw") if is_xpulse else None
         raw_length = len(raw_fid) if raw_fid is not None else (1 << 20)
         self.tdeff_spin.setMaximum(raw_length)
-        saved_truncate = saved.get("truncate")
+        saved_truncate = raw.get("live_truncate")
         if isinstance(saved_truncate, int) and not isinstance(saved_truncate, bool):
             default_tdeff = min(saved_truncate, raw_length)
         else:
@@ -2442,51 +2655,46 @@ class MainWindow(QMainWindow):
             return
 
         self._populate_window_combo(spectrum.metadata.vendor)
-
-        if "window" in saved:
-            window, window_kwargs = saved["window"], saved.get("window_kwargs") or {}
-            key = "__recorded__" if window is None else window
-            self._set_window_combo_key(key)
-            lb = window_kwargs.get("lb", 0.0) if key == "exponential" else 0.0
-        else:
-            self.window_combo.setCurrentIndex(0)
-            self.lb_spin.setEnabled(self.window_combo.currentData() == "exponential")
-            lb = 0.0
+        self._set_window_combo_key(raw.get("live_window", "__recorded__"))
 
         for spin, value in (
-            (self.lb_spin, lb),
-            (self.fid_shift_spin, saved.get("fid_shift", 0.0)),
-            (self.linear_predict_points_spin, saved.get("linear_predict_points", 0)),
+            (self.lb_spin, raw.get("live_lb", 0.0)),
+            (self.fid_shift_spin, raw.get("live_fid_shift", 0.0)),
+            (self.linear_predict_points_spin, raw.get("live_linear_predict_points", 0)),
         ):
             spin.blockSignals(True)
             spin.setValue(value)
             spin.blockSignals(False)
         self.linear_predict_order_spin.blockSignals(True)
-        self.linear_predict_order_spin.setValue(saved.get("linear_predict_order", 20))
+        self.linear_predict_order_spin.setValue(raw.get("live_linear_predict_order", 20))
         self.linear_predict_order_spin.blockSignals(False)
         self.linear_predict_direction_combo.blockSignals(True)
-        direction_index = self.linear_predict_direction_combo.findData(saved.get("linear_predict_direction", "forward"))
+        direction_index = self.linear_predict_direction_combo.findData(raw.get("live_linear_predict_direction", "forward"))
         self.linear_predict_direction_combo.setCurrentIndex(max(0, direction_index))
         self.linear_predict_direction_combo.blockSignals(False)
 
         self.align_echo_button.blockSignals(True)
-        self.align_echo_button.setChecked(saved.get("align_echo", False))
+        self.align_echo_button.setChecked(raw.get("live_align_echo", False))
         self.align_echo_button.blockSignals(False)
 
-        # Absent an explicit saved override, default the combo to this
-        # spectrum's own *actual current* length -- not the "2x NP"
-        # conventional suggestion (_default_zero_fill_size), which is
-        # a proposal for a *future* change, not necessarily what the
-        # vendor reader's own default zero-fill actually produced (it
-        # regularly doesn't -- e.g. X-Pulse's own default is no zero-
-        # fill beyond the raw length at all). Showing the suggestion
-        # here instead of reality meant every live recompute that
-        # reads this combo (window/zero-fill preview, and now phase
-        # dragging too -- see _apply_phase_preview's "1d" branch)
-        # silently zero-filled a freshly-loaded, never-reprocessed
-        # spectrum the moment *any* control was touched, even one
-        # that has nothing to do with zero-fill.
-        default_zero_fill = saved.get("zero_fill", len(spectrum.data))
+        # Absent an explicit live-set override, default the combo to
+        # this spectrum's own *actual current* length -- not the "2x
+        # NP" conventional suggestion (_default_zero_fill_size), which
+        # is a proposal for a *future* change, not necessarily what
+        # the vendor reader's own default zero-fill actually produced
+        # (it regularly doesn't -- e.g. X-Pulse's own default is no
+        # zero-fill beyond the raw length at all). Showing the
+        # suggestion here instead of reality meant every live recompute
+        # that reads this combo silently zero-filled a freshly-loaded,
+        # never-reprocessed spectrum the moment *any* control was
+        # touched, even one that has nothing to do with zero-fill.
+        # F2's own point count specifically -- for a 2D/pseudo-2D
+        # spectrum, len(spectrum.data) is the *row* (F1) count, not
+        # F2's, which is what zero-fill actually resizes (real bug,
+        # found via a live-recompute round trip silently shrinking a
+        # conventional 2D's own F2 dimension down to its F1 row count).
+        f2_length = spectrum.data.shape[-1]
+        default_zero_fill = raw.get("live_zero_fill", f2_length)
         self._set_zero_fill_value(default_zero_fill)
 
     def _resolve_window_kwargs(self) -> tuple[str | None, dict | None]:
@@ -2504,45 +2712,148 @@ class MainWindow(QMainWindow):
             return "exponential", {"lb": self.lb_spin.value()}
         return key, {}
 
-    def _current_fid_processing_kwargs(self, spectrum) -> dict:
-        """The FID-processing box's current control values as
-        ``read_1d``/``read_2d`` load kwargs -- shared by the actual
-        "Apply Processing" commit (:meth:`_on_reprocess_fid_clicked`)
-        and the live Processing-tab preview
-        (:meth:`_show_processing_preview`), so the preview always shows
-        exactly what committing would produce, with no separate,
-        possibly-drifting copy of this logic."""
-        window_kwarg, window_kwargs_kwarg = self._resolve_window_kwargs()
-        kwargs = {
-            "window": window_kwarg,
-            "window_kwargs": window_kwargs_kwarg,
-            "zero_fill": self._zero_fill_value(),
-            "fid_shift": self.fid_shift_spin.value(),
-            "align_echo": self.align_echo_button.isChecked(),
-            "linear_predict_points": self.linear_predict_points_spin.value(),
-        }
-        if self.linear_predict_points_spin.value():
-            kwargs["linear_predict_order"] = self.linear_predict_order_spin.value()
-            kwargs["linear_predict_direction"] = self.linear_predict_direction_combo.currentData()
-        if self.tdeff_spin.isEnabled():  # X-Pulse only -- Bruker's read_1d has no `truncate` kwarg
-            kwargs["truncate"] = self.tdeff_spin.value() or None
-        kwargs.update(self._current_phase_kwargs(spectrum))
-        return kwargs
+    def _persist_fid_processing_controls_to_metadata(self, spectrum) -> None:
+        """Stash the FID-processing controls' own current values into
+        ``spectrum.metadata.raw`` -- same "each experiment object has
+        its own metadata locked in for when it's called upon"
+        mechanism ``phase0``/``phase1``/``baseline_correct`` already
+        use (see :meth:`_capture_phase_reference`'s own restore of
+        those), extended to every other live control now that there's
+        no separate "Apply Processing" commit step to persist them via
+        ``session.get_load_kwargs`` (that only ever updated on an
+        actual ``session.reload`` call, which no longer happens for a
+        live control change -- explicit user report that processing
+        state was "still reset when changing between experiments"
+        once these became live without this). Restored by
+        :meth:`_refresh_fid_processing_controls` on reselection."""
+        raw = spectrum.metadata.raw
+        raw["live_window"] = self.window_combo.currentData()
+        raw["live_lb"] = self.lb_spin.value()
+        raw["live_zero_fill"] = self._zero_fill_value()
+        raw["live_fid_shift"] = self.fid_shift_spin.value()
+        raw["live_align_echo"] = self.align_echo_button.isChecked()
+        raw["live_linear_predict_points"] = self.linear_predict_points_spin.value()
+        raw["live_linear_predict_order"] = self.linear_predict_order_spin.value()
+        raw["live_linear_predict_direction"] = self.linear_predict_direction_combo.currentData()
+        if self.tdeff_spin.isEnabled():  # X-Pulse only -- see tdeff_spin's own tooltip
+            raw["live_truncate"] = self.tdeff_spin.value()
 
-    def _on_reprocess_fid_clicked(self) -> None:
+    def _on_fid_processing_control_changed(self) -> None:
+        """Unified live-update handler for every FID-processing
+        control (window/zero-fill/shift/align-echo/linear-predict/
+        truncate) -- replaces "Apply Processing" entirely. Explicit,
+        repeated user feedback ("Apply processing is still resetting
+        everything... remove the button, we can have a reset button"):
+        a separate commit step kept resetting state -- phase, baseline,
+        whatever the last round's fix hadn't caught up to yet -- that
+        had nothing to do with what was actually being changed, because
+        it went through a full ``session.reload`` (a fresh disk read
+        and reprocess) instead of updating the spectrum already in
+        memory. This updates ``spectrum.data`` directly instead, the
+        same "the live preview *is* the spectrum, not a separate draft"
+        principle phase/baseline already established.
+
+        Only 1D recomputes immediately
+        (:meth:`_commit_processing_preview_as_spectrum`, already fast
+        -- one row). Every multi-row case (pseudo-2D, conventional 2D)
+        always goes through the debounced full recompute
+        (:meth:`_schedule_multi_row_reprocess`), regardless of
+        "Apply to every slice" -- that checkbox is a *phase*-targeting
+        choice (which row(s) a phase drag currently affects), not a
+        FID-domain-processing one: window/zero-fill/etc. were never a
+        per-slice concept, so updating only the currently-visible row
+        and leaving the rest stale until something else happened to
+        touch them would reintroduce exactly the kind of inconsistent-
+        between-views state this whole round is about removing (e.g. a
+        Fit Curve run across every slice silently using stale,
+        un-rewindowed data for every row except whichever one had been
+        on screen most recently). Debouncing rather than running the
+        full per-row cost on every intermediate keystroke/spin-box
+        tick is what actually fixes the "hangs" report -- the single
+        most expensive per-row step (spline baseline correction)
+        firing on every tick, not just once after things settle, is
+        indistinguishable from a hang once the Qt event queue backs up
+        behind it."""
+        index = self._selected_index()
+        if index is None or self._phase_mode is None:
+            return
+        spectrum = self.session.spectra[index]
+        if not self._fid_reprocessable(spectrum):
+            return
+        self._persist_fid_processing_controls_to_metadata(spectrum)
+
+        if self._phase_mode == "1d":
+            self._commit_processing_preview_as_spectrum(spectrum)
+        else:
+            self._schedule_multi_row_reprocess(index)
+        if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
+            self._show_fid_preview(spectrum, switch_tab=False)
+        self._refresh_processing_preview_if_active()
+
+    def _schedule_multi_row_reprocess(self, index: int) -> None:
+        """(Re)start the debounce timer for a full
+        :meth:`_recompute_multi_row_data` recompute of spectrum
+        ``index`` -- restarting on every call (rather than letting an
+        already-running timer finish) is exactly what coalesces a
+        rapid run of changes into one recompute a short idle period
+        after the *last* one, not the first."""
+        self._live_reprocess_pending_index = index
+        self._live_reprocess_timer.start(200)
+
+    def _run_debounced_multi_row_reprocess(self) -> None:
+        index = self._live_reprocess_pending_index
+        self._live_reprocess_pending_index = None
+        if index is None or index >= len(self.session):
+            return
+        spectrum = self.session.spectra[index]
+        if self._fid_reprocessable(spectrum):
+            success = self._recompute_multi_row_data(spectrum)
+        else:
+            # No raw FID to redo the FID-domain steps from at all (a
+            # processed-only fallback load) -- _recompute_multi_row_data
+            # can't help there. Just phase+baseline, the same
+            # computation the (non-debounced) inline pseudo2d/2d
+            # branches of _apply_phase_preview already do for this
+            # exact case, deferred here to settle-time instead so a
+            # multi-row processed-only dataset gets the same "at most
+            # one recompute per drag/edit session" protection.
+            success = self._recompute_multi_row_phase_and_baseline_only(spectrum)
+        if not success:
+            return
+        self.spectrum_list.item(index).setText(self.session.label(index))
+        if index != self._selected_index():
+            return  # recomputed and stored either way -- just not the currently-visible view
+        if self._phase_mode == "pseudo2d":
+            on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
+            self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=False)
+            if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
+                self._show_fid_preview(spectrum, switch_tab=False)
+            if on_processing_preview:
+                self._refresh_processing_preview_if_active()
+        elif self._phase_mode == "2d":
+            self.canvas.show_spectrum(spectrum)
+            if self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
+                self.processing_preview_canvas.show_spectrum(spectrum)
+
+    def _on_reset_processing_clicked(self) -> None:
+        """Discard every live processing choice for the selected
+        spectrum -- window/zero-fill/shift/align-echo/linear-predict/
+        truncate, phase, baseline -- reverting to exactly how it
+        looked right after it was first loaded (see ``_load``'s own
+        snapshot into :attr:`_original_load_kwargs`). The opposite of
+        the old "Apply Processing" button (which committed changes
+        forward, unreliably); this discards them instead -- explicit
+        user request: "remove the button, we can have a reset
+        button"."""
         index = self._selected_index()
         if index is None:
             return
-        spectrum = self.session.spectra[index]
-        kwargs = self._current_fid_processing_kwargs(spectrum)
-
+        original = self._original_load_kwargs.get(index, {})
         try:
-            self.session.reload(index, **kwargs)
-            self._reapply_phase_post_reload(self.session.spectra[index], previous_raw=spectrum.metadata.raw)
+            self.session.reset(index, **original)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-            QMessageBox.critical(self, "Failed to reprocess spectrum", str(exc))
+            QMessageBox.critical(self, "Failed to reset spectrum", str(exc))
             return
-
         self.spectrum_list.item(index).setText(self.session.label(index))
         self._on_selection_changed(index)
 
@@ -2668,13 +2979,13 @@ class MainWindow(QMainWindow):
         than always force-switching to the plain FID tab -- explicit
         user feedback that Align Echo pulled focus out of the
         Processing-preview context it should be the default view for.
-        ``_on_reprocess_fid_clicked`` below already refreshes that
-        preview as a normal side effect of the reselection it ends
-        with, so there's nothing more to do in that case."""
+        ``_on_fid_processing_control_changed`` above already refreshes
+        that preview as a normal part of every control change, so
+        there's nothing more to do in that case."""
         if self._selected_index() is None:
             return
         already_on_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-        self._on_reprocess_fid_clicked()
+        self._on_fid_processing_control_changed()
         if already_on_preview:
             return
         index = self._selected_index()
@@ -3166,14 +3477,25 @@ class MainWindow(QMainWindow):
         :meth:`_compute_processing_preview`'s own read of it, so every
         phase-mode branch of :meth:`_apply_phase_preview` agrees with
         the Processing tab's preview on whether/how baseline correction
-        is currently active."""
+        is currently active.
+
+        ``data`` unchanged (not raised) on a genuine baseline-fit
+        failure too -- e.g. too few points for the estimator, which a
+        live recompute can transiently hit on a very short FID/zero-
+        fill combination -- best-effort, same as every other live
+        preview step in this class; the user sees the uncorrected
+        result rather than the whole live-update pipeline raising out
+        of a signal handler over one edge case."""
         if not spectrum.metadata.raw.get("baseline_correct"):
             return data
-        return processing_ft.baseline_correct(
-            freq_ppm, data,
-            method=spectrum.metadata.raw.get("baseline_method", "linear"),
-            smoothing=spectrum.metadata.raw.get("baseline_smoothing"),
-        )
+        try:
+            return processing_ft.baseline_correct(
+                freq_ppm, data,
+                method=spectrum.metadata.raw.get("baseline_method", "linear"),
+                smoothing=spectrum.metadata.raw.get("baseline_smoothing"),
+            )
+        except Exception:  # noqa: BLE001 -- best-effort live correction, see docstring above
+            return data
 
     def _refresh_baseline_options_visibility(self) -> None:
         is_spline = self.baseline_method_combo.currentData() == "spline"
@@ -3289,6 +3611,34 @@ class MainWindow(QMainWindow):
         if on_processing_preview:
             self._refresh_processing_preview_if_active()
 
+    def _commit_processing_preview_as_spectrum(self, spectrum) -> bool:
+        """Compute :meth:`_compute_processing_preview` and write the
+        result straight into ``spectrum.data``/``data_imag``/``axes``,
+        then refresh ``self.canvas`` in place -- the same source, not
+        a second computation of it (factored out of
+        :meth:`_apply_phase_preview`'s own "1d" branch so
+        :meth:`_on_fid_processing_control_changed` can share it: a
+        window/zero-fill/etc. change is just as much "the live preview
+        *is* the spectrum now" as a phase change is). Returns
+        ``False`` (spectrum left untouched) when there's no raw FID to
+        compute this way from at all -- the caller decides what to do
+        then (fall back to a narrower update, or nothing)."""
+        computed = self._compute_processing_preview(spectrum) if self._fid_reprocessable(spectrum) else None
+        if computed is None:
+            return False
+        fid, dt, preview_spectrum, _title = computed
+        spectrum.data = preview_spectrum.data
+        spectrum.data_imag = preview_spectrum.data_imag
+        spectrum.axes = preview_spectrum.axes
+        # Keep the FID preview tab's own source (metadata.raw["fid"])
+        # in step too -- otherwise it would go stale the moment any
+        # control changed, showing the FID from whatever was last
+        # loaded/reset rather than what's actually now on screen.
+        spectrum.metadata.raw["fid"] = fid
+        spectrum.metadata.raw["fid_dt"] = dt
+        self.canvas.update_data(spectrum)
+        return True
+
     def _apply_phase_preview(self) -> None:
         index = self._selected_index()
         if index is None or self._phase_mode is None:
@@ -3316,22 +3666,17 @@ class MainWindow(QMainWindow):
             # when there's no raw FID to recompute from at all (a
             # processed-only fallback load -- _compute_processing_preview
             # returns None for exactly that case).
-            computed = self._compute_processing_preview(spectrum) if self._fid_reprocessable(spectrum) else None
-            if computed is not None:
-                _fid, _dt, preview_spectrum, _title = computed
-                spectrum.data = preview_spectrum.data
-                spectrum.data_imag = preview_spectrum.data_imag
-                spectrum.axes = preview_spectrum.axes
-            else:
+            if not self._commit_processing_preview_as_spectrum(spectrum):
                 phased = processing_ft.apply_phase(self._phase_reference_full, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
                 phased = self._baseline_correct_if_enabled(phased, freq_ppm, spectrum)
                 spectrum.data = np.real(phased)
                 spectrum.data_imag = np.imag(phased)
-            # Kept up to date regardless of which canvas tab is
-            # actually showing, so switching back to Spectrum later
-            # (from the Processing-preview tab, see below) never shows
-            # stale data -- only the tab *switch* itself is guarded.
-            self.canvas.update_data(spectrum)
+                # Kept up to date regardless of which canvas tab is
+                # actually showing, so switching back to Spectrum later
+                # (from the Processing-preview tab, see below) never
+                # shows stale data -- only the tab *switch* itself is
+                # guarded.
+                self.canvas.update_data(spectrum)
             self.canvas.set_pivot_marker(self.pivot_spin.value())
             if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
                 self.canvas_tabs.setCurrentWidget(self.canvas)
@@ -3349,10 +3694,22 @@ class MainWindow(QMainWindow):
                 phased = processing_ft.apply_phase(
                     self._phase_reference_full, freq_ppm, phase0, phase1, pivot_frac=pivot_frac,
                 )
+                # Baseline correction is deliberately NOT applied here,
+                # even when enabled -- a per-row spline fit across a
+                # real multi-hundred-row dataset is genuinely slow
+                # (~1-2ms/row, but that's seconds across a whole
+                # dataset), and this runs on *every* drag tick with no
+                # debouncing of its own. Recomputing it here on every
+                # tick is exactly the "hangs" a rapid drag could
+                # already cause -- deferred to a debounced full
+                # recompute instead (_schedule_multi_row_reprocess),
+                # which also picks it up from the FID-processing
+                # controls' own live path now that there's no separate
+                # "Apply Processing" step. The display briefly shows
+                # phase-only during an active drag and catches up with
+                # baseline shortly after it settles.
                 if spectrum.metadata.raw.get("baseline_correct"):
-                    phased = np.apply_along_axis(
-                        lambda row: self._baseline_correct_if_enabled(row, freq_ppm, spectrum), 1, phased,
-                    )
+                    self._schedule_multi_row_reprocess(index)
             else:
                 row = self.slice_spin.value() - 1
                 phased = self._phase_reference_full.copy()
@@ -3391,14 +3748,18 @@ class MainWindow(QMainWindow):
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
             data_for_dim = self._phase_reference_full if dim == "f2" else self._phase_reference_full.T
             phased = processing_ft.apply_phase(data_for_dim, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
-            if spectrum.metadata.raw.get("baseline_correct"):
-                phased = np.apply_along_axis(
-                    lambda row: self._baseline_correct_if_enabled(row, freq_ppm, spectrum), 1, phased,
-                )
             if dim == "f1":
                 phased = phased.T
             spectrum.data = np.real(phased)
             spectrum.data_imag = np.imag(phased)
+            # Baseline correction deferred to a debounced recompute,
+            # not applied inline on every drag tick -- see the
+            # matching pseudo2d "apply to every slice" branch above
+            # for why (the actual "hangs" mechanism: a per-row spline
+            # fit re-run on every single mouse-move event during a
+            # phase drag).
+            if spectrum.metadata.raw.get("baseline_correct"):
+                self._schedule_multi_row_reprocess(index)
             self.canvas.show_spectrum(spectrum)
             # A conventional 2D's Processing-preview tab mirrors this
             # same spectrum object directly (see _show_processing_preview's
