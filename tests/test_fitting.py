@@ -125,6 +125,73 @@ def test_estimate_baseline_robust_rejects_outliers():
     assert (b0 + b1 * (0.0 - x_ref)) == pytest.approx(b0_true, abs=1e-2)
 
 
+def test_estimate_baseline_polynomial_degree_1_matches_robust():
+    # estimate_baseline_robust is documented as a thin degree=1 wrapper
+    # around estimate_baseline_polynomial -- confirm they actually agree,
+    # not just that each independently looks reasonable.
+    x = np.linspace(-5, 5, 200)
+    y = 0.5 + 0.1 * x + np.random.default_rng(0).normal(scale=0.01, size=x.shape)
+
+    b0, b1, x_ref = fitting.estimate_baseline_robust(x, y, baseline_regions=(-5, 5), sigma=3.0)
+    coeffs, poly_x_ref = fitting.estimate_baseline_polynomial(x, y, baseline_regions=(-5, 5), sigma=3.0, degree=1)
+
+    assert poly_x_ref == pytest.approx(x_ref)
+    assert coeffs[0] == pytest.approx(b1, abs=1e-9)
+    assert coeffs[1] == pytest.approx(b0, abs=1e-9)
+
+
+def test_estimate_baseline_polynomial_recovers_quadratic_curvature():
+    # A degree-1 (linear) fit structurally cannot follow real
+    # curvature regardless of which points it's fit to -- degree=2
+    # should recover it directly.
+    x = np.linspace(-5, 5, 300)
+    true_coeffs = [0.2, -0.3, 1.0]  # a*x^2 + b*x + c
+    y = np.polyval(true_coeffs, x)
+
+    coeffs, x_ref = fitting.estimate_baseline_polynomial(x, y, baseline_regions=(-5, 5), sigma=3.0, degree=2)
+    recovered = np.polyval(coeffs, x - x_ref)
+
+    np.testing.assert_allclose(recovered, y, atol=1e-6)
+
+
+def test_estimate_baseline_polynomial_rejects_a_peak():
+    x = np.linspace(-5, 5, 300)
+    y = 0.2 * x ** 2 - 0.3 * x + 1.0
+    y_with_peak = y.copy()
+    y_with_peak[145:155] += 50.0  # a "peak" sitting inside the baseline candidate region
+
+    coeffs, x_ref = fitting.estimate_baseline_polynomial(
+        x, y_with_peak, baseline_regions=(-5, 5), sigma=3.0, degree=2,
+    )
+    recovered = np.polyval(coeffs, x - x_ref)
+
+    np.testing.assert_allclose(recovered, y, atol=0.1)
+
+
+def test_estimate_baseline_sinusoidal_recovers_a_known_wave():
+    x = np.linspace(-10, 10, 400)
+    period = 40.0  # twice the x-range -- matches the default period estimate
+    true = 2.0 + 3.0 * np.cos(2 * np.pi * x / period) - 1.5 * np.sin(2 * np.pi * x / period)
+
+    coeffs, fitted_period = fitting.estimate_baseline_sinusoidal(x, true, baseline_regions=(-10, 10), sigma=3.0)
+    recovered = fitting.evaluate_baseline_sinusoidal(coeffs, fitted_period, x)
+
+    np.testing.assert_allclose(recovered, true, atol=1e-6)
+
+
+def test_estimate_baseline_sinusoidal_rejects_a_peak():
+    x = np.linspace(-10, 10, 400)
+    period = 40.0
+    true = 2.0 + 3.0 * np.cos(2 * np.pi * x / period)
+    y_with_peak = true.copy()
+    y_with_peak[195:205] += 50.0
+
+    coeffs, fitted_period = fitting.estimate_baseline_sinusoidal(x, y_with_peak, baseline_regions=(-10, 10), sigma=3.0)
+    recovered = fitting.evaluate_baseline_sinusoidal(coeffs, fitted_period, x)
+
+    np.testing.assert_allclose(recovered, true, atol=0.5)
+
+
 # ============================================================
 # Integrals
 # ============================================================

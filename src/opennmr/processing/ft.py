@@ -368,7 +368,8 @@ def autophase01(spectrum: np.ndarray, freq: np.ndarray, phase0_range: tuple[floa
 def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
                       baseline_regions: list[tuple[float, float]] | tuple[float, float] | None = None,
                       frac: float = 0.05, sigma: float = 2.5, max_iter: int = 10,
-                      method: str = "linear", smoothing: float | None = None) -> np.ndarray:
+                      method: str = "linear", smoothing: float | None = None,
+                      degree: int = 2, n_harmonics: int = 1, period: float | None = None) -> np.ndarray:
     """Subtract a robust baseline fit to the real part, via
     :mod:`opennmr.processing.fitting`'s baseline estimators -- the same
     ones ``fit_spectrum`` already uses to hold a baseline fixed under a
@@ -380,32 +381,61 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
     toward any real peaks included in it, which -- for anything but a
     dead-flat spectrum -- systematically under-corrects: barely moving
     the line, since the peaks it should run underneath instead drag it
-    upward. Both estimators below instead sigma-clip their way to the
+    upward. Every estimator below instead sigma-clips its way to the
     points that are actually baseline (starting from
     ``baseline_regions`` if given, otherwise the first/last ``frac`` of
     the spectrum) before fitting, so real peaks don't bias the result.
 
-    ``method`` : ``"linear"`` (default, :func:`opennmr.processing.
-    fitting.estimate_baseline_robust`) fits a single straight line --
-    fast and usually enough, but systematically under-corrects a real
-    curved/rolling baseline (common on wideline/solid-state spectra),
-    since a line simply cannot follow that shape regardless of which
-    points it's fit to. ``"spline"`` (:func:`opennmr.processing.
-    fitting.estimate_baseline_spline`) fits a smooth cubic spline
-    instead, which can -- explicit user feedback that linear-only
-    baseline correction "doesn't work so well" and asking for a spline
-    option specifically.
+    ``method`` :
+
+    - ``"linear"`` (default, :func:`opennmr.processing.fitting.
+      estimate_baseline_robust`) fits a single straight line -- fast
+      and usually enough, but systematically under-corrects a real
+      curved/rolling baseline (common on wideline/solid-state spectra,
+      and on any spectrum with a large recorded first-order phase --
+      a real first-order phase correction's own effect grows with
+      distance from the pivot, so a residual phase error shows up as
+      *curvature* concentrated toward the spectrum's edges, exactly
+      where the default edge-only candidate region draws its baseline
+      points from), since a line simply cannot follow that shape
+      regardless of which points it's fit to.
+    - ``"polynomial"`` (:func:`opennmr.processing.fitting.
+      estimate_baseline_polynomial`, degree ``degree``) generalizes
+      ``"linear"`` (``degree=1`` is identical to it) to follow real
+      curvature without needing a full spline.
+    - ``"sinusoidal"`` (:func:`opennmr.processing.fitting.
+      estimate_baseline_sinusoidal`, ``n_harmonics``/``period``) fits a
+      slowly rolling, wave-like baseline -- a shape neither a
+      polynomial nor a spline (which can chase noise between distant
+      candidate points) represents as naturally.
+    - ``"spline"`` (:func:`opennmr.processing.fitting.
+      estimate_baseline_spline`) fits a smooth cubic spline -- the
+      most flexible option, and the only one that can follow a shape
+      not well-described by a low-order polynomial or a single
+      sinusoid, at the cost of being the easiest to overfit to noise
+      between sparse candidate points.
 
     ``smoothing`` : ``method="spline"`` only -- see
     :func:`estimate_baseline_spline`'s own ``smoothing`` parameter
-    (``None`` picks a data-driven default). Ignored for ``"linear"``.
+    (``None`` picks a data-driven default).
+
+    ``degree`` : ``method="polynomial"`` only -- polynomial degree
+    (1 = linear, 2 = quadratic, ...).
+
+    ``n_harmonics``/``period`` : ``method="sinusoidal"`` only -- see
+    :func:`estimate_baseline_sinusoidal`'s own parameters of the same
+    names (``period=None`` picks a data-driven default: twice the
+    candidate points' own x-range).
 
     ``baseline_regions`` : explicit (lo, hi) ppm window(s) known to be
     peak-free -- e.g. from the Analysis tab's own peak table, expanded
     a little past each peak's FWHM -- for a spectrum where the default
     edge-only assumption doesn't hold (a peak near either end, or a
     baseline that isn't well represented by just the two edges)."""
-    from .fitting import estimate_baseline_robust, estimate_baseline_spline
+    from .fitting import (
+        estimate_baseline_polynomial, estimate_baseline_sinusoidal,
+        estimate_baseline_spline, evaluate_baseline_sinusoidal,
+    )
     freq = np.asarray(freq, dtype=float)
     if baseline_regions is None:
         # Guarantee a handful of candidate baseline points per edge even
@@ -421,14 +451,20 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
             frac=frac, sigma=sigma, max_iter=max_iter, smoothing=smoothing,
         )
         baseline = spline(freq)
-    elif method == "linear":
-        b0, b1, x_ref = estimate_baseline_robust(
+    elif method in ("linear", "polynomial"):
+        coeffs, x_ref = estimate_baseline_polynomial(
             freq, np.real(spectrum), baseline_regions=baseline_regions,
-            frac=frac, sigma=sigma, max_iter=max_iter,
+            frac=frac, sigma=sigma, max_iter=max_iter, degree=(1 if method == "linear" else degree),
         )
-        baseline = b0 + b1 * (freq - x_ref)
+        baseline = np.polyval(coeffs, freq - x_ref)
+    elif method == "sinusoidal":
+        coeffs, fitted_period = estimate_baseline_sinusoidal(
+            freq, np.real(spectrum), baseline_regions=baseline_regions,
+            frac=frac, sigma=sigma, max_iter=max_iter, n_harmonics=n_harmonics, period=period,
+        )
+        baseline = evaluate_baseline_sinusoidal(coeffs, fitted_period, freq)
     else:
-        raise ValueError(f"method must be 'linear' or 'spline', got {method!r}")
+        raise ValueError(f"method must be 'linear', 'polynomial', 'sinusoidal' or 'spline', got {method!r}")
     return spectrum - baseline
 
 

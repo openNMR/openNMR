@@ -427,3 +427,51 @@ def test_baseline_correct_rejects_unknown_method():
     freq, true_baseline, peak = _sloped_baseline_with_peak()
     with pytest.raises(ValueError):
         ft.baseline_correct(freq, true_baseline + peak, method="quadratic")
+
+
+def test_baseline_correct_polynomial_handles_curved_baseline_linear_cannot():
+    # Same real-curvature case spline was added for -- a degree-2
+    # polynomial should do it too, without needing spline's own
+    # "follows anything, including noise between sparse points" risk.
+    freq, true_baseline, peak = _curved_baseline_with_peak()
+    spectrum = true_baseline + peak
+
+    corrected_linear = ft.baseline_correct(freq, spectrum, method="linear")
+    corrected_poly = ft.baseline_correct(freq, spectrum, method="polynomial", degree=2)
+
+    away_from_peak = np.abs(freq - 1.0) > 2.0
+    linear_residual = np.abs(corrected_linear[away_from_peak]).mean()
+    poly_residual = np.abs(corrected_poly[away_from_peak]).mean()
+    assert poly_residual < linear_residual * 0.05
+    assert poly_residual < 1e-6  # the true baseline genuinely *is* degree 2 -- near-exact recovery
+
+
+def test_baseline_correct_polynomial_degree_1_matches_linear():
+    freq, true_baseline, peak = _sloped_baseline_with_peak()
+    spectrum = true_baseline + peak
+
+    corrected_linear = ft.baseline_correct(freq, spectrum, method="linear")
+    corrected_poly1 = ft.baseline_correct(freq, spectrum, method="polynomial", degree=1)
+
+    np.testing.assert_allclose(corrected_linear, corrected_poly1, atol=1e-8)
+
+
+def _rolling_wave_baseline_with_peak(n=2000):
+    freq = np.linspace(-10.0, 10.0, n)
+    true_baseline = 2.0 + 3.0 * np.cos(2 * np.pi * freq / 40.0)  # one smooth rise-and-fall
+    peak = 5.0 * np.exp(-0.5 * ((freq - 1.0) / 0.3) ** 2)
+    return freq, true_baseline, peak
+
+
+def test_baseline_correct_sinusoidal_handles_a_rolling_wave_baseline():
+    freq, true_baseline, peak = _rolling_wave_baseline_with_peak()
+    spectrum = true_baseline + peak
+
+    corrected_linear = ft.baseline_correct(freq, spectrum, method="linear")
+    corrected_sinusoidal = ft.baseline_correct(freq, spectrum, method="sinusoidal")
+
+    away_from_peak = np.abs(freq - 1.0) > 2.0
+    linear_residual = np.abs(corrected_linear[away_from_peak]).mean()
+    sinusoidal_residual = np.abs(corrected_sinusoidal[away_from_peak]).mean()
+    assert sinusoidal_residual < linear_residual * 0.1
+    assert sinusoidal_residual < 1e-6  # the true baseline genuinely *is* one sinusoid

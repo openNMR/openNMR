@@ -331,3 +331,143 @@ def test_read_auto_dispatches_single_file_to_read_1d(tmp_path):
     path = _write_fixture(tmp_path)
     spectrum = xpulse._read_auto(path, autophase=False, baseline_correct=False)
     assert spectrum.ndim == 1
+
+
+# ============================================================
+# Genuine 2D (NTUPLES-format JCAMP-DX, e.g. HSQC)
+# ============================================================
+
+def _make_ntuples_fixture(tmp_path, n1=8, n2=8, sw1=100.0, sw2=800.0, f1_hz=None, name="hsqc.jdx"):
+    """A synthetic NTUPLES 2D fixture matching the real format
+    confirmed by direct inspection of a real HSQC export: one
+    (T2++(R..R)), (T2++(I..I)) PAGE pair per T1 increment, States-TPPI
+    row-pairing (see processing.ft.decode_hypercomplex_f1's own
+    docstring for the forward model this mirrors). Plain AFFN decimal
+    text, not ASDF pseudo-digit -- deliberately paired with a
+    ``##VARFORM= AFFN, AFFN, AFFN, AFFN`` header claim that's
+    technically *correct* here (unlike the real file, which lies about
+    this) precisely so the auto-detection path is exercised on both
+    "really is AFFN" and (the real file's own) "claims AFFN but is
+    ASDF" without needing two separate fixtures."""
+    if f1_hz is None:
+        f1_hz = 2 * (sw1 / n1)  # an exact FFT bin
+    t2 = np.arange(n2) / sw2
+    # Each NTUPLES page holds one *real*-valued float per T2 point --
+    # confirmed directly against the real file (both its R and I pages
+    # decode to plain float64, never complex) -- so the synthetic F2
+    # content here must be real too, not the complex quadrature signal
+    # test_ft.py's own States-TPPI fixture uses for a genuinely
+    # complex-per-row Bruker row.
+    f2signal = np.exp(-t2 * 50.0)
+    pages = []
+    for k in range(n1):
+        t1 = k / sw1
+        phase = 2 * np.pi * f1_hz * t1
+        sign = -1.0 if k % 2 else 1.0
+        real_row = sign * np.cos(phase) * f2signal
+        imag_row = sign * np.sin(phase) * f2signal
+        pages.append(("R", real_row, k))
+        pages.append(("I", imag_row, k))
+
+    t2_last = (n2 - 1) / sw2
+    lines = [
+        "##TITLE= synthetic NTUPLES fixture",
+        "##JCAMPDX= 6.0",
+        "##DATACLASS= NTUPLES",
+        "##NUMDIM= 2",
+        "$$SpinFlow Sequence Parameters Start",
+        f"$$NP1= {n1}",
+        f"$$NP2= {n2}",
+        f"$$SW1= {sw1}",
+        f"$$Filter= {sw2}",
+        "$$O1= 0.0",
+        "$$NS= 1",
+        "$$TxPPM= 5.0",
+        "$$TxPPMX= 100.0",
+        "$$SpinFlow Sequence Parameters End",
+        "##.OBSERVENUCLEUS= ^1H",
+        "##$INDIRECTNUCLEUS= ^13C",
+        "##.ACQUISITION SCHEME= TPPI",
+        "##$SF= 500.000000 $$ f2",
+        "##$SF= 125.000000 $$ f1",
+        "##$SFO1= 500.000000 $$ f2",
+        "##$SFO1= 125.000000 $$ f1",
+        "##NTUPLES= nD NMR FID",
+        "##VARNAME= TIME1, TIME2, FID/REAL, FID/IMAG",
+        "##SYMBOL= T1, T2, R, I",
+        "##.NUCLEUS=  ^13C, ^1H",
+        "##VARTYPE= INDEPENDENT, INDEPENDENT, DEPENDENT, DEPENDENT",
+        "##VARFORM= AFFN, AFFN, AFFN, AFFN",
+        f"##VARDIM= {n1}, {n2}, {n2}, {n2}",
+        "##UNITS= SECONDS, SECONDS, ARBITRARY UNITS, ARBITRARY UNITS",
+        f"##FIRST= 0, 0, 0, 0",
+        f"##LAST= {(n1 - 1) / sw1}, {t2_last}, 0, 0",
+        "##FIRST= 0,0,0,0",
+    ]
+    for kind, row, t1_index in pages:
+        lines.append(f"##PAGE=\tT1= {t1_index}")
+        lines.append("##FIRST= 0,0,0,0")
+        lines.append(f"##DATATABLE= (T2++({kind}..{kind})), PROFILE")
+        for i, (t2_val, value) in enumerate(zip(t2, row)):
+            lines.append(f"{t2_val:.6f} {value:.6f}")
+    lines.append("##END=")
+
+    path = tmp_path / name
+    path.write_text("\n".join(lines) + "\n")
+    return str(path), f1_hz
+
+
+def test_read_xpulse_ntuples_2d_recovers_known_f1_frequency(tmp_path):
+    n1, sw1 = 8, 100.0
+    path, f1_hz = _make_ntuples_fixture(tmp_path, n1=n1, sw1=sw1)
+    fid_data = xpulse._read_xpulse_ntuples_2d(path)
+    raw_rows = fid_data["complex"]
+    assert raw_rows.shape[0] == 2 * n1  # row-paired, not yet decoded
+
+    from opennmr.processing import ft as processing_ft
+    decoded = processing_ft.decode_hypercomplex_f1(raw_rows, fn_mode=5)
+    assert decoded.shape[0] == n1
+    spectrum = np.fft.fftshift(np.fft.fft(decoded, axis=0), axes=0)
+    power = np.abs(spectrum).sum(axis=1)
+    freqs = np.fft.fftshift(np.fft.fftfreq(n1, d=1.0 / sw1))
+    assert abs(freqs[np.argmax(power)] - f1_hz) < (sw1 / n1) / 2
+
+
+def test_read_xpulse_2d_end_to_end_shape_and_metadata(tmp_path):
+    path, _ = _make_ntuples_fixture(tmp_path, n1=8, n2=16)
+    spectrum = xpulse.read_2d(path, autophase=False)
+    assert spectrum.ndim == 2
+    assert spectrum.data.shape[0] == 8  # F1: row-paired 16 -> decoded 8
+    assert spectrum.metadata.nucleus == "1H"
+    assert spectrum.metadata.nucleus_indirect == "13C"
+    assert spectrum.metadata.raw["fn_mode"] == 5
+    assert spectrum.axes[0].kind == "frequency"
+    assert spectrum.axes[1].kind == "frequency"
+
+
+def test_read_xpulse_2d_zero_fill_and_truncate_f1(tmp_path):
+    path, _ = _make_ntuples_fixture(tmp_path, n1=8, n2=8)
+    spectrum = xpulse.read_2d(path, autophase=False, truncate_f1=4, zero_fill_f1=16)
+    assert spectrum.metadata.raw["fid_raw"].shape[0] == 8  # 4 pairs, row-paired
+    assert spectrum.data.shape[0] == 16
+
+
+def test_detect_varform_ignores_unreliable_header_claim():
+    # The real file's own ##VARFORM= claims AFFN for genuinely
+    # ASDF-encoded data -- confirm detection goes by content.
+    assert xpulse._detect_xpulse_datatable_varform(["0.5J23K11"]) == "ASDF"
+    assert xpulse._detect_xpulse_datatable_varform(["0.5 1.23 -4.5e-2"]) == "AFFN"
+
+
+def test_is_ntuples_2d_file_true_for_ntuples_false_for_plain_1d(tmp_path):
+    ntuples_path, _ = _make_ntuples_fixture(tmp_path)
+    plain_path = _write_fixture(tmp_path)
+    assert xpulse._is_ntuples_2d_file(ntuples_path) is True
+    assert xpulse._is_ntuples_2d_file(plain_path) is False
+
+
+def test_read_auto_dispatches_ntuples_file_to_read_2d(tmp_path):
+    path, _ = _make_ntuples_fixture(tmp_path)
+    spectrum = xpulse._read_auto(path, autophase=False)
+    assert spectrum.ndim == 2
+    assert spectrum.metadata.nucleus_indirect == "13C"

@@ -849,7 +849,12 @@ class MainWindow(QMainWindow):
         ``_XPULSE_RAW_SCAN_RE``), which are skipped so opening a
         folder with N scans doesn't offer N+1 near-duplicate matches
         (the N individual scans, plus the one averaged spectrum that's
-        actually worth loading).
+        actually worth loading) -- and, similarly, a ``raw_slices/``
+        folder sitting alongside a genuine NTUPLES 2D file (e.g. an
+        HSQC's own real dataset) is skipped entirely rather than
+        offering its 100+ individual per-F1-increment files as
+        separate matches once the one real 2D dataset they belong to
+        is already found.
         """
         matches: list[tuple[str, str]] = []
 
@@ -870,10 +875,28 @@ class MainWindow(QMainWindow):
                 entries = sorted(os.scandir(path), key=lambda e: cls._natural_sort_key(e.name))
             except OSError:
                 return
+            # A genuine X-Pulse 2D dataset (e.g. an HSQC's own
+            # "..._avg.jdx" NTUPLES file) already contains everything
+            # its own sibling raw_slices/ folder holds per-F1-increment
+            # -- don't also offer those (128+, for a real dataset)
+            # individual slice files as separate matches once the one
+            # real dataset they belong to is already found here.
+            # raw_slices/ folders that *aren't* siblings of an NTUPLES
+            # file (e.g. a genuine per-slice pseudo-2D PFG series) are
+            # untouched -- their own contents are the real dataset,
+            # not a redundant duplicate of one.
+            has_ntuples_sibling = any(
+                entry.is_file(follow_symlinks=False)
+                and os.path.splitext(entry.name)[1].lower() in (".jdx", ".dx")
+                and io.xpulse._is_ntuples_2d_file(entry.path)
+                for entry in entries
+            )
             for entry in entries:
                 if len(matches) >= max_matches:
                     return
                 if entry.is_dir(follow_symlinks=False):
+                    if has_ntuples_sibling and entry.name.lower() == "raw_slices":
+                        continue
                     walk(entry.path, depth + 1)
                 elif entry.is_file(follow_symlinks=False):
                     if cls._XPULSE_RAW_SCAN_RE.search(entry.name):
@@ -943,25 +966,26 @@ class MainWindow(QMainWindow):
         # whatever the vendor's own raw auto-detection produced) --
         # the Reset button's own target (see _on_reset_processing_clicked).
         self._original_load_kwargs[index] = dict(self.session.get_load_kwargs(index))
-        if spectrum.metadata.vendor == "xpulse":
-            # io.xpulse.read_1d applies its own baseline correction by
-            # default (linear, unless align_echo is on -- see its own
-            # docstring) as a one-off effect of the initial load, with
-            # no record of that choice anywhere retrievable. Now that
-            # every later live control change recomputes from the raw
-            # FID via this GUI's own explicit baseline toggle instead
-            # of read_1d itself, that one-off effect would otherwise
-            # silently vanish the moment *any* control was touched --
-            # seed the toggle to match what the initial load actually
-            # did, so touching an unrelated control doesn't quietly
-            # undo a correction that was already baked into what's on
-            # screen.
-            # align_echo is always False for a fresh GUI load (the GUI
-            # never passes it at load time -- align_echo_button itself
-            # starts unchecked), so read_1d's own "not align_echo"
-            # default resolves to True here unconditionally.
-            spectrum.metadata.raw.setdefault("baseline_correct", True)
-            spectrum.metadata.raw.setdefault("baseline_method", "linear")
+        # Baseline correction now defaults on for every vendor, not
+        # just X-Pulse -- explicit user feedback that a well-phased
+        # spectrum should generally land close to zero, and that this
+        # wasn't reliably happening. For X-Pulse this records an
+        # effect io.xpulse.read_1d already silently applied as a one-
+        # off part of the initial load (linear, unless align_echo is
+        # on -- see its own docstring; align_echo is always False at a
+        # fresh GUI load, so that resolves to True unconditionally
+        # here) -- without this, the correction already baked into
+        # what's on screen would silently vanish the moment *any*
+        # later control was touched, since every live control change
+        # now recomputes from the raw FID via this GUI's own explicit
+        # baseline toggle instead of read_1d itself. For every other
+        # vendor, none of whose readers apply baseline correction at
+        # load time at all, this is a genuine new default rather than
+        # recording an already-applied effect -- a real, visible
+        # change (a freshly-loaded spectrum now gets linear baseline
+        # correction where it previously didn't), not just bookkeeping.
+        spectrum.metadata.raw.setdefault("baseline_correct", True)
+        spectrum.metadata.raw.setdefault("baseline_method", "linear")
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
 
@@ -3227,17 +3251,38 @@ class MainWindow(QMainWindow):
         baseline_options_row = QHBoxLayout()
         self.baseline_method_combo = QComboBox()
         self.baseline_method_combo.addItem("Linear", "linear")
+        self.baseline_method_combo.addItem("Polynomial", "polynomial")
+        self.baseline_method_combo.addItem("Sinusoidal", "sinusoidal")
         self.baseline_method_combo.addItem("Spline", "spline")
         self.baseline_method_combo.setToolTip(
             "Linear: a single straight-line fit -- fast, but can't "
             "follow a curved/rolling baseline (common on wideline/"
-            "solid-state spectra), which it will under-correct no "
-            "matter which points it's fit to. Spline: a smooth cubic "
-            "spline that can follow that curvature."
+            "solid-state spectra, and whenever a large recorded first-"
+            "order phase leaves curvature concentrated at the edges), "
+            "which it will under-correct no matter which points it's "
+            "fit to. Polynomial: linear generalized to a higher degree "
+            "(set below) -- follows real curvature directly. "
+            "Sinusoidal: a slowly rolling, wave-like baseline. Spline: "
+            "the most flexible option (a smooth cubic spline), for a "
+            "shape none of the above capture -- but also the easiest "
+            "to overfit to noise between sparse baseline points."
         )
         self._narrow_combo(self.baseline_method_combo)
         self.baseline_method_combo.currentIndexChanged.connect(self._on_baseline_correct_options_changed)
         baseline_options_row.addWidget(self.baseline_method_combo)
+
+        self.baseline_degree_spin = QSpinBox()
+        self.baseline_degree_spin.setRange(1, 8)
+        self.baseline_degree_spin.setValue(2)
+        self.baseline_degree_spin.setToolTip(
+            "Polynomial degree (1 = linear, 2 = quadratic, ...) -- "
+            "higher follows more curvature, but can start fitting "
+            "noise between baseline points past what the spectrum's "
+            "own baseline shape actually needs. Only used when "
+            "Polynomial is selected above."
+        )
+        self.baseline_degree_spin.valueChanged.connect(self._on_baseline_correct_options_changed)
+        baseline_options_row.addWidget(self.baseline_degree_spin)
 
         self.baseline_smoothing_spin = QDoubleSpinBox()
         self.baseline_smoothing_spin.setRange(0.0, 1.0e9)
@@ -3548,13 +3593,15 @@ class MainWindow(QMainWindow):
                 freq_ppm, data,
                 method=spectrum.metadata.raw.get("baseline_method", "linear"),
                 smoothing=spectrum.metadata.raw.get("baseline_smoothing"),
+                degree=spectrum.metadata.raw.get("baseline_degree", 2),
             )
         except Exception:  # noqa: BLE001 -- best-effort live correction, see docstring above
             return data
 
     def _refresh_baseline_options_visibility(self) -> None:
-        is_spline = self.baseline_method_combo.currentData() == "spline"
-        self.baseline_smoothing_spin.setVisible(is_spline)
+        method = self.baseline_method_combo.currentData()
+        self.baseline_smoothing_spin.setVisible(method == "spline")
+        self.baseline_degree_spin.setVisible(method == "polynomial")
 
     def _on_baseline_correct_options_changed(self, *_args) -> None:
         """Method/smoothing changed -- re-anchor to whatever's
@@ -3571,6 +3618,7 @@ class MainWindow(QMainWindow):
         spectrum.metadata.raw["baseline_method"] = self.baseline_method_combo.currentData()
         smoothing = self.baseline_smoothing_spin.value()
         spectrum.metadata.raw["baseline_smoothing"] = smoothing if smoothing > 0.0 else None
+        spectrum.metadata.raw["baseline_degree"] = self.baseline_degree_spin.value()
         if self.baseline_correct_button.isChecked():
             self._apply_phase_preview()
 
@@ -3984,6 +4032,9 @@ class MainWindow(QMainWindow):
         self.baseline_smoothing_spin.blockSignals(True)
         self.baseline_smoothing_spin.setValue(spectrum.metadata.raw.get("baseline_smoothing") or 0.0)
         self.baseline_smoothing_spin.blockSignals(False)
+        self.baseline_degree_spin.blockSignals(True)
+        self.baseline_degree_spin.setValue(spectrum.metadata.raw.get("baseline_degree", 2))
+        self.baseline_degree_spin.blockSignals(False)
         self._refresh_baseline_options_visibility()
 
         if spectrum.data_imag is None:

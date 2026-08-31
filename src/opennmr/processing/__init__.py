@@ -5,6 +5,7 @@ from .slicing import get_trace, get_slices
 from .fitting import (
     gaussian, lorentzian, pseudo_voigt,
     estimate_baseline_from_edges, estimate_baseline_robust,
+    estimate_baseline_polynomial, estimate_baseline_sinusoidal, evaluate_baseline_sinusoidal,
     fit_spectrum, evaluate_fit, compute_integrals, compute_integral_errors, fit_quality,
     estimate_noise_level, select_2d_traces, NMR2D_fit_slices, NMR2D_print_fit_report,
     print_fit_report,
@@ -23,6 +24,7 @@ __all__ = [
     "get_trace", "get_slices",
     "gaussian", "lorentzian", "pseudo_voigt",
     "estimate_baseline_from_edges", "estimate_baseline_robust",
+    "estimate_baseline_polynomial", "estimate_baseline_sinusoidal", "evaluate_baseline_sinusoidal",
     "fit_spectrum", "evaluate_fit", "compute_integrals", "compute_integral_errors", "fit_quality",
     "estimate_noise_level", "select_2d_traces", "NMR2D_fit_slices", "NMR2D_print_fit_report",
     "print_fit_report",

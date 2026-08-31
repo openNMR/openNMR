@@ -178,6 +178,40 @@ def test_scan_for_spectra_unrecognised_folder_returns_empty(tmp_path):
     assert MainWindow._scan_for_spectra(str(tmp_path)) == []
 
 
+def test_scan_for_spectra_skips_raw_slices_redundant_with_an_ntuples_2d_file(tmp_path):
+    # Real reported symptom: a genuine X-Pulse 2D dataset (e.g. HSQC)
+    # has both its own real NTUPLES "..._avg.jdx" file *and* a sibling
+    # raw_slices/ folder holding the same data per-F1-increment --
+    # scanning used to offer 129 disconnected matches (128 individual
+    # slices + the one real dataset) instead of recognizing it as one.
+    expt = tmp_path / "expt"
+    slice_dir = expt / "raw_slices"
+    slice_dir.mkdir(parents=True)
+    for i in range(1, 5):
+        (slice_dir / f"{i:04d}_slice.jdx").write_text("##TITLE= slice\n##$SFO1= 400.13\n")
+    ntuples = expt / "sample_avg.jdx"
+    ntuples.write_text("##TITLE= test\n##DATACLASS= NTUPLES\n##NUMDIM= 2\n##$SFO1= 400.13\n")
+
+    matches = MainWindow._scan_for_spectra(str(tmp_path))
+
+    assert matches == [(str(ntuples), "xpulse")]
+
+
+def test_scan_for_spectra_keeps_raw_slices_without_an_ntuples_sibling(tmp_path):
+    # The same folder *name* ("raw_slices") is also used for genuine,
+    # standalone per-slice pseudo-2D data (e.g. a PFG series) with no
+    # NTUPLES file anywhere nearby -- must stay fully included, not
+    # suppressed just because the folder happens to be named the same.
+    slice_dir = tmp_path / "expt" / "raw_slices"
+    slice_dir.mkdir(parents=True)
+    for i in range(1, 4):
+        (slice_dir / f"{i:04d}_slice.jdx").write_text("##TITLE= slice\n##$SFO1= 400.13\n")
+
+    matches = MainWindow._scan_for_spectra(str(tmp_path))
+
+    assert len(matches) == 3
+
+
 def test_main_window_open_clicked_loads_single_match_directly(qapp, tmp_path, monkeypatch):
     path = _make_1d_dataset(tmp_path)
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: path)
@@ -683,6 +717,11 @@ def test_main_window_phase_handle_updates_canvas_live(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
 
     index = window._selected_index()
+    # This is about phase reset, not baseline -- disable the
+    # now-on-by-default baseline correction so it doesn't flatten this
+    # fixture's own linear-ramp data (indistinguishable from a pure
+    # baseline) before phase ever gets a chance to change anything.
+    window.baseline_correct_button.setChecked(False)
     original_real = window.session.spectra[index].data.copy()
 
     window.phase0_handle.setValue(90.0)
@@ -1040,6 +1079,12 @@ def test_main_window_processing_preview_phase_survives_slice_switch(qapp, tmp_pa
     window._set_zero_fill_value(64)  # isolate the phase check from zero-fill shape changes
     index = window._selected_index()
     spectrum = window.session.spectra[index]
+    # This is about phase persistence across a slice switch, not
+    # baseline -- disable the now-on-by-default baseline correction so
+    # its own independent sigma-clip fit (run separately for the
+    # preview and the live spectrum) can't introduce an unrelated
+    # mismatch between the two.
+    window.baseline_correct_button.setChecked(False)
 
     window.phase0_spin.setValue(90.0)
     window.slice_spin.setValue(2)
@@ -1064,6 +1109,7 @@ def test_main_window_processing_preview_normalizes_by_ns(qapp, tmp_path, monkeyp
     window._set_zero_fill_value(64)
     index = window._selected_index()
     spectrum = window.session.spectra[index]
+    window.baseline_correct_button.setChecked(False)  # isolate the NS check from baseline correction
 
     _fid, _dt, preview_spectrum, _title = window._compute_processing_preview(spectrum)
 
@@ -1220,10 +1266,21 @@ def test_main_window_revert_autophase_noop_with_nothing_to_revert(qapp, tmp_path
     window._on_revert_autophase_clicked()  # must not raise
 
 
+def test_main_window_baseline_correct_is_now_on_by_default(qapp, tmp_path):
+    # Explicit user feedback: a well-phased spectrum should generally
+    # land close to zero, which wasn't reliably happening while this
+    # was off by default for every vendor but X-Pulse.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    assert window.baseline_correct_button.isChecked() is True
+    assert window.session.spectra[0].metadata.raw.get("baseline_correct") is True
+
+
 def test_main_window_baseline_correct_changes_1d_data(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
     index = window._selected_index()
+    window.baseline_correct_button.setChecked(False)  # start from the uncorrected state
     original = window.session.spectra[index].data.copy()
 
     window.baseline_correct_button.setChecked(True)
@@ -1240,6 +1297,7 @@ def test_main_window_baseline_correct_is_a_toggle_not_one_shot(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
     index = window._selected_index()
+    window.baseline_correct_button.setChecked(False)  # start from the uncorrected state
     original = window.session.spectra[index].data.copy()
 
     window.baseline_correct_button.setChecked(True)
@@ -1324,11 +1382,60 @@ def test_main_window_baseline_correct_spline_method_persists_across_reselection(
     window.baseline_correct_button.setChecked(True)
 
     window._select_single_row(index_b)
-    assert window.baseline_correct_button.isChecked() is False  # untouched spectrum, own default
+    assert window.baseline_correct_button.isChecked() is True  # untouched spectrum, own (now-on) default
+    assert window.baseline_method_combo.currentData() == "linear"  # its own default method, not expt_a's spline
 
     window._select_single_row(index_a)
     assert window.baseline_correct_button.isChecked() is True
     assert window.baseline_method_combo.currentData() == "spline"
+
+
+def test_main_window_baseline_degree_spin_only_visible_for_polynomial(qapp):
+    window = MainWindow()
+    assert window.baseline_method_combo.currentData() == "linear"
+    assert window.baseline_degree_spin.isHidden() is True
+
+    window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData("polynomial"))
+    assert window.baseline_degree_spin.isHidden() is False
+    assert window.baseline_smoothing_spin.isHidden() is True
+
+    window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData("spline"))
+    assert window.baseline_degree_spin.isHidden() is True
+    assert window.baseline_smoothing_spin.isHidden() is False
+
+
+def test_main_window_baseline_correct_polynomial_degree_persists_across_reselection(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64, name="expt_a"), vendor="bruker")
+    index_a = window._selected_index()
+    window._load(_make_1d_dataset(tmp_path, n=64, name="expt_b"), vendor="bruker")
+    index_b = window._selected_index()
+
+    window._select_single_row(index_a)
+    window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData("polynomial"))
+    window.baseline_degree_spin.setValue(4)
+    window.baseline_correct_button.setChecked(True)
+
+    window._select_single_row(index_b)
+    assert window.baseline_degree_spin.value() == 2  # untouched spectrum, own default
+
+    window._select_single_row(index_a)
+    assert window.baseline_method_combo.currentData() == "polynomial"
+    assert window.baseline_degree_spin.value() == 4
+
+
+def test_main_window_baseline_correct_polynomial_and_sinusoidal_change_the_spectrum(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64, name="expt"), vendor="bruker")
+    index = window._selected_index()
+
+    for method in ("polynomial", "sinusoidal"):
+        window.baseline_correct_button.setChecked(False)
+        window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData(method))
+        original = window.session.spectra[index].data.copy()
+        window.baseline_correct_button.setChecked(True)
+        corrected = window.session.spectra[index].data
+        assert not np.allclose(original, corrected)
 
 
 def test_main_window_baseline_correct_noop_with_no_spectrum(qapp):

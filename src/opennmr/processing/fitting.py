@@ -104,10 +104,138 @@ def estimate_baseline_from_edges(x, y, frac=0.05):
     return coeff[0], coeff[1]
 
 
+def _select_baseline_candidates(x, y, baseline_regions, frac):
+    """Shared first step of every baseline estimator below (robust
+    polynomial, sinusoidal, spline): pick the candidate "probably just
+    baseline, not signal" points -- either explicit ``baseline_regions``
+    (lo, hi) window(s), or, absent those, the first/last ``frac`` of the
+    spectrum by point count. Pulled out once three near-identical
+    copies of this exact logic (region masking across possibly several
+    ranges, the frac-based edge fallback) started drifting apart across
+    the different baseline methods -- one implementation, not three to
+    keep in sync."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    if baseline_regions is not None:
+        if isinstance(baseline_regions[0], (int, float, np.integer, np.floating)):
+            baseline_regions = [baseline_regions]
+        mask = np.zeros_like(x, dtype=bool)
+        for lo, hi in baseline_regions:
+            lo, hi = sorted([lo, hi])
+            mask |= (x >= lo) & (x <= hi)
+        return x[mask], y[mask]
+
+    n = len(x)
+    k = max(1, int(n * frac))
+    return np.concatenate([x[:k], x[-k:]]), np.concatenate([y[:k], y[-k:]])
+
+
+def estimate_baseline_polynomial(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
+                                  max_iter=10, degree=1, x_ref=None):
+    """
+    Robustly estimate a degree-``degree`` polynomial baseline,
+    ``baseline = polyval(coeffs, x - x_ref)`` -- ``degree=1`` (the
+    default) is a straight line, the same model
+    :func:`estimate_baseline_robust` fits; higher degrees follow a
+    real curved/rolling baseline (common on wideline/solid-state
+    spectra, and on spectra with a large recorded first-order phase --
+    see :func:`opennmr.processing.ft.baseline_correct`'s own
+    ``method="polynomial"`` docs) that a straight line structurally
+    cannot, without needing a full spline.
+
+    Parameters
+    ----------
+    x, y : ndarray
+        Spectrum.
+
+    baseline_regions : tuple or list of tuples, optional
+        Explicit baseline-only regions, e.g. ``(-1, 0)`` or
+        ``[(-1, 0), (9, 10)]``. If None, the first and last ``frac`` of
+        the spectrum are used as candidate baseline regions.
+
+    frac : float, optional
+        Fraction of the spectrum used at each edge when
+        ``baseline_regions`` is None.
+
+    sigma : float, optional
+        Sigma-clipping threshold.
+
+    max_iter : int, optional
+        Maximum number of clipping iterations.
+
+    degree : int, optional
+        Polynomial degree (1 = linear, 2 = quadratic, ...). Must be
+        less than the number of surviving candidate points.
+
+    x_ref : float, optional
+        Reference x-value. Defaults to the mean of the candidate
+        baseline points -- centring the fit here (rather than at
+        x=0, often far outside the spectrum's own ppm range) keeps
+        the design matrix well-conditioned at higher degrees.
+
+    Returns
+    -------
+    coeffs, x_ref : ndarray, float
+        ``coeffs`` in ``numpy.polyval`` order (highest power first),
+        length ``degree + 1``.
+    """
+    x_base, y_base = _select_baseline_candidates(x, y, baseline_regions, frac)
+
+    if len(x_base) < degree + 2:
+        raise ValueError("Not enough points available for baseline estimation.")
+
+    if x_ref is None:
+        x_ref = np.mean(x_base)
+
+    xc = x_base - x_ref
+    # Vandermonde, highest power first -- matches np.polyval's own
+    # coefficient order, so callers can evaluate with polyval directly.
+    A = np.vander(xc, degree + 1)
+    coeff, *_ = np.linalg.lstsq(A, y_base, rcond=None)
+
+    keep = np.ones(len(y_base), dtype=bool)
+
+    # Each pass: score every candidate point's residual against the
+    # *current* fit, then only refit once membership (`keep`) actually
+    # changes -- so a refit always incorporates the outlier exclusion
+    # that motivated it, and the loop naturally converges once no
+    # further points are added or dropped.
+    for _ in range(max_iter):
+
+        residual = y_base - A @ coeff
+        median = np.median(residual)
+        mad = np.median(np.abs(residual - median))
+        noise = 1.4826 * mad
+
+        if noise <= 0:
+            break
+
+        new_keep = np.abs(residual - median) <= sigma * noise
+
+        if np.sum(new_keep) < degree + 2:
+            break
+
+        if np.array_equal(new_keep, keep):
+            break
+
+        keep = new_keep
+        coeff, *_ = np.linalg.lstsq(A[keep], y_base[keep], rcond=None)
+
+    return coeff, x_ref
+
+
 def estimate_baseline_robust(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
                               max_iter=10, x_ref=None):
     """
     Robustly estimate a linear baseline, ``baseline = b0 + b1 * (x - x_ref)``.
+
+    A thin, signature-preserving wrapper around
+    :func:`estimate_baseline_polynomial` (``degree=1``) -- kept as its
+    own function since ``fit_spectrum``/``NMR2D_fit_relaxation`` (and
+    any external code) already depend on this exact ``(b0, b1, x_ref)``
+    return shape, not the general ``(coeffs, x_ref)`` one degree-N
+    fitting needs.
 
     Parameters
     ----------
@@ -137,50 +265,80 @@ def estimate_baseline_robust(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
     -------
     b0, b1, x_ref : float
     """
+    coeffs, x_ref = estimate_baseline_polynomial(
+        x, y, baseline_regions=baseline_regions, frac=frac, sigma=sigma,
+        max_iter=max_iter, degree=1, x_ref=x_ref,
+    )
+    b1, b0 = coeffs  # np.vander/polyval order is [highest power, ..., constant]
+    return b0, b1, x_ref
 
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
 
-    if baseline_regions is not None:
+def estimate_baseline_sinusoidal(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
+                                  max_iter=10, n_harmonics=1, period=None):
+    """
+    Robustly estimate a sinusoidal baseline,
+    ``baseline = a0 + sum_k a_k*cos(2*pi*k*x/period) + b_k*sin(2*pi*k*x/period)``
+    for ``k = 1..n_harmonics`` -- a slowly rolling, wave-like baseline
+    that neither a straight line nor a low-degree polynomial
+    represents well, without spline's own "follows anything, including
+    noise" flexibility.
 
-        if isinstance(baseline_regions[0], (int, float, np.integer, np.floating)):
-            baseline_regions = [baseline_regions]
+    Linear in its own parameters (the basis functions are sinusoidal,
+    the *coefficients* aren't), so this fits by the same weighted
+    least-squares + sigma-clip loop as :func:`estimate_baseline_polynomial`,
+    just with a different design matrix.
 
-        mask = np.zeros_like(x, dtype=bool)
-        for lo, hi in baseline_regions:
-            lo, hi = sorted([lo, hi])
-            mask |= (x >= lo) & (x <= hi)
+    Parameters
+    ----------
+    x, y : ndarray
+        Spectrum.
 
-        x_base = x[mask]
-        y_base = y[mask]
+    baseline_regions, frac, sigma, max_iter : see
+        :func:`estimate_baseline_polynomial`.
 
-    else:
+    n_harmonics : int, optional
+        Number of sine/cosine harmonics (1 = a single sinusoid).
 
-        n = len(x)
-        k = max(1, int(n * frac))
-        x_base = np.concatenate([x[:k], x[-k:]])
-        y_base = np.concatenate([y[:k], y[-k:]])
+    period : float, optional
+        The fundamental period, in ``x``'s own units. Defaults to
+        twice the candidate points' own x-range -- with no other
+        periodicity known a priori (unlike, say, a fixed instrumental
+        artifact frequency), this treats the observed range as half a
+        cycle, i.e. one smooth rise-and-fall by default, the most
+        common real "rolling baseline" shape -- rather than guessing
+        at a shorter, oscillation-prone period that would just
+        overfit noise.
 
-    if len(x_base) < 3:
+    Returns
+    -------
+    coeffs, period : ndarray, float
+        ``coeffs = [a0, a1, b1, a2, b2, ...]``, length
+        ``2*n_harmonics + 1``. Evaluate with
+        :func:`evaluate_baseline_sinusoidal`.
+    """
+    x_base, y_base = _select_baseline_candidates(x, y, baseline_regions, frac)
+
+    min_points = 2 * n_harmonics + 2
+    if len(x_base) < min_points:
         raise ValueError("Not enough points available for baseline estimation.")
 
-    if x_ref is None:
-        x_ref = np.mean(x_base)
+    if period is None:
+        span = x_base.max() - x_base.min()
+        period = 2 * span if span > 0 else 1.0
 
-    xc = x_base - x_ref
+    def _design_matrix(xb):
+        cols = [np.ones_like(xb)]
+        for k in range(1, n_harmonics + 1):
+            w = 2 * np.pi * k / period
+            cols.append(np.cos(w * xb))
+            cols.append(np.sin(w * xb))
+        return np.column_stack(cols)
 
-    A = np.column_stack([np.ones_like(xc), xc])
+    A = _design_matrix(x_base)
     coeff, *_ = np.linalg.lstsq(A, y_base, rcond=None)
 
     keep = np.ones(len(y_base), dtype=bool)
-
-    # Each pass: score every candidate point's residual against the
-    # *current* fit, then only refit once membership (`keep`) actually
-    # changes -- so a refit always incorporates the outlier exclusion
-    # that motivated it, and the loop naturally converges once no
-    # further points are added or dropped.
     for _ in range(max_iter):
-
         residual = y_base - A @ coeff
         median = np.median(residual)
         mad = np.median(np.abs(residual - median))
@@ -191,7 +349,7 @@ def estimate_baseline_robust(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
 
         new_keep = np.abs(residual - median) <= sigma * noise
 
-        if np.sum(new_keep) < 3:
+        if np.sum(new_keep) < min_points:
             break
 
         if np.array_equal(new_keep, keep):
@@ -200,7 +358,19 @@ def estimate_baseline_robust(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
         keep = new_keep
         coeff, *_ = np.linalg.lstsq(A[keep], y_base[keep], rcond=None)
 
-    return coeff[0], coeff[1], x_ref
+    return coeff, period
+
+
+def evaluate_baseline_sinusoidal(coeffs, period, x):
+    """Evaluate an :func:`estimate_baseline_sinusoidal` fit at ``x``."""
+    x = np.asarray(x, dtype=float)
+    n_harmonics = (len(coeffs) - 1) // 2
+    total = np.full_like(x, coeffs[0])
+    for k in range(1, n_harmonics + 1):
+        w = 2 * np.pi * k / period
+        a_k, b_k = coeffs[2 * k - 1], coeffs[2 * k]
+        total = total + a_k * np.cos(w * x) + b_k * np.sin(w * x)
+    return total
 
 
 def estimate_baseline_spline(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
