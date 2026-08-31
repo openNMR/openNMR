@@ -11,3 +11,4 @@ For fitting, users should be allowed to supply min/max values
 For fitting 2-d data, users should be allowed to skip out certain slices (especially if the data is just noise - fitting will never converge well)
 When fitting T1s, T2s etc, users should be allowed to add their fitted values to plots, and the display of fitted values needs to be clearer/more prominent
 CRITICAL: When loading dense data, the script fails entirely, saying "tuple index out of range" - no other warnings obvious
+There should be an option for plotting/overlaying multiple 1-d spectra: either with a user-defined vertical offset, or with a heatmap (as in NMR1dplot)
