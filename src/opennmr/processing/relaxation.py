@@ -135,6 +135,18 @@ def stejskal_tanner_decay_stretched(b, I0, D, beta):
     return I0 * np.exp(-(b * D) ** beta)
 
 
+def stejskal_tanner_decay_biexponential(b, I0a, Da, I0b, Db):
+    """Sum of two independent Stejskal-Tanner components -- for two
+    genuinely distinct diffusing populations (e.g. bound/free water,
+    or two chemically distinct species) resolved as two separate
+    diffusion coefficients, rather than :func:`stejskal_tanner_decay_
+    stretched`'s single smeared-out distribution. Same shape as
+    :func:`biexponential_decay` with ``b`` substituted for ``t`` and
+    ``D`` for the rate constant -- see :func:`stejskal_tanner_decay`'s
+    own docstring for why that substitution is exact here."""
+    return I0a * np.exp(-b * Da) + I0b * np.exp(-b * Db)
+
+
 # Registry: name -> (function, param names, default p0 fn, default bounds fn)
 # p0/bounds functions take (t, y) and return a list matching param order.
 
@@ -218,6 +230,33 @@ def _bounds_diffusion_stretched(b, y):
     return (lo + [0.05], hi + [1.5])
 
 
+def _p0_diffusion_biexp(b, y):
+    # Same reasoning as _p0_diffusion (D needs a b-range-scaled guess,
+    # not _p0_biexp_decay's own delay-median-based one) applied to two
+    # components -- deliberately far apart (a 10x spread, not
+    # _p0_biexp_decay's own narrower 0.3x/2x) so the fit starts from
+    # two genuinely distinct components, and centred higher than a
+    # first attempt at this guess (20/b_max, 2/b_max, not 5/b_max,
+    # 0.5/b_max): tuned empirically against fit_relaxation's own actual
+    # curve_fit call (bounds + x_scale="jac", not a bare unconstrained
+    # fit) -- confirmed a materially different convergence outcome for
+    # the exact same starting point once real (even very loose) bounds
+    # are present, since that changes which scipy solver runs at all.
+    # The "fast" guess in particular has to decay substantially within
+    # the b-range actually sampled, not just mildly -- a guess that's
+    # still nearly flat across the whole sampled range gives curve_fit
+    # no curvature to distinguish it from a constant/offset early on,
+    # which is enough to derail convergence even for well-separated
+    # true values.
+    I0 = np.max(np.abs(y)) if np.max(np.abs(y)) > 0 else 1.0
+    b_max = np.max(b[b > 0]) if np.any(b > 0) else 1.0
+    return [I0 * 0.5, 20.0 / b_max, I0 * 0.5, 2.0 / b_max]
+
+
+def _bounds_diffusion_biexp(b, y):
+    return ([-np.inf, 1e-15, -np.inf, 1e-15], [np.inf, np.inf, np.inf, np.inf])
+
+
 RELAXATION_MODELS = {
     "saturation_recovery": {
         "func": saturation_recovery, "params": ["M0", "T1"],
@@ -254,6 +293,10 @@ RELAXATION_MODELS = {
     "stejskal_tanner_stretched": {
         "func": stejskal_tanner_decay_stretched, "params": ["I0", "D", "beta"],
         "p0": _p0_diffusion_stretched, "bounds": _bounds_diffusion_stretched, "rate_param": "D",
+    },
+    "stejskal_tanner_biexponential": {
+        "func": stejskal_tanner_decay_biexponential, "params": ["I0a", "Da", "I0b", "Db"],
+        "p0": _p0_diffusion_biexp, "bounds": _bounds_diffusion_biexp, "rate_param": None,
     },
 }
 

@@ -78,6 +78,7 @@ _RELAXATION_MODEL_ITEMS = [
 _DIFFUSION_MODEL_ITEMS = [
     ("Stejskal-Tanner (D)", "stejskal_tanner"),
     ("Stejskal-Tanner, stretched (D)", "stejskal_tanner_stretched"),
+    ("Stejskal-Tanner, biexponential (Da/Db)", "stejskal_tanner_biexponential"),
 ]
 
 _WINDOW_ITEMS = [

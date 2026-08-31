@@ -4591,6 +4591,47 @@ def test_main_window_diffusion_fit_recovers_known_d(qapp):
     assert window.fit_canvas.ax.get_xlabel() == "b-value (s/m²)"
 
 
+def test_main_window_biexponential_diffusion_fit_recovers_known_ds(qapp):
+    # Multicomponent PFG fitting -- explicit user feedback asking for
+    # this specifically. rate_param is None for this model (two D
+    # values, not one), so the results label falls back to showing
+    # every fitted parameter rather than a single "D = ..." summary.
+    from opennmr.processing.relaxation import stejskal_tanner_decay_biexponential
+
+    I0a_true, Da_true, I0b_true, Db_true = 0.4, 0.5e-9, 0.6, 5.0e-9
+    b_values = np.linspace(0.0, 4.0e9, 20)
+    ppm = np.linspace(3.0, 7.0, 800)
+    x0, fwhm = 5.0, 0.05
+    data = np.zeros((len(b_values), len(ppm)))
+    for i, b in enumerate(b_values):
+        amplitude = stejskal_tanner_decay_biexponential(b, I0a_true, Da_true, I0b_true, Db_true)
+        data[i] = gaussian(ppm, x0, fwhm, amplitude)
+    f1_axis = NMRAxis(kind="index", index=np.arange(1, len(b_values) + 1))
+    f2_axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    spectrum = NMRSpectrum(
+        data=data, axes=[f1_axis, f2_axis],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True),
+    )
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=x0, fwhm=fwhm, eta=0.0)
+    window.fit_type_combo.setCurrentIndex(1)  # Diffusion (PFG)
+    window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    window.manual_delays_edit.setText(", ".join(f"{b:.6g}" for b in b_values))
+    biexp_index = next(
+        i for i in range(window.relaxation_model_combo.count())
+        if window.relaxation_model_combo.itemData(i) == "stejskal_tanner_biexponential"
+    )
+    window.relaxation_model_combo.setCurrentIndex(biexp_index)
+
+    _fit_spectrum_then_curve(window)
+
+    results_text = window.analysis_results_label.text()
+    assert "Da" in results_text and "Db" in results_text
+    assert window.canvas_tabs.currentWidget() is window.fit_canvas
+
+
 # ============================================================
 # Analysis-tab state siloed per spectrum
 # ============================================================

@@ -74,12 +74,25 @@ def test_stejskal_tanner_decay_stretched_beta_one_matches_plain():
     )
 
 
+def test_stejskal_tanner_decay_biexponential_known_points():
+    # b=0: both components at full amplitude, matching biexponential_decay's own known-point test.
+    assert relaxation.stejskal_tanner_decay_biexponential(0.0, 1.0, 2e-9, 3.0, 4e-9) == pytest.approx(4.0)
+
+
+def test_stejskal_tanner_decay_biexponential_reduces_to_single_component():
+    # Both components identical -> same as a single Stejskal-Tanner decay of double the amplitude.
+    b = np.linspace(0, 5e9, 20)
+    biexp = relaxation.stejskal_tanner_decay_biexponential(b, 2.0, 1.5e-9, 2.0, 1.5e-9)
+    mono = relaxation.stejskal_tanner_decay(b, 4.0, 1.5e-9)
+    np.testing.assert_allclose(biexp, mono)
+
+
 def test_relaxation_models_registry_contains_expected_keys():
     assert set(relaxation.RELAXATION_MODELS) == {
         "saturation_recovery", "inversion_recovery", "exponential_decay",
         "biexponential_decay", "biexponential_recovery",
         "stretched_decay", "stretched_recovery",
-        "stejskal_tanner", "stejskal_tanner_stretched",
+        "stejskal_tanner", "stejskal_tanner_stretched", "stejskal_tanner_biexponential",
     }
 
 
@@ -261,6 +274,32 @@ def test_fit_relaxation_recovers_stretched_stejskal_tanner():
 
     assert fit["params"]["D"] == pytest.approx(D_true, rel=5e-2)
     assert fit["params"]["beta"] == pytest.approx(beta_true, rel=5e-2)
+
+
+def test_fit_relaxation_recovers_biexponential_diffusion_coefficients():
+    # Two well-separated components (a "fast" and a "slow" diffuser,
+    # e.g. bound/free water) -- widely separated on purpose, matching
+    # _p0_diffusion_biexp's own reasoning, so the fit has a real chance
+    # of resolving two genuinely distinct components rather than both
+    # guesses collapsing onto the same value.
+    I0a_true, Da_true, I0b_true, Db_true = 3.0, 0.5e-9, 5.0, 5.0e-9
+    b = np.linspace(0.0, 4.0e9, 24)
+    y = relaxation.stejskal_tanner_decay_biexponential(b, I0a_true, Da_true, I0b_true, Db_true)
+
+    fit = relaxation.fit_relaxation(b, y, model="stejskal_tanner_biexponential")
+
+    assert fit["rate_param"] is None
+    # Component order isn't identifiable from the data alone (the
+    # model is symmetric under swapping the two) -- accept either
+    # assignment as a correct recovery.
+    fitted = fit["params"]
+    as_found = {(fitted["I0a"], fitted["Da"]), (fitted["I0b"], fitted["Db"])}
+    true_pairs = {(I0a_true, Da_true), (I0b_true, Db_true)}
+    for (i0_found, d_found), (i0_true, d_true) in zip(
+        sorted(as_found, key=lambda p: p[1]), sorted(true_pairs, key=lambda p: p[1]),
+    ):
+        assert i0_found == pytest.approx(i0_true, rel=1e-2)
+        assert d_found == pytest.approx(d_true, rel=1e-2)
 
 
 def test_fit_relaxation_fixed_parameter_is_held_fixed():
