@@ -3592,7 +3592,7 @@ def test_main_window_integrate_regions_feeds_fit_curve_recovers_known_t2(qapp):
     window._add_region_row(4.5, 5.5)
     window._on_integrate_regions_clicked()
 
-    assert "Integrated" in window.analysis_results_label.text()
+    assert "Integrated" in window.integration_results_label.text()
     assert window.view_slice_fit_spin.isEnabled() is False  # no peak-fit-shaped viewer for this
     assert window.value_source_combo.currentData() == "integral"
 
@@ -4094,12 +4094,73 @@ def test_main_window_clear_resets_analysis_tab(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path), vendor="bruker")
     window._add_peak_row(shift=5.0, fwhm=0.1, eta=0.5)
     window.analysis_results_label.setText("Peak 1: T2 = 1 ms")
+    window.integration_results_label.setText("Integrated 1 slice(s) across 1 region(s)")
 
     window._on_clear_clicked()
 
     assert window.peak_table.rowCount() == 0
     assert window.analysis_results_label.text() == ""
+    assert window.integration_results_label.text() == ""
     assert "pseudo-2D" in window.analysis_status_label.text()
+
+
+# ============================================================
+# Analysis tab restructure: Peak Picking / Integration split,
+# Advanced (fit tolerance/S-N) collapsed by default
+# ============================================================
+
+def test_main_window_peak_picking_and_integration_are_separate_subtabs(qapp):
+    # Explicit user feedback: the combined "Spectral Fitting" sub-tab
+    # held peak-picking, integration, and fit-bounds tuning all at
+    # once -- "too much information at once for casual users". Peak
+    # Picking and Integration (alternative "step 1"s, per their own
+    # tooltips) are now separate sub-tabs.
+    window = MainWindow()
+    labels = [window.analysis_sub_tabs.tabText(i) for i in range(window.analysis_sub_tabs.count())]
+    assert labels == ["Peak Picking", "Integration", "Curve Fitting", "VOCS", "Imaging"]
+
+    peak_picking_tab = window.analysis_sub_tabs.widget(0)
+    integration_tab = window.analysis_sub_tabs.widget(1)
+    assert peak_picking_tab.isAncestorOf(window.peak_table)
+    assert integration_tab.isAncestorOf(window.region_table)
+    assert not peak_picking_tab.isAncestorOf(window.region_table)
+    assert not integration_tab.isAncestorOf(window.peak_table)
+
+
+def test_main_window_peak_advanced_section_collapsed_by_default(qapp):
+    # Position tolerance / S-N gating are fit-tuning knobs a casual
+    # user's first fit never needs -- tucked behind a disclosure
+    # toggle, not removed (same widgets/attributes as before, still
+    # fully usable once expanded).
+    window = MainWindow()
+    assert window.peak_advanced_toggle.isChecked() is False
+    assert window.peak_advanced_content.isHidden() is True
+
+    window.peak_advanced_toggle.setChecked(True)
+
+    assert window.peak_advanced_content.isHidden() is False
+    # The actual tuning controls really are inside it, not just the
+    # toggle button itself changing state independently.
+    assert window.peak_advanced_content.isAncestorOf(window.position_tolerance_spin)
+    assert window.peak_advanced_content.isAncestorOf(window.sn_noise_region_edit)
+    assert window.peak_advanced_content.isAncestorOf(window.sn_threshold_spin)
+
+
+def test_main_window_integration_results_persist_across_reselection(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, name="second1d"), vendor="bruker")
+    first_index = 0
+    window._on_selection_changed(first_index)
+    window._add_region_row(1.0, 2.0)
+    window.integration_results_label.setText("Integrated 1 slice(s) across 1 region(s)")
+    window._save_current_analysis_state()
+
+    window._on_selection_changed(1)
+    assert window.integration_results_label.text() == ""  # a different spectrum's own state
+
+    window._on_selection_changed(first_index)
+    assert "Integrated" in window.integration_results_label.text()
 
 
 # ============================================================

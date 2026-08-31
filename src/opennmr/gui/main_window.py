@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
-    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import io
@@ -593,6 +593,49 @@ class MainWindow(QMainWindow):
         row.addWidget(next_button)
         return row, prev_button, next_button
 
+    @staticmethod
+    def _collapsible_section(title: str, content: QWidget, expanded: bool = False) -> tuple[QWidget, QToolButton]:
+        """A disclosure toggle wrapping ``content`` -- collapsed by
+        default, so a side panel's rarely-touched tuning controls
+        don't count toward the vertical space a casual user's default
+        view needs (explicit user feedback: the old single Spectral
+        Fitting sub-tab crammed peak-picking, integration, and per-fit
+        tolerance/S-N tuning into one always-visible stack -- "too
+        much information at once for casual users"). Qt has no native
+        collapsible group box; built from a checkable QToolButton
+        (its arrow indicator flips open/closed) driving ``content``'s
+        own visibility. Returns ``(container, toggle_button)`` -- the
+        caller stores the button itself only if a test needs to click
+        it directly, same convention as :meth:`_spin_with_step_buttons`.
+        A test checking the collapsed/expanded state should assert on
+        ``content.isHidden()`` (this project's own established
+        convention, e.g. ``fid_processing_box``), not ``isVisible()``
+        -- the latter is always ``False`` in these headless tests
+        regardless of this toggle, since the window itself is never
+        actually shown; only ``content``'s own explicit flag, not
+        composed ancestor visibility, is meaningful here."""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        toggle = QToolButton()
+        toggle.setText(title)
+        toggle.setCheckable(True)
+        toggle.setChecked(expanded)
+        toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        toggle.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
+        content.setVisible(expanded)
+
+        def _on_toggled(checked: bool) -> None:
+            toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+            content.setVisible(checked)
+
+        toggle.toggled.connect(_on_toggled)
+        layout.addWidget(toggle)
+        layout.addWidget(content)
+        return container, toggle
+
     # ============================================================
     # Data tab: open / list / remove / nucleus override
     # ============================================================
@@ -999,6 +1042,7 @@ class MainWindow(QMainWindow):
         self._update_compare_tab_visibility()
         self.peak_table.setRowCount(0)
         self.analysis_results_label.setText("")
+        self.integration_results_label.setText("")
         self.spectral_fit_params_label.setText("")
         self.analysis_status_label.setText("Select a pseudo-2D spectrum (e.g. a T1/T2 relaxation series) to fit.")
         self._current_analysis_index = None
@@ -4030,14 +4074,19 @@ class MainWindow(QMainWindow):
         self.analysis_status_label.setWordWrap(True)
         layout.addWidget(self.analysis_status_label)
 
-        # Two sub-tabs -- Spectral Fitting (peak-shape fit against one
-        # spectrum/slice) and Curve Fitting (relaxation/diffusion fit
-        # against a peak's per-slice series) -- were previously one
-        # long stacked panel; splitting them leaves room for future
-        # analysis modes (e.g. VOCS) as further sub-tabs without the
+        # Sub-tabs -- Peak Picking (peak-shape fit against one
+        # spectrum/slice), Integration (peak-fitting-free alternative
+        # producing the same per-slice value), and Curve Fitting
+        # (relaxation/diffusion fit against a peak's per-slice series)
+        # -- were previously one long stacked panel (Peak Picking and
+        # Integration were a single "Spectral Fitting" tab); split
+        # further per explicit feedback that combined tab held too
+        # much information at once for a casual user, leaving room for
+        # future analysis modes as further sub-tabs without any one
         # panel growing without bound.
         self.analysis_sub_tabs = QTabWidget()
-        self.analysis_sub_tabs.addTab(self._build_spectral_fitting_subtab(), "Spectral Fitting")
+        self.analysis_sub_tabs.addTab(self._build_peak_picking_subtab(), "Peak Picking")
+        self.analysis_sub_tabs.addTab(self._build_integration_subtab(), "Integration")
         self.analysis_sub_tabs.addTab(self._build_curve_fitting_subtab(), "Curve Fitting")
         self.analysis_sub_tabs.addTab(self._build_vocs_subtab(), "VOCS")
         self.analysis_sub_tabs.addTab(self._build_imaging_subtab(), "Imaging")
@@ -4045,7 +4094,7 @@ class MainWindow(QMainWindow):
 
         return tab
 
-    def _build_spectral_fitting_subtab(self) -> QWidget:
+    def _build_peak_picking_subtab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
@@ -4128,6 +4177,17 @@ class MainWindow(QMainWindow):
         prominence_row.addWidget(self.auto_pick_prominence_spin)
         peak_layout.addLayout(prominence_row)
 
+        # Position tolerance / S-N gating are fit-quality tuning knobs,
+        # not part of picking a peak itself -- a casual user's first
+        # fit never needs them (both already have sensible defaults).
+        # Collapsed by default so they don't add to what a first-time
+        # user has to read past to find Fit Spectrum, below; still
+        # exactly the same widgets/attributes, just tucked behind a
+        # disclosure toggle rather than removed or renamed.
+        advanced_content = QWidget()
+        advanced_layout = QVBoxLayout(advanced_content)
+        advanced_layout.setContentsMargins(0, 4, 0, 0)
+
         tolerance_row = QHBoxLayout()
         tolerance_row.addWidget(QLabel("Position tolerance:"))
         self.position_tolerance_spin = QDoubleSpinBox()
@@ -4145,7 +4205,7 @@ class MainWindow(QMainWindow):
             "value is effectively unconstrained."
         )
         tolerance_row.addWidget(self.position_tolerance_spin)
-        peak_layout.addLayout(tolerance_row)
+        advanced_layout.addLayout(tolerance_row)
 
         noise_row = QHBoxLayout()
         noise_row.addWidget(QLabel("Noise region (ppm):"))
@@ -4160,7 +4220,7 @@ class MainWindow(QMainWindow):
             "disable (every peak fits normally regardless of S/N)."
         )
         noise_row.addWidget(self.sn_noise_region_edit)
-        peak_layout.addLayout(noise_row)
+        advanced_layout.addLayout(noise_row)
 
         sn_threshold_row = QHBoxLayout()
         sn_threshold_row.addWidget(QLabel("S/N threshold:"))
@@ -4171,10 +4231,15 @@ class MainWindow(QMainWindow):
         self.sn_threshold_spin.setValue(3.0)
         self.sn_threshold_spin.setToolTip("Only used when Noise region above is set.")
         sn_threshold_row.addWidget(self.sn_threshold_spin)
-        peak_layout.addLayout(sn_threshold_row)
+        advanced_layout.addLayout(sn_threshold_row)
+
+        advanced_section, self.peak_advanced_toggle = self._collapsible_section(
+            "Advanced (fit tolerance and S/N)", advanced_content,
+        )
+        self.peak_advanced_content = advanced_content  # for tests -- see isHidden's own note in _collapsible_section
+        peak_layout.addWidget(advanced_section)
 
         layout.addWidget(peak_box)
-        layout.addWidget(self._build_region_box())
 
         fit_button = QPushButton("Fit Spectrum")
         fit_button.setToolTip(
@@ -4218,6 +4283,25 @@ class MainWindow(QMainWindow):
             "slice shown above, one line per peak."
         )
         layout.addWidget(self.spectral_fit_params_label)
+
+        layout.addStretch(1)
+        return tab
+
+    def _build_integration_subtab(self) -> QWidget:
+        """Region integration -- the peak-fitting-free alternative to
+        Peak Picking's own Fit Spectrum for producing a per-slice value
+        Fit Curve can use. Split out into its own sub-tab (previously
+        stacked directly under Peak Picking's own peak table/tuning
+        controls) since the two are alternative "step 1"s, not part of
+        the same flow -- explicit user feedback that the combined tab
+        held too much at once for a casual user to take in."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(self._build_region_box())
+
+        self.integration_results_label = QLabel("")
+        self.integration_results_label.setWordWrap(True)
+        layout.addWidget(self.integration_results_label)
 
         layout.addStretch(1)
         return tab
@@ -5253,13 +5337,20 @@ class MainWindow(QMainWindow):
         there at all. Doesn't touch ``view_slice_fit_spin``/the
         Spectral Fit canvas, though -- :meth:`_display_slice_fit`
         needs a real peak-fit shape (``popt``/``pcov``/``peak_defs``/
-        ``y_fit``), which a plain integral has no equivalent of."""
+        ``y_fit``), which a plain integral has no equivalent of.
+        Writes into ``integration_results_label`` (the Integration
+        sub-tab's own results display), not ``analysis_results_label``
+        (Peak Picking's) -- the two used to share one label back when
+        both lived on the same "Spectral Fitting" sub-tab, still
+        cleared here for the same reason (a stale peak-fit params
+        display from an earlier Fit Spectrum run would be misleading
+        once results come from a plain integral instead)."""
         self._store_slice_results(spectrum, results)
         self.view_slice_fit_spin.blockSignals(True)
         self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.blockSignals(False)
         self.spectral_fit_params_label.setText("")
-        self.analysis_results_label.setText(
+        self.integration_results_label.setText(
             f"Integrated {len(results)} slice(s) across {n_regions} region(s) -- "
             f"ready for Fit Curve (Value source: Integrated area)."
         )
@@ -5658,6 +5749,7 @@ class MainWindow(QMainWindow):
             "sn_noise_region": self.sn_noise_region_edit.text(),
             "sn_threshold": self.sn_threshold_spin.value(),
             "results_text": self.analysis_results_label.text(),
+            "integration_results_text": self.integration_results_label.text(),
         }
 
     def _save_current_analysis_state(self) -> None:
@@ -5670,6 +5762,7 @@ class MainWindow(QMainWindow):
         self.peak_table.setRowCount(0)
         self.region_table.setRowCount(0)
         self.analysis_results_label.setText("")
+        self.integration_results_label.setText("")
         self.spectral_fit_params_label.setText("")
 
         state = spectrum.metadata.raw.get("analysis_state")
@@ -5718,6 +5811,7 @@ class MainWindow(QMainWindow):
             self.sn_noise_region_edit.setText(state.get("sn_noise_region", ""))
             self.sn_threshold_spin.setValue(state.get("sn_threshold", 3.0))
             self.analysis_results_label.setText(state["results_text"])
+            self.integration_results_label.setText(state.get("integration_results_text", ""))
 
         self._slice_fit_results = spectrum.metadata.raw.get("slice_fit_results")
         # Only a real peak fit (popt/pcov/peak_defs/y_fit) can be shown
