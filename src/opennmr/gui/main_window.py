@@ -2400,7 +2400,18 @@ class MainWindow(QMainWindow):
 
         dt_f1 = spectrum.metadata.raw.get("fid_dt_f1")
         if not spectrum.is_pseudo_2d and dt_f1:
-            si1 = spectrum.data.shape[0]  # F1's own current length -- unaffected by F2-only controls
+            # Same hypercomplex row-pair decode read_2d itself does,
+            # before its own F1 FFT -- `data` here still has the raw,
+            # undecoded row count (every row of fid_raw processed
+            # independently above), so skipping this would silently
+            # feed States/States-TPPI/Echo-Antiecho data into zero_fill
+            # at the wrong row count instead of a genuine hypercomplex
+            # point per t1 increment, the moment any F2-only control
+            # changes live -- exactly the "two pipelines quietly
+            # diverge" bug this whole round's own architecture change
+            # was about closing.
+            data = processing_ft.decode_hypercomplex_f1(data, spectrum.metadata.raw.get("fn_mode", 1))
+            si1 = spectrum.data.shape[0]  # F1's own current (already-decoded) length -- unaffected by F2-only controls
             f1_filled = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, data)
             data = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, dt_f1)[1], 0, f1_filled)
             ppm1 = spectrum.axes[0].ppm

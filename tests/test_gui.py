@@ -1646,7 +1646,8 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1"):
     return str(expt)
 
 
-def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d", f1_nuc="13C", ns=1.0):
+def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d", f1_nuc="13C", ns=1.0,
+                          fn_mode=None, fid=None):
     from opennmr.io import bruker as bruker_io
 
     expt = tmp_path / name
@@ -1662,9 +1663,12 @@ def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d
     # parsed off disk -- matching real Bruker behaviour (nmrglue reads
     # every acqu*s/proc*s file itself as part of one `read()` call).
     acqu2s = {"NUC1": f1_nuc, "BF1": 100.6, "O1": 0.0}
-    t2 = np.arange(n_f2) / 8000.0
-    row = np.exp(-t2 * 300) * np.exp(2j * np.pi * 1000.0 * t2)
-    fid = np.tile(row, (n_f1, 1)).astype(np.complex128)
+    if fn_mode is not None:
+        acqu2s["FnMODE"] = fn_mode
+    if fid is None:
+        t2 = np.arange(n_f2) / 8000.0
+        row = np.exp(-t2 * 300) * np.exp(2j * np.pi * 1000.0 * t2)
+        fid = np.tile(row, (n_f1, 1)).astype(np.complex128)
     dic = {"acqus": acqus, "acqu2s": acqu2s}
     monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
@@ -2596,6 +2600,65 @@ def test_main_window_f1_phase_persists_across_live_fid_control_change(qapp, tmp_
     window._recompute_multi_row_data(spectrum)
     without_f1_phase = spectrum.data
     assert not np.allclose(with_f1_phase, without_f1_phase)
+
+
+def _states_tppi_row_paired_fid(n_f1=4, n_f2=32, sw1=2000.0, sw2=8000.0, f1_hz=None):
+    # Same forward model as test_bruker_raw_2d.py's own
+    # _synthetic_hypercomplex_2d_fid -- a States-TPPI-encoded raw
+    # row-pair series (2*n_f1 rows) for a known F1 frequency.
+    if f1_hz is None:
+        f1_hz = 3 * (sw1 / n_f1)
+    t2 = np.arange(n_f2) / sw2
+    f2signal = np.exp(-t2 * 300) * np.exp(2j * np.pi * 1000.0 * t2)
+    rows = []
+    for k in range(n_f1):
+        sign = -1.0 if k % 2 else 1.0
+        phase = 2 * np.pi * f1_hz * (k / sw1)
+        rows.append(sign * np.cos(phase) * f2signal)
+        rows.append(sign * np.sin(phase) * f2signal)
+    return np.array(rows, dtype=np.complex128), f1_hz
+
+
+def test_main_window_live_recompute_redoes_hypercomplex_decode_for_states_tppi(qapp, tmp_path, monkeypatch):
+    # Regression test for a real integration gap found while wiring up
+    # States/States-TPPI/Echo-Antiecho F1 decoding: read_2d itself
+    # decodes correctly at load time, but _recompute_multi_row_data (a
+    # *separate* code path, used for every live F2-only control change
+    # on a conventional 2D) redoes F1's FFT from fid_raw's own
+    # still-undecoded row count -- without also redoing the same
+    # hypercomplex decode there, the very first live control change on
+    # a States-TPPI dataset would silently revert to the old, wrong
+    # behaviour even though the initial load was correct.
+    n_f1 = 4
+    fid, _ = _states_tppi_row_paired_fid(n_f1=n_f1, n_f2=32)
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=n_f1, n_f2=32, name="statestppi2d", fn_mode=5, fid=fid)
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    index = window._selected_index()
+    window.process_indirect_button.setChecked(True)
+    spectrum = window.session.spectra[index]
+    assert spectrum.metadata.raw["fn_mode"] == 5
+
+    def f1_peak_index(spec):
+        projection = np.abs(spec.data + 1j * spec.data_imag).sum(axis=1)
+        return int(np.argmax(projection))
+
+    initial_rows = spectrum.data.shape[0]
+    assert initial_rows == n_f1  # decoded at load time -- not left at the raw 2*n_f1
+    # read_2d's own load-time decode is already covered/validated
+    # elsewhere (test_bruker_raw_2d.py, against an exact Hz target) --
+    # here, comparing the live-recompute's peak row against this
+    # already-correct baseline avoids re-deriving _ppm_hz_axis's own
+    # SF/O1 referencing convention by hand for a 4-point fixture.
+    initial_peak_index = f1_peak_index(spectrum)
+
+    # A live F2-only control change routes through _recompute_multi_row_data
+    window.fid_shift_spin.setValue(0.5)
+    _settle_live_reprocess(window)
+
+    recomputed = window.session.spectra[index]
+    assert recomputed.data.shape[0] == n_f1  # still decoded, not doubled back to the raw row count
+    assert f1_peak_index(recomputed) == initial_peak_index
 
 
 def test_main_window_reprocess_updates_both_spectrum_and_fid_canvases(qapp, tmp_path):

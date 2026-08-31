@@ -242,6 +242,139 @@ def test_prepare_fid_skips_lp_when_no_order_is_valid():
     np.testing.assert_allclose(result, fid)
 
 
+def test_decode_hypercomplex_f1_passes_through_unpaired_modes():
+    data = np.arange(12, dtype=complex).reshape(4, 3)
+    for fn_mode in (0, 1, 2, 3):
+        np.testing.assert_array_equal(ft.decode_hypercomplex_f1(data, fn_mode), data)
+
+
+def test_decode_hypercomplex_f1_states():
+    # Row 2k is the real/"cosine" row, 2k+1 the imaginary/"sine" row,
+    # for the same t1 increment k -- decoded[k] = row[2k] + 1j*row[2k+1].
+    data = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]], dtype=complex)
+    decoded = ft.decode_hypercomplex_f1(data, fn_mode=4)
+    expected = np.array([[1 + 4j, 2 + 5j, 3 + 6j], [7 + 10j, 8 + 11j, 9 + 12j]])
+    np.testing.assert_allclose(decoded, expected)
+
+
+def test_decode_hypercomplex_f1_states_tppi_alternates_sign():
+    # Same row-pairing as plain States, plus every other hypercomplex
+    # point negated -- displaces the axial artifact peak to the edge
+    # of F1 instead of its centre.
+    data = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]], dtype=complex)
+    decoded = ft.decode_hypercomplex_f1(data, fn_mode=5)
+    expected = np.array([[1 + 4j, 2 + 5j, 3 + 6j], [-(7 + 10j), -(8 + 11j), -(9 + 12j)]])
+    np.testing.assert_allclose(decoded, expected)
+
+
+def test_decode_hypercomplex_f1_echo_antiecho():
+    echo = np.array([1, 2, 3], dtype=complex)
+    antiecho = np.array([4, 5, 6], dtype=complex)
+    decoded = ft.decode_hypercomplex_f1(np.array([echo, antiecho]), fn_mode=6)
+    expected = (echo + antiecho) + 1j * (echo - antiecho)
+    np.testing.assert_allclose(decoded, [expected])
+
+
+def test_decode_hypercomplex_f1_drops_trailing_unpaired_row():
+    data = np.arange(15, dtype=complex).reshape(5, 3)  # 5 rows: 2 full pairs + 1 leftover
+    decoded = ft.decode_hypercomplex_f1(data, fn_mode=4)
+    assert decoded.shape == (2, 3)
+
+
+def _synthetic_states_pair_dataset(f1_hz, n1=16, n2=8, dt1=1e-3, states_tppi=False):
+    # Forward model matching decode_hypercomplex_f1's own docstring:
+    # row_R(t1) = cos(2*pi*f1_hz*t1) * f2signal, row_I(t1) = sin(...) *
+    # f2signal -- a States (or States-TPPI, if the receiver-phase sign
+    # alternation is also applied going in) encoded raw row-pair series
+    # for a single, known F1 frequency.
+    t2 = np.arange(n2)
+    f2signal = np.exp(1j * 2 * np.pi * 0.1 * t2)  # arbitrary fixed F2 content, same every row
+    rows = []
+    for k in range(n1):
+        t1 = k * dt1
+        phase = 2 * np.pi * f1_hz * t1
+        sign = -1.0 if (states_tppi and k % 2) else 1.0
+        rows.append(sign * np.cos(phase) * f2signal)
+        rows.append(sign * np.sin(phase) * f2signal)
+    return np.array(rows, dtype=complex), dt1
+
+
+def test_decode_hypercomplex_f1_states_recovers_known_f1_frequency():
+    # End-to-end physical check, not just arithmetic: a States-encoded
+    # series built for a specific, known F1 frequency should FFT (after
+    # decoding) to a peak at that frequency -- and decoding first is
+    # what makes this work, not incidental (see the "regression" test
+    # below for the contrast).
+    n1, dt1 = 16, 1e-3
+    sw1 = 1.0 / dt1
+    f1_hz = 3 * (sw1 / n1)  # an exact FFT bin, safe to check by bin index
+    data, dt1 = _synthetic_states_pair_dataset(f1_hz, n1=n1, dt1=dt1)
+    decoded = ft.decode_hypercomplex_f1(data, fn_mode=4)
+    assert decoded.shape == (n1, data.shape[1])
+    spectrum = np.fft.fftshift(np.fft.fft(decoded, axis=0), axes=0)
+    power = np.abs(spectrum).sum(axis=1)
+    freqs = np.fft.fftshift(np.fft.fftfreq(n1, d=dt1))
+    assert abs(freqs[np.argmax(power)] - f1_hz) < (sw1 / n1) / 2
+
+
+def test_decode_hypercomplex_f1_skipping_decode_would_be_wrong():
+    # Regression guard for the exact bug this feature fixes: FFT-ing
+    # the raw, still-row-paired data directly (as read_2d did before
+    # decode_hypercomplex_f1 existed) does NOT recover the true F1
+    # frequency -- confirms the decode step is load-bearing, not
+    # cosmetic, for this synthetic case.
+    n1, dt1 = 16, 1e-3
+    sw1 = 1.0 / dt1
+    f1_hz = 3 * (sw1 / n1)
+    data, dt1 = _synthetic_states_pair_dataset(f1_hz, n1=n1, dt1=dt1)
+    undecoded_spectrum = np.fft.fftshift(np.fft.fft(data, axis=0), axes=0)
+    undecoded_power = np.abs(undecoded_spectrum).sum(axis=1)
+    undecoded_freqs = np.fft.fftshift(np.fft.fftfreq(data.shape[0], d=dt1))
+    assert abs(undecoded_freqs[np.argmax(undecoded_power)] - f1_hz) > (sw1 / n1)
+
+
+def test_decode_hypercomplex_f1_states_tppi_recovers_known_f1_frequency():
+    n1, dt1 = 16, 1e-3
+    sw1 = 1.0 / dt1
+    f1_hz = 3 * (sw1 / n1)
+    data, dt1 = _synthetic_states_pair_dataset(f1_hz, n1=n1, dt1=dt1, states_tppi=True)
+    decoded = ft.decode_hypercomplex_f1(data, fn_mode=5)
+    spectrum = np.fft.fftshift(np.fft.fft(decoded, axis=0), axes=0)
+    power = np.abs(spectrum).sum(axis=1)
+    freqs = np.fft.fftshift(np.fft.fftfreq(n1, d=dt1))
+    assert abs(freqs[np.argmax(power)] - f1_hz) < (sw1 / n1) / 2
+
+
+def test_decode_hypercomplex_f1_echo_antiecho_recovers_a_consistent_frequency():
+    # Self-consistency check only (see decode_hypercomplex_f1's own
+    # docstring: no real Echo-Antiecho data exists in this project to
+    # validate the absolute sign/handedness convention against). Builds
+    # an echo/antiecho pair from the standard PEP forward model
+    # (P-type/N-type complex exponentials sharing the same F2 content)
+    # and checks *a* single, well-defined frequency comes out at the
+    # expected magnitude -- not that it lands on the "positive" side.
+    n1, dt1 = 16, 1e-3
+    sw1 = 1.0 / dt1
+    f1_hz = 3 * (sw1 / n1)
+    t2 = np.arange(8)
+    f2signal = np.exp(1j * 2 * np.pi * 0.1 * t2)
+    rows = []
+    for k in range(n1):
+        t1 = k * dt1
+        phase = 2 * np.pi * f1_hz * t1
+        echo = np.exp(1j * phase) * f2signal
+        antiecho = np.exp(-1j * phase) * f2signal
+        rows.append(echo)
+        rows.append(antiecho)
+    data = np.array(rows, dtype=complex)
+    decoded = ft.decode_hypercomplex_f1(data, fn_mode=6)
+    spectrum = np.fft.fftshift(np.fft.fft(decoded, axis=0), axes=0)
+    power = np.abs(spectrum).sum(axis=1)
+    freqs = np.fft.fftshift(np.fft.fftfreq(n1, d=dt1))
+    peak_freq = abs(freqs[np.argmax(power)])
+    assert abs(peak_freq - f1_hz) < (sw1 / n1) / 2
+
+
 def test_baseline_correct_respects_explicit_baseline_regions():
     freq, true_baseline, peak = _sloped_baseline_with_peak()
     spectrum = true_baseline + peak

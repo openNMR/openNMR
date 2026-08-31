@@ -395,10 +395,14 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     (more moving parts than 1D) -- validate against
     :func:`read_2d_processed` on real data before trusting it for
     phase-sensitive work (see the project plan's Verification section).
-    Does **not** yet perform States/States-TPPI/Echo-Antiecho
-    hypercomplex row-pair decoding before the F1 FFT (flagged, not
-    silently wrong: see TODO.md) -- correctly shaped raw data is a
-    prerequisite for that, not a substitute.
+    Performs States/States-TPPI/Echo-Antiecho hypercomplex row-pair
+    decoding before the F1 FFT when ``acqu2s``'s own ``FnMODE`` calls
+    for it -- see :func:`opennmr.processing.ft.decode_hypercomplex_f1`
+    for the exact per-mode recipe. States-TPPI is validated against 5
+    real Bruker datasets; Echo-Antiecho is a best-effort implementation
+    with no real data available in this project to check it against
+    (flagged, not silently presented as certain -- see that function's
+    own docstring and TODO.md).
 
     ``pseudo_2d`` : whether F1 is a non-frequency indirect dimension
     (no FFT along that axis -- a slice/experiment index instead), i.e.
@@ -473,7 +477,15 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         o1_1 = float(acqu2s.get("O1", o1))
         sf_1 = float(proc2s.get("SF", sf))
         sw_1 = float(proc2s.get("SW_p", sw))
-    si1 = int(proc2s.get("SI", data.shape[0]))
+    # Governs whether/how F1 row-pairs get combined into genuine
+    # hypercomplex points below, before F1's own FFT -- see
+    # processing.ft.decode_hypercomplex_f1's own docstring for the
+    # exact per-mode recipe and what's/isn't validated against real
+    # data. Defaults to 1 (QF) -- a plain complex-per-row F1, needing
+    # no row-pairing -- matching every genuine (non-pseudo) 2D dataset
+    # actually in this project's test_data that doesn't record FnMODE
+    # explicitly.
+    fn_mode = int(dic.get("acqu2s", {}).get("FnMODE", 1))
 
     # ----- F2 (direct dimension): [shift/align/LP], window, zero-fill, FFT per row -----
     # Same shared step (and step order) as read_1d/xpulse.read_1d --
@@ -552,11 +564,21 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     if phase0 or phase1:
         spectrum = processing_ft.apply_phase(spectrum, x_ppm, phase0, phase1, pivot_frac=pivot_frac)
 
-    # ----- F1 (indirect dimension): zero-fill, FFT along axis 0 (skipped for pseudo-2D) -----
+    # ----- F1 (indirect dimension): hypercomplex decode, zero-fill, FFT along axis 0 (skipped for pseudo-2D) -----
     if pseudo_2d:
         y_index = np.arange(1, spectrum.shape[0] + 1)
         y_axis = NMRAxis(kind="index", index=y_index)
     else:
+        # Row-pair decode (States/States-TPPI/Echo-Antiecho) *before*
+        # zero-fill/FFT -- a no-op for FnMODE 0-3 (see
+        # decode_hypercomplex_f1's own docstring). Halves the row count
+        # for FnMODE 4/5/6, so proc2s's own recorded SI (already in
+        # terms of the *decoded* point count, matching what TopSpin
+        # itself zero-fills to) is used as-is, but the fallback -- for
+        # when SI isn't recorded at all -- must fall back to the
+        # decoded row count, not the raw pre-decode one.
+        spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode)
+        si1 = int(proc2s.get("SI", spectrum.shape[0]))
         fid_f1 = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, spectrum)
         spectrum = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, 1.0 / sw_1)[1], 0, fid_f1)
         y_ppm, y_hz = _ppm_hz_axis(o1_1, sf_1, obs_1, sw_1, si1)
@@ -571,6 +593,13 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         source_path=path, procno=procno, pseudo_2d=pseudo_2d, homonuclear=homonuclear,
         raw={
             "acqus": acqus, "procs": procs, "proc2s": proc2s, "phase0": phase0, "phase1": phase1,
+            # F1's own hypercomplex encoding (see
+            # processing.ft.decode_hypercomplex_f1) -- retrievable so a
+            # live GUI recompute that redoes F1's FFT (any F2-only
+            # control change, for a conventional 2D) can redo this
+            # decode too, rather than silently reverting to plain
+            # complex-per-row once F2's own controls change.
+            "fn_mode": fn_mode,
             # F2's fully processed (pre-FFT) FID, one row per F1
             # position -- an optional GUI preview of FID-domain
             # processing; F1 isn't included (its own FFT, when not

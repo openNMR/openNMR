@@ -95,6 +95,87 @@ def test_read_2d_heteronuclear_uses_acqu2s(tmp_path, monkeypatch):
     assert spectrum.axes[0].kind == "frequency"
 
 
+def _synthetic_hypercomplex_2d_fid(fn_mode, n1=16, n2=32, sw1=2000.0, sw2=8000.0, f0_hz=1000.0, f1_hz=None):
+    """A raw ``ser``-shaped fixture (``2*n1`` rows for States/States-
+    TPPI/Echo-Antiecho, one row-pair per t1 increment) built from the
+    same forward model as test_ft.py's own
+    ``_synthetic_states_pair_dataset``/Echo-Antiecho construction, so
+    read_2d's real pipeline (not just decode_hypercomplex_f1 in
+    isolation) can be checked to actually recover a known, chosen F1
+    frequency end-to-end."""
+    if f1_hz is None:
+        f1_hz = 3 * (sw1 / n1)  # an exact FFT bin, safe to check by bin index
+    t2 = np.arange(n2) / sw2
+    f2signal = np.exp(-t2 * 300) * np.exp(2j * np.pi * f0_hz * t2)
+    rows = []
+    for k in range(n1):
+        t1 = k / sw1
+        phase = 2 * np.pi * f1_hz * t1
+        if fn_mode == 6:  # echo-antiecho: P-type/N-type, not cos/sin
+            rows.append(np.exp(1j * phase) * f2signal)
+            rows.append(np.exp(-1j * phase) * f2signal)
+        else:
+            sign = -1.0 if (fn_mode == 5 and k % 2) else 1.0
+            rows.append(sign * np.cos(phase) * f2signal)
+            rows.append(sign * np.sin(phase) * f2signal)
+    return np.array(rows, dtype=np.complex128), f1_hz
+
+
+@pytest.mark.parametrize("fn_mode", [4, 5])
+def test_read_2d_states_and_states_tppi_recover_known_f1_frequency(tmp_path, monkeypatch, fn_mode):
+    n1, sw1 = 16, 2000.0
+    path = _make_2d_experiment_dir(tmp_path, proc2s_overrides={"SI": n1, "SW_p": sw1})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqu2s = {"NUC1": "13C", "BF1": 100.6, "O1": 0.0, "FnMODE": fn_mode}
+    fid, f1_hz = _synthetic_hypercomplex_2d_fid(fn_mode, n1=n1, sw1=sw1)
+    _mock_2d(monkeypatch, acqus, fid, acqu2s=acqu2s)
+
+    spectrum = bruker.read_2d(path, homonuclear=False, autophase=False)
+
+    assert spectrum.metadata.raw["fn_mode"] == fn_mode
+    assert spectrum.data.shape[0] == n1  # row-paired down to n1, not left at the raw 2*n1
+    f1_ppm = spectrum.axes[0].ppm
+    f1_projection = np.abs(spectrum.data + 1j * spectrum.data_imag).sum(axis=1)
+    peak_hz = f1_ppm[np.argmax(f1_projection)] * spectrum.metadata.sfo1_indirect
+    assert abs(abs(peak_hz) - f1_hz) < (sw1 / n1) * 1.5
+
+
+def test_read_2d_echo_antiecho_halves_row_count_and_records_fn_mode(tmp_path, monkeypatch):
+    # Integration-level wiring check only -- decode_hypercomplex_f1's
+    # own docstring and test_ft.py flag the Echo-Antiecho sign/
+    # handedness convention as unverified against real data, so this
+    # doesn't assert peak position, just that read_2d actually routes
+    # through the decode (shape halved, fn_mode recorded) without
+    # raising.
+    n1, sw1 = 16, 2000.0
+    path = _make_2d_experiment_dir(tmp_path, proc2s_overrides={"SI": n1, "SW_p": sw1})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqu2s = {"NUC1": "13C", "BF1": 100.6, "O1": 0.0, "FnMODE": 6}
+    fid, _ = _synthetic_hypercomplex_2d_fid(6, n1=n1, sw1=sw1)
+    _mock_2d(monkeypatch, acqus, fid, acqu2s=acqu2s)
+
+    spectrum = bruker.read_2d(path, homonuclear=False, autophase=False)
+
+    assert spectrum.metadata.raw["fn_mode"] == 6
+    assert spectrum.data.shape[0] == n1
+
+
+def test_read_2d_default_fn_mode_leaves_row_count_undecoded(tmp_path, monkeypatch):
+    # No FnMODE recorded at all -- defaults to 1 (QF), which is what
+    # every genuine 2D dataset actually in this project's test_data
+    # uses: already complex per row, no row-pairing. Regression guard
+    # against decode_hypercomplex_f1 accidentally triggering by default.
+    path = _make_2d_experiment_dir(tmp_path)
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_2d_fid()  # 16 raw rows, no FnMODE in acqu2s
+    _mock_2d(monkeypatch, acqus, fid)
+
+    spectrum = bruker.read_2d(path, homonuclear=True, autophase=False)
+
+    assert spectrum.metadata.raw["fn_mode"] == 1
+    assert spectrum.data.shape == (32, 64)  # unchanged from test_read_2d_homonuclear_shape
+
+
 def test_read_2d_pseudo2d_indirect_is_index_axis(tmp_path, monkeypatch):
     path = _make_2d_experiment_dir(tmp_path)
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}

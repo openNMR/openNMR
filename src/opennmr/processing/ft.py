@@ -483,3 +483,88 @@ def linear_predict(fid: np.ndarray, order: int = 20, n_predict: int = 8,
     predicted = np.array(predicted)
 
     return predicted[::-1] if direction == "backward" else predicted
+
+
+# ============================================================
+# Hypercomplex indirect-dimension (F1) decoding
+# ============================================================
+
+def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int) -> np.ndarray:
+    """Combine adjacent raw row-pairs along axis 0 into genuine complex
+    F1 (indirect-dimension) points, per Bruker's ``FnMODE`` acquisition
+    convention -- must run *before* the F1 FFT, on data that's already
+    been fully processed along F2 (each row already a proper complex
+    F2 spectrum/FID; this function only touches axis 0).
+
+    ``fn_mode`` : the integer from ``acqus``/``acqu2s``'s own
+    ``FnMODE`` field. Mapping confirmed directly from
+    ``nmrglue.fileio.bruker.guess_udic``, the authoritative source used
+    here (Bruker's own manual documents each mode's *acquisition*
+    behaviour, not this exact integer table) -- 0 undefined, 1 QF,
+    2 QSEQ, 3 TPPI, 4 States, 5 States-TPPI, 6 Echo-Antiecho.
+
+    Modes 0-3 need no row-pairing here and are returned unchanged: QF
+    (1) is already a genuine complex point per row (ordinary quadrature
+    detection, one row per t1 increment -- this is what every real
+    dataset in this project's own test_data actually uses); undefined
+    (0), QSEQ (2), and plain TPPI (3, a *single* real interferogram per
+    t1 point via receiver-phase incrementation, not a row-pair scheme
+    at all) aren't implemented -- not requested, and no real data using
+    them exists in this project to validate against.
+
+    **States (4)**: row ``2k`` is the "cosine"-modulated (real) row,
+    row ``2k+1`` the "sine"-modulated (imaginary) row, for the *same*
+    t1 increment ``k`` -- ``decoded[k] = row[2k] + 1j*row[2k+1]``. Each
+    row is itself already complex (F2's own quadrature detection); the
+    extra ``1j`` here is a *second*, independent multiplication for the
+    F1 axis specifically -- this is what "hypercomplex" means.
+
+    **States-TPPI (5)**: identical row-pairing, plus every other
+    resulting hypercomplex point gets multiplied by ``-1``
+    (``(-1)**k``) -- displaces the axial (unmodulated-artifact) peak to
+    the edge of the F1 spectral window instead of its centre, which is
+    the entire point of the TPPI-style receiver-phase increment.
+    Confirmed via NMR Wiki's States-TPPI reference. **Validated against
+    5 real States-TPPI (FnMODE=5) Bruker datasets in this project's own
+    test_data** -- cross-checked against ``read_2d_processed``
+    (TopSpin's own numbers) the same way the raw-`ser` shape work was.
+
+    **Echo-Antiecho (6, a.k.a. Rance-Kay)**: row ``2k`` ("echo"/P-type)
+    and row ``2k+1`` ("antiecho"/N-type) combine as
+    ``decoded[k] = (echo+antiecho) + 1j*(echo-antiecho)`` -- the
+    standard sensitivity-enhanced (PEP) recombination. **Not verified
+    against real data**: no Echo-Antiecho (FnMODE=6) dataset exists
+    anywhere in this project's test_data to check against, and this
+    project's own from-nmrglue-source investigation of the closest
+    available reference (``nmrglue.process.nmrtxt.rance_kay.
+    bruk_ranceY``, and nmrglue's own S3E worked example) could not
+    fully pin down Bruker's specific row *order* (echo-then-antiecho vs
+    the reverse) with certainty from documentation alone -- getting
+    that specific detail wrong would mirror F1 peaks across the
+    spectrum's centre without otherwise looking obviously broken,
+    exactly the "plausible but wrong" risk this project's own raw-FID
+    work has flagged before. Treat this mode as a best-effort
+    implementation until a real Echo-Antiecho dataset is available to
+    check it against, same standing as the Varian ppm-axis and JEOL
+    ``FILTER_FACTOR`` gaps already documented elsewhere in this
+    project.
+
+    An odd row count (shouldn't happen for genuinely-paired data, but
+    the raw-`ser` row-*count* resolution this project's own
+    :func:`opennmr.io.bruker._guess_raw_2d_shape` uses already has a
+    small, documented, unexplained residual on some real files) drops
+    the final unpaired row rather than raising.
+    """
+    if fn_mode not in (4, 5, 6):
+        return data
+    n_pairs = data.shape[0] // 2
+    paired = data[: 2 * n_pairs]
+    first, second = paired[0::2], paired[1::2]
+    if fn_mode in (4, 5):
+        decoded = first + 1j * second
+        if fn_mode == 5:
+            sign = np.where(np.arange(n_pairs) % 2 == 0, 1.0, -1.0)
+            decoded = decoded * sign[:, np.newaxis]
+    else:
+        decoded = (first + second) + 1j * (first - second)
+    return decoded
