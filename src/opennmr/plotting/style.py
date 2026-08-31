@@ -117,16 +117,17 @@ def setup_plotting(font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
     lw = pl_width / 3.375
     ticklen = lw * 5
 
-    plt.rcParams['font.sans-serif'] = [
-        'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif',
-        'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica',
-        'Avant Garde', 'sans-serif', 'Tahoma',
-    ]
+    plt.rcParams['font.sans-serif'] = [font, 'DejaVu Sans', 'Bitstream Vera Sans', 'Arial', 'Helvetica', 'sans-serif']
+
+    plt.rcParams['mathtext.fontset'] = 'custom'
+    plt.rcParams['mathtext.rm'] = font      
+    plt.rcParams['mathtext.it'] = f'{font}:italic'
+    plt.rcParams['mathtext.bf'] = f'{font}:bold'
+    plt.rcParams['mathtext.default'] = 'regular'  
 
     params = {
         'legend.fontsize': 'large',
         'font.family': 'sans-serif',
-        'font.sans-serif': font,
         'font.weight': 'regular',
         'axes.labelsize': fontsize,
         'axes.titlesize': fontsize,
