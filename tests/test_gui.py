@@ -2301,6 +2301,20 @@ def _make_xpulse_dataset(tmp_path, name="xpulse1.jdx"):
     return str(path)
 
 
+def _make_xpulse_array_experiment(tmp_path, n_steps=3, name="pfg_experiment"):
+    """A parent folder holding ``array1``..``arrayN`` subfolders, each
+    with the same synthetic 1D fixture -- mirrors X-Pulse's real PFG/
+    T1/T2 array layout (see ``opennmr.io.xpulse.read_array``), so
+    ``metadata.raw["fid_raw"]`` ends up genuinely 2D: ``(n_steps,
+    NP)``, not the plain 1D shape a single-file X-Pulse load produces."""
+    root = tmp_path / name
+    for i in range(1, n_steps + 1):
+        array_dir = root / f"array{i}"
+        array_dir.mkdir(parents=True)
+        (array_dir / f"sample_{i}_avg.jdx").write_text(_XPULSE_FIXTURE)
+    return str(root)
+
+
 def _make_xpulse_ntuples_2d_dataset(tmp_path, n1=4, n2=32, name="hsqc.jdx"):
     """A minimal synthetic NTUPLES 2D fixture -- deliberately
     asymmetric (n1 << n2, matching the real HSQC test dataset's own
@@ -2437,6 +2451,28 @@ def test_main_window_tdeff_spin_defaults_to_full_raw_fid_length_when_no_tdeff_re
     raw_length = len(window.session.spectra[index].metadata.raw["fid_raw"])
     assert window.tdeff_spin.maximum() == raw_length
     assert window.tdeff_spin.value() == raw_length
+
+
+def test_main_window_tdeff_spin_maximum_uses_per_fid_length_not_array_step_count(qapp, tmp_path):
+    # Real user report, confirmed by direct reproduction: for an
+    # arrayed X-Pulse dataset (a PFG/T1/T2 series), metadata.raw
+    # ["fid_raw"] is genuinely 2D -- (n_steps, NP). The old
+    # `len(fid_raw)` read axis 0 (the *step* count), so a real 16-step
+    # series capped Truncate's own maximum at 16 regardless of how
+    # many points were actually acquired per FID -- "I can't process
+    # more than 16 data points." Deliberately using more array steps
+    # (16) than the fixture's own per-FID point count (4) here, so the
+    # old buggy behaviour (max == 16) and the fixed one (max == 4)
+    # can't be confused with each other by coincidence.
+    window = MainWindow()
+    path = _make_xpulse_array_experiment(tmp_path, n_steps=16)
+    window._load(path, vendor="xpulse")
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+
+    assert spectrum.metadata.raw["fid_raw"].shape == (16, 4)
+    assert window.tdeff_spin.maximum() == 4
+    assert window.tdeff_spin.isEnabled() is True
 
 
 def _make_varian_dataset(tmp_path, n=8, name="varian1.fid"):

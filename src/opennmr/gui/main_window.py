@@ -2955,9 +2955,20 @@ class MainWindow(QMainWindow):
         # spectrum's own actual raw-FID length -- lets the spin box's
         # step-down arrows/scroll trim points off the end starting from
         # a meaningful place, rather than needing to count up from 1 to
-        # reach a large useful value first.
+        # reach a large useful value first. shape[-1] (not len(), which
+        # reads axis 0 -- the *array-step* count for an X-Pulse arrayed/
+        # pseudo-2D dataset's own 2D fid_raw, e.g. (16 steps, 2048
+        # points) -- would silently cap this at 16 for a real 16-step
+        # PFG/T1/T2 series, one point count short of true, same "len()
+        # reads the wrong axis for 2D input" bug already found and
+        # fixed once this session in processing.ft.fft_spectrum;
+        # real user report, confirmed by direct reproduction: a
+        # 16-step arrayed load capped Truncate's own maximum at 16
+        # instead of the real per-FID point count) -- correct for both
+        # a plain 1D fid_raw (single-file X-Pulse, shape[-1] == len())
+        # and a 2D one (arrayed) alike.
         raw_fid = spectrum.metadata.raw.get("fid_raw") if is_xpulse else None
-        raw_length = len(raw_fid) if raw_fid is not None else (1 << 20)
+        raw_length = raw_fid.shape[-1] if raw_fid is not None else (1 << 20)
         self.tdeff_spin.setMaximum(raw_length)
         saved_truncate = raw.get("live_truncate")
         if isinstance(saved_truncate, int) and not isinstance(saved_truncate, bool):

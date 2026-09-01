@@ -2,6 +2,15 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## X-Pulse: Truncate maximum wrongly capped at the array-step count, not the real FID length (2026-09-01)
+
+Real user report: "there is a default about truncation that only goes up to 16, meaning that I can't process more than 16 data points." Root-caused by direct reproduction (a synthetic 16-step arrayed X-Pulse dataset), not guessed at.
+
+- `_refresh_fid_processing_controls`'s own `tdeff_spin` (F2 truncate, X-Pulse-only) maximum was `len(raw_fid)` -- correct for a plain single-file X-Pulse load (`fid_raw` is 1D), but for an *arrayed* experiment (`io.xpulse.read_array` -- a PFG/T1/T2 series with `array1/`..`arrayN/` subfolders), `metadata.raw["fid_raw"]` is genuinely 2D: `(n_steps, NP)`. `len()` reads axis 0 (the *step* count), not `.shape[-1]` (the real per-FID point count) -- so a real 16-step series capped Truncate's own maximum at 16 regardless of the true acquired length. Same "`len()` reads the wrong axis for 2D input" bug class already found and fixed once this session, in `processing.ft.fft_spectrum`. Fixed with the same one-line pattern: `raw_fid.shape[-1]` instead of `len(raw_fid)` -- correct for both the 1D (single-file) and 2D (arrayed) case.
+- **Audited "for all vendors" per the user's own explicit ask, not just patched the one report**: grepped every `len(...)` call on a raw-FID-like variable in `main_window.py` -- this was the only one. F1's own truncate/zero-fill (`tdeff_f1_spin`/`zero_fill_f1_spin`, already vendor-agnostic since this session's earlier "F1 Truncate/Zero-fill" round) already used `.shape[0]`/`.shape[-1]` explicitly, not `len()` -- confirmed not affected by this same bug.
+- 1 new regression test (`test_gui.py`, a synthetic 16-step arrayed X-Pulse fixture with a 4-point-per-FID fixture -- deliberately step-count != point-count so the old-buggy-value (16) and the fixed value (4) can't be confused with each other by coincidence). 760 tests passing. Committed; not yet pushed.
+- **User flagged this as the first of "some old and some new bugs with x-pulse data"** -- more X-Pulse reports are expected; this is not necessarily the whole list.
+
 ## Phase display redesigned: non-editable current-value labels, not a read-only-label-plus-editable-box (2026-09-01)
 
 Follow-up correction to the previous round's fix: "can you just display non-editable numbers with current phase instead of that editable box? That way you can use whatever numbers internally and the user sees the relevant values. We don't need to see the zeroed out phase values."
