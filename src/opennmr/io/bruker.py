@@ -378,6 +378,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             autophase: bool = True, phase_mode: str = "recorded", phase0_inc: float = 0.1,
             phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5,
             window: str | None = None, window_kwargs: dict | None = None, zero_fill: int | None = None,
+            zero_fill_f1: int | None = None, truncate_f1: int | None = None,
             fid_shift: float = 0.0, align_echo: bool = False,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward") -> NMRSpectrum:
@@ -433,10 +434,21 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     ``window``/``window_kwargs``/``zero_fill``/``fid_shift``/
     ``align_echo``/``linear_predict_points`` : see :func:`read_1d` --
     identical meaning, but only ever applied along F2 (the direct
-    dimension, one row at a time). F1 apodization/zero-fill still
-    always follows TopSpin's own recorded ``proc2s`` -- not exposed as
-    an override here, since indirect-dimension processing is normally
-    fixed at acquisition rather than hand-tuned per view.
+    dimension, one row at a time). F1 apodization still always follows
+    TopSpin's own recorded ``proc2s`` -- not exposed as an override
+    here, since window-function choice is normally fixed at
+    acquisition rather than hand-tuned per view.
+
+    ``zero_fill_f1`` : ``None`` (default) uses ``proc2s``'s own
+    recorded ``SI`` (TopSpin's own F1 zero-fill target), falling back
+    to the row count actually present if that's missing; an ``int``
+    overrides it explicitly. ``truncate_f1`` : ``None`` (default) uses
+    every row/row-pair present; an ``int`` keeps only the first that
+    many F1 increments -- applied to raw row *pairs* (not individual
+    rows) whenever ``FnMODE`` calls for hypercomplex decoding, so a
+    request never separates a real row from its matching imaginary
+    one, same convention as X-Pulse's own
+    :func:`opennmr.io.xpulse.read_2d`.
     """
     # Shape comes from _guess_raw_2d_shape/_read_raw_2d_data (own
     # TD/DTYPA/file-size-based logic, see their own docstrings) rather
@@ -569,16 +581,28 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         y_index = np.arange(1, spectrum.shape[0] + 1)
         y_axis = NMRAxis(kind="index", index=y_index)
     else:
+        # truncate_f1 -- applied to raw row *pairs* when FnMODE calls
+        # for hypercomplex decoding (fn_mode 4/5/6: 2 raw rows per t1
+        # increment), else directly (fn_mode 0-3: 1 raw row per
+        # increment already, e.g. every genuine 2D dataset actually in
+        # this project's own test_data, which is all FnMODE 1/QF) --
+        # same convention as X-Pulse's own read_2d.
+        if truncate_f1 is not None:
+            n1_native = spectrum.shape[0] // 2 if fn_mode in (4, 5, 6) else spectrum.shape[0]
+            if 0 < truncate_f1 < n1_native:
+                raw_row_count = 2 * truncate_f1 if fn_mode in (4, 5, 6) else truncate_f1
+                spectrum = spectrum[:raw_row_count]
         # Row-pair decode (States/States-TPPI/Echo-Antiecho) *before*
         # zero-fill/FFT -- a no-op for FnMODE 0-3 (see
         # decode_hypercomplex_f1's own docstring). Halves the row count
         # for FnMODE 4/5/6, so proc2s's own recorded SI (already in
         # terms of the *decoded* point count, matching what TopSpin
-        # itself zero-fills to) is used as-is, but the fallback -- for
-        # when SI isn't recorded at all -- must fall back to the
-        # decoded row count, not the raw pre-decode one.
+        # itself zero-fills to) is used as-is absent an explicit
+        # zero_fill_f1 override, but the fallback -- for when SI isn't
+        # recorded at all -- must fall back to the decoded row count,
+        # not the raw pre-decode one.
         spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode)
-        si1 = int(proc2s.get("SI", spectrum.shape[0]))
+        si1 = int(zero_fill_f1) if zero_fill_f1 is not None else int(proc2s.get("SI", spectrum.shape[0]))
         fid_f1 = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, spectrum)
         spectrum = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, 1.0 / sw_1)[1], 0, fid_f1)
         y_ppm, y_hz = _ppm_hz_axis(o1_1, sf_1, obs_1, sw_1, si1)

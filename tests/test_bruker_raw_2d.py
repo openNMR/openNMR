@@ -140,6 +140,51 @@ def test_read_2d_states_and_states_tppi_recover_known_f1_frequency(tmp_path, mon
     assert abs(abs(peak_hz) - f1_hz) < (sw1 / n1) * 1.5
 
 
+def test_read_2d_truncate_f1_keeps_only_requested_row_pairs(tmp_path, monkeypatch):
+    # truncate_f1 must operate on raw row *pairs* for States-TPPI (2
+    # raw rows per t1 increment), not raw rows directly -- a request
+    # for 4 increments should keep 8 raw rows, decoding down to 4.
+    # zero_fill_f1 pinned to the same value so the final output shape
+    # unambiguously reflects the truncation -- absent that, the
+    # separately-recorded proc2s SI would zero-fill back up past it
+    # (matching F2's own truncate+zero-fill independence).
+    n1, sw1 = 16, 2000.0
+    path = _make_2d_experiment_dir(tmp_path, proc2s_overrides={"SI": n1, "SW_p": sw1})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqu2s = {"NUC1": "13C", "BF1": 100.6, "O1": 0.0, "FnMODE": 5}
+    fid, _ = _synthetic_hypercomplex_2d_fid(5, n1=n1, sw1=sw1)
+    _mock_2d(monkeypatch, acqus, fid, acqu2s=acqu2s)
+
+    spectrum = bruker.read_2d(path, homonuclear=False, autophase=False, truncate_f1=4, zero_fill_f1=4)
+
+    assert spectrum.data.shape[0] == 4
+
+
+def test_read_2d_truncate_f1_applies_directly_for_qf(tmp_path, monkeypatch):
+    # FnMODE=1 (QF) -- every genuine 2D dataset actually in this
+    # project's own test_data -- has one raw row per t1 increment
+    # already, no row-pairing to account for.
+    path = _make_2d_experiment_dir(tmp_path)
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_2d_fid(n_f1=16)
+    _mock_2d(monkeypatch, acqus, fid)
+
+    spectrum = bruker.read_2d(path, homonuclear=True, autophase=False, truncate_f1=6, zero_fill_f1=6)
+
+    assert spectrum.data.shape[0] == 6
+
+
+def test_read_2d_zero_fill_f1_overrides_recorded_si(tmp_path, monkeypatch):
+    path = _make_2d_experiment_dir(tmp_path)  # proc2s SI defaults to 32
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_2d_fid(n_f1=16)
+    _mock_2d(monkeypatch, acqus, fid)
+
+    spectrum = bruker.read_2d(path, homonuclear=True, autophase=False, zero_fill_f1=64)
+
+    assert spectrum.data.shape == (64, 64)  # F1 overridden to 64, F2 untouched (procs SI)
+
+
 def test_read_2d_echo_antiecho_halves_row_count_and_records_fn_mode(tmp_path, monkeypatch):
     # Integration-level wiring check only -- decode_hypercomplex_f1's
     # own docstring and test_ft.py flag the Echo-Antiecho sign/

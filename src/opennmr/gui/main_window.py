@@ -2081,11 +2081,50 @@ class MainWindow(QMainWindow):
         )
         form.addRow("LP direction:", self.linear_predict_direction_combo)
 
+        # F1 (indirect dimension) TD/SI -- only meaningful for a
+        # genuine 2D spectrum with a real F1 FFT (not pseudo-2D, where
+        # "F1" is a slice index, not a frequency dimension); enabled
+        # state is computed directly from spectrum.ndim/is_pseudo_2d in
+        # _refresh_fid_processing_controls, NOT from self._phase_mode
+        # -- _capture_phase_reference (which sets _phase_mode) runs
+        # *after* _refresh_fid_processing_controls in
+        # _refresh_selection_display's own call order, so _phase_mode
+        # would always be one selection stale here. Explicit user
+        # feedback: F2 already had both (Truncate to/Zero-fill to,
+        # above); F1 had neither, for either vendor.
+        self.tdeff_f1_spin = QSpinBox()
+        self.tdeff_f1_spin.setRange(1, 1 << 20)
+        self.tdeff_f1_spin.setSuffix(" pts")
+        self.tdeff_f1_spin.setToolTip(
+            "Truncate F1 (the indirect dimension) to this many "
+            "increments before its own hypercomplex decode/FFT -- for "
+            "States/States-TPPI/Echo-Antiecho data, a row *pair* per "
+            "increment, so this never separates a real row from its "
+            "matching imaginary one. Defaults to every increment "
+            "actually present (no truncation)."
+        )
+        self.tdeff_f1_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
+        form.addRow("Truncate F1 to:", self.tdeff_f1_spin)
+
+        self.zero_fill_f1_spin = QSpinBox()
+        self.zero_fill_f1_spin.setRange(1, 1 << 20)
+        self.zero_fill_f1_spin.setSuffix(" pts")
+        self.zero_fill_f1_spin.setToolTip(
+            "F1 (the indirect dimension)'s own FFT size -- zero-fills "
+            "(or truncates) F1 to this many points. Defaults to F1's "
+            "own current length (no-op) -- unlike F2's own Zero-fill "
+            "to above, there's no '2x acquired' convention for F1 "
+            "here; opt in explicitly to a larger value."
+        )
+        self.zero_fill_f1_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
+        form.addRow("Zero-fill F1 to:", self.zero_fill_f1_spin)
+
         reset_processing_button = QPushButton("Reset")
         reset_processing_button.setToolTip(
             "Discard every live processing choice above (window/"
-            "zero-fill/shift/align-echo/linear-predict/truncate, "
-            "phase, baseline) and revert to exactly how this spectrum "
+            "zero-fill/shift/align-echo/linear-predict/truncate, F1 "
+            "truncate/zero-fill, phase, baseline) and revert to "
+            "exactly how this spectrum "
             "looked right when it was first loaded. Everything above "
             "is already live -- there's no separate 'Apply' step to "
             "commit it, so this is the opposite: throwing it away, "
@@ -2473,22 +2512,52 @@ class MainWindow(QMainWindow):
         data = processing_ft.apply_phase(data, ppm2, phase0, phase1, pivot_frac=pivot_frac2)
 
         dt_f1 = spectrum.metadata.raw.get("fid_dt_f1")
+        f1_axis = spectrum.axes[0]
         if not spectrum.is_pseudo_2d and dt_f1:
+            fn_mode = spectrum.metadata.raw.get("fn_mode", 1)
+            # F1 truncate -- row-pair aware (a request never separates
+            # a real row from its matching imaginary one), same
+            # convention as io.bruker.read_2d/io.xpulse.read_2d's own
+            # truncate_f1. `data` here still has the raw, undecoded row
+            # count (every row of fid_raw processed independently
+            # above), so this must happen *before* the hypercomplex
+            # decode just below, same ordering read_2d itself uses.
+            live_truncate_f1 = spectrum.metadata.raw.get("live_truncate_f1")
+            if isinstance(live_truncate_f1, int) and not isinstance(live_truncate_f1, bool):
+                n1_native = data.shape[0] // 2 if fn_mode in (4, 5, 6) else data.shape[0]
+                if 0 < live_truncate_f1 < n1_native:
+                    raw_row_count = 2 * live_truncate_f1 if fn_mode in (4, 5, 6) else live_truncate_f1
+                    data = data[:raw_row_count]
             # Same hypercomplex row-pair decode read_2d itself does,
-            # before its own F1 FFT -- `data` here still has the raw,
-            # undecoded row count (every row of fid_raw processed
-            # independently above), so skipping this would silently
+            # before its own F1 FFT -- skipping this would silently
             # feed States/States-TPPI/Echo-Antiecho data into zero_fill
             # at the wrong row count instead of a genuine hypercomplex
             # point per t1 increment, the moment any F2-only control
             # changes live -- exactly the "two pipelines quietly
             # diverge" bug this whole round's own architecture change
             # was about closing.
-            data = processing_ft.decode_hypercomplex_f1(data, spectrum.metadata.raw.get("fn_mode", 1))
-            si1 = spectrum.data.shape[0]  # F1's own current (already-decoded) length -- unaffected by F2-only controls
+            data = processing_ft.decode_hypercomplex_f1(data, fn_mode)
+            live_zero_fill_f1 = spectrum.metadata.raw.get("live_zero_fill_f1")
+            if isinstance(live_zero_fill_f1, int) and not isinstance(live_zero_fill_f1, bool):
+                si1 = live_zero_fill_f1
+            else:
+                # F1's own current (already-decoded) length -- unaffected
+                # by F2-only controls, absent an explicit live F1 choice.
+                si1 = spectrum.data.shape[0]
             f1_filled = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, data)
             data = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, dt_f1)[1], 0, f1_filled)
-            ppm1 = spectrum.axes[0].ppm
+            # F1's ppm span (start/end) depends only on the acquisition
+            # itself (transmitter offset + spectral width), never on
+            # how many points it's sampled into -- same reasoning
+            # ppm2/hz2 above already relies on for F2's own zero-fill.
+            # Re-deriving from the existing axis's own endpoints (rather
+            # than re-deriving o1_1/sf_1/obs_1/sw_1 from vendor-specific
+            # raw params) keeps this vendor-agnostic, matching how this
+            # whole method already avoids vendor-specific formulas.
+            old_ppm1 = f1_axis.ppm
+            ppm1 = np.linspace(old_ppm1[0], old_ppm1[-1], si1) if si1 != len(old_ppm1) else old_ppm1
+            hz1 = ppm1 * (spectrum.metadata.sfo1_indirect or spectrum.metadata.sfo1 or 1.0)
+            f1_axis = NMRAxis(kind="frequency", ppm=ppm1, hz=hz1)
             phase0_f1 = float(spectrum.metadata.raw.get("phase0_f1", 0.0))
             phase1_f1 = float(spectrum.metadata.raw.get("phase1_f1", 0.0))
             if phase0_f1 or phase1_f1:
@@ -2497,7 +2566,7 @@ class MainWindow(QMainWindow):
                 data = processing_ft.apply_phase(data.T, ppm1, phase0_f1, phase1_f1, pivot_frac=pivot_frac1).T
 
         data = self._baseline_correct_if_enabled_multi_row(data, ppm2, spectrum)
-        spectrum.axes = [spectrum.axes[0], NMRAxis(kind="frequency", ppm=ppm2, hz=hz2)]
+        spectrum.axes = [f1_axis, NMRAxis(kind="frequency", ppm=ppm2, hz=hz2)]
         spectrum.data = np.real(data)
         spectrum.data_imag = np.imag(data)
         return True
@@ -2736,6 +2805,48 @@ class MainWindow(QMainWindow):
         self.tdeff_spin.setValue(max(1, default_tdeff))
         self.tdeff_spin.blockSignals(False)
 
+        # F1 (indirect dimension) TD/SI -- vendor-agnostic (unlike F2's
+        # tdeff_spin above, which only applies to X-Pulse), gated on
+        # "genuine 2D with a real F1 FFT" -- not pseudo-2D, where "F1"
+        # is a slice index, not a frequency dimension, and not 1D,
+        # which has no F1 at all. Mirrors the same is_2d computation
+        # _refresh_selection_display uses for the Dimension controls'
+        # own visibility, computed directly from spectrum rather than
+        # from self._phase_mode, which _capture_phase_reference doesn't
+        # (re)set until *after* this method returns (see
+        # _refresh_selection_display's own call order).
+        is_genuine_2d = reprocessable and spectrum.ndim == 2 and not spectrum.is_pseudo_2d
+        raw_fid_f1 = spectrum.metadata.raw.get("fid_raw") if is_genuine_2d else None
+        fn_mode = spectrum.metadata.raw.get("fn_mode", 1)
+        if raw_fid_f1 is not None and raw_fid_f1.ndim == 2:
+            n1_native = raw_fid_f1.shape[0] // 2 if fn_mode in (4, 5, 6) else raw_fid_f1.shape[0]
+        else:
+            n1_native = spectrum.data.shape[0] if is_genuine_2d else (1 << 20)
+
+        self.tdeff_f1_spin.setEnabled(is_genuine_2d)
+        self.tdeff_f1_spin.blockSignals(True)
+        self.tdeff_f1_spin.setMaximum(max(1, n1_native))
+        saved_truncate_f1 = raw.get("live_truncate_f1")
+        if isinstance(saved_truncate_f1, int) and not isinstance(saved_truncate_f1, bool):
+            default_tdeff_f1 = min(saved_truncate_f1, n1_native)
+        else:
+            default_tdeff_f1 = n1_native
+        self.tdeff_f1_spin.setValue(max(1, default_tdeff_f1))
+        self.tdeff_f1_spin.blockSignals(False)
+
+        self.zero_fill_f1_spin.setEnabled(is_genuine_2d)
+        self.zero_fill_f1_spin.blockSignals(True)
+        # F1's own current (already-decoded) length is the no-op
+        # default -- matching _recompute_multi_row_data's own fallback
+        # when no live choice has been made yet.
+        default_si1 = spectrum.data.shape[0] if is_genuine_2d else 1
+        saved_zero_fill_f1 = raw.get("live_zero_fill_f1")
+        if isinstance(saved_zero_fill_f1, int) and not isinstance(saved_zero_fill_f1, bool):
+            default_si1 = saved_zero_fill_f1
+        self.zero_fill_f1_spin.setMaximum(max(default_si1, n1_native, 1) * 4)
+        self.zero_fill_f1_spin.setValue(max(1, default_si1))
+        self.zero_fill_f1_spin.blockSignals(False)
+
         if not reprocessable:
             return
 
@@ -2822,6 +2933,10 @@ class MainWindow(QMainWindow):
         raw["live_linear_predict_direction"] = self.linear_predict_direction_combo.currentData()
         if self.tdeff_spin.isEnabled():  # X-Pulse only -- see tdeff_spin's own tooltip
             raw["live_truncate"] = self.tdeff_spin.value()
+        if self.tdeff_f1_spin.isEnabled():  # genuine 2D only, any vendor -- see tdeff_f1_spin's own tooltip
+            raw["live_truncate_f1"] = self.tdeff_f1_spin.value()
+        if self.zero_fill_f1_spin.isEnabled():
+            raw["live_zero_fill_f1"] = self.zero_fill_f1_spin.value()
 
     def _on_fid_processing_control_changed(self) -> None:
         """Unified live-update handler for every FID-processing

@@ -2678,6 +2678,173 @@ def test_main_window_processing_preview_mirrors_spectrum_for_conventional_2d(qap
     assert any(ax.collections or ax.lines or ax.images for ax in fig.axes)
 
 
+def test_main_window_f1_truncate_zero_fill_enabled_only_for_conventional_2d(qapp, tmp_path, monkeypatch):
+    # Explicit user feedback: "I want the TD and SI options to appear
+    # for both dimensions when any 2D is loaded" -- F1's own controls
+    # (unlike F2's tdeff_spin, which is X-Pulse-only) must be enabled
+    # for a genuine 2D from *any* vendor, and disabled for 1D/pseudo-2D
+    # (where "F1" is a slice index, not a frequency dimension with its
+    # own FFT to truncate/zero-fill).
+    window = MainWindow()
+
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, name="f1gate1d"), vendor="bruker")
+    assert window.tdeff_f1_spin.isEnabled() is False
+    assert window.zero_fill_f1_spin.isEnabled() is False
+
+    window._load(
+        _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=16, name="f1gatepseudo2d", f1_nuc="off"),
+        vendor="bruker",
+    )
+    assert window.tdeff_f1_spin.isEnabled() is False
+    assert window.zero_fill_f1_spin.isEnabled() is False
+
+    window._load(
+        _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=16, name="f1gate2d", f1_nuc="13C"),
+        vendor="bruker",
+    )
+    # A fresh 2D load always defaults to pseudo-2D treatment regardless
+    # of vendor auto-detection (see _load's own comment) -- Process
+    # Indirect Dimension is how a genuine 2D-correlation experiment
+    # opts back into a real F1 FFT, same as
+    # test_main_window_processing_preview_mirrors_spectrum_for_conventional_2d
+    # already relies on.
+    window.process_indirect_button.setChecked(True)
+    assert window.tdeff_f1_spin.isEnabled() is True
+    assert window.zero_fill_f1_spin.isEnabled() is True
+
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=4, n2=16, name="f1gatexpulse2d.jdx"), vendor="xpulse")
+    assert window.tdeff_f1_spin.isEnabled() is True
+    assert window.zero_fill_f1_spin.isEnabled() is True
+
+
+def test_main_window_f1_truncate_and_zero_fill_change_row_count_live_bruker(qapp, tmp_path, monkeypatch):
+    # Truncate alone doesn't shrink the final row count -- a separately
+    # -recorded zero-fill target still applies afterward, same
+    # truncate/zero-fill independence already established for F2 (and
+    # at the io level, see test_bruker_raw_2d.py) -- so both must be
+    # set together here to observe the row count actually change.
+    window = MainWindow()
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=16, name="f1livebruker", f1_nuc="13C")
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt into genuine 2D -- see gating test's own comment
+    index = window._selected_index()
+    assert window.session.spectra[index].data.shape[0] == 8
+
+    window.tdeff_f1_spin.setValue(3)
+    window.zero_fill_f1_spin.setValue(3)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)  # conventional 2D always debounces the actual recompute
+
+    spectrum = window.session.spectra[index]
+    assert spectrum.data.shape[0] == 3
+    assert len(spectrum.axes[0].ppm) == 3
+    assert len(spectrum.axes[0].hz) == 3
+
+
+def test_main_window_f1_truncate_row_pair_aware_matches_read_2d_directly(qapp, tmp_path, monkeypatch):
+    # The live in-memory recompute path (_recompute_multi_row_data)
+    # must treat FnMODE row-pairing the same way io.bruker.read_2d's
+    # own truncate_f1/zero_fill_f1 does -- cross-check the two paths
+    # against each other on the same synthetic States-TPPI-style
+    # (FnMODE 6) raw FID rather than just checking a row count, so a
+    # bug that truncates/zero-fills but separates a real row from its
+    # imaginary pair (or lands on the wrong axis) wouldn't slip through
+    # a shape-only assertion.
+    from opennmr.io import bruker as bruker_io
+
+    window = MainWindow()
+    path = _make_raw_2d_dataset(
+        tmp_path, monkeypatch, n_f1=8, n_f2=16, name="f1pairbruker", f1_nuc="13C", fn_mode=6,
+    )
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt into genuine 2D -- see gating test's own comment
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    assert spectrum.metadata.raw["fn_mode"] == 6
+    assert spectrum.metadata.raw["fid_raw"].shape[0] == 8  # 4 F1 increments, row-paired
+
+    window.tdeff_f1_spin.setValue(3)
+    window.zero_fill_f1_spin.setValue(3)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)  # conventional 2D always debounces the actual recompute
+    live_result = window.session.spectra[index]
+    assert live_result.data.shape[0] == 3
+
+    direct = bruker_io.read_2d(path, truncate_f1=3, zero_fill_f1=3, phase_mode="recorded")
+    np.testing.assert_allclose(live_result.data, direct.data, atol=1e-8)
+    np.testing.assert_allclose(live_result.data_imag, direct.data_imag, atol=1e-8)
+    np.testing.assert_allclose(live_result.axes[0].ppm, direct.axes[0].ppm)
+
+
+def test_main_window_f1_truncate_and_zero_fill_change_row_count_live_xpulse(qapp, tmp_path):
+    window = MainWindow()
+    path = _make_xpulse_ntuples_2d_dataset(tmp_path, n1=8, n2=16, name="f1livexpulse.jdx")
+    window._load(path, vendor="xpulse")
+    index = window._selected_index()
+    assert window.session.spectra[index].data.shape[0] == 8
+
+    window.tdeff_f1_spin.setValue(3)
+    window.zero_fill_f1_spin.setValue(3)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)  # conventional 2D always debounces the actual recompute
+
+    spectrum = window.session.spectra[index]
+    assert spectrum.data.shape[0] == 3
+    assert len(spectrum.axes[0].ppm) == 3
+
+
+def test_main_window_f1_truncate_and_zero_fill_persist_across_reselection(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    path_a = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=16, name="f1persista", f1_nuc="13C")
+    path_b = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=16, name="f1persistb", f1_nuc="13C")
+    window._load(path_a, vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt into genuine 2D -- see gating test's own comment
+    window._load(path_b, vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+
+    window.spectrum_list.setCurrentRow(0)  # back to A
+    window.tdeff_f1_spin.setValue(3)
+    window.zero_fill_f1_spin.setValue(3)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)  # conventional 2D always debounces the actual recompute
+
+    window.spectrum_list.setCurrentRow(1)  # away to B
+    assert window.tdeff_f1_spin.value() == 8
+    assert window.zero_fill_f1_spin.value() == 8
+
+    window.spectrum_list.setCurrentRow(0)  # back to A -- restored, not reset
+    assert window.tdeff_f1_spin.value() == 3
+    assert window.zero_fill_f1_spin.value() == 3
+    assert window.session.spectra[0].data.shape[0] == 3
+
+
+def test_main_window_reset_processing_clears_f1_truncate_and_zero_fill(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=16, name="f1resetbruker", f1_nuc="13C")
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt into genuine 2D -- see gating test's own comment
+    index = window._selected_index()
+
+    window.tdeff_f1_spin.setValue(3)
+    window.zero_fill_f1_spin.setValue(3)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)  # conventional 2D always debounces the actual recompute
+    assert window.session.spectra[index].data.shape[0] == 3
+
+    window._on_reset_processing_clicked()
+
+    # Reset reverts to _original_load_kwargs, snapshotted right after
+    # _load's own "default every fresh 2D to pseudo-2D" step -- i.e.
+    # *before* this test opted into genuine 2D above -- so Reset here
+    # correctly lands back on pseudo-2D, not just "genuine 2D with no
+    # truncate/zero-fill." Either way, F1's own controls must no
+    # longer be reporting a stale truncated/zero-filled value.
+    assert window.session.spectra[index].is_pseudo_2d is True
+    assert window.session.spectra[index].data.shape[0] == 8
+    assert window.tdeff_f1_spin.isEnabled() is False
+    assert window.zero_fill_f1_spin.isEnabled() is False
+
+
 def test_main_window_pivot_marker_clears_when_leaving_processing_tab(qapp, tmp_path):
     # Explicit user feedback: the dashed pivot-point line left over
     # from phasing stayed visible even after navigating away from the
