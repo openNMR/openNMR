@@ -1473,6 +1473,19 @@ class MainWindow(QMainWindow):
     _FIGURE_STYLE_TYPES = (
         ("1D spectrum", "1d"), ("2D contour", "2d"), ("Pseudo-2D stack", "pseudo2d"), ("Compare", "compare"),
     )
+    #: Same "user-level dotfile, survives an update/reinstall" reasoning
+    #: as _FIGURE_STYLES_PATH -- a plain JSON dict of
+    #: {probe_string: {config_key: value}}, explicit user request:
+    #: "a configuration that each user can save directly into the app
+    #: to store info like max gradient strength that can be associated
+    #: automatically with the probe." Saving is an explicit action (the
+    #: "Save as default for this probe" button); looking it up as a
+    #: fallback when a freshly-loaded/reselected spectrum has no
+    #: per-experiment value of its own is automatic -- matches "save...
+    #: associated automatically" precisely: the user decides what to
+    #: save and when, but never has to re-enter it per experiment
+    #: afterward.
+    _PROBE_CONFIG_PATH = os.path.expanduser("~/.opennmr/probe_config.json")
 
     def _all_canvases(self) -> list:
         """Every ``MplCanvas`` instance this window owns -- core
@@ -1524,6 +1537,20 @@ class MainWindow(QMainWindow):
         self.output_tick_width_spin.setValue(MplCanvas._TICK_WIDTH)
         self.output_tick_width_spin.valueChanged.connect(self._on_output_style_changed)
         style_form.addRow("Tick width:", self.output_tick_width_spin)
+
+        self.output_contour_fraction_spin = QSpinBox()
+        self.output_contour_fraction_spin.setRange(1, 100)
+        self.output_contour_fraction_spin.setValue(25)  # matches plotting.plot_2d_contour's own default (0.25)
+        self.output_contour_fraction_spin.setSuffix("%")
+        self.output_contour_fraction_spin.setToolTip(
+            "How much of a 2D contour's own resolution renders by "
+            "default (lower = faster, coarser) -- doesn't affect "
+            "a canvas currently set to Full Resolution (right-click "
+            "the contour), or Save Figure As..., which always exports "
+            "at true resolution regardless of this."
+        )
+        self.output_contour_fraction_spin.valueChanged.connect(self._on_contour_fraction_changed)
+        style_form.addRow("2D downsample:", self.output_contour_fraction_spin)
 
         self.output_grid_checkbox = QCheckBox("Show grid")
         self.output_grid_checkbox.toggled.connect(self._on_output_style_changed)
@@ -1653,6 +1680,11 @@ class MainWindow(QMainWindow):
         self.canvas.set_legend_visible(self.output_legend_checkbox.isChecked())
         self.canvas.set_style(legend_loc=self.output_legend_loc_combo.currentText())
 
+    def _on_contour_fraction_changed(self, value: int) -> None:
+        fraction = value / 100.0
+        for canvas in self._all_canvases():
+            canvas.set_contour_fraction(fraction)
+
     def _load_figure_styles(self) -> dict:
         try:
             with open(self._FIGURE_STYLES_PATH) as f:
@@ -1694,6 +1726,35 @@ class MainWindow(QMainWindow):
         # Every spin/combo above already applies itself on change
         # (_on_output_style_changed/_on_output_export_settings_changed)
         # -- no separate "apply" step needed.
+
+    def _load_probe_config(self) -> dict:
+        try:
+            with open(self._PROBE_CONFIG_PATH) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _on_save_probe_gradient_default_clicked(self) -> None:
+        index = self._selected_index()
+        probe = self.session.spectra[index].metadata.probe if index is not None else None
+        if not probe:
+            QMessageBox.information(
+                self, "No probe recorded",
+                "This spectrum's own vendor file doesn't record a probe identifier, so there's "
+                "nothing to associate this default with.",
+            )
+            return
+        config = self._load_probe_config()
+        config[probe] = {"max_gradient_g_per_cm": self.imaging_max_gradient_spin.value()}
+        os.makedirs(os.path.dirname(self._PROBE_CONFIG_PATH), exist_ok=True)
+        with open(self._PROBE_CONFIG_PATH, "w") as f:
+            json.dump(config, f, indent=2)
+        QMessageBox.information(
+            self, "Saved",
+            f"Saved {self.imaging_max_gradient_spin.value():g} G/cm as the default max gradient "
+            f"for probe '{probe}' -- applied automatically to any spectrum recording this same "
+            f"probe that doesn't already have its own value set.",
+        )
 
     def _selected_rows(self) -> list[int]:
         return sorted(self.spectrum_list.row(item) for item in self.spectrum_list.selectedItems())
@@ -3409,6 +3470,25 @@ class MainWindow(QMainWindow):
         form.addRow("Phase 0 (deg):", self._pair_widget(self.phase0_handle, self.phase0_spin))
         form.addRow("Phase 1 (deg):", self._pair_widget(self.phase1_handle, self.phase1_spin))
 
+        # Phase 0/Phase 1 above are a drag *delta* from whatever this
+        # view already looked like when editing started (always 0 right
+        # after selecting/re-anchoring, by design -- see
+        # _capture_phase_reference's own docstring on why a drag needs
+        # a neutral starting point) -- explicit user feedback that this
+        # reads as the phase value simply "resetting to zero" on
+        # reselection, with nowhere to actually see what's currently
+        # applied. This read-only label shows the real total instead,
+        # kept live during a drag (_apply_phase_preview) and refreshed
+        # on every re-anchor (_capture_phase_reference).
+        self.current_phase_label = QLabel("Current phase: —")
+        self.current_phase_label.setToolTip(
+            "The total phase actually applied to this view right now -- "
+            "Phase 0/Phase 1 above are a delta from here, always "
+            "starting at 0 when you select/re-anchor, not a reset of "
+            "the underlying value."
+        )
+        form.addRow(self.current_phase_label)
+
         quick_phase_column = QVBoxLayout()
         quick_phase_column.setSpacing(2)
         for delta in (180.0, 90.0, -90.0, -180.0):
@@ -4007,6 +4087,7 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         phase0 = self.phase0_spin.value()
         phase1 = self.phase1_spin.value()
+        self._refresh_current_phase_label()
 
         freq_ppm = self._phase_freq_ppm
         span = freq_ppm.max() - freq_ppm.min()
@@ -4250,6 +4331,31 @@ class MainWindow(QMainWindow):
         spectrum.metadata.raw[key1] = float(spectrum.metadata.raw.get(key1, 0.0)) + phase1_delta
         self._schedule_sidecar_save(index)
 
+    def _refresh_current_phase_label(self) -> None:
+        """Show the *total* phase actually applied right now --
+        whatever's already baked into ``metadata.raw`` for whatever
+        this editing session is targeting, plus the live delta still
+        showing in the Phase 0/Phase 1 spin boxes (0 right after a
+        fresh :meth:`_capture_phase_reference`, non-zero mid-drag).
+        Called from both, so this label stays accurate whether nothing
+        is being dragged right now or a drag is actively in progress.
+        Explicit user feedback: Phase 0/Phase 1 resetting to 0 on every
+        reselection read as the phase value itself being lost, with no
+        way to see what's actually applied -- this is that visibility,
+        without changing the drag controls' own delta-from-here
+        behaviour (needed so dragging back to 0 is always a sensible
+        "undo what I just did")."""
+        index = self._phase_target_index
+        if self._phase_mode is None or index is None or not (0 <= index < len(self.session)):
+            self.current_phase_label.setText("Current phase: —")
+            return
+        spectrum = self.session.spectra[index]
+        is_f1 = self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0
+        key0, key1 = ("phase0_f1", "phase1_f1") if is_f1 else ("phase0", "phase1")
+        phase0 = float(spectrum.metadata.raw.get(key0, 0.0)) + self.phase0_spin.value()
+        phase1 = float(spectrum.metadata.raw.get(key1, 0.0)) + self.phase1_spin.value()
+        self.current_phase_label.setText(f"Current phase: {phase0:.2f}° / {phase1:.2f}°")
+
     def _capture_phase_reference(self) -> None:
         """(Re)anchor the phase controls to whatever they're currently
         meant to act on -- a 1D spectrum, one pseudo-2D slice (or all of
@@ -4288,6 +4394,7 @@ class MainWindow(QMainWindow):
             self._phase_mode = None
             self._phase_reference_full = None
             self._phase_freq_ppm = None
+            self._refresh_current_phase_label()
             return
 
         spectrum = self.session.spectra[index]
@@ -4317,6 +4424,7 @@ class MainWindow(QMainWindow):
             self._phase_reference_full = None
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
+            self._refresh_current_phase_label()
             return
 
         if spectrum.ndim == 1:
@@ -4351,8 +4459,10 @@ class MainWindow(QMainWindow):
             self._phase_reference_full = None
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
+            self._refresh_current_phase_label()
             return
 
+        self._refresh_current_phase_label()
         centre_ppm = float((self._phase_freq_ppm.min() + self._phase_freq_ppm.max()) / 2)
         self.pivot_spin.blockSignals(True)
         self.pivot_spin.setValue(centre_ppm)
@@ -4952,6 +5062,15 @@ class MainWindow(QMainWindow):
         )
         self.imaging_max_gradient_spin.valueChanged.connect(self._on_imaging_gradient_changed)
         gradient_form.addRow("Max gradient:", self.imaging_max_gradient_spin)
+
+        save_probe_gradient_button = QPushButton("Save as default for this probe")
+        save_probe_gradient_button.setToolTip(
+            "Remember this max gradient value for this spectrum's own recorded probe, "
+            "app-wide -- any other spectrum (any experiment) recording the same probe "
+            "and with no max gradient of its own already set will use it automatically."
+        )
+        save_probe_gradient_button.clicked.connect(self._on_save_probe_gradient_default_clicked)
+        gradient_form.addRow(save_probe_gradient_button)
 
         self.imaging_gradient_status_label = QLabel("Select a spectrum to enable the mm axis.")
         self.imaging_gradient_status_label.setWordWrap(True)
@@ -6413,7 +6532,21 @@ class MainWindow(QMainWindow):
         self.info_label.setText("\n".join(bits))
 
         self.imaging_max_gradient_spin.blockSignals(True)
-        self.imaging_max_gradient_spin.setValue(meta.raw.get("imaging_max_gradient_g_per_cm") or 0.0)
+        own_gradient = meta.raw.get("imaging_max_gradient_g_per_cm")
+        if own_gradient:
+            gradient_default = own_gradient
+        else:
+            # No per-experiment value recorded yet -- fall back to
+            # this probe's own saved app-wide default (see
+            # _on_save_probe_gradient_default_clicked), if any. Not
+            # written back into metadata.raw itself: an explicit edit
+            # here should still take priority over a *later* probe-
+            # config change, which a silent write-back would defeat by
+            # locking this experiment onto whatever the probe default
+            # happened to be the first time it was ever selected.
+            probe_config = self._load_probe_config().get(meta.probe or "", {})
+            gradient_default = probe_config.get("max_gradient_g_per_cm") or 0.0
+        self.imaging_max_gradient_spin.setValue(gradient_default)
         self.imaging_max_gradient_spin.blockSignals(False)
         self._refresh_imaging_gradient()
 

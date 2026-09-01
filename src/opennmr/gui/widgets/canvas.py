@@ -212,6 +212,16 @@ class MplCanvas(QWidget):
         # exactly where fast/approximate rendering over exactness is
         # the right tradeoff, and keeps the old default).
         self._full_resolution = full_resolution
+        # The 2D contour's own downsampling fraction (see
+        # _contour_fraction_kwargs/plotting.plot_2d_contour's own
+        # contour_fraction_x/contour_fraction_y) when _full_resolution
+        # is off -- explicit user request that the "4x less" default
+        # (0.25 -- plot_2d_contour's own hardcoded default, matched
+        # here) be user-adjustable rather than fixed. Class-level, not
+        # per-canvas-instance-defaulted the way full_resolution is --
+        # every canvas shares one user preference, set uniformly by
+        # MainWindow's Output tab, until changed again.
+        self._contour_fraction = 0.25
         self._pick_mode = False
         self._region_select_mode = False
         self._region_select_start: float | None = None  # x-data value of the drag's own start
@@ -569,13 +579,26 @@ class MplCanvas(QWidget):
     def _contour_fraction_kwargs(self) -> dict:
         """``contour_fraction_x``/``contour_fraction_y`` overrides for
         :func:`opennmr.plotting.plot_2d_contour`, both call sites --
-        ``{}`` (its own default fractions apply) unless
+        :attr:`_contour_fraction` (the user-adjustable downsample
+        fraction, see :meth:`set_contour_fraction`) unless
         :attr:`_full_resolution` is on, in which case both are forced
         to ``None`` (no downsampling at all, see that function's own
         docstring)."""
         if self._full_resolution:
             return {"contour_fraction_x": None, "contour_fraction_y": None}
-        return {}
+        return {"contour_fraction_x": self._contour_fraction, "contour_fraction_y": self._contour_fraction}
+
+    def set_contour_fraction(self, fraction: float) -> None:
+        """Change the 2D contour's own downsampling fraction (see
+        :meth:`_contour_fraction_kwargs`) -- a no-op on the fraction
+        actually used while :attr:`_full_resolution` is on (which
+        already forces no downsampling regardless), but still recorded
+        so it takes effect immediately if full resolution is turned
+        back off. Redraws right away if a 2D contour is currently
+        shown, same as :meth:`set_full_resolution`."""
+        self._contour_fraction = fraction
+        if self._contour_spectrum is not None and not self._full_resolution:
+            self.show_spectrum(self._contour_spectrum)
 
     def _redraw_contour(self, preserve_view: bool) -> None:
         xlim, ylim = (self.ax.get_xlim(), self.ax.get_ylim()) if preserve_view else (None, None)

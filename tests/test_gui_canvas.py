@@ -850,7 +850,11 @@ def test_2d_default_is_downsampled(qapp):
     canvas = MplCanvas()  # default: full_resolution=False, matching every canvas but Spectrum
     canvas.show_spectrum(_make_2d(n_f1=20, n_f2=200))
     fraction_kwargs = canvas._contour_fraction_kwargs()
-    assert fraction_kwargs == {}  # plot_2d_contour's own default fractions apply
+    # Explicit now (canvas._contour_fraction), not just relying on
+    # plot_2d_contour's own hardcoded default -- same effective value
+    # (0.25) but user-adjustable via set_contour_fraction/MainWindow's
+    # Output tab.
+    assert fraction_kwargs == {"contour_fraction_x": 0.25, "contour_fraction_y": 0.25}
 
 
 def test_full_resolution_true_at_construction_skips_2d_downsampling(qapp):
@@ -879,6 +883,57 @@ def test_set_full_resolution_rebuilds_2d_contour(qapp):
     assert full_res_data.shape == spectrum.data.shape
     assert downsampled_data.shape != full_res_data.shape
     assert downsampled_shape == spectrum.data.shape  # _contour_spectrum itself is never downsampled
+
+
+def test_set_contour_fraction_changes_the_default_downsample_kwargs(qapp):
+    canvas = MplCanvas()
+    assert canvas._contour_fraction_kwargs() == {"contour_fraction_x": 0.25, "contour_fraction_y": 0.25}
+
+    canvas.set_contour_fraction(0.5)
+
+    assert canvas._contour_fraction_kwargs() == {"contour_fraction_x": 0.5, "contour_fraction_y": 0.5}
+
+
+def test_set_contour_fraction_rebuilds_a_currently_shown_2d_contour(qapp):
+    # _contour_spectrum itself is never downsampled (see
+    # test_set_full_resolution_rebuilds_2d_contour's own comment) --
+    # check the actually-*rendered* contour data via _prepare_contour,
+    # the same way that test does, not _contour_shape.
+    from opennmr.plotting.twod import _prepare_contour
+
+    canvas = MplCanvas()
+    spectrum = _make_2d(n_f1=20, n_f2=200)
+    canvas.show_spectrum(spectrum)
+    _, _, quarter_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+
+    canvas.set_contour_fraction(0.5)
+
+    _, _, half_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    assert half_data.shape != quarter_data.shape
+    assert half_data.shape[0] > quarter_data.shape[0]
+    assert half_data.shape[1] > quarter_data.shape[1]
+
+
+def test_set_contour_fraction_is_not_overridden_by_full_resolution(qapp):
+    # Recorded either way (see set_contour_fraction's own docstring) so
+    # it's already in effect the moment full resolution is turned back
+    # off -- but has no visible effect while full_resolution is on,
+    # since that already forces no downsampling regardless.
+    from opennmr.plotting.twod import _prepare_contour
+
+    canvas = MplCanvas(full_resolution=True)
+    spectrum = _make_2d(n_f1=20, n_f2=200)
+    canvas.show_spectrum(spectrum)
+    _, _, full_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    assert full_data.shape == spectrum.data.shape
+
+    canvas.set_contour_fraction(0.1)
+    _, _, still_full_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    assert still_full_data.shape == spectrum.data.shape  # still full resolution, unaffected
+
+    canvas.set_full_resolution(False)
+    _, _, downsampled_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    assert downsampled_data.shape != spectrum.data.shape  # now the 0.1 fraction takes effect
 
 
 def test_has_downsampled_data_true_for_a_2d_contour(qapp):

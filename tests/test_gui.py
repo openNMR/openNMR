@@ -1553,6 +1553,45 @@ def test_main_window_2d_dimension_toggle_resets_phase_controls(qapp, tmp_path):
     assert window.phase0_handle.value() == pytest.approx(0.0)
 
 
+def test_main_window_current_phase_label_shows_dash_with_nothing_selected(qapp):
+    window = MainWindow()
+    assert window.current_phase_label.text() == "Current phase: —"
+
+
+def test_main_window_current_phase_label_updates_live_during_a_drag(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    assert window.current_phase_label.text() == "Current phase: 0.00° / 0.00°"
+
+    window.phase0_handle.setValue(45.0)
+
+    assert window.current_phase_label.text() == "Current phase: 45.00° / 0.00°"
+    assert window.phase0_spin.value() == pytest.approx(45.0)  # the delta control is untouched by this
+
+
+def test_main_window_current_phase_label_survives_reselection_unlike_the_delta_spin_box(qapp, tmp_path):
+    # Explicit user feedback: Phase 0/Phase 1 resetting to 0 on
+    # reselection read as the phase value itself being lost -- this
+    # label is what actually shows the still-applied total, while the
+    # spin boxes keep their own (deliberate, delta-from-here) behavior
+    # unchanged.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="expt_a"), vendor="bruker")
+    index_a = window._selected_index()
+    window._load(_make_1d_dataset(tmp_path, name="expt_b"), vendor="bruker")
+
+    window._select_single_row(index_a)
+    window.phase0_handle.setValue(45.0)
+    assert window.current_phase_label.text() == "Current phase: 45.00° / 0.00°"
+
+    window._select_single_row(1)  # away to B
+    assert window.current_phase_label.text() == "Current phase: 0.00° / 0.00°"  # B was never phased
+
+    window._select_single_row(index_a)  # back to A
+    assert window.phase0_spin.value() == pytest.approx(0.0)  # the delta control resets, by design
+    assert window.current_phase_label.text() == "Current phase: 45.00° / 0.00°"  # but the real value is shown
+
+
 def test_main_window_2d_pivot_matches_selected_dimension(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
@@ -5507,6 +5546,22 @@ def test_main_window_output_style_change_applies_to_every_canvas(qapp):
         assert canvas._AXIS_LINEWIDTH == pytest.approx(3.0)
 
 
+def test_main_window_contour_fraction_spin_defaults_to_25_percent(qapp):
+    # Matches plotting.plot_2d_contour's own default (0.25) -- explicit
+    # user request: "a factor of 4 less should be appropriate" as the
+    # default, made user-adjustable rather than hardcoded.
+    window = MainWindow()
+    assert window.output_contour_fraction_spin.value() == 25
+    assert window.canvas._contour_fraction == pytest.approx(0.25)
+
+
+def test_main_window_contour_fraction_change_applies_to_every_canvas(qapp):
+    window = MainWindow()
+    window.output_contour_fraction_spin.setValue(60)
+    for canvas in window._all_canvases():
+        assert canvas._contour_fraction == pytest.approx(0.6)
+
+
 def test_main_window_output_fontsize_and_ticks_apply(qapp):
     window = MainWindow()
     window.output_fontsize_spin.setValue(22)
@@ -5589,6 +5644,90 @@ def test_main_window_load_figure_style_template_missing_shows_message(qapp, tmp_
     window._on_load_figure_style_template()
 
     assert shown.get("called") is True
+
+
+# ============================================================
+# Per-probe app-wide config (imaging max gradient)
+# ============================================================
+
+def test_main_window_save_probe_gradient_default_writes_config_file(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_PROBE_CONFIG_PATH", str(tmp_path / "probe_config.json"))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, name="probecfg1d", probe="5 mm BBO"), vendor="bruker")
+
+    window.imaging_max_gradient_spin.setValue(42.5)
+    window._on_save_probe_gradient_default_clicked()
+
+    config = window._load_probe_config()
+    assert config == {"5 mm BBO": {"max_gradient_g_per_cm": pytest.approx(42.5)}}
+
+
+def test_main_window_save_probe_gradient_default_without_a_probe_shows_message(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_PROBE_CONFIG_PATH", str(tmp_path / "probe_config.json"))
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, name="noprobe1d"), vendor="bruker")  # no probe kwarg
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+
+    window._on_save_probe_gradient_default_clicked()
+
+    assert shown.get("called") is True
+    assert window._load_probe_config() == {}
+
+
+def test_main_window_probe_default_gradient_applies_automatically_to_a_new_spectrum(qapp, tmp_path, monkeypatch):
+    # Explicit user request: a saved probe default should be
+    # "associated automatically with the probe" -- no separate load
+    # step, unlike the figure-style templates above.
+    monkeypatch.setattr(MainWindow, "_PROBE_CONFIG_PATH", str(tmp_path / "probe_config.json"))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, name="probesave1d", probe="5 mm BBO"), vendor="bruker")
+    window.imaging_max_gradient_spin.setValue(42.5)
+    window._on_save_probe_gradient_default_clicked()
+
+    # A second, otherwise-unrelated spectrum recording the *same* probe.
+    window._load(
+        _make_raw_1d_dataset(tmp_path, monkeypatch, name="probeauto1d", probe="5 mm BBO"), vendor="bruker",
+    )
+
+    assert window.imaging_max_gradient_spin.value() == pytest.approx(42.5)
+
+
+def test_main_window_per_experiment_gradient_overrides_the_probe_default(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_PROBE_CONFIG_PATH", str(tmp_path / "probe_config.json"))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, name="probesave1d", probe="5 mm BBO"), vendor="bruker")
+    window.imaging_max_gradient_spin.setValue(42.5)
+    window._on_save_probe_gradient_default_clicked()
+
+    window._load(
+        _make_raw_1d_dataset(tmp_path, monkeypatch, name="probeoverride1d", probe="5 mm BBO"), vendor="bruker",
+    )
+    index = window._selected_index()
+    window.imaging_max_gradient_spin.setValue(10.0)  # this experiment's own explicit value
+
+    window._select_single_row(0)
+    window._select_single_row(index)  # back to the overridden one
+
+    assert window.imaging_max_gradient_spin.value() == pytest.approx(10.0)  # not silently reverted to 42.5
+
+
+def test_main_window_probe_default_gradient_does_not_apply_to_a_different_probe(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_PROBE_CONFIG_PATH", str(tmp_path / "probe_config.json"))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, name="probesave1d", probe="5 mm BBO"), vendor="bruker")
+    window.imaging_max_gradient_spin.setValue(42.5)
+    window._on_save_probe_gradient_default_clicked()
+
+    window._load(
+        _make_raw_1d_dataset(tmp_path, monkeypatch, name="otherprobe1d", probe="1.3 mm MAS"), vendor="bruker",
+    )
+
+    assert window.imaging_max_gradient_spin.value() == pytest.approx(0.0)
 
 
 # ============================================================
