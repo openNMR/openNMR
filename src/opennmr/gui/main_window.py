@@ -439,7 +439,7 @@ class MainWindow(QMainWindow):
 
         analysis_menu.addSeparator()
         clear_peaks_menu_action = QAction("&Clear Peak Table", self)
-        clear_peaks_menu_action.triggered.connect(lambda: self.peak_table.setRowCount(0))
+        clear_peaks_menu_action.triggered.connect(self._on_clear_peaks_clicked)
         analysis_menu.addAction(clear_peaks_menu_action)
 
         analysis_menu.addSeparator()
@@ -4313,6 +4313,12 @@ class MainWindow(QMainWindow):
         )
         self.peak_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.peak_table.customContextMenuRequested.connect(self._on_peak_table_context_menu)
+        # Same "table and canvas must always agree" reasoning as
+        # region_table's own itemChanged connection just below --
+        # editing a shift directly in the table (not just adding/
+        # removing/auto-picking) should move its own triangle marker
+        # too.
+        self.peak_table.itemChanged.connect(lambda _item: self._refresh_peak_markers())
         peak_layout.addWidget(self.peak_table)
 
         peak_button_row = QHBoxLayout()
@@ -4322,7 +4328,7 @@ class MainWindow(QMainWindow):
         remove_peak_button.clicked.connect(self._on_remove_peak_clicked)
         clear_peaks_button = QPushButton("Clear All")
         clear_peaks_button.setToolTip("Remove every row from the peak table.")
-        clear_peaks_button.clicked.connect(lambda: self.peak_table.setRowCount(0))
+        clear_peaks_button.clicked.connect(self._on_clear_peaks_clicked)
         peak_button_row.addWidget(add_peak_button)
         peak_button_row.addWidget(remove_peak_button)
         peak_button_row.addWidget(clear_peaks_button)
@@ -5022,13 +5028,45 @@ class MainWindow(QMainWindow):
     def _sync_region_shading(self) -> None:
         """Reflect the region table's current contents as shaded spans
         on the Spectrum canvas -- called whenever the table itself
-        changes (add/remove/clear/edit/drag-select) and on spectrum
-        reselection (:meth:`_restore_analysis_state`). Not hooked into
+        changes (add/remove/clear/edit/drag-select), from
+        :meth:`_restore_analysis_state` (needed there for a
+        canvas-preserving refresh, e.g. a nucleus/mass override that
+        doesn't redraw the canvas at all), and again from
+        :meth:`_draw_selected_spectrum` itself (needed *there*
+        specifically -- see its own comment -- since
+        ``_restore_analysis_state``'s own call runs *before* that
+        method's redraw in ``_on_selection_changed``'s call order and
+        would otherwise be silently discarded by it). Not hooked into
         every possible Spectrum redraw (a phase drag, a slice switch)
         -- an acceptable, purely cosmetic gap given how many places
         redraw that canvas; the region *definitions* themselves are
         unaffected and stay correct for fitting/integration regardless."""
         self.canvas.set_regions(self._read_region_defs())
+
+    def _refresh_peak_markers(self) -> None:
+        """Reflect the peak table's current contents as triangle
+        markers on the Spectrum canvas -- same "table and canvas must
+        always agree" reasoning as :meth:`_sync_region_shading` just
+        above, extended to peaks. Previously only ever called after
+        Auto-Pick (which built its own marker list from the detection
+        result directly, not the table), so a manually added/removed/
+        cleared/edited peak (click-to-pick, the Add/Remove/Clear
+        buttons, or a typed-in edit) left the canvas showing stale
+        markers or -- for a fresh manual add -- none at all, even
+        though the peak was really in the table. Called whenever the
+        peak table itself changes, and (see :meth:`_draw_selected_spectrum`)
+        after any canvas rebuild that would otherwise silently discard
+        the previous marker `Line2D` references."""
+        shifts = []
+        for row in range(self.peak_table.rowCount()):
+            item = self.peak_table.item(row, 0)
+            if item is None:
+                continue
+            try:
+                shifts.append(float(item.text()))
+            except ValueError:
+                continue
+        self.canvas.set_peak_markers(shifts or None)
 
     def _on_select_region_toggled(self, checked: bool) -> None:
         # Mirrors _on_pick_peak_toggled: region-select only ever
@@ -5087,6 +5125,7 @@ class MainWindow(QMainWindow):
         self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
         if bounds:
             self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, bounds)
+        self._refresh_peak_markers()
 
     @staticmethod
     def _make_fixed_checkbox_item(checked: bool) -> QTableWidgetItem:
@@ -5099,6 +5138,11 @@ class MainWindow(QMainWindow):
         row = self.peak_table.currentRow()
         if row >= 0:
             self.peak_table.removeRow(row)
+        self._refresh_peak_markers()
+
+    def _on_clear_peaks_clicked(self) -> None:
+        self.peak_table.setRowCount(0)
+        self._refresh_peak_markers()
 
     def _on_peak_table_context_menu(self, pos) -> None:
         row = self.peak_table.currentRow()
@@ -5201,11 +5245,13 @@ class MainWindow(QMainWindow):
             return
         self.peak_table.setRowCount(0)
         for peak in peaks:
+            # Explicit user request: auto-pick should leave a visual
+            # indication on the spectrum, not just fill the table -- a
+            # small marker at each detected peak's own shift.
+            # _add_peak_row's own _refresh_peak_markers call handles
+            # this (reads the whole table, so the last iteration here
+            # already reflects every peak added, not just its own row).
             self._add_peak_row(shift=peak["shift"], fwhm=peak["fwhm"], eta=peak["eta"])
-        # Explicit user request: auto-pick should leave a visual
-        # indication on the spectrum, not just fill the table -- a
-        # small marker at each detected peak's own shift.
-        self.canvas.set_peak_markers([peak["shift"] for peak in peaks])
 
     def _restore_sr_control(self, spectrum) -> None:
         self.sr_shift_spin.blockSignals(True)
@@ -6018,6 +6064,7 @@ class MainWindow(QMainWindow):
             self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.blockSignals(False)
         self._sync_region_shading()
+        self._refresh_peak_markers()
 
         self._relaxation_fit_results = spectrum.metadata.raw.get("relaxation_fit_results")
         self._relaxation_fit_xlabel = spectrum.metadata.raw.get("relaxation_fit_xlabel", "Delay (s)")
@@ -6136,6 +6183,24 @@ class MainWindow(QMainWindow):
             self._refresh_processing_preview_if_active()
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot spectrum", str(exc))
+
+        # Re-sync region shading/peak markers *after* whatever redraw
+        # just happened above -- both are also called from
+        # _restore_analysis_state (needed for a canvas-preserving
+        # refresh, e.g. a nucleus/mass override that doesn't redraw at
+        # all), but _restore_analysis_state itself runs *before*
+        # _draw_selected_spectrum in _on_selection_changed's own call
+        # order, so that earlier call silently gets discarded whenever
+        # self.canvas.show_spectrum/_show_pseudo2d_stack just rebuilt
+        # the figure (a real, confirmed-by-reproduction bug for region
+        # shading specifically -- reselecting back to a spectrum with
+        # a saved region lost its shading; peak markers had the same
+        # gap plus never being drawn for a manually added peak at
+        # all). Both calls are cheap and safely no-op via their own
+        # canvas-side guards when there's nothing sensible to draw on
+        # (a stack view, Compare-tab-active skip, etc.).
+        self._sync_region_shading()
+        self._refresh_peak_markers()
 
         self._silo_other_canvas_tabs(spectrum, skip_compare=compare_matches_list)
 

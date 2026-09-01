@@ -3837,6 +3837,112 @@ def test_main_window_auto_pick_peaks_shows_markers_on_spectrum(qapp):
     assert window.canvas._peak_marker_lines == []
 
 
+def test_main_window_manually_added_peak_shows_a_marker(qapp):
+    # Real user report: "manual peak picking also needs triangle
+    # markers" -- auto-pick already drew its own marker list directly
+    # from the detection result, but a manual add (the Add Peak
+    # button, or click-to-pick via _on_peak_picked, both of which go
+    # through _add_peak_row) never called set_peak_markers at all, so
+    # nothing appeared on the canvas until Auto-Pick happened to be
+    # used instead.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    assert window.canvas._peak_marker_lines == []
+
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    assert len(window.canvas._peak_marker_lines) == 1
+    assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([5.0])
+
+    window._add_peak_row(shift=6.0, fwhm=0.05, eta=0.5)
+    assert len(window.canvas._peak_marker_lines) == 2
+
+
+def test_main_window_peak_picked_via_click_shows_a_marker(qapp):
+    # Same gap as the manual-add test above, exercised through the
+    # actual click-to-pick path (_on_pick_peak_toggled -> canvas click
+    # -> _on_peak_picked) rather than calling _add_peak_row directly.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window.pick_peak_button.setChecked(True)
+    window._on_peak_picked(5.0)
+    assert len(window.canvas._peak_marker_lines) == 1
+
+
+def test_main_window_removing_a_peak_removes_its_marker(qapp):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    window._add_peak_row(shift=6.0, fwhm=0.05, eta=0.5)
+    assert len(window.canvas._peak_marker_lines) == 2
+
+    window.peak_table.setCurrentCell(0, 0)
+    window._on_remove_peak_clicked()
+    assert len(window.canvas._peak_marker_lines) == 1
+    assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([6.0])
+
+
+def test_main_window_editing_a_peak_shift_moves_its_marker(qapp):
+    # peak_table.itemChanged is wired to _refresh_peak_markers, same
+    # as region_table's own itemChanged -> _sync_region_shading --
+    # typing a new shift directly into the table (not just add/
+    # remove/auto-pick) should move the marker too.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([5.0])
+
+    window.peak_table.item(0, 0).setText("6.5")
+    assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([6.5])
+
+
+def test_main_window_peak_markers_survive_reselection(qapp):
+    # Real, related bug found while fixing the manual-peak-marker gap
+    # above: MplCanvas.show_spectrum's own figure.clear() (run by
+    # every reselection) discards the previous marker Line2D
+    # references -- _restore_analysis_state's own peak-table rebuild
+    # ran *before* that redraw (see _refresh_selection_display's own
+    # call order), so its refresh was silently thrown away by the
+    # very next line. Fixed by re-syncing again after
+    # _draw_selected_spectrum, not just from _restore_analysis_state.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, n_pts=200))
+    index_a = window._selected_index()
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    assert len(window.canvas._peak_marker_lines) == 1
+
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=3.0, fwhm=0.05, n_pts=200))
+    index_b = window._selected_index()
+    assert index_b != index_a
+    assert window.canvas._peak_marker_lines == []  # B has no peaks of its own
+
+    window._select_single_row(index_a)
+    assert len(window.canvas._peak_marker_lines) == 1
+    assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([5.0])
+
+
+def test_main_window_region_shading_survives_reselection(qapp):
+    # Same underlying bug as the peak-marker one above, same fix --
+    # confirmed via direct reproduction before fixing (region shading
+    # silently vanished on reselecting back to a spectrum that had a
+    # saved region, even though the region_table itself still had the
+    # row).
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, n_pts=200))
+    index_a = window._selected_index()
+    window._add_region_row(4.5, 5.5)
+
+    def region_patch_count():
+        return sum(1 for p in window.canvas.ax.patches if p.get_gid() == window.canvas._REGION_PATCH_GID)
+
+    assert region_patch_count() == 1
+
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=3.0, fwhm=0.05, n_pts=200))
+    assert region_patch_count() == 0
+
+    window._select_single_row(index_a)
+    assert region_patch_count() == 1
+
+
 def test_main_window_auto_pick_peaks_not_supported_for_conventional_2d(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
@@ -3874,7 +3980,7 @@ def test_main_window_clear_all_peaks_button(qapp):
     window._add_peak_row(shift=5.0, fwhm=0.1, eta=0.5)
     window._add_peak_row(shift=6.0, fwhm=0.2, eta=0.3)
     assert window.peak_table.rowCount() == 2
-    window.peak_table.setRowCount(0)  # what the "Clear All" button's own click handler calls
+    window._on_clear_peaks_clicked()  # what the "Clear All" button/menu action actually call
     assert window.peak_table.rowCount() == 0
 
 
