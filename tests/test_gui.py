@@ -1746,7 +1746,7 @@ def _synthetic_raw_fid(n=64, sw=8000.0, f0_hz=1000.0, decay=200.0):
     return (np.exp(-t * decay) * np.exp(2j * np.pi * f0_hz * t)).astype(np.complex128)
 
 
-def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1"):
+def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=None):
     """A Bruker experiment with a real (parseable) `procs` but a mocked
     raw `fid` read -- same approach as test_bruker_raw_fid.py, so
     `read_1d`'s real window/zero-fill/FFT code runs for real while the
@@ -1762,6 +1762,8 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1"):
     (expt / "acqus").write_bytes(b"\x00")
 
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    if probe is not None:
+        acqus["PROBHD"] = probe
     fid = _synthetic_raw_fid(n=n)
     dic = {"acqus": acqus}
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
@@ -3767,6 +3769,15 @@ def _settle_live_reprocess(window):
         window._run_debounced_multi_row_reprocess()
 
 
+def _settle_sidecar_save(window):
+    """:func:`_settle_live_reprocess`'s own sibling for
+    :attr:`MainWindow._sidecar_save_timer` (see its own docstring) --
+    force a pending debounced sidecar-file write to run immediately."""
+    if window._sidecar_save_timer.isActive():
+        window._sidecar_save_timer.stop()
+        window._run_debounced_sidecar_save()
+
+
 def _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, amplitude=1.0, n_pts=400):
     """A real, fittable 1D peak (unlike ``_make_1d_dataset``'s tiny
     8-point linear-ramp placeholder, which has nothing peak-shaped for
@@ -5730,3 +5741,165 @@ def test_main_window_compare_explicit_plot_still_renders_immediately(qapp):
 
     assert window._compare_view_stale is False
     assert window.canvas_tabs.currentWidget() is window.compare_canvas
+
+
+# ============================================================
+# Sidecar-file persistence (io.persistence)
+# ============================================================
+
+def test_main_window_fid_processing_change_writes_sidecar_files(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="sidecar1d")
+    window._load(path, vendor="bruker")
+
+    window._set_zero_fill_value(128)
+    window._on_fid_processing_control_changed()
+    _settle_sidecar_save(window)
+
+    from opennmr.io import persistence
+    processing = persistence.load_processing_sidecar(path)
+    assert processing["live_zero_fill"] == 128
+    metadata = persistence.load_metadata_sidecar(path)
+    assert metadata["vendor"] == "bruker"
+
+
+def test_main_window_reopening_restores_zero_fill_and_recomputes_data(qapp, tmp_path, monkeypatch):
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="sidecarreopen1d")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._set_zero_fill_value(128)
+    window._on_fid_processing_control_changed()
+    _settle_sidecar_save(window)
+    assert len(window.session.spectra[0].data) == 128
+
+    # A fresh MainWindow/session -- same on-disk data, nothing carried
+    # over in memory -- proves this survives an app restart, not just
+    # a reselection within one running session.
+    window2 = MainWindow()
+    window2._load(path, vendor="bruker")
+    index = window2._selected_index()
+
+    assert window2.zero_fill_custom_spin.value() == 128
+    assert len(window2.session.spectra[index].data) == 128
+
+
+def test_main_window_reopening_restores_phase(qapp, tmp_path, monkeypatch):
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="sidecarphase1d")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    original = window.session.spectra[0].data.copy()
+
+    window.phase0_handle.setValue(45.0)
+    window._capture_phase_reference()  # commits the pending phase delta into metadata.raw, same as reselecting
+    _settle_sidecar_save(window)
+
+    from opennmr.io import persistence
+    saved = persistence.load_processing_sidecar(path)
+    assert saved["phase0"] == pytest.approx(45.0)
+
+    window2 = MainWindow()
+    window2._load(path, vendor="bruker")
+    restored = window2.session.spectra[0].data
+    assert not np.allclose(original, restored)  # actually re-phased, not just bookkeeping
+
+
+def test_main_window_reopening_restores_mass_and_nucleus_override(qapp, tmp_path, monkeypatch):
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="sidecarmeta1d")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    index = window._selected_index()
+
+    window.session.set_mass(index, 0.045)
+    window._schedule_sidecar_save(index)
+    window._set_nucleus(index, "23Na")
+    _settle_sidecar_save(window)
+
+    window2 = MainWindow()
+    window2._load(path, vendor="bruker")
+    restored = window2.session.spectra[window2._selected_index()]
+    assert restored.metadata.mass == pytest.approx(0.045)
+    assert restored.metadata.nucleus == "23Na"
+
+
+def test_main_window_reopening_a_2d_restores_f1_truncate(qapp, tmp_path, monkeypatch):
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=16, name="sidecar2d", f1_nuc="13C")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt into genuine 2D -- see F1-truncate tests' own comment
+    window.tdeff_f1_spin.setValue(3)
+    window.zero_fill_f1_spin.setValue(3)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)
+    _settle_sidecar_save(window)
+    assert window.session.spectra[0].data.shape[0] == 3
+
+    window2 = MainWindow()
+    window2._load(path, vendor="bruker")
+    index = window2._selected_index()
+    assert window2.session.spectra[index].data.shape[0] == 3
+    assert window2.tdeff_f1_spin.value() == 3
+    assert window2.zero_fill_f1_spin.value() == 3
+
+
+def test_main_window_no_sidecar_files_is_a_silent_noop_on_load(qapp, tmp_path, monkeypatch):
+    # The common, first-ever-load case -- nothing saved yet -- must
+    # load exactly as it always did, no crash, no spurious restore.
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="nosidecar1d")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    assert len(window.session.spectra[0].data) == 64  # plain vendor-default length, untouched
+
+
+def test_main_window_info_label_shows_probe_when_recorded(qapp, tmp_path, monkeypatch):
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="probeinfo1d", probe="5 mm BBO")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+
+    assert "Probe: 5 mm BBO" in window.info_label.text()
+
+
+def test_main_window_reselection_flushes_pending_sidecar_save_for_outgoing_spectrum(qapp, tmp_path, monkeypatch):
+    # _schedule_sidecar_save only tracks one pending index at a time --
+    # switching to spectrum B right after editing spectrum A (before A's
+    # own debounce timer fires) would otherwise silently drop A's edit
+    # instead of ever writing it to disk.
+    path_a = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="flusha")
+    path_b = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="flushb")
+    window = MainWindow()
+    window._load(path_a, vendor="bruker")
+    window._load(path_b, vendor="bruker")
+
+    window._select_single_row(0)
+    window._set_zero_fill_value(128)
+    window._on_fid_processing_control_changed()
+    assert window._sidecar_save_timer.isActive()  # scheduled, not yet flushed
+
+    window._select_single_row(1)  # switch away before the debounce interval elapses
+
+    from opennmr.io import persistence
+    assert persistence.load_processing_sidecar(path_a)["live_zero_fill"] == 128
+
+
+def test_main_window_reset_processing_updates_the_saved_sidecar(qapp, tmp_path, monkeypatch):
+    # Without this, an old saved sidecar would silently resurrect
+    # exactly what Reset just discarded, the next time this experiment
+    # is reopened.
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="resetsidecar1d")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._set_zero_fill_value(128)
+    window._on_fid_processing_control_changed()
+    _settle_sidecar_save(window)
+
+    from opennmr.io import persistence
+    assert persistence.load_processing_sidecar(path)["live_zero_fill"] == 128
+
+    window._on_reset_processing_clicked()
+    _settle_sidecar_save(window)
+
+    saved = persistence.load_processing_sidecar(path) or {}
+    assert saved.get("live_zero_fill") != 128
+
+    window2 = MainWindow()
+    window2._load(path, vendor="bruker")
+    assert len(window2.session.spectra[0].data) == 64  # plain vendor-default length, not the discarded 128

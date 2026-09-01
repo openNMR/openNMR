@@ -343,7 +343,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
 
     metadata = NMRMetadata(
         vendor="bruker", nucleus=acqus.get("NUC1"), sfo1=sf, bf1=obs, o1=o1, ns=ns,
-        source_path=path, procno=procno,
+        source_path=path, procno=procno, probe=acqus.get("PROBHD"),
         raw={
             "acqus": acqus, "procs": procs, "phase0": phase0, "phase1": phase1,
             # The exact (shift/echo-align/LP/windowed/zero-filled) FID
@@ -615,6 +615,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         vendor="bruker", nucleus=acqus.get("NUC1"), nucleus_indirect=nuc2,
         sfo1=sf, sfo1_indirect=(None if pseudo_2d else sf_1), bf1=obs, o1=o1, ns=ns,
         source_path=path, procno=procno, pseudo_2d=pseudo_2d, homonuclear=homonuclear,
+        probe=acqus.get("PROBHD"),
         raw={
             "acqus": acqus, "procs": procs, "proc2s": proc2s, "phase0": phase0, "phase1": phase1,
             # F1's own hypercomplex encoding (see
@@ -699,6 +700,7 @@ def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float 
 
     metadata = NMRMetadata(
         vendor="bruker", nucleus=nuc, sfo1=sf, bf1=obs, o1=o1, ns=ns, source_path=path, procno=procno,
+        probe=acq_meta.get("PROBHD"),
         raw={"acqus": axis_meta, "procs": procs},
     )
     axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
@@ -807,6 +809,7 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
         vendor="bruker", nucleus=acqus.get("NUC1"), nucleus_indirect=nuc2,
         sfo1=sf, sfo1_indirect=(None if pseudo_2d else sf_1), bf1=obs, o1=o1, ns=ns,
         source_path=path, procno=procno, pseudo_2d=pseudo_2d, homonuclear=homonuclear,
+        probe=acqus.get("PROBHD"),
         raw={"acqus": acqus, "procs": procs, "proc2s": proc2s},
     )
     x_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)

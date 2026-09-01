@@ -87,6 +87,21 @@ def _write_echo_fixture(tmp_path):
     return str(path)
 
 
+def test_read_1d_records_probe_from_dollar_dollar_probe(tmp_path):
+    path = tmp_path / "spectrum_with_probe.jdx"
+    path.write_text(FIXTURE.replace("$$Filter=10000", "$$Filter=10000\n$$Probe=HFX"))
+    spectrum = xpulse.read_1d(str(path), autophase=False, baseline_correct=False)
+
+    assert spectrum.metadata.probe == "HFX"
+
+
+def test_read_1d_probe_is_none_when_not_recorded(tmp_path):
+    path = _write_fixture(tmp_path)
+    spectrum = xpulse.read_1d(path, autophase=False, baseline_correct=False)
+
+    assert spectrum.metadata.probe is None
+
+
 def test_read_xpulse_jcamp_decodes_affn_fid(tmp_path):
     path = _write_fixture(tmp_path)
     fid_data = xpulse._read_xpulse_jcamp(path)

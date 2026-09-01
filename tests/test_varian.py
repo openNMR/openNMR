@@ -28,7 +28,7 @@ def _procpar_entry(name, values, basictype="1"):
 
 
 def _write_varian_1d(tmp_path, n=8, sw=1000.0, sfrq=100.0, reffrq=100.0, tof=0.0,
-                      tn="Li7", nt=1.0, name="synthetic.fid"):
+                      tn="Li7", nt=1.0, name="synthetic.fid", probe=None):
     data = (np.arange(1, n + 1) + 1j * np.arange(1, n + 1)).astype(np.complex64)
     dic = {
         "nblocks": 1, "ntraces": 1, "np": 2 * n, "ebytes": 4, "tbytes": 4 * 2 * n, "bbytes": 4 * 2 * n + 28,
@@ -46,6 +46,8 @@ def _write_varian_1d(tmp_path, n=8, sw=1000.0, sfrq=100.0, reffrq=100.0, tof=0.0
             "ni": _procpar_entry("ni", [1]),
         },
     }
+    if probe is not None:
+        dic["procpar"]["probe"] = _procpar_entry("probe", [probe], basictype="2")
     path = str(tmp_path / name)
     ng.varian.write(path, dic, data, overwrite=True)
     return path
@@ -122,6 +124,18 @@ def test_read_1d_produces_nmrspectrum(tmp_path):
     assert spectrum.metadata.nucleus == "7Li"  # normalized from procpar's "Li7"
     assert spectrum.metadata.sfo1 == pytest.approx(100.0)
     assert len(spectrum.axes[0].ppm) == 8
+
+
+def test_read_1d_records_probe(tmp_path):
+    path = _write_varian_1d(tmp_path, n=8, probe="3.2mm HXY probe")
+    spectrum = varian.read_1d(path, autophase=False)
+    assert spectrum.metadata.probe == "3.2mm HXY probe"
+
+
+def test_read_1d_probe_is_none_when_not_recorded(tmp_path):
+    path = _write_varian_1d(tmp_path, n=8)
+    spectrum = varian.read_1d(path, autophase=False)
+    assert spectrum.metadata.probe is None
 
 
 def test_read_1d_zero_fill(tmp_path):

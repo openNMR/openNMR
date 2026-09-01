@@ -554,6 +554,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
         bf1=sf_hz / 1e6,
         o1=o1_hz,
         source_path=path,
+        probe=exp_params.get("Probe"),
         raw={
             "params": params, "exp_params": exp_params, "phase0": phase0, "phase1": phase1,
             # The fully processed (pre-FFT) FID -- an optional GUI
@@ -938,6 +939,7 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
         nucleus=nucleus_f2, nucleus_indirect=nucleus_f1,
         sfo1=sfo1_hz / 1e6, sfo1_indirect=sfo1_hz_f1 / 1e6,
         source_path=path,
+        probe=exp_params.get("Probe"),
         raw={
             "params": params, "exp_params": exp_params, "phase0": phase0, "phase1": phase1,
             "fn_mode": 5,

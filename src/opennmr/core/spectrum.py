@@ -89,6 +89,13 @@ class NMRMetadata:
     #: Bruker readers accept (which divides the data immediately,
     #: rather than recording the value for later).
     mass: float | None = None
+    #: Probe identifier, as recorded by the vendor -- Bruker's
+    #: ``##$PROBHD`` (e.g. "1.3 mm MAS BB/1H/19F/19F H13708/0016"),
+    #: X-Pulse's ``$$Probe`` (e.g. "HFX", a channel-configuration
+    #: code rather than a serial number -- less specific than Bruker's,
+    #: but still the closest equivalent the format records). ``None``
+    #: for a vendor/dataset where nothing recognizable was found.
+    probe: str | None = None
     raw: dict = field(default_factory=dict)
 
 

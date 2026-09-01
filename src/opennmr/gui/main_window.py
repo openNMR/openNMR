@@ -31,6 +31,7 @@ from .. import plotting
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRSpectrum
 from ..io import bruker as io_bruker
+from ..io import persistence as io_persistence
 from ..processing import arithmetic as processing_arithmetic
 from ..processing import fitting as processing_fitting
 from ..processing import ft as processing_ft
@@ -172,6 +173,21 @@ class MainWindow(QMainWindow):
         self._live_reprocess_timer.setSingleShot(True)
         self._live_reprocess_timer.timeout.connect(self._run_debounced_multi_row_reprocess)
         self._live_reprocess_pending_index: int | None = None
+        # Same debounce reasoning as _live_reprocess_timer just above,
+        # for a different job: writing this experiment's own sidecar
+        # files (see io.persistence) to disk after any live control/
+        # metadata change, so the saved recipe survives an app restart
+        # -- explicit user request. A longer interval than the
+        # recompute timer's own 200ms since a disk write matters far
+        # less to coalesce tightly (nothing on screen depends on it
+        # finishing promptly the way a recompute's own visible result
+        # does) and a rapid burst of edits (e.g. a spin box held down)
+        # would otherwise mean a much higher write rate than the
+        # recompute timer already limits itself to.
+        self._sidecar_save_timer = QTimer(self)
+        self._sidecar_save_timer.setSingleShot(True)
+        self._sidecar_save_timer.timeout.connect(self._run_debounced_sidecar_save)
+        self._sidecar_save_pending_index: int | None = None
         # Each spectrum's own load kwargs immediately after _load's
         # initial pseudo-2D-default handling, before any live
         # FID-processing/phase/baseline control ever touched it --
@@ -953,6 +969,11 @@ class MainWindow(QMainWindow):
             return
 
         index = len(self.session) - 1
+        # Loaded early (before the pseudo-2D default below) so a
+        # previously-saved "Process Indirect Dimension" opt-in can
+        # override that default rather than being silently reset by it
+        # on every reopen -- see the pseudo_2d branch just below.
+        saved_metadata = io_persistence.load_metadata_sidecar(spectrum.metadata.source_path)
         if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
             # Pseudo-2D is the default treatment for any 2D data,
             # regardless of what the vendor's own (known-unreliable for
@@ -961,9 +982,20 @@ class MainWindow(QMainWindow):
             # under-detecting pseudo-2D is the failure mode actually
             # seen on real data. Process Indirect Dimension (unchecked
             # by default after this) is how a genuine 2D-correlation
-            # experiment opts back into a real F1 FFT.
+            # experiment opts back into a real F1 FFT -- or, if this
+            # exact experiment already had that opt-in saved from a
+            # previous session (see io.persistence), respect it here
+            # instead of forcing pseudo-2D and making the user redo it
+            # after every restart.
+            # Only an explicit saved `False` overrides the default --
+            # anything else (no saved sidecar, an older one predating
+            # this field, or a saved 1D/pseudo-2D-only spectrum whose
+            # own field is None) keeps today's unconditional "force
+            # pseudo-2D" behaviour unchanged, rather than silently
+            # switching to auto-detection.
+            wants_pseudo_2d = (saved_metadata or {}).get("pseudo_2d") is not False
             try:
-                spectrum = self.session.reload(index, pseudo_2d=True)
+                spectrum = self.session.reload(index, pseudo_2d=wants_pseudo_2d)
             except Exception:  # noqa: BLE001 -- fall back to what actually loaded rather than failing the load
                 pass
         # Snapshot *after* the pseudo-2D default above (its own
@@ -992,8 +1024,41 @@ class MainWindow(QMainWindow):
         # correction where it previously didn't), not just bookkeeping.
         spectrum.metadata.raw.setdefault("baseline_correct", True)
         spectrum.metadata.raw.setdefault("baseline_method", "linear")
+
+        # Restore this experiment's own saved sidecar state (see
+        # io.persistence), if any, *before* selecting it below -- so
+        # _refresh_fid_processing_controls/_restore_analysis_state
+        # (both run as part of _select_single_row's own cascade) see
+        # the restored values immediately, the same way they already
+        # pick up in-session-only state today. Explicit user request:
+        # a saved processing recipe should survive an app restart, not
+        # just a reselection within one running session. saved_metadata
+        # itself was already loaded above (before the pseudo_2d default) --
+        # re-used here rather than re-read, same file either way.
+        if saved_metadata:
+            if saved_metadata.get("mass_g") is not None:
+                self.session.set_mass(index, saved_metadata["mass_g"])
+                spectrum = self.session.spectra[index]
+            if saved_metadata.get("nucleus"):
+                self.session.set_nucleus(index, saved_metadata["nucleus"])
+                spectrum = self.session.spectra[index]
+            if saved_metadata.get("nucleus_indirect"):
+                self.session.set_nucleus(index, saved_metadata["nucleus_indirect"], indirect=True)
+                spectrum = self.session.spectra[index]
+        saved_processing = io_persistence.load_processing_sidecar(spectrum.metadata.source_path)
+        if saved_processing:
+            spectrum.metadata.raw.update(saved_processing)
+
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
+        if saved_processing:
+            # Seeding metadata.raw above only affects widget *values*
+            # (via _refresh_fid_processing_controls, already run by
+            # _select_single_row) and future persistence -- it doesn't
+            # by itself touch spectrum.data, which is still whatever
+            # the vendor's own default load just produced. Actually
+            # apply the restored recipe now.
+            self._apply_loaded_processing_sidecar(spectrum, index)
 
         shape_note = spectrum.metadata.raw.get("read_2d_shape_guess_failed")
         if shape_note:
@@ -1014,6 +1079,40 @@ class MainWindow(QMainWindow):
                 f"a different one from the Processing tab and click Apply Processing, "
                 f"or leave it unwindowed.",
             )
+
+    def _apply_loaded_processing_sidecar(self, spectrum, index: int) -> None:
+        """Actually apply a just-restored processing-parameters
+        sidecar to ``spectrum.data`` itself -- called once, right
+        after :meth:`_load` has already merged the saved dict into
+        ``spectrum.metadata.raw`` and selected the row (so
+        ``_refresh_fid_processing_controls`` has already set every
+        live-control widget from it, and ``_capture_phase_reference``
+        has already zeroed the Phase spin boxes against it). Merging
+        into ``metadata.raw`` alone only changes widget *values* and
+        future persistence -- ``spectrum.data`` itself is still
+        whatever the vendor's own default load just produced until
+        something actually recomputes it.
+
+        Synchronous, not the usual debounced multi-row path
+        (:meth:`_schedule_multi_row_reprocess`) -- this runs once at
+        load time, not on a rapid run of live-edit ticks that
+        debouncing exists to coalesce, and a synchronous recompute
+        here means the SR-shift reapplication below (which needs the
+        *already-recomputed* axis to rebase against, not a stale
+        vendor-default one) doesn't have to guess when a debounced
+        recompute will actually finish."""
+        if not self._fid_reprocessable(spectrum):
+            return
+        if spectrum.ndim == 1:
+            self._commit_processing_preview_as_spectrum(spectrum)
+        else:
+            self._recompute_multi_row_data(spectrum)
+        self.spectrum_list.item(index).setText(self.session.label(index))
+        sr_shift = spectrum.metadata.raw.get("sr_shift_hz")
+        if sr_shift:
+            self._apply_reference_shift_hz(sr_shift)  # also redraws
+        else:
+            self._draw_selected_spectrum(spectrum, row=index)
 
     def _select_single_row(self, row: int) -> None:
         """Select exactly ``row``, clearing any other selection.
@@ -1132,6 +1231,7 @@ class MainWindow(QMainWindow):
         self.spectrum_list.item(index).setText(self.session.label(index))
         if index == self._selected_index():
             self._refresh_selection_display(index)
+        self._schedule_sidecar_save(index)
 
     def _on_override_nucleus_action(self, index: int) -> None:
         current = self.session.spectra[index].metadata.nucleus or ""
@@ -1174,6 +1274,7 @@ class MainWindow(QMainWindow):
             if index == self._selected_index():
                 self._refresh_selection_display(index)
             self._refresh_compare_view_if_active()
+            self._schedule_sidecar_save(index)
 
     def _on_change_procno_action(self, index: int) -> None:
         current = self.session.spectra[index].metadata.procno or 1
@@ -1218,6 +1319,7 @@ class MainWindow(QMainWindow):
             self.process_indirect_button.blockSignals(False)
             return
         self._on_selection_changed(index)
+        self._schedule_sidecar_save(index)
 
     def _on_pseudo2d_view_changed(self, _index: int) -> None:
         index = self._selected_index()
@@ -2937,6 +3039,7 @@ class MainWindow(QMainWindow):
             raw["live_truncate_f1"] = self.tdeff_f1_spin.value()
         if self.zero_fill_f1_spin.isEnabled():
             raw["live_zero_fill_f1"] = self.zero_fill_f1_spin.value()
+        self._schedule_sidecar_save()
 
     def _on_fid_processing_control_changed(self) -> None:
         """Unified live-update handler for every FID-processing
@@ -2989,6 +3092,32 @@ class MainWindow(QMainWindow):
         if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
             self._show_fid_preview(spectrum, switch_tab=False)
         self._refresh_processing_preview_if_active()
+
+    def _schedule_sidecar_save(self, index: int | None = None) -> None:
+        """(Re)start the debounce timer for writing spectrum
+        ``index``'s (default: whatever's currently selected) two
+        on-disk sidecar files (see :mod:`opennmr.io.persistence`) --
+        called after any live FID-processing control, phase commit,
+        baseline toggle, analysis-state change (peaks/regions/fit
+        settings), or metadata override (mass/nucleus/SR shift/
+        imaging gradient) changes. A no-op if nothing is selected --
+        e.g. a metadata change made via a right-click action on a
+        *different* row than the one currently shown still passes its
+        own ``index`` explicitly rather than relying on the default."""
+        target = index if index is not None else self._selected_index()
+        if target is None:
+            return
+        self._sidecar_save_pending_index = target
+        self._sidecar_save_timer.start(800)
+
+    def _run_debounced_sidecar_save(self) -> None:
+        index = self._sidecar_save_pending_index
+        self._sidecar_save_pending_index = None
+        if index is None or index >= len(self.session):
+            return
+        spectrum = self.session.spectra[index]
+        io_persistence.save_metadata_sidecar(spectrum)
+        io_persistence.save_processing_sidecar(spectrum)
 
     def _schedule_multi_row_reprocess(self, index: int) -> None:
         """(Re)start the debounce timer for a full
@@ -3056,6 +3185,11 @@ class MainWindow(QMainWindow):
             return
         self.spectrum_list.item(index).setText(self.session.label(index))
         self._on_selection_changed(index)
+        # Without this, Reset only discards the *in-memory* state --
+        # an old saved processing sidecar (see io.persistence) would
+        # still be sitting on disk and silently resurrect exactly what
+        # was just reset the next time this experiment is reopened.
+        self._schedule_sidecar_save(index)
 
     def _current_phase_kwargs(self, spectrum) -> dict:
         """The *total* current phase (whatever was already baked in
@@ -3740,6 +3874,7 @@ class MainWindow(QMainWindow):
         smoothing = self.baseline_smoothing_spin.value()
         spectrum.metadata.raw["baseline_smoothing"] = smoothing if smoothing > 0.0 else None
         spectrum.metadata.raw["baseline_degree"] = self.baseline_degree_spin.value()
+        self._schedule_sidecar_save(index)
         if self.baseline_correct_button.isChecked():
             self._apply_phase_preview()
 
@@ -3763,6 +3898,7 @@ class MainWindow(QMainWindow):
             return
         spectrum = self.session.spectra[index]
         spectrum.metadata.raw["baseline_correct"] = checked
+        self._schedule_sidecar_save(index)
         self._apply_phase_preview()
 
     def _on_phase_target_changed(self) -> None:
@@ -4112,6 +4248,7 @@ class MainWindow(QMainWindow):
         key0, key1 = ("phase0_f1", "phase1_f1") if is_f1 else ("phase0", "phase1")
         spectrum.metadata.raw[key0] = float(spectrum.metadata.raw.get(key0, 0.0)) + phase0_delta
         spectrum.metadata.raw[key1] = float(spectrum.metadata.raw.get(key1, 0.0)) + phase1_delta
+        self._schedule_sidecar_save(index)
 
     def _capture_phase_reference(self) -> None:
         """(Re)anchor the phase controls to whatever they're currently
@@ -4830,6 +4967,7 @@ class MainWindow(QMainWindow):
             self.session.spectra[index].metadata.raw["imaging_max_gradient_g_per_cm"] = (
                 self.imaging_max_gradient_spin.value() or None
             )
+            self._schedule_sidecar_save(index)
         self._refresh_imaging_gradient()
 
     def _refresh_imaging_gradient(self) -> None:
@@ -5318,6 +5456,7 @@ class MainWindow(QMainWindow):
 
         spectrum.metadata.raw["sr_shift_hz"] = sr_hz
         self._restore_sr_control(spectrum)
+        self._schedule_sidecar_save(index)
 
         # A full show_spectrum() redraw (via _draw_selected_spectrum)
         # always resets the view to ppm -- fine for an actual spectrum
@@ -5992,6 +6131,7 @@ class MainWindow(QMainWindow):
         if index is None or not (0 <= index < len(self.session)):
             return
         self.session.spectra[index].metadata.raw["analysis_state"] = self._capture_analysis_state()
+        self._schedule_sidecar_save(index)
 
     def _restore_analysis_state(self, spectrum) -> None:
         self.peak_table.setRowCount(0)
@@ -6085,6 +6225,18 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self.session):
             return
         self._save_current_analysis_state()
+        # Flush any still-pending sidecar save for the *outgoing*
+        # spectrum synchronously, rather than leaving it in the
+        # debounce timer -- _schedule_sidecar_save only ever tracks
+        # one pending index at a time (same limitation
+        # _live_reprocess_timer already has), so scheduling one for
+        # the *new* selection below would otherwise silently drop an
+        # edit made to this spectrum just before switching away from
+        # it, exactly the same "outgoing spectrum's own last edit"
+        # concern _save_current_analysis_state right above exists for.
+        if self._sidecar_save_timer.isActive():
+            self._sidecar_save_timer.stop()
+            self._run_debounced_sidecar_save()
         spectrum = self.session.spectra[row]
         # Refresh widget state (slice index range/default, etc.) before
         # drawing -- the FID-preview branch below reads e.g. slice_spin,
@@ -6256,6 +6408,8 @@ class MainWindow(QMainWindow):
             bits.append(f"Indirect nucleus: {meta.nucleus_indirect}")
         if meta.mass:
             bits.append(f"Sample mass: {meta.mass * 1000.0:g} mg")
+        if meta.probe:
+            bits.append(f"Probe: {meta.probe}")
         self.info_label.setText("\n".join(bits))
 
         self.imaging_max_gradient_spin.blockSignals(True)
