@@ -1553,28 +1553,45 @@ def test_main_window_2d_dimension_toggle_resets_phase_controls(qapp, tmp_path):
     assert window.phase0_handle.value() == pytest.approx(0.0)
 
 
-def test_main_window_current_phase_label_shows_dash_with_nothing_selected(qapp):
+def test_main_window_phase_current_display_is_read_only(qapp):
+    # Explicit user request: "just display non-editable numbers with
+    # current phase instead of that editable box" -- phase0_spin/
+    # phase1_spin still exist (see _make_phase_control's own comment)
+    # but are never added to any layout; these read-only labels are
+    # what the user actually sees and interacts with (via the drag
+    # handle, not by typing into the display itself).
     window = MainWindow()
-    assert window.current_phase_label.text() == "Current phase: —"
+    for display in (window.phase0_current_display, window.phase1_current_display):
+        assert isinstance(display, QLabel)
+        assert display.parent() is not None  # actually placed in the layout
+    assert window.phase0_spin.parent() is None  # the old editable control is not
 
 
-def test_main_window_current_phase_label_updates_live_during_a_drag(qapp, tmp_path):
+def test_main_window_current_phase_display_shows_dash_with_nothing_selected(qapp):
+    window = MainWindow()
+    assert window.phase0_current_display.text() == "—"
+    assert window.phase1_current_display.text() == "—"
+
+
+def test_main_window_current_phase_display_updates_live_during_a_drag(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path), vendor="bruker")
-    assert window.current_phase_label.text() == "Current phase: 0.00° / 0.00°"
+    assert window.phase0_current_display.text() == "0.00°"
+    assert window.phase1_current_display.text() == "0.00°"
 
     window.phase0_handle.setValue(45.0)
 
-    assert window.current_phase_label.text() == "Current phase: 45.00° / 0.00°"
-    assert window.phase0_spin.value() == pytest.approx(45.0)  # the delta control is untouched by this
+    assert window.phase0_current_display.text() == "45.00°"
+    assert window.phase1_current_display.text() == "0.00°"
+    assert window.phase0_spin.value() == pytest.approx(45.0)  # the hidden delta control is untouched by this
 
 
-def test_main_window_current_phase_label_survives_reselection_unlike_the_delta_spin_box(qapp, tmp_path):
+def test_main_window_current_phase_display_survives_reselection_unlike_the_hidden_delta(qapp, tmp_path):
     # Explicit user feedback: Phase 0/Phase 1 resetting to 0 on
     # reselection read as the phase value itself being lost -- this
-    # label is what actually shows the still-applied total, while the
-    # spin boxes keep their own (deliberate, delta-from-here) behavior
-    # unchanged.
+    # display is what actually shows the still-applied total, while
+    # the hidden delta control keeps its own (deliberate, delta-from-
+    # here) behavior unchanged.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, name="expt_a"), vendor="bruker")
     index_a = window._selected_index()
@@ -1582,14 +1599,14 @@ def test_main_window_current_phase_label_survives_reselection_unlike_the_delta_s
 
     window._select_single_row(index_a)
     window.phase0_handle.setValue(45.0)
-    assert window.current_phase_label.text() == "Current phase: 45.00° / 0.00°"
+    assert window.phase0_current_display.text() == "45.00°"
 
     window._select_single_row(1)  # away to B
-    assert window.current_phase_label.text() == "Current phase: 0.00° / 0.00°"  # B was never phased
+    assert window.phase0_current_display.text() == "0.00°"  # B was never phased
 
     window._select_single_row(index_a)  # back to A
-    assert window.phase0_spin.value() == pytest.approx(0.0)  # the delta control resets, by design
-    assert window.current_phase_label.text() == "Current phase: 45.00° / 0.00°"  # but the real value is shown
+    assert window.phase0_spin.value() == pytest.approx(0.0)  # the hidden delta control resets, by design
+    assert window.phase0_current_display.text() == "45.00°"  # but the real value is still shown
 
 
 def test_main_window_2d_pivot_matches_selected_dimension(qapp, tmp_path):
@@ -2048,13 +2065,15 @@ def test_main_window_fid_x_unit_combo_switches_axis_label(qapp, tmp_path, monkey
     assert window.fid_canvas.ax.get_xlabel() == "Points"
 
 
-def test_main_window_phase_spin_box_wide_enough_for_large_values(qapp):
-    # Explicit user feedback: the Phase 0/1 spin boxes were too narrow
-    # to read a value like "-1234.56" -- especially relevant now that
-    # their range is unbounded (see _make_phase_control's own comment).
+def test_main_window_phase_current_display_wide_enough_for_large_values(qapp):
+    # Explicit user feedback: the Phase 0/1 controls were too narrow
+    # to read a value like "-1234.56" -- still relevant now that these
+    # are read-only current-value displays rather than editable spin
+    # boxes (see _make_phase_control's own comment), since a real
+    # recorded phase1 can run into 4 digits.
     window = MainWindow()
-    for spin in (window.phase0_spin, window.phase1_spin):
-        assert spin.minimumWidth() >= 80
+    for display in (window.phase0_current_display, window.phase1_current_display):
+        assert display.minimumWidth() >= 80
 
 
 # ============================================================

@@ -2,6 +2,17 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Phase display redesigned: non-editable current-value labels, not a read-only-label-plus-editable-box (2026-09-01)
+
+Follow-up correction to the previous round's fix: "can you just display non-editable numbers with current phase instead of that editable box? That way you can use whatever numbers internally and the user sees the relevant values. We don't need to see the zeroed out phase values."
+
+- Removed the separate `current_phase_label` line added last round; instead **replaced Phase 0/Phase 1's own visible editable spin boxes with non-editable `QLabel`s** (`phase0_current_display`/`phase1_current_display`, selectable-but-not-editable, showing the real absolute total, e.g. "45.00°") placed directly next to each drag handle, in the spin boxes' own old spot.
+- **Internals unchanged, exactly as the user suggested** ("use whatever numbers internally"): `phase0_spin`/`phase1_spin` (the old editable `RelativeDoubleSpinBox`es) still exist and are still the real drag-delta state `DragHandle` stays synced with -- just never added to any layout any more, so every one of the ~30 existing call sites that read/write `.value()` (`_apply_phase_preview`, `_commit_pending_phase_to_metadata`, `_compute_processing_preview`, `_current_phase_kwargs`, quick-phase nudge buttons, autophase/revert-autophase, pivot-move phase-folding) needed zero changes. `_pair_widget`'s signature generalized (`display: QWidget` instead of `spin: QDoubleSpinBox`) since it now pairs a handle with a label, not a handle with a spin box.
+- `_refresh_current_phase_displays` (renamed from last round's `_refresh_current_phase_label`) now updates both labels directly instead of one combined line, same two call sites as before (`_capture_phase_reference`, `_apply_phase_preview`).
+- Updated `_set_processing_enabled`'s widget list to also grey out the two new displays when phase editing isn't available, and updated a pre-existing test (`phase_spin_box_wide_enough_for_large_values` -> the displays, not the now-hidden spin boxes) plus rewrote the 3 tests from last round's own fix. 759 tests passing. Committed; not yet pushed.
+
+**Also, a standing instruction restated with emphasis, not specific to this item**: "Many of the things I've requested definitely exist inside the codebase I initially provided [nmrtools2/leonmr]. Always use that code as a basis instead of writing from scratch." Saved as a dedicated feedback memory (`feedback_reuse_reference_code.md`) rather than left as a one-off -- check those two repos for an existing implementation before building any new opennmr feature from scratch, going forward. (Checked for this specific phase-display item -- confirmed nmrtools2/leonmr have no GUI code at all, so there was genuinely nothing to reuse here; this rule matters most for the still-queued 2D-roadmap and fitting-wizard items, which are much more likely to have real processing/plotting analogues worth checking first.)
+
 ## Current-phase display fix, user-adjustable 2D downsample fraction, per-probe gradient config (2026-09-01)
 
 Three quick items ahead of (and the start of) the 2D roadmap's downsampling piece.

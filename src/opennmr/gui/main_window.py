@@ -3458,36 +3458,17 @@ class MainWindow(QMainWindow):
         phase_box = QGroupBox("Phase")
         form = QFormLayout(phase_box)
 
-        self.phase0_handle, self.phase0_spin = self._make_phase_control()
+        self.phase0_handle, self.phase0_spin, self.phase0_current_display = self._make_phase_control()
         # Phase 1 (linear, applied across the whole spectrum) needs a
         # much larger per-step change than Phase 0 to have a visible
         # effect -- one degree of phase1 barely moves anything, unlike
         # one degree of phase0. ~20x (1-2 orders of magnitude) larger
         # step/drag-sensitivity, per explicit user feedback.
-        self.phase1_handle, self.phase1_spin = self._make_phase_control(
+        self.phase1_handle, self.phase1_spin, self.phase1_current_display = self._make_phase_control(
             sensitivity=0.2 * _PHASE1_STEP_MULTIPLIER, step=1.0 * _PHASE1_STEP_MULTIPLIER,
         )
-        form.addRow("Phase 0 (deg):", self._pair_widget(self.phase0_handle, self.phase0_spin))
-        form.addRow("Phase 1 (deg):", self._pair_widget(self.phase1_handle, self.phase1_spin))
-
-        # Phase 0/Phase 1 above are a drag *delta* from whatever this
-        # view already looked like when editing started (always 0 right
-        # after selecting/re-anchoring, by design -- see
-        # _capture_phase_reference's own docstring on why a drag needs
-        # a neutral starting point) -- explicit user feedback that this
-        # reads as the phase value simply "resetting to zero" on
-        # reselection, with nowhere to actually see what's currently
-        # applied. This read-only label shows the real total instead,
-        # kept live during a drag (_apply_phase_preview) and refreshed
-        # on every re-anchor (_capture_phase_reference).
-        self.current_phase_label = QLabel("Current phase: —")
-        self.current_phase_label.setToolTip(
-            "The total phase actually applied to this view right now -- "
-            "Phase 0/Phase 1 above are a delta from here, always "
-            "starting at 0 when you select/re-anchor, not a reset of "
-            "the underlying value."
-        )
-        form.addRow(self.current_phase_label)
+        form.addRow("Phase 0 (deg):", self._pair_widget(self.phase0_handle, self.phase0_current_display))
+        form.addRow("Phase 1 (deg):", self._pair_widget(self.phase1_handle, self.phase1_current_display))
 
         quick_phase_column = QVBoxLayout()
         quick_phase_column.setSpacing(2)
@@ -3686,31 +3667,51 @@ class MainWindow(QMainWindow):
 
         return box
 
-    def _make_phase_control(self, sensitivity: float = 0.2, step: float = 1.0) -> tuple[DragHandle, QDoubleSpinBox]:
+    def _make_phase_control(self, sensitivity: float = 0.2, step: float = 1.0) -> tuple[DragHandle, QDoubleSpinBox, QLabel]:
         handle = DragHandle(sensitivity=sensitivity, step=step)
 
+        # Never shown -- kept purely as the internal drag *delta*
+        # value DragHandle stays synced with (_on_phase_handle_changed/
+        # _on_phase_spin_changed, both otherwise unchanged), so every
+        # existing computation that reads this spin box's own .value()
+        # keeps working exactly as before. What the user actually sees
+        # is current_display below instead: a plain non-editable
+        # readout of the *absolute* phase (see
+        # _refresh_current_phase_displays). Explicit user feedback:
+        # "just display non-editable numbers with current phase
+        # instead of that editable box... we don't need to see the
+        # zeroed out phase values" -- the editable, always-0-after-
+        # reselection number was the actual complaint, not the drag
+        # handle itself, which keeps working exactly as before.
         spin = RelativeDoubleSpinBox()
         spin.setRange(-_PHASE_SPIN_RANGE, _PHASE_SPIN_RANGE)
         spin.setDecimals(2)
         spin.setSingleStep(step)
         spin.setValue(0.0)
-        # Qt's own sizeHint for a QDoubleSpinBox doesn't account for
-        # -_PHASE_SPIN_RANGE being unbounded -- default width is too
-        # narrow to show even a 3-4 digit value (e.g. "-1234.56")
-        # without scrolling the text inside the box.
-        spin.setMinimumWidth(80)
+
+        current_display = QLabel("—")
+        # Same reasoning the old editable spin box's own minimumWidth
+        # had -- real recorded phase1 values can run into 4 digits
+        # (e.g. -1748.5), too wide for Qt's own default label sizing.
+        current_display.setMinimumWidth(80)
+        current_display.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        current_display.setToolTip(
+            "The total phase actually applied right now -- drag the "
+            "handle to adjust it. Always the real value, never a delta "
+            "that resets to 0 on reselection."
+        )
 
         handle.valueChanged.connect(lambda v: self._on_phase_handle_changed(handle, spin, v))
         spin.valueChanged.connect(lambda v: self._on_phase_spin_changed(handle, spin, v))
-        return handle, spin
+        return handle, spin, current_display
 
     @staticmethod
-    def _pair_widget(handle: DragHandle, spin: QDoubleSpinBox) -> QWidget:
+    def _pair_widget(handle: DragHandle, display: QWidget) -> QWidget:
         widget = QWidget()
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(handle)
-        row.addWidget(spin)
+        row.addWidget(display)
         return widget
 
     def _on_phase_handle_changed(self, handle: DragHandle, spin: QDoubleSpinBox, value: float) -> None:
@@ -4087,7 +4088,7 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         phase0 = self.phase0_spin.value()
         phase1 = self.phase1_spin.value()
-        self._refresh_current_phase_label()
+        self._refresh_current_phase_displays()
 
         freq_ppm = self._phase_freq_ppm
         span = freq_ppm.max() - freq_ppm.min()
@@ -4331,30 +4332,29 @@ class MainWindow(QMainWindow):
         spectrum.metadata.raw[key1] = float(spectrum.metadata.raw.get(key1, 0.0)) + phase1_delta
         self._schedule_sidecar_save(index)
 
-    def _refresh_current_phase_label(self) -> None:
-        """Show the *total* phase actually applied right now --
-        whatever's already baked into ``metadata.raw`` for whatever
-        this editing session is targeting, plus the live delta still
-        showing in the Phase 0/Phase 1 spin boxes (0 right after a
-        fresh :meth:`_capture_phase_reference`, non-zero mid-drag).
-        Called from both, so this label stays accurate whether nothing
-        is being dragged right now or a drag is actively in progress.
-        Explicit user feedback: Phase 0/Phase 1 resetting to 0 on every
-        reselection read as the phase value itself being lost, with no
-        way to see what's actually applied -- this is that visibility,
-        without changing the drag controls' own delta-from-here
-        behaviour (needed so dragging back to 0 is always a sensible
-        "undo what I just did")."""
+    def _refresh_current_phase_displays(self) -> None:
+        """Show the *total* phase actually applied right now, in
+        ``phase0_current_display``/``phase1_current_display`` (the
+        non-editable labels next to each drag handle -- see
+        :meth:`_make_phase_control`) -- whatever's already baked into
+        ``metadata.raw`` for whatever this editing session is
+        targeting, plus the live delta still held in the hidden
+        ``phase0_spin``/``phase1_spin`` (0 right after a fresh
+        :meth:`_capture_phase_reference`, non-zero mid-drag). Called
+        from both, so these stay accurate whether nothing is being
+        dragged right now or a drag is actively in progress."""
         index = self._phase_target_index
         if self._phase_mode is None or index is None or not (0 <= index < len(self.session)):
-            self.current_phase_label.setText("Current phase: —")
+            self.phase0_current_display.setText("—")
+            self.phase1_current_display.setText("—")
             return
         spectrum = self.session.spectra[index]
         is_f1 = self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0
         key0, key1 = ("phase0_f1", "phase1_f1") if is_f1 else ("phase0", "phase1")
         phase0 = float(spectrum.metadata.raw.get(key0, 0.0)) + self.phase0_spin.value()
         phase1 = float(spectrum.metadata.raw.get(key1, 0.0)) + self.phase1_spin.value()
-        self.current_phase_label.setText(f"Current phase: {phase0:.2f}° / {phase1:.2f}°")
+        self.phase0_current_display.setText(f"{phase0:.2f}°")
+        self.phase1_current_display.setText(f"{phase1:.2f}°")
 
     def _capture_phase_reference(self) -> None:
         """(Re)anchor the phase controls to whatever they're currently
@@ -4394,7 +4394,7 @@ class MainWindow(QMainWindow):
             self._phase_mode = None
             self._phase_reference_full = None
             self._phase_freq_ppm = None
-            self._refresh_current_phase_label()
+            self._refresh_current_phase_displays()
             return
 
         spectrum = self.session.spectra[index]
@@ -4424,7 +4424,7 @@ class MainWindow(QMainWindow):
             self._phase_reference_full = None
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
-            self._refresh_current_phase_label()
+            self._refresh_current_phase_displays()
             return
 
         if spectrum.ndim == 1:
@@ -4459,10 +4459,10 @@ class MainWindow(QMainWindow):
             self._phase_reference_full = None
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
-            self._refresh_current_phase_label()
+            self._refresh_current_phase_displays()
             return
 
-        self._refresh_current_phase_label()
+        self._refresh_current_phase_displays()
         centre_ppm = float((self._phase_freq_ppm.min() + self._phase_freq_ppm.max()) / 2)
         self.pivot_spin.blockSignals(True)
         self.pivot_spin.setValue(centre_ppm)
@@ -4474,7 +4474,8 @@ class MainWindow(QMainWindow):
 
     def _set_processing_enabled(self, enabled: bool, status: str | None = None) -> None:
         for widget in (
-            self.phase0_handle, self.phase0_spin, self.phase1_handle, self.phase1_spin,
+            self.phase0_handle, self.phase0_spin, self.phase0_current_display,
+            self.phase1_handle, self.phase1_spin, self.phase1_current_display,
             self.pivot_spin, self.pivot_slider, self.autophase_joint_checkbox,
             self.baseline_correct_button, self.baseline_method_combo, self.baseline_smoothing_spin,
         ):
