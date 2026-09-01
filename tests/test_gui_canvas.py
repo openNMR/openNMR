@@ -837,6 +837,103 @@ def test_export_full_resolution_noop_when_already_full_resolution(qapp):
 
 
 # ============================================================
+# Full resolution -- 2D contour (a QuadContourSet has no in-place
+# swap the way a Line2D does, so this is a full show_spectrum rebuild,
+# not a data-swap -- see set_full_resolution's own docstring)
+# ============================================================
+
+def _contour_shape(canvas):
+    return canvas._contour_spectrum.data.shape if canvas._contour_spectrum is not None else None
+
+
+def test_2d_default_is_downsampled(qapp):
+    canvas = MplCanvas()  # default: full_resolution=False, matching every canvas but Spectrum
+    canvas.show_spectrum(_make_2d(n_f1=20, n_f2=200))
+    fraction_kwargs = canvas._contour_fraction_kwargs()
+    assert fraction_kwargs == {}  # plot_2d_contour's own default fractions apply
+
+
+def test_full_resolution_true_at_construction_skips_2d_downsampling(qapp):
+    # Explicit user feedback: the main Spectrum canvas should show a
+    # fully sampled 2D contour by default, unlike every other canvas
+    # (e.g. the FID-processing live preview).
+    canvas = MplCanvas(full_resolution=True)
+    assert canvas._contour_fraction_kwargs() == {"contour_fraction_x": None, "contour_fraction_y": None}
+
+
+def test_set_full_resolution_rebuilds_2d_contour(qapp):
+    canvas = MplCanvas()
+    spectrum = _make_2d(n_f1=20, n_f2=200)
+    canvas.show_spectrum(spectrum)
+    downsampled_shape = _contour_shape(canvas)
+
+    canvas.set_full_resolution(True)
+
+    # _contour_spectrum is the original (never-downsampled) spectrum
+    # object either way -- what actually changed is the *rendered*
+    # contour, checked via _prepare_contour with the same kwargs
+    # show_spectrum itself would now use.
+    from opennmr.plotting.twod import _prepare_contour
+    _, _, full_res_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    _, _, downsampled_data, _, _ = _prepare_contour(spectrum)
+    assert full_res_data.shape == spectrum.data.shape
+    assert downsampled_data.shape != full_res_data.shape
+    assert downsampled_shape == spectrum.data.shape  # _contour_spectrum itself is never downsampled
+
+
+def test_has_downsampled_data_true_for_a_2d_contour(qapp):
+    canvas = MplCanvas()
+    assert canvas.has_downsampled_data() is False  # nothing plotted yet
+    canvas.show_spectrum(_make_2d(n_f1=20, n_f2=200))
+    assert canvas.has_downsampled_data() is True
+
+
+def test_export_full_resolution_2d_uses_full_data_then_restores_view(qapp):
+    # The actual explicit user request, for 2D: an export (and,
+    # per this same-session fix, the live Spectrum view too) must
+    # never be silently downsampled.
+    from opennmr.plotting.twod import _prepare_contour
+
+    canvas = MplCanvas()  # default False -- exercises the swap-then-restore path
+    spectrum = _make_2d(n_f1=20, n_f2=200)
+    canvas.show_spectrum(spectrum)
+    canvas.ax.set_xlim(3.0, 7.0)
+    canvas.ax.set_ylim(92.0, 98.0)
+
+    seen_shapes = []
+
+    def fake_save():
+        _, _, data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+        seen_shapes.append(data.shape)
+
+    canvas.export_full_resolution(fake_save)
+
+    assert seen_shapes == [spectrum.data.shape]  # save_fn saw the true full-resolution data
+    assert canvas._full_resolution is False  # live view setting restored
+    assert canvas.ax.get_xlim() == pytest.approx((3.0, 7.0))  # zoom preserved across the rebuild
+    assert canvas.ax.get_ylim() == pytest.approx((92.0, 98.0))
+
+
+def test_export_full_resolution_2d_noop_when_already_full_resolution(qapp):
+    from opennmr.plotting.twod import _prepare_contour
+
+    canvas = MplCanvas(full_resolution=True)
+    spectrum = _make_2d(n_f1=20, n_f2=200)
+    canvas.show_spectrum(spectrum)
+
+    seen_shapes = []
+
+    def fake_save():
+        _, _, data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+        seen_shapes.append(data.shape)
+
+    canvas.export_full_resolution(fake_save)
+
+    assert seen_shapes == [spectrum.data.shape]
+    assert canvas._full_resolution is True  # untouched -- nothing needed swapping
+
+
+# ============================================================
 # show_compare "Stacked" mode: one subplot per spectrum
 # ============================================================
 

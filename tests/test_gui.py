@@ -536,6 +536,22 @@ def test_main_window_menu_window_panel_actions_switch_side_tabs(qapp):
     assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Analysis"
 
 
+def test_main_window_spectrum_canvas_defaults_to_full_resolution_others_do_not(qapp):
+    # Explicit user feedback: the main Spectrum tab was silently,
+    # severely downsampled by default -- "only the spectrum in fid
+    # processing should be [downsampled]... I need to have the fully
+    # sampled spectrum in the spectrum tab." Every other canvas keeps
+    # the fast/approximate default, which is the right tradeoff there
+    # (explicitly named: FID processing).
+    window = MainWindow()
+    assert window.canvas._full_resolution is True
+    assert window.processing_preview_canvas._full_resolution is False
+    assert window.fid_canvas._full_resolution is False
+    assert window.compare_canvas._full_resolution is False
+    assert window.fit_canvas._full_resolution is False
+    assert window.spectral_fit_canvas._full_resolution is False
+
+
 def test_main_window_menu_window_view_actions_switch_canvas_tabs(qapp):
     window = MainWindow()
     window_menu = window.menuBar().actions()[2].menu()

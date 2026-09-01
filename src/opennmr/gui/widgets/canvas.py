@@ -162,7 +162,7 @@ class MplCanvas(QWidget):
     #: Axes each time, invalidating any previously held patch objects).
     _REGION_PATCH_GID = "integration_region"
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, full_resolution: bool = False) -> None:
         super().__init__(parent)
 
         self.figure = Figure()
@@ -197,12 +197,21 @@ class MplCanvas(QWidget):
         self._export_fig_height: float | None = None
         # Persists across a rebuild the same way legend/aspect-lock do
         # (see show_spectrum's own docstring) -- an explicit opt-out of
-        # plot_1d's default rendering-only downsampling (see
-        # opennmr.plotting.style.downsample_indices), for on-screen
-        # viewing. Exporting/saving a figure always uses full
-        # resolution regardless of this (see export_full_resolution) --
-        # this only controls what's interactively shown.
-        self._full_resolution = False
+        # plot_1d's/plot_2d_contour's default rendering-only
+        # downsampling (see opennmr.plotting.style.downsample_indices/
+        # downsample_2d), for on-screen viewing. Exporting/saving a
+        # figure always uses full resolution regardless of this (see
+        # export_full_resolution) -- this only controls what's
+        # interactively shown. Defaults False (fast rendering) except
+        # where a caller passes ``full_resolution=True`` at
+        # construction -- MainWindow does this only for the main
+        # Spectrum canvas (explicit user feedback: the Spectrum tab
+        # was silently, severely downsampled by default with no way to
+        # tell without already knowing to look for the toggle -- every
+        # other canvas, e.g. the FID-processing live preview, is
+        # exactly where fast/approximate rendering over exactness is
+        # the right tradeoff, and keeps the old default).
+        self._full_resolution = full_resolution
         self._pick_mode = False
         self._region_select_mode = False
         self._region_select_start: float | None = None  # x-data value of the drag's own start
@@ -557,6 +566,17 @@ class MplCanvas(QWidget):
         self._contour_power = power
         self._redraw_contour(preserve_view=True)
 
+    def _contour_fraction_kwargs(self) -> dict:
+        """``contour_fraction_x``/``contour_fraction_y`` overrides for
+        :func:`opennmr.plotting.plot_2d_contour`, both call sites --
+        ``{}`` (its own default fractions apply) unless
+        :attr:`_full_resolution` is on, in which case both are forced
+        to ``None`` (no downsampling at all, see that function's own
+        docstring)."""
+        if self._full_resolution:
+            return {"contour_fraction_x": None, "contour_fraction_y": None}
+        return {}
+
     def _redraw_contour(self, preserve_view: bool) -> None:
         xlim, ylim = (self.ax.get_xlim(), self.ax.get_ylim()) if preserve_view else (None, None)
         self.figure.clear()
@@ -564,6 +584,7 @@ class MplCanvas(QWidget):
         _, _, self._proj_axes = plotting.plot_2d_contour(
             self._contour_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
             clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
+            **self._contour_fraction_kwargs(),
         )
         if preserve_view:
             self.ax.set_xlim(xlim)
@@ -1183,6 +1204,7 @@ class MplCanvas(QWidget):
             _, _, self._proj_axes = plotting.plot_2d_contour(
                 spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
                 clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
+                **self._contour_fraction_kwargs(),
             )
         else:
             raise ValueError(f"Cannot display a spectrum with ndim={spectrum.ndim}")
@@ -1754,7 +1776,14 @@ class MplCanvas(QWidget):
         :attr:`_full_resolution` is already on) rendered below its own
         true resolution -- gates the right-click "Full Resolution"
         toggle, so it's not offered when there's nothing it would
-        actually change."""
+        actually change. A 2D contour is always eligible (unlike the
+        1D-line check below, this doesn't distinguish "actually
+        reduced" from "configured to allow it" -- matching the same
+        simplification the 1D stashing already makes; ``downsample_2d``
+        itself is a safe no-op when the data's already smaller than
+        the point cap)."""
+        if self._contour_spectrum is not None:
+            return True
         return any(hasattr(line, "_opennmr_full_res") for line in self._lines_for_export())
 
     def set_full_resolution(self, full: bool) -> None:
@@ -1776,7 +1805,14 @@ class MplCanvas(QWidget):
         downsampled data from that same full-resolution array
         (:func:`opennmr.plotting.style.downsample_indices` is
         deterministic in array length alone, so this reproduces
-        exactly what the original plot call would have shown)."""
+        exactly what the original plot call would have shown).
+
+        A 2D contour has no equivalent in-place swap (a
+        ``QuadContourSet``, unlike a ``Line2D``, has no reusable
+        "already-plotted data" to reach back into) -- a full
+        :meth:`show_spectrum` rebuild instead, which already reads
+        :attr:`_full_resolution` (just set above) via
+        :meth:`_contour_fraction_kwargs`."""
         self._full_resolution = full
         for line in self._lines_for_export():
             full_data = getattr(line, "_opennmr_full_res", None)
@@ -1788,6 +1824,8 @@ class MplCanvas(QWidget):
                 x_full, y_full = full_data
                 idx = plotting.downsample_indices(len(y_full))
                 line.set_data((x_full, y_full) if idx is None else (x_full[idx], y_full[idx]))
+        if self._contour_spectrum is not None:
+            self.show_spectrum(self._contour_spectrum)
         self.canvas.draw_idle()
 
     def export_full_resolution(self, save_fn) -> None:
@@ -1808,7 +1846,12 @@ class MplCanvas(QWidget):
         the on-screen (possibly still-downsampled, still-interactive-
         sized) view again afterward either way, including if
         ``save_fn`` itself raises or the user cancels the save dialog
-        inside it."""
+        inside it.
+
+        A 2D contour has no in-place swap the way a ``Line2D`` does
+        (see :meth:`set_full_resolution`'s own docstring) -- a full
+        rebuild instead, with the current pan/zoom saved and restored
+        around it so an export doesn't silently reset the view."""
         swapped = []
         for line in self._lines_for_export():
             full_data = getattr(line, "_opennmr_full_res", None)
@@ -1818,6 +1861,16 @@ class MplCanvas(QWidget):
             line.set_data(*full_data)
         if swapped:
             self.canvas.draw()
+
+        contour_swapped = False
+        contour_xlim = contour_ylim = None
+        if self._contour_spectrum is not None and not self._full_resolution:
+            contour_xlim, contour_ylim = self.ax.get_xlim(), self.ax.get_ylim()
+            self._full_resolution = True
+            self.show_spectrum(self._contour_spectrum)
+            self.ax.set_xlim(contour_xlim)
+            self.ax.set_ylim(contour_ylim)
+            contour_swapped = True
 
         original_dpi = self.figure.get_dpi()
         original_size = self.figure.get_size_inches()
@@ -1835,6 +1888,11 @@ class MplCanvas(QWidget):
             if swapped:
                 for line, x, y in swapped:
                     line.set_data(x, y)
+            if contour_swapped:
+                self._full_resolution = False
+                self.show_spectrum(self._contour_spectrum)
+                self.ax.set_xlim(contour_xlim)
+                self.ax.set_ylim(contour_ylim)
             self.figure.set_dpi(original_dpi)
             self.figure.set_size_inches(original_size)
             self.canvas.draw_idle()

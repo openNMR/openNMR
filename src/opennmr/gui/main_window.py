@@ -215,7 +215,12 @@ class MainWindow(QMainWindow):
         # the main "Spectrum" view (1D / 2D contour / pseudo-2D slice
         # or stack) -- unqualified since it's the default/most-used
         # one and predates the other three.
-        self.canvas = MplCanvas()
+        # full_resolution=True: explicit user feedback that the main
+        # Spectrum view was silently, severely downsampled by default
+        # with no obvious way to tell -- every other canvas (e.g. the
+        # FID-processing live preview below) keeps the default fast/
+        # approximate rendering, which is the right tradeoff there.
+        self.canvas = MplCanvas(full_resolution=True)
         self.canvas.peakPicked.connect(self._on_peak_picked)
         self.canvas.regionSelected.connect(self._on_region_selected)
         self.canvas.referenceShiftRequested.connect(self._on_reference_shift_from_plot)
