@@ -2225,6 +2225,96 @@ def _make_xpulse_dataset(tmp_path, name="xpulse1.jdx"):
     return str(path)
 
 
+def _make_xpulse_ntuples_2d_dataset(tmp_path, n1=4, n2=32, name="hsqc.jdx"):
+    """A minimal synthetic NTUPLES 2D fixture -- deliberately
+    asymmetric (n1 << n2, matching the real HSQC test dataset's own
+    128x2048 shape) since that's exactly the shape that exposed the
+    real fft_spectrum bug (len() reading axis 0 instead of the last
+    axis for a 2D array) as a loud crash rather than a silent
+    wrong-value bug a square array wouldn't have caught."""
+    t2 = np.arange(n2) / 800.0
+    f2signal = np.exp(-t2 * 50.0)
+    lines = [
+        "##TITLE= synthetic NTUPLES 2D fixture", "##DATACLASS= NTUPLES", "##NUMDIM= 2",
+        "$$SpinFlow Sequence Parameters Start",
+        f"$$NP1= {n1}", f"$$NP2= {n2}", "$$SW1= 100.0", "$$Filter= 800.0",
+        "$$O1= 0.0", "$$NS= 1", "$$TxPPM= 5.0", "$$TxPPMX= 100.0",
+        "$$SpinFlow Sequence Parameters End",
+        "##.OBSERVENUCLEUS= ^1H", "##$INDIRECTNUCLEUS= ^13C",
+        "##.ACQUISITION SCHEME= TPPI",
+        "##$SF= 500.0 $$ f2", "##$SF= 125.0 $$ f1",
+        "##$SFO1= 500.0 $$ f2", "##$SFO1= 125.0 $$ f1",
+        "##NTUPLES= nD NMR FID", "##VARFORM= AFFN, AFFN, AFFN, AFFN",
+        "##FIRST= 0, 0, 0, 0", f"##LAST= {(n1 - 1) / 100.0}, {(n2 - 1) / 800.0}, 0, 0",
+        "##FIRST= 0,0,0,0",
+    ]
+    for k in range(n1):
+        sign = -1.0 if k % 2 else 1.0
+        for kind, row in (("R", sign * f2signal), ("I", sign * f2signal * 0.5)):
+            lines.append(f"##PAGE=\tT1= {k}")
+            lines.append("##FIRST= 0,0,0,0")
+            lines.append(f"##DATATABLE= (T2++({kind}..{kind})), PROFILE")
+            for t2_val, value in zip(t2, row):
+                lines.append(f"{t2_val:.6f} {value:.6f}")
+    lines.append("##END=")
+    path = tmp_path / name
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def test_main_window_xpulse_2d_loads_and_renders_without_crashing(qapp, tmp_path, monkeypatch):
+    # Real bug, found on real data (a 128x2048 HSQC): loading a
+    # genuine X-Pulse 2D (NTUPLES) spectrum crashed while rendering
+    # the initial contour -- ValueError: x and y must have same first
+    # dimension -- caught by _draw_selected_spectrum's own try/except
+    # and turned into a QMessageBox.critical, which blocks forever in
+    # a headless test with nothing to click "OK" (a real, separate
+    # trap this test avoids by mocking it, same as the load itself
+    # would show a real user). Root cause: processing.ft.fft_spectrum
+    # used len(fid) (reads axis 0) instead of fid.shape[-1] for a 2D
+    # array's own frequency-axis length -- fixed at the source.
+    from PySide6.QtWidgets import QMessageBox
+
+    path = _make_xpulse_ntuples_2d_dataset(tmp_path)
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: critical_calls.append(a))
+
+    window = MainWindow()
+    window._load(path, vendor="xpulse")
+
+    assert critical_calls == []
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    assert spectrum.data.shape[0] == 4  # F1: row-paired 8 -> decoded 4
+    assert len(spectrum.axes[0].ppm) == spectrum.data.shape[0]
+    assert len(spectrum.axes[1].ppm) == spectrum.data.shape[1]
+
+
+def test_main_window_xpulse_2d_phase_drag_does_not_crash(qapp, tmp_path, monkeypatch):
+    # The user's own real report: the crash above happened repeatedly
+    # during a live phase drag specifically (_apply_phase_preview's
+    # "2d" branch), not just once on load -- that call site had no
+    # exception guard at all (unlike _draw_selected_spectrum's), so it
+    # printed an unhandled traceback once per mouse-move tick for the
+    # whole drag. Both the underlying shape bug and the missing guard
+    # are fixed; this exercises the live-drag path specifically.
+    from PySide6.QtWidgets import QMessageBox
+
+    path = _make_xpulse_ntuples_2d_dataset(tmp_path)
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: critical_calls.append(a))
+
+    window = MainWindow()
+    window._load(path, vendor="xpulse")
+    assert window._phase_mode == "2d"
+
+    window.phase0_handle.setValue(15.0)
+
+    assert critical_calls == []
+    index = window._selected_index()
+    assert window.session.spectra[index].data.shape[0] == 4
+
+
 def test_main_window_linear_predict_direction_defaults_to_forward_and_threads_through(qapp, tmp_path):
     # LP direction should actually change the live-recomputed spectrum
     # (not just be recorded) -- forward extends past the FID's own

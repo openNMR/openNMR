@@ -3864,16 +3864,33 @@ class MainWindow(QMainWindow):
             # phase drag).
             if spectrum.metadata.raw.get("baseline_correct"):
                 self._schedule_multi_row_reprocess(index)
-            self.canvas.show_spectrum(spectrum)
-            # A conventional 2D's Processing-preview tab mirrors this
-            # same spectrum object directly (see _show_processing_preview's
-            # own "same source, not a second computation" reasoning) --
-            # keep it live during a drag too, rather than only catching
-            # up the next time something else refreshes it.
-            if self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
-                self.processing_preview_canvas.show_spectrum(spectrum)
-            else:
-                self.canvas_tabs.setCurrentWidget(self.canvas)
+            # Best-effort, same reasoning as _baseline_correct_if_enabled:
+            # this runs on *every* drag tick, so a rendering exception
+            # here must never raise out of the signal handler (freezing
+            # the drag) or -- worse, since a dialog here would otherwise
+            # pop once per mouse-move tick -- show a QMessageBox the way
+            # _draw_selected_spectrum's own one-shot render failure does.
+            # Skip this tick's redraw and let the next one (once
+            # whatever's wrong resolves, e.g. the drag settles onto a
+            # value that renders fine) catch up, rather than leaving the
+            # whole live-phase-drag UX unusable over one bad frame. Found
+            # via a real crash: a 2D contour render failure (a genuine
+            # axis-shape bug, since fixed) reached this exact call site
+            # unguarded and printed an unhandled traceback once per tick
+            # for the whole duration of the drag.
+            try:
+                self.canvas.show_spectrum(spectrum)
+                # A conventional 2D's Processing-preview tab mirrors this
+                # same spectrum object directly (see _show_processing_preview's
+                # own "same source, not a second computation" reasoning) --
+                # keep it live during a drag too, rather than only catching
+                # up the next time something else refreshes it.
+                if self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
+                    self.processing_preview_canvas.show_spectrum(spectrum)
+                else:
+                    self.canvas_tabs.setCurrentWidget(self.canvas)
+            except Exception:  # noqa: BLE001 -- see comment above
+                pass
 
     def _show_pseudo2d_slice(self, spectrum, reset_view: bool, switch_tab: bool = True) -> None:
         """Preview a pseudo-2D spectrum as the single slice currently

@@ -212,12 +212,28 @@ def zero_fill(fid: np.ndarray, n: int) -> np.ndarray:
 def fft_spectrum(fid: np.ndarray, dt: float) -> tuple[np.ndarray, np.ndarray]:
     """FFT a time-domain FID into a frequency-domain spectrum.
 
-    Returns ``(freq_hz, spectrum)``, both length ``len(fid)``, with
-    ``freq_hz`` decreasing (matching NMR's high-frequency-on-the-left
-    display convention).
+    Returns ``(freq_hz, spectrum)``, ``freq_hz`` length ``fid.shape[-1]``
+    (decreasing, matching NMR's high-frequency-on-the-left display
+    convention) and ``spectrum`` the same shape as ``fid`` -- ``fid``
+    is meant to be a single 1D FID (the common case, where
+    ``fid.shape[-1] == len(fid)`` so this is a no-op distinction), but
+    ``np.fft.fft``'s own default ``axis=-1`` already does the right
+    thing for a batch of FIDs stacked along a leading axis too;
+    ``fid.shape[-1]`` (not ``len(fid)``, which reads the *first*
+    dimension for anything with more than one) is what makes
+    ``freq_hz`` come out the right length in that case as well, rather
+    than silently matching the wrong axis. Found via a real bug: a
+    caller passed a 2D array directly here expecting per-row batch
+    FFT, and the previous ``len(fid)`` produced a frequency axis
+    matching the *row* count instead of the row length -- every other
+    caller doing multi-row FFT works around this today by calling
+    ``fft_spectrum`` once per row via ``np.apply_along_axis`` instead
+    (still fine, and unaffected by this fix), but there's no reason
+    this function itself has to be wrong about its own output shape
+    for 2D input.
     """
-    n = len(fid)
-    spectrum = np.fft.fftshift(np.fft.fft(fid))
+    n = fid.shape[-1]
+    spectrum = np.fft.fftshift(np.fft.fft(fid, axis=-1), axes=-1)
     freq_hz = -np.fft.fftshift(np.fft.fftfreq(n, dt))
     return freq_hz, spectrum
 

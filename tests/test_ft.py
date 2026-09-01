@@ -42,6 +42,37 @@ def test_fft_spectrum_peak_at_zero_freq_for_dc_fid():
     assert abs(peak_freq) < 1e-6
 
 
+def test_fft_spectrum_2d_input_matches_last_axis_length():
+    # Real bug: a 2D array (a batch of FIDs stacked along axis 0, e.g.
+    # F1 rows each holding a length-64 FID) used to produce a freq_hz
+    # matching the *row count* (len(fid) reads axis 0) instead of the
+    # row length -- a shape this project's own X-Pulse read_2d hit
+    # directly (F1=128 rows, F2=2048 points -- freq_hz for the F1 FFT
+    # came out length 2048, not 128, causing a real crash rendering
+    # the resulting spectrum).
+    dt = 1e-4
+    fid_2d = np.ones((5, 64), dtype=complex)  # 5 rows, 64 points each
+    freq_hz, spectrum = ft.fft_spectrum(fid_2d, dt)
+    assert freq_hz.shape == (64,)
+    assert spectrum.shape == (5, 64)
+
+
+def test_fft_spectrum_2d_input_ffts_each_row_independently():
+    # Each row should FFT exactly as it would on its own, not get
+    # mixed with the others (a plain np.fft.fftshift with no axes=
+    # argument would incorrectly shift axis 0 -- the row index -- too).
+    dt = 1e-4
+    row0 = np.exp(1j * 2 * np.pi * 1000.0 * np.arange(64) * dt)
+    row1 = np.ones(64, dtype=complex)
+    fid_2d = np.array([row0, row1])
+    freq_hz_2d, spectrum_2d = ft.fft_spectrum(fid_2d, dt)
+    freq_hz_0, spectrum_0 = ft.fft_spectrum(row0, dt)
+    freq_hz_1, spectrum_1 = ft.fft_spectrum(row1, dt)
+    np.testing.assert_allclose(freq_hz_2d, freq_hz_0)
+    np.testing.assert_allclose(spectrum_2d[0], spectrum_0)
+    np.testing.assert_allclose(spectrum_2d[1], spectrum_1)
+
+
 def test_apply_phase_zero_order_rotates_real_to_imag():
     spectrum = np.array([1.0 + 0j, 1.0 + 0j])
     freq = np.array([0.0, 0.0])
