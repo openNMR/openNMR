@@ -2929,16 +2929,58 @@ def test_main_window_reset_processing_clears_f1_truncate_and_zero_fill(qapp, tmp
 
     window._on_reset_processing_clicked()
 
-    # Reset reverts to _original_load_kwargs, snapshotted right after
-    # _load's own "default every fresh 2D to pseudo-2D" step -- i.e.
-    # *before* this test opted into genuine 2D above -- so Reset here
-    # correctly lands back on pseudo-2D, not just "genuine 2D with no
-    # truncate/zero-fill." Either way, F1's own controls must no
-    # longer be reporting a stale truncated/zero-filled value.
+    # Reset discards *processing* choices (window/zero-fill/phase/
+    # truncate/baseline) but deliberately preserves whatever "Process
+    # Indirect Dimension" choice is currently in effect -- that's a
+    # structural interpretation (genuine 2D vs. pseudo-2D), not a
+    # processing recipe. Real user report, confirmed by direct
+    # reproduction against a real EXSY dataset: Reset used to also
+    # silently revert this opt-in back to _load's own pseudo-2D-by-
+    # default snapshot, on top of discarding the truncate/zero-fill
+    # values it was actually meant to discard.
+    assert window.session.spectra[index].is_pseudo_2d is False
+    assert window.tdeff_f1_spin.isEnabled() is True
+    assert window.zero_fill_f1_spin.isEnabled() is True
+    assert window.tdeff_f1_spin.value() == 8  # truncate/zero-fill *values* still correctly discarded
+    assert window.zero_fill_f1_spin.value() == 8
+
+
+def test_main_window_reset_preserves_process_indirect_dimension_choice(qapp, tmp_path, monkeypatch):
+    # Focused regression test for the fix itself, isolated from the F1
+    # truncate/zero-fill concerns the test above also covers. Real
+    # user report, reproduced directly against a real EXSY dataset
+    # before fixing: Reset was silently flattening a genuine-2D
+    # dataset back to pseudo-2D.
+    window = MainWindow()
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=16, name="resetkeepsgenuine2d", f1_nuc="13C")
+    window._load(path, vendor="bruker")
+    index = window._selected_index()
+    assert window.session.spectra[index].is_pseudo_2d is True  # the usual pseudo-2D-by-default
+
+    window.process_indirect_button.setChecked(True)
+    assert window.session.spectra[index].is_pseudo_2d is False
+
+    window._on_reset_processing_clicked()
+
+    assert window.session.spectra[index].is_pseudo_2d is False
+    assert window.process_indirect_button.isChecked() is True
+
+
+def test_main_window_reset_still_reverts_to_pseudo_2d_when_never_opted_out(qapp, tmp_path, monkeypatch):
+    # The fix above must not change behaviour for the common case --
+    # a 2D never explicitly opted into genuine-2D treatment should
+    # still land back on (i.e. stay at) the pseudo-2D default after
+    # Reset, same as before this fix.
+    window = MainWindow()
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=16, name="resetstillpseudo2d", f1_nuc="13C")
+    window._load(path, vendor="bruker")
+    index = window._selected_index()
     assert window.session.spectra[index].is_pseudo_2d is True
-    assert window.session.spectra[index].data.shape[0] == 8
-    assert window.tdeff_f1_spin.isEnabled() is False
-    assert window.zero_fill_f1_spin.isEnabled() is False
+
+    window._on_reset_processing_clicked()
+
+    assert window.session.spectra[index].is_pseudo_2d is True
+    assert window.process_indirect_button.isChecked() is False
 
 
 def test_main_window_pivot_marker_clears_when_leaving_processing_tab(qapp, tmp_path):

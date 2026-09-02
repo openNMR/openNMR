@@ -3237,7 +3237,7 @@ class MainWindow(QMainWindow):
                 self.processing_preview_canvas.show_spectrum(spectrum)
 
     def _on_reset_processing_clicked(self) -> None:
-        """Discard every live processing choice for the selected
+        """Discard every live *processing* choice for the selected
         spectrum -- window/zero-fill/shift/align-echo/linear-predict/
         truncate, phase, baseline -- reverting to exactly how it
         looked right after it was first loaded (see ``_load``'s own
@@ -3245,11 +3245,28 @@ class MainWindow(QMainWindow):
         the old "Apply Processing" button (which committed changes
         forward, unreliably); this discards them instead -- explicit
         user request: "remove the button, we can have a reset
-        button"."""
+        button".
+
+        Deliberately does *not* revert a 2D's own "Process Indirect
+        Dimension" choice (genuine 2D vs. pseudo-2D) -- that's a
+        structural interpretation of the data, not a processing
+        recipe, so it's carried forward from whatever it's currently
+        set to rather than reset to ``_load``'s own pseudo-2D-by-
+        default snapshot. Real user report: Reset on a genuine-2D
+        EXSY dataset was silently flattening it back to pseudo-2D
+        along with discarding the window/zero-fill/phase/truncate
+        choices it was actually meant to discard -- confirmed by
+        direct reproduction (not a "shows as a literal 1D" bug, but a
+        real, understandable point of confusion: "Reset... defaults it
+        to a 1D" was describing pseudo-2D's own per-slice treatment,
+        not a genuine dimensionality collapse)."""
         index = self._selected_index()
         if index is None:
             return
-        original = self._original_load_kwargs.get(index, {})
+        spectrum = self.session.spectra[index]
+        original = dict(self._original_load_kwargs.get(index, {}))
+        if spectrum.ndim == 2:
+            original["pseudo_2d"] = spectrum.is_pseudo_2d
         try:
             self.session.reset(index, **original)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed

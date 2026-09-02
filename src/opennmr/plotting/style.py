@@ -5,7 +5,9 @@ Plotting style helpers shared by ``oned``/``twod``.
 ``get_contour_cmap``/``downsample_2d``/``save_figure`` are ``ax``-
 scoped (they only ever touch the ``Axes``/data passed to them), so
 they're safe to call from GUI code embedding a canvas -- ported from
-``nmrtools2``'s ``plotting.py`` unchanged.
+``nmrtools2``'s ``plotting.py``. ``downsample_2d`` has since diverged
+from that original (still evenly-spaced decimation there) -- see its
+own docstring for why.
 
 ``setup_plotting`` is the one exception: it calls
 ``plt.rcParams.update(...)``, a *global* matplotlib style change. That
@@ -237,25 +239,108 @@ def save_figure(fig, fig_name='nmr_plot', save_format='png', dpi=300):
 
 
 def downsample_2d(data, x, y, max_points_x=2000, max_points_y=500):
-    """Evenly downsample a 2D array (and its axes) for fast contour
-    rendering.
+    """Downsample a 2D array (and its axes) for fast contour
+    rendering, keeping each output cell's own largest-magnitude
+    (signed) value rather than a plain evenly-spaced index pick.
+
+    ``nmrtools2``'s original (and this function's own, until this
+    fix) picked evenly-spaced *indices* (``np.linspace``) and threw
+    everything else away -- fine for a smooth, broad feature, but a
+    thin/sparse one (an EXSY/NOESY diagonal ridge, often only 1-2
+    points wide at real digital resolution) can fall entirely between
+    the sampled indices and vanish, or survive at scattered points
+    that no longer look like a continuous ridge -- even though the
+    underlying data never changed. Real user report, confirmed by
+    direct reproduction against a real 2H EXSY dataset: the Processing
+    tab's own preview (this function, ~16x fewer total points at the
+    default 0.25 contour fraction) and the Spectrum tab's own full-
+    resolution view of the *exact same spectrum object* looked like
+    "two different 2Ds" -- the diagonal visible in one, not the other.
+    Max-magnitude-per-bin instead of index-skipping means a bin
+    containing any part of a real feature always keeps *a* point from
+    it, not nothing.
+
+    Reduces one axis at a time (X then Y) via :func:`_max_abs_bin` --
+    a separable approximation of a true joint-2D block-max (which
+    would need reducing both axes of each block simultaneously), but
+    a large improvement over index-skipping, and correct for the
+    common case (contour fraction applied independently per axis,
+    matching every existing caller's own ``contour_fraction_x``/
+    ``contour_fraction_y`` convention).
+
+    **Not free, unlike the old index-skip -- has to touch every input
+    element at least once to find each bin's own max, where index-
+    skipping only ever touched the output-sized subset.** Measured
+    directly on a real, large conventional-2D array (1024x65536, a
+    real EXSY dataset): ~0.35s here vs. a few ms for the old method.
+    Fine for a one-off settled redraw (spectrum selection, a drag
+    settling), but a real, known cost during a *live 2D phase-drag*
+    on data this large specifically, since that redraws on every
+    mouse-move tick with no in-place update path for a contour (see
+    ``MplCanvas.set_full_resolution``'s own docstring on why). Not
+    optimized further here -- the actual fix for 2D drag
+    responsiveness at any data size is phasing only the relevant row/
+    column during the drag itself, not re-rendering (let alone
+    downsampling) the whole contour on every tick; see this project's
+    own TODO.md "2D roadmap" for that separate, queued work.
 
     ``data`` : shape ``(len(y), len(x))``. Returns ``data_ds, x_ds,
-    y_ds`` unchanged if already within the point-count limits.
+    y_ds`` unchanged (well, each axis fed back through unchanged) if
+    already within the point-count limits.
     """
     n_y, n_x = data.shape
 
     max_points_x = max(2, min(max_points_x, n_x))
     max_points_y = max(2, min(max_points_y, n_y))
 
-    x_idx = np.linspace(0, n_x - 1, max_points_x, dtype=int)
-    y_idx = np.linspace(0, n_y - 1, max_points_y, dtype=int)
-
-    data_ds = data[np.ix_(y_idx, x_idx)]
-    x_ds = x[x_idx]
-    y_ds = y[y_idx]
+    # X (columns, the last/contiguous axis) first -- reducing along
+    # the last axis keeps every argmax/take_along_axis's own memory
+    # access contiguous; reducing Y (a middle axis once reshaped)
+    # first was measured directly to be *slower* on a real-sized
+    # array despite operating on fewer total elements, since each of
+    # its per-bin comparisons strides across memory instead of
+    # scanning it in order.
+    data_ds, x_ds = _max_abs_bin(data, x, max_points_x, axis=1)
+    data_ds, y_ds = _max_abs_bin(data_ds, y, max_points_y, axis=0)
 
     return data_ds, x_ds, y_ds
+
+
+def _max_abs_bin(data, coords, n_bins, axis):
+    """Reduce ``data``/``coords`` along ``axis`` to ``n_bins`` bins --
+    each bin keeps the *signed* value with the largest magnitude
+    across its own span (not just an evenly-spaced index pick, see
+    :func:`downsample_2d`'s own docstring for why), with the bin's own
+    middle-index coordinate standing in for the whole span. A no-op
+    (returns ``data``/``coords`` unchanged) if ``n_bins`` already
+    covers every index along ``axis``.
+
+    Fully vectorized (reshape + one ``argmax``/``take_along_axis`` --
+    no Python-level loop over bins) -- an earlier version used
+    ``numpy.array_split`` plus a per-bin loop instead, simpler but
+    ~0.7s on a real 1024x65536 contour, unusably slow for a live 2D
+    phase-drag tick (a fresh downsample on every mouse-move, since a
+    ``QuadContourSet`` has no in-place data swap the way a ``Line2D``
+    does). Achieves the uniform bin size a reshape needs by trimming
+    at most ``n_bins - 1`` trailing indices (never more than one bin's
+    own width) rather than requiring ``n_bins`` to evenly divide the
+    axis length -- a negligible edge effect for any real acquisition
+    size, and the same "drop a few, don't fail" spirit as this
+    project's own raw-``ser``-shape floor-division fallback."""
+    n = data.shape[axis]
+    if n_bins >= n:
+        return data, coords
+    bin_size = n // n_bins
+    trimmed_n = bin_size * n_bins
+    if trimmed_n != n:
+        data = np.take(data, np.arange(trimmed_n), axis=axis)
+    new_shape = data.shape[:axis] + (n_bins, bin_size) + data.shape[axis + 1:]
+    reshaped = data.reshape(new_shape)
+    peak_index = np.argmax(np.abs(reshaped), axis=axis + 1, keepdims=True)
+    reduced = np.take_along_axis(reshaped, peak_index, axis=axis + 1)
+    reduced = np.squeeze(reduced, axis=axis + 1)
+    reduced_coords = coords[:trimmed_n].reshape(n_bins, bin_size)[:, bin_size // 2]
+    return reduced, reduced_coords
 
 
 #: Default cap for :func:`downsample_indices` -- rendering (not
