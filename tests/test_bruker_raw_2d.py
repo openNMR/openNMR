@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from opennmr.io import bruker
+from opennmr.processing import ft
 
 
 def _write_procs(path, params):
@@ -199,10 +200,13 @@ def test_read_2d_zero_fill_f1_overrides_recorded_si(tmp_path, monkeypatch):
 
 
 def test_read_2d_echo_antiecho_halves_row_count_and_records_fn_mode(tmp_path, monkeypatch):
-    # Integration-level wiring check only -- decode_hypercomplex_f1's
-    # own docstring and test_ft.py flag the Echo-Antiecho sign/
-    # handedness convention as unverified against real data, so this
-    # doesn't assert peak position, just that read_2d actually routes
+    # Integration-level wiring check only -- this synthetic fixture's
+    # P/N-type forward model (a shared F2 signal times a plain +-phase
+    # t1 scalar) doesn't reproduce the real raw-quadrature relationship
+    # between echo/antiecho rows (see read_2d's own fn_mode==6 comment,
+    # and test_read_2d_echo_antiecho_undoes_the_conjugate_only_for_the_
+    # echo_row below for a fixture that does model that relationship),
+    # so this doesn't assert peak position -- just that read_2d routes
     # through the decode (shape halved, fn_mode recorded) without
     # raising.
     n1, sw1 = 16, 2000.0
@@ -216,6 +220,53 @@ def test_read_2d_echo_antiecho_halves_row_count_and_records_fn_mode(tmp_path, mo
 
     assert spectrum.metadata.raw["fn_mode"] == 6
     assert spectrum.data.shape[0] == n1
+
+
+def test_read_2d_echo_antiecho_undoes_the_conjugate_only_for_the_echo_row(tmp_path, monkeypatch):
+    # Real-data-verified regression guard for the fn_mode==6 fix in
+    # read_2d (see its own comment there, and decode_hypercomplex_f1's
+    # docstring): a real Echo-Antiecho dataset (test_data/Bruker
+    # Example Data/Cyclosporine/203) showed every genuine peak
+    # alongside an equal-magnitude ghost at its F1-mirror position
+    # (ratio ~0.8-1.2x) until the "echo" (even) raw row was conjugated
+    # before F2 processing -- that dropped the ghost to ~0.005-0.02x
+    # on the 10 strongest real peaks. This test locks in that specific
+    # code behaviour without needing real NMR physics in the fixture:
+    # every raw ``ser`` row already passes through one unconditional
+    # ``data = np.conj(data)`` (see read_2d's own
+    # _CONJUGATE_QUADRATURE_NOTE) before fn_mode==6's own extra
+    # conjugate of the even rows -- two conjugates of the same row
+    # cancel, so the net, verified-correct effect is "the echo row
+    # reaches F2 processing exactly as stored on disk; the antiecho
+    # row still gets the one original conjugate". Built with a single
+    # t1 point (one row pair) and a zeroed antiecho row specifically so
+    # the resulting F2 row can be compared directly against processing
+    # the known on-disk echo FID through the same window/zero-fill/FFT
+    # pipeline, instead of needing to interpret the ppm/Hz axis.
+    n2, sw2, f0_hz = 32, 8000.0, 1500.0
+    t2 = np.arange(n2) / sw2
+    known_fid = np.exp(-t2 * 300) * np.exp(2j * np.pi * f0_hz * t2)
+    fid = np.array([known_fid, np.zeros(n2, dtype=np.complex128)], dtype=np.complex128)
+    path = _make_2d_experiment_dir(tmp_path, proc2s_overrides={"SI": 1, "SW_p": 500.0})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqu2s = {"NUC1": "13C", "BF1": 100.6, "O1": 0.0, "FnMODE": 6}
+    _mock_2d(monkeypatch, acqus, fid, acqu2s=acqu2s)
+
+    spectrum = bruker.read_2d(path, homonuclear=False, autophase=False)
+    actual_row = spectrum.data[0] + 1j * spectrum.data_imag[0]
+
+    # antiecho row is all-zero, so decoded = echo_f2 + i*echo_f2.
+    expected_f2 = ft.fft_spectrum(ft.zero_fill(known_fid, 64), 1.0 / sw2)[1]
+    expected_row = expected_f2 * (1 + 1j)
+    np.testing.assert_allclose(actual_row, expected_row)
+
+    # Confirms this actually discriminates: skipping the fn_mode==6
+    # conjugate (i.e. leaving the one pre-existing global conjugate as
+    # the *only* transform on the echo row, matching this project's
+    # pre-fix behaviour) would have produced a materially different,
+    # not just numerically-close, row.
+    without_fix_f2 = ft.fft_spectrum(ft.zero_fill(np.conj(known_fid), 64), 1.0 / sw2)[1]
+    assert np.max(np.abs(without_fix_f2 - expected_f2)) > 0.9 * np.max(np.abs(expected_f2))
 
 
 def test_read_2d_default_fn_mode_leaves_row_count_undecoded(tmp_path, monkeypatch):

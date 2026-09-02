@@ -378,6 +378,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             autophase: bool = True, phase_mode: str = "recorded", phase0_inc: float = 0.1,
             phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5,
             window: str | None = None, window_kwargs: dict | None = None, zero_fill: int | None = None,
+            window_f1: str | None = None, window_kwargs_f1: dict | None = None,
             zero_fill_f1: int | None = None, truncate_f1: int | None = None,
             fid_shift: float = 0.0, align_echo: bool = False,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
@@ -400,10 +401,11 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     decoding before the F1 FFT when ``acqu2s``'s own ``FnMODE`` calls
     for it -- see :func:`opennmr.processing.ft.decode_hypercomplex_f1`
     for the exact per-mode recipe. States-TPPI is validated against 5
-    real Bruker datasets; Echo-Antiecho is a best-effort implementation
-    with no real data available in this project to check it against
-    (flagged, not silently presented as certain -- see that function's
-    own docstring and TODO.md).
+    real Bruker datasets; Echo-Antiecho is now also validated against a
+    real dataset (``test_data/Bruker Example Data/Cyclosporine/203``,
+    2026-09-02 -- see this function's own ``fn_mode == 6`` comment
+    below and :func:`opennmr.processing.ft.decode_hypercomplex_f1`'s
+    docstring for what that took).
 
     ``pseudo_2d`` : whether F1 is a non-frequency indirect dimension
     (no FFT along that axis -- a slice/experiment index instead), i.e.
@@ -434,10 +436,27 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     ``window``/``window_kwargs``/``zero_fill``/``fid_shift``/
     ``align_echo``/``linear_predict_points`` : see :func:`read_1d` --
     identical meaning, but only ever applied along F2 (the direct
-    dimension, one row at a time). F1 apodization still always follows
-    TopSpin's own recorded ``proc2s`` -- not exposed as an override
-    here, since window-function choice is normally fixed at
-    acquisition rather than hand-tuned per view.
+    dimension, one row at a time).
+
+    ``window_f1``/``window_kwargs_f1`` : same idea for F1 (the indirect
+    dimension, one column -- i.e. one already-F2-processed row's worth
+    of complex points across every t1 increment -- at a time), applied
+    *after* :func:`opennmr.processing.ft.decode_hypercomplex_f1` and
+    before F1's own zero-fill/FFT, same ordering as F2's own
+    window-then-zero-fill-then-FFT. ``None`` (default, matching
+    ``window``'s own convention) reproduces TopSpin's own recorded
+    ``proc2s`` ``WDW``/``LB``/``SSB`` via :func:`_apply_bruker_window`
+    -- **this was previously silently unimplemented** (this docstring
+    used to claim F1 "always follows TopSpin's own recorded proc2s",
+    which the code never actually did -- F1 got no apodization
+    whatsoever, recorded or otherwise) **and is now applied**, found
+    via the same real Echo-Antiecho dataset that surfaced the
+    ``fn_mode == 6`` conjugate fix above (its own ``proc2s`` records
+    ``WDW=4``/``SSB=2``, QSINE, same as F2). An unsupported recorded
+    ``proc2s`` ``WDW`` code degrades the same way F2's own does --
+    leaves F1 unwindowed and records
+    ``metadata.raw["window_unsupported_f1"]`` -- rather than failing
+    the whole load.
 
     ``zero_fill_f1`` : ``None`` (default) uses ``proc2s``'s own
     recorded ``SI`` (TopSpin's own F1 zero-fill target), falling back
@@ -498,6 +517,35 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # actually in this project's test_data that doesn't record FnMODE
     # explicitly.
     fn_mode = int(dic.get("acqu2s", {}).get("FnMODE", 1))
+
+    # Echo-Antiecho (FnMODE 6, a.k.a. Rance-Kay) needs one more thing
+    # *before* F2 processing even starts: the "echo" (even-indexed)
+    # raw row of each pair must be conjugated first. This was flagged
+    # in decode_hypercomplex_f1's own docstring as unverified/
+    # best-effort (no real Echo-Antiecho data existed in this project
+    # to check against) -- now verified against a real dataset
+    # (test_data/Bruker Example Data/Cyclosporine/203, FnMODE=6): the
+    # plain sum/diff combine (no raw-row conjugate) reproduced every
+    # real peak at its correct position but *also* produced an
+    # equal-magnitude ghost at that peak's F1-mirror position (ratio
+    # ~0.8-1.2x the genuine peak) -- exactly the "mirror across the
+    # spectrum's centre" failure mode that docstring predicted. No
+    # sign/order permutation of the post-FFT combine formula fixed
+    # this (tried all four), which makes sense: the antiecho/echo
+    # coherence-pathway relationship is a conjugate, and FFT does not
+    # commute with conjugation (FFT(conj(x))[k] == conj(FFT(x)[-k]),
+    # not conj(FFT(x))[k]) -- so this can only be fixed on the raw,
+    # pre-F2-FFT time-domain row, not by adjusting
+    # decode_hypercomplex_f1's post-FFT formula. Conjugating the
+    # even-indexed raw row of each pair here, then combining with the
+    # *same* sum+i*diff formula decode_hypercomplex_f1 already used,
+    # dropped that ghost-to-genuine ratio to ~0.005-0.02 (noise floor)
+    # across the 10 strongest real peaks. A copy, not an in-place
+    # conjugate, so ``metadata.raw["fid_raw"]`` (assigned above from
+    # this same ``data`` binding) stays genuinely unmodified.
+    if fn_mode == 6:
+        data = data.copy()
+        data[0::2] = np.conj(data[0::2])
 
     # ----- F2 (direct dimension): [shift/align/LP], window, zero-fill, FFT per row -----
     # Same shared step (and step order) as read_1d/xpulse.read_1d --
@@ -577,6 +625,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         spectrum = processing_ft.apply_phase(spectrum, x_ppm, phase0, phase1, pivot_frac=pivot_frac)
 
     # ----- F1 (indirect dimension): hypercomplex decode, zero-fill, FFT along axis 0 (skipped for pseudo-2D) -----
+    window_unsupported_note_f1 = None
     if pseudo_2d:
         y_index = np.arange(1, spectrum.shape[0] + 1)
         y_axis = NMRAxis(kind="index", index=y_index)
@@ -602,6 +651,19 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         # recorded at all -- must fall back to the decoded row count,
         # not the raw pre-decode one.
         spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode)
+        if window_f1 is not None:
+            spectrum = np.apply_along_axis(
+                lambda col: processing_ft.apodize(col, 1.0 / sw_1, window=window_f1, **(window_kwargs_f1 or {})),
+                0, spectrum,
+            )
+        else:
+            try:
+                spectrum = np.apply_along_axis(lambda col: _apply_bruker_window(col, proc2s, sw_1), 0, spectrum)
+            except NotImplementedError as exc:
+                # Same reasoning as F2's own WDW fallback above -- stay
+                # on the raw-FID path (full reprocessing still
+                # available) rather than abandoning it.
+                window_unsupported_note_f1 = str(exc)
         si1 = int(zero_fill_f1) if zero_fill_f1 is not None else int(proc2s.get("SI", spectrum.shape[0]))
         fid_f1 = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, spectrum)
         spectrum = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, 1.0 / sw_1)[1], 0, fid_f1)
@@ -644,6 +706,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # already baked into "fid").
             "fid_raw": fid_raw,
             **({"window_unsupported": window_unsupported_note} if window_unsupported_note else {}),
+            **({"window_unsupported_f1": window_unsupported_note_f1} if window_unsupported_note_f1 else {}),
         },
     )
     return NMRSpectrum(data=np.real(spectrum), axes=[y_axis, x_axis], metadata=metadata, data_imag=np.imag(spectrum))
