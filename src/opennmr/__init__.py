@@ -19,6 +19,7 @@ from . import core
 from . import io
 from . import processing
 from . import plotting
+from . import notebook
 from ._version import __version__
 
-__all__ = ["core", "io", "processing", "plotting", "__version__"]
+__all__ = ["core", "io", "processing", "plotting", "notebook", "__version__"]
