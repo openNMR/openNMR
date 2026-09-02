@@ -21,8 +21,8 @@ agnostic. ``linear_predict`` is ported from the same module.
 from __future__ import annotations
 
 import numpy as np
+import nmrglue.process.proc_base as _proc_base
 from scipy.optimize import minimize
-from scipy.signal.windows import gaussian as _scipy_gaussian
 
 
 # ============================================================
@@ -147,27 +147,100 @@ def prepare_fid(fid: np.ndarray, *, fid_shift: float = 0.0, align_echo_enabled: 
 # ============================================================
 
 def _window_exponential(n: int, dt: float, lb: float = 0.0) -> np.ndarray:
-    """Exponential multiplication (line broadening ``lb``, in Hz)."""
-    t = np.arange(n) * dt
-    return np.exp(-t * np.pi * lb)
+    """Exponential multiplication (line broadening ``lb``, in Hz).
+    ``exp(-t*pi*lb) == exp(-pi*i*(lb/sw_hz))`` (``t = i*dt = i/sw_hz``)
+    -- exactly :func:`nmrglue.process.proc_base.em`'s own formula with
+    ``lb_nmrglue = lb/sw_hz`` (confirmed algebraically, not just by
+    inspection, before switching this from a hand-rolled ``np.exp``
+    call to the shared primitive below, for the same reason
+    :func:`_window_gaussian`/:func:`_window_sine` now use it too: one
+    consistent, ``nmrglue``-backed implementation per window shape,
+    shared with ``io.bruker``'s own "Recorded" ``WDW`` path rather than
+    a second hand-rolled formula that could quietly drift from it."""
+    sw_hz = 1.0 / dt
+    weights = _proc_base.em(np.ones(n, dtype=complex), lb=lb / sw_hz)
+    return np.real(weights)
 
 
 def _window_hann(n: int, dt: float) -> np.ndarray:
     return np.hanning(n)
 
 
-def _window_gaussian(n: int, dt: float, std: float | None = None) -> np.ndarray:
-    if std is None:
-        std = n / 6.0
-    return _scipy_gaussian(n, std)
+def _window_gaussian(n: int, dt: float, lb: float = 0.0, gb: float = 0.0) -> np.ndarray:
+    """Lorentz-to-Gauss (Bruker/NMRPipe "GM") apodization: cancels the
+    natural exponential decay with ``lb`` (Hz, typically *negative* --
+    real user report: "Gaussian I think need[s] a negative lb"), then
+    tapers with a Gaussian envelope of width ``gb`` (Hz, same units and
+    scale as ``lb`` -- confirmed via NMRPipe's own published GM formula
+    (``e = pi*i*g1/sw``, ``g = 0.6*pi*g2*(g3*(size-1)-i)/sw``, both
+    ``g1``/``g2`` "in Hz"), not a bare 0-1 fraction as an earlier draft
+    of this function assumed -- that gave a window crushed to ~0
+    everywhere except one edge point for any realistic array size, an
+    easy, non-obvious mistake this project's own web search caught
+    before it shipped. ``gb=0.0`` (default) degenerates to a plain
+    exponential (no Gaussian term at all), matching ``lb`` alone being
+    equivalent to :func:`_window_exponential` with the opposite sign.
+
+    Uses :func:`nmrglue.process.proc_base.gm` -- the same
+    NMRPipe-compatible primitive already used for the Bruker "Recorded"
+    ``WDW`` path elsewhere in this package -- with ``g3`` (location of
+    the Gaussian maximum, 0..1) fixed at 0.5 rather than exposed:
+    TopSpin's own GM UI likewise only ever exposes LB/GB, not a
+    separate centre control, and a location fixed at the array's very
+    end (``g3=1.0``, tried first) degenerately puts the window's peak
+    at the last point unconditionally, for any ``gb`` -- not a useful
+    apodization shape.
+
+    ``nmrglue.gm``'s own ``g1`` sign is opposite ``em``'s: positive
+    ``g1`` sharpens/grows, negative decays -- so ``lb``'s own sign is
+    negated below (keeping this function's own ``lb`` in the same
+    "positive shortens T2*, negative sharpens/cancels decay" sense
+    :func:`_window_exponential`'s ``lb`` already uses, for a consistent
+    feel across every window in this registry). ``g2`` only ever
+    appears squared in NMRPipe's own formula, so ``gb``'s sign never
+    matters, only its magnitude.
+
+    **Not verified against real Bruker GM-processed data** (unlike
+    ``_apply_bruker_window``'s own WDW 0/1/3/4 cases, or
+    ``decode_hypercomplex_f1``'s Echo-Antiecho mode, both cross-checked
+    against real TopSpin output) -- flagged, not silently presented as
+    certain, same standing as this project's other documented-but-
+    unverified gaps (Varian's ppm-axis convention, JEOL's
+    ``FILTER_FACTOR``). Bruker's own TopSpin may derive its two-box
+    LB/GB from a different internal formula than NMRPipe's published
+    one; this reproduces the latter, which is at minimum a real,
+    working, correctly-shaped Gaussian-tapering window, just not
+    guaranteed bit-for-bit identical to what TopSpin itself would show
+    for the same nominal numbers."""
+    sw_hz = 1.0 / dt
+    g1 = -lb / sw_hz
+    g2 = gb / sw_hz
+    weights = _proc_base.gm(np.ones(n, dtype=complex), g1=g1, g2=g2, g3=0.5)
+    return np.real(weights)
 
 
-def _window_sine(n: int, dt: float) -> np.ndarray:
-    return np.sin(np.pi * np.arange(n) / n)
+def _window_sine(n: int, dt: float, ssb: float = 0.0) -> np.ndarray:
+    """Shifted sine-bell, Bruker's ``SSB`` convention: ``ssb >= 2``
+    starts the bell ``1/ssb`` of the way in (``ssb=2`` is a pure cosine
+    bell, matching a "phase-shifted sine" description many vendors
+    use); ``ssb < 2`` (default 0.0) is a plain full sine bell from 0,
+    same shape :func:`_window_qsine`'s own former hardcoded formula
+    used before this parameter existed. Same ``off`` formula
+    :func:`opennmr.io.bruker._apply_bruker_window` already uses (and
+    has real-data-validated) for Bruker's own recorded ``WDW``
+    3/SINE."""
+    off = 1.0 / ssb if ssb >= 2 else 0.0
+    weights = _proc_base.sp(np.ones(n, dtype=complex), off=off, end=1.0, pow=1.0)
+    return np.real(weights)
 
 
-def _window_qsine(n: int, dt: float) -> np.ndarray:
-    return np.sin(np.pi * np.arange(n) / n) ** 2
+def _window_qsine(n: int, dt: float, ssb: float = 0.0) -> np.ndarray:
+    """Shifted sine-bell squared -- see :func:`_window_sine`, same
+    ``ssb`` convention, matching Bruker's own recorded ``WDW`` 4/QSINE
+    (:func:`opennmr.io.bruker._apply_bruker_window`)."""
+    off = 1.0 / ssb if ssb >= 2 else 0.0
+    weights = _proc_base.sp(np.ones(n, dtype=complex), off=off, end=1.0, pow=2.0)
+    return np.real(weights)
 
 
 _WINDOWS = {
@@ -182,15 +255,22 @@ _WINDOWS = {
 def apodize(fid: np.ndarray, dt: float, window: str = "exponential", **params) -> np.ndarray:
     """Multiply ``fid`` by a named window function.
 
-    ``window`` : one of ``_WINDOWS`` (``"exponential"`` (default, needs
-    ``lb`` in Hz), ``"hann"``, ``"gaussian"`` (optional ``std`` in
-    samples), ``"sine"``, ``"qsine"``). Adding a new window later is
-    adding one function to ``_WINDOWS``, not touching call sites.
+    ``window`` : one of ``_WINDOWS`` -- ``"exponential"`` (default,
+    ``lb`` in Hz), ``"hann"`` (no parameters), ``"gaussian"`` (``lb``/
+    ``gb``, both in Hz -- see :func:`_window_gaussian`'s own docstring
+    for the sign convention and what's/isn't verified), ``"sine"``/
+    ``"qsine"`` (``ssb``, Bruker's own convention -- see
+    :func:`_window_sine`). Adding a new window later is adding one
+    function to ``_WINDOWS``, not touching call sites.
 
-    These are generic textbook window formulas -- for *exactly*
-    reproducing a specific vendor's own apodization (e.g. Bruker's
-    WDW-coded windows), see ``opennmr.io.bruker``, which uses
-    ``nmrglue`` for that instead of this registry.
+    Every window here (bar ``"hann"``, parameter-free even in the
+    Bruker/NMRPipe convention) is built from ``nmrglue``'s own
+    NMRPipe-compatible primitives (``proc_base.em``/``gm``/``sp``) --
+    the same functions ``opennmr.io.bruker._apply_bruker_window``
+    already uses for exactly reproducing a Bruker file's own recorded
+    ``WDW`` -- so a user-chosen window here (not "Recorded") uses the
+    identical math, just with independently dialed-in parameters
+    instead of whatever TopSpin itself recorded.
     """
     if window not in _WINDOWS:
         raise ValueError(f"Unknown window {window!r}; available: {sorted(_WINDOWS)}")
@@ -584,22 +664,22 @@ def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int) -> np.ndarray:
     **Echo-Antiecho (6, a.k.a. Rance-Kay)**: row ``2k`` ("echo"/P-type)
     and row ``2k+1`` ("antiecho"/N-type) combine as
     ``decoded[k] = (echo+antiecho) + 1j*(echo-antiecho)`` -- the
-    standard sensitivity-enhanced (PEP) recombination. **Not verified
-    against real data**: no Echo-Antiecho (FnMODE=6) dataset exists
-    anywhere in this project's test_data to check against, and this
-    project's own from-nmrglue-source investigation of the closest
-    available reference (``nmrglue.process.nmrtxt.rance_kay.
-    bruk_ranceY``, and nmrglue's own S3E worked example) could not
-    fully pin down Bruker's specific row *order* (echo-then-antiecho vs
-    the reverse) with certainty from documentation alone -- getting
-    that specific detail wrong would mirror F1 peaks across the
-    spectrum's centre without otherwise looking obviously broken,
-    exactly the "plausible but wrong" risk this project's own raw-FID
-    work has flagged before. Treat this mode as a best-effort
-    implementation until a real Echo-Antiecho dataset is available to
-    check it against, same standing as the Varian ppm-axis and JEOL
-    ``FILTER_FACTOR`` gaps already documented elsewhere in this
-    project.
+    standard sensitivity-enhanced (PEP) recombination, *given* that the
+    caller has already conjugated the raw "echo" row's time-domain FID
+    before F2 processing -- see ``io.bruker.read_2d``'s own comment at
+    its ``fn_mode == 6`` branch for why that conjugate has to happen
+    there (pre-F2-FFT), not in this function (which only ever sees
+    already-F2-FFT'd rows, and FFT doesn't commute with conjugation).
+    **Verified against real data 2026-09-02** (``test_data/Bruker
+    Example Data/Cyclosporine/203``, FnMODE=6): without the raw-row
+    conjugate, every real peak landed at its correct position but was
+    accompanied by an equal-magnitude ghost at that peak's F1-mirror
+    position (ratio ~0.8-1.2x the genuine peak, across the 10 strongest
+    real peaks) -- exactly the "mirror across the spectrum's centre"
+    risk this docstring used to flag as untested. No sign/order
+    permutation of *this* function's own combine formula fixed it (all
+    four tried); the raw-row conjugate in ``read_2d`` dropped that
+    ghost ratio to ~0.005-0.02 (noise floor) on the same 10 peaks.
 
     An odd row count (shouldn't happen for genuinely-paired data, but
     the raw-`ser` row-*count* resolution this project's own

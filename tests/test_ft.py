@@ -34,6 +34,95 @@ def test_apodize_unknown_window_raises():
         raise AssertionError("expected ValueError")
 
 
+def test_apodize_exponential_matches_nmrglue_em_hz_convention():
+    # _window_exponential switched from a hand-rolled np.exp call to
+    # nmrglue.process.proc_base.em -- confirm the Hz-based lb
+    # convention survived the switch unchanged (algebraically
+    # equivalent, but worth a real regression test, not just a
+    # derivation in a comment).
+    fid = np.ones(200, dtype=complex)
+    dt = 1.0 / 5000.0
+    windowed = ft.apodize(fid, dt=dt, window="exponential", lb=20.0)
+    sw_hz = 1.0 / dt
+    t = np.arange(200) * dt
+    expected = np.exp(-t * np.pi * 20.0)
+    np.testing.assert_allclose(np.abs(windowed), expected, atol=1e-10)
+
+
+def test_apodize_gaussian_zero_gb_is_plain_exponential():
+    # gb=0.0 (default) disables the Gaussian term entirely -- should
+    # degenerate to exactly the same shape as the plain exponential
+    # window for the same lb.
+    fid = np.ones(200, dtype=complex)
+    dt = 1.0 / 5000.0
+    gaussian_windowed = ft.apodize(fid, dt=dt, window="gaussian", lb=-10.0, gb=0.0)
+    exponential_windowed = ft.apodize(fid, dt=dt, window="exponential", lb=-10.0)
+    # Gaussian's own lb uses the *same* sign sense as exponential's
+    # (see _window_gaussian's own docstring: negative -> sharpen/grow,
+    # same as passing exponential a negative lb) -- lb=-10 for both
+    # should match exactly once gb=0 removes the Gaussian term.
+    np.testing.assert_allclose(np.abs(gaussian_windowed), np.abs(exponential_windowed), atol=1e-8)
+
+
+def test_apodize_gaussian_negative_lb_grows_then_gaussian_tapers_to_near_zero():
+    # Real user report: "Gaussian I think need[s] a negative lb" -- a
+    # negative lb should cancel/reverse the FID's own decay (growth
+    # early on), with the gb-controlled Gaussian term eventually
+    # dominating and tapering the window back toward zero well before
+    # the end -- not a monotonic decay (that would just be a
+    # differently-signed exponential, not a real Lorentz-to-Gauss
+    # shape) and not unbounded growth all the way to the last point
+    # (an earlier draft of this window, using a too-small or
+    # wrongly-scaled gb, produced exactly that -- see the function's
+    # own docstring for the real debugging story).
+    n = 4096
+    dt = 1.0 / 8000.0
+    fid = np.ones(n, dtype=complex)
+    windowed = ft.apodize(fid, dt=dt, window="gaussian", lb=-2.0, gb=10.0)
+    mag = np.abs(windowed)
+    peak_index = int(np.argmax(mag))
+    assert 0 < peak_index < n - 1  # peak is genuinely interior, not pinned to either edge
+    assert mag[0] < mag[peak_index]  # grows away from the start...
+    assert mag[-1] < 0.1 * mag[peak_index]  # ...then tapers back down well before the end
+
+
+def test_apodize_sine_ssb_two_is_a_pure_cosine_bell():
+    fid = np.ones(64, dtype=complex)
+    windowed = ft.apodize(fid, dt=1e-3, window="sine", ssb=2.0)
+    # off = 1/ssb = 0.5 -- sin(pi*0.5) = 1 at the very first point,
+    # i.e. a cosine-shaped bell, not a plain sine starting at 0.
+    assert windowed[0] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_apodize_sine_default_ssb_matches_plain_sine_bell():
+    # ssb=0.0 (below Bruker's own ssb>=2 threshold for a shift) should
+    # be the same plain 0-starting sine bell _window_sine/_window_qsine
+    # used before the ssb parameter existed.
+    n = 64
+    fid = np.ones(n, dtype=complex)
+    sine = ft.apodize(fid, dt=1e-3, window="sine", ssb=0.0)
+    qsine = ft.apodize(fid, dt=1e-3, window="qsine", ssb=0.0)
+    expected_sine = np.sin(np.pi * np.arange(n) / (n - 1))
+    np.testing.assert_allclose(np.abs(sine), expected_sine, atol=1e-8)
+    np.testing.assert_allclose(np.abs(qsine), expected_sine ** 2, atol=1e-8)
+
+
+def test_apodize_qsine_ssb_matches_bruker_apply_window_convention():
+    # Same off=1/ssb formula opennmr.io.bruker._apply_bruker_window
+    # already uses (and has real-data validation for) on Bruker's own
+    # recorded WDW=4/QSINE -- confirms the generic registry's ssb
+    # parameter produces the identical window, not a second,
+    # independently-drifting formula.
+    from opennmr.io import bruker as bru
+
+    n = 128
+    dt = 1.0 / 4000.0
+    fid = np.ones(n, dtype=complex)
+    generic = ft.apodize(fid, dt=dt, window="qsine", ssb=3.0)
+    recorded = bru._apply_bruker_window(fid.copy(), {"WDW": 4, "SSB": 3.0}, 1.0 / dt)
+    np.testing.assert_allclose(np.abs(generic), np.abs(recorded), atol=1e-8)
+
+
 def test_fft_spectrum_peak_at_zero_freq_for_dc_fid():
     dt = 1e-4
     fid = np.ones(256, dtype=complex)  # pure DC -> single peak at 0 Hz
