@@ -2139,12 +2139,48 @@ class MainWindow(QMainWindow):
         form.addRow("Window:", self.window_combo)
 
         self.lb_spin = QDoubleSpinBox()
-        self.lb_spin.setRange(0.0, 1.0e5)
+        # Negative range needed for Gaussian (GM) -- real user report:
+        # "Gaussian I think need[s] a negative lb" -- see
+        # processing.ft._window_gaussian's own docstring for why.
+        # Exponential itself only ever uses lb >= 0 in practice, but a
+        # negative value there is harmless (just line-sharpening
+        # instead of broadening), not worth a second spin box to
+        # forbid it.
+        self.lb_spin.setRange(-1.0e5, 1.0e5)
         self.lb_spin.setDecimals(2)
         self.lb_spin.setSuffix(" Hz")
-        self.lb_spin.setToolTip("Line broadening, for the Exponential window only.")
+        self.lb_spin.setToolTip(
+            "Line broadening, for the Exponential window. For Gaussian, "
+            "the line-sharpening term (typically negative, to cancel "
+            "the FID's own decay before the Gaussian taper below)."
+        )
         self.lb_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Line broadening:", self.lb_spin)
+
+        self.gb_spin = QDoubleSpinBox()
+        self.gb_spin.setRange(0.0, 1.0e5)
+        self.gb_spin.setDecimals(2)
+        self.gb_spin.setSuffix(" Hz")
+        self.gb_spin.setToolTip(
+            "Gaussian broadening width, for the Gaussian window only "
+            "(see processing.ft._window_gaussian's own docstring -- "
+            "not verified against real Bruker GM output). 0 disables "
+            "the Gaussian term, leaving a plain exponential."
+        )
+        self.gb_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
+        form.addRow("Gaussian broadening:", self.gb_spin)
+
+        self.ssb_spin = QDoubleSpinBox()
+        self.ssb_spin.setRange(0.0, 32.0)
+        self.ssb_spin.setDecimals(2)
+        self.ssb_spin.setValue(2.0)
+        self.ssb_spin.setToolTip(
+            "Sine-bell shift, Bruker's own SSB convention, for the Sine "
+            "and QSine windows only. 2 = a pure cosine bell (no shift); "
+            "0 or 1 = a plain sine bell starting at 0."
+        )
+        self.ssb_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
+        form.addRow("Sine-bell shift (SSB):", self.ssb_spin)
 
         self.zero_fill_combo = QComboBox()
         for size in _ZERO_FILL_SIZES:
@@ -2307,10 +2343,20 @@ class MainWindow(QMainWindow):
             self.window_combo.addItem(label, key)
         self.window_combo.setCurrentIndex(0)
         self.window_combo.blockSignals(False)
-        self.lb_spin.setEnabled(self.window_combo.currentData() == "exponential")
+        self._update_window_param_spin_enabled()
+
+    def _update_window_param_spin_enabled(self) -> None:
+        """Each window shape has its own parameters -- lb_spin (Exponential
+        and Gaussian), gb_spin (Gaussian only), ssb_spin (Sine/QSine
+        only) -- shown but disabled otherwise, same convention
+        ``lb_spin`` alone already used before this existed."""
+        key = self.window_combo.currentData()
+        self.lb_spin.setEnabled(key in ("exponential", "gaussian"))
+        self.gb_spin.setEnabled(key == "gaussian")
+        self.ssb_spin.setEnabled(key in ("sine", "qsine"))
 
     def _on_window_combo_changed(self, _index: int) -> None:
-        self.lb_spin.setEnabled(self.window_combo.currentData() == "exponential")
+        self._update_window_param_spin_enabled()
         self._on_fid_processing_control_changed()
 
     def _set_window_combo_key(self, key: str) -> None:
@@ -2318,7 +2364,7 @@ class MainWindow(QMainWindow):
         self.window_combo.blockSignals(True)
         self.window_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.window_combo.blockSignals(False)
-        self.lb_spin.setEnabled(self.window_combo.currentData() == "exponential")
+        self._update_window_param_spin_enabled()
 
     def _on_zero_fill_combo_changed(self, _index: int) -> None:
         self.zero_fill_custom_spin.setVisible(self.zero_fill_combo.currentData() is None)
@@ -2648,6 +2694,23 @@ class MainWindow(QMainWindow):
         if raw_fid is None or dt is None or raw_fid.ndim != 2:
             return False
 
+        fn_mode = spectrum.metadata.raw.get("fn_mode", 1)
+        if fn_mode == 6:
+            # Mirrors io.bruker.read_2d's own fn_mode==6 raw-row
+            # conjugate (see its comment there for the real-data
+            # verification) -- "fid_raw" here already has whatever
+            # global conjugate read_2d applied to every row before
+            # caching it (its own `_CONJUGATE_QUADRATURE_NOTE` step),
+            # so this only needs the same *extra* even-row conjugate,
+            # not the full sequence again. Without this, a live F2-only
+            # control change on an Echo-Antiecho 2D would silently
+            # revert to the pre-fix mirrored-F1-ghost behaviour the
+            # moment this path recomputes -- exactly the "two pipelines
+            # quietly diverge" bug class this method's own docstring
+            # already warns about for decode_hypercomplex_f1 below.
+            raw_fid = raw_fid.copy()
+            raw_fid[0::2] = np.conj(raw_fid[0::2])
+
         rows = []
         filled_rows = []
         for row in raw_fid:
@@ -2677,7 +2740,6 @@ class MainWindow(QMainWindow):
         dt_f1 = spectrum.metadata.raw.get("fid_dt_f1")
         f1_axis = spectrum.axes[0]
         if not spectrum.is_pseudo_2d and dt_f1:
-            fn_mode = spectrum.metadata.raw.get("fn_mode", 1)
             # F1 truncate -- row-pair aware (a request never separates
             # a real row from its matching imaginary one), same
             # convention as io.bruker.read_2d/io.xpulse.read_2d's own
@@ -3029,6 +3091,8 @@ class MainWindow(QMainWindow):
 
         for spin, value in (
             (self.lb_spin, raw.get("live_lb", 0.0)),
+            (self.gb_spin, raw.get("live_gb", 0.0)),
+            (self.ssb_spin, raw.get("live_ssb", 2.0)),
             (self.fid_shift_spin, raw.get("live_fid_shift", 0.0)),
             (self.linear_predict_points_spin, raw.get("live_linear_predict_points", 0)),
         ):
@@ -3080,6 +3144,10 @@ class MainWindow(QMainWindow):
             return "exponential", {"lb": 0.0}
         if key == "exponential":
             return "exponential", {"lb": self.lb_spin.value()}
+        if key == "gaussian":
+            return "gaussian", {"lb": self.lb_spin.value(), "gb": self.gb_spin.value()}
+        if key in ("sine", "qsine"):
+            return key, {"ssb": self.ssb_spin.value()}
         return key, {}
 
     def _persist_fid_processing_controls_to_metadata(self, spectrum) -> None:
@@ -3099,6 +3167,8 @@ class MainWindow(QMainWindow):
         raw = spectrum.metadata.raw
         raw["live_window"] = self.window_combo.currentData()
         raw["live_lb"] = self.lb_spin.value()
+        raw["live_gb"] = self.gb_spin.value()
+        raw["live_ssb"] = self.ssb_spin.value()
         raw["live_zero_fill"] = self._zero_fill_value()
         raw["live_fid_shift"] = self.fid_shift_spin.value()
         raw["live_align_echo"] = self.align_echo_button.isChecked()

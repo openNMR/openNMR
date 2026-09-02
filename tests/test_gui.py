@@ -4905,6 +4905,142 @@ def test_main_window_fid_processing_lb_persists_for_exponential_window(qapp, tmp
     assert window.lb_spin.value() == pytest.approx(15.0)
 
 
+def test_main_window_changing_window_function_does_not_change_committed_phase(qapp, tmp_path, monkeypatch):
+    # Real user concern: "make sure that changing the window function
+    # doesn't reset the phase in any weird way (even just the output
+    # spectrum)". Code reading shows phase0/phase1 fed into
+    # processing_ft.apply_phase (both the single-row preview path,
+    # _compute_processing_preview, and the multi-row path,
+    # _recompute_multi_row_data) are computed purely from
+    # spectrum.metadata.raw["phase0"/"phase1"] (+ the live drag delta
+    # for the single-row case) -- no window-related term anywhere in
+    # that expression, so they should be mathematically identical
+    # regardless of which window is selected. Spying directly on the
+    # actual (phase0, phase1) arguments passed to apply_phase is the
+    # real check here -- comparing the *output spectrum's* phase at a
+    # specific discrete sample instead (tried first) is confounded by
+    # each window's own different lineshape/spectral-leakage shifting
+    # exactly which sample is the magnitude-argmax, giving a
+    # fractional-degree "difference" that's a measurement artefact of
+    # a non-bin-exact synthetic peak, not a real phase change --
+    # confirmed by hand before writing this test the more direct way.
+    from opennmr.gui import main_window as main_window_module
+
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=256), vendor="bruker")
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    spectrum.metadata.raw["phase0"] = 45.0
+    spectrum.metadata.raw["phase1"] = 5.0
+
+    seen_phases = []
+    real_apply_phase = main_window_module.processing_ft.apply_phase
+
+    def spy_apply_phase(spectrum_arg, freq, phase0, phase1, **kwargs):
+        seen_phases.append((phase0, phase1))
+        return real_apply_phase(spectrum_arg, freq, phase0, phase1, **kwargs)
+
+    monkeypatch.setattr(main_window_module.processing_ft, "apply_phase", spy_apply_phase)
+
+    for key in ("exponential", "hann", "gaussian", "sine", "qsine"):
+        row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == key)
+        window.window_combo.setCurrentIndex(row)
+        window._on_fid_processing_control_changed()
+
+    assert len(seen_phases) >= 5  # at least once per window change
+    assert all(p == pytest.approx((45.0, 5.0)) for p in seen_phases)
+
+
+def test_main_window_gb_and_ssb_spins_enable_for_the_right_window_only(qapp, tmp_path, monkeypatch):
+    # Real user report: Gaussian/Sine/QSine existed as window_combo
+    # choices with no way to actually tune them (no ssb, no negative
+    # lb, no gb) -- gb_spin/ssb_spin are new controls for exactly that;
+    # confirm each is enabled only for the window shape it applies to.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="a"), vendor="bruker")
+    window._select_single_row(0)
+
+    def set_window(key):
+        row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == key)
+        window.window_combo.setCurrentIndex(row)
+
+    set_window("exponential")
+    assert window.lb_spin.isEnabled() is True
+    assert window.gb_spin.isEnabled() is False
+    assert window.ssb_spin.isEnabled() is False
+
+    set_window("gaussian")
+    assert window.lb_spin.isEnabled() is True
+    assert window.gb_spin.isEnabled() is True
+    assert window.ssb_spin.isEnabled() is False
+
+    set_window("sine")
+    assert window.lb_spin.isEnabled() is False
+    assert window.gb_spin.isEnabled() is False
+    assert window.ssb_spin.isEnabled() is True
+
+    set_window("qsine")
+    assert window.ssb_spin.isEnabled() is True
+
+    set_window("hann")
+    assert window.lb_spin.isEnabled() is False
+    assert window.gb_spin.isEnabled() is False
+    assert window.ssb_spin.isEnabled() is False
+
+
+def test_main_window_gaussian_window_reprocesses_without_crashing(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="a"), vendor="bruker")
+    window._select_single_row(0)
+    index = window._selected_index()
+
+    row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "gaussian")
+    window.window_combo.setCurrentIndex(row)
+    window.lb_spin.setValue(-5.0)
+    window.gb_spin.setValue(20.0)
+    window._on_fid_processing_control_changed()
+
+    spectrum = window.session.spectra[index]
+    assert spectrum.data.shape[0] > 0
+    assert np.all(np.isfinite(spectrum.data))
+
+
+def test_main_window_qsine_window_reprocesses_without_crashing(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="a"), vendor="bruker")
+    window._select_single_row(0)
+    index = window._selected_index()
+
+    row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "qsine")
+    window.window_combo.setCurrentIndex(row)
+    window.ssb_spin.setValue(3.0)
+    window._on_fid_processing_control_changed()
+
+    spectrum = window.session.spectra[index]
+    assert spectrum.data.shape[0] > 0
+    assert np.all(np.isfinite(spectrum.data))
+
+
+def test_main_window_gb_and_ssb_persist_across_reselection(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="a"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+
+    window._select_single_row(0)
+    row = next(i for i in range(window.window_combo.count()) if window.window_combo.itemData(i) == "gaussian")
+    window.window_combo.setCurrentIndex(row)
+    window.lb_spin.setValue(-3.0)
+    window.gb_spin.setValue(12.0)
+    window._on_fid_processing_control_changed()
+
+    window._select_single_row(1)
+    window._select_single_row(0)
+
+    assert window.window_combo.currentData() == "gaussian"
+    assert window.lb_spin.value() == pytest.approx(-3.0)
+    assert window.gb_spin.value() == pytest.approx(12.0)
+
+
 def test_main_window_unmodified_spectrum_still_gets_fresh_defaults(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="a"), vendor="bruker")
