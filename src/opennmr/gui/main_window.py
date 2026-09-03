@@ -2552,6 +2552,10 @@ class MainWindow(QMainWindow):
         dt = spectrum.metadata.raw.get("fid_dt")
         title = ""
         if fid.ndim == 2:
+            # Note: _fid_preview_available (every real call site's own
+            # gate) already excludes a genuine (non-pseudo) 2D
+            # entirely -- this branch only ever runs for pseudo-2D in
+            # practice.
             row = min(max(self.slice_spin.value() - 1, 0), fid.shape[0] - 1) if spectrum.is_pseudo_2d else 0
             if spectrum.is_pseudo_2d:
                 title = self._slice_label(spectrum, row + 1)
@@ -2707,6 +2711,26 @@ class MainWindow(QMainWindow):
         data = data / (spectrum.metadata.ns or 1.0)
         return filled, data
 
+    def _phase_2d_proportional_row(self, spectrum, raw_row_count: int) -> int:
+        """Map :attr:`_phase_2d_slice_index` (an index into the
+        *processed*, zero-filled F1 axis -- ``spectrum.data.shape[0]``
+        long) onto an approximate row in a differently-sized raw array
+        (``metadata.raw["fid_raw"]``/``["fid"]``, both pre-F1-zero-fill
+        and, for a hypercomplex ``FnMODE``, pre-decode too -- so a
+        genuine 2D's own raw row count essentially never equals its
+        processed F1 length; confirmed on real data, 256 raw rows vs.
+        1024 processed). There's no true inverse for a zero-filled
+        index -- it doesn't correspond to any single real acquired
+        point -- so this is deliberately proportional ("roughly the
+        same relative position in the acquisition"), not exact, which
+        is good enough for a preview but should not be treated as
+        picking out a specific real data point."""
+        processed_row_count = spectrum.data.shape[0]
+        if processed_row_count <= 1 or raw_row_count <= 1:
+            return 0
+        fraction = (self._phase_2d_slice_index - 1) / (processed_row_count - 1)
+        return int(round(fraction * (raw_row_count - 1)))
+
     def _compute_processing_preview(self, spectrum):
         """Compute the Processing tab's live preview entirely from the
         already-cached raw FID (``metadata.raw["fid_raw"]``), in
@@ -2736,7 +2760,21 @@ class MainWindow(QMainWindow):
         title = ""
         slice_template = spectrum
         if raw_fid.ndim == 2:
-            row = min(max(self.slice_spin.value() - 1, 0), raw_fid.shape[0] - 1)
+            if not spectrum.is_pseudo_2d and self._phase_mode == "2d" and self.dim_combo.currentIndex() == 0 \
+                    and self._phase_2d_slice_index is not None:
+                # This preview (the Processing tab's own bottom panel)
+                # was silently using slice_spin's own value (always 1,
+                # since that control is hidden for a genuine 2D)
+                # instead of whichever row was actually being phased/
+                # shown on the Spectrum tab, which read as "phasing
+                # looks different depending on which tab you're on."
+                # (_show_fid_preview has no analogous fix: it's always
+                # gated off for a genuine 2D by _fid_preview_available,
+                # so its own raw_fid.ndim == 2 branch never runs for
+                # this case.)
+                row = self._phase_2d_proportional_row(spectrum, raw_fid.shape[0])
+            else:
+                row = min(max(self.slice_spin.value() - 1, 0), raw_fid.shape[0] - 1)
             title = self._slice_label(spectrum, row + 1)
             raw_fid = raw_fid[row]
             slice_template = get_trace(spectrum, axis="f1", index=row + 1)

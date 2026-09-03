@@ -2,6 +2,18 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## 2D phasing preview mismatch between the Spectrum and Processing tabs (2026-09-03)
+
+Real user report: "there is something happening still with phasing for 2D data, especially when switching between tabs." Reproduced directly: while genuine-2D phasing, the Spectrum tab shows the row picked by `_phase_2d_slice_index` (the max-magnitude row on the *processed* F1 axis), but `_compute_processing_preview` (the Processing tab's own live preview) was reading `slice_spin.value()` instead -- a control that's hidden and stuck at 1 for a genuine 2D -- so the two tabs could show completely different, unrelated rows while switching between them mid-edit.
+
+First fix attempt used `_phase_2d_slice_index` directly as a `raw_fid` row index -- wrong, because `_phase_2d_slice_index` indexes the *processed*, zero-filled F1 axis (`spectrum.data.shape[0]`), while `raw_fid` (`metadata.raw["fid_raw"]`) is the pre-zero-fill (and, for a hypercomplex FnMODE, pre-decode) acquired array -- confirmed on real data the two lengths differ substantially (256 raw rows vs. 1024 processed). A zero-filled processed index has no true inverse into the raw array (it doesn't correspond to any single real acquired point), so a direct/clamped use just saturated at the raw array's last row for any out-of-range index -- a wrong, silently-plausible-looking answer, not a crash.
+
+Fixed with a new proportional-mapping helper, `_phase_2d_proportional_row` -- maps `_phase_2d_slice_index`'s fractional position along the processed axis onto the equivalent fractional position in the raw array ("roughly the same relative position in the acquisition"), used only in the branch where genuine-2D phasing is actually active (`not spectrum.is_pseudo_2d and self._phase_mode == "2d"` and F2/direct dimension selected and a slice index has been captured); every other case (pseudo-2D, F1-dimension phasing, no active 2D-phase session) is unchanged, still driven by `slice_spin`.
+
+`_show_fid_preview` was checked for the same bug and found NOT to need a fix -- `_fid_preview_available` (which gates every one of its ~9 call sites) always excludes a genuine 2D, so its own `fid.ndim == 2` branch is unreachable for this case in practice; left as-is with a comment explaining why, instead of shipping a dead-code edit.
+
+- Covered by a new test, `test_main_window_processing_preview_slice_matches_spectrum_tab_across_zero_fill_mismatch`, deliberately zero-filling F1 from 4 raw rows to 16 processed rows so the three candidate behaviours (the old dead `slice_spin` path, the first-attempt direct/clamped index, and the proportional mapping) give three different, known answers ("Slice 1" / "Slice 4" / "Slice 3") -- confirmed discriminating by running it against both broken variants directly, not just against the final fix.
+
 ## Echo-Antiecho fix, round 2: the conjugate-only version shipped a real F2-mirror bug (2026-09-03)
 
 Real user report, caught by actually using the app: "I'm pretty sure the echo-anti echo data is now mirrored in x." Correct, and a genuine mistake in this project's own earlier "fixed and verified" work (the "Echo-Antiecho F1-mirror bug... found and fixed" entry, 2026-09-02) -- worth a full, honest account, not just a quiet patch.

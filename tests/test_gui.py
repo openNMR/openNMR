@@ -1720,6 +1720,52 @@ def test_main_window_2d_phase_slice_follows_dimension_switch(qapp, tmp_path):
     assert window._phase_2d_slice_index == n_f2  # F1 default: column n_f2
 
 
+def test_main_window_processing_preview_slice_matches_spectrum_tab_across_zero_fill_mismatch(
+        qapp, tmp_path, monkeypatch):
+    # Real user report: "there is something happening still with
+    # phasing for 2D data, especially when switching between tabs."
+    # _compute_processing_preview (the Processing tab's own live
+    # preview) picked its row from slice_spin.value() -- always 1,
+    # since that control is hidden for a genuine 2D -- instead of
+    # _phase_2d_slice_index, the row actually shown on the Spectrum
+    # tab while 2D-phasing. A first fix used _phase_2d_slice_index
+    # directly as a raw_fid row index, which is *also* wrong:
+    # _phase_2d_slice_index indexes the *processed*, zero-filled F1
+    # axis (spectrum.data.shape[0]), while raw_fid
+    # (metadata.raw["fid_raw"]) is the pre-zero-fill acquired array --
+    # the two have different lengths whenever F1 zero-fill changes the
+    # processed size, with no exact index correspondence between them
+    # (a zero-filled row isn't a real acquired point). This test
+    # deliberately zero-fills F1 from 4 raw rows to 16 processed rows
+    # so the three candidate behaviours give three different, known
+    # answers: the dead slice_spin path gives "Slice 1"; a direct/
+    # clamped use of _phase_2d_slice_index saturates at the raw
+    # array's own last row, "Slice 4"; only the proportional mapping
+    # (_phase_2d_proportional_row) gives the correct "Slice 3" for
+    # _phase_2d_slice_index == 9 of 16 processed rows against 4 raw
+    # rows (fraction 8/15 -> round(1.6) -> raw row 2, 1-based 3).
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt into genuine 2D
+    window.dim_combo.setCurrentIndex(0)  # F2 (direct) -- the branch under test
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+
+    window.zero_fill_f1_spin.setValue(16)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)
+    assert spectrum.data.shape[0] == 16  # processed F1 now mismatches the 4 raw rows
+
+    raw_fid = spectrum.metadata.raw["fid_raw"]
+    assert raw_fid.shape[0] == 4  # the raw cache is untouched by the live F1 zero-fill
+
+    window._phase_2d_slice_index = 9  # deliberately not proportional to either row count
+
+    _fid, _dt, _preview_spectrum, title = window._compute_processing_preview(spectrum)
+
+    assert title == "Slice 3"
+
+
 def test_main_window_2d_pivot_matches_selected_dimension(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
