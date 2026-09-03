@@ -3494,6 +3494,57 @@ def test_main_window_compare_skips_non_1d_spectra(qapp, tmp_path):
     assert "Select at least two" in window.compare_status_label.text()
 
 
+def test_main_window_compare_overlays_multiple_2d_spectra(qapp, tmp_path):
+    # Real roadmap ask: "a way to overlay multiple 2D contours."
+    # plotting.twod.overlay_plot already existed (ported from
+    # nmrtools2's own NMR2D_overlay_plot), just never wired to the GUI.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, name="a2d"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    window._load(_make_2d_dataset(tmp_path, name="b2d"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+
+    _select_rows(window, [0, 1])
+
+    assert "Overlaying 2 2D spectra" in window.compare_status_label.text()
+    assert window.canvas_tabs.currentWidget() is window.compare_canvas
+    assert window.compare_canvas._contour_spectrum is None  # not a single-spectrum contour view
+    assert len(window.compare_canvas.ax.collections) >= 2  # one contour-line collection per spectrum
+
+
+def test_main_window_compare_2d_overlay_rejects_incompatible_spectra(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, name="het", f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    window._load(_make_2d_dataset(tmp_path, name="homo", f1_nuc="1H"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+
+    _select_rows(window, [0, 1])
+
+    # overlay_plot's own compatibility check (different F1 nuclides)
+    # surfaces as a status message, not a crash -- same "quiet status
+    # text, no popup, no forced tab switch" treatment the existing "not
+    # 1D"/"no sample mass set" skip-reasons already get, since this is
+    # an expected/reportable mismatch, not an exceptional failure.
+    assert "nuclide" in window.compare_status_label.text().lower()
+
+
+def test_main_window_compare_2d_overlay_only_applies_to_2_or_3_spectra(qapp, tmp_path):
+    # 4 (compatible) 2D spectra selected together falls through to the
+    # existing 1D-only logic (which reports them all as "not 1D")
+    # rather than attempting an overlay outside overlay_plot's own
+    # documented 2-3-spectra range.
+    window = MainWindow()
+    for name in ("a2d", "b2d", "c2d", "d2d"):
+        window._load(_make_2d_dataset(tmp_path, name=name), vendor="bruker")
+        window.process_indirect_button.setChecked(True)
+
+    _select_rows(window, [0, 1, 2, 3])
+
+    assert "not 1D" in window.compare_status_label.text()
+    assert "Select at least two" in window.compare_status_label.text()
+
+
 def test_main_window_compare_superimposed_layout_runs(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")

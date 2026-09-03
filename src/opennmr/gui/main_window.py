@@ -2020,6 +2020,25 @@ class MainWindow(QMainWindow):
         rows_and_candidates = [(row, self._resolve_compare_entry(e)) for row, e in rows_and_entries]
         # stale entries (removed/reprocessed) silently drop
         rows_and_candidates = [(row, c) for row, c in rows_and_candidates if c is not None]
+
+        # A way to overlay multiple 2D contours (real roadmap ask) --
+        # reuses plotting.twod.overlay_plot (already ported from
+        # nmrtools2's own NMR2D_overlay_plot, just never wired to the
+        # GUI before this) via its own dedicated path, since its
+        # compatibility rules (same F1/F2 nuclides, conventional vs.
+        # pseudo-2D, 2-3 spectra only) and rendering (flat-colour line
+        # contours, no mass-normalization/per-row-highlight concept)
+        # are different enough from the 1D stack/superimpose view below
+        # that folding them into the same code path would tangle two
+        # genuinely different features together. A *mixed* 1D/2D, a
+        # single 2D, or a >3-spectra 2D selection all fall through to
+        # the existing 1D-only logic below unchanged (which already
+        # skips non-1D entries and reports them as such).
+        two_d_rows_and_candidates = [(row, c) for row, c in rows_and_candidates if c.ndim == 2]
+        if len(rows_and_candidates) == len(two_d_rows_and_candidates) and 2 <= len(two_d_rows_and_candidates) <= 3:
+            self._refresh_compare_2d_overlay(two_d_rows_and_candidates, switch_tab=switch_tab, force_render=force_render)
+            return
+
         rows_and_1d = [(row, c) for row, c in rows_and_candidates if c.ndim == 1]
         skipped_ndim = len(rows_and_candidates) - len(rows_and_1d)
 
@@ -2094,6 +2113,35 @@ class MainWindow(QMainWindow):
             self._on_compare_list_current_row_changed(self.compare_list.currentRow())
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
+
+    def _refresh_compare_2d_overlay(self, rows_and_candidates: list[tuple[int, object]],
+                                     switch_tab: bool, force_render: bool) -> None:
+        """:meth:`_refresh_compare_view`'s own 2-3-genuine-2D-spectra
+        branch -- see its own comment for why this is a separate
+        method rather than folded into the 1D logic. Mirrors that
+        method's own "defer the draw until Compare is actually
+        visited" staleness guard, but has no mass-normalization/
+        per-row-highlight concept to carry over (an overlay's own
+        legend, from each spectrum's ``Session.label``, already
+        identifies which contour is which)."""
+        if not force_render and not switch_tab and self.canvas_tabs.currentWidget() is not self.compare_canvas:
+            self._compare_view_stale = True
+            return
+        self._compare_view_stale = False
+        self._compare_plot_row_positions = {}
+
+        labels = [self.session.label(row) for row, _c in rows_and_candidates]
+        spectra = [c for _row, c in rows_and_candidates]
+        try:
+            self.compare_canvas.show_2d_overlay(spectra, labels=labels)
+            self.compare_status_label.setText(f"Overlaying {len(spectra)} 2D spectra.")
+            if switch_tab:
+                self.canvas_tabs.setCurrentWidget(self.compare_canvas)
+        except ValueError as exc:
+            self.compare_status_label.setText(str(exc))
+            self.compare_canvas.clear()
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Failed to overlay spectra", str(exc))
 
     def _on_compare_list_current_row_changed(self, row: int) -> None:
         """Highlight (tint the background of) whichever row of the

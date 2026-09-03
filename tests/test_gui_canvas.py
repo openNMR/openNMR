@@ -457,6 +457,32 @@ def test_extract_slice_shows_1d_row(qapp):
     assert len(canvas._current_1d_spectrum.data) == 64  # traced along F2
 
 
+def test_show_2d_overlay_renders_and_clears_contour_spectrum(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8, n_f2=64))
+    assert canvas._contour_spectrum is not None
+
+    spec_a = _make_2d(n_f1=8, n_f2=64)
+    spec_b = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_2d_overlay([spec_a, spec_b], labels=["A", "B"])
+
+    # Not a single-spectrum contour view -- see show_2d_overlay's own
+    # docstring for why (scroll-to-threshold/Extract Slice/etc. all
+    # assume one specific spectrum's own data).
+    assert canvas._contour_spectrum is None
+    assert len(canvas.ax.collections) >= 2
+    assert canvas.ax.get_legend() is not None
+
+
+def test_show_2d_overlay_raises_for_incompatible_spectra(qapp):
+    canvas = MplCanvas()
+    spec_a = _make_2d(n_f1=8, n_f2=64)
+    spec_b = _make_2d(n_f1=8, n_f2=64)
+    spec_b.metadata.nucleus_indirect = "31P"  # deliberately mismatched
+    with pytest.raises(ValueError):
+        canvas.show_2d_overlay([spec_a, spec_b])
+
+
 def test_extract_slice_shows_1d_column(qapp):
     canvas = MplCanvas()
     spec = _make_2d(n_f1=8, n_f2=64)

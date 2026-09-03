@@ -1635,6 +1635,32 @@ class MplCanvas(QWidget):
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
+    def show_2d_overlay(self, spectra: list[NMRSpectrum], labels: list[str] | None = None) -> None:
+        """Overlay 2-3 2D/pseudo-2D spectra as flat-colour line contours
+        on one set of axes -- real roadmap ask: "a way to overlay
+        multiple 2D contours." Thin wrapper around
+        :func:`opennmr.plotting.twod.overlay_plot` (already ported from
+        ``nmrtools2``'s own ``NMR2D_overlay_plot``, just never called
+        from GUI code before this) -- that function does the actual
+        compatibility checking (same F1/F2 nuclides, conventional vs.
+        pseudo-2D, 2-3 spectra only) and raises ``ValueError``
+        otherwise; this method doesn't duplicate those checks, the
+        caller decides how to surface that error.
+
+        Unlike :meth:`show_spectrum`'s own single-2D-contour view, this
+        is *not* set as :attr:`_contour_spectrum` -- scroll-to-
+        threshold, Set Contour Levels…, and Extract Slice… all assume
+        one specific spectrum's own data, which an overlay of several
+        doesn't have."""
+        self.clear()  # already leaves self.ax as a fresh, single subplot
+        plotting.overlay_plot(spectra, ax=self.ax, fig=self.figure, labels=labels, **self._contour_fraction_kwargs())
+        if labels is not None:
+            self.ax.legend()
+            self._legend_visible = True
+        self._apply_view_options()
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
     def show_slice_fit(self, x, y_data, y_fit, components=None, peak_labels=None, title: str = "",
                         spectrum: NMRSpectrum | None = None) -> None:
         """Plot one pseudo-2D slice's spectrum alongside its fitted
