@@ -230,6 +230,31 @@ def test_fit_spectrum_recovers_single_gaussian_peak():
     assert popt[2] == pytest.approx(A_true, abs=1e-2)
 
 
+def test_fit_spectrum_fixed_dict_locks_only_the_named_parameter():
+    # peak_defs' own "fixed" dict is per-parameter (e.g. {"shift":
+    # True} locks only the shift, leaving FWHM/amplitude free) -- the
+    # GUI now exposes this directly (individual parameters, not just
+    # an entire peak, fixable), but nothing at this backend level had
+    # ever actually verified a *partial* fixed dict numerically before
+    # (only the GUI's own all-four-True "Fixed" checkbox case had any
+    # coverage at all). Deliberately wrong starting shift (5.2, true
+    # 5.0) with only "shift" fixed: if fixed were silently ignored,
+    # the fit would pull the shift back toward 5.0; locked correctly,
+    # it must stay pinned exactly at its own starting value while FWHM
+    # still converges close to the true value around it.
+    x0_true, fwhm_true, A_true = 5.0, 0.05, 1.0
+    spec = _make_1d(x0=x0_true, fwhm=fwhm_true, A=A_true, kind="gaussian", b0=0.0, b1=0.0)
+
+    wrong_shift = 5.02
+    peak_defs = [{"type": "gaussian", "shift": wrong_shift, "fwhm": 0.08, "fixed": {"shift": True}}]
+    popt, _pcov_free, is_free, _scale, _x_ref = fitting.fit_spectrum(spec, peak_defs, use_normalised=False)
+
+    assert popt[0] == pytest.approx(wrong_shift, abs=1e-9)  # locked, not pulled toward x0_true
+    assert not is_free[0]
+    assert is_free[1] and is_free[2]  # FWHM/amplitude still free
+    assert popt[1] == pytest.approx(fwhm_true, abs=0.03)  # widens slightly to still cover the off-center true peak
+
+
 def test_fit_spectrum_recovers_two_peaks_gaussian_and_lorentzian():
     ppm = np.linspace(0, 10, 2000)
     x_ref_true = np.mean(ppm)

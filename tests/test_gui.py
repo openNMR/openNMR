@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter,
+    QApplication, QCheckBox, QDialog, QFileDialog, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QSplitter,
 )
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
@@ -4711,6 +4712,82 @@ def test_main_window_peak_table_fixed_checkbox_unchecked_by_default(qapp):
     assert "fixed" not in peak_def
 
 
+def test_main_window_peak_table_per_parameter_fixed(qapp):
+    # Real user requirement: "individual parameters (not just an entire
+    # line) should be fixable." The row's own all-or-nothing "Fixed"
+    # checkbox (tested above) already covers "fix everything" -- this
+    # is the finer-grained path, via _PEAK_FIXED_ITEM_ROLE (set by the
+    # Set Bounds / Fixed Parameters… dialog; here direct, matching the
+    # existing bounds test's own style).
+    window = MainWindow()
+    window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5, per_param_fixed={"shift": True})
+
+    peak_def = window._read_peak_defs()[0]
+
+    assert peak_def["fixed"] == {"shift": True}
+
+
+def test_main_window_peak_table_row_fixed_checkbox_overrides_per_parameter_fixed(qapp):
+    # _on_set_peak_bounds's own documented precedence: the row's
+    # all-or-nothing checkbox wins outright over any per-parameter
+    # choice, even a conflicting one (here: FWHM explicitly left free
+    # per-parameter, but the row checkbox still fixes it too).
+    window = MainWindow()
+    window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5, per_param_fixed={"shift": True})
+    window.peak_table.item(0, 3).setCheckState(Qt.CheckState.Checked)
+
+    peak_def = window._read_peak_defs()[0]
+
+    assert peak_def["fixed"] == {"shift": True, "fwhm": True, "A": True, "eta": True}
+
+
+def test_main_window_set_peak_bounds_dialog_stores_per_parameter_fixed(qapp, monkeypatch):
+    window = MainWindow()
+    window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5)
+
+    def fake_exec(dialog):
+        checks = dialog.findChildren(QCheckBox)
+        checks[0].setChecked(True)  # shift, per _PEAK_BOUNDS_FIELDS' own order
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+    window._on_set_peak_bounds(0)
+
+    stored = window.peak_table.item(0, 0).data(window._PEAK_FIXED_ITEM_ROLE)
+    assert stored == {"shift": True}
+    peak_def = window._read_peak_defs()[0]
+    assert peak_def["fixed"] == {"shift": True}
+
+
+def test_main_window_set_peak_bounds_dialog_prefills_existing_per_parameter_fixed(qapp, monkeypatch):
+    window = MainWindow()
+    window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5, per_param_fixed={"fwhm": True})
+
+    def fake_exec(dialog):
+        checks = dialog.findChildren(QCheckBox)
+        assert checks[1].isChecked()  # fwhm, per _PEAK_BOUNDS_FIELDS' own order
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+    window._on_set_peak_bounds(0)
+
+
+def test_main_window_fit_updating_peak_table_preserves_per_parameter_fixed(qapp):
+    window = MainWindow()
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5, per_param_fixed={"shift": True})
+    result = {
+        "popt": np.array([5.02, 0.05, 1.0, 0.5]),
+        "pcov": np.zeros((4, 4)),
+        "peak_defs": window._read_peak_defs(),
+        "is_free": np.array([True, True, True, True]),
+    }
+
+    window._update_peak_table_from_fit(result)
+
+    stored = window.peak_table.item(0, 0).data(window._PEAK_FIXED_ITEM_ROLE)
+    assert stored == {"shift": True}
+
+
 def test_main_window_peak_custom_bounds_override_default_shift_bound(qapp):
     window = MainWindow()
     window._add_peak_row(shift=5.1, fwhm=0.2, eta=0.5)
@@ -4787,7 +4864,9 @@ def test_main_window_sn_gating_kwargs_raises_on_bad_region(qapp):
 def test_main_window_analysis_state_round_trips_fixed_and_bounds(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
-    window._add_peak_row(shift=5.0, fwhm=0.1, eta=0.5, fixed=True, bounds={"shift": (4.5, 5.5)})
+    window._add_peak_row(
+        shift=5.0, fwhm=0.1, eta=0.5, fixed=True, bounds={"shift": (4.5, 5.5)}, per_param_fixed={"eta": True},
+    )
     window.sn_noise_region_edit.setText("8, 9")
     window.sn_threshold_spin.setValue(4.0)
     window._save_current_analysis_state()
@@ -4797,6 +4876,7 @@ def test_main_window_analysis_state_round_trips_fixed_and_bounds(qapp, tmp_path)
 
     assert window.peak_table.item(0, 3).checkState() == Qt.CheckState.Checked
     assert window.peak_table.item(0, 0).data(Qt.ItemDataRole.UserRole) == {"shift": (4.5, 5.5)}
+    assert window.peak_table.item(0, 0).data(window._PEAK_FIXED_ITEM_ROLE) == {"eta": True}
     assert window.sn_noise_region_edit.text() == "8, 9"
     assert window.sn_threshold_spin.value() == pytest.approx(4.0)
 

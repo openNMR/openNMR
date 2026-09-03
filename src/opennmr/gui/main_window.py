@@ -5899,7 +5899,8 @@ class MainWindow(QMainWindow):
         self._show_integration_results(spectrum, results, len(regions))
 
     def _add_peak_row(self, shift: float = 0.0, fwhm: float = 1.0, eta: float = 0.5,
-                       fixed: bool = False, bounds: dict | None = None) -> None:
+                       fixed: bool = False, bounds: dict | None = None,
+                       per_param_fixed: dict | None = None) -> None:
         row = self.peak_table.rowCount()
         self.peak_table.insertRow(row)
         for col, value in enumerate((shift, fwhm, eta)):
@@ -5907,6 +5908,8 @@ class MainWindow(QMainWindow):
         self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
         if bounds:
             self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, bounds)
+        if per_param_fixed:
+            self.peak_table.item(row, 0).setData(self._PEAK_FIXED_ITEM_ROLE, per_param_fixed)
         self._refresh_peak_markers()
 
     @staticmethod
@@ -5931,7 +5934,7 @@ class MainWindow(QMainWindow):
         if row < 0:
             return
         menu = QMenu(self)
-        bounds_action = menu.addAction("Set Custom Bounds…")
+        bounds_action = menu.addAction("Set Bounds / Fixed Parameters…")
         chosen = menu.exec(self.peak_table.viewport().mapToGlobal(pos))
         if chosen is bounds_action:
             self._on_set_peak_bounds(row)
@@ -5943,19 +5946,46 @@ class MainWindow(QMainWindow):
     _PEAK_BOUNDS_FIELDS = (("Shift (ppm)", "shift"), ("FWHM (ppm)", "fwhm"),
                            ("Amplitude", "amplitude"), ("Eta", "eta"))
 
+    #: Second custom data role on a peak row's own column-0 item (see
+    #: _on_set_peak_bounds) -- UserRole itself already holds this row's
+    #: custom *bounds* dict; per-parameter *fixed* flags are stored
+    #: alongside it here rather than folded into the same dict, so
+    #: existing bounds-only code (persistence, _update_peak_table_from_fit)
+    #: didn't need to change shape to gain this.
+    _PEAK_FIXED_ITEM_ROLE = Qt.ItemDataRole.UserRole + 1
+
     def _on_set_peak_bounds(self, row: int) -> None:
-        existing = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole) or {}
+        """A peak row's own "Fixed" checkbox (column 3) fixes *every*
+        parameter together -- real user requirement: "individual
+        parameters (not just an entire line) should be fixable." This
+        dialog is the finer-grained tool for that: each field gets its
+        own optional bounds text box *and* its own "Fixed" checkbox.
+        The row's own all-or-nothing checkbox still wins outright when
+        checked (see :meth:`_read_peak_defs`) -- leave it unchecked to
+        let these per-parameter choices take effect instead."""
+        existing_bounds = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole) or {}
+        existing_fixed = self.peak_table.item(row, 0).data(self._PEAK_FIXED_ITEM_ROLE) or {}
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Custom bounds -- peak {row + 1}")
+        dialog.setWindowTitle(f"Bounds / fixed parameters -- peak {row + 1}")
         form = QFormLayout(dialog)
         edits = {}
+        fixed_checks = {}
         for label, key in self._PEAK_BOUNDS_FIELDS:
+            fixed_key = "A" if key == "amplitude" else key
             edit = QLineEdit()
-            if key in existing:
-                edit.setText(f"{existing[key][0]:g}, {existing[key][1]:g}")
+            if key in existing_bounds:
+                edit.setText(f"{existing_bounds[key][0]:g}, {existing_bounds[key][1]:g}")
             edit.setPlaceholderText("optional, 'low, high'")
-            form.addRow(f"{label}:", edit)
+            checkbox = QCheckBox("Fixed")
+            checkbox.setChecked(bool(existing_fixed.get(fixed_key, False)))
+            field_row = QWidget()
+            field_layout = QHBoxLayout(field_row)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.addWidget(edit)
+            field_layout.addWidget(checkbox)
+            form.addRow(f"{label}:", field_row)
             edits[key] = edit
+            fixed_checks[fixed_key] = checkbox
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -5973,7 +6003,9 @@ class MainWindow(QMainWindow):
             except ValueError:
                 QMessageBox.critical(self, "Invalid bounds", f"{key}: expected 'low, high', got {text!r}.")
                 return
+        fixed = {key: True for key, checkbox in fixed_checks.items() if checkbox.isChecked()}
         self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, bounds or None)
+        self.peak_table.item(row, 0).setData(self._PEAK_FIXED_ITEM_ROLE, fixed or None)
 
     def _on_peak_picked(self, shift: float) -> None:
         if self.pick_peak_button.isChecked():
@@ -6133,9 +6165,18 @@ class MainWindow(QMainWindow):
             # raising instead of just pinning it very tightly.
             margin = max(tolerance * fwhm, 1e-9)
             peak_def["bounds"] = {"shift": (shift - margin, shift + margin)}
+            # Per-parameter fixed choices (Set Bounds / Fixed
+            # Parameters…) apply first; the row's own all-or-nothing
+            # "Fixed" checkbox (column 3), when checked, still wins
+            # outright over them -- same precedence _on_set_peak_bounds's
+            # own docstring documents.
+            per_param_fixed = self.peak_table.item(row, 0).data(self._PEAK_FIXED_ITEM_ROLE)
+            fixed = dict(per_param_fixed) if per_param_fixed else {}
             fixed_item = self.peak_table.item(row, 3)
             if fixed_item is not None and fixed_item.checkState() == Qt.CheckState.Checked:
-                peak_def["fixed"] = {"shift": True, "fwhm": True, "A": True, "eta": True}
+                fixed = {"shift": True, "fwhm": True, "A": True, "eta": True}
+            if fixed:
+                peak_def["fixed"] = fixed
             custom_bounds = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
             if custom_bounds:
                 peak_def["bounds"] = {**peak_def["bounds"], **custom_bounds}
@@ -6678,14 +6719,18 @@ class MainWindow(QMainWindow):
             if row >= self.peak_table.rowCount():
                 break
             params = dict(zip(peak["names"], peak["params"]))
-            # Preserve any custom bounds already attached to this row's
-            # column-0 item (see _on_set_peak_bounds) -- a fresh
-            # QTableWidgetItem here would otherwise silently drop them.
-            custom_bounds = self.peak_table.item(row, 0).data(Qt.ItemDataRole.UserRole) \
-                if self.peak_table.item(row, 0) else None
+            # Preserve any custom bounds/per-parameter-fixed choices
+            # already attached to this row's column-0 item (see
+            # _on_set_peak_bounds) -- a fresh QTableWidgetItem here
+            # would otherwise silently drop them.
+            old_item = self.peak_table.item(row, 0)
+            custom_bounds = old_item.data(Qt.ItemDataRole.UserRole) if old_item else None
+            per_param_fixed = old_item.data(self._PEAK_FIXED_ITEM_ROLE) if old_item else None
             shift_item = QTableWidgetItem(f"{params['shift']:.4g}")
             if custom_bounds:
                 shift_item.setData(Qt.ItemDataRole.UserRole, custom_bounds)
+            if per_param_fixed:
+                shift_item.setData(self._PEAK_FIXED_ITEM_ROLE, per_param_fixed)
             self.peak_table.setItem(row, 0, shift_item)
             self.peak_table.setItem(row, 1, QTableWidgetItem(f"{params['fwhm']:.4g}"))
             if "eta" in params:
@@ -6737,6 +6782,7 @@ class MainWindow(QMainWindow):
     def _capture_analysis_state(self) -> dict:
         peaks = []
         peak_bounds = []
+        peak_fixed_params = []
         for row in range(self.peak_table.rowCount()):
             row_values = [self.peak_table.item(row, col).text() if self.peak_table.item(row, col) else ""
                           for col in range(3)]  # Shift, FWHM, Eta -- plain text columns
@@ -6745,6 +6791,7 @@ class MainWindow(QMainWindow):
             peaks.append(row_values)
             shift_item = self.peak_table.item(row, 0)
             peak_bounds.append((shift_item.data(Qt.ItemDataRole.UserRole) if shift_item else None) or {})
+            peak_fixed_params.append((shift_item.data(self._PEAK_FIXED_ITEM_ROLE) if shift_item else None) or {})
         regions = [
             [self.region_table.item(row, col).text() if self.region_table.item(row, col) else ""
              for col in range(len(self._REGION_TABLE_COLUMNS))]
@@ -6753,6 +6800,7 @@ class MainWindow(QMainWindow):
         return {
             "peaks": peaks,
             "peak_bounds": peak_bounds,
+            "peak_fixed_params": peak_fixed_params,
             "regions": regions,
             "fit_type": self.fit_type_combo.currentIndex(),
             "model": self.relaxation_model_combo.currentIndex(),
@@ -6800,6 +6848,7 @@ class MainWindow(QMainWindow):
             self.sn_threshold_spin.setValue(3.0)
         else:
             peak_bounds = state.get("peak_bounds", [])
+            peak_fixed_params = state.get("peak_fixed_params", [])
             for i, peak_row in enumerate(state["peaks"]):
                 shift, fwhm, eta = peak_row[0], peak_row[1], peak_row[2]
                 fixed = len(peak_row) > 3 and peak_row[3] == "1"
@@ -6810,6 +6859,8 @@ class MainWindow(QMainWindow):
                 self.peak_table.setItem(row, 3, self._make_fixed_checkbox_item(fixed))
                 if i < len(peak_bounds) and peak_bounds[i]:
                     self.peak_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, peak_bounds[i])
+                if i < len(peak_fixed_params) and peak_fixed_params[i]:
+                    self.peak_table.item(row, 0).setData(self._PEAK_FIXED_ITEM_ROLE, peak_fixed_params[i])
             for lo, hi in state.get("regions", []):
                 row = self.region_table.rowCount()
                 self.region_table.insertRow(row)
