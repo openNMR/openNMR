@@ -2,6 +2,15 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## 2D roadmap, overlay multiple 2D contours -- another already-ported backend function wired up (2026-09-03)
+
+Continuing item 2 of the "LWG roadmap" list -- "a way to overlay multiple 2D contours." Same pattern as the diagonal-line item above: `plotting.twod.overlay_plot` already existed, ported from `nmrtools2`'s own `NMR2D_overlay_plot` per the earlier project-plan document, complete with its own compatibility checking (`_check_overlay_compatible` -- same F1/F2 nuclides, conventional-vs-pseudo-2D, homo-vs-heteronuclear) and flat-colour-per-spectrum rendering -- just never called from GUI code.
+
+- New `MplCanvas.show_2d_overlay(spectra, labels)` -- thin wrapper around `overlay_plot`. **Found and fixed a real bug while building this**: calling `self.figure.add_subplot(111)` a second time right after `self.clear()` (which already leaves `self.ax` as a fresh subplot) created two overlapping, visually broken axes -- caught immediately from an actual rendered image, not just a "did it crash" check.
+- Wired into `MainWindow._refresh_compare_view` as a dedicated early branch (new `_refresh_compare_2d_overlay`): when 2-3 *and only* 2-3 checked Compare-tab entries are all genuine 2D, this overlay path runs instead of the existing 1D stack/superimpose logic -- deliberately kept as a separate method rather than folded into the 1D path, since mass-normalization and per-row plot highlighting don't have 2D-overlay equivalents. A mixed 1D/2D selection, a single 2D spectrum, or more than 3 2D spectra all fall through to the existing 1D-only logic unchanged (already reports non-1D entries as skipped). An incompatible pair (e.g. different F1 nuclides) surfaces `overlay_plot`'s own `ValueError` as quiet status-label text, matching how "not 1D"/"no sample mass set" are already reported -- not a popup, and doesn't force a tab switch, since this is an expected/reportable mismatch, not an exceptional failure.
+- Verified against the real Cyclosporine dataset loaded twice (both a broken-axes and a fixed render inspected directly as images, not just checked for exceptions).
+- 6 new tests (`test_gui.py`: a working 2-spectrum overlay, an incompatible-nuclide rejection, a 4-spectra selection correctly falling through to the 1D-only skip path; `test_gui_canvas.py`: `show_2d_overlay` clears `_contour_spectrum` and renders a legend, raises for incompatible spectra).
+
 ## 2D roadmap, Extract Slice now defaults to the cursor's own position (2026-09-03)
 
 Continuing item 2 of the "LWG roadmap" list -- "Row/slice extraction should default to the cursor's current position rather than a fixed index." The right-click "Extract Slice…" dialog's own `index_spin` previously always started at 1 (`QSpinBox`'s own range-minimum default, never explicitly set) regardless of where the contour was actually right-clicked.
