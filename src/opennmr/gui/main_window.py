@@ -2760,21 +2760,37 @@ class MainWindow(QMainWindow):
         title = ""
         slice_template = spectrum
         if raw_fid.ndim == 2:
-            if not spectrum.is_pseudo_2d and self._phase_mode == "2d" and self.dim_combo.currentIndex() == 0 \
-                    and self._phase_2d_slice_index is not None:
-                # This preview (the Processing tab's own bottom panel)
-                # was silently using slice_spin's own value (always 1,
-                # since that control is hidden for a genuine 2D)
-                # instead of whichever row was actually being phased/
-                # shown on the Spectrum tab, which read as "phasing
-                # looks different depending on which tab you're on."
-                # (_show_fid_preview has no analogous fix: it's always
-                # gated off for a genuine 2D by _fid_preview_available,
-                # so its own raw_fid.ndim == 2 branch never runs for
-                # this case.)
+            if spectrum.is_pseudo_2d:
+                row = min(max(self.slice_spin.value() - 1, 0), raw_fid.shape[0] - 1)
+            elif self._phase_2d_slice_index is not None and self.dim_combo.currentIndex() == 0:
+                # This method only ever previews the F2 (direct)
+                # dimension -- callers route the F1 (indirect) case to
+                # _show_2d_indirect_processing_preview instead, since
+                # an F1 trace can't be cheaply rebuilt from one raw row
+                # the way an F2 trace can (F1 only exists once every
+                # row's own F2 processing is already done -- see that
+                # method's own docstring). Real user requirement,
+                # repeated across two rounds of feedback: the Processing
+                # tab must show a single representative slice for *any*
+                # genuine 2D, not just while a phase drag happens to be
+                # in progress -- so this always uses whichever F1 row
+                # is currently the largest-magnitude one
+                # (_phase_2d_slice_index, the same single source of
+                # truth the Spectrum tab's own phase-preview slice
+                # uses, see _capture_phase_reference), not gated behind
+                # _phase_mode/an active drag. (_show_fid_preview has no
+                # analogous need: it's always gated off for a genuine
+                # 2D by _fid_preview_available, so its own
+                # raw_fid.ndim == 2 branch never runs for this case.)
                 row = self._phase_2d_proportional_row(spectrum, raw_fid.shape[0])
             else:
-                row = min(max(self.slice_spin.value() - 1, 0), raw_fid.shape[0] - 1)
+                # No valid F2 slice index yet (e.g. dim_combo is on F1
+                # -- shouldn't normally reach here, see above -- or
+                # spectrum.data_imag is None so phasing, and therefore
+                # _phase_2d_slice_index, was never set up at all).
+                # "First" row, matching the user's own "first or
+                # largest magnitude" framing for the default.
+                row = 0
             title = self._slice_label(spectrum, row + 1)
             raw_fid = raw_fid[row]
             slice_template = get_trace(spectrum, axis="f1", index=row + 1)
@@ -2815,6 +2831,70 @@ class MainWindow(QMainWindow):
             data=np.real(data), axes=[axis], metadata=slice_template.metadata, data_imag=np.imag(data),
         )
         return filled, dt, preview_spectrum, title
+
+    def _show_2d_indirect_processing_preview(self, spectrum) -> None:
+        """The Processing tab's own preview for a genuine 2D while the
+        Dimension box is on F1 (indirect) -- :meth:`_compute_processing_preview`'s
+        sibling for the other dimension, but structurally different:
+        an F1 trace only exists once every raw row has already been
+        through its *own* F2-domain processing (window/zero-fill/FFT),
+        so there's no cheap single-raw-row rebuild the way F2 has.
+        That per-row work is exactly what the debounced whole-dataset
+        recompute (:meth:`_recompute_multi_row_data`) already keeps
+        ``spectrum.data`` current with (F1 zero-fill/truncate, *and*
+        both dimensions' own durably-committed phase, included -- see
+        that method's own docstring) -- so this just reads a trace
+        straight off ``spectrum`` and displays it, deliberately
+        applying *no* phase of its own, exactly matching
+        :meth:`_show_2d_phase_slice`'s own F1 branch (the Spectrum
+        tab's already-trusted equivalent for this same dimension).
+
+        That "no phase of its own" choice isn't an oversight: whichever
+        dimension ``dim_combo`` currently points to already has its
+        live phase-drag delta written straight into ``spectrum.data``
+        by :meth:`_apply_phase_preview`'s own "2d" branch (uniformly,
+        across the whole array) *before* this method ever runs -- a
+        first version of this method re-applied ``phase0_f1``/
+        ``phase1_f1`` plus the live spin-box delta on top of the
+        already-phased trace, silently double-phasing it. Caught by
+        cross-checking this method's own output against
+        :meth:`_show_2d_phase_slice`'s numerically, on real data
+        (``test_data/20200804_NaMgMnO_Pristine_111218C_Check_23Na_1p3mm/31``)
+        -- differed by a magnitude comparable to the data itself, not a
+        rounding-sized gap.
+
+        No FID-domain top panel either, for the same reason
+        :meth:`_show_processing_preview`'s own docstring gives for
+        skipping it elsewhere: F1 has no window/shift/echo/LP controls
+        of its own to judge against a raw trace.
+
+        Falls back to the plain :meth:`MplCanvas.show_spectrum` full-
+        contour view when there's no slice index to show yet
+        (``spectrum.data_imag`` is ``None``, so phasing -- and
+        therefore :attr:`_phase_2d_slice_index` -- was never set up)."""
+        if self._phase_2d_slice_index is None:
+            self.processing_preview_canvas.show_spectrum(spectrum)
+            return
+        trace = get_trace(spectrum, axis="f2", index=self._phase_2d_slice_index)
+
+        canvas = self.processing_preview_canvas
+        # Same "prefer an in-place update, only rebuild when there's no
+        # existing line to update" choice as _show_2d_phase_slice's own
+        # F2 sibling on the main Spectrum canvas, and for the identical
+        # reason (a live phase drag shouldn't reset the view on every
+        # tick) -- including preserving whatever ppm zoom was already
+        # on screen the first time this replaces a full contour.
+        if not canvas.ax.lines:
+            preserve_xlim = canvas._contour_spectrum is not None
+            xlim = canvas.ax.get_xlim() if preserve_xlim else None
+            canvas.show_spectrum(trace)
+            if xlim is not None:
+                canvas.ax.set_xlim(xlim)
+        else:
+            canvas.update_data(trace)
+        canvas.ax.set_title(f"F2 column {self._phase_2d_slice_index} (phase preview)")
+        canvas.set_pivot_marker(self.pivot_spin.value())
+        canvas.canvas.draw_idle()
 
     def _recompute_multi_row_data(self, spectrum) -> bool:
         """The whole-dataset analogue of :meth:`_compute_processing_preview`
@@ -3016,18 +3096,22 @@ class MainWindow(QMainWindow):
         Falls back to plainly mirroring the Spectrum tab's own live
         view (:meth:`MplCanvas.show_spectrum` against this same
         ``spectrum`` object -- the same source, not a second
-        computation of it) for anything the FID+spectrum dual preview
-        can't sensibly show: not FID-reprocessable at all, or a
-        conventional (non-pseudo) 2D, whose F1 FID isn't captured
-        either -- same rule :func:`_fid_preview_available` already
-        uses for the real FID tab. Explicit user feedback: this tab
-        going entirely blank for a real, F1-processed 2D (or whenever
-        the raw-FID reprocess path itself failed) looked like the
-        figure had "disappeared," when there was a perfectly good
-        current spectrum to show all along -- just not one this
-        method's own from-the-raw-FID preview knows how to rebuild."""
-        if not self._fid_reprocessable(spectrum) or (spectrum.ndim == 2 and not spectrum.is_pseudo_2d):
+        computation of it) only when there's genuinely nothing else to
+        show: not FID-reprocessable at all. A genuine (non-pseudo) 2D
+        does *not* fall into this branch any more -- real, repeated
+        user feedback that this tab kept showing a full contour
+        (expensive to redraw on every tick, and visually inconsistent
+        with the Spectrum tab's own single-slice phase preview) instead
+        of "just one slice, like it already does for pseudo-2D" for
+        *any* genuine 2D, not only while a phase drag happened to be in
+        progress. F2 (direct) routes through :meth:`_compute_processing_preview`
+        below, same as pseudo-2D; F1 (indirect) has no cheap from-raw
+        rebuild (see :meth:`_show_2d_indirect_processing_preview`'s own
+        docstring), so it's handled separately."""
+        if not self._fid_reprocessable(spectrum):
             self.processing_preview_canvas.show_spectrum(spectrum)
+        elif spectrum.ndim == 2 and not spectrum.is_pseudo_2d and self.dim_combo.currentIndex() != 0:
+            self._show_2d_indirect_processing_preview(spectrum)
         else:
             try:
                 computed = self._compute_processing_preview(spectrum)
@@ -3088,13 +3172,21 @@ class MainWindow(QMainWindow):
         returns ``False``) -- possible even here despite the "phase-only"
         framing, since the live recompute this pulls from also picks up
         window/zero-fill/etc. still sitting unapplied on the Processing
-        tab, not just phase."""
+        tab, not just phase.
+
+        A genuine 2D on F1 (indirect) has no dual FID+spectrum panel to
+        update in place at all -- routed to
+        :meth:`_show_2d_indirect_processing_preview` instead, which
+        manages its own in-place-vs-rebuild choice."""
         if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
             return
         index = self._selected_index()
         if index is None:
             return
         spectrum = self.session.spectra[index]
+        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d and self.dim_combo.currentIndex() != 0:
+            self._show_2d_indirect_processing_preview(spectrum)
+            return
         try:
             computed = self._compute_processing_preview(spectrum)
         except Exception:  # noqa: BLE001 -- best-effort live preview, see _show_processing_preview
@@ -4545,9 +4637,13 @@ class MainWindow(QMainWindow):
                 # pseudo2d's own three-way canvas_tabs branching just
                 # above, including deferring the FID/Processing-preview
                 # tabs to their own already-dimension-generic refresh
-                # methods (_show_fid_preview/_compute_processing_preview
-                # already slice a genuine 2D's own row-per-F1-position
-                # fid_raw the same way they always sliced a pseudo-2D's).
+                # methods (_show_fid_preview is a no-op for a genuine
+                # 2D either way, gated off by _fid_preview_available;
+                # _refresh_processing_preview_phase_only routes to
+                # _compute_processing_preview or
+                # _show_2d_indirect_processing_preview depending on
+                # dim_combo -- see their own docstrings for why the
+                # two dimensions can't share one implementation).
                 if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
                     self._show_fid_preview(spectrum, switch_tab=False)
                 elif self.canvas_tabs.currentWidget() is self.processing_preview_canvas:

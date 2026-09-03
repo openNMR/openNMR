@@ -1766,6 +1766,99 @@ def test_main_window_processing_preview_slice_matches_spectrum_tab_across_zero_f
     assert title == "Slice 3"
 
 
+def test_main_window_2d_genuine_processing_preview_shows_a_slice_not_a_contour(qapp, tmp_path, monkeypatch):
+    # Real user report: "I get a different contour in processing vs
+    # the spectrum/import tabs." Just landing on the Processing tab
+    # for a genuine 2D (no phase-dragging involved at all)
+    # used to fall back to a full contour redraw of the whole spectrum
+    # (_show_processing_preview's own old "conventional 2D... falls
+    # back to mirroring the Spectrum tab" branch) instead of a single
+    # slice, unlike pseudo-2D, which already only ever showed one
+    # slice here. Explicit follow-up ask: "the processing is just for
+    # a single slice (first or largest magnitude)... This is what I
+    # have been asking for for all 2D data."
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt into genuine 2D
+
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+
+    canvas = window.processing_preview_canvas
+    assert canvas._contour_spectrum is None  # a slice, not a contour
+    assert len(canvas.ax.lines) >= 1
+
+
+def test_main_window_2d_genuine_processing_preview_supports_f1_dimension(qapp, tmp_path, monkeypatch):
+    # "should be independently possible for the indirect dimension" --
+    # explicit follow-up ask alongside the single-slice fix above: F1
+    # (indirect) previously fell back to the same full-contour view
+    # regardless of dim_combo, since only F2 (direct) had a single-
+    # slice preview implemented at all.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+
+    window.dim_combo.setCurrentIndex(1)  # F1 (indirect)
+
+    canvas = window.processing_preview_canvas
+    assert canvas._contour_spectrum is None
+    assert len(canvas.ax.lines) >= 1
+    assert "F2 column" in canvas.ax.get_title()
+
+
+def test_main_window_2d_indirect_processing_preview_does_not_double_apply_phase(qapp, tmp_path, monkeypatch):
+    # A first version of _show_2d_indirect_processing_preview extracted
+    # an F1 trace straight from spectrum.data -- already kept current
+    # with the live phase delta by _apply_phase_preview's own "2d"
+    # branch, see that method's docstring -- and then applied
+    # phase0_f1/phase1_f1 plus the live spin-box delta *again* on top,
+    # silently double-phasing the preview. Found by cross-checking
+    # against _show_2d_phase_slice (the already-trusted Spectrum-tab
+    # equivalent for the same dimension) on real data; this reproduces
+    # that same cross-check on a small synthetic fixture so it runs in
+    # the regular suite.
+    #
+    # Deliberately not the fixture's own default fid (identical across
+    # every F1 row): that F1 FFTs to a pure single-point real delta,
+    # and MplCanvas's own real-part display (NMRSpectrum.normalized(),
+    # scaled to [-1, 1] by its own max-abs) reduces any single-nonzero-
+    # point array to the same [0, 0, +-1, 0] shape regardless of that
+    # one point's actual phase/magnitude -- rendered-line comparisons
+    # against a fixture like that can't discriminate a phase bug at
+    # all (confirmed directly: this test still passed with the double-
+    # phasing bug reintroduced, using the default fid). A distinct
+    # complex weight per row keeps the F1 trace multi-point and
+    # genuinely phase-sensitive after normalization.
+    n_f1, n_f2 = 4, 8
+    t2 = np.arange(n_f2) / 8000.0
+    base_row = np.exp(-t2 * 300) * np.exp(2j * np.pi * 1000.0 * t2)
+    weights = np.array([1.0, 0.6 + 0.3j, -0.4 + 0.7j, 0.2 - 0.9j])
+    fid = (weights[:, None] * base_row[None, :]).astype(np.complex128)
+
+    window = MainWindow()
+    window._load(
+        _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=n_f1, n_f2=n_f2, f1_nuc="13C", fid=fid), vendor="bruker",
+    )
+    window.process_indirect_button.setChecked(True)
+    window.dim_combo.setCurrentIndex(1)  # F1 (indirect)
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    window.phase0_handle.setValue(40.0)
+    window.phase1_handle.setValue(15.0)
+
+    window._show_2d_phase_slice(spectrum, "f1", reset_view=True, switch_tab=False)
+    reference_y = window.canvas.ax.lines[0].get_ydata().copy()
+
+    canvas = window.processing_preview_canvas
+    assert canvas._contour_spectrum is None
+    preview_y = canvas.ax.lines[0].get_ydata()
+
+    np.testing.assert_allclose(preview_y, reference_y, atol=1e-8)
+
+
 def test_main_window_2d_pivot_matches_selected_dimension(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
