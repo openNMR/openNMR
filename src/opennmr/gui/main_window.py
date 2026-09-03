@@ -354,6 +354,16 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._on_open_clicked)
         file_menu.addAction(open_action)
 
+        open_files_action = QAction("Open &File(s)…", self)
+        open_files_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        open_files_action.setToolTip(
+            "For vendors whose data is a single file rather than a "
+            "folder (e.g. X-Pulse, JEOL) -- pick one or more files "
+            "directly."
+        )
+        open_files_action.triggered.connect(self._on_open_files_clicked)
+        file_menu.addAction(open_files_action)
+
         save_figure_action = QAction("&Save Figure As…", self)
         save_figure_action.setShortcut(QKeySequence.StandardKey.Save)
         save_figure_action.setToolTip("Save the currently visible canvas tab as an image.")
@@ -662,17 +672,40 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        open_button = QPushButton("Open…")
-        open_button.setToolTip(
-            "Pick one or more experiment folders and/or individual "
-            "spectrum files (e.g. X-Pulse, JEOL) in any combination -- "
-            "single-click an entry to select it, whether it's a file or "
-            "a folder (double-click a folder to navigate into it "
-            "instead). A folder holding several experiments prompts you "
-            "to choose which to open."
+        # One visible button (real user request: "there should just be
+        # one button that can open files or folders"), but internally
+        # still two separate *native* dialogs -- a single non-native
+        # QFileDialog that tried to let one dialog session pick either
+        # (an earlier version of this) turned out unreliable in
+        # practice: real user report, its own restrictive default name
+        # filter hid every extensionless Bruker/Varian folder and raw
+        # fid/ser file, "basically only works for jeol", and even with
+        # that fixed, folder selection itself "doesn't allow for just a
+        # folder to be selected any more" -- the community-documented
+        # "single click selects a folder too" behaviour for a
+        # non-native ExistingFiles dialog didn't hold up on real usage.
+        # A QToolButton with MenuButtonPopup keeps one visible button --
+        # a plain click goes straight to the proven, reliable folder
+        # picker (the common case, explicitly the more useful one per
+        # that same feedback); the small dropdown arrow offers "Open
+        # File(s)…" for the individual-file vendors (X-Pulse, JEOL)
+        # via the other proven native dialog.
+        self.open_button = QToolButton()
+        self.open_button.setText("Open…")
+        self.open_button.setToolTip(
+            "Pick a folder -- either one experiment itself, or a parent "
+            "folder holding several. If more than one spectrum is found "
+            "inside, you'll get to choose which to open. Use the "
+            "dropdown arrow to open individual files instead (e.g. "
+            "X-Pulse, JEOL)."
         )
-        open_button.clicked.connect(self._on_open_clicked)
-        layout.addWidget(open_button)
+        self.open_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.open_button.clicked.connect(self._on_open_clicked)
+        open_button_menu = QMenu(self.open_button)
+        open_files_action_button = open_button_menu.addAction("Open File(s)…")
+        open_files_action_button.triggered.connect(self._on_open_files_clicked)
+        self.open_button.setMenu(open_button_menu)
+        layout.addWidget(self.open_button)
 
         self.spectrum_list = QListWidget()
         self.spectrum_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -716,11 +749,11 @@ class MainWindow(QMainWindow):
         info_form.addRow(self.process_indirect_button)
 
         self.pseudo2d_view_combo = QComboBox()
-        self.pseudo2d_view_combo.addItems(["Contour", "Stacked slices"])
+        self.pseudo2d_view_combo.addItems(["Contour", "Stacked slices", "Heatmap"])
         self.pseudo2d_view_combo.setToolTip(
             "How to display a pseudo-2D series: as a contour (F2 vs. "
-            "slice number), or as every slice plotted as an offset "
-            "1D stack."
+            "slice number), every slice plotted as an offset 1D stack, "
+            "or a heatmap (F2 vs. slice number, colour = intensity)."
         )
         self.pseudo2d_view_combo.currentIndexChanged.connect(self._on_pseudo2d_view_changed)
         info_form.addRow("View:", self.pseudo2d_view_combo)
@@ -730,29 +763,39 @@ class MainWindow(QMainWindow):
         return tab
 
     def _on_open_clicked(self) -> None:
-        """One dialog for both experiment folders and individual
-        spectrum files -- real user request: "there should just be one
-        button that can open files or folders" (previously two separate
-        buttons/menu actions/dialogs). Qt's own native file dialogs
-        don't support picking files *or* folders in one session on any
-        platform (a well-known, still-open Qt limitation -- confirmed,
-        not assumed, before building this); the standard cross-platform
-        workaround, used here, is a non-native ``QFileDialog`` instance
-        in ``ExistingFiles`` mode -- Qt's own (not the OS's) file-list
-        view lets a single click select *any* row, file or folder alike
-        (double-click still navigates into a folder), unlike a native
-        panel where only files are selectable in this mode. Routes the
-        result through :meth:`_open_paths`, reporting (not silently
-        skipping) anything unrecognised -- a deliberate dialog pick,
-        unlike a drag-and-drop that can carry along OS clutter (see
-        :meth:`_handle_dropped_paths`)."""
-        dialog = QFileDialog(self, "Open spectra -- pick one or more files and/or folders")
-        dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        dialog.setNameFilter("NMR spectrum files (*.jdx *.dx *.jdf);;All files (*)")
-        if not dialog.exec():
+        """The Open… button's own plain-click action -- the reliable
+        native folder picker, same as this project always used before
+        the (reverted) single-non-native-dialog attempt. See the
+        button's own construction comment in :meth:`_build_spectra_tab`
+        for why: real user reports that a non-native ``ExistingFiles``
+        dialog didn't actually let a folder be *selected* (only
+        navigated into) in practice, and its own restrictive default
+        name filter hid every extensionless Bruker/Varian folder and
+        raw file besides. :meth:`_on_open_files_clicked` (the dropdown)
+        is the individual-file counterpart."""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Open a data folder -- an experiment folder itself, or a "
+                  "parent folder containing several",
+        )
+        if not directory:
             return
-        self._open_paths(dialog.selectedFiles())
+        self._open_directory(directory)
+
+    def _on_open_files_clicked(self) -> None:
+        """The Open… button's dropdown action -- picks one or more
+        individual spectrum files (X-Pulse, JEOL) via the native file
+        dialog. "All files" is the *default* selected filter (not the
+        NMR-specific one) so a vendor's own extensionless raw files
+        stay visible/selectable without the user needing to switch
+        filters by hand -- the same restrictive-filter problem the
+        button's own plain-click path already ran into for folders."""
+        paths, _selected_filter = QFileDialog.getOpenFileNames(
+            self, "Open one or more spectrum files",
+            filter="All files (*);;NMR spectrum files (*.jdx *.dx *.jdf)",
+        )
+        if not paths:
+            return
+        self._open_paths(paths)
 
     def _open_paths(self, paths: list[str], report_unrecognised: bool = True) -> None:
         """Load each of ``paths`` -- a directory routes through the
@@ -1330,6 +1373,20 @@ class MainWindow(QMainWindow):
         n_slices = spectrum.data.shape[0]
         slices = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))
         self.canvas.show_compare(slices["rows"], mode="stack", normalize=True)
+        self.canvas_tabs.setCurrentWidget(self.canvas)
+
+    def _show_pseudo2d_heatmap(self, spectrum) -> None:
+        """Plot every slice of a pseudo-2D series as a heatmap (F2 vs.
+        slice number, colour = intensity) -- real roadmap ask:
+        "pseudo-2D/stacked-1D data should be plottable as either a
+        contour or a heatmap." Same slice extraction
+        :meth:`_show_pseudo2d_stack` already uses; the rendering itself
+        is :func:`opennmr.plotting.plot_1d_heatmap` (already ported
+        from ``nmrtools2``'s own ``NMR1dheatmap``, just never called
+        from GUI code before this)."""
+        n_slices = spectrum.data.shape[0]
+        slices = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))
+        self.canvas.show_1d_heatmap(slices["rows"])
         self.canvas_tabs.setCurrentWidget(self.canvas)
 
     # ============================================================
@@ -2764,19 +2821,25 @@ class MainWindow(QMainWindow):
         fn_mode = spectrum.metadata.raw.get("fn_mode", 1)
         if fn_mode == 6:
             # Mirrors io.bruker.read_2d's own fn_mode==6 raw-row
-            # conjugate (see its comment there for the real-data
-            # verification) -- "fid_raw" here already has whatever
-            # global conjugate read_2d applied to every row before
-            # caching it (its own `_CONJUGATE_QUADRATURE_NOTE` step),
-            # so this only needs the same *extra* even-row conjugate,
-            # not the full sequence again. Without this, a live F2-only
-            # control change on an Echo-Antiecho 2D would silently
-            # revert to the pre-fix mirrored-F1-ghost behaviour the
-            # moment this path recomputes -- exactly the "two pipelines
-            # quietly diverge" bug class this method's own docstring
-            # already warns about for decode_hypercomplex_f1 below.
+            # conjugate-and-reverse (see its comment there for the
+            # real-data verification, including the round-1-shipped,
+            # user-reported "mirrored in x" bug a conjugate-without-
+            # reversal version of this exact line caused -- checking
+            # only the F1 axis after a fix touching a raw time-domain
+            # row isn't enough, since FFT(conj(x)) also reverses that
+            # row's own F2 frequency axis, not just its phase) --
+            # "fid_raw" here already has whatever global conjugate
+            # read_2d applied to every row before caching it (its own
+            # `_CONJUGATE_QUADRATURE_NOTE` step), so this only needs
+            # the same *extra* even-row conjugate+reversal, not the
+            # full sequence again. Without this, a live F2-only control
+            # change on an Echo-Antiecho 2D would silently revert to
+            # the pre-fix mirrored-ghost behaviour the moment this path
+            # recomputes -- exactly the "two pipelines quietly diverge"
+            # bug class this method's own docstring already warns
+            # about for decode_hypercomplex_f1 below.
             raw_fid = raw_fid.copy()
-            raw_fid[0::2] = np.conj(raw_fid[0::2])
+            raw_fid[0::2] = np.conj(raw_fid[0::2])[:, ::-1]
 
         rows = []
         filled_rows = []
@@ -6685,6 +6748,9 @@ class MainWindow(QMainWindow):
         is_pseudo2d_stack = (
             spectrum.ndim == 2 and spectrum.is_pseudo_2d and self.pseudo2d_view_combo.currentIndex() == 1
         )
+        is_pseudo2d_heatmap = (
+            spectrum.ndim == 2 and spectrum.is_pseudo_2d and self.pseudo2d_view_combo.currentIndex() == 2
+        )
         # The FID tab is a live view of whatever's selected, not an
         # opt-in overlay (no more checkbox) -- if it's already the
         # active tab, a reselection keeps it active and refreshes it,
@@ -6718,6 +6784,8 @@ class MainWindow(QMainWindow):
         try:
             if is_pseudo2d_stack:
                 self._show_pseudo2d_stack(spectrum)
+            elif is_pseudo2d_heatmap:
+                self._show_pseudo2d_heatmap(spectrum)
             elif compare_tab_active_and_matches:
                 pass
             else:

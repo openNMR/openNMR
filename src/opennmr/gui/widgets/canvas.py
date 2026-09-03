@@ -1661,6 +1661,23 @@ class MplCanvas(QWidget):
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
+    def show_1d_heatmap(self, spectra: list[NMRSpectrum]) -> None:
+        """Plot several 1D spectra (a pseudo-2D series' own slices) as
+        rows of a heatmap -- real roadmap ask: "pseudo-2D/stacked-1D
+        data should be plottable as either a contour or a heatmap."
+        Thin wrapper around :func:`opennmr.plotting.plot_1d_heatmap`
+        (already ported from ``nmrtools2``'s own ``NMR1dheatmap``, just
+        never called from GUI code before this).
+
+        Not a :attr:`_contour_spectrum` either, same reasoning as
+        :meth:`show_2d_overlay` -- this is several interpolated-onto-
+        one-axis 1D traces, not one spectrum's own 2D array."""
+        self.clear()  # already leaves self.ax as a fresh, single subplot
+        plotting.plot_1d_heatmap(spectra, ax=self.ax, fig=self.figure)
+        self._apply_view_options()
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
     def show_slice_fit(self, x, y_data, y_fit, components=None, peak_labels=None, title: str = "",
                         spectrum: NMRSpectrum | None = None) -> None:
         """Plot one pseudo-2D slice's spectrum alongside its fitted

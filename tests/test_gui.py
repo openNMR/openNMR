@@ -213,22 +213,9 @@ def test_scan_for_spectra_keeps_raw_slices_without_an_ntuples_sibling(tmp_path):
     assert len(matches) == 3
 
 
-def _mock_open_dialog(monkeypatch, paths, accepted=True):
-    """The Open… dialog is now one non-native QFileDialog instance
-    (ExistingFiles mode, see _on_open_clicked's own docstring for why),
-    not the static getExistingDirectory/getOpenFileNames convenience
-    functions -- mocked the same way this file already mocks other
-    QDialog subclasses' own .exec() (see e.g.
-    test_main_window_set_peak_bounds_dialog_stores_parsed_bounds),
-    since a specific dialog instance created inside the method under
-    test can't be intercepted any other way."""
-    monkeypatch.setattr(QFileDialog, "exec", lambda self: accepted)
-    monkeypatch.setattr(QFileDialog, "selectedFiles", lambda self: paths)
-
-
 def test_main_window_open_clicked_loads_single_match_directly(qapp, tmp_path, monkeypatch):
     path = _make_1d_dataset(tmp_path)
-    _mock_open_dialog(monkeypatch, [path])
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: path)
 
     window = MainWindow()
     window._on_open_clicked()
@@ -240,7 +227,7 @@ def test_main_window_open_clicked_loads_single_match_directly(qapp, tmp_path, mo
 def test_main_window_open_clicked_prompts_when_multiple_matches(qapp, tmp_path, monkeypatch):
     _make_1d_dataset(tmp_path, name="1")
     _make_1d_dataset(tmp_path, name="2")
-    _mock_open_dialog(monkeypatch, [str(tmp_path)])
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
 
     window = MainWindow()
     prompted = {}
@@ -258,7 +245,7 @@ def test_main_window_open_clicked_prompts_when_multiple_matches(qapp, tmp_path, 
 
 def test_main_window_open_clicked_no_matches_shows_error(qapp, tmp_path, monkeypatch):
     (tmp_path / "junk.txt").write_text("hello")
-    _mock_open_dialog(monkeypatch, [str(tmp_path)])
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
 
     shown = {}
     monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: shown.setdefault("called", True))
@@ -270,57 +257,40 @@ def test_main_window_open_clicked_no_matches_shows_error(qapp, tmp_path, monkeyp
     assert window.spectrum_list.count() == 0
 
 
-def test_main_window_open_clicked_loads_each_file(qapp, tmp_path, monkeypatch):
+def test_main_window_open_files_clicked_loads_each_file(qapp, tmp_path, monkeypatch):
     path = _make_xpulse_dataset(tmp_path)
-    _mock_open_dialog(monkeypatch, [path])
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([path], ""))
 
     window = MainWindow()
-    window._on_open_clicked()
+    window._on_open_files_clicked()
 
     assert window.spectrum_list.count() == 1
     assert window.session.spectra[0].metadata.vendor == "xpulse"
 
 
-def test_main_window_open_clicked_cancelled_does_nothing(qapp, monkeypatch):
-    _mock_open_dialog(monkeypatch, [], accepted=False)
+def test_main_window_open_files_clicked_cancelled_does_nothing(qapp, monkeypatch):
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([], ""))
 
     window = MainWindow()
-    window._on_open_clicked()
+    window._on_open_files_clicked()
 
     assert window.spectrum_list.count() == 0
 
 
-def test_main_window_open_clicked_reports_unrecognised_files(qapp, tmp_path, monkeypatch):
+def test_main_window_open_files_reports_unrecognised_files(qapp, tmp_path, monkeypatch):
     good = _make_xpulse_dataset(tmp_path)
     junk = tmp_path / "junk.txt"
     junk.write_text("hello")
-    _mock_open_dialog(monkeypatch, [good, str(junk)])
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *a, **k: ([good, str(junk)], ""))
 
     shown = {}
     monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: shown.setdefault("called", True))
 
     window = MainWindow()
-    window._on_open_clicked()
+    window._on_open_files_clicked()
 
     assert window.spectrum_list.count() == 1
     assert shown.get("called") is True
-
-
-def test_main_window_open_clicked_accepts_a_folder_and_a_file_together(qapp, tmp_path, monkeypatch):
-    # The actual real user-facing capability this whole redesign is
-    # for: "there should just be one button that can open files or
-    # folders" -- one dialog session, a folder and an individual file
-    # picked together, both load.
-    folder_path = _make_1d_dataset(tmp_path, name="folder_expt")
-    file_path = _make_xpulse_dataset(tmp_path, name="file_expt.jdx")
-    _mock_open_dialog(monkeypatch, [folder_path, file_path])
-
-    window = MainWindow()
-    window._on_open_clicked()
-
-    assert window.spectrum_list.count() == 2
-    vendors = {s.metadata.vendor for s in window.session.spectra}
-    assert vendors == {"bruker", "xpulse"}
 
 
 def test_main_window_accepts_drops(qapp):
@@ -504,6 +474,34 @@ def test_main_window_menu_open_action_triggers_open_dialog(qapp, monkeypatch):
     file_menu = window.menuBar().actions()[0].menu()
     open_action = next(a for a in file_menu.actions() if "Open" in a.text())
     open_action.trigger()
+    assert called == [True]
+
+
+def test_main_window_menu_open_files_action_triggers_open_files_dialog(qapp, monkeypatch):
+    window = MainWindow()
+    called = []
+    monkeypatch.setattr(window, "_on_open_files_clicked", lambda: called.append(True))
+    file_menu = window.menuBar().actions()[0].menu()
+    open_files_action = next(a for a in file_menu.actions() if "File(s)" in a.text())
+    open_files_action.trigger()
+    assert called == [True]
+
+
+def test_main_window_open_button_dropdown_offers_open_files(qapp, monkeypatch):
+    # Real user regression report: the single-dialog Open… redesign
+    # stopped reliably allowing a plain folder to be selected, and its
+    # own restrictive default name filter hid extensionless files
+    # ("basically only works for jeol"). Reverted to two separate,
+    # proven native dialogs behind one visible QToolButton -- a plain
+    # click for the (more commonly useful) folder picker, the
+    # dropdown's own menu for individual files.
+    window = MainWindow()
+    called = []
+    monkeypatch.setattr(window, "_on_open_files_clicked", lambda: called.append(True))
+    menu = window.open_button.menu()
+    assert menu is not None
+    action = next(a for a in menu.actions() if "File(s)" in a.text())
+    action.trigger()
     assert called == [True]
 
 
@@ -5363,6 +5361,21 @@ def test_main_window_pseudo2d_stacked_view_shows_all_slices(qapp, tmp_path):
 
     assert _compare_line_count(window.canvas) == 5
     assert window.canvas_tabs.currentWidget() is window.canvas
+
+
+def test_main_window_pseudo2d_heatmap_view_renders(qapp, tmp_path):
+    # Real roadmap ask: "pseudo-2D/stacked-1D data should be plottable
+    # as either a contour or a heatmap." plot_1d_heatmap already
+    # existed (ported from nmrtools2's own NMR1dheatmap), just never
+    # called from GUI code.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=5, n_f2=8), vendor="bruker")
+
+    window.pseudo2d_view_combo.setCurrentIndex(2)  # Heatmap
+
+    assert window.canvas_tabs.currentWidget() is window.canvas
+    assert window.canvas._contour_spectrum is None  # not the single-spectrum contour view
+    assert len(window.canvas.ax.collections) >= 1  # pcolormesh
 
 
 def test_main_window_pseudo2d_view_resets_to_contour_on_reselection(qapp, tmp_path):
