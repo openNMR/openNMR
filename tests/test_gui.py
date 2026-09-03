@@ -1,4 +1,6 @@
+import csv
 import dataclasses
+import io
 import os
 
 import numpy as np
@@ -4992,6 +4994,87 @@ def test_main_window_fit_spectrum_works_for_1d(qapp):
     assert window.view_slice_fit_spin.isEnabled() is True
     assert window.view_slice_fit_spin.maximum() == 1
     assert window.canvas_tabs.currentWidget() is window.spectral_fit_canvas
+
+
+def test_main_window_build_fit_report_csv_spectral_fit_only(qapp):
+    # Fitting-wizard roadmap item: "a more readable, exportable fit
+    # report." Spectral-fit-only case (no Fit Curve run yet) -- the
+    # CSV should have exactly the spectral-fit section, correctly
+    # parseable, with no "Curve fit" section at all.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, amplitude=1.0))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    window._on_fit_spectrum_clicked()
+
+    spectrum = window.session.spectra[window._selected_index()]
+    report = window._build_fit_report_csv(spectrum.metadata.raw["slice_fit_results"])
+
+    rows = list(csv.reader(io.StringIO(report)))
+    assert rows[0] == ["Spectral fit -- one row per slice per peak"]
+    assert rows[1] == ["Slice", "Peak", "Type", "Shift", "Shift err", "FWHM", "FWHM err",
+                        "Amplitude", "Amplitude err", "Eta", "Eta err"]
+    assert rows[2][0:3] == ["1", "1", "pseudo_voigt"]
+    assert float(rows[2][3]) == pytest.approx(5.0, abs=1e-2)  # shift
+    assert float(rows[2][7]) == pytest.approx(1.0, abs=1e-1)  # amplitude
+    assert "Curve fit" not in report
+
+
+def test_main_window_build_fit_report_csv_includes_curve_fit_section(qapp):
+    true_t2 = 0.05
+    delays = np.geomspace(0.001, 0.3, 12)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=true_t2)
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
+
+    _fit_spectrum_then_curve(window)
+
+    report = window._build_fit_report_csv(
+        spectrum.metadata.raw["slice_fit_results"], spectrum.metadata.raw.get("relaxation_fit_results"),
+    )
+    rows = list(csv.reader(io.StringIO(report)))
+    assert sum(1 for r in rows[2:] if len(r) > 2 and r[2] == "pseudo_voigt") == len(delays)  # one row per slice
+    curve_header_idx = rows.index(["Curve fit -- one row per peak"])
+    header = rows[curve_header_idx + 1]
+    assert header[0:2] == ["Peak", "Model"]
+    assert "T2" in header
+    data_row = rows[curve_header_idx + 2]
+    t2_value = float(data_row[header.index("T2")])
+    assert t2_value == pytest.approx(true_t2, rel=0.1)
+
+
+def test_main_window_export_fit_report_writes_csv_file(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    window._on_fit_spectrum_clicked()
+
+    out_path = tmp_path / "report.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out_path), "CSV files (*.csv)"))
+    window._on_export_fit_report_clicked()
+
+    assert out_path.exists()
+    content = out_path.read_text()
+    assert "Spectral fit" in content
+    assert "pseudo_voigt" in content
+
+
+def test_main_window_export_fit_report_prompts_when_nothing_fitted_yet(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+
+    dialog_called = []
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: dialog_called.append(True))
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+
+    window._on_export_fit_report_clicked()
+
+    assert shown.get("called") is True
+    assert dialog_called == []  # never even got to the save dialog
 
 
 def test_main_window_fit_spectrum_warns_when_result_lands_near_region_edge(qapp, monkeypatch):

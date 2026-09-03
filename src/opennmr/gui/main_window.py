@@ -10,10 +10,12 @@ updates the canvas live.
 
 from __future__ import annotations
 
+import csv
 import dataclasses
 import json
 import os
 import re
+from io import StringIO
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
@@ -5252,6 +5254,16 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.spectral_fit_params_label)
 
+        export_report_button = QPushButton("Export Fit Report…")
+        export_report_button.setToolTip(
+            "Save every slice's fitted peak parameters (shift/FWHM/"
+            "amplitude/eta, with uncertainties) as a CSV file -- plus "
+            "the curve-fit (Fit Curve) result per peak, if one has "
+            "been run for this spectrum."
+        )
+        export_report_button.clicked.connect(self._on_export_fit_report_clicked)
+        layout.addWidget(export_report_button)
+
         layout.addStretch(1)
         return tab
 
@@ -6761,6 +6773,83 @@ class MainWindow(QMainWindow):
             ]
             lines.append(f"{label}: " + ", ".join(parts))
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_fit_report_csv(slice_results: list[dict], relaxation_results: list[dict] | None = None) -> str:
+        """Fitting-wizard roadmap item: "a more readable, exportable
+        fit report." A plain in-app label only ever shows one slice's
+        own spectral-fit parameters at a time (:attr:`spectral_fit_params_label`)
+        -- nothing aggregates across a whole pseudo-2D series, and
+        nothing writes to a file at all. This builds one CSV (a
+        genuinely readable table -- opens directly in Excel/Origin/
+        pandas, not just a wall of text) covering *every* slice's
+        fitted peak parameters, plus a second section for the curve
+        fit (Fit Curve's own per-peak relaxation/diffusion result)
+        when one has been run. A pure string-builder (no Qt, no file
+        I/O) precisely so it can be tested directly against its own
+        output, not just "did a file get written."""
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+
+        writer.writerow(["Spectral fit -- one row per slice per peak"])
+        writer.writerow(["Slice", "Peak", "Type", "Shift", "Shift err", "FWHM", "FWHM err",
+                          "Amplitude", "Amplitude err", "Eta", "Eta err"])
+        for slice_idx, result in enumerate(slice_results, start=1):
+            per_peak = processing_fitting.extract_params_and_errors(
+                result["popt"], result["pcov"], result["peak_defs"], result["is_free"],
+            )
+            for peak_idx, peak in enumerate(per_peak, start=1):
+                values = dict(zip(peak["names"], peak["params"]))
+                errors = dict(zip(peak["names"], peak["errors"]))
+                writer.writerow([
+                    slice_idx, peak_idx, peak["type"],
+                    f"{values['shift']:.6g}", f"{errors['shift']:.4g}",
+                    f"{values['fwhm']:.6g}", f"{errors['fwhm']:.4g}",
+                    f"{values['amplitude']:.6g}", f"{errors['amplitude']:.4g}",
+                    f"{values['eta']:.6g}" if "eta" in values else "",
+                    f"{errors['eta']:.4g}" if "eta" in errors else "",
+                ])
+
+        if relaxation_results:
+            writer.writerow([])
+            writer.writerow(["Curve fit -- one row per peak"])
+            param_names = relaxation_results[0]["param_names"]
+            header = ["Peak", "Model"]
+            for name in param_names:
+                header.extend([name, f"{name} err"])
+            header.append("RMSE")
+            writer.writerow(header)
+            for result in relaxation_results:
+                row = [result["peak_label"], result["model"]]
+                for name in param_names:
+                    row.extend([f"{result['params'][name]:.6g}", f"{result['errors'][name]:.4g}"])
+                row.append(f"{result['fit_quality']['rmse']:.4g}")
+                writer.writerow(row)
+
+        return buffer.getvalue()
+
+    def _on_export_fit_report_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        slice_results = spectrum.metadata.raw.get("slice_fit_results")
+        if not slice_results:
+            QMessageBox.information(self, "Nothing to export", "Run Fit Spectrum first.")
+            return
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export fit report", "fit_report.csv", "CSV files (*.csv)",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        if not path:
+            return
+        relaxation_results = spectrum.metadata.raw.get("relaxation_fit_results")
+        report = self._build_fit_report_csv(slice_results, relaxation_results)
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(report)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
 
     def _update_peak_table_from_fit(self, result: dict) -> None:
         """After a spectral fit, replace each peak row's starting
