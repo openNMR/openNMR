@@ -2,6 +2,16 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## 2D roadmap, Extract Slice now defaults to the cursor's own position (2026-09-03)
+
+Continuing item 2 of the "LWG roadmap" list -- "Row/slice extraction should default to the cursor's current position rather than a fixed index." The right-click "Extract Slice…" dialog's own `index_spin` previously always started at 1 (`QSpinBox`'s own range-minimum default, never explicitly set) regardless of where the contour was actually right-clicked.
+
+- `MplCanvas._on_press`'s own right-click position capture (`_last_right_click_xy`) was gated on `_fit_mode` (only used for the fit-tab's "Exclude Nearest Point" action) -- widened to capture on *every* right-click, still returning early only for the fit-mode case so nothing else about that path changed.
+- New `MplCanvas._nearest_slice_index(spectrum, axis, cursor_value)`: the 1-based row/column index nearest a cursor's data-coordinate value -- ppm-based nearest-match for a genuine frequency axis (same approach `processing.slicing.get_trace`'s own `shift` parameter already uses), or round-and-clip for a pseudo-2D's index-kind F1 axis (which has no ppm at all, but whose plotted Y value already *is* approximately the 1-based slice number).
+- `_prompt_extract_slice`'s `index_spin` now defaults from this (using the cursor's Y position when the "Row (fix F1)" axis is selected, X when "Column (fix F2)" is), re-deriving live if the axis choice is switched inside the dialog -- falls back to the old fixed default of 1 if the menu was somehow opened without a tracked right-click position at all.
+- Verified against the real Cyclosporine dataset (a right-click at a specific ppm position correctly resolves to the nearest row/column index, matching the axis's own recorded ppm values).
+- 7 new tests (`test_gui_canvas.py`: `_nearest_slice_index` on a frequency axis, out-of-range clipping, the pseudo-2D index-axis branch; the dialog's own pre-filled default following the cursor for both axis choices, and falling back to 1 without a tracked cursor position).
+
 ## 2D roadmap, indirect-dimension carrier frequency -- verified correct against nmrtools2 (2026-09-03)
 
 Continuing item 2 of the "LWG roadmap" list -- explicit standing ask: "Verify the indirect dimension's own carrier frequency is calculated correctly... cross-check against nmrtools2's own code." Read nmrtools2's `two_d.py::NMR2dimport` directly (not a summary) to get its exact F1-axis formula, then compared line-by-line against `io.bruker._ppm_hz_axis` (the shared F1/F2 axis function `read_2d`/`read_2d_processed` both already use).
