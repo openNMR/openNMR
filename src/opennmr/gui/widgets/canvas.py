@@ -643,7 +643,13 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def _on_press(self, event) -> None:
-        if self._fit_mode and event.button == 3 and event.xdata is not None:
+        # getattr, not a plain attribute access -- a real matplotlib
+        # MouseEvent always has .xdata (possibly None), but this is no
+        # longer gated on _fit_mode first (see below), so a fake event
+        # missing the attribute entirely (some existing tests' own
+        # minimal doubles, built before this needed to handle the
+        # non-fit-mode case too) must not raise AttributeError here.
+        if event.button == 3 and getattr(event, "xdata", None) is not None:
             # Captured here (a real matplotlib event, with xdata/ydata
             # already correctly computed) rather than re-derived from
             # the QPoint _on_context_menu's own customContextMenuRequested
@@ -652,8 +658,15 @@ class MplCanvas(QWidget):
             # correctly (accounting for the y-flip and any HiDPI scale
             # factor between the two coordinate systems) isn't needed
             # when the data position is already sitting right here.
+            # Not gated on _fit_mode any more -- also used by
+            # _prompt_extract_slice to default a right-clicked 2D
+            # contour's Extract Slice… dialog to the cursor's own
+            # position instead of a fixed index (real roadmap ask:
+            # "row/slice extraction should default to the cursor's
+            # current position rather than a fixed index").
             self._last_right_click_xy = (float(event.xdata), float(event.ydata))
-            return
+            if self._fit_mode:
+                return
         if event.inaxes is None or event.button != 1 or self.toolbar.mode != "":
             return
         if self._pick_mode:
@@ -994,6 +1007,25 @@ class MplCanvas(QWidget):
             level_mode = "power" if mode_combo.currentIndex() == 0 else "linear"
             self.set_contour_levels(clevels_spin.value(), level_mode, power_spin.value(), start_spin.value())
 
+    @staticmethod
+    def _nearest_slice_index(spectrum: NMRSpectrum, axis: str, cursor_value: float) -> int:
+        """The 1-based row (``axis="f1"``) or column (``"f2"``) index
+        nearest a cursor's data-coordinate value -- ``cursor_value`` is
+        the Y position (F1) when fixing a row, or the X position (F2)
+        when fixing a column, matching :func:`opennmr.processing.
+        slicing.get_trace`'s own ``axis`` convention. A genuine
+        frequency axis is matched by ppm (same nearest-value approach
+        ``get_trace``'s own ``shift`` parameter already uses); a
+        pseudo-2D's index-kind F1 axis has no ppm at all, but its own
+        plotted Y value already *is* approximately the 1-based slice
+        number, so just rounds and clips that instead."""
+        spectrum_axis = spectrum.axes[0] if axis == "f1" else spectrum.axes[1]
+        n = len(spectrum_axis)
+        if spectrum_axis.kind == "frequency":
+            values = spectrum_axis.values("ppm")
+            return int(np.argmin(np.abs(values - cursor_value))) + 1
+        return int(np.clip(round(cursor_value), 1, n))
+
     def _prompt_extract_slice(self) -> None:
         """Right-click "Extract Slice…" -- pulls a single row (fixed
         F1) or column (fixed F2) out of the current 2D/pseudo-2D
@@ -1004,11 +1036,19 @@ class MplCanvas(QWidget):
         look at just one row/column on its own, for either a
         conventional 2D spectrum or a pseudo-2D series without
         retained imaginary data (the phase-preview slice spinner needs
-        that)."""
+        that).
+
+        The index defaults to wherever the user actually right-clicked
+        (:attr:`_last_right_click_xy`, real roadmap ask: "row/slice
+        extraction should default to the cursor's current position
+        rather than a fixed index") -- falls back to 1 (the previous,
+        fixed default) if the menu was somehow opened without a
+        tracked right-click position (e.g. via the keyboard)."""
         spectrum = self._contour_spectrum
         if spectrum is None:
             return
         n_f1, n_f2 = spectrum.data.shape
+        cursor_xy = self._last_right_click_xy
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Extract Slice")
@@ -1021,10 +1061,20 @@ class MplCanvas(QWidget):
 
         index_spin = QSpinBox()
         index_spin.setRange(1, n_f1)
+
+        def _default_index(axis: str) -> int:
+            if cursor_xy is None:
+                return 1
+            cursor_x, cursor_y = cursor_xy
+            return self._nearest_slice_index(spectrum, axis, cursor_y if axis == "f1" else cursor_x)
+
+        index_spin.setValue(_default_index("f1"))
         form.addRow("Index:", index_spin)
 
         def _sync_range(i: int) -> None:
-            index_spin.setRange(1, n_f1 if axis_combo.itemData(i) == "f1" else n_f2)
+            axis = axis_combo.itemData(i)
+            index_spin.setRange(1, n_f1 if axis == "f1" else n_f2)
+            index_spin.setValue(_default_index(axis))
         axis_combo.currentIndexChanged.connect(_sync_range)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)

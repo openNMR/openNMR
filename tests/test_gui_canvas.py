@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QSpinBox
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.widgets.canvas import MplCanvas
@@ -464,6 +464,99 @@ def test_extract_slice_shows_1d_column(qapp):
     canvas.extract_slice("f2", 10)
     assert canvas._current_1d_spectrum.ndim == 1
     assert len(canvas._current_1d_spectrum.data) == 8  # traced along F1
+
+
+def test_nearest_slice_index_matches_cursor_ppm_on_a_frequency_axis(qapp):
+    spec = _make_2d(n_f1=8, n_f2=64)  # F1 ppm: linspace(90, 100, 8); F2 ppm: linspace(0, 10, 64)
+    row = MplCanvas._nearest_slice_index(spec, "f1", 95.0)
+    assert spec.axes[0].ppm[row - 1] == pytest.approx(95.0, abs=0.75)
+    col = MplCanvas._nearest_slice_index(spec, "f2", 5.0)
+    assert spec.axes[1].ppm[col - 1] == pytest.approx(5.0, abs=0.2)
+
+
+def test_nearest_slice_index_clips_to_valid_range(qapp):
+    spec = _make_2d(n_f1=8, n_f2=64)
+    assert MplCanvas._nearest_slice_index(spec, "f1", 1000.0) == 8  # far past the axis's own max ppm
+    assert MplCanvas._nearest_slice_index(spec, "f1", -1000.0) == 1
+
+
+def test_nearest_slice_index_handles_pseudo_2d_index_axis(qapp):
+    # A pseudo-2D's own F1 axis has no ppm at all (kind="index") --
+    # the plotted Y value already *is* approximately the 1-based slice
+    # number, so this should just round/clip it rather than trying
+    # (and failing) to look up a ppm value.
+    n_f1, n_f2 = 6, 32
+    x_ppm = np.linspace(0, 10, n_f2)
+    data = np.exp(-((x_ppm - 5) ** 2)) * np.ones((n_f1, 1))
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True)
+    f1_axis = NMRAxis(kind="index", index=np.arange(1, n_f1 + 1))
+    f2_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_ppm * 400.0)
+    spec = NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
+
+    assert MplCanvas._nearest_slice_index(spec, "f1", 3.4) == 3
+    assert MplCanvas._nearest_slice_index(spec, "f1", 100.0) == n_f1  # clipped
+
+
+def test_extract_slice_dialog_defaults_index_to_the_right_clicked_position(qapp):
+    # Real roadmap ask: "row/slice extraction should default to the
+    # cursor's current position rather than a fixed index."
+    canvas = MplCanvas()
+    spec = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spec)
+    canvas.canvas.draw()
+
+    # Simulate a real right-click at F2=5ppm (x), F1=95ppm (y) -- same
+    # capture path _on_press already uses (button 3, xdata/ydata set).
+    from types import SimpleNamespace
+    canvas._on_press(SimpleNamespace(button=3, xdata=5.0, ydata=95.0, inaxes=canvas.ax))
+
+    seen = {}
+
+    def fake_exec(dialog):
+        seen["axis_combo"] = dialog.findChild(QComboBox)
+        seen["index_spin"] = dialog.findChild(QSpinBox)
+        return QDialog.DialogCode.Rejected  # don't actually extract -- just inspect the pre-filled state
+
+    orig_exec = QDialog.exec
+    QDialog.exec = fake_exec
+    try:
+        canvas._prompt_extract_slice()
+    finally:
+        QDialog.exec = orig_exec
+
+    # Default axis is "Row (fix F1)" -- its index should default from
+    # the cursor's own Y position (95 ppm), not a fixed 1.
+    expected_row = MplCanvas._nearest_slice_index(spec, "f1", 95.0)
+    assert seen["index_spin"].value() == expected_row
+    assert expected_row != 1  # confirms this is a real, non-trivial default, not a coincidence
+
+    # Switching to "Column (fix F2)" should re-derive from the cursor's
+    # X position (5 ppm) instead.
+    seen["axis_combo"].setCurrentIndex(1)
+    expected_col = MplCanvas._nearest_slice_index(spec, "f2", 5.0)
+    assert seen["index_spin"].value() == expected_col
+
+
+def test_extract_slice_dialog_falls_back_to_index_1_without_a_tracked_cursor(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8, n_f2=64))
+    canvas.canvas.draw()
+    assert canvas._last_right_click_xy is None  # never right-clicked in this test
+
+    seen = {}
+
+    def fake_exec(dialog):
+        seen["index_spin"] = dialog.findChild(QSpinBox)
+        return QDialog.DialogCode.Rejected
+
+    orig_exec = QDialog.exec
+    QDialog.exec = fake_exec
+    try:
+        canvas._prompt_extract_slice()
+    finally:
+        QDialog.exec = orig_exec
+
+    assert seen["index_spin"].value() == 1
 
 
 def test_scroll_over_f2_projection_zooms_its_intensity_only(qapp):
