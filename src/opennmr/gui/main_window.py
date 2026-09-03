@@ -354,16 +354,6 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._on_open_clicked)
         file_menu.addAction(open_action)
 
-        open_files_action = QAction("Open &File(s)…", self)
-        open_files_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
-        open_files_action.setToolTip(
-            "For vendors whose data is a single file rather than a "
-            "folder (e.g. X-Pulse, JEOL) -- pick one or more files "
-            "directly."
-        )
-        open_files_action.triggered.connect(self._on_open_files_clicked)
-        file_menu.addAction(open_files_action)
-
         save_figure_action = QAction("&Save Figure As…", self)
         save_figure_action.setShortcut(QKeySequence.StandardKey.Save)
         save_figure_action.setToolTip("Save the currently visible canvas tab as an image.")
@@ -674,21 +664,15 @@ class MainWindow(QMainWindow):
 
         open_button = QPushButton("Open…")
         open_button.setToolTip(
-            "Pick a folder -- either one experiment itself, or a parent "
-            "folder holding several. If more than one spectrum is found "
-            "inside, you'll get to choose which to open."
+            "Pick one or more experiment folders and/or individual "
+            "spectrum files (e.g. X-Pulse, JEOL) in any combination -- "
+            "single-click an entry to select it, whether it's a file or "
+            "a folder (double-click a folder to navigate into it "
+            "instead). A folder holding several experiments prompts you "
+            "to choose which to open."
         )
         open_button.clicked.connect(self._on_open_clicked)
         layout.addWidget(open_button)
-
-        open_files_button = QPushButton("Open File(s)…")
-        open_files_button.setToolTip(
-            "For vendors whose data is a single file rather than a "
-            "folder (e.g. X-Pulse, JEOL) -- pick one or more files "
-            "directly."
-        )
-        open_files_button.clicked.connect(self._on_open_files_clicked)
-        layout.addWidget(open_files_button)
 
         self.spectrum_list = QListWidget()
         self.spectrum_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -746,33 +730,44 @@ class MainWindow(QMainWindow):
         return tab
 
     def _on_open_clicked(self) -> None:
-        directory = QFileDialog.getExistingDirectory(
-            self, "Open a data folder -- an experiment folder itself, or a "
-                  "parent folder containing several",
-        )
-        if not directory:
+        """One dialog for both experiment folders and individual
+        spectrum files -- real user request: "there should just be one
+        button that can open files or folders" (previously two separate
+        buttons/menu actions/dialogs). Qt's own native file dialogs
+        don't support picking files *or* folders in one session on any
+        platform (a well-known, still-open Qt limitation -- confirmed,
+        not assumed, before building this); the standard cross-platform
+        workaround, used here, is a non-native ``QFileDialog`` instance
+        in ``ExistingFiles`` mode -- Qt's own (not the OS's) file-list
+        view lets a single click select *any* row, file or folder alike
+        (double-click still navigates into a folder), unlike a native
+        panel where only files are selectable in this mode. Routes the
+        result through :meth:`_open_paths`, reporting (not silently
+        skipping) anything unrecognised -- a deliberate dialog pick,
+        unlike a drag-and-drop that can carry along OS clutter (see
+        :meth:`_handle_dropped_paths`)."""
+        dialog = QFileDialog(self, "Open spectra -- pick one or more files and/or folders")
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setNameFilter("NMR spectrum files (*.jdx *.dx *.jdf);;All files (*)")
+        if not dialog.exec():
             return
-        self._open_directory(directory)
+        self._open_paths(dialog.selectedFiles())
 
-    def _on_open_files_clicked(self) -> None:
-        paths, _selected_filter = QFileDialog.getOpenFileNames(
-            self, "Open one or more spectrum files",
-            filter="NMR spectrum files (*.jdx *.dx *.jdf);;All files (*)",
-        )
-        if not paths:
-            return
-        self._open_files(paths)
-
-    def _open_files(self, paths: list[str]) -> None:
-        """Load each of ``paths`` directly (no folder scan) -- shared
-        by the Open File(s)… dialog and drag-and-drop of individual
-        files. Unlike a folder drop (which silently skips anything
-        unrecognised, since OS clutter like ``.DS_Store`` can easily
-        ride along), files picked one-by-one through a dialog are an
-        explicit choice -- an unrecognised one is reported, not
-        silently dropped."""
+    def _open_paths(self, paths: list[str], report_unrecognised: bool = True) -> None:
+        """Load each of ``paths`` -- a directory routes through the
+        folder scan (:meth:`_open_directory`), a file loads directly
+        via vendor auto-detection. ``report_unrecognised`` (default
+        ``True``, a deliberate dialog pick) shows a message box listing
+        anything not recognised; ``False`` (used by
+        :meth:`_handle_dropped_paths`) silently skips it instead, since
+        a drop can easily carry along OS clutter (e.g. ``.DS_Store``)
+        that was never meant to be opened."""
         unrecognised: list[str] = []
         for path in paths:
+            if os.path.isdir(path):
+                self._open_directory(path)
+                continue
             try:
                 vendor = io.detect_vendor(path)
             except ValueError:
@@ -780,7 +775,7 @@ class MainWindow(QMainWindow):
                 continue
             self._load(path, vendor)
 
-        if unrecognised:
+        if unrecognised and report_unrecognised:
             QMessageBox.critical(
                 self, "Some files not recognised",
                 "Could not auto-detect a vendor format for:\n\n"
@@ -820,22 +815,15 @@ class MainWindow(QMainWindow):
         """Drag a data folder (an experiment folder itself, or a
         parent folder holding several) straight into the window,
         instead of needing the Open… dialog -- reuses the exact same
-        scan/prompt/load path. A dropped single file that's itself a
-        recognised spectrum (e.g. one X-Pulse/Varian file, not inside
-        a folder) loads directly; anything else unrecognised is
-        silently skipped rather than raising, since a drop can easily
+        scan/prompt/load path (:meth:`_open_paths`, same routing the
+        Open… dialog itself now uses). A dropped single file that's
+        itself a recognised spectrum (e.g. one X-Pulse/Varian file, not
+        inside a folder) loads directly; anything else unrecognised is
+        silently skipped rather than reported, since a drop can easily
         include the OS's own clutter (a `.DS_Store`, etc.) alongside
         the folder actually meant. Split out from ``dropEvent`` itself
         so this is testable without constructing a real ``QDropEvent``."""
-        for path in paths:
-            if os.path.isdir(path):
-                self._open_directory(path)
-            elif os.path.isfile(path):
-                try:
-                    vendor = io.detect_vendor(path)
-                except ValueError:
-                    continue
-                self._load(path, vendor)
+        self._open_paths([p for p in paths if os.path.isdir(p) or os.path.isfile(p)], report_unrecognised=False)
 
     #: X-Pulse individual-scan-repeat files, e.g.
     #: ``"...H_1_10_raw.jdx"`` -- one per scan within an averaged
