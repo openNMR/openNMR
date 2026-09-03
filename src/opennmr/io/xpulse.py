@@ -1114,17 +1114,20 @@ def _detect(path: str) -> bool:
 def _is_ntuples_2d_file(path: str) -> bool:
     """Whether ``path`` is a genuine hypercomplex 2D NTUPLES file
     (:func:`read_2d`), not a plain 1D FID (:func:`read_1d`) -- both
-    are single-file X-Pulse JCAMP-DX, distinguished by the
-    ``##DATACLASS= NTUPLES``/``##NUMDIM= 2`` declaration every real
-    NTUPLES export carries (confirmed present on the one real test
-    dataset available) that a plain 1D file never has."""
+    are single-file X-Pulse JCAMP-DX using the same ``##DATACLASS=
+    NTUPLES`` data-table format for their FID either way, so that
+    field alone doesn't distinguish them (real bug: it's present even
+    on a plain 1D file, e.g. ``test_data/xpulse_MRI/14/*_avg.jdx``,
+    which was misdetected as 2D and sent into :func:`read_2d`, which
+    then failed on this file's non-existent F1 spectral width -- "must
+    be > 0 to compute dt"). ``##NUMDIM= 2`` (vs. ``= 1`` for a plain
+    FID) is the field that actually says so."""
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             head = f.read(4096)
     except OSError:
         return False
-    head_upper = head.upper()
-    return "DATACLASS" in head_upper and "NTUPLES" in head_upper
+    return re.search(r"##NUMDIM\s*=\s*2\b", head, re.IGNORECASE) is not None
 
 
 def _read_auto(path: str, **kwargs) -> NMRSpectrum:

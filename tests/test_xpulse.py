@@ -481,6 +481,29 @@ def test_is_ntuples_2d_file_true_for_ntuples_false_for_plain_1d(tmp_path):
     assert xpulse._is_ntuples_2d_file(plain_path) is False
 
 
+def test_is_ntuples_2d_file_false_for_a_1d_file_that_still_declares_ntuples(tmp_path):
+    # Real bug, found on a real file: a plain 1D X-Pulse FID export
+    # (test_data/xpulse_MRI/14/*_avg.jdx) still declares
+    # "##DATACLASS= NTUPLES" -- every X-Pulse export uses the NTUPLES
+    # data-table format for its FID regardless of dimensionality, only
+    # differing in "##NUMDIM=". The old detector checked for
+    # "DATACLASS"/"NTUPLES" as bare substrings anywhere in the header,
+    # so it misdetected this file as 2D and routed it into read_2d,
+    # which then failed on this file's non-existent F1 spectral width.
+    # _write_fixture's own "false" case above never exercised this --
+    # its FIXTURE constant predates the NTUPLES format entirely, so it
+    # never contained those substrings at all, discriminating nothing.
+    path = tmp_path / "one_d_but_ntuples.jdx"
+    path.write_text(
+        "##TITLE= real-shaped 1D NTUPLES fixture\n"
+        "##DATACLASS= NTUPLES\n"
+        "##NUMDIM= 1\n"
+        "##NTUPLES= NMRFID\n"
+        "##VARNAME= TIME, FID/RE\n"
+    )
+    assert xpulse._is_ntuples_2d_file(str(path)) is False
+
+
 def test_read_auto_dispatches_ntuples_file_to_read_2d(tmp_path):
     path, _ = _make_ntuples_fixture(tmp_path)
     spectrum = xpulse._read_auto(path, autophase=False)
