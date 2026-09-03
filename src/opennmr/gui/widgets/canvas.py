@@ -222,6 +222,15 @@ class MplCanvas(QWidget):
         # every canvas shares one user preference, set uniformly by
         # MainWindow's Output tab, until changed again.
         self._contour_fraction = 0.25
+        # Diagonal-line overlay (plotting.plot_2d_contour's own
+        # show_nQ_line/nQ params -- already existed in the backend,
+        # just never wired to the GUI until this) -- y = n*x per value
+        # in _nq_values, the standard way to mark the main diagonal
+        # (n=1, an EXSY/NOESY/COSY-style homonuclear correlation) or a
+        # multiple-quantum correlation (n=2/3/...). Off by default,
+        # same as show_nQ_line's own default.
+        self._show_nq_line = False
+        self._nq_values: list[int] = [1]
         self._pick_mode = False
         self._region_select_mode = False
         self._region_select_start: float | None = None  # x-data value of the drag's own start
@@ -600,6 +609,24 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None and not self._full_resolution:
             self.show_spectrum(self._contour_spectrum)
 
+    def _nq_line_kwargs(self) -> dict:
+        """``show_nQ_line``/``nQ`` overrides for
+        :func:`opennmr.plotting.plot_2d_contour`, both call sites --
+        see :meth:`set_nq_line`."""
+        return {"show_nQ_line": self._show_nq_line, "nQ": self._nq_values}
+
+    def set_nq_line(self, enabled: bool, values: list[int] | None = None) -> None:
+        """Turn the diagonal-line overlay on/off, and/or change which
+        ``n`` value(s) it draws (``y = n*x``, e.g. ``[1]`` for the main
+        diagonal, ``[2]`` for a double-quantum correlation) -- redraws
+        right away if a 2D contour is currently shown, same as
+        :meth:`set_contour_fraction`."""
+        self._show_nq_line = enabled
+        if values is not None:
+            self._nq_values = values
+        if self._contour_spectrum is not None:
+            self.show_spectrum(self._contour_spectrum)
+
     def _redraw_contour(self, preserve_view: bool) -> None:
         xlim, ylim = (self.ax.get_xlim(), self.ax.get_ylim()) if preserve_view else (None, None)
         self.figure.clear()
@@ -607,7 +634,7 @@ class MplCanvas(QWidget):
         _, _, self._proj_axes = plotting.plot_2d_contour(
             self._contour_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
             clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
-            **self._contour_fraction_kwargs(),
+            **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
         )
         if preserve_view:
             self.ax.set_xlim(xlim)
@@ -1227,7 +1254,7 @@ class MplCanvas(QWidget):
             _, _, self._proj_axes = plotting.plot_2d_contour(
                 spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
                 clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
-                **self._contour_fraction_kwargs(),
+                **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
             )
         else:
             raise ValueError(f"Cannot display a spectrum with ndim={spectrum.ndim}")

@@ -914,6 +914,36 @@ def test_set_contour_fraction_rebuilds_a_currently_shown_2d_contour(qapp):
     assert half_data.shape[1] > quarter_data.shape[1]
 
 
+def test_nq_line_kwargs_default_off(qapp):
+    # plotting.plot_2d_contour's own show_nQ_line/nQ params already
+    # existed in the backend -- this is the canvas-level plumbing that
+    # actually passes them through, off by default matching
+    # show_nQ_line's own default.
+    canvas = MplCanvas()
+    assert canvas._nq_line_kwargs() == {"show_nQ_line": False, "nQ": [1]}
+
+
+def test_set_nq_line_changes_the_kwargs(qapp):
+    canvas = MplCanvas()
+    canvas.set_nq_line(True, [2])
+    assert canvas._nq_line_kwargs() == {"show_nQ_line": True, "nQ": [2]}
+
+
+def test_set_nq_line_rebuilds_a_currently_shown_2d_contour(qapp):
+    canvas = MplCanvas()
+    spectrum = _make_2d(n_f1=20, n_f2=200)
+    canvas.show_spectrum(spectrum)
+    assert len(canvas.ax.lines) == 0
+
+    canvas.set_nq_line(True)
+
+    assert len(canvas.ax.lines) == 1
+
+    canvas.set_nq_line(False)
+
+    assert len(canvas.ax.lines) == 0
+
+
 def test_set_contour_fraction_is_not_overridden_by_full_resolution(qapp):
     # Recorded either way (see set_contour_fraction's own docstring) so
     # it's already in effect the moment full resolution is turned back

@@ -5952,6 +5952,45 @@ def test_main_window_contour_fraction_change_applies_to_every_canvas(qapp):
         assert canvas._contour_fraction == pytest.approx(0.6)
 
 
+def test_main_window_nq_line_checkbox_defaults_off(qapp):
+    window = MainWindow()
+    assert window.output_nq_line_checkbox.isChecked() is False
+    assert window.output_nq_value_spin.isEnabled() is False
+    assert window.canvas._show_nq_line is False
+    assert window.canvas._nq_values == [1]
+
+
+def test_main_window_nq_line_toggle_applies_to_every_canvas(qapp):
+    window = MainWindow()
+    window.output_nq_line_checkbox.setChecked(True)
+    assert window.output_nq_value_spin.isEnabled() is True
+    for canvas in window._all_canvases():
+        assert canvas._show_nq_line is True
+        assert canvas._nq_values == [1]
+
+    window.output_nq_value_spin.setValue(3)
+    for canvas in window._all_canvases():
+        assert canvas._nq_values == [3]
+
+    window.output_nq_line_checkbox.setChecked(False)
+    assert window.output_nq_value_spin.isEnabled() is False
+    for canvas in window._all_canvases():
+        assert canvas._show_nq_line is False
+
+
+def test_main_window_nq_line_draws_and_removes_a_line_on_a_real_2d_contour(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    assert len(window.canvas.ax.lines) == 0
+
+    window.output_nq_line_checkbox.setChecked(True)
+    assert len(window.canvas.ax.lines) == 1
+
+    window.output_nq_line_checkbox.setChecked(False)
+    assert len(window.canvas.ax.lines) == 0
+
+
 def test_main_window_output_fontsize_and_ticks_apply(qapp):
     window = MainWindow()
     window.output_fontsize_spin.setValue(22)

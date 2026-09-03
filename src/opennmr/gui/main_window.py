@@ -1546,6 +1546,24 @@ class MainWindow(QMainWindow):
         self.output_contour_fraction_spin.valueChanged.connect(self._on_contour_fraction_changed)
         style_form.addRow("2D downsample:", self.output_contour_fraction_spin)
 
+        self.output_nq_line_checkbox = QCheckBox("Show diagonal (nQ) line")
+        self.output_nq_line_checkbox.setToolTip(
+            "Overlay a dashed y = n*x line on a 2D contour -- n = 1 for "
+            "the main diagonal (e.g. an EXSY/NOESY/COSY-style homonuclear "
+            "correlation), or a higher n for a multiple-quantum "
+            "correlation. plotting.plot_2d_contour's own show_nQ_line/nQ "
+            "parameters -- this is the GUI wiring for it."
+        )
+        self.output_nq_line_checkbox.toggled.connect(self._on_nq_line_changed)
+        style_form.addRow(self.output_nq_line_checkbox)
+
+        self.output_nq_value_spin = QSpinBox()
+        self.output_nq_value_spin.setRange(1, 8)
+        self.output_nq_value_spin.setValue(1)
+        self.output_nq_value_spin.setEnabled(False)
+        self.output_nq_value_spin.valueChanged.connect(self._on_nq_line_changed)
+        style_form.addRow("Diagonal n:", self.output_nq_value_spin)
+
         self.output_grid_checkbox = QCheckBox("Show grid")
         self.output_grid_checkbox.toggled.connect(self._on_output_style_changed)
         style_form.addRow(self.output_grid_checkbox)
@@ -1678,6 +1696,13 @@ class MainWindow(QMainWindow):
         fraction = value / 100.0
         for canvas in self._all_canvases():
             canvas.set_contour_fraction(fraction)
+
+    def _on_nq_line_changed(self, *_args) -> None:
+        enabled = self.output_nq_line_checkbox.isChecked()
+        self.output_nq_value_spin.setEnabled(enabled)
+        n_values = [self.output_nq_value_spin.value()]
+        for canvas in self._all_canvases():
+            canvas.set_nq_line(enabled, n_values)
 
     def _load_figure_styles(self) -> dict:
         try:
