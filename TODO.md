@@ -2,6 +2,10 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## "SI for both dimensions" -- checked, does not reproduce (2026-09-03)
+
+Resumed the one item explicitly paused during the phase/window round above ("hold off on adding the new 2D stuff for now"). Changed F2's own zero-fill and F1's (`zero_fill_f1_spin`) *together*, not just one at a time the way every pre-existing zero-fill test covered -- against the real Cyclosporine echo-antiecho dataset (grow both, ~2x each) and a synthetic fixture cross-checked directly against `io.bruker.read_2d` (grow both; separately, shrink both) -- shapes, values, and ppm axes all matched exactly in every case, no crash, and a phase interaction (including the pivot slider) right after a combined resize worked cleanly too. Also checked Reset afterward: correctly restores the original size and keeps the genuine-2D interpretation (doesn't revert to pseudo-2D). New regression test `test_main_window_zero_fill_f1_and_f2_together_matches_read_2d_directly`. Most likely explanation: this concern and the pivot-slider crash (fixed just above) were the same underlying issue -- both are triggered by a live resize of `spectrum.data`/`axes`, and the shape-gated re-anchor fix covers a resize from *either or both* dimensions changing, not just one.
+
 ## Pivot-slider crash fixed, genuine-2D phasing now slice-based by default (2026-09-03)
 
 User asked to act on the two previously-noted-only errors, plus a new explicit requirement: "the phasing for a 2D should still default to a 1D slice like it does before you process the indirect dimension rather than trying to phase the entire thing all at once."

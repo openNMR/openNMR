@@ -2965,6 +2965,50 @@ def test_main_window_f1_truncate_row_pair_aware_matches_read_2d_directly(qapp, t
     np.testing.assert_allclose(live_result.axes[0].ppm, direct.axes[0].ppm)
 
 
+def test_main_window_zero_fill_f1_and_f2_together_matches_read_2d_directly(qapp, tmp_path, monkeypatch):
+    # Real user concern: "the SI for both dimensions doesn't screw up
+    # anything else" -- changing F2's own zero-fill (the pre-existing
+    # zero_fill_combo/zero_fill_custom_spin control) and F1's
+    # (zero_fill_f1_spin) *together*, not just one at a time the way
+    # every existing zero-fill test already covers. Cross-checks the
+    # GUI's live in-memory recompute against a fresh read_2d call given
+    # the identical zero_fill/zero_fill_f1 kwargs, on real code (not a
+    # shape-only assertion) -- same discriminating pattern as
+    # test_main_window_f1_truncate_row_pair_aware_matches_read_2d_directly.
+    from opennmr.io import bruker as bruker_io
+
+    window = MainWindow()
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=16, name="zfbothbruker", f1_nuc="13C")
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt into genuine 2D
+    index = window._selected_index()
+    original_f2 = window.session.spectra[index].data.shape[1]
+
+    window._set_zero_fill_value(original_f2 * 2)
+    window.zero_fill_f1_spin.setValue(8)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)
+
+    live_result = window.session.spectra[index]
+    assert live_result.data.shape == (8, original_f2 * 2)
+
+    direct = bruker_io.read_2d(path, zero_fill=original_f2 * 2, zero_fill_f1=8, phase_mode="recorded")
+    np.testing.assert_allclose(live_result.data, direct.data, atol=1e-8)
+    np.testing.assert_allclose(live_result.data_imag, direct.data_imag, atol=1e-8)
+    np.testing.assert_allclose(live_result.axes[0].ppm, direct.axes[0].ppm)
+    np.testing.assert_allclose(live_result.axes[1].ppm, direct.axes[1].ppm)
+
+    # And a subsequent phase interaction on this doubly-resized
+    # spectrum must not crash (the pivot-slider crash this session
+    # already fixed was triggered by exactly this kind of live-resize
+    # -- confirm it holds for a *combined* F1+F2 resize too, not just
+    # the single-dimension case that fix's own regression test covers).
+    window.phase0_handle.setValue(20.0)
+    window._on_pivot_slider_changed(300)
+    spectrum = window.session.spectra[index]
+    assert spectrum.data.shape[1] == len(spectrum.axes[-1].ppm)
+
+
 def test_main_window_f1_truncate_and_zero_fill_change_row_count_live_xpulse(qapp, tmp_path):
     window = MainWindow()
     path = _make_xpulse_ntuples_2d_dataset(tmp_path, n1=8, n2=16, name="f1livexpulse.jdx")
