@@ -5077,6 +5077,72 @@ def test_main_window_export_fit_report_prompts_when_nothing_fitted_yet(qapp, tmp
     assert dialog_called == []  # never even got to the save dialog
 
 
+def _make_drifting_peak_series(n_slices=6, drift_per_slice=0.15, x0=5.0, fwhm=0.05, A=1.0, n_pts=800):
+    """test_fitting.py's own helper of the same name, duplicated here
+    (a plain NMRSpectrum builder, no GUI/Qt involved) rather than
+    imported across test files -- a pseudo-2D series where the peak's
+    true position drifts slice to slice, exercising seed_mode."""
+    ppm = np.linspace(3.0, 7.0, n_pts)
+    true_shifts = [x0 + drift_per_slice * i for i in range(n_slices)]
+    data = np.array([gaussian(ppm, s, fwhm, A) for s in true_shifts])
+    f1_axis = NMRAxis(kind="index", index=np.arange(1, n_slices + 1))
+    f2_axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True)
+    return NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata), true_shifts
+
+
+def test_main_window_seed_mode_combo_defaults_to_independent(qapp):
+    window = MainWindow()
+    assert window.seed_mode_combo.currentData() == "independent"
+
+
+def test_main_window_fit_spectrum_seed_mode_propagate_tracks_drift(qapp):
+    # Fitting-wizard roadmap item: "fit one slice first, then... use
+    # them as each next slice's own starting guess... rather than
+    # every slice fit independently from scratch, today's behaviour."
+    # End-to-end through the real GUI call path (_on_fit_spectrum_clicked
+    # -> _fit_peaks -> NMR2D_fit_slices), not just the backend function
+    # directly (already covered in test_fitting.py) -- confirms the
+    # combo's own selection actually reaches the fit.
+    #
+    # position_tolerance_spin widened: unlike test_fitting.py's own
+    # bare-peak_defs backend test (no bounds at all), the GUI always
+    # attaches a shift bound from this control (_read_peak_defs), which
+    # _reseed_peak_position recentres around each new seed but does not
+    # widen -- left at its default (0.5xFWHM = 0.025 ppm half-width),
+    # this series' own 0.15 ppm/slice drift is simply too large for a
+    # handful of slices to "catch up" one narrow recentred window at a
+    # time (confirmed directly: capped at ~5.125 ppm instead of the
+    # true 5.75 with the default tolerance) -- a real, separate control
+    # doing its own job correctly, not a seed_mode bug, and a genuinely
+    # large drift like this needs that control widened either way, in
+    # the GUI as much as in this test.
+    spectrum, true_shifts = _make_drifting_peak_series()
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=true_shifts[0], fwhm=0.05, eta=0.0)
+    window.position_tolerance_spin.setValue(20.0)
+    window.seed_mode_combo.setCurrentIndex(window.seed_mode_combo.findData("propagate"))
+
+    window._on_fit_spectrum_clicked()
+
+    last_result = spectrum.metadata.raw["slice_fit_results"][-1]
+    assert last_result["popt"][0] == pytest.approx(true_shifts[-1], abs=1e-2)
+
+
+def test_main_window_seed_mode_round_trips_through_reselection(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window.seed_mode_combo.setCurrentIndex(window.seed_mode_combo.findData("apply_first"))
+    window._save_current_analysis_state()
+
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")  # switch away
+    assert window.seed_mode_combo.currentData() == "independent"  # spectrum b has no saved state
+
+    window._select_single_row(0)  # switch back -- triggers _restore_analysis_state
+    assert window.seed_mode_combo.currentData() == "apply_first"
+
+
 def test_main_window_fit_spectrum_warns_when_result_lands_near_region_edge(qapp, monkeypatch):
     # Fitting-wizard roadmap item: "a sensible warning when a fit
     # result lands too close to its own region edge." Region (4.9,

@@ -320,3 +320,75 @@ def test_nmr2d_fit_slices_recovers_amplitudes_via_get_slices():
         assert r["slice_type"] == "row"
         assert r["slice"].metadata.raw["slice"]["index"] == expected_index
         assert r["integrals"][0] > 0
+
+
+def _make_drifting_peak_series(n_slices=6, drift_per_slice=0.15, x0=5.0, fwhm=0.05, A=1.0, n_pts=800):
+    """A pseudo-2D series where the peak's own true position drifts
+    slice to slice -- e.g. a temperature-dependent shift -- used to
+    exercise seed_mode, which today's default ("independent", every
+    slice fit from the same user-entered guess) has no way to track."""
+    ppm = np.linspace(3.0, 7.0, n_pts)
+    true_shifts = [x0 + drift_per_slice * i for i in range(n_slices)]
+    data = np.array([gaussian(ppm, s, fwhm, A) for s in true_shifts])
+    f1_axis = NMRAxis(kind="index", index=np.arange(1, n_slices + 1))
+    f2_axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True)
+    spectrum = NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
+    return spectrum, true_shifts
+
+
+def test_nmr2d_fit_slices_seed_mode_independent_can_lose_track_of_drift():
+    # The problem seed_mode exists to solve: fitting-wizard roadmap
+    # item "fit one slice first, then... use them as each next slice's
+    # own starting guess... rather than every slice fit independently
+    # from scratch, today's behaviour." Confirms that behaviour is
+    # real -- a peak that drifts several FWHM away from the table's
+    # own single starting guess isn't reliably recovered by later
+    # slices under the default mode.
+    spectrum, true_shifts = _make_drifting_peak_series()
+    slices = slicing.get_slices(spectrum, rows=list(range(1, len(true_shifts) + 1)))
+    peak_defs = [{"type": "gaussian", "shift": true_shifts[0], "fwhm": 0.05}]
+
+    fitted = fitting.NMR2D_fit_slices(slices, peak_defs, mode="rows",
+                                       show_report=False, show_warnings=False, seed_mode="independent")
+
+    fitted_shifts = [r["popt"][0] for r in fitted["rows"]]
+    assert fitted_shifts[0] == pytest.approx(true_shifts[0], abs=1e-2)  # first slice always recovers fine
+    assert fitted_shifts[-1] != pytest.approx(true_shifts[-1], abs=1e-2)  # last slice does not
+
+
+def test_nmr2d_fit_slices_seed_mode_propagate_tracks_drift():
+    spectrum, true_shifts = _make_drifting_peak_series()
+    slices = slicing.get_slices(spectrum, rows=list(range(1, len(true_shifts) + 1)))
+    peak_defs = [{"type": "gaussian", "shift": true_shifts[0], "fwhm": 0.05}]
+
+    fitted = fitting.NMR2D_fit_slices(slices, peak_defs, mode="rows",
+                                       show_report=False, show_warnings=False, seed_mode="propagate")
+
+    fitted_shifts = [r["popt"][0] for r in fitted["rows"]]
+    np.testing.assert_allclose(fitted_shifts, true_shifts, atol=1e-2)
+
+
+def test_nmr2d_fit_slices_seed_mode_apply_first_fixes_shift_and_fwhm():
+    spectrum, true_shifts = _make_drifting_peak_series()
+    slices = slicing.get_slices(spectrum, rows=list(range(1, len(true_shifts) + 1)))
+    peak_defs = [{"type": "gaussian", "shift": true_shifts[0], "fwhm": 0.05}]
+
+    fitted = fitting.NMR2D_fit_slices(slices, peak_defs, mode="rows",
+                                       show_report=False, show_warnings=False, seed_mode="apply_first")
+
+    rows = fitted["rows"]
+    first_shift, first_fwhm = rows[0]["popt"][0], rows[0]["popt"][1]
+    for r in rows[1:]:
+        assert r["popt"][0] == pytest.approx(first_shift, abs=1e-9)  # locked, not tracking the true drift
+        assert r["popt"][1] == pytest.approx(first_fwhm, abs=1e-9)
+        assert not r["is_free"][0] and not r["is_free"][1]  # shift/FWHM genuinely marked not-free
+        assert r["is_free"][2]  # amplitude still free
+
+
+def test_nmr2d_fit_slices_invalid_seed_mode_raises():
+    spec = _make_2d_for_fitting()
+    slices = slicing.get_slices(spec, rows=[1])
+    with pytest.raises(ValueError):
+        fitting.NMR2D_fit_slices(slices, [{"type": "gaussian", "shift": 5.0, "fwhm": 0.04}],
+                                  mode="rows", seed_mode="not-a-real-mode")

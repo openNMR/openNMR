@@ -5177,6 +5177,31 @@ class MainWindow(QMainWindow):
         tolerance_row.addWidget(self.position_tolerance_spin)
         advanced_layout.addLayout(tolerance_row)
 
+        seed_mode_row = QHBoxLayout()
+        seed_mode_row.addWidget(QLabel("Seed each slice from:"))
+        self.seed_mode_combo = QComboBox()
+        self.seed_mode_combo.addItem("Table above (every slice independent)", "independent")
+        self.seed_mode_combo.addItem("Previous slice's own result", "propagate")
+        self.seed_mode_combo.addItem("First slice's result (shift/FWHM fixed)", "apply_first")
+        self.seed_mode_combo.setToolTip(
+            "How each slice after the first gets its own starting shift/"
+            "FWHM/eta across a pseudo-2D series (never amplitude, which "
+            "is expected to vary -- that's the point of a relaxation/"
+            "diffusion series). 'Table above' (default): every slice "
+            "starts from the same guess entered above, fit independently "
+            "-- can fail to track a peak that drifts noticeably across "
+            "the series. 'Previous slice's own result': each slice "
+            "seeds the next with its own converged position/width -- "
+            "follows a slow drift, or gives a weak later slice a much "
+            "closer starting point. 'First slice's result': shift/FWHM "
+            "(and eta) are fixed at the first slice's own converged "
+            "values for every slice after it -- only amplitude is still "
+            "fit; fastest, and most robust for a peak whose shape "
+            "genuinely shouldn't change across the series."
+        )
+        seed_mode_row.addWidget(self.seed_mode_combo)
+        advanced_layout.addLayout(seed_mode_row)
+
         noise_row = QHBoxLayout()
         noise_row.addWidget(QLabel("Noise region (ppm):"))
         self.sn_noise_region_edit = QLineEdit()
@@ -6368,7 +6393,13 @@ class MainWindow(QMainWindow):
         noise (against a user-marked noise region) falls below the
         threshold across a series, its amplitude is fixed to zero
         rather than the fit chasing noise once a real peak has decayed
-        away."""
+        away. Also seeds each slice after the first per
+        :attr:`seed_mode_combo` (see its own tooltip) rather than
+        always fitting every slice independently from the same
+        starting guess -- real user requirement: "fit one slice
+        first, then either apply those same parameters to every
+        other slice or use them as each next slice's own starting
+        guess"."""
         peak_defs = self._read_peak_defs()
         if not peak_defs:
             raise ValueError("Add at least one peak to fit.")
@@ -6377,7 +6408,8 @@ class MainWindow(QMainWindow):
         sn_kwargs = self._read_sn_gating_kwargs()
         fitted = processing_fitting.NMR2D_fit_slices(
             {"rows": prepared}, peak_defs, mode="rows", fit_regions=fit_regions,
-            show_report=False, show_warnings=False, **sn_kwargs,
+            show_report=False, show_warnings=False, seed_mode=self.seed_mode_combo.currentData(),
+            **sn_kwargs,
         )
         return fitted["rows"]
 
@@ -6957,6 +6989,7 @@ class MainWindow(QMainWindow):
             "start": self.delay_start_spin.value(),
             "step": self.delay_step_spin.value(), "vclist_factor": self.vclist_factor_spin.value(),
             "position_tolerance": self.position_tolerance_spin.value(),
+            "seed_mode": self.seed_mode_combo.currentIndex(),
             "sn_noise_region": self.sn_noise_region_edit.text(),
             "sn_threshold": self.sn_threshold_spin.value(),
             "results_text": self.analysis_results_label.text(),
@@ -6989,6 +7022,7 @@ class MainWindow(QMainWindow):
             self.delay_step_spin.setValue(0.1)
             self.vclist_factor_spin.setValue(1.0)
             self.position_tolerance_spin.setValue(0.5)
+            self.seed_mode_combo.setCurrentIndex(0)
             self.sn_noise_region_edit.clear()
             self.sn_threshold_spin.setValue(3.0)
         else:
@@ -7023,6 +7057,7 @@ class MainWindow(QMainWindow):
             self.delay_step_spin.setValue(state["step"])
             self.vclist_factor_spin.setValue(state["vclist_factor"])
             self.position_tolerance_spin.setValue(state.get("position_tolerance", 0.5))
+            self.seed_mode_combo.setCurrentIndex(state.get("seed_mode", 0))
             self.sn_noise_region_edit.setText(state.get("sn_noise_region", ""))
             self.sn_threshold_spin.setValue(state.get("sn_threshold", 3.0))
             self.analysis_results_label.setText(state["results_text"])

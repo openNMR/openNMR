@@ -1204,12 +1204,37 @@ def select_2d_traces(dataset: NMRSpectrum, axis: str = "f1", indices=None, shift
 # 2D slice fitting
 # ============================================================
 
+def _reseed_peak_position(peak: dict, seed: dict) -> None:
+    """Update ``peak`` in place to start from ``seed``'s own converged
+    shift/FWHM(/eta) -- :func:`NMR2D_fit_slices`'s own ``seed_mode``
+    helper. Also *recentres* any existing ``bounds["shift"]`` window
+    onto the new shift, keeping its width unchanged, rather than
+    leaving it where it was. That window is normally set once by a
+    caller (e.g. the GUI's own position-tolerance control) relative to
+    the *original* table guess -- left untouched, it would silently
+    cap how far ``seed_mode="propagate"``/``"apply_first"`` can
+    actually follow a drifting peak once the drift exceeds that
+    original window, defeating the entire point of seeding a new
+    starting guess in the first place (found by real end-to-end
+    testing through the GUI's own call path, not just this function in
+    isolation -- a bare backend call with no bounds at all never
+    exercised this interaction)."""
+    bounds = peak.get("bounds")
+    if bounds and "shift" in bounds:
+        lo, hi = bounds["shift"]
+        half_width = (hi - lo) / 2
+        peak["bounds"] = {**bounds, "shift": (seed["shift"] - half_width, seed["shift"] + half_width)}
+    peak["shift"], peak["fwhm"] = seed["shift"], seed["fwhm"]
+    if "eta" in seed:
+        peak["eta"] = seed["eta"]
+
+
 def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str = "rows", fit_regions=None,
                       baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
                       x_unit='ppm', noise_region=None, normalize=False,
                       show_components=True, positive_intensity=True,
                       allow_negative_intensity=False, sn_threshold=3,
-                      show_report=False, show_warnings=True) -> dict:
+                      show_report=False, show_warnings=True, seed_mode: str = "independent") -> dict:
     """
     Fit one or more extracted 2D NMR slices (rows and/or columns).
 
@@ -1247,6 +1272,36 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
     show_report, show_warnings : bool, optional
         Print a per-slice fit report / bound-hit warnings as each
         slice is fitted.
+    seed_mode : {"independent", "propagate", "apply_first"}, optional
+        How each slice after the first gets its own starting
+        shift/FWHM/eta -- never amplitude, which is expected to vary
+        across a relaxation/diffusion series (that's the point of one);
+        S/N-based amplitude gating above still applies exactly the same
+        regardless of this setting.
+
+        ``"independent"`` (default): every slice starts from the same
+        user-supplied ``peak_defs``, unchanged -- this function's own
+        original, only behaviour before this parameter existed.
+
+        ``"propagate"``: each slice's own *converged* shift/FWHM/eta
+        becomes the *next* slice's starting guess (never fixed, just a
+        better initial guess than the original one) -- useful when a
+        peak might slowly drift position/width across a series (e.g.
+        a temperature-dependent shift), or a later, weaker slice needs
+        a closer starting point than the first slice's own guess to
+        converge reliably at all.
+
+        ``"apply_first"``: the first slice fits normally (from
+        ``peak_defs``, shift/FWHM/eta free); every slice after that
+        has shift/FWHM/eta *fixed* at the first slice's own converged
+        values (added into that slice's own ``fixed`` dict, without
+        overwriting whatever the caller's own ``peak_defs`` already
+        marked fixed there) -- only amplitude (and the baseline) is
+        actually re-optimised per slice. Useful when the peak's shape
+        genuinely shouldn't change across the series and only
+        intensity should, and is both the fastest option and often the
+        most robust one for a slice too weak/noisy to reliably
+        converge its own shift/width from scratch.
 
     Returns
     -------
@@ -1262,6 +1317,8 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
 
     if mode not in ["rows", "columns", "both"]:
         raise ValueError("mode must be 'rows', 'columns', or 'both'")
+    if seed_mode not in ("independent", "propagate", "apply_first"):
+        raise ValueError("seed_mode must be 'independent', 'propagate', or 'apply_first'")
 
     selected = []
     if mode in ["rows", "both"]:
@@ -1274,12 +1331,30 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
 
     fitted = {"rows": [], "columns": []}
 
+    # Only ever read/written when seed_mode != "independent" -- see
+    # that parameter's own docstring above for what each holds and why.
+    previous_converged = None
+    first_converged = None
+
     for slice_type, trace in selected:
 
         x = trace.axis_values(0, unit=x_unit.lower())
         y = trace.normalized() if normalize else trace.data
 
         local_peak_defs = [p.copy() for p in peak_defs]
+
+        if seed_mode == "propagate" and previous_converged is not None:
+            for peak, seed in zip(local_peak_defs, previous_converged):
+                _reseed_peak_position(peak, seed)
+        elif seed_mode == "apply_first" and first_converged is not None:
+            for peak, seed in zip(local_peak_defs, first_converged):
+                _reseed_peak_position(peak, seed)
+                fixed = dict(peak.get("fixed", {}))
+                fixed["shift"] = True
+                fixed["fwhm"] = True
+                if "eta" in seed:
+                    fixed["eta"] = True
+                peak["fixed"] = fixed
 
         # ----- S/N-based amplitude gating -----
 
@@ -1363,6 +1438,15 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
             "warnings": warnings,
             "peak_defs": local_peak_defs,
         }
+
+        if seed_mode != "independent":
+            converged = [
+                {name: value for name, value in zip(peak["names"], peak["params"]) if name in ("shift", "fwhm", "eta")}
+                for peak in extract_params_and_errors(popt, pcov, local_peak_defs, is_free)
+            ]
+            previous_converged = converged
+            if first_converged is None:
+                first_converged = converged
 
         if show_report or show_warnings:
             NMR2D_print_fit_report(
