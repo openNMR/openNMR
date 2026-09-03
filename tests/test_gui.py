@@ -1658,20 +1658,23 @@ def test_main_window_current_phase_display_survives_reselection_unlike_the_hidde
     assert window.phase0_current_display.text() == "45.00°"  # but the real value is still shown
 
 
-def test_main_window_2d_phase_defaults_to_the_max_magnitude_row(qapp, tmp_path):
+def test_main_window_2d_phase_defaults_to_slice_1(qapp, tmp_path):
     # Real user requirement: "the phasing for a 2D should still default
     # to a 1D slice like it does before you process the indirect
     # dimension rather than trying to phase the entire thing all at
-    # once." _make_2d_dataset's own data (np.arange reshaped) is
-    # monotonically increasing row-major, so the last row (1-based
-    # index n_f1) is unambiguously the largest-magnitude one -- picked
-    # once by _capture_phase_reference, not re-derived every tick.
+    # once." Originally picked the largest-total-magnitude row/column
+    # (needing the *processed* F1 axis to even evaluate); replaced per
+    # explicit follow-up feedback ("the processing should just always
+    # use slice 1 of the 'xf2' (unprocessed indirect)") with a fixed
+    # index 1 -- always a valid position in both the raw and the
+    # processed array, sidestepping the raw-vs-processed row-count
+    # mismatch class of bug entirely.
     n_f1, n_f2 = 4, 8
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=n_f1, n_f2=n_f2), vendor="bruker")
     window.process_indirect_button.setChecked(True)
     assert window._phase_mode == "2d"
-    assert window._phase_2d_slice_index == n_f1
+    assert window._phase_2d_slice_index == 1
 
 
 def test_main_window_2d_phase_shows_a_slice_not_a_full_contour(qapp, tmp_path):
@@ -1709,15 +1712,29 @@ def test_main_window_2d_phase_still_applies_uniformly_to_every_row(qapp, tmp_pat
 
 
 def test_main_window_2d_phase_slice_follows_dimension_switch(qapp, tmp_path):
+    # _phase_2d_slice_index is now a fixed 1 regardless of dimension
+    # (see test_main_window_2d_phase_defaults_to_slice_1), so the index
+    # itself can no longer discriminate whether a dimension switch
+    # actually re-anchors the phase-preview display -- checked via the
+    # canvas title (_show_2d_phase_slice's own "F1 row"/"F2 column"
+    # label) instead, which does still change with dim. A phase0 tick
+    # is needed first to actually force the slice view onto the canvas
+    # at all -- right after loading, self.canvas correctly still shows
+    # the default full contour (see the "stuck on slice" fix above),
+    # not yet a titled slice.
     n_f1, n_f2 = 4, 8
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=n_f1, n_f2=n_f2), vendor="bruker")
     window.process_indirect_button.setChecked(True)
-    assert window._phase_2d_slice_index == n_f1  # F2 (direct) default: row n_f1
+    assert window._phase_2d_slice_index == 1  # F2 (direct) default: row 1
+
+    window.phase0_handle.setValue(1.0)
+    assert "F1 row 1" in window.canvas.ax.get_title()
 
     window.dim_combo.setCurrentIndex(1)  # switch to F1 (indirect)
 
-    assert window._phase_2d_slice_index == n_f2  # F1 default: column n_f2
+    assert window._phase_2d_slice_index == 1  # F1 default: column 1
+    assert "F2 column 1" in window.canvas.ax.get_title()
 
 
 def test_main_window_processing_preview_slice_matches_spectrum_tab_across_zero_fill_mismatch(

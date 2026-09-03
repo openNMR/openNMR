@@ -764,18 +764,30 @@ class MainWindow(QMainWindow):
 
     def _on_open_clicked(self) -> None:
         """The Open… button's own plain-click action -- the reliable
-        native folder picker, same as this project always used before
-        the (reverted) single-non-native-dialog attempt. See the
-        button's own construction comment in :meth:`_build_spectra_tab`
-        for why: real user reports that a non-native ``ExistingFiles``
-        dialog didn't actually let a folder be *selected* (only
-        navigated into) in practice, and its own restrictive default
-        name filter hid every extensionless Bruker/Varian folder and
-        raw file besides. :meth:`_on_open_files_clicked` (the dropdown)
-        is the individual-file counterpart."""
+        *folder-only* picker, same file-mode semantics this project
+        always used before the (reverted) single-non-native-dialog
+        attempt, but styled with Qt's own cross-platform dialog widget
+        instead of the OS-native panel. See the button's own
+        construction comment in :meth:`_build_spectra_tab` for why the
+        original non-native attempt was reverted: real user reports
+        that a non-native dialog in ``ExistingFiles`` mode (offering
+        *files and folders together*) didn't actually let a folder be
+        *selected* (only navigated into) in practice. This is
+        deliberately narrower -- ``Directory`` mode only, matching
+        :func:`QFileDialog.getExistingDirectory`'s own single-purpose
+        semantics exactly, just with ``DontUseNativeDialog`` added --
+        so the specific file-vs-folder click ambiguity that broke the
+        earlier attempt doesn't apply here at all. Still, this couldn't
+        be interactively verified in this headless dev environment (see
+        this project's own standing lesson about that); worth a quick
+        real check that folder selection still feels right. The
+        restrictive-default-filter half of the original revert doesn't
+        apply here either -- a plain directory picker has no name
+        filter to restrict in the first place."""
         directory = QFileDialog.getExistingDirectory(
             self, "Open a data folder -- an experiment folder itself, or a "
                   "parent folder containing several",
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not directory:
             return
@@ -783,15 +795,18 @@ class MainWindow(QMainWindow):
 
     def _on_open_files_clicked(self) -> None:
         """The Open… button's dropdown action -- picks one or more
-        individual spectrum files (X-Pulse, JEOL) via the native file
-        dialog. "All files" is the *default* selected filter (not the
-        NMR-specific one) so a vendor's own extensionless raw files
-        stay visible/selectable without the user needing to switch
-        filters by hand -- the same restrictive-filter problem the
-        button's own plain-click path already ran into for folders."""
+        individual spectrum files (X-Pulse, JEOL), styled the same way
+        as :meth:`_on_open_clicked` above (Qt's own dialog widget, not
+        the OS-native one) and for the same reason. "All files" is
+        still the *default* selected filter (not the NMR-specific one)
+        so a vendor's own extensionless raw files stay visible/
+        selectable without the user needing to switch filters by hand
+        -- the restrictive-filter half of the original revert, kept
+        fixed regardless of dialog style."""
         paths, _selected_filter = QFileDialog.getOpenFileNames(
             self, "Open one or more spectrum files",
             filter="All files (*);;NMR spectrum files (*.jdx *.dx *.jdf)",
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not paths:
             return
@@ -3600,23 +3615,46 @@ class MainWindow(QMainWindow):
             # "uncorrected" reference it recomputed from wasn't
             # actually uncorrected any more).
             self._capture_phase_reference()
+        # Real user report: "I only see the 1d slice unless I unprocess
+        # and reprocess the indirect dimension. Something is being
+        # linked where it shouldn't." Root cause: both branches below
+        # used to switch self.canvas to a single-slice line
+        # unconditionally, on *every* settled FID-processing change --
+        # not just a phase-adjacent one, and not just while self.canvas
+        # was already showing a slice -- silently converting the
+        # Spectrum tab's default contour/stacked/heatmap view into a
+        # slice in the background even while looking at a completely
+        # different tab (Processing, Compare, ...), with nothing to
+        # ever convert it back except a full reload. Only actually
+        # switch to a slice here if self.canvas was already showing one
+        # (i.e. this settle is happening *during* an active phase-
+        # editing session, where the "avoid flicker" reasoning below
+        # applies) -- otherwise refresh whatever it was already showing
+        # (a contour, most commonly) with the newly-recomputed data.
+        was_showing_contour = self.canvas._contour_spectrum is not None
         if self._phase_mode == "pseudo2d":
             on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-            self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=False)
+            if was_showing_contour:
+                self.canvas.show_spectrum(spectrum)
+            else:
+                self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=False)
             if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
                 self._show_fid_preview(spectrum, switch_tab=False)
             if on_processing_preview:
                 self._refresh_processing_preview_if_active()
         elif self._phase_mode == "2d":
-            # Slice, not a full contour redraw -- same reasoning as
-            # _apply_phase_preview's own "2d" branch (see
-            # _show_2d_phase_slice's own docstring); keeps a settled
-            # FID-processing change from snapping the view back to a
-            # full contour only for the next phase tick to snap it back
-            # to a slice again.
+            # Slice, not a full contour redraw, *while already mid-edit*
+            # -- same reasoning as _apply_phase_preview's own "2d"
+            # branch (see _show_2d_phase_slice's own docstring); keeps a
+            # settled FID-processing change from snapping the view back
+            # to a full contour only for the next phase tick to snap it
+            # back to a slice again.
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
             on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-            self._show_2d_phase_slice(spectrum, dim, reset_view=False, switch_tab=False)
+            if was_showing_contour:
+                self.canvas.show_spectrum(spectrum)
+            else:
+                self._show_2d_phase_slice(spectrum, dim, reset_view=False, switch_tab=False)
             if on_processing_preview:
                 self._refresh_processing_preview_phase_only()
 
@@ -4918,15 +4956,25 @@ class MainWindow(QMainWindow):
             # uniformly to the *whole* array here (a genuine-2D phase is
             # one shared correction across every row/column, not a
             # per-slice one the way pseudo-2D's own "not every slice"
-            # mode is) -- only the *display* during editing changes,
-            # picked once per capture (not every tick) as whichever row
-            # (dim="f2", phasing along F2 -- an F1 row is representative)
-            # or column (dim="f1" -- an F2 column) has the largest total
-            # magnitude, the most informative slice to judge a phase
-            # correction against.
-            magnitude = np.abs(self._phase_reference_full)
-            row_or_col_totals = magnitude.sum(axis=1) if dim == "f2" else magnitude.sum(axis=0)
-            self._phase_2d_slice_index = int(np.argmax(row_or_col_totals)) + 1
+            # mode is) -- only the *display* during editing changes.
+            #
+            # Always slice 1 -- explicit follow-up request ("the
+            # processing should just always use slice 1 of the 'xf2'
+            # (unprocessed indirect)"), replacing an earlier largest-
+            # total-magnitude pick. That pick needed the *processed* F1
+            # axis to even evaluate (magnitude.sum along the just-FFT'd
+            # array), which is exactly what made the raw-vs-processed
+            # row-count mismatch this session's own earlier fixes had to
+            # work around (_phase_2d_proportional_row) -- always using
+            # index 1 sidesteps that class of bug entirely: it's a valid
+            # position in *both* the raw and the processed array (index
+            # 0 either way), no mapping needed. Every consumer of
+            # _phase_2d_slice_index (_show_2d_phase_slice,
+            # _compute_processing_preview, _show_2d_indirect_processing_preview)
+            # already reads it as "the row/column to show," so this one
+            # change is enough to make the whole 2D-phasing display
+            # consistently slice-1-based.
+            self._phase_2d_slice_index = 1
             dim_label = "F2 (direct)" if dim == "f2" else "F1 (indirect)"
             self._set_processing_enabled(True, f"Adjust phase along {dim_label} for the whole 2D spectrum.")
 
