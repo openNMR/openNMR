@@ -519,33 +519,52 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     fn_mode = int(dic.get("acqu2s", {}).get("FnMODE", 1))
 
     # Echo-Antiecho (FnMODE 6, a.k.a. Rance-Kay) needs one more thing
-    # *before* F2 processing even starts: the "echo" (even-indexed)
-    # raw row of each pair must be conjugated first. This was flagged
-    # in decode_hypercomplex_f1's own docstring as unverified/
-    # best-effort (no real Echo-Antiecho data existed in this project
-    # to check against) -- now verified against a real dataset
-    # (test_data/Bruker Example Data/Cyclosporine/203, FnMODE=6): the
-    # plain sum/diff combine (no raw-row conjugate) reproduced every
-    # real peak at its correct position but *also* produced an
-    # equal-magnitude ghost at that peak's F1-mirror position (ratio
-    # ~0.8-1.2x the genuine peak) -- exactly the "mirror across the
-    # spectrum's centre" failure mode that docstring predicted. No
-    # sign/order permutation of the post-FFT combine formula fixed
-    # this (tried all four), which makes sense: the antiecho/echo
-    # coherence-pathway relationship is a conjugate, and FFT does not
-    # commute with conjugation (FFT(conj(x))[k] == conj(FFT(x)[-k]),
-    # not conj(FFT(x))[k]) -- so this can only be fixed on the raw,
-    # pre-F2-FFT time-domain row, not by adjusting
-    # decode_hypercomplex_f1's post-FFT formula. Conjugating the
-    # even-indexed raw row of each pair here, then combining with the
-    # *same* sum+i*diff formula decode_hypercomplex_f1 already used,
-    # dropped that ghost-to-genuine ratio to ~0.005-0.02 (noise floor)
-    # across the 10 strongest real peaks. A copy, not an in-place
-    # conjugate, so ``metadata.raw["fid_raw"]`` (assigned above from
-    # this same ``data`` binding) stays genuinely unmodified.
+    # *before* F2 processing even starts: the "echo" (even-indexed) raw
+    # row of each pair must be conjugated *and time-reversed* first.
+    # This was flagged in decode_hypercomplex_f1's own docstring as
+    # unverified/best-effort (no real Echo-Antiecho data existed in
+    # this project to check against) -- verified against a real
+    # dataset (test_data/Bruker Example Data/Cyclosporine/203,
+    # FnMODE=6) in two rounds, the first of which shipped a real,
+    # user-reported bug (worth understanding, not just the fix itself):
+    #
+    # Round 1 found that the plain sum/diff combine (no raw-row
+    # transform at all) reproduced every real peak at its correct
+    # position but *also* produced an equal-magnitude ghost at that
+    # peak's F1-mirror position (ratio ~0.8-1.2x the genuine peak) --
+    # exactly the "mirror across the spectrum's centre" failure mode
+    # that docstring predicted. Conjugating the even-indexed raw row
+    # (no reversal) dropped that ghost to ~0.005-0.02 (noise floor) on
+    # F1 -- shipped as the fix. **But conjugating a raw time-domain row
+    # doesn't just fix the F1/hypercomplex phase relationship -- FFT
+    # doesn't commute with conjugation (FFT(conj(x))[k] ==
+    # conj(FFT(x)[-k])), so it also *reverses that row's own F2
+    # frequency axis*, an unavoidable side effect neither round 1's
+    # verification nor its own reasoning checked for** (it only
+    # measured the F1-mirror ratio, not an F2 one) -- confirmed
+    # directly: the lone-conjugate fix's own F1 ratio was excellent
+    # (~0.01) but its F2 ratio was ~0.95, an equal-magnitude ghost at
+    # each peak's F2-mirror position instead. Real user report caught
+    # this ("I'm pretty sure the echo-anti echo data is now mirrored
+    # in x") after the lone-conjugate version had already shipped.
+    #
+    # Round 2's fix: conjugate *and* reverse the even row (order
+    # doesn't matter -- conjugation is elementwise, reversal is a pure
+    # reordering, so they commute) -- the two frequency-reversals
+    # (one from the conjugate, one from the explicit reversal) cancel,
+    # leaving F2 untouched, while the conjugate's own value-negation
+    # still supplies the hypercomplex relationship F1 needs. Verified
+    # on the same real dataset: both F1 and F2 mirror ratios land at
+    # ~0.005-0.01 (noise floor) across the 10 strongest real peaks,
+    # simultaneously -- checked together this time, specifically
+    # because round 1's own gap was "fixed and verified one axis
+    # without checking the other actually stayed fixed too." A copy,
+    # not an in-place transform, so ``metadata.raw["fid_raw"]``
+    # (assigned above from this same ``data`` binding) stays genuinely
+    # unmodified.
     if fn_mode == 6:
         data = data.copy()
-        data[0::2] = np.conj(data[0::2])
+        data[0::2] = np.conj(data[0::2])[:, ::-1]
 
     # ----- F2 (direct dimension): [shift/align/LP], window, zero-fill, FFT per row -----
     # Same shared step (and step order) as read_1d/xpulse.read_1d --

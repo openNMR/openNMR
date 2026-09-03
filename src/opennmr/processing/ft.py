@@ -665,21 +665,41 @@ def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int) -> np.ndarray:
     and row ``2k+1`` ("antiecho"/N-type) combine as
     ``decoded[k] = (echo+antiecho) + 1j*(echo-antiecho)`` -- the
     standard sensitivity-enhanced (PEP) recombination, *given* that the
-    caller has already conjugated the raw "echo" row's time-domain FID
-    before F2 processing -- see ``io.bruker.read_2d``'s own comment at
-    its ``fn_mode == 6`` branch for why that conjugate has to happen
-    there (pre-F2-FFT), not in this function (which only ever sees
-    already-F2-FFT'd rows, and FFT doesn't commute with conjugation).
+    caller has already conjugated **and time-reversed** the raw "echo"
+    row's time-domain FID before F2 processing -- see
+    ``io.bruker.read_2d``'s own comment at its ``fn_mode == 6`` branch
+    (including the real, user-reported bug its first, conjugate-only
+    version shipped with) for why that has to happen there (pre-F2-FFT),
+    not in this function (which only ever sees already-F2-FFT'd rows,
+    and FFT doesn't commute with conjugation).
+
     **Verified against real data 2026-09-02** (``test_data/Bruker
-    Example Data/Cyclosporine/203``, FnMODE=6): without the raw-row
-    conjugate, every real peak landed at its correct position but was
-    accompanied by an equal-magnitude ghost at that peak's F1-mirror
-    position (ratio ~0.8-1.2x the genuine peak, across the 10 strongest
-    real peaks) -- exactly the "mirror across the spectrum's centre"
-    risk this docstring used to flag as untested. No sign/order
-    permutation of *this* function's own combine formula fixed it (all
-    four tried); the raw-row conjugate in ``read_2d`` dropped that
-    ghost ratio to ~0.005-0.02 (noise floor) on the same 10 peaks.
+    Example Data/Cyclosporine/203``, FnMODE=6), in two rounds:
+
+    Round 1: without any raw-row transform at all, every real peak
+    landed at its correct position but was accompanied by an
+    equal-magnitude ghost at that peak's F1-mirror position (ratio
+    ~0.8-1.2x the genuine peak, across the 10 strongest real peaks) --
+    exactly the "mirror across the spectrum's centre" risk this
+    docstring used to flag as untested. No sign/order permutation of
+    *this* function's own combine formula fixed it (all four tried);
+    conjugating the raw "echo" row (no reversal) dropped that ghost
+    ratio to ~0.005-0.02 on F1 -- shipped as the fix, but *only* the F1
+    axis was actually re-measured after it; conjugating a raw
+    time-domain row also reverses that row's own F2 frequency axis
+    (``FFT(conj(x))[k] == conj(FFT(x)[-k])``), an unavoidable side
+    effect this round's own verification didn't check for. A real user
+    caught it after the conjugate-only version had shipped: "I'm
+    pretty sure the echo-anti echo data is now mirrored in x."
+
+    Round 2: conjugating *and* reversing the same row (order doesn't
+    matter -- conjugation is elementwise, reversal a pure reordering,
+    so they commute) cancels the two frequency-reversals (one from
+    each operation) while the conjugate's own value-negation still
+    supplies the F1 relationship needed -- both F1 and F2 mirror ratios
+    now land at ~0.005-0.01 (noise floor) simultaneously, checked
+    together this time specifically because round 1's own gap was
+    "verified one axis without checking the other stayed fixed too."
 
     An odd row count (shouldn't happen for genuinely-paired data, but
     the raw-`ser` row-*count* resolution this project's own

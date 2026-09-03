@@ -222,31 +222,39 @@ def test_read_2d_echo_antiecho_halves_row_count_and_records_fn_mode(tmp_path, mo
     assert spectrum.data.shape[0] == n1
 
 
-def test_read_2d_echo_antiecho_undoes_the_conjugate_only_for_the_echo_row(tmp_path, monkeypatch):
+def test_read_2d_echo_antiecho_conjugates_and_reverses_the_echo_row(tmp_path, monkeypatch):
     # Real-data-verified regression guard for the fn_mode==6 fix in
     # read_2d (see its own comment there, and decode_hypercomplex_f1's
-    # docstring): a real Echo-Antiecho dataset (test_data/Bruker
-    # Example Data/Cyclosporine/203) showed every genuine peak
-    # alongside an equal-magnitude ghost at its F1-mirror position
-    # (ratio ~0.8-1.2x) until the "echo" (even) raw row was conjugated
-    # before F2 processing -- that dropped the ghost to ~0.005-0.02x
-    # on the 10 strongest real peaks. This test locks in that specific
-    # code behaviour without needing real NMR physics in the fixture:
-    # every raw ``ser`` row already passes through one unconditional
-    # ``data = np.conj(data)`` (see read_2d's own
-    # _CONJUGATE_QUADRATURE_NOTE) before fn_mode==6's own extra
-    # conjugate of the even rows -- two conjugates of the same row
-    # cancel, so the net, verified-correct effect is "the echo row
-    # reaches F2 processing exactly as stored on disk; the antiecho
-    # row still gets the one original conjugate". Built with a single
-    # t1 point (one row pair) and a zeroed antiecho row specifically so
-    # the resulting F2 row can be compared directly against processing
-    # the known on-disk echo FID through the same window/zero-fill/FFT
-    # pipeline, instead of needing to interpret the ppm/Hz axis.
+    # docstring, for the full two-round story). A real Echo-Antiecho
+    # dataset (test_data/Bruker Example Data/Cyclosporine/203) showed
+    # every genuine peak alongside an equal-magnitude ghost at its
+    # F1-mirror position (ratio ~0.8-1.2x) until the "echo" (even) raw
+    # row was conjugated before F2 processing (round 1) -- but a
+    # conjugate-only fix, verified only on F1, turned out to introduce
+    # an equal-magnitude F2-mirror ghost instead (real user report:
+    # "the echo-anti echo data is now mirrored in x") -- round 2 found
+    # conjugating *and reversing* the row fixes both simultaneously.
+    #
+    # This test locks in that exact code behaviour without needing real
+    # NMR physics in the fixture: every raw ``ser`` row already passes
+    # through one unconditional ``data = np.conj(data)`` (see read_2d's
+    # own _CONJUGATE_QUADRATURE_NOTE) before fn_mode==6's own extra
+    # conjugate-and-reverse of the even rows -- the two conjugates on
+    # the same row cancel, leaving just the reversal, so the net,
+    # verified-correct effect is "the echo row reaches F2 processing
+    # exactly as stored on disk, but time-reversed; the antiecho row
+    # still gets only the one original conjugate, unreversed". Built
+    # with a single t1 point (one row pair) and a zeroed antiecho row
+    # specifically so the resulting F2 row can be compared directly
+    # against processing the known on-disk echo FID through the same
+    # window/zero-fill/FFT pipeline, instead of needing to interpret
+    # the ppm/Hz axis.
     n2, sw2, f0_hz = 32, 8000.0, 1500.0
     t2 = np.arange(n2) / sw2
     known_fid = np.exp(-t2 * 300) * np.exp(2j * np.pi * f0_hz * t2)
-    fid = np.array([known_fid, np.zeros(n2, dtype=np.complex128)], dtype=np.complex128)
+    # Stored pre-reversed so the net (disk value, reversed by the fix)
+    # lands back on known_fid -- see the comment above.
+    fid = np.array([known_fid[::-1].copy(), np.zeros(n2, dtype=np.complex128)], dtype=np.complex128)
     path = _make_2d_experiment_dir(tmp_path, proc2s_overrides={"SI": 1, "SW_p": 500.0})
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
     acqu2s = {"NUC1": "13C", "BF1": 100.6, "O1": 0.0, "FnMODE": 6}
@@ -260,13 +268,12 @@ def test_read_2d_echo_antiecho_undoes_the_conjugate_only_for_the_echo_row(tmp_pa
     expected_row = expected_f2 * (1 + 1j)
     np.testing.assert_allclose(actual_row, expected_row)
 
-    # Confirms this actually discriminates: skipping the fn_mode==6
-    # conjugate (i.e. leaving the one pre-existing global conjugate as
-    # the *only* transform on the echo row, matching this project's
-    # pre-fix behaviour) would have produced a materially different,
-    # not just numerically-close, row.
-    without_fix_f2 = ft.fft_spectrum(ft.zero_fill(np.conj(known_fid), 64), 1.0 / sw2)[1]
-    assert np.max(np.abs(without_fix_f2 - expected_f2)) > 0.9 * np.max(np.abs(expected_f2))
+    # Confirms this actually discriminates: conjugating without also
+    # reversing (round 1's own, real-user-reported-broken fix) would
+    # have produced a materially different, not just numerically-close,
+    # row -- the F2-mirrored ghost the real bug report was about.
+    conjugate_only_f2 = ft.fft_spectrum(ft.zero_fill(np.conj(known_fid[::-1]), 64), 1.0 / sw2)[1]
+    assert np.max(np.abs(conjugate_only_f2 - expected_f2)) > 0.9 * np.max(np.abs(expected_f2))
 
 
 def test_read_2d_default_fn_mode_leaves_row_count_undecoded(tmp_path, monkeypatch):
