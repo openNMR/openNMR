@@ -196,6 +196,25 @@ class MainWindow(QMainWindow):
         self._sidecar_save_timer.setSingleShot(True)
         self._sidecar_save_timer.timeout.connect(self._run_debounced_sidecar_save)
         self._sidecar_save_pending_index: int | None = None
+        # Same debounce reasoning as _live_reprocess_timer above, for
+        # self.canvas's own 2D/pseudo-2D contour during a live phase
+        # drag on a genuine 2D or "apply to every slice" pseudo-2D --
+        # real user requirement, repeated across several rounds: "the
+        # Spectrum tab should always show the 2D or pseudo 2D where
+        # there is one," never switch to a single-slice line the way
+        # phase-editing used to make it. A full contour redraw is
+        # measured at ~0.35s on a real, large conventional-2D array
+        # (see plotting.style.downsample_2d's own docstring) -- fine
+        # settled, but redrawing on literally every mouse-move tick of
+        # a drag would make the drag itself feel frozen. Debounced the
+        # same way the multi-row recompute already is: the phase
+        # correction itself is still applied to spectrum.data on every
+        # tick (cheap, a plain array op), only the expensive on-screen
+        # contour redraw waits for a short quiet period.
+        self._canvas_2d_refresh_timer = QTimer(self)
+        self._canvas_2d_refresh_timer.setSingleShot(True)
+        self._canvas_2d_refresh_timer.timeout.connect(self._run_debounced_canvas_2d_refresh)
+        self._canvas_2d_refresh_pending_index: int | None = None
         # Each spectrum's own load kwargs immediately after _load's
         # initial pseudo-2D-default handling, before any live
         # FID-processing/phase/baseline control ever touched it --
@@ -2863,9 +2882,11 @@ class MainWindow(QMainWindow):
         both dimensions' own durably-committed phase, included -- see
         that method's own docstring) -- so this just reads a trace
         straight off ``spectrum`` and displays it, deliberately
-        applying *no* phase of its own, exactly matching
-        :meth:`_show_2d_phase_slice`'s own F1 branch (the Spectrum
-        tab's already-trusted equivalent for this same dimension).
+        applying *no* phase of its own -- ``spectrum.data`` is already
+        the single source of truth for "current total phase," the same
+        principle a genuine 2D's own Spectrum-tab contour now relies on
+        too (self.canvas no longer renders its own 2D phase slice at
+        all -- see :meth:`_apply_phase_preview`'s own docstring).
 
         That "no phase of its own" choice isn't an oversight: whichever
         dimension ``dim_combo`` currently points to already has its
@@ -2875,9 +2896,10 @@ class MainWindow(QMainWindow):
         first version of this method re-applied ``phase0_f1``/
         ``phase1_f1`` plus the live spin-box delta on top of the
         already-phased trace, silently double-phasing it. Caught by
-        cross-checking this method's own output against
-        :meth:`_show_2d_phase_slice`'s numerically, on real data
-        (``test_data/20200804_NaMgMnO_Pristine_111218C_Check_23Na_1p3mm/31``)
+        cross-checking this method's own output numerically against a
+        direct ``get_trace`` read of ``spectrum.data`` (the trusted
+        reference, same source this method itself now uses), on real
+        data (``test_data/20200804_NaMgMnO_Pristine_111218C_Check_23Na_1p3mm/31``)
         -- differed by a magnitude comparable to the data itself, not a
         rounding-sized gap.
 
@@ -2896,12 +2918,11 @@ class MainWindow(QMainWindow):
         trace = get_trace(spectrum, axis="f2", index=self._phase_2d_slice_index)
 
         canvas = self.processing_preview_canvas
-        # Same "prefer an in-place update, only rebuild when there's no
-        # existing line to update" choice as _show_2d_phase_slice's own
-        # F2 sibling on the main Spectrum canvas, and for the identical
-        # reason (a live phase drag shouldn't reset the view on every
-        # tick) -- including preserving whatever ppm zoom was already
-        # on screen the first time this replaces a full contour.
+        # Prefer an in-place update, only rebuild when there's no
+        # existing line to update -- a live phase drag shouldn't reset
+        # the view on every tick, including preserving whatever ppm
+        # zoom was already on screen the first time this replaces a
+        # full contour.
         if not canvas.ax.lines:
             preserve_xlim = canvas._contour_spectrum is not None
             xlim = canvas.ax.get_xlim() if preserve_xlim else None
@@ -3618,48 +3639,61 @@ class MainWindow(QMainWindow):
             # "uncorrected" reference it recomputed from wasn't
             # actually uncorrected any more).
             self._capture_phase_reference()
-        # Real user report: "I only see the 1d slice unless I unprocess
-        # and reprocess the indirect dimension. Something is being
-        # linked where it shouldn't." Root cause: both branches below
-        # used to switch self.canvas to a single-slice line
-        # unconditionally, on *every* settled FID-processing change --
-        # not just a phase-adjacent one, and not just while self.canvas
-        # was already showing a slice -- silently converting the
-        # Spectrum tab's default contour/stacked/heatmap view into a
-        # slice in the background even while looking at a completely
-        # different tab (Processing, Compare, ...), with nothing to
-        # ever convert it back except a full reload. Only actually
-        # switch to a slice here if self.canvas was already showing one
-        # (i.e. this settle is happening *during* an active phase-
-        # editing session, where the "avoid flicker" reasoning below
-        # applies) -- otherwise refresh whatever it was already showing
-        # (a contour, most commonly) with the newly-recomputed data.
-        was_showing_contour = self.canvas._contour_spectrum is not None
+        # Real, repeated user report: "the Spectrum tab should always
+        # show the 2D or pseudo 2D where there is one" -- self.canvas
+        # never switches to a single-slice line for phase-editing
+        # purposes any more (see _apply_phase_preview's own matching
+        # comment), so a settled FID-processing change just refreshes
+        # whatever it's already showing -- always a contour/stack, not
+        # conditionally so.
         if self._phase_mode == "pseudo2d":
             on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-            if was_showing_contour:
-                self.canvas.show_spectrum(spectrum)
-            else:
-                self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=False)
+            self.canvas.show_spectrum(spectrum)
             if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
                 self._show_fid_preview(spectrum, switch_tab=False)
             if on_processing_preview:
                 self._refresh_processing_preview_if_active()
         elif self._phase_mode == "2d":
-            # Slice, not a full contour redraw, *while already mid-edit*
-            # -- same reasoning as _apply_phase_preview's own "2d"
-            # branch (see _show_2d_phase_slice's own docstring); keeps a
-            # settled FID-processing change from snapping the view back
-            # to a full contour only for the next phase tick to snap it
-            # back to a slice again.
-            dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
             on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-            if was_showing_contour:
-                self.canvas.show_spectrum(spectrum)
-            else:
-                self._show_2d_phase_slice(spectrum, dim, reset_view=False, switch_tab=False)
+            self.canvas.show_spectrum(spectrum)
             if on_processing_preview:
                 self._refresh_processing_preview_phase_only()
+
+    def _schedule_canvas_2d_refresh(self, index: int) -> None:
+        """(Re)start the debounce timer for ``self.canvas``'s own 2D/
+        pseudo-2D contour redraw during a live phase drag -- see its
+        timer's own construction comment in ``__init__`` for why this
+        is debounced at all, rather than redrawing on every tick the
+        way the phase correction itself is applied."""
+        self._canvas_2d_refresh_pending_index = index
+        self._canvas_2d_refresh_timer.start(200)
+
+    def _run_debounced_canvas_2d_refresh(self) -> None:
+        index = self._canvas_2d_refresh_pending_index
+        self._canvas_2d_refresh_pending_index = None
+        if index is None or index != self._selected_index() or index >= len(self.session):
+            return
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim != 2:
+            return
+        try:
+            # A full contour rebuild has no in-place update path (see
+            # MplCanvas.set_full_resolution's own docstring) and resets
+            # the view by default -- preserve whatever ppm/index zoom
+            # was already there across it, the same "phase-editing
+            # shouldn't silently reset a deliberate zoom" reasoning
+            # already applied elsewhere in this codebase (e.g.
+            # update_data's own docstring, or the 1D case just above in
+            # _apply_phase_preview).
+            xlim, ylim = self.canvas.ax.get_xlim(), self.canvas.ax.get_ylim()
+            self.canvas.show_spectrum(spectrum)
+            self.canvas.ax.set_xlim(xlim)
+            self.canvas.ax.set_ylim(ylim)
+            self.canvas.canvas.draw_idle()
+        except Exception:  # noqa: BLE001 -- best-effort, same reasoning as
+            # _apply_phase_preview's own "2d" branch: a render failure here
+            # must never raise out of a timer callback mid-drag.
+            pass
 
     def _on_reset_processing_clicked(self) -> None:
         """Discard every live *processing* choice for the selected
@@ -3925,10 +3959,15 @@ class MainWindow(QMainWindow):
 
         quick_phase_column = QVBoxLayout()
         quick_phase_column.setSpacing(2)
-        for delta in (180.0, 90.0, -90.0, -180.0):
-            quick_button = QPushButton(f"{delta:+.0f}°")
+        # +180 and -180 nudge by the identical amount (phase is 360-
+        # degree periodic) -- real user feedback that having both was
+        # pointless, one "180°" button (no sign, since neither is more
+        # correct than the other) replaces them.
+        for delta in (180.0, 90.0, -90.0):
+            label = f"{delta:+.0f}°" if delta != 180.0 else "180°"
+            quick_button = QPushButton(label)
             quick_button.setToolTip(
-                f"Nudge Phase 0 by {delta:+.0f} degrees from its current value -- "
+                f"Nudge Phase 0 by {delta:.0f} degrees from its current value -- "
                 "a quick fix for a spectrum that's fully inverted (180) or "
                 "rotated a quarter-turn (90). Composes with whatever's already "
                 "there (two +90 clicks equal one +180), same as typing/dragging "
@@ -4072,7 +4111,19 @@ class MainWindow(QMainWindow):
         form.addRow("Baseline method:", baseline_options_row)
         self._refresh_baseline_options_visibility()
 
+        zero_phase_row = QHBoxLayout()
+        zero_phase0_button = QPushButton("Zero Phase 0")
+        zero_phase0_button.setToolTip("Zero just Phase 0 (0th order), leaving Phase 1 untouched.")
+        zero_phase0_button.clicked.connect(lambda: self._on_zero_phase_clicked(0))
+        zero_phase_row.addWidget(zero_phase0_button)
+        zero_phase1_button = QPushButton("Zero Phase 1")
+        zero_phase1_button.setToolTip("Zero just Phase 1 (1st order), leaving Phase 0 untouched.")
+        zero_phase1_button.clicked.connect(lambda: self._on_zero_phase_clicked(1))
+        zero_phase_row.addWidget(zero_phase1_button)
+        form.addRow(zero_phase_row)
+
         reset_button = QPushButton("Reset")
+        reset_button.setToolTip("Zero both Phase 0 and Phase 1 together.")
         reset_button.clicked.connect(self._on_reset_phase_clicked)
         form.addRow(reset_button)
 
@@ -4273,6 +4324,18 @@ class MainWindow(QMainWindow):
             spin.blockSignals(True)
             spin.setValue(0.0)
             spin.blockSignals(False)
+        self._apply_phase_preview()
+
+    def _on_zero_phase_clicked(self, order: int) -> None:
+        """Zero just Phase 0 (``order=0``) or just Phase 1 (``order=1``),
+        leaving the other untouched -- real user request, distinct from
+        :meth:`_on_reset_phase_clicked` (the combined Reset button,
+        which zeros both together)."""
+        handle, spin = (self.phase0_handle, self.phase0_spin) if order == 0 else (self.phase1_handle, self.phase1_spin)
+        handle.setValue(0.0, emit=False)
+        spin.blockSignals(True)
+        spin.setValue(0.0)
+        spin.blockSignals(False)
         self._apply_phase_preview()
 
     def _on_autophase_clicked(self) -> None:
@@ -4499,10 +4562,16 @@ class MainWindow(QMainWindow):
         # Phase controls to it (same as a fresh selection), rather than
         # leaving them pointing at the pre-autophase snapshot.
         self._capture_phase_reference()
+        # Discrete, one-shot action (a button click, not a continuous
+        # drag) -- an immediate contour refresh is fine here, same as
+        # _run_debounced_multi_row_reprocess's own settled-event
+        # refresh; no need for _schedule_canvas_2d_refresh's own
+        # per-tick debounce.
         on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-        self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=not on_processing_preview)
-        self.canvas.set_pivot_marker(self.pivot_spin.value())
-        if on_processing_preview:
+        self.canvas.show_spectrum(spectrum)
+        if not on_processing_preview:
+            self.canvas_tabs.setCurrentWidget(self.canvas)
+        else:
             self._refresh_processing_preview_if_active()
 
     def _commit_processing_preview_as_spectrum(self, spectrum) -> bool:
@@ -4621,23 +4690,29 @@ class MainWindow(QMainWindow):
             # still refresh an active FID preview to the newly selected
             # slice, not redraw it with the (irrelevant, for that view)
             # phased spectrum line.
+            # Real, repeated user requirement: "the Spectrum tab should
+            # always show the 2D or pseudo 2D where there is one" --
+            # self.canvas no longer ever switches to a single-slice
+            # line for phase editing (that was the "1D slice for
+            # judging phase" idea an earlier round of this same
+            # feedback asked for; superseded by this one, which asks
+            # for the opposite). The Processing tab's own 1D preview
+            # (already slice-based, see _compute_processing_preview/
+            # _show_2d_indirect_processing_preview) is now the *only*
+            # place a judgeable 1D slice is shown during 2D phase
+            # editing -- "the processing tab should only have a 1D
+            # that is matched to the fid tab" (for a pseudo-2D, both
+            # already key off the same slice_spin row). self.canvas
+            # itself just gets a debounced contour refresh -- see
+            # _schedule_canvas_2d_refresh's own docstring for why not
+            # an immediate one on every tick.
             if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
                 self._show_fid_preview(spectrum, switch_tab=False)
             elif self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
-                # Keep the Spectrum tab's own content correct in the
-                # background (switch_tab=False, reset_view=False -- so
-                # switching back to it later shows the current phase,
-                # with whatever zoom was already there preserved),
-                # without stealing focus from the Processing tab's own
-                # preview -- which itself also refreshes in place now
-                # (see _refresh_processing_preview_phase_only), for the
-                # same "don't reset a deliberate zoom on every drag
-                # tick" reason.
-                self._show_pseudo2d_slice(spectrum, reset_view=False, switch_tab=False)
                 self._refresh_processing_preview_phase_only()
             else:
-                self._show_pseudo2d_slice(spectrum, reset_view=False)
-                self.canvas.set_pivot_marker(self.pivot_spin.value())
+                self.canvas_tabs.setCurrentWidget(self.canvas)
+            self._schedule_canvas_2d_refresh(index)
 
         elif self._phase_mode == "2d":
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
@@ -4670,97 +4745,30 @@ class MainWindow(QMainWindow):
             # unguarded and printed an unhandled traceback once per tick
             # for the whole duration of the drag.
             try:
-                # Same "show one representative line, not a full
-                # contour redraw" choice _show_pseudo2d_slice already
-                # makes, and for the identical reason -- see
-                # _capture_phase_reference's own "2d" branch and
-                # _show_2d_phase_slice's own docstring. Mirrors
-                # pseudo2d's own three-way canvas_tabs branching just
-                # above, including deferring the FID/Processing-preview
-                # tabs to their own already-dimension-generic refresh
-                # methods (_show_fid_preview is a no-op for a genuine
-                # 2D either way, gated off by _fid_preview_available;
+                # self.canvas never switches to a single-slice line for
+                # phase editing any more -- see the matching comment in
+                # the "pseudo2d" branch above for the full reasoning
+                # ("the Spectrum tab should always show the 2D or
+                # pseudo 2D where there is one"). Mirrors that branch's
+                # own three-way canvas_tabs handling, including
+                # deferring the FID/Processing-preview tabs to their own
+                # already-dimension-generic refresh methods
+                # (_show_fid_preview is a no-op for a genuine 2D either
+                # way, gated off by _fid_preview_available;
                 # _refresh_processing_preview_phase_only routes to
                 # _compute_processing_preview or
                 # _show_2d_indirect_processing_preview depending on
-                # dim_combo -- see their own docstrings for why the
-                # two dimensions can't share one implementation).
+                # dim_combo -- see their own docstrings for why the two
+                # dimensions can't share one implementation).
                 if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
                     self._show_fid_preview(spectrum, switch_tab=False)
                 elif self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
-                    self._show_2d_phase_slice(spectrum, dim, reset_view=False, switch_tab=False)
                     self._refresh_processing_preview_phase_only()
                 else:
-                    self._show_2d_phase_slice(spectrum, dim, reset_view=False)
-                    self.canvas.set_pivot_marker(self.pivot_spin.value())
+                    self.canvas_tabs.setCurrentWidget(self.canvas)
+                self._schedule_canvas_2d_refresh(index)
             except Exception:  # noqa: BLE001 -- see comment above
                 pass
-
-    def _show_2d_phase_slice(self, spectrum, dim: str, reset_view: bool, switch_tab: bool = True) -> None:
-        """:meth:`_show_pseudo2d_slice`'s sibling for a genuine 2D --
-        same reasoning (a full contour redraw on every phase-drag tick
-        is far too slow, see ``plotting.style.downsample_2d``'s own
-        docstring for the measured cost on real data, and a line plot
-        is what you actually need to judge a phase correction anyway),
-        real user requirement: 2D phasing should default to a 1D slice
-        "like it does before you process the indirect dimension"
-        (pseudo-2D) rather than phasing/redrawing the whole thing at
-        once.
-
-        Shows ``self._phase_2d_slice_index`` (picked once per
-        :meth:`_capture_phase_reference` call, not every tick -- the
-        row/column with the largest total magnitude, for whichever
-        dimension ``dim`` names) -- an F1 row (running along F2) when
-        ``dim == "f2"`` (phasing the direct dimension), or an F2 column
-        (running along F1) when ``dim == "f1"``."""
-        axis = "f1" if dim == "f2" else "f2"
-        trace = get_trace(spectrum, axis=axis, index=self._phase_2d_slice_index)
-        if reset_view or not self.canvas.ax.lines:
-            preserve_xlim = not reset_view and self.canvas._contour_spectrum is not None
-            xlim = self.canvas.ax.get_xlim() if preserve_xlim else None
-            self.canvas.show_spectrum(trace)
-            if xlim is not None:
-                self.canvas.ax.set_xlim(xlim)
-        else:
-            self.canvas.update_data(trace)
-        slice_label = "F1 row" if dim == "f2" else "F2 column"
-        self.canvas.ax.set_title(f"{slice_label} {self._phase_2d_slice_index} (phase preview)")
-        self.canvas.canvas.draw_idle()
-        if switch_tab:
-            self.canvas_tabs.setCurrentWidget(self.canvas)
-
-    def _show_pseudo2d_slice(self, spectrum, reset_view: bool, switch_tab: bool = True) -> None:
-        """Preview a pseudo-2D spectrum as the single slice currently
-        selected in the Dimension box -- a full contour redraw on every
-        drag tick would be far too slow, and a line plot is what you
-        actually need to see to judge a phase correction anyway.
-        ``switch_tab=False`` (see :meth:`_show_fid_preview`'s own
-        matching param) keeps the Spectrum tab's own content correct
-        without stealing focus from whichever canvas tab is actually
-        showing right now -- e.g. the Processing-preview tab, while
-        that's the active context for phasing."""
-        slice_index = self.slice_spin.value()
-        trace = get_trace(spectrum, axis="f1", index=slice_index)
-        if reset_view or not self.canvas.ax.lines:
-            # No existing Line2D for update_data to refresh in place --
-            # most commonly, phasing was just started from a pseudo-2D's
-            # default contour view. X (ppm) means the same thing on a
-            # contour and a slice line view (unlike y -- slice number
-            # vs. intensity, genuinely different), so preserve whatever
-            # ppm zoom was already there across the otherwise-
-            # unavoidable rebuild, rather than silently resetting it
-            # the moment the user's very first phase tick lands.
-            preserve_xlim = not reset_view and self.canvas._contour_spectrum is not None
-            xlim = self.canvas.ax.get_xlim() if preserve_xlim else None
-            self.canvas.show_spectrum(trace)
-            if xlim is not None:
-                self.canvas.ax.set_xlim(xlim)
-        else:
-            self.canvas.update_data(trace)
-        self.canvas.ax.set_title(self._slice_label(spectrum, slice_index))
-        self.canvas.canvas.draw_idle()
-        if switch_tab:
-            self.canvas_tabs.setCurrentWidget(self.canvas)
 
     @staticmethod
     def _slice_label(spectrum, slice_index: int) -> str:
@@ -4950,33 +4958,31 @@ class MainWindow(QMainWindow):
             self._phase_reference_full = spectrum.complex_data
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
             self._phase_freq_ppm = spectrum.axis_values(-1 if dim == "f2" else 0, "ppm")
-            # Real user requirement: phasing a genuine 2D should default
-            # to showing a single 1D slice while editing -- exactly like
-            # pseudo-2D already does (_show_pseudo2d_slice) -- rather
-            # than redrawing the whole contour (an expensive
-            # downsample_2d call, see plotting.style's own docstring) on
-            # every drag tick. The correction itself still applies
-            # uniformly to the *whole* array here (a genuine-2D phase is
-            # one shared correction across every row/column, not a
-            # per-slice one the way pseudo-2D's own "not every slice"
-            # mode is) -- only the *display* during editing changes.
+            # _phase_2d_slice_index picks which row/column the
+            # Processing tab's own 1D preview shows while phasing a
+            # genuine 2D (_compute_processing_preview for F2/direct,
+            # _show_2d_indirect_processing_preview for F1/indirect) --
+            # self.canvas itself no longer renders a slice of its own
+            # at all any more (see _apply_phase_preview's own
+            # docstring: "the Spectrum tab should always show the 2D or
+            # pseudo 2D where there is one"). The correction itself
+            # still applies uniformly to the *whole* array regardless
+            # (a genuine-2D phase is one shared correction across every
+            # row/column, not a per-slice one the way pseudo-2D's own
+            # "not every slice" mode is) -- only which row/column gets
+            # *shown* is what this index controls.
             #
-            # Always slice 1 -- explicit follow-up request ("the
-            # processing should just always use slice 1 of the 'xf2'
-            # (unprocessed indirect)"), replacing an earlier largest-
-            # total-magnitude pick. That pick needed the *processed* F1
-            # axis to even evaluate (magnitude.sum along the just-FFT'd
-            # array), which is exactly what made the raw-vs-processed
-            # row-count mismatch this session's own earlier fixes had to
-            # work around (_phase_2d_proportional_row) -- always using
-            # index 1 sidesteps that class of bug entirely: it's a valid
+            # Always slice 1 -- explicit request ("the processing
+            # should just always use slice 1 of the 'xf2' (unprocessed
+            # indirect)"), replacing an earlier largest-total-magnitude
+            # pick. That pick needed the *processed* F1 axis to even
+            # evaluate (magnitude.sum along the just-FFT'd array), which
+            # is exactly what made the raw-vs-processed row-count
+            # mismatch this session's own earlier fixes had to work
+            # around (_phase_2d_proportional_row) -- always using index
+            # 1 sidesteps that class of bug entirely: it's a valid
             # position in *both* the raw and the processed array (index
-            # 0 either way), no mapping needed. Every consumer of
-            # _phase_2d_slice_index (_show_2d_phase_slice,
-            # _compute_processing_preview, _show_2d_indirect_processing_preview)
-            # already reads it as "the row/column to show," so this one
-            # change is enough to make the whole 2D-phasing display
-            # consistently slice-1-based.
+            # 0 either way), no mapping needed.
             self._phase_2d_slice_index = 1
             dim_label = "F2 (direct)" if dim == "f2" else "F1 (indirect)"
             self._set_processing_enabled(True, f"Adjust phase along {dim_label} for the whole 2D spectrum.")

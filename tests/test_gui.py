@@ -15,6 +15,7 @@ from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.main_window import MainWindow
 from opennmr.gui.session import Session
 from opennmr.processing import ft as processing_ft
+from opennmr.processing.slicing import get_trace
 from opennmr.processing.fitting import gaussian
 
 
@@ -914,6 +915,25 @@ def test_main_window_quick_phase_buttons_nudge_from_current_value(qapp, tmp_path
     assert window.phase0_handle.value() == pytest.approx(0.0)  # stays in sync
 
 
+def test_main_window_zero_phase_buttons_zero_only_their_own_order(qapp, tmp_path):
+    # Real user request: "there should be a button to zero 0th or 1st
+    # order phase" -- distinct from the combined Reset button, which
+    # zeros both together.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    window.phase0_spin.setValue(45.0)
+    window.phase1_spin.setValue(30.0)
+
+    window._on_zero_phase_clicked(0)
+    assert window.phase0_spin.value() == pytest.approx(0.0)
+    assert window.phase0_handle.value() == pytest.approx(0.0)
+    assert window.phase1_spin.value() == pytest.approx(30.0)  # untouched
+
+    window._on_zero_phase_clicked(1)
+    assert window.phase1_spin.value() == pytest.approx(0.0)
+    assert window.phase1_handle.value() == pytest.approx(0.0)
+
+
 def test_main_window_autophase_button_sets_phase0_and_resets_phase1(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
@@ -1680,17 +1700,77 @@ def test_main_window_2d_phase_defaults_to_slice_1(qapp, tmp_path):
     assert window._phase_2d_slice_index == 1
 
 
-def test_main_window_2d_phase_shows_a_slice_not_a_full_contour(qapp, tmp_path):
+def test_main_window_2d_phase_stays_a_contour_not_a_slice(qapp, tmp_path, monkeypatch):
+    # Real, repeated user requirement, superseding an earlier round's
+    # opposite request: "the Spectrum tab should always show the 2D or
+    # pseudo 2D where there is one" -- phasing a genuine 2D must never
+    # switch self.canvas to a single-slice line the way it used to
+    # (renamed from this test's own former name,
+    # "..._shows_a_slice_not_a_full_contour", which asserted exactly
+    # the behaviour this now forbids). _make_raw_2d_dataset, not
+    # _make_2d_dataset -- the Processing tab's own auto-switch-to-
+    # preview (_on_side_tab_changed) is gated on _fid_reprocessable,
+    # which the plain (no cached raw FID) fixture never satisfies, so
+    # the Processing-preview half of this test wouldn't exercise
+    # anything real with it (confirmed directly: canvas_tabs never
+    # actually switches tabs in that case at all).
     window = MainWindow()
-    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
     window.process_indirect_button.setChecked(True)
     assert window.canvas._contour_spectrum is not None  # starts as a contour
 
     window.phase0_handle.setValue(45.0)
+    _settle_canvas_2d_refresh(window)
 
-    assert window.canvas._contour_spectrum is None  # now a 1D line, not a contour
-    assert len(window.canvas.ax.lines) >= 1
-    assert "F1 row" in window.canvas.ax.get_title()
+    assert window.canvas._contour_spectrum is not None  # still a contour
+    assert len(window.canvas.ax.collections) >= 1
+
+    # The 1D slice for judging phase now lives only on the Processing
+    # tab's own preview -- "the processing tab should only have a 1D
+    # that is matched to the fid tab."
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    assert window.processing_preview_canvas._contour_spectrum is None
+    assert len(window.processing_preview_canvas.ax.lines) >= 1
+
+
+def test_main_window_2d_phase_never_needs_reprocessing_process_indirect_to_recover_contour(
+        qapp, tmp_path, monkeypatch):
+    # Real user report, verbatim: "I still have to repeatedly select
+    # and deselect the process indirect button to get back the 2D."
+    # A real, multi-step sequence of phase-adjacent interactions --
+    # drag, dimension switch, tab switch, per-slice autophase -- with
+    # process_indirect_button *never* touched after the initial opt-in,
+    # confirming self.canvas is a contour at every single point along
+    # the way, not just immediately after one specific action.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+
+    def assert_still_a_contour(label):
+        assert window.canvas._contour_spectrum is not None, f"not a contour after: {label}"
+        assert len(window.canvas.ax.collections) >= 1, f"no collections after: {label}"
+
+    assert_still_a_contour("initial opt-in")
+
+    window.phase0_handle.setValue(30.0)
+    _settle_canvas_2d_refresh(window)
+    assert_still_a_contour("phase0 drag + settle")
+
+    window.dim_combo.setCurrentIndex(1)  # switch to F1 (indirect)
+    _settle_canvas_2d_refresh(window)
+    assert_still_a_contour("dimension switch")
+
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    assert_still_a_contour("entering the Processing tab")
+
+    window.phase1_handle.setValue(15.0)
+    _settle_canvas_2d_refresh(window)
+    assert_still_a_contour("phase1 drag while on the Processing tab")
+
+    window.side_tabs.setCurrentIndex(0)  # back to the Spectra tab
+    assert_still_a_contour("leaving the Processing tab")
+
+    assert window.process_indirect_button.isChecked() is True  # never touched, still on
 
 
 def test_main_window_2d_phase_still_applies_uniformly_to_every_row(qapp, tmp_path):
@@ -1714,30 +1794,28 @@ def test_main_window_2d_phase_still_applies_uniformly_to_every_row(qapp, tmp_pat
         np.testing.assert_allclose(complex_data[row], expected, atol=1e-8)
 
 
-def test_main_window_2d_phase_slice_follows_dimension_switch(qapp, tmp_path):
+def test_main_window_2d_phase_slice_follows_dimension_switch(qapp, tmp_path, monkeypatch):
     # _phase_2d_slice_index is now a fixed 1 regardless of dimension
     # (see test_main_window_2d_phase_defaults_to_slice_1), so the index
     # itself can no longer discriminate whether a dimension switch
     # actually re-anchors the phase-preview display -- checked via the
-    # canvas title (_show_2d_phase_slice's own "F1 row"/"F2 column"
-    # label) instead, which does still change with dim. A phase0 tick
-    # is needed first to actually force the slice view onto the canvas
-    # at all -- right after loading, self.canvas correctly still shows
-    # the default full contour (see the "stuck on slice" fix above),
-    # not yet a titled slice.
+    # Processing-preview canvas's own title instead (the only place a
+    # titled slice shows any more: self.canvas always stays a contour,
+    # see test_main_window_2d_phase_stays_a_contour_not_a_slice).
+    # _make_raw_2d_dataset -- see that same test's own comment on why
+    # the plain fixture can't exercise the Processing-preview canvas
+    # at all (_on_side_tab_changed's own _fid_reprocessable gate).
     n_f1, n_f2 = 4, 8
     window = MainWindow()
-    window._load(_make_2d_dataset(tmp_path, n_f1=n_f1, n_f2=n_f2), vendor="bruker")
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=n_f1, n_f2=n_f2, f1_nuc="13C"), vendor="bruker")
     window.process_indirect_button.setChecked(True)
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
     assert window._phase_2d_slice_index == 1  # F2 (direct) default: row 1
-
-    window.phase0_handle.setValue(1.0)
-    assert "F1 row 1" in window.canvas.ax.get_title()
 
     window.dim_combo.setCurrentIndex(1)  # switch to F1 (indirect)
 
     assert window._phase_2d_slice_index == 1  # F1 default: column 1
-    assert "F2 column 1" in window.canvas.ax.get_title()
+    assert "F2 column 1" in window.processing_preview_canvas.ax.get_title()
 
 
 def test_main_window_processing_preview_slice_matches_spectrum_tab_across_zero_fill_mismatch(
@@ -1834,10 +1912,12 @@ def test_main_window_2d_indirect_processing_preview_does_not_double_apply_phase(
     # branch, see that method's docstring -- and then applied
     # phase0_f1/phase1_f1 plus the live spin-box delta *again* on top,
     # silently double-phasing the preview. Found by cross-checking
-    # against _show_2d_phase_slice (the already-trusted Spectrum-tab
-    # equivalent for the same dimension) on real data; this reproduces
-    # that same cross-check on a small synthetic fixture so it runs in
-    # the regular suite.
+    # against a direct get_trace read of spectrum.data (the already-
+    # trusted source -- self.canvas no longer renders a 2D phase slice
+    # of its own at all, see test_main_window_2d_phase_stays_a_contour_not_a_slice,
+    # so that's the only "trusted reference" left) on real data; this
+    # reproduces that same cross-check on a small synthetic fixture so
+    # it runs in the regular suite.
     #
     # Deliberately not the fixture's own default fid (identical across
     # every F1 row): that F1 FFTs to a pure single-point real delta,
@@ -1869,8 +1949,8 @@ def test_main_window_2d_indirect_processing_preview_does_not_double_apply_phase(
     window.phase0_handle.setValue(40.0)
     window.phase1_handle.setValue(15.0)
 
-    window._show_2d_phase_slice(spectrum, "f1", reset_view=True, switch_tab=False)
-    reference_y = window.canvas.ax.lines[0].get_ydata().copy()
+    reference_trace = get_trace(spectrum, axis="f2", index=window._phase_2d_slice_index)
+    reference_y = reference_trace.normalized()
 
     canvas = window.processing_preview_canvas
     assert canvas._contour_spectrum is None
@@ -1914,23 +1994,30 @@ def test_main_window_pseudo2d_phase_affects_only_selected_slice(qapp, tmp_path):
 
 
 def test_main_window_phase_from_contour_preserves_ppm_zoom(qapp, tmp_path):
-    # Regression test: starting to phase a pseudo-2D spectrum straight
-    # from its default contour view (the common case -- a fresh
-    # selection always lands there) used to silently reset any ppm
-    # zoom the user had set on the contour, because there's no
-    # existing Line2D yet for update_data to refresh in place, so a
-    # full show_spectrum rebuild ran -- which resets the view by
-    # design. X (ppm) means the same thing on a contour and a slice
-    # line view, so it should survive that one-time rebuild.
+    # Regression test: phasing a pseudo-2D spectrum from its default
+    # contour view used to silently reset any ppm/index zoom the user
+    # had set. self.canvas now always stays a contour and only ever
+    # gets a debounced refresh during a drag (_schedule_canvas_2d_refresh
+    # -- see its own docstring for why: a full contour rebuild has no
+    # in-place update path, and resets the view by default), so both
+    # axes' own zoom must be explicitly restored around that rebuild,
+    # not just x -- unlike the old single-slice-line view (only x, ppm,
+    # carried real meaning there; y was slice-index/intensity, a
+    # different axis each time), a contour's y axis is a *second* ppm/
+    # index axis just as meaningful to preserve as x.
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
     assert window.canvas._contour_spectrum is not None  # confirms we're really on the contour
 
     window.canvas.ax.set_xlim(2.0, 4.0)
+    window.canvas.ax.set_ylim(1.0, 3.0)
 
     window.phase0_handle.setValue(10.0)
+    _settle_canvas_2d_refresh(window)
 
+    assert window.canvas._contour_spectrum is not None  # still a contour, not reset to something else
     assert window.canvas.ax.get_xlim() == pytest.approx((2.0, 4.0))
+    assert window.canvas.ax.get_ylim() == pytest.approx((1.0, 3.0))
 
 
 def test_main_window_pseudo2d_apply_to_all_slices(qapp, tmp_path):
@@ -2036,14 +2123,28 @@ def test_main_window_pseudo2d_switching_slice_resets_phase_controls(qapp, tmp_pa
     assert window.phase0_handle.value() == pytest.approx(0.0)
 
 
-def test_main_window_pseudo2d_phase_sets_canvas_slice_title(qapp, tmp_path):
+def test_main_window_pseudo2d_phase_sets_processing_preview_slice_title(qapp, tmp_path, monkeypatch):
+    # Renamed from this test's own former name,
+    # "..._sets_canvas_slice_title": self.canvas always stays a
+    # stacked/contour view now (see
+    # test_main_window_2d_phase_stays_a_contour_not_a_slice) -- the
+    # titled slice this test checks for lives on the Processing-preview
+    # canvas instead. _make_raw_2d_dataset -- see that same test's own
+    # comment on why the plain fixture can't exercise the Processing-
+    # preview canvas at all (_on_side_tab_changed's own
+    # _fid_reprocessable gate).
     window = MainWindow()
-    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8), vendor="bruker")
     window.slice_spin.setValue(3)
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
 
     window.phase0_handle.setValue(10.0)
 
-    assert window.canvas.ax.get_title() == "Slice 3"
+    # The title lands on the dual-panel preview's own FID (top) axes,
+    # not processing_preview_canvas.ax itself (== the bottom spectrum
+    # axes, spec_ax -- see show_processing_preview's own layout).
+    assert window.processing_preview_canvas._processing_preview_fid_ax.get_title() == "Slice 3"
+    assert window.canvas._contour_spectrum is not None  # unaffected -- still not a slice
 
 
 def test_slice_label_reports_bare_position_when_index_matches_it(qapp, tmp_path):
@@ -4255,6 +4356,16 @@ def _load_spectrum_directly(window, spectrum):
     window.session._load_info.append({"path": "synthetic", "vendor": "bruker", "kwargs": {}})
     window.spectrum_list.addItem(window.session.label(len(window.session) - 1))
     window._select_single_row(len(window.session) - 1)
+
+
+def _settle_canvas_2d_refresh(window):
+    """:func:`_settle_live_reprocess`'s own sibling for
+    :attr:`MainWindow._canvas_2d_refresh_timer` -- force a pending
+    debounced 2D/pseudo-2D contour redraw on ``self.canvas`` to run
+    immediately, instead of a real test waiting out the debounce."""
+    if window._canvas_2d_refresh_timer.isActive():
+        window._canvas_2d_refresh_timer.stop()
+        window._run_debounced_canvas_2d_refresh()
 
 
 def _settle_live_reprocess(window):
