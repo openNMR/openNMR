@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.main_window import MainWindow
 from opennmr.gui.session import Session
+from opennmr.processing import ft as processing_ft
 from opennmr.processing.fitting import gaussian
 
 
@@ -1214,6 +1215,36 @@ def test_main_window_pivot_spin_moves_pivot_slider(qapp, tmp_path):
     assert window.pivot_slider.value() == 1000
 
 
+def test_main_window_pivot_change_after_live_zero_fill_does_not_crash(qapp, tmp_path, monkeypatch):
+    # Real user-reported crash: ValueError: x and y must have same
+    # first dimension (8192 vs 4096), dragging the phase pivot slider
+    # on a pseudo-2D slice. Root cause: _phase_reference_full/
+    # _phase_freq_ppm are a one-time snapshot (_capture_phase_reference,
+    # "never called mid-drag") -- a live FID-processing change (e.g.
+    # zero-fill) that changes spectrum.data/axes' own shape via the
+    # debounced _recompute_multi_row_data left that snapshot stale, so
+    # the next phase/pivot interaction wrote the *old*-shaped snapshot
+    # straight into spectrum.data while spectrum.axes had already
+    # moved to the *new* shape. Reproduces the exact real sequence:
+    # load, change zero-fill live, let the debounce settle, then move
+    # the pivot slider -- must not raise.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, f1_nuc="off"), vendor="bruker")
+    index = window._selected_index()
+    assert window._phase_mode == "pseudo2d"
+    original_points = window.session.spectra[index].data.shape[1]
+
+    window._set_zero_fill_value(original_points * 2)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)
+    assert window.session.spectra[index].data.shape[1] == original_points * 2
+
+    window._on_pivot_slider_changed(500)  # must not raise
+
+    spectrum = window.session.spectra[index]
+    assert spectrum.data.shape[1] == len(spectrum.axes[-1].ppm)
+
+
 def test_main_window_moving_pivot_does_not_reset_phase(qapp, tmp_path):
     # Explicit user requirement: moving the pivot (spin or slider)
     # must never zero out an in-progress Phase 0/Phase 1 correction --
@@ -1607,6 +1638,68 @@ def test_main_window_current_phase_display_survives_reselection_unlike_the_hidde
     window._select_single_row(index_a)  # back to A
     assert window.phase0_spin.value() == pytest.approx(0.0)  # the hidden delta control resets, by design
     assert window.phase0_current_display.text() == "45.00°"  # but the real value is still shown
+
+
+def test_main_window_2d_phase_defaults_to_the_max_magnitude_row(qapp, tmp_path):
+    # Real user requirement: "the phasing for a 2D should still default
+    # to a 1D slice like it does before you process the indirect
+    # dimension rather than trying to phase the entire thing all at
+    # once." _make_2d_dataset's own data (np.arange reshaped) is
+    # monotonically increasing row-major, so the last row (1-based
+    # index n_f1) is unambiguously the largest-magnitude one -- picked
+    # once by _capture_phase_reference, not re-derived every tick.
+    n_f1, n_f2 = 4, 8
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=n_f1, n_f2=n_f2), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    assert window._phase_mode == "2d"
+    assert window._phase_2d_slice_index == n_f1
+
+
+def test_main_window_2d_phase_shows_a_slice_not_a_full_contour(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    assert window.canvas._contour_spectrum is not None  # starts as a contour
+
+    window.phase0_handle.setValue(45.0)
+
+    assert window.canvas._contour_spectrum is None  # now a 1D line, not a contour
+    assert len(window.canvas.ax.lines) >= 1
+    assert "F1 row" in window.canvas.ax.get_title()
+
+
+def test_main_window_2d_phase_still_applies_uniformly_to_every_row(qapp, tmp_path):
+    # The *display* changed (see the test above), but the correction
+    # itself must still be the one shared phase0/phase1 across the
+    # whole array -- not silently narrowed to only the displayed row.
+    n_f1, n_f2 = 4, 8
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=n_f1, n_f2=n_f2), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    index = window._selected_index()
+
+    window.phase0_handle.setValue(90.0)
+
+    spectrum = window.session.spectra[index]
+    complex_data = spectrum.data + 1j * spectrum.data_imag
+    reference = window._phase_reference_full
+    freq_ppm = window._phase_freq_ppm
+    for row in range(n_f1):
+        expected = processing_ft.apply_phase(reference[row], freq_ppm, 90.0, 0.0, pivot_frac=0.5)
+        np.testing.assert_allclose(complex_data[row], expected, atol=1e-8)
+
+
+def test_main_window_2d_phase_slice_follows_dimension_switch(qapp, tmp_path):
+    n_f1, n_f2 = 4, 8
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=n_f1, n_f2=n_f2), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    assert window._phase_2d_slice_index == n_f1  # F2 (direct) default: row n_f1
+
+    window.dim_combo.setCurrentIndex(1)  # switch to F1 (indirect)
+
+    assert window._phase_2d_slice_index == n_f2  # F1 default: column n_f2
 
 
 def test_main_window_2d_pivot_matches_selected_dimension(qapp, tmp_path):
