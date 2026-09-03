@@ -4994,6 +4994,61 @@ def test_main_window_fit_spectrum_works_for_1d(qapp):
     assert window.canvas_tabs.currentWidget() is window.spectral_fit_canvas
 
 
+def test_main_window_fit_spectrum_warns_when_result_lands_near_region_edge(qapp, monkeypatch):
+    # Fitting-wizard roadmap item: "a sensible warning when a fit
+    # result lands too close to its own region edge." Region (4.9,
+    # 4.98) is deliberately narrower than the true peak needs (real
+    # centre 5.0) -- the region masks out everything past 4.98, so the
+    # fit can only see the peak's rising left shoulder and pushes the
+    # fitted shift to the region's own upper edge, not because of the
+    # position-tolerance bound (widened here specifically to rule that
+    # out as the real constraint -- confirmed by direct reproduction
+    # that a default-tolerance run hits *that* bound first instead,
+    # which would defeat the purpose of this test).
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window.position_tolerance_spin.setValue(20.0)
+    window._add_peak_row(shift=4.95, fwhm=0.05, eta=0.5)
+    window._add_region_row(4.9, 4.98)
+
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
+    window._on_fit_spectrum_clicked()
+
+    assert len(warnings) == 1
+    assert "peak 1" in warnings[0]
+    assert "region" in warnings[0].lower()
+
+
+def test_main_window_fit_spectrum_no_warning_when_peak_is_well_inside_region(qapp, monkeypatch):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window.position_tolerance_spin.setValue(20.0)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    window._add_region_row(4.9, 5.5)  # peak sits centrally, nowhere near either edge
+
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
+    window._on_fit_spectrum_clicked()
+
+    assert warnings == []
+
+
+def test_main_window_fit_spectrum_no_edge_warning_without_any_regions(qapp, monkeypatch):
+    # No region at all -- an unconstrained fit has no "edge" to land
+    # near, regardless of where the fitted shift ends up.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    assert window.region_table.rowCount() == 0
+
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
+    window._on_fit_spectrum_clicked()
+
+    assert warnings == []
+
+
 def test_main_window_fit_spectrum_not_supported_for_conventional_2d(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")

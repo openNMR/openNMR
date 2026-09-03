@@ -2049,6 +2049,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Fit failed", str(exc))
             return
+        self._warn_if_fit_near_region_edge(slice_results)
         # No single spectrum "owns" a Compare-stack fit the way a
         # pseudo-2D's own slices do -- reference_spectrum only
         # supplies vendor/path context for the Values-source combo
@@ -6368,6 +6369,59 @@ class MainWindow(QMainWindow):
         )
         return fitted["rows"]
 
+    #: Fraction of a region's own width, measured from either edge,
+    #: that counts as "too close" for _warn_if_fit_near_region_edge --
+    #: arbitrary but conservative (a peak fitted to within 1/20th of
+    #: the window it was allowed to move in is a real sign the region
+    #: itself may be cutting the true peak off, not usually a
+    #: coincidence).
+    _FIT_REGION_EDGE_WARNING_FRACTION = 0.05
+
+    def _warn_if_fit_near_region_edge(self, results: list[dict]) -> None:
+        """Real fitting-wizard-roadmap requirement: "a sensible warning
+        when a fit result lands too close to its own region edge."
+        Only meaningful when the Integration Regions table actually
+        constrained the fit at all -- an unconstrained fit has no
+        "edge" to land near. For each fitted peak, "its own region" is
+        whichever region contained *that starting guess* (not the
+        fitted result, which may already have drifted outside a region
+        entirely -- a more serious problem this same check still
+        catches, since a shift outside every region trivially counts
+        as "not within the margin of the one it started in" here).
+        Aggregated across every slice into one summary dialog rather
+        than one popup per slice -- a pseudo-2D fit can run across
+        hundreds of slices, and a popup per slice would make the whole
+        feature unusable at that scale."""
+        fit_regions = self._read_region_defs()
+        if not fit_regions:
+            return
+        affected: dict[int, int] = {}
+        for result in results:
+            per_peak = processing_fitting.extract_params_and_errors(
+                result["popt"], result["pcov"], result["peak_defs"], result["is_free"],
+            )
+            for i, peak in enumerate(per_peak):
+                fitted_shift = dict(zip(peak["names"], peak["params"]))["shift"]
+                start_shift = result["peak_defs"][i]["shift"]
+                region = next(((lo, hi) for lo, hi in fit_regions if lo <= start_shift <= hi), None)
+                if region is None:
+                    continue
+                lo, hi = region
+                margin = self._FIT_REGION_EDGE_WARNING_FRACTION * (hi - lo)
+                if margin > 0 and (fitted_shift - lo < margin or hi - fitted_shift < margin):
+                    affected[i] = affected.get(i, 0) + 1
+        if not affected:
+            return
+        n_slices = len(results)
+        detail = "; ".join(f"peak {i + 1} in {count} of {n_slices} slice(s)"
+                            for i, count in sorted(affected.items()))
+        QMessageBox.warning(
+            self, "Fit landed near a region edge",
+            f"The fitted shift ended up within {self._FIT_REGION_EDGE_WARNING_FRACTION:.0%} of its own "
+            f"region's edge for {detail} -- the true peak may extend beyond that region. Consider "
+            f"widening the region in the Integration Regions table.",
+        )
+
     def _store_slice_results(self, spectrum, results: list[dict]) -> None:
         self._slice_fit_results = results
         # Kept per-spectrum (not just in the live _slice_fit_results
@@ -6448,6 +6502,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Fit failed", str(exc))
             return
+        self._warn_if_fit_near_region_edge(results)
 
         self._show_spectral_fit_results(spectrum, results)
 
@@ -6680,6 +6735,7 @@ class MainWindow(QMainWindow):
                 n_slices = spectrum.data.shape[0]
                 entries = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))["rows"]
                 slice_results = self._fit_peaks(entries)
+                self._warn_if_fit_near_region_edge(slice_results)
                 self._show_spectral_fit_results(spectrum, slice_results)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Fit failed", str(exc))
