@@ -185,7 +185,6 @@ def find_gamma(isotope, field='', SFO1=''):
         gamma = abs(gamma / 1e6)
         field_strength = 11.75
         freqactual = SFO1 / (field_strength / 5)
-        gamma = abs(gamma / 1e6)
         sortdf = df.sort_values("Gyromagnetic Ratio (MHz/T)")
         df_closest = sortdf.iloc[
             (sortdf['Gyromagnetic Ratio (MHz/T)'].astype(float) - freqactual).abs().argsort()[:1]

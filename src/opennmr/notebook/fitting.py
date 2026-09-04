@@ -525,7 +525,7 @@ def fit_spectrum(results, peak_defs, fit_regions=None, use_normalised=True, x_un
             idx += step
         return popt
 
-    final_popt = popt if use_normalised else rescale_params(popt, scale)
+    final_popt = rescale_params(popt, scale) if use_normalised else popt
 
     return final_popt, pcov_free, is_free, scale, x_ref
 
@@ -599,7 +599,7 @@ def compute_integrals(x, components):
     integrals = [_trapz(np.asarray(comp)[order], x_sorted) for comp in components[:-1]]
     total = np.sum(integrals)
 
-    if total > 0:
+    if total != 0:
         integrals_norm = [100 * a / total for a in integrals]
     else:
         integrals_norm = [np.nan for _ in integrals]

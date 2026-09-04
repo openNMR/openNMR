@@ -171,10 +171,9 @@ def NMR2dimport(datapath, procno=1, f1l=0, f1r=0, f2l=0, f2r=0, homonuclear=Fals
             if XDIM_F2str in line.decode():
                 linestr = line.decode()
                 XDIM_F2 = int(linestr[len(XDIM_F2str):len(linestr) - 1])
-            if ~np.isnan(SI) and ~np.isnan(NC_proc) and ~np.isnan(SF) and XDIM_F2 != int(0):
-                break
             if GRPDLYstr in line.decode():
                 GRPDLY = float(line.decode().split('=')[1])
+            if ~np.isnan(SI) and ~np.isnan(NC_proc) and ~np.isnan(SF) and XDIM_F2 != int(0):
                 break
 
     # ----- acqu2s (F1 / indirect dimension) -----
