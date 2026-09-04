@@ -702,6 +702,38 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         si1 = int(zero_fill_f1) if zero_fill_f1 is not None else int(proc2s.get("SI", spectrum.shape[0]))
         fid_f1 = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, spectrum)
         spectrum = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, 1.0 / sw_1)[1], 0, fid_f1)
+        if fn_mode not in (4, 5, 6):
+            # Real bug, found and fixed: for FnMODE 0-3 (QF and friends
+            # -- decode_hypercomplex_f1 is a no-op for these, see its
+            # own docstring), each row's own raw complex value is used
+            # directly as F1's time-domain point. That value already
+            # carries the module-level _CONJUGATE_QUADRATURE_NOTE fix
+            # (np.conj(data), applied once up front) -- correct for F2
+            # (confirmed against real data), but that fix's own
+            # docstring explicitly flagged F1 as *assumed*, not
+            # verified, "since every real dataset available while
+            # building this was pseudo-2D, which never exercises the F1
+            # FFT branch". This is the first genuine (non-pseudo) QF-
+            # mode 2D dataset to actually exercise it, and the
+            # assumption doesn't hold: conjugating a signal before its
+            # own FFT reverses that FFT's own frequency-bin order
+            # (FFT(conj(x))[k] == conj(FFT(x)[-k])), so F1 comes out
+            # mirrored -- confirmed directly against real COSY data
+            # (test_data/Bruker Example Data/exam_CMCse_3/12,
+            # PULPROG cosygpmfppqf, FnMODE 1): read_2d_processed's own
+            # (trusted) diagonal peaks sit at up to ~135x higher
+            # intensity once F1 is reversed to match, at every one of 8
+            # independently-checked positions along the diagonal (a
+            # homonuclear COSY's own diagonal peaks are always at
+            # F1==F2, an unambiguous, dataset-independent check). The
+            # hypercomplex modes (4/5/6) don't need this: their own row-
+            # pair recombination (decode_hypercomplex_f1) evidently
+            # already produces the correct F1 direction as a side
+            # effect of its own construction (already validated
+            # end-to-end against real States-TPPI/Echo-Antiecho data
+            # elsewhere in this project's history) -- this fix is
+            # deliberately scoped to leave that path untouched.
+            spectrum = spectrum[::-1, :]
         y_ppm, y_hz = _ppm_hz_axis(o1_1, sf_1, obs_1, sw_1, si1)
         y_axis = NMRAxis(kind="frequency", ppm=y_ppm, hz=y_hz)
 

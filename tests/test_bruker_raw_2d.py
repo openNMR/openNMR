@@ -122,6 +122,63 @@ def test_read_2d_heteronuclear_uses_acqu2s(tmp_path, monkeypatch):
     assert spectrum.axes[0].kind == "frequency"
 
 
+def _synthetic_qf_2d_fid(n1=16, n2=32, sw1=2000.0, sw2=8000.0, f0_hz=1000.0, f1_hz=500.0):
+    """A raw ``ser``-shaped fixture for plain QF (FnMODE 0-3, one raw
+    row per t1 increment, no row-pairing at all) with a real,
+    deliberately signed F1 modulation -- unlike
+    ``_synthetic_hypercomplex_2d_fid``'s own end-to-end check (which
+    only ever compares ``abs(abs(peak_hz) - f1_hz)``, blind to which
+    *side* of centre the recovered peak lands on), this fixture exists
+    specifically to catch a mirrored F1 axis, which needs the sign
+    checked directly."""
+    t2 = np.arange(n2) / sw2
+    f2signal = np.exp(-t2 * 300) * np.exp(2j * np.pi * f0_hz * t2)
+    rows = []
+    for k in range(n1):
+        t1 = k / sw1
+        rows.append(np.exp(-2j * np.pi * f1_hz * t1) * f2signal)
+    return np.array(rows, dtype=np.complex128)
+
+
+def test_read_2d_qf_f1_axis_is_not_mirrored(tmp_path, monkeypatch):
+    # Real bug, found and fixed: for FnMODE 0-3 (QF and friends --
+    # decode_hypercomplex_f1 is a no-op for these), each row's own raw
+    # complex value is used directly as F1's time-domain point, which
+    # already carries the module-level np.conj(data) fix applied once,
+    # up front, for F2's own sake. That fix's own docstring explicitly
+    # flagged F1 as *assumed*, not verified, correct under the same
+    # convention -- confirmed wrong here: conjugating a signal before
+    # its own FFT reverses that FFT's own frequency-bin order, so F1
+    # came out mirrored. Confirmed directly against real COSY data
+    # (PULPROG cosygpmfppqf, FnMODE 1, test_data/Bruker Example
+    # Data/exam_CMCse_3/12): read_2d_processed's own trusted diagonal
+    # peaks (a homonuclear COSY's diagonal is always exactly F1==F2,
+    # dataset-independent) sat at up to ~135x higher intensity in
+    # read_2d's own output once F1 was reversed to match, checked at 8
+    # independent positions along the diagonal.
+    #
+    # This test uses a deliberately *signed* synthetic F1 frequency and
+    # checks the recovered peak's own sign directly -- unlike
+    # test_read_2d_states_and_states_tppi_recover_known_f1_frequency
+    # below, which only ever compares abs(abs(peak_hz) - f1_hz), blind
+    # to which side of centre the recovered peak lands on, and would
+    # not have caught this.
+    n1, sw1 = 16, 2000.0
+    path = _make_2d_experiment_dir(tmp_path, proc2s_overrides={"SI": n1, "SW_p": sw1})
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqu2s = {"NUC1": "13C", "BF1": 100.6, "O1": 0.0, "FnMODE": 1}
+    f1_hz = 500.0
+    fid = _synthetic_qf_2d_fid(n1=n1, sw1=sw1, f1_hz=f1_hz)
+    _mock_2d(monkeypatch, acqus, fid, acqu2s=acqu2s)
+
+    spectrum = bruker.read_2d(path, homonuclear=False, autophase=False)
+
+    f1_ppm = spectrum.axes[0].ppm
+    f1_projection = np.abs(spectrum.data + 1j * spectrum.data_imag).sum(axis=1)
+    peak_hz = f1_ppm[np.argmax(f1_projection)] * spectrum.metadata.sfo1_indirect
+    assert abs(peak_hz - f1_hz) < (sw1 / n1) * 1.5  # signed comparison -- not abs(peak_hz)
+
+
 def _synthetic_hypercomplex_2d_fid(fn_mode, n1=16, n2=32, sw1=2000.0, sw2=8000.0, f0_hz=1000.0, f1_hz=None):
     """A raw ``ser``-shaped fixture (``2*n1`` rows for States/States-
     TPPI/Echo-Antiecho, one row-pair per t1 increment) built from the
