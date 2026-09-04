@@ -634,6 +634,7 @@ class MplCanvas(QWidget):
         _, _, self._proj_axes = plotting.plot_2d_contour(
             self._contour_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
             clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
+            square_aspect=self._aspect_ratio is None,
             **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
         )
         if preserve_view:
@@ -1179,21 +1180,17 @@ class MplCanvas(QWidget):
             existing = self.ax.get_legend()
             if existing is not None:
                 existing.remove()
-        # A 2D/pseudo-2D contour panel defaults to a square physical
-        # box (real roadmap ask: "the contour panel itself should be
-        # square... automatic/default for 2D, not something the user
-        # has to turn on") -- distinct from the general, user-driven
-        # _aspect_ratio lock above, which still wins outright when the
-        # user has explicitly set one (an arbitrary width:height ratio
-        # is a deliberate choice, not something this default should
-        # override). Every other view (1D, FID, Compare, Processing
-        # preview) keeps today's behaviour: fully auto unless locked.
-        if self._aspect_ratio is not None:
-            self.ax.set_box_aspect(self._aspect_ratio)
-        elif self._contour_spectrum is not None:
-            self.ax.set_box_aspect(1.0)
-        else:
-            self.ax.set_box_aspect(None)
+        # A 2D/pseudo-2D contour panel's own default square box (real
+        # roadmap ask: "the contour panel itself should be square...
+        # automatic/default for 2D") is applied by plot_2d_contour's own
+        # square_aspect (via the same AxesDivider that lays out the F1/
+        # F2 projections, see that function's own docstring for why --
+        # box_aspect alone shrinks the main axes in isolation, stranding
+        # any sibling projection axes at their pre-shrink position), not
+        # here. This still applies the user's own general, explicit
+        # _aspect_ratio lock (None when unlocked -- a no-op layered on
+        # top of whatever plot_2d_contour's own divider already set).
+        self.ax.set_box_aspect(self._aspect_ratio)
         # matplotlib's own Axes.grid(visible, **kwargs) quirk: passing
         # any style kwarg (even alongside visible=False) is treated as
         # an implicit "turn it on" and warns -- only pass alpha when
@@ -1318,6 +1315,7 @@ class MplCanvas(QWidget):
             _, _, self._proj_axes = plotting.plot_2d_contour(
                 spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
                 clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
+                square_aspect=self._aspect_ratio is None,
                 **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
             )
         else:

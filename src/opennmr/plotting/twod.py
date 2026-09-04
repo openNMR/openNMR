@@ -18,7 +18,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from matplotlib.ticker import MultipleLocator, MaxNLocator
-from mpl_toolkits.axes_grid1 import make_axes_locatable
+from mpl_toolkits.axes_grid1 import axes_size
+from mpl_toolkits.axes_grid1.axes_divider import AxesDivider
 
 from ..core.registry import find_gamma, NUC_label
 from ..core.spectrum import NMRSpectrum
@@ -105,7 +106,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                      pl_height=7.0, pl_width=7.0, factor=0.07, clevels=7,
                      level_mode="power", power=1.25,
                      proj_scale=1.0, projection_mode="auto", show_projections=True,
-                     projection_size=2.0, projection_pad=0.1,
+                     projection_size=2.0, projection_pad=0.1, square_aspect=True,
                      field='', xlabel=None, ylabel=None, xlims=None, ylims=None,
                      font='Arial', fontsize=12, output_format='',
                      colour_spectra=None, equal_tickspacing=False, tick_number=None,
@@ -123,6 +124,24 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
 
     ``show_projections`` : ``True`` (both), ``False`` (neither, e.g.
     embedding a compact panel), or ``'f1'``/``'f2'`` (one only).
+
+    ``square_aspect`` : ``True`` (default) makes the main contour panel
+    itself square, via the same ``AxesDivider`` that lays out the F1/F2
+    projections (``divider.set_aspect(True)``) rather than
+    ``ax.set_box_aspect`` -- the divider coordinates *all* of its cells
+    (main panel + any appended projections) together when resizing for
+    the aspect constraint, so the projections stay correctly sized/
+    positioned against the now-square panel; ``ax.set_box_aspect``
+    shrinks only the main axes in isolation, leaving sibling axes
+    created via ``divider.append_axes`` stranded at their pre-shrink
+    position/size (confirmed directly -- a real, visible misalignment,
+    not a theoretical concern). Set ``False`` to leave the panel's
+    aspect fully auto (e.g. a caller that will apply its own
+    ``ax.set_box_aspect``/``set_aspect`` afterward -- doing so together
+    with ``square_aspect=True`` is redundant, not additive, and doing
+    so with ``square_aspect=True`` when projections are also shown
+    reintroduces the exact misalignment this parameter exists to
+    avoid).
 
     ``clevels``/``level_mode``/``power`` : see :func:`_prepare_contour`.
 
@@ -182,7 +201,24 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     else:
         ax.contour(contour_x, contour_y, contour_data, colors='black', levels=thresvec)
 
-    divider = make_axes_locatable(ax)
+    # A plain make_axes_locatable(ax) divider's default reference sizes
+    # (Size.AxesX/AxesY) are the axes' own *data-coordinate range*, not
+    # its physical size -- fine for divider.set_aspect(False) (this
+    # function's own non-square path, where the reference size choice
+    # doesn't affect the result either way), but wrong for
+    # square_aspect=True: equalising those would make 1 ppm on F2 equal
+    # 1 ppm on F1 *physically* (data-aspect-locked), not make the panel
+    # itself a square box -- and F1/F2 ppm spans are essentially never
+    # numerically equal for real NMR data (confirmed directly: a real
+    # HSQC's F2/F1 spans differed by ~10x, producing a panel roughly
+    # 1 inch by 10 inches under the plain make_axes_locatable default,
+    # not square at all, despite divider.set_aspect(True) being set).
+    # Size.Scaled(1) is a plain, data-independent relative unit -- using
+    # it for both directions makes divider.set_aspect(True) equalise
+    # genuine physical box dimensions instead.
+    divider = AxesDivider(ax, xref=axes_size.Scaled(1), yref=axes_size.Scaled(1))
+    ax.set_axes_locator(divider.new_locator(nx=0, ny=0))
+    divider.set_aspect(square_aspect)
 
     ax.set_xlabel(labeltextx, fontsize=fontsize)
     if pseudo2d:

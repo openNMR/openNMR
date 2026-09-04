@@ -254,10 +254,68 @@ def test_aspect_ratio_persists_across_show_spectrum(qapp):
     assert canvas.ax.get_box_aspect() == pytest.approx(1.5)
 
 
-def test_2d_contour_defaults_to_a_square_box_aspect(qapp):
+def _make_2d_asymmetric_range(n_f1=8, n_f2=64):
+    """Like _make_2d, but with a deliberately very different F1 vs. F2
+    ppm *span* (10 ppm vs. 200 ppm, a real-world-scale mismatch -- e.g.
+    a real 1H/13C HSQC's own F2/F1 spans differ by roughly this much).
+    _make_2d's own equal 10-ppm/10-ppm spans are a real blind spot for
+    testing square_aspect: mpl_toolkits.axes_grid1's default divider
+    reference size (Size.AxesX/AxesY) is the axes' own *data range*,
+    not its physical size -- with equal spans, "equalise the data-range
+    reference" and "make the physical box square" coincidentally agree,
+    which is exactly what let a real square_aspect+projections bug slip
+    through undetected (found directly against real HSQC data, not
+    this fixture -- fixed by using Size.Scaled(1) references instead,
+    see plotting.twod.plot_2d_contour's own square_aspect docstring)."""
+    x_ppm = np.linspace(0, 10, n_f2)
+    y_ppm = np.linspace(0, 200, n_f1)
+    data = np.exp(-((x_ppm - 5) ** 2)) * np.ones((n_f1, 1))
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", nucleus_indirect="13C", sfo1=400.0, sfo1_indirect=100.0)
+    f1_axis = NMRAxis(kind="frequency", ppm=y_ppm, hz=y_ppm * 100.0)
+    f2_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_ppm * 400.0)
+    return NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
+
+
+def test_2d_contour_defaults_to_a_square_physical_panel(qapp):
+    # get_box_aspect() alone doesn't discriminate here -- square_aspect
+    # is implemented via the AxesDivider (divider.set_aspect(True)), not
+    # ax.set_box_aspect, so box_aspect itself stays None. The physical
+    # position (in figure-fraction, converted to inches) is what
+    # actually needs checking. A real synchronous draw() is required --
+    # the divider's own locator resolves lazily at draw time, not at
+    # show_spectrum() (which only calls the async draw_idle()).
     canvas = MplCanvas()
-    canvas.show_spectrum(_make_2d())
-    assert canvas.ax.get_box_aspect() == pytest.approx(1.0)
+    canvas.figure.set_size_inches(10, 6)  # deliberately non-square figure
+    canvas.show_spectrum(_make_2d_asymmetric_range())
+    canvas.canvas.draw()
+    pos = canvas.ax.get_position()
+    fig_w, fig_h = canvas.figure.get_size_inches()
+    assert pos.width * fig_w == pytest.approx(pos.height * fig_h, rel=1e-6)
+
+
+def test_2d_square_default_keeps_f1_f2_projections_matched_to_the_panel(qapp):
+    # An invariant, not the specific bug (see test_2d_contour_defaults_
+    # to_a_square_physical_panel for that -- confirmed directly by
+    # temporarily reverting to a plain make_axes_locatable() divider
+    # that this "matched" property alone does NOT discriminate the real
+    # bug: the appended F1/F2 axes are sized via that exact same
+    # divider as the main panel, so they track *whatever* the main
+    # panel's own cell resolves to, square or not). Kept anyway as a
+    # genuine, separately-worth-having regression check: if a future
+    # change ever gave the projections their own independent sizing
+    # instead of going through the same coordinated divider, this is
+    # what would catch it going out of sync with the main panel.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(10, 6)
+    canvas.show_spectrum(_make_2d_asymmetric_range())
+    canvas.canvas.draw()
+    ax_pos = canvas.ax.get_position()
+    f1_pos = canvas._proj_axes["f1"].get_position()
+    f2_pos = canvas._proj_axes["f2"].get_position()
+    assert ax_pos.height == pytest.approx(f1_pos.height, rel=1e-6)
+    assert ax_pos.width == pytest.approx(f2_pos.width, rel=1e-6)
+    assert ax_pos.x0 - f1_pos.x1 == pytest.approx(0.1 / 10, abs=1e-3)  # projection_pad, in fig-fraction
+    assert f2_pos.y0 - ax_pos.y1 == pytest.approx(0.1 / 6, abs=1e-3)
 
 
 def test_2d_square_default_survives_a_contour_redraw(qapp):
@@ -266,9 +324,13 @@ def test_2d_square_default_survives_a_contour_redraw(qapp):
     # show_spectrum that also rebuilds the axes from scratch -- confirm
     # the square default isn't only applied on the very first render.
     canvas = MplCanvas()
-    canvas.show_spectrum(_make_2d())
+    canvas.figure.set_size_inches(10, 6)
+    canvas.show_spectrum(_make_2d_asymmetric_range())
     canvas._redraw_contour(preserve_view=False)
-    assert canvas.ax.get_box_aspect() == pytest.approx(1.0)
+    canvas.canvas.draw()
+    pos = canvas.ax.get_position()
+    fig_w, fig_h = canvas.figure.get_size_inches()
+    assert pos.width * fig_w == pytest.approx(pos.height * fig_h, rel=1e-6)
 
 
 def test_explicit_aspect_ratio_overrides_the_2d_square_default(qapp):
