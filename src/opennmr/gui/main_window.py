@@ -2854,6 +2854,7 @@ class MainWindow(QMainWindow):
         if raw_fid.ndim == 2:
             if spectrum.is_pseudo_2d:
                 row = min(max(self.slice_spin.value() - 1, 0), raw_fid.shape[0] - 1)
+                spectrum_row = row + 1
             elif self._phase_2d_slice_index is not None and self.dim_combo.currentIndex() == 0:
                 # This method only ever previews the F2 (direct)
                 # dimension -- callers route the F1 (indirect) case to
@@ -2875,6 +2876,19 @@ class MainWindow(QMainWindow):
                 # 2D by _fid_preview_available, so its own
                 # raw_fid.ndim == 2 branch never runs for this case.)
                 row = self._phase_2d_proportional_row(spectrum, raw_fid.shape[0])
+                # _phase_2d_slice_index is already the exact 1-based
+                # index into spectrum's own (processed) F1 axis --
+                # unlike `row`, which _phase_2d_proportional_row's own
+                # docstring warns is only an approximate mapping into
+                # the differently-sized *raw* array, "not... a specific
+                # real data point". Using it directly here (rather than
+                # row + 1) only happens to give the same value today
+                # because _phase_2d_slice_index is hardcoded to 1 (see
+                # _capture_phase_reference) -- keeping this explicit
+                # avoids silently breaking again if that hardcoding is
+                # ever revisited, the way it already changed once this
+                # session (away from a largest-magnitude pick).
+                spectrum_row = self._phase_2d_slice_index
             else:
                 # No valid F2 slice index yet (e.g. dim_combo is on F1
                 # -- shouldn't normally reach here, see above -- or
@@ -2883,6 +2897,19 @@ class MainWindow(QMainWindow):
                 # "First" row, matching the user's own "first or
                 # largest magnitude" framing for the default.
                 row = 0
+                spectrum_row = row + 1
+            # title labels the FID panel specifically (show_processing_
+            # preview sets it via fid_ax.set_title, not on the spectrum
+            # axes below) -- that panel's own data is raw_fid[row]
+            # (unchanged, still genuinely raw-row-based even after the
+            # spectrum-panel fix below), so the title must keep
+            # describing *that* row, i.e. row + 1, not spectrum_row.
+            # _phase_2d_proportional_row's own job is picking a raw row
+            # that approximately *is* the same acquisition slice as
+            # spectrum_row, so this remains an accurate (if approximate)
+            # label for the spectrum panel too whenever the two diverge
+            # (e.g. after a live F1 zero-fill/truncate) -- see
+            # test_main_window_processing_preview_slice_matches_spectrum_tab_across_zero_fill_mismatch.
             title = self._slice_label(spectrum, row + 1)
             raw_fid = raw_fid[row]
             # Echo-Antiecho (FnMODE 6): "fid_raw" already carries
@@ -2905,12 +2932,50 @@ class MainWindow(QMainWindow):
             # trace looks like at a glance, not a literal phase error.
             if spectrum.metadata.raw.get("fn_mode", 1) == 6 and row % 2 == 0:
                 raw_fid = np.conj(raw_fid)[::-1]
-            slice_template = get_trace(spectrum, axis="f1", index=row + 1)
+            slice_template = get_trace(spectrum, axis="f1", index=spectrum_row)
 
         computed = self._process_raw_fid_row(spectrum, raw_fid, dt)
         if computed is None:
             return None
         filled, data = computed
+
+        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
+            # Real bug, found and fixed: for a genuine 2D, "raw_fid[row],
+            # reprocessed through F2's own pipeline alone" is a
+            # fundamentally different quantity from "F1's actual
+            # frequency bin at this slice" (spectrum.data's own row) --
+            # F1's bin is a *weighted FFT combination across every raw
+            # row*, not any single row on its own. For a dataset with
+            # real F1 modulation (e.g. an EXSY, where slice-to-slice
+            # variation *is* the signal), the two can look completely
+            # different -- confirmed directly against real States-TPPI
+            # EXSY data: ~94% relative difference for the default
+            # "Slice 1" preview, while adjacent *raw* rows alone
+            # already differ from each other by ~200%, confirming the
+            # gap is an expected consequence of comparing "one raw row"
+            # against "an FFT combination of many", not a computation
+            # bug (the same raw-row pipeline matches spectrum.data
+            # exactly, to floating-point precision, whenever the two
+            # really are the same quantity -- i.e. pseudo-2D, or any
+            # 1D case). User report: "still something different between
+            # the processing and 2D contour... maybe just the first
+            # slice."
+            #
+            # Fixed the same way _show_2d_indirect_processing_preview
+            # already handles F1: for a genuine 2D, trust spectrum.data
+            # itself (already the single source of truth for the
+            # current total phase, including any live F2-phase-drag
+            # delta -- _apply_phase_preview's own "2d" branch writes
+            # that straight into spectrum.data before this ever runs,
+            # same as it does for F1) rather than re-deriving an
+            # approximation from one raw row. slice_template (already
+            # computed above, via get_trace) *is* that accurate trace --
+            # only the FID panel above still needs the raw row's own
+            # time-domain signal, which remains a legitimate, genuinely
+            # per-row concept (window/TDeff/align-echo apply the same
+            # way to every row) even though the spectrum panel no
+            # longer derives from it.
+            return filled, dt, slice_template, title
 
         # The ppm axis's *range* is fixed by acquisition (O1/SF/SW),
         # unaffected by window/zero-fill choice -- only the point

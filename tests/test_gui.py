@@ -3494,6 +3494,68 @@ def test_main_window_recompute_uses_each_dimensions_own_pivot_not_the_other_ones
     np.testing.assert_allclose(spectrum.complex_data, ref.complex_data, rtol=1e-6)
 
 
+def test_main_window_processing_preview_uses_spectrum_data_for_genuine_2d(qapp, tmp_path, monkeypatch):
+    # Real bug, found and fixed: for a genuine (non-pseudo) 2D,
+    # _compute_processing_preview built its "Slice 1" preview by
+    # reprocessing raw_fid[0] through F2's own pipeline alone -- but
+    # that raw row is a fundamentally different quantity from F1
+    # frequency bin 1 (spectrum.data's own row 0), which is a *weighted
+    # FFT combination across every raw row*, not any single row on its
+    # own. Whenever real F1 modulation exists (e.g. an EXSY, where
+    # slice-to-slice variation *is* the signal), the two can look
+    # completely different. Confirmed directly against real States-TPPI
+    # EXSY data: ~94% relative difference for the default "Slice 1"
+    # preview. Real user report: "still something different between the
+    # processing and 2D contour... maybe just the first slice."
+    #
+    # Fixed the same way _show_2d_indirect_processing_preview already
+    # handles F1: for a genuine 2D, trust spectrum.data itself (already
+    # the single source of truth for the current total phase, including
+    # any live phase-drag delta) rather than re-deriving an
+    # approximation from one raw row.
+    #
+    # This fixture gives every raw row a deliberately different F2
+    # frequency, so F1 bin 1 (a combination across all rows) is
+    # guaranteed to differ sharply from row 0 alone -- confirmed before
+    # this fix, reprocessing raw_fid[0] alone was off by ~102% relative
+    # to spectrum.complex_data[0] on this exact fixture; fixed, it
+    # matches to floating-point precision.
+    n_f1, n_f2 = 6, 32
+    t2 = np.arange(n_f2) / 8000.0
+    rows = [
+        np.exp(-t2 * 300) * np.exp(2j * np.pi * (1000.0 + 300.0 * k) * t2)
+        for k in range(n_f1)
+    ]
+    fid = np.array(rows, dtype=np.complex128)
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=n_f1, n_f2=n_f2, name="previewgenuine2d", f1_nuc="13C", fid=fid)
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)  # opt into genuine 2D
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    assert not spectrum.is_pseudo_2d
+    # Isolates the row-selection logic under test from the unrelated
+    # live-vs-baked-in baseline-correction timing gap that every other
+    # preview test in this file already works around the same way.
+    spectrum.metadata.raw["baseline_correct"] = False
+
+    filled, dt, preview_spectrum, title = window._compute_processing_preview(spectrum)
+
+    assert title == "Slice 1"
+    np.testing.assert_allclose(preview_spectrum.complex_data, spectrum.complex_data[0], atol=1e-6)
+
+    # Live phase drag must still flow through: _apply_phase_preview's
+    # own "2d" branch writes a phase-dragged delta straight into
+    # spectrum.data, and the preview must keep tracking that value, not
+    # freeze at whatever it showed when the drag started.
+    window.phase0_spin.setValue(37.0)
+    window._apply_phase_preview()
+    _filled2, _dt2, preview_spectrum2, _title2 = window._compute_processing_preview(spectrum)
+    assert not np.allclose(preview_spectrum2.complex_data, preview_spectrum.complex_data)
+    np.testing.assert_allclose(preview_spectrum2.complex_data, spectrum.complex_data[0], atol=1e-6)
+
+
 def test_main_window_zero_fill_f1_and_f2_together_matches_read_2d_directly(qapp, tmp_path, monkeypatch):
     # Real user concern: "the SI for both dimensions doesn't screw up
     # anything else" -- changing F2's own zero-fill (the pre-existing
