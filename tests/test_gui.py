@@ -934,6 +934,76 @@ def test_main_window_zero_phase_buttons_zero_only_their_own_order(qapp, tmp_path
     assert window.phase1_handle.value() == pytest.approx(0.0)
 
 
+def test_main_window_committed_phase0_wraps_cyclically_past_360(qapp, tmp_path):
+    # Real user request: "make 0th order phase cyclic from 0 to 359" --
+    # phase0 is a full rotation (exp(i*phase0)), physically identical
+    # 360deg away, so it shouldn't grow unbounded across many separate
+    # drag sessions the way phase1 (a ramp rate, not a rotation) still
+    # should.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    spectrum = window.session.spectra[window._selected_index()]
+    spectrum.metadata.raw["phase0"] = 0.0
+
+    window.phase0_handle.setValue(400.0)  # deliberately past a full rotation
+    window._capture_phase_reference()  # commits the pending delta
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(40.0)
+
+
+def test_main_window_committed_phase0_wraps_negative_deltas_into_range(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    spectrum = window.session.spectra[window._selected_index()]
+    spectrum.metadata.raw["phase0"] = 40.0
+
+    window.phase0_handle.setValue(-100.0)  # would go negative without wrapping
+    window._capture_phase_reference()
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(300.0)
+
+
+def test_main_window_phase1_is_not_wrapped(qapp, tmp_path):
+    # Phase 1 is deliberately excluded -- a ramp rate across the
+    # spectrum, not a rotation, so "modulo 360" has no equivalent
+    # physical meaning for it (matches _PHASE_SPIN_RANGE's own
+    # genuinely-unbounded design for the live delta itself).
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    spectrum = window.session.spectra[window._selected_index()]
+    spectrum.metadata.raw["phase1"] = 0.0
+
+    window.phase1_handle.setValue(400.0)
+    window._capture_phase_reference()
+    assert spectrum.metadata.raw["phase1"] == pytest.approx(400.0)
+
+
+def test_main_window_phase0_display_wraps_mid_drag_before_commit(qapp, tmp_path):
+    # The display must stay cyclic continuously during an active drag,
+    # not just once it's committed.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
+    spectrum = window.session.spectra[window._selected_index()]
+    spectrum.metadata.raw["phase0"] = 0.0
+    window._capture_phase_reference()  # re-anchor against the baseline set above
+
+    window.phase0_handle.setValue(370.0)  # not yet committed
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(0.0)  # unchanged until commit
+    assert window.phase0_current_display.text() == "10.00°"  # but the display already wraps
+
+
+def test_main_window_f1_phase0_also_wraps_cyclically(qapp, tmp_path, monkeypatch):
+    # Same wrap must apply to phase0_f1 (the indirect dimension's own
+    # zero-order phase), not just F2's plain "phase0" key.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    spectrum = window.session.spectra[window._selected_index()]
+
+    window.dim_combo.setCurrentIndex(1)  # F1 focused
+    window.phase0_handle.setValue(400.0)
+    window._capture_phase_reference()  # commits
+    assert spectrum.metadata.raw["phase0_f1"] == pytest.approx(40.0)
+
+
 def test_main_window_autophase_button_sets_phase0_and_resets_phase1(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
@@ -3385,6 +3455,43 @@ def test_main_window_processing_preview_applies_echo_antiecho_row_transform(qapp
 
     assert title == "Slice 1"
     np.testing.assert_allclose(preview_spectrum.complex_data, actual_row0, atol=1e-6)
+
+
+def test_main_window_recompute_uses_each_dimensions_own_pivot_not_the_other_ones(qapp, tmp_path, monkeypatch):
+    # Real bug, found and fixed: _recompute_multi_row_data reapplies
+    # F2's and F1's own committed phase separately, but both reused the
+    # *same* live pivot_spin.value() -- meaningful for only whichever
+    # dimension the Phase panel happens to be currently focused on. A
+    # nonzero phase1 (F2) committed while F1 is the focused dimension
+    # (pivot_spin centred on F1's own, unrelated ppm range) got
+    # reapplied around the *wrong* pivot on every live recompute
+    # afterward (window/zero-fill/etc.) -- a genuinely different,
+    # wrong correction, not a cosmetic one (pivot_frac defines where
+    # the phase1 ramp is zero). Confirmed directly: with F1's own
+    # centre (0.0 ppm) reused as F2's pivot on a fixture where F2's own
+    # range doesn't even contain 0, the resulting data was off by
+    # ~129% relative to the correct (centre-pivoted) reference; fixed,
+    # it matches to floating-point precision.
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=32, name="pivotmix2d", f1_nuc="13C")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+
+    f1_ppm = spectrum.axis_values(0, "ppm")
+    f2_ppm = spectrum.axis_values(-1, "ppm")
+    assert not (f2_ppm.min() <= 0.0 <= f2_ppm.max())  # F1's own centre (~0) falls outside F2's range
+
+    window.phase1_handle.setValue(50.0)  # commit a real F2 phase1 while F2 is focused
+    window.dim_combo.setCurrentIndex(1)  # switch focus to F1 -- pivot_spin recentres onto F1's own range
+    assert spectrum.metadata.raw.get("phase1") == pytest.approx(50.0)
+
+    window._recompute_multi_row_data(spectrum)
+
+    from opennmr.io import bruker as bruker_io
+    ref = bruker_io.read_2d(path, phase0=0.0, phase1=50.0, pivot_frac=0.5, autophase=False, pseudo_2d=False)
+    np.testing.assert_allclose(spectrum.complex_data, ref.complex_data, rtol=1e-6)
 
 
 def test_main_window_zero_fill_f1_and_f2_together_matches_read_2d_directly(qapp, tmp_path, monkeypatch):

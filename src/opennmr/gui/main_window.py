@@ -3050,6 +3050,22 @@ class MainWindow(QMainWindow):
         if raw_fid is None or dt is None or raw_fid.ndim != 2:
             return False
 
+        # Whether the live phase-editing session (_phase_mode/dim_combo/
+        # pivot_spin) is actually targeting *this* spectrum right now --
+        # guards the F2/F1 pivot reuse below from a live pivot_spin
+        # value that belongs to a completely different, unrelated
+        # spectrum (this method's callers always operate on whatever's
+        # currently selected, and _capture_phase_reference keeps
+        # _phase_target_index in sync with that on every selection
+        # change, so this should hold in practice -- checked explicitly
+        # rather than assumed, since nothing else in this method
+        # verifies it).
+        is_phase_target = (
+            self._phase_target_index is not None
+            and 0 <= self._phase_target_index < len(self.session)
+            and self.session.spectra[self._phase_target_index] is spectrum
+        )
+
         fn_mode = spectrum.metadata.raw.get("fn_mode", 1)
         if fn_mode == 6:
             # Mirrors io.bruker.read_2d's own fn_mode==6 raw-row
@@ -3096,7 +3112,25 @@ class MainWindow(QMainWindow):
         phase0 = float(spectrum.metadata.raw.get("phase0", 0.0))
         phase1 = float(spectrum.metadata.raw.get("phase1", 0.0))
         span2 = ppm2.max() - ppm2.min()
-        pivot_frac2 = (self.pivot_spin.value() - ppm2.min()) / span2 if span2 else 0.5
+        # pivot_spin is a single, shared widget -- only meaningful for
+        # F2 specifically while F2 is the currently-focused dimension
+        # (pseudo-2D phasing is always F2, so always meaningful there).
+        # Real bug this fixes: reusing it unconditionally meant F2's
+        # own phase1 got reapplied around whatever pivot F1 was last
+        # centred on (in F1's own ppm units) any time this recompute
+        # ran after switching dimensions -- a genuinely different,
+        # wrong correction whenever phase1 is nonzero, not just a
+        # cosmetic difference (pivot_frac defines *where* the phase1
+        # ramp is zero). Centre (0.5) otherwise, matching
+        # _current_phase_kwargs's own reasoning: no per-dimension pivot
+        # is persisted anywhere, and centre is what a fresh
+        # _capture_phase_reference always resets to, so it's what
+        # phase0/phase1 were computed against unless the user
+        # deliberately moved the pivot during that same session.
+        f2_pivot_is_live = is_phase_target and (
+            spectrum.is_pseudo_2d or (self._phase_mode == "2d" and self.dim_combo.currentIndex() == 0)
+        )
+        pivot_frac2 = ((self.pivot_spin.value() - ppm2.min()) / span2 if span2 else 0.5) if f2_pivot_is_live else 0.5
         data = processing_ft.apply_phase(data, ppm2, phase0, phase1, pivot_frac=pivot_frac2)
 
         dt_f1 = spectrum.metadata.raw.get("fid_dt_f1")
@@ -3149,7 +3183,13 @@ class MainWindow(QMainWindow):
             phase1_f1 = float(spectrum.metadata.raw.get("phase1_f1", 0.0))
             if phase0_f1 or phase1_f1:
                 span1 = ppm1.max() - ppm1.min()
-                pivot_frac1 = (self.pivot_spin.value() - ppm1.min()) / span1 if span1 else 0.5
+                # Mirror image of f2_pivot_is_live above: pivot_spin is
+                # only meaningful for F1 while F1 is the currently-
+                # focused dimension of the live-targeted spectrum.
+                f1_pivot_is_live = is_phase_target and self._phase_mode == "2d" and self.dim_combo.currentIndex() == 1
+                pivot_frac1 = (
+                    ((self.pivot_spin.value() - ppm1.min()) / span1 if span1 else 0.5) if f1_pivot_is_live else 0.5
+                )
                 data = processing_ft.apply_phase(data.T, ppm1, phase0_f1, phase1_f1, pivot_frac=pivot_frac1).T
 
         data = self._baseline_correct_if_enabled_multi_row(data, ppm2, spectrum)
@@ -4934,7 +4974,13 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         is_f1 = self._phase_mode == "2d" and self._phase_target_dim == "f1"
         key0, key1 = ("phase0_f1", "phase1_f1") if is_f1 else ("phase0", "phase1")
-        spectrum.metadata.raw[key0] = float(spectrum.metadata.raw.get(key0, 0.0)) + phase0_delta
+        # Zero-order phase is cyclic (a full rotation, exp(i*phase0) --
+        # 360deg away is physically identical) -- wrapped into [0, 360)
+        # on commit so it doesn't grow unbounded across many separate
+        # drag sessions. Phase 1 is deliberately left unwrapped: it's a
+        # ramp *rate* across the spectrum, not a rotation, so "modulo
+        # 360" has no equivalent physical meaning for it.
+        spectrum.metadata.raw[key0] = (float(spectrum.metadata.raw.get(key0, 0.0)) + phase0_delta) % 360.0
         spectrum.metadata.raw[key1] = float(spectrum.metadata.raw.get(key1, 0.0)) + phase1_delta
         self._schedule_sidecar_save(index)
 
@@ -4957,7 +5003,12 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         is_f1 = self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0
         key0, key1 = ("phase0_f1", "phase1_f1") if is_f1 else ("phase0", "phase1")
-        phase0 = float(spectrum.metadata.raw.get(key0, 0.0)) + self.phase0_spin.value()
+        # Wrapped the same way _commit_pending_phase_to_metadata wraps
+        # the stored value -- keeps this display cyclic continuously
+        # during an active drag too (e.g. a committed 350deg plus a
+        # live +30deg delta shows as 20deg, not 380deg), not just after
+        # the drag ends and commits.
+        phase0 = (float(spectrum.metadata.raw.get(key0, 0.0)) + self.phase0_spin.value()) % 360.0
         phase1 = float(spectrum.metadata.raw.get(key1, 0.0)) + self.phase1_spin.value()
         self.phase0_current_display.setText(f"{phase0:.2f}°")
         self.phase1_current_display.setText(f"{phase1:.2f}°")
