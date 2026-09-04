@@ -36,7 +36,7 @@ from .utils import find_gamma, NUC_label
 from .plotting import setup_plotting, apply_tick_style, apply_spine_style, save_figure
 from .one_d import NMR1dimport
 from .fitting import build_region_mask, estimate_baseline_robust, fit_quality, expand_pcov
-from .csa_quad_simulator import csa_definition, make_static_csa_spectrum, finite_mas_csa_spectrum
+from .simulations import csa_definition, make_static_csa_spectrum, finite_mas_csa_spectrum
 
 _CSA_PARAM_NAMES = ["d_iso", "span_or_Delta", "skew_or_eta", "fwhm", "amplitude"]
 
