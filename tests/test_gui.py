@@ -3491,6 +3491,82 @@ def test_main_window_processing_preview_applies_echo_antiecho_row_transform(qapp
     np.testing.assert_allclose(preview_spectrum.complex_data, actual_row0, atol=1e-6)
 
 
+def test_main_window_recompute_applies_f1_window_matching_read_2d(qapp, tmp_path, monkeypatch):
+    # Real bug, found and fixed: _recompute_multi_row_data never
+    # applied any window function to F1 at all -- read_2d always does,
+    # defaulting to proc2s's own recorded WDW (the GUI has no live
+    # override control for F1's window at all, unlike F2's own
+    # window_combo, so "recorded" is the only correct choice). Real
+    # user report: "I get a flicker as it saves and it seems to reload
+    # something old" while phasing a genuine 2D -- confirmed directly
+    # against a real COSY dataset (proc2s WDW=4/QSINE): even a live
+    # recompute with *no* phase or FID-processing change at all
+    # (phase0=phase1=0, every other control untouched) produced data
+    # ~80% different from the original, freshly-loaded spectrum, not a
+    # rounding-level gap. Isolated to this exact missing step by first
+    # confirming F2's own per-row processing already matched read_2d's
+    # own primitives exactly.
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=16, name="f1windowmiss2d", f1_nuc="13C")
+    _write_params(
+        tmp_path / "f1windowmiss2d" / "pdata" / "1" / "proc2s",
+        {"SW_p": 2000.0, "SI": 4, "SF": 100.6, "WDW": 4, "SSB": 2.0},  # QSINE, a real, non-trivial window
+    )
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    spectrum.metadata.raw["baseline_correct"] = False
+
+    original = spectrum.complex_data.copy()
+    window._recompute_multi_row_data(spectrum)  # no control changed at all -- should be a pure no-op
+
+    np.testing.assert_allclose(spectrum.complex_data, original, atol=1e-6)
+
+
+def test_main_window_recompute_reflects_live_phase_drag_not_just_committed(qapp, tmp_path, monkeypatch):
+    # Real bug, found and fixed: this method only ever read the
+    # *committed* phase0/phase1 (metadata.raw), never the live,
+    # not-yet-committed delta still sitting in the Phase spin boxes
+    # mid-drag. Correct once a drag is released and committed, but this
+    # method can also fire *during* an active drag: baseline correction
+    # is deliberately skipped on every drag tick (too slow to re-run
+    # per-tick) and instead deferred to this same debounced recompute,
+    # restarted on every tick while baseline_correct is on. If the drag
+    # paused for the 200ms debounce window before being released, this
+    # method fired mid-drag and rebuilt spectrum.data using only the
+    # *old*, pre-drag committed phase -- silently reverting the live-
+    # dragged display back to it. Real user report, part of the same
+    # "flicker... reload something old" complaint as the F1-window fix
+    # above. Confirmed directly on real data: a live 77-degree F2 drag
+    # followed by this method firing showed a ~1.35e9 magnitude
+    # difference (not a rounding-level gap) before this fix; exact
+    # match after. Checked for both dimensions -- the F1 side had the
+    # identical gap, via a matching but separate code path.
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=16, name="livedragrace2d", f1_nuc="13C")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    spectrum.metadata.raw["baseline_correct"] = False
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+
+    window.dim_combo.setCurrentIndex(0)
+    window.phase0_handle.setValue(77.0)
+    window._apply_phase_preview()
+    data_during_f2_drag = spectrum.data.copy()
+    window._recompute_multi_row_data(spectrum)  # simulates the debounce firing mid-drag, uncommitted
+    np.testing.assert_allclose(spectrum.data, data_during_f2_drag, atol=1e-5)
+
+    window.dim_combo.setCurrentIndex(1)
+    window.phase0_handle.setValue(45.0)
+    window._apply_phase_preview()
+    data_during_f1_drag = spectrum.data.copy()
+    window._recompute_multi_row_data(spectrum)
+    np.testing.assert_allclose(spectrum.data, data_during_f1_drag, atol=1e-5)
+
+
 def test_main_window_recompute_uses_each_dimensions_own_pivot_not_the_other_ones(qapp, tmp_path, monkeypatch):
     # Real bug, found and fixed: _recompute_multi_row_data reapplies
     # F2's and F1's own committed phase separately, but both reused the
@@ -3528,32 +3604,18 @@ def test_main_window_recompute_uses_each_dimensions_own_pivot_not_the_other_ones
     np.testing.assert_allclose(spectrum.complex_data, ref.complex_data, rtol=1e-6)
 
 
-def test_main_window_processing_preview_uses_spectrum_data_for_genuine_2d(qapp, tmp_path, monkeypatch):
-    # Real bug, found and fixed: for a genuine (non-pseudo) 2D,
-    # _compute_processing_preview built its "Slice 1" preview by
-    # reprocessing raw_fid[0] through F2's own pipeline alone -- but
-    # that raw row is a fundamentally different quantity from F1
-    # frequency bin 1 (spectrum.data's own row 0), which is a *weighted
-    # FFT combination across every raw row*, not any single row on its
-    # own. Whenever real F1 modulation exists (e.g. an EXSY, where
-    # slice-to-slice variation *is* the signal), the two can look
-    # completely different. Confirmed directly against real States-TPPI
-    # EXSY data: ~94% relative difference for the default "Slice 1"
-    # preview. Real user report: "still something different between the
-    # processing and 2D contour... maybe just the first slice."
-    #
-    # Fixed the same way _show_2d_indirect_processing_preview already
-    # handles F1: for a genuine 2D, trust spectrum.data itself (already
-    # the single source of truth for the current total phase, including
-    # any live phase-drag delta) rather than re-deriving an
-    # approximation from one raw row.
-    #
+def test_main_window_processing_preview_uses_xf2_raw_row_for_genuine_2d(qapp, tmp_path, monkeypatch):
+    # Real design requirement, stated explicitly by the user: "2D
+    # processing should use slice one of the xf2, whether or not the
+    # indirect dimension has been processed, not index 1 of the fully
+    # processed data." An earlier round of this exact method tried the
+    # opposite (matching spectrum.data's own F1 frequency bin instead,
+    # see the git history for that round's own now-removed test) --
+    # reverted once the user clarified the intended design directly.
     # This fixture gives every raw row a deliberately different F2
     # frequency, so F1 bin 1 (a combination across all rows) is
-    # guaranteed to differ sharply from row 0 alone -- confirmed before
-    # this fix, reprocessing raw_fid[0] alone was off by ~102% relative
-    # to spectrum.complex_data[0] on this exact fixture; fixed, it
-    # matches to floating-point precision.
+    # guaranteed to differ sharply from raw row 0 alone -- making it
+    # unambiguous which one the preview is actually built from.
     n_f1, n_f2 = 6, 32
     t2 = np.arange(n_f2) / 8000.0
     rows = [
@@ -3569,25 +3631,20 @@ def test_main_window_processing_preview_uses_spectrum_data_for_genuine_2d(qapp, 
     index = window._selected_index()
     spectrum = window.session.spectra[index]
     assert not spectrum.is_pseudo_2d
-    # Isolates the row-selection logic under test from the unrelated
-    # live-vs-baked-in baseline-correction timing gap that every other
-    # preview test in this file already works around the same way.
     spectrum.metadata.raw["baseline_correct"] = False
 
     filled, dt, preview_spectrum, title = window._compute_processing_preview(spectrum)
 
     assert title == "Slice 1"
-    np.testing.assert_allclose(preview_spectrum.complex_data, spectrum.complex_data[0], atol=1e-6)
-
-    # Live phase drag must still flow through: _apply_phase_preview's
-    # own "2d" branch writes a phase-dragged delta straight into
-    # spectrum.data, and the preview must keep tracking that value, not
-    # freeze at whatever it showed when the drag started.
-    window.phase0_spin.setValue(37.0)
-    window._apply_phase_preview()
-    _filled2, _dt2, preview_spectrum2, _title2 = window._compute_processing_preview(spectrum)
-    assert not np.allclose(preview_spectrum2.complex_data, preview_spectrum.complex_data)
-    np.testing.assert_allclose(preview_spectrum2.complex_data, spectrum.complex_data[0], atol=1e-6)
+    # Must NOT match F1 bin 1 (spectrum.data's own row 0) -- these are
+    # guaranteed to differ sharply for this fixture, confirming the
+    # preview is genuinely built from the raw row (xf2), not spectrum.data.
+    assert not np.allclose(preview_spectrum.complex_data, spectrum.complex_data[0], atol=1.0)
+    # Must match raw_fid[0] reprocessed through F2's own pipeline alone.
+    raw_fid = spectrum.metadata.raw.get("fid_raw")
+    reference = window._process_raw_fid_row(spectrum, raw_fid[0], spectrum.metadata.raw.get("fid_dt"))
+    _filled_ref, data_ref = reference
+    np.testing.assert_allclose(preview_spectrum.complex_data, data_ref, atol=1e-6)
 
 
 def test_main_window_zero_fill_f1_and_f2_together_matches_read_2d_directly(qapp, tmp_path, monkeypatch):

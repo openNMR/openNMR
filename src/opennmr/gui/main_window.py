@@ -2948,43 +2948,24 @@ class MainWindow(QMainWindow):
             return None
         filled, data = computed
 
-        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
-            # Real bug, found and fixed: for a genuine 2D, "raw_fid[row],
-            # reprocessed through F2's own pipeline alone" is a
-            # fundamentally different quantity from "F1's actual
-            # frequency bin at this slice" (spectrum.data's own row) --
-            # F1's bin is a *weighted FFT combination across every raw
-            # row*, not any single row on its own. For a dataset with
-            # real F1 modulation (e.g. an EXSY, where slice-to-slice
-            # variation *is* the signal), the two can look completely
-            # different -- confirmed directly against real States-TPPI
-            # EXSY data: ~94% relative difference for the default
-            # "Slice 1" preview, while adjacent *raw* rows alone
-            # already differ from each other by ~200%, confirming the
-            # gap is an expected consequence of comparing "one raw row"
-            # against "an FFT combination of many", not a computation
-            # bug (the same raw-row pipeline matches spectrum.data
-            # exactly, to floating-point precision, whenever the two
-            # really are the same quantity -- i.e. pseudo-2D, or any
-            # 1D case). User report: "still something different between
-            # the processing and 2D contour... maybe just the first
-            # slice."
-            #
-            # Fixed the same way _show_2d_indirect_processing_preview
-            # already handles F1: for a genuine 2D, trust spectrum.data
-            # itself (already the single source of truth for the
-            # current total phase, including any live F2-phase-drag
-            # delta -- _apply_phase_preview's own "2d" branch writes
-            # that straight into spectrum.data before this ever runs,
-            # same as it does for F1) rather than re-deriving an
-            # approximation from one raw row. slice_template (already
-            # computed above, via get_trace) *is* that accurate trace --
-            # only the FID panel above still needs the raw row's own
-            # time-domain signal, which remains a legitimate, genuinely
-            # per-row concept (window/TDeff/align-echo apply the same
-            # way to every row) even though the spectrum panel no
-            # longer derives from it.
-            return filled, dt, slice_template, title
+        # Real design requirement, stated explicitly: "2D processing
+        # should use slice one of the xf2, whether or not the indirect
+        # dimension has been processed, not index 1 of the fully
+        # processed data." An earlier round of this exact method tried
+        # making this branch return slice_template (spectrum.data's own
+        # row, i.e. an F1 frequency bin) instead, reasoning that "raw
+        # row reprocessed through F2 alone" and "F1's actual frequency
+        # bin" are different quantities whenever real F1 modulation
+        # exists (true, and still true) -- but that fix optimized for
+        # "match the fully-processed contour" over "show what F2's own
+        # controls, alone, would do to the raw acquisition," which is
+        # this tab's actual, stated purpose (matching xf2/raw-row
+        # semantics that pseudo-2D and 1D already use here without
+        # controversy). Reverted once the user clarified the intended
+        # design directly, rather than left as a guess either way --
+        # `filled`/`data` (the raw-row reprocessing computed just above)
+        # fall through to the same ppm/phase/NMRSpectrum-construction
+        # code every other case already uses, unconditionally.
 
         # The ppm axis's *range* is fixed by acquisition (O1/SF/SW),
         # unaffected by window/zero-fill choice -- only the point
@@ -3204,6 +3185,31 @@ class MainWindow(QMainWindow):
         f2_pivot_is_live = is_phase_target and (
             spectrum.is_pseudo_2d or (self._phase_mode == "2d" and self.dim_combo.currentIndex() == 0)
         )
+        if f2_pivot_is_live:
+            # Real bug, found and fixed: this method only ever read the
+            # *committed* phase0/phase1, never the live, not-yet-
+            # committed delta still sitting in the Phase spin boxes
+            # mid-drag -- correct once a drag is released and committed
+            # (_commit_pending_phase_to_metadata runs first), but this
+            # method can also fire *during* an active drag: baseline
+            # correction is deliberately skipped on every drag tick
+            # (too slow to re-run per-tick) and instead deferred to
+            # this same debounced recompute, restarted on every tick
+            # while baseline_correct is on (see _apply_phase_preview's
+            # own "2d"/pseudo2d branches). If the drag pauses for the
+            # 200ms debounce window before being released, this method
+            # fires mid-drag and rebuilt spectrum.data from the raw FID
+            # using only the *old*, pre-drag committed phase -- silently
+            # reverting the live-dragged display back to it. Real user
+            # report: "I get a flicker as it saves and it seems to
+            # reload something old." Confirmed directly: a live 77-
+            # degree drag followed by this method firing (simulating
+            # the debounce winning a race against the user releasing)
+            # showed a ~1.35e9 magnitude difference between the
+            # correctly-live-phased data and what this method rebuilt
+            # -- not a rounding-level gap.
+            phase0 += self.phase0_spin.value()
+            phase1 += self.phase1_spin.value()
         pivot_frac2 = ((self.pivot_spin.value() - ppm2.min()) / span2 if span2 else 0.5) if f2_pivot_is_live else 0.5
         data = processing_ft.apply_phase(data, ppm2, phase0, phase1, pivot_frac=pivot_frac2)
 
@@ -3232,6 +3238,35 @@ class MainWindow(QMainWindow):
             # diverge" bug this whole round's own architecture change
             # was about closing.
             data = processing_ft.decode_hypercomplex_f1(data, fn_mode)
+            if spectrum.metadata.vendor == "bruker":
+                # Real bug, found and fixed: this method never applied
+                # any window to F1 at all -- read_2d always does
+                # (defaulting to proc2s's own recorded WDW, the same
+                # "__recorded__" convention F2's own window_combo
+                # exposes, but with no equivalent live control for F1 at
+                # all -- so "recorded" is the only correct choice here,
+                # unconditionally). Confirmed directly: even a live
+                # recompute with *no* phase or FID-processing change at
+                # all (phase0=phase1=0, every other control untouched)
+                # produced data ~80% different from the original,
+                # freshly-loaded spectrum on a real COSY dataset (proc2s
+                # WDW=4/QSINE) -- not a rounding-level gap, and not
+                # explained by anything phase-related; isolated to this
+                # exact missing step by confirming F2's own per-row
+                # processing already matched read_2d's own primitives
+                # exactly (0.0 diff) before looking at F1. X-Pulse's own
+                # read_2d applies no F1 window either (confirmed by
+                # reading it directly), so this stays Bruker-only.
+                proc2s = spectrum.metadata.raw.get("proc2s")
+                sw_1_for_window = spectrum.metadata.raw.get("proc2s", {}).get("SW_p") if proc2s else None
+                if proc2s and sw_1_for_window:
+                    try:
+                        data = np.apply_along_axis(
+                            lambda col: io_bruker._apply_bruker_window(col, proc2s, float(sw_1_for_window)),
+                            0, data,
+                        )
+                    except NotImplementedError:
+                        pass  # matches read_2d's own "leave unwindowed" fallback for an unsupported WDW
             live_zero_fill_f1 = spectrum.metadata.raw.get("live_zero_fill_f1")
             if isinstance(live_zero_fill_f1, int) and not isinstance(live_zero_fill_f1, bool):
                 si1 = live_zero_fill_f1
@@ -3268,12 +3303,25 @@ class MainWindow(QMainWindow):
             f1_axis = NMRAxis(kind="frequency", ppm=ppm1, hz=hz1)
             phase0_f1 = float(spectrum.metadata.raw.get("phase0_f1", 0.0))
             phase1_f1 = float(spectrum.metadata.raw.get("phase1_f1", 0.0))
+            # Mirror image of f2_pivot_is_live above: pivot_spin is
+            # only meaningful for F1 while F1 is the currently-
+            # focused dimension of the live-targeted spectrum.
+            f1_pivot_is_live = is_phase_target and self._phase_mode == "2d" and self.dim_combo.currentIndex() == 1
+            if f1_pivot_is_live:
+                # Same live-drag-vs-debounced-recompute race as F2's
+                # own fix just above -- see that comment for the full
+                # story. Computed (and the "should we bother calling
+                # apply_phase at all" check below moved after it)
+                # *before* the old `if phase0_f1 or phase1_f1` guard,
+                # which used to only ever see the committed total: a
+                # live F1 drag that hadn't committed anything yet (both
+                # committed values still exactly 0) skipped this whole
+                # block entirely, silently dropping the live delta
+                # rather than just reapplying a stale phase.
+                phase0_f1 += self.phase0_spin.value()
+                phase1_f1 += self.phase1_spin.value()
             if phase0_f1 or phase1_f1:
                 span1 = ppm1.max() - ppm1.min()
-                # Mirror image of f2_pivot_is_live above: pivot_spin is
-                # only meaningful for F1 while F1 is the currently-
-                # focused dimension of the live-targeted spectrum.
-                f1_pivot_is_live = is_phase_target and self._phase_mode == "2d" and self.dim_combo.currentIndex() == 1
                 pivot_frac1 = (
                     ((self.pivot_spin.value() - ppm1.min()) / span1 if span1 else 0.5) if f1_pivot_is_live else 0.5
                 )
