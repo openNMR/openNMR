@@ -2344,7 +2344,7 @@ def _synthetic_raw_fid(n=64, sw=8000.0, f0_hz=1000.0, decay=200.0):
     return (np.exp(-t * decay) * np.exp(2j * np.pi * f0_hz * t)).astype(np.complex128)
 
 
-def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=None):
+def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=None, pulprog=None):
     """A Bruker experiment with a real (parseable) `procs` but a mocked
     raw `fid` read -- same approach as test_bruker_raw_fid.py, so
     `read_1d`'s real window/zero-fill/FFT code runs for real while the
@@ -2362,6 +2362,8 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=Non
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
     if probe is not None:
         acqus["PROBHD"] = probe
+    if pulprog is not None:
+        acqus["PULPROG"] = pulprog
     fid = _synthetic_raw_fid(n=n)
     dic = {"acqus": acqus}
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
@@ -7396,6 +7398,36 @@ def test_main_window_info_label_shows_probe_when_recorded(qapp, tmp_path, monkey
     window._load(path, vendor="bruker")
 
     assert "Probe: 5 mm BBO" in window.info_label.text()
+
+
+def test_main_window_info_label_shows_pulse_programme_when_recorded(qapp, tmp_path, monkeypatch):
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="pulprog1d", pulprog="zg30")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+
+    assert "Pulse programme: zg30" in window.info_label.text()
+
+
+def test_main_window_info_label_notes_when_loaded_from_processed_data(qapp, tmp_path, monkeypatch):
+    # Real user request: "note when the processed data is being read in
+    # instead of raw data" -- io.bruker._read_auto tags
+    # metadata.raw["loaded_from_processed"] with a short reason for
+    # every fallback path (see that function's own docstring); the
+    # info panel should surface it persistently (not just the existing
+    # one-time popup at load time) so it's visible any time this
+    # spectrum is reselected later, not only right after loading.
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="procnote1d")
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    assert "loaded_from_processed" not in spectrum.metadata.raw  # sanity: not set by default
+
+    spectrum.metadata.raw["loaded_from_processed"] = "No raw ser file found for this experiment."
+    window._refresh_selection_display(index)
+
+    assert "Loaded from processed data, not the raw FID" in window.info_label.text()
+    assert "No raw ser file found for this experiment." in window.info_label.text()
 
 
 def test_main_window_reselection_flushes_pending_sidecar_save_for_outgoing_spectrum(qapp, tmp_path, monkeypatch):

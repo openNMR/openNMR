@@ -83,6 +83,19 @@ def test_read_1d_records_probe_from_probhd(tmp_path, monkeypatch):
     assert spectrum.metadata.probe == "1.3 mm MAS BB/1H/19F/19F H13708/0016"
 
 
+def test_read_1d_records_pulse_program_from_pulprog(tmp_path, monkeypatch):
+    path = _make_experiment_dir(tmp_path)
+    acqus = {
+        "NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0,
+        "PULPROG": "zg30",
+    }
+    _mock_ng_bruker_read(monkeypatch, acqus, _synthetic_fid())
+
+    spectrum = bruker.read_1d(path, autophase=False)
+
+    assert spectrum.metadata.pulse_program == "zg30"
+
+
 def test_read_1d_probe_is_none_when_not_recorded(tmp_path, monkeypatch):
     path = _make_experiment_dir(tmp_path)
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}

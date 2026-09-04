@@ -277,3 +277,49 @@ def test_read_auto_does_not_mask_unrelated_value_errors(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError):
         bruker._read_auto(path)
+
+
+def test_read_auto_tags_shape_guess_failure_as_loaded_from_processed(tmp_path, monkeypatch):
+    # metadata.raw["loaded_from_processed"] is the more general note
+    # (see _read_auto's own docstring) meant to cover every already-
+    # processed-data fallback uniformly, regardless of *why* -- confirm
+    # this specific, existing failure mode sets it too, alongside the
+    # older, narrower read_2d_shape_guess_failed it's always paired
+    # with here.
+    path = _make_2d_dataset_with_processed(tmp_path, n_f1=4, n_f2=8)
+
+    def fake_read_2d(_path, **_kwargs):
+        raise IndexError("tuple index out of range")
+
+    monkeypatch.setattr(bruker, "read_2d", fake_read_2d)
+
+    spectrum = bruker._read_auto(path)
+
+    assert spectrum.metadata.raw["loaded_from_processed"] == "tuple index out of range"
+
+
+def test_read_auto_tags_loaded_from_processed_when_no_ser_present(tmp_path):
+    # Previously silent: a genuine 2D with only pdata (2rr/2ri) on
+    # disk, no raw ser at all, always fell back to read_2d_processed
+    # with no indication anywhere that raw-FID reprocessing was never
+    # even attempted (unlike the shape-guess-failure case above, which
+    # at least set read_2d_shape_guess_failed).
+    path = _make_2d_dataset_with_processed(tmp_path, n_f1=4, n_f2=8)
+    os.remove(os.path.join(path, "ser"))
+
+    spectrum = bruker._read_auto(path)
+
+    assert spectrum.data.shape == (4, 8)
+    assert spectrum.metadata.raw["loaded_from_processed"] == "No raw ser file found for this experiment."
+    assert "read_2d_shape_guess_failed" not in spectrum.metadata.raw
+
+
+def test_read_auto_tags_loaded_from_processed_for_1d_processed_only(tmp_path):
+    # Same gap as the 2D case above, for the equivalent 1D-only
+    # fallback (only 1r/1i on disk, no raw fid at all).
+    path = _make_1d_dataset(tmp_path)
+
+    spectrum = bruker._read_auto(path)
+
+    assert spectrum.ndim == 1
+    assert spectrum.metadata.raw["loaded_from_processed"] == "No raw fid file found for this experiment."

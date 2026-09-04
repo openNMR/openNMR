@@ -168,7 +168,23 @@ def _read_raw_2d_data(path: str, dic: dict) -> np.ndarray:
     ``TD``'s own expected total -- see that function's docstring).
     Truncating and reshaping that flat array ourselves in that case is
     always safe: the target shape's element count was already derived
-    from this exact array's own length, by construction."""
+    from this exact array's own length, by construction.
+
+    A large-looking leftover here (tens of percent of one row) is not
+    by itself evidence of a wrong guess -- confirmed on two independent
+    real ``exsy_echo3.enb`` datasets (``test_data/.../2011``, 53% of one
+    row left over, and ``.../2019``, 42%, both in the same acquisition
+    session): both guesses' own F2 projections match ``read_2d_processed``'s
+    trusted top-5 peak positions closely, and ``2019``'s raw path has
+    been extensively used and cross-validated against independent
+    references elsewhere in this project's own history. An earlier
+    version of this function raised on exactly this condition, which
+    would have silently broken raw-FID reprocessing for the
+    already-validated ``2019`` dataset -- reverted once that was found;
+    see TODO.md for the full investigation, including why autocorrelation
+    and "does some other row count divide the file exactly" both turned
+    out to be unreliable signals for this specific pulse sequence
+    family."""
     ser_path = os.path.join(path, "ser")
     n_rows, n_complex_per_row = _guess_raw_2d_shape(dic, ser_path)
     shape = (n_rows, n_complex_per_row)
@@ -343,7 +359,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
 
     metadata = NMRMetadata(
         vendor="bruker", nucleus=acqus.get("NUC1"), sfo1=sf, bf1=obs, o1=o1, ns=ns,
-        source_path=path, procno=procno, probe=acqus.get("PROBHD"),
+        source_path=path, procno=procno, probe=acqus.get("PROBHD"), pulse_program=acqus.get("PULPROG"),
         raw={
             "acqus": acqus, "procs": procs, "phase0": phase0, "phase1": phase1,
             # The exact (shift/echo-align/LP/windowed/zero-filled) FID
@@ -696,7 +712,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         vendor="bruker", nucleus=acqus.get("NUC1"), nucleus_indirect=nuc2,
         sfo1=sf, sfo1_indirect=(None if pseudo_2d else sf_1), bf1=obs, o1=o1, ns=ns,
         source_path=path, procno=procno, pseudo_2d=pseudo_2d, homonuclear=homonuclear,
-        probe=acqus.get("PROBHD"),
+        probe=acqus.get("PROBHD"), pulse_program=acqus.get("PULPROG"),
         raw={
             "acqus": acqus, "procs": procs, "proc2s": proc2s, "phase0": phase0, "phase1": phase1,
             # F1's own hypercomplex encoding (see
@@ -782,7 +798,7 @@ def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float 
 
     metadata = NMRMetadata(
         vendor="bruker", nucleus=nuc, sfo1=sf, bf1=obs, o1=o1, ns=ns, source_path=path, procno=procno,
-        probe=acq_meta.get("PROBHD"),
+        probe=acq_meta.get("PROBHD"), pulse_program=acq_meta.get("PULPROG"),
         raw={"acqus": axis_meta, "procs": procs},
     )
     axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
@@ -891,7 +907,7 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
         vendor="bruker", nucleus=acqus.get("NUC1"), nucleus_indirect=nuc2,
         sfo1=sf, sfo1_indirect=(None if pseudo_2d else sf_1), bf1=obs, o1=o1, ns=ns,
         source_path=path, procno=procno, pseudo_2d=pseudo_2d, homonuclear=homonuclear,
-        probe=acqus.get("PROBHD"),
+        probe=acqus.get("PROBHD"), pulse_program=acqus.get("PULPROG"),
         raw={"acqus": acqus, "procs": procs, "proc2s": proc2s},
     )
     x_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
@@ -1038,19 +1054,30 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     GUI) can tell the user why raw-FID reprocessing isn't available,
     rather than it being silent.
 
+    Every branch that returns already-processed data instead of the
+    raw-FID path -- including the two below that always did, silently
+    -- also tags the more general ``metadata.raw["loaded_from_processed"]``
+    with a short reason, so the GUI can show a "you're looking at
+    processed, not raw, data" note uniformly regardless of *why* (no
+    raw file at all vs. a raw file whose shape couldn't be determined).
+
     Catches ``KeyError`` (``_guess_raw_2d_shape``'s own ``acqus["TD"]``
     lookup, its only way to fail) and, defensively, ``IndexError``
-    (this project's own raw-shape resolution replaced the
-    ``nmrglue``-shape-guess-then-``.reshape()``-then-``data.shape[1]``
-    chain that used to be the real source of this -- see TODO.md's
-    Bruker raw-``ser`` investigation -- so this shouldn't actually
-    trigger any more, but costs nothing to keep). Deliberately not the
-    broader ``ValueError``: something else going wrong inside
-    ``read_2d`` should surface to the caller normally (found one for
-    real once: ``align_echo``'s auto-truncation disagreeing row-to-row
-    -- fixed directly, not by routing it through this fallback), not
-    be silently swallowed into a fallback that discards whatever
-    raw-FID processing was actually requested."""
+    (this project's own raw-shape resolution replaced the ``nmrglue``-
+    shape-guess-then-``.reshape()``-then-``data.shape[1]`` chain that
+    used to be the real source of this -- see TODO.md's Bruker raw-
+    ``ser`` investigation -- so this shouldn't actually trigger any
+    more, but costs nothing to keep). Deliberately not the broader
+    ``ValueError``: something else going wrong inside ``read_2d``
+    should surface to the caller normally (found one for real once:
+    ``align_echo``'s auto-truncation disagreeing row-to-row -- fixed
+    directly, not by routing it through this fallback), not be
+    silently swallowed into a fallback that discards whatever raw-FID
+    processing was actually requested. Also deliberately not a broad
+    catch for "the guessed shape left an oddly large fraction of the
+    file unaccounted for" -- tried once, reverted, see
+    :func:`_read_raw_2d_data`'s own docstring for why that turned out
+    to be a false signal, not a real one, for this vendor's data."""
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
     has_2rr = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
@@ -1070,12 +1097,17 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
             }
             spectrum = read_2d_processed(path, **processed_kwargs)
             spectrum.metadata.raw["read_2d_shape_guess_failed"] = str(exc)
+            spectrum.metadata.raw["loaded_from_processed"] = str(exc)
             return spectrum
     if has_fid:
         return read_1d(path, **kwargs)
     if has_2rr:
-        return read_2d_processed(path, **kwargs)
-    return read_1d_processed(path, **kwargs)
+        spectrum = read_2d_processed(path, **kwargs)
+        spectrum.metadata.raw["loaded_from_processed"] = "No raw ser file found for this experiment."
+        return spectrum
+    spectrum = read_1d_processed(path, **kwargs)
+    spectrum.metadata.raw["loaded_from_processed"] = "No raw fid file found for this experiment."
+    return spectrum
 
 
 base.register("bruker", _detect, _read_auto)

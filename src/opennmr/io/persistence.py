@@ -52,7 +52,7 @@ _PROCESSING_VERSION = 1
 _PROCESSING_RAW_BLOCKLIST = frozenset({
     "acqus", "procs", "proc2s", "params", "exp_params",
     "fid", "fid_raw",
-    "window_unsupported", "read_2d_shape_guess_failed",
+    "window_unsupported", "read_2d_shape_guess_failed", "loaded_from_processed",
 })
 
 

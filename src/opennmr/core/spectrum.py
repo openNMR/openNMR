@@ -96,6 +96,11 @@ class NMRMetadata:
     #: but still the closest equivalent the format records). ``None``
     #: for a vendor/dataset where nothing recognizable was found.
     probe: str | None = None
+    #: The pulse sequence/program name, as recorded by the vendor --
+    #: Bruker's ``##$PULPROG`` (e.g. ``"exsy_echo3.enb"``). ``None`` for
+    #: a vendor/dataset where nothing recognizable was found (currently
+    #: only populated for Bruker).
+    pulse_program: str | None = None
     raw: dict = field(default_factory=dict)
 
 

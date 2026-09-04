@@ -1152,10 +1152,10 @@ class MainWindow(QMainWindow):
         if shape_note:
             QMessageBox.information(
                 self, "Loaded from processed data",
-                f"{self.session.label(index)}:\n\n{shape_note}\n\nCouldn't determine the raw "
-                f"ser file's shape, so this loaded from TopSpin's own already-processed data "
-                f"instead -- raw-FID reprocessing (window, zero-fill, phase, ...) isn't "
-                f"available for it.",
+                f"{self.session.label(index)}:\n\n{shape_note}\n\nCouldn't determine a "
+                f"trustworthy shape for the raw ser file, so this loaded from TopSpin's own "
+                f"already-processed data instead -- raw-FID reprocessing (window, zero-fill, "
+                f"phase, ...) isn't available for it.",
             )
 
         window_note = spectrum.metadata.raw.get("window_unsupported")
@@ -7544,6 +7544,11 @@ class MainWindow(QMainWindow):
             bits.append(f"Sample mass: {meta.mass * 1000.0:g} mg")
         if meta.probe:
             bits.append(f"Probe: {meta.probe}")
+        if meta.pulse_program:
+            bits.append(f"Pulse programme: {meta.pulse_program}")
+        processed_reason = meta.raw.get("loaded_from_processed")
+        if processed_reason:
+            bits.append(f"Loaded from processed data, not the raw FID: {processed_reason}")
         self.info_label.setText("\n".join(bits))
 
         self.imaging_max_gradient_spin.blockSignals(True)

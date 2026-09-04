@@ -95,6 +95,19 @@ def test_read_2d_records_probe_from_probhd(tmp_path, monkeypatch):
     assert spectrum.metadata.probe == "1.3 mm MAS BB/1H/19F/19F H13708/0016"
 
 
+def test_read_2d_records_pulse_program_from_pulprog(tmp_path, monkeypatch):
+    path = _make_2d_experiment_dir(tmp_path)
+    acqus = {
+        "NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0,
+        "PULPROG": "exsy_echo3.enb",
+    }
+    _mock_2d(monkeypatch, acqus, _synthetic_2d_fid())
+
+    spectrum = bruker.read_2d(path, homonuclear=True, autophase=False)
+
+    assert spectrum.metadata.pulse_program == "exsy_echo3.enb"
+
+
 def test_read_2d_heteronuclear_uses_acqu2s(tmp_path, monkeypatch):
     path = _make_2d_experiment_dir(tmp_path)
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
