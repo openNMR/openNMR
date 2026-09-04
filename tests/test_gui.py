@@ -1794,6 +1794,107 @@ def test_main_window_2d_phase_still_applies_uniformly_to_every_row(qapp, tmp_pat
         np.testing.assert_allclose(complex_data[row], expected, atol=1e-8)
 
 
+def test_main_window_dimension_switch_commits_pending_phase_to_the_correct_key(qapp, tmp_path, monkeypatch):
+    # Real bug, found and fixed: dim_combo.currentIndexChanged fires
+    # *after* Qt has already updated dim_combo.currentIndex() to the
+    # new value, so a stale read inside _commit_pending_phase_to_metadata
+    # (itself triggered by that same signal, via _capture_phase_reference)
+    # used to commit a pending F2 delta under the F1 key (or vice versa)
+    # on every dimension switch -- confirmed directly against real 2D
+    # data before this fix existed.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    spectrum = window.session.spectra[window._selected_index()]
+    baseline_phase0 = float(spectrum.metadata.raw.get("phase0", 0.0))
+
+    assert window.dim_combo.currentIndex() == 0  # F2 (direct) focused
+    window.phase0_handle.setValue(37.0)  # a pending F2 delta, not yet committed
+
+    window.dim_combo.setCurrentIndex(1)  # switch focus to F1 mid-pending-delta
+
+    assert spectrum.metadata.raw.get("phase0") == pytest.approx(baseline_phase0 + 37.0)
+    assert spectrum.metadata.raw.get("phase0_f1") is None  # not the wrong key
+
+
+def test_main_window_dimension_switch_commits_pending_phase_to_the_correct_key_reverse(
+        qapp, tmp_path, monkeypatch):
+    # Same bug, opposite direction (F1 -> F2), for symmetry.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    spectrum = window.session.spectra[window._selected_index()]
+
+    window.dim_combo.setCurrentIndex(1)  # F1 focused first
+    window.phase0_handle.setValue(15.0)  # a pending F1 delta, not yet committed
+
+    window.dim_combo.setCurrentIndex(0)  # switch focus to F2 mid-pending-delta
+
+    assert spectrum.metadata.raw.get("phase0_f1") == pytest.approx(15.0)
+
+
+def test_main_window_process_indirect_toggle_preserves_both_dimensions_phase(qapp, tmp_path, monkeypatch):
+    # Real bug, found and fixed: _current_phase_kwargs/_reapply_phase_
+    # post_reload only ever preserved whichever dimension the Phase
+    # panel's own Dimension combo happened to be currently focused on,
+    # silently discarding the *other* dimension's already-established
+    # phase on every "Process Indirect Dimension" toggle -- confirmed
+    # directly against real 2D data before this fix existed. Explicit
+    # user requirement: "phasing of 2D data before and after processing
+    # the indirect dimension should use the same info."
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    spectrum = window.session.spectra[window._selected_index()]
+
+    window.phase0_handle.setValue(37.0)
+    window.dim_combo.setCurrentIndex(1)  # commits the F2 delta, focus -> F1
+    window.phase0_handle.setValue(15.0)
+    window.dim_combo.setCurrentIndex(0)  # commits the F1 delta, focus -> F2 (left here)
+
+    expected_phase0 = spectrum.metadata.raw.get("phase0")
+    expected_phase0_f1 = spectrum.metadata.raw.get("phase0_f1")
+    assert expected_phase0_f1 == pytest.approx(15.0)
+
+    # F2 is focused right now -- toggling should still preserve F1's
+    # own phase too, not just F2's (the bug: only the focused one did).
+    window.process_indirect_button.setChecked(False)  # -> pseudo-2D
+    window.process_indirect_button.setChecked(True)  # -> genuine 2D again
+
+    new_spectrum = window.session.spectra[window._selected_index()]
+    assert new_spectrum.metadata.raw.get("phase0") == pytest.approx(expected_phase0)
+    assert new_spectrum.metadata.raw.get("phase0_f1") == pytest.approx(expected_phase0_f1)
+
+
+def test_main_window_process_indirect_toggle_round_trip_preserves_f1_phase(qapp, tmp_path, monkeypatch):
+    # Real bug, found and fixed: even after the single-toggle
+    # preservation fix above, F1's phase was only ever baked into
+    # spectrum.data post-hoc -- never written back into the freshly-
+    # reloaded spectrum's own metadata.raw -- so it survived exactly
+    # one toggle and was then gone for good: a genuine 2D -> pseudo-2D
+    # -> genuine 2D round trip (e.g. briefly checking the pseudo-2D
+    # relaxation view and coming back) silently lost it, even though a
+    # single toggle in isolation didn't. Checked across two round
+    # trips, not just one, to rule out a one-shot fluke.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"), vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    spectrum = window.session.spectra[window._selected_index()]
+
+    window.dim_combo.setCurrentIndex(1)
+    window.phase0_handle.setValue(15.0)
+    window.dim_combo.setCurrentIndex(0)
+    expected_phase0_f1 = spectrum.metadata.raw.get("phase0_f1")
+    assert expected_phase0_f1 == pytest.approx(15.0)
+
+    for round_trip in (1, 2):
+        window.process_indirect_button.setChecked(False)
+        window.process_indirect_button.setChecked(True)
+        new_spectrum = window.session.spectra[window._selected_index()]
+        assert new_spectrum.metadata.raw.get("phase0_f1") == pytest.approx(expected_phase0_f1), \
+            f"F1 phase lost after round trip #{round_trip}"
+
+
 def test_main_window_2d_phase_slice_follows_dimension_switch(qapp, tmp_path, monkeypatch):
     # _phase_2d_slice_index is now a fixed 1 regardless of dimension
     # (see test_main_window_2d_phase_defaults_to_slice_1), so the index

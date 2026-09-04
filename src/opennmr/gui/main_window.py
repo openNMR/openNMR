@@ -132,6 +132,21 @@ class MainWindow(QMainWindow):
         # spectrum being switched *to*, not the one whose pending phase
         # delta needs committing.
         self._phase_target_index: int | None = None
+        # Same reasoning as _phase_target_index just above, for a
+        # genuine-2D session's own F2-vs-F1 target specifically (only
+        # meaningful when _phase_mode == "2d") -- real bug this fixes:
+        # dim_combo.currentIndexChanged fires *after* Qt has already
+        # updated dim_combo.currentIndex() to the new value, so reading
+        # it live inside _commit_pending_phase_to_metadata (itself
+        # called from _capture_phase_reference, which that same signal
+        # triggers via _on_phase_target_changed) would silently commit
+        # a pending F2 delta under the F1 key (or vice versa) whenever
+        # switching dimensions mid-edit -- confirmed directly against
+        # real 2D data. Set once, in _capture_phase_reference's own
+        # "2d" branch, at the point a session's target dimension is
+        # actually established -- not re-derived from the (by then
+        # possibly already-changed) live combo box.
+        self._phase_target_dim: str | None = None
         # The pivot (ppm) the last-applied Phase 0/Phase 1 numbers are
         # actually measured from -- see _on_pivot_spin_changed, which
         # compensates Phase 0 whenever the pivot moves so the visible
@@ -1231,6 +1246,7 @@ class MainWindow(QMainWindow):
         ):
             canvas.clear()
         self._phase_mode = None
+        self._phase_target_dim = None
         self._set_processing_enabled(False)
         self.info_label.setText("—")
         self.process_indirect_button.setVisible(False)
@@ -1373,17 +1389,56 @@ class MainWindow(QMainWindow):
         """Checked = process the indirect (F1) dimension as a real
         frequency dimension (``pseudo_2d=False``); unchecked (the
         default -- see :meth:`_load`) = pseudo-2D, F1 left as an
-        index/slice dimension with no FFT."""
+        index/slice dimension with no FFT.
+
+        Commits any pending (not-yet-committed) phase delta *before*
+        touching anything else -- real bug this fixes: without this,
+        an uncommitted live delta sitting in the Phase spin boxes at
+        the moment this button is clicked (e.g. mid-drag, released but
+        not yet re-anchored by reselecting/switching dimension) would
+        be silently dropped by the reload below, since neither
+        :meth:`_current_phase_kwargs` nor :meth:`_reapply_phase_post_reload`
+        reads the live spin boxes any more -- both now read only
+        already-committed ``metadata.raw`` (see their own docstrings
+        for why: whichever dimension *wasn't* currently focused used
+        to lose its phase on every toggle regardless).
+
+        F1's own ``"phase0_f1"/"phase1_f1"`` are carried over into the
+        freshly-reloaded spectrum's own ``metadata.raw`` unconditionally,
+        *before* :meth:`_reapply_phase_post_reload` runs -- real bug
+        this fixes: ``read_2d``/``read_1d`` always build a brand new
+        ``metadata.raw`` from scratch on every reload, with no F1-phase
+        concept of its own (see :meth:`_current_phase_kwargs`'s own
+        docstring) -- so without this, F1's phase survived exactly one
+        toggle (baked into ``.data``, but never recorded anywhere) and
+        was then gone for good, silently, on the next one: a genuine
+        2D -> pseudo-2D -> genuine 2D round trip (e.g. briefly checking
+        the pseudo-2D relaxation view and coming back) lost F1's phase
+        entirely, even though a single toggle in isolation didn't.
+        Carried over regardless of the direction switched *to* -- a
+        dormant value sitting unread in a pseudo-2D spectrum's own
+        metadata is harmless (nothing reads it in that state), and is
+        exactly what makes the value available again the next time a
+        toggle switches back to genuine 2D. Confirmed directly against
+        real 2D data, including a full round trip."""
         index = self._selected_index()
         if index is None:
             return
+        self._commit_pending_phase_to_metadata()
         spectrum = self.session.spectra[index]
         wants_pseudo_2d = not checked
         if spectrum.ndim != 2 or spectrum.is_pseudo_2d == wants_pseudo_2d:
             return
+        phase0_f1 = spectrum.metadata.raw.get("phase0_f1")
+        phase1_f1 = spectrum.metadata.raw.get("phase1_f1")
         try:
             self.session.reload(index, pseudo_2d=wants_pseudo_2d, **self._current_phase_kwargs(spectrum))
-            self._reapply_phase_post_reload(self.session.spectra[index], previous_raw=spectrum.metadata.raw)
+            new_spectrum = self.session.spectra[index]
+            if phase0_f1 is not None:
+                new_spectrum.metadata.raw["phase0_f1"] = phase0_f1
+            if phase1_f1 is not None:
+                new_spectrum.metadata.raw["phase1_f1"] = phase1_f1
+            self._reapply_phase_post_reload(new_spectrum)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to reprocess spectrum", str(exc))
             # Revert the button to match what's actually loaded.
@@ -3740,110 +3795,122 @@ class MainWindow(QMainWindow):
         self._schedule_sidecar_save(index)
 
     def _current_phase_kwargs(self, spectrum) -> dict:
-        """The *total* current phase (whatever was already baked in
-        by the last load/reprocess, plus the live delta still showing
-        in the Phase spin boxes) as ``read_1d``/``read_2d``'s own
-        ``phase0``/``phase1``/``pivot_frac``/``autophase=False``
-        kwargs -- so a raw-FID reprocess reproduces the exact phase
-        currently on screen instead of resetting to the vendor's own
-        default (every vendor's ``read_1d``/``read_2d`` bakes its own
-        applied ``phase0``/``phase1`` into ``metadata.raw``, which is
-        exactly the "already baked in" half of this sum; the Phase
-        spin boxes are deliberately *deltas* since editing started --
-        see :meth:`_capture_phase_reference` -- not the total, so
-        adding them on their own would under-correct).
+        """``metadata.raw``'s own already-committed F2 phase
+        (``"phase0"``/``"phase1"``), as ``read_1d``/``read_2d``'s own
+        ``phase0``/``phase1``/``pivot_frac``/``autophase=False`` kwargs
+        -- so a raw-FID reload (currently only
+        :meth:`_on_process_indirect_toggled`, which always commits any
+        pending live delta into ``metadata.raw`` via
+        :meth:`_commit_pending_phase_to_metadata` immediately before
+        calling this) reproduces the spectrum's own already-established
+        F2 phase instead of resetting to the vendor's own default.
 
-        Returns ``{}`` (no override -- vendor default applies,
-        unchanged) when nothing is phase-editable, when ``spectrum``
-        isn't actually being re-read from a raw FID at all (e.g. a
-        Bruker experiment with no ``fid``/``ser`` on disk -- routed
-        through ``read_1d_processed``/``read_2d_processed``, which has
-        no ``phase0``/``phase1`` concept at all, unlike ``read_1d``/
-        ``read_2d``), or when the current Phase-controls target isn't
-        a single scalar phase shared across the whole dataset along F2
-        -- a pseudo-2D slice's own phase (not every slice's shared
-        one), or a conventional 2D's F1/indirect phase -- since
-        ``read_2d`` has no way to apply either of those on its own;
-        see :meth:`_reapply_phase_post_reload` for how those two cases
-        are instead carried through post-hoc."""
-        if self._phase_mode is None or self._phase_freq_ppm is None:
-            return {}
+        Always reads ``metadata.raw`` directly, never a live UI control
+        -- real bug this fixes: an earlier version only forwarded F2's
+        phase when the Phase panel's own Dimension combo happened to be
+        currently focused on F2, silently discarding it on every
+        "Process Indirect Dimension" toggle whenever F1 was focused
+        instead (a dataset's own established F2 phase has nothing to
+        do with which dimension the UI happens to be showing right
+        now). Confirmed directly against real 2D data.
+
+        ``pivot_frac`` is always centre (0.5) -- this project doesn't
+        persist *which* pivot ``phase0``/``phase1`` were originally
+        computed against (only the live ``pivot_spin``, reset to
+        centre on every :meth:`_capture_phase_reference`), so there's
+        nothing more specific to reproduce here; only matters when
+        ``phase1`` is nonzero and the pivot was deliberately moved
+        off-centre for that correction.
+
+        Returns ``{}`` (no override -- vendor default applies) when
+        ``spectrum`` isn't actually being re-read from a raw FID at
+        all (e.g. a Bruker experiment with no ``fid``/``ser`` on disk
+        -- routed through ``read_1d_processed``/``read_2d_processed``,
+        which has no ``phase0``/``phase1`` concept at all), or when
+        F2's own phase is exactly zero (nothing to override)."""
         if not self._fid_reprocessable(spectrum):
             return {}
-        if self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked():
-            return {}
-        if self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0:
-            return {}
-        freq_ppm = self._phase_freq_ppm
-        span = freq_ppm.max() - freq_ppm.min()
-        pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
         baked_in = spectrum.metadata.raw
-        return {
-            "phase0": float(baked_in.get("phase0", 0.0)) + self.phase0_spin.value(),
-            "phase1": float(baked_in.get("phase1", 0.0)) + self.phase1_spin.value(),
-            "pivot_frac": pivot_frac,
-            "autophase": False,
-        }
+        phase0 = float(baked_in.get("phase0", 0.0))
+        phase1 = float(baked_in.get("phase1", 0.0))
+        if not phase0 and not phase1:
+            return {}
+        return {"phase0": phase0, "phase1": phase1, "pivot_frac": 0.5, "autophase": False}
 
-    def _reapply_phase_post_reload(self, spectrum, previous_raw: dict | None = None) -> None:
+    def _reapply_phase_post_reload(self, spectrum) -> None:
         """Companion to :meth:`_current_phase_kwargs`: for the two
         cases it can't forward into the reload itself -- one pseudo-2D
         slice's own phase, or a conventional 2D's F1/indirect phase --
         reapply that same phase directly to the freshly-reloaded
         spectrum post-hoc, so at least what's actually being looked at
-        keeps its phase instead of silently resetting. A no-op outside
-        those two cases, or if the total is zero, or if the reload
-        changed what the phase target even means (e.g. switching to
-        pseudo-2D drops F1's frequency meaning entirely).
+        keeps its phase instead of silently resetting. Each of the two
+        cases below is a self-contained, independent ``if`` (not
+        ``elif``) -- both are no-ops when their own preconditions
+        aren't met, e.g. when the reload changed what the phase target
+        even means (switching to pseudo-2D drops F1's frequency
+        meaning entirely, so the F1 block below never fires for that
+        direction) -- rather than one sharing a single early ``return``
+        that could skip a case still worth checking.
 
-        ``previous_raw`` -- the *pre-reload* spectrum's own
-        ``metadata.raw`` (the caller's own local ``spectrum`` variable,
-        captured before ``session.reload`` replaced it) -- is where the
-        F1 branch's own persisted ``"phase0_f1"/"phase1_f1"`` (see
-        :meth:`_commit_pending_phase_to_metadata`) is read from: the
-        *freshly*-reloaded spectrum's own ``metadata.raw`` never has
-        these (unlike F2's ``"phase0"/"phase1"``, ``read_2d`` doesn't
-        accept or record an F1 phase kwarg at all -- see
-        :meth:`_current_phase_kwargs`'s own docstring), so without this
-        the total would silently drop back to just the live spin-box
-        delta, i.e. the exact loss this method exists to prevent."""
+        The F1 block reads ``spectrum.metadata.raw["phase0_f1"/
+        "phase1_f1"]`` directly -- ``read_2d`` always builds a brand
+        new ``metadata.raw`` from scratch on every reload with no F1-
+        phase concept of its own (see :meth:`_current_phase_kwargs`'s
+        own docstring), so the caller (:meth:`_on_process_indirect_toggled`)
+        must carry these two keys over from the pre-reload spectrum's
+        own ``metadata.raw`` into this (post-reload) one *before*
+        calling this method, or there is nothing here to read."""
         if spectrum.ndim != 2 or spectrum.data_imag is None:
             return
 
-        if self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked():
+        # pseudo-2D single-slice phase: never durably committed to
+        # metadata.raw at all (see _commit_pending_phase_to_metadata's
+        # own docstring for why -- it describes one row, not the whole
+        # dataset) -- can only be recovered from the live spin boxes,
+        # which is safe here specifically because this branch only
+        # ever fires when _phase_mode == "pseudo2d" was already the
+        # active session immediately before this toggle (no risk of
+        # picking up a stale value left over from editing some other
+        # dimension, unlike the F1 case below).
+        if (self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked()
+                and spectrum.is_pseudo_2d):
             phase0 = self.phase0_spin.value()
             phase1 = self.phase1_spin.value()
-            if not phase0 and not phase1:
-                return
-            if not spectrum.is_pseudo_2d:
-                return
             row = self.slice_spin.value() - 1
-            if not (0 <= row < spectrum.data.shape[0]):
-                return
-            freq_ppm = spectrum.axis_values(-1, "ppm")
-            span = freq_ppm.max() - freq_ppm.min()
-            pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
-            complex_row = spectrum.data[row] + 1j * spectrum.data_imag[row]
-            phased_row = processing_ft.apply_phase(complex_row, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
-            spectrum.data[row] = np.real(phased_row)
-            spectrum.data_imag[row] = np.imag(phased_row)
+            if (phase0 or phase1) and 0 <= row < spectrum.data.shape[0]:
+                freq_ppm = spectrum.axis_values(-1, "ppm")
+                span = freq_ppm.max() - freq_ppm.min()
+                pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
+                complex_row = spectrum.data[row] + 1j * spectrum.data_imag[row]
+                phased_row = processing_ft.apply_phase(complex_row, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
+                spectrum.data[row] = np.real(phased_row)
+                spectrum.data_imag[row] = np.imag(phased_row)
 
-        elif self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0:
-            if spectrum.is_pseudo_2d:
-                return  # F1 no longer a frequency axis -- nothing to reapply
-            baked_in = previous_raw or {}
-            phase0 = float(baked_in.get("phase0_f1", 0.0)) + self.phase0_spin.value()
-            phase1 = float(baked_in.get("phase1_f1", 0.0)) + self.phase1_spin.value()
-            if not phase0 and not phase1:
-                return
-            freq_ppm = spectrum.axis_values(0, "ppm")
-            span = freq_ppm.max() - freq_ppm.min()
-            pivot_frac = (self.pivot_spin.value() - freq_ppm.min()) / span if span else 0.5
-            phased = processing_ft.apply_phase(
-                spectrum.complex_data.T, freq_ppm, phase0, phase1, pivot_frac=pivot_frac,
-            ).T
-            spectrum.data = np.real(phased)
-            spectrum.data_imag = np.imag(phased)
+        # F1/indirect phase: always reapplied for a genuine-2D target,
+        # regardless of which dimension the Phase panel happens to be
+        # currently focused on -- real bug this fixes (mirrors
+        # _current_phase_kwargs's own F2 fix, see its docstring):
+        # previously gated on dim_combo.currentIndex() != 0, silently
+        # dropping F1's own already-established phase on every toggle
+        # whenever F2 was the one currently focused instead. No live
+        # spin-box delta added on top -- nothing is left pending by the
+        # time this runs (see _on_process_indirect_toggled's own
+        # up-front commit). pivot_frac is always centre, same reasoning
+        # as _current_phase_kwargs's own docstring (no per-dimension
+        # pivot is persisted anywhere; the live pivot_spin could
+        # reflect whichever dimension was most recently active, not
+        # necessarily F1).
+        if not spectrum.is_pseudo_2d:
+            baked_in = spectrum.metadata.raw
+            phase0 = float(baked_in.get("phase0_f1", 0.0))
+            phase1 = float(baked_in.get("phase1_f1", 0.0))
+            if phase0 or phase1:
+                freq_ppm = spectrum.axis_values(0, "ppm")
+                phased = processing_ft.apply_phase(
+                    spectrum.complex_data.T, freq_ppm, phase0, phase1, pivot_frac=0.5,
+                ).T
+                spectrum.data = np.real(phased)
+                spectrum.data_imag = np.imag(phased)
 
     def _on_align_echo_toggled(self, _checked: bool) -> None:
         """Align Echo is a push button, not a passive checkbox --
@@ -4820,7 +4887,19 @@ class MainWindow(QMainWindow):
         spin boxes had already been re-zeroed by a later
         :meth:`_capture_phase_reference` call -- reselecting, changing
         slice/dimension -- silently reset F1 back to unphased, with no
-        way to tell it had ever been touched."""
+        way to tell it had ever been touched.
+
+        Uses :attr:`_phase_target_dim` (captured once when this
+        session's own target was established), not a live read of
+        ``dim_combo.currentIndex()`` -- real bug, found and fixed:
+        when this method runs because the *dimension* just changed
+        (``dim_combo.currentIndexChanged`` -> ``_on_phase_target_changed``
+        -> ``_capture_phase_reference`` -> here, all before this
+        session's own new target is established), Qt has already
+        updated ``dim_combo.currentIndex()`` to the *new* dimension by
+        the time this runs -- a live read would silently commit a
+        pending F2 delta under the F1 key (or vice versa) on every
+        dimension switch. Confirmed directly against real 2D data."""
         if self._phase_mode is None or self._phase_target_index is None:
             return
         if self._phase_mode == "pseudo2d" and not self.apply_all_slices_checkbox.isChecked():
@@ -4833,7 +4912,7 @@ class MainWindow(QMainWindow):
         if not (0 <= index < len(self.session)):
             return
         spectrum = self.session.spectra[index]
-        is_f1 = self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0
+        is_f1 = self._phase_mode == "2d" and self._phase_target_dim == "f1"
         key0, key1 = ("phase0_f1", "phase1_f1") if is_f1 else ("phase0", "phase1")
         spectrum.metadata.raw[key0] = float(spectrum.metadata.raw.get(key0, 0.0)) + phase0_delta
         spectrum.metadata.raw[key1] = float(spectrum.metadata.raw.get(key1, 0.0)) + phase1_delta
@@ -4899,6 +4978,7 @@ class MainWindow(QMainWindow):
         self._phase_target_index = index
         if index is None:
             self._phase_mode = None
+            self._phase_target_dim = None
             self._phase_reference_full = None
             self._phase_freq_ppm = None
             self._refresh_current_phase_displays()
@@ -4928,6 +5008,7 @@ class MainWindow(QMainWindow):
 
         if spectrum.data_imag is None:
             self._phase_mode = None
+            self._phase_target_dim = None
             self._phase_reference_full = None
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
@@ -4938,12 +5019,14 @@ class MainWindow(QMainWindow):
             self._phase_mode = "1d"
             self._phase_reference_full = spectrum.complex_data
             self._phase_freq_ppm = spectrum.axis_values(0, "ppm")
+            self._phase_target_dim = None
             self._set_processing_enabled(True, "Adjust phase for the selected spectrum.")
 
         elif spectrum.ndim == 2 and spectrum.is_pseudo_2d:
             self._phase_mode = "pseudo2d"
             self._phase_reference_full = spectrum.complex_data
             self._phase_freq_ppm = spectrum.axis_values(-1, "ppm")
+            self._phase_target_dim = None
             n_slices = spectrum.data.shape[0]
             row = self.slice_spin.value()
             status = (
@@ -4957,6 +5040,7 @@ class MainWindow(QMainWindow):
             self._phase_mode = "2d"
             self._phase_reference_full = spectrum.complex_data
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
+            self._phase_target_dim = dim
             self._phase_freq_ppm = spectrum.axis_values(-1 if dim == "f2" else 0, "ppm")
             # _phase_2d_slice_index picks which row/column the
             # Processing tab's own 1D preview shows while phasing a
@@ -4989,6 +5073,7 @@ class MainWindow(QMainWindow):
 
         else:
             self._phase_mode = None
+            self._phase_target_dim = None
             self._phase_reference_full = None
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
