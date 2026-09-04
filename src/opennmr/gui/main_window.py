@@ -2885,6 +2885,26 @@ class MainWindow(QMainWindow):
                 row = 0
             title = self._slice_label(spectrum, row + 1)
             raw_fid = raw_fid[row]
+            # Echo-Antiecho (FnMODE 6): "fid_raw" already carries
+            # whatever global conjugate read_2d applies to every row
+            # (its own _CONJUGATE_QUADRATURE_NOTE step), but not its
+            # own *extra* even-row conjugate-and-reversal, which is a
+            # per-pair fix that isn't knowable until a specific row is
+            # actually picked -- see _recompute_multi_row_data's own
+            # matching comment for the real, user-reported "mirrored
+            # in x" bug a conjugate-without-reversal version of this
+            # exact fix once caused (checking only one axis after a
+            # raw time-domain fix isn't enough, since FFT(conj(x))
+            # also reverses that row's own F2 frequency axis). This
+            # method previously missed the fix entirely -- confirmed
+            # directly against real data: a genuinely wrong (not just
+            # re-phased) trace for any echo (even-indexed) row,
+            # exactly the "two pipelines quietly diverge" class that
+            # comment already warns about. Real user report: "the
+            # phase is 90 offset" -- what a conjugated-and-unreversed
+            # trace looks like at a glance, not a literal phase error.
+            if spectrum.metadata.raw.get("fn_mode", 1) == 6 and row % 2 == 0:
+                raw_fid = np.conj(raw_fid)[::-1]
             slice_template = get_trace(spectrum, axis="f1", index=row + 1)
 
         computed = self._process_raw_fid_row(spectrum, raw_fid, dt)

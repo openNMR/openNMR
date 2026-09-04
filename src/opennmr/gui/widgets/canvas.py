@@ -241,6 +241,17 @@ class MplCanvas(QWidget):
         # zooming (see _on_scroll). None whenever any other view
         # (1D line, FID, compare, fit) is shown.
         self._contour_spectrum: NMRSpectrum | None = None
+        # Set only by extract_slice, right before it replaces a
+        # contour with a single extracted row/column -- the contour
+        # spectrum that slice came *from*, so a "Show Contour" menu
+        # action can get back to it. Real gap this fixes: extract_slice
+        # had no way back at all once used, short of reselecting the
+        # spectrum in the list (which also loses anything else it was
+        # mid-editing). Cleared unconditionally at the top of every
+        # show_spectrum call (below) -- correct any time this canvas's
+        # own content genuinely changes to something else, since
+        # show_spectrum is the only entry point for this canvas.
+        self._extracted_from_spectrum: NMRSpectrum | None = None
         self._contour_factor: float | None = None
         # Number of contour levels, and how they're spaced between the
         # noise floor (_contour_factor) and the data's own peak -- see
@@ -818,6 +829,10 @@ class MplCanvas(QWidget):
             contour_levels_action = menu.addAction("Set Contour Levels…")
             extract_slice_action = menu.addAction("Extract Slice…")
 
+        show_contour_action = None
+        if self._extracted_from_spectrum is not None:
+            show_contour_action = menu.addAction("Show Contour")
+
         exclude_point_action = None
         reset_points_action = None
         if self._fit_mode:
@@ -855,6 +870,14 @@ class MplCanvas(QWidget):
             self._prompt_contour_levels()
         elif extract_slice_action is not None and chosen is extract_slice_action:
             self._prompt_extract_slice()
+        elif show_contour_action is not None and chosen is show_contour_action:
+            # Read out first -- show_spectrum unconditionally clears
+            # _extracted_from_spectrum at its own top (correct for
+            # every other caller, since this canvas's own content is
+            # genuinely changing to something else), so grabbing the
+            # value after that call would already see None.
+            spectrum = self._extracted_from_spectrum
+            self.show_spectrum(spectrum)
         elif exclude_point_action is not None and chosen is exclude_point_action:
             if self._last_right_click_xy is not None:
                 self.fitPointExcludeRequested.emit(*self._last_right_click_xy)
@@ -1091,9 +1114,12 @@ class MplCanvas(QWidget):
         """Pull a single row (``axis="f1"``) or column (``"f2"``) out
         of the current 2D/pseudo-2D spectrum as its own 1D trace, via
         :func:`opennmr.processing.slicing.get_trace`, and show it in
-        place of the contour."""
-        trace = processing_slicing.get_trace(self._contour_spectrum, axis=axis, index=index)
+        place of the contour -- right-click "Show Contour" (see
+        ``_on_context_menu``) gets back to the contour it came from."""
+        source = self._contour_spectrum
+        trace = processing_slicing.get_trace(source, axis=axis, index=index)
         self.show_spectrum(trace)
+        self._extracted_from_spectrum = source
 
     @property
     def axis_unit(self) -> str:
@@ -1279,6 +1305,7 @@ class MplCanvas(QWidget):
         canvas's legend-visible/aspect-lock choices across the
         rebuild."""
         self.figure.clear()
+        self._extracted_from_spectrum = None
 
         if spectrum.ndim == 1:
             self._contour_spectrum = None

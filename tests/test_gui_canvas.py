@@ -553,6 +553,47 @@ def test_extract_slice_shows_1d_row(qapp):
     assert len(canvas._current_1d_spectrum.data) == 64  # traced along F2
 
 
+def test_extract_slice_remembers_its_own_source_contour(qapp):
+    # Real gap, found and fixed: extract_slice had no way back to the
+    # contour at all once used, short of reselecting the spectrum in
+    # the list -- confirmed there was no "show contour" mechanism
+    # anywhere in this file before this fix.
+    canvas = MplCanvas()
+    spec = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spec)
+    canvas.extract_slice("f1", 3)
+    assert canvas._extracted_from_spectrum is spec
+
+
+def test_show_contour_after_extract_slice_restores_the_contour(qapp):
+    canvas = MplCanvas()
+    spec = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spec)
+    canvas.extract_slice("f1", 3)
+
+    # Mirrors the right-click "Show Contour" handler in _on_context_menu.
+    saved = canvas._extracted_from_spectrum
+    canvas.show_spectrum(saved)
+
+    assert canvas._contour_spectrum is spec
+    assert canvas._current_1d_spectrum is None
+    assert canvas._extracted_from_spectrum is None  # consumed, not left stale
+
+
+def test_extracted_from_spectrum_cleared_by_an_unrelated_show_spectrum_call(qapp):
+    # Staleness guard: after extracting a slice, showing a *different*
+    # spectrum must not leave a "Show Contour" action pointing at the
+    # old one.
+    canvas = MplCanvas()
+    spec = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spec)
+    canvas.extract_slice("f1", 3)
+    assert canvas._extracted_from_spectrum is not None
+
+    canvas.show_spectrum(_make_1d())
+    assert canvas._extracted_from_spectrum is None
+
+
 def test_show_2d_overlay_renders_and_clears_contour_spectrum(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_2d(n_f1=8, n_f2=64))

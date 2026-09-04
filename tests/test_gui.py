@@ -3344,6 +3344,49 @@ def test_main_window_f1_truncate_row_pair_aware_matches_read_2d_directly(qapp, t
     np.testing.assert_allclose(live_result.axes[0].ppm, direct.axes[0].ppm)
 
 
+def test_main_window_processing_preview_applies_echo_antiecho_row_transform(qapp, tmp_path, monkeypatch):
+    # Real bug, found and fixed: _compute_processing_preview reads a
+    # single row straight out of the cached fid_raw, but for an Echo-
+    # Antiecho (FnMODE 6) dataset that cache is missing the extra
+    # even-row conjugate-and-reversal read_2d itself applies before F2
+    # processing (see io.bruker.read_2d's own _CONJUGATE_QUADRATURE_NOTE-
+    # adjacent comment, and _recompute_multi_row_data's matching fix,
+    # which this method was apparently never updated to match -- "two
+    # pipelines quietly diverge"). Confirmed directly against real data
+    # before this fix: a ~208% relative difference for slice 1 (row 0,
+    # an echo/even row), not a rounding-level one. Real user report:
+    # "the phase is 90 offset" -- a rough description of what a
+    # conjugated-but-unreversed trace looks like, not a literal phase
+    # error.
+    #
+    # pseudo-2D mode specifically: slice 1 (row 0 of the ACTUAL
+    # committed spectrum) is a valid, direct apples-to-apples reference
+    # for what the preview *should* show -- unlike genuine 2D, where a
+    # processed row is an F1 frequency bin (a mixture across every raw
+    # row), not any single raw row's own trace.
+    path = _make_raw_2d_dataset(
+        tmp_path, monkeypatch, n_f1=8, n_f2=16, name="echoantiechopreview", f1_nuc="13C", fn_mode=6,
+    )
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+    assert spectrum.is_pseudo_2d  # default -- see _load's own pseudo-2D-by-default policy
+    assert spectrum.metadata.raw["fn_mode"] == 6
+    # Isolates the transform under test from an unrelated timing detail:
+    # a fresh read_2d-built spectrum.data has no baseline correction
+    # baked in yet (that only happens via a live recompute), but
+    # _compute_processing_preview applies it live on every call -- off
+    # here so the comparison below checks only the row transform.
+    spectrum.metadata.raw["baseline_correct"] = False
+
+    actual_row0 = spectrum.complex_data[0]  # row 0 is even -- an echo row
+    filled, dt, preview_spectrum, title = window._compute_processing_preview(spectrum)
+
+    assert title == "Slice 1"
+    np.testing.assert_allclose(preview_spectrum.complex_data, actual_row0, atol=1e-6)
+
+
 def test_main_window_zero_fill_f1_and_f2_together_matches_read_2d_directly(qapp, tmp_path, monkeypatch):
     # Real user concern: "the SI for both dimensions doesn't screw up
     # anything else" -- changing F2's own zero-fill (the pre-existing
