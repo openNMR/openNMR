@@ -1062,7 +1062,16 @@ class MainWindow(QMainWindow):
         # override that default rather than being silently reset by it
         # on every reopen -- see the pseudo_2d branch just below.
         saved_metadata = io_persistence.load_metadata_sidecar(spectrum.metadata.source_path)
-        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
+        # X-Pulse's own read_2d has no pseudo_2d parameter at all --
+        # every genuine 2D load from it is unconditionally the real
+        # thing, so there is nothing to opt out of here (see
+        # _refresh_selection_display's own matching guard on the
+        # "Process Indirect Dimension" button for the full story). The
+        # reload attempt below would always raise TypeError for it --
+        # harmlessly swallowed by the except below today, but skipping
+        # it outright avoids a guaranteed-to-fail call on every X-Pulse
+        # 2D load.
+        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d and spectrum.metadata.vendor != "xpulse":
             # Pseudo-2D is the default treatment for any 2D data,
             # regardless of what the vendor's own (known-unreliable for
             # at least Bruker T2/PFG data, see TODO.md) auto-detection
@@ -3232,6 +3241,19 @@ class MainWindow(QMainWindow):
                 si1 = spectrum.data.shape[0]
             f1_filled = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, data)
             data = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, dt_f1)[1], 0, f1_filled)
+            if fn_mode not in (4, 5, 6):
+                # Mirrors io.bruker.read_2d's own matching fix -- same
+                # "two pipelines quietly diverge" class this project has
+                # hit before (e.g. the fn_mode==6 raw-row fix a few
+                # lines above this method's own docstring already
+                # covers): this method rebuilds F1's own FFT from
+                # scratch, independently of read_2d, so it needs the
+                # identical F1-mirror fix applied here too, not just
+                # there. See read_2d's own comment on this exact branch
+                # for the full "conjugating before an FFT reverses that
+                # FFT's own frequency-bin order" story and the real COSY
+                # data (PULPROG cosygpmfppqf) that caught it.
+                data = data[::-1, :]
             # F1's ppm span (start/end) depends only on the acquisition
             # itself (transmitter offset + spectral width), never on
             # how many points it's sampled into -- same reasoning
@@ -4169,6 +4191,22 @@ class MainWindow(QMainWindow):
             quick_phase_column.addWidget(quick_button)
         form.addRow("Quick phase:", quick_phase_column)
 
+        zero_phase_row = QHBoxLayout()
+        zero_phase0_button = QPushButton("Zero Phase 0")
+        zero_phase0_button.setToolTip("Zero just Phase 0 (0th order), leaving Phase 1 untouched.")
+        zero_phase0_button.clicked.connect(lambda: self._on_zero_phase_clicked(0))
+        zero_phase_row.addWidget(zero_phase0_button)
+        zero_phase1_button = QPushButton("Zero Phase 1")
+        zero_phase1_button.setToolTip("Zero just Phase 1 (1st order), leaving Phase 0 untouched.")
+        zero_phase1_button.clicked.connect(lambda: self._on_zero_phase_clicked(1))
+        zero_phase_row.addWidget(zero_phase1_button)
+        form.addRow(zero_phase_row)
+
+        reset_button = QPushButton("Reset")
+        reset_button.setToolTip("Zero both Phase 0 and Phase 1 together.")
+        reset_button.clicked.connect(self._on_reset_phase_clicked)
+        form.addRow(reset_button)
+
         self.pivot_spin = RelativeDoubleSpinBox()
         self.pivot_spin.setRange(-1.0e5, 1.0e5)
         self.pivot_spin.setDecimals(3)
@@ -4302,22 +4340,6 @@ class MainWindow(QMainWindow):
         baseline_options_row.addWidget(self.baseline_smoothing_spin)
         form.addRow("Baseline method:", baseline_options_row)
         self._refresh_baseline_options_visibility()
-
-        zero_phase_row = QHBoxLayout()
-        zero_phase0_button = QPushButton("Zero Phase 0")
-        zero_phase0_button.setToolTip("Zero just Phase 0 (0th order), leaving Phase 1 untouched.")
-        zero_phase0_button.clicked.connect(lambda: self._on_zero_phase_clicked(0))
-        zero_phase_row.addWidget(zero_phase0_button)
-        zero_phase1_button = QPushButton("Zero Phase 1")
-        zero_phase1_button.setToolTip("Zero just Phase 1 (1st order), leaving Phase 0 untouched.")
-        zero_phase1_button.clicked.connect(lambda: self._on_zero_phase_clicked(1))
-        zero_phase_row.addWidget(zero_phase1_button)
-        form.addRow(zero_phase_row)
-
-        reset_button = QPushButton("Reset")
-        reset_button.setToolTip("Zero both Phase 0 and Phase 1 together.")
-        reset_button.clicked.connect(self._on_reset_phase_clicked)
-        form.addRow(reset_button)
 
         layout.addWidget(phase_box)
         layout.addWidget(self._build_reference_box())
@@ -7570,7 +7592,18 @@ class MainWindow(QMainWindow):
         self.imaging_max_gradient_spin.blockSignals(False)
         self._refresh_imaging_gradient()
 
-        self.process_indirect_button.setVisible(spectrum.ndim == 2)
+        # X-Pulse's own read_2d has no pseudo_2d concept at all (every
+        # genuine 2D load is unconditionally the real thing, no
+        # parameter to ask for pseudo-2D instead) -- unlike Bruker/
+        # Varian, which both accept it. Offering this toggle anyway let
+        # a user reach _on_process_indirect_toggled's own reload call,
+        # which forwards pseudo_2d= straight into read_2d and raised
+        # TypeError: read_2d() got an unexpected keyword argument
+        # 'pseudo_2d' -- confirmed directly against a real X-Pulse HSQC
+        # dataset. Hidden here the same way it already is for 1D data,
+        # rather than shown-but-broken.
+        supports_pseudo_2d_toggle = spectrum.metadata.vendor != "xpulse"
+        self.process_indirect_button.setVisible(spectrum.ndim == 2 and supports_pseudo_2d_toggle)
         self.process_indirect_button.blockSignals(True)
         self.process_indirect_button.setChecked(not spectrum.is_pseudo_2d)
         self.process_indirect_button.blockSignals(False)

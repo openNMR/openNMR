@@ -2949,6 +2949,38 @@ def test_main_window_xpulse_2d_phase_drag_does_not_crash(qapp, tmp_path, monkeyp
     assert window.session.spectra[index].data.shape[0] == 4
 
 
+def test_main_window_process_indirect_button_hidden_for_xpulse_2d(qapp, tmp_path, monkeypatch):
+    # Real user report: "Importing 2D x-pulse causes a crash." Root
+    # cause: io.xpulse.read_2d has no pseudo_2d parameter at all (every
+    # genuine 2D load from it is unconditionally the real thing) --
+    # unlike Bruker/Varian, which both accept one. The "Process
+    # Indirect Dimension" button was shown regardless, so unchecking it
+    # (or the button's own state ever needing a reload) reached
+    # _on_process_indirect_toggled's reload call, which forwards
+    # pseudo_2d= straight into read_2d and raised
+    # "TypeError: read_2d() got an unexpected keyword argument
+    # 'pseudo_2d'" -- confirmed directly. Fixed by hiding the button
+    # for this vendor, the same way it's already hidden for 1D data.
+    from PySide6.QtWidgets import QMessageBox
+
+    path = _make_xpulse_ntuples_2d_dataset(tmp_path)
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: critical_calls.append(a))
+
+    window = MainWindow()
+    window._load(path, vendor="xpulse")
+
+    assert critical_calls == []
+    assert window.process_indirect_button.isHidden()
+
+    # A genuine (non-pseudo) Bruker 2D must still show and support it.
+    bruker_path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=16, name="stillworks2d", f1_nuc="13C")
+    window._load(bruker_path, vendor="bruker")
+    assert not window.process_indirect_button.isHidden()
+    window.process_indirect_button.setChecked(True)
+    assert critical_calls == []
+
+
 def test_main_window_linear_predict_direction_defaults_to_forward_and_threads_through(qapp, tmp_path):
     # LP direction should actually change the live-recomputed spectrum
     # (not just be recorded) -- forward extends past the FID's own
