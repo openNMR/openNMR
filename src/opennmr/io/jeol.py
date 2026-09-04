@@ -461,6 +461,11 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
 
     nucleus = _normalize_nucleus(_get_param(params, "X_DOMAIN")["value"] if _get_param(params, "X_DOMAIN") else None)
     solvent_param = _get_param(params, "solvent")
+    # "experiment" is JEOL's own closest equivalent to Bruker's PULPROG/
+    # X-Pulse's .PULSESEQUENCE/Varian's seqfil -- confirmed present and
+    # giving a sensible pulse-sequence-like name (e.g. "single_pulse_dec",
+    # "carbon.jxp") on all four real JEOL test files available.
+    experiment_param = _get_param(params, "experiment")
 
     metadata = NMRMetadata(
         vendor="jeol",
@@ -469,6 +474,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
         bf1=freq_hz / 1e6,
         o1=offset_ppm * freq_hz / 1e6,
         source_path=path,
+        pulse_program=experiment_param["value"] if experiment_param else None,
         raw={
             "header": header, "params": params, "phase0": phase0, "phase1": phase1,
             "solvent": solvent_param["value"] if solvent_param else None,

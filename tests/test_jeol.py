@@ -35,7 +35,7 @@ def _pack_param(name, value, value_type, unit_base=0, endian=BE):
 
 def _build_jdf(n_points=8, x_sweep_hz=1000.0, x_freq_hz=400_000_000.0, x_offset_ppm=5.0,
                x_domain="1H", solvent="CDCl3", title="synthetic", comment="test fixture",
-               little_endian_body=False, data_format=1, fid=None, filter_factor=0):
+               little_endian_body=False, data_format=1, fid=None, filter_factor=0, experiment=None):
     """A minimal, structurally-valid synthetic ``.jdf`` byte buffer --
     real field values only where ``opennmr.io.jeol`` actually reads
     them (nucleus, sweep width, frequency, offset, solvent, the data
@@ -88,6 +88,8 @@ def _build_jdf(n_points=8, x_sweep_hz=1000.0, x_freq_hz=400_000_000.0, x_offset_
     ]
     if filter_factor:
         params.append(_pack_param("FILTER_FACTOR", filter_factor, "Integer", endian=param_endian))
+    if experiment is not None:
+        params.append(_pack_param("experiment", experiment, "String", endian=param_endian))
     param_section = bytearray()
     param_section += struct.pack(param_endian + "I", 0)  # parameterSize
     param_section += struct.pack(param_endian + "I", 0)  # lowIndex
@@ -203,6 +205,22 @@ def test_read_1d_extracts_solvent_title_comment(tmp_path):
     assert spectrum.metadata.raw["solvent"] == "DMSO-D6"
     assert spectrum.metadata.raw["title"] == "my_experiment"
     assert spectrum.metadata.raw["comment"] == "qHNMR test"
+
+
+def test_read_1d_records_pulse_program_from_experiment_param(tmp_path):
+    # JEOL's own closest equivalent to Bruker's PULPROG/X-Pulse's
+    # .PULSESEQUENCE/Varian's seqfil -- confirmed present (as
+    # "experiment") and giving a sensible pulse-sequence-like name on
+    # all four real JEOL test files available in this project.
+    path = _write_jdf(tmp_path, experiment="single_pulse_dec")
+    spectrum = jeol.read_1d(path, autophase=False, baseline_correct=False)
+    assert spectrum.metadata.pulse_program == "single_pulse_dec"
+
+
+def test_read_1d_pulse_program_is_none_when_not_recorded(tmp_path):
+    path = _write_jdf(tmp_path)
+    spectrum = jeol.read_1d(path, autophase=False, baseline_correct=False)
+    assert spectrum.metadata.pulse_program is None
 
 
 def test_read_1d_little_endian_body(tmp_path):

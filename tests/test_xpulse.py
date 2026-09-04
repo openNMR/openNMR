@@ -102,6 +102,23 @@ def test_read_1d_probe_is_none_when_not_recorded(tmp_path):
     assert spectrum.metadata.probe is None
 
 
+def test_read_1d_records_pulse_program_from_dot_pulsesequence(tmp_path):
+    path = tmp_path / "spectrum_with_pulseq.jdx"
+    path.write_text(FIXTURE.replace(
+        "##.OBSERVENUCLEUS= 1H", "##.OBSERVENUCLEUS= 1H\n##.PULSESEQUENCE= HSQC_HX",
+    ))
+    spectrum = xpulse.read_1d(str(path), autophase=False, baseline_correct=False)
+
+    assert spectrum.metadata.pulse_program == "HSQC_HX"
+
+
+def test_read_1d_pulse_program_is_none_when_not_recorded(tmp_path):
+    path = _write_fixture(tmp_path)
+    spectrum = xpulse.read_1d(path, autophase=False, baseline_correct=False)
+
+    assert spectrum.metadata.pulse_program is None
+
+
 def test_read_xpulse_jcamp_decodes_affn_fid(tmp_path):
     path = _write_fixture(tmp_path)
     fid_data = xpulse._read_xpulse_jcamp(path)
