@@ -1179,7 +1179,21 @@ class MplCanvas(QWidget):
             existing = self.ax.get_legend()
             if existing is not None:
                 existing.remove()
-        self.ax.set_box_aspect(self._aspect_ratio)
+        # A 2D/pseudo-2D contour panel defaults to a square physical
+        # box (real roadmap ask: "the contour panel itself should be
+        # square... automatic/default for 2D, not something the user
+        # has to turn on") -- distinct from the general, user-driven
+        # _aspect_ratio lock above, which still wins outright when the
+        # user has explicitly set one (an arbitrary width:height ratio
+        # is a deliberate choice, not something this default should
+        # override). Every other view (1D, FID, Compare, Processing
+        # preview) keeps today's behaviour: fully auto unless locked.
+        if self._aspect_ratio is not None:
+            self.ax.set_box_aspect(self._aspect_ratio)
+        elif self._contour_spectrum is not None:
+            self.ax.set_box_aspect(1.0)
+        else:
+            self.ax.set_box_aspect(None)
         # matplotlib's own Axes.grid(visible, **kwargs) quirk: passing
         # any style kwarg (even alongside visible=False) is treated as
         # an implicit "turn it on" and warns -- only pass alpha when

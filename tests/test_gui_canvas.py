@@ -254,6 +254,40 @@ def test_aspect_ratio_persists_across_show_spectrum(qapp):
     assert canvas.ax.get_box_aspect() == pytest.approx(1.5)
 
 
+def test_2d_contour_defaults_to_a_square_box_aspect(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    assert canvas.ax.get_box_aspect() == pytest.approx(1.0)
+
+
+def test_2d_square_default_survives_a_contour_redraw(qapp):
+    # _redraw_contour (contour-fraction/level changes, a live phase
+    # drag's debounced refresh, ...) is a separate code path from
+    # show_spectrum that also rebuilds the axes from scratch -- confirm
+    # the square default isn't only applied on the very first render.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas._redraw_contour(preserve_view=False)
+    assert canvas.ax.get_box_aspect() == pytest.approx(1.0)
+
+
+def test_explicit_aspect_ratio_overrides_the_2d_square_default(qapp):
+    canvas = MplCanvas()
+    canvas.set_aspect_ratio(2.0)
+    canvas.show_spectrum(_make_2d())
+    assert canvas.ax.get_box_aspect() == pytest.approx(2.0)
+
+
+def test_1d_still_defaults_to_unlocked_aspect_after_a_2d_view(qapp):
+    # The square default is contour-specific (gated on _contour_spectrum,
+    # set by show_spectrum's own ndim==2 branch) -- switching back to a
+    # 1D spectrum must not leave the box aspect stuck at 1.0.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())
+    canvas.show_spectrum(_make_1d())
+    assert canvas.ax.get_box_aspect() is None
+
+
 def test_toolbar_has_no_popup_dialog_buttons():
     from opennmr.gui.widgets.canvas import _Toolbar
 
