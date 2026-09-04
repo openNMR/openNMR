@@ -61,6 +61,11 @@ from .simulations import (
     static_quadrupolar_spectrum_exact
 )
 
+from .csa_fitting import (
+    csa_model_full, build_csa_model, fit_csa_spectrum, evaluate_csa_fit,
+    print_csa_fit_report, NMR1dplot_with_csa_fit, NMRCSAFitWorkflow
+)
+
 __all__ = [
     # utils
     "find_gamma", "NUC_label", "read_bruker_metadata", "read_vdlist",
@@ -96,4 +101,7 @@ __all__ = [
     "csa_frequency", "powder_orientations", "powder_orientations_octant", 
     "static_csa", "make_static_csa_spectrum", "finite_mas_csa_spectrum",
     "static_quadrupolar_spectrum_exact",
+    # csa_fitting
+    "csa_model_full", "build_csa_model", "fit_csa_spectrum", "evaluate_csa_fit",
+    "print_csa_fit_report", "NMR1dplot_with_csa_fit", "NMRCSAFitWorkflow",
 ]
