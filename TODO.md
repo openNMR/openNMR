@@ -2,6 +2,20 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Rigorous 2D-processing-flow audit: two real data-consistency bugs found and fixed, xf2-slice default reverted (2026-09-05)
+
+User: "I get a flicker as it saves and it seems to reload something old" while phasing any 2D, plus an explicit request for a rigorous audit ("make sure that every update/save state is updating the same data, from the same data... be extra sure about the updates and where the processed spectra read in and out from") and a design clarification ("2D processing should use slice one of the xf2... not index 1 of the fully processed data").
+
+**Bug 1, the main suspect for the flicker**: `_recompute_multi_row_data` never applied any window function to F1 at all. `read_2d` always does (defaulting to `proc2s`'s own recorded WDW -- there's no live GUI control for F1's window at all, unlike F2's own `window_combo`). Confirmed on real COSY data (`exam_CMCse_3/12`, proc2s WDW=4/QSINE): a live recompute with *no* phase or FID-processing change at all produced data ~80% different from the original load -- not subtle. Found by first confirming F2's own per-row processing matched `read_2d`'s own primitives exactly (0.0 diff), which narrowed the search to F1 specifically.
+
+**Bug 2**: the same method only ever read the *committed* phase0/phase1, never the live, not-yet-committed drag delta. Baseline correction is deliberately deferred to this debounced recompute (too slow to re-run every drag tick) rather than applied inline -- restarted on every tick while `baseline_correct` is on. If the 200ms debounce fired while a drag was paused but not released, this method rebuilt `spectrum.data` from raw using the *old* phase, silently reverting the live-dragged display. Confirmed: a live 77-degree drag followed by this firing showed a ~1.35e9 magnitude difference before the fix, exact match after. Fixed for both F2 and F1.
+
+**Design reversion**: `_compute_processing_preview`'s genuine-2D branch (see the "Processing tab's 'Slice 1' preview didn't match the 2D contour" entry earlier in this file) is reverted back to xf2/raw-row-based, per direct user clarification -- that earlier fix optimized for "match the contour" over "show what F2's controls alone would do to the raw acquisition," which is this tab's actual stated purpose.
+
+**Not yet done, flagged rather than rushed**: a numeric "choose which slice" control for genuine 2D (pseudo-2D already has `slice_spin`; genuine 2D's own `_phase_2d_slice_index` is still hardcoded to 1 with no user-facing control). "Grab a slice from the spectrum" already exists (`MplCanvas.extract_slice`, with "Show Contour" to get back) and covers part of the same request.
+
+4 new regression tests (2 for the bugs above, verified to discriminate by reverting each fix independently; 1 replacing the now-invalid genuine-2D-preview test; the pre-existing xf2-mismatch test needed no changes, confirming the revert was clean). 896 tests passing (894 -> 896). Commit `f7d464e`, pushed.
+
 ## Five-part follow-up: X-Pulse 2D crash, real COSY F1-mirror bug (fixed), contour colour contrast, phase-button layout, projections source (2026-09-05)
 
 User sent five items in one message, plus a direct question answered inline. In order:
