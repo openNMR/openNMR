@@ -54,6 +54,13 @@ from .relaxation import (
 
 from .arithmetic import combine_spectra, combine_spectra_as_results
 
+from .simulations import (
+    haeberlen_csa_tensor, herzfeld_berger_csa_tensor, csa_definition,
+    csa_frequency, powder_orientations, powder_orientations_octant, 
+    static_csa, make_static_csa_spectrum, finite_mas_csa_spectrum,
+    static_quadrupolar_spectrum_exact
+)
+
 __all__ = [
     # utils
     "find_gamma", "NUC_label", "read_bruker_metadata", "read_vdlist",
@@ -84,4 +91,9 @@ __all__ = [
     "NMR2D_relaxation_workflow",
     # arithmetic
     "combine_spectra", "combine_spectra_as_results",
+    # simulations
+    "haeberlen_csa_tensor", "herzfeld_berger_csa_tensor", "csa_definition",
+    "csa_frequency", "powder_orientations", "powder_orientations_octant", 
+    "static_csa", "make_static_csa_spectrum", "finite_mas_csa_spectrum",
+    "static_quadrupolar_spectrum_exact",
 ]
