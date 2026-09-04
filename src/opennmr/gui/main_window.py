@@ -5208,6 +5208,24 @@ class MainWindow(QMainWindow):
         seed_mode_row.addWidget(self.seed_mode_combo)
         advanced_layout.addLayout(seed_mode_row)
 
+        self.amplitude_bound_regions_checkbox = QCheckBox("Bound amplitude using region integrals")
+        self.amplitude_bound_regions_checkbox.setToolTip(
+            "For each peak whose starting shift falls inside one of the "
+            "Integration Regions above, cap its amplitude using that "
+            "region's own raw (unfitted) integral -- converted via the "
+            "peak's lineshape/FWHM -- instead of leaving it unbounded "
+            "above. Recomputed fresh per slice, so it tracks a genuinely "
+            "varying true amplitude across a relaxation/diffusion series. "
+            "Deliberately loose (a whole region's own integral, not a "
+            "tight per-peak estimate) -- mainly useful to keep an "
+            "unconstrained fit from inflating one peak's amplitude to "
+            "compensate for an unmodelled overlapping neighbour. Has no "
+            "effect unless at least one region is defined above, and "
+            "never overrides a peak's own explicit amplitude bound (Set "
+            "Bounds... dialog)."
+        )
+        advanced_layout.addWidget(self.amplitude_bound_regions_checkbox)
+
         noise_row = QHBoxLayout()
         noise_row.addWidget(QLabel("Noise region (ppm):"))
         self.sn_noise_region_edit = QLineEdit()
@@ -6405,16 +6423,22 @@ class MainWindow(QMainWindow):
         starting guess -- real user requirement: "fit one slice
         first, then either apply those same parameters to every
         other slice or use them as each next slice's own starting
-        guess"."""
+        guess". And optionally caps each peak's amplitude from its own
+        Integration Region's raw integral when
+        :attr:`amplitude_bound_regions_checkbox` is checked (see its
+        own tooltip) -- fitting-wizard-roadmap item "bounding possibly
+        from integrals"."""
         peak_defs = self._read_peak_defs()
         if not peak_defs:
             raise ValueError("Add at least one peak to fit.")
         prepared = [self._ensure_slice_info(s, i + 1) for i, s in enumerate(entries)]
         fit_regions = self._read_region_defs() or None
         sn_kwargs = self._read_sn_gating_kwargs()
+        amplitude_bound_regions = fit_regions if self.amplitude_bound_regions_checkbox.isChecked() else None
         fitted = processing_fitting.NMR2D_fit_slices(
             {"rows": prepared}, peak_defs, mode="rows", fit_regions=fit_regions,
             show_report=False, show_warnings=False, seed_mode=self.seed_mode_combo.currentData(),
+            amplitude_bound_regions=amplitude_bound_regions,
             **sn_kwargs,
         )
         return fitted["rows"]
@@ -6996,6 +7020,7 @@ class MainWindow(QMainWindow):
             "step": self.delay_step_spin.value(), "vclist_factor": self.vclist_factor_spin.value(),
             "position_tolerance": self.position_tolerance_spin.value(),
             "seed_mode": self.seed_mode_combo.currentIndex(),
+            "amplitude_bound_regions": self.amplitude_bound_regions_checkbox.isChecked(),
             "sn_noise_region": self.sn_noise_region_edit.text(),
             "sn_threshold": self.sn_threshold_spin.value(),
             "results_text": self.analysis_results_label.text(),
@@ -7029,6 +7054,7 @@ class MainWindow(QMainWindow):
             self.vclist_factor_spin.setValue(1.0)
             self.position_tolerance_spin.setValue(0.5)
             self.seed_mode_combo.setCurrentIndex(0)
+            self.amplitude_bound_regions_checkbox.setChecked(False)
             self.sn_noise_region_edit.clear()
             self.sn_threshold_spin.setValue(3.0)
         else:
@@ -7064,6 +7090,7 @@ class MainWindow(QMainWindow):
             self.vclist_factor_spin.setValue(state["vclist_factor"])
             self.position_tolerance_spin.setValue(state.get("position_tolerance", 0.5))
             self.seed_mode_combo.setCurrentIndex(state.get("seed_mode", 0))
+            self.amplitude_bound_regions_checkbox.setChecked(state.get("amplitude_bound_regions", False))
             self.sn_noise_region_edit.setText(state.get("sn_noise_region", ""))
             self.sn_threshold_spin.setValue(state.get("sn_threshold", 3.0))
             self.analysis_results_label.setText(state["results_text"])

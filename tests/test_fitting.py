@@ -230,6 +230,27 @@ def test_fit_spectrum_recovers_single_gaussian_peak():
     assert popt[2] == pytest.approx(A_true, abs=1e-2)
 
 
+def test_fit_spectrum_clips_data_driven_initial_guess_into_a_tight_manual_bound():
+    # Real bug, found while building amplitude_bound_regions (below):
+    # initialize_params_with_map's own initial amplitude guess is read
+    # straight off the data (the y-value at the peak's own starting
+    # shift), with no knowledge of whatever bounds will actually be
+    # used -- a manual "Set Bounds..." amplitude entry (or
+    # amplitude_bound_regions) tighter than that raw data value used to
+    # crash scipy's bounded curve_fit outright ("Initial guess is
+    # outside of provided bounds"), rather than being respected.
+    x0_true, fwhm_true, A_true = 5.0, 0.05, 2.0
+    spec = _make_1d(x0=x0_true, fwhm=fwhm_true, A=A_true, kind="gaussian", b0=0.0, b1=0.0)
+
+    tight_upper = 0.5  # well below the true peak height (2.0) the raw-data guess would read
+    peak_defs = [{"type": "gaussian", "shift": x0_true, "fwhm": fwhm_true,
+                  "bounds": {"amplitude": (-np.inf, tight_upper)}}]
+
+    popt, _pcov_free, _is_free, _scale, _x_ref = fitting.fit_spectrum(spec, peak_defs, use_normalised=False)
+
+    assert popt[2] == pytest.approx(tight_upper, rel=1e-3)  # pinned at the bound, not a crash
+
+
 def test_fit_spectrum_fixed_dict_locks_only_the_named_parameter():
     # peak_defs' own "fixed" dict is per-parameter (e.g. {"shift":
     # True} locks only the shift, leaving FWHM/amplitude free) -- the
@@ -392,3 +413,112 @@ def test_nmr2d_fit_slices_invalid_seed_mode_raises():
     with pytest.raises(ValueError):
         fitting.NMR2D_fit_slices(slices, [{"type": "gaussian", "shift": 5.0, "fwhm": 0.04}],
                                   mode="rows", seed_mode="not-a-real-mode")
+
+
+def _make_single_gaussian_slice(x0=5.0, fwhm=0.2, A=2.0, n_pts=4000):
+    """A one-slice pseudo-2D wrapping a single, clean, isolated Gaussian
+    -- used to test amplitude_bound_regions, where the exact area under
+    a known analytic peak needs to be hand-computable."""
+    ppm = np.linspace(3.0, 7.0, n_pts)
+    y = gaussian(ppm, x0, fwhm, A)
+    f1_axis = NMRAxis(kind="index", index=np.array([1]))
+    f2_axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True)
+    spectrum = NMRSpectrum(data=y[np.newaxis, :], axes=[f1_axis, f2_axis], metadata=metadata)
+    return spectrum, ppm, y
+
+
+def test_nmr2d_fit_slices_amplitude_bound_regions_computes_correct_bound_and_constrains_the_fit():
+    # Real fitting-wizard-roadmap item: "bounding possibly from
+    # integrals." Region deliberately narrower than the true peak's own
+    # support (±0.05 ppm around a 0.2 ppm-FWHM peak) -- captures only a
+    # fraction of its true area, so the derived bound must sit below
+    # the true amplitude, and curve_fit (given no other way to reduce
+    # residual further) should converge to that bound's own edge.
+    x0, fwhm, true_A = 5.0, 0.2, 2.0
+    spectrum, ppm, y = _make_single_gaussian_slice(x0, fwhm, true_A)
+    slices = slicing.get_slices(spectrum, rows=[1])
+    region = (4.95, 5.05)
+    peak_defs = [{"type": "gaussian", "shift": x0, "fwhm": fwhm}]
+
+    fitted = fitting.NMR2D_fit_slices(slices, peak_defs, mode="rows", show_report=False, show_warnings=False,
+                                       amplitude_bound_regions=[region])
+
+    result = fitted["rows"][0]
+    lo, hi = result["peak_defs"][0]["bounds"]["amplitude"]
+    assert lo == -np.inf
+
+    mask = (ppm >= region[0]) & (ppm <= region[1])
+    expected_integral = fitting._trapz(y[mask], ppm[mask])
+    expected_bound = expected_integral / (fwhm * np.sqrt(np.pi / (4 * np.log(2))))
+    assert hi == pytest.approx(expected_bound, rel=1e-6)
+    assert expected_bound < true_A  # confirms the region really is the tighter constraint here
+
+    fitted_A = result["popt"][2]
+    assert fitted_A == pytest.approx(expected_bound, rel=1e-3)
+    assert fitted_A < true_A  # genuinely capped, not coincidentally already there
+
+
+def test_nmr2d_fit_slices_amplitude_bound_regions_respects_explicit_user_bound():
+    # A peak's own explicit bounds (e.g. from the GUI's "Set Bounds..."
+    # dialog) must always win outright -- this feature only ever fills
+    # in an upper bound where none already exists.
+    spectrum, ppm, y = _make_single_gaussian_slice()
+    slices = slicing.get_slices(spectrum, rows=[1])
+    peak_defs = [{"type": "gaussian", "shift": 5.0, "fwhm": 0.2, "bounds": {"amplitude": (-np.inf, 7.0)}}]
+
+    fitted = fitting.NMR2D_fit_slices(slices, peak_defs, mode="rows", show_report=False, show_warnings=False,
+                                       amplitude_bound_regions=[(4.5, 5.5)])
+
+    assert fitted["rows"][0]["peak_defs"][0]["bounds"]["amplitude"] == (-np.inf, 7.0)
+
+
+def test_nmr2d_fit_slices_amplitude_bound_regions_off_by_default():
+    spectrum, ppm, y = _make_single_gaussian_slice()
+    slices = slicing.get_slices(spectrum, rows=[1])
+    peak_defs = [{"type": "gaussian", "shift": 5.0, "fwhm": 0.2}]
+
+    fitted = fitting.NMR2D_fit_slices(slices, peak_defs, mode="rows", show_report=False, show_warnings=False)
+
+    assert "amplitude" not in fitted["rows"][0]["peak_defs"][0].get("bounds", {})
+
+
+def test_nmr2d_fit_slices_amplitude_bound_regions_uses_the_tightest_overlapping_region():
+    x0, fwhm, true_A = 5.0, 0.2, 2.0
+    spectrum, ppm, y = _make_single_gaussian_slice(x0, fwhm, true_A)
+    slices = slicing.get_slices(spectrum, rows=[1])
+    narrow, wide = (4.95, 5.05), (4.0, 6.0)
+    peak_defs = [{"type": "gaussian", "shift": x0, "fwhm": fwhm}]
+
+    # Order shouldn't matter -- pass the looser region first to confirm
+    # the tighter one isn't just "whichever came first."
+    fitted = fitting.NMR2D_fit_slices(slices, peak_defs, mode="rows", show_report=False, show_warnings=False,
+                                       amplitude_bound_regions=[wide, narrow])
+
+    _, hi = fitted["rows"][0]["peak_defs"][0]["bounds"]["amplitude"]
+
+    narrow_mask = (ppm >= narrow[0]) & (ppm <= narrow[1])
+    narrow_integral = fitting._trapz(y[narrow_mask], ppm[narrow_mask])
+    expected = narrow_integral / (fwhm * np.sqrt(np.pi / (4 * np.log(2))))
+    assert hi == pytest.approx(expected, rel=1e-6)
+    assert hi < true_A  # sanity: the narrow region is indeed the tighter of the two
+
+
+def test_nmr2d_fit_slices_amplitude_bound_regions_skips_a_nonpositive_integral():
+    # A genuinely negative-going peak (e.g. an inversion-recovery slice
+    # before the null point) has a negative raw integral over its own
+    # region -- must not silently force a near-zero amplitude cap here;
+    # explicit S/N gating (noise_region/sn_threshold) is the deliberate
+    # tool for "pin amplitude to zero," not a side effect of this one.
+    x0, fwhm, true_A = 5.0, 0.2, -1.5
+    spectrum, ppm, y = _make_single_gaussian_slice(x0, fwhm, true_A)
+    slices = slicing.get_slices(spectrum, rows=[1])
+    peak_defs = [{"type": "gaussian", "shift": x0, "fwhm": fwhm}]
+
+    fitted = fitting.NMR2D_fit_slices(slices, peak_defs, mode="rows", show_report=False, show_warnings=False,
+                                       amplitude_bound_regions=[(4.5, 5.5)],
+                                       positive_intensity=False, allow_negative_intensity=True)
+
+    result = fitted["rows"][0]
+    assert "amplitude" not in result["peak_defs"][0].get("bounds", {})
+    assert result["popt"][2] == pytest.approx(true_A, abs=1e-2)  # unaffected, correctly recovers the true value

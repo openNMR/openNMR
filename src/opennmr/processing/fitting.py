@@ -835,13 +835,21 @@ def fit_spectrum(spectrum: NMRSpectrum, peak_defs, fit_regions=None, use_normali
 
     assert len(p0) == len(is_free) == len(lower) == len(upper), "parameter length mismatch"
 
+    # p0's own data-driven guess (initialize_params_with_map -- e.g. an
+    # amplitude read straight off the spectrum at each peak's shift) is
+    # built with no knowledge of bounds, and a tight bound -- a manual
+    # "Set Bounds..." entry, or NMR2D_fit_slices's own
+    # amplitude_bound_regions -- can leave it outside its own box.
+    # scipy's bounded curve_fit raises immediately in that case ("Initial
+    # guess is outside of provided bounds") rather than clipping it
+    # itself, so it has to happen here. Only clips the *free* subset --
+    # a fixed parameter's value must never be silently altered, and
+    # nothing outside is_free is ever passed to curve_fit anyway.
+    p0[is_free] = np.clip(p0[is_free], lower[is_free], upper[is_free])
+
     def model_wrapper(x, *free_params):
         full = reconstruct_full(p0, free_params, is_free)
         return build_model(x, full, peak_defs, x_ref)
-
-    for i, (val, lo, hi) in enumerate(zip(p0[is_free], lower[is_free], upper[is_free])):
-        if val < lo or val > hi:
-            print("BAD INITIAL PARAMETER", i, "value=", val, "bounds=", lo, hi)
 
     popt_free, pcov_free = curve_fit(
         model_wrapper, x, y, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
@@ -1204,6 +1212,31 @@ def select_2d_traces(dataset: NMRSpectrum, axis: str = "f1", indices=None, shift
 # 2D slice fitting
 # ============================================================
 
+#: Area under a unit-height (A=1) peak of unit FWHM, for each
+#: lineshape -- i.e. ``area = A * fwhm * <this factor>`` (Gaussian:
+#: sigma = fwhm / (2*sqrt(2*ln2)), area = A*sigma*sqrt(2*pi), which
+#: simplifies to A*fwhm*sqrt(pi/(4*ln2)); Lorentzian: gamma = fwhm/2,
+#: area = A*gamma*pi = A*fwhm*(pi/2)). Already independently verified
+#: in this project against a hand-computed value (see the fit-report
+#: CSV export's own writeup in TODO.md) -- reused here, not re-derived.
+_GAUSSIAN_AREA_FACTOR = float(np.sqrt(np.pi / (4 * np.log(2))))
+_LORENTZIAN_AREA_FACTOR = np.pi / 2
+
+
+def _peak_area_per_unit_amplitude(peak: dict) -> float:
+    """Area contributed per unit amplitude (peak height), for one
+    peak's own lineshape/FWHM -- i.e. ``area = A * this``. Used by
+    :func:`NMR2D_fit_slices`'s ``amplitude_bound_regions`` to convert a
+    raw, measured region integral into an amplitude upper bound."""
+    fwhm = peak["fwhm"]
+    if peak["type"] == "gaussian":
+        return fwhm * _GAUSSIAN_AREA_FACTOR
+    if peak["type"] == "lorentzian":
+        return fwhm * _LORENTZIAN_AREA_FACTOR
+    eta = peak.get("eta", 0.5)
+    return fwhm * (eta * _LORENTZIAN_AREA_FACTOR + (1 - eta) * _GAUSSIAN_AREA_FACTOR)
+
+
 def _reseed_peak_position(peak: dict, seed: dict) -> None:
     """Update ``peak`` in place to start from ``seed``'s own converged
     shift/FWHM(/eta) -- :func:`NMR2D_fit_slices`'s own ``seed_mode``
@@ -1234,7 +1267,8 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
                       x_unit='ppm', noise_region=None, normalize=False,
                       show_components=True, positive_intensity=True,
                       allow_negative_intensity=False, sn_threshold=3,
-                      show_report=False, show_warnings=True, seed_mode: str = "independent") -> dict:
+                      show_report=False, show_warnings=True, seed_mode: str = "independent",
+                      amplitude_bound_regions=None) -> dict:
     """
     Fit one or more extracted 2D NMR slices (rows and/or columns).
 
@@ -1302,6 +1336,38 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
         intensity should, and is both the fastest option and often the
         most robust one for a slice too weak/noisy to reliably
         converge its own shift/width from scratch.
+    amplitude_bound_regions : list of (float, float), optional
+        Region-derived amplitude upper bounds -- for each peak whose
+        *starting* shift falls inside one of these ``(lo, hi)``
+        regions (typically the same list as ``fit_regions``, e.g. the
+        GUI's own Integration Regions table), this slice's own raw
+        (unfitted) data is trapezoidally integrated over that region,
+        then converted to an amplitude bound via the peak's own
+        lineshape/FWHM (:func:`_peak_area_per_unit_amplitude`) and
+        used as an upper bound on that peak's amplitude for *this*
+        slice -- recomputed fresh per slice, so it tracks a
+        genuinely-varying true amplitude across a relaxation/diffusion
+        series rather than freezing in whatever the first slice
+        happened to measure. Deliberately loose, not a tight per-peak
+        estimate: an entire region's own raw integral is used as-is
+        (no extra margin) as the cap for *each* peak inside it, since
+        that's already a true physical upper bound for any single
+        peak sharing the region (it can't individually contain more
+        signal than the whole region measures) even when several
+        peaks/baseline share it. When a peak's shift falls inside more
+        than one given region, the tightest (smallest) resulting bound
+        is used. A region whose raw integral comes out <= 0 (e.g. a
+        peak decayed into the noise) is skipped for that peak/slice
+        rather than forcing a near-zero cap -- S/N-based gating
+        (``noise_region``/``sn_threshold``) already exists as the
+        deliberate, explicit tool for "fix amplitude to zero once a
+        peak is gone"; this shouldn't silently do that as a side
+        effect of an unrelated, mildly-negative trapz artifact. Only
+        ever *adds* an upper bound where none already exists -- a
+        peak's own explicit ``bounds["amplitude"]``/``bounds["A"]``
+        (e.g. from the GUI's "Set Bounds..." dialog) always wins
+        outright and is never overridden. ``None`` (default): off,
+        identical to this parameter never having existed.
 
     Returns
     -------
@@ -1383,6 +1449,36 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
                 if sn < sn_threshold:
                     peak["fixed"] = {**peak.get("fixed", {}), "A": True}
                     peak["A_init"] = 0.0
+
+        # ----- region-integral-derived amplitude bounds -----
+
+        if amplitude_bound_regions:
+
+            order = np.argsort(x)
+            x_sorted, y_sorted = x[order], y[order]
+
+            for peak in local_peak_defs:
+
+                existing = peak.get("bounds", {})
+                if "amplitude" in existing or "A" in existing:
+                    continue  # an explicit user bound always wins outright
+
+                best_bound = None
+                for lo, hi in amplitude_bound_regions:
+                    if not (lo <= peak["shift"] <= hi):
+                        continue
+                    mask = (x_sorted >= lo) & (x_sorted <= hi)
+                    if not np.any(mask):
+                        continue
+                    integral = _trapz(y_sorted[mask], x_sorted[mask])
+                    if integral <= 0:
+                        continue
+                    candidate = integral / _peak_area_per_unit_amplitude(peak)
+                    if best_bound is None or candidate < best_bound:
+                        best_bound = candidate
+
+                if best_bound is not None:
+                    peak["bounds"] = {**existing, "amplitude": (-np.inf, best_bound)}
 
         # ----- fit -----
         # Fits with local_peak_defs (which may have S/N-gated

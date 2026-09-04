@@ -5254,6 +5254,50 @@ def test_main_window_seed_mode_round_trips_through_reselection(qapp, tmp_path):
     assert window.seed_mode_combo.currentData() == "apply_first"
 
 
+def test_main_window_amplitude_bound_regions_checkbox_defaults_to_unchecked(qapp):
+    window = MainWindow()
+    assert not window.amplitude_bound_regions_checkbox.isChecked()
+
+
+def test_main_window_fit_spectrum_amplitude_bound_regions_caps_the_fit(qapp):
+    # Fitting-wizard roadmap item: "bounding possibly from integrals."
+    # End-to-end through the real GUI call path (_on_fit_spectrum_clicked
+    # -> _fit_peaks -> NMR2D_fit_slices), not just the backend function
+    # directly (already covered in test_fitting.py). Region (4.95, 5.05)
+    # is deliberately narrower than the true peak's own support
+    # (fwhm=0.2) -- captures only a fraction of its true area, so
+    # checking the box should visibly cap the fitted amplitude below
+    # what the exact same fit finds unconstrained.
+    x0, fwhm, true_A = 5.0, 0.2, 2.0
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=x0, fwhm=fwhm, amplitude=true_A))
+    window._add_peak_row(shift=x0, fwhm=fwhm, eta=0.0)
+    window._add_region_row(4.95, 5.05)
+
+    window._on_fit_spectrum_clicked()
+    unconstrained_A = window.session.spectra[0].metadata.raw["slice_fit_results"][0]["popt"][2]
+    assert unconstrained_A == pytest.approx(true_A, rel=1e-2)
+
+    window.amplitude_bound_regions_checkbox.setChecked(True)
+    window._on_fit_spectrum_clicked()
+    bounded_A = window.session.spectra[0].metadata.raw["slice_fit_results"][0]["popt"][2]
+    assert bounded_A < unconstrained_A
+    assert bounded_A < true_A
+
+
+def test_main_window_amplitude_bound_regions_round_trips_through_reselection(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window.amplitude_bound_regions_checkbox.setChecked(True)
+    window._save_current_analysis_state()
+
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")  # switch away
+    assert not window.amplitude_bound_regions_checkbox.isChecked()  # spectrum b has no saved state
+
+    window._select_single_row(0)  # switch back -- triggers _restore_analysis_state
+    assert window.amplitude_bound_regions_checkbox.isChecked()
+
+
 def test_main_window_fit_spectrum_warns_when_result_lands_near_region_edge(qapp, monkeypatch):
     # Fitting-wizard roadmap item: "a sensible warning when a fit
     # result lands too close to its own region edge." Region (4.9,
