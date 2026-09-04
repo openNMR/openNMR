@@ -35,7 +35,7 @@ def test_prepare_contour_power_mode_top_level_never_exceeds_data_max():
     # dataset "starting out scaled way too high" (barely anything
     # visible) until the threshold was manually scrolled down a lot.
     spec = _make_2d()
-    _, _, _, thresvec, _ = twod._prepare_contour(spec, factor=1e-3, clevels=20, level_mode="power", power=1.25)
+    _, _, _, thresvec, _, _ = twod._prepare_contour(spec, factor=1e-3, clevels=20, level_mode="power", power=1.25)
     assert thresvec[-1] == pytest.approx(np.amax(spec.data))
     assert all(level <= np.amax(spec.data) + 1e-6 for level in thresvec)
 
@@ -46,11 +46,62 @@ def test_prepare_contour_power_mode_bunches_toward_noise_floor():
     # docstring ("steeper/more levels bunched near the noise floor as
     # power increases past 1").
     spec = _make_2d()
-    _, _, _, linear_like, _ = twod._prepare_contour(spec, factor=1e-3, clevels=20, level_mode="power", power=1.0)
-    _, _, _, bunched, _ = twod._prepare_contour(spec, factor=1e-3, clevels=20, level_mode="power", power=1.25)
+    _, _, _, linear_like, _, _ = twod._prepare_contour(spec, factor=1e-3, clevels=20, level_mode="power", power=1.0)
+    _, _, _, bunched, _, _ = twod._prepare_contour(spec, factor=1e-3, clevels=20, level_mode="power", power=1.25)
     # Every level below the top one should sit lower (closer to the
     # noise floor) with the steeper power than with power=1.
     assert all(b <= lin for b, lin in zip(bunched[:-1], linear_like[:-1]))
+
+
+def test_prepare_contour_neg_thresvec_none_when_all_positive():
+    spec = _make_2d()  # a pure positive Gaussian, no negative content at all
+    _, _, _, _, _, neg_thresvec = twod._prepare_contour(spec)
+    assert neg_thresvec is None
+
+
+def test_prepare_contour_neg_thresvec_mirrors_positive_side():
+    # Real user request: colour contrast for positive and negative
+    # contours -- needs its own, correctly-signed set of levels for
+    # the negative side first. Built from a spectrum with a real
+    # negative-going lobe (mimicking a dispersive/incoherent artifact
+    # sitting next to a well-phased positive peak), not just an
+    # arbitrary negative constant.
+    spec = _make_2d()
+    spec.data = spec.data - 1.5 * np.amax(spec.data) * np.exp(
+        -(((np.arange(spec.data.shape[1]) - 5) ** 2)) / 10.0
+    )
+    assert np.amin(spec.data) < 0
+    _, _, _, thresvec, _, neg_thresvec = twod._prepare_contour(spec)
+    assert neg_thresvec is not None
+    assert len(neg_thresvec) == len(thresvec)
+    assert all(level < 0 for level in neg_thresvec)
+    # Magnitude increasing away from zero, same convention as the
+    # positive side's own thresvec (small-to-large magnitude, not
+    # numeric order -- plot_2d_contour itself sorts numerically right
+    # before handing levels to matplotlib's own contour(), which
+    # test_plot_2d_contour_draws_negative_contours_in_contrasting_colour
+    # already exercises without matplotlib raising on level ordering).
+    assert neg_thresvec == sorted(neg_thresvec, key=abs)
+    assert abs(neg_thresvec[0]) < abs(neg_thresvec[-1])
+
+
+def test_plot_2d_contour_draws_negative_contours_in_contrasting_colour(monkeypatch):
+    spec = _make_2d()
+    spec.data = spec.data - 1.5 * np.amax(spec.data) * np.exp(
+        -(((np.arange(spec.data.shape[1]) - 5) ** 2)) / 10.0
+    )
+    calls = []
+    real_contour = plt.Axes.contour
+
+    def spy(self, *args, **kwargs):
+        calls.append(kwargs.get("colors"))
+        return real_contour(self, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "contour", spy)
+    fig, ax, _ = twod.plot_2d_contour(spec, show_projections=False)
+    assert "black" in calls
+    assert "red" in calls
+    plt.close(fig)
 
 
 def test_plot_2d_contour_conventional_standalone():

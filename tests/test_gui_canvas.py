@@ -1134,8 +1134,8 @@ def test_set_full_resolution_rebuilds_2d_contour(qapp):
     # contour, checked via _prepare_contour with the same kwargs
     # show_spectrum itself would now use.
     from opennmr.plotting.twod import _prepare_contour
-    _, _, full_res_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
-    _, _, downsampled_data, _, _ = _prepare_contour(spectrum)
+    _, _, full_res_data, _, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    _, _, downsampled_data, _, _, _ = _prepare_contour(spectrum)
     assert full_res_data.shape == spectrum.data.shape
     assert downsampled_data.shape != full_res_data.shape
     assert downsampled_shape == spectrum.data.shape  # _contour_spectrum itself is never downsampled
@@ -1160,11 +1160,11 @@ def test_set_contour_fraction_rebuilds_a_currently_shown_2d_contour(qapp):
     canvas = MplCanvas()
     spectrum = _make_2d(n_f1=20, n_f2=200)
     canvas.show_spectrum(spectrum)
-    _, _, quarter_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    _, _, quarter_data, _, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
 
     canvas.set_contour_fraction(0.5)
 
-    _, _, half_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    _, _, half_data, _, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
     assert half_data.shape != quarter_data.shape
     assert half_data.shape[0] > quarter_data.shape[0]
     assert half_data.shape[1] > quarter_data.shape[1]
@@ -1210,15 +1210,15 @@ def test_set_contour_fraction_is_not_overridden_by_full_resolution(qapp):
     canvas = MplCanvas(full_resolution=True)
     spectrum = _make_2d(n_f1=20, n_f2=200)
     canvas.show_spectrum(spectrum)
-    _, _, full_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    _, _, full_data, _, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
     assert full_data.shape == spectrum.data.shape
 
     canvas.set_contour_fraction(0.1)
-    _, _, still_full_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    _, _, still_full_data, _, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
     assert still_full_data.shape == spectrum.data.shape  # still full resolution, unaffected
 
     canvas.set_full_resolution(False)
-    _, _, downsampled_data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+    _, _, downsampled_data, _, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
     assert downsampled_data.shape != spectrum.data.shape  # now the 0.1 fraction takes effect
 
 
@@ -1244,7 +1244,7 @@ def test_export_full_resolution_2d_uses_full_data_then_restores_view(qapp):
     seen_shapes = []
 
     def fake_save():
-        _, _, data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+        _, _, data, _, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
         seen_shapes.append(data.shape)
 
     canvas.export_full_resolution(fake_save)
@@ -1265,7 +1265,7 @@ def test_export_full_resolution_2d_noop_when_already_full_resolution(qapp):
     seen_shapes = []
 
     def fake_save():
-        _, _, data, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
+        _, _, data, _, _, _ = _prepare_contour(spectrum, **canvas._contour_fraction_kwargs())
         seen_shapes.append(data.shape)
 
     canvas.export_full_resolution(fake_save)

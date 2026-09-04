@@ -73,32 +73,44 @@ def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fra
     if level_mode not in ("power", "linear"):
         raise ValueError("level_mode must be 'power' or 'linear'")
 
-    thresh_min = factor * np.amax(data)
-    thresh_max = np.amax(data)
-    if level_mode == "linear":
-        thresvec = list(np.linspace(thresh_min, thresh_max, clevels))
-    else:
-        # Real bug, found and fixed: the exponent used to be
-        # `power * i / clevels`, which only reaches exactly `power`
-        # (not 1) at the top level (i == clevels) -- for power > 1
-        # (the default is 1.25), that overshoots thresh_max, so the
-        # top several "contour levels" sit above every real data
-        # point and are never actually drawn. The visible levels were
-        # then squeezed into the remaining lower fraction of the
-        # range, several coarser than intended -- moderate, real
-        # signal often fell entirely between two of them, looking
-        # like a 2D/pseudo-2D dataset "starts out scaled way too
-        # high" (barely anything visible) until the threshold was
-        # manually scrolled down a lot. `(i / clevels) ** power`
-        # always reaches exactly 1 at i == clevels (so the top level
-        # is exactly thresh_max, regardless of power), and for
-        # power > 1 still bunches more levels toward thresh_min first
-        # -- matching this function's own docstring ("steeper/more
-        # levels bunched near the noise floor as power increases").
-        cc2 = np.linspace(1, clevels, clevels)
-        thresvec = [thresh_min * (thresh_max / thresh_min) ** ((i / clevels) ** power) for i in cc2]
+    thresvec = _contour_levels(factor * np.amax(data), np.amax(data), clevels, level_mode, power)
 
-    return contour_x, contour_y, contour_data, thresvec, y_axis
+    neg_max = np.amin(data)  # most-negative value, i.e. the "positive" end for the negative side
+    neg_thresvec = (
+        _contour_levels(factor * neg_max, neg_max, clevels, level_mode, power) if neg_max < 0 else None
+    )
+
+    return contour_x, contour_y, contour_data, thresvec, y_axis, neg_thresvec
+
+
+def _contour_levels(thresh_min, thresh_max, clevels, level_mode, power):
+    """``clevels`` threshold levels between ``thresh_min`` and
+    ``thresh_max`` (same sign as each other; either both positive, for
+    the usual case, or both negative, for the mirrored negative-side
+    levels ``_prepare_contour`` also computes) -- factored out of
+    :func:`_prepare_contour` so the same spacing logic (and its own
+    bug-fix history, see below) applies to both sides identically."""
+    if level_mode == "linear":
+        return list(np.linspace(thresh_min, thresh_max, clevels))
+    # Real bug, found and fixed: the exponent used to be
+    # `power * i / clevels`, which only reaches exactly `power`
+    # (not 1) at the top level (i == clevels) -- for power > 1
+    # (the default is 1.25), that overshoots thresh_max, so the
+    # top several "contour levels" sit above every real data
+    # point and are never actually drawn. The visible levels were
+    # then squeezed into the remaining lower fraction of the
+    # range, several coarser than intended -- moderate, real
+    # signal often fell entirely between two of them, looking
+    # like a 2D/pseudo-2D dataset "starts out scaled way too
+    # high" (barely anything visible) until the threshold was
+    # manually scrolled down a lot. `(i / clevels) ** power`
+    # always reaches exactly 1 at i == clevels (so the top level
+    # is exactly thresh_max, regardless of power), and for
+    # power > 1 still bunches more levels toward thresh_min first
+    # -- matching this function's own docstring ("steeper/more
+    # levels bunched near the noise floor as power increases").
+    cc2 = np.linspace(1, clevels, clevels)
+    return [thresh_min * (thresh_max / thresh_min) ** ((i / clevels) ** power) for i in cc2]
 
 
 def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fraction_y=0.25,
@@ -164,7 +176,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     pseudo2d = spectrum.is_pseudo_2d
     homonuclear = spectrum.metadata.homonuclear
 
-    contour_x, contour_y, contour_data, thresvec, y_axis = _prepare_contour(
+    contour_x, contour_y, contour_data, thresvec, y_axis, neg_thresvec = _prepare_contour(
         spectrum, contour_fraction_x=contour_fraction_x, contour_fraction_y=contour_fraction_y,
         ncontourpts_x=ncontourpts_x, ncontourpts_y=ncontourpts_y, factor=factor, clevels=clevels,
         level_mode=level_mode, power=power,
@@ -200,6 +212,16 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                    cmap=get_contour_cmap(colour_spectra), norm=LogNorm())
     else:
         ax.contour(contour_x, contour_y, contour_data, colors='black', levels=thresvec)
+
+    if neg_thresvec is not None:
+        # Negative-going signal (dispersive phase error, an artifact,
+        # or genuinely negative-intensity data) drawn in a contrasting
+        # colour rather than invisible or lost among the positive
+        # levels -- real user request, and a real practical need: it's
+        # what makes an incoherent (no single correct phase) artifact
+        # visually distinguishable from the genuine, phaseable peak
+        # next to it.
+        ax.contour(contour_x, contour_y, contour_data, colors='red', levels=sorted(neg_thresvec))
 
     # A plain make_axes_locatable(ax) divider's default reference sizes
     # (Size.AxesX/AxesY) are the axes' own *data-coordinate range*, not
@@ -506,7 +528,7 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
         fig = ax.figure
 
     for spectrum, colour, label in zip(spectra, resolved_colours, labels if labels is not None else [None] * n):
-        contour_x, contour_y, contour_data, thresvec, _ = _prepare_contour(
+        contour_x, contour_y, contour_data, thresvec, _, _ = _prepare_contour(
             spectrum, contour_fraction_x=contour_fraction_x, contour_fraction_y=contour_fraction_y,
             ncontourpts_x=ncontourpts_x, ncontourpts_y=ncontourpts_y, factor=factor, clevels=clevels,
         )
