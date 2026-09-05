@@ -1126,6 +1126,16 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
     has_2rr = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
+    # `pseudo_2d` is meaningless for the 1D readers (neither accepts it),
+    # but a caller can't know whether a given path is 1D or 2D without
+    # doing the very read it's trying to parameterise -- the branch
+    # below is the first point where that's actually known. Dropping it
+    # here lets the GUI pass its pseudo-2D preference in on the *first*
+    # load rather than reading the file once to discover it's 2D and
+    # then reading it a second time with the right flag (which cost a
+    # discarded 5.19s genuine-2D reconstruction per load on the real
+    # EXSY benchmark -- see TODO.md's duplication-trace entry).
+    one_d_kwargs = {k: v for k, v in kwargs.items() if k != "pseudo_2d"}
     if has_ser:
         try:
             return read_2d(path, **kwargs)
@@ -1145,12 +1155,12 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
             spectrum.metadata.raw["loaded_from_processed"] = str(exc)
             return spectrum
     if has_fid:
-        return read_1d(path, **kwargs)
+        return read_1d(path, **one_d_kwargs)
     if has_2rr:
         spectrum = read_2d_processed(path, **kwargs)
         spectrum.metadata.raw["loaded_from_processed"] = "No raw ser file found for this experiment."
         return spectrum
-    spectrum = read_1d_processed(path, **kwargs)
+    spectrum = read_1d_processed(path, **one_d_kwargs)
     spectrum.metadata.raw["loaded_from_processed"] = "No raw fid file found for this experiment."
     return spectrum
 

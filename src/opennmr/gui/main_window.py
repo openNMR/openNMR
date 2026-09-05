@@ -1050,8 +1050,30 @@ class MainWindow(QMainWindow):
         return [matches[list_widget.row(item)] for item in list_widget.selectedItems()]
 
     def _load(self, path: str, vendor: str) -> None:
+        # Decide the pseudo-2D treatment *before* the read, not after.
+        # Every vendor reader sets metadata.source_path to exactly the
+        # path handed to it, so this experiment's own saved preference
+        # is readable straight from `path` -- which means a genuine 2D
+        # can be read once with the right flag instead of being read in
+        # full, inspected, and then read a second time (traced on the
+        # real EXSY benchmark: a 5.19s genuine-2D reconstruction, F1 FFT
+        # and all, computed and then discarded, before the 2.83s
+        # pseudo-2D read whose result is what actually survives -- see
+        # TODO.md's duplication-trace entry).
+        #
+        # Bruker only, deliberately: io.xpulse.read_2d has no pseudo_2d
+        # parameter at all (see _refresh_selection_display's own guard),
+        # and the other vendors keep the read-then-reload path below
+        # unchanged rather than being switched on an assumption about
+        # readers this trace never measured. io.bruker._read_auto drops
+        # `pseudo_2d` for the 1D branches, so passing it here is safe
+        # without knowing yet whether `path` is 1D or 2D.
+        add_kwargs = {}
+        if vendor == "bruker":
+            presel = io_persistence.load_metadata_sidecar(path)
+            add_kwargs["pseudo_2d"] = (presel or {}).get("pseudo_2d") is not False
         try:
-            spectrum = self.session.add(path, vendor=vendor)
+            spectrum = self.session.add(path, vendor=vendor, **add_kwargs)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to load spectrum", str(exc))
             return
@@ -1071,7 +1093,27 @@ class MainWindow(QMainWindow):
         # harmlessly swallowed by the except below today, but skipping
         # it outright avoids a guaranteed-to-fail call on every X-Pulse
         # 2D load.
-        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d and spectrum.metadata.vendor != "xpulse":
+        # Skipped entirely when the pre-read decision above already
+        # applied this experiment's own preference (Bruker): the read
+        # has already honoured it, so re-reading could only ever
+        # reproduce the same result. Leaving this branch reachable in
+        # that case was a real bug in the first draft of this fix,
+        # caught by its own regression test rather than by inspection:
+        # for a *saved genuine-2D* preference (pseudo_2d False), the
+        # freshly-loaded spectrum is correctly not pseudo-2D, which
+        # satisfied `not spectrum.is_pseudo_2d` and triggered a second,
+        # byte-for-byte identical read -- reintroducing exactly the
+        # duplicate this change exists to remove, for the one case that
+        # doesn't take the common path.
+        #
+        # Still the live path for every other vendor, which deliberately
+        # keeps the original read-then-reload behaviour (see above).
+        if (
+            "pseudo_2d" not in add_kwargs
+            and spectrum.ndim == 2
+            and not spectrum.is_pseudo_2d
+            and spectrum.metadata.vendor != "xpulse"
+        ):
             # Pseudo-2D is the default treatment for any 2D data,
             # regardless of what the vendor's own (known-unreliable for
             # at least Bruker T2/PFG data, see TODO.md) auto-detection
@@ -1212,7 +1254,8 @@ class MainWindow(QMainWindow):
             self._draw_selected_spectrum(spectrum, row=index)
 
     def _select_single_row(self, row: int) -> None:
-        """Select exactly ``row``, clearing any other selection.
+        """Select exactly ``row``, clearing any other selection, and
+        refresh the display for it exactly once.
 
         Under ``ExtendedSelection`` mode, ``setCurrentRow`` alone moves
         keyboard/current focus *without* deselecting previously
@@ -1220,11 +1263,47 @@ class MainWindow(QMainWindow):
         -- which would otherwise leave a stale multi-selection (and the
         Compare view still showing it) after loading a new spectrum or
         reordering one.
+
+        The three list mutations below are done with the widget's own
+        signals blocked, followed by one explicit
+        :meth:`_on_list_selection_changed` call, because otherwise this
+        method redraws the whole spectrum **twice**. Two of this
+        widget's signals are connected to handlers that both end in a
+        redraw (``currentRowChanged -> _on_selection_changed`` and
+        ``itemSelectionChanged -> _on_list_selection_changed``, which
+        itself calls ``_on_selection_changed``), and ``setCurrentRow``
+        fires both -- traced directly on the real EXSY benchmark
+        dataset, where each redraw is ~4.2s, so the duplicate was ~24%
+        of a ~17.4s load (see TODO.md's duplication-trace entry).
+
+        Deliberately fixed *here*, at the one call site that emits both
+        signals for a single programmatic selection, rather than by
+        removing ``_on_list_selection_changed``'s own explicit
+        ``_on_selection_changed`` call -- that call is load-bearing for
+        the case its own comment describes (a multi- to single-selection
+        gesture doesn't necessarily change ``currentRow()``, so
+        ``currentRowChanged`` genuinely doesn't fire on its own there),
+        and every user-driven selection change still goes through the
+        normal unblocked signal path unchanged.
         """
-        self.spectrum_list.clearSelection()
-        self.spectrum_list.setCurrentRow(row)
-        if 0 <= row < self.spectrum_list.count():
-            self.spectrum_list.item(row).setSelected(True)
+        self.spectrum_list.blockSignals(True)
+        try:
+            self.spectrum_list.clearSelection()
+            self.spectrum_list.setCurrentRow(row)
+            if 0 <= row < self.spectrum_list.count():
+                self.spectrum_list.item(row).setSelected(True)
+        finally:
+            # finally, so a raised exception can't leave the list
+            # permanently signal-deaf for the rest of the session.
+            self.spectrum_list.blockSignals(False)
+        # Exactly one dispatch, standing in for the (identical, but
+        # duplicated) work the two blocked signals would have done.
+        # _on_list_selection_changed is the right entry point rather
+        # than _on_selection_changed directly: it dispatches to the
+        # single- vs multi-selection branch itself, and its single-
+        # selection branch already calls _on_selection_changed plus the
+        # pseudo-2D Compare-population step that follows it.
+        self._on_list_selection_changed()
 
     def _on_remove_clicked(self) -> None:
         row = self.spectrum_list.currentRow()

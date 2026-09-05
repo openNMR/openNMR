@@ -1,6 +1,7 @@
 import csv
 import dataclasses
 import io
+import json
 import os
 
 import numpy as np
@@ -14,6 +15,9 @@ from PySide6.QtWidgets import (
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.main_window import MainWindow
 from opennmr.gui.session import Session
+from opennmr import io as opennmr_io
+from opennmr.io import bruker as io_bruker
+from opennmr.io import persistence as io_persistence
 from opennmr.processing import ft as processing_ft
 from opennmr.processing.slicing import get_trace
 from opennmr.processing.fitting import gaussian
@@ -7564,3 +7568,110 @@ def test_main_window_reset_processing_updates_the_saved_sidecar(qapp, tmp_path, 
     window2 = MainWindow()
     window2._load(path, vendor="bruker")
     assert len(window2.session.spectra[0].data) == 64  # plain vendor-default length, not the discarded 128
+
+
+def test_main_window_select_single_row_draws_exactly_once(qapp, tmp_path, monkeypatch):
+    # Regression test for a traced duplication: this widget has *two*
+    # signals connected to handlers that both end in a full redraw
+    # (currentRowChanged -> _on_selection_changed, and
+    # itemSelectionChanged -> _on_list_selection_changed, which itself
+    # calls _on_selection_changed), and setCurrentRow fires both -- so
+    # every programmatic selection used to draw the whole spectrum
+    # twice. On the real EXSY benchmark each redraw is ~4.2s, i.e. ~24%
+    # of the load spent rendering a second identical picture.
+    path = _make_1d_dataset(tmp_path)
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+
+    draws = []
+    original = window._draw_selected_spectrum
+    monkeypatch.setattr(
+        window, "_draw_selected_spectrum",
+        lambda *a, **k: (draws.append(1), original(*a, **k))[1],
+    )
+
+    window._select_single_row(0)
+
+    assert len(draws) == 1, f"expected exactly one redraw, got {len(draws)}"
+
+
+def test_main_window_select_single_row_still_selects_exactly_that_row(qapp, tmp_path):
+    # The duplicate-redraw fix blocks the list's signals around the
+    # three mutations -- so the selection state it produces still has
+    # to be right, not just fast (blockSignals suppresses notification,
+    # not the mutation itself, but that is exactly the kind of thing
+    # worth pinning rather than assuming).
+    window = MainWindow()
+    for i in range(3):
+        window._load(_make_1d_dataset(tmp_path, name=f"expt{i}"), vendor="bruker")
+
+    window._select_single_row(1)
+
+    assert window.spectrum_list.currentRow() == 1
+    assert window._selected_rows() == [1]
+
+
+def test_main_window_load_reads_a_genuine_2d_only_once(qapp, tmp_path, monkeypatch):
+    # Regression test for the second traced duplication: _load used to
+    # call session.add (a full genuine-2D read, F1 FFT and all) and
+    # then session.reload(pseudo_2d=...), a complete *second* read from
+    # disk, discarding the first result entirely. Measured at 5.19s of
+    # pure waste per load on the real EXSY benchmark.
+    path = _make_2d_dataset(tmp_path)
+
+    reads = []
+    original = opennmr_io.load
+    monkeypatch.setattr(
+        opennmr_io, "load",
+        lambda *a, **k: (reads.append((a, k)), original(*a, **k))[1],
+    )
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+
+    assert len(reads) == 1, f"expected a single read, got {len(reads)}"
+    # ...and the one read it does perform must be the one that asks for
+    # the treatment actually wanted, rather than reading the default and
+    # correcting afterwards.
+    assert reads[0][1].get("pseudo_2d") is True
+    assert window.session.spectra[0].is_pseudo_2d is True
+
+
+def test_main_window_load_respects_a_saved_genuine_2d_preference_in_one_read(qapp, tmp_path, monkeypatch):
+    # The pre-read decision must honour a saved "Process Indirect
+    # Dimension" opt-in (pseudo_2d: False) -- otherwise the fast path
+    # would silently force pseudo-2D on datasets the user explicitly
+    # opted out of, which is a correctness regression, not a perf one.
+    path = _make_2d_dataset(tmp_path)
+    # Written directly rather than via save_metadata_sidecar (which
+    # takes a whole spectrum) -- this test only needs the one field the
+    # pre-read decision actually consults.
+    with open(io_persistence.metadata_sidecar_path(path), "w") as f:
+        json.dump({"pseudo_2d": False}, f)
+
+    reads = []
+    original = opennmr_io.load
+    monkeypatch.setattr(
+        opennmr_io, "load",
+        lambda *a, **k: (reads.append((a, k)), original(*a, **k))[1],
+    )
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+
+    assert len(reads) == 1
+    assert reads[0][1].get("pseudo_2d") is False
+
+
+def test_read_auto_drops_pseudo_2d_for_one_dimensional_data(qapp, tmp_path):
+    # _load can't know whether a path is 1D or 2D without doing the very
+    # read it wants to parameterise, so it passes pseudo_2d in
+    # unconditionally for Bruker; _read_auto is what makes that safe by
+    # dropping it on the branches whose readers don't accept it. Without
+    # this, every 1D Bruker load would raise TypeError.
+    path = _make_1d_dataset(tmp_path)
+
+    spectrum = io_bruker._read_auto(path, pseudo_2d=True)
+
+    assert spectrum.ndim == 1

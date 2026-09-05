@@ -27,6 +27,30 @@ All three per-row steps are either already batch-safe or trivially made so -- ch
 - Caching the reconstructed array (keyed to file mtime + processing params, e.g. alongside the existing sidecar) would only help *re*-opening the same large file, not first load, and adds real cache-invalidation complexity -- lowest priority tier.
 - The already-known, already-documented **Compare-tab 1024-subplot rendering cost** (~25s, matplotlib doesn't scale to 1000+ subplots -- see the "Loading the 2D ser..." entry further down this file) is squarely part of "big data feels slow to open" from the user's perspective even though it's display-side, not `read_2d` itself -- a candidate fix (not scoped) is rendering very large slice counts as a single 2D image/heatmap instead of N separate line-plot subplots, or lazily rendering only the visible/nearby slices.
 
+## Both traced duplications fixed: 17.4s -> 8.0s per load, byte-identical output (2026-09-05)
+
+User: "Fix them however you think is best", with a follow-up steer mid-work: "The goal is accuracy and speed." Both duplications from the trace entry below are fixed. **Output is byte-identical on all five real datasets checked** (`np.array_equal` True, max abs diff `0.0`) -- accuracy was treated as the gate, speed as the result.
+
+| dataset | before | after | |
+|---|---|---|---|
+| EXSY 2019 (2048x65536) | 17.08s | **8.02s** | 2.13x |
+| COSY genuine 2D | 0.242s | 0.100s | 2.42x |
+| bruker_T2 pseudo-2D | 0.414s | 0.205s | 2.02x |
+| bruker_PFG pseudo-2D | 0.806s | 0.429s | 1.88x |
+| Bruker 1D | 0.059s | 0.035s | 1.69x |
+
+Re-running the duplication trace afterwards confirms **every** duplicate is gone: `_draw_selected_spectrum`, `read_2d`, `_remove_digital_filter`, `_read_raw_2d_data`, `_refresh_selection_display` and `_prepare_contour` are all 1 call now, down from 2. (The one remaining N-per-load pattern, `get_trace` x1002 at 0.122s, is inherent to populating the Compare list and was already ruled not worth touching.) The test suite itself got faster as a side effect: 93s -> 67s.
+
+**Fix 1 -- redraw once, in `_select_single_row`.** The three list mutations now run inside `blockSignals(True)`/`blockSignals(False)` (in a `try`/`finally`, so an exception can't leave the widget permanently signal-deaf), followed by one explicit `_on_list_selection_changed()` call. Deliberately fixed at the single call site that emits both signals for one programmatic selection, rather than by removing `_on_list_selection_changed`'s own explicit `_on_selection_changed` call -- that call is load-bearing for the multi- to single-selection case its comment describes, and every user-driven selection still goes through the normal unblocked path untouched. `_on_list_selection_changed` (not `_on_selection_changed`) is the right single entry point because it dispatches the single-vs-multi branch itself and its single-selection branch already runs the pseudo-2D Compare-population step too.
+
+**Fix 2 -- read once, with the right flag.** `_load` now reads this experiment's saved pseudo-2D preference from `path` *before* loading (every vendor reader sets `metadata.source_path` to exactly the path handed to it, so the sidecar is addressable without having read the file yet) and passes `pseudo_2d=` into the first `session.add`. `io.bruker._read_auto` drops `pseudo_2d` on its 1D branches, which is what makes passing it safe before anyone knows whether the path is 1D or 2D. Scoped to Bruker deliberately: `io.xpulse.read_2d` has no `pseudo_2d` parameter at all, and the other vendors keep the original read-then-reload path rather than being switched on an assumption about readers this trace never measured.
+
+**A real bug in the first draft of fix 2, caught by its own regression test rather than by inspection**: the old read-then-reload branch was left reachable, and for a *saved genuine-2D* preference (`pseudo_2d: False`) the freshly-loaded spectrum is correctly not pseudo-2D -- which satisfied `not spectrum.is_pseudo_2d` and triggered a second, byte-for-byte identical read, reintroducing the exact duplicate the change exists to remove, for the one case that doesn't take the common path. Now gated on `"pseudo_2d" not in add_kwargs`.
+
+**A flaw in my own verification harness, worth recording because it nearly produced a false alarm**: the first A/B pointed *every* dataset's sidecar at one shared temp file, so each dataset's saved state leaked into the next one's load and 4 of 5 datasets appeared to "change". Nothing was wrong with the product code -- the harness needed per-source-path isolation (hash the path into the filename). The standing sidecar-isolation practice in this project is "redirect to a fresh temp dir"; that is not sufficient when a single run loads more than one dataset.
+
+5 new regression tests, each verified to discriminate by reverting its own fix independently and confirming the failure, then restoring and `diff`-confirming the file came back byte-identical. 903 tests passing (898 -> 903).
+
 ## Traced: every duplicated/redundant call in a big-data load -- 54% of the wall time is doing work twice (2026-09-05)
 
 User: "Can you trace all the duplicated and redundant calls that slow us down?" Done by **instrumenting the real GUI load** (wrapping each expensive function in place, recording every call's duration plus its opennmr-side caller chain, then running `MainWindow._load` on the EXSY benchmark dataset) rather than reading call sites and inferring -- so every claim below has a caller stack behind it. Traced, not fixed: nothing here is implemented yet.
