@@ -242,3 +242,96 @@ def test_prepare_contour_below_the_cap_is_the_untouched_full_resolution_array():
         ncontourpts_x=10**9, ncontourpts_y=10**9,
     )
     assert np.array_equal(contour_data, spectrum.data)
+
+
+def _make_signed_2d(n_f1=64, n_f2=128):
+    """A 2D with one known-*positive* peak and one known-*negative*
+    peak, at different F1 and F2 positions so each projection's own
+    polarity can be read off independently."""
+    yy, xx = np.mgrid[0:n_f1, 0:n_f2]
+    data = (
+        1000 * np.exp(-(((xx - n_f2 // 4) ** 2) / 8 + ((yy - n_f1 // 4) ** 2) / 8))
+        - 1000 * np.exp(-(((xx - 3 * n_f2 // 4) ** 2) / 8 + ((yy - 3 * n_f1 // 4) ** 2) / 8))
+    )
+    return NMRSpectrum(
+        data=data,
+        axes=[
+            NMRAxis(kind="frequency", ppm=np.linspace(150, 100, n_f1), hz=np.linspace(150, 100, n_f1) * 100),
+            NMRAxis(kind="frequency", ppm=np.linspace(10, 0, n_f2), hz=np.linspace(10, 0, n_f2) * 400),
+        ],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", nucleus_indirect="13C", sfo1=400.13),
+    )
+
+
+def test_projections_preserve_sign_and_agree_with_each_other():
+    # Real user report: "the phase of the contours and the projections
+    # are definitely inverted... it's more about the matching of the
+    # contour phase to the projection phase". The F1 projection used to
+    # be plotted negated (`-f1_projection`) while F2 was not, so a
+    # positive (black-contour) peak showed as a negative-going trace in
+    # the F1 strip and vice versa -- the two projections disagreed with
+    # each other, and F1 disagreed with the contour beside it.
+    spectrum = _make_signed_2d()
+    n_f1, n_f2 = spectrum.data.shape
+    fig, ax = plt.subplots()
+    try:
+        _, _, proj_axes = twod.plot_2d_contour(
+            spectrum, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9, projection_mode="sum",
+        )
+        f2_plotted = proj_axes["f2"].lines[0].get_ydata()
+        f1_plotted = proj_axes["f1"].lines[0].get_xdata()
+    finally:
+        plt.close(fig)
+
+    # F2: positive peak reads positive, negative peak reads negative.
+    assert f2_plotted[n_f2 // 4] > 0
+    assert f2_plotted[3 * n_f2 // 4] < 0
+    # F1: the same way round -- this is the assertion that fails on the
+    # pre-fix negated version.
+    assert f1_plotted[n_f1 // 4] > 0
+    assert f1_plotted[3 * n_f1 // 4] < 0
+
+
+def test_f1_projection_peaks_still_point_away_from_the_contour():
+    # The negation the fix removed was doing real layout work: this
+    # panel sits left of the contour with intensity along x, and
+    # negating pointed positive peaks leftward, away from it. The fix
+    # reverses the *axis* instead of the data, so this has to stay
+    # true -- otherwise the polarity fix would have silently flipped
+    # the panel's orientation as a side effect.
+    spectrum = _make_signed_2d()
+    fig, ax = plt.subplots()
+    try:
+        _, _, proj_axes = twod.plot_2d_contour(
+            spectrum, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9, projection_mode="sum",
+        )
+        xlim = proj_axes["f1"].get_xlim()
+    finally:
+        plt.close(fig)
+
+    assert xlim[0] > xlim[1], "F1 projection axis must descend, so peaks point away from the contour"
+    # ...and the baseline must remain the xmax (second) end, which is
+    # what MplCanvas._zoom_projection_intensity pins when zooming.
+    assert abs(xlim[1]) < abs(xlim[0])
+
+
+def test_projection_max_mode_is_unaffected_by_the_sign_fix():
+    # 'max' mode (the pseudo-2D default) takes max(abs(...)), so it is
+    # positive by construction -- it must still render, and still on a
+    # descending F1 axis.
+    spectrum = _make_signed_2d()
+    fig, ax = plt.subplots()
+    try:
+        _, _, proj_axes = twod.plot_2d_contour(
+            spectrum, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9, projection_mode="max",
+        )
+        f1_plotted = proj_axes["f1"].lines[0].get_xdata()
+        xlim = proj_axes["f1"].get_xlim()
+    finally:
+        plt.close(fig)
+
+    assert np.max(f1_plotted) > 0
+    assert xlim[0] > xlim[1]

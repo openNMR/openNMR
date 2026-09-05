@@ -396,8 +396,32 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             ax_f1.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False, labeltop=False)
             ax_f1.tick_params(axis='y', which='both', left=False, right=False, labelleft=False, labelright=False)
             f1_projection = np.sum(spec_float, axis=1) if mode == "sum" else np.max(np.abs(spec_float), axis=1)
-            ax_f1.plot(-f1_projection + (0.02 * np.min(-f1_projection)), y_axis, 'k')
-            ax_f1.set_xlim([np.min(-f1_projection) * proj_scale, np.max(-f1_projection) * 0.99])
+            # Real bug, user-reported ("the phase of the contours and
+            # the projections are definitely inverted... it's more about
+            # the matching of the contour phase to the projection
+            # phase") and confirmed with a controlled synthetic fixture
+            # carrying one known-positive and one known-negative peak:
+            # this used to plot *negated* data (`-f1_projection`) while
+            # the F2 projection above plots its own un-negated, so a
+            # positive (black-contour) peak appeared as a
+            # negative-going trace here and a negative (red-contour) one
+            # as positive -- the two projections disagreed with each
+            # other and the F1 one disagreed with the contour it sits
+            # beside.
+            #
+            # The negation was doing real layout work, though, and that
+            # has to be preserved: this panel sits to the *left* of the
+            # contour with intensity along x, and negating made positive
+            # peaks point leftward, away from the contour, rather than
+            # into it. Fixed by reversing the *axis* instead of the
+            # data -- plot the true values, then set a descending xlim,
+            # which points the peaks the same way while leaving the
+            # plotted numbers honest. The scroll-to-zoom handler
+            # (`MplCanvas._zoom_projection_intensity`) still works
+            # unchanged: it pins whichever end `set_xlim`'s second
+            # element is, which is still the baseline end here.
+            ax_f1.plot(f1_projection + (0.02 * np.min(f1_projection)), y_axis, 'k')
+            ax_f1.set_xlim([np.max(f1_projection) * proj_scale, np.min(f1_projection) * 0.99])
             proj_axes["f1"] = ax_f1
 
         for proj_ax in proj_axes.values():

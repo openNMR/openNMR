@@ -2,6 +2,27 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## F1 projection was plotted with inverted polarity (2026-09-05)
+
+User: "The phase of the contours and the projections are definitely inverted and doesn't match the processing window", clarified mid-investigation as "it's more about the matching of the contour phase to the projection phase".
+
+**Confirmed and fixed.** `plot_2d_contour` plotted the F1 (left) projection as `-f1_projection` while the F2 (top) projection plotted its own un-negated. A positive (black-contour) peak therefore appeared as a *negative-going* trace in the F1 strip, and a negative (red-contour) peak as positive -- so the two projections disagreed with each other, and the F1 one disagreed with the contour sitting beside it. Proven with a controlled synthetic fixture carrying one known-positive and one known-negative peak at different F1/F2 positions: before the fix, F2 read `+4913 / -5114` (correct) while F1 read `-5114 / +4913` (inverted); after, both read `+4913 / -5114`.
+
+**The negation was doing real layout work, and that is preserved**: this panel sits to the *left* of the contour with intensity along x, and negating made positive peaks point leftward, away from the contour, instead of into it. Fixed by reversing the *axis* rather than the data -- plot the true values on a descending xlim -- which points the peaks the same way while leaving the plotted numbers honest. `MplCanvas._zoom_projection_intensity` needed no change: it was already written in terms of pinning whichever end `xmax` is, and the baseline is still that end (its docstring, which described the old negation, was updated).
+
+3 new regression tests, all verified to discriminate by restoring the negated version and confirming they fail. 916 tests passing (913 -> 916).
+
+## Found while investigating the above, NOT fixed -- read_2d ignores recorded phase that read_1d honours
+
+Two real gaps, found by comparing `read_2d`'s genuine-2D output against `read_2d_processed` (TopSpin's own trusted result) on the COSY. Flagged rather than fixed, because both change the default phase of every 2D load and the user's report had already been narrowed to the projection issue above -- **ask before changing**.
+
+- **F2's recorded `PHC1` is never applied.** `read_1d` reads both (`phase0 = procs["PHC0"]`, `phase1 = procs["PHC1"]`, `bruker.py:347-348`) but `read_2d` reads only `PHC0` (`bruker.py:661`). Real effect: the EXSY 2019 dataset records `PHC0=309.42, PHC1=77.15` -- the first-order term is silently dropped, so its F2 is left with a real, visible phase error that TopSpin itself does not have.
+- **F1 has no recorded-phase step at all.** There is no `proc2s.get("PHC0")`/`proc2s.get("PHC1")` anywhere in `read_2d`. The COSY's strongest TopSpin peaks are cleanly absorptive (all `+1.3e8` to `+1.7e8` across the peak) while `read_2d` swings `-6.8e8` to `+5.9e8` over the same points -- a dispersive lineshape, i.e. an unphased indirect dimension, not an inverted one.
+
+**Also unhandled, and relevant to judging the above**: `PH_mod` is never consulted. The COSY records `procs PH_mod=0` (no F2 phase correction) and `proc2s PH_mod=2` (**magnitude mode** in F1) -- so TopSpin displays that dataset in magnitude mode, which is why its peaks are uniformly positive. Any fix for the two gaps above should read `PH_mod` first rather than unconditionally applying `PHC0`/`PHC1`, or it will be wrong for exactly this class of dataset.
+
+
+
 ## Big-data loading performance: profiled, planned, and the top item shipped (2026-09-05)
 
 User: "Plan out some methods to make the loading of big data faster and add it to the list." Profiled a real load first (`cProfile` against the "2019" EXSY dataset, `2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119/2019`, 2048x65536 points -- the same dataset from the T1-noise investigation elsewhere in this file) rather than guessing where the time goes, per this project's own standing discipline.

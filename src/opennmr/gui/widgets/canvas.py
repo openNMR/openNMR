@@ -502,10 +502,17 @@ class MplCanvas(QWidget):
         :meth:`_on_scroll`'s own docstring for why) -- ``"f2"`` (the
         top strip) plots intensity along y, low end is baseline
         (shared x with the main contour); ``"f1"`` (the left strip)
-        plots it along x, but *negated* and rotated, so its baseline
-        end is the high (xmax) end instead -- see ``plot_2d_contour``'s
-        own ``-f1_projection`` plot call. Independent of the main
-        contour's own threshold/zoom (see :meth:`_on_scroll`)."""
+        plots it along x, rotated, on a *descending* axis so its peaks
+        point away from the contour -- which leaves its baseline at the
+        ``xmax`` (second) end of its own xlim, so pinning ``xmax`` is
+        still pinning the baseline. That descending axis replaced an
+        earlier ``-f1_projection`` negation, which pointed the peaks
+        the same way but inverted the displayed polarity relative to
+        both the contour and the F2 projection (a real, user-reported
+        bug -- see ``plot_2d_contour``'s own comment there); this
+        method needed no change, since it was already written in terms
+        of whichever end ``xmax`` is. Independent of the main contour's
+        own threshold/zoom (see :meth:`_on_scroll`)."""
         factor = 1 / self.ZOOM_FACTOR if event.button == "up" else self.ZOOM_FACTOR
         if kind == "f2":
             if event.ydata is None:
