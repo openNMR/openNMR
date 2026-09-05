@@ -70,7 +70,7 @@ from .pnmr_simulator import (
     read_cif_with_occupancies, get_neighbors_by_shell, 
     local_environment_distribution, combine_labeled_shells, enumerate_local_environments, 
     build_shift_table, compute_BF1_SFO1, _broadened_spectrum, generate_spectrum_dict, 
-    plot_spectrum_dict, plot_comparison
+    plot_spectrum_dict, plot_comparison, shell_distance_histogram
 )
 
 __all__ = [
@@ -115,5 +115,5 @@ __all__ = [
     "read_cif_with_occupancies", "get_neighbors_by_shell", 
     "local_environment_distribution", "combine_labeled_shells", "enumerate_local_environments", 
     "build_shift_table", "compute_BF1_SFO1", "_broadened_spectrum", "generate_spectrum_dict", 
-    "plot_spectrum_dict", "plot_comparison",
+    "plot_spectrum_dict", "plot_comparison", "shell_distance_histogram"
 ]
