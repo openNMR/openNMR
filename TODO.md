@@ -2,6 +2,29 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Tried applying the recorded `PHC1` to 2D -- it makes things WORSE, not shipped (2026-09-05)
+
+User: "Let's try it" (re: applying F2's recorded `PHC1`, which `read_1d` applies and `read_2d` does not). **Tried, measured, and deliberately abandoned** -- the naive fix is a large regression. No code changed; this entry is the result.
+
+**Measured against `read_2d_processed` (TopSpin's own `2rr`), row 0, correlation:**
+
+| dataset | recorded PHC0 / PHC1 | shipped now (PHC0 only) | applying recorded PHC0+PHC1 | best achievable by *any* phase |
+|---|---|---|---|---|
+| `bruker_T2/11` | -205.704 / 908.800 | **+0.848** | **-0.241** | +0.99947 |
+| `bruker_PFG/150` | 349.742 / -80.100 | **+0.513** | **-0.134** | +0.99995 |
+
+Applying the recorded values takes both datasets from usable to *anti-correlated*. Shipping that would have been a clear regression, caught only because the change was measured against real data before being written.
+
+**But the residual genuinely is a phase error, and it is large.** A freely fitted `(phase0, phase1)` reaches **0.99947** and **0.99995** -- essentially perfect -- so nothing else (window, zero-fill, scaling, baseline) meaningfully differs from TopSpin. This is a real, fixable defect worth pursuing, not an acceptable limitation; `bruker_PFG/150` in particular ships at only 0.513.
+
+**Why the recorded values don't transfer -- ruled out, so the next attempt doesn't repeat this:**
+- Not a pivot convention: scanned `pivot_frac` 0.0/0.25/0.5/0.75/1.0 and both signs. Best over that whole grid was +0.863 against a +0.848 baseline -- marginal, and at an arbitrary point.
+- Not a simple scale/sign relationship: fitted-vs-recorded first-order ratios are **-0.900** (T2) and **-1.083** (PFG). Inconsistent between datasets, so there is no constant convention factor to apply.
+- Not frequency-axis reversal: converting the fit into Bruker's own index order (`PHC0' = p0+p1`, `PHC1' = -p1`) leaves T2 off by ~91 degrees on *both* terms and PFG off by 104 and 6.6 -- again inconsistent.
+- Not residual group delay: T2 records `GRPDLY=-1` (no digital filter at all) yet needs 2.27 points of delay to match; PFG records `GRPDLY=76` and needs -0.24. No correspondence.
+
+**Recommended next step, not started**: rather than trying to transplant TopSpin's own recorded constants into a differently-reconstructed spectrum, give `read_2d` the joint phase0/phase1 autophasing `read_1d` already has (`processing.ft.autophase01`; `read_2d`'s `phase_mode="apc0"` currently fits phase0 only). The fits above show a correct phase exists and is findable from the data alone -- which is a more robust route than reverse-engineering a convention that two datasets already disagree about.
+
 ## Projections were phase-blind: `max(abs())` replaced with signed max-magnitude (2026-09-05)
 
 User: "The 2D data still isn't matching the phase window phasing info", clarified mid-investigation as "specifically the projections".
