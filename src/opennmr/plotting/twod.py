@@ -26,6 +26,66 @@ from ..core.spectrum import NMRSpectrum
 from .style import setup_plotting, get_stack_colormap, get_contour_cmap, downsample_2d, save_figure
 
 
+# Absolute ceiling on how many points are handed to matplotlib's
+# contour generator, applied on top of whatever resolution the caller
+# asked for. Only very large datasets are affected at all.
+#
+# Why a ceiling exists: contour cost is linear in *levels x points*
+# (measured -- and, notably, *not* in the number of `ax.contour` calls,
+# so drawing the positive and negative level sets separately costs the
+# same as one combined call), and there is no way to thread it.
+# matplotlib never passes `thread_count` through to contourpy and
+# offers no route to inject one, and contourpy does not release the
+# GIL anyway (measured at 0.94x/0.97x across 4 threads), so resolution
+# is the only lever that exists. On the project's real EXSY benchmark
+# (1002 x 65536 = 65.7M points) full-resolution contouring costs ~4.0s,
+# which was the single largest cost in a load once the duplicated work
+# was removed.
+#
+# Why 16M and not lower: full resolution in the Spectrum tab is an
+# explicit standing user instruction, so this is deliberately a
+# safety ceiling for outliers rather than a general downsampling
+# policy -- chosen (with the user) to leave every other real dataset
+# in this project's own test_data untouched. For scale: the COSY
+# (0.5M), bruker_T2 (2.1M) and bruker_PFG (4.2M) datasets are all far
+# below it and render exactly as before; only the 65.7M-point EXSY
+# class of dataset is capped. Downsampling uses `downsample_2d`, which
+# keeps each output bin's largest-magnitude value (see its own
+# docstring for the EXSY-diagonal bug that motivated that), so thin
+# ridges survive rather than being decimated away; measured pixel
+# difference at this cap is ~0.1% of a rendered canvas.
+_MAX_CONTOUR_POINTS = 16_777_216
+
+# Don't sacrifice the indirect dimension to save the direct one: F1 is
+# usually far smaller (1002 vs 65536 on the benchmark) and far more
+# sensitive to losing rows, so the cap comes out of F2 first and only
+# touches F1 if F1 alone already exceeds the ceiling.
+_MIN_CAPPED_CONTOUR_X = 4096
+
+
+def _cap_contour_points(max_x: int, max_y: int) -> tuple[int, int]:
+    """Clamp a requested contour resolution to
+    :data:`_MAX_CONTOUR_POINTS` total, reducing F2 (``max_x``) first.
+
+    Returns the requested values unchanged whenever they are already
+    within the ceiling, which is the case for every dataset in this
+    project's own test data except the largest EXSY one.
+    """
+    if max_x <= 0 or max_y <= 0 or max_x * max_y <= _MAX_CONTOUR_POINTS:
+        return max_x, max_y
+    # Take it out of F2 first, but never below the floor (and never
+    # *up*, for a caller that asked for less than the floor already).
+    capped_x = min(max_x, max(_MIN_CAPPED_CONTOUR_X, _MAX_CONTOUR_POINTS // max_y))
+    if capped_x * max_y <= _MAX_CONTOUR_POINTS:
+        return capped_x, max_y
+    # F2 is down at its floor and the total is *still* over, i.e. F1 is
+    # genuinely oversized on its own -- reduce it too, rather than
+    # returning something that silently breaches the ceiling anyway.
+    # (Caught by the cap's own test: a hypothetical 65536x65536 request
+    # came back 16x over the ceiling before this branch existed.)
+    return capped_x, max(1, _MAX_CONTOUR_POINTS // capped_x)
+
+
 def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fraction_y=0.25,
                       ncontourpts_x=16384, ncontourpts_y=1024, factor=0.07, clevels=7,
                       level_mode="power", power=1.25):
@@ -64,6 +124,12 @@ def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fra
             int(len(y_axis) * contour_fraction_y) if contour_fraction_y is not None else len(y_axis),
             len(y_axis), ncontourpts_y,
         )
+    else:
+        max_x, max_y = len(x_ppm), len(y_axis)
+
+    max_x, max_y = _cap_contour_points(max_x, max_y)
+
+    if (max_x, max_y) != (len(x_ppm), len(y_axis)):
         contour_data, contour_x, contour_y = downsample_2d(
             data, x_ppm, y_axis, max_points_x=max_x, max_points_y=max_y,
         )

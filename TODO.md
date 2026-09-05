@@ -27,7 +27,7 @@ All three per-row steps are either already batch-safe or trivially made so -- ch
 - Caching the reconstructed array (keyed to file mtime + processing params, e.g. alongside the existing sidecar) would only help *re*-opening the same large file, not first load, and adds real cache-invalidation complexity -- lowest priority tier.
 - The already-known, already-documented **Compare-tab 1024-subplot rendering cost** (~25s, matplotlib doesn't scale to 1000+ subplots -- see the "Loading the 2D ser..." entry further down this file) is squarely part of "big data feels slow to open" from the user's perspective even though it's display-side, not `read_2d` itself -- a candidate fix (not scoped) is rendering very large slice counts as a single 2D image/heatmap instead of N separate line-plot subplots, or lazily rendering only the visible/nearby slices.
 
-## Threaded FFT shipped; contour threading investigated and ruled out with evidence (2026-09-05)
+## Adaptive contour ceiling + threaded FFT shipped; contour threading ruled out (2026-09-05)
 
 User: "Do it" (re: the contour render, then the threading items). One item shipped, one closed as **not possible**, one escalated as a user decision.
 
@@ -64,7 +64,19 @@ With threading ruled out, **resolution is the only remaining lever** on the ~4.0
 | 4096 | 0.251s | 16.0x | 0.191% |
 | 2048 | 0.126s | 32.0x | 0.186% |
 
-The difference is small and does not grow much with further downsampling (consistent with anti-aliasing on the contour lines rather than lost features -- `downsample_2d` keeps each bin's largest-magnitude value since the earlier EXSY-diagonal fix, so thin ridges survive). **But it is not zero, and the full-resolution Spectrum tab is an explicit standing user instruction** ("I need to have the fully sampled spectrum in the spectrum tab") -- so this is deliberately left unchanged and put to the user rather than silently traded away for speed.
+The difference is small and does not grow much with further downsampling (consistent with anti-aliasing on the contour lines rather than lost features -- `downsample_2d` keeps each bin's largest-magnitude value since the earlier EXSY-diagonal fix, so thin ridges survive). **But it is not zero, and the full-resolution Spectrum tab is an explicit standing user instruction** ("I need to have the fully sampled spectrum in the spectrum tab") -- so rather than silently trading it away under a "make it fast" mandate, the options were put to the user, who chose **"adaptive: full res unless huge."**
+
+### Shipped: an adaptive contour ceiling (`_cap_contour_points`)
+
+`_prepare_contour` now clamps the resolution handed to matplotlib to `_MAX_CONTOUR_POINTS` (16,777,216) total, on top of whatever the caller asked for. Deliberately a safety valve for outliers, not a downsampling policy: **every other dataset in this project's own test data is far below it and comes back as the bit-for-bit identical full-resolution array** -- verified directly, not just by shape (COSY 2048x2048, bruker_T2 64x32768, bruker_PFG 16x262144 all `np.array_equal` to `spectrum.data`). Only the 65.7M-point EXSY class is capped, to 1002x16743.
+
+The reduction comes out of F2 first (`_MIN_CAPPED_CONTOUR_X` floor of 4096), since F1 is typically far smaller and far more sensitive to losing rows -- the EXSY keeps all 1002 F1 rows. `spectrum.data` itself is never touched; the cap affects only what is handed to the contour generator, so every downstream consumer (slices, fitting, projections, phase) still sees full resolution. Peak magnitude survives exactly (`abs().max()` identical before and after capping), since `downsample_2d` is max-preserving.
+
+**EXSY benchmark load: 7.42s -> 4.77s.** Cumulative for the whole effort: **17.4s -> 4.8s (3.6x)**, with `spectrum.data` byte-identical to the original pre-all-fixes baseline on all five datasets throughout.
+
+**A real bug in this function's own first draft, caught by its own test rather than by review**: reducing F2 alone isn't always sufficient, because F2 has a floor -- a request whose F1 is itself oversized (e.g. a hypothetical 65536x65536) came back **16x over the ceiling**. Now it reduces F1 too once F2 is at its floor. Verified the test discriminates by restoring the buggy logic and confirming the failure, then restoring and `diff`-confirming byte-identity.
+
+9 new regression tests. 913 tests passing (908 -> 913).
 
 ## Both traced duplications fixed: 17.4s -> 8.0s per load, byte-identical output (2026-09-05)
 

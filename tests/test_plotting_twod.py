@@ -164,3 +164,81 @@ def test_overlay_plot_wrong_count_raises():
     specs = [_make_2d()]
     with pytest.raises(ValueError):
         twod.overlay_plot(specs)
+
+
+def test_cap_contour_points_leaves_normal_sized_requests_alone():
+    # The ceiling is a safety valve for outliers, not a downsampling
+    # policy -- full-resolution Spectrum-tab rendering is an explicit
+    # standing user instruction, so every ordinary dataset must come
+    # back untouched. These are the real shapes in this project's own
+    # test data (COSY, bruker_T2, bruker_PFG), all far below the cap.
+    for max_x, max_y in [(2048, 2048), (32768, 64), (262144, 16), (1, 1)]:
+        assert twod._cap_contour_points(max_x, max_y) == (max_x, max_y)
+
+    # Exactly at the ceiling is still "within" it, not over.
+    at_cap = (16384, 1024)
+    assert at_cap[0] * at_cap[1] == twod._MAX_CONTOUR_POINTS
+    assert twod._cap_contour_points(*at_cap) == at_cap
+
+
+def test_cap_contour_points_never_returns_more_than_the_ceiling():
+    # Regression test for a real bug in this function's own first
+    # draft, caught here rather than in review: reducing F2 alone is
+    # not always enough, because F2 has a floor (F1 is far smaller and
+    # far more sensitive to losing rows, so the cap comes out of F2
+    # first) -- a request whose F1 is itself oversized used to come
+    # back 16x over the ceiling.
+    oversized = [
+        (65536, 1002),    # the real EXSY benchmark
+        (4096, 8192),     # F1 oversized once F2 is at its floor
+        (65536, 65536),   # both oversized -- the case that was broken
+        (100, 500_000),   # F2 already below the floor, F1 enormous
+    ]
+    for max_x, max_y in oversized:
+        capped_x, capped_y = twod._cap_contour_points(max_x, max_y)
+        assert capped_x * capped_y <= twod._MAX_CONTOUR_POINTS, (max_x, max_y)
+        assert capped_x <= max_x and capped_y <= max_y  # only ever reduces
+
+
+def test_cap_contour_points_reduces_the_direct_dimension_first():
+    # F1 (max_y) is usually far smaller and carries far fewer points to
+    # spare, so a dataset that is over only because F2 is huge must
+    # keep every F1 row.
+    capped_x, capped_y = twod._cap_contour_points(65536, 1002)
+    assert capped_y == 1002
+    assert capped_x < 65536
+
+
+def test_prepare_contour_caps_a_very_large_spectrum_but_keeps_its_peak():
+    # Even when capped, downsample_2d keeps each bin's largest-magnitude
+    # value (see its own docstring for the EXSY-diagonal bug that
+    # motivated that), so the contour levels -- which are computed from
+    # the *full* data -- still have real data reaching them.
+    spectrum = _make_2d(n_f1=8, n_f2=64)
+    monkey_cap = 128  # far below this fixture, to exercise the path cheaply
+    original = twod._MAX_CONTOUR_POINTS
+    original_floor = twod._MIN_CAPPED_CONTOUR_X
+    try:
+        twod._MAX_CONTOUR_POINTS = monkey_cap
+        twod._MIN_CAPPED_CONTOUR_X = 4
+        _, _, contour_data, _, _, _ = twod._prepare_contour(
+            spectrum, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9,
+        )
+    finally:
+        twod._MAX_CONTOUR_POINTS = original
+        twod._MIN_CAPPED_CONTOUR_X = original_floor
+
+    assert contour_data.size <= monkey_cap
+    assert np.abs(contour_data).max() == pytest.approx(np.abs(spectrum.data).max())
+
+
+def test_prepare_contour_below_the_cap_is_the_untouched_full_resolution_array():
+    # Not merely "the same shape" -- the identical array, so a
+    # full-resolution request really is bit-for-bit what gets contoured.
+    spectrum = _make_2d(n_f1=20, n_f2=30)
+    _, _, contour_data, _, _, _ = twod._prepare_contour(
+        spectrum, contour_fraction_x=1.0, contour_fraction_y=1.0,
+        ncontourpts_x=10**9, ncontourpts_y=10**9,
+    )
+    assert np.array_equal(contour_data, spectrum.data)
