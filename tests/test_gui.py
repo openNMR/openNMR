@@ -7675,3 +7675,71 @@ def test_read_auto_drops_pseudo_2d_for_one_dimensional_data(qapp, tmp_path):
     spectrum = io_bruker._read_auto(path, pseudo_2d=True)
 
     assert spectrum.ndim == 1
+
+
+def test_main_window_magnitude_button_reflects_recorded_mode(qapp, tmp_path, monkeypatch):
+    # A dataset whose own PH_mod asks for magnitude should come up with
+    # the button already on, without the user doing anything.
+    path = _make_1d_dataset(tmp_path)
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    assert window.magnitude_button.isChecked() is False  # this fixture records no PH_mod
+
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["magnitude_mode"] = "magnitude"
+    window._refresh_selection_display(0)
+    assert window.magnitude_button.isChecked() is True
+
+
+def test_main_window_magnitude_toggle_reloads_with_explicit_flag(qapp, tmp_path, monkeypatch):
+    # Magnitude is applied by the reader, deliberately with no second
+    # in-memory implementation -- so the toggle must go through a
+    # reload carrying an explicit `magnitude=`, not recompute locally.
+    path = _make_1d_dataset(tmp_path)
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+
+    seen = []
+    original = Session.reload
+    monkeypatch.setattr(
+        Session, "reload",
+        lambda self, index, **kw: (seen.append(kw), original(self, index, **kw))[1],
+    )
+
+    window.magnitude_button.setChecked(True)
+
+    assert seen and seen[-1].get("magnitude") is True
+    # The explicit choice is recorded separately from the reader's own
+    # descriptive flag, so "off" can be told apart from "never set".
+    assert window.session.spectra[0].metadata.raw.get("magnitude_override") is True
+
+
+def test_main_window_magnitude_off_is_remembered_for_a_file_that_records_it(qapp, tmp_path):
+    # The case the separate override flag exists for: a file whose own
+    # PH_mod asks for magnitude, which the user switched off. Without
+    # an explicit saved False, the next load re-detects PH_mod and
+    # silently turns it back on.
+    path = _make_1d_dataset(tmp_path)
+    # The processing sidecar wraps its payload under "state" -- written
+    # in that shape rather than as a bare dict, which load_processing_
+    # sidecar silently ignores.
+    with open(io_persistence.processing_sidecar_path(path), "w") as f:
+        json.dump({"state": {"magnitude_override": False}}, f)
+
+    seen = {}
+    window = MainWindow()
+    real_add = window.session.add
+    window.session.add = lambda p, vendor=None, **kw: (seen.update(kw), real_add(p, vendor=vendor, **kw))[1]
+    window._load(path, vendor="bruker")
+
+    assert seen.get("magnitude") is False
+
+
+def test_main_window_magnitude_button_hidden_for_non_bruker(qapp, tmp_path):
+    # Bruker is the only reader with a `magnitude` parameter today --
+    # showing the button elsewhere would offer a control that raises.
+    window = MainWindow()
+    spectrum = _make_1d_peak_spectrum()
+    spectrum.metadata.vendor = "xpulse"
+    _load_spectrum_directly(window, spectrum)
+    assert window.magnitude_button.isVisible() is False

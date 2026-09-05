@@ -53,6 +53,13 @@ _PROCESSING_RAW_BLOCKLIST = frozenset({
     "acqus", "procs", "proc2s", "params", "exp_params",
     "fid", "fid_raw",
     "window_unsupported", "read_2d_shape_guess_failed", "loaded_from_processed",
+    # Re-derived from the vendor's own PH_mod on every load, so it
+    # would be a stale copy -- and, worse, an actively wrong one for
+    # the case that matters: "requested" only describes *this*
+    # session's explicit toggle. `magnitude_mode` itself is persisted
+    # (it's a real user choice worth restoring); only the provenance
+    # note is dropped.
+    "magnitude_mode_source",
 })
 
 

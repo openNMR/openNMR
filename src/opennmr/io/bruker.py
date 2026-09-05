@@ -216,6 +216,85 @@ def _apply_bruker_window(fid: np.ndarray, procs: dict, sw_hz: float) -> np.ndarr
     )
 
 
+# Bruker's own PH_mod codes, from procs/proc2s -- how TopSpin itself
+# displays this dataset.
+_PH_MOD_NONE = 0     # "no"  -- no phase correction
+_PH_MOD_PK = 1       # "pk"  -- apply the recorded PHC0/PHC1
+_PH_MOD_MC = 2       # "mc"  -- magnitude calculation
+_PH_MOD_PS = 3       # "ps"  -- power spectrum
+
+_PH_MOD_NAMES = {
+    _PH_MOD_NONE: "no (no phase correction)",
+    _PH_MOD_PK: "pk (recorded PHC0/PHC1)",
+    _PH_MOD_MC: "mc (magnitude)",
+    _PH_MOD_PS: "ps (power)",
+}
+
+
+def _resolve_magnitude_mode(magnitude: bool | None, *procs_dicts) -> str | None:
+    """Decide whether to produce a magnitude/power spectrum, and which.
+
+    Returns ``"magnitude"``, ``"power"``, or ``None`` (leave the
+    spectrum phase-sensitive).
+
+    ``magnitude`` is the caller's explicit override: ``True`` forces a
+    magnitude spectrum for *any* dataset (the GUI's own "Magnitude
+    mode" toggle -- useful for a badly-phased or hard-to-phase
+    spectrum regardless of what the vendor recorded), ``False`` forces
+    it off even when the file asks for it, and ``None`` (the default)
+    follows whatever TopSpin itself recorded in ``PH_mod``.
+
+    Real, and the reason this exists: magnitude mode is genuinely used
+    in this project's own test data -- 9 Bruker datasets record
+    ``PH_mod=2``, mostly gradient-COSY experiments (e.g.
+    ``exam_CMCse_3/12``, ``cosygpmfppqf``). Ignoring it made those load
+    as an unphased, dispersive-looking phase-sensitive spectrum that
+    correlated **+0.01** with TopSpin's own processed output, against
+    **+0.86** for the magnitude of the same complex data -- which is
+    what the "contours are inverted / don't match" report turned out to
+    be about for that class of file.
+
+    Any of the supplied parameter dicts asking for magnitude/power is
+    enough (for a 2D, F2's ``procs`` and F1's ``proc2s`` are both
+    consulted, since either dimension can carry the flag -- the COSY
+    above records it on F1 while F2 says ``no``). Pass only the dicts
+    that actually apply: a pseudo-2D's ``proc2s`` describes an indirect
+    dimension that was never transformed, so it shouldn't vote.
+
+    ``PH_mod=3`` (power) is supported for completeness but is
+    **unverified against real data** -- no dataset available here
+    records it, unlike magnitude.
+    """
+    if magnitude is not None:
+        return "magnitude" if magnitude else None
+    for procs in procs_dicts:
+        if not procs:
+            continue
+        try:
+            ph_mod = int(float(procs.get("PH_mod", _PH_MOD_NONE) or _PH_MOD_NONE))
+        except (TypeError, ValueError):
+            continue
+        if ph_mod == _PH_MOD_MC:
+            return "magnitude"
+        if ph_mod == _PH_MOD_PS:
+            return "power"
+    return None
+
+
+def _apply_magnitude_mode(spectrum: np.ndarray, mode: str | None) -> np.ndarray:
+    """``abs()`` for ``"magnitude"``, ``abs()**2`` for ``"power"``,
+    unchanged for ``None``. Applied at the very *end* of processing,
+    after windowing/FFT/phasing in every dimension -- which is where it
+    was verified to reproduce TopSpin's own output (taking it earlier,
+    e.g. between F2's and F1's transforms, is a different and wrong
+    quantity)."""
+    if mode == "magnitude":
+        return np.abs(spectrum)
+    if mode == "power":
+        return np.abs(spectrum) ** 2
+    return spectrum
+
+
 def _read_procs(datapath: str, procno: int, proc2: bool = False) -> dict:
     filename = "proc2s" if proc2 else "procs"
     return parse_jcampdx_params(os.path.join(datapath, "pdata", str(procno), filename))
@@ -246,7 +325,8 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             window: str | None = None, window_kwargs: dict | None = None, zero_fill: int | None = None,
             fid_shift: float = 0.0, align_echo: bool = False,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
-            linear_predict_direction: str = "forward") -> NMRSpectrum:
+            linear_predict_direction: str = "forward",
+            magnitude: bool | None = None) -> NMRSpectrum:
     """Read the raw ``fid`` and reprocess it using the parameters
     TopSpin itself recorded in ``procs`` (window, ``SI``, and --
     ``phase_mode="recorded"``, the default -- the phase TopSpin itself
@@ -383,6 +463,20 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
         },
     )
     axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
+    # Magnitude/power last of all, after phasing -- see
+    # _apply_magnitude_mode. Only F2's own procs votes for a 1D.
+    magnitude_mode = _resolve_magnitude_mode(magnitude, procs)
+    if magnitude_mode:
+        spectrum = _apply_magnitude_mode(spectrum, magnitude_mode)
+        metadata.raw["magnitude_mode"] = magnitude_mode
+        metadata.raw["magnitude_mode_source"] = "requested" if magnitude is not None else "recorded (PH_mod)"
+        # A magnitude/power spectrum has no meaningful phase left, so
+        # there is no imaginary part to retain -- and data_imag=None is
+        # already how the GUI knows to disable its phase controls
+        # ("Phase adjustment needs a spectrum with retained imaginary
+        # data"), rather than offering a correction that cannot do
+        # anything.
+        return NMRSpectrum(data=np.real(spectrum), axes=[axis], metadata=metadata, data_imag=None)
     return NMRSpectrum(data=np.real(spectrum), axes=[axis], metadata=metadata, data_imag=np.imag(spectrum))
 
 
@@ -398,7 +492,8 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             zero_fill_f1: int | None = None, truncate_f1: int | None = None,
             fid_shift: float = 0.0, align_echo: bool = False,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
-            linear_predict_direction: str = "forward") -> NMRSpectrum:
+            linear_predict_direction: str = "forward",
+            magnitude: bool | None = None) -> NMRSpectrum:
     """Read the raw ``ser`` and reprocess it (F2 then F1) using the
     parameters TopSpin recorded in ``procs``/``proc2s``.
 
@@ -789,6 +884,21 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             **({"window_unsupported_f1": window_unsupported_note_f1} if window_unsupported_note_f1 else {}),
         },
     )
+    # Magnitude/power last of all, after both dimensions' own
+    # windowing/FFT/phasing -- see _apply_magnitude_mode for why the
+    # position matters. Both dimensions' parameter sets get a vote,
+    # since either can carry the flag (the real COSY that motivated
+    # this records mc on F1 while F2 says "no") -- but a pseudo-2D's
+    # proc2s describes an indirect dimension that was never
+    # transformed, so it is deliberately excluded there.
+    magnitude_mode = _resolve_magnitude_mode(magnitude, procs, None if pseudo_2d else proc2s)
+    if magnitude_mode:
+        spectrum = _apply_magnitude_mode(spectrum, magnitude_mode)
+        metadata.raw["magnitude_mode"] = magnitude_mode
+        metadata.raw["magnitude_mode_source"] = "requested" if magnitude is not None else "recorded (PH_mod)"
+        # See read_1d's own matching comment: no meaningful phase
+        # remains, and data_imag=None is how the GUI disables phasing.
+        return NMRSpectrum(data=np.real(spectrum), axes=[y_axis, x_axis], metadata=metadata, data_imag=None)
     return NMRSpectrum(data=np.real(spectrum), axes=[y_axis, x_axis], metadata=metadata, data_imag=np.imag(spectrum))
 
 
@@ -797,7 +907,8 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
 # ============================================================
 
 def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p: float = 0.0,
-                       heteronuclear_2d_slice: bool = False, slice_dimension: int = 2) -> NMRSpectrum:
+                       heteronuclear_2d_slice: bool = False, slice_dimension: int = 2,
+                       magnitude: bool | None = None) -> NMRSpectrum:
     """Read TopSpin's own already-processed ``1r``/``1i`` directly --
     ported from ``nmrtools2``'s ``NMR1dimport``."""
     real_path = os.path.join(path, "pdata", str(procno), "1r")
@@ -847,11 +958,29 @@ def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float 
         raw={"acqus": axis_meta, "procs": procs},
     )
     axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
+    # Magnitude/power applies just the same to TopSpin's own already-
+    # processed data as to the raw-FID path -- same PH_mod, same
+    # explicit override -- so the toggle behaves identically whichever
+    # way a dataset happened to load. (Found the hard way: without
+    # this, `_read_auto` forwarded `magnitude=` into a reader that
+    # didn't accept it and raised TypeError on every processed-fallback
+    # dataset.)
+    magnitude_mode = _resolve_magnitude_mode(magnitude, procs)
+    if magnitude_mode:
+        metadata.raw["magnitude_mode"] = magnitude_mode
+        metadata.raw["magnitude_mode_source"] = "requested" if magnitude is not None else "recorded (PH_mod)"
+        # See read_2d_processed's own matching block for why a missing
+        # imaginary part is normal here rather than a defect.
+        source = real + 1j * imag if imag is not None else real.astype(complex)
+        if imag is None and magnitude is None:
+            return NMRSpectrum(data=real, axes=[axis], metadata=metadata, data_imag=None)
+        combined = _apply_magnitude_mode(source, magnitude_mode)
+        return NMRSpectrum(data=np.real(combined), axes=[axis], metadata=metadata, data_imag=None)
     return NMRSpectrum(data=real, axes=[axis], metadata=metadata, data_imag=imag)
 
 
 def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
-                       pseudo_2d: bool | None = None) -> NMRSpectrum:
+                       pseudo_2d: bool | None = None, magnitude: bool | None = None) -> NMRSpectrum:
     """Read TopSpin's own already-processed ``2rr`` directly -- ported
     from ``nmrtools2``'s ``NMR2dimport``, including its Bruker XDIM
     submatrix-block reconstruction and ``GRPDLY`` roll, both of which
@@ -956,6 +1085,31 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
         raw={"acqus": acqus, "procs": procs, "proc2s": proc2s},
     )
     x_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
+    # See read_1d_processed's own matching block. proc2s votes too,
+    # except for a pseudo-2D whose indirect dimension was never
+    # transformed -- same rule as read_2d.
+    magnitude_mode = _resolve_magnitude_mode(magnitude, procs, None if pseudo_2d else proc2s)
+    if magnitude_mode:
+        metadata.raw["magnitude_mode"] = magnitude_mode
+        metadata.raw["magnitude_mode_source"] = "requested" if magnitude is not None else "recorded (PH_mod)"
+        if spectrum_imag is not None:
+            combined = _apply_magnitude_mode(spectrum + 1j * spectrum_imag, magnitude_mode)
+            return NMRSpectrum(data=np.real(combined), axes=[y_axis, x_axis], metadata=metadata, data_imag=None)
+        # No imaginary part on disk. For a file that *records*
+        # magnitude mode this is the normal case, not a defect --
+        # TopSpin doesn't write a 2ri for one, because the data it
+        # wrote is already the magnitude (confirmed on the real COSY:
+        # every value in its 2rr is non-negative). So the mode is
+        # recorded for the UI's benefit and the data is passed through
+        # untouched rather than having abs() applied a second time.
+        # An explicit user request still gets abs() applied, since a
+        # real-only array is all there is to work with.
+        if magnitude is not None:
+            return NMRSpectrum(
+                data=_apply_magnitude_mode(spectrum.astype(complex), magnitude_mode).real,
+                axes=[y_axis, x_axis], metadata=metadata, data_imag=None,
+            )
+        return NMRSpectrum(data=spectrum, axes=[y_axis, x_axis], metadata=metadata, data_imag=None)
     return NMRSpectrum(data=spectrum, axes=[y_axis, x_axis], metadata=metadata, data_imag=spectrum_imag)
 
 
@@ -1148,7 +1302,7 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
             # check this function just made), so only the parameters
             # read_2d_processed actually accepts are forwarded here.
             processed_kwargs = {
-                k: v for k, v in kwargs.items() if k in ("procno", "homonuclear", "pseudo_2d")
+                k: v for k, v in kwargs.items() if k in ("procno", "homonuclear", "pseudo_2d", "magnitude")
             }
             spectrum = read_2d_processed(path, **processed_kwargs)
             spectrum.metadata.raw["read_2d_shape_guess_failed"] = str(exc)

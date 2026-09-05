@@ -784,6 +784,23 @@ class MainWindow(QMainWindow):
         self.process_indirect_button.toggled.connect(self._on_process_indirect_toggled)
         info_form.addRow(self.process_indirect_button)
 
+        self.magnitude_button = QPushButton("Magnitude Mode")
+        self.magnitude_button.setCheckable(True)
+        self.magnitude_button.setToolTip(
+            "Display the magnitude (absolute value) of the spectrum "
+            "instead of its phase-sensitive real part -- |real + i*imag|, "
+            "so every peak is positive and no phasing is needed (or "
+            "possible: the phase controls switch off while this is on).\n\n"
+            "Switched on automatically for any dataset whose own "
+            "processing parameters ask for it (Bruker PH_mod = mc), "
+            "which is common for gradient-COSY experiments. Turn it on "
+            "yourself for anything that is hard to phase, or off to see "
+            "the phase-sensitive spectrum a file recorded as magnitude. "
+            "Reprocesses from the original file immediately."
+        )
+        self.magnitude_button.toggled.connect(self._on_magnitude_toggled)
+        info_form.addRow(self.magnitude_button)
+
         self.pseudo2d_view_combo = QComboBox()
         self.pseudo2d_view_combo.addItems(["Contour", "Stacked slices", "Heatmap"])
         self.pseudo2d_view_combo.setToolTip(
@@ -1072,6 +1089,17 @@ class MainWindow(QMainWindow):
         if vendor == "bruker":
             presel = io_persistence.load_metadata_sidecar(path)
             add_kwargs["pseudo_2d"] = (presel or {}).get("pseudo_2d") is not False
+            # Magnitude mode has to be decided here too, for the same
+            # reason: it is applied by the *reader* (there is
+            # deliberately no second in-memory implementation, see
+            # _on_magnitude_toggled), so the sidecar-restore path --
+            # which recomputes from the cached raw FID rather than
+            # re-reading -- cannot apply it afterwards. Only an
+            # explicit saved choice is honoured; with none, the reader
+            # follows the file's own recorded PH_mod as usual.
+            saved_processing = io_persistence.load_processing_sidecar(path) or {}
+            if "magnitude_override" in saved_processing:
+                add_kwargs["magnitude"] = bool(saved_processing["magnitude_override"])
         try:
             spectrum = self.session.add(path, vendor=vendor, **add_kwargs)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
@@ -1534,6 +1562,66 @@ class MainWindow(QMainWindow):
             self.process_indirect_button.setChecked(not spectrum.is_pseudo_2d)
             self.process_indirect_button.blockSignals(False)
             return
+        self._on_selection_changed(index)
+        self._schedule_sidecar_save(index)
+
+    def _on_magnitude_toggled(self, checked: bool) -> None:
+        """Turn magnitude mode on/off for the selected spectrum,
+        reprocessing from the original file.
+
+        Deliberately a **reload** (like "Process Indirect Dimension"
+        above, and unlike the window/zero-fill/phase controls, which
+        recompute in memory from the cached raw FID): magnitude is a
+        discrete on/off, not something dragged continuously, so there
+        is no responsiveness argument for a second in-memory
+        implementation -- and this project has repeatedly been bitten
+        by exactly that ("two pipelines quietly diverge", see TODO.md).
+        Reloading means ``io.bruker``'s own ``_apply_magnitude_mode``
+        stays the single implementation.
+
+        Passing ``magnitude=`` explicitly (rather than clearing it back
+        to ``None``) is what makes "off" mean *off* even for a file
+        whose own ``PH_mod`` asks for magnitude -- ``None`` would
+        re-detect and switch it straight back on, which would make the
+        button look broken for exactly the datasets it matters most
+        for.
+        """
+        index = self._selected_index()
+        if index is None:
+            return
+        self._commit_pending_phase_to_metadata()
+        spectrum = self.session.spectra[index]
+        if bool(spectrum.metadata.raw.get("magnitude_mode")) == checked:
+            return
+        try:
+            self.session.reload(index, magnitude=checked)
+        except TypeError:
+            # A vendor reader without a `magnitude` parameter (only
+            # Bruker has one today) -- surfaced plainly rather than
+            # leaving the button stuck on a state that never applied.
+            QMessageBox.information(
+                self, "Magnitude mode not available",
+                f"{self.session.label(index)} was loaded by a reader that doesn't support "
+                f"magnitude mode yet -- it's currently Bruker-only.",
+            )
+            self.magnitude_button.blockSignals(True)
+            self.magnitude_button.setChecked(not checked)
+            self.magnitude_button.blockSignals(False)
+            return
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Failed to reprocess spectrum", str(exc))
+            self.magnitude_button.blockSignals(True)
+            self.magnitude_button.setChecked(not checked)
+            self.magnitude_button.blockSignals(False)
+            return
+        # Record the *explicit* choice, separately from the reader's own
+        # descriptive `magnitude_mode`. The two are not interchangeable:
+        # `magnitude_mode` is absent both when the user turned this off
+        # and when they never touched it, so it alone can't restore
+        # "off" for a file whose own PH_mod asks for magnitude -- that
+        # would silently switch back on at the next load. This flag is
+        # what `_load` reads before the read to decide (see there).
+        self.session.spectra[index].metadata.raw["magnitude_override"] = checked
         self._on_selection_changed(index)
         self._schedule_sidecar_save(index)
 
@@ -7734,6 +7822,15 @@ class MainWindow(QMainWindow):
         self.process_indirect_button.blockSignals(True)
         self.process_indirect_button.setChecked(not spectrum.is_pseudo_2d)
         self.process_indirect_button.blockSignals(False)
+
+        # Bruker-only for now -- it's the one reader with a `magnitude`
+        # parameter, and the only vendor whose files record the mode
+        # themselves (PH_mod). Shown for 1D as well as 2D: a
+        # hard-to-phase 1D is exactly what the manual override is for.
+        self.magnitude_button.setVisible(spectrum.metadata.vendor == "bruker")
+        self.magnitude_button.blockSignals(True)
+        self.magnitude_button.setChecked(bool(spectrum.metadata.raw.get("magnitude_mode")))
+        self.magnitude_button.blockSignals(False)
 
         is_pseudo2d_now = spectrum.ndim == 2 and spectrum.is_pseudo_2d
         self.pseudo2d_view_combo.setVisible(is_pseudo2d_now)

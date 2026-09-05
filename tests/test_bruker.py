@@ -323,3 +323,45 @@ def test_read_auto_tags_loaded_from_processed_for_1d_processed_only(tmp_path):
 
     assert spectrum.ndim == 1
     assert spectrum.metadata.raw["loaded_from_processed"] == "No raw fid file found for this experiment."
+
+
+def test_resolve_magnitude_mode_follows_recorded_ph_mod():
+    # Bruker PH_mod: 0 = none, 1 = pk (PHC0/PHC1), 2 = mc (magnitude),
+    # 3 = ps (power). Only 2 appears in this project's real test data
+    # (9 datasets, mostly gradient COSY); 3 is supported but unverified
+    # against a real file.
+    assert bruker._resolve_magnitude_mode(None, {"PH_mod": 2}) == "magnitude"
+    assert bruker._resolve_magnitude_mode(None, {"PH_mod": 3}) == "power"
+    assert bruker._resolve_magnitude_mode(None, {"PH_mod": 1}) is None
+    assert bruker._resolve_magnitude_mode(None, {"PH_mod": 0}) is None
+    assert bruker._resolve_magnitude_mode(None, {}) is None
+    # Either dimension may carry the flag -- the real COSY that
+    # motivated this records mc on F1 while F2 says "no".
+    assert bruker._resolve_magnitude_mode(None, {"PH_mod": 0}, {"PH_mod": 2}) == "magnitude"
+    # A None dict (e.g. a pseudo-2D's excluded proc2s) must not vote.
+    assert bruker._resolve_magnitude_mode(None, {"PH_mod": 0}, None) is None
+
+
+def test_resolve_magnitude_mode_explicit_override_beats_the_file():
+    # True forces it on for anything; False forces it off even for a
+    # file whose own PH_mod asks for it -- without that, the GUI's
+    # "off" would silently flip back on for exactly the datasets the
+    # toggle matters most for.
+    assert bruker._resolve_magnitude_mode(True, {"PH_mod": 0}) == "magnitude"
+    assert bruker._resolve_magnitude_mode(False, {"PH_mod": 2}) is None
+
+
+def test_resolve_magnitude_mode_tolerates_unparseable_ph_mod():
+    # PH_mod arrives from a hand-parsed JCAMP-DX file; a malformed
+    # value should fall through to "phase-sensitive", not raise in the
+    # middle of a load.
+    assert bruker._resolve_magnitude_mode(None, {"PH_mod": "junk"}) is None
+    assert bruker._resolve_magnitude_mode(None, {"PH_mod": None}) is None
+    assert bruker._resolve_magnitude_mode(None, {"PH_mod": 2.0}) == "magnitude"
+
+
+def test_apply_magnitude_mode_math():
+    spectrum = np.array([3 + 4j, -3 - 4j, 0 + 0j])
+    np.testing.assert_allclose(bruker._apply_magnitude_mode(spectrum, "magnitude"), [5.0, 5.0, 0.0])
+    np.testing.assert_allclose(bruker._apply_magnitude_mode(spectrum, "power"), [25.0, 25.0, 0.0])
+    np.testing.assert_array_equal(bruker._apply_magnitude_mode(spectrum, None), spectrum)
