@@ -27,6 +27,45 @@ All three per-row steps are either already batch-safe or trivially made so -- ch
 - Caching the reconstructed array (keyed to file mtime + processing params, e.g. alongside the existing sidecar) would only help *re*-opening the same large file, not first load, and adds real cache-invalidation complexity -- lowest priority tier.
 - The already-known, already-documented **Compare-tab 1024-subplot rendering cost** (~25s, matplotlib doesn't scale to 1000+ subplots -- see the "Loading the 2D ser..." entry further down this file) is squarely part of "big data feels slow to open" from the user's perspective even though it's display-side, not `read_2d` itself -- a candidate fix (not scoped) is rendering very large slice counts as a single 2D image/heatmap instead of N separate line-plot subplots, or lazily rendering only the visible/nearby slices.
 
+## Threaded FFT shipped; contour threading investigated and ruled out with evidence (2026-09-05)
+
+User: "Do it" (re: the contour render, then the threading items). One item shipped, one closed as **not possible**, one escalated as a user decision.
+
+### Shipped: `scipy.fft` with a bounded, overridable worker count
+
+`processing.ft.fft_spectrum` now uses `scipy.fft.fft(..., workers=fft_workers())` instead of `numpy.fft`. Same pocketfft underneath -- the switch buys only the `workers` parameter. `read_2d` on the benchmark: **4.385s serial -> 3.630s threaded**; full GUI load 8.02s -> 7.42s (a smaller share now, since the load is no longer FFT-dominated).
+
+**Accuracy gate, checked before anything else**: output is **bit-identical to `numpy.fft`** at workers 1/2/4/8 across five real array shapes (`np.array_equal`, not `allclose` -- a tolerance would hide exactly the thread-count-dependent drift worth ruling out). Threading splits the batch across independent 1D transforms, so no individual transform's summation order changes. The five-dataset end-to-end A/B is still byte-identical to the **original pre-all-fixes baseline**.
+
+Worker policy follows the system-agnosticism contract written in the threading plan below:
+- `_available_cpus()` uses `os.process_cpu_count()` (3.13+) -> `os.sched_getaffinity` (Linux only, probed not assumed) -> `os.cpu_count()` -> 1. Never bare `os.cpu_count()`, which reports the machine rather than this process's allowance and is wrong under cgroup limits and affinity masks.
+- Capped at 4 (`_FFT_WORKER_CAP`), never `workers=-1`: the measured F2 plateau is 4, and scipy/numpy's own BLAS/OpenMP pools are already live in-process, so uncapped threading risks oversubscription for no measured gain.
+- `OPENNMR_FFT_WORKERS` pins the count; `1` selects the fully serial path, which is measurably numpy's own performance and bit-identical output, so "threads off" is genuinely supported rather than degraded. A malformed or non-positive value falls back to automatic rather than raising -- a bad env var must not stop a spectrum loading. **The full suite passes under `OPENNMR_FFT_WORKERS=1` as well as the default** (908 tests, both ways).
+
+### Ruled out with evidence: threading the contour render
+
+The threading plan below flagged `contourpy(thread_count=...)` as promising-but-unverified. **Now verified, and it is a dead end** -- two independent reasons, either sufficient:
+
+1. **matplotlib never passes it.** `matplotlib/contour.py` constructs `contourpy.contour_generator(x, y, z, name=..., corner_mask=..., line_type=..., fill_type=..., chunk_size=self.nchunk)` -- no `thread_count`, and no public route to inject one. (`thread_count` also only does anything with chunking enabled, which matplotlib leaves at `nchunk=0` by default.)
+2. **contourpy does not release the GIL.** Measured directly: 14 levels on a `(1002, 16384)` array take 7.76s serially, **8.28s** across 4 threads with a generator per call, and **7.99s** across 4 threads sharing one generator -- i.e. 0.94x and 0.97x. Threading contour generation cannot help from Python at all, whatever API is used.
+
+**Also measured and worth recording**: the contour cost is linear in *levels x points*, not in the number of `ax.contour()` calls. Collapsing the positive and negative passes into one call with per-level colours was tried and gives **no speedup at all** (4.019s -> 4.066s), because contourpy calls `create_contour` once per level regardless -- and it also silently loses the dashed-negative visual cue, since matplotlib only applies `negative_linestyles` when the level set is signed the way two separate calls make it. Not shipped.
+
+### Escalated rather than decided: contour resolution
+
+With threading ruled out, **resolution is the only remaining lever** on the ~4.0s contour. Measured on the benchmark (880x660 px canvas), downsampling F2 with the existing max-preserving `downsample_2d`:
+
+| F2 points | contour time | speedup | pixels differing >2% |
+|---|---|---|---|
+| 65536 (full) | 4.012s | 1.0x | -- |
+| 32768 | 1.977s | 2.0x | 0.102% |
+| 16384 | 0.995s | 4.0x | 0.108% |
+| 8192 | 0.499s | 8.0x | 0.177% |
+| 4096 | 0.251s | 16.0x | 0.191% |
+| 2048 | 0.126s | 32.0x | 0.186% |
+
+The difference is small and does not grow much with further downsampling (consistent with anti-aliasing on the contour lines rather than lost features -- `downsample_2d` keeps each bin's largest-magnitude value since the earlier EXSY-diagonal fix, so thin ridges survive). **But it is not zero, and the full-resolution Spectrum tab is an explicit standing user instruction** ("I need to have the fully sampled spectrum in the spectrum tab") -- so this is deliberately left unchanged and put to the user rather than silently traded away for speed.
+
 ## Both traced duplications fixed: 17.4s -> 8.0s per load, byte-identical output (2026-09-05)
 
 User: "Fix them however you think is best", with a follow-up steer mid-work: "The goal is accuracy and speed." Both duplications from the trace entry below are fixed. **Output is byte-identical on all five real datasets checked** (`np.array_equal` True, max abs diff `0.0`) -- accuracy was treated as the gate, speed as the result.

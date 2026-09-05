@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pytest
 
@@ -617,3 +619,74 @@ def test_baseline_correct_sinusoidal_handles_a_rolling_wave_baseline():
     sinusoidal_residual = np.abs(corrected_sinusoidal[away_from_peak]).mean()
     assert sinusoidal_residual < linear_residual * 0.1
     assert sinusoidal_residual < 1e-6  # the true baseline genuinely *is* one sinusoid
+
+
+def test_fft_spectrum_is_bit_identical_to_numpy_at_every_worker_count(monkeypatch):
+    # fft_spectrum switched from numpy.fft to scipy.fft purely for its
+    # `workers` parameter. Threading splits the batch across
+    # independent 1D transforms, so no individual transform's own
+    # summation order changes and the result must be *bit*-identical --
+    # not merely close. Asserted with array_equal rather than allclose
+    # deliberately: a tolerance here would hide exactly the kind of
+    # thread-count-dependent numerical drift this check exists to rule
+    # out.
+    rng = np.random.default_rng(0)
+    fid = rng.standard_normal((6, 512)) + 1j * rng.standard_normal((6, 512))
+    reference = np.fft.fftshift(np.fft.fft(fid, axis=-1), axes=-1)
+
+    for workers in (1, 2, 4, 8):
+        monkeypatch.setenv("OPENNMR_FFT_WORKERS", str(workers))
+        _, spectrum = ft.fft_spectrum(fid, dt=1e-4)
+        assert np.array_equal(spectrum, reference), f"differs at workers={workers}"
+
+
+def test_fft_workers_env_override_pins_the_count(monkeypatch):
+    monkeypatch.setenv("OPENNMR_FFT_WORKERS", "1")
+    assert ft.fft_workers() == 1  # the supported "threads off" configuration
+    monkeypatch.setenv("OPENNMR_FFT_WORKERS", "3")
+    assert ft.fft_workers() == 3
+
+
+def test_fft_workers_ignores_a_bad_override_instead_of_raising(monkeypatch):
+    # A malformed or non-positive environment value must not stop a
+    # spectrum from loading -- it falls back to the automatic choice.
+    for bad in ("garbage", "0", "-2", ""):
+        monkeypatch.setenv("OPENNMR_FFT_WORKERS", bad)
+        assert ft.fft_workers() >= 1
+
+
+def test_fft_workers_is_capped_and_never_exceeds_available_cpus(monkeypatch):
+    # Never workers=-1: scipy/numpy's own BLAS/OpenMP pools are already
+    # live in this process, and the measured F2 plateau is 4, so
+    # uncapped threading costs more than it buys on a many-core box.
+    monkeypatch.delenv("OPENNMR_FFT_WORKERS", raising=False)
+    monkeypatch.setattr(ft, "_available_cpus", lambda: 128)
+    assert ft.fft_workers() == ft._FFT_WORKER_CAP
+
+    # ...and on a constrained machine it follows the allowance down,
+    # rather than pinning the cap regardless.
+    monkeypatch.setattr(ft, "_available_cpus", lambda: 1)
+    assert ft.fft_workers() == 1
+
+
+def test_available_cpus_prefers_the_process_allowance_over_machine_cores(monkeypatch):
+    # os.cpu_count() reports the machine, not this process's own
+    # allowance -- wrong under cgroup limits and CPU affinity masks.
+    # os.process_cpu_count() is the correct API but is 3.13+, so the
+    # fallback chain has to work on 3.10-3.12 too; both paths are
+    # pinned here rather than only whichever this interpreter happens
+    # to take.
+    monkeypatch.setattr(os, "cpu_count", lambda: 64)
+    monkeypatch.setattr(os, "process_cpu_count", lambda: 2, raising=False)
+    assert ft._available_cpus() == 2
+
+    # Without process_cpu_count (i.e. Python < 3.13), sched_getaffinity
+    # is the next-best source where it exists (Linux); it is absent on
+    # macOS/Windows, which is why it is probed rather than assumed.
+    monkeypatch.delattr(os, "process_cpu_count", raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: {0, 1, 2}, raising=False)
+    assert ft._available_cpus() == 3
+
+    # Neither available -> os.cpu_count() is the last resort.
+    monkeypatch.delattr(os, "sched_getaffinity", raising=False)
+    assert ft._available_cpus() == 64
