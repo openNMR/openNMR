@@ -17,11 +17,33 @@ def test_zero_fill_pads_and_truncates():
     assert len(ft.zero_fill(fid, 2)) == 2
 
 
+def test_zero_fill_batches_2d_along_last_axis():
+    # Same result as calling per-row, since io.bruker.read_2d switched
+    # from an np.apply_along_axis loop to calling this directly on the
+    # whole array -- this is the property that fix actually depends on.
+    fid = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=complex)
+    batched = ft.zero_fill(fid, 5)
+    per_row = np.stack([ft.zero_fill(row, 5) for row in fid])
+    np.testing.assert_array_equal(batched, per_row)
+    assert batched.shape == (2, 5)
+    truncated = ft.zero_fill(fid, 2)
+    np.testing.assert_array_equal(truncated, fid[:, :2])
+
+
 def test_apodize_exponential_decays():
     fid = np.ones(100, dtype=complex)
     windowed = ft.apodize(fid, dt=1e-3, window="exponential", lb=50.0)
     assert windowed[0] == 1.0
     assert np.all(np.diff(np.abs(windowed)) <= 0)  # monotonically decaying
+
+
+def test_apodize_batches_2d_along_last_axis():
+    fid = np.array([[1.0, 1.0, 1.0, 1.0], [2.0, 2.0, 2.0, 2.0]], dtype=complex)
+    batched = ft.apodize(fid, dt=1e-3, window="exponential", lb=50.0)
+    per_row = np.stack(
+        [ft.apodize(row, dt=1e-3, window="exponential", lb=50.0) for row in fid]
+    )
+    np.testing.assert_allclose(batched, per_row)
 
 
 def test_apodize_unknown_window_raises():

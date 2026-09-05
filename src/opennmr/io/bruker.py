@@ -630,20 +630,27 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         fid_f2 = data
     window_unsupported_note = None
     if window is not None:
-        fid_f2 = np.apply_along_axis(
-            lambda row: processing_ft.apodize(row, 1.0 / sw, window=window, **(window_kwargs or {})), 1, fid_f2,
-        )
+        # Whole-array calls, not np.apply_along_axis -- window/zero_fill/
+        # fft_spectrum all operate on the last axis (F2's own axis
+        # already), batched across every row in one call. Confirmed via
+        # profiling (real 2048x65536 EXSY load, 9.3s total) that these
+        # six apply_along_axis calls (F2's three plus F1's three below)
+        # accounted for 67% of read_2d's own wall time, almost entirely
+        # np.apply_along_axis's own per-call Python overhead across
+        # 66,000+ single-row/column calls rather than actual FFT cost --
+        # see TODO.md's "Big-data loading performance" entry.
+        fid_f2 = processing_ft.apodize(fid_f2, 1.0 / sw, window=window, **(window_kwargs or {}))
     else:
         try:
-            fid_f2 = np.apply_along_axis(lambda row: _apply_bruker_window(row, procs, sw), 1, fid_f2)
+            fid_f2 = _apply_bruker_window(fid_f2, procs, sw)
         except NotImplementedError as exc:
             # Same reasoning as read_1d -- stay on the raw-FID path
             # (full reprocessing still available) rather than
             # abandoning it; the same WDW code applies to every row,
-            # so this fails (or doesn't) on the first one either way.
+            # so this fails (or doesn't) for the whole batch at once.
             window_unsupported_note = str(exc)
-    fid_f2 = np.apply_along_axis(lambda row: processing_ft.zero_fill(row, si2), 1, fid_f2)
-    spectrum = np.apply_along_axis(lambda row: processing_ft.fft_spectrum(row, 1.0 / sw)[1], 1, fid_f2)
+    fid_f2 = processing_ft.zero_fill(fid_f2, si2)
+    _, spectrum = processing_ft.fft_spectrum(fid_f2, 1.0 / sw)
 
     # F2's ppm axis, computed now (F1 processing below only changes
     # axis 0's length, never F2's point count) since a phase1/pivot
@@ -686,22 +693,28 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         # recorded at all -- must fall back to the decoded row count,
         # not the raw pre-decode one.
         spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode)
+        # Transpose so F1 is the last axis for the same whole-array
+        # calls used for F2 above (window/zero_fill/fft_spectrum all
+        # operate on shape[-1]), then transpose back -- avoids
+        # np.apply_along_axis's per-column loop (65536 separate calls
+        # on this project's real EXSY benchmark, each processing a
+        # short column, so per-call overhead dominated even more here
+        # than in F2's own loop).
+        spectrum = spectrum.T
         if window_f1 is not None:
-            spectrum = np.apply_along_axis(
-                lambda col: processing_ft.apodize(col, 1.0 / sw_1, window=window_f1, **(window_kwargs_f1 or {})),
-                0, spectrum,
-            )
+            spectrum = processing_ft.apodize(spectrum, 1.0 / sw_1, window=window_f1, **(window_kwargs_f1 or {}))
         else:
             try:
-                spectrum = np.apply_along_axis(lambda col: _apply_bruker_window(col, proc2s, sw_1), 0, spectrum)
+                spectrum = _apply_bruker_window(spectrum, proc2s, sw_1)
             except NotImplementedError as exc:
                 # Same reasoning as F2's own WDW fallback above -- stay
                 # on the raw-FID path (full reprocessing still
                 # available) rather than abandoning it.
                 window_unsupported_note_f1 = str(exc)
-        si1 = int(zero_fill_f1) if zero_fill_f1 is not None else int(proc2s.get("SI", spectrum.shape[0]))
-        fid_f1 = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, spectrum)
-        spectrum = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, 1.0 / sw_1)[1], 0, fid_f1)
+        si1 = int(zero_fill_f1) if zero_fill_f1 is not None else int(proc2s.get("SI", spectrum.shape[-1]))
+        fid_f1 = processing_ft.zero_fill(spectrum, si1)
+        _, spectrum = processing_ft.fft_spectrum(fid_f1, 1.0 / sw_1)
+        spectrum = spectrum.T
         if fn_mode not in (4, 5, 6):
             # Real bug, found and fixed: for FnMODE 0-3 (QF and friends
             # -- decode_hypercomplex_f1 is a no-op for these, see its

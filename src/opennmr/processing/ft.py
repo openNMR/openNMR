@@ -271,10 +271,18 @@ def apodize(fid: np.ndarray, dt: float, window: str = "exponential", **params) -
     ``WDW`` -- so a user-chosen window here (not "Recorded") uses the
     identical math, just with independently dialed-in parameters
     instead of whatever TopSpin itself recorded.
+
+    ``fid`` may be a batch of FIDs stacked along a leading axis (the
+    window only ever depends on the row length, identical for every
+    row) -- ``fid.shape[-1]``, not ``len(fid)``, is what makes this
+    correct for 2D input instead of silently sizing ``weights`` to the
+    row *count*; same fix, same reasoning as :func:`fft_spectrum`'s
+    own ``len(fid)`` bug, found while vectorizing ``io.bruker.read_2d``
+    away from a 66,000-call ``np.apply_along_axis`` loop.
     """
     if window not in _WINDOWS:
         raise ValueError(f"Unknown window {window!r}; available: {sorted(_WINDOWS)}")
-    weights = _WINDOWS[window](len(fid), dt, **params)
+    weights = _WINDOWS[window](fid.shape[-1], dt, **params)
     return fid * weights
 
 
@@ -283,10 +291,15 @@ def apodize(fid: np.ndarray, dt: float, window: str = "exponential", **params) -
 # ============================================================
 
 def zero_fill(fid: np.ndarray, n: int) -> np.ndarray:
-    """Zero-fill (or truncate) ``fid`` to length ``n``."""
-    if n <= len(fid):
-        return fid[:n]
-    return np.pad(fid, (0, n - len(fid)), mode="constant")
+    """Zero-fill (or truncate) ``fid`` to length ``n`` along its last
+    axis -- a single 1D FID (the common case) or a batch stacked along
+    a leading axis, matching :func:`apodize`/:func:`fft_spectrum`'s own
+    ``shape[-1]`` convention rather than assuming 1D input."""
+    length = fid.shape[-1]
+    if n <= length:
+        return fid[..., :n]
+    pad_width = [(0, 0)] * (fid.ndim - 1) + [(0, n - length)]
+    return np.pad(fid, pad_width, mode="constant")
 
 
 def fft_spectrum(fid: np.ndarray, dt: float) -> tuple[np.ndarray, np.ndarray]:
