@@ -58,6 +58,10 @@ def _mock_2d(monkeypatch, acqus, fid, acqu2s=None):
         dic["acqu2s"] = acqu2s
     monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    # read_1d/read_2d read the binary themselves now (see
+    # bruker._read_bruker_binary) rather than via ng.bruker.read, so the
+    # synthetic fid has to be injected at that seam too.
+    monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
     # _guess_raw_2d_shape's own TD/DTYPA/file-size-based block-rounding
     # (see its own docstring) is real-file-scale logic that doesn't

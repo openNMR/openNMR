@@ -187,11 +187,69 @@ def _read_raw_2d_data(path: str, dic: dict) -> np.ndarray:
     family."""
     ser_path = os.path.join(path, "ser")
     n_rows, n_complex_per_row = _guess_raw_2d_shape(dic, ser_path)
-    shape = (n_rows, n_complex_per_row)
-    _, data = ng.bruker.read(path, shape=shape, cplex=True, read_pulseprogram=False)
-    if data.shape != shape:
-        data = data[: n_rows * n_complex_per_row].reshape(shape)
-    return data
+    return _read_bruker_binary(ser_path, dic, (n_rows, n_complex_per_row))
+
+
+def _read_bruker_binary(binary_path: str, dic: dict, shape: tuple[int, int] | None = None) -> np.ndarray:
+    """Read a raw Bruker ``ser``/``fid`` file into a complex array.
+
+    Replaces a ``nmrglue.bruker.read(..., shape=...)`` call. Same
+    result -- verified byte-identical against it on every real dataset
+    in this project's ``test_data`` -- but without routing through
+    ``nmrglue``'s own reshape, which *warns* and returns the flat,
+    unshaped array whenever the requested shape doesn't divide the file
+    exactly::
+
+        UserWarning: (39583744,) cannot be shaped into (1002, 39488)
+
+    That warning was cosmetic (this module immediately truncated and
+    reshaped the flat array itself, which is always safe here because
+    the shape's own element count is derived from this exact array's
+    length by construction -- see :func:`_guess_raw_2d_shape`), but it
+    surfaced to users on real EXSY data and read as a genuine error
+    when it wasn't one. Reading the file directly means the
+    "leftover tail" case is simply the normal path, with no warning to
+    explain away.
+
+    Deliberately narrow in scope: this reads the *binary* file only.
+    ``nmrglue`` is still used, on purpose, for the parts that are
+    genuinely hard to get right and that it has already validated
+    against real Bruker output -- digital-filter/group-delay removal
+    (:func:`_remove_digital_filter`) and the window functions
+    (:func:`_apply_bruker_window`). Parameter files were never
+    ``nmrglue``'s job here: :mod:`opennmr.io.jcampdx` has parsed those
+    from scratch since the beginning.
+
+    Endianness and data type follow the same rules ``nmrglue`` itself
+    applies (confirmed by reading its source, not assumed):
+    big-endian only when ``acqus``'s ``BYTORDA == 1``, and float64 only
+    when ``DTYPA == 2``; int32 otherwise.
+
+    ``shape`` : ``(n_rows, n_complex_per_row)`` for a 2D ``ser``, or
+    ``None`` for a 1D ``fid`` (returns a flat complex array). A file
+    holding more data than ``shape`` needs is truncated to fit; one
+    holding less raises, rather than silently returning a short array.
+    """
+    acqus = dic.get("acqus", {}) if isinstance(dic, dict) else {}
+    big_endian = acqus.get("BYTORDA") == 1
+    is_float = acqus.get("DTYPA") == 2
+    dtype = np.dtype(("f8" if is_float else "i4")).newbyteorder(">" if big_endian else "<")
+
+    flat = np.fromfile(binary_path, dtype=dtype)
+    # Interleaved real/imaginary pairs -- drop a trailing unpaired
+    # value rather than letting the complex view fail on an odd count.
+    complex_data = flat[: (flat.size // 2) * 2].astype(np.float64).view(np.complex128)
+
+    if shape is None:
+        return complex_data
+    n_rows, n_complex_per_row = shape
+    needed = n_rows * n_complex_per_row
+    if complex_data.size < needed:
+        raise ValueError(
+            f"{binary_path} holds {complex_data.size} complex points, fewer than the "
+            f"{needed} required for shape {shape}."
+        )
+    return complex_data[:needed].reshape(shape)
 
 
 def _apply_bruker_window(fid: np.ndarray, procs: dict, sw_hz: float) -> np.ndarray:
@@ -370,7 +428,15 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     # It also feeds nmrglue's own shape-guessing for 2D+ data (see
     # read_2d) -- not a concern here since 1D shape-guessing doesn't
     # need it, but skipped uniformly for the same reason either way.
-    dic, data = ng.bruker.read(path, read_pulseprogram=False)
+    # Parameters via nmrglue's own acqus reader, but the binary `fid`
+    # via this module's :func:`_read_bruker_binary` -- same reasoning
+    # (and same verified-identical result) as the 2D path in
+    # :func:`_read_raw_2d_data`. 1D has no shape to guess, so it never
+    # produced the reshape warning that motivated the 2D change; done
+    # here too so both paths read their binary the same single way
+    # rather than splitting into two conventions that could drift.
+    dic = ng.bruker.read_acqus_file(path)
+    data = _read_bruker_binary(os.path.join(path, "fid"), dic)
     fid = _remove_digital_filter(dic, data).astype(np.complex128)
     fid = np.conj(fid)  # see _CONJUGATE_QUADRATURE_NOTE below
     fid_raw = fid  # the truly raw FID -- see metadata.raw["fid_raw"]'s own comment below

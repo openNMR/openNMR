@@ -175,10 +175,22 @@ def test_cap_contour_points_leaves_normal_sized_requests_alone():
     for max_x, max_y in [(2048, 2048), (32768, 64), (262144, 16), (1, 1)]:
         assert twod._cap_contour_points(max_x, max_y) == (max_x, max_y)
 
-    # Exactly at the ceiling is still "within" it, not over.
-    at_cap = (16384, 1024)
+    # Exactly at the ceiling is still "within" it, not over. Derived
+    # from the constant rather than hardcoded, so raising the ceiling
+    # (as happened once already, on user request) doesn't leave this
+    # asserting a stale number.
+    at_cap = (twod._MAX_CONTOUR_POINTS // 1024, 1024)
     assert at_cap[0] * at_cap[1] == twod._MAX_CONTOUR_POINTS
     assert twod._cap_contour_points(*at_cap) == at_cap
+
+
+def test_max_contour_points_is_at_least_half_the_exsy_benchmark():
+    # Explicit user instruction: "set a max value of data density that
+    # is at least half of those EXSYs". The pseudo-2D EXSY benchmark is
+    # 1002 x 65536; pinned here so a later change can't quietly walk
+    # the ceiling back below what was asked for.
+    exsy_points = 1002 * 65536
+    assert twod._MAX_CONTOUR_POINTS >= exsy_points // 2
 
 
 def test_cap_contour_points_never_returns_more_than_the_ceiling():

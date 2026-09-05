@@ -4747,23 +4747,65 @@ class MainWindow(QMainWindow):
         self.phase0_spin.setValue(self.phase0_spin.value() + delta)
 
     def _on_reset_phase_clicked(self) -> None:
-        for handle in (self.phase0_handle, self.phase1_handle):
-            handle.setValue(0.0, emit=False)
-        for spin in (self.phase0_spin, self.phase1_spin):
+        """Zero both Phase 0 and Phase 1 together -- the same "actually
+        zero the applied phase, not just the drag delta" behaviour as
+        :meth:`_on_zero_phase_clicked`, which see for why."""
+        for order, (handle, spin) in enumerate(
+            ((self.phase0_handle, self.phase0_spin), (self.phase1_handle, self.phase1_spin))
+        ):
+            target_delta = -self._phase_committed_value(order)
+            handle.setValue(target_delta, emit=False)
             spin.blockSignals(True)
-            spin.setValue(0.0)
+            spin.setValue(target_delta)
             spin.blockSignals(False)
         self._apply_phase_preview()
+
+    def _phase_committed_value(self, order: int) -> float:
+        """The phase already baked into whatever the controls are
+        currently targeting -- the other half of the total that
+        :meth:`_refresh_current_phase_displays` shows (that total is
+        this plus the live spin-box delta). ``0.0`` when there is no
+        valid target, so callers don't have to re-check."""
+        index = self._phase_target_index
+        if self._phase_mode is None or index is None or not (0 <= index < len(self.session)):
+            return 0.0
+        is_f1 = self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0
+        if order == 0:
+            key = "phase0_f1" if is_f1 else "phase0"
+        else:
+            key = "phase1_f1" if is_f1 else "phase1"
+        return float(self.session.spectra[index].metadata.raw.get(key, 0.0))
 
     def _on_zero_phase_clicked(self, order: int) -> None:
         """Zero just Phase 0 (``order=0``) or just Phase 1 (``order=1``),
         leaving the other untouched -- real user request, distinct from
         :meth:`_on_reset_phase_clicked` (the combined Reset button,
-        which zeros both together)."""
+        which zeros both together).
+
+        Zeros the phase **actually applied**, not merely the live drag
+        delta. Real user report: "Zeroing phases should actually zero
+        the values, not just reset to the loaded values." The spin box
+        holds only the delta since the last
+        :meth:`_capture_phase_reference`; the total in force is that
+        delta *plus* whatever is committed in ``metadata.raw`` (which,
+        on a freshly loaded Bruker spectrum, is the file's own recorded
+        ``PHC0``/``PHC1``). Setting the delta to 0 therefore used to
+        return to the *loaded* phase rather than to zero -- visibly
+        doing nothing at all on a spectrum that hadn't been dragged
+        yet, which is exactly what was reported.
+
+        Setting the delta to ``-committed`` instead drives the total to
+        0 while leaving every existing mechanism untouched: the same
+        preview, commit and persistence paths run as for any other
+        phase edit, rather than this reaching into ``metadata.raw``
+        behind their back and having to re-derive what they already
+        handle.
+        """
         handle, spin = (self.phase0_handle, self.phase0_spin) if order == 0 else (self.phase1_handle, self.phase1_spin)
-        handle.setValue(0.0, emit=False)
+        target_delta = -self._phase_committed_value(order)
+        handle.setValue(target_delta, emit=False)
         spin.blockSignals(True)
-        spin.setValue(0.0)
+        spin.setValue(target_delta)
         spin.blockSignals(False)
         self._apply_phase_preview()
 

@@ -2370,7 +2370,14 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=Non
         acqus["PULPROG"] = pulprog
     fid = _synthetic_raw_fid(n=n)
     dic = {"acqus": acqus}
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
     return str(expt)
 
@@ -2400,7 +2407,14 @@ def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d
         fid = np.tile(row, (n_f1, 1)).astype(np.complex128)
     dic = {"acqus": acqus, "acqu2s": acqu2s}
     monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
     # _guess_raw_2d_shape's real-file-scale TD/DTYPA/file-size logic
     # (see its own docstring in io/bruker.py) doesn't apply to this
@@ -2790,7 +2804,14 @@ def test_main_window_processing_preview_pseudo2d_uses_only_active_slice(qapp, tm
     fid = np.stack([np.exp(-t2 * 300 * (row + 1)) * np.exp(2j * np.pi * 1000.0 * t2) for row in range(n_f1)])
     dic = {"acqus": acqus, "acqu2s": acqu2s}
     monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
     monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
@@ -3109,7 +3130,14 @@ def test_main_window_unsupported_window_shows_notice_but_stays_reprocessable(qap
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
     fid = _synthetic_raw_fid(n=64)
     dic = {"acqus": acqus}
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
 
     shown = []
@@ -3142,10 +3170,14 @@ def test_main_window_2d_shape_guess_failure_falls_back_and_hides_fid_box(qapp, t
     path = _make_2d_dataset(tmp_path, n_f1=4, n_f2=8)
     (tmp_path / "expt2d" / "ser").write_bytes(b"\x00")
 
-    def fake_read(_path, **_kw):
+    def fake_read(*_a, **_kw):
         raise IndexError("tuple index out of range")
 
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", fake_read)
+    # Patched at the binary-read seam, not ng.bruker.read: read_2d reads
+    # the ser itself now (bruker._read_bruker_binary), so that is where a
+    # raw-read failure has to be simulated for _read_auto's
+    # already-processed fallback to be exercised.
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", fake_read)
     monkeypatch.setattr("opennmr.gui.main_window.QMessageBox.information", lambda *a, **kw: None)
 
     window = MainWindow()
@@ -3859,7 +3891,14 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
     fid = np.array(rows)
     dic = {"acqus": acqus, "acqu2s": {"NUC1": "off", "BF1": 400.0, "O1": 0.0}}
     monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
     monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
@@ -7743,3 +7782,51 @@ def test_main_window_magnitude_button_hidden_for_non_bruker(qapp, tmp_path):
     spectrum.metadata.vendor = "xpulse"
     _load_spectrum_directly(window, spectrum)
     assert window.magnitude_button.isVisible() is False
+
+
+def test_main_window_zero_phase_zeros_the_applied_phase_not_just_the_delta(qapp, tmp_path, monkeypatch):
+    # Real user report: "Zeroing phases should actually zero the values,
+    # not just reset to the loaded values." The spin box holds only the
+    # delta since the last phase-reference capture; the total in force
+    # is that delta plus whatever is committed in metadata.raw -- which
+    # on a freshly loaded Bruker spectrum is the file's own recorded
+    # PHC0/PHC1. Zeroing the delta therefore returned to the *loaded*
+    # phase, visibly doing nothing on a spectrum not yet dragged.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["phase0"] = 120.0
+    spectrum.metadata.raw["phase1"] = 45.0
+
+    window._on_zero_phase_clicked(0)
+    assert window.phase0_spin.value() == pytest.approx(-120.0)
+    assert window.phase1_spin.value() == pytest.approx(0.0)  # untouched
+
+    window._on_zero_phase_clicked(1)
+    assert window.phase1_spin.value() == pytest.approx(-45.0)
+
+
+def test_main_window_reset_phase_zeros_both_applied_phases(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["phase0"] = -30.0
+    spectrum.metadata.raw["phase1"] = 200.0
+
+    window._on_reset_phase_clicked()
+
+    assert window.phase0_spin.value() == pytest.approx(30.0)
+    assert window.phase1_spin.value() == pytest.approx(-200.0)
+
+
+def test_main_window_zero_phase_with_no_committed_phase_is_still_zero(qapp, tmp_path, monkeypatch):
+    # Nothing committed -> the delta that zeros the total is itself 0,
+    # i.e. the old behaviour, so this must not regress the common case.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window.session.spectra[0].metadata.raw["phase0"] = 0.0
+    window.phase0_spin.setValue(37.0)
+
+    window._on_zero_phase_clicked(0)
+
+    assert window.phase0_spin.value() == pytest.approx(0.0)

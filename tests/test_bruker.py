@@ -365,3 +365,54 @@ def test_apply_magnitude_mode_math():
     np.testing.assert_allclose(bruker._apply_magnitude_mode(spectrum, "magnitude"), [5.0, 5.0, 0.0])
     np.testing.assert_allclose(bruker._apply_magnitude_mode(spectrum, "power"), [25.0, 25.0, 0.0])
     np.testing.assert_array_equal(bruker._apply_magnitude_mode(spectrum, None), spectrum)
+
+
+def test_read_bruker_binary_matches_dtype_and_endianness_rules(tmp_path):
+    # Same rules nmrglue itself applies (confirmed by reading its
+    # source): big-endian only when BYTORDA == 1, float64 only when
+    # DTYPA == 2, int32 otherwise.
+    values = np.array([1, -2, 3, -4, 5, -6], dtype="<i4")
+    path = tmp_path / "fid"
+    path.write_bytes(values.tobytes())
+    got = bruker._read_bruker_binary(str(path), {"acqus": {"BYTORDA": 0, "DTYPA": 0}})
+    np.testing.assert_array_equal(got, np.array([1 - 2j, 3 - 4j, 5 - 6j]))
+
+    big = np.array([1, -2, 3, -4], dtype=">i4")
+    path_big = tmp_path / "fid_big"
+    path_big.write_bytes(big.tobytes())
+    got_big = bruker._read_bruker_binary(str(path_big), {"acqus": {"BYTORDA": 1, "DTYPA": 0}})
+    np.testing.assert_array_equal(got_big, np.array([1 - 2j, 3 - 4j]))
+
+    floats = np.array([1.5, -2.5, 3.5, -4.5], dtype="<f8")
+    path_f = tmp_path / "fid_float"
+    path_f.write_bytes(floats.tobytes())
+    got_f = bruker._read_bruker_binary(str(path_f), {"acqus": {"BYTORDA": 0, "DTYPA": 2}})
+    np.testing.assert_array_equal(got_f, np.array([1.5 - 2.5j, 3.5 - 4.5j]))
+
+
+def test_read_bruker_binary_truncates_a_leftover_tail_without_warning(tmp_path, recwarn):
+    # The whole point of replacing nmrglue's own reshape here: a file
+    # whose length doesn't divide exactly into the requested shape is
+    # the *normal* case for real EXSY data, and used to emit
+    # "UserWarning: (39583744,) cannot be shaped into (1002, 39488)".
+    # Truncating is safe because the shape's element count is derived
+    # from this same file's length by construction.
+    values = np.arange(2 * (3 * 4) + 6, dtype="<i4")  # 3x4 complex, plus a leftover tail
+    path = tmp_path / "ser"
+    path.write_bytes(values.tobytes())
+
+    got = bruker._read_bruker_binary(str(path), {"acqus": {"BYTORDA": 0, "DTYPA": 0}}, (3, 4))
+
+    assert got.shape == (3, 4)
+    assert not [w for w in recwarn if "cannot be shaped" in str(w.message)]
+
+
+def test_read_bruker_binary_raises_when_the_file_is_too_short(tmp_path):
+    # Genuinely truncated/corrupt data must not come back silently
+    # short -- that would produce a plausible-looking but wrong
+    # spectrum rather than an error.
+    values = np.arange(4, dtype="<i4")  # only 2 complex points
+    path = tmp_path / "ser"
+    path.write_bytes(values.tobytes())
+    with pytest.raises(ValueError, match="fewer than"):
+        bruker._read_bruker_binary(str(path), {"acqus": {"BYTORDA": 0, "DTYPA": 0}}, (10, 10))

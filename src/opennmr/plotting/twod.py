@@ -42,19 +42,26 @@ from .style import setup_plotting, get_stack_colormap, get_contour_cmap, downsam
 # which was the single largest cost in a load once the duplicated work
 # was removed.
 #
-# Why 16M and not lower: full resolution in the Spectrum tab is an
-# explicit standing user instruction, so this is deliberately a
-# safety ceiling for outliers rather than a general downsampling
-# policy -- chosen (with the user) to leave every other real dataset
-# in this project's own test_data untouched. For scale: the COSY
-# (0.5M), bruker_T2 (2.1M) and bruker_PFG (4.2M) datasets are all far
-# below it and render exactly as before; only the 65.7M-point EXSY
-# class of dataset is capped. Downsampling uses `downsample_2d`, which
-# keeps each output bin's largest-magnitude value (see its own
-# docstring for the EXSY-diagonal bug that motivated that), so thin
-# ridges survive rather than being decimated away; measured pixel
-# difference at this cap is ~0.1% of a rendered canvas.
-_MAX_CONTOUR_POINTS = 16_777_216
+# Why this value: full resolution in the Spectrum tab is an explicit
+# standing user instruction, so this is deliberately a safety ceiling
+# for outliers rather than a general downsampling policy -- it leaves
+# every other real dataset in this project's own test_data untouched.
+# For scale: the COSY (0.5M), bruker_T2 (2.1M) and bruker_PFG (4.2M)
+# datasets are all far below it and render exactly as before.
+#
+# Raised from 16,777,216 (2**24) on direct user instruction: "set a max
+# value of data density that is at least half of those EXSYs". The
+# pseudo-2D EXSY benchmark is 1002 x 65536 = 65,667,072 points, so half
+# is 32,833,536; 2**25 = 33,554,432 clears that. At this ceiling the
+# EXSY renders at 1002 x 33487 (roughly half its F2 resolution rather
+# than the quarter the old cap gave), costing ~2.0s of contour time
+# against ~4.0s at full resolution.
+#
+# Downsampling uses `downsample_2d`, which keeps each output bin's
+# largest-magnitude value (see its own docstring for the EXSY-diagonal
+# bug that motivated that), so thin ridges survive rather than being
+# decimated away.
+_MAX_CONTOUR_POINTS = 33_554_432
 
 # Don't sacrifice the indirect dimension to save the direct one: F1 is
 # usually far smaller (1002 vs 65536 on the benchmark) and far more
