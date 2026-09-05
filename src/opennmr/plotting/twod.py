@@ -63,6 +63,44 @@ _MAX_CONTOUR_POINTS = 16_777_216
 _MIN_CAPPED_CONTOUR_X = 4096
 
 
+def _signed_max_magnitude(data: np.ndarray, axis: int) -> np.ndarray:
+    """Per column (or row), the single value with the largest
+    *magnitude*, keeping its own sign.
+
+    The phase-sensitive replacement for ``max(abs(data))`` in the
+    ``"max"`` projection mode. Real user report -- "the 2D data still
+    isn't matching the phase window phasing info... specifically the
+    projections" -- and the mechanism is exact rather than subtle:
+    ``max(abs(...))`` is *phase-blind by construction*, so a 180-degree
+    phase change, which inverts every peak in the spectrum and in the
+    phase window's own slice, moved the projections by **exactly
+    zero**. Measured on real pseudo-2D data (``bruker_T2/11``): the
+    phase-window slice changed by 2.0 (a complete inversion) while both
+    projections changed by 0.00000.
+
+    Why not the obvious alternatives:
+    - ``sum`` is phase-sensitive, but ``max`` was chosen for pseudo-2D
+      precisely because summing washes out the slice-to-slice
+      amplitude changes that a relaxation/diffusion series exists to
+      show (see ``plot_2d_contour``'s own ``projection_mode`` doc).
+    - Plain ``max(data)`` is phase-sensitive but silently loses
+      negative peaks -- for a column that is entirely negative it
+      returns the *least* negative value, i.e. the noise floor rather
+      than the peak.
+
+    Signed max-magnitude keeps all three properties at once, and is the
+    same rule ``plotting.style.downsample_2d`` already uses for exactly
+    the same reason (keeping a bin's largest-magnitude signed value
+    rather than discarding sign or feature). For all-positive,
+    well-phased data it is *identical* to ``max(abs(...))``, so nothing
+    about a correctly-phased spectrum's appearance changes -- the
+    difference shows up only where there is genuine negative or
+    dispersive signal, which is exactly when it is needed.
+    """
+    index = np.expand_dims(np.argmax(np.abs(data), axis=axis), axis)
+    return np.squeeze(np.take_along_axis(data, index, axis=axis), axis=axis)
+
+
 def _cap_contour_points(max_x: int, max_y: int) -> tuple[int, int]:
     """Clamp a requested contour resolution to
     :data:`_MAX_CONTOUR_POINTS` total, reducing F2 (``max_x``) first.
@@ -386,7 +424,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             ax_f2 = divider.append_axes("top", projection_size, pad=projection_pad, sharex=ax)
             ax_f2.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False, labeltop=False)
             ax_f2.tick_params(axis='y', which='both', left=False, right=False, labelleft=False, labelright=False)
-            f2_projection = np.sum(spec_float, axis=0) if mode == "sum" else np.max(np.abs(spec_float), axis=0)
+            f2_projection = np.sum(spec_float, axis=0) if mode == "sum" else _signed_max_magnitude(spec_float, axis=0)
             ax_f2.plot(x_ppm, f2_projection + (0.02 * np.min(f2_projection)), 'k')
             ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
             proj_axes["f2"] = ax_f2
@@ -395,7 +433,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             ax_f1 = divider.append_axes("left", projection_size, pad=projection_pad, sharey=ax)
             ax_f1.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False, labeltop=False)
             ax_f1.tick_params(axis='y', which='both', left=False, right=False, labelleft=False, labelright=False)
-            f1_projection = np.sum(spec_float, axis=1) if mode == "sum" else np.max(np.abs(spec_float), axis=1)
+            f1_projection = np.sum(spec_float, axis=1) if mode == "sum" else _signed_max_magnitude(spec_float, axis=1)
             # Real bug, user-reported ("the phase of the contours and
             # the projections are definitely inverted... it's more about
             # the matching of the contour phase to the projection

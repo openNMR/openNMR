@@ -2,6 +2,28 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Projections were phase-blind: `max(abs())` replaced with signed max-magnitude (2026-09-05)
+
+User: "The 2D data still isn't matching the phase window phasing info", clarified mid-investigation as "specifically the projections".
+
+**Confirmed with an exact, not subtle, mechanism.** `plot_2d_contour`'s `"max"` projection mode -- which `"auto"` selects for *every* pseudo-2D, i.e. the default for essentially every 2D in this app -- computed `np.max(np.abs(data), axis=...)`. Absolute value is **phase-blind by construction**, so the projections could not respond to phasing at all. Measured on real data (`bruker_T2/11`): applying `phase0=180` degrees inverts every peak, changing the phase window's own slice by 2.0 (a complete inversion) while both projections changed by **exactly 0.00000**.
+
+| phase0 | F2 projection change | F1 projection change | phase-window slice change |
+|---|---|---|---|
+| 45 deg | 0.55747 | 0.15220 | 0.55754 |
+| 90 deg | 0.96357 | 0.33995 | 1.25751 |
+| **180 deg** | **0.00000** | **0.00000** | **2.00000** |
+
+**Fixed** with a new `_signed_max_magnitude(data, axis)`: per column, the single value with the largest *magnitude*, keeping its own sign. After the fix the same measurements track the slice (45 deg: 0.564, 90 deg: 1.272, 180 deg: 2.025 against the slice's 2.0).
+
+Why not the obvious alternatives, both rejected for concrete reasons rather than taste: `sum` is phase-sensitive but washes out the slice-to-slice amplitude changes that `max` was chosen for in the first place (a relaxation/diffusion series exists to show exactly those); plain `max(data)` is phase-sensitive but silently loses negative peaks, returning a wholly-negative column's *least* negative value -- the noise floor -- instead of its peak. Signed max-magnitude keeps all three properties, and is the same rule `plotting.style.downsample_2d` already uses for the same reason.
+
+**No visual change for correctly-phased data**: for an all-positive array the two rules are *identical* (asserted directly, and confirmed against real data), so the difference appears only where there is genuine negative or dispersive signal -- exactly when it is needed.
+
+4 new regression tests, including an end-to-end one through `plot_2d_contour` verified to fail on the old `max(abs(...))` version (where the two projections were bit-identical before and after a sign flip). 928 tests passing (924 -> 928).
+
+**Also confirmed while investigating, still NOT fixed** (see the entry further down): `read_2d` reports and applies `phase0` from the file's `PHC0` but leaves `phase1` at **0.0** while the file records a real value -- `PHC1=77.15` for EXSY 2019, `PHC1=908.8` for `bruker_T2/11`. `read_1d` reads and applies both. So for those datasets the phase window honestly reports what was applied, but what was applied is missing TopSpin's own first-order term entirely. This is a *separate* mismatch from the projection bug above and is the most likely remaining source of "the 2D doesn't match" reports -- **ask before changing**, since it alters the default phase of every 2D load; `PH_mod` (now read, see the magnitude round) is available to gate it correctly.
+
 ## Magnitude mode implemented: recorded `PH_mod` honoured, plus a manual toggle for anything (2026-09-05)
 
 User: "if magnitude mode is used somewhere, you can implement that. Or better yet, do that and have the option to switch it on for anything." Both done, commit `cf58b51`.

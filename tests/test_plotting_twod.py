@@ -335,3 +335,79 @@ def test_projection_max_mode_is_unaffected_by_the_sign_fix():
 
     assert np.max(f1_plotted) > 0
     assert xlim[0] > xlim[1]
+
+
+def test_signed_max_magnitude_keeps_the_sign_of_the_largest_peak():
+    # Column 0's biggest excursion is negative, column 1's is positive.
+    # max(abs(...)) would report both as positive; plain max(...) would
+    # report column 0 as its least-negative value (the noise floor).
+    data = np.array([
+        [-10.0, 2.0],
+        [3.0, 7.0],
+        [-1.0, -4.0],
+    ])
+    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=0), [-10.0, 7.0])
+    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=1), [-10.0, 7.0, -4.0])
+
+
+def test_signed_max_magnitude_matches_max_abs_for_all_positive_data():
+    # The property that guarantees no visual change for a correctly
+    # phased spectrum: for all-positive data the two rules agree
+    # exactly, so only genuinely negative/dispersive signal is affected.
+    rng = np.random.default_rng(0)
+    data = np.abs(rng.standard_normal((12, 20)))
+    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=0), np.max(np.abs(data), axis=0))
+    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=1), np.max(np.abs(data), axis=1))
+
+
+def test_signed_max_magnitude_inverts_exactly_under_a_sign_flip():
+    # The core of the user report: a 180-degree phase change negates
+    # every point, and the projection must follow. Under max(abs(...))
+    # this was *exactly* invariant -- the projections did not move at
+    # all while the phase window's own slice inverted completely.
+    rng = np.random.default_rng(1)
+    data = rng.standard_normal((10, 16))
+    for axis in (0, 1):
+        np.testing.assert_allclose(
+            twod._signed_max_magnitude(-data, axis=axis),
+            -twod._signed_max_magnitude(data, axis=axis),
+        )
+        # ...and the old rule provably could not do this, which is what
+        # makes this test discriminating rather than merely descriptive.
+        assert np.allclose(np.max(np.abs(-data), axis=axis), np.max(np.abs(data), axis=axis))
+
+
+def test_max_mode_projections_respond_to_a_phase_inversion():
+    # End-to-end through plot_2d_contour, on the pseudo-2D default
+    # ('auto' -> 'max'), since that is the path the report came from.
+    spectrum = _make_signed_2d()
+    spectrum.metadata.pseudo_2d = True
+    spectrum.axes[0] = NMRAxis(kind="index", index=np.arange(1, spectrum.data.shape[0] + 1))
+
+    def _projections(data):
+        spec = NMRSpectrum(data=data, axes=spectrum.axes, metadata=spectrum.metadata)
+        fig, ax = plt.subplots()
+        try:
+            _, _, proj = twod.plot_2d_contour(
+                spec, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+                ncontourpts_x=10**9, ncontourpts_y=10**9,
+            )
+            return proj["f2"].lines[0].get_ydata().copy(), proj["f1"].lines[0].get_xdata().copy()
+        finally:
+            plt.close(fig)
+
+    f2, f1 = _projections(spectrum.data)
+    f2_flipped, f1_flipped = _projections(-spectrum.data)
+
+    # Must actually move -- this is the assertion that fails outright
+    # on the pre-fix max(abs(...)) version, which was bit-identical.
+    assert not np.allclose(f2, f2_flipped)
+    assert not np.allclose(f1, f1_flipped)
+    # ...and at a column whose sign is known from the fixture, it must
+    # change sign rather than merely differ. Checked at that specific
+    # column, not at the projection's global argmax: this fixture's two
+    # peaks are equal and opposite, so the global peak simply swaps
+    # between them under a flip and its sign is uninformative.
+    positive_peak_col = spectrum.data.shape[1] // 4
+    assert f2[positive_peak_col] > 0
+    assert f2_flipped[positive_peak_col] < 0
