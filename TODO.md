@@ -2,6 +2,24 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Magnitude mode implemented: recorded `PH_mod` honoured, plus a manual toggle for anything (2026-09-05)
+
+User: "if magnitude mode is used somewhere, you can implement that. Or better yet, do that and have the option to switch it on for anything." Both done, commit `cf58b51`.
+
+**It is genuinely used**: surveyed every Bruker dataset in `test_data` -- **9 record `PH_mod=2` (mc/magnitude)**, mostly gradient-COSY experiments (`exam_CMCse_3/12`, `exam_CMCse_1/2`, `exam_CMCse_2/3`+`/5`, `Menthyl-Anthranilate/20`+`/71`, `exam_CMCse_3/14`+`/16`, and two 2H datasets). None record `PH_mod=3` (ps/power). Ignoring it is exactly what made those load as an unphased, dispersive-looking phase-sensitive spectrum: the COSY correlated **+0.0107** with TopSpin's own processed output, against **+0.8612** for the magnitude of the same complex data.
+
+All four Bruker readers (`read_1d`, `read_2d`, `read_1d_processed`, `read_2d_processed`) take `magnitude=None|True|False`: `None` follows the recorded `PH_mod`, `True` forces it on for any spectrum (1D or 2D), `False` forces it off even for a file that asks for it. Applied **last**, after windowing/FFT/phasing in every dimension -- which is where it was verified to reproduce TopSpin; taking it between F2's and F1's transforms is a different, wrong quantity. For a 2D, either dimension's parameters may carry the flag (the COSY records mc on F1 while F2 says "no"), but a pseudo-2D's `proc2s` is excluded since its indirect dimension was never transformed. `data_imag` becomes `None`, which is already how the GUI disables its phase controls -- a magnitude spectrum has no phase left to correct.
+
+**GUI**: a "Magnitude Mode" toggle next to "Process Indirect Dimension", shown for Bruker 1D and 2D. It **reloads** rather than recomputing in memory -- magnitude is a discrete on/off with no responsiveness argument for a second implementation, and this project has repeatedly been bitten by "two pipelines quietly diverge". The user's explicit choice is stored as `magnitude_override`, separately from the reader's descriptive `magnitude_mode`, because "off" and "never set" are otherwise indistinguishable: without it, switching magnitude off on a `PH_mod=mc` file would silently turn back on at the next load. `_load` reads it before the read, for the same reason `pseudo_2d` is decided there. `magnitude_mode_source` is blocklisted from the sidecar (re-derived every load; "requested" describes only the session that set it).
+
+**Two real bugs found while building this, both caught by running the tests rather than by inspection:**
+1. The processed-data readers didn't accept `magnitude`, so `_read_auto` forwarded it into them and raised `TypeError` on every processed-fallback dataset -- which surfaced as a *hung test run*, because the GUI handler's error path opens a modal dialog. Fixed by supporting it there too (and adding `magnitude` to the fallback's own kwarg filter).
+2. A file that records magnitude mode has **no `2ri`/`1i` on disk** -- TopSpin's stored data is already the magnitude (confirmed: every value in the COSY's `2rr` is non-negative). The first version's `spectrum_imag is not None` guard therefore silently reported no mode at all for exactly those files, so the GUI button would have shown "off" for a magnitude dataset. Now the mode is recorded for the UI and the data passed through untouched, rather than having `abs()` applied a second time; an explicit user request still applies `abs()`, since a real-only array is all there is.
+
+**Benchmarks unaffected**: EXSY 2019, bruker_T2 and bruker_PFG all record `PH_mod=1`/`0` and still load phase-sensitive with `data_imag` retained.
+
+9 new regression tests. 924 tests passing (916 -> 924). **Still open** from the entry below: `read_2d` ignoring F2's recorded `PHC1` and having no F1 recorded-phase step -- unchanged by this round, and now with `PH_mod` available to gate it correctly.
+
 ## F1 projection was plotted with inverted polarity (2026-09-05)
 
 User: "The phase of the contours and the projections are definitely inverted and doesn't match the processing window", clarified mid-investigation as "it's more about the matching of the contour phase to the projection phase".
