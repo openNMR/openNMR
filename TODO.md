@@ -27,6 +27,46 @@ All three per-row steps are either already batch-safe or trivially made so -- ch
 - Caching the reconstructed array (keyed to file mtime + processing params, e.g. alongside the existing sidecar) would only help *re*-opening the same large file, not first load, and adds real cache-invalidation complexity -- lowest priority tier.
 - The already-known, already-documented **Compare-tab 1024-subplot rendering cost** (~25s, matplotlib doesn't scale to 1000+ subplots -- see the "Loading the 2D ser..." entry further down this file) is squarely part of "big data feels slow to open" from the user's perspective even though it's display-side, not `read_2d` itself -- a candidate fix (not scoped) is rendering very large slice counts as a single 2D image/heatmap instead of N separate line-plot subplots, or lazily rendering only the visible/nearby slices.
 
+## Traced: every duplicated/redundant call in a big-data load -- 54% of the wall time is doing work twice (2026-09-05)
+
+User: "Can you trace all the duplicated and redundant calls that slow us down?" Done by **instrumenting the real GUI load** (wrapping each expensive function in place, recording every call's duration plus its opennmr-side caller chain, then running `MainWindow._load` on the EXSY benchmark dataset) rather than reading call sites and inferring -- so every claim below has a caller stack behind it. Traced, not fixed: nothing here is implemented yet.
+
+**Total: `_load` = 17.4s, of which ~9.4s (54%) is duplicated work.** Only two root causes, each with one clear mechanism:
+
+### 1. The spectrum is fully redrawn twice -- ~4.24s wasted
+
+`_draw_selected_spectrum` runs **twice** per load, 4.265s + 4.238s, on the same spectrum and same row, through the identical `show_spectrum` -> `plot_2d_contour` path. The two caller chains differ by exactly one frame, which is what identifies the mechanism:
+
+```
+call 1:  _select_single_row:1225 -> _on_list_selection_changed:1948 -> _on_selection_changed:7445 -> _draw_selected_spectrum
+call 2:  _select_single_row:1225 -> _on_selection_changed:7445 -> _draw_selected_spectrum
+```
+
+`MainWindow` connects **two** signals from the same widget to two handlers that both end in a redraw (`main_window.py:752-753`): `currentRowChanged -> _on_selection_changed` and `itemSelectionChanged -> _on_list_selection_changed`. `_select_single_row`'s own `setCurrentRow(row)` (line 1225) fires **both**. `_on_list_selection_changed`'s single-selection branch then calls `_on_selection_changed(...)` *explicitly* -- deliberately, with a comment giving a real reason ("Multi- -> single-selection doesn't always change `currentRow()` ... so `currentRowChanged` wouldn't fire on its own"). That reasoning is correct for the multi->single case it was written for, but the call is unconditional, so in the common case -- a fresh load, where `currentRowChanged` *does* fire -- the spectrum gets drawn twice. **This is a guard for one case silently doubling the work in another**, not a stray call; a fix needs to keep the multi->single path working (that's what its own comment is protecting) rather than just deleting the explicit call. `_refresh_selection_display` is duplicated by the same mechanism (0.376s across 2 calls, minor by comparison).
+
+### 2. Every genuine 2D file is read from disk twice -- ~5.19s wasted
+
+`read_2d` runs **twice**, 5.432s + 2.824s:
+
+```
+call 1 (5.432s):  _load:1054 -> session.add:35        -> io.load -> _read_auto -> read_2d          # genuine 2D
+call 2 (2.824s):  _load:1095 -> session.reload:50     -> _load_with:84 -> ... -> read_2d           # pseudo-2D
+```
+
+`_load` calls `session.add(path)` (a full genuine-2D read, F1 FFT included), then -- for any 2D that isn't already pseudo-2D -- `session.reload(index, pseudo_2d=wants_pseudo_2d)`, and `Session.reload` calls `_load_with`, a **complete second read from disk**, not an in-memory reinterpretation. The first read's entire result is discarded; the spectrum that survives is `pseudo_2d: True`, shape `(1002, 65536)`.
+
+Measured directly to size the waste precisely, rather than assuming the two reads cost the same: **the discarded genuine-2D read is 5.188s; the pseudo-2D read that's actually kept is 2.826s.** So loading once with the right flag would cost 2.83s instead of 8.01s. The pseudo-2D default itself is correct and deliberate (see the "Pseudo-2D-by-default" round) -- the waste is paying for a genuine-2D reconstruction in order to *discover* that. `_load` already reads `saved_metadata` early (before the pseudo-2D branch, for an unrelated ordering reason it documents), so the deciding information is available before `session.add` is ever called. Knock-on duplicates that vanish with this one: `_remove_digital_filter` (2 calls, 3.62s), `_read_raw_2d_data` (2), `nmrglue.bruker.read` (2, 0.311s).
+
+### Explicitly ruled out (checked, not assumed)
+
+- **Redundant parameter-file parsing: not a problem.** `parse_jcampdx_params` runs 4x and `_read_procs` 4x, but that is 2x per read (`procs` + `proc2s`) purely as a consequence of duplicate #2, and it costs **0.001s total** -- there is no caching worth adding here.
+- **`slicing.get_trace` runs 1002 times** (once per slice, from `_refresh_compare_view` -> `_resolve_compare_entry` populating the Compare list) but totals **0.123s** -- a real N-per-load pattern, but not a cost worth touching. The expensive part of Compare is already deferred (`_compare_view_stale`, from an earlier round) and correctly did not render here.
+- **`downsample_2d` never ran** -- consistent with the Spectrum tab's full-resolution default from the earlier downsampling round.
+
+### Sizing
+
+Fixing both would take the benchmark load from ~17.4s to roughly ~8s, without threading, without touching any numerics, and without changing a single output value -- both fixes are "stop doing the identical work a second time." That is a larger win than every item in the threading plan below combined, which is why they belong first. Caveat carried from the threading entry: these numbers come from a headless `offscreen` Qt platform, and some matplotlib text-metric time in that profile may not be representative of a real display -- the *duplication counts* are platform-independent, but the exact per-redraw seconds may differ.
+
 ## Threading plan for big-data loading -- measured scope, and an explicit system-agnosticism contract (2026-09-05)
 
 User: "start planning out the threading and make sure it'll be system-agnostic." Planning only -- nothing below is implemented. Profiled the **real, user-facing** GUI load first (not just `read_2d` in isolation) so the plan is scoped against what a user actually waits for, and the result substantially reframes what threading can and can't buy.
