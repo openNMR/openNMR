@@ -2,6 +2,49 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Rebuild stage 2 (in progress): F1 isolated against ground truth; EA and States-TPPI fail differently (2026-09-06)
+
+Stage 2 started. **No code changed** -- this round built the diagnostic that isolates F1 and used it to narrow the problem substantially. Two findings are solid enough to build on; the fix itself is not yet identified.
+
+### The diagnostic: recover TopSpin's own F1 interferogram
+
+A fully 2D-processed dataset stores all four hypercomplex blocks (`2rr`, `2ir`, `2ri`, `2ii`), so TopSpin's own **complex** F1 spectrum can be assembled, its recorded F1 phase and window undone, and the result inverse-FFT'd along F1 to recover **the interferogram TopSpin actually fed into its F1 transform**. That is precisely the quantity `decode_hypercomplex_f1` produces, so the decode can be compared against ground truth *in isolation* instead of end-to-end.
+
+### Bruker's block naming, resolved empirically (was guesswork before)
+
+Both orderings were tried and scored by whether `2rr + i*<block>` behaves as a genuine complex pair (smooth phase across a strong row):
+
+| pairing | phase-step std |
+|---|---|
+| `2rr + i*2ri` | **0.0006 rad** |
+| `2rr + i*2ii` | 0.0072 rad |
+| `2rr + i*2ir` | 0.0981 rad |
+
+So **the first letter is F1 and the second is F2**: `2ri` is the F2-imaginary partner, and therefore **`2ir` is the F1-imaginary** -- the block needed for F1 work. Worth recording, because the two orderings are easy to assume and produce plausible-looking but wrong references either way. (Consistent with the xf2-only datasets, where the F2-imaginary lives in `2ii` because F1 has no real/imaginary distinction there at all.)
+
+### Echo-Antiecho: F2 is right, and the recombination is *exactly* linear
+
+- **F2 is correct at row level**: our raw row `2k` matches TopSpin's interferogram row `k` at **+0.999** (row 0), decaying gently to +0.925 by row 5 as signal decays -- i.e. agreement is limited by SNR, not by processing.
+- **The recombination is an exact linear combination.** Solving `interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)` per increment (strong-signal points only) fits with **residual 0.0022**. That is a solved-form answer, not a fit that merely looks decent.
+- **But the solution is surprising**: for every `k >= 1` the coefficients collapse to `interf[k] ~ -i * b`, i.e. **the odd (antiecho) row alone**, with `a`, `conj(a)` and `conj(b)` all at ~0.000. `k = 0` is the exception (both rows contribute). This does not match any textbook Rance-Kay recombination and is the concrete lead to chase next -- either TopSpin performs the echo/antiecho combination inside its own transform (so what is recovered here is post-recombination), or the `2ir` block carries something other than assumed. **Do not implement `-i*b` on the strength of this alone**; understand it first.
+- Separately measured: the `fn_mode == 6` conj-and-time-reverse of even raw rows is **near-neutral** for F2 (profile 0.832 with it, 0.840 without). It was arrived at empirically in an earlier round to kill mirror ghosts, and this suggests it may be compensating for something else rather than being correct. Worth re-deriving.
+
+### States-TPPI: fails much earlier, and differently
+
+- **F2 itself is wrong here** -- F2 profile correlation against TopSpin is only **+0.52** (against +0.84 for EA and +0.9999 for the QF/xf2 datasets). Peak positions only partly coincide (bins 1312 and 1686 shared; 713/1472/1478 present in TopSpin but not ours, 1533/1893/1958 in ours but not TopSpin's).
+- **No linear combination of our row pairs explains TopSpin's interferogram, under any pairing tried**: interleaved `(2k, 2k+1)`, blocked `(k, k+N/2)`, and reversed interleave all give residuals of **~0.999** -- i.e. no fit at all, versus 0.0022 for EA. Since a linear model that succeeds for EA fails completely here, **the problem is upstream of the decode**, consistent with the poor F2 profile.
+- Note this dataset has F2 `TD=8192` but `SI=2048`, i.e. TopSpin **truncated** F2 rather than zero-filling it -- unlike every dataset where F2 currently verifies. That asymmetry is the first thing to check.
+
+### Confirmed unchanged
+
+The global `np.conj(data)` is genuinely required for hypercomplex data too: dropping it collapses the F2 profile from +0.84 to **-0.06** (EA) and +0.52 to **+0.02** (States-TPPI).
+
+### Where to resume
+
+1. Explain the Echo-Antiecho `-i * b` result before implementing anything from it.
+2. Fix States-TPPI's **F2** first (start with the `SI < TD` truncation case); its decode cannot be judged until then.
+3. Re-derive the `fn_mode == 6` raw-row transform, now that it is known to be near-neutral for F2.
+
 ## Rebuild stage 1 SHIPPED: recorded and user phase separated, F2 now +0.9999 by default (2026-09-06)
 
 User: "start on that. Make sure everything is implemented cleanly and without redundancy." The deferred half of stage 1 is done -- the measured TopSpin convention is now the shipped default, with the GUI consistent with it.
