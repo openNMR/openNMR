@@ -810,9 +810,16 @@ class MainWindow(QMainWindow):
         self._set_navigation_mode("zoom" if self._navigation_mode() == "pan" else "pan")
 
     def _reset_navigation_view(self) -> None:
-        """Reset the visible canvas's pan/zoom back to the full view."""
+        """Reset the visible canvas's pan/zoom back to the full view --
+        via :meth:`MplCanvas.reset_view`, which restores the *layout*
+        as well as the limits (``toolbar.home()`` alone leaves a
+        clipped axis label behind; see that method)."""
         current = self.canvas_tabs.currentWidget()
-        if current is not None and hasattr(current, "toolbar"):
+        if current is None:
+            return
+        if hasattr(current, "reset_view"):
+            current.reset_view()
+        elif hasattr(current, "toolbar"):
             current.toolbar.home()
 
     def _on_save_figure_clicked(self) -> None:

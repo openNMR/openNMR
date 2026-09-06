@@ -1848,3 +1848,72 @@ def test_canvas_export_applies_the_default_size_without_an_override(qapp):
     canvas.set_export_settings(fig_width=12.0)
     canvas.export_full_resolution(lambda: seen.append(tuple(canvas.figure.get_size_inches())))
     assert seen == [(12.0, 8.0)]     # explicit width, defaulted height
+
+
+def _xlabel_is_inside_the_figure(canvas, ax):
+    canvas.canvas.draw()
+    label_box = ax.xaxis.label.get_window_extent()
+    return label_box.y0 >= 0 and label_box.x0 >= 0
+
+
+def test_canvas_contour_rebuild_keeps_the_x_label_on_the_figure(qapp):
+    # Real user report: "the x-axis label got cut off". _redraw_contour
+    # never re-ran the layout pass show_spectrum ends with, so a rebuild
+    # kept whatever subplot margins were last in force -- and once the
+    # slice panel (which brings its own x-axis label) changed what the
+    # figure needs, the contour's own label fell off the bottom.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    assert _xlabel_is_inside_the_figure(canvas, canvas.ax)
+
+    canvas._add_contour_slice("f1", 3, "A")
+    assert _xlabel_is_inside_the_figure(canvas, canvas.ax)
+    assert _xlabel_is_inside_the_figure(canvas, canvas._proj_axes["slices"])
+
+    # Asserted as "the rebuild runs the layout pass", not as an exact
+    # axes position: tight_layout is not idempotent on an AxesDivider
+    # figure, so comparing a rebuild's geometry against a fresh
+    # show_spectrum's differs by a hair either way and discriminates
+    # nothing. Whether the label is *visibly* clipped depends on the
+    # figure size and on how much the slice panel's own x label shifts
+    # the margins, which is exactly why the layout has to re-run.
+    calls = []
+    original = canvas.figure.tight_layout
+    canvas.figure.tight_layout = lambda *a, **k: (calls.append(1), original(*a, **k))[1]
+    try:
+        canvas._redraw_contour(preserve_view=True)
+    finally:
+        canvas.figure.tight_layout = original
+    assert calls, "a contour rebuild must re-run the layout, as show_spectrum does"
+
+
+def test_canvas_reset_view_restores_limits_and_layout(qapp):
+    # "Be sure that the contour plot position resets back to the
+    # original load position." toolbar.home() only restores axis limits
+    # from the navigation stack -- and that stack still holds Axes from
+    # before this canvas's own figure rebuilds, so it cannot restore a
+    # layout at all.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    original = (canvas.ax.get_xlim(), canvas.ax.get_ylim())
+
+    canvas._add_contour_slice("f1", 3, "A")
+    canvas.ax.set_xlim(6.0, 2.0)
+    canvas.ax.set_ylim(96.0, 92.0)
+    assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) != original
+
+    canvas.reset_view()
+    assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) == original
+    assert _xlabel_is_inside_the_figure(canvas, canvas.ax)
+    # The slices themselves survive a view reset -- it resets the view,
+    # not the annotations.
+    assert len(canvas._contour_slices) == 1
+
+
+def test_canvas_reset_view_on_a_1d_still_uses_the_toolbar(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.reset_view()          # must not raise without a contour
+    assert canvas._contour_spectrum is None

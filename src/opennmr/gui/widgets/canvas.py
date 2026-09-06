@@ -782,6 +782,29 @@ class MplCanvas(QWidget):
             self.ax.set_xlim(xlim)
             self.ax.set_ylim(ylim)
         self._apply_view_options()
+        # Same layout pass show_spectrum ends with. Without it a rebuild
+        # kept whatever subplot margins were last in force, and once the
+        # slice panel (which brings its own x-axis label) changed what
+        # the figure needs, the contour's own x label was clipped off
+        # the bottom. Real user report: "the x-axis label got cut off".
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
+    def reset_view(self) -> None:
+        """Back to the view a fresh load gives -- limits *and* layout.
+
+        For a 2D this rebuilds the contour at its natural limits rather
+        than going through ``toolbar.home()``: home only restores axis
+        limits from the navigation stack, and that stack still holds
+        Axes from before any of this canvas's own figure rebuilds, so it
+        cannot restore a layout at all. Explicit user request: "be sure
+        that the contour plot position resets back to the original load
+        position"."""
+        if self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=False)
+            return
+        self.toolbar.home()
+        self.figure.tight_layout()
         self.canvas.draw_idle()
 
     def _on_press(self, event) -> None:

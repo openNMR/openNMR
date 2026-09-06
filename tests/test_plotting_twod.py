@@ -608,3 +608,33 @@ def test_plot_2d_contour_without_slices_has_no_panel():
     assert "slices" not in panels
     assert len(ax.lines) == 0
     plt.close(fig)
+
+
+def test_plot_2d_contour_slice_traces_are_heavier_than_their_contour_lines():
+    # "Linewidths of extracted slices should be 2." The dashed lines on
+    # the contour stay thinner, so they read as annotation over the data
+    # rather than competing with it.
+    spectrum = _slice_test_spectrum()
+    fig, ax, panels = twod.plot_2d_contour(
+        spectrum, slices=[{"axis": "f1", "index": 6}, {"axis": "f1", "index": 17}],
+    )
+    assert {line.get_linewidth() for line in panels["slices"].lines} == {2.0}
+    assert all(line.get_linewidth() < 2.0 for line in ax.lines)
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_reaches_the_top_projection():
+    # "The extracted slice plot should be able to reach the top height
+    # of the top projection." append_axes places the panel alongside the
+    # contour cell only, so its locator is re-pointed at every row.
+    spectrum = _slice_test_spectrum()
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=[{"axis": "f1", "index": 6}])
+    fig.canvas.draw()
+
+    panel_box = panels["slices"].get_window_extent()
+    top_box = panels["f2"].get_window_extent()
+    contour_box = ax.get_window_extent()
+    assert panel_box.y1 == pytest.approx(top_box.y1, abs=1.5)      # up to the strip's top
+    assert panel_box.y0 == pytest.approx(contour_box.y0, abs=1.5)  # down to the contour's base
+    assert panel_box.y1 > contour_box.y1 + 1.0                     # genuinely taller than before
+    plt.close(fig)

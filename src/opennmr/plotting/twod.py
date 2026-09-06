@@ -223,7 +223,7 @@ _SLICE_DASHES = (0, (7, 3, 1, 3))
 
 def _draw_slice_panel(ax, divider, spectrum, slices, *,
                       size, pad, offset_fraction, colours,
-                      font, fontsize, axis_label):
+                      font, fontsize, axis_label, linewidth):
     """Draw extracted slices beside a contour: a dashed line across the
     contour at each slice's own position, and the extracted traces
     stacked in a panel to the right, one colour per slice.
@@ -294,6 +294,17 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
         "right", axes_size.Scaled(size), pad=pad,
         **({"sharex": ax} if axis_kind == "f1" else {}),
     )
+    # Span every row of the divider, not just the contour's own, so the
+    # panel reaches the top of the F2 projection strip -- explicit user
+    # request, "the extracted slice plot should be able to reach the top
+    # height of the top projection". append_axes places it alongside the
+    # main cell only; re-pointing its locator at rows 0..n gives it the
+    # contour's height plus the pad and the strip above it. Self-
+    # adapting: with no top projection there is one row and this is a
+    # no-op.
+    panel.set_axes_locator(divider.new_locator(
+        nx=len(divider.get_horizontal()) - 1, ny=0, ny1=len(divider.get_vertical()),
+    ))
     fixed_axis = spectrum.axes[0] if axis_kind == "f1" else spectrum.axes[1]
     fixed_positions = fixed_axis.ppm if fixed_axis.ppm is not None else fixed_axis.index
 
@@ -321,7 +332,7 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
         # Normalised per trace, not on one shared scale.
         scale = (slot * offset_fraction) / heights[i]
         panel.plot(trace_x, (y - float(np.min(y))) * scale + baseline,
-                   color=colour, linewidth=1.0)
+                   color=colour, linewidth=linewidth)
 
         label = spec.get("label")
         if label:
@@ -366,7 +377,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                      tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
                      show_nQ_line=False, nQ=1, nQ_colors=None,
                      slices=None, slice_panel_size=1.0, slice_panel_pad=0.95,
-                     slice_offset_fraction=0.85, slice_colors=None,
+                     slice_offset_fraction=0.85, slice_colors=None, slice_linewidth=2.0,
                      ax=None, fig=None, save_fig=False, fig_name='nmr_2d_spectrum',
                      save_format='png'):
     """Plot a 2D NMR spectrum as a contour plot with F1/F2 projections.
@@ -636,7 +647,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             ax, divider, spectrum, slices,
             size=slice_panel_size, pad=slice_panel_pad,
             offset_fraction=slice_offset_fraction, colours=slice_colors,
-            font=font, fontsize=fontsize,
+            font=font, fontsize=fontsize, linewidth=slice_linewidth,
             # The trace runs along the *other* dimension from the one
             # its slice fixes, so a row's panel carries the contour's
             # own x label and a column's its y label. User: "the axis

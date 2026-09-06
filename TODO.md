@@ -2,6 +2,32 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Slice linewidth, a clipped axis label, and a taller slice panel (2026-09-06)
+
+User: "Linewidths of extracted slices should be 2. Be sure that the contour plot position resets back to the original load position (when I tried, the x-axis label got cut off). The extracted slice plot should be able to reach the top height of the top projection."
+
+### Slice traces at linewidth 2
+
+`slice_linewidth=2.0`, a parameter rather than a literal. The dashed lines on the contour stay thinner deliberately, so they read as annotation over the data rather than competing with it.
+
+### The clipped x label: a rebuild never re-ran the layout
+
+`show_spectrum` ends with `figure.tight_layout()`. `_redraw_contour` -- the preserve-the-view path used by a contour-level scroll and by adding or clearing a slice -- did not. So a rebuild kept whatever subplot margins were last in force, and once the slice panel (which brings its own x-axis label) changed what the figure needs, the contour's own label fell off the bottom. Now both paths run the same layout pass.
+
+### Reset really resets
+
+`_reset_navigation_view` called `toolbar.home()`, which only restores **axis limits** from the navigation stack -- and that stack still holds Axes from before any of this canvas's figure rebuilds, so it cannot restore a *layout* at all. New `MplCanvas.reset_view()`: for a 2D it rebuilds the contour at its natural limits (which now includes the layout pass); otherwise it falls back to `home()` plus a layout pass. Extracted slices survive it -- it resets the view, not the annotations.
+
+### The slice panel reaches the top projection
+
+`divider.append_axes` places the panel alongside the contour cell only. Its locator is now re-pointed at rows `0..n`, giving it the contour's height plus the pad and the F2 strip above it. Self-adapting: with no top projection there is one row and it is a no-op. Verified against the rendered geometry -- panel top matches the strip's top to within 1.5 px, panel bottom matches the contour's base.
+
+### A test that could not fail, twice
+
+The first version of the label test asserted only that the label was still inside the figure -- true either way in the synthetic case, where dropping the layout pass shifts the margins without clipping anything. The second compared a rebuild's axes position against a fresh `show_spectrum`'s, which fails **both** with and without the fix: `tight_layout` is not idempotent on an `AxesDivider` figure, so running it twice in sequence lands a hair off. Settled on asserting that the rebuild *runs* the layout pass, which is the actual invariant and does discriminate.
+
+5 new tests, each verified to fail with its own change reverted. 1017 passing (1012 -> 1017).
+
 ## Contour redraws lost the Output style; new style defaults (2026-09-06)
 
 User: "Scrolling the contours redraws the axis with defaults, not the ones set in output. These defaults should probably be: tick and line widths of 1.75 and fontsize of 16, and fig size of 8 by 8 (or 7.5 by 10 for 2D with extracted slices). Also the extracted projections should be normalised."
