@@ -412,11 +412,43 @@ def test_decode_hypercomplex_f1_states_tppi_alternates_sign():
 
 
 def test_decode_hypercomplex_f1_echo_antiecho():
-    echo = np.array([1, 2, 3], dtype=complex)
-    antiecho = np.array([4, 5, 6], dtype=complex)
+    # Solved against TopSpin's own recombined F1 interferogram, not
+    # guessed -- see decode_hypercomplex_f1's docstring for the fit
+    # (residual 0.0172, per-point |corr| 0.997-1.0000, and a scale
+    # whose phase is a constant +90 degrees, which is the 1j here).
+    echo = np.array([1 + 2j, 2 - 1j, 3 + 0j])
+    antiecho = np.array([4 + 1j, 5 + 3j, 6 - 2j])
     decoded = ft.decode_hypercomplex_f1(np.array([echo, antiecho]), fn_mode=6)
-    expected = (echo + antiecho) + 1j * (echo - antiecho)
-    np.testing.assert_allclose(decoded, [expected])
+    np.testing.assert_allclose(decoded, [1j * (np.conj(echo) - antiecho)])
+
+    # The two components the hypercomplex F1 step needs must each be a
+    # single *real* F2 plane -- that is the whole point, and what the
+    # superseded whole-complex-row form got wrong (it left F2's
+    # dispersion mixed into F1, i.e. the hourglass lineshape).
+    np.testing.assert_allclose(np.real(decoded[0]), np.imag(echo) + np.imag(antiecho))
+    np.testing.assert_allclose(np.imag(decoded[0]), np.real(echo) - np.real(antiecho))
+
+
+def test_decode_hypercomplex_f1_states_uses_only_the_f2_real_parts():
+    # Same error class as Echo-Antiecho above: combining whole complex
+    # rows as a + 1j*b silently carries each row's F2 imaginary part
+    # into F1's quadrature, so the F1 transform's real part comes out
+    # as RR - II (the phase twist) instead of RR.
+    cos_row = np.array([1 + 7j, 2 - 5j, 3 + 4j])
+    sin_row = np.array([4 + 1j, 5 + 3j, 6 - 2j])
+    data = np.array([cos_row, sin_row])
+    decoded = ft.decode_hypercomplex_f1(data, fn_mode=4)
+    np.testing.assert_allclose(decoded, [np.real(cos_row) + 1j * np.real(sin_row)])
+
+    # Discriminates against the superseded form, which these rows' own
+    # imaginary parts would otherwise dominate.
+    assert np.max(np.abs(decoded[0] - (cos_row + 1j * sin_row))) > 1.0
+
+    # States-TPPI is the same combination plus (-1)**k.
+    four_rows = np.array([cos_row, sin_row, cos_row, sin_row])
+    tppi = ft.decode_hypercomplex_f1(four_rows, fn_mode=5)
+    np.testing.assert_allclose(tppi[0], np.real(cos_row) + 1j * np.real(sin_row))
+    np.testing.assert_allclose(tppi[1], -(np.real(cos_row) + 1j * np.real(sin_row)))
 
 
 def test_decode_hypercomplex_f1_drops_trailing_unpaired_row():

@@ -2,6 +2,94 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## The hourglass contours: F2's dispersion was leaking into F1 (2026-09-06)
+
+User: "I'm still suffering from this hourglass shape in the contours, I feel like the phases of f2 and f1 are somehow offset from each other's phases."
+
+That reading was right, and it names the artifact precisely. An hourglass (bowtie) contour **is** a phase-twist lineshape -- `Re[(A1 + iD1)(A2 + iD2)] = A1*A2 - D1*D2` -- which is what you get when the two dimensions' absorption and dispersion are mixed 90 degrees apart. Not a phase *setting* that could be dialled out: a structural error in the hypercomplex decode.
+
+### The error, which both hypercomplex modes made
+
+After the F2 FFT each row `a` is complex: `Re(a)` is F2 absorption, `Im(a)` F2 dispersion. The decode combined **whole complex rows** as `a + 1j*b`. That looks like the textbook hypercomplex step, but
+
+```
+a + 1j*b  ==  (Re(a) + 1j*Re(b))  +  1j*(Im(a) + 1j*Im(b))
+```
+
+-- the F2-real hypercomplex series *plus 1j times* the F2-imaginary one. F1-transform that and take the real part and you get `RR - II`, the phase twist. The wanted spectrum is `RR` alone, so the F2 imaginary has to be dropped (States) or cancelled (Echo-Antiecho) **before** the F1 transform.
+
+The tell that this was structural rather than a phase offset: `a + 1j*b` is C-linear, so a global F2 phase commutes straight through it and through the F1 FFT. That accidental commuting property is exactly what let F2's dispersion into F1, and it is gone now -- see "consequence" below.
+
+### Echo-Antiecho had a second, independent bug underneath
+
+The raw "echo" row was conjugated **and time-reversed** before F2 processing. The stated reasoning -- the conjugate's own frequency reversal and the explicit reversal cancel -- is true for a bare FFT. It is false here, because **the window and the zero-fill sit in between**: reversing a decaying FID and then multiplying it by a decaying window applies the window backwards, and the zero-fill pads what is now the head of the signal. The echo rows were not mirrored, they were destroyed.
+
+Measured against TopSpin's own `xf2` output (procno 2 of `Cyclosporine/203`, which the user had already processed that way):
+
+| | our even (echo) rows | our odd (antiecho) rows |
+|---|---|---|
+| with the transform | **0.03** | 0.72 |
+| transform removed | **0.73** | 0.72 |
+
+Undoing it afterwards in the frequency domain recovers nothing (0.0008) -- the tell that information was lost rather than moved. With it removed, all 128 high-SNR rows match their own index.
+
+### How the right answer was found, instead of guessed
+
+Two earlier rounds guessed at sign/order permutations and "verified" the winner. This time the recombination was **solved**. TopSpin's own recombined F1 interferogram is recoverable from any finished 2D: undo `proc2s`'s `PHC0`/`PHC1`, then inverse-FFT along F1. Fitting `interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)` per t1 point then gives, with no ambiguity:
+
+- coefficients **1.0000** on `conj(echo)` and on `antiecho`, **0.0003/0.0004** on the other two
+- median relative residual **0.0172**, per-point `|corr|` **0.997-1.0000**
+- a per-point scale whose phase is a **constant +90 degrees**, its magnitude just the F1 window (halved at k=0 by `FCOR`)
+
+So `interferogram = 1j * (conj(echo) - antiecho)`. That constant 90 degrees is the whole ballgame: it turns F1 absorption into F1 dispersion, and dropping it costs everything -- end-to-end +0.9948 with it, **+0.0010** without. Guessing formulas would never have found a factor that looks like a no-op.
+
+A prerequisite fell out of the same work: **which block is which dimension's imaginary partner had been recorded backwards.** Inverse-transform each candidate pair and only the true one comes back causal:
+
+| pair | along F1 | along F2 |
+|---|---|---|
+| `2rr + 1j*2ir` | 49.55% | **94.32%** |
+| `2rr + 1j*2ri` | **100.00%** | 49.36% |
+| `2rr + 1j*2ii` | 50.20% | 49.66% |
+
+`2ir` is F2's imaginary, `2ri` is **F1's** -- first letter F2, second F1. The 49-50% entries are the signature of a pairing that isn't one (an effectively real spectrum inverse-transforms Hermitian-symmetric, splitting energy between head and tail). An xf2-only dataset is the exception and stores only `2rr`/`2ii`. Recorded as `io.bruker._PROCESSED_BLOCK_NAMING_NOTE`.
+
+### Result, against TopSpin's own `2rr`
+
+| dataset | mode | before | after |
+|---|---|---|---|
+| `Cyclosporine/203` | Echo-Antiecho | +0.4448 | **+0.9948** |
+| `Cyclosporine/204` | Echo-Antiecho | +0.0953 | **+0.9939** |
+| `2p5mm/2011` | States-TPPI | +0.6883 | **+0.9986** |
+| `2p5mm/2016` | States-TPPI | +0.7049 | **+0.9990** |
+| `2p5mm/2019` (EXSY benchmark) | States-TPPI | +0.7021 | **+0.9956** |
+| `2p5mm/2023` | States-TPPI | +0.6721 | **+0.9493** |
+| `2p5mm/6` | States-TPPI | +0.6947 | **+0.9623** |
+
+And the artifact itself, measured as negative/positive intensity in a box around each of the 6 strongest peaks (a phase twist has large negative diagonal wings; pure double absorption has almost none): **0.4227 -> 0.0311**, against TopSpin's own **0.0347**. The hourglass is gone, not reduced.
+
+The EXSY load benchmark is unaffected: 3.7 s best of 3 (ceiling 9.268 s).
+
+### Consequence: F2 phasing on a hypercomplex 2D can no longer be previewed live
+
+The corrected decode is only R-linear, so an F2 phase no longer commutes through it -- correctly. It also means the stored `data`/`data_imag` pair for a hypercomplex 2D is **F1's** quadrature (TopSpin's `2rr`/`2ri`), which is exactly what F1 phasing wants and exactly what F2 phasing cannot use. F2 phase ticks for those spectra now defer to the debounced rebuild, which phases F2 before the decode where it still means something (`MainWindow._f2_quadrature_is_spent`). F1 phasing, the common interactive case, is unaffected and still live.
+
+Not done instead: keeping the second hypercomplex plane (`2ir`/`2ii`) so F2 could be phased from four stored planes the way TopSpin does. That is the textbook answer, rejected on memory -- the EXSY's decoded array is already ~1 GB, and this project caps contour points at a quarter of that same dataset for the same reason.
+
+A pleasant side effect: `read_2d` and `read_2d_processed` now agree on what `data_imag` means for a hypercomplex 2D, since the latter already returned `2ri`.
+
+### Two copies of the deleted transform lived in the GUI
+
+`_recompute_multi_row_data` and the per-row slice path both carried their own copy of the Echo-Antiecho raw-row transform. The suite's live-rebuild-equals-load tests caught both immediately. Worth noting the symmetry: this project's standing "two pipelines quietly diverge" warning is usually about a fix that reaches only one copy -- here it was a *deletion* that had to reach all three.
+
+### Still broken, and not caused by this (both were equally broken before)
+
+- `Cyclosporine/211` (Echo-Antiecho): +0.0143 -> +0.0113. F2 projection +0.71, F1 projection +0.03. Not the F1 LP (disabling it gives +0.0250), not a strip transform (`STSR=0`, `STSI=SI`). Its `proc2s` asks for an 8x LP extrapolation (`LPBIN=2048` from 128 complex points), which is the most suspicious thing about it but not yet demonstrated.
+- `exam_CMCse_3/19` (States-TPPI): +0.0139 -> +0.0164, and its interferogram fits nothing (residual 0.998). Here it is **F2** that is wrong (F2 projection +0.51, F1 projection +0.90). Its `procs` has `TDeff=4096` with `SI=2048`, i.e. TopSpin windows over more points than it transforms -- a window computed over the wrong length changes the lineshape, which fits the symptom. Untested.
+
+Both are single datasets with a specific parameter combination; neither is the hourglass.
+
+5 new discriminating tests (all verified to fail with the fixes reverted) plus 8 real-data agreement tests that pin the table above and skip when the data isn't present. 981 tests passing (971 -> 981).
+
 ## Live phasing no longer "bounces" between baseline-corrected and not (2026-09-06)
 
 User: "The indirect phasing sort of bounces like there is a mismatch to the current and read phases."

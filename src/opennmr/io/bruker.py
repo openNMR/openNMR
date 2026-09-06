@@ -252,6 +252,35 @@ def _read_bruker_binary(binary_path: str, dic: dict, shape: tuple[int, int] | No
     return complex_data[:needed].reshape(shape)
 
 
+#: Which of TopSpin's four processed blocks is which dimension's
+#: imaginary partner -- measured, because the answer is not what this
+#: project assumed for a while (it had ``2ri`` recorded as F2's).
+#:
+#: For a **fully transformed** 2D, inverse-transform each candidate
+#: pair along one axis and see which one comes back causal (all the
+#: energy in the leading, non-zero-filled points -- a real
+#: interferogram/FID has nothing at negative time). On
+#: ``Bruker Example Data/Cyclosporine/203``:
+#:
+#:     pair            along F1     along F2
+#:     2rr + 1j*2ir      49.55%       94.32%
+#:     2rr + 1j*2ri     100.00%       49.36%
+#:     2rr + 1j*2ii      50.20%       49.66%
+#:
+#: So ``2ir`` is F2's imaginary and ``2ri`` is **F1's** -- first letter
+#: F2, second letter F1. The 49-50% entries are the signature of a
+#: pairing that isn't one: an effectively real spectrum inverse-
+#: transforms to a Hermitian-symmetric series, splitting its energy
+#: evenly between the head and the tail.
+#:
+#: An **xf2-only** dataset is the exception and stores just ``2rr`` and
+#: ``2ii`` (``bruker_T2/11``, ``bruker_PFG/150`` -- verified by listing
+#: them), with ``2ii`` holding F2's imaginary; see
+#: :func:`apply_recorded_phase`, which uses exactly that to measure
+#: TopSpin's phase convention.
+_PROCESSED_BLOCK_NAMING_NOTE = None
+
+
 def apply_recorded_phase(spectrum: np.ndarray, phc0: float, phc1: float, axis: int = -1) -> np.ndarray:
     """Apply TopSpin's own recorded ``PHC0``/``PHC1`` in TopSpin's own
     convention: ``phi(i) = PHC0 + PHC1 * i/(n-1)`` across ``axis``,
@@ -892,50 +921,39 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # Echo-Antiecho (FnMODE 6, a.k.a. Rance-Kay) needs one more thing
     # *before* F2 processing even starts: the "echo" (even-indexed) raw
     # row of each pair must be conjugated *and time-reversed* first.
-    # This was flagged in decode_hypercomplex_f1's own docstring as
-    # unverified/best-effort (no real Echo-Antiecho data existed in
-    # this project to check against) -- verified against a real
-    # dataset (test_data/Bruker Example Data/Cyclosporine/203,
-    # FnMODE=6) in two rounds, the first of which shipped a real,
-    # user-reported bug (worth understanding, not just the fix itself):
+    # No raw-row transform for Echo-Antiecho (FnMODE 6). Two earlier
+    # versions applied one here and both were wrong; the failures are
+    # worth keeping because each was "verified" before it shipped.
     #
-    # Round 1 found that the plain sum/diff combine (no raw-row
-    # transform at all) reproduced every real peak at its correct
-    # position but *also* produced an equal-magnitude ghost at that
-    # peak's F1-mirror position (ratio ~0.8-1.2x the genuine peak) --
-    # exactly the "mirror across the spectrum's centre" failure mode
-    # that docstring predicted. Conjugating the even-indexed raw row
-    # (no reversal) dropped that ghost to ~0.005-0.02 (noise floor) on
-    # F1 -- shipped as the fix. **But conjugating a raw time-domain row
-    # doesn't just fix the F1/hypercomplex phase relationship -- FFT
-    # doesn't commute with conjugation (FFT(conj(x))[k] ==
-    # conj(FFT(x)[-k])), so it also *reverses that row's own F2
-    # frequency axis*, an unavoidable side effect neither round 1's
-    # verification nor its own reasoning checked for** (it only
-    # measured the F1-mirror ratio, not an F2 one) -- confirmed
-    # directly: the lone-conjugate fix's own F1 ratio was excellent
-    # (~0.01) but its F2 ratio was ~0.95, an equal-magnitude ghost at
-    # each peak's F2-mirror position instead. Real user report caught
-    # this ("I'm pretty sure the echo-anti echo data is now mirrored
-    # in x") after the lone-conjugate version had already shipped.
+    # Round 1 conjugated the even ("echo") raw row. That did drop the
+    # F1 mirror ghost to the noise floor, which is what was measured --
+    # but conjugating a *time-domain* row also reverses that row's own
+    # F2 frequency axis (FFT(conj(x))[k] == conj(FFT(x)[-k])), and only
+    # F1 was re-checked. A user caught the rest: "I'm pretty sure the
+    # echo-anti echo data is now mirrored in x."
     #
-    # Round 2's fix: conjugate *and* reverse the even row (order
-    # doesn't matter -- conjugation is elementwise, reversal is a pure
-    # reordering, so they commute) -- the two frequency-reversals
-    # (one from the conjugate, one from the explicit reversal) cancel,
-    # leaving F2 untouched, while the conjugate's own value-negation
-    # still supplies the hypercomplex relationship F1 needs. Verified
-    # on the same real dataset: both F1 and F2 mirror ratios land at
-    # ~0.005-0.01 (noise floor) across the 10 strongest real peaks,
-    # simultaneously -- checked together this time, specifically
-    # because round 1's own gap was "fixed and verified one axis
-    # without checking the other actually stayed fixed too." A copy,
-    # not an in-place transform, so ``metadata.raw["fid_raw"]``
-    # (assigned above from this same ``data`` binding) stays genuinely
-    # unmodified.
-    if fn_mode == 6:
-        data = data.copy()
-        data[0::2] = np.conj(data[0::2])[:, ::-1]
+    # Round 2 conjugated *and* time-reversed the same row, reasoning
+    # that the two frequency-reversals cancel and leave F2 untouched.
+    # They do cancel -- for a bare FFT. They do not here, because
+    # windowing and zero-filling sit between this point and the FFT:
+    # reversing a decaying FID and then multiplying it by a decaying
+    # window applies the window backwards, and zero-filling pads what
+    # is now the *head* of the signal. The echo rows were not mirrored
+    # after round 2, they were destroyed. Measured directly against
+    # TopSpin's own xf2 output for this dataset (procno 2, which is
+    # xf2-only): with the transform, our even rows matched TopSpin's at
+    # a median |corr| of 0.03 while the untouched odd rows matched at
+    # 0.72; with it removed, the even rows jump to 0.73 and all 128
+    # high-SNR rows match their own index. Undoing the transform
+    # afterwards in the frequency domain cannot recover them (0.0008),
+    # which is the tell that information was lost rather than moved.
+    #
+    # The real relationship needs no pre-FFT step at all: it is
+    # 1j*(conj(echo) - antiecho) applied to the *processed* rows, and
+    # a frequency-domain conjugate does not touch F2's axis. See
+    # processing.ft.decode_hypercomplex_f1 for how that was solved
+    # against TopSpin's own interferogram, and for the hourglass
+    # (phase-twist) artifact that both of these rounds left behind.
 
     # ----- F2 (direct dimension): [shift/align/LP], window, zero-fill, FFT per row -----
     # Same shared step (and step order) as read_1d/xpulse.read_1d --

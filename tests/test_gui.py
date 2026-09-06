@@ -8096,8 +8096,7 @@ def test_main_window_slice_source_is_dropped_if_the_2d_is_removed(qapp, tmp_path
     assert window._slice_source_of(kept) == (None, None)
 
 
-@pytest.mark.parametrize("dim_index,dim", [(0, "F2"), (1, "F1")])
-def test_main_window_live_phase_keeps_the_baseline_after_a_settle(qapp, dim_index, dim, tmp_path, monkeypatch):
+def test_main_window_live_phase_keeps_the_baseline_after_a_settle(qapp, tmp_path, monkeypatch):
     # Real user report: "The indirect phasing sort of bounces like there
     # is a mismatch to the current and read phases."
     #
@@ -8124,7 +8123,9 @@ def test_main_window_live_phase_keeps_the_baseline_after_a_settle(qapp, dim_inde
         window._on_process_indirect_toggled(True)
         spectrum = window.session.spectra[0]
         spectrum.metadata.raw["baseline_correct"] = True
-        window.dim_combo.setCurrentIndex(dim_index)
+        # F1. F2 on a hypercomplex 2D has no live tick to bounce any
+        # more -- see the test below.
+        window.dim_combo.setCurrentIndex(1)
         for value in phases:
             window.phase0_spin.setValue(value)
             if value in settle_at and window._live_reprocess_timer.isActive():
@@ -8139,6 +8140,61 @@ def test_main_window_live_phase_keeps_the_baseline_after_a_settle(qapp, dim_inde
 
     scale = max(np.max(np.abs(authoritative)), 1e-30)
     assert np.max(np.abs(live - authoritative)) / scale < 1e-3
+
+
+def test_main_window_f2_phase_on_hypercomplex_2d_never_shows_an_invalid_state(qapp, tmp_path, monkeypatch):
+    # The hypercomplex decode consumes each row's F2 imaginary part to
+    # build F1's, so a hypercomplex 2D's stored complex pair is F1's
+    # quadrature. Rotating it by an F2 phase is not an F2 phase
+    # correction -- it is the very absorption/dispersion mixing that
+    # produced the hourglass lineshape in the first place. So the live
+    # tick applies nothing for F2 here and defers to the rebuild, which
+    # phases F2 before the decode where it still means something.
+    #
+    # Asserted as: what the user is shown is always *exactly* a state a
+    # clean rebuild can reproduce -- here the last settled phase, to the
+    # bit -- rather than an invalid intermediate that happens to be
+    # close. Re-enabling the preview (making _f2_quadrature_is_spent
+    # return False) breaks this by ~1e-2 relative.
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip("needs the real Cyclosporine/203 dataset")
+    _isolate_sidecars(monkeypatch, tmp_path)
+
+    def _build(phases, settle_at):
+        window = MainWindow()
+        window._load(path, vendor="bruker")
+        window._on_process_indirect_toggled(True)
+        spectrum = window.session.spectra[0]
+        spectrum.metadata.raw["baseline_correct"] = True
+        window.dim_combo.setCurrentIndex(0)
+        for value in phases:
+            window.phase0_spin.setValue(value)
+            if value in settle_at and window._live_reprocess_timer.isActive():
+                window._live_reprocess_timer.stop()
+                window._run_debounced_multi_row_reprocess()
+        return np.asarray(spectrum.data)
+
+    # Settle at 30, then keep dragging to 30.5 without settling again.
+    shown = _build([30.0, 30.5], {30.0})
+    settled = _build([30.0], {30.0})
+    np.testing.assert_array_equal(shown, settled)
+
+
+def test_main_window_f2_quadrature_is_spent_only_for_hypercomplex_2d(qapp, tmp_path, monkeypatch):
+    # Modes 0-3 keep F2's own imaginary (their F1 point is one raw
+    # complex row, nothing is consumed), and a pseudo-2D never runs an
+    # F1 transform at all -- both must keep the fast live F2 preview.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.pseudo_2d = False
+    for fn_mode, spent in ((1, False), (3, False), (4, True), (5, True), (6, True)):
+        spectrum.metadata.raw["fn_mode"] = fn_mode
+        assert window._f2_quadrature_is_spent(spectrum) is spent, fn_mode
+    spectrum.metadata.pseudo_2d = True
+    spectrum.metadata.raw["fn_mode"] = 6
+    assert window._f2_quadrature_is_spent(spectrum) is False
 
 
 def test_main_window_phase_reference_tracks_what_it_already_contains(qapp, tmp_path, monkeypatch):

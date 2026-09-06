@@ -3347,21 +3347,9 @@ class MainWindow(QMainWindow):
             # (its own _CONJUGATE_QUADRATURE_NOTE step), but not its
             # own *extra* even-row conjugate-and-reversal, which is a
             # per-pair fix that isn't knowable until a specific row is
-            # actually picked -- see _recompute_multi_row_data's own
-            # matching comment for the real, user-reported "mirrored
-            # in x" bug a conjugate-without-reversal version of this
-            # exact fix once caused (checking only one axis after a
-            # raw time-domain fix isn't enough, since FFT(conj(x))
-            # also reverses that row's own F2 frequency axis). This
-            # method previously missed the fix entirely -- confirmed
-            # directly against real data: a genuinely wrong (not just
-            # re-phased) trace for any echo (even-indexed) row,
-            # exactly the "two pipelines quietly diverge" class that
-            # comment already warns about. Real user report: "the
-            # phase is 90 offset" -- what a conjugated-and-unreversed
-            # trace looks like at a glance, not a literal phase error.
-            if spectrum.metadata.raw.get("fn_mode", 1) == 6 and row % 2 == 0:
-                raw_fid = np.conj(raw_fid)[::-1]
+            # actually picked. No Echo-Antiecho raw-row transform
+            # here either -- see _recompute_multi_row_data's own
+            # matching note and io.bruker.read_2d's fn_mode == 6 one.
             slice_template = get_trace(spectrum, axis="f1", index=spectrum_row)
 
         computed = self._process_raw_fid_row(spectrum, raw_fid, dt)
@@ -3550,27 +3538,18 @@ class MainWindow(QMainWindow):
         )
 
         fn_mode = spectrum.metadata.raw.get("fn_mode", 1)
-        if fn_mode == 6:
-            # Mirrors io.bruker.read_2d's own fn_mode==6 raw-row
-            # conjugate-and-reverse (see its comment there for the
-            # real-data verification, including the round-1-shipped,
-            # user-reported "mirrored in x" bug a conjugate-without-
-            # reversal version of this exact line caused -- checking
-            # only the F1 axis after a fix touching a raw time-domain
-            # row isn't enough, since FFT(conj(x)) also reverses that
-            # row's own F2 frequency axis, not just its phase) --
-            # "fid_raw" here already has whatever global conjugate
-            # read_2d applied to every row before caching it (its own
-            # `_CONJUGATE_QUADRATURE_NOTE` step), so this only needs
-            # the same *extra* even-row conjugate+reversal, not the
-            # full sequence again. Without this, a live F2-only control
-            # change on an Echo-Antiecho 2D would silently revert to
-            # the pre-fix mirrored-ghost behaviour the moment this path
-            # recomputes -- exactly the "two pipelines quietly diverge"
-            # bug class this method's own docstring already warns
-            # about for decode_hypercomplex_f1 below.
-            raw_fid = raw_fid.copy()
-            raw_fid[0::2] = np.conj(raw_fid[0::2])[:, ::-1]
+        # No raw-row transform for Echo-Antiecho (fn_mode 6). This
+        # method used to carry a copy of one, mirroring io.bruker.
+        # read_2d's; that transform turned out to be destroying the
+        # echo rows (it reversed each FID *before* the window and
+        # zero-fill, so the window was applied backwards), and the
+        # recombination it was propping up was wrong too. Both are
+        # gone from the reader -- see its own fn_mode == 6 note and
+        # processing.ft.decode_hypercomplex_f1. Kept here as a comment
+        # rather than silence because the "two pipelines quietly
+        # diverge" class this method's docstring warns about cuts both
+        # ways: a copy that is *not* deleted alongside the original is
+        # the same bug wearing the opposite sign.
 
         rows = []
         filled_rows = []
@@ -5461,6 +5440,45 @@ class MainWindow(QMainWindow):
         self.canvas.update_data(spectrum)
         return True
 
+    @staticmethod
+    def _f2_quadrature_is_spent(spectrum) -> bool:
+        """Whether ``spectrum``'s stored ``data``/``data_imag`` pair is
+        F1's quadrature rather than F2's -- true for a genuine
+        hypercomplex 2D (``FnMODE`` 4 States, 5 States-TPPI, 6
+        Echo-Antiecho), false for everything else.
+
+        The hypercomplex step *consumes* each row's F2 imaginary part
+        to build F1's (see
+        :func:`opennmr.processing.ft.decode_hypercomplex_f1`), so after
+        the F1 transform what survives is TopSpin's ``2rr`` and
+        ``2ri``: F1's pair. That is exactly what F1 phasing wants and
+        exactly what F2 phasing cannot use.
+
+        Why this needs saying at all: the *previous* decode combined
+        whole complex rows (``a + 1j*b``), which is C-linear, so a
+        global F2 phase commuted straight through it and through the
+        F1 FFT -- phasing F2 on the finished array gave the same answer
+        as phasing the rows first. That accidental equivalence is
+        precisely what let F2's dispersion leak into F1 and produce the
+        hourglass lineshape. The corrected decode is only R-linear, so
+        the equivalence is gone -- correctly, but it means an F2 phase
+        can no longer be previewed from the finished array and has to
+        be applied before the decode, i.e. by a rebuild from the raw
+        FID.
+
+        Not done instead: keeping the second hypercomplex plane
+        (TopSpin's ``2ir``/``2ii``) so F2 could be phased from four
+        stored planes the way TopSpin does it. That is the textbook
+        answer and it is rejected on memory -- the EXSY benchmark's
+        decoded array is already ~1 GB, and this project caps contour
+        points at a quarter of that same dataset for the same reason.
+        """
+        return (
+            not spectrum.metadata.pseudo_2d
+            and spectrum.ndim == 2
+            and int(spectrum.metadata.raw.get("fn_mode", 1)) in (4, 5, 6)
+        )
+
     def _apply_phase_preview(self) -> None:
         index = self._selected_index()
         if index is None or self._phase_mode is None:
@@ -5586,20 +5604,30 @@ class MainWindow(QMainWindow):
 
         elif self._phase_mode == "2d":
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
-            data_for_dim = self._phase_reference_full if dim == "f2" else self._phase_reference_full.T
-            phased = processing_ft.apply_phase(data_for_dim, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
-            if dim == "f1":
-                phased = phased.T
-            spectrum.data = np.real(phased)
-            spectrum.data_imag = np.imag(phased)
-            # Baseline correction deferred to a debounced recompute,
-            # not applied inline on every drag tick -- see the
-            # matching pseudo2d "apply to every slice" branch above
-            # for why (the actual "hangs" mechanism: a per-row spline
-            # fit re-run on every single mouse-move event during a
-            # phase drag).
-            if spectrum.metadata.raw.get("baseline_correct"):
+            if dim == "f2" and self._f2_quadrature_is_spent(spectrum):
+                # Nothing to preview from: for a hypercomplex 2D the
+                # stored complex pair is F1's quadrature, not F2's, so
+                # rotating it by an F2 phase is not an F2 phase
+                # correction. Defer the whole tick to the debounced
+                # rebuild, which goes back to the raw FID and phases F2
+                # in the one place it is still meaningful -- before the
+                # hypercomplex decode. See _f2_quadrature_is_spent.
                 self._schedule_multi_row_reprocess(index)
+            else:
+                data_for_dim = self._phase_reference_full if dim == "f2" else self._phase_reference_full.T
+                phased = processing_ft.apply_phase(data_for_dim, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
+                if dim == "f1":
+                    phased = phased.T
+                spectrum.data = np.real(phased)
+                spectrum.data_imag = np.imag(phased)
+                # Baseline correction deferred to a debounced recompute,
+                # not applied inline on every drag tick -- see the
+                # matching pseudo2d "apply to every slice" branch above
+                # for why (the actual "hangs" mechanism: a per-row spline
+                # fit re-run on every single mouse-move event during a
+                # phase drag).
+                if spectrum.metadata.raw.get("baseline_correct"):
+                    self._schedule_multi_row_reprocess(index)
             # Best-effort, same reasoning as _baseline_correct_if_enabled:
             # this runs on *every* drag tick, so a rendering exception
             # here must never raise out of the signal handler (freezing
