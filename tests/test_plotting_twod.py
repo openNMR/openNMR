@@ -349,46 +349,6 @@ def test_projection_max_mode_is_unaffected_by_the_sign_fix():
     assert xlim[0] > xlim[1]
 
 
-def test_signed_max_magnitude_keeps_the_sign_of_the_largest_peak():
-    # Column 0's biggest excursion is negative, column 1's is positive.
-    # max(abs(...)) would report both as positive; plain max(...) would
-    # report column 0 as its least-negative value (the noise floor).
-    data = np.array([
-        [-10.0, 2.0],
-        [3.0, 7.0],
-        [-1.0, -4.0],
-    ])
-    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=0), [-10.0, 7.0])
-    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=1), [-10.0, 7.0, -4.0])
-
-
-def test_signed_max_magnitude_matches_max_abs_for_all_positive_data():
-    # The property that guarantees no visual change for a correctly
-    # phased spectrum: for all-positive data the two rules agree
-    # exactly, so only genuinely negative/dispersive signal is affected.
-    rng = np.random.default_rng(0)
-    data = np.abs(rng.standard_normal((12, 20)))
-    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=0), np.max(np.abs(data), axis=0))
-    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=1), np.max(np.abs(data), axis=1))
-
-
-def test_signed_max_magnitude_inverts_exactly_under_a_sign_flip():
-    # The core of the user report: a 180-degree phase change negates
-    # every point, and the projection must follow. Under max(abs(...))
-    # this was *exactly* invariant -- the projections did not move at
-    # all while the phase window's own slice inverted completely.
-    rng = np.random.default_rng(1)
-    data = rng.standard_normal((10, 16))
-    for axis in (0, 1):
-        np.testing.assert_allclose(
-            twod._signed_max_magnitude(-data, axis=axis),
-            -twod._signed_max_magnitude(data, axis=axis),
-        )
-        # ...and the old rule provably could not do this, which is what
-        # makes this test discriminating rather than merely descriptive.
-        assert np.allclose(np.max(np.abs(-data), axis=axis), np.max(np.abs(data), axis=axis))
-
-
 def test_max_mode_projections_respond_to_a_phase_inversion():
     # End-to-end through plot_2d_contour, on the pseudo-2D default
     # ('auto' -> 'max'), since that is the path the report came from.
@@ -423,3 +383,54 @@ def test_max_mode_projections_respond_to_a_phase_inversion():
     positive_peak_col = spectrum.data.shape[1] // 4
     assert f2[positive_peak_col] > 0
     assert f2_flipped[positive_peak_col] < 0
+
+
+def test_projections_default_to_the_positive_maximum_not_the_sum():
+    # Real user request: "the 2D projections should probably just be the
+    # positive projections (not the sum)". A sum projection of a
+    # phase-sensitive spectrum cancels its own positive and negative
+    # lobes against each other and washes the peaks out.
+    spectrum = _make_signed_2d()
+    n_f1, n_f2 = spectrum.data.shape
+    fig, ax = plt.subplots()
+    try:
+        _, _, proj = twod.plot_2d_contour(
+            spectrum, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9,   # 'auto'
+        )
+        auto_f2 = proj["f2"].lines[0].get_ydata().copy()
+    finally:
+        plt.close(fig)
+
+    fig, ax = plt.subplots()
+    try:
+        _, _, proj = twod.plot_2d_contour(
+            spectrum, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9, projection_mode="max",
+        )
+        explicit_f2 = proj["f2"].lines[0].get_ydata().copy()
+    finally:
+        plt.close(fig)
+
+    # 'auto' now resolves to 'max' for a conventional 2D as well, not
+    # just pseudo-2D.
+    np.testing.assert_allclose(auto_f2, explicit_f2)
+    # ...and 'max' is the positive maximum, so the positive peak
+    # dominates its column rather than being cancelled by the negative
+    # one a sum would fold in.
+    assert explicit_f2[n_f2 // 4] > 0
+
+
+def test_sum_projection_is_still_available_explicitly():
+    spectrum = _make_signed_2d()
+    fig, ax = plt.subplots()
+    try:
+        _, _, proj = twod.plot_2d_contour(
+            spectrum, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9, projection_mode="sum",
+        )
+        summed = proj["f2"].lines[0].get_ydata().copy()
+    finally:
+        plt.close(fig)
+    expected = np.sum(spectrum.data, axis=0)
+    np.testing.assert_allclose(summed - summed.min(), (expected - expected.min()), rtol=1e-6, atol=1e-6)

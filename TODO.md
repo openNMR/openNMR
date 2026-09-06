@@ -2,6 +2,43 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Positive projections; and the Echo-Antiecho "slant" measured and diagnosed (2026-09-06)
+
+User: "the contours in the echo-antiecho are somehow slanted, and I'm not sure why. Also, the 2D projections should probably just be the positive projections (not the sum)."
+
+### Projections -- done
+
+`projection_mode="auto"` now resolves to `"max"` for **every** 2D, not just pseudo-2D, and `"max"` is the plain positive maximum. A sum projection of a phase-sensitive spectrum cancels its own positive and negative lobes and washes the peaks out, which is what prompted this. `"sum"` remains available explicitly. `_signed_max_magnitude` (added a few rounds ago to make `max` phase-sensitive) is now unused and was **deleted along with its three tests** rather than left as dead code -- `np.max` is phase-sensitive anyway, so the property that helper existed for is retained.
+
+### The slant is real, and now quantified
+
+Measured via the strongest peak's own 2D second moments:
+
+| | F1 width | F2 width | F1-F2 covariance | tilt |
+|---|---|---|---|---|
+| ours | 4.48 rows | 2.41 pts | **-1.083** | **-4.32 deg** |
+| TopSpin | 1.21 rows | 1.42 pts | -0.003 | axis-aligned |
+
+So the observation was correct: our peaks are genuinely tilted (correlation coefficient -0.100) where TopSpin's are square to the axes.
+
+### Root cause 1, confirmed: TopSpin uses linear prediction in F1 and we do not
+
+`proc2s` for Cyclosporine/203 records **`ME_mod=2.0`** (linear prediction) with `NCOEF=32`, `LPBIN=512`, `TDeff=512` -- TopSpin extends F1 from its 128 complex points to 512 by LP before zero-filling to 1024. This project applies no F1 LP at all, which is exactly why our F1 lines are **~4x broader** (4.48 rows against 1.21).
+
+This matters beyond appearance: **it caps how high the correlation against TopSpin can go regardless of whether the recombination is right**, which makes whole-array correlation a poor metric for the remaining Echo-Antiecho work. `processing.ft.linear_predict` already exists, so wiring F1 LP is a well-defined, independent improvement -- and probably the next thing to do.
+
+### Root cause 2: still the unresolved recombination -- and a useful negative result
+
+Tilt is a far more sensitive probe than correlation, so the recombination space was re-searched scoring by tilt. A candidate does reach TopSpin's tilt exactly:
+
+    EA transform OFF, decode = -((a+b) - 1j*(a-b))   ->  tilt +0.0022 (TopSpin: -0.0018)
+
+**But it is wrong**, and the check that caught it is worth keeping: its peaks land at F1 mirror positions (828 -> 196, 789 -> 235, 791 -> 233, 738 -> 286 in a 1024-point F1), matching only **3/8** of TopSpin's strongest peaks against the current form's **5/8**. Zero tilt was achieved by *symmetrising the mirror artifacts*, not by fixing the reconstruction.
+
+**Lesson: tilt is necessary but not sufficient.** Any future candidate has to be scored on tilt **and** peak positions together -- either alone is satisfiable by a wrong answer.
+
+Echo-Antiecho therefore remains unsolved at **+0.395**. The concrete next step is F1 linear prediction, both because it is correct in its own right and because it removes the linewidth confound from every subsequent measurement.
+
 ## Vendor conventions normalised at read time: `processing/` is now vendor-free (2026-09-06)
 
 User: "many of the phase conventions etc should be fixed if the GUI reformats any read data into a common file type so it is then agnostic for vendor". Done for the two leaks that existed. Output is **identical on all five real datasets**, so this is purely structural.
