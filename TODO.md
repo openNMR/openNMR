@@ -2,6 +2,41 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Normalise vendor conventions at read time (architecture -- user request, NOT yet implemented)
+
+User: "I think many of the phase conventions etc should be fixed if the GUI reformats any read data into a common file type so it is then agnostic for vendor, like we discussed."
+
+**This is the right diagnosis, and there is now direct evidence for it.** The vendor-agnostic core model (`NMRSpectrum`) has existed since the start, but *conventions* were never normalised -- only the container was. The leaks are concrete and were all hit while debugging 2D:
+
+- `processing.ft.decode_hypercomplex_f1` now takes a **`conjugate_f1` vendor flag** (Bruker `True`, X-Pulse `False`), because `io.bruker` conjugates the whole raw FID up front while `io.xpulse` does not. A "vendor-agnostic" processing function needing a vendor flag is the smell itself.
+- **Two phase models** coexist (`apply_recorded_phase`'s TopSpin index ramp vs `processing.ft.apply_phase`'s pivot model), so `metadata.raw` has to carry `recorded_phase*` and `phase*` separately and `apply_dimension_phase` exists purely to compose them in the right order.
+- Bruker's global `np.conj` (`_CONJUGATE_QUADRATURE_NOTE`) exists to fix F2's frequency direction, and then has knock-on effects on F1 that took several rounds to untangle.
+
+**The proposal**: each reader normalises to one canonical internal convention at read time -- canonical quadrature sense, canonical frequency direction, and the *recorded* phase converted into the single internal phase model -- so `processing/` and the GUI never branch on vendor at all. Readers become the only place vendor knowledge lives, which is what the original layering intended.
+
+**Why it is worth doing now rather than after stage 2**: the unsolved Echo-Antiecho reconstruction is exactly a convention problem (see below -- two coupled sign/direction errors, where each candidate fix interacts with the global conjugate and with the raw-row transform). Normalising first would collapse that search space instead of leaving each hypothesis entangled with three others. It is plausible this is a prerequisite, not a follow-up.
+
+**Not started.** Scope needs its own pass: pick the canonical conventions, convert each reader, remove `conjugate_f1` and ideally one of the two phase models, with the existing byte-identity and recompute-vs-load checks as the acceptance tests.
+
+## Stage 2, part 2: Echo-Antiecho -- raw-row transform proven wrong, decode still unsolved (2026-09-06)
+
+The user supplied **`Cyclosporine/203` reprocessed with `xf2` only into procno 2** -- exactly the F2-only ground truth for hypercomplex data that was missing. Confirmed genuine: **256 nonzero rows** (matching the 256 raw rows) zero-filled to 1024, so its `2rr`/`2ir` really is "F2 processed, F1 untouched".
+
+**Result 1 -- our F2 is correct for Echo-Antiecho, and the `fn_mode == 6` raw-row transform is wrong.** Comparing our F2-processed rows against procno 2 row by row, the ratio to TopSpin is:
+
+| | magnitude ratio, row 0 |
+|---|---|
+| **without** the conj+time-reverse | **0.015 .. 0.016** (constant -> a pure phase difference) |
+| with it | 0.012 .. 0.087 (scattered) |
+
+A constant magnitude ratio with a per-row phase is exactly right: that residual per-row phase *is* the F1 evolution. So F2 is sound, and `data[0::2] = conj(data[0::2])[:, ::-1]` -- added empirically in an earlier round to suppress F1 mirror ghosts -- is not what TopSpin does.
+
+**Result 2 -- removing it alone does not help, because the decode is also wrong.** End-to-end against TopSpin's procno 1, across both settings and six candidate recombinations, the best is **+0.6166** (`-1j*b`, with the transform still on). Every standard Rance-Kay form sits at 0.30-0.55. **`-1j*b` was deliberately not shipped**: it discards the echo row entirely, which would halve SNR in a *sensitivity-enhanced* experiment -- physically implausible, and far more likely an artifact of a second error than a real recombination.
+
+So Echo-Antiecho has **at least two coupled errors** (the raw-row transform and the recombination), and testing them jointly over this candidate set does not reach a credible answer. This is the concrete reason the convention-normalisation above may be a prerequisite rather than a nicety.
+
+**Still open**: Echo-Antiecho at **+0.395** as shipped. States-TPPI at **+0.70** after part 1.
+
 ## Stage 2, part 1: States-TPPI F1 quadrature sign identified and fixed (+0.03 -> +0.70) (2026-09-06)
 
 The decode's States/States-TPPI recombination had F1's quadrature sense backwards for Bruker. Found by solving for it against ground truth, not by guessing.
