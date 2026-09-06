@@ -2,6 +2,32 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Crosshair removed (deferred, not abandoned); slice-panel scroll fixed (2026-09-06)
+
+User: "crosshair is just filling the contour and not going away, and if I try to zoom then there is still an issue. Remove the crosshair for now (I still want it eventually) but keep the other improvements for the slicing."
+
+### The crosshair is out
+
+Removed entirely -- the class, the state, the lazy sync, its call in `_on_motion`, the import, and its tests. The `onmove`-vs-`ignore` fix from the previous entry was necessary but not sufficient: "filling the contour and not going away" is a *second* blit-coherence failure, and one that a headless test cannot see. Both symptoms are the same underlying thing -- a blitting widget and a canvas that also calls `draw_idle()` from its own scroll/pan/level handlers do not reliably agree on what the background is, so stale frames get restored and cursor lines accumulate instead of being erased.
+
+### What a future attempt should start from
+
+- Standing down in pan/zoom belongs in `onmove`, **never** in `ignore` -- `MultiCursor.clear`, the `draw_event` handler that recaptures the blit background, goes through `ignore` too (previous entry).
+- That alone is not enough. The canvas issues `draw_idle()` from `_on_scroll`, the pan drag, and the contour-level adjust. Interleaving those with a widget that blits leaves stale regions on screen. A working version needs the crosshair to own its redraws -- i.e. every one of those paths has to invalidate/recapture the background, or the crosshair has to be drawn as a normal (non-blitted) artist and the redraw cost solved another way.
+- The cost is why blitting was chosen: a plain redraw per mouse-move repaints the whole contour, measured at **295 ms** for a real HSQC and **1.34 s** for the EXSY.
+
+### The real zoom defect that was left behind
+
+Zoom itself was verified working throughout -- scroll on the x-strip, the y-strip and the body, both projection strips, a full toolbar rubber-band drag, and Home, with and without a slice panel. (An earlier sweep reported two projection strips as broken; that was my own crude event helper attributing the event to the wrong Axes, not the code. Rebuilt with properly-formed events, both zoom correctly.)
+
+One genuine defect did survive: the slice panel lives in `_proj_axes` alongside the F1/F2 strips, and `_on_scroll` iterated that dict treating **every** entry as a projection. The panel's y axis is a normalised 0..1 stack of evenly-spread traces, so scrolling over it silently rescaled the stack and broke the layout -- and the panel sits exactly where the contour's right-hand "y strip" zoom region used to be empty. Now an explicit no-op, and the projection loop names `f1`/`f2` rather than iterating, so nothing else that dict grows later can be mistaken for a strip.
+
+### Noted, not changed
+
+`NavigationToolbar2`'s view stack is never cleared when this canvas rebuilds its figure (there is no `toolbar.update()` call anywhere), so it accumulates references to Axes that no longer exist. `home()` still behaves correctly in every case tested, so this is recorded rather than fixed -- clearing the stack on every contour redraw would throw away the user's zoom history, which is a worse trade.
+
+1009 passing (1011 -> 1009: 4 crosshair tests removed, 2 scroll regression tests added).
+
 ## The crosshair froze the canvas: standing down belongs in onmove, not ignore (2026-09-06)
 
 User: "zooming on the 2D no longer works. Something has been broken." Regression from the crosshair added an hour earlier, in the same session.

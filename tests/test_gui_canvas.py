@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import types
 
 import numpy as np
-from matplotlib.backend_bases import MouseEvent
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QSpinBox
@@ -1739,99 +1738,52 @@ def test_canvas_adding_a_slice_preserves_the_view(qapp):
     assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) == before
 
 
-def test_canvas_crosshair_spans_the_contour_and_both_projections(qapp):
-    # "When the input isn't panning or zooming, the cursor should be a
-    # cross with lines covering the entire contour space AND the
-    # projections." Two cursors, not one: a single MultiCursor over all
-    # three axes would also draw a horizontal line across the top strip
-    # and a vertical one down the left strip, in those panels' own
-    # unrelated intensity coordinates.
-    canvas = MplCanvas()
-    canvas.show_spectrum(_make_2d(n_f1=8))
-    canvas._sync_crosshair()
-
-    assert len(canvas._crosshairs) == 2
-    vertical, horizontal = canvas._crosshairs
-    assert vertical.vertOn and not vertical.horizOn
-    assert horizontal.horizOn and not horizontal.vertOn
-    assert set(vertical.axes) == {canvas.ax, canvas._proj_axes["f2"]}
-    assert set(horizontal.axes) == {canvas.ax, canvas._proj_axes["f1"]}
-
-
-def _motion_at(canvas, ax, xfrac=0.5, yfrac=0.5):
+def _scroll_at(canvas, ax, xfrac=0.5, yfrac=0.5, button="up", inaxes=True):
     bbox = ax.get_window_extent()
-    return MouseEvent("motion_notify_event", canvas.canvas,
-                      bbox.x0 + xfrac * bbox.width, bbox.y0 + yfrac * bbox.height)
+    x, y = bbox.x0 + xfrac * bbox.width, bbox.y0 + yfrac * bbox.height
+    event = types.SimpleNamespace(button=button, step=1, name="scroll_event",
+                                  canvas=canvas.canvas, inaxes=ax if inaxes else None, x=x, y=y)
+    event.xdata, event.ydata = ax.transData.inverted().transform((x, y))
+    return event
 
 
-def test_canvas_crosshair_stands_down_during_pan_and_zoom(qapp):
+def test_canvas_scroll_over_the_slice_panel_is_a_no_op(qapp):
+    # The slice panel lives in _proj_axes alongside the F1/F2 strips,
+    # but it is not a projection: its y axis is a normalised 0..1 stack
+    # of evenly-spread traces, so an intensity zoom would silently
+    # rescale it and break the layout. It also sits exactly where the
+    # contour's right-hand "y strip" zoom region used to be empty.
     canvas = MplCanvas()
-    canvas.figure.set_size_inches(8, 6)
-    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "A")
     canvas.canvas.draw()
-    canvas._sync_crosshair()
-    cursor = canvas._crosshairs[0]
-    event = _motion_at(canvas, canvas.ax)
 
-    canvas.toolbar.mode = ""
-    cursor.onmove(event)
-    assert cursor.vlines[0].get_visible()
-
-    for mode in ("pan/zoom", "zoom rect"):
-        canvas.toolbar.mode = mode
-        cursor.onmove(event)
-        assert not cursor.vlines[0].get_visible(), mode
-    canvas.toolbar.mode = ""
+    panel = canvas._proj_axes["slices"]
+    before = (panel.get_xlim(), panel.get_ylim())
+    canvas._on_scroll(_scroll_at(canvas, panel))
+    assert (panel.get_xlim(), panel.get_ylim()) == before
 
 
-def test_canvas_crosshair_refreshes_its_blit_background_in_every_mode(qapp):
-    # Real user report: "zooming on the 2D no longer works. Something
-    # has been broken."
-    #
-    # MultiCursor.clear -- the draw_event handler that *recaptures the
-    # blit background* -- goes through ignore() as well as onmove does.
-    # Gating ignore() on the toolbar mode therefore froze that
-    # background for as long as pan or zoom was selected, and the next
-    # mouse move blitted the stale image back over the canvas: the zoom
-    # had happened, but the display reverted to the frame captured
-    # before it. Pan being the default mode on load made this the normal
-    # case rather than an edge one. Standing down belongs in onmove, not
-    # ignore.
+def test_canvas_projection_zoom_still_works_with_a_slice_panel(qapp):
+    # ...and the strips it sits beside must keep their own behaviour --
+    # the projection loop is named f1/f2 explicitly now, so nothing else
+    # appearing in _proj_axes can be mistaken for a strip.
     canvas = MplCanvas()
-    canvas.figure.set_size_inches(8, 6)
-    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "A")
     canvas.canvas.draw()
-    canvas._sync_crosshair()
-    cursor = canvas._crosshairs[0]
 
-    for mode in ("", "pan/zoom", "zoom rect"):
-        canvas.toolbar.mode = mode
-        for info in cursor._canvas_infos.values():
-            info["background"] = None
-        canvas.canvas.draw()
-        assert all(info["background"] is not None
-                   for info in cursor._canvas_infos.values()), mode
-    canvas.toolbar.mode = ""
+    for kind in ("f1", "f2"):
+        ax = canvas._proj_axes[kind]
+        before = (ax.get_xlim(), ax.get_ylim())
+        canvas._on_scroll(_scroll_at(canvas, ax))
+        assert (ax.get_xlim(), ax.get_ylim()) != before, kind
 
-
-def test_canvas_crosshair_is_rebuilt_when_the_figure_changes(qapp):
-    # This canvas clears and rebuilds its figure from a dozen methods; a
-    # cursor still holding removed Axes would draw into them. The sync
-    # is driven from motion rather than from every redraw path, so it
-    # has to notice for itself.
-    canvas = MplCanvas()
-    canvas.show_spectrum(_make_2d(n_f1=8))
-    canvas._sync_crosshair()
-    first = canvas._crosshairs[0]
-    stale_axes = canvas._crosshair_axes
-
-    canvas.show_spectrum(_make_2d(n_f1=8))          # new figure, new Axes
-    canvas._sync_crosshair()
-    assert canvas._crosshairs[0] is not first
-    assert canvas._crosshair_axes != stale_axes
-    assert all(a in canvas.figure.axes for a in canvas._crosshair_axes)
-
-    # ...and torn down entirely once there is no contour to hover over.
-    canvas.show_spectrum(_make_1d())
-    canvas._sync_crosshair()
-    assert canvas._crosshairs == []
+    # The contour's own x zoom keeps working, and the panel follows it.
+    panel = canvas._proj_axes["slices"]
+    before_x = canvas.ax.get_xlim()
+    canvas._on_scroll(_scroll_at(canvas, canvas.ax, yfrac=-0.07, inaxes=False))
+    assert canvas.ax.get_xlim() != before_x
+    assert panel.get_xlim() == canvas.ax.get_xlim()

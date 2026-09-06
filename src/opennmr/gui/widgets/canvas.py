@@ -15,7 +15,6 @@ import os
 import numpy as np
 from matplotlib import colormaps
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-from matplotlib.widgets import MultiCursor
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -28,58 +27,6 @@ from ...core.registry import find_gamma, NUC_label
 from ...core.spectrum import NMRSpectrum
 from ... import plotting
 from ...processing import slicing as processing_slicing
-
-
-class _NavigationAwareMultiCursor(MultiCursor):
-    """A :class:`~matplotlib.widgets.MultiCursor` that stands down
-    while the toolbar is in pan or zoom mode.
-
-    Explicit user request: "when the input isn't panning or zooming,
-    the cursor should be a cross with lines covering the entire contour
-    space AND the projections". Pan and zoom have their own cursors and
-    their own drag semantics, so a crosshair on top of them is noise.
-
-    ``MultiCursor`` rather than a hand-rolled pair of lines because it
-    blits: a plain redraw per mouse-move would repaint the whole
-    contour, measured at 295 ms for a real HSQC and 1.34 s for the
-    EXSY, which is nowhere near interactive.
-    """
-
-    def __init__(self, canvas, axes, *, toolbar, **kwargs):
-        self._toolbar = toolbar
-        super().__init__(canvas, axes, **kwargs)
-
-    def onmove(self, event):
-        """Stand down while pan or zoom is selected.
-
-        **Overriding this rather than ``ignore``.** ``ignore`` looks
-        like the natural hook, but ``MultiCursor.clear`` -- the
-        ``draw_event`` handler that *recaptures the blit background* --
-        goes through it too. Gating ``ignore`` on the toolbar mode
-        therefore froze that background for as long as pan or zoom was
-        selected, and the next mouse move blitted the stale image back
-        over the canvas. The zoom had happened; the display reverted to
-        the frame captured before it. Real user report: "zooming on the
-        2D no longer works. Something has been broken." Pan being the
-        default mode on load made it the normal case, not an edge one.
-        """
-        if getattr(self._toolbar, "mode", ""):
-            self._hide_lines()
-            return
-        super().onmove(event)
-
-    def _hide_lines(self) -> None:
-        """Take the crosshair off screen when handing over to pan/zoom.
-        A plain redraw rather than a blit, since the point of this whole
-        override is that the blit background cannot be trusted at the
-        moment the mode changes -- and it costs one redraw on the
-        transition only, because after that the lines are already
-        hidden."""
-        if any(line.get_visible() for line in (*self.vlines, *self.hlines)):
-            for line in (*self.vlines, *self.hlines):
-                line.set_visible(False)
-            for canvas in self._canvas_infos:
-                canvas.draw_idle()
 
 
 class _Toolbar(NavigationToolbar2QT):
@@ -383,11 +330,6 @@ class MplCanvas(QWidget):
         # zoom over a projection adjust its own intensity scale
         # independently of the main contour (see _on_scroll).
         self._proj_axes: dict = {"f1": None, "f2": None}
-        # Crosshair cursors (one vertical across the contour + its
-        # top strip, one horizontal across the contour + its left
-        # strip) -- see _sync_crosshair.
-        self._crosshairs: list = []
-        self._crosshair_axes: tuple = ()
         # Set only for a plain 1D spectrum/slice view -- lets the
         # right-click menu offer ppm/Hz/kHz switching by re-using the
         # spectrum's own stored axis arrays, no recomputation needed.
@@ -545,7 +487,21 @@ class MplCanvas(QWidget):
         if event.x is None or event.y is None:
             return
 
-        for kind, proj_ax in self._proj_axes.items():
+        # The extracted-slice panel is in _proj_axes too, but it is not
+        # a projection strip: its y axis is a normalised 0..1 stack of
+        # evenly-spread traces, so both the intensity zoom below and
+        # the generic fall-through further down would silently rescale
+        # it and break the layout. It also sits exactly where the
+        # contour's own right-hand "y strip" zoom region used to be
+        # unoccupied. A no-op for now, rather than a wrong-op.
+        if self._proj_axes.get("slices") is not None and event.inaxes is self._proj_axes["slices"]:
+            return
+
+        # Named explicitly rather than iterating _proj_axes, so anything
+        # else that dict grows later cannot be mistaken for a
+        # projection strip by this loop.
+        for kind in ("f1", "f2"):
+            proj_ax = self._proj_axes.get(kind)
             if proj_ax is not None and event.inaxes is proj_ax:
                 self._zoom_projection_intensity(proj_ax, kind, event)
                 return
@@ -858,54 +814,7 @@ class MplCanvas(QWidget):
             return
         self._pan_start = (event.x, event.y, event.inaxes.get_xlim(), event.inaxes.get_ylim(), event.inaxes)
 
-    def _sync_crosshair(self) -> None:
-        """Keep the crosshair matched to whatever is currently drawn.
-
-        Two cursors, not one: a vertical line spanning the contour and
-        the F2 (top) projection, and a horizontal line spanning the
-        contour and the F1 (left) projection. A single ``MultiCursor``
-        over all three would also draw a horizontal line across the top
-        strip and a vertical one down the left strip, in those panels'
-        own unrelated intensity coordinates.
-
-        Rebuilt lazily from :meth:`_on_motion` rather than from every
-        redraw path: this canvas clears and rebuilds its figure from a
-        dozen different methods (``show_compare``, ``show_fit``,
-        ``extract_slice``, ...), and a cursor still holding removed
-        Axes would draw into them. Checking that the Axes it was built
-        for are still the ones on the figure is one hook instead of
-        twelve, and self-heals rather than depending on every future
-        rebuild path remembering to call a teardown."""
-        wanted = tuple(
-            a for a in (self.ax, self._proj_axes.get("f2"), self._proj_axes.get("f1"))
-            if a is not None
-        )
-        live = all(a in self.figure.axes for a in self._crosshair_axes)
-        if self._crosshairs and (not live or self._crosshair_axes != wanted
-                                 or self._contour_spectrum is None):
-            for cursor in self._crosshairs:
-                try:
-                    cursor.disconnect_events()
-                except Exception:  # noqa: BLE001 -- teardown must never raise mid-drag
-                    pass
-            self._crosshairs = []
-            self._crosshair_axes = ()
-        if self._contour_spectrum is None or self._crosshairs or self.ax is None:
-            return
-
-        vertical = [a for a in (self.ax, self._proj_axes.get("f2")) if a is not None]
-        horizontal = [a for a in (self.ax, self._proj_axes.get("f1")) if a is not None]
-        style = {"color": "0.35", "linewidth": 0.8, "linestyle": "--"}
-        self._crosshairs = [
-            _NavigationAwareMultiCursor(self.canvas, vertical, toolbar=self.toolbar,
-                                        horizOn=False, vertOn=True, useblit=True, **style),
-            _NavigationAwareMultiCursor(self.canvas, horizontal, toolbar=self.toolbar,
-                                        horizOn=True, vertOn=False, useblit=True, **style),
-        ]
-        self._crosshair_axes = wanted
-
     def _on_motion(self, event) -> None:
-        self._sync_crosshair()
         if self._region_select_start is not None and event.x is not None and self._region_select_ax is not None:
             # Pixel coordinates, not event.xdata directly -- like the
             # pan drag below, this needs to keep tracking smoothly even
