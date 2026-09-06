@@ -2,6 +2,58 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## 2D-mode robustness survey: EVERY phase-sensitive 2D mode is wrong, not just Echo-Antiecho (2026-09-06)
+
+User: investigate the Cyclosporine 203 HSQC defect, and "search through the sample bruker data for any other 2D processing modes to test our robustness". Plus a design steer: "the F2/F1 phasing doesn't need to be decoupled, maybe this is the difference to the bruker data. However it does need to apply properly in the 2D contour."
+
+### The survey
+
+54 datasets with a raw `ser`. Modes present:
+
+| FnMODE (acqu2s) | MC2 (proc2s) | count |
+|---|---|---|
+| QF | QF | 25 |
+| **Echo-Antiecho** | Echo-Antiecho | **15** |
+| States-TPPI | States-TPPI | 11 |
+| undefined | QF | 3 |
+
+Echo-Antiecho is the **second-largest class**, not an edge case. No TPPI (3) or plain States (4) data exists here, so those two decode branches remain unvalidated against real data.
+
+### The finding: this is much broader than the reported HSQC
+
+Correlating `read_2d`'s genuine-2D output against `read_2d_processed` (TopSpin's own `2rr`), each dataset in its own recorded mode:
+
+| mode | n | median | worst | best |
+|---|---|---|---|---|
+| Echo-Antiecho | 1 | **-0.543** | -0.543 | -0.543 |
+| States-TPPI | 6 | **-0.022** | -0.104 | +0.000 |
+| QF | 20 | +0.067 | -0.304 | **+0.861** |
+
+**Essentially every phase-sensitive 2D reconstruction is uncorrelated with TopSpin.** The single good result (+0.861) is the magnitude-mode COSY -- and it is good *because* magnitude discards phase entirely. This is not a Cyclosporine-203 problem; it is the genuine-2D path in general.
+
+### Hypotheses tested and eliminated
+
+- **Not the recorded F1 phase.** `read_2d` never applies `proc2s`'s `PHC0`/`PHC1`, but applying Cyclosporine 203's own (`PHC0=-1.7`) moves it from -0.5433 to **-0.5464**. Worse.
+- **Not any F1 phase.** Best achievable by a freely fitted F1 `(phase0, phase1)` is **+0.5574** for the HSQC and **+0.0030** for the States-TPPI INADEQUATE. A global F1 phase cannot fix either.
+- **Not axis orientation.** F1-reversed, F2-reversed, both-reversed, half-rolled and fftshifted variants all drop the HSQC to |corr| < 0.01. The current orientation is right.
+- **Not the coupling fix on its own.** The user's steer is well-founded in principle -- nmrglue's and NMRPipe's own order is *phase F2, delete imaginary (`di`), then build F1* -- and this code instead feeds the **complex** F2 data into `decode_hypercomplex_f1`. Implemented that (`Re()` of each F2 component before forming the F1 point) and measured: HSQC -0.5433 -> **-0.4027**, States-TPPI +0.0004 -> **-0.0005**. Better for one, no change for the other; not a fix.
+- **Not phase at all, even jointly.** A full 4-parameter fit over F2 `(p0,p1)` and F1 `(p0,p1)`, tried both coupled and decoupled, tops out at **+0.4104** (coupled) and **+0.5549** (decoupled) for the HSQC.
+
+### The real diagnostic, and where the next attempt should start
+
+For Cyclosporine 203 the **magnitude** correlation is **+0.6074** while the signed correlation is **-0.5433**. Peaks are largely in the right *places* but with wrong signs -- and no global phase fixes that. Critically, even the magnitude only reaches 0.61, so the reconstruction differs beyond phase as well.
+
+That combination (right positions, wrong signs, phase-unfixable, magnitude also imperfect) points at the hypercomplex construction itself rather than at any phase step. **The F2 phase being wrong is the more likely upstream cause**: an earlier round established that F2's recorded `PHC0`/`PHC1` do not transfer to this reconstruction at all (see that entry), and for hypercomplex data F1 is built *from* the F2-phased result -- so an F2 phase error propagates into F1 in a frequency-dependent way that no single F1 phase can undo. Getting F2 right is therefore a prerequisite, not an independent task; the two are coupled exactly as the user said.
+
+**Not fixed.** Four separate hypotheses were measured and none held; shipping any of them would have been a guess. This needs a focused rebuild of the hypercomplex path validated against TopSpin at each stage (F2-only, then decode, then F1), rather than end-to-end correlation fitting.
+
+### Shipped from this round: two real robustness crashes, found by sweeping all 156 Bruker experiments
+
+- **Missing `2rr` crashed with `AttributeError: 'NoneType' object has no attribute 'ndim'`** from inside `NMRSpectrum`'s constructor, naming neither the file nor the experiment. `_load_block` returns `None` for a missing file -- correct for the *optional* `2ri`/`2ii` blocks, wrong for the real block. Real dataset: `Bruker Example Data/Cyclosporine/206/pdata/1` holds `procs`, `proc2s`, `clevels` and a thumbnail but no `2rr`. Now a clear `FileNotFoundError`. **Pre-existing, not introduced by any recent change** (confirmed against `HEAD`).
+- **An experiment with neither raw nor processed data** (`.../2010`: `acqus` and `pdata/1`, but no `fid`, `ser` or `1r` -- an aborted acquisition) failed with a bare errno-2 from `np.fromfile`. Now the same clear message.
+
+After both, **155 of 156 Bruker experiments load cleanly** through `_read_auto`; the one failure is the genuinely empty `2010`, which now says so. 937 tests passing (935 -> 937).
+
 ## Four-item round: zero-phase semantics, density cap raised, own binary reader (nmrglue warning gone) (2026-09-06)
 
 Three of four items done; the fourth (Cyclosporine 203's indirect phase) turned up a **bigger, separate defect** than the one reported -- quantified below, not fixed.

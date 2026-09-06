@@ -981,6 +981,20 @@ def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float 
     imag_path = os.path.join(path, "pdata", str(procno), "1i")
     acqus_path = os.path.join(path, "acqus")
 
+    if not os.path.exists(real_path):
+        # Matches read_2d_processed's own 2rr guard -- this is the last
+        # fallback _read_auto tries, so without a clear message here an
+        # experiment with neither raw nor processed data fails with a
+        # bare errno-2 from np.fromfile. Found by sweeping every Bruker
+        # dataset in test_data: `.../2010` has acqus and a pdata/1
+        # directory but no fid, no ser and no 1r -- an aborted or
+        # never-processed acquisition.
+        raise FileNotFoundError(
+            f"No processed 1r data at {real_path}, and no raw fid/ser either -- this "
+            f"experiment has parameter files but no acquired or processed spectrum "
+            f"(an aborted or never-processed acquisition)."
+        )
+
     if heteronuclear_2d_slice:
         if slice_dimension not in (2, 3):
             raise ValueError("slice_dimension must be 2 or 3")
@@ -1137,6 +1151,23 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
 
     ns = float(acqus.get("NS", 1.0))
     spectrum = _load_block(real_path)
+    if spectrum is None:
+        # `_load_block` returns None for a missing file, which is the
+        # right answer for the *optional* imaginary blocks (2ri/2ii --
+        # a magnitude-mode dataset legitimately has none) but not for
+        # the real block this function exists to read. Without this,
+        # a `pdata/N` directory holding only parameter files produced
+        # `AttributeError: 'NoneType' object has no attribute 'ndim'`
+        # from deep inside NMRSpectrum's own constructor, with nothing
+        # naming the file or the experiment. Real, pre-existing, and
+        # found by sweeping every Bruker dataset in test_data:
+        # `Bruker Example Data/Cyclosporine/206/pdata/1` has procs,
+        # proc2s, clevels and a thumbnail but no 2rr at all.
+        raise FileNotFoundError(
+            f"No processed 2rr data at {real_path} -- this experiment's pdata/{procno} "
+            f"directory has parameter files but no processed spectrum. Process it in "
+            f"TopSpin first, pick a different procno, or load the raw ser instead."
+        )
     spectrum_imag = _load_block(imag_path)
     if spectrum is not None:
         spectrum = spectrum / ns  # match read_1d_processed's convention: data is always per-scan

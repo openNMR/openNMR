@@ -416,3 +416,45 @@ def test_read_bruker_binary_raises_when_the_file_is_too_short(tmp_path):
     path.write_bytes(values.tobytes())
     with pytest.raises(ValueError, match="fewer than"):
         bruker._read_bruker_binary(str(path), {"acqus": {"BYTORDA": 0, "DTYPA": 0}}, (10, 10))
+
+
+def test_read_2d_processed_missing_2rr_raises_a_clear_error(tmp_path):
+    # Real, pre-existing crash found by sweeping every Bruker dataset in
+    # test_data: `Cyclosporine/206/pdata/1` holds procs, proc2s, clevels
+    # and a thumbnail but no 2rr. _load_block returns None for a missing
+    # file (correct for the optional 2ri/2ii blocks) and that None used
+    # to reach NMRSpectrum's constructor, failing with
+    # "AttributeError: 'NoneType' object has no attribute 'ndim'" --
+    # naming neither the file nor the experiment.
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    for name, params in (
+        ("procs", {"SW_p": 8000.0, "SI": 8, "SF": 400.13, "XDIM": 1}),
+        ("proc2s", {"SW_p": 2000.0, "SI": 4, "SF": 400.13, "XDIM": 1}),
+    ):
+        with open(pdata / name, "w") as f:
+            f.write("\n".join(f"##${k}= {v}" for k, v in params.items()) + "\n")
+    for name in ("acqus", "acqu2s"):
+        with open(expt / name, "w") as f:
+            f.write("##$NUC1= <1H>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    with pytest.raises(FileNotFoundError, match="2rr"):
+        bruker.read_2d_processed(str(expt))
+
+
+def test_read_1d_processed_missing_1r_raises_a_clear_error(tmp_path):
+    # The same guard for the last fallback _read_auto tries -- an
+    # experiment with neither raw nor processed data (test_data's
+    # `.../2010` is a real example) otherwise failed with a bare errno-2
+    # from np.fromfile.
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    with open(pdata / "procs", "w") as f:
+        f.write("##$SW_p= 8000.0\n##$SI= 8\n##$SF= 400.13\n")
+    with open(expt / "acqus", "w") as f:
+        f.write("##$NUC1= <1H>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    with pytest.raises(FileNotFoundError, match="1r"):
+        bruker.read_1d_processed(str(expt))
