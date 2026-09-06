@@ -2,7 +2,41 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
-## Normalise vendor conventions at read time (architecture -- user request, NOT yet implemented)
+## Vendor conventions normalised at read time: `processing/` is now vendor-free (2026-09-06)
+
+User: "many of the phase conventions etc should be fixed if the GUI reformats any read data into a common file type so it is then agnostic for vendor". Done for the two leaks that existed. Output is **identical on all five real datasets**, so this is purely structural.
+
+### 1. The two phase models were provably redundant -- now one
+
+Measured, not assumed: for the descending ppm axis every reader produces,
+
+    apply_recorded_phase(s, PHC0, PHC1)  ==  apply_phase(s, ppm, -PHC0, +PHC1, pivot_frac=1.0)
+
+to **5e-16**. `pivot_frac=1.0` puts the pivot at the array's first point, which is exactly what an index ramp starting at `PHC0` means; the `-PHC0` accounts for `apply_phase`'s `exp(-i*phi)` against TopSpin's `exp(+i*phi)`.
+
+So `apply_recorded_phase` is no longer a second implementation of phasing -- it is now a thin, named *conversion* onto the single model, verified identical to the old ramp across 1D/2D/3D shapes and both axes. The conversion stays behind a name because the sign and pivot flips are measured rather than obvious, and belong in exactly one place.
+
+### 2. `conjugate_f1` removed -- and it was not what it looked like
+
+The flag looked like a leaked artifact of Bruker's up-front `np.conj(data)`. It is not. Testing a **fully conjugate-free** pipeline (plain F2 reversal after the FFT, no conjugate anywhere, recorded phase negated to absorb the difference) reproduces today's results exactly -- QF **+0.9999**, States-TPPI **+0.7075** -- and **still requires the flag**. So Bruker's F1 quadrature sense genuinely differs from X-Pulse's; it is a real vendor convention, not an artifact.
+
+That makes the right fix a *data* normalisation rather than a flag: the reader now negates the sine-modulated rows before decoding, which is exactly equivalent (`a - 1j*b == a + 1j*(-b)`), and `processing.ft.decode_hypercomplex_f1` is back to `(data, fn_mode)` with **no vendor knowledge at all**. A test asserts its signature stays that way.
+
+Also established along the way, and worth not re-deriving: `FFT(conj(x))` equals `conj(reverse(FFT(x)))` **only with a one-sample roll** -- exact to 1.6e-16 with it, wrong by O(1) without. That is the modular-wrap term this project had hit before.
+
+### A real bug the test suite did not catch
+
+The first version normalised for `fn_mode in (4, 5, 6)`. Echo-Antiecho (6) uses a different recombination that this sign is not part of, so it flipped real Cyclosporine/203 data from **+0.395 to -0.380** -- while **all 948 tests still passed**. Found only by the real-data check that runs alongside the suite. Now scoped to `(4, 5)`, with a regression test covering the distinction.
+
+### Verification
+
+All five real datasets match their pre-refactor values exactly (PFG +0.9999, T2 +0.9972, EXSY +0.7021, babaDQ +0.7049, EA 203 +0.3951), the recompute-vs-load acceptance test is still **0.000000** across 1D, pseudo-2D, both hypercomplex modes and magnitude mode, and 949 tests pass (948 -> 949).
+
+### Not normalised (deliberately, for now)
+
+The **frequency-direction** convention -- Bruker's global `np.conj(data)` versus a post-FFT reversal -- is left as-is. Both were measured as exactly equivalent for QF and the conjugate-free variant is marginally *better* for States-TPPI (+0.7075 vs +0.7021), but switching it changes what "zero phase" means for every existing spectrum and interacts with the recorded phase, so it wants its own pass rather than being bundled here.
+
+## Normalise vendor conventions at read time (original plan, now superseded above)
 
 User: "I think many of the phase conventions etc should be fixed if the GUI reformats any read data into a common file type so it is then agnostic for vendor, like we discussed."
 

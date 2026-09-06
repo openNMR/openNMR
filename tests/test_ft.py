@@ -692,24 +692,32 @@ def test_available_cpus_prefers_the_process_allowance_over_machine_cores(monkeyp
     assert ft._available_cpus() == 64
 
 
-def test_decode_hypercomplex_f1_conjugate_flag_flips_the_sine_component():
-    # conjugate_f1 selects the F1 quadrature sense. This is vendor
-    # convention, not preference: Bruker needs it (it conjugates the
-    # whole raw FID up front), X-Pulse does not.
+def test_decode_hypercomplex_f1_is_vendor_agnostic():
+    # This module is deliberately vendor-free: the F1 quadrature sense
+    # differs between Bruker and X-Pulse, and that difference is
+    # normalised by the *reader* (io.bruker negates the sine-modulated
+    # rows), not by a flag here. A `conjugate_f1` parameter existed for
+    # one release and was removed for exactly that reason.
+    import inspect
+
+    params = inspect.signature(ft.decode_hypercomplex_f1).parameters
+    assert set(params) == {"data", "fn_mode"}
+
     rows = np.array([[1 + 0j, 2 + 0j], [3 + 0j, 4 + 0j]])
-    default = ft.decode_hypercomplex_f1(rows, fn_mode=4)
-    conjugated = ft.decode_hypercomplex_f1(rows, fn_mode=4, conjugate_f1=True)
-    np.testing.assert_allclose(default, rows[0::2] + 1j * rows[1::2])
-    np.testing.assert_allclose(conjugated, rows[0::2] - 1j * rows[1::2])
-    # Default must stay the historical behaviour, so X-Pulse is untouched.
-    np.testing.assert_allclose(ft.decode_hypercomplex_f1(rows, 4), default)
+    np.testing.assert_allclose(
+        ft.decode_hypercomplex_f1(rows, fn_mode=4), rows[0::2] + 1j * rows[1::2]
+    )
 
 
-def test_decode_hypercomplex_f1_conjugate_flag_composes_with_tppi_sign():
-    # States-TPPI's own (-1)**k alternation applies on top, not instead:
-    # the measured Bruker form is (-1)**k * (a - 1j*b).
+def test_negating_sine_rows_matches_the_opposite_quadrature_sense():
+    # The identity the reader-side normalisation relies on:
+    # a - 1j*b == a + 1j*(-b). Pinned so the two can never drift.
     rows = np.arange(8, dtype=complex).reshape(4, 2)
-    got = ft.decode_hypercomplex_f1(rows, fn_mode=5, conjugate_f1=True)
     a, b = rows[0::2], rows[1::2]
+
+    normalised = rows.copy()
+    normalised[1::2] *= -1
+    got = ft.decode_hypercomplex_f1(normalised, fn_mode=5)
+
     expected = (a - 1j * b) * np.array([1.0, -1.0])[:, np.newaxis]
     np.testing.assert_allclose(got, expected)

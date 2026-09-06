@@ -719,7 +719,7 @@ def linear_predict(fid: np.ndarray, order: int = 20, n_predict: int = 8,
 # Hypercomplex indirect-dimension (F1) decoding
 # ============================================================
 
-def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int, conjugate_f1: bool = False) -> np.ndarray:
+def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int) -> np.ndarray:
     """Combine adjacent raw row-pairs along axis 0 into genuine complex
     F1 (indirect-dimension) points, per Bruker's ``FnMODE`` acquisition
     convention -- must run *before* the F1 FFT, on data that's already
@@ -742,31 +742,23 @@ def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int, conjugate_f1: bool = 
     at all) aren't implemented -- not requested, and no real data using
     them exists in this project to validate against.
 
-    ``conjugate_f1`` : use ``first - 1j*second`` instead of
-    ``first + 1j*second``, i.e. the opposite F1 quadrature sense. This
-    is **vendor convention, not a preference**, and it is why the sign
-    is a parameter rather than a fixed choice: Bruker needs it,
-    X-Pulse does not.
+    **Vendor conventions are normalised before this point, not here.**
+    This function had a ``conjugate_f1`` flag for one release, because
+    Bruker's F1 quadrature sense is the opposite of X-Pulse's. That was
+    a vendor flag inside a deliberately vendor-agnostic module, so it
+    has been moved into the Bruker reader, which now negates the
+    sine-modulated rows itself -- exactly equivalent
+    (``a - 1j*b == a + 1j*(-b)``) and leaves this module free of vendor
+    knowledge.
 
-    Identified against ground truth rather than guessed. Solving
-    ``interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)`` against
-    TopSpin's *own* F1 interferogram -- recovered from its stored
-    hypercomplex blocks with the recorded F1 phase and window undone,
-    then inverse-FFT'd along F1 -- fits with residual **0.0015-0.0022**
-    on high-SNR real data, and the coefficients come out ``+a`` at
-    k=0, ``-a + 1j*b`` at k=1, ``+a - 1j*b`` at k=2, i.e.
-    ``(-1)**k * (a - 1j*b)``. (k=0's own ``b`` coefficient is
-    unidentifiable and reads ~0, because the sine-modulated component
-    is itself ~0 at t1=0 -- worth knowing before reading too much into
-    the first increment.)
-
-    Bruker needs it because :mod:`opennmr.io.bruker` conjugates the
-    whole raw FID up front (see its own ``_CONJUGATE_QUADRATURE_NOTE``),
-    which flips this sense; X-Pulse does not conjugate, and its own
-    end-to-end test recovering a *known* F1 frequency fails if this is
-    forced on -- which is exactly how the vendor split was found, by
-    the shared function's own cross-vendor tests rather than by
-    inspection.
+    The convention was identified against ground truth, not guessed:
+    solving ``interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)``
+    against TopSpin's own F1 interferogram fits with residual
+    0.0015-0.0022 on high-SNR real data, giving ``(-1)**k * (a - 1j*b)``
+    for Bruker. (At k=0 the ``b`` coefficient is unidentifiable and
+    reads ~0, because the sine-modulated component is itself ~0 at
+    t1=0 -- worth knowing before reading much into the first
+    increment.)
 
     **States (4)**: row ``2k`` is the "cosine"-modulated (real) row,
     row ``2k+1`` the "sine"-modulated (imaginary) row, for the *same*
@@ -837,7 +829,7 @@ def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int, conjugate_f1: bool = 
     paired = data[: 2 * n_pairs]
     first, second = paired[0::2], paired[1::2]
     if fn_mode in (4, 5):
-        decoded = first + (-1j if conjugate_f1 else 1j) * second
+        decoded = first + 1j * second
         if fn_mode == 5:
             sign = np.where(np.arange(n_pairs) % 2 == 0, 1.0, -1.0)
             decoded = decoded * sign[:, np.newaxis]

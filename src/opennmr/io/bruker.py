@@ -287,20 +287,37 @@ def apply_recorded_phase(spectrum: np.ndarray, phc0: float, phc1: float, axis: i
     ``0`` for F1 -- the ramp always runs across the *transformed*
     dimension's own points.
 
-    Note the deliberate difference from
-    :func:`opennmr.processing.ft.apply_phase`, which stays the right
-    tool for a *user's* interactive phase: that one is pivot-based, so
-    dragging first-order phase rotates about a chosen point rather than
-    about index 0. This function reproduces a file's recorded state;
-    that one expresses a user's live intent.
+    **Not a second phase model.** This is TopSpin's own parameters
+    *converted into* the one model this project uses --
+    :func:`opennmr.processing.ft.apply_phase` -- rather than an
+    independent implementation of phasing. The two are exactly
+    equivalent (verified to 5e-16, not approximately):
+
+        ``apply_recorded_phase(s, PHC0, PHC1)``
+          ==  ``apply_phase(s, ppm, -PHC0, +PHC1, pivot_frac=1.0)``
+
+    for the descending ppm axis every reader in this project produces.
+    ``pivot_frac=1.0`` puts the pivot at the *first* point of the array
+    -- which is what an index ramp starting at ``PHC0`` means -- and
+    the ``-PHC0`` accounts for ``apply_phase``'s own ``exp(-i*phi)``
+    against this convention's ``exp(+i*phi)``.
+
+    Keeping the conversion behind a named function (rather than
+    scattering the sign and pivot flips across call sites) is the point:
+    the mapping is measured, not obvious, and belongs in exactly one
+    place.
     """
     n = spectrum.shape[axis]
     if n < 2 or (not phc0 and not phc1):
         return spectrum
-    ramp = np.exp(1j * np.deg2rad(phc0 + phc1 * np.arange(n) / (n - 1)))
-    shape = [1] * spectrum.ndim
-    shape[axis] = n
-    return spectrum * ramp.reshape(shape)
+    moved = np.moveaxis(spectrum, axis, -1)
+    # A synthetic descending axis: apply_phase normalises over the
+    # axis's own *range*, so only its direction and linearity matter,
+    # not its units -- which keeps this correct for an F1 axis carrying
+    # slice indices as readily as one carrying ppm.
+    axis_values = np.linspace(1.0, 0.0, n)
+    phased = processing_ft.apply_phase(moved, axis_values, -phc0, phc1, pivot_frac=1.0)
+    return np.moveaxis(phased, -1, axis)
 
 
 #: ``metadata.raw`` keys holding the phase TopSpin itself recorded, per
@@ -972,11 +989,20 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         # zero_fill_f1 override, but the fallback -- for when SI isn't
         # recorded at all -- must fall back to the decoded row count,
         # not the raw pre-decode one.
-# conjugate_f1: Bruker conjugates the whole raw FID up front
-        # (_CONJUGATE_QUADRATURE_NOTE), which flips F1's quadrature
-        # sense -- see decode_hypercomplex_f1's own docstring for how
-        # this was measured against TopSpin's own interferogram.
-        spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode, conjugate_f1=True)
+        # Normalise Bruker's own F1 quadrature sense to the canonical
+        # one before decoding, rather than teaching the shared decoder
+        # about vendors: negating the sine-modulated rows is exactly
+        # `a - 1j*b` (see decode_hypercomplex_f1's own docstring for how
+        # that form was measured against TopSpin).
+        # States / States-TPPI only (4, 5). Echo-Antiecho (6) uses a
+        # different recombination that this sign is not part of --
+        # applying it there flipped real EA data from +0.395 to
+        # -0.380, caught by the real-data check rather than the
+        # suite, which passed regardless.
+        if fn_mode in (4, 5):
+            spectrum = spectrum.copy()
+            spectrum[1::2] *= -1
+        spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode)
         # Transpose so F1 is the last axis for the same whole-array
         # calls used for F2 above (window/zero_fill/fft_spectrum all
         # operate on shape[-1]), then transpose back -- avoids

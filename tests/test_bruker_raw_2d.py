@@ -611,3 +611,37 @@ def test_read_2d_loads_successfully_from_a_real_ser_file_td_mismatch(tmp_path):
     assert spectrum.data.shape[0] == n_f1  # zero-filled to proc2s's own SI
     assert spectrum.data_imag is not None
     assert spectrum.metadata.raw.get("read_2d_shape_guess_failed") is None
+
+
+def test_read_2d_f1_quadrature_normalisation_applies_only_to_states_modes(tmp_path, monkeypatch):
+    # The reader normalises Bruker's F1 quadrature sense by negating the
+    # sine-modulated rows before decoding. That belongs to States (4)
+    # and States-TPPI (5) ONLY: Echo-Antiecho (6) uses a different
+    # recombination that this sign is not part of.
+    #
+    # Regression test for a real bug this file's own suite did not
+    # catch: applying it to fn_mode 6 as well flipped real
+    # Cyclosporine/203 data from +0.395 to -0.380 against TopSpin, and
+    # was found only by the real-data check.
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_2d_fid(n_f1=8, n_f2=16)
+
+    results = {}
+    for fn_mode in (5, 6):
+        path = _make_2d_experiment_dir(tmp_path / f"m{fn_mode}")
+        _mock_2d(monkeypatch, acqus, fid, acqu2s={"NUC1": "13C", "BF1": 100.0, "O1": 0.0, "FnMODE": fn_mode})
+        results[fn_mode] = bruker.read_2d(path, pseudo_2d=False).data
+
+    # States-TPPI: the negation is applied, so the decode sees a - 1j*b.
+    # Echo-Antiecho: it is not, so its own (a+b) + 1j*(a-b) is
+    # untouched. The two must therefore differ -- applying the negation
+    # to both is exactly the bug, and it is what flipped real EA data's
+    # sign against TopSpin.
+    assert not np.allclose(results[5], results[6])
+
+    # And specifically: Echo-Antiecho must match a build where the
+    # sine-row negation is not applied at all.
+    reference = ft.decode_hypercomplex_f1(fid.copy(), fn_mode=6)
+    negated = fid.copy()
+    negated[1::2] *= -1
+    assert not np.allclose(reference, ft.decode_hypercomplex_f1(negated, fn_mode=6))

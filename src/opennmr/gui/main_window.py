@@ -3417,10 +3417,13 @@ class MainWindow(QMainWindow):
             # changes live -- exactly the "two pipelines quietly
             # diverge" bug this whole round's own architecture change
             # was about closing.
-            # conjugate_f1=True to match io.bruker.read_2d -- this path
-            # rebuilds the same Bruker data, so it needs the same
-            # quadrature convention.
-            data = processing_ft.decode_hypercomplex_f1(data, fn_mode, conjugate_f1=True)
+            # Same F1-quadrature normalisation io.bruker.read_2d does
+            # before decoding -- this path rebuilds the same Bruker data,
+            # so it must normalise it the same way.
+            if fn_mode in (4, 5):
+                data = data.copy()
+                data[1::2] *= -1
+            data = processing_ft.decode_hypercomplex_f1(data, fn_mode)
             if spectrum.metadata.vendor == "bruker":
                 # Real bug, found and fixed: this method never applied
                 # any window to F1 at all -- read_2d always does
