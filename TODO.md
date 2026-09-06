@@ -2,6 +2,33 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## The crosshair froze the canvas: standing down belongs in onmove, not ignore (2026-09-06)
+
+User: "zooming on the 2D no longer works. Something has been broken." Regression from the crosshair added an hour earlier, in the same session.
+
+### Not what it looked like
+
+Zooming was working. Every mechanism checked out headless -- scroll zoom on the x-strip and y-strip, contour-level scroll, and a full toolbar rubber-band press/drag/release all changed the limits correctly, with and without a slice panel present. The limits were right; the *picture* was not.
+
+### The mechanism
+
+`_NavigationAwareMultiCursor` stood down in pan/zoom by overriding `ignore()`. That looks like the natural hook -- it is the one `Widget.active` itself goes through -- but `MultiCursor` routes **two** handlers through it:
+
+- `onmove` (motion) -- the one that should stand down, and
+- `clear` (**draw_event**) -- which is what *recaptures the blit background*.
+
+So while pan or zoom was selected, the background was frozen at whatever frame was current when the mode was entered. The next mouse move blitted that stale image straight back over the canvas. The zoom had happened; the display reverted.
+
+**Pan is the default mode on load** (an earlier request in this project), so this was the normal case, not an edge one -- the background was stale from the moment a spectrum appeared.
+
+Fixed by overriding `onmove` instead, leaving `clear` alone. Standing down also hides the lines with a plain `draw_idle` rather than a blit -- the whole point of the override is that the blit background cannot be trusted at the moment the mode changes -- and costs one redraw on the transition only, since after that the lines are already hidden.
+
+### Worth keeping
+
+Blitting widgets have two entry points, and a gate on the shared predicate catches both. When suppressing a blitting widget, suppress the *event handler*, never the background capture. And a "nothing responds" report is not always a broken handler: here every handler was fine and only the frame being painted was wrong, which is invisible to a headless test that asserts on state. The regression test asserts on the cached background itself for that reason.
+
+2 tests (one rewritten, one new), both verified to fail with the `ignore()` gate restored. 1011 passing (1010 -> 1011).
+
 ## Slice-panel refinements and a blitted crosshair (2026-09-06)
 
 Six follow-ups on the slice panel plus a cursor request.

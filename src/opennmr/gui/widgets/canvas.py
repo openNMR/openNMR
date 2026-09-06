@@ -49,8 +49,37 @@ class _NavigationAwareMultiCursor(MultiCursor):
         self._toolbar = toolbar
         super().__init__(canvas, axes, **kwargs)
 
-    def ignore(self, event):
-        return super().ignore(event) or bool(getattr(self._toolbar, "mode", ""))
+    def onmove(self, event):
+        """Stand down while pan or zoom is selected.
+
+        **Overriding this rather than ``ignore``.** ``ignore`` looks
+        like the natural hook, but ``MultiCursor.clear`` -- the
+        ``draw_event`` handler that *recaptures the blit background* --
+        goes through it too. Gating ``ignore`` on the toolbar mode
+        therefore froze that background for as long as pan or zoom was
+        selected, and the next mouse move blitted the stale image back
+        over the canvas. The zoom had happened; the display reverted to
+        the frame captured before it. Real user report: "zooming on the
+        2D no longer works. Something has been broken." Pan being the
+        default mode on load made it the normal case, not an edge one.
+        """
+        if getattr(self._toolbar, "mode", ""):
+            self._hide_lines()
+            return
+        super().onmove(event)
+
+    def _hide_lines(self) -> None:
+        """Take the crosshair off screen when handing over to pan/zoom.
+        A plain redraw rather than a blit, since the point of this whole
+        override is that the blit background cannot be trusted at the
+        moment the mode changes -- and it costs one redraw on the
+        transition only, because after that the lines are already
+        hidden."""
+        if any(line.get_visible() for line in (*self.vlines, *self.hlines)):
+            for line in (*self.vlines, *self.hlines):
+                line.set_visible(False)
+            for canvas in self._canvas_infos:
+                canvas.draw_idle()
 
 
 class _Toolbar(NavigationToolbar2QT):

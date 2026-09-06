@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import types
 
 import numpy as np
+from matplotlib.backend_bases import MouseEvent
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QSpinBox
@@ -1757,19 +1758,59 @@ def test_canvas_crosshair_spans_the_contour_and_both_projections(qapp):
     assert set(horizontal.axes) == {canvas.ax, canvas._proj_axes["f1"]}
 
 
+def _motion_at(canvas, ax, xfrac=0.5, yfrac=0.5):
+    bbox = ax.get_window_extent()
+    return MouseEvent("motion_notify_event", canvas.canvas,
+                      bbox.x0 + xfrac * bbox.width, bbox.y0 + yfrac * bbox.height)
+
+
 def test_canvas_crosshair_stands_down_during_pan_and_zoom(qapp):
     canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
     canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.canvas.draw()
+    canvas._sync_crosshair()
+    cursor = canvas._crosshairs[0]
+    event = _motion_at(canvas, canvas.ax)
+
+    canvas.toolbar.mode = ""
+    cursor.onmove(event)
+    assert cursor.vlines[0].get_visible()
+
+    for mode in ("pan/zoom", "zoom rect"):
+        canvas.toolbar.mode = mode
+        cursor.onmove(event)
+        assert not cursor.vlines[0].get_visible(), mode
+    canvas.toolbar.mode = ""
+
+
+def test_canvas_crosshair_refreshes_its_blit_background_in_every_mode(qapp):
+    # Real user report: "zooming on the 2D no longer works. Something
+    # has been broken."
+    #
+    # MultiCursor.clear -- the draw_event handler that *recaptures the
+    # blit background* -- goes through ignore() as well as onmove does.
+    # Gating ignore() on the toolbar mode therefore froze that
+    # background for as long as pan or zoom was selected, and the next
+    # mouse move blitted the stale image back over the canvas: the zoom
+    # had happened, but the display reverted to the frame captured
+    # before it. Pan being the default mode on load made this the normal
+    # case rather than an edge one. Standing down belongs in onmove, not
+    # ignore.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.canvas.draw()
     canvas._sync_crosshair()
     cursor = canvas._crosshairs[0]
 
-    event = types.SimpleNamespace(inaxes=canvas.ax, x=10, y=10,
-                                  xdata=1.0, ydata=1.0, canvas=canvas.canvas)
-    canvas.toolbar.mode = ""
-    assert not cursor.ignore(event)
-    for mode in ("pan/zoom", "zoom rect"):
+    for mode in ("", "pan/zoom", "zoom rect"):
         canvas.toolbar.mode = mode
-        assert cursor.ignore(event), mode
+        for info in cursor._canvas_infos.values():
+            info["background"] = None
+        canvas.canvas.draw()
+        assert all(info["background"] is not None
+                   for info in cursor._canvas_infos.values()), mode
     canvas.toolbar.mode = ""
 
 
