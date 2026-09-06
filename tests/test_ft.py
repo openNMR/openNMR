@@ -690,3 +690,26 @@ def test_available_cpus_prefers_the_process_allowance_over_machine_cores(monkeyp
     # Neither available -> os.cpu_count() is the last resort.
     monkeypatch.delattr(os, "sched_getaffinity", raising=False)
     assert ft._available_cpus() == 64
+
+
+def test_decode_hypercomplex_f1_conjugate_flag_flips_the_sine_component():
+    # conjugate_f1 selects the F1 quadrature sense. This is vendor
+    # convention, not preference: Bruker needs it (it conjugates the
+    # whole raw FID up front), X-Pulse does not.
+    rows = np.array([[1 + 0j, 2 + 0j], [3 + 0j, 4 + 0j]])
+    default = ft.decode_hypercomplex_f1(rows, fn_mode=4)
+    conjugated = ft.decode_hypercomplex_f1(rows, fn_mode=4, conjugate_f1=True)
+    np.testing.assert_allclose(default, rows[0::2] + 1j * rows[1::2])
+    np.testing.assert_allclose(conjugated, rows[0::2] - 1j * rows[1::2])
+    # Default must stay the historical behaviour, so X-Pulse is untouched.
+    np.testing.assert_allclose(ft.decode_hypercomplex_f1(rows, 4), default)
+
+
+def test_decode_hypercomplex_f1_conjugate_flag_composes_with_tppi_sign():
+    # States-TPPI's own (-1)**k alternation applies on top, not instead:
+    # the measured Bruker form is (-1)**k * (a - 1j*b).
+    rows = np.arange(8, dtype=complex).reshape(4, 2)
+    got = ft.decode_hypercomplex_f1(rows, fn_mode=5, conjugate_f1=True)
+    a, b = rows[0::2], rows[1::2]
+    expected = (a - 1j * b) * np.array([1.0, -1.0])[:, np.newaxis]
+    np.testing.assert_allclose(got, expected)

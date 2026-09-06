@@ -972,7 +972,11 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         # zero_fill_f1 override, but the fallback -- for when SI isn't
         # recorded at all -- must fall back to the decoded row count,
         # not the raw pre-decode one.
-        spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode)
+# conjugate_f1: Bruker conjugates the whole raw FID up front
+        # (_CONJUGATE_QUADRATURE_NOTE), which flips F1's quadrature
+        # sense -- see decode_hypercomplex_f1's own docstring for how
+        # this was measured against TopSpin's own interferogram.
+        spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode, conjugate_f1=True)
         # Transpose so F1 is the last axis for the same whole-array
         # calls used for F2 above (window/zero_fill/fft_spectrum all
         # operate on shape[-1]), then transpose back -- avoids

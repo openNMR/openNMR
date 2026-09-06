@@ -2,7 +2,43 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
-## Rebuild stage 2 (in progress): F1 isolated against ground truth; EA and States-TPPI fail differently (2026-09-06)
+## Stage 2, part 1: States-TPPI F1 quadrature sign identified and fixed (+0.03 -> +0.70) (2026-09-06)
+
+The decode's States/States-TPPI recombination had F1's quadrature sense backwards for Bruker. Found by solving for it against ground truth, not by guessing.
+
+### Two corrections to the previous entry's conclusions
+
+**1. "F2 is wrong for States-TPPI" was wrong -- that was SNR, not a bug.** The dataset used (`exam_CMCse_3/19`) is a natural-abundance INADEQUATE with a **2rr peak SNR of 38.5**, against 13212 for the Cyclosporine HSQC. Ranking every hypercomplex dataset with all four blocks by SNR found far better States-TPPI targets -- the user's own EXSY data at **SNR 1194-2083**. On those, our raw row `2k` matches TopSpin's interferogram row `k` at **+0.999**: F2 was fine all along. **Lesson: check the validation target's own SNR before concluding the code is wrong -- a weak experiment cannot distinguish a correct pipeline from a broken one.**
+
+**2. `TDeff` is not the cause either.** Tested (truncating before windowing, which is what TopSpin does): +0.5272 -> +0.5238 for the INADEQUATE, and 0.997203 -> 0.997225 for `bruker_T2/11`. No meaningful effect; not implemented.
+
+### The actual bug, identified by least squares
+
+Solving `interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)` against TopSpin's recovered F1 interferogram on high-SNR EXSY data fits with **residual 0.0015-0.0022**, and the coefficients come out unambiguous:
+
+| k | coefficients | meaning |
+|---|---|---|
+| 0 | `+a` | (b unidentifiable -- the sine component is ~0 at t1=0) |
+| 1 | `-a + 1j*b` | `-(a - 1j*b)` |
+| 2 | `+a - 1j*b` | `+(a - 1j*b)` |
+
+i.e. **`(-1)**k * (a - 1j*b)`**, where the code computed `(-1)**k * (a + 1j*b)`. The sine-modulated component's sign was inverted.
+
+**Measured end-to-end against TopSpin on three independent datasets**: EXSY 2019 **+0.034 -> +0.702**, EXSY 2011 **+0.121 -> +0.688**, babaDQ 2016 **+0.142 -> +0.705**.
+
+### It is a vendor convention, and the shared tests proved it
+
+Flipping the sign outright broke `test_read_xpulse_ntuples_2d_recovers_known_f1_frequency` -- X-Pulse shares `decode_hypercomplex_f1`, and its own end-to-end test recovers a *known* F1 frequency, so that failure is authoritative rather than incidental. Bruker needs the opposite sense because `io.bruker` conjugates the whole raw FID up front (`_CONJUGATE_QUADRATURE_NOTE`); X-Pulse does not conjugate.
+
+So it is exposed as `decode_hypercomplex_f1(..., conjugate_f1=False)`, **defaulting to the historical behaviour** so X-Pulse is untouched, with Bruker's two call sites (the reader and the GUI's live rebuild, kept in step as always) passing `True`. **Lesson: a shared function's cross-vendor tests are the cheapest possible check that a "fix" is not really a vendor convention in disguise.**
+
+### Still open
+
+**This is a real improvement, not a solution**: +0.70 is not +0.99. Something further remains in the F1 chain (window, zero-fill, or the F1 recorded-phase model). Echo-Antiecho is untouched at **+0.395** -- its own least-squares fit (residual 0.0022) reduced to `interf[k] ~ -1j*b`, the antiecho row alone, for every `k >= 1`, which matches no textbook Rance-Kay form and is still unexplained. Do not implement it without understanding it.
+
+948 tests passing (946 -> 948).
+
+## Rebuild stage 2 (investigation): F1 isolated against ground truth (2026-09-06)
 
 Stage 2 started. **No code changed** -- this round built the diagnostic that isolates F1 and used it to narrow the problem substantially. Two findings are solid enough to build on; the fix itself is not yet identified.
 
