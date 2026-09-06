@@ -184,13 +184,14 @@ def test_cap_contour_points_leaves_normal_sized_requests_alone():
     assert twod._cap_contour_points(*at_cap) == at_cap
 
 
-def test_max_contour_points_is_at_least_half_the_exsy_benchmark():
-    # Explicit user instruction: "set a max value of data density that
-    # is at least half of those EXSYs". The pseudo-2D EXSY benchmark is
-    # 1002 x 65536; pinned here so a later change can't quietly walk
-    # the ceiling back below what was asked for.
-    exsy_points = 1002 * 65536
-    assert twod._MAX_CONTOUR_POINTS >= exsy_points // 2
+def test_max_contour_points_is_a_quarter_of_the_exsy_benchmark():
+    # Explicit user instruction: "restrict any dataset to 0.25x the
+    # EXSY's number of points". Pinned against the benchmark's own point
+    # count rather than a literal, so the relationship survives any
+    # later edit -- this ceiling has already been moved once (briefly to
+    # half, on an earlier reading) and corrected back.
+    assert twod._EXSY_BENCHMARK_POINTS == 1002 * 65536
+    assert twod._MAX_CONTOUR_POINTS == twod._EXSY_BENCHMARK_POINTS // 4
 
 
 def test_cap_contour_points_never_returns_more_than_the_ceiling():

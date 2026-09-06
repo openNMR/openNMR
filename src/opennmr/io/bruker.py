@@ -377,6 +377,69 @@ def apply_dimension_phase(data: np.ndarray, ppm: np.ndarray, recorded: tuple[flo
     return data
 
 
+#: Bruker ``ME_mod`` codes for *forward* linear prediction -- extending
+#: the interferogram past its acquired end. The backward modes (3/LPbr,
+#: 4/LPbc) reconstruct points *before* the start instead, which is a
+#: different operation with different semantics; no dataset here uses
+#: one, so they are deliberately not implemented rather than guessed at.
+_ME_MOD_FORWARD_LP = (1, 2)
+
+
+def apply_recorded_f1_linear_prediction(interferogram: np.ndarray, proc2s: dict,
+                                         enabled: bool | None = None) -> np.ndarray:
+    """Extend an F1 interferogram by linear prediction, matching what
+    TopSpin recorded in ``proc2s`` (``ME_mod``/``NCOEF``/``LPBIN``).
+
+    Real user report -- Echo-Antiecho contours looking "slanted" --
+    traced to this being absent: **27 of the 54 2D datasets here record
+    F1 linear prediction and this project applied none**, leaving F1
+    lines far broader than TopSpin's. On ``Cyclosporine/203`` the F1
+    peak spanned 8 rows FWHM against TopSpin's 4, and its peak blob
+    carried a real -4.3-degree tilt (F1/F2 covariance -1.083) where
+    TopSpin's is axis-aligned (-0.003).
+
+    ``LPBIN`` counts *real* points, the same convention as ``TD`` --
+    established by measurement, not assumption: extending to
+    ``LPBIN/2`` complex points reproduces TopSpin's F1 FWHM of 4 exactly
+    on that dataset, while treating ``LPBIN`` as a complex count
+    over-narrows it to 1.
+
+    ``enabled`` : ``None`` (default) follows the file's own ``ME_mod``;
+    ``False`` skips it -- which matters because this is genuinely
+    expensive (one least-squares AR fit per F2 column: ~1.5s for a
+    4096-column dataset), so a caller that wants a fast preview has a
+    way out.
+
+    ``interferogram`` is ``(n_f1, n_f2)``; the prediction runs down F1
+    (axis 0), independently per F2 column, and shorter columns are left
+    alone rather than raising -- an AR fit needs ``order < n - 1``, and
+    a dataset whose own recorded ``NCOEF`` is too large for its own F1
+    point count is a real (if odd) possibility.
+    """
+    if enabled is False:
+        return interferogram
+    try:
+        me_mod = int(float(proc2s.get("ME_mod", 0) or 0))
+    except (TypeError, ValueError):
+        return interferogram
+    if enabled is None and me_mod not in _ME_MOD_FORWARD_LP:
+        return interferogram
+
+    n_points = interferogram.shape[0]
+    target = int(float(proc2s.get("LPBIN", 0) or 0)) // 2
+    order = int(float(proc2s.get("NCOEF", 0) or 0))
+    if target <= n_points or order < 1 or order >= n_points - 1:
+        return interferogram
+
+    n_predict = target - n_points
+    extended = np.empty((target, interferogram.shape[1]), dtype=np.complex128)
+    for column in range(interferogram.shape[1]):
+        extended[:, column] = processing_ft.linear_predict(
+            interferogram[:, column], order=order, n_predict=n_predict,
+        )
+    return extended
+
+
 def _apply_bruker_window(fid: np.ndarray, procs: dict, sw_hz: float) -> np.ndarray:
     """Apply the window TopSpin recorded in ``procs`` (``WDW``, with
     ``LB``/``SSB`` as needed), via ``nmrglue.proc_base``."""
@@ -689,7 +752,8 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             fid_shift: float = 0.0, align_echo: bool = False,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward",
-            magnitude: bool | None = None) -> NMRSpectrum:
+            magnitude: bool | None = None,
+            linear_predict_f1: bool | None = None) -> NMRSpectrum:
     """Read the raw ``ser`` and reprocess it (F2 then F1) using the
     parameters TopSpin recorded in ``procs``/``proc2s``.
 
@@ -1003,6 +1067,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             spectrum = spectrum.copy()
             spectrum[1::2] *= -1
         spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode)
+        spectrum = apply_recorded_f1_linear_prediction(spectrum, proc2s, enabled=linear_predict_f1)
         # Transpose so F1 is the last axis for the same whole-array
         # calls used for F2 above (window/zero_fill/fft_spectrum all
         # operate on shape[-1]), then transpose back -- avoids

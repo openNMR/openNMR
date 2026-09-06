@@ -2,6 +2,40 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## F1 linear prediction implemented; contour ceiling corrected to 0.25x (2026-09-06)
+
+### F1 linear prediction
+
+`io.bruker.apply_recorded_f1_linear_prediction` now extends the F1 interferogram exactly as TopSpin recorded, driven by `proc2s`'s `ME_mod`/`NCOEF`/`LPBIN`. **27 of the 54 2D datasets here ask for it and this project applied none.**
+
+`LPBIN` counts **real** points (the same convention as `TD`) -- established by measurement rather than assumption: extending to `LPBIN/2` complex points reproduces TopSpin's F1 FWHM of **4** exactly on `Cyclosporine/203`, while treating `LPBIN` as a complex count over-narrows it to 1.
+
+Effect on the dataset that prompted this (the "slanted" Echo-Antiecho):
+
+| | F1 FWHM | tilt | corr vs TopSpin |
+|---|---|---|---|
+| no LP | 8 rows | -0.1006 | +0.3951 |
+| **with LP** | **4 rows** | **-0.0665** | **+0.4454** |
+| TopSpin | 4 rows | -0.0018 | -- |
+
+So the F1 linewidth now matches TopSpin exactly and the tilt is substantially reduced -- but not eliminated, which is consistent with the recombination still being wrong. Wired into the GUI's live rebuild too, so recompute-vs-load stays **0.000000** across all five real datasets.
+
+Forward-only modes (`ME_mod` 1/2) are implemented; the backward ones (3/4) reconstruct points *before* the start, a different operation, and no dataset here uses one -- deliberately not guessed at. `linear_predict_f1=False` skips it, since it is genuinely expensive (one AR fit per F2 column, ~1.5s for a 4096-column dataset).
+
+### A real bug this exposed: unstable linear prediction
+
+Three of the five LP datasets came back with peak magnitudes of **1e85 to 1e104** against an expected ~1e11, driving their correlation with TopSpin to *exactly* 0.0000. The unconstrained least-squares AR fit was putting poles outside the unit circle, so the "prediction" grew exponentially instead of extrapolating a decaying signal.
+
+Fixed with **root reflection** (`_reflect_unstable_roots`): any pole outside the unit circle is replaced by `1/conj(r)` -- same frequency, decaying magnitude -- and the coefficients rebuilt. This is what TopSpin and NMRPipe do. Magnitudes are now sane (1e11/1e8/1e5) and nothing collapses to zero. Cost is 0.6 -> 0.9 ms per column.
+
+**Scoped to forward prediction only**, and that distinction is subtle enough to be worth stating: backward prediction reverses the FID first, so a normally-decaying signal becomes a *growing* series whose poles legitimately sit outside the circle. Reflecting them predicts a *smaller* signal before t=0 when the true one is larger. Caught by the existing backward-reconstruction test, which reproduces a known signal and started failing by 75%.
+
+### Contour ceiling corrected
+
+`_MAX_CONTOUR_POINTS` is now defined as **a quarter of the EXSY benchmark's own point count** (`1002 * 65536 // 4` = 16,416,768), per direct instruction: "restrict any dataset to 0.25x the EXSY's number of points". It had been briefly set to half on an earlier reading of "at least half"; 0.25x is the preference. The EXSY now renders at 1002 x 16384, and its test asserts the *relationship* to the benchmark rather than a literal, so it survives future edits.
+
+953 tests passing (948 -> 953).
+
 ## Positive projections; and the Echo-Antiecho "slant" measured and diagnosed (2026-09-06)
 
 User: "the contours in the echo-antiecho are somehow slanted, and I'm not sure why. Also, the 2D projections should probably just be the positive projections (not the sum)."

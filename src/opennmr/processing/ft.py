@@ -666,8 +666,42 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
 # Linear prediction
 # ============================================================
 
+def _reflect_unstable_roots(coeffs: np.ndarray) -> np.ndarray:
+    """Force an AR model to be stable, by reflecting any of its
+    poles that lie outside the unit circle back inside.
+
+    Without this, linear prediction can diverge *exponentially*
+    instead of extrapolating a decaying signal -- not a subtle
+    inaccuracy: on real Bruker data whose own ``proc2s`` asks for F1
+    linear prediction, three of five datasets came back with peak
+    magnitudes of 1e85 to 1e104 against an expected ~1e11, which
+    reduced their correlation with TopSpin to exactly 0.0000. The
+    fit is least-squares and unconstrained, so nothing otherwise
+    stops a pole landing outside the unit circle; TopSpin and
+    NMRPipe both apply the same root reflection.
+
+    A pole at ``r`` outside the circle is replaced by
+    ``1/conj(r)`` -- the same frequency, mirrored to a decaying
+    magnitude -- and the coefficients rebuilt from the corrected
+    pole set. Returns the coefficients unchanged when every pole is
+    already inside, which is the common case and costs one
+    root-finding call.
+    """
+    # x[n] = sum_k coeffs[k] * x[n-1-k]  ->  characteristic
+    # polynomial z^p - c0 z^(p-1) - ... - c_(p-1).
+    roots = np.roots(np.concatenate(([1.0], -np.asarray(coeffs))))
+    outside = np.abs(roots) > 1.0
+    if not outside.any():
+        return coeffs
+    roots = roots.copy()
+    # Guard the degenerate r == 0 case, which has no reflection.
+    safe = outside & (np.abs(roots) > 0)
+    roots[safe] = 1.0 / np.conj(roots[safe])
+    return -np.poly(roots)[1:]
+
+
 def linear_predict(fid: np.ndarray, order: int = 20, n_predict: int = 8,
-                    direction: str = "forward") -> np.ndarray:
+                    direction: str = "forward", stabilise: bool = True) -> np.ndarray:
     """``extended_fid = linear_predict(fid, order=20, n_predict=8, direction='forward')``
 
     Extend (or backward-reconstruct) a complex FID using linear
@@ -688,6 +722,13 @@ def linear_predict(fid: np.ndarray, order: int = 20, n_predict: int = 8,
     overfitting noise; ``order=20-30`` is a reasonable default for a
     single dominant echo/peak.
 
+    ``stabilise`` : reflect any AR poles that land outside the unit
+    circle back inside before predicting (see
+    :func:`_reflect_unstable_roots`). On by default because an
+    unconstrained least-squares fit can otherwise diverge
+    exponentially rather than extrapolate a decaying signal --
+    observed on real data, not hypothetical.
+
     Returns the extended complex FID (length ``len(fid) + n_predict``).
     """
     fid = np.asarray(fid, dtype=np.complex128)
@@ -705,6 +746,16 @@ def linear_predict(fid: np.ndarray, order: int = 20, n_predict: int = 8,
         A[:, j] = x[order - 1 - j: n - 1 - j]
     b = x[order:n]
     coeffs, *_ = np.linalg.lstsq(A, b, rcond=None)
+
+    # Forward only. Backward prediction reverses the FID first, so a
+    # normally-decaying signal becomes a *growing* series whose poles
+    # legitimately sit outside the unit circle -- reflecting them
+    # forces decay in the reversed direction, which is exactly wrong
+    # (it predicts a *smaller* signal before t=0, when the true one is
+    # larger). Caught by the existing backward-reconstruction test,
+    # which reproduces a known signal and started failing by 75%.
+    if stabilise and direction == "forward":
+        coeffs = _reflect_unstable_roots(coeffs)
 
     predicted = list(x)
     for _ in range(n_predict):

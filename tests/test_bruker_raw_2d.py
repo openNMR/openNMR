@@ -645,3 +645,40 @@ def test_read_2d_f1_quadrature_normalisation_applies_only_to_states_modes(tmp_pa
     negated = fid.copy()
     negated[1::2] *= -1
     assert not np.allclose(reference, ft.decode_hypercomplex_f1(negated, fn_mode=6))
+
+
+def test_apply_recorded_f1_linear_prediction_follows_me_mod(tmp_path):
+    interferogram = np.exp(-0.05 * np.arange(64))[:, None] * np.ones((64, 4), dtype=complex)
+
+    # ME_mod=0 (none) -> untouched, even though LPBIN/NCOEF are present.
+    off = bruker.apply_recorded_f1_linear_prediction(
+        interferogram, {"ME_mod": 0.0, "LPBIN": 256.0, "NCOEF": 8.0})
+    assert off.shape == interferogram.shape
+
+    # ME_mod=2 (LPfc) -> extended to LPBIN/2 complex points. LPBIN counts
+    # *real* points, the same convention as TD -- established by
+    # measurement: LPBIN/2 reproduces TopSpin's own F1 FWHM of 4 on
+    # Cyclosporine/203, while treating it as a complex count
+    # over-narrows to 1.
+    on = bruker.apply_recorded_f1_linear_prediction(
+        interferogram, {"ME_mod": 2.0, "LPBIN": 256.0, "NCOEF": 8.0})
+    assert on.shape == (128, 4)
+    np.testing.assert_allclose(on[:64], interferogram)  # measured points untouched
+
+
+def test_apply_recorded_f1_linear_prediction_can_be_forced_off(tmp_path):
+    # It is genuinely expensive (one AR fit per F2 column), so a caller
+    # wanting a fast preview needs a way out.
+    interferogram = np.exp(-0.05 * np.arange(64))[:, None] * np.ones((64, 4), dtype=complex)
+    same = bruker.apply_recorded_f1_linear_prediction(
+        interferogram, {"ME_mod": 2.0, "LPBIN": 256.0, "NCOEF": 8.0}, enabled=False)
+    assert same.shape == interferogram.shape
+
+
+def test_apply_recorded_f1_linear_prediction_skips_an_impossible_order():
+    # An AR fit needs order < n-1; a dataset recording an NCOEF too
+    # large for its own F1 point count must be skipped, not raise.
+    short = np.ones((6, 3), dtype=complex)
+    out = bruker.apply_recorded_f1_linear_prediction(
+        short, {"ME_mod": 2.0, "LPBIN": 64.0, "NCOEF": 32.0})
+    assert out.shape == short.shape

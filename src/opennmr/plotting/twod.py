@@ -49,19 +49,19 @@ from .style import setup_plotting, get_stack_colormap, get_contour_cmap, downsam
 # For scale: the COSY (0.5M), bruker_T2 (2.1M) and bruker_PFG (4.2M)
 # datasets are all far below it and render exactly as before.
 #
-# Raised from 16,777,216 (2**24) on direct user instruction: "set a max
-# value of data density that is at least half of those EXSYs". The
-# pseudo-2D EXSY benchmark is 1002 x 65536 = 65,667,072 points, so half
-# is 32,833,536; 2**25 = 33,554,432 clears that. At this ceiling the
-# EXSY renders at 1002 x 33487 (roughly half its F2 resolution rather
-# than the quarter the old cap gave), costing ~2.0s of contour time
-# against ~4.0s at full resolution.
+# The value is defined as a *quarter of the EXSY benchmark's own point
+# count*, on direct user instruction: "I stated that the maximum should
+# be about that value for these EXSYs and should be applied to restrict
+# any dataset to 0.25x the EXSY's number of points". The pseudo-2D EXSY
+# is 1002 x 65536 = 65,667,072 points, so the ceiling is 16,416,768.
 #
-# Downsampling uses `downsample_2d`, which keeps each output bin's
-# largest-magnitude value (see its own docstring for the EXSY-diagonal
-# bug that motivated that), so thin ridges survive rather than being
-# decimated away.
-_MAX_CONTOUR_POINTS = 33_554_432
+# (It was briefly raised to 2**25 on an earlier reading of "at least
+# half", then corrected back here -- 0.25x is the preference.)
+#
+# At this ceiling the EXSY renders at 1002 x 16384, a quarter of its F2
+# resolution, costing ~1.0s of contour time against ~4.0s at full.
+_EXSY_BENCHMARK_POINTS = 1002 * 65536
+_MAX_CONTOUR_POINTS = _EXSY_BENCHMARK_POINTS // 4
 
 # Don't sacrifice the indirect dimension to save the direct one: F1 is
 # usually far smaller (1002 vs 65536 on the benchmark) and far more

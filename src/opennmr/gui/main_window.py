@@ -3424,6 +3424,16 @@ class MainWindow(QMainWindow):
                 data = data.copy()
                 data[1::2] *= -1
             data = processing_ft.decode_hypercomplex_f1(data, fn_mode)
+            # F1 linear prediction, same as io.bruker.read_2d -- without
+            # it this rebuild would silently drop it and the spectrum
+            # would jump (broader F1 lines) the moment any control was
+            # touched. Deliberately follows the file's own ME_mod here,
+            # matching the load, rather than being skipped for speed:
+            # a live rebuild that differs from the load is exactly the
+            # failure this project keeps hitting.
+            proc2s_lp = spectrum.metadata.raw.get("proc2s")
+            if proc2s_lp:
+                data = io_bruker.apply_recorded_f1_linear_prediction(data, proc2s_lp)
             if spectrum.metadata.vendor == "bruker":
                 # Real bug, found and fixed: this method never applied
                 # any window to F1 at all -- read_2d always does

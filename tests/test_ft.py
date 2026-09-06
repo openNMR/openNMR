@@ -721,3 +721,44 @@ def test_negating_sine_rows_matches_the_opposite_quadrature_sense():
 
     expected = (a - 1j * b) * np.array([1.0, -1.0])[:, np.newaxis]
     np.testing.assert_allclose(got, expected)
+
+
+def test_linear_predict_stabilises_a_divergent_ar_fit():
+    # Real failure on real data: an unconstrained least-squares AR fit
+    # can put poles outside the unit circle, so the "prediction" grows
+    # exponentially instead of extrapolating a decaying signal. Three of
+    # five Bruker datasets whose proc2s asks for F1 linear prediction
+    # came back with peak magnitudes of 1e85 to 1e104 against an
+    # expected ~1e11, which drove their correlation with TopSpin to
+    # exactly 0.0000.
+    #
+    # A short noisy record with a growing component is the reliable way
+    # to provoke it.
+    rng = np.random.default_rng(3)
+    n = 64
+    t = np.arange(n)
+    fid = np.exp(0.02 * t) * np.exp(2j * np.pi * 0.05 * t)
+    fid = fid + 0.05 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+
+    unstable = ft.linear_predict(fid, order=24, n_predict=192, stabilise=False)
+    stabilised = ft.linear_predict(fid, order=24, n_predict=192, stabilise=True)
+
+    input_max = np.max(np.abs(fid))
+    # The stabilised prediction must not blow up past the input's own
+    # scale by orders of magnitude...
+    assert np.max(np.abs(stabilised)) < 100 * input_max
+    # ...and must be dramatically better behaved than the raw fit.
+    assert np.max(np.abs(stabilised)) < np.max(np.abs(unstable))
+    assert np.isfinite(stabilised).all()
+    # The measured points themselves are never altered.
+    np.testing.assert_allclose(stabilised[:n], fid)
+
+
+def test_reflect_unstable_roots_leaves_a_stable_model_alone():
+    # A model whose poles are already inside the unit circle must come
+    # back untouched -- the guard should cost nothing but a root-find
+    # in the common case.
+    decaying = np.exp(-0.1 * np.arange(48)) * np.exp(2j * np.pi * 0.1 * np.arange(48))
+    with_guard = ft.linear_predict(decaying, order=8, n_predict=16, stabilise=True)
+    without = ft.linear_predict(decaying, order=8, n_predict=16, stabilise=False)
+    np.testing.assert_allclose(with_guard, without, rtol=1e-6, atol=1e-9)
