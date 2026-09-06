@@ -2,6 +2,52 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Rebuild stage 1 DONE: TopSpin's phase convention measured exactly (F2 now +0.9999) (2026-09-06)
+
+User: "start this rebuild". Stage 1 -- **validate and fix F2 in isolation** -- is solved, and the answer overturns an earlier conclusion in this file.
+
+### The enabler: a genuine F2-only reference
+
+`bruker_T2/11` and `bruker_PFG/150` are processed by TopSpin with **`xf2` only** -- `proc2s`'s `SI` equals its `TD`, so F1 was never transformed. Their `2rr` is therefore exactly "F2 processed, F1 untouched", which makes F2 testable without any F1 involvement. Better still, both store a **`2ii`** block that is the F2 *imaginary* partner (confirmed: identical size to `2rr`, and a smoothly varying phase across a peak), so `2rr + 1j*2ii` is TopSpin's own **complex** F2 spectrum -- and the per-point ratio against our own unphased output gives the applied phase **with no fitting at all**.
+
+### The convention, measured not fitted
+
+On `bruker_PFG/150` that ratio has **constant magnitude** (15.997..16.003 -- a pure phase difference, the 16 being `NC_proc` scaling) and a first-order fit residual of **0.001 degrees**:
+
+| | measured | recorded |
+|---|---|---|
+| p0 | **-10.250** | `PHC0` = 349.742 (= -10.258 mod 360) |
+| p1 | **-80.115** | `PHC1` = -80.100 |
+
+So TopSpin's convention is exactly **`phi(i) = PHC0 + PHC1 * i/(SI-1)`**, applied as `exp(+i*phi)` across the transformed dimension's own points, in array order.
+
+**This overturns the earlier "the recorded PHC values don't transfer" conclusion** (see the entry below). They transfer *exactly*. What was wrong was the **model**: this code routes them through `processing.ft.apply_phase`, which is pivot-based and normalised over the *ppm* range. That earlier round's measurements were correct about that model; the inference drawn from them was too broad. **Lesson: "applying the recorded constants makes it worse" falsifies the model you applied them with, not the constants.**
+
+Applying the measured convention end-to-end:
+
+| dataset | shipped | measured convention |
+|---|---|---|
+| `bruker_PFG/150` | +0.513 | **+0.9999** |
+| `bruker_T2/11` | +0.816 | **+0.9972** |
+
+And across the whole corpus, the F2-only (xf2-style) comparison now reaches **median +0.9999, best +1.0000 over 17 datasets**. F2 is solved.
+
+**A self-inflicted near-miss worth recording**: an intermediate check had T2 apparently unfixable (best 0.087 over a full first-order scan). Cause was my own harness reading `2rr` with a plain `np.fromfile(...).reshape()`, bypassing the **XDIM submatrix block reconstruction** (`procs XDIM=4096`, `proc2s XDIM=4`) that `read_2d_processed` correctly performs. PFG has `proc2s XDIM=1` and so was unaffected, which is why one dataset "worked" and the other didn't. Always compare against `read_2d_processed`, never a raw `fromfile` of `2rr`.
+
+### What shipped, and what deliberately did not
+
+**Shipped**: `io.bruker.apply_recorded_phase(spectrum, phc0, phc1, axis)` -- the convention above, with the full measurement recorded in its docstring, plus regression tests including one that reproduces the +0.999 agreement on real `bruker_PFG/150` data and asserts it beats the shipped path by >0.4.
+
+**Deliberately NOT shipped: the default-behaviour switch.** Wiring it into `read_1d`/`read_2d` was implemented and verified (the numbers above are from that build) and then **reverted**, because it made the GUI's live recompute diverge from the load -- measured at **0.46** (T2) and **0.76** (PFG) relative difference, i.e. touch any control and the spectrum jumps. The GUI applies the committed phase through the pivot model at six separate sites (`main_window.py` 3160, 3381, 3495, 3537, 4247, 4271); making the reader speak a different convention than those without converting them all is precisely this project's recurring "two pipelines quietly diverge" failure. Shipping half of it would have traded a known-wrong-but-stable state for an inconsistent one.
+
+**The remaining work, now well-defined**: separate the *recorded* phase (Bruker convention, from the file) from the *user's* phase (pivot convention, from the controls) -- store them distinctly in `metadata.raw` rather than merged into `phase0`/`phase1` -- and have every reconstruction path apply recorded-then-user in that order. That is a mechanical but wide change across the reader and those six GUI sites, and it needs its own pass with the recompute-vs-load consistency check above as the acceptance test.
+
+### Stage 2 (hypercomplex F1) remains open
+
+With the correct F2 phase applied, `Cyclosporine/203` (Echo-Antiecho) improves from **-0.5433 to +0.395**, and States-TPPI datasets stay near 0. So F2 was a genuine and necessary prerequisite -- exactly as the user predicted ("the F2/F1 phasing doesn't need to be decoupled") -- but it is not sufficient: the hypercomplex F1 construction has its own separate defect still to find.
+
+940 tests passing (937 -> 940).
+
 ## 2D-mode robustness survey: EVERY phase-sensitive 2D mode is wrong, not just Echo-Antiecho (2026-09-06)
 
 User: investigate the Cyclosporine 203 HSQC defect, and "search through the sample bruker data for any other 2D processing modes to test our robustness". Plus a design steer: "the F2/F1 phasing doesn't need to be decoupled, maybe this is the difference to the bruker data. However it does need to apply properly in the 2D contour."

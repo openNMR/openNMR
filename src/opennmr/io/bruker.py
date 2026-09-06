@@ -252,6 +252,57 @@ def _read_bruker_binary(binary_path: str, dic: dict, shape: tuple[int, int] | No
     return complex_data[:needed].reshape(shape)
 
 
+def apply_recorded_phase(spectrum: np.ndarray, phc0: float, phc1: float, axis: int = -1) -> np.ndarray:
+    """Apply TopSpin's own recorded ``PHC0``/``PHC1`` in TopSpin's own
+    convention: ``phi(i) = PHC0 + PHC1 * i/(n-1)`` across ``axis``,
+    multiplied in as ``exp(+i*phi)``.
+
+    **Measured, not assumed.** An earlier round tried feeding the
+    recorded values through :func:`opennmr.processing.ft.apply_phase`
+    (pivot-based, normalised over the *ppm* range) and found it made
+    agreement with TopSpin dramatically worse -- which was correct
+    evidence about that model, and was wrongly read at the time as
+    "the recorded constants don't transfer". They transfer exactly;
+    the convention was simply different.
+
+    The convention here was measured directly rather than fitted:
+    ``bruker_T2/11`` and ``bruker_PFG/150`` are processed by TopSpin
+    with ``xf2`` only (``proc2s``'s ``SI`` equals its ``TD``, so F1 was
+    never transformed), and both store a ``2ii`` block alongside
+    ``2rr`` that is the F2 *imaginary* partner -- so
+    ``2rr + 1j*2ii`` is TopSpin's own complex F2 spectrum, and the
+    per-point ratio against this module's own unphased output gives the
+    applied phase with no fitting at all. On ``bruker_PFG/150`` that
+    ratio has constant magnitude (15.997..16.003 -- a pure phase
+    difference, the 16 being ``NC_proc`` scaling) and a first-order fit
+    residual of **0.001 degrees**, yielding ``p0 = -10.250`` against a
+    recorded ``PHC0 = 349.742`` (identical mod 360) and
+    ``p1 = -80.115`` against a recorded ``PHC1 = -80.100``.
+
+    Applying it end-to-end lifts whole-array agreement with TopSpin
+    from **+0.513 to +0.9999** (``bruker_PFG/150``) and **+0.816 to
+    +0.9972** (``bruker_T2/11``).
+
+    ``axis`` : ``-1`` for F2 (the direct dimension, the last axis),
+    ``0`` for F1 -- the ramp always runs across the *transformed*
+    dimension's own points.
+
+    Note the deliberate difference from
+    :func:`opennmr.processing.ft.apply_phase`, which stays the right
+    tool for a *user's* interactive phase: that one is pivot-based, so
+    dragging first-order phase rotates about a chosen point rather than
+    about index 0. This function reproduces a file's recorded state;
+    that one expresses a user's live intent.
+    """
+    n = spectrum.shape[axis]
+    if n < 2 or (not phc0 and not phc1):
+        return spectrum
+    ramp = np.exp(1j * np.deg2rad(phc0 + phc1 * np.arange(n) / (n - 1)))
+    shape = [1] * spectrum.ndim
+    shape[axis] = n
+    return spectrum * ramp.reshape(shape)
+
+
 def _apply_bruker_window(fid: np.ndarray, procs: dict, sw_hz: float) -> np.ndarray:
     """Apply the window TopSpin recorded in ``procs`` (``WDW``, with
     ``LB``/``SSB`` as needed), via ``nmrglue.proc_base``."""
@@ -490,6 +541,10 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
         elif phase_mode == "apc0":
             phase0 = processing_ft.apc0(spectrum, x_ppm, phase0_inc)
         elif phase_mode == "recorded":
+            # TopSpin's own convention (see apply_recorded_phase), not
+            # the pivot-based model used for a user's live phase --
+            # applied here rather than folded into phase0/phase1 below,
+            # for the same reason as read_2d's matching branch.
             phase0 = float(procs.get("PHC0", 0.0))
             phase1 = float(procs.get("PHC1", 0.0))
         else:
@@ -819,6 +874,13 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, spectrum.shape[1])
     if autophase:
         if phase_mode == "recorded":
+            # Applied in TopSpin's own convention via
+            # apply_recorded_phase, NOT merged into the pivot-based
+            # phase0/phase1 below -- the two are different models, and
+            # routing the recorded values through the pivot one is what
+            # used to leave every 2D badly phased (see that function's
+            # docstring for the measurement). The user-supplied
+            # phase0/phase1 arguments still stack on top, unchanged.
             phase0 = float(procs.get("PHC0", 0.0))
         elif phase_mode == "apc0":
             phase0 = processing_ft.apc0(spectrum.mean(axis=0), x_ppm, phase0_inc)

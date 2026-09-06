@@ -458,3 +458,65 @@ def test_read_1d_processed_missing_1r_raises_a_clear_error(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="1r"):
         bruker.read_1d_processed(str(expt))
+
+
+def test_apply_recorded_phase_uses_topspin_index_ramp_convention():
+    # phi(i) = PHC0 + PHC1 * i/(n-1), applied as exp(+i*phi) -- measured
+    # directly against TopSpin, not assumed. Deliberately *not* the
+    # pivot-based model processing.ft.apply_phase uses for a user's
+    # interactive phase: routing the recorded constants through that one
+    # is what left every 2D badly phased.
+    spectrum = np.ones(5, dtype=complex)
+    got = bruker.apply_recorded_phase(spectrum, 30.0, 90.0)
+    expected = np.exp(1j * np.deg2rad(30.0 + 90.0 * np.arange(5) / 4))
+    np.testing.assert_allclose(got, expected)
+
+    # First point carries PHC0 alone; last carries PHC0 + PHC1.
+    assert np.angle(got[0], deg=True) == pytest.approx(30.0)
+    assert np.angle(got[-1], deg=True) == pytest.approx(120.0)
+
+
+def test_apply_recorded_phase_axis_and_noop():
+    data = np.ones((4, 6), dtype=complex)
+    along_f1 = bruker.apply_recorded_phase(data, 0.0, 180.0, axis=0)
+    assert np.angle(along_f1[0, 0], deg=True) == pytest.approx(0.0)
+    assert np.angle(along_f1[-1, 0], deg=True) == pytest.approx(180.0)
+    # constant across the other axis
+    assert np.allclose(along_f1[2, :], along_f1[2, 0])
+    # Zero phase is an exact no-op, not a multiply by ~1.0
+    assert bruker.apply_recorded_phase(data, 0.0, 0.0) is data
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join("test_data", "bruker_PFG", "150")),
+    reason="needs the real bruker_PFG dataset",
+)
+def test_apply_recorded_phase_reproduces_topspin_on_real_xf2_data():
+    # The measurement this convention was derived from, pinned as a
+    # regression test. bruker_PFG/150 is processed by TopSpin with xf2
+    # only (proc2s SI == TD, so F1 was never transformed), which makes
+    # its 2rr a clean F2-only reference.
+    from opennmr.io.jcampdx import parse_jcampdx_params
+
+    path = os.path.join("test_data", "bruker_PFG", "150")
+    procs = parse_jcampdx_params(os.path.join(path, "pdata", "1", "procs"))
+    reference = np.real(bruker.read_2d_processed(path, pseudo_2d=True).data)
+    unphased = bruker.read_2d(path, pseudo_2d=True, autophase=False)
+    complex_spectrum = unphased.data + 1j * unphased.data_imag
+
+    phased = np.real(
+        bruker.apply_recorded_phase(
+            complex_spectrum, float(procs["PHC0"]), float(procs["PHC1"]), axis=-1,
+        )
+    )
+
+    def _corr(a, b):
+        a = np.asarray(a, float).ravel() - np.mean(a)
+        b = np.asarray(b, float).ravel() - np.mean(b)
+        return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+    # Essentially exact agreement with TopSpin's own processed data.
+    assert _corr(phased, reference) > 0.999
+    # ...and decisively better than what read_2d currently ships, which
+    # routes PHC0 through the pivot-based model (~0.51 here).
+    assert _corr(phased, reference) > _corr(bruker.read_2d(path, pseudo_2d=True).data, reference) + 0.4
