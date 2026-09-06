@@ -8094,3 +8094,77 @@ def test_main_window_slice_source_is_dropped_if_the_2d_is_removed(qapp, tmp_path
 
     window.session.remove(0)
     assert window._slice_source_of(kept) == (None, None)
+
+
+@pytest.mark.parametrize("dim_index,dim", [(0, "F2"), (1, "F1")])
+def test_main_window_live_phase_keeps_the_baseline_after_a_settle(qapp, dim_index, dim, tmp_path, monkeypatch):
+    # Real user report: "The indirect phasing sort of bounces like there
+    # is a mismatch to the current and read phases."
+    #
+    # Mechanism: baseline correction is deliberately NOT applied on
+    # every drag tick (measured at 173 ms for this dataset and 1.5 s for
+    # the EXSY -- far too slow), so it is deferred to a debounced
+    # rebuild. That rebuild fires whenever the drag pauses for 200 ms.
+    # Before this fix the *next* tick re-derived the display from the
+    # pre-drag snapshot, throwing the baseline away again -- so the view
+    # alternated between corrected and uncorrected on every pause.
+    #
+    # The fix makes the rebuild's own result the new reference, so the
+    # drag continues from it. Asserted against the authoritative answer
+    # (a clean rebuild at the same phase) rather than against a raw
+    # difference, since a phase change legitimately alters the data.
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip("needs the real Cyclosporine/203 dataset")
+    _isolate_sidecars(monkeypatch, tmp_path)
+
+    def _build(phases, settle_at):
+        window = MainWindow()
+        window._load(path, vendor="bruker")
+        window._on_process_indirect_toggled(True)
+        spectrum = window.session.spectra[0]
+        spectrum.metadata.raw["baseline_correct"] = True
+        window.dim_combo.setCurrentIndex(dim_index)
+        for value in phases:
+            window.phase0_spin.setValue(value)
+            if value in settle_at and window._live_reprocess_timer.isActive():
+                window._live_reprocess_timer.stop()
+                window._run_debounced_multi_row_reprocess()
+        return np.asarray(spectrum.data)
+
+    # Settle at 30, then one more tick to 30.5 -- what the user sees.
+    live = _build([30.0, 30.5], {30.0})
+    # The authoritative answer for 30.5.
+    authoritative = _build([30.5], {30.5})
+
+    scale = max(np.max(np.abs(authoritative)), 1e-30)
+    assert np.max(np.abs(live - authoritative)) / scale < 1e-3
+
+
+def test_main_window_phase_reference_tracks_what_it_already_contains(qapp, tmp_path, monkeypatch):
+    # The bookkeeping the fix above depends on: after a debounced
+    # rebuild the reference *is* the rebuilt data, and the phase that
+    # data already carries is recorded so the next tick applies only
+    # the remainder. Without the second half, the whole phase would be
+    # re-applied to data that already had it.
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip("needs the real Cyclosporine/203 dataset")
+    _isolate_sidecars(monkeypatch, tmp_path)
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["baseline_correct"] = True
+    window.dim_combo.setCurrentIndex(1)
+
+    assert window._phase_reference_delta_applied == (0.0, 0.0)
+    window.phase0_spin.setValue(30.0)
+    window._live_reprocess_timer.stop()
+    window._run_debounced_multi_row_reprocess()
+
+    assert window._phase_reference_delta_applied == (30.0, 0.0)
+    np.testing.assert_allclose(
+        np.real(window._phase_reference_full), np.real(spectrum.complex_data)
+    )

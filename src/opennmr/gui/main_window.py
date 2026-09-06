@@ -4296,7 +4296,8 @@ class MainWindow(QMainWindow):
             return
         spectrum = self.session.spectra[index]
         shape_before = spectrum.data.shape
-        if self._fid_reprocessable(spectrum):
+        rebuilt_from_raw = self._fid_reprocessable(spectrum)
+        if rebuilt_from_raw:
             success = self._recompute_multi_row_data(spectrum)
         else:
             # No raw FID to redo the FID-domain steps from at all (a
@@ -4365,6 +4366,32 @@ class MainWindow(QMainWindow):
         # comment), so a settled FID-processing change just refreshes
         # whatever it's already showing -- always a contour/stack, not
         # conditionally so.
+        # This rebuild's result is baseline-corrected and carries the
+        # full live phase; make it the new reference so the drag
+        # continues *from* it. Without this the next tick re-derived
+        # the display from the pre-drag snapshot, throwing the baseline
+        # away again -- the display then alternated between corrected
+        # and not on every pause, which is the reported "bouncing".
+        # Only for the multi-row modes, which are the ones that defer
+        # baseline correction to this rebuild in the first place.
+        # Only when the rebuild came from the raw FID. The
+        # processed-only fallback (_recompute_multi_row_phase_and_
+        # baseline_only) *derives* its result from this reference, so
+        # overwriting it with that result would make the reference
+        # self-referential -- baseline correction could then never be
+        # turned back off, because the "uncorrected" source it would
+        # revert to had been replaced by the corrected output. Caught
+        # by the pseudo-2D apply-all-slices test, which toggles
+        # baseline off and back on.
+        if (rebuilt_from_raw and self._phase_mode in ("pseudo2d", "2d")
+                and self._phase_reference_full is not None):
+            refreshed = spectrum.complex_data
+            if refreshed is not None and refreshed.shape == self._phase_reference_full.shape:
+                self._phase_reference_full = refreshed
+                self._phase_reference_delta_applied = (
+                    self.phase0_spin.value(), self.phase1_spin.value(),
+                )
+
         if self._phase_mode == "pseudo2d":
             on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
             self.canvas.show_spectrum(spectrum)
@@ -5440,8 +5467,19 @@ class MainWindow(QMainWindow):
             return
 
         spectrum = self.session.spectra[index]
-        phase0 = self.phase0_spin.value()
-        phase1 = self.phase1_spin.value()
+        # Only the part not already baked into the reference. A
+        # debounced rebuild that lands mid-drag replaces the reference
+        # with its own (baseline-corrected) result and records the
+        # phase that result already carries -- without subtracting it
+        # here, the next drag tick would re-apply the whole phase to
+        # data that already had it *and* silently discard the baseline,
+        # so the display flipped between baselined and not on every
+        # pause. Real user report: "The indirect phasing sort of
+        # bounces like there is a mismatch to the current and read
+        # phases."
+        applied0, applied1 = self._phase_reference_delta_applied
+        phase0 = self.phase0_spin.value() - applied0
+        phase1 = self.phase1_spin.value() - applied1
         self._refresh_current_phase_displays()
 
         freq_ppm = self._phase_freq_ppm
@@ -5760,6 +5798,7 @@ class MainWindow(QMainWindow):
             self._phase_mode = None
             self._phase_target_dim = None
             self._phase_reference_full = None
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = None
             self._refresh_current_phase_displays()
             return
@@ -5790,6 +5829,7 @@ class MainWindow(QMainWindow):
             self._phase_mode = None
             self._phase_target_dim = None
             self._phase_reference_full = None
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
             self._refresh_current_phase_displays()
@@ -5798,6 +5838,7 @@ class MainWindow(QMainWindow):
         if spectrum.ndim == 1:
             self._phase_mode = "1d"
             self._phase_reference_full = spectrum.complex_data
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = spectrum.axis_values(0, "ppm")
             self._phase_target_dim = None
             self._set_processing_enabled(True, "Adjust phase for the selected spectrum.")
@@ -5805,6 +5846,7 @@ class MainWindow(QMainWindow):
         elif spectrum.ndim == 2 and spectrum.is_pseudo_2d:
             self._phase_mode = "pseudo2d"
             self._phase_reference_full = spectrum.complex_data
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = spectrum.axis_values(-1, "ppm")
             self._phase_target_dim = None
             n_slices = spectrum.data.shape[0]
@@ -5819,6 +5861,7 @@ class MainWindow(QMainWindow):
         elif spectrum.ndim == 2:
             self._phase_mode = "2d"
             self._phase_reference_full = spectrum.complex_data
+            self._phase_reference_delta_applied = (0.0, 0.0)
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
             self._phase_target_dim = dim
             self._phase_freq_ppm = spectrum.axis_values(-1 if dim == "f2" else 0, "ppm")
@@ -5855,6 +5898,7 @@ class MainWindow(QMainWindow):
             self._phase_mode = None
             self._phase_target_dim = None
             self._phase_reference_full = None
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
             self._refresh_current_phase_displays()

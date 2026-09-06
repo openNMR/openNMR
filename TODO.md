@@ -2,6 +2,44 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Live phasing no longer "bounces" between baseline-corrected and not (2026-09-06)
+
+User: "The indirect phasing sort of bounces like there is a mismatch to the current and read phases."
+
+### It is not indirect-specific, and it is not a phase mismatch
+
+Measured both dimensions with baseline correction on and off, which separates the two candidate causes cleanly:
+
+| dim | baseline | live vs rebuilt |
+|---|---|---|
+| F2 | off | 0.000000 |
+| F2 | **on** | **0.001701** |
+| F1 | off | 0.000000 |
+| F1 | **on** | **0.001701** |
+
+Identical for F2 and F1, and zero without baseline correction. So the cause is **baseline correction**, not the indirect dimension and not a recorded-vs-current phase mismatch. (A double-baseline hypothesis was tested and rejected first -- baseline correction is exactly idempotent here, 0.000000 applied twice.)
+
+### The mechanism
+
+Baseline correction is deliberately **not** applied on every drag tick -- measured at **173 ms** for `Cyclosporine/203` and **1.5 s** for the EXSY, far too slow for a per-tick path, so the existing comment claiming as much is still correct. It is deferred to a debounced rebuild that fires after 200 ms of stillness.
+
+The bug was what happened *next*: the following drag tick re-derived the display from the **pre-drag snapshot**, which has no baseline -- so the correction was thrown away again. Pause, correction appears; move, correction vanishes; pause, it reappears. That is the bouncing, and it repeats for the whole drag.
+
+### The fix
+
+After a rebuild, its result becomes the new phase reference, and the phase that result already carries is recorded (`_phase_reference_delta_applied`) so the next tick applies only the *remainder* rather than re-applying the whole phase to data that already has it. The drag then continues *from* the corrected data.
+
+Live view after a settle, against the authoritative rebuild at the same phase: **0.001701 -> 0.000028**, for both dimensions.
+
+**Restricted to rebuilds that came from the raw FID.** The processed-only fallback (`_recompute_multi_row_phase_and_baseline_only`) *derives* its result from this reference, so overwriting the reference with that result would make it self-referential -- baseline correction could then never be switched back off, because the uncorrected source it reverts to had been replaced by the corrected output. Caught by the existing pseudo-2D apply-all-slices test, which toggles baseline off and on again.
+
+### Two measurement mistakes of my own, worth recording
+
+- An early check called `_commit_pending_phase_to_metadata()` directly and appeared to show the phase doubling on commit. That is not a user-reachable path; re-running with **only real UI actions** showed the values stable. Direct calls to internal commit helpers do not reproduce user behaviour.
+- The first anti-bounce check compared raw before/after magnitudes and "failed" at 0.007 for a 0.5-degree tick. That is the *correct* magnitude -- a phase rotation mixes in the dispersive component, so the change scales as `sin(0.5 deg) ~ 0.0087` of the imaginary part, not linearly with the phase. The meaningful comparison is against the authoritative rebuild, not against the previous frame.
+
+3 new regression tests (parametrised over both dimensions), all verified to fail with the fix disabled. 971 tests passing (968 -> 971).
+
 ## Extracted slices now round-trip: phase on a slice, apply to the 2D (2026-09-06)
 
 User: "I don't think the derived slice phasing is feeding back into the contour, it should be more like a temporary file and have some way to go back into the contour data."
