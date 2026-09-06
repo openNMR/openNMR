@@ -8345,6 +8345,110 @@ def test_main_window_nq_line_survives_a_reload(qapp, tmp_path, monkeypatch):
     assert reopened.output_nq_value_spin.value() == 2
 
 
+def _answer_calibration_dialog(monkeypatch, values, accept=True):
+    """Fill the "Set Reference from Cursor" dialog's ppm boxes and
+    accept (or cancel) it, in creation order: direct, then indirect."""
+    from PySide6.QtWidgets import QDialog, QDoubleSpinBox
+
+    def fake_exec(self):
+        if not accept:
+            return QDialog.DialogCode.Rejected
+        for spin, value in zip(self.findChildren(QDoubleSpinBox), values):
+            spin.setValue(value)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+
+
+def test_main_window_ppm_referencing_sets_both_dimensions(qapp, tmp_path, monkeypatch):
+    # User request: "I need a right click option on the 2D spectra to be
+    # able to set the sr (by setting ppm values)." Both dimensions at
+    # once for a genuine 2D -- a heteronuclear pair needs referencing on
+    # each.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+    f2_before = spectrum.axes[1].ppm.copy()
+    f1_before = spectrum.axes[0].ppm.copy()
+
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0])
+    window._on_reference_calibration_from_plot((2.5, 25.0))
+
+    assert spectrum.metadata.raw["sr_shift_hz"] == pytest.approx(
+        (2.0 - 2.5) * spectrum.metadata.sfo1)
+    assert spectrum.metadata.raw["sr_shift_hz_f1"] == pytest.approx(
+        (20.0 - 25.0) * spectrum.metadata.sfo1_indirect)
+    # The axes really move, by exactly the requested correction.
+    np.testing.assert_allclose(spectrum.axes[1].ppm, f2_before + (2.0 - 2.5))
+    np.testing.assert_allclose(spectrum.axes[0].ppm, f1_before + (20.0 - 25.0))
+
+
+def test_main_window_ppm_referencing_reads_the_current_axis_not_the_original(qapp, tmp_path, monkeypatch):
+    # The clicked position comes off the axis *as displayed*, which
+    # already carries whatever SR is applied -- so the new value is the
+    # existing one plus the correction. _apply_reference_shift_hz is
+    # idempotent against the original as-loaded axis, so treating the
+    # correction as the whole value would be wrong twice over.
+    # Asserted as: re-referencing a peak that already reads correctly
+    # changes nothing.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0])
+    window._on_reference_calibration_from_plot((2.5, 25.0))
+    after_first = (spectrum.metadata.raw["sr_shift_hz"],
+                   spectrum.metadata.raw["sr_shift_hz_f1"],
+                   spectrum.axes[1].ppm.copy(), spectrum.axes[0].ppm.copy())
+
+    # The peak now sits at 2.0 / 20.0; saying so again must be a no-op.
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0])
+    window._on_reference_calibration_from_plot((2.0, 20.0))
+    assert spectrum.metadata.raw["sr_shift_hz"] == pytest.approx(after_first[0])
+    assert spectrum.metadata.raw["sr_shift_hz_f1"] == pytest.approx(after_first[1])
+    np.testing.assert_allclose(spectrum.axes[1].ppm, after_first[2])
+    np.testing.assert_allclose(spectrum.axes[0].ppm, after_first[3])
+
+
+def test_main_window_ppm_referencing_skips_a_pseudo_2d_indirect_axis(qapp, tmp_path, monkeypatch):
+    # A pseudo-2D's indirect axis is a slice index, so there is nothing
+    # to reference against there -- only the direct dimension is offered
+    # or set.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0])
+    window._on_reference_calibration_from_plot((2.5, 4.0))
+
+    assert spectrum.metadata.raw["sr_shift_hz"] == pytest.approx(
+        (2.0 - 2.5) * spectrum.metadata.sfo1)
+    assert "sr_shift_hz_f1" not in spectrum.metadata.raw
+
+
+def test_main_window_ppm_referencing_cancel_changes_nothing(qapp, tmp_path, monkeypatch):
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    before = spectrum.axes[1].ppm.copy()
+
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0], accept=False)
+    window._on_reference_calibration_from_plot((2.5, 25.0))
+
+    assert "sr_shift_hz" not in spectrum.metadata.raw
+    np.testing.assert_allclose(spectrum.axes[1].ppm, before)
+
+
 def test_main_window_indirect_sr_shifts_only_the_indirect_axis(qapp, tmp_path, monkeypatch):
     # User request: "we need to add sr for indirect dimension in 2Ds."
     # The two dimensions need independent SR values against independent

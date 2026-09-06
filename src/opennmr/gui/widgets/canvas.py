@@ -144,6 +144,13 @@ class MplCanvas(QWidget):
     #: asks the owner (MainWindow) to handle it.
     referenceShiftRequested = Signal()
 
+    #: Emitted with the right-clicked ``(x, y)`` position when the user
+    #: asks to reference a 2D from the cursor. Carries the position
+    #: rather than letting MainWindow read ``_last_right_click_xy``
+    #: back out, so the handler cannot act on a *different* click than
+    #: the one that opened the menu.
+    referenceCalibrationRequested = Signal(object)
+
     #: Emitted with the right-clicked (x, y) data position when
     #: "Exclude Nearest Point" is chosen from the right-click menu,
     #: while a relaxation/diffusion curve fit (show_relaxation_fit) is
@@ -940,6 +947,17 @@ class MplCanvas(QWidget):
             # fully transparent for the bleed.
             row_ax.patch.set_alpha(1.0 if selected else 0.0)
 
+    def _exec_context_menu(self, menu, pos):
+        """Show ``menu`` modally and return the chosen action.
+
+        A one-line seam, so a test can inspect what the right-click menu
+        offers without a real modal menu blocking the run. Patching
+        ``QMenu.exec`` itself does not work -- PySide6 resolves it
+        through the C++ binding, so the real menu opens anyway and the
+        headless suite hangs rather than fails.
+        """
+        return menu.exec(self.canvas.mapToGlobal(pos))
+
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
 
@@ -956,6 +974,17 @@ class MplCanvas(QWidget):
         sr_action = None
         if self._current_1d_spectrum is not None:
             sr_action = menu.addAction("Set Reference Shift (Hz)…")
+
+        # The Hz entry above is gated on a 1D view, so a 2D contour had
+        # no referencing action at all -- and an Hz offset is the wrong
+        # thing to ask for on one anyway, since what a user actually
+        # knows is where a peak *should* be. This asks for that instead:
+        # right-click the peak, type its true shift, and the SR follows.
+        # A contour's axes are always in ppm (set_axis_unit only ever
+        # applies to a 1D view), so the click needs no unit conversion.
+        calibrate_action = None
+        if self._contour_spectrum is not None and self._last_right_click_xy is not None:
+            calibrate_action = menu.addAction("Set Reference from Cursor (ppm)…")
 
         unit_actions = {}
         if self._current_1d_spectrum is not None:
@@ -1017,7 +1046,7 @@ class MplCanvas(QWidget):
                 "resolution regardless of this)."
             )
 
-        chosen = menu.exec(self.canvas.mapToGlobal(pos))
+        chosen = self._exec_context_menu(menu, pos)
         if chosen in unit_actions:
             self.set_axis_unit(unit_actions[chosen])
         elif chosen is legend_action:
@@ -1032,6 +1061,8 @@ class MplCanvas(QWidget):
                 self.set_aspect_ratio(value)
         elif sr_action is not None and chosen is sr_action:
             self.referenceShiftRequested.emit()
+        elif calibrate_action is not None and chosen is calibrate_action:
+            self.referenceCalibrationRequested.emit(self._last_right_click_xy)
         elif contour_levels_action is not None and chosen is contour_levels_action:
             self._prompt_contour_levels()
         elif extract_slice_action is not None and chosen is extract_slice_action:

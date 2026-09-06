@@ -283,6 +283,7 @@ class MainWindow(QMainWindow):
         self.canvas.regionSelected.connect(self._on_region_selected)
         self.canvas.referenceShiftRequested.connect(self._on_reference_shift_from_plot)
         self.canvas.contourSlicesChanged.connect(self._on_contour_slices_changed)
+        self.canvas.referenceCalibrationRequested.connect(self._on_reference_calibration_from_plot)
         self.canvas.sliceKeepRequested.connect(self._on_slice_keep_requested)
         self.fid_canvas = MplCanvas()
         self.compare_canvas = MplCanvas()
@@ -7289,6 +7290,73 @@ class MainWindow(QMainWindow):
         indirect_hz = self.sr_shift_indirect_spin.value()
         self._apply_reference_shift_hz(direct_hz, "f2")
         self._apply_reference_shift_hz(indirect_hz, "f1")
+
+    def _on_reference_calibration_from_plot(self, position) -> None:
+        """Right-click "Set Reference from Cursor (ppm)…" on a 2D --
+        reference the spectrum by saying where the clicked peak
+        *should* be, rather than by working out an Hz offset by hand.
+
+        Explicit user request: "I need a right click option on the 2D
+        spectra to be able to set the sr (by setting ppm values)."
+        Both dimensions at once for a genuine 2D, since a heteronuclear
+        pair needs referencing on each; the direct one alone for a
+        pseudo-2D, whose indirect axis is a slice index.
+
+        The clicked position is read off the axis *as currently
+        displayed*, which already carries whatever SR is applied -- so
+        the new value is the existing one plus the correction, not the
+        correction alone. (:meth:`_apply_reference_shift_hz` is
+        idempotent against the original as-loaded axis, so a cumulative
+        delta here would be wrong twice over.)"""
+        index = self._selected_index()
+        if index is None or position is None:
+            return
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim != 2:
+            return
+        clicked = {"f2": float(position[0]), "f1": float(position[1])}
+        dims = ["f2"] + (["f1"] if self._sr_axis(spectrum, "f1") is not None else [])
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Reference from Cursor")
+        form = QFormLayout(dialog)
+        form.addRow(QLabel(
+            "Enter the true chemical shift of the peak under the cursor.\n"
+            "The reference (SR) for each dimension is set to match."
+        ))
+        spins = {}
+        labels = {"f2": f"Direct ({spectrum.metadata.nucleus or 'F2'}):",
+                  "f1": f"Indirect ({spectrum.metadata.nucleus_indirect or 'F1'}):"}
+        for dim in dims:
+            spin = QDoubleSpinBox()
+            spin.setRange(-1.0e5, 1.0e5)
+            spin.setDecimals(4)
+            spin.setSuffix(" ppm")
+            spin.setValue(clicked[dim])
+            spin.setToolTip(f"Cursor is currently at {clicked[dim]:.4f} ppm here.")
+            form.addRow(labels[dim], spin)
+            spins[dim] = spin
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # Both values worked out before either is applied -- see
+        # _on_apply_sr_clicked for why (applying one rewrites the other's
+        # spin box from metadata).
+        updates = {}
+        for dim in dims:
+            base_mhz = spectrum.metadata.sfo1 if dim == "f2" else spectrum.metadata.sfo1_indirect
+            if not base_mhz:
+                continue
+            current = float(spectrum.metadata.raw.get(self._SR_KEYS[dim][0], 0.0))
+            updates[dim] = current + (spins[dim].value() - clicked[dim]) * base_mhz
+        for dim, value in updates.items():
+            self._apply_reference_shift_hz(value, dim)
 
     def _on_reference_shift_from_plot(self) -> None:
         """Handles :attr:`MplCanvas.referenceShiftRequested`, the

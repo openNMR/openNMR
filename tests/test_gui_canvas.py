@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import types
 
 import numpy as np
+from PySide6.QtCore import QPoint
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QSpinBox
@@ -1917,3 +1918,56 @@ def test_canvas_reset_view_on_a_1d_still_uses_the_toolbar(qapp):
     canvas.show_spectrum(_make_1d())
     canvas.reset_view()          # must not raise without a contour
     assert canvas._contour_spectrum is None
+
+
+def _menu_labels(canvas, monkeypatch, choose=None):
+    """Open the context menu, capture what it offers, and optionally
+    pick one entry.
+
+    Goes through MplCanvas._exec_context_menu rather than patching
+    QMenu.exec: PySide6 resolves exec through the C++ binding, so a
+    patch on the Qt class does not take and the real modal menu opens
+    -- which hangs the headless suite instead of failing it."""
+    captured = {}
+
+    def fake_exec(self, menu, pos):
+        captured["labels"] = [a.text() for a in menu.actions() if a.text()]
+        if choose is None:
+            return None
+        return next((a for a in menu.actions() if a.text() == choose), None)
+
+    monkeypatch.setattr(MplCanvas, "_exec_context_menu", fake_exec)
+    canvas._on_context_menu(QPoint(5, 5))
+    return captured.get("labels", [])
+
+
+def test_canvas_offers_ppm_referencing_on_a_2d_only(qapp, monkeypatch):
+    # User request: "I need a right click option on the 2D spectra to be
+    # able to set the sr (by setting ppm values)." The existing Hz entry
+    # is gated on a 1D view, so a contour had no referencing action at
+    # all -- and an Hz offset is the wrong thing to ask for on one
+    # anyway, since what a user knows is where a peak should be.
+    label = "Set Reference from Cursor (ppm)…"
+
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    assert label not in _menu_labels(canvas, monkeypatch)
+
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._last_right_click_xy = (5.0, 95.0)
+    assert label in _menu_labels(canvas, monkeypatch)
+
+
+def test_canvas_ppm_referencing_emits_the_clicked_position(qapp, monkeypatch):
+    # The position travels with the signal rather than being read back
+    # out of _last_right_click_xy, so the handler cannot act on a
+    # different click than the one that opened the menu.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._last_right_click_xy = (5.0, 95.0)
+
+    seen = []
+    canvas.referenceCalibrationRequested.connect(seen.append)
+    _menu_labels(canvas, monkeypatch, choose="Set Reference from Cursor (ppm)…")
+    assert seen == [(5.0, 95.0)]

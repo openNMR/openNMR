@@ -2,6 +2,30 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Reference a 2D by clicking a peak and typing its shift (2026-09-06)
+
+User: "I need a right click option on the 2D spectra to be able to set the sr (by setting ppm values)."
+
+### There was no referencing action on a 2D at all
+
+The existing right-click "Set Reference Shift (Hz)…" is gated on `_current_1d_spectrum`, which a contour never sets -- so it simply never appeared on a 2D. And an Hz offset is the wrong question to ask on one anyway: what a user knows is *where a peak should be*, not how many Hz the axis is out by.
+
+New action, "Set Reference from Cursor (ppm)…": right-click the peak, type its true shift, and the SR follows. Both dimensions at once for a genuine 2D (a heteronuclear pair needs referencing on each, against `sfo1` and `sfo1_indirect` respectively); the direct one alone for a pseudo-2D, whose indirect axis is a slice index. No unit conversion is needed on the click, because `set_axis_unit` only ever applies to a 1D view -- a contour's axes are always ppm.
+
+### The part that is easy to get backwards
+
+The clicked position is read off the axis **as currently displayed**, which already carries whatever SR is applied. `_apply_reference_shift_hz` is idempotent *against the original as-loaded axis*, so the value it wants is `existing + (target - clicked) * base_MHz`, not the correction alone. Treating the correction as the whole value would be wrong twice over -- it would both discard the existing reference and re-apply the same correction on every subsequent use.
+
+The regression test asserts this the way a user would notice it: re-referencing a peak that already reads correctly must change nothing.
+
+Both dimensions are worked out before either is applied, for the reason recorded earlier in `_on_apply_sr_clicked` -- applying one calls `_restore_sr_control`, which rewrites the other's spin box from metadata.
+
+### A hung test, and the seam that fixed it
+
+The first version of the menu test patched `QMenu.exec`. That does not take: PySide6 resolves `exec` through the C++ binding, so the real modal menu opened and the headless suite **hung** rather than failing -- the same signature this project has hit before. Added a one-line `_exec_context_menu` seam on `MplCanvas` for the test to patch instead. (`QDialog.exec` *is* patchable at the class level, which is why the dialog tests need no equivalent.)
+
+6 new tests. 1023 passing (1017 -> 1023).
+
 ## Slice linewidth, a clipped axis label, and a taller slice panel (2026-09-06)
 
 User: "Linewidths of extracted slices should be 2. Be sure that the contour plot position resets back to the original load position (when I tried, the x-axis label got cut off). The extracted slice plot should be able to reach the top height of the top projection."
