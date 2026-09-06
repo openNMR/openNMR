@@ -303,6 +303,63 @@ def apply_recorded_phase(spectrum: np.ndarray, phc0: float, phc1: float, axis: i
     return spectrum * ramp.reshape(shape)
 
 
+#: ``metadata.raw`` keys holding the phase TopSpin itself recorded, per
+#: dimension. Kept **separate** from ``phase0``/``phase1`` (and their
+#: ``_f1`` siblings), which mean the *user's* own phase: the two are
+#: expressed in different models -- see :func:`apply_recorded_phase` --
+#: so merging them into one number would make neither reproducible.
+#: ``apply_dimension_phase`` is the single place they are combined.
+RECORDED_PHASE_KEYS = {
+    "f2": ("recorded_phase0", "recorded_phase1"),
+    "f1": ("recorded_phase0_f1", "recorded_phase1_f1"),
+}
+USER_PHASE_KEYS = {
+    "f2": ("phase0", "phase1"),
+    "f1": ("phase0_f1", "phase1_f1"),
+}
+
+
+def recorded_phase(raw: dict, dim: str = "f2") -> tuple[float, float]:
+    """This spectrum's recorded ``(PHC0, PHC1)`` for ``dim``
+    (``"f2"``/``"f1"``), or ``(0.0, 0.0)``. One accessor so the reader,
+    the GUI's live rebuild and the phase display can't disagree about
+    which keys hold it."""
+    key0, key1 = RECORDED_PHASE_KEYS[dim]
+    return float(raw.get(key0, 0.0) or 0.0), float(raw.get(key1, 0.0) or 0.0)
+
+
+def apply_dimension_phase(data: np.ndarray, ppm: np.ndarray, recorded: tuple[float, float],
+                           user: tuple[float, float], pivot_frac: float = 0.5) -> np.ndarray:
+    """Apply a dimension's full phase to ``data``'s **last axis**:
+    the file's own recorded phase first, then the user's own on top.
+
+    The single composition point for the two different phase models
+    this project has to hold at once, so every path that rebuilds a
+    spectrum from its raw FID produces the same answer:
+
+    * **recorded** -- TopSpin's ``PHC0``/``PHC1`` in TopSpin's own
+      index-ramp convention (:func:`apply_recorded_phase`). Reproduces
+      what the file says the spectrum should look like.
+    * **user** -- whatever the operator has dialled in since, in the
+      pivot-based model (:func:`opennmr.processing.ft.apply_phase`)
+      that makes interactive first-order phasing rotate about a chosen
+      point rather than about index 0.
+
+    Order matters and is not arbitrary: the recorded phase describes
+    the file's own state, so it belongs underneath; the user's phase is
+    an adjustment *relative to* that state, which is exactly what the
+    Phase controls show.
+
+    Callers handle their own orientation -- transpose so the dimension
+    of interest is last (F1 paths already do), matching
+    ``processing.ft``'s own last-axis convention.
+    """
+    data = apply_recorded_phase(data, recorded[0], recorded[1], axis=-1)
+    if user[0] or user[1]:
+        data = processing_ft.apply_phase(data, ppm, user[0], user[1], pivot_frac=pivot_frac)
+    return data
+
+
 def _apply_bruker_window(fid: np.ndarray, procs: dict, sw_hz: float) -> np.ndarray:
     """Apply the window TopSpin recorded in ``procs`` (``WDW``, with
     ``LB``/``SSB`` as needed), via ``nmrglue.proc_base``."""
@@ -532,6 +589,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     _, spectrum = processing_ft.fft_spectrum(fid, dt)
     x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, si)
 
+    recorded_f2 = (0.0, 0.0)
     if autophase:
         if phase_mode == "joint":
             phase0, phase1 = processing_ft.autophase01(
@@ -541,16 +599,15 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
         elif phase_mode == "apc0":
             phase0 = processing_ft.apc0(spectrum, x_ppm, phase0_inc)
         elif phase_mode == "recorded":
-            # TopSpin's own convention (see apply_recorded_phase), not
-            # the pivot-based model used for a user's live phase --
-            # applied here rather than folded into phase0/phase1 below,
-            # for the same reason as read_2d's matching branch.
-            phase0 = float(procs.get("PHC0", 0.0))
-            phase1 = float(procs.get("PHC1", 0.0))
+            # Kept as the *recorded* phase, in TopSpin's own model,
+            # rather than folded into phase0/phase1 (the user's own, in
+            # the pivot model) -- see apply_dimension_phase for why the
+            # two must not be merged into one number.
+            recorded_f2 = (float(procs.get("PHC0", 0.0)), float(procs.get("PHC1", 0.0)))
         else:
             raise ValueError("phase_mode must be 'apc0', 'joint', or 'recorded'")
 
-    spectrum = processing_ft.apply_phase(spectrum, x_ppm, phase0, phase1, pivot_frac=pivot_frac)
+    spectrum = apply_dimension_phase(spectrum, x_ppm, recorded_f2, (phase0, phase1), pivot_frac=pivot_frac)
     spectrum = spectrum / mass / ns
 
     if f1p != 0 or f2p != 0:
@@ -563,6 +620,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
         source_path=path, procno=procno, probe=acqus.get("PROBHD"), pulse_program=acqus.get("PULPROG"),
         raw={
             "acqus": acqus, "procs": procs, "phase0": phase0, "phase1": phase1,
+            "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
             # The exact (shift/echo-align/LP/windowed/zero-filled) FID
             # fed into the FFT above -- an optional GUI preview of what
             # FID-domain processing actually did, kept alongside (not
@@ -872,25 +930,24 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # axis 0's length, never F2's point count) since a phase1/pivot
     # correction needs it.
     x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, spectrum.shape[1])
+    recorded_f2 = (0.0, 0.0)
     if autophase:
         if phase_mode == "recorded":
-            # Applied in TopSpin's own convention via
-            # apply_recorded_phase, NOT merged into the pivot-based
-            # phase0/phase1 below -- the two are different models, and
-            # routing the recorded values through the pivot one is what
-            # used to leave every 2D badly phased (see that function's
-            # docstring for the measurement). The user-supplied
-            # phase0/phase1 arguments still stack on top, unchanged.
-            phase0 = float(procs.get("PHC0", 0.0))
+            # F2's recorded phase, kept separate from the user's own --
+            # see apply_dimension_phase. Note PHC1 is now honoured here;
+            # it used to be dropped entirely for 2D (read_1d always read
+            # both), which left every 2D missing TopSpin's own
+            # first-order term.
+            recorded_f2 = (float(procs.get("PHC0", 0.0)), float(procs.get("PHC1", 0.0)))
         elif phase_mode == "apc0":
             phase0 = processing_ft.apc0(spectrum.mean(axis=0), x_ppm, phase0_inc)
         else:
             raise ValueError("phase_mode must be 'apc0' or 'recorded'")
-    if phase0 or phase1:
-        spectrum = processing_ft.apply_phase(spectrum, x_ppm, phase0, phase1, pivot_frac=pivot_frac)
+    spectrum = apply_dimension_phase(spectrum, x_ppm, recorded_f2, (phase0, phase1), pivot_frac=pivot_frac)
 
     # ----- F1 (indirect dimension): hypercomplex decode, zero-fill, FFT along axis 0 (skipped for pseudo-2D) -----
     window_unsupported_note_f1 = None
+    recorded_f1 = (0.0, 0.0)
     if pseudo_2d:
         y_index = np.arange(1, spectrum.shape[0] + 1)
         y_axis = NMRAxis(kind="index", index=y_index)
@@ -970,6 +1027,16 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # elsewhere in this project's history) -- this fix is
             # deliberately scoped to leave that path untouched.
             spectrum = spectrum[::-1, :]
+        # F1's own recorded phase. This dimension previously had no
+        # recorded-phase step at all -- a real gap, reported as "the
+        # indirect phase is for sure not loading across from
+        # processing". Applied directly rather than through
+        # apply_dimension_phase: this reader takes no F1 *user* phase
+        # (the GUI owns that, and applies both together on its own
+        # rebuild path), so there is nothing here to compose with.
+        if autophase and phase_mode == "recorded":
+            recorded_f1 = (float(proc2s.get("PHC0", 0.0)), float(proc2s.get("PHC1", 0.0)))
+            spectrum = apply_recorded_phase(spectrum, recorded_f1[0], recorded_f1[1], axis=0)
         y_ppm, y_hz = _ppm_hz_axis(o1_1, sf_1, obs_1, sw_1, si1)
         y_axis = NMRAxis(kind="frequency", ppm=y_ppm, hz=y_hz)
 
@@ -983,6 +1050,8 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         probe=acqus.get("PROBHD"), pulse_program=acqus.get("PULPROG"),
         raw={
             "acqus": acqus, "procs": procs, "proc2s": proc2s, "phase0": phase0, "phase1": phase1,
+            "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
+            "recorded_phase0_f1": recorded_f1[0], "recorded_phase1_f1": recorded_f1[1],
             # F1's own hypercomplex encoding (see
             # processing.ft.decode_hypercomplex_f1) -- retrievable so a
             # live GUI recompute that redoes F1's FFT (any F2-only

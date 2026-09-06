@@ -2,7 +2,66 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
-## Rebuild stage 1 DONE: TopSpin's phase convention measured exactly (F2 now +0.9999) (2026-09-06)
+## Rebuild stage 1 SHIPPED: recorded and user phase separated, F2 now +0.9999 by default (2026-09-06)
+
+User: "start on that. Make sure everything is implemented cleanly and without redundancy." The deferred half of stage 1 is done -- the measured TopSpin convention is now the shipped default, with the GUI consistent with it.
+
+### The design
+
+Two phase models have to coexist, so they are stored and applied separately rather than merged:
+
+* **recorded** -- the file's own `PHC0`/`PHC1` in TopSpin's index-ramp convention (`apply_recorded_phase`). Describes the file's own state.
+* **user** -- whatever the operator has dialled since, in the pivot-based model (`processing.ft.apply_phase`) that makes interactive first-order phasing rotate about a chosen point.
+
+Merging them into one number would make neither reproducible, which is exactly what the old code did (`phase0` held `PHC0` *and* the user's value, applied through the pivot model).
+
+**One composition point**: `io.bruker.apply_dimension_phase(data, ppm, recorded, user, pivot_frac)` -- recorded first, user on top, on the last axis. Called by `read_1d`, `read_2d` (F2), and the GUI's three raw-FID rebuild sites. **One accessor**: `io.bruker.recorded_phase(raw, dim)`, with the key names held in `RECORDED_PHASE_KEYS`/`USER_PHASE_KEYS` so nothing re-derives them. Verified no direct key access survives anywhere outside those.
+
+### Which sites actually needed changing -- three, not six
+
+Auditing the six candidate sites showed only those that **rebuild from the raw FID** need the recorded phase re-applied (the reader's own application lives in the spectrum they replace, not in `fid_raw`):
+
+| site | needs it | why |
+|---|---|---|
+| `_process_raw_fid_row` | **yes** | rebuilds a row from `fid_raw` |
+| `_recompute_multi_row_data` F2 | **yes** | rebuilds every row from `fid_raw` |
+| `_recompute_multi_row_data` F1 | **yes** | rebuilds F1 from `fid_raw` |
+| `_recompute_multi_row_phase_and_baseline_only` | no | the *processed-only* fallback -- TopSpin already baked the phase into `2rr` |
+| per-row live preview | no | applies the live delta to already-phased data |
+| `_reapply_phase_post_reload` | no | runs after a fresh read, so the reader already applied it |
+
+Getting this wrong in either direction double-applies or drops the phase, so the audit mattered more than the edit.
+
+### Results
+
+**Shipped default vs TopSpin, F2-processed datasets (n=17): median +0.9999, best +1.0000, 14/17 above +0.99** -- against a median of **+0.067** before this work. `bruker_PFG/150` went +0.513 -> +0.9999 and `bruker_T2/11` +0.816 -> +0.9972. F2's `PHC1` is now honoured for 2D as well (it was dropped entirely; `read_1d` always read both), and F1 has a recorded-phase step for the first time -- the "indirect phase is for sure not loading across from processing" report.
+
+One outlier remains at +0.0262 (`20200804_NaMgMnO.../31`), not yet investigated.
+
+**The acceptance test that blocked this last time now passes exactly.** Live rebuild vs load, relative difference:
+
+| | before | after |
+|---|---|---|
+| 1D | -- | **0.000000** |
+| T2 pseudo-2D | 0.46 | **0.000000** |
+| PFG pseudo-2D | 0.76 | **0.000000** |
+| Echo-Antiecho genuine-2D | -- | **0.000000** |
+| States-TPPI genuine-2D | -- | **0.000000** |
+| magnitude-mode COSY | 1.93 | **0.000000** |
+
+Pinned as a parametrised regression test over all five real datasets, verified to discriminate (4 of 5 fail when the fix is reverted).
+
+**A third divergence found and fixed while testing**: `_recompute_multi_row_data` never applied **magnitude mode**, so a magnitude-mode spectrum silently reverted to phase-sensitive the moment any control was touched (the 1.93 above). Same class as the phase gap -- a rebuild path not matching the reader -- so it is fixed the same way, calling the reader's own `_apply_magnitude_mode` last.
+
+### Also cleaned up
+
+- **Zeroing is now exact.** "Zero Phase 0/1" and "Reset" clear the *recorded* half at its source instead of trying to cancel it with an equal-and-opposite user phase -- which could never work for first-order phase, since the two use different models. `Reset` is now just both Zero calls rather than a third copy of the same logic. Both trigger a rebuild, since the recorded phase is applied during reconstruction.
+- **The phase display** shows recorded + user + live delta, so "current phase" means what is actually applied.
+- `recorded_phase*` is deliberately **not** blocklisted from the processing sidecar: once Zero can clear it, it is a user choice that has to survive a reload.
+
+946 tests passing (940 -> 946). **Stage 2 (hypercomplex F1) unchanged and still open**: Echo-Antiecho +0.395, States-TPPI +0.034.
+
+## Rebuild stage 1 (investigation): TopSpin's phase convention measured exactly (2026-09-06)
 
 User: "start this rebuild". Stage 1 -- **validate and fix F2 in isolation** -- is solved, and the answer overturns an earlier conclusion in this file.
 

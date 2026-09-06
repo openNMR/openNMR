@@ -432,7 +432,11 @@ def test_read_2d_default_phase_mode_uses_recorded_not_apc0(tmp_path, monkeypatch
 
     spectrum = bruker.read_2d(path, homonuclear=True, autophase=True)
 
-    assert spectrum.metadata.raw["phase0"] == pytest.approx(42.0)
+    # Stored under its own key now: phase0/phase1 mean the *user's*
+    # phase, recorded_phase0/1 the file's own (they use different
+    # models -- see io.bruker.apply_dimension_phase).
+    assert spectrum.metadata.raw["recorded_phase0"] == pytest.approx(42.0)
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(0.0)
 
 
 def test_read_2d_f2_window_override_applies_per_row(tmp_path, monkeypatch):

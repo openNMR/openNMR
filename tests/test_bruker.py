@@ -515,8 +515,9 @@ def test_apply_recorded_phase_reproduces_topspin_on_real_xf2_data():
         b = np.asarray(b, float).ravel() - np.mean(b)
         return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
 
-    # Essentially exact agreement with TopSpin's own processed data.
+    # Essentially exact agreement with TopSpin's own processed data...
     assert _corr(phased, reference) > 0.999
-    # ...and decisively better than what read_2d currently ships, which
-    # routes PHC0 through the pivot-based model (~0.51 here).
-    assert _corr(phased, reference) > _corr(bruker.read_2d(path, pseudo_2d=True).data, reference) + 0.4
+    # ...and read_2d's own default now does exactly this, so a plain
+    # load reproduces TopSpin too (it used to sit at ~0.51, routing
+    # PHC0 through the pivot-based model and dropping PHC1 entirely).
+    assert _corr(bruker.read_2d(path, pseudo_2d=True).data, reference) > 0.999

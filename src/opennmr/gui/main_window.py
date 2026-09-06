@@ -3157,7 +3157,14 @@ class MainWindow(QMainWindow):
         phase1 = float(spectrum.metadata.raw.get("phase1", 0.0)) + self.phase1_spin.value()
         span = ppm.max() - ppm.min()
         pivot_frac = (self.pivot_spin.value() - ppm.min()) / span if span else 0.5
-        data = processing_ft.apply_phase(data, ppm, phase0, phase1, pivot_frac=pivot_frac)
+        # Rebuilt from the raw FID, so the file's own recorded phase has
+        # to be re-applied here too -- the reader's own application of it
+        # lives in the spectrum this replaces, not in `fid_raw`. Same
+        # composition, same order, as io.bruker.read_1d/read_2d.
+        data = io_bruker.apply_dimension_phase(
+            data, ppm, io_bruker.recorded_phase(spectrum.metadata.raw, "f2"),
+            (phase0, phase1), pivot_frac=pivot_frac,
+        )
         data = self._baseline_correct_if_enabled(data, ppm, spectrum)
 
         axis = NMRAxis(kind="frequency", ppm=ppm, hz=hz)
@@ -3378,7 +3385,13 @@ class MainWindow(QMainWindow):
             phase0 += self.phase0_spin.value()
             phase1 += self.phase1_spin.value()
         pivot_frac2 = ((self.pivot_spin.value() - ppm2.min()) / span2 if span2 else 0.5) if f2_pivot_is_live else 0.5
-        data = processing_ft.apply_phase(data, ppm2, phase0, phase1, pivot_frac=pivot_frac2)
+        # Recorded phase re-applied for the same reason as in
+        # _process_raw_fid_row: this rebuilds from `fid_raw`, which is
+        # the FID *before* the reader phased anything.
+        data = io_bruker.apply_dimension_phase(
+            data, ppm2, io_bruker.recorded_phase(spectrum.metadata.raw, "f2"),
+            (phase0, phase1), pivot_frac=pivot_frac2,
+        )
 
         dt_f1 = spectrum.metadata.raw.get("fid_dt_f1")
         f1_axis = spectrum.axes[0]
@@ -3487,15 +3500,34 @@ class MainWindow(QMainWindow):
                 # rather than just reapplying a stale phase.
                 phase0_f1 += self.phase0_spin.value()
                 phase1_f1 += self.phase1_spin.value()
-            if phase0_f1 or phase1_f1:
+            recorded_f1 = io_bruker.recorded_phase(spectrum.metadata.raw, "f1")
+            # The guard now includes the recorded phase: F1's own
+            # recorded values can be nonzero while the user has dialled
+            # nothing, and skipping the call then would drop the file's
+            # own phase on every live rebuild.
+            if phase0_f1 or phase1_f1 or any(recorded_f1):
                 span1 = ppm1.max() - ppm1.min()
                 pivot_frac1 = (
                     ((self.pivot_spin.value() - ppm1.min()) / span1 if span1 else 0.5) if f1_pivot_is_live else 0.5
                 )
-                data = processing_ft.apply_phase(data.T, ppm1, phase0_f1, phase1_f1, pivot_frac=pivot_frac1).T
+                data = io_bruker.apply_dimension_phase(
+                    data.T, ppm1, recorded_f1, (phase0_f1, phase1_f1), pivot_frac=pivot_frac1,
+                ).T
 
         data = self._baseline_correct_if_enabled_multi_row(data, ppm2, spectrum)
         spectrum.axes = [f1_axis, NMRAxis(kind="frequency", ppm=ppm2, hz=hz2)]
+        # Magnitude/power last, exactly as the reader does it -- this
+        # path rebuilds from the raw FID, so without it a magnitude-mode
+        # spectrum silently reverted to phase-sensitive the moment any
+        # control was touched (measured at 1.93 relative difference on
+        # the real magnitude-mode COSY, against 0.000000 for every
+        # phase-sensitive dataset once the recorded phase was wired in).
+        magnitude_mode = spectrum.metadata.raw.get("magnitude_mode")
+        if magnitude_mode:
+            data = io_bruker._apply_magnitude_mode(data, magnitude_mode)
+            spectrum.data = np.real(data)
+            spectrum.data_imag = None
+            return True
         spectrum.data = np.real(data)
         spectrum.data_imag = np.imag(data)
         return True
@@ -4746,35 +4778,65 @@ class MainWindow(QMainWindow):
         the same live-preview path as every other Phase 0 change."""
         self.phase0_spin.setValue(self.phase0_spin.value() + delta)
 
+    def _recompute_from_raw_if_possible(self, spectrum) -> bool:
+        """Rebuild ``spectrum`` from its cached raw FID, so a change to
+        something applied *during* reconstruction (the recorded phase)
+        actually takes effect. ``False`` when there is no raw FID to
+        rebuild from, leaving the caller to fall back to a plain
+        preview."""
+        if spectrum is None or not self._fid_reprocessable(spectrum):
+            return False
+        if spectrum.ndim == 1:
+            self._commit_processing_preview_as_spectrum(spectrum)
+        else:
+            self._recompute_multi_row_data(spectrum)
+        index = self._selected_index()
+        if index is not None:
+            self._draw_selected_spectrum(spectrum, row=index)
+            self._schedule_sidecar_save(index)
+        self._refresh_current_phase_displays()
+        return True
+
     def _on_reset_phase_clicked(self) -> None:
         """Zero both Phase 0 and Phase 1 together -- the same "actually
         zero the applied phase, not just the drag delta" behaviour as
         :meth:`_on_zero_phase_clicked`, which see for why."""
-        for order, (handle, spin) in enumerate(
-            ((self.phase0_handle, self.phase0_spin), (self.phase1_handle, self.phase1_spin))
-        ):
-            target_delta = -self._phase_committed_value(order)
-            handle.setValue(target_delta, emit=False)
-            spin.blockSignals(True)
-            spin.setValue(target_delta)
-            spin.blockSignals(False)
-        self._apply_phase_preview()
+        self._on_zero_phase_clicked(0)
+        self._on_zero_phase_clicked(1)
+
+    def _phase_target_dim_key(self) -> str:
+        """``"f1"`` or ``"f2"`` -- which dimension the Phase controls
+        are currently editing. One accessor, so every phase helper
+        agrees about the target rather than each re-deriving it."""
+        return "f1" if (self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0) else "f2"
+
+    def _phase_target_spectrum(self):
+        """The spectrum the Phase controls act on, or ``None``."""
+        index = self._phase_target_index
+        if self._phase_mode is None or index is None or not (0 <= index < len(self.session)):
+            return None
+        return self.session.spectra[index]
 
     def _phase_committed_value(self, order: int) -> float:
-        """The phase already baked into whatever the controls are
+        """The phase already applied to whatever the controls are
         currently targeting -- the other half of the total that
         :meth:`_refresh_current_phase_displays` shows (that total is
         this plus the live spin-box delta). ``0.0`` when there is no
-        valid target, so callers don't have to re-check."""
-        index = self._phase_target_index
-        if self._phase_mode is None or index is None or not (0 <= index < len(self.session)):
+        valid target, so callers don't have to re-check.
+
+        Includes **both** halves: the file's own recorded phase and the
+        user's own. They are stored separately and applied through
+        different models (see ``io.bruker.apply_dimension_phase``), but
+        what is "already applied" -- which is what the display shows and
+        what the Zero buttons must cancel -- is their sum.
+        """
+        spectrum = self._phase_target_spectrum()
+        if spectrum is None:
             return 0.0
-        is_f1 = self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0
-        if order == 0:
-            key = "phase0_f1" if is_f1 else "phase0"
-        else:
-            key = "phase1_f1" if is_f1 else "phase1"
-        return float(self.session.spectra[index].metadata.raw.get(key, 0.0))
+        dim = self._phase_target_dim_key()
+        raw = spectrum.metadata.raw
+        user_key = io_bruker.USER_PHASE_KEYS[dim][order]
+        return float(raw.get(user_key, 0.0) or 0.0) + io_bruker.recorded_phase(raw, dim)[order]
 
     def _on_zero_phase_clicked(self, order: int) -> None:
         """Zero just Phase 0 (``order=0``) or just Phase 1 (``order=1``),
@@ -4801,13 +4863,27 @@ class MainWindow(QMainWindow):
         behind their back and having to re-derive what they already
         handle.
         """
+        spectrum = self._phase_target_spectrum()
+        if spectrum is not None:
+            # Clear the recorded half outright rather than trying to
+            # cancel it with an equal-and-opposite user phase: the two
+            # use different models (index ramp vs pivot), so for
+            # first-order phase an opposing user value would *not*
+            # actually cancel it. Zeroing means "no phase", so remove
+            # it at its source.
+            dim = self._phase_target_dim_key()
+            spectrum.metadata.raw[io_bruker.RECORDED_PHASE_KEYS[dim][order]] = 0.0
+            spectrum.metadata.raw[io_bruker.USER_PHASE_KEYS[dim][order]] = 0.0
         handle, spin = (self.phase0_handle, self.phase0_spin) if order == 0 else (self.phase1_handle, self.phase1_spin)
-        target_delta = -self._phase_committed_value(order)
-        handle.setValue(target_delta, emit=False)
+        handle.setValue(0.0, emit=False)
         spin.blockSignals(True)
-        spin.setValue(target_delta)
+        spin.setValue(0.0)
         spin.blockSignals(False)
-        self._apply_phase_preview()
+        # Rebuild rather than just re-previewing: the recorded phase is
+        # applied during reconstruction from the raw FID, so clearing it
+        # only takes effect once that rebuild runs.
+        if not self._recompute_from_raw_if_possible(spectrum):
+            self._apply_phase_preview()
 
     def _on_autophase_clicked(self) -> None:
         """Autophase for whatever the Phase controls currently target
@@ -5347,13 +5423,17 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         is_f1 = self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0
         key0, key1 = ("phase0_f1", "phase1_f1") if is_f1 else ("phase0", "phase1")
+        # The file's own recorded phase counts as "already applied" too
+        # -- see _phase_committed_value. Added here rather than merged
+        # into the stored phase0/phase1, which mean the user's own.
+        recorded0, recorded1 = io_bruker.recorded_phase(spectrum.metadata.raw, "f1" if is_f1 else "f2")
         # Wrapped the same way _commit_pending_phase_to_metadata wraps
         # the stored value -- keeps this display cyclic continuously
         # during an active drag too (e.g. a committed 350deg plus a
         # live +30deg delta shows as 20deg, not 380deg), not just after
         # the drag ends and commits.
-        phase0 = (float(spectrum.metadata.raw.get(key0, 0.0)) + self.phase0_spin.value()) % 360.0
-        phase1 = float(spectrum.metadata.raw.get(key1, 0.0)) + self.phase1_spin.value()
+        phase0 = (float(spectrum.metadata.raw.get(key0, 0.0)) + recorded0 + self.phase0_spin.value()) % 360.0
+        phase1 = float(spectrum.metadata.raw.get(key1, 0.0)) + recorded1 + self.phase1_spin.value()
         self.phase0_current_display.setText(f"{phase0:.2f}°")
         self.phase1_current_display.setText(f"{phase1:.2f}°")
 

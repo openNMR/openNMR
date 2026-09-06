@@ -4795,6 +4795,21 @@ def _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05, M0=1.
     return NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
 
 
+def _isolate_sidecars(monkeypatch, tmp_path):
+    """Point sidecar reads/writes at a scratch directory, keyed per
+    source path. Per-path, not one shared file: a single shared sidecar
+    leaks one dataset's saved state into the next one's load, which
+    silently invalidates any before/after comparison across datasets."""
+    import hashlib
+
+    def _path(source_path, suffix):
+        key = hashlib.sha1(str(source_path).encode()).hexdigest()[:16]
+        return str(tmp_path / f"{key}_{suffix}.json")
+
+    monkeypatch.setattr(io_persistence, "metadata_sidecar_path", lambda p: _path(p, "meta"))
+    monkeypatch.setattr(io_persistence, "processing_sidecar_path", lambda p: _path(p, "proc"))
+
+
 def _load_spectrum_directly(window, spectrum):
     """Append an already-constructed NMRSpectrum straight into the
     session, bypassing file I/O -- for synthetic data no importer
@@ -7799,11 +7814,16 @@ def test_main_window_zero_phase_zeros_the_applied_phase_not_just_the_delta(qapp,
     spectrum.metadata.raw["phase1"] = 45.0
 
     window._on_zero_phase_clicked(0)
-    assert window.phase0_spin.value() == pytest.approx(-120.0)
-    assert window.phase1_spin.value() == pytest.approx(0.0)  # untouched
+    # The *applied* phase is what must reach zero -- asserted through
+    # _phase_committed_value, which sums the file's own recorded phase
+    # and the user's, since those are stored separately and use
+    # different models.
+    assert window._phase_committed_value(0) == pytest.approx(0.0)
+    assert window.phase0_spin.value() == pytest.approx(0.0)
+    assert window._phase_committed_value(1) == pytest.approx(45.0)  # untouched
 
     window._on_zero_phase_clicked(1)
-    assert window.phase1_spin.value() == pytest.approx(-45.0)
+    assert window._phase_committed_value(1) == pytest.approx(0.0)
 
 
 def test_main_window_reset_phase_zeros_both_applied_phases(qapp, tmp_path, monkeypatch):
@@ -7815,8 +7835,8 @@ def test_main_window_reset_phase_zeros_both_applied_phases(qapp, tmp_path, monke
 
     window._on_reset_phase_clicked()
 
-    assert window.phase0_spin.value() == pytest.approx(30.0)
-    assert window.phase1_spin.value() == pytest.approx(-200.0)
+    assert window._phase_committed_value(0) == pytest.approx(0.0)
+    assert window._phase_committed_value(1) == pytest.approx(0.0)
 
 
 def test_main_window_zero_phase_with_no_committed_phase_is_still_zero(qapp, tmp_path, monkeypatch):
@@ -7825,8 +7845,62 @@ def test_main_window_zero_phase_with_no_committed_phase_is_still_zero(qapp, tmp_
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
     window.session.spectra[0].metadata.raw["phase0"] = 0.0
+    window.session.spectra[0].metadata.raw["recorded_phase0"] = 0.0
     window.phase0_spin.setValue(37.0)
 
     window._on_zero_phase_clicked(0)
 
     assert window.phase0_spin.value() == pytest.approx(0.0)
+    assert window._phase_committed_value(0) == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("dataset,genuine_2d", [
+    ("bruker_T2/11", False),
+    ("bruker_PFG/150", False),
+    ("Bruker Example Data/Cyclosporine/203", True),      # Echo-Antiecho
+    ("Bruker Example Data/exam_CMCse_3/19", True),       # States-TPPI
+    ("Bruker Example Data/exam_CMCse_3/12", True),       # magnitude mode
+])
+def test_main_window_live_rebuild_reproduces_the_load_exactly(qapp, dataset, genuine_2d, monkeypatch, tmp_path):
+    # THE acceptance test for separating the recorded phase from the
+    # user's. The GUI rebuilds from the cached raw FID, which is the FID
+    # *before* the reader phased anything -- so every reconstruction
+    # path has to re-apply the file's own recorded phase, in the file's
+    # own model, or touching any control makes the spectrum jump.
+    #
+    # This is exactly what blocked shipping the phase-convention fix the
+    # first time: measured at 0.46 (T2) and 0.76 (PFG) relative
+    # difference before the split, and 1.93 for the magnitude-mode COSY
+    # (whose rebuild path dropped magnitude entirely).
+    path = os.path.join("test_data", *dataset.split("/"))
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real {dataset} dataset")
+
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    if genuine_2d:
+        window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    # Baseline correction off: it is a separate, deliberately deferred
+    # step, not part of what this test is pinning.
+    spectrum.metadata.raw["baseline_correct"] = False
+    before = np.array(spectrum.data)
+
+    window._recompute_multi_row_data(spectrum)
+
+    after = np.array(window.session.spectra[0].data)
+    scale = max(np.max(np.abs(before)), 1e-30)
+    assert np.max(np.abs(after - before)) / scale < 1e-6
+
+
+def test_main_window_recorded_and_user_phase_are_stored_separately(qapp, tmp_path, monkeypatch):
+    # They are applied through different models, so merging them into
+    # one number would make neither reproducible.
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64)
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    raw = window.session.spectra[0].metadata.raw
+
+    assert "recorded_phase0" in raw and "recorded_phase1" in raw
+    assert raw["phase0"] == pytest.approx(0.0)  # the user has dialled nothing yet

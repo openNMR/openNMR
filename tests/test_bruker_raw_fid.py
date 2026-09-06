@@ -167,7 +167,11 @@ def test_read_1d_default_phase_mode_uses_recorded_not_apc0(tmp_path, monkeypatch
 
     spectrum = bruker.read_1d(path, autophase=True)  # phase_mode not specified -- uses the default
 
-    assert spectrum.metadata.raw["phase0"] == pytest.approx(37.5)
+    # Stored under its own key now: phase0/phase1 mean the *user's*
+    # phase, recorded_phase0/1 the file's own (they use different
+    # models -- see io.bruker.apply_dimension_phase).
+    assert spectrum.metadata.raw["recorded_phase0"] == pytest.approx(37.5)
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(0.0)
 
 
 def test_read_1d_recorded_phase_mode_ignores_data_entirely(tmp_path, monkeypatch):
