@@ -2,6 +2,30 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Contour redraws lost the Output style; new style defaults (2026-09-06)
+
+User: "Scrolling the contours redraws the axis with defaults, not the ones set in output. These defaults should probably be: tick and line widths of 1.75 and fontsize of 16, and fig size of 8 by 8 (or 7.5 by 10 for 2D with extracted slices). Also the extracted projections should be normalised."
+
+### The style leak
+
+`set_style` stores the Output tab's choices on the instance and applies them to the axes on screen, and its docstring says "every ``show_*`` method reads ``self._AXIS_LINEWIDTH`` etc., so a future redraw picks these up automatically". True of the 1D views, which set those values directly -- and **not** true of the 2D path, which hands off to `plot_2d_contour` and never passed them. So every contour rebuild fell back to that function's own manuscript defaults (fontsize 12, tick width 1.0). A contour-level scroll triggers exactly such a rebuild, which is where the user hit it.
+
+Fixed in two halves, because `plot_2d_contour` only accepts some of it: `_contour_style_kwargs()` passes `fontsize`/`tick_length`/`tick_width` into the call, and `_apply_current_axis_style()` applies the rest (spine linewidth, minor ticks) to every axes afterwards. `set_style` now delegates its own axis-style half to that same method rather than repeating it -- applying all of it unconditionally is equivalent to the old per-argument guards, since anything not passed in is re-applied at its existing value.
+
+### New defaults
+
+`_AXIS_LINEWIDTH` and `_TICK_WIDTH` 1.4 -> **1.75**, `_AXIS_LABELSIZE` 13 -> **16**. Tick length left at 5.5 (not mentioned).
+
+Export figure size is now a real default rather than an accident: `_EXPORT_FIG_SIZE = (8.0, 8.0)`, and `_EXPORT_FIG_SIZE_WITH_SLICES = (7.5, 10.0)` for a 2D showing extracted slices, picked by `default_export_size()`. Before this the size was left alone entirely unless the Output tab had been edited, so an exported figure inherited whatever size Qt's layout happened to give the live widget; and the Output tab's own spin boxes were initialised from that same live size (6.4 x 4.8) rather than from anything chosen.
+
+**Flagged to the user, implemented as stated**: 7.5 x 10 is taken literally as width x height, i.e. portrait. The sliced layout is contour + panel side by side, which is wider than it is tall, so 10 x 7.5 may have been meant. One number to swap either way.
+
+### Extracted traces are normalised
+
+Each trace now fills its own slot rather than sharing one amplitude scale across the stack. This reverses a deliberate earlier choice (a shared scale keeps relative intensities honest); the user asked for the other trade, which favours comparing lineshape between a weak row and a strong one.
+
+4 new/updated tests, each verified to fail with its own change reverted. 1012 passing (1009 -> 1012).
+
 ## Crosshair removed (deferred, not abandoned); slice-panel scroll fixed (2026-09-06)
 
 User: "crosshair is just filling the contour and not going away, and if I try to zoom then there is still an issue. Remove the crosshair for now (I still want it eventually) but keep the other improvements for the slicing."

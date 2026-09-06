@@ -2202,7 +2202,11 @@ class MainWindow(QMainWindow):
         self.output_dpi_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("DPI:", self.output_dpi_spin)
 
-        fig_w, fig_h = self.canvas.figure.get_size_inches()
+        # The canvas's own export default (8x8, or 7.5x10 once a 2D is
+        # showing extracted slices), not the live embedded figure's
+        # size -- that is whatever Qt's layout happened to give the
+        # widget, which is not a sensible default for a saved figure.
+        fig_w, fig_h = self.canvas.default_export_size()
         self.output_fig_width_spin = QDoubleSpinBox()
         self.output_fig_width_spin.setRange(1.0, 40.0)
         self.output_fig_width_spin.setValue(float(fig_w))

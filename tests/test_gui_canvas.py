@@ -1787,3 +1787,64 @@ def test_canvas_projection_zoom_still_works_with_a_slice_panel(qapp):
     canvas._on_scroll(_scroll_at(canvas, canvas.ax, yfrac=-0.07, inaxes=False))
     assert canvas.ax.get_xlim() != before_x
     assert panel.get_xlim() == canvas.ax.get_xlim()
+
+
+def test_canvas_contour_redraw_keeps_the_output_tab_style(qapp):
+    # Real user report: "scrolling the contours redraws the axis with
+    # defaults, not the ones set in output". Every contour rebuild --
+    # including the one a contour-level scroll triggers -- went through
+    # plot_2d_contour without the style, so it fell back to that
+    # function's own manuscript defaults and silently undid the Output
+    # tab. The 1D views never had this problem because they read
+    # self._AXIS_LABELSIZE and friends directly.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas.set_style(linewidth=3.0, labelsize=22, tick_width=3.0, tick_length=9.0)
+
+    def styled(ax):
+        return (ax.spines["bottom"].get_linewidth(),
+                ax.xaxis.label.get_fontsize(),
+                ax.xaxis.get_major_ticks()[0].tick1line.get_markeredgewidth())
+
+    expected = styled(canvas.ax)
+    assert expected == (3.0, 22.0, 3.0)
+
+    canvas._on_scroll(_scroll_at(canvas, canvas.ax))      # contour-level adjust -> rebuild
+    assert styled(canvas.ax) == expected
+    assert styled(canvas._proj_axes["f2"]) == expected    # projection strips too
+
+    canvas._add_contour_slice("f1", 3, "A")               # another rebuild path
+    assert styled(canvas.ax) == expected
+
+
+def test_canvas_default_export_size_switches_for_a_sliced_2d(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    assert canvas.default_export_size() == (8.0, 8.0)
+
+    canvas._add_contour_slice("f1", 3, "A")
+    assert canvas.default_export_size() == (7.5, 10.0)
+
+    canvas._clear_contour_slices()
+    assert canvas.default_export_size() == (8.0, 8.0)
+
+
+def test_canvas_export_applies_the_default_size_without_an_override(qapp):
+    # The size used to be left alone entirely unless the Output tab had
+    # been edited, so an exported figure inherited whatever size Qt's
+    # layout happened to give the live widget.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=8))
+
+    seen = []
+    canvas.export_full_resolution(lambda: seen.append(tuple(canvas.figure.get_size_inches())))
+    assert seen == [(8.0, 8.0)]
+    # ...and restored afterwards, never left on the live figure.
+    assert tuple(canvas.figure.get_size_inches()) == (9.0, 6.0)
+
+    seen.clear()
+    canvas.set_export_settings(fig_width=12.0)
+    canvas.export_full_resolution(lambda: seen.append(tuple(canvas.figure.get_size_inches())))
+    assert seen == [(12.0, 8.0)]     # explicit width, defaulted height

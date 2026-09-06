@@ -545,10 +545,13 @@ def test_plot_2d_contour_slice_panel_spreads_traces_evenly_over_the_panel():
     baselines = sorted(float(np.min(line.get_ydata())) for line in panel.lines)
     np.testing.assert_allclose(baselines, [0.0, 1 / 3, 2 / 3], atol=1e-9)
 
-    # One shared amplitude scale, so relative intensities stay honest --
-    # the synthetic rows differ in height by construction.
+    # Each trace normalised to its own height ("the extracted
+    # projections should be normalised"), so a weak row can be compared
+    # with a strong one on lineshape -- the synthetic rows differ in
+    # height by construction, and must come out equal here.
     heights = [float(np.ptp(line.get_ydata())) for line in panel.lines]
-    assert len(set(round(h, 9) for h in heights)) > 1
+    np.testing.assert_allclose(heights, heights[0])
+    assert heights[0] == pytest.approx(1 / 3 * 0.85)   # slot x offset_fraction
     plt.close(fig)
 
 

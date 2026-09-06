@@ -108,10 +108,18 @@ class MplCanvas(QWidget):
     #: so :meth:`set_style` can override them per-instance (the
     #: Output tab's live style panel) without touching every show_*
     #: call site.
-    _AXIS_LINEWIDTH = 1.4
-    _AXIS_LABELSIZE = 13
+    _AXIS_LINEWIDTH = 1.75
+    _AXIS_LABELSIZE = 16
     _TICK_LENGTH = 5.5
-    _TICK_WIDTH = 1.4
+    _TICK_WIDTH = 1.75
+
+    #: Default **export** figure size, inches. Not applied to the live
+    #: embedded figure at any point -- see :meth:`set_export_settings`
+    #: for why that fights Qt's own canvas resizing. A 2D carrying
+    #: extracted slices gets its own pair, since it is a two-panel
+    #: layout rather than one square contour.
+    _EXPORT_FIG_SIZE = (8.0, 8.0)
+    _EXPORT_FIG_SIZE_WITH_SLICES = (7.5, 10.0)
 
     #: Max pixel movement between a click and its release still counted
     #: as a click (row-select in a "Stacked" Compare view -- see
@@ -767,8 +775,9 @@ class MplCanvas(QWidget):
             clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
             square_aspect=self._aspect_ratio is None,
             **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
-            **self._slice_panel_kwargs(),
+            **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
         )
+        self._apply_current_axis_style()
         if preserve_view:
             self.ax.set_xlim(xlim)
             self.ax.set_ylim(ylim)
@@ -1034,6 +1043,57 @@ class MplCanvas(QWidget):
         self._apply_view_options()
         self.canvas.draw_idle()
 
+    def default_export_size(self) -> tuple[float, float]:
+        """The export figure size to use when the Output tab hasn't
+        been given an explicit one -- :attr:`_EXPORT_FIG_SIZE`, or
+        :attr:`_EXPORT_FIG_SIZE_WITH_SLICES` for a 2D contour that is
+        currently showing extracted slices, which is a two-panel
+        layout rather than one square contour."""
+        if self._contour_spectrum is not None and self._contour_slices:
+            return self._EXPORT_FIG_SIZE_WITH_SLICES
+        return self._EXPORT_FIG_SIZE
+
+    def _contour_style_kwargs(self) -> dict:
+        """The Output tab's own live style, in the form
+        :func:`opennmr.plotting.plot_2d_contour` takes it.
+
+        Real user report: "scrolling the contours redraws the axis with
+        defaults, not the ones set in output". Every contour rebuild --
+        including the one a contour-level scroll triggers -- went
+        through ``plot_2d_contour`` without these, so it fell back to
+        that function's own manuscript defaults (fontsize 12, tick
+        width 1.0) and silently undid the Output tab. The 1D views
+        never had this problem because they read
+        ``self._AXIS_LABELSIZE`` and friends directly."""
+        return {
+            "fontsize": self._AXIS_LABELSIZE,
+            "tick_length": self._TICK_LENGTH,
+            "tick_width": self._TICK_WIDTH,
+        }
+
+    def _apply_current_axis_style(self) -> None:
+        """Apply the current linewidth/tick/label style to every axes
+        on the figure. Called both by :meth:`set_style` (so a change is
+        visible immediately) and after every contour rebuild (so a
+        redraw doesn't revert to ``plot_2d_contour``'s own defaults --
+        ``_contour_style_kwargs`` covers what that function accepts,
+        this covers the rest, spine linewidth and minor ticks)."""
+        for ax in self.figure.get_axes():
+            for spine in ax.spines.values():
+                spine.set_linewidth(self._AXIS_LINEWIDTH)
+            ax.tick_params(which="major", length=self._TICK_LENGTH,
+                           width=self._TICK_WIDTH, labelsize=self._AXIS_LABELSIZE)
+            if self._minor_ticks_visible:
+                ax.minorticks_on()
+                ax.tick_params(which="minor", length=self._TICK_LENGTH * 0.5,
+                               width=self._TICK_WIDTH * 0.75)
+            else:
+                ax.minorticks_off()
+            ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+            ax.yaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+            if ax.get_title():
+                ax.title.set_fontsize(self._AXIS_LABELSIZE)
+
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
                   minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None) -> None:
         """The Output tab's live style panel -- updates whichever of
@@ -1069,23 +1129,14 @@ class MplCanvas(QWidget):
         if compare_colormap is not None:
             self._compare_colormap = compare_colormap
 
+        # Everything except grid/legend is the same "apply the current
+        # style to every axes" the contour rebuild needs, so it lives in
+        # one place rather than being written twice. Applying all of it
+        # unconditionally is equivalent to the old per-argument guards,
+        # since anything not passed in is re-applied at its existing
+        # value.
+        self._apply_current_axis_style()
         for ax in self.figure.get_axes():
-            if linewidth is not None:
-                for spine in ax.spines.values():
-                    spine.set_linewidth(linewidth)
-            if tick_length is not None or tick_width is not None or minor_ticks is not None:
-                ax.tick_params(which="major", length=self._TICK_LENGTH, width=self._TICK_WIDTH)
-                if self._minor_ticks_visible:
-                    ax.minorticks_on()
-                    ax.tick_params(which="minor", length=self._TICK_LENGTH * 0.5, width=self._TICK_WIDTH * 0.75)
-                else:
-                    ax.minorticks_off()
-            if labelsize is not None:
-                ax.tick_params(which="major", labelsize=labelsize)
-                ax.xaxis.label.set_fontsize(labelsize)
-                ax.yaxis.label.set_fontsize(labelsize)
-                if ax.get_title():
-                    ax.title.set_fontsize(labelsize)
             if grid is not None:
                 ax.grid(grid, **({"alpha": 0.3} if grid else {}))
             if legend_loc is not None and ax.get_legend() is not None:
@@ -1583,8 +1634,9 @@ class MplCanvas(QWidget):
                 clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
                 square_aspect=self._aspect_ratio is None,
                 **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
-                **self._slice_panel_kwargs(),
+                **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
             )
+            self._apply_current_axis_style()
         else:
             raise ValueError(f"Cannot display a spectrum with ndim={spectrum.ndim}")
 
@@ -2298,11 +2350,11 @@ class MplCanvas(QWidget):
         original_size = self.figure.get_size_inches()
         if self._export_dpi is not None:
             self.figure.set_dpi(self._export_dpi)
-        if self._export_fig_width is not None or self._export_fig_height is not None:
-            self.figure.set_size_inches(
-                self._export_fig_width if self._export_fig_width is not None else original_size[0],
-                self._export_fig_height if self._export_fig_height is not None else original_size[1],
-            )
+        default_width, default_height = self.default_export_size()
+        self.figure.set_size_inches(
+            self._export_fig_width if self._export_fig_width is not None else default_width,
+            self._export_fig_height if self._export_fig_height is not None else default_height,
+        )
 
         try:
             save_fn()

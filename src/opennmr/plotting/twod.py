@@ -246,10 +246,11 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
     contour a few pixels wide).
 
     **Traces are spread evenly over the panel's full height**, one slot
-    each, and scaled by a single shared factor so their relative
-    intensities stay honest -- a per-trace normalisation would make a
-    weak slice look as strong as the diagonal. ``offset_fraction`` is
-    how much of its own slot the tallest trace fills.
+    each, and **each is normalised to its own height** ("the extracted
+    projections should be normalised") so that a weak row can be
+    compared with a strong one on lineshape rather than being flattened
+    against it. ``offset_fraction`` is how much of its slot each trace
+    fills.
 
     **No connector lines.** An earlier version continued each dashed
     line across the gap and joined it to its own trace's baseline. It
@@ -297,12 +298,10 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
     fixed_positions = fixed_axis.ppm if fixed_axis.ppm is not None else fixed_axis.index
 
     # Evenly spread: one slot per trace across a normalised 0..1 panel,
-    # with a single shared amplitude scale so relative intensities are
-    # preserved.
+    # each trace scaled to fill its own slot.
     n = len(traces)
     slot = 1.0 / n
     heights = [float(np.max(t.data) - np.min(t.data)) or 1.0 for _, t in traces]
-    scale = (slot * offset_fraction) / max(heights)
 
     # Stack so the panel's vertical order matches the contour's: the
     # slice whose dashed line sits highest gets the highest trace.
@@ -319,6 +318,8 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
         trace_x = trace_axis.ppm if trace_axis.ppm is not None else trace_axis.index
         baseline = baselines[i]
         y = np.asarray(trace.data, dtype=float)
+        # Normalised per trace, not on one shared scale.
+        scale = (slot * offset_fraction) / heights[i]
         panel.plot(trace_x, (y - float(np.min(y))) * scale + baseline,
                    color=colour, linewidth=1.0)
 
