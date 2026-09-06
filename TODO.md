@@ -2,6 +2,24 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Extracted-slice actions made visible (2026-09-06)
+
+User: "There is no way to actually phase the extracted slice as it stands. maybe the extracted view should have new options to do something with the slice."
+
+**The capability was there and worked -- the affordance was not.** Checked first rather than assuming a functional bug: after "Keep Slice", the phase controls are in the *identical* state as for a normally-loaded 1D (`_phase_mode == "1d"`, correct target index, handles enabled, same status text), and phasing genuinely changes the data. The problem was that the only way in was a **right-click context menu on the plot** -- not somewhere anyone looks, so in practice the feature may as well not have existed.
+
+Fixed as suggested: the extracted view now has its own visible bar, shown **only** while a slice is being viewed:
+
+- a label naming the slice and stating it is *not yet in the spectrum list*, so its status is obvious rather than inferred;
+- **"Keep for Phasing/Fitting"** -- adds it to the session and selects it;
+- **"Back to Contour"** -- returns to the 2D it came from.
+
+Both buttons share the same helpers as the context-menu entries, which are kept so anyone who had found them is not broken. `_refresh_slice_bar` is driven from the single set/clear points, so the bar can never be left showing over an unrelated view.
+
+**A real self-inflicted bug, caught by running it rather than by reading it**: a global text replace rewrote the signal emit *inside* `_emit_slice_keep_requested` into a call to the helper itself, so clicking Keep recursed to `RecursionError`. It has its own regression test now. A second, smaller one: the new canvas tests asserted `isVisible()`, which Qt reports as `False` for every child of a widget that was never shown -- `isHidden()` is the right check when the parent is not realised.
+
+963 tests passing (959 -> 963).
+
 ## Navigation shortcuts, phasable extracted slices, and softer negative contours (2026-09-06)
 
 Three requests, all done.

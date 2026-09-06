@@ -19,7 +19,8 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QInputDialog, QMenu, QSpinBox, QVBoxLayout, QWidget,
+    QHBoxLayout, QInputDialog, QLabel, QMenu, QPushButton, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
 from ...core.registry import find_gamma, NUC_label
@@ -181,6 +182,40 @@ class MplCanvas(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.toolbar)
+
+        # A visible bar for acting on an extracted slice, shown only
+        # while one is being viewed. Real user report: "There is no way
+        # to actually phase the extracted slice as it stands. maybe the
+        # extracted view should have new options to do something with
+        # the slice". The actions already existed in the right-click
+        # menu and worked -- but a context menu on a plot is not
+        # somewhere anyone looks, so in practice the capability may as
+        # well not have been there. Kept in the context menu too, since
+        # removing it would break the habit of anyone who had found it.
+        self._slice_bar = QWidget(self)
+        slice_bar_layout = QHBoxLayout(self._slice_bar)
+        slice_bar_layout.setContentsMargins(4, 0, 4, 0)
+        self._slice_label = QLabel("")
+        slice_bar_layout.addWidget(self._slice_label)
+        slice_bar_layout.addStretch(1)
+
+        self._keep_slice_button = QPushButton("Keep for Phasing/Fitting")
+        self._keep_slice_button.setToolTip(
+            "Add this slice to the spectrum list as its own 1D spectrum, so "
+            "the Phase controls, fitting and Compare can act on it. Viewing "
+            "a slice alone only displays it."
+        )
+        self._keep_slice_button.clicked.connect(self._emit_slice_keep_requested)
+        slice_bar_layout.addWidget(self._keep_slice_button)
+
+        self._back_to_contour_button = QPushButton("Back to Contour")
+        self._back_to_contour_button.setToolTip("Return to the 2D contour this slice came from.")
+        self._back_to_contour_button.clicked.connect(self._show_contour_again)
+        slice_bar_layout.addWidget(self._back_to_contour_button)
+
+        self._slice_bar.setVisible(False)
+        layout.addWidget(self._slice_bar)
+
         layout.addWidget(self.canvas)
 
         self._pan_start = None  # (x_pixel, y_pixel, xlim, ylim) while dragging
@@ -901,7 +936,7 @@ class MplCanvas(QWidget):
         elif extract_slice_action is not None and chosen is extract_slice_action:
             self._prompt_extract_slice()
         elif keep_slice_action is not None and chosen is keep_slice_action:
-            self.sliceKeepRequested.emit((self._extracted_trace, self._extracted_label))
+            self._emit_slice_keep_requested()
         elif show_contour_action is not None and chosen is show_contour_action:
             # Read out first -- show_spectrum unconditionally clears
             # _extracted_from_spectrum at its own top (correct for
@@ -1160,6 +1195,31 @@ class MplCanvas(QWidget):
             return
         self.extract_slice(axis_combo.currentData(), index_spin.value())
 
+    def _emit_slice_keep_requested(self) -> None:
+        """Hand the displayed slice to whoever is listening (the main
+        window adds it to the session). Shared by the toolbar button
+        and the context-menu action so the two can't diverge."""
+        if self._extracted_trace is not None:
+            self.sliceKeepRequested.emit((self._extracted_trace, self._extracted_label))
+
+    def _show_contour_again(self) -> None:
+        """Back to the 2D this slice came from. Reads the source out
+        *before* calling show_spectrum, which clears it at its own top
+        (correct for every other caller, since the content genuinely
+        changes) -- reading afterwards would already see ``None``."""
+        source = self._extracted_from_spectrum
+        if source is not None:
+            self.show_spectrum(source)
+
+    def _refresh_slice_bar(self) -> None:
+        """Show the slice action bar exactly while a slice is being
+        viewed. Driven from one place so the bar can't be left showing
+        over an unrelated view."""
+        showing = self._extracted_trace is not None
+        self._slice_bar.setVisible(showing)
+        if showing:
+            self._slice_label.setText(f"Viewing {self._extracted_label} \u2014 not yet in the spectrum list")
+
     def extract_slice(self, axis: str, index: int) -> None:
         """Pull a single row (``axis="f1"``) or column (``"f2"``) out
         of the current 2D/pseudo-2D spectrum as its own 1D trace, via
@@ -1174,7 +1234,8 @@ class MplCanvas(QWidget):
         # trace being displayed to the session, rather than recomputing
         # it from arguments the context menu would have to carry.
         self._extracted_trace = trace
-        self._extracted_label = f"{axis.upper()} slice {index}" 
+        self._extracted_label = f"{axis.upper()} slice {index}"
+        self._refresh_slice_bar()
 
     @property
     def axis_unit(self) -> str:
@@ -1363,6 +1424,7 @@ class MplCanvas(QWidget):
         self._extracted_from_spectrum = None
         self._extracted_trace = None
         self._extracted_label = ""
+        self._refresh_slice_bar()
 
         if spectrum.ndim == 1:
             self._contour_spectrum = None

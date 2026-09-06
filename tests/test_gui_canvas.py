@@ -1612,3 +1612,86 @@ def test_set_style_compare_colormap_used_on_next_redraw(qapp):
     canvas = MplCanvas()
     canvas.set_style(compare_colormap="plasma")
     assert canvas._compare_colormap == "plasma"
+
+
+def _2d_for_slicing(n_f1=8, n_f2=32):
+    y = np.linspace(150, 100, n_f1)
+    x = np.linspace(10, 0, n_f2)
+    yy, xx = np.meshgrid(np.arange(n_f1), np.arange(n_f2), indexing="ij")
+    data = np.exp(-(((xx - n_f2 / 2) ** 2 + (yy - n_f1 / 2) ** 2)) / 8.0) * 100
+    return NMRSpectrum(
+        data=data,
+        axes=[
+            NMRAxis(kind="frequency", ppm=y, hz=y * 100.0),
+            NMRAxis(kind="frequency", ppm=x, hz=x * 400.0),
+        ],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", nucleus_indirect="13C",
+                             sfo1=400.0, sfo1_indirect=100.0),
+        data_imag=np.zeros_like(data),
+    )
+
+
+def test_canvas_slice_bar_appears_only_while_a_slice_is_viewed(qapp):
+    # Real user report: "There is no way to actually phase the extracted
+    # slice as it stands. maybe the extracted view should have new
+    # options to do something with the slice". The capability existed in
+    # the right-click menu and worked -- but a context menu on a plot is
+    # not somewhere anyone looks, so a visible bar is what makes it real.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_2d_for_slicing())
+    # isHidden(), not isVisible(): this canvas is never shown in a
+    # window here, and Qt reports every child of an unshown widget as
+    # not visible regardless of its own state.
+    assert canvas._slice_bar.isHidden() is True
+
+    canvas.extract_slice("f1", 2)
+    assert canvas._slice_bar.isHidden() is False
+    assert "F1 slice 2" in canvas._slice_label.text()
+
+    # Returning to the contour hides it again -- the bar must never be
+    # left showing over an unrelated view.
+    canvas._back_to_contour_button.click()
+    assert canvas._slice_bar.isHidden() is True
+    assert canvas._contour_spectrum is not None
+
+
+def test_canvas_keep_slice_button_emits_the_displayed_trace(qapp):
+    canvas = MplCanvas()
+    source = _2d_for_slicing()
+    canvas.show_spectrum(source)
+    canvas.extract_slice("f1", 3)
+
+    received = []
+    canvas.sliceKeepRequested.connect(received.append)
+    canvas._keep_slice_button.click()
+
+    assert len(received) == 1
+    trace, label = received[0]
+    assert label == "F1 slice 3"
+    assert trace.ndim == 1
+    # The trace must carry its imaginary part, or the whole point --
+    # phasing it -- does not work.
+    assert trace.data_imag is not None
+    np.testing.assert_allclose(trace.data, source.data[2])
+
+
+def test_canvas_keep_slice_helper_does_not_recurse(qapp):
+    # Regression test for a real self-inflicted bug: a global text
+    # replace rewrote the emit *inside* the helper into a call to the
+    # helper itself, so clicking Keep recursed until RecursionError.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_2d_for_slicing())
+    canvas.extract_slice("f1", 1)
+    received = []
+    canvas.sliceKeepRequested.connect(received.append)
+    canvas._emit_slice_keep_requested()
+    assert len(received) == 1
+
+
+def test_canvas_keep_slice_is_a_noop_without_a_slice(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_2d_for_slicing())
+    received = []
+    canvas.sliceKeepRequested.connect(received.append)
+    canvas._emit_slice_keep_requested()
+    assert received == []
