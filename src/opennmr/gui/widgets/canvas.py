@@ -155,6 +155,15 @@ class MplCanvas(QWidget):
     #: peakPicked's single click.
     regionSelected = Signal(float, float)
 
+    #: An extracted slice the user wants to work on properly (phase,
+    #: fit, compare) rather than just look at. `extract_slice` only
+    #: *displays* a trace -- it never reaches the session, so none of
+    #: the phase controls (which act on session spectra) could touch
+    #: it. Carries the trace itself; `MainWindow` adds it to the
+    #: session and selects it. Real user request: "a method to phase
+    #: on an extracted slice".
+    sliceKeepRequested = Signal(object)
+
     #: Tag applied to every persistent integration-region axvspan (see
     #: :func:`set_regions`) so they can be found and cleared by gid on
     #: the next call, without needing to track a separate reference
@@ -252,6 +261,12 @@ class MplCanvas(QWidget):
         # own content genuinely changes to something else, since
         # show_spectrum is the only entry point for this canvas.
         self._extracted_from_spectrum: NMRSpectrum | None = None
+        # The extracted trace itself (and a label for it), so
+        # "Keep Slice" can hand exactly what is on screen to the
+        # session rather than recomputing it. Cleared alongside
+        # _extracted_from_spectrum whenever the view changes.
+        self._extracted_trace: NMRSpectrum | None = None
+        self._extracted_label: str = ""
         self._contour_factor: float | None = None
         # Number of contour levels, and how they're spaced between the
         # noise floor (_contour_factor) and the data's own peak -- see
@@ -837,8 +852,16 @@ class MplCanvas(QWidget):
             extract_slice_action = menu.addAction("Extract Slice…")
 
         show_contour_action = None
+        keep_slice_action = None
         if self._extracted_from_spectrum is not None:
             show_contour_action = menu.addAction("Show Contour")
+            if getattr(self, "_extracted_trace", None) is not None:
+                keep_slice_action = menu.addAction("Keep Slice (for phasing/fitting)")
+                keep_slice_action.setToolTip(
+                    "Add this slice to the spectrum list as its own 1D "
+                    "spectrum, so the Phase controls, fitting and Compare "
+                    "can act on it. Extracting alone only displays it."
+                )
 
         exclude_point_action = None
         reset_points_action = None
@@ -877,6 +900,8 @@ class MplCanvas(QWidget):
             self._prompt_contour_levels()
         elif extract_slice_action is not None and chosen is extract_slice_action:
             self._prompt_extract_slice()
+        elif keep_slice_action is not None and chosen is keep_slice_action:
+            self.sliceKeepRequested.emit((self._extracted_trace, self._extracted_label))
         elif show_contour_action is not None and chosen is show_contour_action:
             # Read out first -- show_spectrum unconditionally clears
             # _extracted_from_spectrum at its own top (correct for
@@ -1088,6 +1113,24 @@ class MplCanvas(QWidget):
         axis_combo = QComboBox()
         axis_combo.addItem("Row (fix F1, trace along F2)", "f1")
         axis_combo.addItem("Column (fix F2, trace along F1)", "f2")
+        if self._contour_spectrum is not None and self._contour_spectrum.is_pseudo_2d:
+            # Pre-existing crash, found while adding "Keep Slice": for a
+            # pseudo-2D, F1 is a slice *index*, not a frequency, so a
+            # trace along it has an index axis and plot_1d raises
+            # "This axis has no 'ppm' values (kind='index')". Disabled
+            # rather than removed, so the reason is visible instead of
+            # the option silently not being there. (Tracing a pseudo-2D
+            # along F1 is a decay curve, not a spectrum -- the Analysis
+            # tab is where that belongs.)
+            item = axis_combo.model().item(axis_combo.count() - 1)
+            item.setEnabled(False)
+            axis_combo.setItemData(
+                axis_combo.count() - 1,
+                "Not available for a pseudo-2D: F1 is a slice index, not a frequency, "
+                "so a trace along it is a decay curve rather than a spectrum. Use the "
+                "Analysis tab for that.",
+                Qt.ItemDataRole.ToolTipRole,
+            )
         form.addRow("Axis:", axis_combo)
 
         index_spin = QSpinBox()
@@ -1127,6 +1170,11 @@ class MplCanvas(QWidget):
         trace = processing_slicing.get_trace(source, axis=axis, index=index)
         self.show_spectrum(trace)
         self._extracted_from_spectrum = source
+        # Kept so "Keep Slice (for phasing/fitting)" can hand the exact
+        # trace being displayed to the session, rather than recomputing
+        # it from arguments the context menu would have to carry.
+        self._extracted_trace = trace
+        self._extracted_label = f"{axis.upper()} slice {index}" 
 
     @property
     def axis_unit(self) -> str:
@@ -1313,6 +1361,8 @@ class MplCanvas(QWidget):
         rebuild."""
         self.figure.clear()
         self._extracted_from_spectrum = None
+        self._extracted_trace = None
+        self._extracted_label = ""
 
         if spectrum.ndim == 1:
             self._contour_spectrum = None

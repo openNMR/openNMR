@@ -469,10 +469,20 @@ def test_main_window_process_indirect_button_hidden_for_1d(qapp, tmp_path):
 # Menu bar
 # ============================================================
 
+
+def _menu_by_title(window, title):
+    """A top-level menu by its own name. Positional lookup broke every
+    time a menu was added -- name lookup does not."""
+    for action in window.menuBar().actions():
+        if action.text().replace("&", "") == title:
+            return action.menu()
+    raise AssertionError(f"no {title!r} menu")
+
+
 def test_main_window_has_file_edit_window_menus(qapp):
     window = MainWindow()
     titles = [action.text().replace("&", "") for action in window.menuBar().actions()]
-    assert titles == ["File", "Edit", "Window", "Analysis", "Fitting"]
+    assert titles == ["File", "Edit", "View", "Window", "Analysis", "Fitting"]
 
 
 def test_main_window_menu_open_action_triggers_open_dialog(qapp, monkeypatch):
@@ -557,7 +567,7 @@ def test_main_window_remove_peak_shortcut_is_scoped_to_peak_table(qapp, tmp_path
 
 def test_main_window_menu_window_panel_actions_switch_side_tabs(qapp):
     window = MainWindow()
-    window_menu = window.menuBar().actions()[2].menu()
+    window_menu = _menu_by_title(window, "Window")
     analysis_action = next(a for a in window_menu.actions() if a.text() == "Analysis")
     analysis_action.trigger()
     assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Analysis"
@@ -581,7 +591,7 @@ def test_main_window_spectrum_canvas_defaults_to_full_resolution_others_do_not(q
 
 def test_main_window_menu_window_view_actions_switch_canvas_tabs(qapp):
     window = MainWindow()
-    window_menu = window.menuBar().actions()[2].menu()
+    window_menu = _menu_by_title(window, "Window")
     compare_action = next(a for a in window_menu.actions() if a.text() == "Compare View")
     compare_action.trigger()
     assert window.canvas_tabs.currentWidget() is window.compare_canvas
@@ -7904,3 +7914,80 @@ def test_main_window_recorded_and_user_phase_are_stored_separately(qapp, tmp_pat
 
     assert "recorded_phase0" in raw and "recorded_phase1" in raw
     assert raw["phase0"] == pytest.approx(0.0)  # the user has dialled nothing yet
+
+
+def test_main_window_pan_is_the_default_mode_once_data_is_loaded(qapp, tmp_path, monkeypatch):
+    # Explicit user request: "Pan should be on by default when the
+    # programme/data is loaded." Applied on load rather than at startup
+    # so it lands on canvases that actually have something plotted.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    assert window._navigation_mode() == ""  # nothing loaded yet
+
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+
+    assert window._navigation_mode() == "pan"
+
+
+def test_main_window_navigation_mode_toggle_and_idempotence(qapp, tmp_path, monkeypatch):
+    # matplotlib's toolbar pan()/zoom() *toggle*, so setting a mode that
+    # is already active would turn it back off -- the helper has to
+    # check first. Pinned because it is an easy and invisible mistake.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+
+    window._toggle_navigation_mode()
+    assert window._navigation_mode() == "zoom"
+    window._toggle_navigation_mode()
+    assert window._navigation_mode() == "pan"
+
+    window._set_navigation_mode("zoom")
+    window._set_navigation_mode("zoom")   # must not toggle back off
+    assert window._navigation_mode() == "zoom"
+
+
+def test_main_window_navigation_mode_applies_to_every_canvas(qapp, tmp_path, monkeypatch):
+    # The mode is a per-toolbar flag, so leaving the other canvases
+    # alone would mean switching canvas tab silently changed the
+    # interaction mode back.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window._set_navigation_mode("zoom")
+
+    modes = {
+        canvas.toolbar.mode.name if hasattr(canvas.toolbar.mode, "name") else str(canvas.toolbar.mode)
+        for canvas in window._all_canvases()
+    }
+    assert len(modes) == 1 and "ZOOM" in modes.pop().upper()
+
+
+def test_main_window_keeping_an_extracted_slice_makes_it_phasable(qapp, tmp_path, monkeypatch):
+    # Real user request: "a method to phase on an extracted slice".
+    # extract_slice only *displayed* a trace -- it never reached the
+    # session, and every phase control acts on session spectra.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    before = len(window.session)
+
+    window.canvas.extract_slice("f1", 1)
+    assert window.canvas._extracted_trace is not None
+    window.canvas.sliceKeepRequested.emit(
+        (window.canvas._extracted_trace, window.canvas._extracted_label)
+    )
+
+    assert len(window.session) == before + 1
+    kept = window.session.spectra[-1]
+    assert kept.ndim == 1
+    # "derived": it has no raw FID to reprocess from, so the FID
+    # controls stay hidden while the phase controls still work.
+    assert kept.metadata.vendor == "derived"
+    # Phasable, which is the whole point -- get_trace carries data_imag.
+    assert kept.data_imag is not None
+    assert window._selected_index() == len(window.session) - 1
+
+    before_data = np.array(window.session.spectra[-1].data)
+    window.phase0_spin.setValue(90.0)
+    assert not np.allclose(before_data, window.session.spectra[-1].data)

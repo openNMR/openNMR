@@ -282,6 +282,7 @@ class MainWindow(QMainWindow):
         self.canvas.peakPicked.connect(self._on_peak_picked)
         self.canvas.regionSelected.connect(self._on_region_selected)
         self.canvas.referenceShiftRequested.connect(self._on_reference_shift_from_plot)
+        self.canvas.sliceKeepRequested.connect(self._on_slice_keep_requested)
         self.fid_canvas = MplCanvas()
         self.compare_canvas = MplCanvas()
         self.fit_canvas = MplCanvas()
@@ -443,6 +444,37 @@ class MainWindow(QMainWindow):
         autophase_action.triggered.connect(self._on_autophase_clicked)
         edit_menu.addAction(autophase_action)
 
+        # Navigation-mode shortcuts. matplotlib's own toolbar owns the
+        # pan/zoom state, so these drive it rather than duplicating it --
+        # the toolbar buttons stay in sync because they *are* the state.
+        view_menu = menu_bar.addMenu("&View")
+        pan_action = QAction("&Pan Mode", self)
+        pan_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        pan_action.setToolTip("Drag to pan the spectrum. On by default when data is loaded.")
+        pan_action.triggered.connect(lambda: self._set_navigation_mode("pan"))
+        view_menu.addAction(pan_action)
+
+        zoom_action = QAction("&Zoom Mode", self)
+        zoom_action.setShortcut(QKeySequence("Ctrl+Shift+Z"))
+        zoom_action.setToolTip("Drag a rectangle to zoom into it.")
+        zoom_action.triggered.connect(lambda: self._set_navigation_mode("zoom"))
+        view_menu.addAction(zoom_action)
+
+        toggle_nav_action = QAction("&Toggle Pan/Zoom", self)
+        # Ctrl+Z (Cmd+Z on macOS) as explicitly requested. There is no
+        # undo stack in this application for it to collide with.
+        toggle_nav_action.setShortcut(QKeySequence("Ctrl+Z"))
+        toggle_nav_action.setToolTip("Switch between pan and zoom.")
+        toggle_nav_action.triggered.connect(self._toggle_navigation_mode)
+        view_menu.addAction(toggle_nav_action)
+
+        view_menu.addSeparator()
+        home_action = QAction("Reset &View", self)
+        home_action.setShortcut(QKeySequence("Ctrl+0"))
+        home_action.setToolTip("Reset pan/zoom back to the full spectrum.")
+        home_action.triggered.connect(self._reset_navigation_view)
+        view_menu.addAction(home_action)
+
         window_menu = menu_bar.addMenu("&Window")
         minimize_action = QAction("&Minimize", self)
         minimize_action.setShortcut(QKeySequence("Ctrl+M"))
@@ -566,6 +598,96 @@ class MainWindow(QMainWindow):
         model_actions = self._model_menu_group.actions()
         if 0 <= self.relaxation_model_combo.currentIndex() < len(model_actions):
             model_actions[self.relaxation_model_combo.currentIndex()].setChecked(True)
+
+    def _on_slice_keep_requested(self, payload) -> None:
+        """Add an extracted slice to the session as its own 1D
+        spectrum, and select it.
+
+        Real user request: "a method to phase on an extracted slice".
+        ``MplCanvas.extract_slice`` only ever *displayed* a trace -- it
+        never reached the session, and every phase control acts on
+        session spectra, so an extracted slice could be looked at but
+        not worked on. Adding it makes phasing, fitting and Compare all
+        apply to it through their existing paths, with no parallel
+        machinery.
+
+        Registered via :meth:`Session.add_derived`, which marks the
+        vendor ``"derived"`` -- correct here: the slice has no raw FID
+        of its own to reprocess from, so the FID-processing controls
+        stay hidden for it (see ``_fid_reprocessable``) while the phase
+        controls, which need only retained imaginary data, work
+        normally. ``processing.slicing.get_trace`` carries ``data_imag``
+        through, which is what makes that true -- and when it is absent
+        (a magnitude-mode or processed-only source), the slice is still
+        kept, but the user is told why phasing will be unavailable
+        rather than left to discover a greyed-out control.
+        """
+        trace, label = payload
+        if trace is None:
+            return
+        if trace.data_imag is None:
+            QMessageBox.information(
+                self, "Slice kept without phase data",
+                f"{label} has no retained imaginary data, so it can be fitted and compared "
+                f"but not phased. That happens when the spectrum it came from was itself "
+                f"loaded without an imaginary part (a magnitude-mode or processed-only load).",
+            )
+        index = self.session.add_derived(trace, label)
+        self.spectrum_list.addItem(self.session.label(index))
+        self._select_single_row(index)
+        self.statusBar().showMessage(f"Kept {label} as its own spectrum.", 5000)
+
+    def _set_navigation_mode(self, mode: str) -> None:
+        """Put **every** canvas into ``"pan"`` or ``"zoom"``.
+
+        Applied to all of them, not just the visible one: the mode is a
+        per-toolbar flag, so leaving the others alone would mean
+        switching canvas tab silently changed the interaction mode back.
+
+        matplotlib's own toolbar owns this state and its ``pan()``/
+        ``zoom()`` methods *toggle*, so each is called only when the
+        toolbar is not already in the requested mode -- calling
+        unconditionally would turn it back off.
+        """
+        for canvas in self._all_canvases():
+            toolbar = getattr(canvas, "toolbar", None)
+            if toolbar is None:
+                continue
+            current = toolbar.mode.name if hasattr(toolbar.mode, "name") else str(toolbar.mode)
+            already = (mode == "pan" and "PAN" in current.upper()) or (
+                mode == "zoom" and "ZOOM" in current.upper()
+            )
+            if already:
+                continue
+            if mode == "pan":
+                toolbar.pan()
+            else:
+                toolbar.zoom()
+
+    def _navigation_mode(self) -> str:
+        """``"pan"``, ``"zoom"`` or ``""`` for the visible canvas."""
+        current = self.canvas_tabs.currentWidget()
+        if current is None or not hasattr(current, "toolbar"):
+            return ""
+        mode = current.toolbar.mode
+        text = (mode.name if hasattr(mode, "name") else str(mode)).upper()
+        if "PAN" in text:
+            return "pan"
+        if "ZOOM" in text:
+            return "zoom"
+        return ""
+
+    def _toggle_navigation_mode(self) -> None:
+        """Ctrl/Cmd+Z -- swap between pan and zoom. From neither mode
+        (both toggled off via the toolbar), goes to pan, matching the
+        default the app starts in."""
+        self._set_navigation_mode("zoom" if self._navigation_mode() == "pan" else "pan")
+
+    def _reset_navigation_view(self) -> None:
+        """Reset the visible canvas's pan/zoom back to the full view."""
+        current = self.canvas_tabs.currentWidget()
+        if current is not None and hasattr(current, "toolbar"):
+            current.toolbar.home()
 
     def _on_save_figure_clicked(self) -> None:
         """File > Save Figure As… -- delegates to whichever canvas tab
@@ -1218,6 +1340,13 @@ class MainWindow(QMainWindow):
 
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
+        # Pan is the default interaction once there is data to pan --
+        # explicit user request. Applied on load rather than at startup
+        # so it lands on canvases that actually have something plotted,
+        # and only for the first spectrum, so it never overrides a mode
+        # the user has since chosen for themselves.
+        if len(self.session) == 1:
+            self._set_navigation_mode("pan")
         if saved_processing:
             # Seeding metadata.raw above only affects widget *values*
             # (via _refresh_fid_processing_controls, already run by

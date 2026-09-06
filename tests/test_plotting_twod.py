@@ -100,7 +100,11 @@ def test_plot_2d_contour_draws_negative_contours_in_contrasting_colour(monkeypat
     monkeypatch.setattr(plt.Axes, "contour", spy)
     fig, ax, _ = twod.plot_2d_contour(spec, show_projections=False)
     assert "black" in calls
-    assert "red" in calls
+    # Teal, not red: red read as an alarm colour and dominated the black
+    # positive contours visually. Asserted via the module constant so
+    # the colour can be retuned in one place.
+    assert twod.NEGATIVE_CONTOUR_COLOUR in calls
+    assert twod.NEGATIVE_CONTOUR_COLOUR != "red"
     plt.close(fig)
 
 
@@ -435,3 +439,48 @@ def test_sum_projection_is_still_available_explicitly():
         plt.close(fig)
     expected = np.sum(spectrum.data, axis=0)
     np.testing.assert_allclose(summed - summed.min(), (expected - expected.min()), rtol=1e-6, atol=1e-6)
+
+
+def test_contour_levels_are_scaled_to_the_greatest_absolute_value():
+    # Real user report: "the negative contours look really prominent vs
+    # the positive. can the size of the contours be based on the
+    # greatest absolute value, not the greatest negative value?"
+    #
+    # The negative side used to be scaled to amin(data) independently,
+    # so on a spectrum with a big positive peak and a small negative one
+    # its lowest level sat far below the positive side's -- drawing many
+    # more rings and reading as "prominent" when the signal was weaker.
+    spectrum = _make_2d()
+    n_f1, n_f2 = spectrum.data.shape
+    yy, xx = np.mgrid[0:n_f1, 0:n_f2]
+    spectrum.data = (
+        1000 * np.exp(-(((xx - n_f2 // 4) ** 2) / 8 + ((yy - n_f1 // 4) ** 2) / 8))
+        - 60 * np.exp(-(((xx - 3 * n_f2 // 4) ** 2) / 8 + ((yy - 3 * n_f1 // 4) ** 2) / 8))
+    )
+    _, _, _, thresvec, _, neg_thresvec = twod._prepare_contour(
+        spectrum, contour_fraction_x=1.0, contour_fraction_y=1.0,
+        ncontourpts_x=10**9, ncontourpts_y=10**9,
+    )
+    # A -60 excursion against a +1000 peak is below the positive side's
+    # own lowest level, so it draws no negative contours at all.
+    assert neg_thresvec is None
+    assert thresvec[-1] == pytest.approx(1000.0, rel=1e-6)
+
+
+def test_negative_levels_mirror_the_positive_ones_when_they_are_drawn():
+    # With genuinely comparable negative signal, the two sides are exact
+    # mirrors -- a contour at a given level means the same intensity
+    # whichever sign it has.
+    spectrum = _make_2d()
+    n_f1, n_f2 = spectrum.data.shape
+    yy, xx = np.mgrid[0:n_f1, 0:n_f2]
+    spectrum.data = (
+        1000 * np.exp(-(((xx - n_f2 // 4) ** 2) / 8 + ((yy - n_f1 // 4) ** 2) / 8))
+        - 900 * np.exp(-(((xx - 3 * n_f2 // 4) ** 2) / 8 + ((yy - 3 * n_f1 // 4) ** 2) / 8))
+    )
+    _, _, _, thresvec, _, neg_thresvec = twod._prepare_contour(
+        spectrum, contour_fraction_x=1.0, contour_fraction_y=1.0,
+        ncontourpts_x=10**9, ncontourpts_y=10**9,
+    )
+    assert neg_thresvec is not None
+    np.testing.assert_allclose(neg_thresvec, [-level for level in thresvec])

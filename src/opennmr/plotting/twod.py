@@ -69,6 +69,10 @@ _MAX_CONTOUR_POINTS = _EXSY_BENCHMARK_POINTS // 4
 # touches F1 if F1 alone already exceeds the ceiling.
 _MIN_CAPPED_CONTOUR_X = 4096
 
+#: Colour for negative-going contours. Teal, not red -- see the
+#: contour call in :func:`plot_2d_contour` for why.
+NEGATIVE_CONTOUR_COLOUR = "teal"
+
 
 def _cap_contour_points(max_x: int, max_y: int) -> tuple[int, int]:
     """Clamp a requested contour resolution to
@@ -146,12 +150,28 @@ def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fra
     if level_mode not in ("power", "linear"):
         raise ValueError("level_mode must be 'power' or 'linear'")
 
-    thresvec = _contour_levels(factor * np.amax(data), np.amax(data), clevels, level_mode, power)
+    # Both sides are scaled to the same reference -- the largest
+    # *absolute* value in the data -- so a contour at a given level
+    # means the same intensity whichever sign it has.
+    #
+    # Real user report: "the negative contours look really prominent vs
+    # the positive. can the size of the contours be based on the
+    # greatest absolute value, not the greatest negative value?" That is
+    # exactly what was wrong: the negative side used to be scaled to
+    # `amin(data)` independently, so on a spectrum whose negative
+    # excursions are small (dispersive tails, artifacts) its lowest
+    # level sat at `factor * |amin|` -- a far lower *absolute* threshold
+    # than the positive side's `factor * amax`. The negative contours
+    # therefore started much closer to the noise floor and drew far more
+    # rings, reading as "prominent" when the underlying signal was
+    # weaker, not stronger.
+    peak = float(np.amax(np.abs(data)))
+    thresvec = _contour_levels(factor * peak, peak, clevels, level_mode, power)
 
-    neg_max = np.amin(data)  # most-negative value, i.e. the "positive" end for the negative side
-    neg_thresvec = (
-        _contour_levels(factor * neg_max, neg_max, clevels, level_mode, power) if neg_max < 0 else None
-    )
+    # The negative levels are now the exact mirror of the positive ones,
+    # drawn only when there is genuinely negative signal above the same
+    # threshold the positive side starts at.
+    neg_thresvec = [-level for level in thresvec] if float(np.amin(data)) < -factor * peak else None
 
     return contour_x, contour_y, contour_data, thresvec, y_axis, neg_thresvec
 
@@ -294,7 +314,15 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
         # what makes an incoherent (no single correct phase) artifact
         # visually distinguishable from the genuine, phaseable peak
         # next to it.
-        ax.contour(contour_x, contour_y, contour_data, colors='red', levels=sorted(neg_thresvec))
+        # Teal rather than red: red reads as an error/alarm colour and
+        # dominated the black positive contours visually even at equal
+        # intensity. Teal stays clearly distinguishable from black
+        # (and remains so for the common red-green colour-vision
+        # deficiencies, which red-vs-black does not) without
+        # shouting. Real user request: "maybe also the colour needs to
+        # be softened to something less stark like a teal".
+        ax.contour(contour_x, contour_y, contour_data,
+                   colors=NEGATIVE_CONTOUR_COLOUR, levels=sorted(neg_thresvec))
 
     # A plain make_axes_locatable(ax) divider's default reference sizes
     # (Size.AxesX/AxesY) are the axes' own *data-coordinate range*, not

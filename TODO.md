@@ -2,6 +2,37 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Navigation shortcuts, phasable extracted slices, and softer negative contours (2026-09-06)
+
+Three requests, all done.
+
+### (a) Navigation-mode shortcuts, pan by default
+
+New **View** menu: **Pan Mode** (`Ctrl/Cmd+Shift+P`), **Zoom Mode** (`Ctrl/Cmd+Shift+Z`), **Toggle Pan/Zoom** (`Ctrl/Cmd+Z`, as requested -- there is no undo stack for it to collide with), and **Reset View** (`Ctrl/Cmd+0`). **Pan is switched on automatically once data is loaded**, and only for the first spectrum, so it never overrides a mode the user has since chosen.
+
+Two things worth knowing about the implementation: matplotlib's toolbar owns this state and its `pan()`/`zoom()` methods **toggle**, so the helper checks the current mode first -- calling unconditionally would turn the requested mode straight back off. And the mode is applied to *every* canvas, not just the visible one, because it is a per-toolbar flag: otherwise switching canvas tab would silently change the interaction mode back.
+
+### (b) Extracted slices can now be phased
+
+`MplCanvas.extract_slice` only ever *displayed* a trace -- it never reached the session, and every phase control acts on session spectra, so an extracted slice could be looked at but not worked on. A new right-click **"Keep Slice (for phasing/fitting)"** (on an extracted slice) hands the exact displayed trace to `Session.add_derived` and selects it, so phasing, fitting and Compare all apply through their existing paths with no parallel machinery. `processing.slicing.get_trace` already carries `data_imag` through, which is what makes phasing work; when it is absent (a magnitude-mode or processed-only source) the slice is still kept, with a message explaining why phasing is unavailable rather than leaving the user to find a dead control.
+
+**A pre-existing crash found while building this**: extracting a *column* (trace along F1) from a **pseudo-2D** raised `ValueError: This axis has no 'ppm' values (kind='index')` from `plot_1d` -- F1 there is a slice index, not a frequency. Reachable straight from the Extract Slice dialog. That option is now disabled for pseudo-2D, with a tooltip saying why (a trace along F1 is a decay curve; the Analysis tab is where that belongs) rather than silently removed.
+
+### (c) Negative contours: absolute scaling, and teal
+
+Both fixes to the same complaint -- "the negative contours look really prominent vs the positive".
+
+**Scaling** was the substantive half. The negative side used to be scaled to `amin(data)` *independently* of the positive side, so on a spectrum with a big positive peak and small negative excursions its lowest level sat at `factor * |amin|` -- a far lower **absolute** threshold than the positive side's `factor * amax`. The negative contours therefore started much closer to the noise floor and drew far more rings, reading as prominent when the underlying signal was weaker. Both sides now scale to `max(|data|)`, and the negative levels are the exact mirror of the positive ones. On a 1000-vs-(-60) test spectrum, the negative side now draws **nothing at all**, which is correct: -60 is below the level the positive side itself starts at.
+
+**Colour** changed from red to **teal** (`NEGATIVE_CONTOUR_COLOUR`, one constant so it can be retuned in one place). Red reads as an alarm colour and dominated the black positive contours even at equal intensity; teal stays clearly distinguishable from black -- and remains so under the common red-green colour-vision deficiencies, which red-against-black does not.
+
+### Also cleaned up
+
+- Removed an `_all_canvases` **duplicate I had just introduced** -- the class already had one. Caught by an assertion in my own edit script rather than shipping two methods with the same name.
+- The menu tests looked menus up **positionally** (`menuBar().actions()[2]`), so adding the View menu broke three unrelated tests. Now looked up by name via a `_menu_by_title` helper, which will not break next time.
+
+959 tests passing (953 -> 959).
+
 ## F1 linear prediction implemented; contour ceiling corrected to 0.25x (2026-09-06)
 
 ### F1 linear prediction
