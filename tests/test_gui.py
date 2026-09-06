@@ -45,7 +45,7 @@ def _make_1d_dataset(tmp_path, n=8, name="expt1"):
     expt = tmp_path / name
     pdata = expt / "pdata" / "1"
     pdata.mkdir(parents=True)
-    _write_params(expt / "acqus", {"NUC1": "1H", "BF1": 400.0, "SFO1": 400.13, "O1": 2000.0, "NS": 4})
+    _write_params(expt / "acqus", {"NUC1": "1H", "BF1": 400.13, "SFO1": 400.13, "O1": 2000.0, "NS": 4})
     _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": n, "SF": 400.13, "NC_proc": 0})
     (np.arange(n, dtype="int32") - n // 2).tofile(pdata / "1r")
     np.zeros(n, dtype="int32").tofile(pdata / "1i")
@@ -60,8 +60,8 @@ def _make_2d_dataset(tmp_path, n_f1=4, n_f2=8, name="expt2d", f1_nuc="1H", with_
     expt = tmp_path / name
     pdata = expt / "pdata" / "1"
     pdata.mkdir(parents=True)
-    _write_params(expt / "acqus", {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1})
-    _write_params(expt / "acqu2s", {"NUC1": f1_nuc, "BF1": 400.0, "O1": 0.0})
+    _write_params(expt / "acqus", {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1})
+    _write_params(expt / "acqu2s", {"NUC1": f1_nuc, "BF1": 400.13, "O1": 0.0})
     _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": n_f2, "SF": 400.13})
     _write_params(pdata / "proc2s", {"SW_p": 2000.0, "SI": n_f1, "SF": 400.13})
     data = np.arange(n_f1 * n_f2, dtype="int32").reshape(n_f1, n_f2)
@@ -803,7 +803,12 @@ def test_main_window_pivot_defaults_to_spectrum_centre(qapp, tmp_path):
     index = window._selected_index()
     freq_ppm = window.session.spectra[index].axis_values(0, "ppm")
     expected_centre = (freq_ppm.min() + freq_ppm.max()) / 2
-    assert window.pivot_spin.value() == pytest.approx(expected_centre)
+    # abs, not the default relative tolerance: pivot_spin displays 3
+    # decimal places, so its value is rounded to 5e-4 regardless of
+    # where the axis sits. The relative default only passed before
+    # because this fixture's axis happened to be centred near -320 ppm,
+    # where 1e-6 relative is larger than that rounding.
+    assert window.pivot_spin.value() == pytest.approx(expected_centre, abs=5e-4)
 
 
 def test_main_window_pivot_slider_change_compensates_phase0_so_data_does_not_jump(qapp, tmp_path):
@@ -1322,11 +1327,13 @@ def test_main_window_pivot_slider_moves_pivot_spin(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
     freq_ppm = window._phase_freq_ppm
 
+    # abs tolerance -- pivot_spin rounds to 3 decimal places (see
+    # test_main_window_pivot_defaults_to_spectrum_centre).
     window.pivot_slider.setValue(0)  # left end of the slider
-    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.max()))
+    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.max()), abs=5e-4)
 
     window.pivot_slider.setValue(1000)  # right end of the slider
-    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.min()))
+    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.min()), abs=5e-4)
 
 
 def test_main_window_pivot_spin_moves_pivot_slider(qapp, tmp_path):
@@ -2374,7 +2381,7 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=Non
     (expt / "fid").write_bytes(b"\x00")  # existence is all _read_auto checks; content is never read (mocked)
     (expt / "acqus").write_bytes(b"\x00")
 
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1.0}
     if probe is not None:
         acqus["PROBHD"] = probe
     if pulprog is not None:
@@ -2394,7 +2401,7 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=Non
 
 
 def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d", f1_nuc="13C", ns=1.0,
-                          fn_mode=None, fid=None):
+                          fn_mode=None, fid=None, f1_o1=0.0):
     from opennmr.io import bruker as bruker_io
 
     expt = tmp_path / name
@@ -2405,11 +2412,11 @@ def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d
     (expt / "ser").write_bytes(b"\x00")
     (expt / "acqus").write_bytes(b"\x00")
 
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": ns}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": ns}
     # `acqu2s` is read from the mocked `ng.bruker.read()` dict, not
     # parsed off disk -- matching real Bruker behaviour (nmrglue reads
     # every acqu*s/proc*s file itself as part of one `read()` call).
-    acqu2s = {"NUC1": f1_nuc, "BF1": 100.6, "O1": 0.0}
+    acqu2s = {"NUC1": f1_nuc, "BF1": 100.6, "O1": f1_o1}
     if fn_mode is not None:
         acqu2s["FnMODE"] = fn_mode
     if fid is None:
@@ -2808,7 +2815,7 @@ def test_main_window_processing_preview_pseudo2d_uses_only_active_slice(qapp, tm
     _write_params(pdata / "proc2s", {"SW_p": 2000.0, "SI": n_f1, "SF": 100.6, "WDW": 0})
     (expt / "ser").write_bytes(b"\x00")
     (expt / "acqus").write_bytes(b"\x00")
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1.0}
     acqu2s = {"NUC1": "off", "BF1": 100.6, "O1": 0.0}
     t2 = np.arange(n_f2) / 8000.0
     # A different decay rate per row -- slices are visibly distinct.
@@ -3138,7 +3145,7 @@ def test_main_window_unsupported_window_shows_notice_but_stays_reprocessable(qap
     _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": 64, "SF": 400.13, "WDW": 2})
     (expt / "fid").write_bytes(b"\x00")
     (expt / "acqus").write_bytes(b"\x00")
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1.0}
     fid = _synthetic_raw_fid(n=64)
     dic = {"acqus": acqus}
     # read_acqus_file too: read_1d/read_2d take their parameters from it
@@ -3629,7 +3636,15 @@ def test_main_window_recompute_uses_each_dimensions_own_pivot_not_the_other_ones
     # range doesn't even contain 0, the resulting data was off by
     # ~129% relative to the correct (centre-pivoted) reference; fixed,
     # it matches to floating-point precision.
-    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=32, name="pivotmix2d", f1_nuc="13C")
+    #
+    # f1_o1 puts F1's own centre at ~100 ppm, well clear of F2's range.
+    # It used to be 0 ppm and that was outside F2's range by accident --
+    # the fixture's BF1 disagreed with its SF, which implied a 130 kHz
+    # vendor reference and pushed F2 out to around -320 ppm. Making the
+    # fixture self-consistent brought F2 back to a normal range that
+    # contains 0, so the separation is now arranged deliberately.
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=32, name="pivotmix2d",
+                                f1_nuc="13C", f1_o1=10060.0)
     window = MainWindow()
     window._load(path, vendor="bruker")
     window.process_indirect_button.setChecked(True)
@@ -3638,7 +3653,8 @@ def test_main_window_recompute_uses_each_dimensions_own_pivot_not_the_other_ones
 
     f1_ppm = spectrum.axis_values(0, "ppm")
     f2_ppm = spectrum.axis_values(-1, "ppm")
-    assert not (f2_ppm.min() <= 0.0 <= f2_ppm.max())  # F1's own centre (~0) falls outside F2's range
+    f1_centre = (f1_ppm.min() + f1_ppm.max()) / 2
+    assert not (f2_ppm.min() <= f1_centre <= f2_ppm.max())  # F1's centre is outside F2's range
 
     window.phase1_handle.setValue(50.0)  # commit a real F2 phase1 while F2 is focused
     window.dim_combo.setCurrentIndex(1)  # switch focus to F1 -- pivot_spin recentres onto F1's own range
@@ -3890,7 +3906,7 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
     (pdata / "2rr").write_bytes(b"\x00" * (n_f1 * n_f2 * 4))
     (pdata / "2ii").write_bytes(b"\x00" * (n_f1 * n_f2 * 4))
 
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1.0}
     t2 = np.arange(n_f2)
     rows = []
     for row_index in range(n_f1):
@@ -3900,7 +3916,7 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
         row += 0.01 * np.exp(-((t2 - peak_at) ** 2) / 8.0)
         rows.append(row)
     fid = np.array(rows)
-    dic = {"acqus": acqus, "acqu2s": {"NUC1": "off", "BF1": 400.0, "O1": 0.0}}
+    dic = {"acqus": acqus, "acqu2s": {"NUC1": "off", "BF1": 400.13, "O1": 0.0}}
     monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     # read_acqus_file too: read_1d/read_2d take their parameters from it
     # now, rather than from a combined ng.bruker.read call. Without this
@@ -8343,6 +8359,101 @@ def test_main_window_nq_line_survives_a_reload(qapp, tmp_path, monkeypatch):
     reopened._select_single_row(0)
     assert reopened.output_nq_line_checkbox.isChecked()
     assert reopened.output_nq_value_spin.value() == 2
+
+
+def test_main_window_sr_box_shows_the_file_s_own_reference(qapp, tmp_path, monkeypatch):
+    # User request: "I want any sr that was noted in the import files to
+    # be applied already and to show in the processing tab." It was
+    # always applied -- _ppm_hz_axis folds (SF - BF1) into every axis it
+    # builds -- but nothing recorded how much, so the box read 0 for a
+    # dataset that plainly was referenced.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = os.path.join("test_data", "2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119", "2019")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    assert spectrum.metadata.raw["sr_recorded_hz"] == pytest.approx(315.3)
+    assert window.sr_shift_spin.value() == pytest.approx(315.3)
+    assert window.sr_shift_indirect_spin.value() == pytest.approx(315.3, abs=1e-6)
+
+
+def test_main_window_sr_box_is_the_total_not_a_delta(qapp, tmp_path, monkeypatch):
+    # Showing the file's own value means the number in the box is the
+    # *total* SR in effect, so _apply_reference_shift_hz applies
+    # value - recorded to the as-loaded axis. Applying the unchanged
+    # value must therefore be a no-op, and typing a different one means
+    # "make the total this".
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = os.path.join("test_data", "2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119", "2019")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+    as_loaded = spectrum.axes[-1].ppm.copy()
+
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(spectrum.axes[-1].ppm, as_loaded)
+
+    window.sr_shift_spin.setValue(415.3)          # +100 Hz on the total
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(spectrum.axes[-1].ppm,
+                               as_loaded + 100.0 / spectrum.metadata.sfo1)
+
+    window.sr_shift_spin.setValue(315.3)          # back to the file's own
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(spectrum.axes[-1].ppm, as_loaded)
+
+
+def test_main_window_imaging_gradient_uses_gpz1_as_a_percentage(qapp, tmp_path, monkeypatch):
+    # Real user report: "the relative gradient strength doesn't seem to
+    # be calculated correctly for my Bruker data (should be gpz1
+    # generally as a percentage value, e.g. gpz1=2 is 2%)". GPZ1 was not
+    # read at all -- the mm axis used the probe's full maximum, so at
+    # gpz1=2 the scale came out 50x too small.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._select_single_row(0)
+    spectrum = window.session.spectra[0]
+
+    assert window._recorded_gradient_percent(spectrum) == pytest.approx(80.0)
+    assert window.imaging_gradient_percent_spin.value() == pytest.approx(80.0)
+
+    window.imaging_max_gradient_spin.setValue(50.0)
+    assert window.canvas._imaging_max_gradient_g_per_cm == pytest.approx(40.0)
+
+    # "generally" is not "always" -- the override wins and is stored.
+    window.imaging_gradient_percent_spin.setValue(2.0)
+    assert window.canvas._imaging_max_gradient_g_per_cm == pytest.approx(1.0)
+    assert spectrum.metadata.raw["imaging_gradient_percent"] == pytest.approx(2.0)
+
+
+def test_main_window_imaging_gradient_percent_defaults_to_full_without_gpz(qapp, tmp_path, monkeypatch):
+    # No GPZ array (a non-Bruker dataset, or one whose parameters were
+    # not retained) falls back to 100%, i.e. exactly the old behaviour.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window._select_single_row(0)
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw.pop("acqus", None)
+
+    assert window._recorded_gradient_percent(spectrum) is None
+    window._restore_imaging_gradient_percent(spectrum)
+    assert window.imaging_gradient_percent_spin.value() == pytest.approx(100.0)
 
 
 def _answer_calibration_dialog(monkeypatch, values, accept=True):

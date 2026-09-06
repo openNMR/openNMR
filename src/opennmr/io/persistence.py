@@ -65,6 +65,10 @@ _PROCESSING_RAW_BLOCKLIST = frozenset({
     # survives a reload, and the object isn't JSON-serialisable
     # anyway. See MainWindow._on_slice_keep_requested.
     "slice_parent", "slice_axis", "slice_index",
+    # Re-derived from SF/BF1 on every load, so persisting it would be a
+    # stale copy of something the vendor files already say. The user's
+    # own SR (`sr_shift_hz`) *is* persisted -- it is a real choice.
+    "sr_recorded_hz", "sr_recorded_hz_f1",
 })
 
 

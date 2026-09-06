@@ -2,6 +2,63 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## The file's own SR is now visible; imaging gradient reads GPZ1 (2026-09-06)
+
+User: "As far as the sr goes, I want any sr that was noted in the import files to be applied already and to show in the processing tab. Also for imaging, the relative gradient strength doesn't seem to be calculated correctly for my Bruker data (should be gpz1 generally as a percentage value, e.g. gpz1=2 is 2%)."
+
+### The SR was always applied -- nothing said so
+
+`_ppm_hz_axis` has always folded `(SF - BF1) * 1e6` into every axis it builds, so a spectrum arrives already referenced. What was missing is that nothing recorded *how much*, so the Processing tab's SR box read 0.00 Hz for a dataset that plainly was referenced -- **315.3 Hz** on this project's own EXSY (`2p5mm/2019`), 0 on the Cyclosporine sets.
+
+The readers now record it (`sr_recorded_hz`, `sr_recorded_hz_f1`), and it is blocklisted from the sidecar because it is re-derived from the vendor files on every load.
+
+**This changes what the number in the box means**: it is now the **total** SR in effect, not a user-only delta on top of an invisible one. So `_apply_reference_shift_hz` applies `value - recorded` to the as-loaded axis. Leaving the box alone is then a no-op; typing a different number means "make the total this". Same adjustment in the ppm calibration handler and in the post-reprocess reapply, which now only reapplies a value that actually differs from the file's own (a fresh read has already folded that in).
+
+**Known migration gap**: a sidecar written before this change stores `sr_shift_hz` as a user-only delta, and it will now be read as a total. Harmless where the recorded SR is 0 (most datasets); on one with a recorded SR it would shift the axis by that amount. Not worth a versioned migration for a feature this new, but recorded here rather than left to be discovered.
+
+### Imaging gradient: GPZ1 was never read
+
+The mm axis used the probe's **maximum** gradient as the applied one. A Bruker experiment runs at a *percentage* of it, recorded as `GPZ1` in `acqus` -- so at `gpz1=2` the scale came out 50x too small. Now read automatically (`GPZ[1]`; 80% on Cyclosporine/203, for instance) into a new "Gradient used" box, and the effective gradient is `maximum x percent / 100`.
+
+Editable, and stored per spectrum, because the user's own word was "**generally** gpz1" -- another pulse programme may put its imaging gradient on a different channel. Falls back to 100% when there is no `GPZ` array at all, which is exactly the old behaviour.
+
+### Two test fixtures were quietly self-contradictory
+
+`_make_1d_dataset`/`_make_raw_2d_dataset` wrote `BF1: 400.0` alongside `SF: 400.13`. Nothing read both together before, so it never mattered; it now implies a **130 kHz** vendor reference, i.e. a 325 ppm offset, which is not what any test meant. Made self-consistent (`BF1: 400.13`).
+
+That moved the fixtures' axes from about -320 ppm to a normal range, which surfaced two further things that had been passing by accident:
+
+- Two pivot tests compared `pivot_spin.value()` against an exact centre with `pytest.approx`'s **relative** default. The spin box displays 3 decimal places, so its value is rounded to 5e-4 regardless -- at -320 ppm the relative default is larger than that rounding and it passed; at 5 ppm it is not. Now an explicit `abs=5e-4`.
+- `test_..._own_pivot_not_the_other_ones` needed F1's centre to fall outside F2's range, and that held only because the bogus 130 kHz pushed F2 out to -320 ppm. The fixture now takes an `f1_o1`, and the test arranges the separation deliberately instead.
+
+8 new tests. 1027 passing (1023 -> 1027).
+
+## Planned, not built: load speed, and a folder browser in the Data tab
+
+Recorded from a user request to plan rather than implement. Nothing below is done.
+
+### Faster loading of large datasets
+
+The EXSY benchmark (`2p5mm/2019`, 2048 x 65536) reads in **3.7 s** against a 9.268 s starting point, after vectorising the per-row loops, replacing `ng.bruker.read` with a direct binary read, and threading the FFTs. What is left is dominated by three things, and they want different remedies:
+
+1. **The FFTs themselves.** Already `scipy.fft` with a capped worker count. Remaining headroom is in *not transforming what is not looked at* -- see (3).
+2. **Peak memory.** The decoded array is ~1 GB in complex128 and several transient copies exist (window, zero-fill, transpose for F1). `complex64` throughout would halve it at ~7 digits of precision, which is far more than any NMR intensity carries; the risk is that comparisons against TopSpin (currently agreeing at +0.99) get noisier, so this needs measuring against the real-data suite rather than assuming.
+3. **The user's own idea: Bruker's submatrix layout.** TopSpin stores processed 2D data in `XDIM` blocks precisely so a viewer can read *a region* without touching the whole file, and `read_2d_processed` already reconstructs those blocks -- it just reassembles all of them. A tiled reader that loads only the blocks intersecting the current view would make opening a large processed 2D near-instant, at the cost of a re-read on pan/zoom. This applies only to the **processed** path (`2rr`), not to raw `ser`, which has no such structure.
+   A raw-`ser` equivalent exists but is different: transform F2 for every row (unavoidable), then transform **only the F1 columns in view**. That is a real restructure of `read_2d`, not a tweak.
+4. **Sparse matrices** (also the user's idea) are worth being honest about: an NMR 2D is not sparse before thresholding -- every point carries noise. Sparsity only appears *after* a contour threshold is chosen, which is exactly where this project already saves work via `_MAX_CONTOUR_POINTS`. A sparse representation would help a *stored* peak list or a thresholded overlay, not the load.
+
+Order of expected value: submatrix/tiled reads for processed data, then `complex64`, then view-limited F1 transforms. Each needs the real-data agreement suite re-run, not just timings.
+
+### A folder browser in the Data tab
+
+User: "the data tab might be nice to have a built-in file viewer where folders are collapsable tabs (like the MNova and bruker programmes). So a user can note a file directory and then click between folders within to load data."
+
+A `QTreeView` over a `QFileSystemModel` rooted at a user-chosen directory, filtered to things this project can actually open, with the existing `io.load` dispatch on activation. The parts that need thought, not the widget:
+
+- **What counts as a node.** A Bruker experiment is a numbered directory containing `acqus`; its `pdata/N` children are separate loadable procnos. The tree should show experiments, not raw filesystem depth, or it will be unusable on a real dataset directory.
+- **Cost.** Deciding whether a directory is loadable means reading a parameter file. Doing that eagerly for a whole tree would be slow; it wants lazy evaluation per expanded node.
+- **Overlap with what exists.** The Data tab already lists *loaded* spectra. This is a second, different list (things on disk, not yet loaded), so the two need distinguishing clearly rather than looking alike.
+
 ## Reference a 2D by clicking a peak and typing its shift (2026-09-06)
 
 User: "I need a right click option on the 2D spectra to be able to set the sr (by setting ppm values)."

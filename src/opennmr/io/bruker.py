@@ -575,6 +575,23 @@ def _read_procs(datapath: str, procno: int, proc2: bool = False) -> dict:
     return parse_jcampdx_params(os.path.join(datapath, "pdata", str(procno), filename))
 
 
+#: The reference correction TopSpin has already applied, in Hz:
+#: ``(SF - BF1) * 1e6``, where ``BF1`` is the bare basic frequency and
+#: ``SF`` the referenced one. :func:`_ppm_hz_axis` folds this into
+#: every axis it builds, so a spectrum arrives already referenced --
+#: but nothing recorded *how much*, so the GUI's own SR box read 0 for
+#: a dataset that plainly was referenced (315.3 Hz on this project's
+#: own EXSY, for one). Stored here so it can be shown, and so a later
+#: edit is understood as "the total SR should be X" rather than "add X
+#: to whatever is already there".
+_SR_RECORDED_KEY = "sr_recorded_hz"
+_SR_RECORDED_KEY_F1 = "sr_recorded_hz_f1"
+
+
+def _recorded_sr_hz(sf: float, obs: float) -> float:
+    return (float(sf) - float(obs)) * 1e6
+
+
 def _ppm_hz_axis(o1: float, sf: float, obs: float, sw: float, si: int) -> tuple[np.ndarray, np.ndarray]:
     """The ppm/Hz axis formula used throughout ``nmrtools2`` -- kept
     identical here (for both the raw-FID and processed-fallback paths)
@@ -729,6 +746,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
         source_path=path, procno=procno, probe=acqus.get("PROBHD"), pulse_program=acqus.get("PULPROG"),
         raw={
             "acqus": acqus, "procs": procs, "phase0": phase0, "phase1": phase1,
+            _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs),
             "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
             # The exact (shift/echo-align/LP/windowed/zero-filled) FID
             # fed into the FFT above -- an optional GUI preview of what
@@ -1163,6 +1181,8 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         probe=acqus.get("PROBHD"), pulse_program=acqus.get("PULPROG"),
         raw={
             "acqus": acqus, "procs": procs, "proc2s": proc2s, "phase0": phase0, "phase1": phase1,
+            _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs),
+            _SR_RECORDED_KEY_F1: (None if pseudo_2d else _recorded_sr_hz(sf_1, obs_1)),
             "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
             "recorded_phase0_f1": recorded_f1[0], "recorded_phase1_f1": recorded_f1[1],
             # F1's own hypercomplex encoding (see
@@ -1279,7 +1299,8 @@ def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float 
     metadata = NMRMetadata(
         vendor="bruker", nucleus=nuc, sfo1=sf, bf1=obs, o1=o1, ns=ns, source_path=path, procno=procno,
         probe=acq_meta.get("PROBHD"), pulse_program=acq_meta.get("PULPROG"),
-        raw={"acqus": axis_meta, "procs": procs},
+        raw={"acqus": axis_meta, "procs": procs,
+             _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs)},
     )
     axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
     # Magnitude/power applies just the same to TopSpin's own already-
@@ -1423,7 +1444,9 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
         sfo1=sf, sfo1_indirect=(None if pseudo_2d else sf_1), bf1=obs, o1=o1, ns=ns,
         source_path=path, procno=procno, pseudo_2d=pseudo_2d, homonuclear=homonuclear,
         probe=acqus.get("PROBHD"), pulse_program=acqus.get("PULPROG"),
-        raw={"acqus": acqus, "procs": procs, "proc2s": proc2s},
+        raw={"acqus": acqus, "procs": procs, "proc2s": proc2s,
+             _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs),
+             _SR_RECORDED_KEY_F1: (None if pseudo_2d else _recorded_sr_hz(sf_1, obs_1))},
     )
     x_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
     # See read_1d_processed's own matching block. proc2s votes too,

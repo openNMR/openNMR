@@ -1544,7 +1544,9 @@ class MainWindow(QMainWindow):
         applied = False
         for dim in ("f2", "f1"):
             sr_shift = spectrum.metadata.raw.get(self._SR_KEYS[dim][0])
-            if sr_shift:
+            # Only a *user* value needs reapplying -- a fresh read has
+            # already folded the file's own SR into its new axis.
+            if sr_shift is not None and sr_shift != self._recorded_sr(spectrum, dim):
                 self._apply_reference_shift_hz(sr_shift, dim)  # also redraws
                 applied = True
         if not applied:
@@ -6730,6 +6732,30 @@ class MainWindow(QMainWindow):
         self.imaging_max_gradient_spin.valueChanged.connect(self._on_imaging_gradient_changed)
         gradient_form.addRow("Max gradient:", self.imaging_max_gradient_spin)
 
+        # The gradient a Bruker experiment actually ran at is a
+        # *percentage* of the probe's maximum, recorded as GPZ1 in
+        # acqus. Real user report: "the relative gradient strength
+        # doesn't seem to be calculated correctly for my Bruker data
+        # (should be gpz1 generally as a percentage value, e.g. gpz1=2
+        # is 2%)". It was not being read at all -- the mm axis used the
+        # full probe maximum, so at gpz1=2 the scale came out 50x too
+        # small. Prefilled from GPZ1 but editable, since "generally"
+        # is not "always": another pulse programme may put the imaging
+        # gradient on a different GPZ index.
+        self.imaging_gradient_percent_spin = QDoubleSpinBox()
+        self.imaging_gradient_percent_spin.setRange(0.0, 100.0)
+        self.imaging_gradient_percent_spin.setDecimals(3)
+        self.imaging_gradient_percent_spin.setSuffix(" %")
+        self.imaging_gradient_percent_spin.setToolTip(
+            "Gradient actually used, as a percentage of the maximum "
+            "above -- Bruker's own GPZ1 from acqus, which is read "
+            "automatically. Override it if this experiment's pulse "
+            "programme puts its imaging gradient on a different "
+            "gradient channel."
+        )
+        self.imaging_gradient_percent_spin.valueChanged.connect(self._on_imaging_gradient_changed)
+        gradient_form.addRow("Gradient used:", self.imaging_gradient_percent_spin)
+
         save_probe_gradient_button = QPushButton("Save as default for this probe")
         save_probe_gradient_button.setToolTip(
             "Remember this max gradient value for this spectrum's own recorded probe, "
@@ -6750,11 +6776,37 @@ class MainWindow(QMainWindow):
     def _on_imaging_gradient_changed(self, _value: float) -> None:
         index = self._selected_index()
         if index is not None:
-            self.session.spectra[index].metadata.raw["imaging_max_gradient_g_per_cm"] = (
-                self.imaging_max_gradient_spin.value() or None
-            )
+            raw = self.session.spectra[index].metadata.raw
+            raw["imaging_max_gradient_g_per_cm"] = self.imaging_max_gradient_spin.value() or None
+            raw["imaging_gradient_percent"] = self.imaging_gradient_percent_spin.value()
             self._schedule_sidecar_save(index)
         self._refresh_imaging_gradient()
+
+    @staticmethod
+    def _recorded_gradient_percent(spectrum) -> float | None:
+        """Bruker's ``GPZ1`` for ``spectrum``, as a percentage of the
+        probe's maximum gradient -- ``acqus``'s ``GPZ`` array, index 1.
+        ``None`` when there is no such array (a non-Bruker dataset, or
+        one whose parameters weren't retained)."""
+        gpz = (spectrum.metadata.raw.get("acqus") or {}).get("GPZ")
+        if not isinstance(gpz, (list, tuple)) or len(gpz) < 2:
+            return None
+        try:
+            return float(gpz[1])
+        except (TypeError, ValueError):
+            return None
+
+    def _restore_imaging_gradient_percent(self, spectrum) -> None:
+        """Put the gradient-percentage box back to this spectrum's own
+        value -- its saved override, else ``GPZ1``, else 100% (the old
+        behaviour, i.e. "the full maximum")."""
+        stored = spectrum.metadata.raw.get("imaging_gradient_percent")
+        if stored is None:
+            recorded = self._recorded_gradient_percent(spectrum)
+            stored = recorded if recorded else 100.0
+        self.imaging_gradient_percent_spin.blockSignals(True)
+        self.imaging_gradient_percent_spin.setValue(float(stored))
+        self.imaging_gradient_percent_spin.blockSignals(False)
 
     def _refresh_imaging_gradient(self) -> None:
         """Recompute (and hand to the canvas) the gamma/max-gradient
@@ -6764,7 +6816,12 @@ class MainWindow(QMainWindow):
         gradient edit, so switching spectra never leaves the mm axis
         showing a stale nucleus's conversion."""
         index = self._selected_index()
-        max_gradient = self.imaging_max_gradient_spin.value() or None
+        # The *applied* gradient, not the probe's maximum: a Bruker
+        # experiment runs at GPZ1 percent of it (see
+        # _recorded_gradient_percent).
+        percent = self.imaging_gradient_percent_spin.value()
+        maximum = self.imaging_max_gradient_spin.value() or None
+        max_gradient = (maximum * percent / 100.0) if (maximum and percent) else None
         gamma = None
         if index is not None and max_gradient:
             spectrum = self.session.spectra[index]
@@ -7266,7 +7323,7 @@ class MainWindow(QMainWindow):
     def _restore_sr_control(self, spectrum) -> None:
         for dim, spin in (("f2", self.sr_shift_spin), ("f1", self.sr_shift_indirect_spin)):
             spin.blockSignals(True)
-            spin.setValue(float(spectrum.metadata.raw.get(self._SR_KEYS[dim][0], 0.0)))
+            spin.setValue(self._current_sr(spectrum, dim))
             spin.blockSignals(False)
         # Nothing to reference against on a 1D or a pseudo-2D, whose
         # indirect axis is a slice index rather than a frequency.
@@ -7353,7 +7410,7 @@ class MainWindow(QMainWindow):
             base_mhz = spectrum.metadata.sfo1 if dim == "f2" else spectrum.metadata.sfo1_indirect
             if not base_mhz:
                 continue
-            current = float(spectrum.metadata.raw.get(self._SR_KEYS[dim][0], 0.0))
+            current = self._current_sr(spectrum, dim)
             updates[dim] = current + (spins[dim].value() - clicked[dim]) * base_mhz
         for dim, value in updates.items():
             self._apply_reference_shift_hz(value, dim)
@@ -7367,7 +7424,7 @@ class MainWindow(QMainWindow):
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        current_hz = spectrum.metadata.raw.get("sr_shift_hz", 0.0)
+        current_hz = self._current_sr(spectrum, "f2")
         value, ok = QInputDialog.getDouble(
             self, "Reference shift", "SR (Hz):", current_hz, -1.0e6, 1.0e6, 4,
         )
@@ -7383,6 +7440,37 @@ class MainWindow(QMainWindow):
         "f2": ("sr_shift_hz", "sr_original_hz", "sr_original_ppm"),
         "f1": ("sr_shift_hz_f1", "sr_original_hz_f1", "sr_original_ppm_f1"),
     }
+
+    #: Where the vendor's own already-applied SR is recorded -- see
+    #: :data:`opennmr.io.bruker._SR_RECORDED_KEY`.
+    _SR_RECORDED_KEYS = {"f2": "sr_recorded_hz", "f1": "sr_recorded_hz_f1"}
+
+    @classmethod
+    def _recorded_sr(cls, spectrum, dim: str) -> float:
+        """The SR the *file* already carries for ``dim`` -- TopSpin's
+        ``(SF - BF1) * 1e6``, which the reader has folded into the axis
+        before this GUI ever sees it.
+
+        Explicit user request: "I want any sr that was noted in the
+        import files to be applied already and to show in the
+        processing tab". It was always applied; what was missing is
+        that nothing said so, and the SR box read 0 for a dataset that
+        plainly was referenced -- 315.3 Hz on this project's own EXSY.
+
+        Making the box show it means the number in it is the **total**
+        SR in effect, not a user-only delta on top. So
+        :meth:`_apply_reference_shift_hz` applies ``value - recorded``
+        to the as-loaded axis: leaving the box alone is then a no-op,
+        and typing a different number means "make the total this"."""
+        value = spectrum.metadata.raw.get(cls._SR_RECORDED_KEYS[dim])
+        return float(value) if value else 0.0
+
+    @classmethod
+    def _current_sr(cls, spectrum, dim: str) -> float:
+        """The SR currently in effect for ``dim`` -- whatever the user
+        has set, or the file's own value if they haven't."""
+        stored = spectrum.metadata.raw.get(cls._SR_KEYS[dim][0])
+        return float(stored) if stored is not None else cls._recorded_sr(spectrum, dim)
 
     @staticmethod
     def _sr_axis(spectrum, dim: str):
@@ -7444,12 +7532,17 @@ class MainWindow(QMainWindow):
 
         shift_key, hz_key, ppm_key = self._SR_KEYS[dim]
         base_mhz = spectrum.metadata.sfo1 if dim == "f2" else spectrum.metadata.sfo1_indirect
+        # The stashed original axis is the one the reader produced, and
+        # that already carries the file's own SR -- so what gets applied
+        # on top of it is the *difference* from that, not the whole
+        # value. See _recorded_sr.
+        offset_hz = sr_hz - self._recorded_sr(spectrum, dim)
         original_hz = spectrum.metadata.raw.get(hz_key)
         original_ppm = spectrum.metadata.raw.get(ppm_key)
         if original_hz is not None:
-            axis.hz = original_hz + sr_hz
+            axis.hz = original_hz + offset_hz
         if original_ppm is not None and base_mhz:
-            axis.ppm = original_ppm + sr_hz / base_mhz
+            axis.ppm = original_ppm + offset_hz / base_mhz
 
         spectrum.metadata.raw[shift_key] = sr_hz
         self._restore_sr_control(spectrum)
@@ -8606,6 +8699,7 @@ class MainWindow(QMainWindow):
             gradient_default = probe_config.get("max_gradient_g_per_cm") or 0.0
         self.imaging_max_gradient_spin.setValue(gradient_default)
         self.imaging_max_gradient_spin.blockSignals(False)
+        self._restore_imaging_gradient_percent(spectrum)
         self._refresh_imaging_gradient()
 
         # X-Pulse's own read_2d has no pseudo_2d concept at all (every
