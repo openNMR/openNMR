@@ -592,6 +592,51 @@ def _recorded_sr_hz(sf: float, obs: float) -> float:
     return (float(sf) - float(obs)) * 1e6
 
 
+#: Bruker parameters that are *arrays*, expanded to the indexed names a
+#: user actually writes: ``D`` -> ``d0, d1, ...``, ``CNST`` ->
+#: ``cnst0, ...``, and so on. Matching TopSpin's own naming is the
+#: whole point -- someone writing a fitting equation reaches for ``d1``
+#: and ``l4`` because that is what the pulse programme calls them.
+_CONSTANT_ARRAYS = ("D", "P", "CNST", "L", "IN", "INF", "PL", "PLW",
+                    "SP", "SPW", "GPZ", "GPX", "GPY")
+
+
+def acquisition_constants(spectrum) -> dict[str, float]:
+    """Every numeric acquisition parameter of ``spectrum``, named the
+    way a pulse programme names it, for use as a known value in a
+    fitting equation (see
+    :func:`opennmr.processing.relaxation.build_custom_model`).
+
+    Explicit user request: "it would be good if I can make fitting
+    equations using values from the input data (e.g. delays and
+    constants and L or whatever)". So ``d1``, ``p1``, ``cnst2``, ``l4``
+    from the indexed arrays, plus every scalar (``ns``, ``td``, ``te``,
+    ``sw``, ...) under its own lowercase name.
+
+    **Values are exactly as the vendor recorded them, not converted**
+    -- ``d1`` in seconds, ``p1`` in microseconds, because that is what
+    those numbers mean in TopSpin and on the spectrometer, and quietly
+    rescaling them would make an equation copied off a pulse programme
+    silently wrong. Only ``acqus`` is read: these are acquisition
+    facts, not processing choices.
+
+    Returns an empty dict for a spectrum with no retained ``acqus``
+    (a non-Bruker dataset, or a derived trace).
+    """
+    acqus = (getattr(spectrum.metadata, "raw", None) or {}).get("acqus")
+    if not isinstance(acqus, dict):
+        return {}
+    constants: dict[str, float] = {}
+    for key, value in acqus.items():
+        if key in _CONSTANT_ARRAYS and isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                if isinstance(item, (int, float)) and not isinstance(item, bool):
+                    constants[f"{key.lower()}{index}"] = float(item)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            constants[key.lower()] = float(value)
+    return constants
+
+
 def _ppm_hz_axis(o1: float, sf: float, obs: float, sw: float, si: int) -> tuple[np.ndarray, np.ndarray]:
     """The ppm/Hz axis formula used throughout ``nmrtools2`` -- kept
     identical here (for both the raw-FID and processed-fallback paths)

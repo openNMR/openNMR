@@ -2,6 +2,41 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Axis units on a 2D, projections that survive a rescale, equations that read the data (2026-09-06)
+
+User: "I am not able to right-click and change the axis on a 2D (for imaging) and also the 2D projections shouldn't reset when I scale the contours. It would be good if I can make fitting equations using values from the input data (e.g. delays and constants and L or whatever)."
+
+### Axis units on a contour
+
+The Axis Units menu was gated on `_current_1d_spectrum`, which a contour never sets, and `set_axis_unit` only ever rewrote `Line2D` x-data. A contour takes its axes from the spectrum, so a unit change is a **rebuild**, not a data swap.
+
+`plot_2d_contour` reads `axes[i].ppm` directly, so the display goes through a shallow **copy** whose frequency axes carry the converted values, with the labels passed explicitly to say what they really are. A copy rather than a mutation: `_contour_spectrum` stays in ppm, which is what slicing, referencing and everything else still reason in.
+
+Two consequences that had to be handled rather than left to rot:
+
+- **`_nearest_slice_index` now resolves against the displayed unit.** The cursor value comes off the axis on screen, so comparing it to ppm would pick the wrong row the moment the contour showed Hz. (It stops being a `staticmethod`, since it needs the canvas's unit and gradient.)
+- **"Set Reference from Cursor (ppm)…" stands down off ppm.** Asking for a shift in ppm against an mm axis is nonsense. The comment claiming "a contour's axes are always in ppm" was true when it was written and isn't any more -- replaced with the guard that makes it true.
+
+`mm` needs a gradient, so it is offered only when `set_imaging_gradient_params` has real values -- and the Hz/mm conversion is now one shared helper instead of being written out twice.
+
+### Projections survive a contour rescale
+
+Scrolling the contour body adjusts the levels, which rebuilds the figure -- and the projection strips are their own Axes with their own intensity zoom, which the rebuild threw away. `_redraw_contour(preserve_view=True)` was preserving only the *main* axes' limits. It now captures and restores the F2 strip's ylim and the F1 strip's xlim alongside them.
+
+### Fitting equations can use the acquisition
+
+`build_custom_model` treated every free symbol other than `x` as something to fit. It now takes `constants`, substituted into the expression **before** the free symbols are counted, so a known value becomes a number rather than another parameter.
+
+`io.bruker.acquisition_constants` supplies them under the names a pulse programme uses -- `d1`, `p1`, `cnst2`, `l4` from the indexed arrays, plus every scalar (`ns`, `td`, `te`, ...) -- 781 of them on a real dataset. The GUI passes **all** of them and lets the substitution pick: only names an equation actually uses are substituted, so an unused one costs nothing and a symbol nobody supplies stays a fitted parameter exactly as before. The parameter preview now also names what it took from the data, so "why is d1 not being fitted?" answers itself.
+
+**Values are exactly as the vendor recorded them** -- `d1` in seconds, `p1` in microseconds. Quietly rescaling them would make an equation copied off a pulse programme silently wrong. The independent variable is never substitutable, even if a vendor records a parameter of the same name.
+
+### Fallout, all in tests
+
+`_nearest_slice_index` becoming an instance method broke 8 static call sites; they now go through a canvas showing the spectrum, which is what "resolve against the displayed axis" needs anyway. And `test_set_axis_unit_noop_without_a_1d_spectrum` asserted precisely the limitation being removed -- replaced with tests of the new behaviour.
+
+11 new tests, each verified to fail with its own change reverted. 1038 passing (1027 -> 1038).
+
 ## The file's own SR is now visible; imaging gradient reads GPZ1 (2026-09-06)
 
 User: "As far as the sr goes, I want any sr that was noted in the import files to be applied already and to show in the processing tab. Also for imaging, the relative gradient strength doesn't seem to be calculated correctly for my Bruker data (should be gpz1 generally as a percentage value, e.g. gpz1=2 is 2%)."

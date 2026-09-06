@@ -632,18 +632,28 @@ def test_extract_slice_shows_1d_column(qapp):
     assert len(canvas._current_1d_spectrum.data) == 8  # traced along F1
 
 
+
+def _slice_index_of(spectrum, axis, cursor_value):
+    """_nearest_slice_index is an instance method now -- it resolves the
+    cursor against the axis *as displayed*, which needs the canvas's own
+    unit. These tests all mean "showing this spectrum in ppm"."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(spectrum)
+    return canvas._nearest_slice_index(spectrum, axis, cursor_value)
+
+
 def test_nearest_slice_index_matches_cursor_ppm_on_a_frequency_axis(qapp):
     spec = _make_2d(n_f1=8, n_f2=64)  # F1 ppm: linspace(90, 100, 8); F2 ppm: linspace(0, 10, 64)
-    row = MplCanvas._nearest_slice_index(spec, "f1", 95.0)
+    row = _slice_index_of(spec, "f1", 95.0)
     assert spec.axes[0].ppm[row - 1] == pytest.approx(95.0, abs=0.75)
-    col = MplCanvas._nearest_slice_index(spec, "f2", 5.0)
+    col = _slice_index_of(spec, "f2", 5.0)
     assert spec.axes[1].ppm[col - 1] == pytest.approx(5.0, abs=0.2)
 
 
 def test_nearest_slice_index_clips_to_valid_range(qapp):
     spec = _make_2d(n_f1=8, n_f2=64)
-    assert MplCanvas._nearest_slice_index(spec, "f1", 1000.0) == 8  # far past the axis's own max ppm
-    assert MplCanvas._nearest_slice_index(spec, "f1", -1000.0) == 1
+    assert _slice_index_of(spec, "f1", 1000.0) == 8  # far past the axis's own max ppm
+    assert _slice_index_of(spec, "f1", -1000.0) == 1
 
 
 def test_nearest_slice_index_handles_pseudo_2d_index_axis(qapp):
@@ -659,8 +669,8 @@ def test_nearest_slice_index_handles_pseudo_2d_index_axis(qapp):
     f2_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_ppm * 400.0)
     spec = NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
 
-    assert MplCanvas._nearest_slice_index(spec, "f1", 3.4) == 3
-    assert MplCanvas._nearest_slice_index(spec, "f1", 100.0) == n_f1  # clipped
+    assert _slice_index_of(spec, "f1", 3.4) == 3
+    assert _slice_index_of(spec, "f1", 100.0) == n_f1  # clipped
 
 
 def test_extract_slice_dialog_defaults_index_to_the_right_clicked_position(qapp):
@@ -692,14 +702,14 @@ def test_extract_slice_dialog_defaults_index_to_the_right_clicked_position(qapp)
 
     # Default axis is "Row (fix F1)" -- its index should default from
     # the cursor's own Y position (95 ppm), not a fixed 1.
-    expected_row = MplCanvas._nearest_slice_index(spec, "f1", 95.0)
+    expected_row = _slice_index_of(spec, "f1", 95.0)
     assert seen["index_spin"].value() == expected_row
     assert expected_row != 1  # confirms this is a real, non-trivial default, not a coincidence
 
     # Switching to "Column (fix F2)" should re-derive from the cursor's
     # X position (5 ppm) instead.
     seen["axis_combo"].setCurrentIndex(1)
-    expected_col = MplCanvas._nearest_slice_index(spec, "f2", 5.0)
+    expected_col = _slice_index_of(spec, "f2", 5.0)
     assert seen["index_spin"].value() == expected_col
 
 
@@ -892,11 +902,76 @@ def test_set_axis_unit_back_to_ppm_restores_original_xdata_and_label(qapp):
     assert canvas.ax.get_xlabel() == original_label
 
 
-def test_set_axis_unit_noop_without_a_1d_spectrum(qapp):
+def test_set_axis_unit_switches_a_contour(qapp):
+    # Real user report: "I am not able to right-click and change the
+    # axis on a 2D (for imaging)". The Axis Units menu was gated on a 1D
+    # view, and set_axis_unit only ever rewrote line data -- a contour
+    # takes its axes from the spectrum, so the unit change is a rebuild.
     canvas = MplCanvas()
-    canvas.show_spectrum(_make_2d())
-    canvas.set_axis_unit("hz")  # must not raise, and must not touch the contour view
-    assert canvas._axis_unit == "ppm"
+    spectrum = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spectrum)
+    ppm_limits = canvas.ax.get_xlim()
+
+    canvas.set_axis_unit("hz")
+    assert canvas._axis_unit == "hz"
+    hz = spectrum.axes[1].values("hz")
+    assert canvas.ax.get_xlim() != ppm_limits
+    # Compared as a span, not as limits: plot_2d_contour pads the view
+    # past the data, so the endpoints are not the data's own.
+    span = abs(canvas.ax.get_xlim()[1] - canvas.ax.get_xlim()[0])
+    assert span == pytest.approx(float(hz.max() - hz.min()), rel=0.25)
+    assert canvas.ax.get_xlabel() == "Frequency / Hz"
+
+    # The underlying spectrum is untouched -- slicing and referencing
+    # still reason in ppm.
+    np.testing.assert_allclose(canvas._contour_spectrum.axes[1].ppm, spectrum.axes[1].ppm)
+
+    canvas.set_axis_unit("ppm")
+    assert canvas.ax.get_xlim() == pytest.approx(ppm_limits)
+
+
+def test_set_axis_unit_mm_on_a_contour_needs_a_gradient(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8, n_f2=64))
+    canvas.set_axis_unit("mm")
+    assert canvas._axis_unit == "ppm"        # no gradient -> nothing to convert with
+
+    canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
+    canvas.set_axis_unit("mm")
+    assert canvas._axis_unit == "mm"
+    assert canvas.ax.get_xlabel() == "Position / mm"
+
+
+def test_nearest_slice_index_follows_the_displayed_unit(qapp):
+    # The cursor value comes off the displayed axis, so resolving it
+    # against ppm would pick the wrong row once the contour shows Hz.
+    canvas = MplCanvas()
+    spectrum = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spectrum)
+    in_ppm = canvas._nearest_slice_index(spectrum, "f1", 95.0)
+
+    canvas.set_axis_unit("hz")
+    hz_at_that_row = float(spectrum.axes[0].values("hz")[in_ppm - 1])
+    assert canvas._nearest_slice_index(spectrum, "f1", hz_at_that_row) == in_ppm
+    # ...and the raw ppm number now resolves somewhere else entirely.
+    assert canvas._nearest_slice_index(spectrum, "f1", 95.0) != in_ppm
+
+
+def test_canvas_offers_axis_units_on_a_contour_but_not_ppm_referencing_off_ppm(qapp, monkeypatch):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8, n_f2=64))
+    canvas._last_right_click_xy = (5.0, 95.0)
+
+    labels = _menu_labels(canvas, monkeypatch)
+    assert "Axis Units" in labels
+    assert "Set Reference from Cursor (ppm)…" in labels
+
+    # Off ppm the click is in another unit, so asking for a shift in ppm
+    # would be nonsense -- the action stands down, the units stay.
+    canvas.set_axis_unit("hz")
+    labels = _menu_labels(canvas, monkeypatch)
+    assert "Axis Units" in labels
+    assert "Set Reference from Cursor (ppm)…" not in labels
 
 
 def test_set_axis_unit_rejects_unknown_unit(qapp):
@@ -1971,3 +2046,22 @@ def test_canvas_ppm_referencing_emits_the_clicked_position(qapp, monkeypatch):
     canvas.referenceCalibrationRequested.connect(seen.append)
     _menu_labels(canvas, monkeypatch, choose="Set Reference from Cursor (ppm)…")
     assert seen == [(5.0, 95.0)]
+
+
+def test_canvas_projection_zoom_survives_a_contour_level_change(qapp):
+    # Real user report: "the 2D projections shouldn't reset when I scale
+    # the contours". Scrolling the contour body adjusts the levels,
+    # which rebuilds the figure -- and the projection strips are their
+    # own Axes with their own intensity zoom, which the rebuild threw
+    # away.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas.canvas.draw()
+
+    canvas._on_scroll(_scroll_at(canvas, canvas._proj_axes["f2"]))
+    canvas._on_scroll(_scroll_at(canvas, canvas._proj_axes["f1"]))
+    zoomed = (canvas._proj_axes["f2"].get_ylim(), canvas._proj_axes["f1"].get_xlim())
+
+    canvas._on_scroll(_scroll_at(canvas, canvas.ax))     # contour body -> levels -> rebuild
+    assert (canvas._proj_axes["f2"].get_ylim(), canvas._proj_axes["f1"].get_xlim()) == zoomed

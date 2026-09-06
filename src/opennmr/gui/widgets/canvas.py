@@ -10,6 +10,7 @@ one canvas must never restyle every other open one.
 
 from __future__ import annotations
 
+import copy
 import os
 
 import numpy as np
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.registry import find_gamma, NUC_label
-from ...core.spectrum import NMRSpectrum
+from ...core.spectrum import NMRAxis, NMRSpectrum
 from ... import plotting
 from ...processing import slicing as processing_slicing
 
@@ -773,12 +774,38 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None:
             self.show_spectrum(self._contour_spectrum)
 
+    def _projection_intensity_limits(self) -> dict:
+        """Each projection strip's own intensity limit -- the F2 (top)
+        strip plots intensity along y, the F1 (left) strip along x.
+        Captured around a rebuild so a scroll-zoom of a projection
+        survives one."""
+        limits = {}
+        if self._proj_axes.get("f2") is not None:
+            limits["f2"] = self._proj_axes["f2"].get_ylim()
+        if self._proj_axes.get("f1") is not None:
+            limits["f1"] = self._proj_axes["f1"].get_xlim()
+        return limits
+
+    def _restore_projection_intensity_limits(self, limits: dict) -> None:
+        if "f2" in limits and self._proj_axes.get("f2") is not None:
+            self._proj_axes["f2"].set_ylim(limits["f2"])
+        if "f1" in limits and self._proj_axes.get("f1") is not None:
+            self._proj_axes["f1"].set_xlim(limits["f1"])
+
     def _redraw_contour(self, preserve_view: bool) -> None:
         xlim, ylim = (self.ax.get_xlim(), self.ax.get_ylim()) if preserve_view else (None, None)
+        # The projection strips are their own Axes with their own
+        # intensity zoom, and a rebuild threw it away -- so scrolling the
+        # contour body to rescale the levels silently reset both
+        # projections at the same time. Real user report: "the 2D
+        # projections shouldn't reset when I scale the contours".
+        projection_limits = self._projection_intensity_limits() if preserve_view else {}
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
+        display_spectrum, unit_xlabel, unit_ylabel = self._contour_for_display()
         _, _, self._proj_axes = plotting.plot_2d_contour(
-            self._contour_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+            display_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+            xlabel=unit_xlabel, ylabel=unit_ylabel,
             clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
             square_aspect=self._aspect_ratio is None,
             **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
@@ -788,6 +815,7 @@ class MplCanvas(QWidget):
         if preserve_view:
             self.ax.set_xlim(xlim)
             self.ax.set_ylim(ylim)
+            self._restore_projection_intensity_limits(projection_limits)
         self._apply_view_options()
         # Same layout pass show_spectrum ends with. Without it a rebuild
         # kept whatever subplot margins were last in force, and once the
@@ -980,14 +1008,18 @@ class MplCanvas(QWidget):
         # thing to ask for on one anyway, since what a user actually
         # knows is where a peak *should* be. This asks for that instead:
         # right-click the peak, type its true shift, and the SR follows.
-        # A contour's axes are always in ppm (set_axis_unit only ever
-        # applies to a 1D view), so the click needs no unit conversion.
+        # The click needs no unit conversion because this is offered
+        # only while ppm is displayed -- see the guard below.
+        # ...and only while the contour is actually showing ppm: the
+        # click is read in whatever unit is displayed, so asking for a
+        # shift in ppm against an mm axis would be nonsense.
         calibrate_action = None
-        if self._contour_spectrum is not None and self._last_right_click_xy is not None:
+        if (self._contour_spectrum is not None and self._last_right_click_xy is not None
+                and self._axis_unit == "ppm"):
             calibrate_action = menu.addAction("Set Reference from Cursor (ppm)…")
 
         unit_actions = {}
-        if self._current_1d_spectrum is not None:
+        if self._current_1d_spectrum is not None or self._contour_spectrum is not None:
             unit_menu = menu.addMenu("Axis Units")
             for label, key in (("ppm", "ppm"), ("Hz", "hz"), ("kHz", "khz")):
                 action = unit_menu.addAction(label)
@@ -1274,8 +1306,7 @@ class MplCanvas(QWidget):
             level_mode = "power" if mode_combo.currentIndex() == 0 else "linear"
             self.set_contour_levels(clevels_spin.value(), level_mode, power_spin.value(), start_spin.value())
 
-    @staticmethod
-    def _nearest_slice_index(spectrum: NMRSpectrum, axis: str, cursor_value: float) -> int:
+    def _nearest_slice_index(self, spectrum: NMRSpectrum, axis: str, cursor_value: float) -> int:
         """The 1-based row (``axis="f1"``) or column (``"f2"``) index
         nearest a cursor's data-coordinate value -- ``cursor_value`` is
         the Y position (F1) when fixing a row, or the X position (F2)
@@ -1289,7 +1320,13 @@ class MplCanvas(QWidget):
         spectrum_axis = spectrum.axes[0] if axis == "f1" else spectrum.axes[1]
         n = len(spectrum_axis)
         if spectrum_axis.kind == "frequency":
-            values = spectrum_axis.values("ppm")
+            # In whatever unit is on screen, not always ppm -- the
+            # cursor value comes off the displayed axis, so comparing it
+            # against ppm would pick the wrong row once the contour is
+            # showing Hz, kHz or mm.
+            values = self._axis_values_in_unit(spectrum_axis, self._axis_unit)
+            if values is None:
+                values = spectrum_axis.values("ppm")
             return int(np.argmin(np.abs(values - cursor_value))) + 1
         return int(np.clip(round(cursor_value), 1, n))
 
@@ -1483,6 +1520,85 @@ class MplCanvas(QWidget):
         self._imaging_gamma_hz_per_t = gamma_hz_per_t
         self._imaging_max_gradient_g_per_cm = max_gradient_g_per_cm
 
+    #: Axis label for each non-ppm display unit. ppm's own label is
+    #: nucleus-dependent and comes from ``NUC_label`` instead.
+    _UNIT_LABELS = {"hz": "Frequency / Hz", "khz": "Frequency / kHz", "mm": "Position / mm"}
+
+    def _imaging_hz_per_mm(self) -> float | None:
+        """Hz per mm for the current imaging gradient, or ``None`` when
+        :meth:`set_imaging_gradient_params` hasn't been given real
+        values. Spelled out in separate unit steps rather than one
+        folded constant, so the conversion is checkable at a glance
+        rather than needing to be trusted."""
+        gamma = self._imaging_gamma_hz_per_t
+        gradient = self._imaging_max_gradient_g_per_cm
+        if not gamma or not gradient:
+            return None
+        gradient_t_per_m = gradient * 1e-2   # G/cm -> T/m (1 G = 1e-4 T, 1 cm = 1e-2 m)
+        hz_per_m = gamma * gradient_t_per_m
+        return hz_per_m * 1e-3
+
+    def _axis_values_in_unit(self, axis, unit: str):
+        """``axis``'s own values in ``unit``, or ``None`` if it cannot
+        be expressed that way (an index axis, or ``"mm"`` with no
+        gradient set)."""
+        if axis is None or axis.kind != "frequency":
+            return None
+        if unit == "ppm":
+            return axis.values("ppm")
+        hz = axis.values("hz")
+        if unit == "hz":
+            return hz
+        if unit == "khz":
+            return hz / 1000.0
+        if unit == "mm":
+            hz_per_mm = self._imaging_hz_per_mm()
+            return hz / hz_per_mm if hz_per_mm else None
+        return None
+
+    def _contour_for_display(self):
+        """``(spectrum, xlabel, ylabel)`` to hand to
+        :func:`plot_2d_contour` for the current display unit.
+
+        For ppm this is the spectrum itself. For anything else it is a
+        shallow copy whose frequency axes carry the *converted* values,
+        because ``plot_2d_contour`` reads ``axes[i].ppm`` directly --
+        so the copy's ``ppm`` field holds Hz/kHz/mm and the labels are
+        passed explicitly to say so. A copy rather than a mutation:
+        ``_contour_spectrum`` stays in ppm, which is what slicing,
+        referencing and everything else still reason in.
+
+        Real user report: "I am not able to right-click and change the
+        axis on a 2D (for imaging)" -- the Axis Units menu was gated on
+        a 1D view, and ``set_axis_unit`` only ever rewrote line data.
+        """
+        spectrum = self._contour_spectrum
+        if spectrum is None or self._axis_unit == "ppm":
+            return spectrum, None, None
+        converted = copy.copy(spectrum)
+        converted.axes = list(spectrum.axes)
+        label = self._UNIT_LABELS.get(self._axis_unit)
+        xlabel = ylabel = None
+        for dim in (0, 1):
+            values = self._axis_values_in_unit(spectrum.axes[dim], self._axis_unit)
+            if values is None:
+                continue
+            axis = spectrum.axes[dim]
+            converted.axes[dim] = NMRAxis(kind="frequency", ppm=values, hz=axis.hz,
+                                          index=axis.index, label=axis.label)
+            if dim == 1:
+                xlabel = label
+            else:
+                ylabel = label
+        return converted, xlabel, ylabel
+
+    def _contour_unit_available(self, unit: str) -> bool:
+        """Whether the current contour can be shown in ``unit`` at all
+        -- its direct axis has to be expressible that way."""
+        if self._contour_spectrum is None:
+            return False
+        return self._axis_values_in_unit(self._contour_spectrum.axes[1], unit) is not None
+
     def set_axis_unit(self, unit: str) -> None:
         """Switch the current 1D view's x-axis between ``"ppm"``,
         ``"hz"``, ``"khz"``, and ``"mm"``, re-using the spectrum's own
@@ -1495,7 +1611,19 @@ class MplCanvas(QWidget):
         (falls through to whatever unit was already showing) if not,
         matching this method's existing "can't do this yet" behaviour
         for every other precondition it checks."""
-        if self._current_1d_spectrum is None or unit not in ("ppm", "hz", "khz", "mm") or not self.ax.lines:
+        if unit not in ("ppm", "hz", "khz", "mm"):
+            return
+        if self._contour_spectrum is not None:
+            # A contour has no lines to rewrite -- its axes come from
+            # the spectrum, so the unit change is a rebuild. Not
+            # preserve_view: the old limits are in the *old* unit, so
+            # keeping them would frame a meaningless region.
+            if not self._contour_unit_available(unit):
+                return
+            self._axis_unit = unit
+            self._redraw_contour(preserve_view=False)
+            return
+        if self._current_1d_spectrum is None or not self.ax.lines:
             return
         axis = self._current_1d_spectrum.axes[0]
         if unit == "ppm":
@@ -1508,19 +1636,11 @@ class MplCanvas(QWidget):
             x = axis.values("hz") / 1000.0
             label = "Frequency / kHz"
         else:
-            gamma = self._imaging_gamma_hz_per_t
-            gradient = self._imaging_max_gradient_g_per_cm
-            if not gamma or not gradient:
+            hz_per_mm = self._imaging_hz_per_mm()
+            if not hz_per_mm:
                 return
-            # G/cm -> T/m (1 G = 1e-4 T, 1 cm = 1e-2 m) -> Hz/m (via
-            # gamma) -> Hz/mm -- spelled out in separate steps rather
-            # than one folded constant, so the unit conversion is
-            # checkable at a glance rather than needing to be trusted.
-            gradient_t_per_m = gradient * 1e-2
-            hz_per_m = gamma * gradient_t_per_m
-            hz_per_mm = hz_per_m * 1e-3
             x = axis.values("hz") / hz_per_mm
-            label = "Position / mm"
+            label = self._UNIT_LABELS["mm"]
 
         for line in self.ax.lines:
             line.set_xdata(x)
@@ -1683,8 +1803,10 @@ class MplCanvas(QWidget):
             self._contour_level_mode = self._CONTOUR_LEVEL_MODE_DEFAULT
             self._contour_power = self._CONTOUR_POWER_DEFAULT
             self.ax = self.figure.add_subplot(111)
+            display_spectrum, unit_xlabel, unit_ylabel = self._contour_for_display()
             _, _, self._proj_axes = plotting.plot_2d_contour(
-                spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+                display_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+                xlabel=unit_xlabel, ylabel=unit_ylabel,
                 clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
                 square_aspect=self._aspect_ratio is None,
                 **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),

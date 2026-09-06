@@ -301,7 +301,8 @@ RELAXATION_MODELS = {
 }
 
 def build_custom_model(equation: str, independent_var: str = "x",
-                        p0_overrides: list[float] | tuple[float, ...] | None = None) -> dict:
+                        p0_overrides: list[float] | tuple[float, ...] | None = None,
+                        constants: dict | None = None) -> dict:
     """Build a :data:`RELAXATION_MODELS`-shaped spec dict from a user-
     typed equation string (e.g. ``"A*exp(-x/T1)+C"``), for
     :func:`fit_relaxation`'s/:func:`NMR2D_fit_relaxation`'s own
@@ -315,6 +316,21 @@ def build_custom_model(equation: str, independent_var: str = "x",
     ``equation`` reading left to right -- also the order
     ``p0_overrides`` (if given) is read in, so what the user typed and
     what they set initial guesses for line up the same way.
+
+    ``constants`` : named values substituted into the equation before
+    anything is fitted, so a symbol that is *known* doesn't become a
+    free parameter. Explicit user request: "it would be good if I can
+    make fitting equations using values from the input data (e.g.
+    delays and constants and L or whatever)" -- so an equation can be
+    written as ``A*exp(-x*d1/T2)`` with ``d1`` taken from the
+    acquisition rather than typed in as a magic number, or fitted for
+    when nobody supplies it.
+
+    Only symbols the equation actually uses are substituted, and a
+    constant never shadows ``independent_var``. Names not present in
+    the equation are ignored, which matters because the caller
+    generally passes *every* acquisition parameter it has rather than
+    guessing which ones a given equation wants.
 
     ``p0_overrides`` : initial guesses, positionally matching the
     detected parameter order. Any parameter beyond the given values
@@ -345,6 +361,22 @@ def build_custom_model(equation: str, independent_var: str = "x",
             f"Equation '{equation}' doesn't reference the independent variable '{independent_var}'."
         )
 
+    # Substituted before the free symbols are counted, so a known value
+    # is a number in the expression rather than something to fit. The
+    # independent variable is never substitutable, even if a vendor
+    # happens to record a parameter of the same name.
+    substitutions = {}
+    if constants:
+        for name, value in constants.items():
+            if name == independent_var or value is None:
+                continue
+            symbol = sympy.Symbol(str(name))
+            if symbol in expr.free_symbols:
+                substitutions[symbol] = float(value)
+    if substitutions:
+        expr = expr.subs(substitutions)
+    substituted_names = {str(symbol) for symbol in substitutions}
+
     seen: list[str] = []
     for token in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", equation):
         symbol = sympy.Symbol(token)
@@ -353,7 +385,10 @@ def build_custom_model(equation: str, independent_var: str = "x",
     param_names = seen
 
     if not param_names:
-        raise ValueError(f"Equation '{equation}' has no free parameters to fit (only '{independent_var}').")
+        known = f" (only '{independent_var}'"
+        if substituted_names:
+            known += " and the supplied " + ", ".join(sorted(substituted_names))
+        raise ValueError(f"Equation '{equation}' has no free parameters to fit{known}).")
 
     param_symbols = [sympy.Symbol(name) for name in param_names]
     numeric_func = sympy.lambdify((x_symbol, *param_symbols), expr, modules="numpy")
@@ -370,7 +405,10 @@ def build_custom_model(equation: str, independent_var: str = "x",
     p0_values = [overrides[i] if i < len(overrides) else 1.0 for i in range(len(param_names))]
 
     return {
-        "func": func, "params": param_names,
+        "func": func, "params": param_names, "constants": dict(
+            (name, float(value)) for name, value in
+            ((str(sym), val) for sym, val in substitutions.items())
+        ),
         "p0": lambda t, y: list(p0_values),
         "bounds": lambda t, y: ([-1.0e12] * len(param_names), [1.0e12] * len(param_names)),
         "rate_param": None,

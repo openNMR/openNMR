@@ -521,3 +521,36 @@ def test_apply_recorded_phase_reproduces_topspin_on_real_xf2_data():
     # load reproduces TopSpin too (it used to sit at ~0.51, routing
     # PHC0 through the pivot-based model and dropping PHC1 entirely).
     assert _corr(bruker.read_2d(path, pseudo_2d=True).data, reference) > 0.999
+
+
+def test_acquisition_constants_names_parameters_the_way_a_pulse_programme_does():
+    # User request: fitting equations should be able to use "values from
+    # the input data (e.g. delays and constants and L or whatever)".
+    # Matching TopSpin's own naming is the point -- someone writing an
+    # equation reaches for d1 and l4 because that is what the pulse
+    # programme calls them.
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    spectrum = bruker.read_2d(path)
+    constants = bruker.acquisition_constants(spectrum)
+
+    assert constants["d1"] == pytest.approx(2.0)          # indexed array entries
+    assert constants["p1"] == pytest.approx(8.01)
+    assert constants["cnst2"] == pytest.approx(145.0)
+    assert constants["gpz1"] == pytest.approx(80.0)
+    assert constants["ns"] == pytest.approx(8.0)          # plain scalars
+    assert constants["td"] == pytest.approx(2048.0)
+    # Values as the vendor recorded them, not rescaled: d1 is seconds
+    # and p1 microseconds, which is what those numbers mean in TopSpin.
+    assert all(isinstance(v, float) for v in constants.values())
+
+
+def test_acquisition_constants_is_empty_without_acqus():
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    spectrum = NMRSpectrum(
+        data=np.zeros(4), axes=[NMRAxis(kind="frequency", ppm=np.arange(4.0))],
+        metadata=NMRMetadata(vendor="test", nucleus="1H"),
+    )
+    assert bruker.acquisition_constants(spectrum) == {}

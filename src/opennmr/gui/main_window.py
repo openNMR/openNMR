@@ -7638,21 +7638,48 @@ class MainWindow(QMainWindow):
         if is_custom:
             self._on_custom_equation_changed(self.custom_equation_edit.text())
 
+    def _fit_equation_constants(self) -> dict:
+        """The selected spectrum's own acquisition parameters, named
+        the way a pulse programme names them (``d1``, ``p1``, ``cnst2``,
+        ``l4``, ``ns``, ...), for use as known values in a custom
+        fitting equation.
+
+        Explicit user request: "it would be good if I can make fitting
+        equations using values from the input data (e.g. delays and
+        constants and L or whatever)". Every parameter is offered
+        rather than a guessed subset -- ``build_custom_model``
+        substitutes only the names an equation actually uses, so an
+        unused one costs nothing, and a symbol nobody supplies stays a
+        fitted parameter exactly as before."""
+        index = self._selected_index()
+        if index is None:
+            return {}
+        return io_bruker.acquisition_constants(self.session.spectra[index])
+
     def _on_custom_equation_changed(self, text: str) -> None:
         """Live preview of the parameters :func:`_build_custom_relaxation_model`
         would detect from the equation typed so far -- lets a typo or a
         missing independent variable be caught before Fit Curve is
-        even clicked, rather than only surfacing as an error dialog."""
+        even clicked, rather than only surfacing as an error dialog.
+
+        Also names which acquisition parameters the equation picked up,
+        so "why is d1 not being fitted?" answers itself."""
         text = text.strip()
         if not text:
             self.custom_params_label.setText("")
             return
         try:
-            spec = processing_relaxation.build_custom_model(text)
+            spec = processing_relaxation.build_custom_model(
+                text, constants=self._fit_equation_constants())
         except ValueError as exc:
             self.custom_params_label.setText(f"Error: {exc}")
             return
-        self.custom_params_label.setText(f"Parameters (in order): {', '.join(spec['params'])}")
+        message = f"Parameters (in order): {', '.join(spec['params'])}"
+        used = spec.get("constants") or {}
+        if used:
+            message += "  |  from the data: " + ", ".join(
+                f"{name}={value:g}" for name, value in sorted(used.items()))
+        self.custom_params_label.setText(message)
 
     def _build_custom_relaxation_model(self) -> dict:
         equation = self.custom_equation_edit.text().strip()
@@ -7660,7 +7687,8 @@ class MainWindow(QMainWindow):
             raise ValueError("Enter an equation for the custom model (e.g. A*exp(-x/T1)+C).")
         p0_text = self.custom_p0_edit.text().strip()
         p0_overrides = [float(tok) for tok in p0_text.split(",") if tok.strip()] if p0_text else None
-        return processing_relaxation.build_custom_model(equation, p0_overrides=p0_overrides)
+        return processing_relaxation.build_custom_model(
+            equation, p0_overrides=p0_overrides, constants=self._fit_equation_constants())
 
     def _on_delay_source_changed(self, index: int) -> None:
         self.manual_delays_edit.setVisible(index == 1)

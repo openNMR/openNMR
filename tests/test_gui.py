@@ -8361,6 +8361,36 @@ def test_main_window_nq_line_survives_a_reload(qapp, tmp_path, monkeypatch):
     assert reopened.output_nq_value_spin.value() == 2
 
 
+def test_main_window_custom_equation_uses_acquisition_constants(qapp, tmp_path, monkeypatch):
+    # "It would be good if I can make fitting equations using values
+    # from the input data (e.g. delays and constants and L or
+    # whatever)." Every acquisition parameter is offered rather than a
+    # guessed subset -- build_custom_model substitutes only the names an
+    # equation actually uses, so an unused one costs nothing.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._select_single_row(0)
+
+    window.custom_equation_edit.setText("A*exp(-x*d1/T2)+C")
+    window._on_custom_equation_changed(window.custom_equation_edit.text())
+    label = window.custom_params_label.text()
+    assert "A, T2, C" in label          # d1 is not among them
+    assert "d1=2" in label              # ...and the preview says why
+
+    spec = window._build_custom_relaxation_model()
+    assert spec["params"] == ["A", "T2", "C"]
+    assert spec["constants"] == {"d1": pytest.approx(2.0)}
+
+    # A symbol nobody supplies is still fitted, exactly as before.
+    window.custom_equation_edit.setText("A*exp(-x/Tq)+C")
+    assert window._build_custom_relaxation_model()["params"] == ["A", "Tq", "C"]
+
+
 def test_main_window_sr_box_shows_the_file_s_own_reference(qapp, tmp_path, monkeypatch):
     # User request: "I want any sr that was noted in the import files to
     # be applied already and to show in the processing tab." It was
