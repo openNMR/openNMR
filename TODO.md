@@ -2,6 +2,40 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Slice-panel refinements and a blitted crosshair (2026-09-06)
+
+Six follow-ups on the slice panel plus a cursor request.
+
+### The connector lines are gone
+
+"Drop the lines to the extracted slices, it seems too hard to maintain across different views." Correct call: they looked right in a saved figure, but in the GUI the contour and the panel zoom, pan and change units independently, and a line spanning two Axes has to be re-derived on every one of those. The shared colour is what pairs a line with its trace now. `slice_connect` and the `ConnectionPatch` import are removed rather than left as a disabled option.
+
+### Traces now fill the panel
+
+Was: a fixed offset of `0.55 x` the tallest trace, with the y-limit stretched to whatever the stack happened to reach -- so a short top trace left dead space above it. Now each trace gets one slot of `1/n` across a normalised 0..1 panel, with **a single shared amplitude scale** rather than a per-trace normalisation, so a weak slice still reads as weak next to the diagonal.
+
+### The panel shares the contour's axis, rather than copying it once
+
+Setting `panel.set_xlim(ax.get_xlim())` at draw time was not enough, and the reason is a genuinely subtle interaction: the GUI's own preserve-the-view redraw restores the contour's limits *after* `plot_2d_contour` has returned, so a zoomed contour got a full-range panel beside it. `sharex=ax` makes the two track through every later zoom and pan as well. A *column* panel's x axis is the contour's *y*, which matplotlib cannot share across orientations, so that case still takes a one-time copy.
+
+Also: a matching x-axis label (the contour's own x label for a row panel, its y label for a column panel), no panel title, and the pad raised 0.45 -> 0.95 inches so the panel clears the contour's right-hand y-axis label.
+
+### Adding a slice no longer resets the view
+
+`_add_contour_slice`/`_clear_contour_slices` called `show_spectrum`, which rebuilds from scratch. They use the existing `_redraw_contour(preserve_view=True)` now -- adding a slice is an annotation, not a change of subject.
+
+### Crosshair across the contour and both projections
+
+**Two cursors, not one.** A single `MultiCursor` over all three Axes would also draw a horizontal line across the top strip and a vertical one down the left strip, in those panels' own unrelated intensity coordinates. So: one vertical across the contour + F2 strip, one horizontal across the contour + F1 strip.
+
+**`MultiCursor` rather than a hand-rolled pair of lines, because it blits.** A plain redraw per mouse-move repaints the whole contour -- measured at 295 ms for a real HSQC and 1.34 s for the EXSY, nowhere near interactive.
+
+**It stands down in pan/zoom mode** (`_NavigationAwareMultiCursor.ignore` also consults `toolbar.mode`), per the request: those have their own cursors and drag semantics.
+
+**Rebuilt lazily from `_on_motion`, not from every redraw path.** This canvas clears and rebuilds its figure from about a dozen methods (`show_compare`, `show_fit`, `extract_slice`, ...), and a cursor still holding removed Axes would draw into them. Checking that the Axes it was built for are still the ones on the figure is one hook instead of twelve, and self-heals rather than depending on every future rebuild path remembering to call a teardown.
+
+7 new/rewritten tests, each verified to fail with its own change reverted. 1010 passing (1004 -> 1010).
+
 ## Extracted-slice panel, indirect SR, per-spectrum nQ, pseudo-2D peak picking (2026-09-06)
 
 Five requests in one round.

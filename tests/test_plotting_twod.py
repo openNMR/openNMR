@@ -506,10 +506,12 @@ def _slice_test_spectrum(n_f1=32, n_f2=64):
     )
 
 
-def test_plot_2d_contour_slice_panel_draws_lines_traces_and_connectors():
+def test_plot_2d_contour_slice_panel_pairs_lines_and_traces_by_colour():
     # User request: "plot slices from 2D contours with a dashed line
-    # across the contour slice and then projecting out", with the lines
-    # connecting to the traces.
+    # across the contour slice and then projecting out". The shared
+    # colour is what pairs a line with its trace -- the connector lines
+    # an earlier version drew are gone ("drop the lines to the extracted
+    # slices, it seems too hard to maintain across different views").
     spectrum = _slice_test_spectrum()
     slices = [{"axis": "f1", "index": 6, "label": "A"},
               {"axis": "f1", "index": 17, "label": "B"},
@@ -520,14 +522,48 @@ def test_plot_2d_contour_slice_panel_draws_lines_traces_and_connectors():
     assert panel is not None
     assert len(panel.lines) == 3                       # one trace per slice
     assert len(ax.lines) == 3                          # one dashed line per slice
-    connectors = [a for a in fig.artists if isinstance(a, ConnectionPatch)]
-    assert len(connectors) == 3
-    # Each line, trace and connector share one colour -- the pairing is
-    # the entire point of the feature.
-    for contour_line, trace, connector in zip(ax.lines, panel.lines, connectors):
+    for contour_line, trace in zip(ax.lines, panel.lines):
         assert contour_line.get_color() == trace.get_color()
-        assert connector.get_edgecolor()[:3] == to_rgba(trace.get_color())[:3]
     assert {t.get_text() for t in panel.texts} == {"A", "B", "C"}
+
+    # No connectors, and no panel title.
+    assert not [a for a in fig.artists if isinstance(a, ConnectionPatch)]
+    assert panel.get_title() == ""
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_spreads_traces_evenly_over_the_panel():
+    # "The slices ... should spread evenly to fill the space" -- one
+    # slot each across the full panel height, rather than bunched at the
+    # bottom with dead space above.
+    spectrum = _slice_test_spectrum()
+    slices = [{"axis": "f1", "index": i} for i in (6, 17, 27)]
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=slices)
+
+    panel = panels["slices"]
+    assert panel.get_ylim() == pytest.approx((0.0, 1.0))
+    baselines = sorted(float(np.min(line.get_ydata())) for line in panel.lines)
+    np.testing.assert_allclose(baselines, [0.0, 1 / 3, 2 / 3], atol=1e-9)
+
+    # One shared amplitude scale, so relative intensities stay honest --
+    # the synthetic rows differ in height by construction.
+    heights = [float(np.ptp(line.get_ydata())) for line in panel.lines]
+    assert len(set(round(h, 9) for h in heights)) > 1
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_labels_and_tracks_the_contour_axis():
+    # "The axis needs a matching axis label", and the traces must stay
+    # aligned under the contour through later zooming -- setting the
+    # limits once at draw time was not enough, because the GUI's
+    # preserve-the-view redraw restores the contour's limits afterwards.
+    spectrum = _slice_test_spectrum()
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=[{"axis": "f1", "index": 6}])
+    panel = panels["slices"]
+
+    assert panel.get_xlabel() == ax.get_xlabel() != ""
+    ax.set_xlim(8.0, 2.0)
+    assert panel.get_xlim() == pytest.approx((8.0, 2.0))
     plt.close(fig)
 
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
-from matplotlib.patches import ConnectionPatch
 from matplotlib.ticker import MultipleLocator, MaxNLocator
 from mpl_toolkits.axes_grid1 import axes_size
 from mpl_toolkits.axes_grid1.axes_divider import AxesDivider
@@ -222,39 +221,43 @@ SLICE_COLOURS = ("#3b4cc0", "#b02ba0", "#e8703a", "#2a9d8f", "#7a4fbf", "#c0392b
 _SLICE_DASHES = (0, (7, 3, 1, 3))
 
 
-def _draw_slice_panel(fig, ax, divider, spectrum, slices, *,
-                      size, pad, title, offset_fraction, colours,
-                      font, fontsize, connect):
+def _draw_slice_panel(ax, divider, spectrum, slices, *,
+                      size, pad, offset_fraction, colours,
+                      font, fontsize, axis_label):
     """Draw extracted slices beside a contour: a dashed line across the
     contour at each slice's own position, and the extracted traces
     stacked in a panel to the right, one colour per slice.
-
-    Built to a user-supplied reference figure. Each dashed line
-    continues past the contour's edge and joins its own trace's baseline
-    in the panel ("I would prefer the dashed lines to connect to the
-    spectra") -- drawn as a :class:`~matplotlib.patches.ConnectionPatch`
-    with clipping off, which is the only way to draw a line that spans
-    two Axes.
-
-    ``size`` : panel width as a multiple of the contour panel's own
-    width (``axes_size.Scaled``), not inches -- see the call.
 
     ``slices`` : one dict per slice, ``{"axis", "index", "label",
     "color"}``. ``axis`` follows
     :func:`opennmr.processing.slicing.get_trace`'s own convention --
     ``"f1"`` fixes a position along F1 and yields a *row* running along
-    F2 (the common case, and the reference figure's). All slices in one
-    call must share an ``axis``: the panel has a single x-axis, and
-    rows and columns run along different dimensions, so mixing them
-    would put two unrelated frequency axes on one plot. The first
-    slice's axis wins and any other is skipped rather than silently
-    mis-plotted.
+    F2 (the common case). All slices in one call must share an
+    ``axis``: the panel has a single x-axis, and rows and columns run
+    along different dimensions, so mixing them would put two unrelated
+    frequency axes on one plot. The first slice's axis wins and any
+    other is skipped rather than silently mis-plotted.
 
-    Traces are stacked with vertical offsets rather than overlaid
-    (user's choice), each on its own baseline, at
-    ``offset_fraction`` x the tallest trace's height. The panel's
-    x-limits are taken from the contour's matching axis, so a peak in a
-    trace sits directly under the same shift in the contour.
+    ``size`` : panel width as a multiple of the contour panel's own
+    width (``axes_size.Scaled``), not inches. The same function draws
+    both a standalone figure and the GUI's own embedded canvas, and a
+    fixed inch width that looks right in one crushes the contour to a
+    sliver in the other (measured -- 3.5 inches left the embedded
+    contour a few pixels wide).
+
+    **Traces are spread evenly over the panel's full height**, one slot
+    each, and scaled by a single shared factor so their relative
+    intensities stay honest -- a per-trace normalisation would make a
+    weak slice look as strong as the diagonal. ``offset_fraction`` is
+    how much of its own slot the tallest trace fills.
+
+    **No connector lines.** An earlier version continued each dashed
+    line across the gap and joined it to its own trace's baseline. It
+    looked right in a saved figure but was not worth its upkeep in the
+    GUI, where zooming, panning and unit changes all move the two
+    Axes independently: "drop the lines to the extracted slices, it
+    seems too hard to maintain across different views." The shared
+    colour is what pairs a line with its trace now.
 
     Returns the panel Axes, or ``None`` if there was nothing to draw.
     """
@@ -262,10 +265,11 @@ def _draw_slice_panel(fig, ax, divider, spectrum, slices, *,
     if not slices:
         return None
     axis_kind = slices[0].get("axis", "f1")
-    usable = [s for s in slices if s.get("axis", "f1") == axis_kind]
 
     traces = []
-    for spec in usable:
+    for spec in slices:
+        if spec.get("axis", "f1") != axis_kind:
+            continue
         try:
             trace = get_trace(spectrum, axis=axis_kind, index=int(spec["index"]))
         except (ValueError, IndexError, KeyError):
@@ -277,30 +281,37 @@ def _draw_slice_panel(fig, ax, divider, spectrum, slices, *,
     if not traces:
         return None
 
-    # Relative width, not inches: this same function draws both a
-    # standalone 7-inch figure and the GUI's own embedded canvas, and a
-    # fixed inch width that looks right in one crushes the contour to a
-    # sliver in the other (measured -- 3.5 inches left the embedded
-    # contour a few pixels wide). Scaled(1.0) is the same unit the
-    # divider's own xref/yref use, so the default makes the panel
-    # exactly as wide as the contour, as in the reference figure.
-    panel = divider.append_axes("right", axes_size.Scaled(size), pad=pad)
+    # sharex for a row panel, so the traces stay aligned under the
+    # contour through every later zoom/pan rather than only at draw
+    # time. Setting the limits once from ax.get_xlim() was not enough:
+    # the GUI's own preserve-the-view redraw restores the contour's
+    # limits *after* this function has already run, so a zoomed contour
+    # got a full-range panel beside it. A column panel's x axis is the
+    # contour's *y*, which matplotlib cannot share across orientations,
+    # so that case still takes a one-time copy below.
+    panel = divider.append_axes(
+        "right", axes_size.Scaled(size), pad=pad,
+        **({"sharex": ax} if axis_kind == "f1" else {}),
+    )
     fixed_axis = spectrum.axes[0] if axis_kind == "f1" else spectrum.axes[1]
     fixed_positions = fixed_axis.ppm if fixed_axis.ppm is not None else fixed_axis.index
 
+    # Evenly spread: one slot per trace across a normalised 0..1 panel,
+    # with a single shared amplitude scale so relative intensities are
+    # preserved.
+    n = len(traces)
+    slot = 1.0 / n
     heights = [float(np.max(t.data) - np.min(t.data)) or 1.0 for _, t in traces]
-    step = offset_fraction * max(heights)
+    scale = (slot * offset_fraction) / max(heights)
 
     # Stack so the panel's vertical order matches the contour's: the
     # slice whose dashed line sits highest gets the highest trace.
-    # Without this the connectors cross each other, which reads as an
-    # error even though every line is joined to the right trace.
     lo, hi = ax.get_ylim() if axis_kind == "f1" else ax.get_xlim()
     span = (hi - lo) or 1.0
     palette = tuple(colours) if colours else SLICE_COLOURS
     positions = [float(fixed_positions[int(spec["index"]) - 1]) for spec, _ in traces]
-    order = sorted(range(len(traces)), key=lambda i: (positions[i] - lo) / span)
-    baselines = {slot: rank * step for rank, slot in enumerate(order)}
+    order = sorted(range(n), key=lambda i: (positions[i] - lo) / span)
+    baselines = {slot_index: rank * slot for rank, slot_index in enumerate(order)}
 
     for i, (spec, trace) in enumerate(traces):
         colour = spec.get("color") or palette[i % len(palette)]
@@ -308,14 +319,14 @@ def _draw_slice_panel(fig, ax, divider, spectrum, slices, *,
         trace_x = trace_axis.ppm if trace_axis.ppm is not None else trace_axis.index
         baseline = baselines[i]
         y = np.asarray(trace.data, dtype=float)
-        panel.plot(trace_x, y - float(np.min(y)) + baseline, color=colour, linewidth=1.0)
+        panel.plot(trace_x, (y - float(np.min(y))) * scale + baseline,
+                   color=colour, linewidth=1.0)
 
         label = spec.get("label")
         if label:
             # Above the trace's own baseline noise rather than on it --
-            # the left-hand end of a real row is rarely the flat
-            # baseline the reference figure's was.
-            panel.text(0.015, baseline + 0.30 * step, str(label), color=colour,
+            # the left-hand end of a real row is rarely flat.
+            panel.text(0.015, baseline + 0.45 * slot, str(label), color=colour,
                        transform=panel.get_yaxis_transform(which="grid"),
                        fontname=font, fontsize=fontsize - 2, va="bottom", ha="left",
                        clip_on=False)
@@ -323,44 +334,22 @@ def _draw_slice_panel(fig, ax, divider, spectrum, slices, *,
         position = positions[i]
         if axis_kind == "f1":
             ax.axhline(position, color=colour, linestyle=_SLICE_DASHES, linewidth=1.0)
-            anchor = (ax.get_xlim()[1], position)
         else:
             ax.axvline(position, color=colour, linestyle=_SLICE_DASHES, linewidth=1.0)
-            # A column's dashed line is vertical, so it has no "right
-            # end" to carry on from -- anchor the connector at its top
-            # instead, which is the edge the panel sits beyond.
-            anchor = (position, ax.get_ylim()[1])
-
-        if connect:
-            # The panel end is anchored in *axes* coordinates for x
-            # (0.0 == its left edge) and data coordinates for y, via
-            # get_yaxis_transform. Using data coordinates for both, as
-            # this first did, reads panel.get_xlim() before the final
-            # set_xlim below has run, so the endpoint lands on a value
-            # outside the finished axis and the connector shoots across
-            # the whole panel instead of stopping at its edge.
-            connector = ConnectionPatch(
-                xyA=anchor, coordsA=ax.transData,
-                xyB=(0.0, baseline), coordsB=panel.get_yaxis_transform(),
-                color=colour, linestyle=_SLICE_DASHES, linewidth=1.0,
-            )
-            connector.set_clip_on(False)
-            # On the figure, not either Axes: an artist owned by one
-            # Axes is drawn in that Axes' own stacking context and gets
-            # clipped to its box in practice, which is exactly what a
-            # line spanning the gap between two panels must not be.
-            fig.add_artist(connector)
 
     # Match the contour's own limits on the shared dimension, so a peak
-    # in a trace lines up with the same shift in the contour above it.
-    panel.set_xlim(ax.get_xlim() if axis_kind == "f1" else ax.get_ylim())
-    panel.set_ylim(-0.05 * step, (len(traces) - 1) * step + 1.15 * max(heights))
+    # in a trace sits directly under the same shift in the contour.
+    # (Already automatic for a row panel via sharex, above.)
+    if axis_kind != "f1":
+        panel.set_xlim(ax.get_ylim())
+    panel.set_ylim(0.0, 1.0)
+    if axis_label:
+        panel.set_xlabel(axis_label, fontsize=fontsize)
     panel.tick_params(axis="y", which="both", left=False, right=False,
                       labelleft=False, labelright=False)
+    panel.tick_params(axis="x", which="both", labelsize=fontsize)
     for spine in ("top", "right", "left"):
         panel.spines[spine].set_visible(False)
-    if title:
-        panel.set_title(title, fontname=font, fontsize=fontsize)
     return panel
 
 
@@ -375,9 +364,8 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                      colour_spectra=None, equal_tickspacing=False, tick_number=None,
                      tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
                      show_nQ_line=False, nQ=1, nQ_colors=None,
-                     slices=None, slice_panel_size=1.0, slice_panel_pad=0.45,
-                     slice_panel_title='Extracted rows', slice_offset_fraction=0.55,
-                     slice_colors=None, slice_connect=True,
+                     slices=None, slice_panel_size=1.0, slice_panel_pad=0.95,
+                     slice_offset_fraction=0.85, slice_colors=None,
                      ax=None, fig=None, save_fig=False, fig_name='nmr_2d_spectrum',
                      save_format='png'):
     """Plot a 2D NMR spectrum as a contour plot with F1/F2 projections.
@@ -644,10 +632,15 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     # comment above for why its reference sizes matter here).
     if slices:
         proj_axes["slices"] = _draw_slice_panel(
-            fig, ax, divider, spectrum, slices,
-            size=slice_panel_size, pad=slice_panel_pad, title=slice_panel_title,
+            ax, divider, spectrum, slices,
+            size=slice_panel_size, pad=slice_panel_pad,
             offset_fraction=slice_offset_fraction, colours=slice_colors,
-            font=font, fontsize=fontsize, connect=slice_connect,
+            font=font, fontsize=fontsize,
+            # The trace runs along the *other* dimension from the one
+            # its slice fixes, so a row's panel carries the contour's
+            # own x label and a column's its y label. User: "the axis
+            # needs a matching axis label".
+            axis_label=(labeltextx if slices[0].get("axis", "f1") == "f1" else labeltexty),
         )
 
     if standalone:

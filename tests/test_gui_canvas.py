@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import types
+
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
@@ -1718,3 +1720,77 @@ def test_canvas_extract_slice_can_re_slice_while_showing_a_slice(qapp):
     canvas.extract_slice("f1", 4)
     assert canvas._extracted_index == 4
     assert canvas._extracted_from_spectrum is source     # same 2D, not lost
+
+
+def test_canvas_adding_a_slice_preserves_the_view(qapp):
+    # "The scale/view shouldn't reset when a slice is extracted" --
+    # adding one is an annotation, not a change of subject.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.ax.set_xlim(6.0, 2.0)
+    canvas.ax.set_ylim(40.0, 10.0)
+    before = (canvas.ax.get_xlim(), canvas.ax.get_ylim())
+
+    canvas._add_contour_slice("f1", 3, "A")
+    assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) == before
+
+    canvas._clear_contour_slices()
+    assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) == before
+
+
+def test_canvas_crosshair_spans_the_contour_and_both_projections(qapp):
+    # "When the input isn't panning or zooming, the cursor should be a
+    # cross with lines covering the entire contour space AND the
+    # projections." Two cursors, not one: a single MultiCursor over all
+    # three axes would also draw a horizontal line across the top strip
+    # and a vertical one down the left strip, in those panels' own
+    # unrelated intensity coordinates.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._sync_crosshair()
+
+    assert len(canvas._crosshairs) == 2
+    vertical, horizontal = canvas._crosshairs
+    assert vertical.vertOn and not vertical.horizOn
+    assert horizontal.horizOn and not horizontal.vertOn
+    assert set(vertical.axes) == {canvas.ax, canvas._proj_axes["f2"]}
+    assert set(horizontal.axes) == {canvas.ax, canvas._proj_axes["f1"]}
+
+
+def test_canvas_crosshair_stands_down_during_pan_and_zoom(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._sync_crosshair()
+    cursor = canvas._crosshairs[0]
+
+    event = types.SimpleNamespace(inaxes=canvas.ax, x=10, y=10,
+                                  xdata=1.0, ydata=1.0, canvas=canvas.canvas)
+    canvas.toolbar.mode = ""
+    assert not cursor.ignore(event)
+    for mode in ("pan/zoom", "zoom rect"):
+        canvas.toolbar.mode = mode
+        assert cursor.ignore(event), mode
+    canvas.toolbar.mode = ""
+
+
+def test_canvas_crosshair_is_rebuilt_when_the_figure_changes(qapp):
+    # This canvas clears and rebuilds its figure from a dozen methods; a
+    # cursor still holding removed Axes would draw into them. The sync
+    # is driven from motion rather than from every redraw path, so it
+    # has to notice for itself.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._sync_crosshair()
+    first = canvas._crosshairs[0]
+    stale_axes = canvas._crosshair_axes
+
+    canvas.show_spectrum(_make_2d(n_f1=8))          # new figure, new Axes
+    canvas._sync_crosshair()
+    assert canvas._crosshairs[0] is not first
+    assert canvas._crosshair_axes != stale_axes
+    assert all(a in canvas.figure.axes for a in canvas._crosshair_axes)
+
+    # ...and torn down entirely once there is no contour to hover over.
+    canvas.show_spectrum(_make_1d())
+    canvas._sync_crosshair()
+    assert canvas._crosshairs == []

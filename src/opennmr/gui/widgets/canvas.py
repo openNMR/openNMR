@@ -15,6 +15,7 @@ import os
 import numpy as np
 from matplotlib import colormaps
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.widgets import MultiCursor
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -27,6 +28,29 @@ from ...core.registry import find_gamma, NUC_label
 from ...core.spectrum import NMRSpectrum
 from ... import plotting
 from ...processing import slicing as processing_slicing
+
+
+class _NavigationAwareMultiCursor(MultiCursor):
+    """A :class:`~matplotlib.widgets.MultiCursor` that stands down
+    while the toolbar is in pan or zoom mode.
+
+    Explicit user request: "when the input isn't panning or zooming,
+    the cursor should be a cross with lines covering the entire contour
+    space AND the projections". Pan and zoom have their own cursors and
+    their own drag semantics, so a crosshair on top of them is noise.
+
+    ``MultiCursor`` rather than a hand-rolled pair of lines because it
+    blits: a plain redraw per mouse-move would repaint the whole
+    contour, measured at 295 ms for a real HSQC and 1.34 s for the
+    EXSY, which is nowhere near interactive.
+    """
+
+    def __init__(self, canvas, axes, *, toolbar, **kwargs):
+        self._toolbar = toolbar
+        super().__init__(canvas, axes, **kwargs)
+
+    def ignore(self, event):
+        return super().ignore(event) or bool(getattr(self._toolbar, "mode", ""))
 
 
 class _Toolbar(NavigationToolbar2QT):
@@ -330,6 +354,11 @@ class MplCanvas(QWidget):
         # zoom over a projection adjust its own intensity scale
         # independently of the main contour (see _on_scroll).
         self._proj_axes: dict = {"f1": None, "f2": None}
+        # Crosshair cursors (one vertical across the contour + its
+        # top strip, one horizontal across the contour + its left
+        # strip) -- see _sync_crosshair.
+        self._crosshairs: list = []
+        self._crosshair_axes: tuple = ()
         # Set only for a plain 1D spectrum/slice view -- lets the
         # right-click menu offer ppm/Hz/kHz switching by re-using the
         # spectrum's own stored axis arrays, no recomputation needed.
@@ -719,14 +748,18 @@ class MplCanvas(QWidget):
     def _add_contour_slice(self, axis: str, index: int, label: str) -> None:
         self._contour_slices.append({"axis": axis, "index": int(index), "label": label})
         self.contourSlicesChanged.emit(list(self._contour_slices))
+        # preserve_view: adding a slice is an annotation, not a change
+        # of subject -- explicit user request, "the scale/view shouldn't
+        # reset when a slice is extracted". show_spectrum would rebuild
+        # from scratch and drop whatever zoom was set.
         if self._contour_spectrum is not None:
-            self.show_spectrum(self._contour_spectrum)
+            self._redraw_contour(preserve_view=True)
 
     def _clear_contour_slices(self) -> None:
         self._contour_slices = []
         self.contourSlicesChanged.emit([])
         if self._contour_spectrum is not None:
-            self.show_spectrum(self._contour_spectrum)
+            self._redraw_contour(preserve_view=True)
 
     def set_nq_line(self, enabled: bool, values: list[int] | None = None) -> None:
         """Turn the diagonal-line overlay on/off, and/or change which
@@ -796,7 +829,54 @@ class MplCanvas(QWidget):
             return
         self._pan_start = (event.x, event.y, event.inaxes.get_xlim(), event.inaxes.get_ylim(), event.inaxes)
 
+    def _sync_crosshair(self) -> None:
+        """Keep the crosshair matched to whatever is currently drawn.
+
+        Two cursors, not one: a vertical line spanning the contour and
+        the F2 (top) projection, and a horizontal line spanning the
+        contour and the F1 (left) projection. A single ``MultiCursor``
+        over all three would also draw a horizontal line across the top
+        strip and a vertical one down the left strip, in those panels'
+        own unrelated intensity coordinates.
+
+        Rebuilt lazily from :meth:`_on_motion` rather than from every
+        redraw path: this canvas clears and rebuilds its figure from a
+        dozen different methods (``show_compare``, ``show_fit``,
+        ``extract_slice``, ...), and a cursor still holding removed
+        Axes would draw into them. Checking that the Axes it was built
+        for are still the ones on the figure is one hook instead of
+        twelve, and self-heals rather than depending on every future
+        rebuild path remembering to call a teardown."""
+        wanted = tuple(
+            a for a in (self.ax, self._proj_axes.get("f2"), self._proj_axes.get("f1"))
+            if a is not None
+        )
+        live = all(a in self.figure.axes for a in self._crosshair_axes)
+        if self._crosshairs and (not live or self._crosshair_axes != wanted
+                                 or self._contour_spectrum is None):
+            for cursor in self._crosshairs:
+                try:
+                    cursor.disconnect_events()
+                except Exception:  # noqa: BLE001 -- teardown must never raise mid-drag
+                    pass
+            self._crosshairs = []
+            self._crosshair_axes = ()
+        if self._contour_spectrum is None or self._crosshairs or self.ax is None:
+            return
+
+        vertical = [a for a in (self.ax, self._proj_axes.get("f2")) if a is not None]
+        horizontal = [a for a in (self.ax, self._proj_axes.get("f1")) if a is not None]
+        style = {"color": "0.35", "linewidth": 0.8, "linestyle": "--"}
+        self._crosshairs = [
+            _NavigationAwareMultiCursor(self.canvas, vertical, toolbar=self.toolbar,
+                                        horizOn=False, vertOn=True, useblit=True, **style),
+            _NavigationAwareMultiCursor(self.canvas, horizontal, toolbar=self.toolbar,
+                                        horizOn=True, vertOn=False, useblit=True, **style),
+        ]
+        self._crosshair_axes = wanted
+
     def _on_motion(self, event) -> None:
+        self._sync_crosshair()
         if self._region_select_start is not None and event.x is not None and self._region_select_ax is not None:
             # Pixel coordinates, not event.xdata directly -- like the
             # pan drag below, this needs to keep tracking smoothly even
