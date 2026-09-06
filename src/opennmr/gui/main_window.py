@@ -622,7 +622,7 @@ class MainWindow(QMainWindow):
         kept, but the user is told why phasing will be unavailable
         rather than left to discover a greyed-out control.
         """
-        trace, label = payload
+        trace, label, parent, axis, slice_index = payload
         if trace is None:
             return
         if trace.data_imag is None:
@@ -633,9 +633,134 @@ class MainWindow(QMainWindow):
                 f"loaded without an imaginary part (a magnitude-mode or processed-only load).",
             )
         index = self.session.add_derived(trace, label)
+        kept = self.session.spectra[index]
+        # Provenance, so the slice is a *working copy* of part of the 2D
+        # rather than a dead end: "Apply Phase to Source 2D" uses these
+        # to push a phase dialled in here back into the parent. Held as
+        # a live object reference (not a session index, which shifts
+        # when spectra are removed or reordered) and blocklisted from
+        # the sidecar, since neither a spectrum object nor a
+        # within-session relationship is meaningful once reloaded.
+        kept.metadata.raw["slice_parent"] = parent
+        kept.metadata.raw["slice_axis"] = axis
+        kept.metadata.raw["slice_index"] = slice_index
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
-        self.statusBar().showMessage(f"Kept {label} as its own spectrum.", 5000)
+        self.statusBar().showMessage(
+            f"Kept {label}. Phase it, then use \u201cApply Phase to Source 2D\u201d "
+            f"to push that phase back into the 2D.", 8000,
+        )
+
+    def _slice_source_of(self, spectrum):
+        """``(parent, dim)`` for an extracted slice that still has a
+        live link back to its 2D, else ``(None, None)``.
+
+        ``dim`` is the parent dimension the slice's own phase belongs
+        to, which is the *opposite* of the axis that was held fixed:
+        extracting with ``axis="f1"`` fixes F1 and traces **along F2**,
+        so phasing that trace is an F2 phase. Getting this backwards
+        would silently phase the wrong dimension, so it is derived in
+        one place rather than at each call site.
+        """
+        if spectrum is None:
+            return None, None
+        parent = spectrum.metadata.raw.get("slice_parent")
+        axis = spectrum.metadata.raw.get("slice_axis")
+        if parent is None or axis not in ("f1", "f2"):
+            return None, None
+        # Identity, not `in`/`.index()`: those compare with `==`, and
+        # NMRSpectrum is a dataclass holding numpy arrays, so equality
+        # returns an array and raises "truth value of an array with
+        # more than one element is ambiguous". Caught by the test for
+        # the removed-parent case.
+        if not any(candidate is parent for candidate in self.session.spectra):
+            # The 2D was removed from the session since; nothing to
+            # apply to, and holding a reference to it would be worse
+            # than saying so.
+            return None, None
+        return parent, ("f2" if axis == "f1" else "f1")
+
+    def _on_apply_slice_phase_to_source(self) -> None:
+        """Push the phase dialled in on an extracted slice back into
+        the 2D it came from.
+
+        Real user request: "I don't think the derived slice phasing is
+        feeding back into the contour, it should be more like a
+        temporary file and have some way to go back into the contour
+        data." Without this the slice was a dead end -- you could phase
+        it, but the result went nowhere.
+
+        Deliberately adds into the parent's own *user* phase keys and
+        then rebuilds it through :meth:`_recompute_multi_row_data`,
+        rather than mutating the parent's data directly. That reuses
+        the one pipeline everything else goes through, so the result is
+        identical to having dialled the same phase on the 2D itself --
+        and it survives the next rebuild, which a direct data mutation
+        would not.
+
+        Only the phase *added since extraction* is transferred: the
+        slice inherited the parent's recorded phase when it was cut, so
+        transferring that too would apply it twice.
+        """
+        index = self._selected_index()
+        if index is None:
+            return
+        slice_spectrum = self.session.spectra[index]
+        parent, dim = self._slice_source_of(slice_spectrum)
+        if parent is None:
+            QMessageBox.information(
+                self, "No source 2D",
+                "This spectrum isn't an extracted slice, or the 2D it came from is no "
+                "longer loaded.",
+            )
+            return
+
+        self._commit_pending_phase_to_metadata()
+        raw = slice_spectrum.metadata.raw
+        phase0 = float(raw.get("phase0", 0.0) or 0.0)
+        phase1 = float(raw.get("phase1", 0.0) or 0.0)
+        if not phase0 and not phase1:
+            QMessageBox.information(
+                self, "No phase to apply",
+                "No phase has been dialled in on this slice yet, so there is nothing to "
+                "apply to the 2D.",
+            )
+            return
+
+        key0, key1 = io_bruker.USER_PHASE_KEYS[dim]
+        parent_raw = parent.metadata.raw
+        parent_raw[key0] = float(parent_raw.get(key0, 0.0) or 0.0) + phase0
+        parent_raw[key1] = float(parent_raw.get(key1, 0.0) or 0.0) + phase1
+        # Cleared on the slice so a second click can't apply the same
+        # phase twice -- the slice's own displayed data keeps it (it is
+        # already baked in), which is what makes the two agree.
+        raw["phase0"] = 0.0
+        raw["phase1"] = 0.0
+        # The live spin boxes have to be zeroed too, and *before*
+        # selecting the parent: _capture_phase_reference commits any
+        # pending phase into the outgoing target on the way out, which
+        # would write the same value straight back onto the slice and
+        # undo the clearing above. Found by testing the round trip
+        # rather than by reading the code.
+        for spin, handle in ((self.phase0_spin, self.phase0_handle),
+                             (self.phase1_spin, self.phase1_handle)):
+            spin.blockSignals(True)
+            spin.setValue(0.0)
+            spin.blockSignals(False)
+            handle.setValue(0.0, emit=False)
+
+        # Identity search, for the same reason as in
+        # _slice_source_of -- list.index() compares with `==`.
+        parent_index = next(
+            i for i, candidate in enumerate(self.session.spectra) if candidate is parent
+        )
+        self._select_single_row(parent_index)
+        if not self._recompute_from_raw_if_possible(parent):
+            self._draw_selected_spectrum(parent, row=parent_index)
+        self.statusBar().showMessage(
+            f"Applied phase0 {phase0:+.2f}\u00b0, phase1 {phase1:+.2f}\u00b0 to the "
+            f"2D's {dim.upper()} dimension.", 8000,
+        )
 
     def _set_navigation_mode(self, mode: str) -> None:
         """Put **every** canvas into ``"pan"`` or ``"zoom"``.
@@ -4599,6 +4724,21 @@ class MainWindow(QMainWindow):
         reset_button.clicked.connect(self._on_reset_phase_clicked)
         form.addRow(reset_button)
 
+        # Only meaningful for an extracted slice, so hidden otherwise
+        # (see _refresh_selection_display). A slice is a working copy of
+        # one row/column of a 2D: phase it on a single trace, where the
+        # lineshape is actually readable, then push that phase into the
+        # whole dataset.
+        self.apply_slice_phase_button = QPushButton("Apply Phase to Source 2D")
+        self.apply_slice_phase_button.setToolTip(
+            "Add the phase dialled in on this slice to the 2D it was extracted "
+            "from, along the matching dimension, and switch back to it. Phasing "
+            "a single trace is far easier to judge than a contour."
+        )
+        self.apply_slice_phase_button.clicked.connect(self._on_apply_slice_phase_to_source)
+        self.apply_slice_phase_button.setVisible(False)
+        form.addRow(self.apply_slice_phase_button)
+
         self.pivot_spin = RelativeDoubleSpinBox()
         self.pivot_spin.setRange(-1.0e5, 1.0e5)
         self.pivot_spin.setDecimals(3)
@@ -8094,6 +8234,11 @@ class MainWindow(QMainWindow):
         # parameter, and the only vendor whose files record the mode
         # themselves (PH_mod). Shown for 1D as well as 2D: a
         # hard-to-phase 1D is exactly what the manual override is for.
+        # Only an extracted slice with a still-loaded parent can push
+        # its phase back, so the button is hidden otherwise rather than
+        # shown-but-failing.
+        self.apply_slice_phase_button.setVisible(self._slice_source_of(spectrum)[0] is not None)
+
         self.magnitude_button.setVisible(spectrum.metadata.vendor == "bruker")
         self.magnitude_button.blockSignals(True)
         self.magnitude_button.setChecked(bool(spectrum.metadata.raw.get("magnitude_mode")))

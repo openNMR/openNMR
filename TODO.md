@@ -2,6 +2,29 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Extracted slices now round-trip: phase on a slice, apply to the 2D (2026-09-06)
+
+User: "I don't think the derived slice phasing is feeding back into the contour, it should be more like a temporary file and have some way to go back into the contour data."
+
+Correct -- a kept slice was an independent copy, so phasing it went nowhere. It is now a **working copy with a live link home**.
+
+**Provenance** is recorded when a slice is kept: the parent spectrum (a live object reference, *not* a session index, which shifts when spectra are removed or reordered), the axis, and the index. All three are blocklisted from the sidecar -- a spectrum object is not serialisable, and a within-session relationship means nothing after a reload.
+
+**"Apply Phase to Source 2D"** appears in the Processing tab only for a slice whose parent is still loaded. It adds the phase dialled in on the slice into the parent's own *user* phase keys and rebuilds it through `_recompute_multi_row_data`, then switches back to the 2D. Going through the existing pipeline rather than mutating the parent's data directly is what makes the result **identical to having dialled the same phase on the 2D itself** -- verified to `< 1e-9` relative difference -- and what makes it survive the next rebuild.
+
+**The dimension mapping is the subtle part** and is derived in one place: extracting with `axis="f1"` *fixes* F1 and traces **along F2**, so phasing that trace is an **F2** phase. Backwards would silently phase the wrong dimension of the 2D.
+
+Only the phase added *since extraction* is transferred -- the slice inherited the parent's recorded phase when it was cut, so transferring that as well would apply it twice. The slice's own phase keys are cleared afterwards, so a second click cannot double-apply (it says "No phase to apply" instead).
+
+### Two real bugs found by testing the round trip
+
+- **Selecting the parent re-applied the phase to the slice.** `_capture_phase_reference` commits any pending phase into the *outgoing* target on the way out, so switching to the 2D wrote the still-live spin value straight back onto the slice, undoing the clearing. Fixed by zeroing the spin boxes *before* selecting. Found by running the round trip, not by reading it.
+- **`parent not in self.session.spectra` raised.** `in` and `list.index()` compare with `==`, and `NMRSpectrum` is a dataclass holding numpy arrays, so equality returns an array: *"truth value of an array with more than one element is ambiguous"*. Both lookups now compare by identity. Caught by the test for the removed-parent case.
+
+Also corrected in passing: an earlier equivalence check appeared to fail at 1.1 relative difference, which was my own harness not settling the debounced rebuild before comparing -- the real figure is 0.0.
+
+968 tests passing (963 -> 968).
+
 ## Extracted-slice actions made visible (2026-09-06)
 
 User: "There is no way to actually phase the extracted slice as it stands. maybe the extracted view should have new options to do something with the slice."

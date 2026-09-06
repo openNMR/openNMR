@@ -60,6 +60,11 @@ _PROCESSING_RAW_BLOCKLIST = frozenset({
     # (it's a real user choice worth restoring); only the provenance
     # note is dropped.
     "magnitude_mode_source",
+    # An extracted slice's link back to the 2D it came from. A live
+    # spectrum object and a within-session relationship -- neither
+    # survives a reload, and the object isn't JSON-serialisable
+    # anyway. See MainWindow._on_slice_keep_requested.
+    "slice_parent", "slice_axis", "slice_index",
 })
 
 

@@ -302,6 +302,8 @@ class MplCanvas(QWidget):
         # _extracted_from_spectrum whenever the view changes.
         self._extracted_trace: NMRSpectrum | None = None
         self._extracted_label: str = ""
+        self._extracted_axis: str = ""
+        self._extracted_index: int = 0
         self._contour_factor: float | None = None
         # Number of contour levels, and how they're spaced between the
         # noise floor (_contour_factor) and the data's own peak -- see
@@ -1200,7 +1202,10 @@ class MplCanvas(QWidget):
         window adds it to the session). Shared by the toolbar button
         and the context-menu action so the two can't diverge."""
         if self._extracted_trace is not None:
-            self.sliceKeepRequested.emit((self._extracted_trace, self._extracted_label))
+            self.sliceKeepRequested.emit((
+                self._extracted_trace, self._extracted_label,
+                self._extracted_from_spectrum, self._extracted_axis, self._extracted_index,
+            ))
 
     def _show_contour_again(self) -> None:
         """Back to the 2D this slice came from. Reads the source out
@@ -1235,6 +1240,10 @@ class MplCanvas(QWidget):
         # it from arguments the context menu would have to carry.
         self._extracted_trace = trace
         self._extracted_label = f"{axis.upper()} slice {index}"
+        # Provenance, so a kept slice can feed its phase back into the
+        # 2D it came from rather than being a dead end.
+        self._extracted_axis = axis
+        self._extracted_index = index
         self._refresh_slice_bar()
 
     @property
@@ -1424,6 +1433,8 @@ class MplCanvas(QWidget):
         self._extracted_from_spectrum = None
         self._extracted_trace = None
         self._extracted_label = ""
+        self._extracted_axis = ""
+        self._extracted_index = 0
         self._refresh_slice_bar()
 
         if spectrum.ndim == 1:

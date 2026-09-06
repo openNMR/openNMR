@@ -7974,9 +7974,7 @@ def test_main_window_keeping_an_extracted_slice_makes_it_phasable(qapp, tmp_path
 
     window.canvas.extract_slice("f1", 1)
     assert window.canvas._extracted_trace is not None
-    window.canvas.sliceKeepRequested.emit(
-        (window.canvas._extracted_trace, window.canvas._extracted_label)
-    )
+    window.canvas._keep_slice_button.click()
 
     assert len(window.session) == before + 1
     kept = window.session.spectra[-1]
@@ -7991,3 +7989,108 @@ def test_main_window_keeping_an_extracted_slice_makes_it_phasable(qapp, tmp_path
     before_data = np.array(window.session.spectra[-1].data)
     window.phase0_spin.setValue(90.0)
     assert not np.allclose(before_data, window.session.spectra[-1].data)
+
+
+def _keep_a_slice(window, axis="f1", index=1):
+    """Extract a slice and keep it, returning the kept spectrum."""
+    window.canvas.extract_slice(axis, index)
+    window.canvas._keep_slice_button.click()
+    return window.session.spectra[-1]
+
+
+def test_main_window_kept_slice_records_its_source(qapp, tmp_path, monkeypatch):
+    # The slice is a working copy of part of the 2D, not a dead end --
+    # it keeps a live link back so its phase can be pushed home.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    parent = window.session.spectra[0]
+
+    kept = _keep_a_slice(window)
+
+    assert kept.metadata.raw["slice_parent"] is parent
+    assert kept.metadata.raw["slice_axis"] == "f1"
+    # Fixing F1 traces *along F2*, so the slice's own phase is an F2
+    # phase. Getting this backwards would silently phase the wrong
+    # dimension of the 2D.
+    assert window._slice_source_of(kept) == (parent, "f2")
+
+
+def test_main_window_slice_phase_applies_to_the_source_2d(qapp, tmp_path, monkeypatch):
+    # Real user request: "I don't think the derived slice phasing is
+    # feeding back into the contour... have some way to go back into
+    # the contour data."
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    parent = window.session.spectra[0]
+    parent.metadata.raw["baseline_correct"] = False
+    before = np.array(parent.data)
+
+    kept = _keep_a_slice(window)
+    window.phase0_spin.setValue(60.0)
+    window.apply_slice_phase_button.click()
+
+    # The 2D picked the phase up, and the view returned to it.
+    assert parent.metadata.raw["phase0"] == pytest.approx(60.0)
+    assert window._selected_index() == 0
+    assert not np.allclose(before, window.session.spectra[0].data)
+    # Cleared on the slice, so a second click can't double-apply.
+    assert kept.metadata.raw["phase0"] == pytest.approx(0.0)
+    assert window.phase0_spin.value() == pytest.approx(0.0)
+
+
+def test_main_window_slice_phase_matches_phasing_the_2d_directly(qapp, tmp_path, monkeypatch):
+    # The whole point: routing a phase through a slice must land in
+    # exactly the same place as dialling it on the 2D itself, because
+    # both go through _recompute_multi_row_data rather than one of them
+    # mutating data on its own.
+    _isolate_sidecars(monkeypatch, tmp_path)
+
+    def _settle(window):
+        if window._live_reprocess_timer.isActive():
+            window._live_reprocess_timer.stop()
+            window._run_debounced_multi_row_reprocess()
+
+    via_slice = MainWindow()
+    via_slice._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, name="viaslice"), vendor="bruker")
+    _keep_a_slice(via_slice)
+    via_slice.phase0_spin.setValue(60.0)
+    via_slice.apply_slice_phase_button.click()
+    _settle(via_slice)
+
+    direct = MainWindow()
+    direct._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, name="direct"), vendor="bruker")
+    direct.phase0_spin.setValue(60.0)
+    _settle(direct)
+
+    a = np.asarray(via_slice.session.spectra[0].data)
+    b = np.asarray(direct.session.spectra[0].data)
+    assert np.max(np.abs(a - b)) / max(np.max(np.abs(b)), 1e-30) < 1e-9
+
+
+def test_main_window_apply_slice_phase_button_only_shown_for_a_slice(qapp, tmp_path, monkeypatch):
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    assert window.apply_slice_phase_button.isHidden() is True
+
+    _keep_a_slice(window)
+    assert window.apply_slice_phase_button.isHidden() is False
+
+    # Back on the 2D itself, it is meaningless again.
+    window._select_single_row(0)
+    assert window.apply_slice_phase_button.isHidden() is True
+
+
+def test_main_window_slice_source_is_dropped_if_the_2d_is_removed(qapp, tmp_path, monkeypatch):
+    # Holding a reference to a spectrum no longer in the session would
+    # let the button apply a phase to something the user can't see.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    kept = _keep_a_slice(window)
+    assert window._slice_source_of(kept)[0] is not None
+
+    window.session.remove(0)
+    assert window._slice_source_of(kept) == (None, None)

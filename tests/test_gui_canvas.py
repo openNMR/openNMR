@@ -1666,8 +1666,12 @@ def test_canvas_keep_slice_button_emits_the_displayed_trace(qapp):
     canvas._keep_slice_button.click()
 
     assert len(received) == 1
-    trace, label = received[0]
+    # The payload carries provenance too, so a kept slice can push its
+    # phase back into the 2D it came from.
+    trace, label, parent, axis, index = received[0]
     assert label == "F1 slice 3"
+    assert parent is source
+    assert (axis, index) == ("f1", 3)
     assert trace.ndim == 1
     # The trace must carry its imaginary part, or the whole point --
     # phasing it -- does not work.
