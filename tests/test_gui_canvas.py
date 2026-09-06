@@ -1699,3 +1699,22 @@ def test_canvas_keep_slice_is_a_noop_without_a_slice(qapp):
     canvas.sliceKeepRequested.connect(received.append)
     canvas._emit_slice_keep_requested()
     assert received == []
+
+
+def test_canvas_extract_slice_can_re_slice_while_showing_a_slice(qapp):
+    # show_spectrum(trace) clears _contour_spectrum (the trace is 1D),
+    # so extract_slice's source was None on any second call and
+    # get_trace raised "expects a 2D NMRSpectrum". That made the
+    # right-click "Extract Slice..." a one-shot, and silently pinned
+    # peak-picking to whichever slice it started on.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=6))
+
+    canvas.extract_slice("f1", 1)
+    assert canvas._extracted_index == 1
+    source = canvas._extracted_from_spectrum
+    assert source is not None
+
+    canvas.extract_slice("f1", 4)
+    assert canvas._extracted_index == 4
+    assert canvas._extracted_from_spectrum is source     # same 2D, not lost

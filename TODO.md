@@ -2,6 +2,50 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Extracted-slice panel, indirect SR, per-spectrum nQ, pseudo-2D peak picking (2026-09-06)
+
+Five requests in one round.
+
+### 1. SR for the indirect dimension
+
+The `Reference (SR)` box worked only on `axes[-1]`. The two dimensions need **independent** values against independent base frequencies (`sfo1` / `sfo1_indirect`) -- on a heteronuclear 2D they are different nuclei, so one Hz offset cannot reference both. Generalised over a dimension key (`_SR_KEYS`, direct keys left unsuffixed so older sidecars still restore), with a second spin box shown only when there is an indirect *frequency* axis to reference -- hidden for 1D and for a pseudo-2D, whose indirect axis is a slice index.
+
+One bug found by running it: `_apply_reference_shift_hz` ends by calling `_restore_sr_control`, which rewrites **both** spin boxes from metadata -- so reading the second box after applying the first handed back the stored value (0) instead of what the user had just typed, and the indirect shift silently did nothing. Both values are now read up front. The post-reprocess reapply path also restored only the direct dimension.
+
+### 2. The nQ line is now the spectrum's, not the app's
+
+It genuinely belongs to the data: a diagonal means something on a homonuclear correlation and nothing on a heteronuclear one, and `n` is a property of the experiment. As one global switch it followed the user onto every other spectrum they selected. Now stored in `metadata.raw`, restored on selection, and persisted with the rest of the processing state. The restore path blocks signals so looking at a spectrum doesn't stamp a default onto it.
+
+### 3. Extracted slices beside the contour
+
+Built to a user-supplied reference figure: a dash-dot line across the contour at each slice's position, the extracted traces stacked in a panel to the right, one colour per slice, and -- the user's clarification -- **each line continues across the gap and joins its own trace's baseline**. Drawn as a `ConnectionPatch` with clipping off, added to the *figure* rather than either Axes, which is the only way to draw a line spanning two panels.
+
+Choices, all the user's: panel on the right; traces stacked with offsets rather than overlaid; placed from the existing right-click "Extract Slice…", which gained a "Show as:" mode (`Show beside the contour` / `Replace the view`) and a label field.
+
+Three things measured rather than assumed:
+
+- **Panel width is relative (`axes_size.Scaled`), not inches.** The same function draws a standalone 7-inch figure and the GUI's embedded canvas; a fixed 3.5-inch panel left the embedded contour a few pixels wide.
+- **Stacking order follows the contour.** The slice whose line sits highest gets the highest trace -- otherwise the connectors cross, which reads as an error even though every line joins the right trace.
+- **The panel-side connector anchor is in axes coordinates, not data.** Data coordinates read `panel.get_xlim()` before the final `set_xlim`, so the endpoint landed outside the finished axis and the connector shot across the whole panel instead of stopping at its edge.
+
+Slices are stored against the spectrum (a slice at F1 index 412 means nothing on another dataset), with `set_contour_slices` deliberately not emitting so restoring doesn't write straight back out.
+
+### 4. Peak picking on a pseudo-2D
+
+It really was impossible. Manual picking listens on the Spectrum canvas, which shows the contour/stack for a pseudo-2D, so a click there yields a 2D position with no single trace to attach a peak to; Auto-Pick was hard-wired to `index=1`; and a conventional 2D was refused outright.
+
+Now there is a "Pick on slice" spinner (first by default, `setWrapping(True)` per the user: "pressing down on the lowest should cycle back to the highest"), turning pick mode on shows that slice on its own so there is something to click, and changing the slice while picking follows along. Both manual and Auto-Pick go through one `_peak_pick_target`.
+
+**A latent bug fell out**: `extract_slice` read `self._contour_spectrum`, which `show_spectrum(trace)` clears because the trace is 1D -- so the source was `None` on any *second* call and `get_trace` raised. The right-click "Extract Slice…" was a one-shot, and picking silently stuck to whichever slice it started on. It now falls back to `_extracted_from_spectrum`. Found only because a broad `except Exception` I had just written was hiding it; narrowed to `IndexError`.
+
+**A test that could not fail**: the first version of the Auto-Pick test passed with the hard-wired `index=1` still in place, because the shared 2D fixture tiles one identical row -- slice 1 and slice 3 are the same array. Rebuilt with per-row-distinct data and re-checked against the reverted fix.
+
+### 5. Nothing pre-selected in Compare
+
+`_rebuild_compare_list` always set a current row. This **narrows** the earlier "it is no longer obvious which spectrum is selected" feedback rather than reversing it: that was about the highlight being invisible once a row had been chosen, which still works. What is gone is the choice made on the user's behalf before any click. A current entry is still preserved across a rebuild, so Move Up/Down and check-state toggles don't lose their place.
+
+18 new tests. Each fix verified to fail with itself reverted, independently. 1004 tests passing (986 -> 1004).
+
 ## Phasing a 2D snapped the zoom back to full scale on every pause (2026-09-06)
 
 User: "Something is up with the GUI phase control for the indirect and it's jumping during phasing."

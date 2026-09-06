@@ -1,5 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import to_rgba
+from matplotlib.patches import ConnectionPatch
 import pytest
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
@@ -484,3 +486,86 @@ def test_negative_levels_mirror_the_positive_ones_when_they_are_drawn():
     )
     assert neg_thresvec is not None
     np.testing.assert_allclose(neg_thresvec, [-level for level in thresvec])
+
+
+# --- Extracted-slice panel -------------------------------------------------
+
+def _slice_test_spectrum(n_f1=32, n_f2=64):
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    y = np.linspace(150.0, 0.0, n_f1)
+    x = np.linspace(12.0, -2.0, n_f2)
+    data = np.zeros((n_f1, n_f2))
+    for row, col in ((5, 10), (16, 30), (26, 50)):
+        data[row, col] = 100.0 * (row + 1)
+    return NMRSpectrum(
+        data=data,
+        axes=[NMRAxis(kind="frequency", ppm=y, hz=y * 100.0),
+              NMRAxis(kind="frequency", ppm=x, hz=x * 400.0)],
+        metadata=NMRMetadata(vendor="test", nucleus="1H", nucleus_indirect="13C",
+                             sfo1=400.0, sfo1_indirect=100.0),
+    )
+
+
+def test_plot_2d_contour_slice_panel_draws_lines_traces_and_connectors():
+    # User request: "plot slices from 2D contours with a dashed line
+    # across the contour slice and then projecting out", with the lines
+    # connecting to the traces.
+    spectrum = _slice_test_spectrum()
+    slices = [{"axis": "f1", "index": 6, "label": "A"},
+              {"axis": "f1", "index": 17, "label": "B"},
+              {"axis": "f1", "index": 27, "label": "C"}]
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=slices)
+
+    panel = panels["slices"]
+    assert panel is not None
+    assert len(panel.lines) == 3                       # one trace per slice
+    assert len(ax.lines) == 3                          # one dashed line per slice
+    connectors = [a for a in fig.artists if isinstance(a, ConnectionPatch)]
+    assert len(connectors) == 3
+    # Each line, trace and connector share one colour -- the pairing is
+    # the entire point of the feature.
+    for contour_line, trace, connector in zip(ax.lines, panel.lines, connectors):
+        assert contour_line.get_color() == trace.get_color()
+        assert connector.get_edgecolor()[:3] == to_rgba(trace.get_color())[:3]
+    assert {t.get_text() for t in panel.texts} == {"A", "B", "C"}
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_stacks_in_contour_order():
+    # The trace whose dashed line sits highest on the contour must be
+    # the highest trace, or the connectors cross each other -- which
+    # reads as an error even though every line joins the right trace.
+    spectrum = _slice_test_spectrum()
+    # Deliberately out of order: index 27 is the *highest* on the
+    # contour (its F1 ppm is lowest, and the F1 axis descends downward).
+    slices = [{"axis": "f1", "index": 17}, {"axis": "f1", "index": 6}, {"axis": "f1", "index": 27}]
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=slices)
+
+    ppm = spectrum.axes[0].ppm
+    lo, hi = ax.get_ylim()
+    baselines = [float(np.min(line.get_ydata())) for line in panels["slices"].lines]
+    screen = [(float(ppm[s["index"] - 1]) - lo) / (hi - lo) for s in slices]
+    # Rank by height on the contour and by height in the panel: same order.
+    assert np.argsort(screen).tolist() == np.argsort(baselines).tolist()
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_skips_out_of_range_and_mixed_axes():
+    # A stale index (dataset reprocessed to a different size) must not
+    # take the whole figure down, and mixing rows with columns would put
+    # two unrelated frequency axes on one panel.
+    spectrum = _slice_test_spectrum()
+    slices = [{"axis": "f1", "index": 6},
+              {"axis": "f1", "index": 9999},     # out of range
+              {"axis": "f2", "index": 10}]       # different axis
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=slices)
+    assert len(panels["slices"].lines) == 1
+    plt.close(fig)
+
+
+def test_plot_2d_contour_without_slices_has_no_panel():
+    spectrum = _slice_test_spectrum()
+    fig, ax, panels = twod.plot_2d_contour(spectrum)
+    assert "slices" not in panels
+    assert len(ax.lines) == 0
+    plt.close(fig)

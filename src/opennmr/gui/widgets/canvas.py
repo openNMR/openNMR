@@ -19,7 +19,7 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QHBoxLayout, QInputDialog, QLabel, QMenu, QPushButton, QSpinBox,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSpinBox,
     QVBoxLayout, QWidget,
 )
 
@@ -165,6 +165,12 @@ class MplCanvas(QWidget):
     #: on an extracted slice".
     sliceKeepRequested = Signal(object)
 
+    #: Emitted with the full list of extracted-slice specs whenever
+    #: the user adds or clears one, so MainWindow can store them
+    #: against the spectrum (and persist them) rather than leaving
+    #: them as canvas-local state that a reselection would drop.
+    contourSlicesChanged = Signal(object)
+
     #: Tag applied to every persistent integration-region axvspan (see
     #: :func:`set_regions`) so they can be found and cleared by gid on
     #: the next call, without needing to track a separate reference
@@ -274,6 +280,12 @@ class MplCanvas(QWidget):
         # multiple-quantum correlation (n=2/3/...). Off by default,
         # same as show_nQ_line's own default.
         self._show_nq_line = False
+        # Extracted slices drawn *beside* the contour (dashed line
+        # across it + the trace in a panel to the right), as opposed
+        # to extract_slice's own "replace the view with this trace".
+        # Owned by the spectrum, not the canvas -- MainWindow stores
+        # and restores them via contourSlicesChanged.
+        self._contour_slices: list[dict] = []
         self._nq_values: list[int] = [1]
         self._pick_mode = False
         self._region_select_mode = False
@@ -685,6 +697,37 @@ class MplCanvas(QWidget):
         see :meth:`set_nq_line`."""
         return {"show_nQ_line": self._show_nq_line, "nQ": self._nq_values}
 
+    def _slice_panel_kwargs(self) -> dict:
+        """``slices`` override for
+        :func:`opennmr.plotting.plot_2d_contour`, both call sites --
+        see :meth:`set_contour_slices`."""
+        return {"slices": self._contour_slices or None}
+
+    def set_contour_slices(self, slices: list[dict] | None) -> None:
+        """Replace the set of extracted slices drawn beside the contour
+        -- each a ``{"axis", "index", "label"}`` dict, see
+        :func:`opennmr.plotting.twod._draw_slice_panel`. Redraws right
+        away if a 2D contour is currently shown, same as
+        :meth:`set_nq_line`. Does *not* emit
+        :attr:`contourSlicesChanged`: this is the restore direction
+        (MainWindow pushing a spectrum's stored slices in), and
+        emitting here would write them straight back out again."""
+        self._contour_slices = list(slices or [])
+        if self._contour_spectrum is not None:
+            self.show_spectrum(self._contour_spectrum)
+
+    def _add_contour_slice(self, axis: str, index: int, label: str) -> None:
+        self._contour_slices.append({"axis": axis, "index": int(index), "label": label})
+        self.contourSlicesChanged.emit(list(self._contour_slices))
+        if self._contour_spectrum is not None:
+            self.show_spectrum(self._contour_spectrum)
+
+    def _clear_contour_slices(self) -> None:
+        self._contour_slices = []
+        self.contourSlicesChanged.emit([])
+        if self._contour_spectrum is not None:
+            self.show_spectrum(self._contour_spectrum)
+
     def set_nq_line(self, enabled: bool, values: list[int] | None = None) -> None:
         """Turn the diagonal-line overlay on/off, and/or change which
         ``n`` value(s) it draws (``y = n*x``, e.g. ``[1]`` for the main
@@ -706,6 +749,7 @@ class MplCanvas(QWidget):
             clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
             square_aspect=self._aspect_ratio is None,
             **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
+            **self._slice_panel_kwargs(),
         )
         if preserve_view:
             self.ax.set_xlim(xlim)
@@ -884,9 +928,14 @@ class MplCanvas(QWidget):
 
         contour_levels_action = None
         extract_slice_action = None
+        clear_slices_action = None
         if self._contour_spectrum is not None:
             contour_levels_action = menu.addAction("Set Contour Levels…")
             extract_slice_action = menu.addAction("Extract Slice…")
+            if self._contour_slices:
+                clear_slices_action = menu.addAction(
+                    f"Clear Extracted Slices ({len(self._contour_slices)})"
+                )
 
         show_contour_action = None
         keep_slice_action = None
@@ -937,6 +986,8 @@ class MplCanvas(QWidget):
             self._prompt_contour_levels()
         elif extract_slice_action is not None and chosen is extract_slice_action:
             self._prompt_extract_slice()
+        elif clear_slices_action is not None and chosen is clear_slices_action:
+            self._clear_contour_slices()
         elif keep_slice_action is not None and chosen is keep_slice_action:
             self._emit_slice_keep_requested()
         elif show_contour_action is not None and chosen is show_contour_action:
@@ -1182,6 +1233,30 @@ class MplCanvas(QWidget):
         index_spin.setValue(_default_index("f1"))
         form.addRow("Index:", index_spin)
 
+        # Two genuinely different things to do with a slice, so this is
+        # a mode rather than a second menu entry: "replace" is the
+        # original behaviour (swap the canvas over to the trace, to
+        # phase or fit it); "panel" keeps the contour and draws the
+        # slice beside it. User request: "the option to plot slices from
+        # 2D contours with a dashed line across the contour slice and
+        # then projecting out".
+        mode_combo = QComboBox()
+        mode_combo.addItem("Show beside the contour (keep contour)", "panel")
+        mode_combo.addItem("Replace the view with this slice", "replace")
+        form.addRow("Show as:", mode_combo)
+
+        label_edit = QLineEdit()
+        label_edit.setPlaceholderText("optional, e.g. Impurity")
+        label_edit.setToolTip(
+            "Labels the trace in the panel, in the same colour as its "
+            "dashed line on the contour."
+        )
+        form.addRow("Label:", label_edit)
+
+        def _sync_mode(i: int) -> None:
+            label_edit.setEnabled(mode_combo.itemData(i) == "panel")
+        mode_combo.currentIndexChanged.connect(_sync_mode)
+
         def _sync_range(i: int) -> None:
             axis = axis_combo.itemData(i)
             index_spin.setRange(1, n_f1 if axis == "f1" else n_f2)
@@ -1195,7 +1270,12 @@ class MplCanvas(QWidget):
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self.extract_slice(axis_combo.currentData(), index_spin.value())
+        if mode_combo.currentData() == "panel":
+            self._add_contour_slice(
+                axis_combo.currentData(), index_spin.value(), label_edit.text().strip(),
+            )
+        else:
+            self.extract_slice(axis_combo.currentData(), index_spin.value())
 
     def _emit_slice_keep_requested(self) -> None:
         """Hand the displayed slice to whoever is listening (the main
@@ -1231,7 +1311,18 @@ class MplCanvas(QWidget):
         :func:`opennmr.processing.slicing.get_trace`, and show it in
         place of the contour -- right-click "Show Contour" (see
         ``_on_context_menu``) gets back to the contour it came from."""
+        # Fall back to the spectrum a slice already on screen came
+        # from, so extracting a *second* slice works while looking at
+        # the first. show_spectrum(trace) clears _contour_spectrum (the
+        # trace is 1D), so before this the source was None on any
+        # re-slice and get_trace raised "expects a 2D NMRSpectrum" --
+        # which made the right-click "Extract Slice..." a one-shot, and
+        # silently pinned peak-picking to whichever slice it started on.
         source = self._contour_spectrum
+        if source is None:
+            source = self._extracted_from_spectrum
+        if source is None:
+            raise ValueError("No 2D spectrum to extract a slice from.")
         trace = processing_slicing.get_trace(source, axis=axis, index=index)
         self.show_spectrum(trace)
         self._extracted_from_spectrum = source
@@ -1474,6 +1565,7 @@ class MplCanvas(QWidget):
                 clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
                 square_aspect=self._aspect_ratio is None,
                 **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
+                **self._slice_panel_kwargs(),
             )
         else:
             raise ValueError(f"Cannot display a spectrum with ndim={spectrum.ndim}")

@@ -282,6 +282,7 @@ class MainWindow(QMainWindow):
         self.canvas.peakPicked.connect(self._on_peak_picked)
         self.canvas.regionSelected.connect(self._on_region_selected)
         self.canvas.referenceShiftRequested.connect(self._on_reference_shift_from_plot)
+        self.canvas.contourSlicesChanged.connect(self._on_contour_slices_changed)
         self.canvas.sliceKeepRequested.connect(self._on_slice_keep_requested)
         self.fid_canvas = MplCanvas()
         self.compare_canvas = MplCanvas()
@@ -1529,10 +1530,16 @@ class MainWindow(QMainWindow):
         else:
             self._recompute_multi_row_data(spectrum)
         self.spectrum_list.item(index).setText(self.session.label(index))
-        sr_shift = spectrum.metadata.raw.get("sr_shift_hz")
-        if sr_shift:
-            self._apply_reference_shift_hz(sr_shift)  # also redraws
-        else:
+        # Both dimensions -- a genuine 2D can carry an SR on each, and
+        # reapplying only the direct one after a reprocess would
+        # silently drop the indirect axis's referencing.
+        applied = False
+        for dim in ("f2", "f1"):
+            sr_shift = spectrum.metadata.raw.get(self._SR_KEYS[dim][0])
+            if sr_shift:
+                self._apply_reference_shift_hz(sr_shift, dim)  # also redraws
+                applied = True
+        if not applied:
             self._draw_selected_spectrum(spectrum, row=index)
 
     def _select_single_row(self, row: int) -> None:
@@ -2276,11 +2283,68 @@ class MainWindow(QMainWindow):
             canvas.set_contour_fraction(fraction)
 
     def _on_nq_line_changed(self, *_args) -> None:
+        """The diagonal (nQ) overlay, stored against the spectrum it
+        was set on rather than as one app-wide switch.
+
+        Explicit user request: "plotting options like nQ line should be
+        tied to the loaded spectrum". It genuinely belongs to the data,
+        not the app -- a diagonal means something on a homonuclear
+        correlation and nothing on a heteronuclear one, and n is a
+        property of the experiment (1 for EXSY/NOESY/COSY, higher for a
+        multiple-quantum correlation). As one global setting it followed
+        the user onto every other spectrum they selected, including the
+        ones it was meaningless on.
+
+        Persisted with the rest of the processing state, so it survives
+        a restart (:mod:`opennmr.io.persistence` writes every
+        JSON-serialisable ``metadata.raw`` key it isn't told to skip)."""
         enabled = self.output_nq_line_checkbox.isChecked()
+        n_value = self.output_nq_value_spin.value()
         self.output_nq_value_spin.setEnabled(enabled)
-        n_values = [self.output_nq_value_spin.value()]
         for canvas in self._all_canvases():
-            canvas.set_nq_line(enabled, n_values)
+            canvas.set_nq_line(enabled, [n_value])
+        index = self._selected_index()
+        if index is not None:
+            raw = self.session.spectra[index].metadata.raw
+            raw["nq_line"] = enabled
+            raw["nq_value"] = n_value
+            self._schedule_sidecar_save(index)
+
+    def _on_contour_slices_changed(self, slices) -> None:
+        """Store the canvas's extracted slices against the spectrum
+        they were taken from -- same reasoning as the nQ line (see
+        :meth:`_on_nq_line_changed`): a slice at F1 index 412 means
+        nothing on any other dataset, so it cannot be canvas-local
+        state that survives a reselection."""
+        index = self._selected_index()
+        if index is None:
+            return
+        self.session.spectra[index].metadata.raw["contour_slices"] = list(slices)
+        self._schedule_sidecar_save(index)
+
+    def _restore_contour_slices(self, spectrum) -> None:
+        """Push ``spectrum``'s own stored slices back onto the canvas.
+        Uses :meth:`MplCanvas.set_contour_slices`, which deliberately
+        doesn't emit -- otherwise restoring would immediately write the
+        same list back out as if the user had just added it."""
+        self.canvas.set_contour_slices(spectrum.metadata.raw.get("contour_slices") or [])
+
+    def _restore_nq_line_control(self, spectrum) -> None:
+        """Put the nQ controls (and every canvas) back to whatever
+        ``spectrum`` itself carries -- see :meth:`_on_nq_line_changed`.
+        Signals are blocked so restoring doesn't write the value
+        straight back out again as if the user had just set it."""
+        enabled = bool(spectrum.metadata.raw.get("nq_line", False))
+        n_value = int(spectrum.metadata.raw.get("nq_value", 1))
+        self.output_nq_line_checkbox.blockSignals(True)
+        self.output_nq_line_checkbox.setChecked(enabled)
+        self.output_nq_line_checkbox.blockSignals(False)
+        self.output_nq_value_spin.blockSignals(True)
+        self.output_nq_value_spin.setValue(n_value)
+        self.output_nq_value_spin.blockSignals(False)
+        self.output_nq_value_spin.setEnabled(enabled)
+        for canvas in self._all_canvases():
+            canvas.set_nq_line(enabled, [n_value])
 
     def _load_figure_styles(self) -> dict:
         try:
@@ -2456,20 +2520,22 @@ class MainWindow(QMainWindow):
             item.setCheckState(previous_checked.get(entry, Qt.CheckState.Checked))
             item.setData(Qt.ItemDataRole.UserRole, entry)
             self.compare_list.addItem(item)
-        # Always leave *something* current/highlighted -- explicit user
-        # feedback that it's "no longer obvious which spectrum is
-        # selected" in this list. Nothing ever set an initial current
-        # row before (only Move Up/Down did, and only after the user
-        # had already clicked a row to move it), so a freshly
-        # (re)populated list -- including the automatic pseudo-2D
-        # auto-populate, which needs no click at all -- showed no
-        # current-row highlight whatsoever. Keeps the same entry
-        # current across a rebuild when it's still present (e.g. after
-        # Move Up/Down or a check-state toggle), falling back to the
-        # first row otherwise.
-        if new_order:
-            current_row = new_order.index(previous_current_entry) if previous_current_entry in new_order else 0
-            self.compare_list.setCurrentRow(current_row)
+        # Keep whatever the user had current across a rebuild (so Move
+        # Up/Down and check-state toggles don't lose their place), but
+        # never *pre*-select anything on a fresh populate. Explicit user
+        # request: "in compare, none of the spectra should be
+        # pre-selected like the last one is now."
+        #
+        # This narrows, rather than reverses, the earlier feedback that
+        # it was "no longer obvious which spectrum is selected" here:
+        # that was about the highlight being invisible once a row *had*
+        # been chosen, which still works. What is gone is the automatic
+        # choice made on the user's behalf before they have clicked
+        # anything.
+        if new_order and previous_current_entry in new_order:
+            self.compare_list.setCurrentRow(new_order.index(previous_current_entry))
+        else:
+            self.compare_list.setCurrentRow(-1)
         self.compare_list.blockSignals(False)
         self._update_compare_tab_visibility()
 
@@ -4937,7 +5003,21 @@ class MainWindow(QMainWindow):
         self.sr_shift_spin.setRange(-1.0e6, 1.0e6)
         self.sr_shift_spin.setDecimals(4)
         self.sr_shift_spin.setSuffix(" Hz")
-        form.addRow("SR:", self.sr_shift_spin)
+        form.addRow("SR (direct):", self.sr_shift_spin)
+
+        # The indirect axis needs its own SR, not a share of F2's: it
+        # has its own base frequency (metadata.sfo1_indirect) and, on a
+        # heteronuclear 2D, its own nucleus entirely, so one Hz offset
+        # cannot reference both. Shown only when there is an indirect
+        # frequency axis to reference -- hidden for 1D, and for a
+        # pseudo-2D, whose indirect axis is an index (slice number),
+        # not a frequency.
+        self.sr_shift_indirect_spin = QDoubleSpinBox()
+        self.sr_shift_indirect_spin.setRange(-1.0e6, 1.0e6)
+        self.sr_shift_indirect_spin.setDecimals(4)
+        self.sr_shift_indirect_spin.setSuffix(" Hz")
+        self.sr_indirect_label = QLabel("SR (indirect):")
+        form.addRow(self.sr_indirect_label, self.sr_shift_indirect_spin)
 
         apply_button = QPushButton("Apply Reference Shift")
         apply_button.clicked.connect(self._on_apply_sr_clicked)
@@ -6074,6 +6154,34 @@ class MainWindow(QMainWindow):
         peak_button_row.addWidget(clear_peaks_button)
         peak_layout.addLayout(peak_button_row)
 
+        # Which slice of a multi-row spectrum peaks are picked on.
+        # Real user report: "peak picking on a pseudo 2D is currently
+        # impossible" -- and it was: manual picking listens on the
+        # Spectrum canvas, which shows the contour/stack for a
+        # pseudo-2D, so a click there yields a 2D position with no
+        # single trace to attach a peak to, and Auto-Pick was hard-wired
+        # to slice 1 with no way to choose another.
+        self.peak_slice_row = QWidget()
+        peak_slice_layout = QHBoxLayout(self.peak_slice_row)
+        peak_slice_layout.setContentsMargins(0, 0, 0, 0)
+        peak_slice_layout.addWidget(QLabel("Pick on slice:"))
+        self.peak_slice_spin = QSpinBox()
+        self.peak_slice_spin.setRange(1, 1)
+        # Wraps, per explicit user request: "if there's a box with a
+        # number, pressing down on the lowest should cycle back to the
+        # highest".
+        self.peak_slice_spin.setWrapping(True)
+        self.peak_slice_spin.setToolTip(
+            "Which slice of a 2D/pseudo-2D series to pick peaks on -- "
+            "both 'Pick from Plot' (which shows this slice on its own "
+            "so there is a 1D trace to click) and 'Auto-Pick Peaks'. "
+            "Wraps around at either end."
+        )
+        self.peak_slice_spin.valueChanged.connect(self._on_peak_slice_changed)
+        peak_slice_layout.addWidget(self.peak_slice_spin)
+        peak_slice_layout.addStretch(1)
+        peak_layout.addWidget(self.peak_slice_row)
+
         auto_pick_row = QHBoxLayout()
         self.pick_peak_button = QPushButton("Pick from Plot")
         self.pick_peak_button.setCheckable(True)
@@ -6086,7 +6194,8 @@ class MainWindow(QMainWindow):
         auto_pick_button = QPushButton("Auto-Pick Peaks")
         auto_pick_button.setToolTip(
             "Detect peaks automatically (scipy find_peaks on the "
-            "current selection -- slice 1, for a pseudo-2D series) and "
+            "current selection, or on the chosen slice of a 2D/"
+            "pseudo-2D series) and "
             "replace the table above with them, as a starting point -- "
             "still just initial guesses, refined by the fit like any "
             "other row here. Sensitivity set by Min. prominence, below."
@@ -7037,6 +7146,63 @@ class MainWindow(QMainWindow):
             fwhm_guess = abs(xmax - xmin) * 0.01 or 1.0
             self._add_peak_row(shift=shift, fwhm=fwhm_guess, eta=0.5)
 
+    def _peak_pick_slice_index(self) -> int:
+        return int(self.peak_slice_spin.value())
+
+    def _refresh_peak_slice_control(self, spectrum) -> None:
+        """Show the "Pick on slice" selector only where there is more
+        than one row to choose between, and keep its range matched to
+        the current data (a reprocess can change the row count)."""
+        multi_row = spectrum is not None and spectrum.ndim == 2
+        self.peak_slice_row.setVisible(bool(multi_row))
+        if not multi_row:
+            return
+        n_rows = int(spectrum.data.shape[0])
+        self.peak_slice_spin.blockSignals(True)
+        self.peak_slice_spin.setRange(1, max(1, n_rows))
+        if self.peak_slice_spin.value() > n_rows:
+            self.peak_slice_spin.setValue(1)
+        self.peak_slice_spin.blockSignals(False)
+
+    def _peak_pick_target(self, spectrum):
+        """The 1D spectrum peaks are picked on: the spectrum itself
+        when it already is 1D, otherwise the selected slice. Replaces a
+        hard-wired ``index=1``."""
+        if spectrum.ndim == 1:
+            return spectrum
+        return processing_slicing.get_trace(spectrum, axis="f1", index=self._peak_pick_slice_index())
+
+    def _on_peak_slice_changed(self, _value: int) -> None:
+        # Only re-show the slice while picking is actually active --
+        # otherwise changing the number would yank the user's contour
+        # view away for no reason.
+        if self.pick_peak_button.isChecked():
+            self._show_peak_pick_slice()
+
+    def _show_peak_pick_slice(self) -> None:
+        """Put the chosen slice on the Spectrum canvas as its own 1D
+        trace, so there is something to click. Reuses the canvas's
+        existing extract-slice view (which brings its own "Back to
+        Contour" bar), rather than inventing a second single-trace
+        mode."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim != 2:
+            return
+        # Narrow, not a blanket swallow: only a stale/out-of-range
+        # index is tolerated here (a reprocess can shrink the row count
+        # between the spinner's range being set and this running). A
+        # broad `except Exception` hid a real bug during development --
+        # extract_slice raising because it could not find its source
+        # spectrum at all -- and made peak-picking silently stick to
+        # whichever slice it started on.
+        try:
+            self.canvas.extract_slice("f1", self._peak_pick_slice_index())
+        except IndexError:
+            pass
+
     def _on_pick_peak_toggled(self, checked: bool) -> None:
         # Pick mode only ever listens on self.canvas (the Spectrum
         # tab) -- clicking elsewhere (Compare, Fit, Spectral Fit, the
@@ -7048,6 +7214,10 @@ class MainWindow(QMainWindow):
         self.canvas.set_pick_mode(checked)
         if checked:
             self.canvas_tabs.setCurrentWidget(self.canvas)
+            # A 2D/pseudo-2D canvas has no 1D trace to click, which is
+            # exactly why picking was impossible on one -- show the
+            # chosen slice on its own for the duration.
+            self._show_peak_pick_slice()
 
     def _on_auto_pick_peaks_clicked(self) -> None:
         """Replace the peak table with automatically-detected peaks
@@ -7058,15 +7228,8 @@ class MainWindow(QMainWindow):
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
-            QMessageBox.information(
-                self, "Not supported",
-                "Auto-pick isn't available for a conventional 2D spectrum yet -- "
-                "select a 1D spectrum or a pseudo-2D series.",
-            )
-            return
         try:
-            target = spectrum if spectrum.ndim == 1 else processing_slicing.get_trace(spectrum, axis="f1", index=1)
+            target = self._peak_pick_target(spectrum)
             peaks = processing_fitting.auto_pick_peaks(target, prominence=self.auto_pick_prominence_spin.value())
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Auto-pick failed", str(exc))
@@ -7089,12 +7252,32 @@ class MainWindow(QMainWindow):
             self._add_peak_row(shift=peak["shift"], fwhm=peak["fwhm"], eta=peak["eta"])
 
     def _restore_sr_control(self, spectrum) -> None:
-        self.sr_shift_spin.blockSignals(True)
-        self.sr_shift_spin.setValue(spectrum.metadata.raw.get("sr_shift_hz", 0.0))
-        self.sr_shift_spin.blockSignals(False)
+        for dim, spin in (("f2", self.sr_shift_spin), ("f1", self.sr_shift_indirect_spin)):
+            spin.blockSignals(True)
+            spin.setValue(float(spectrum.metadata.raw.get(self._SR_KEYS[dim][0], 0.0)))
+            spin.blockSignals(False)
+        # Nothing to reference against on a 1D or a pseudo-2D, whose
+        # indirect axis is a slice index rather than a frequency.
+        has_indirect = self._sr_axis(spectrum, "f1") is not None
+        self.sr_indirect_label.setVisible(has_indirect)
+        self.sr_shift_indirect_spin.setVisible(has_indirect)
 
     def _on_apply_sr_clicked(self) -> None:
-        self._apply_reference_shift_hz(self.sr_shift_spin.value())
+        # Both dimensions from the one button. Each is idempotent
+        # (recomputed from its own stashed original axis), so applying
+        # the unchanged one costs nothing and re-entering the same
+        # numbers twice stays a no-op.
+        #
+        # Both values are read up front, before either is applied:
+        # _apply_reference_shift_hz ends by calling _restore_sr_control,
+        # which rewrites *both* spin boxes from metadata -- so reading
+        # the second one after applying the first handed back the
+        # stored value (0) instead of what the user had just typed, and
+        # the indirect shift silently did nothing.
+        direct_hz = self.sr_shift_spin.value()
+        indirect_hz = self.sr_shift_indirect_spin.value()
+        self._apply_reference_shift_hz(direct_hz, "f2")
+        self._apply_reference_shift_hz(indirect_hz, "f1")
 
     def _on_reference_shift_from_plot(self) -> None:
         """Handles :attr:`MplCanvas.referenceShiftRequested`, the
@@ -7112,46 +7295,84 @@ class MainWindow(QMainWindow):
         if ok:
             self._apply_reference_shift_hz(value)
 
-    @staticmethod
-    def _capture_original_axis(spectrum) -> None:
-        """Stash the direct (F2) axis's hz/ppm arrays exactly as
-        loaded, the first time SR is ever touched for this spectrum
-        this session -- the stable baseline every SR value is
-        recomputed from, so applying "the same SR twice" is a no-op
-        instead of compounding, and applying "a different SR" replaces
-        rather than adds to whatever's currently displayed. Reprocessing
-        the FID naturally invalidates this (a fresh NMRSpectrum from
-        the vendor reader has no ``raw`` carried over), which is the
-        right behaviour -- SR starts over from the new axis."""
-        if "sr_original_hz" in spectrum.metadata.raw:
-            return
-        axis = spectrum.axes[-1]
-        spectrum.metadata.raw["sr_original_hz"] = axis.hz.copy() if axis.hz is not None else None
-        spectrum.metadata.raw["sr_original_ppm"] = axis.ppm.copy() if axis.ppm is not None else None
+    #: ``metadata.raw`` keys per dimension: (applied value, original
+    #: Hz axis, original ppm axis). The direct dimension's keys are
+    #: unsuffixed, exactly as they were before the indirect axis got
+    #: its own SR, so a sidecar written by an older version still
+    #: restores.
+    _SR_KEYS = {
+        "f2": ("sr_shift_hz", "sr_original_hz", "sr_original_ppm"),
+        "f1": ("sr_shift_hz_f1", "sr_original_hz_f1", "sr_original_ppm_f1"),
+    }
 
-    def _apply_reference_shift_hz(self, sr_hz: float) -> None:
-        """Set the spectrum's SR to the absolute value ``sr_hz`` --
-        the Hz offset from its own SFO1 base frequency -- recomputing
-        the direct-dimension axis from the original, as-loaded arrays
+    @staticmethod
+    def _sr_axis(spectrum, dim: str):
+        """``spectrum``'s own axis for SR dimension ``dim``, or
+        ``None`` when there isn't one to reference -- an indirect axis
+        only counts if it's a genuine frequency axis with a base
+        frequency to convert Hz to ppm with (a pseudo-2D's indirect
+        axis is a slice index, and a 1D has no indirect axis at all)."""
+        if dim == "f2":
+            return spectrum.axes[-1]
+        if spectrum.ndim != 2 or spectrum.metadata.pseudo_2d or not spectrum.metadata.sfo1_indirect:
+            return None
+        axis = spectrum.axes[0]
+        return axis if axis.kind == "frequency" else None
+
+    @classmethod
+    def _capture_original_axis(cls, spectrum, dim: str = "f2") -> None:
+        """Stash ``dim``'s hz/ppm arrays exactly as loaded, the first
+        time SR is ever touched for this spectrum this session -- the
+        stable baseline every SR value is recomputed from, so applying
+        "the same SR twice" is a no-op instead of compounding, and
+        applying "a different SR" replaces rather than adds to whatever's
+        currently displayed. Reprocessing the FID naturally invalidates
+        this (a fresh NMRSpectrum from the vendor reader has no ``raw``
+        carried over), which is the right behaviour -- SR starts over
+        from the new axis."""
+        _, hz_key, ppm_key = cls._SR_KEYS[dim]
+        if hz_key in spectrum.metadata.raw:
+            return
+        axis = cls._sr_axis(spectrum, dim)
+        if axis is None:
+            return
+        spectrum.metadata.raw[hz_key] = axis.hz.copy() if axis.hz is not None else None
+        spectrum.metadata.raw[ppm_key] = axis.ppm.copy() if axis.ppm is not None else None
+
+    def _apply_reference_shift_hz(self, sr_hz: float, dim: str = "f2") -> None:
+        """Set ``dim``'s SR to the absolute value ``sr_hz`` -- the Hz
+        offset from that dimension's own base frequency -- recomputing
+        its axis from the original, as-loaded arrays
         (:meth:`_capture_original_axis`) rather than adding onto
         whatever the axis currently is, so this is idempotent (calling
         it again with the same value is a no-op) rather than
-        cumulative."""
+        cumulative.
+
+        ``dim`` : ``"f2"`` (direct) or ``"f1"`` (indirect). The two are
+        independent values against independent base frequencies --
+        ``sfo1`` and ``sfo1_indirect`` -- because on a heteronuclear 2D
+        they are different nuclei, so a single Hz offset could not
+        reference both. A no-op for ``"f1"`` when there is no indirect
+        frequency axis (see :meth:`_sr_axis`)."""
         index = self._selected_index()
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        self._capture_original_axis(spectrum)
+        axis = self._sr_axis(spectrum, dim)
+        if axis is None:
+            return
+        self._capture_original_axis(spectrum, dim)
 
-        axis = spectrum.axes[-1]  # direct (F2) dimension -- always frequency
-        original_hz = spectrum.metadata.raw.get("sr_original_hz")
-        original_ppm = spectrum.metadata.raw.get("sr_original_ppm")
+        shift_key, hz_key, ppm_key = self._SR_KEYS[dim]
+        base_mhz = spectrum.metadata.sfo1 if dim == "f2" else spectrum.metadata.sfo1_indirect
+        original_hz = spectrum.metadata.raw.get(hz_key)
+        original_ppm = spectrum.metadata.raw.get(ppm_key)
         if original_hz is not None:
             axis.hz = original_hz + sr_hz
-        if original_ppm is not None and spectrum.metadata.sfo1:
-            axis.ppm = original_ppm + sr_hz / spectrum.metadata.sfo1
+        if original_ppm is not None and base_mhz:
+            axis.ppm = original_ppm + sr_hz / base_mhz
 
-        spectrum.metadata.raw["sr_shift_hz"] = sr_hz
+        spectrum.metadata.raw[shift_key] = sr_hz
         self._restore_sr_control(spectrum)
         self._schedule_sidecar_save(index)
 
@@ -8357,6 +8578,9 @@ class MainWindow(QMainWindow):
 
         self._refresh_fid_processing_controls(spectrum, row)
         self._restore_sr_control(spectrum)
+        self._restore_nq_line_control(spectrum)
+        self._restore_contour_slices(spectrum)
+        self._refresh_peak_slice_control(spectrum)
         self._refresh_analysis_tab(spectrum)
 
         # Which Dimension controls apply depends on the spectrum type --

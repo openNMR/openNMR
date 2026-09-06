@@ -18,6 +18,7 @@ from opennmr.gui.session import Session
 from opennmr import io as opennmr_io
 from opennmr.io import bruker as io_bruker
 from opennmr.io import persistence as io_persistence
+from opennmr.processing import slicing as processing_slicing
 from opennmr.processing import ft as processing_ft
 from opennmr.processing.slicing import get_trace
 from opennmr.processing.fitting import gaussian
@@ -4120,20 +4121,23 @@ def test_main_window_multi_selection_shows_compare(qapp, tmp_path):
     assert window.canvas_tabs.currentWidget() is window.compare_canvas
 
 
-def test_main_window_compare_list_has_a_current_row_after_populating(qapp, tmp_path):
-    # Explicit user feedback: "it is no longer obvious which spectrum
-    # is selected" -- nothing ever set an initial current/highlighted
-    # row in this list, only Move Up/Down did (and only after a click
-    # had already set one), so a freshly (re)populated list showed no
-    # current-row highlight at all.
+def test_main_window_compare_list_preserves_a_current_row_but_never_preselects(qapp, tmp_path):
+    # Explicit user request: "in compare, none of the spectra should be
+    # pre-selected like the last one is now." This narrows, rather than
+    # reverses, the earlier feedback that it was "no longer obvious
+    # which spectrum is selected" -- that was about the highlight being
+    # invisible once a row *had* been chosen, which still works below.
+    # What's gone is the choice made on the user's behalf before they
+    # have clicked anything.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     _select_rows(window, [0, 1])
-    assert window.compare_list.currentRow() == 0
+    assert window.compare_list.currentRow() == -1
 
-    # Still current after Move Down shuffles the order, not silently
-    # reset to row 0 again.
+    # Once the user does pick one, it survives a rebuild -- Move
+    # Up/Down and check-state toggles must not lose their place.
+    window.compare_list.setCurrentRow(0)
     window._on_move_compare_item(1)
     assert window.compare_list.currentRow() == 1
     moved_entry = window.compare_list.item(1).data(Qt.ItemDataRole.UserRole)
@@ -4158,7 +4162,13 @@ def test_main_window_compare_list_selection_highlights_matching_plot_row(qapp, t
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     window._load(_make_1d_dataset(tmp_path, name="c"), vendor="bruker")
     _select_rows(window, [0, 1, 2])
-    assert window.compare_list.currentRow() == 0
+    # Nothing pre-selected (see the test above), so no row is tinted
+    # until the user actually picks one.
+    assert window.compare_list.currentRow() == -1
+    assert all(ax.patch.get_alpha() == pytest.approx(0.0)
+               for ax in window.compare_canvas._compare_axes)
+
+    window.compare_list.setCurrentRow(0)
     assert window.compare_canvas._selected_compare_index == 0
     assert window.compare_canvas._compare_axes[0].patch.get_alpha() == pytest.approx(1.0)
     assert window.compare_canvas._compare_axes[1].patch.get_alpha() == pytest.approx(0.0)
@@ -8140,6 +8150,311 @@ def test_main_window_live_phase_keeps_the_baseline_after_a_settle(qapp, tmp_path
 
     scale = max(np.max(np.abs(authoritative)), 1e-30)
     assert np.max(np.abs(live - authoritative)) / scale < 1e-3
+
+
+def test_main_window_pick_mode_shows_a_slice_for_a_pseudo_2d(qapp, tmp_path, monkeypatch):
+    # Real user report: "peak picking on a pseudo 2D is currently
+    # impossible". Manual picking listens on the Spectrum canvas, which
+    # shows the contour/stack for a pseudo-2D -- so a click yielded a 2D
+    # position with no single trace to attach a peak to. Turning pick
+    # mode on now puts the chosen slice up on its own.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._select_single_row(0)
+
+    assert not window.peak_slice_row.isHidden()
+    assert window.peak_slice_spin.maximum() == spectrum.data.shape[0]
+    assert window.peak_slice_spin.value() == 1          # first by default
+
+    assert window.canvas._extracted_from_spectrum is None
+    window.pick_peak_button.setChecked(True)
+    assert window.canvas._extracted_from_spectrum is not None
+    assert window.canvas._extracted_index == 1
+
+    # Changing the slice while picking follows along.
+    window.peak_slice_spin.setValue(4)
+    assert window.canvas._extracted_index == 4
+
+
+def test_main_window_peak_slice_spin_wraps_at_both_ends(qapp, tmp_path, monkeypatch):
+    # Explicit user request: "if there's a box with a number, pressing
+    # down on the lowest should cycle back to the highest".
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._select_single_row(0)
+    n_rows = window.session.spectra[0].data.shape[0]
+
+    assert window.peak_slice_spin.wrapping()
+    window.peak_slice_spin.setValue(1)
+    window.peak_slice_spin.stepBy(-1)
+    assert window.peak_slice_spin.value() == n_rows
+    window.peak_slice_spin.stepBy(1)
+    assert window.peak_slice_spin.value() == 1
+
+
+def test_main_window_peak_slice_row_hidden_for_a_1d(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window._select_single_row(0)
+    assert window.peak_slice_row.isHidden()
+
+
+def test_main_window_auto_pick_uses_the_selected_slice(qapp, tmp_path, monkeypatch):
+    # Auto-Pick was hard-wired to slice 1 with no way to choose another,
+    # and refused a conventional 2D outright.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    # Rows must differ from each other, or "picks on slice 3" and
+    # "picks on slice 1" are indistinguishable -- the default fixture
+    # tiles one identical row, which made an earlier version of this
+    # test pass even with the hard-wired index=1 still in place.
+    n_f1, n_f2 = 8, 32
+    t2 = np.arange(n_f2) / 8000.0
+    fid = np.stack([
+        (k + 1) * np.exp(-t2 * 300) * np.exp(2j * np.pi * (500.0 + 200.0 * k) * t2)
+        for k in range(n_f1)
+    ]).astype(np.complex128)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=n_f1, n_f2=n_f2, fid=fid),
+                 vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._select_single_row(0)
+
+    window.peak_slice_spin.setValue(3)
+    target = window._peak_pick_target(spectrum)
+    expected = processing_slicing.get_trace(spectrum, axis="f1", index=3)
+    np.testing.assert_allclose(target.data, expected.data)
+    slice_one = processing_slicing.get_trace(spectrum, axis="f1", index=1)
+    assert not np.allclose(target.data, slice_one.data)
+
+    # A genuine 2D is no longer refused outright either -- it picks on
+    # one row at a time, exactly like a pseudo-2D.
+    window._on_process_indirect_toggled(True)
+    genuine = window.session.spectra[0]
+    window._refresh_peak_slice_control(genuine)
+    assert not window.peak_slice_row.isHidden()
+    assert window._peak_pick_target(genuine).ndim == 1
+
+
+def test_main_window_contour_slices_are_stored_against_the_spectrum(qapp, tmp_path, monkeypatch):
+    # A slice at F1 index 412 means nothing on any other dataset, so
+    # like the nQ line it belongs to the spectrum, not the canvas.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, name="one"), vendor="bruker")
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, name="two"), vendor="bruker")
+
+    window._select_single_row(0)
+    window.canvas._add_contour_slice("f1", 2, "Impurity")
+    window.canvas._add_contour_slice("f1", 5, "Shift")
+    assert window.session.spectra[0].metadata.raw["contour_slices"] == [
+        {"axis": "f1", "index": 2, "label": "Impurity"},
+        {"axis": "f1", "index": 5, "label": "Shift"},
+    ]
+
+    window._select_single_row(1)
+    assert window.canvas._contour_slices == []
+    assert "contour_slices" not in window.session.spectra[1].metadata.raw
+
+    window._select_single_row(0)
+    assert len(window.canvas._contour_slices) == 2
+
+    window.canvas._clear_contour_slices()
+    assert window.session.spectra[0].metadata.raw["contour_slices"] == []
+
+
+def test_main_window_restoring_contour_slices_does_not_write_back(qapp, tmp_path, monkeypatch):
+    # set_contour_slices deliberately doesn't emit -- otherwise pushing
+    # a spectrum's stored slices onto the canvas would immediately write
+    # the same list straight back out as if the user had just added it.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+
+    emitted = []
+    window.canvas.contourSlicesChanged.connect(emitted.append)
+    window._restore_contour_slices(spectrum)
+    assert emitted == []
+    assert "contour_slices" not in spectrum.metadata.raw
+
+
+def test_main_window_nq_line_is_per_spectrum_not_app_wide(qapp, tmp_path, monkeypatch):
+    # User request: "plotting options like nQ line should be tied to the
+    # loaded spectrum." A diagonal means something on a homonuclear
+    # correlation and nothing on a heteronuclear one, and n is a
+    # property of the experiment -- as one global switch it followed the
+    # user onto every other spectrum, including the ones it was
+    # meaningless on.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, name="first"), vendor="bruker")
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, name="second"), vendor="bruker")
+
+    window._select_single_row(0)
+    window.output_nq_line_checkbox.setChecked(True)
+    window.output_nq_value_spin.setValue(3)
+    assert window.session.spectra[0].metadata.raw["nq_line"] is True
+    assert window.session.spectra[0].metadata.raw["nq_value"] == 3
+
+    # Selecting the other spectrum must not carry it across.
+    window._select_single_row(1)
+    assert not window.output_nq_line_checkbox.isChecked()
+    assert "nq_line" not in window.session.spectra[1].metadata.raw
+
+    # ...and coming back restores it, canvases included.
+    window._select_single_row(0)
+    assert window.output_nq_line_checkbox.isChecked()
+    assert window.output_nq_value_spin.value() == 3
+    assert window.output_nq_value_spin.isEnabled()
+
+
+def test_main_window_nq_line_restore_does_not_write_back(qapp, tmp_path, monkeypatch):
+    # Restoring the control from the spectrum must not look like the
+    # user setting it -- otherwise selecting a spectrum that has never
+    # had an nQ line would stamp a default onto it (and dirty its
+    # sidecar) just by being looked at.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+
+    window._restore_nq_line_control(spectrum)
+    assert "nq_line" not in spectrum.metadata.raw
+    assert "nq_value" not in spectrum.metadata.raw
+
+
+def test_main_window_nq_line_survives_a_reload(qapp, tmp_path, monkeypatch):
+    # It rides along with the rest of the processing state, so it has to
+    # come back on a fresh load of the same experiment.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8)
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._select_single_row(0)
+    window.output_nq_line_checkbox.setChecked(True)
+    window.output_nq_value_spin.setValue(2)
+    io_persistence.save_processing_sidecar(window.session.spectra[0])
+
+    reopened = MainWindow()
+    reopened._load(path, vendor="bruker")
+    reopened._select_single_row(0)
+    assert reopened.output_nq_line_checkbox.isChecked()
+    assert reopened.output_nq_value_spin.value() == 2
+
+
+def test_main_window_indirect_sr_shifts_only_the_indirect_axis(qapp, tmp_path, monkeypatch):
+    # User request: "we need to add sr for indirect dimension in 2Ds."
+    # The two dimensions need independent SR values against independent
+    # base frequencies -- on a heteronuclear 2D they are different
+    # nuclei, so one Hz offset cannot reference both.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    f1_before = spectrum.axes[0].ppm.copy()
+    f2_before = spectrum.axes[1].ppm.copy()
+
+    window.sr_shift_indirect_spin.setValue(100.0)
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(
+        spectrum.axes[0].ppm, f1_before + 100.0 / spectrum.metadata.sfo1_indirect,
+    )
+    np.testing.assert_allclose(spectrum.axes[1].ppm, f2_before)
+
+    # Independent: a direct-dimension SR moves only F2, and does not
+    # disturb the indirect shift already applied.
+    window.sr_shift_spin.setValue(50.0)
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(
+        spectrum.axes[1].ppm, f2_before + 50.0 / spectrum.metadata.sfo1,
+    )
+    np.testing.assert_allclose(
+        spectrum.axes[0].ppm, f1_before + 100.0 / spectrum.metadata.sfo1_indirect,
+    )
+
+    # A value, not a delta: re-applying is a no-op, and zero restores.
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(
+        spectrum.axes[0].ppm, f1_before + 100.0 / spectrum.metadata.sfo1_indirect,
+    )
+    window.sr_shift_indirect_spin.setValue(0.0)
+    window.sr_shift_spin.setValue(0.0)
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(spectrum.axes[0].ppm, f1_before)
+    np.testing.assert_allclose(spectrum.axes[1].ppm, f2_before)
+
+
+def test_main_window_apply_sr_reads_both_boxes_before_applying_either(qapp, tmp_path, monkeypatch):
+    # _apply_reference_shift_hz ends by calling _restore_sr_control,
+    # which rewrites *both* spin boxes from metadata. Reading the second
+    # box after applying the first therefore handed back the stored
+    # value (0) rather than what the user had just typed, and the
+    # indirect shift silently did nothing. Found by running it.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    # Direct first in apply order, indirect second -- the one that got lost.
+    window.sr_shift_spin.setValue(25.0)
+    window.sr_shift_indirect_spin.setValue(75.0)
+    window._on_apply_sr_clicked()
+
+    assert spectrum.metadata.raw["sr_shift_hz"] == pytest.approx(25.0)
+    assert spectrum.metadata.raw["sr_shift_hz_f1"] == pytest.approx(75.0)
+
+
+def test_main_window_indirect_sr_row_hidden_without_an_indirect_frequency_axis(qapp, tmp_path, monkeypatch):
+    # Nothing to reference against on a 1D, or on a pseudo-2D whose
+    # indirect axis is a slice index rather than a frequency.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+
+    window._restore_sr_control(spectrum)          # pseudo-2D by default
+    assert window.sr_shift_indirect_spin.isHidden()
+    assert window.sr_indirect_label.isHidden()
+    assert window._sr_axis(spectrum, "f1") is None
+    # ...and applying one anyway changes nothing.
+    window._apply_reference_shift_hz(100.0, "f1")
+    assert "sr_shift_hz_f1" not in spectrum.metadata.raw
+
+    window._on_process_indirect_toggled(True)
+    genuine = window.session.spectra[0]
+    window._restore_sr_control(genuine)
+    assert not window.sr_shift_indirect_spin.isHidden()
+    assert not window.sr_indirect_label.isHidden()
+
+
+def test_main_window_reprocess_reapplies_both_sr_values(qapp, tmp_path, monkeypatch):
+    # The post-reprocess reapply path used to restore only the direct
+    # dimension's SR, silently dropping the indirect axis's referencing
+    # the first time any FID-processing control was touched.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+    window.sr_shift_spin.setValue(40.0)
+    window.sr_shift_indirect_spin.setValue(90.0)
+    window._on_apply_sr_clicked()
+    f1_referenced = spectrum.axes[0].ppm.copy()
+    f2_referenced = spectrum.axes[1].ppm.copy()
+
+    window._apply_loaded_processing_sidecar(spectrum, 0)
+
+    np.testing.assert_allclose(spectrum.axes[0].ppm, f1_referenced)
+    np.testing.assert_allclose(spectrum.axes[1].ppm, f2_referenced)
 
 
 @pytest.mark.parametrize("baseline", [False, True])
