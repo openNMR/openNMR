@@ -2,6 +2,39 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Phasing a 2D snapped the zoom back to full scale on every pause (2026-09-06)
+
+User: "Something is up with the GUI phase control for the indirect and it's jumping during phasing."
+
+The jump was literal, and it is a view bug rather than a phase one -- the phase values themselves are smooth. Traced a real F1 drag tick by tick on `Cyclosporine/203`: each 0.5-degree tick changes the data by ~0.0102 relative, decreasing smoothly, with no discontinuity at a settle (0.00024) and `_phase_reference_delta_applied` tracking correctly. Nothing wrong there.
+
+### What was actually jumping
+
+Two 200 ms debounce timers -- `_live_reprocess_timer` and `_canvas_2d_refresh_timer` -- both restart on **every** drag tick, so on a pause they always fired as a pair. `_run_debounced_canvas_2d_refresh` carefully saves and restores the axis limits around its contour rebuild ("phase-editing shouldn't silently reset a deliberate zoom"). `_run_debounced_multi_row_reprocess` did not: a bare `show_spectrum`. It runs first, so its reset won.
+
+Measured, with the view zoomed to 4..2 ppm x 60..20 ppm and one drag tick:
+
+| baseline correction | timers that fire | zoom after |
+|---|---|---|
+| off | canvas only | preserved |
+| **on** | reprocess, canvas | **reset to 12.7..-3.3 x 157.5..-7.5** |
+
+Baseline correction is what puts the reprocess timer in play for a phase drag, which is why this shows up while phasing rather than at rest.
+
+### Also: every settle rebuilt the identical contour twice
+
+Both timers redrew, one straight after the other, for one frame. A contour rebuild measures **295 ms** for `Cyclosporine/203` and **1.34 s** for the EXSY (against a 7 ms and 140 ms phase tick), so the entire cost of a settle was being paid twice. The reprocess now cancels the canvas-refresh debounce, since it *is* that redraw.
+
+### Fix
+
+One `_redraw_2d_preserving_view` helper, used by both settle paths -- the zoom-preserving version was already written, it just wasn't shared. 5 new tests (parametrised over both dimensions and baseline on/off), verified to fail with each half of the fix reverted independently.
+
+### Left alone deliberately
+
+During a *continuous* drag the contour still does not redraw at all: both debounces keep restarting, so the update lands only when the drag pauses. That is the existing deliberate trade-off, and at 295 ms / 1.34 s per rebuild it is not obviously wrong -- a throttle would give feedback while dragging but would block the event loop for 1.34 s at a time on the EXSY. Flagged for the user rather than changed unilaterally.
+
+986 tests passing (981 -> 986).
+
 ## The hourglass contours: F2's dispersion was leaking into F1 (2026-09-06)
 
 User: "I'm still suffering from this hourglass shape in the contours, I feel like the phases of f2 and f1 are somehow offset from each other's phases."

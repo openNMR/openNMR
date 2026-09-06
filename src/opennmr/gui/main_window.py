@@ -4371,17 +4371,25 @@ class MainWindow(QMainWindow):
                     self.phase0_spin.value(), self.phase1_spin.value(),
                 )
 
-        if self._phase_mode == "pseudo2d":
+        if self._phase_mode in ("pseudo2d", "2d"):
             on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-            self.canvas.show_spectrum(spectrum)
-            if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
-                self._show_fid_preview(spectrum, switch_tab=False)
-            if on_processing_preview:
-                self._refresh_processing_preview_if_active()
-        elif self._phase_mode == "2d":
-            on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-            self.canvas.show_spectrum(spectrum)
-            if on_processing_preview:
+            self._redraw_2d_preserving_view(spectrum)
+            # This *is* the settle redraw, so cancel the canvas-refresh
+            # debounce rather than letting it fire straight afterwards
+            # and rebuild the identical contour a second time. Both
+            # timers are 200 ms and both restart on every drag tick, so
+            # before this they always fired as a pair on a pause --
+            # measured at 295 ms per contour rebuild for
+            # Cyclosporine/203 and 1.34 s for the EXSY, i.e. the whole
+            # cost of a settle was being paid twice for one frame.
+            self._canvas_2d_refresh_timer.stop()
+            self._canvas_2d_refresh_pending_index = None
+            if self._phase_mode == "pseudo2d":
+                if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
+                    self._show_fid_preview(spectrum, switch_tab=False)
+                if on_processing_preview:
+                    self._refresh_processing_preview_if_active()
+            elif on_processing_preview:
                 self._refresh_processing_preview_phase_only()
 
     def _schedule_canvas_2d_refresh(self, index: int) -> None:
@@ -4401,23 +4409,37 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         if spectrum.ndim != 2:
             return
+        self._redraw_2d_preserving_view(spectrum)
+
+    def _redraw_2d_preserving_view(self, spectrum) -> None:
+        """Rebuild ``self.canvas``'s contour for ``spectrum`` without
+        throwing away whatever ppm/index zoom is currently on it.
+
+        A full contour rebuild has no in-place update path (see
+        ``MplCanvas.set_full_resolution``'s own docstring) and resets
+        the view by default. Both debounced settle paths need the same
+        "phase-editing shouldn't silently reset a deliberate zoom"
+        treatment already applied to the 1D case in
+        :meth:`_apply_phase_preview` -- real user report: "Something is
+        up with the GUI phase control for the indirect and it's jumping
+        during phasing". The jump was literal: with baseline correction
+        on, both 200 ms debounce timers fire on every pause in a drag,
+        and :meth:`_run_debounced_multi_row_reprocess` used a bare
+        ``show_spectrum`` -- so a view zoomed to 4..2 ppm x 60..20 ppm
+        snapped back to the full 12.7..-3.3 x 157.5..-7.5 every time
+        the user paused.
+
+        Best-effort by design: this runs from timer callbacks during a
+        drag, where a render failure must never raise (same reasoning
+        as :meth:`_apply_phase_preview`'s own "2d" branch) -- skip the
+        frame and let the next one catch up."""
         try:
-            # A full contour rebuild has no in-place update path (see
-            # MplCanvas.set_full_resolution's own docstring) and resets
-            # the view by default -- preserve whatever ppm/index zoom
-            # was already there across it, the same "phase-editing
-            # shouldn't silently reset a deliberate zoom" reasoning
-            # already applied elsewhere in this codebase (e.g.
-            # update_data's own docstring, or the 1D case just above in
-            # _apply_phase_preview).
             xlim, ylim = self.canvas.ax.get_xlim(), self.canvas.ax.get_ylim()
             self.canvas.show_spectrum(spectrum)
             self.canvas.ax.set_xlim(xlim)
             self.canvas.ax.set_ylim(ylim)
             self.canvas.canvas.draw_idle()
-        except Exception:  # noqa: BLE001 -- best-effort, same reasoning as
-            # _apply_phase_preview's own "2d" branch: a render failure here
-            # must never raise out of a timer callback mid-drag.
+        except Exception:  # noqa: BLE001 -- see docstring
             pass
 
     def _on_reset_processing_clicked(self) -> None:

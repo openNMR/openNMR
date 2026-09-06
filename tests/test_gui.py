@@ -8142,6 +8142,67 @@ def test_main_window_live_phase_keeps_the_baseline_after_a_settle(qapp, tmp_path
     assert np.max(np.abs(live - authoritative)) / scale < 1e-3
 
 
+@pytest.mark.parametrize("baseline", [False, True])
+@pytest.mark.parametrize("dim_index,dim", [(0, "F2"), (1, "F1")])
+def test_main_window_phase_settle_preserves_the_2d_zoom(qapp, dim_index, dim, baseline, tmp_path, monkeypatch):
+    # Real user report: "Something is up with the GUI phase control for
+    # the indirect and it's jumping during phasing." The jump was
+    # literal. Two 200 ms debounce timers both restart on every drag
+    # tick, so both fire on a pause; _run_debounced_multi_row_reprocess
+    # used a bare show_spectrum, which rebuilds the contour and resets
+    # the view. A window zoomed to 4..2 x 60..20 ppm snapped back to the
+    # full 12.7..-3.3 x 157.5..-7.5 every time the drag paused.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["baseline_correct"] = baseline
+    window.dim_combo.setCurrentIndex(dim_index)
+
+    zoom = ((4.0, 2.0), (60.0, 20.0))
+    window.canvas.ax.set_xlim(*zoom[0])
+    window.canvas.ax.set_ylim(*zoom[1])
+
+    window.phase0_spin.setValue(5.0)
+    for timer, run in ((window._live_reprocess_timer, window._run_debounced_multi_row_reprocess),
+                       (window._canvas_2d_refresh_timer, window._run_debounced_canvas_2d_refresh)):
+        if timer.isActive():
+            timer.stop()
+            run()
+
+    assert window.canvas.ax.get_xlim() == pytest.approx(zoom[0])
+    assert window.canvas.ax.get_ylim() == pytest.approx(zoom[1])
+
+
+def test_main_window_phase_settle_rebuilds_the_contour_only_once(qapp, tmp_path, monkeypatch):
+    # Both debounce timers are 200 ms and both restart on every drag
+    # tick, so before this they always fired as a pair on a pause and
+    # rebuilt the identical contour twice. Measured at 295 ms per
+    # rebuild for Cyclosporine/203 and 1.34 s for the EXSY -- the whole
+    # cost of a settle, paid twice for one frame.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["baseline_correct"] = True
+    window.dim_combo.setCurrentIndex(1)
+
+    window.phase0_spin.setValue(5.0)
+    assert window._live_reprocess_timer.isActive()
+
+    calls = []
+    original = window.canvas.show_spectrum
+    window.canvas.show_spectrum = lambda *a, **k: (calls.append(1), original(*a, **k))[1]
+
+    window._live_reprocess_timer.stop()
+    window._run_debounced_multi_row_reprocess()
+    # The reprocess *is* the settle redraw, so it must also have taken
+    # the canvas-refresh timer out of the running.
+    assert not window._canvas_2d_refresh_timer.isActive()
+    assert window._canvas_2d_refresh_pending_index is None
+    assert len(calls) == 1
+
+
 def test_main_window_f2_phase_on_hypercomplex_2d_never_shows_an_invalid_state(qapp, tmp_path, monkeypatch):
     # The hypercomplex decode consumes each row's F2 imaginary part to
     # build F1's, so a hypercomplex 2D's stored complex pair is F1's
