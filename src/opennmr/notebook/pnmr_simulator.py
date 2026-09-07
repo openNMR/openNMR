@@ -234,11 +234,25 @@ def build_shift_table(local_envs, shift_dict, warn_missing=True, print_table=Fal
 
     df = pd.DataFrame(rows).fillna(0)
 
+    # The configuration probabilities are normalized independently
+    # for each crystallographic/site instance. Convert them to weights
+    # normalized over the complete shift table so that sum(p) == 1.
+    n_sites = df["Site"].nunique()
+    if n_sites > 0:
+        df["p"] /= n_sites
+
     if print_table:
         with pd.option_context('display.max_rows', None,
-                                'display.max_columns', None,
-                                'display.precision', 3):
+                               'display.max_columns', None,
+                               'display.precision', 3):
             print(df)
+
+    # Sanity check: probabilities/weights should now sum to 1.
+    p_sum = df["p"].sum()
+    if not np.isclose(p_sum, 1.0, atol=1e-12):
+        raise RuntimeError(
+            f"Shift-table probabilities sum to {p_sum:.12g}, expected 1.0."
+        )
 
     return df
 
