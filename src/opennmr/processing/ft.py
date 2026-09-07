@@ -666,8 +666,42 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
 # Linear prediction
 # ============================================================
 
+def _reflect_unstable_roots(coeffs: np.ndarray) -> np.ndarray:
+    """Force an AR model to be stable, by reflecting any of its
+    poles that lie outside the unit circle back inside.
+
+    Without this, linear prediction can diverge *exponentially*
+    instead of extrapolating a decaying signal -- not a subtle
+    inaccuracy: on real Bruker data whose own ``proc2s`` asks for F1
+    linear prediction, three of five datasets came back with peak
+    magnitudes of 1e85 to 1e104 against an expected ~1e11, which
+    reduced their correlation with TopSpin to exactly 0.0000. The
+    fit is least-squares and unconstrained, so nothing otherwise
+    stops a pole landing outside the unit circle; TopSpin and
+    NMRPipe both apply the same root reflection.
+
+    A pole at ``r`` outside the circle is replaced by
+    ``1/conj(r)`` -- the same frequency, mirrored to a decaying
+    magnitude -- and the coefficients rebuilt from the corrected
+    pole set. Returns the coefficients unchanged when every pole is
+    already inside, which is the common case and costs one
+    root-finding call.
+    """
+    # x[n] = sum_k coeffs[k] * x[n-1-k]  ->  characteristic
+    # polynomial z^p - c0 z^(p-1) - ... - c_(p-1).
+    roots = np.roots(np.concatenate(([1.0], -np.asarray(coeffs))))
+    outside = np.abs(roots) > 1.0
+    if not outside.any():
+        return coeffs
+    roots = roots.copy()
+    # Guard the degenerate r == 0 case, which has no reflection.
+    safe = outside & (np.abs(roots) > 0)
+    roots[safe] = 1.0 / np.conj(roots[safe])
+    return -np.poly(roots)[1:]
+
+
 def linear_predict(fid: np.ndarray, order: int = 20, n_predict: int = 8,
-                    direction: str = "forward") -> np.ndarray:
+                    direction: str = "forward", stabilise: bool = True) -> np.ndarray:
     """``extended_fid = linear_predict(fid, order=20, n_predict=8, direction='forward')``
 
     Extend (or backward-reconstruct) a complex FID using linear
@@ -688,6 +722,13 @@ def linear_predict(fid: np.ndarray, order: int = 20, n_predict: int = 8,
     overfitting noise; ``order=20-30`` is a reasonable default for a
     single dominant echo/peak.
 
+    ``stabilise`` : reflect any AR poles that land outside the unit
+    circle back inside before predicting (see
+    :func:`_reflect_unstable_roots`). On by default because an
+    unconstrained least-squares fit can otherwise diverge
+    exponentially rather than extrapolate a decaying signal --
+    observed on real data, not hypothetical.
+
     Returns the extended complex FID (length ``len(fid) + n_predict``).
     """
     fid = np.asarray(fid, dtype=np.complex128)
@@ -705,6 +746,16 @@ def linear_predict(fid: np.ndarray, order: int = 20, n_predict: int = 8,
         A[:, j] = x[order - 1 - j: n - 1 - j]
     b = x[order:n]
     coeffs, *_ = np.linalg.lstsq(A, b, rcond=None)
+
+    # Forward only. Backward prediction reverses the FID first, so a
+    # normally-decaying signal becomes a *growing* series whose poles
+    # legitimately sit outside the unit circle -- reflecting them
+    # forces decay in the reversed direction, which is exactly wrong
+    # (it predicts a *smaller* signal before t=0, when the true one is
+    # larger). Caught by the existing backward-reconstruction test,
+    # which reproduces a known signal and started failing by 75%.
+    if stabilise and direction == "forward":
+        coeffs = _reflect_unstable_roots(coeffs)
 
     predicted = list(x)
     for _ in range(n_predict):
@@ -742,62 +793,99 @@ def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int) -> np.ndarray:
     at all) aren't implemented -- not requested, and no real data using
     them exists in this project to validate against.
 
-    **States (4)**: row ``2k`` is the "cosine"-modulated (real) row,
-    row ``2k+1`` the "sine"-modulated (imaginary) row, for the *same*
-    t1 increment ``k`` -- ``decoded[k] = row[2k] + 1j*row[2k+1]``. Each
-    row is itself already complex (F2's own quadrature detection); the
-    extra ``1j`` here is a *second*, independent multiplication for the
-    F1 axis specifically -- this is what "hypercomplex" means.
+    **Vendor conventions are normalised before this point, not here.**
+    This function had a ``conjugate_f1`` flag for one release, because
+    Bruker's F1 quadrature sense is the opposite of X-Pulse's. That was
+    a vendor flag inside a deliberately vendor-agnostic module, so it
+    has been moved into the Bruker reader, which now negates the
+    sine-modulated rows itself -- exactly equivalent
+    (``a - 1j*b == a + 1j*(-b)``) and leaves this module free of vendor
+    knowledge.
 
-    **States-TPPI (5)**: identical row-pairing, plus every other
-    resulting hypercomplex point gets multiplied by ``-1``
-    (``(-1)**k``) -- displaces the axial (unmodulated-artifact) peak to
-    the edge of the F1 spectral window instead of its centre, which is
-    the entire point of the TPPI-style receiver-phase increment.
-    Confirmed via NMR Wiki's States-TPPI reference. **Validated against
-    5 real States-TPPI (FnMODE=5) Bruker datasets in this project's own
-    test_data** -- cross-checked against ``read_2d_processed``
-    (TopSpin's own numbers) the same way the raw-`ser` shape work was.
+    The convention was identified against ground truth, not guessed:
+    solving ``interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)``
+    against TopSpin's own F1 interferogram, recovered by inverse-
+    transforming its finished 2D along F1 (see below).
 
-    **Echo-Antiecho (6, a.k.a. Rance-Kay)**: row ``2k`` ("echo"/P-type)
-    and row ``2k+1`` ("antiecho"/N-type) combine as
-    ``decoded[k] = (echo+antiecho) + 1j*(echo-antiecho)`` -- the
-    standard sensitivity-enhanced (PEP) recombination, *given* that the
-    caller has already conjugated **and time-reversed** the raw "echo"
-    row's time-domain FID before F2 processing -- see
-    ``io.bruker.read_2d``'s own comment at its ``fn_mode == 6`` branch
-    (including the real, user-reported bug its first, conjugate-only
-    version shipped with) for why that has to happen there (pre-F2-FFT),
-    not in this function (which only ever sees already-F2-FFT'd rows,
-    and FFT doesn't commute with conjugation).
+    **Each row's F2 imaginary part must not leak into F1's quadrature.**
+    This is the single mistake both hypercomplex branches used to make,
+    and it has a characteristic look: an *hourglass* (bowtie) contour
+    shape, reported by a user as "the phases of f2 and f1 are somehow
+    offset from each other's phases", which is exactly what it is.
 
-    **Verified against real data 2026-09-02** (``test_data/Bruker
-    Example Data/Cyclosporine/203``, FnMODE=6), in two rounds:
+    After the F2 FFT each row ``a`` is complex: ``Re(a)`` is F2
+    absorption, ``Im(a)`` F2 dispersion. Combining whole complex rows
+    as ``a + 1j*b`` looks like the textbook hypercomplex step but is
+    not it, because ``a + 1j*b == (Re(a) + 1j*Re(b)) + 1j*(Im(a) +
+    1j*Im(b))`` -- the F2-real hypercomplex series *plus 1j times* the
+    F2-imaginary one. F1-transforming that and taking the real part
+    yields ``RR - II``, i.e. ``A1*A2 - D1*D2``: the phase-twist
+    lineshape, whose contours are the hourglass. The pure double-
+    absorption spectrum wanted is ``RR`` alone, so the F2 imaginary
+    has to be dropped (or cancelled) *before* the F1 transform.
 
-    Round 1: without any raw-row transform at all, every real peak
-    landed at its correct position but was accompanied by an
-    equal-magnitude ghost at that peak's F1-mirror position (ratio
-    ~0.8-1.2x the genuine peak, across the 10 strongest real peaks) --
-    exactly the "mirror across the spectrum's centre" risk this
-    docstring used to flag as untested. No sign/order permutation of
-    *this* function's own combine formula fixed it (all four tried);
-    conjugating the raw "echo" row (no reversal) dropped that ghost
-    ratio to ~0.005-0.02 on F1 -- shipped as the fix, but *only* the F1
-    axis was actually re-measured after it; conjugating a raw
-    time-domain row also reverses that row's own F2 frequency axis
-    (``FFT(conj(x))[k] == conj(FFT(x)[-k])``), an unavoidable side
-    effect this round's own verification didn't check for. A real user
-    caught it after the conjugate-only version had shipped: "I'm
-    pretty sure the echo-anti echo data is now mirrored in x."
+    **States (4) / States-TPPI (5)**: row ``2k`` is the "cosine"-
+    modulated row and row ``2k+1`` the "sine"-modulated row for the
+    *same* t1 increment ``k``, and the F1 point is built from their F2
+    **real parts only** -- ``decoded[k] = Re(row[2k]) + 1j*Re(row[2k+1])``.
+    The extra ``1j`` is a *second*, independent multiplication for the
+    F1 axis specifically; that is what "hypercomplex" means, and it
+    only works if what it multiplies is real.
 
-    Round 2: conjugating *and* reversing the same row (order doesn't
-    matter -- conjugation is elementwise, reversal a pure reordering,
-    so they commute) cancels the two frequency-reversals (one from
-    each operation) while the conjugate's own value-negation still
-    supplies the F1 relationship needed -- both F1 and F2 mirror ratios
-    now land at ~0.005-0.01 (noise floor) simultaneously, checked
-    together this time specifically because round 1's own gap was
-    "verified one axis without checking the other stayed fixed too."
+    States-TPPI (5) adds ``(-1)**k`` on top -- displaces the axial
+    (unmodulated-artifact) peak to the edge of the F1 spectral window
+    instead of its centre, which is the entire point of the TPPI-style
+    receiver-phase increment. Confirmed via NMR Wiki's States-TPPI
+    reference.
+
+    **Echo-Antiecho (6, a.k.a. Rance-Kay)**: row ``2k`` is the "echo"
+    (P-type) and row ``2k+1`` the "antiecho" (N-type), and they combine
+    as ``decoded[k] = 1j * (conj(echo) - antiecho)``. Here the F2
+    imaginary parts cancel rather than being discarded: writing it out,
+    ``Re(decoded) == Im(echo) + Im(antiecho)`` and ``Im(decoded) ==
+    Re(echo) - Re(antiecho)``, so the cosine- and sine-modulated
+    components are each a single real F2 plane, as the hypercomplex
+    step requires -- just with the F2 real/imaginary roles distributed
+    across the pair differently than the naive textbook form suggests
+    (the gradient-selected pair is 90 degrees apart in F2 as well as
+    opposite in F1). No raw-row transform is applied before the F2 FFT;
+    see ``io.bruker.read_2d``'s own ``fn_mode == 6`` note for the two
+    earlier attempts at one and why both were wrong.
+
+    **How both forms were measured** (2026-09-06, superseding two
+    earlier rounds of pattern-guessing that are recorded in
+    ``io.bruker.read_2d`` because their failure modes are instructive):
+    TopSpin's own recombined F1 interferogram is recoverable from a
+    finished 2D -- undo ``proc2s``'s ``PHC0``/``PHC1``, then inverse-
+    FFT along F1. The pair to inverse-transform is ``2rr + 1j*2ri``;
+    that pairing is not a guess either, see this module's caller note
+    and ``io.bruker``'s ``_PROCESSED_BLOCK_NAMING_NOTE``. Fitting
+    ``interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)`` per t1 point
+    against real Echo-Antiecho data (``test_data/Bruker Example
+    Data/Cyclosporine/203``) then gives, unambiguously, coefficients
+    of 1.0000 on ``conj(a)`` and ``b`` and 0.0003/0.0004 on the other
+    two, at a median relative residual of **0.0172**, with a per-point
+    ``|corr|`` of **0.997-1.0000** and a scale factor whose phase is a
+    constant **+90 degrees** across every t1 point (its magnitude being
+    just the F1 window, halved at k=0 by ``FCOR``). That constant 90
+    degrees is the ``1j``; dropping it costs everything, since it turns
+    F1 absorption into F1 dispersion -- end-to-end correlation against
+    TopSpin's own ``2rr`` is +0.9948 with it and +0.0010 without.
+
+    Overall, against TopSpin's ``2rr``: Echo-Antiecho +0.4448 ->
+    **+0.9948**, States-TPPI +0.6883 -> **+0.9986**.
+
+    **What the caller gets back, and why it matters.** For modes 4/5/6
+    the returned array's imaginary part is the **F1** quadrature
+    partner, not F2's -- the F2 imaginary is spent here and does not
+    survive the F1 transform. After that transform the real part is
+    TopSpin's ``2rr`` and the imaginary part its ``2ri``, which is
+    exactly the pair F1 phasing needs (and the same pair
+    ``io.bruker.read_2d_processed`` returns, so the raw and processed
+    readers now agree on what ``data_imag`` means). Re-phasing **F2**
+    on such a spectrum therefore cannot be done from the returned
+    array and requires a rebuild from the raw FID. Modes 0-3 are
+    unaffected: their ``data_imag`` is still F2's own.
 
     An odd row count (shouldn't happen for genuinely-paired data, but
     the raw-`ser` row-*count* resolution this project's own
@@ -811,10 +899,12 @@ def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int) -> np.ndarray:
     paired = data[: 2 * n_pairs]
     first, second = paired[0::2], paired[1::2]
     if fn_mode in (4, 5):
-        decoded = first + 1j * second
+        # Real parts only -- see this function's own "Each row's F2
+        # imaginary part must not leak into F1's quadrature" note.
+        decoded = np.real(first) + 1j * np.real(second)
         if fn_mode == 5:
             sign = np.where(np.arange(n_pairs) % 2 == 0, 1.0, -1.0)
             decoded = decoded * sign[:, np.newaxis]
     else:
-        decoded = (first + second) + 1j * (first - second)
+        decoded = 1j * (np.conj(first) - second)
     return decoded

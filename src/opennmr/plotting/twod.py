@@ -23,6 +23,7 @@ from mpl_toolkits.axes_grid1.axes_divider import AxesDivider
 
 from ..core.registry import find_gamma, NUC_label
 from ..core.spectrum import NMRSpectrum
+from ..processing.slicing import get_trace
 from .style import setup_plotting, get_stack_colormap, get_contour_cmap, downsample_2d, save_figure
 
 
@@ -42,19 +43,26 @@ from .style import setup_plotting, get_stack_colormap, get_contour_cmap, downsam
 # which was the single largest cost in a load once the duplicated work
 # was removed.
 #
-# Why 16M and not lower: full resolution in the Spectrum tab is an
-# explicit standing user instruction, so this is deliberately a
-# safety ceiling for outliers rather than a general downsampling
-# policy -- chosen (with the user) to leave every other real dataset
-# in this project's own test_data untouched. For scale: the COSY
-# (0.5M), bruker_T2 (2.1M) and bruker_PFG (4.2M) datasets are all far
-# below it and render exactly as before; only the 65.7M-point EXSY
-# class of dataset is capped. Downsampling uses `downsample_2d`, which
-# keeps each output bin's largest-magnitude value (see its own
-# docstring for the EXSY-diagonal bug that motivated that), so thin
-# ridges survive rather than being decimated away; measured pixel
-# difference at this cap is ~0.1% of a rendered canvas.
-_MAX_CONTOUR_POINTS = 16_777_216
+# Why this value: full resolution in the Spectrum tab is an explicit
+# standing user instruction, so this is deliberately a safety ceiling
+# for outliers rather than a general downsampling policy -- it leaves
+# every other real dataset in this project's own test_data untouched.
+# For scale: the COSY (0.5M), bruker_T2 (2.1M) and bruker_PFG (4.2M)
+# datasets are all far below it and render exactly as before.
+#
+# The value is defined as a *quarter of the EXSY benchmark's own point
+# count*, on direct user instruction: "I stated that the maximum should
+# be about that value for these EXSYs and should be applied to restrict
+# any dataset to 0.25x the EXSY's number of points". The pseudo-2D EXSY
+# is 1002 x 65536 = 65,667,072 points, so the ceiling is 16,416,768.
+#
+# (It was briefly raised to 2**25 on an earlier reading of "at least
+# half", then corrected back here -- 0.25x is the preference.)
+#
+# At this ceiling the EXSY renders at 1002 x 16384, a quarter of its F2
+# resolution, costing ~1.0s of contour time against ~4.0s at full.
+_EXSY_BENCHMARK_POINTS = 1002 * 65536
+_MAX_CONTOUR_POINTS = _EXSY_BENCHMARK_POINTS // 4
 
 # Don't sacrifice the indirect dimension to save the direct one: F1 is
 # usually far smaller (1002 vs 65536 on the benchmark) and far more
@@ -62,43 +70,9 @@ _MAX_CONTOUR_POINTS = 16_777_216
 # touches F1 if F1 alone already exceeds the ceiling.
 _MIN_CAPPED_CONTOUR_X = 4096
 
-
-def _signed_max_magnitude(data: np.ndarray, axis: int) -> np.ndarray:
-    """Per column (or row), the single value with the largest
-    *magnitude*, keeping its own sign.
-
-    The phase-sensitive replacement for ``max(abs(data))`` in the
-    ``"max"`` projection mode. Real user report -- "the 2D data still
-    isn't matching the phase window phasing info... specifically the
-    projections" -- and the mechanism is exact rather than subtle:
-    ``max(abs(...))`` is *phase-blind by construction*, so a 180-degree
-    phase change, which inverts every peak in the spectrum and in the
-    phase window's own slice, moved the projections by **exactly
-    zero**. Measured on real pseudo-2D data (``bruker_T2/11``): the
-    phase-window slice changed by 2.0 (a complete inversion) while both
-    projections changed by 0.00000.
-
-    Why not the obvious alternatives:
-    - ``sum`` is phase-sensitive, but ``max`` was chosen for pseudo-2D
-      precisely because summing washes out the slice-to-slice
-      amplitude changes that a relaxation/diffusion series exists to
-      show (see ``plot_2d_contour``'s own ``projection_mode`` doc).
-    - Plain ``max(data)`` is phase-sensitive but silently loses
-      negative peaks -- for a column that is entirely negative it
-      returns the *least* negative value, i.e. the noise floor rather
-      than the peak.
-
-    Signed max-magnitude keeps all three properties at once, and is the
-    same rule ``plotting.style.downsample_2d`` already uses for exactly
-    the same reason (keeping a bin's largest-magnitude signed value
-    rather than discarding sign or feature). For all-positive,
-    well-phased data it is *identical* to ``max(abs(...))``, so nothing
-    about a correctly-phased spectrum's appearance changes -- the
-    difference shows up only where there is genuine negative or
-    dispersive signal, which is exactly when it is needed.
-    """
-    index = np.expand_dims(np.argmax(np.abs(data), axis=axis), axis)
-    return np.squeeze(np.take_along_axis(data, index, axis=axis), axis=axis)
+#: Colour for negative-going contours. Teal, not red -- see the
+#: contour call in :func:`plot_2d_contour` for why.
+NEGATIVE_CONTOUR_COLOUR = "teal"
 
 
 def _cap_contour_points(max_x: int, max_y: int) -> tuple[int, int]:
@@ -177,12 +151,28 @@ def _prepare_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fra
     if level_mode not in ("power", "linear"):
         raise ValueError("level_mode must be 'power' or 'linear'")
 
-    thresvec = _contour_levels(factor * np.amax(data), np.amax(data), clevels, level_mode, power)
+    # Both sides are scaled to the same reference -- the largest
+    # *absolute* value in the data -- so a contour at a given level
+    # means the same intensity whichever sign it has.
+    #
+    # Real user report: "the negative contours look really prominent vs
+    # the positive. can the size of the contours be based on the
+    # greatest absolute value, not the greatest negative value?" That is
+    # exactly what was wrong: the negative side used to be scaled to
+    # `amin(data)` independently, so on a spectrum whose negative
+    # excursions are small (dispersive tails, artifacts) its lowest
+    # level sat at `factor * |amin|` -- a far lower *absolute* threshold
+    # than the positive side's `factor * amax`. The negative contours
+    # therefore started much closer to the noise floor and drew far more
+    # rings, reading as "prominent" when the underlying signal was
+    # weaker, not stronger.
+    peak = float(np.amax(np.abs(data)))
+    thresvec = _contour_levels(factor * peak, peak, clevels, level_mode, power)
 
-    neg_max = np.amin(data)  # most-negative value, i.e. the "positive" end for the negative side
-    neg_thresvec = (
-        _contour_levels(factor * neg_max, neg_max, clevels, level_mode, power) if neg_max < 0 else None
-    )
+    # The negative levels are now the exact mirror of the positive ones,
+    # drawn only when there is genuinely negative signal above the same
+    # threshold the positive side starts at.
+    neg_thresvec = [-level for level in thresvec] if float(np.amin(data)) < -factor * peak else None
 
     return contour_x, contour_y, contour_data, thresvec, y_axis, neg_thresvec
 
@@ -217,6 +207,164 @@ def _contour_levels(thresh_min, thresh_max, clevels, level_mode, power):
     return [thresh_min * (thresh_max / thresh_min) ** ((i / clevels) ** power) for i in cc2]
 
 
+#: Default colour cycle for extracted-slice lines and their traces.
+#: Each slice's dashed line on the contour and its trace in the panel
+#: share one colour -- that pairing is the whole point, so the cycle is
+#: chosen to stay distinguishable both from the black positive contours
+#: and from each other, including for the common red-green colour-vision
+#: deficiencies.
+SLICE_COLOURS = ("#3b4cc0", "#b02ba0", "#e8703a", "#2a9d8f", "#7a4fbf", "#c0392b")
+
+#: Dash pattern for the slice lines: a long-dash/dot alternation, so
+#: they read as annotation rather than as another contour level, and
+#: stay legible where they cross dense contours.
+_SLICE_DASHES = (0, (7, 3, 1, 3))
+
+
+def _draw_slice_panel(ax, divider, spectrum, slices, *,
+                      size, pad, offset_fraction, colours,
+                      font, fontsize, axis_label, linewidth):
+    """Draw extracted slices beside a contour: a dashed line across the
+    contour at each slice's own position, and the extracted traces
+    stacked in a panel to the right, one colour per slice.
+
+    ``slices`` : one dict per slice, ``{"axis", "index", "label",
+    "color"}``. ``axis`` follows
+    :func:`opennmr.processing.slicing.get_trace`'s own convention --
+    ``"f1"`` fixes a position along F1 and yields a *row* running along
+    F2 (the common case). All slices in one call must share an
+    ``axis``: the panel has a single x-axis, and rows and columns run
+    along different dimensions, so mixing them would put two unrelated
+    frequency axes on one plot. The first slice's axis wins and any
+    other is skipped rather than silently mis-plotted.
+
+    ``size`` : panel width as a multiple of the contour panel's own
+    width (``axes_size.Scaled``), not inches. The same function draws
+    both a standalone figure and the GUI's own embedded canvas, and a
+    fixed inch width that looks right in one crushes the contour to a
+    sliver in the other (measured -- 3.5 inches left the embedded
+    contour a few pixels wide).
+
+    **Traces are spread evenly over the panel's full height**, one slot
+    each, and **each is normalised to its own height** ("the extracted
+    projections should be normalised") so that a weak row can be
+    compared with a strong one on lineshape rather than being flattened
+    against it. ``offset_fraction`` is how much of its slot each trace
+    fills.
+
+    **No connector lines.** An earlier version continued each dashed
+    line across the gap and joined it to its own trace's baseline. It
+    looked right in a saved figure but was not worth its upkeep in the
+    GUI, where zooming, panning and unit changes all move the two
+    Axes independently: "drop the lines to the extracted slices, it
+    seems too hard to maintain across different views." The shared
+    colour is what pairs a line with its trace now.
+
+    Returns the panel Axes, or ``None`` if there was nothing to draw.
+    """
+    slices = [s for s in slices if s is not None]
+    if not slices:
+        return None
+    axis_kind = slices[0].get("axis", "f1")
+
+    traces = []
+    for spec in slices:
+        if spec.get("axis", "f1") != axis_kind:
+            continue
+        try:
+            trace = get_trace(spectrum, axis=axis_kind, index=int(spec["index"]))
+        except (ValueError, IndexError, KeyError):
+            # A slice index left over from a dataset that has since been
+            # reprocessed to a different size shouldn't take the whole
+            # figure down with it -- skip it and draw the rest.
+            continue
+        traces.append((spec, trace))
+    if not traces:
+        return None
+
+    # sharex for a row panel, so the traces stay aligned under the
+    # contour through every later zoom/pan rather than only at draw
+    # time. Setting the limits once from ax.get_xlim() was not enough:
+    # the GUI's own preserve-the-view redraw restores the contour's
+    # limits *after* this function has already run, so a zoomed contour
+    # got a full-range panel beside it. A column panel's x axis is the
+    # contour's *y*, which matplotlib cannot share across orientations,
+    # so that case still takes a one-time copy below.
+    panel = divider.append_axes(
+        "right", axes_size.Scaled(size), pad=pad,
+        **({"sharex": ax} if axis_kind == "f1" else {}),
+    )
+    # Span every row of the divider, not just the contour's own, so the
+    # panel reaches the top of the F2 projection strip -- explicit user
+    # request, "the extracted slice plot should be able to reach the top
+    # height of the top projection". append_axes places it alongside the
+    # main cell only; re-pointing its locator at rows 0..n gives it the
+    # contour's height plus the pad and the strip above it. Self-
+    # adapting: with no top projection there is one row and this is a
+    # no-op.
+    panel.set_axes_locator(divider.new_locator(
+        nx=len(divider.get_horizontal()) - 1, ny=0, ny1=len(divider.get_vertical()),
+    ))
+    fixed_axis = spectrum.axes[0] if axis_kind == "f1" else spectrum.axes[1]
+    fixed_positions = fixed_axis.ppm if fixed_axis.ppm is not None else fixed_axis.index
+
+    # Evenly spread: one slot per trace across a normalised 0..1 panel,
+    # each trace scaled to fill its own slot.
+    n = len(traces)
+    slot = 1.0 / n
+    heights = [float(np.max(t.data) - np.min(t.data)) or 1.0 for _, t in traces]
+
+    # Stack so the panel's vertical order matches the contour's: the
+    # slice whose dashed line sits highest gets the highest trace.
+    lo, hi = ax.get_ylim() if axis_kind == "f1" else ax.get_xlim()
+    span = (hi - lo) or 1.0
+    palette = tuple(colours) if colours else SLICE_COLOURS
+    positions = [float(fixed_positions[int(spec["index"]) - 1]) for spec, _ in traces]
+    order = sorted(range(n), key=lambda i: (positions[i] - lo) / span)
+    baselines = {slot_index: rank * slot for rank, slot_index in enumerate(order)}
+
+    for i, (spec, trace) in enumerate(traces):
+        colour = spec.get("color") or palette[i % len(palette)]
+        trace_axis = trace.axes[0]
+        trace_x = trace_axis.ppm if trace_axis.ppm is not None else trace_axis.index
+        baseline = baselines[i]
+        y = np.asarray(trace.data, dtype=float)
+        # Normalised per trace, not on one shared scale.
+        scale = (slot * offset_fraction) / heights[i]
+        panel.plot(trace_x, (y - float(np.min(y))) * scale + baseline,
+                   color=colour, linewidth=linewidth)
+
+        label = spec.get("label")
+        if label:
+            # Above the trace's own baseline noise rather than on it --
+            # the left-hand end of a real row is rarely flat.
+            panel.text(0.015, baseline + 0.45 * slot, str(label), color=colour,
+                       transform=panel.get_yaxis_transform(which="grid"),
+                       fontname=font, fontsize=fontsize - 2, va="bottom", ha="left",
+                       clip_on=False)
+
+        position = positions[i]
+        if axis_kind == "f1":
+            ax.axhline(position, color=colour, linestyle=_SLICE_DASHES, linewidth=1.0)
+        else:
+            ax.axvline(position, color=colour, linestyle=_SLICE_DASHES, linewidth=1.0)
+
+    # Match the contour's own limits on the shared dimension, so a peak
+    # in a trace sits directly under the same shift in the contour.
+    # (Already automatic for a row panel via sharex, above.)
+    if axis_kind != "f1":
+        panel.set_xlim(ax.get_ylim())
+    panel.set_ylim(0.0, 1.0)
+    if axis_label:
+        panel.set_xlabel(axis_label, fontsize=fontsize)
+    panel.tick_params(axis="y", which="both", left=False, right=False,
+                      labelleft=False, labelright=False)
+    panel.tick_params(axis="x", which="both", labelsize=fontsize)
+    for spine in ("top", "right", "left"):
+        panel.spines[spine].set_visible(False)
+    return panel
+
+
 def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fraction_y=0.25,
                      ncontourpts_x=16384, ncontourpts_y=1024,
                      pl_height=7.0, pl_width=7.0, factor=0.07, clevels=7,
@@ -228,6 +376,8 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                      colour_spectra=None, equal_tickspacing=False, tick_number=None,
                      tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
                      show_nQ_line=False, nQ=1, nQ_colors=None,
+                     slices=None, slice_panel_size=1.0, slice_panel_pad=0.95,
+                     slice_offset_fraction=0.85, slice_colors=None, slice_linewidth=2.0,
                      ax=None, fig=None, save_fig=False, fig_name='nmr_2d_spectrum',
                      save_format='png'):
     """Plot a 2D NMR spectrum as a contour plot with F1/F2 projections.
@@ -240,6 +390,13 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
 
     ``show_projections`` : ``True`` (both), ``False`` (neither, e.g.
     embedding a compact panel), or ``'f1'``/``'f2'`` (one only).
+
+    ``slices`` : extracted slices to show beside the contour -- one
+    dict per slice, ``{"axis", "index", "label", "color"}``, drawn as a
+    dashed line across the contour at that slice's own position plus
+    its extracted trace, stacked in a panel to the right and joined to
+    its line. See :func:`_draw_slice_panel` for the full behaviour and
+    the remaining ``slice_*`` parameters.
 
     ``square_aspect`` : ``True`` (default) makes the main contour panel
     itself square, via the same ``AxesDivider`` that lays out the F1/F2
@@ -325,7 +482,15 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
         # what makes an incoherent (no single correct phase) artifact
         # visually distinguishable from the genuine, phaseable peak
         # next to it.
-        ax.contour(contour_x, contour_y, contour_data, colors='red', levels=sorted(neg_thresvec))
+        # Teal rather than red: red reads as an error/alarm colour and
+        # dominated the black positive contours visually even at equal
+        # intensity. Teal stays clearly distinguishable from black
+        # (and remains so for the common red-green colour-vision
+        # deficiencies, which red-vs-black does not) without
+        # shouting. Real user request: "maybe also the colour needs to
+        # be softened to something less stark like a teal".
+        ax.contour(contour_x, contour_y, contour_data,
+                   colors=NEGATIVE_CONTOUR_COLOUR, levels=sorted(neg_thresvec))
 
     # A plain make_axes_locatable(ax) divider's default reference sizes
     # (Size.AxesX/AxesY) are the axes' own *data-coordinate range*, not
@@ -416,7 +581,13 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
         spec_float = np.asarray(data, dtype=np.float64)
         mode = projection_mode
         if mode == "auto":
-            mode = "max" if pseudo2d else "sum"
+            # "max" for *every* 2D now, not just pseudo-2D. A sum
+            # projection of a phase-sensitive spectrum cancels its own
+            # positive and negative lobes against each other and washes
+            # the peaks out -- real user request: "the 2D projections
+            # should probably just be the positive projections (not the
+            # sum)". "sum" is still available explicitly.
+            mode = "max"
         elif mode not in ("sum", "max"):
             raise ValueError("projection_mode must be 'auto', 'sum', or 'max'")
 
@@ -424,7 +595,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             ax_f2 = divider.append_axes("top", projection_size, pad=projection_pad, sharex=ax)
             ax_f2.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False, labeltop=False)
             ax_f2.tick_params(axis='y', which='both', left=False, right=False, labelleft=False, labelright=False)
-            f2_projection = np.sum(spec_float, axis=0) if mode == "sum" else _signed_max_magnitude(spec_float, axis=0)
+            f2_projection = np.sum(spec_float, axis=0) if mode == "sum" else np.max(spec_float, axis=0)
             ax_f2.plot(x_ppm, f2_projection + (0.02 * np.min(f2_projection)), 'k')
             ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
             proj_axes["f2"] = ax_f2
@@ -433,7 +604,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             ax_f1 = divider.append_axes("left", projection_size, pad=projection_pad, sharey=ax)
             ax_f1.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False, labeltop=False)
             ax_f1.tick_params(axis='y', which='both', left=False, right=False, labelleft=False, labelright=False)
-            f1_projection = np.sum(spec_float, axis=1) if mode == "sum" else _signed_max_magnitude(spec_float, axis=1)
+            f1_projection = np.sum(spec_float, axis=1) if mode == "sum" else np.max(spec_float, axis=1)
             # Real bug, user-reported ("the phase of the contours and
             # the projections are definitely inverted... it's more about
             # the matching of the contour phase to the projection
@@ -467,6 +638,22 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                 continue
             for spine in ('top', 'right', 'bottom', 'left'):
                 proj_ax.spines[spine].set_visible(False)
+
+    # After the projections, so the panel is appended outside them and
+    # the divider lays all the cells out together (see the AxesDivider
+    # comment above for why its reference sizes matter here).
+    if slices:
+        proj_axes["slices"] = _draw_slice_panel(
+            ax, divider, spectrum, slices,
+            size=slice_panel_size, pad=slice_panel_pad,
+            offset_fraction=slice_offset_fraction, colours=slice_colors,
+            font=font, fontsize=fontsize, linewidth=slice_linewidth,
+            # The trace runs along the *other* dimension from the one
+            # its slice fixes, so a row's panel carries the contour's
+            # own x label and a column's its y label. User: "the axis
+            # needs a matching axis label".
+            axis_label=(labeltextx if slices[0].get("axis", "f1") == "f1" else labeltexty),
+        )
 
     if standalone:
         fig.set_figheight(pl_height)

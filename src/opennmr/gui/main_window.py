@@ -282,6 +282,9 @@ class MainWindow(QMainWindow):
         self.canvas.peakPicked.connect(self._on_peak_picked)
         self.canvas.regionSelected.connect(self._on_region_selected)
         self.canvas.referenceShiftRequested.connect(self._on_reference_shift_from_plot)
+        self.canvas.contourSlicesChanged.connect(self._on_contour_slices_changed)
+        self.canvas.referenceCalibrationRequested.connect(self._on_reference_calibration_from_plot)
+        self.canvas.sliceKeepRequested.connect(self._on_slice_keep_requested)
         self.fid_canvas = MplCanvas()
         self.compare_canvas = MplCanvas()
         self.fit_canvas = MplCanvas()
@@ -443,6 +446,37 @@ class MainWindow(QMainWindow):
         autophase_action.triggered.connect(self._on_autophase_clicked)
         edit_menu.addAction(autophase_action)
 
+        # Navigation-mode shortcuts. matplotlib's own toolbar owns the
+        # pan/zoom state, so these drive it rather than duplicating it --
+        # the toolbar buttons stay in sync because they *are* the state.
+        view_menu = menu_bar.addMenu("&View")
+        pan_action = QAction("&Pan Mode", self)
+        pan_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        pan_action.setToolTip("Drag to pan the spectrum. On by default when data is loaded.")
+        pan_action.triggered.connect(lambda: self._set_navigation_mode("pan"))
+        view_menu.addAction(pan_action)
+
+        zoom_action = QAction("&Zoom Mode", self)
+        zoom_action.setShortcut(QKeySequence("Ctrl+Shift+Z"))
+        zoom_action.setToolTip("Drag a rectangle to zoom into it.")
+        zoom_action.triggered.connect(lambda: self._set_navigation_mode("zoom"))
+        view_menu.addAction(zoom_action)
+
+        toggle_nav_action = QAction("&Toggle Pan/Zoom", self)
+        # Ctrl+Z (Cmd+Z on macOS) as explicitly requested. There is no
+        # undo stack in this application for it to collide with.
+        toggle_nav_action.setShortcut(QKeySequence("Ctrl+Z"))
+        toggle_nav_action.setToolTip("Switch between pan and zoom.")
+        toggle_nav_action.triggered.connect(self._toggle_navigation_mode)
+        view_menu.addAction(toggle_nav_action)
+
+        view_menu.addSeparator()
+        home_action = QAction("Reset &View", self)
+        home_action.setShortcut(QKeySequence("Ctrl+0"))
+        home_action.setToolTip("Reset pan/zoom back to the full spectrum.")
+        home_action.triggered.connect(self._reset_navigation_view)
+        view_menu.addAction(home_action)
+
         window_menu = menu_bar.addMenu("&Window")
         minimize_action = QAction("&Minimize", self)
         minimize_action.setShortcut(QKeySequence("Ctrl+M"))
@@ -566,6 +600,228 @@ class MainWindow(QMainWindow):
         model_actions = self._model_menu_group.actions()
         if 0 <= self.relaxation_model_combo.currentIndex() < len(model_actions):
             model_actions[self.relaxation_model_combo.currentIndex()].setChecked(True)
+
+    def _on_slice_keep_requested(self, payload) -> None:
+        """Add an extracted slice to the session as its own 1D
+        spectrum, and select it.
+
+        Real user request: "a method to phase on an extracted slice".
+        ``MplCanvas.extract_slice`` only ever *displayed* a trace -- it
+        never reached the session, and every phase control acts on
+        session spectra, so an extracted slice could be looked at but
+        not worked on. Adding it makes phasing, fitting and Compare all
+        apply to it through their existing paths, with no parallel
+        machinery.
+
+        Registered via :meth:`Session.add_derived`, which marks the
+        vendor ``"derived"`` -- correct here: the slice has no raw FID
+        of its own to reprocess from, so the FID-processing controls
+        stay hidden for it (see ``_fid_reprocessable``) while the phase
+        controls, which need only retained imaginary data, work
+        normally. ``processing.slicing.get_trace`` carries ``data_imag``
+        through, which is what makes that true -- and when it is absent
+        (a magnitude-mode or processed-only source), the slice is still
+        kept, but the user is told why phasing will be unavailable
+        rather than left to discover a greyed-out control.
+        """
+        trace, label, parent, axis, slice_index = payload
+        if trace is None:
+            return
+        if trace.data_imag is None:
+            QMessageBox.information(
+                self, "Slice kept without phase data",
+                f"{label} has no retained imaginary data, so it can be fitted and compared "
+                f"but not phased. That happens when the spectrum it came from was itself "
+                f"loaded without an imaginary part (a magnitude-mode or processed-only load).",
+            )
+        index = self.session.add_derived(trace, label)
+        kept = self.session.spectra[index]
+        # Provenance, so the slice is a *working copy* of part of the 2D
+        # rather than a dead end: "Apply Phase to Source 2D" uses these
+        # to push a phase dialled in here back into the parent. Held as
+        # a live object reference (not a session index, which shifts
+        # when spectra are removed or reordered) and blocklisted from
+        # the sidecar, since neither a spectrum object nor a
+        # within-session relationship is meaningful once reloaded.
+        kept.metadata.raw["slice_parent"] = parent
+        kept.metadata.raw["slice_axis"] = axis
+        kept.metadata.raw["slice_index"] = slice_index
+        self.spectrum_list.addItem(self.session.label(index))
+        self._select_single_row(index)
+        self.statusBar().showMessage(
+            f"Kept {label}. Phase it, then use \u201cApply Phase to Source 2D\u201d "
+            f"to push that phase back into the 2D.", 8000,
+        )
+
+    def _slice_source_of(self, spectrum):
+        """``(parent, dim)`` for an extracted slice that still has a
+        live link back to its 2D, else ``(None, None)``.
+
+        ``dim`` is the parent dimension the slice's own phase belongs
+        to, which is the *opposite* of the axis that was held fixed:
+        extracting with ``axis="f1"`` fixes F1 and traces **along F2**,
+        so phasing that trace is an F2 phase. Getting this backwards
+        would silently phase the wrong dimension, so it is derived in
+        one place rather than at each call site.
+        """
+        if spectrum is None:
+            return None, None
+        parent = spectrum.metadata.raw.get("slice_parent")
+        axis = spectrum.metadata.raw.get("slice_axis")
+        if parent is None or axis not in ("f1", "f2"):
+            return None, None
+        # Identity, not `in`/`.index()`: those compare with `==`, and
+        # NMRSpectrum is a dataclass holding numpy arrays, so equality
+        # returns an array and raises "truth value of an array with
+        # more than one element is ambiguous". Caught by the test for
+        # the removed-parent case.
+        if not any(candidate is parent for candidate in self.session.spectra):
+            # The 2D was removed from the session since; nothing to
+            # apply to, and holding a reference to it would be worse
+            # than saying so.
+            return None, None
+        return parent, ("f2" if axis == "f1" else "f1")
+
+    def _on_apply_slice_phase_to_source(self) -> None:
+        """Push the phase dialled in on an extracted slice back into
+        the 2D it came from.
+
+        Real user request: "I don't think the derived slice phasing is
+        feeding back into the contour, it should be more like a
+        temporary file and have some way to go back into the contour
+        data." Without this the slice was a dead end -- you could phase
+        it, but the result went nowhere.
+
+        Deliberately adds into the parent's own *user* phase keys and
+        then rebuilds it through :meth:`_recompute_multi_row_data`,
+        rather than mutating the parent's data directly. That reuses
+        the one pipeline everything else goes through, so the result is
+        identical to having dialled the same phase on the 2D itself --
+        and it survives the next rebuild, which a direct data mutation
+        would not.
+
+        Only the phase *added since extraction* is transferred: the
+        slice inherited the parent's recorded phase when it was cut, so
+        transferring that too would apply it twice.
+        """
+        index = self._selected_index()
+        if index is None:
+            return
+        slice_spectrum = self.session.spectra[index]
+        parent, dim = self._slice_source_of(slice_spectrum)
+        if parent is None:
+            QMessageBox.information(
+                self, "No source 2D",
+                "This spectrum isn't an extracted slice, or the 2D it came from is no "
+                "longer loaded.",
+            )
+            return
+
+        self._commit_pending_phase_to_metadata()
+        raw = slice_spectrum.metadata.raw
+        phase0 = float(raw.get("phase0", 0.0) or 0.0)
+        phase1 = float(raw.get("phase1", 0.0) or 0.0)
+        if not phase0 and not phase1:
+            QMessageBox.information(
+                self, "No phase to apply",
+                "No phase has been dialled in on this slice yet, so there is nothing to "
+                "apply to the 2D.",
+            )
+            return
+
+        key0, key1 = io_bruker.USER_PHASE_KEYS[dim]
+        parent_raw = parent.metadata.raw
+        parent_raw[key0] = float(parent_raw.get(key0, 0.0) or 0.0) + phase0
+        parent_raw[key1] = float(parent_raw.get(key1, 0.0) or 0.0) + phase1
+        # Cleared on the slice so a second click can't apply the same
+        # phase twice -- the slice's own displayed data keeps it (it is
+        # already baked in), which is what makes the two agree.
+        raw["phase0"] = 0.0
+        raw["phase1"] = 0.0
+        # The live spin boxes have to be zeroed too, and *before*
+        # selecting the parent: _capture_phase_reference commits any
+        # pending phase into the outgoing target on the way out, which
+        # would write the same value straight back onto the slice and
+        # undo the clearing above. Found by testing the round trip
+        # rather than by reading the code.
+        for spin, handle in ((self.phase0_spin, self.phase0_handle),
+                             (self.phase1_spin, self.phase1_handle)):
+            spin.blockSignals(True)
+            spin.setValue(0.0)
+            spin.blockSignals(False)
+            handle.setValue(0.0, emit=False)
+
+        # Identity search, for the same reason as in
+        # _slice_source_of -- list.index() compares with `==`.
+        parent_index = next(
+            i for i, candidate in enumerate(self.session.spectra) if candidate is parent
+        )
+        self._select_single_row(parent_index)
+        if not self._recompute_from_raw_if_possible(parent):
+            self._draw_selected_spectrum(parent, row=parent_index)
+        self.statusBar().showMessage(
+            f"Applied phase0 {phase0:+.2f}\u00b0, phase1 {phase1:+.2f}\u00b0 to the "
+            f"2D's {dim.upper()} dimension.", 8000,
+        )
+
+    def _set_navigation_mode(self, mode: str) -> None:
+        """Put **every** canvas into ``"pan"`` or ``"zoom"``.
+
+        Applied to all of them, not just the visible one: the mode is a
+        per-toolbar flag, so leaving the others alone would mean
+        switching canvas tab silently changed the interaction mode back.
+
+        matplotlib's own toolbar owns this state and its ``pan()``/
+        ``zoom()`` methods *toggle*, so each is called only when the
+        toolbar is not already in the requested mode -- calling
+        unconditionally would turn it back off.
+        """
+        for canvas in self._all_canvases():
+            toolbar = getattr(canvas, "toolbar", None)
+            if toolbar is None:
+                continue
+            current = toolbar.mode.name if hasattr(toolbar.mode, "name") else str(toolbar.mode)
+            already = (mode == "pan" and "PAN" in current.upper()) or (
+                mode == "zoom" and "ZOOM" in current.upper()
+            )
+            if already:
+                continue
+            if mode == "pan":
+                toolbar.pan()
+            else:
+                toolbar.zoom()
+
+    def _navigation_mode(self) -> str:
+        """``"pan"``, ``"zoom"`` or ``""`` for the visible canvas."""
+        current = self.canvas_tabs.currentWidget()
+        if current is None or not hasattr(current, "toolbar"):
+            return ""
+        mode = current.toolbar.mode
+        text = (mode.name if hasattr(mode, "name") else str(mode)).upper()
+        if "PAN" in text:
+            return "pan"
+        if "ZOOM" in text:
+            return "zoom"
+        return ""
+
+    def _toggle_navigation_mode(self) -> None:
+        """Ctrl/Cmd+Z -- swap between pan and zoom. From neither mode
+        (both toggled off via the toolbar), goes to pan, matching the
+        default the app starts in."""
+        self._set_navigation_mode("zoom" if self._navigation_mode() == "pan" else "pan")
+
+    def _reset_navigation_view(self) -> None:
+        """Reset the visible canvas's pan/zoom back to the full view --
+        via :meth:`MplCanvas.reset_view`, which restores the *layout*
+        as well as the limits (``toolbar.home()`` alone leaves a
+        clipped axis label behind; see that method)."""
+        current = self.canvas_tabs.currentWidget()
+        if current is None:
+            return
+        if hasattr(current, "reset_view"):
+            current.reset_view()
+        elif hasattr(current, "toolbar"):
+            current.toolbar.home()
 
     def _on_save_figure_clicked(self) -> None:
         """File > Save Figure As… -- delegates to whichever canvas tab
@@ -1218,6 +1474,13 @@ class MainWindow(QMainWindow):
 
         self.spectrum_list.addItem(self.session.label(index))
         self._select_single_row(index)
+        # Pan is the default interaction once there is data to pan --
+        # explicit user request. Applied on load rather than at startup
+        # so it lands on canvases that actually have something plotted,
+        # and only for the first spectrum, so it never overrides a mode
+        # the user has since chosen for themselves.
+        if len(self.session) == 1:
+            self._set_navigation_mode("pan")
         if saved_processing:
             # Seeding metadata.raw above only affects widget *values*
             # (via _refresh_fid_processing_controls, already run by
@@ -1275,10 +1538,18 @@ class MainWindow(QMainWindow):
         else:
             self._recompute_multi_row_data(spectrum)
         self.spectrum_list.item(index).setText(self.session.label(index))
-        sr_shift = spectrum.metadata.raw.get("sr_shift_hz")
-        if sr_shift:
-            self._apply_reference_shift_hz(sr_shift)  # also redraws
-        else:
+        # Both dimensions -- a genuine 2D can carry an SR on each, and
+        # reapplying only the direct one after a reprocess would
+        # silently drop the indirect axis's referencing.
+        applied = False
+        for dim in ("f2", "f1"):
+            sr_shift = spectrum.metadata.raw.get(self._SR_KEYS[dim][0])
+            # Only a *user* value needs reapplying -- a fresh read has
+            # already folded the file's own SR into its new axis.
+            if sr_shift is not None and sr_shift != self._recorded_sr(spectrum, dim):
+                self._apply_reference_shift_hz(sr_shift, dim)  # also redraws
+                applied = True
+        if not applied:
             self._draw_selected_spectrum(spectrum, row=index)
 
     def _select_single_row(self, row: int) -> None:
@@ -1941,7 +2212,11 @@ class MainWindow(QMainWindow):
         self.output_dpi_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("DPI:", self.output_dpi_spin)
 
-        fig_w, fig_h = self.canvas.figure.get_size_inches()
+        # The canvas's own export default (8x8, or 7.5x10 once a 2D is
+        # showing extracted slices), not the live embedded figure's
+        # size -- that is whatever Qt's layout happened to give the
+        # widget, which is not a sensible default for a saved figure.
+        fig_w, fig_h = self.canvas.default_export_size()
         self.output_fig_width_spin = QDoubleSpinBox()
         self.output_fig_width_spin.setRange(1.0, 40.0)
         self.output_fig_width_spin.setValue(float(fig_w))
@@ -2022,11 +2297,68 @@ class MainWindow(QMainWindow):
             canvas.set_contour_fraction(fraction)
 
     def _on_nq_line_changed(self, *_args) -> None:
+        """The diagonal (nQ) overlay, stored against the spectrum it
+        was set on rather than as one app-wide switch.
+
+        Explicit user request: "plotting options like nQ line should be
+        tied to the loaded spectrum". It genuinely belongs to the data,
+        not the app -- a diagonal means something on a homonuclear
+        correlation and nothing on a heteronuclear one, and n is a
+        property of the experiment (1 for EXSY/NOESY/COSY, higher for a
+        multiple-quantum correlation). As one global setting it followed
+        the user onto every other spectrum they selected, including the
+        ones it was meaningless on.
+
+        Persisted with the rest of the processing state, so it survives
+        a restart (:mod:`opennmr.io.persistence` writes every
+        JSON-serialisable ``metadata.raw`` key it isn't told to skip)."""
         enabled = self.output_nq_line_checkbox.isChecked()
+        n_value = self.output_nq_value_spin.value()
         self.output_nq_value_spin.setEnabled(enabled)
-        n_values = [self.output_nq_value_spin.value()]
         for canvas in self._all_canvases():
-            canvas.set_nq_line(enabled, n_values)
+            canvas.set_nq_line(enabled, [n_value])
+        index = self._selected_index()
+        if index is not None:
+            raw = self.session.spectra[index].metadata.raw
+            raw["nq_line"] = enabled
+            raw["nq_value"] = n_value
+            self._schedule_sidecar_save(index)
+
+    def _on_contour_slices_changed(self, slices) -> None:
+        """Store the canvas's extracted slices against the spectrum
+        they were taken from -- same reasoning as the nQ line (see
+        :meth:`_on_nq_line_changed`): a slice at F1 index 412 means
+        nothing on any other dataset, so it cannot be canvas-local
+        state that survives a reselection."""
+        index = self._selected_index()
+        if index is None:
+            return
+        self.session.spectra[index].metadata.raw["contour_slices"] = list(slices)
+        self._schedule_sidecar_save(index)
+
+    def _restore_contour_slices(self, spectrum) -> None:
+        """Push ``spectrum``'s own stored slices back onto the canvas.
+        Uses :meth:`MplCanvas.set_contour_slices`, which deliberately
+        doesn't emit -- otherwise restoring would immediately write the
+        same list back out as if the user had just added it."""
+        self.canvas.set_contour_slices(spectrum.metadata.raw.get("contour_slices") or [])
+
+    def _restore_nq_line_control(self, spectrum) -> None:
+        """Put the nQ controls (and every canvas) back to whatever
+        ``spectrum`` itself carries -- see :meth:`_on_nq_line_changed`.
+        Signals are blocked so restoring doesn't write the value
+        straight back out again as if the user had just set it."""
+        enabled = bool(spectrum.metadata.raw.get("nq_line", False))
+        n_value = int(spectrum.metadata.raw.get("nq_value", 1))
+        self.output_nq_line_checkbox.blockSignals(True)
+        self.output_nq_line_checkbox.setChecked(enabled)
+        self.output_nq_line_checkbox.blockSignals(False)
+        self.output_nq_value_spin.blockSignals(True)
+        self.output_nq_value_spin.setValue(n_value)
+        self.output_nq_value_spin.blockSignals(False)
+        self.output_nq_value_spin.setEnabled(enabled)
+        for canvas in self._all_canvases():
+            canvas.set_nq_line(enabled, [n_value])
 
     def _load_figure_styles(self) -> dict:
         try:
@@ -2202,20 +2534,22 @@ class MainWindow(QMainWindow):
             item.setCheckState(previous_checked.get(entry, Qt.CheckState.Checked))
             item.setData(Qt.ItemDataRole.UserRole, entry)
             self.compare_list.addItem(item)
-        # Always leave *something* current/highlighted -- explicit user
-        # feedback that it's "no longer obvious which spectrum is
-        # selected" in this list. Nothing ever set an initial current
-        # row before (only Move Up/Down did, and only after the user
-        # had already clicked a row to move it), so a freshly
-        # (re)populated list -- including the automatic pseudo-2D
-        # auto-populate, which needs no click at all -- showed no
-        # current-row highlight whatsoever. Keeps the same entry
-        # current across a rebuild when it's still present (e.g. after
-        # Move Up/Down or a check-state toggle), falling back to the
-        # first row otherwise.
-        if new_order:
-            current_row = new_order.index(previous_current_entry) if previous_current_entry in new_order else 0
-            self.compare_list.setCurrentRow(current_row)
+        # Keep whatever the user had current across a rebuild (so Move
+        # Up/Down and check-state toggles don't lose their place), but
+        # never *pre*-select anything on a fresh populate. Explicit user
+        # request: "in compare, none of the spectra should be
+        # pre-selected like the last one is now."
+        #
+        # This narrows, rather than reverses, the earlier feedback that
+        # it was "no longer obvious which spectrum is selected" here:
+        # that was about the highlight being invisible once a row *had*
+        # been chosen, which still works. What is gone is the automatic
+        # choice made on the user's behalf before they have clicked
+        # anything.
+        if new_order and previous_current_entry in new_order:
+            self.compare_list.setCurrentRow(new_order.index(previous_current_entry))
+        else:
+            self.compare_list.setCurrentRow(-1)
         self.compare_list.blockSignals(False)
         self._update_compare_tab_visibility()
 
@@ -3093,21 +3427,9 @@ class MainWindow(QMainWindow):
             # (its own _CONJUGATE_QUADRATURE_NOTE step), but not its
             # own *extra* even-row conjugate-and-reversal, which is a
             # per-pair fix that isn't knowable until a specific row is
-            # actually picked -- see _recompute_multi_row_data's own
-            # matching comment for the real, user-reported "mirrored
-            # in x" bug a conjugate-without-reversal version of this
-            # exact fix once caused (checking only one axis after a
-            # raw time-domain fix isn't enough, since FFT(conj(x))
-            # also reverses that row's own F2 frequency axis). This
-            # method previously missed the fix entirely -- confirmed
-            # directly against real data: a genuinely wrong (not just
-            # re-phased) trace for any echo (even-indexed) row,
-            # exactly the "two pipelines quietly diverge" class that
-            # comment already warns about. Real user report: "the
-            # phase is 90 offset" -- what a conjugated-and-unreversed
-            # trace looks like at a glance, not a literal phase error.
-            if spectrum.metadata.raw.get("fn_mode", 1) == 6 and row % 2 == 0:
-                raw_fid = np.conj(raw_fid)[::-1]
+            # actually picked. No Echo-Antiecho raw-row transform
+            # here either -- see _recompute_multi_row_data's own
+            # matching note and io.bruker.read_2d's fn_mode == 6 one.
             slice_template = get_trace(spectrum, axis="f1", index=spectrum_row)
 
         computed = self._process_raw_fid_row(spectrum, raw_fid, dt)
@@ -3157,7 +3479,14 @@ class MainWindow(QMainWindow):
         phase1 = float(spectrum.metadata.raw.get("phase1", 0.0)) + self.phase1_spin.value()
         span = ppm.max() - ppm.min()
         pivot_frac = (self.pivot_spin.value() - ppm.min()) / span if span else 0.5
-        data = processing_ft.apply_phase(data, ppm, phase0, phase1, pivot_frac=pivot_frac)
+        # Rebuilt from the raw FID, so the file's own recorded phase has
+        # to be re-applied here too -- the reader's own application of it
+        # lives in the spectrum this replaces, not in `fid_raw`. Same
+        # composition, same order, as io.bruker.read_1d/read_2d.
+        data = io_bruker.apply_dimension_phase(
+            data, ppm, io_bruker.recorded_phase(spectrum.metadata.raw, "f2"),
+            (phase0, phase1), pivot_frac=pivot_frac,
+        )
         data = self._baseline_correct_if_enabled(data, ppm, spectrum)
 
         axis = NMRAxis(kind="frequency", ppm=ppm, hz=hz)
@@ -3289,27 +3618,18 @@ class MainWindow(QMainWindow):
         )
 
         fn_mode = spectrum.metadata.raw.get("fn_mode", 1)
-        if fn_mode == 6:
-            # Mirrors io.bruker.read_2d's own fn_mode==6 raw-row
-            # conjugate-and-reverse (see its comment there for the
-            # real-data verification, including the round-1-shipped,
-            # user-reported "mirrored in x" bug a conjugate-without-
-            # reversal version of this exact line caused -- checking
-            # only the F1 axis after a fix touching a raw time-domain
-            # row isn't enough, since FFT(conj(x)) also reverses that
-            # row's own F2 frequency axis, not just its phase) --
-            # "fid_raw" here already has whatever global conjugate
-            # read_2d applied to every row before caching it (its own
-            # `_CONJUGATE_QUADRATURE_NOTE` step), so this only needs
-            # the same *extra* even-row conjugate+reversal, not the
-            # full sequence again. Without this, a live F2-only control
-            # change on an Echo-Antiecho 2D would silently revert to
-            # the pre-fix mirrored-ghost behaviour the moment this path
-            # recomputes -- exactly the "two pipelines quietly diverge"
-            # bug class this method's own docstring already warns
-            # about for decode_hypercomplex_f1 below.
-            raw_fid = raw_fid.copy()
-            raw_fid[0::2] = np.conj(raw_fid[0::2])[:, ::-1]
+        # No raw-row transform for Echo-Antiecho (fn_mode 6). This
+        # method used to carry a copy of one, mirroring io.bruker.
+        # read_2d's; that transform turned out to be destroying the
+        # echo rows (it reversed each FID *before* the window and
+        # zero-fill, so the window was applied backwards), and the
+        # recombination it was propping up was wrong too. Both are
+        # gone from the reader -- see its own fn_mode == 6 note and
+        # processing.ft.decode_hypercomplex_f1. Kept here as a comment
+        # rather than silence because the "two pipelines quietly
+        # diverge" class this method's docstring warns about cuts both
+        # ways: a copy that is *not* deleted alongside the original is
+        # the same bug wearing the opposite sign.
 
         rows = []
         filled_rows = []
@@ -3378,7 +3698,13 @@ class MainWindow(QMainWindow):
             phase0 += self.phase0_spin.value()
             phase1 += self.phase1_spin.value()
         pivot_frac2 = ((self.pivot_spin.value() - ppm2.min()) / span2 if span2 else 0.5) if f2_pivot_is_live else 0.5
-        data = processing_ft.apply_phase(data, ppm2, phase0, phase1, pivot_frac=pivot_frac2)
+        # Recorded phase re-applied for the same reason as in
+        # _process_raw_fid_row: this rebuilds from `fid_raw`, which is
+        # the FID *before* the reader phased anything.
+        data = io_bruker.apply_dimension_phase(
+            data, ppm2, io_bruker.recorded_phase(spectrum.metadata.raw, "f2"),
+            (phase0, phase1), pivot_frac=pivot_frac2,
+        )
 
         dt_f1 = spectrum.metadata.raw.get("fid_dt_f1")
         f1_axis = spectrum.axes[0]
@@ -3404,7 +3730,23 @@ class MainWindow(QMainWindow):
             # changes live -- exactly the "two pipelines quietly
             # diverge" bug this whole round's own architecture change
             # was about closing.
+            # Same F1-quadrature normalisation io.bruker.read_2d does
+            # before decoding -- this path rebuilds the same Bruker data,
+            # so it must normalise it the same way.
+            if fn_mode in (4, 5):
+                data = data.copy()
+                data[1::2] *= -1
             data = processing_ft.decode_hypercomplex_f1(data, fn_mode)
+            # F1 linear prediction, same as io.bruker.read_2d -- without
+            # it this rebuild would silently drop it and the spectrum
+            # would jump (broader F1 lines) the moment any control was
+            # touched. Deliberately follows the file's own ME_mod here,
+            # matching the load, rather than being skipped for speed:
+            # a live rebuild that differs from the load is exactly the
+            # failure this project keeps hitting.
+            proc2s_lp = spectrum.metadata.raw.get("proc2s")
+            if proc2s_lp:
+                data = io_bruker.apply_recorded_f1_linear_prediction(data, proc2s_lp)
             if spectrum.metadata.vendor == "bruker":
                 # Real bug, found and fixed: this method never applied
                 # any window to F1 at all -- read_2d always does
@@ -3487,15 +3829,34 @@ class MainWindow(QMainWindow):
                 # rather than just reapplying a stale phase.
                 phase0_f1 += self.phase0_spin.value()
                 phase1_f1 += self.phase1_spin.value()
-            if phase0_f1 or phase1_f1:
+            recorded_f1 = io_bruker.recorded_phase(spectrum.metadata.raw, "f1")
+            # The guard now includes the recorded phase: F1's own
+            # recorded values can be nonzero while the user has dialled
+            # nothing, and skipping the call then would drop the file's
+            # own phase on every live rebuild.
+            if phase0_f1 or phase1_f1 or any(recorded_f1):
                 span1 = ppm1.max() - ppm1.min()
                 pivot_frac1 = (
                     ((self.pivot_spin.value() - ppm1.min()) / span1 if span1 else 0.5) if f1_pivot_is_live else 0.5
                 )
-                data = processing_ft.apply_phase(data.T, ppm1, phase0_f1, phase1_f1, pivot_frac=pivot_frac1).T
+                data = io_bruker.apply_dimension_phase(
+                    data.T, ppm1, recorded_f1, (phase0_f1, phase1_f1), pivot_frac=pivot_frac1,
+                ).T
 
         data = self._baseline_correct_if_enabled_multi_row(data, ppm2, spectrum)
         spectrum.axes = [f1_axis, NMRAxis(kind="frequency", ppm=ppm2, hz=hz2)]
+        # Magnitude/power last, exactly as the reader does it -- this
+        # path rebuilds from the raw FID, so without it a magnitude-mode
+        # spectrum silently reverted to phase-sensitive the moment any
+        # control was touched (measured at 1.93 relative difference on
+        # the real magnitude-mode COSY, against 0.000000 for every
+        # phase-sensitive dataset once the recorded phase was wired in).
+        magnitude_mode = spectrum.metadata.raw.get("magnitude_mode")
+        if magnitude_mode:
+            data = io_bruker._apply_magnitude_mode(data, magnitude_mode)
+            spectrum.data = np.real(data)
+            spectrum.data_imag = None
+            return True
         spectrum.data = np.real(data)
         spectrum.data_imag = np.imag(data)
         return True
@@ -3994,7 +4355,8 @@ class MainWindow(QMainWindow):
             return
         spectrum = self.session.spectra[index]
         shape_before = spectrum.data.shape
-        if self._fid_reprocessable(spectrum):
+        rebuilt_from_raw = self._fid_reprocessable(spectrum)
+        if rebuilt_from_raw:
             success = self._recompute_multi_row_data(spectrum)
         else:
             # No raw FID to redo the FID-domain steps from at all (a
@@ -4063,17 +4425,51 @@ class MainWindow(QMainWindow):
         # comment), so a settled FID-processing change just refreshes
         # whatever it's already showing -- always a contour/stack, not
         # conditionally so.
-        if self._phase_mode == "pseudo2d":
+        # This rebuild's result is baseline-corrected and carries the
+        # full live phase; make it the new reference so the drag
+        # continues *from* it. Without this the next tick re-derived
+        # the display from the pre-drag snapshot, throwing the baseline
+        # away again -- the display then alternated between corrected
+        # and not on every pause, which is the reported "bouncing".
+        # Only for the multi-row modes, which are the ones that defer
+        # baseline correction to this rebuild in the first place.
+        # Only when the rebuild came from the raw FID. The
+        # processed-only fallback (_recompute_multi_row_phase_and_
+        # baseline_only) *derives* its result from this reference, so
+        # overwriting it with that result would make the reference
+        # self-referential -- baseline correction could then never be
+        # turned back off, because the "uncorrected" source it would
+        # revert to had been replaced by the corrected output. Caught
+        # by the pseudo-2D apply-all-slices test, which toggles
+        # baseline off and back on.
+        if (rebuilt_from_raw and self._phase_mode in ("pseudo2d", "2d")
+                and self._phase_reference_full is not None):
+            refreshed = spectrum.complex_data
+            if refreshed is not None and refreshed.shape == self._phase_reference_full.shape:
+                self._phase_reference_full = refreshed
+                self._phase_reference_delta_applied = (
+                    self.phase0_spin.value(), self.phase1_spin.value(),
+                )
+
+        if self._phase_mode in ("pseudo2d", "2d"):
             on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-            self.canvas.show_spectrum(spectrum)
-            if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
-                self._show_fid_preview(spectrum, switch_tab=False)
-            if on_processing_preview:
-                self._refresh_processing_preview_if_active()
-        elif self._phase_mode == "2d":
-            on_processing_preview = self.canvas_tabs.currentWidget() is self.processing_preview_canvas
-            self.canvas.show_spectrum(spectrum)
-            if on_processing_preview:
+            self._redraw_2d_preserving_view(spectrum)
+            # This *is* the settle redraw, so cancel the canvas-refresh
+            # debounce rather than letting it fire straight afterwards
+            # and rebuild the identical contour a second time. Both
+            # timers are 200 ms and both restart on every drag tick, so
+            # before this they always fired as a pair on a pause --
+            # measured at 295 ms per contour rebuild for
+            # Cyclosporine/203 and 1.34 s for the EXSY, i.e. the whole
+            # cost of a settle was being paid twice for one frame.
+            self._canvas_2d_refresh_timer.stop()
+            self._canvas_2d_refresh_pending_index = None
+            if self._phase_mode == "pseudo2d":
+                if self.canvas_tabs.currentWidget() is self.fid_canvas and self._fid_preview_available(spectrum):
+                    self._show_fid_preview(spectrum, switch_tab=False)
+                if on_processing_preview:
+                    self._refresh_processing_preview_if_active()
+            elif on_processing_preview:
                 self._refresh_processing_preview_phase_only()
 
     def _schedule_canvas_2d_refresh(self, index: int) -> None:
@@ -4093,23 +4489,37 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         if spectrum.ndim != 2:
             return
+        self._redraw_2d_preserving_view(spectrum)
+
+    def _redraw_2d_preserving_view(self, spectrum) -> None:
+        """Rebuild ``self.canvas``'s contour for ``spectrum`` without
+        throwing away whatever ppm/index zoom is currently on it.
+
+        A full contour rebuild has no in-place update path (see
+        ``MplCanvas.set_full_resolution``'s own docstring) and resets
+        the view by default. Both debounced settle paths need the same
+        "phase-editing shouldn't silently reset a deliberate zoom"
+        treatment already applied to the 1D case in
+        :meth:`_apply_phase_preview` -- real user report: "Something is
+        up with the GUI phase control for the indirect and it's jumping
+        during phasing". The jump was literal: with baseline correction
+        on, both 200 ms debounce timers fire on every pause in a drag,
+        and :meth:`_run_debounced_multi_row_reprocess` used a bare
+        ``show_spectrum`` -- so a view zoomed to 4..2 ppm x 60..20 ppm
+        snapped back to the full 12.7..-3.3 x 157.5..-7.5 every time
+        the user paused.
+
+        Best-effort by design: this runs from timer callbacks during a
+        drag, where a render failure must never raise (same reasoning
+        as :meth:`_apply_phase_preview`'s own "2d" branch) -- skip the
+        frame and let the next one catch up."""
         try:
-            # A full contour rebuild has no in-place update path (see
-            # MplCanvas.set_full_resolution's own docstring) and resets
-            # the view by default -- preserve whatever ppm/index zoom
-            # was already there across it, the same "phase-editing
-            # shouldn't silently reset a deliberate zoom" reasoning
-            # already applied elsewhere in this codebase (e.g.
-            # update_data's own docstring, or the 1D case just above in
-            # _apply_phase_preview).
             xlim, ylim = self.canvas.ax.get_xlim(), self.canvas.ax.get_ylim()
             self.canvas.show_spectrum(spectrum)
             self.canvas.ax.set_xlim(xlim)
             self.canvas.ax.set_ylim(ylim)
             self.canvas.canvas.draw_idle()
-        except Exception:  # noqa: BLE001 -- best-effort, same reasoning as
-            # _apply_phase_preview's own "2d" branch: a render failure here
-            # must never raise out of a timer callback mid-drag.
+        except Exception:  # noqa: BLE001 -- see docstring
             pass
 
     def _on_reset_processing_clicked(self) -> None:
@@ -4422,6 +4832,21 @@ class MainWindow(QMainWindow):
         reset_button.clicked.connect(self._on_reset_phase_clicked)
         form.addRow(reset_button)
 
+        # Only meaningful for an extracted slice, so hidden otherwise
+        # (see _refresh_selection_display). A slice is a working copy of
+        # one row/column of a 2D: phase it on a single trace, where the
+        # lineshape is actually readable, then push that phase into the
+        # whole dataset.
+        self.apply_slice_phase_button = QPushButton("Apply Phase to Source 2D")
+        self.apply_slice_phase_button.setToolTip(
+            "Add the phase dialled in on this slice to the 2D it was extracted "
+            "from, along the matching dimension, and switch back to it. Phasing "
+            "a single trace is far easier to judge than a contour."
+        )
+        self.apply_slice_phase_button.clicked.connect(self._on_apply_slice_phase_to_source)
+        self.apply_slice_phase_button.setVisible(False)
+        form.addRow(self.apply_slice_phase_button)
+
         self.pivot_spin = RelativeDoubleSpinBox()
         self.pivot_spin.setRange(-1.0e5, 1.0e5)
         self.pivot_spin.setDecimals(3)
@@ -4592,7 +5017,21 @@ class MainWindow(QMainWindow):
         self.sr_shift_spin.setRange(-1.0e6, 1.0e6)
         self.sr_shift_spin.setDecimals(4)
         self.sr_shift_spin.setSuffix(" Hz")
-        form.addRow("SR:", self.sr_shift_spin)
+        form.addRow("SR (direct):", self.sr_shift_spin)
+
+        # The indirect axis needs its own SR, not a share of F2's: it
+        # has its own base frequency (metadata.sfo1_indirect) and, on a
+        # heteronuclear 2D, its own nucleus entirely, so one Hz offset
+        # cannot reference both. Shown only when there is an indirect
+        # frequency axis to reference -- hidden for 1D, and for a
+        # pseudo-2D, whose indirect axis is an index (slice number),
+        # not a frequency.
+        self.sr_shift_indirect_spin = QDoubleSpinBox()
+        self.sr_shift_indirect_spin.setRange(-1.0e6, 1.0e6)
+        self.sr_shift_indirect_spin.setDecimals(4)
+        self.sr_shift_indirect_spin.setSuffix(" Hz")
+        self.sr_indirect_label = QLabel("SR (indirect):")
+        form.addRow(self.sr_indirect_label, self.sr_shift_indirect_spin)
 
         apply_button = QPushButton("Apply Reference Shift")
         apply_button.clicked.connect(self._on_apply_sr_clicked)
@@ -4746,26 +5185,112 @@ class MainWindow(QMainWindow):
         the same live-preview path as every other Phase 0 change."""
         self.phase0_spin.setValue(self.phase0_spin.value() + delta)
 
+    def _recompute_from_raw_if_possible(self, spectrum) -> bool:
+        """Rebuild ``spectrum`` from its cached raw FID, so a change to
+        something applied *during* reconstruction (the recorded phase)
+        actually takes effect. ``False`` when there is no raw FID to
+        rebuild from, leaving the caller to fall back to a plain
+        preview."""
+        if spectrum is None or not self._fid_reprocessable(spectrum):
+            return False
+        if spectrum.ndim == 1:
+            self._commit_processing_preview_as_spectrum(spectrum)
+        else:
+            self._recompute_multi_row_data(spectrum)
+        index = self._selected_index()
+        if index is not None:
+            self._draw_selected_spectrum(spectrum, row=index)
+            self._schedule_sidecar_save(index)
+        self._refresh_current_phase_displays()
+        return True
+
     def _on_reset_phase_clicked(self) -> None:
-        for handle in (self.phase0_handle, self.phase1_handle):
-            handle.setValue(0.0, emit=False)
-        for spin in (self.phase0_spin, self.phase1_spin):
-            spin.blockSignals(True)
-            spin.setValue(0.0)
-            spin.blockSignals(False)
-        self._apply_phase_preview()
+        """Zero both Phase 0 and Phase 1 together -- the same "actually
+        zero the applied phase, not just the drag delta" behaviour as
+        :meth:`_on_zero_phase_clicked`, which see for why."""
+        self._on_zero_phase_clicked(0)
+        self._on_zero_phase_clicked(1)
+
+    def _phase_target_dim_key(self) -> str:
+        """``"f1"`` or ``"f2"`` -- which dimension the Phase controls
+        are currently editing. One accessor, so every phase helper
+        agrees about the target rather than each re-deriving it."""
+        return "f1" if (self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0) else "f2"
+
+    def _phase_target_spectrum(self):
+        """The spectrum the Phase controls act on, or ``None``."""
+        index = self._phase_target_index
+        if self._phase_mode is None or index is None or not (0 <= index < len(self.session)):
+            return None
+        return self.session.spectra[index]
+
+    def _phase_committed_value(self, order: int) -> float:
+        """The phase already applied to whatever the controls are
+        currently targeting -- the other half of the total that
+        :meth:`_refresh_current_phase_displays` shows (that total is
+        this plus the live spin-box delta). ``0.0`` when there is no
+        valid target, so callers don't have to re-check.
+
+        Includes **both** halves: the file's own recorded phase and the
+        user's own. They are stored separately and applied through
+        different models (see ``io.bruker.apply_dimension_phase``), but
+        what is "already applied" -- which is what the display shows and
+        what the Zero buttons must cancel -- is their sum.
+        """
+        spectrum = self._phase_target_spectrum()
+        if spectrum is None:
+            return 0.0
+        dim = self._phase_target_dim_key()
+        raw = spectrum.metadata.raw
+        user_key = io_bruker.USER_PHASE_KEYS[dim][order]
+        return float(raw.get(user_key, 0.0) or 0.0) + io_bruker.recorded_phase(raw, dim)[order]
 
     def _on_zero_phase_clicked(self, order: int) -> None:
         """Zero just Phase 0 (``order=0``) or just Phase 1 (``order=1``),
         leaving the other untouched -- real user request, distinct from
         :meth:`_on_reset_phase_clicked` (the combined Reset button,
-        which zeros both together)."""
+        which zeros both together).
+
+        Zeros the phase **actually applied**, not merely the live drag
+        delta. Real user report: "Zeroing phases should actually zero
+        the values, not just reset to the loaded values." The spin box
+        holds only the delta since the last
+        :meth:`_capture_phase_reference`; the total in force is that
+        delta *plus* whatever is committed in ``metadata.raw`` (which,
+        on a freshly loaded Bruker spectrum, is the file's own recorded
+        ``PHC0``/``PHC1``). Setting the delta to 0 therefore used to
+        return to the *loaded* phase rather than to zero -- visibly
+        doing nothing at all on a spectrum that hadn't been dragged
+        yet, which is exactly what was reported.
+
+        Setting the delta to ``-committed`` instead drives the total to
+        0 while leaving every existing mechanism untouched: the same
+        preview, commit and persistence paths run as for any other
+        phase edit, rather than this reaching into ``metadata.raw``
+        behind their back and having to re-derive what they already
+        handle.
+        """
+        spectrum = self._phase_target_spectrum()
+        if spectrum is not None:
+            # Clear the recorded half outright rather than trying to
+            # cancel it with an equal-and-opposite user phase: the two
+            # use different models (index ramp vs pivot), so for
+            # first-order phase an opposing user value would *not*
+            # actually cancel it. Zeroing means "no phase", so remove
+            # it at its source.
+            dim = self._phase_target_dim_key()
+            spectrum.metadata.raw[io_bruker.RECORDED_PHASE_KEYS[dim][order]] = 0.0
+            spectrum.metadata.raw[io_bruker.USER_PHASE_KEYS[dim][order]] = 0.0
         handle, spin = (self.phase0_handle, self.phase0_spin) if order == 0 else (self.phase1_handle, self.phase1_spin)
         handle.setValue(0.0, emit=False)
         spin.blockSignals(True)
         spin.setValue(0.0)
         spin.blockSignals(False)
-        self._apply_phase_preview()
+        # Rebuild rather than just re-previewing: the recorded phase is
+        # applied during reconstruction from the raw FID, so clearing it
+        # only takes effect once that rebuild runs.
+        if not self._recompute_from_raw_if_possible(spectrum):
+            self._apply_phase_preview()
 
     def _on_autophase_clicked(self) -> None:
         """Autophase for whatever the Phase controls currently target
@@ -5031,14 +5556,64 @@ class MainWindow(QMainWindow):
         self.canvas.update_data(spectrum)
         return True
 
+    @staticmethod
+    def _f2_quadrature_is_spent(spectrum) -> bool:
+        """Whether ``spectrum``'s stored ``data``/``data_imag`` pair is
+        F1's quadrature rather than F2's -- true for a genuine
+        hypercomplex 2D (``FnMODE`` 4 States, 5 States-TPPI, 6
+        Echo-Antiecho), false for everything else.
+
+        The hypercomplex step *consumes* each row's F2 imaginary part
+        to build F1's (see
+        :func:`opennmr.processing.ft.decode_hypercomplex_f1`), so after
+        the F1 transform what survives is TopSpin's ``2rr`` and
+        ``2ri``: F1's pair. That is exactly what F1 phasing wants and
+        exactly what F2 phasing cannot use.
+
+        Why this needs saying at all: the *previous* decode combined
+        whole complex rows (``a + 1j*b``), which is C-linear, so a
+        global F2 phase commuted straight through it and through the
+        F1 FFT -- phasing F2 on the finished array gave the same answer
+        as phasing the rows first. That accidental equivalence is
+        precisely what let F2's dispersion leak into F1 and produce the
+        hourglass lineshape. The corrected decode is only R-linear, so
+        the equivalence is gone -- correctly, but it means an F2 phase
+        can no longer be previewed from the finished array and has to
+        be applied before the decode, i.e. by a rebuild from the raw
+        FID.
+
+        Not done instead: keeping the second hypercomplex plane
+        (TopSpin's ``2ir``/``2ii``) so F2 could be phased from four
+        stored planes the way TopSpin does it. That is the textbook
+        answer and it is rejected on memory -- the EXSY benchmark's
+        decoded array is already ~1 GB, and this project caps contour
+        points at a quarter of that same dataset for the same reason.
+        """
+        return (
+            not spectrum.metadata.pseudo_2d
+            and spectrum.ndim == 2
+            and int(spectrum.metadata.raw.get("fn_mode", 1)) in (4, 5, 6)
+        )
+
     def _apply_phase_preview(self) -> None:
         index = self._selected_index()
         if index is None or self._phase_mode is None:
             return
 
         spectrum = self.session.spectra[index]
-        phase0 = self.phase0_spin.value()
-        phase1 = self.phase1_spin.value()
+        # Only the part not already baked into the reference. A
+        # debounced rebuild that lands mid-drag replaces the reference
+        # with its own (baseline-corrected) result and records the
+        # phase that result already carries -- without subtracting it
+        # here, the next drag tick would re-apply the whole phase to
+        # data that already had it *and* silently discard the baseline,
+        # so the display flipped between baselined and not on every
+        # pause. Real user report: "The indirect phasing sort of
+        # bounces like there is a mismatch to the current and read
+        # phases."
+        applied0, applied1 = self._phase_reference_delta_applied
+        phase0 = self.phase0_spin.value() - applied0
+        phase1 = self.phase1_spin.value() - applied1
         self._refresh_current_phase_displays()
 
         freq_ppm = self._phase_freq_ppm
@@ -5145,20 +5720,30 @@ class MainWindow(QMainWindow):
 
         elif self._phase_mode == "2d":
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
-            data_for_dim = self._phase_reference_full if dim == "f2" else self._phase_reference_full.T
-            phased = processing_ft.apply_phase(data_for_dim, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
-            if dim == "f1":
-                phased = phased.T
-            spectrum.data = np.real(phased)
-            spectrum.data_imag = np.imag(phased)
-            # Baseline correction deferred to a debounced recompute,
-            # not applied inline on every drag tick -- see the
-            # matching pseudo2d "apply to every slice" branch above
-            # for why (the actual "hangs" mechanism: a per-row spline
-            # fit re-run on every single mouse-move event during a
-            # phase drag).
-            if spectrum.metadata.raw.get("baseline_correct"):
+            if dim == "f2" and self._f2_quadrature_is_spent(spectrum):
+                # Nothing to preview from: for a hypercomplex 2D the
+                # stored complex pair is F1's quadrature, not F2's, so
+                # rotating it by an F2 phase is not an F2 phase
+                # correction. Defer the whole tick to the debounced
+                # rebuild, which goes back to the raw FID and phases F2
+                # in the one place it is still meaningful -- before the
+                # hypercomplex decode. See _f2_quadrature_is_spent.
                 self._schedule_multi_row_reprocess(index)
+            else:
+                data_for_dim = self._phase_reference_full if dim == "f2" else self._phase_reference_full.T
+                phased = processing_ft.apply_phase(data_for_dim, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
+                if dim == "f1":
+                    phased = phased.T
+                spectrum.data = np.real(phased)
+                spectrum.data_imag = np.imag(phased)
+                # Baseline correction deferred to a debounced recompute,
+                # not applied inline on every drag tick -- see the
+                # matching pseudo2d "apply to every slice" branch above
+                # for why (the actual "hangs" mechanism: a per-row spline
+                # fit re-run on every single mouse-move event during a
+                # phase drag).
+                if spectrum.metadata.raw.get("baseline_correct"):
+                    self._schedule_multi_row_reprocess(index)
             # Best-effort, same reasoning as _baseline_correct_if_enabled:
             # this runs on *every* drag tick, so a rendering exception
             # here must never raise out of the signal handler (freezing
@@ -5305,13 +5890,17 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         is_f1 = self._phase_mode == "2d" and self.dim_combo.currentIndex() != 0
         key0, key1 = ("phase0_f1", "phase1_f1") if is_f1 else ("phase0", "phase1")
+        # The file's own recorded phase counts as "already applied" too
+        # -- see _phase_committed_value. Added here rather than merged
+        # into the stored phase0/phase1, which mean the user's own.
+        recorded0, recorded1 = io_bruker.recorded_phase(spectrum.metadata.raw, "f1" if is_f1 else "f2")
         # Wrapped the same way _commit_pending_phase_to_metadata wraps
         # the stored value -- keeps this display cyclic continuously
         # during an active drag too (e.g. a committed 350deg plus a
         # live +30deg delta shows as 20deg, not 380deg), not just after
         # the drag ends and commits.
-        phase0 = (float(spectrum.metadata.raw.get(key0, 0.0)) + self.phase0_spin.value()) % 360.0
-        phase1 = float(spectrum.metadata.raw.get(key1, 0.0)) + self.phase1_spin.value()
+        phase0 = (float(spectrum.metadata.raw.get(key0, 0.0)) + recorded0 + self.phase0_spin.value()) % 360.0
+        phase1 = float(spectrum.metadata.raw.get(key1, 0.0)) + recorded1 + self.phase1_spin.value()
         self.phase0_current_display.setText(f"{phase0:.2f}°")
         self.phase1_current_display.setText(f"{phase1:.2f}°")
 
@@ -5353,6 +5942,7 @@ class MainWindow(QMainWindow):
             self._phase_mode = None
             self._phase_target_dim = None
             self._phase_reference_full = None
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = None
             self._refresh_current_phase_displays()
             return
@@ -5383,6 +5973,7 @@ class MainWindow(QMainWindow):
             self._phase_mode = None
             self._phase_target_dim = None
             self._phase_reference_full = None
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
             self._refresh_current_phase_displays()
@@ -5391,6 +5982,7 @@ class MainWindow(QMainWindow):
         if spectrum.ndim == 1:
             self._phase_mode = "1d"
             self._phase_reference_full = spectrum.complex_data
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = spectrum.axis_values(0, "ppm")
             self._phase_target_dim = None
             self._set_processing_enabled(True, "Adjust phase for the selected spectrum.")
@@ -5398,6 +5990,7 @@ class MainWindow(QMainWindow):
         elif spectrum.ndim == 2 and spectrum.is_pseudo_2d:
             self._phase_mode = "pseudo2d"
             self._phase_reference_full = spectrum.complex_data
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = spectrum.axis_values(-1, "ppm")
             self._phase_target_dim = None
             n_slices = spectrum.data.shape[0]
@@ -5412,6 +6005,7 @@ class MainWindow(QMainWindow):
         elif spectrum.ndim == 2:
             self._phase_mode = "2d"
             self._phase_reference_full = spectrum.complex_data
+            self._phase_reference_delta_applied = (0.0, 0.0)
             dim = "f2" if self.dim_combo.currentIndex() == 0 else "f1"
             self._phase_target_dim = dim
             self._phase_freq_ppm = spectrum.axis_values(-1 if dim == "f2" else 0, "ppm")
@@ -5448,6 +6042,7 @@ class MainWindow(QMainWindow):
             self._phase_mode = None
             self._phase_target_dim = None
             self._phase_reference_full = None
+            self._phase_reference_delta_applied = (0.0, 0.0)
             self._phase_freq_ppm = None
             self._set_processing_enabled(False, "Phase adjustment needs a spectrum with retained imaginary data.")
             self._refresh_current_phase_displays()
@@ -5573,6 +6168,34 @@ class MainWindow(QMainWindow):
         peak_button_row.addWidget(clear_peaks_button)
         peak_layout.addLayout(peak_button_row)
 
+        # Which slice of a multi-row spectrum peaks are picked on.
+        # Real user report: "peak picking on a pseudo 2D is currently
+        # impossible" -- and it was: manual picking listens on the
+        # Spectrum canvas, which shows the contour/stack for a
+        # pseudo-2D, so a click there yields a 2D position with no
+        # single trace to attach a peak to, and Auto-Pick was hard-wired
+        # to slice 1 with no way to choose another.
+        self.peak_slice_row = QWidget()
+        peak_slice_layout = QHBoxLayout(self.peak_slice_row)
+        peak_slice_layout.setContentsMargins(0, 0, 0, 0)
+        peak_slice_layout.addWidget(QLabel("Pick on slice:"))
+        self.peak_slice_spin = QSpinBox()
+        self.peak_slice_spin.setRange(1, 1)
+        # Wraps, per explicit user request: "if there's a box with a
+        # number, pressing down on the lowest should cycle back to the
+        # highest".
+        self.peak_slice_spin.setWrapping(True)
+        self.peak_slice_spin.setToolTip(
+            "Which slice of a 2D/pseudo-2D series to pick peaks on -- "
+            "both 'Pick from Plot' (which shows this slice on its own "
+            "so there is a 1D trace to click) and 'Auto-Pick Peaks'. "
+            "Wraps around at either end."
+        )
+        self.peak_slice_spin.valueChanged.connect(self._on_peak_slice_changed)
+        peak_slice_layout.addWidget(self.peak_slice_spin)
+        peak_slice_layout.addStretch(1)
+        peak_layout.addWidget(self.peak_slice_row)
+
         auto_pick_row = QHBoxLayout()
         self.pick_peak_button = QPushButton("Pick from Plot")
         self.pick_peak_button.setCheckable(True)
@@ -5585,7 +6208,8 @@ class MainWindow(QMainWindow):
         auto_pick_button = QPushButton("Auto-Pick Peaks")
         auto_pick_button.setToolTip(
             "Detect peaks automatically (scipy find_peaks on the "
-            "current selection -- slice 1, for a pseudo-2D series) and "
+            "current selection, or on the chosen slice of a 2D/"
+            "pseudo-2D series) and "
             "replace the table above with them, as a starting point -- "
             "still just initial guesses, refined by the fit like any "
             "other row here. Sensitivity set by Min. prominence, below."
@@ -6108,6 +6732,30 @@ class MainWindow(QMainWindow):
         self.imaging_max_gradient_spin.valueChanged.connect(self._on_imaging_gradient_changed)
         gradient_form.addRow("Max gradient:", self.imaging_max_gradient_spin)
 
+        # The gradient a Bruker experiment actually ran at is a
+        # *percentage* of the probe's maximum, recorded as GPZ1 in
+        # acqus. Real user report: "the relative gradient strength
+        # doesn't seem to be calculated correctly for my Bruker data
+        # (should be gpz1 generally as a percentage value, e.g. gpz1=2
+        # is 2%)". It was not being read at all -- the mm axis used the
+        # full probe maximum, so at gpz1=2 the scale came out 50x too
+        # small. Prefilled from GPZ1 but editable, since "generally"
+        # is not "always": another pulse programme may put the imaging
+        # gradient on a different GPZ index.
+        self.imaging_gradient_percent_spin = QDoubleSpinBox()
+        self.imaging_gradient_percent_spin.setRange(0.0, 100.0)
+        self.imaging_gradient_percent_spin.setDecimals(3)
+        self.imaging_gradient_percent_spin.setSuffix(" %")
+        self.imaging_gradient_percent_spin.setToolTip(
+            "Gradient actually used, as a percentage of the maximum "
+            "above -- Bruker's own GPZ1 from acqus, which is read "
+            "automatically. Override it if this experiment's pulse "
+            "programme puts its imaging gradient on a different "
+            "gradient channel."
+        )
+        self.imaging_gradient_percent_spin.valueChanged.connect(self._on_imaging_gradient_changed)
+        gradient_form.addRow("Gradient used:", self.imaging_gradient_percent_spin)
+
         save_probe_gradient_button = QPushButton("Save as default for this probe")
         save_probe_gradient_button.setToolTip(
             "Remember this max gradient value for this spectrum's own recorded probe, "
@@ -6128,11 +6776,37 @@ class MainWindow(QMainWindow):
     def _on_imaging_gradient_changed(self, _value: float) -> None:
         index = self._selected_index()
         if index is not None:
-            self.session.spectra[index].metadata.raw["imaging_max_gradient_g_per_cm"] = (
-                self.imaging_max_gradient_spin.value() or None
-            )
+            raw = self.session.spectra[index].metadata.raw
+            raw["imaging_max_gradient_g_per_cm"] = self.imaging_max_gradient_spin.value() or None
+            raw["imaging_gradient_percent"] = self.imaging_gradient_percent_spin.value()
             self._schedule_sidecar_save(index)
         self._refresh_imaging_gradient()
+
+    @staticmethod
+    def _recorded_gradient_percent(spectrum) -> float | None:
+        """Bruker's ``GPZ1`` for ``spectrum``, as a percentage of the
+        probe's maximum gradient -- ``acqus``'s ``GPZ`` array, index 1.
+        ``None`` when there is no such array (a non-Bruker dataset, or
+        one whose parameters weren't retained)."""
+        gpz = (spectrum.metadata.raw.get("acqus") or {}).get("GPZ")
+        if not isinstance(gpz, (list, tuple)) or len(gpz) < 2:
+            return None
+        try:
+            return float(gpz[1])
+        except (TypeError, ValueError):
+            return None
+
+    def _restore_imaging_gradient_percent(self, spectrum) -> None:
+        """Put the gradient-percentage box back to this spectrum's own
+        value -- its saved override, else ``GPZ1``, else 100% (the old
+        behaviour, i.e. "the full maximum")."""
+        stored = spectrum.metadata.raw.get("imaging_gradient_percent")
+        if stored is None:
+            recorded = self._recorded_gradient_percent(spectrum)
+            stored = recorded if recorded else 100.0
+        self.imaging_gradient_percent_spin.blockSignals(True)
+        self.imaging_gradient_percent_spin.setValue(float(stored))
+        self.imaging_gradient_percent_spin.blockSignals(False)
 
     def _refresh_imaging_gradient(self) -> None:
         """Recompute (and hand to the canvas) the gamma/max-gradient
@@ -6142,7 +6816,12 @@ class MainWindow(QMainWindow):
         gradient edit, so switching spectra never leaves the mm axis
         showing a stale nucleus's conversion."""
         index = self._selected_index()
-        max_gradient = self.imaging_max_gradient_spin.value() or None
+        # The *applied* gradient, not the probe's maximum: a Bruker
+        # experiment runs at GPZ1 percent of it (see
+        # _recorded_gradient_percent).
+        percent = self.imaging_gradient_percent_spin.value()
+        maximum = self.imaging_max_gradient_spin.value() or None
+        max_gradient = (maximum * percent / 100.0) if (maximum and percent) else None
         gamma = None
         if index is not None and max_gradient:
             spectrum = self.session.spectra[index]
@@ -6536,6 +7215,63 @@ class MainWindow(QMainWindow):
             fwhm_guess = abs(xmax - xmin) * 0.01 or 1.0
             self._add_peak_row(shift=shift, fwhm=fwhm_guess, eta=0.5)
 
+    def _peak_pick_slice_index(self) -> int:
+        return int(self.peak_slice_spin.value())
+
+    def _refresh_peak_slice_control(self, spectrum) -> None:
+        """Show the "Pick on slice" selector only where there is more
+        than one row to choose between, and keep its range matched to
+        the current data (a reprocess can change the row count)."""
+        multi_row = spectrum is not None and spectrum.ndim == 2
+        self.peak_slice_row.setVisible(bool(multi_row))
+        if not multi_row:
+            return
+        n_rows = int(spectrum.data.shape[0])
+        self.peak_slice_spin.blockSignals(True)
+        self.peak_slice_spin.setRange(1, max(1, n_rows))
+        if self.peak_slice_spin.value() > n_rows:
+            self.peak_slice_spin.setValue(1)
+        self.peak_slice_spin.blockSignals(False)
+
+    def _peak_pick_target(self, spectrum):
+        """The 1D spectrum peaks are picked on: the spectrum itself
+        when it already is 1D, otherwise the selected slice. Replaces a
+        hard-wired ``index=1``."""
+        if spectrum.ndim == 1:
+            return spectrum
+        return processing_slicing.get_trace(spectrum, axis="f1", index=self._peak_pick_slice_index())
+
+    def _on_peak_slice_changed(self, _value: int) -> None:
+        # Only re-show the slice while picking is actually active --
+        # otherwise changing the number would yank the user's contour
+        # view away for no reason.
+        if self.pick_peak_button.isChecked():
+            self._show_peak_pick_slice()
+
+    def _show_peak_pick_slice(self) -> None:
+        """Put the chosen slice on the Spectrum canvas as its own 1D
+        trace, so there is something to click. Reuses the canvas's
+        existing extract-slice view (which brings its own "Back to
+        Contour" bar), rather than inventing a second single-trace
+        mode."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim != 2:
+            return
+        # Narrow, not a blanket swallow: only a stale/out-of-range
+        # index is tolerated here (a reprocess can shrink the row count
+        # between the spinner's range being set and this running). A
+        # broad `except Exception` hid a real bug during development --
+        # extract_slice raising because it could not find its source
+        # spectrum at all -- and made peak-picking silently stick to
+        # whichever slice it started on.
+        try:
+            self.canvas.extract_slice("f1", self._peak_pick_slice_index())
+        except IndexError:
+            pass
+
     def _on_pick_peak_toggled(self, checked: bool) -> None:
         # Pick mode only ever listens on self.canvas (the Spectrum
         # tab) -- clicking elsewhere (Compare, Fit, Spectral Fit, the
@@ -6547,6 +7283,10 @@ class MainWindow(QMainWindow):
         self.canvas.set_pick_mode(checked)
         if checked:
             self.canvas_tabs.setCurrentWidget(self.canvas)
+            # A 2D/pseudo-2D canvas has no 1D trace to click, which is
+            # exactly why picking was impossible on one -- show the
+            # chosen slice on its own for the duration.
+            self._show_peak_pick_slice()
 
     def _on_auto_pick_peaks_clicked(self) -> None:
         """Replace the peak table with automatically-detected peaks
@@ -6557,15 +7297,8 @@ class MainWindow(QMainWindow):
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
-            QMessageBox.information(
-                self, "Not supported",
-                "Auto-pick isn't available for a conventional 2D spectrum yet -- "
-                "select a 1D spectrum or a pseudo-2D series.",
-            )
-            return
         try:
-            target = spectrum if spectrum.ndim == 1 else processing_slicing.get_trace(spectrum, axis="f1", index=1)
+            target = self._peak_pick_target(spectrum)
             peaks = processing_fitting.auto_pick_peaks(target, prominence=self.auto_pick_prominence_spin.value())
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Auto-pick failed", str(exc))
@@ -6588,12 +7321,99 @@ class MainWindow(QMainWindow):
             self._add_peak_row(shift=peak["shift"], fwhm=peak["fwhm"], eta=peak["eta"])
 
     def _restore_sr_control(self, spectrum) -> None:
-        self.sr_shift_spin.blockSignals(True)
-        self.sr_shift_spin.setValue(spectrum.metadata.raw.get("sr_shift_hz", 0.0))
-        self.sr_shift_spin.blockSignals(False)
+        for dim, spin in (("f2", self.sr_shift_spin), ("f1", self.sr_shift_indirect_spin)):
+            spin.blockSignals(True)
+            spin.setValue(self._current_sr(spectrum, dim))
+            spin.blockSignals(False)
+        # Nothing to reference against on a 1D or a pseudo-2D, whose
+        # indirect axis is a slice index rather than a frequency.
+        has_indirect = self._sr_axis(spectrum, "f1") is not None
+        self.sr_indirect_label.setVisible(has_indirect)
+        self.sr_shift_indirect_spin.setVisible(has_indirect)
 
     def _on_apply_sr_clicked(self) -> None:
-        self._apply_reference_shift_hz(self.sr_shift_spin.value())
+        # Both dimensions from the one button. Each is idempotent
+        # (recomputed from its own stashed original axis), so applying
+        # the unchanged one costs nothing and re-entering the same
+        # numbers twice stays a no-op.
+        #
+        # Both values are read up front, before either is applied:
+        # _apply_reference_shift_hz ends by calling _restore_sr_control,
+        # which rewrites *both* spin boxes from metadata -- so reading
+        # the second one after applying the first handed back the
+        # stored value (0) instead of what the user had just typed, and
+        # the indirect shift silently did nothing.
+        direct_hz = self.sr_shift_spin.value()
+        indirect_hz = self.sr_shift_indirect_spin.value()
+        self._apply_reference_shift_hz(direct_hz, "f2")
+        self._apply_reference_shift_hz(indirect_hz, "f1")
+
+    def _on_reference_calibration_from_plot(self, position) -> None:
+        """Right-click "Set Reference from Cursor (ppm)…" on a 2D --
+        reference the spectrum by saying where the clicked peak
+        *should* be, rather than by working out an Hz offset by hand.
+
+        Explicit user request: "I need a right click option on the 2D
+        spectra to be able to set the sr (by setting ppm values)."
+        Both dimensions at once for a genuine 2D, since a heteronuclear
+        pair needs referencing on each; the direct one alone for a
+        pseudo-2D, whose indirect axis is a slice index.
+
+        The clicked position is read off the axis *as currently
+        displayed*, which already carries whatever SR is applied -- so
+        the new value is the existing one plus the correction, not the
+        correction alone. (:meth:`_apply_reference_shift_hz` is
+        idempotent against the original as-loaded axis, so a cumulative
+        delta here would be wrong twice over.)"""
+        index = self._selected_index()
+        if index is None or position is None:
+            return
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim != 2:
+            return
+        clicked = {"f2": float(position[0]), "f1": float(position[1])}
+        dims = ["f2"] + (["f1"] if self._sr_axis(spectrum, "f1") is not None else [])
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Reference from Cursor")
+        form = QFormLayout(dialog)
+        form.addRow(QLabel(
+            "Enter the true chemical shift of the peak under the cursor.\n"
+            "The reference (SR) for each dimension is set to match."
+        ))
+        spins = {}
+        labels = {"f2": f"Direct ({spectrum.metadata.nucleus or 'F2'}):",
+                  "f1": f"Indirect ({spectrum.metadata.nucleus_indirect or 'F1'}):"}
+        for dim in dims:
+            spin = QDoubleSpinBox()
+            spin.setRange(-1.0e5, 1.0e5)
+            spin.setDecimals(4)
+            spin.setSuffix(" ppm")
+            spin.setValue(clicked[dim])
+            spin.setToolTip(f"Cursor is currently at {clicked[dim]:.4f} ppm here.")
+            form.addRow(labels[dim], spin)
+            spins[dim] = spin
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # Both values worked out before either is applied -- see
+        # _on_apply_sr_clicked for why (applying one rewrites the other's
+        # spin box from metadata).
+        updates = {}
+        for dim in dims:
+            base_mhz = spectrum.metadata.sfo1 if dim == "f2" else spectrum.metadata.sfo1_indirect
+            if not base_mhz:
+                continue
+            current = self._current_sr(spectrum, dim)
+            updates[dim] = current + (spins[dim].value() - clicked[dim]) * base_mhz
+        for dim, value in updates.items():
+            self._apply_reference_shift_hz(value, dim)
 
     def _on_reference_shift_from_plot(self) -> None:
         """Handles :attr:`MplCanvas.referenceShiftRequested`, the
@@ -6604,53 +7424,127 @@ class MainWindow(QMainWindow):
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        current_hz = spectrum.metadata.raw.get("sr_shift_hz", 0.0)
+        current_hz = self._current_sr(spectrum, "f2")
         value, ok = QInputDialog.getDouble(
             self, "Reference shift", "SR (Hz):", current_hz, -1.0e6, 1.0e6, 4,
         )
         if ok:
             self._apply_reference_shift_hz(value)
 
-    @staticmethod
-    def _capture_original_axis(spectrum) -> None:
-        """Stash the direct (F2) axis's hz/ppm arrays exactly as
-        loaded, the first time SR is ever touched for this spectrum
-        this session -- the stable baseline every SR value is
-        recomputed from, so applying "the same SR twice" is a no-op
-        instead of compounding, and applying "a different SR" replaces
-        rather than adds to whatever's currently displayed. Reprocessing
-        the FID naturally invalidates this (a fresh NMRSpectrum from
-        the vendor reader has no ``raw`` carried over), which is the
-        right behaviour -- SR starts over from the new axis."""
-        if "sr_original_hz" in spectrum.metadata.raw:
-            return
-        axis = spectrum.axes[-1]
-        spectrum.metadata.raw["sr_original_hz"] = axis.hz.copy() if axis.hz is not None else None
-        spectrum.metadata.raw["sr_original_ppm"] = axis.ppm.copy() if axis.ppm is not None else None
+    #: ``metadata.raw`` keys per dimension: (applied value, original
+    #: Hz axis, original ppm axis). The direct dimension's keys are
+    #: unsuffixed, exactly as they were before the indirect axis got
+    #: its own SR, so a sidecar written by an older version still
+    #: restores.
+    _SR_KEYS = {
+        "f2": ("sr_shift_hz", "sr_original_hz", "sr_original_ppm"),
+        "f1": ("sr_shift_hz_f1", "sr_original_hz_f1", "sr_original_ppm_f1"),
+    }
 
-    def _apply_reference_shift_hz(self, sr_hz: float) -> None:
-        """Set the spectrum's SR to the absolute value ``sr_hz`` --
-        the Hz offset from its own SFO1 base frequency -- recomputing
-        the direct-dimension axis from the original, as-loaded arrays
+    #: Where the vendor's own already-applied SR is recorded -- see
+    #: :data:`opennmr.io.bruker._SR_RECORDED_KEY`.
+    _SR_RECORDED_KEYS = {"f2": "sr_recorded_hz", "f1": "sr_recorded_hz_f1"}
+
+    @classmethod
+    def _recorded_sr(cls, spectrum, dim: str) -> float:
+        """The SR the *file* already carries for ``dim`` -- TopSpin's
+        ``(SF - BF1) * 1e6``, which the reader has folded into the axis
+        before this GUI ever sees it.
+
+        Explicit user request: "I want any sr that was noted in the
+        import files to be applied already and to show in the
+        processing tab". It was always applied; what was missing is
+        that nothing said so, and the SR box read 0 for a dataset that
+        plainly was referenced -- 315.3 Hz on this project's own EXSY.
+
+        Making the box show it means the number in it is the **total**
+        SR in effect, not a user-only delta on top. So
+        :meth:`_apply_reference_shift_hz` applies ``value - recorded``
+        to the as-loaded axis: leaving the box alone is then a no-op,
+        and typing a different number means "make the total this"."""
+        value = spectrum.metadata.raw.get(cls._SR_RECORDED_KEYS[dim])
+        return float(value) if value else 0.0
+
+    @classmethod
+    def _current_sr(cls, spectrum, dim: str) -> float:
+        """The SR currently in effect for ``dim`` -- whatever the user
+        has set, or the file's own value if they haven't."""
+        stored = spectrum.metadata.raw.get(cls._SR_KEYS[dim][0])
+        return float(stored) if stored is not None else cls._recorded_sr(spectrum, dim)
+
+    @staticmethod
+    def _sr_axis(spectrum, dim: str):
+        """``spectrum``'s own axis for SR dimension ``dim``, or
+        ``None`` when there isn't one to reference -- an indirect axis
+        only counts if it's a genuine frequency axis with a base
+        frequency to convert Hz to ppm with (a pseudo-2D's indirect
+        axis is a slice index, and a 1D has no indirect axis at all)."""
+        if dim == "f2":
+            return spectrum.axes[-1]
+        if spectrum.ndim != 2 or spectrum.metadata.pseudo_2d or not spectrum.metadata.sfo1_indirect:
+            return None
+        axis = spectrum.axes[0]
+        return axis if axis.kind == "frequency" else None
+
+    @classmethod
+    def _capture_original_axis(cls, spectrum, dim: str = "f2") -> None:
+        """Stash ``dim``'s hz/ppm arrays exactly as loaded, the first
+        time SR is ever touched for this spectrum this session -- the
+        stable baseline every SR value is recomputed from, so applying
+        "the same SR twice" is a no-op instead of compounding, and
+        applying "a different SR" replaces rather than adds to whatever's
+        currently displayed. Reprocessing the FID naturally invalidates
+        this (a fresh NMRSpectrum from the vendor reader has no ``raw``
+        carried over), which is the right behaviour -- SR starts over
+        from the new axis."""
+        _, hz_key, ppm_key = cls._SR_KEYS[dim]
+        if hz_key in spectrum.metadata.raw:
+            return
+        axis = cls._sr_axis(spectrum, dim)
+        if axis is None:
+            return
+        spectrum.metadata.raw[hz_key] = axis.hz.copy() if axis.hz is not None else None
+        spectrum.metadata.raw[ppm_key] = axis.ppm.copy() if axis.ppm is not None else None
+
+    def _apply_reference_shift_hz(self, sr_hz: float, dim: str = "f2") -> None:
+        """Set ``dim``'s SR to the absolute value ``sr_hz`` -- the Hz
+        offset from that dimension's own base frequency -- recomputing
+        its axis from the original, as-loaded arrays
         (:meth:`_capture_original_axis`) rather than adding onto
         whatever the axis currently is, so this is idempotent (calling
         it again with the same value is a no-op) rather than
-        cumulative."""
+        cumulative.
+
+        ``dim`` : ``"f2"`` (direct) or ``"f1"`` (indirect). The two are
+        independent values against independent base frequencies --
+        ``sfo1`` and ``sfo1_indirect`` -- because on a heteronuclear 2D
+        they are different nuclei, so a single Hz offset could not
+        reference both. A no-op for ``"f1"`` when there is no indirect
+        frequency axis (see :meth:`_sr_axis`)."""
         index = self._selected_index()
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        self._capture_original_axis(spectrum)
+        axis = self._sr_axis(spectrum, dim)
+        if axis is None:
+            return
+        self._capture_original_axis(spectrum, dim)
 
-        axis = spectrum.axes[-1]  # direct (F2) dimension -- always frequency
-        original_hz = spectrum.metadata.raw.get("sr_original_hz")
-        original_ppm = spectrum.metadata.raw.get("sr_original_ppm")
+        shift_key, hz_key, ppm_key = self._SR_KEYS[dim]
+        base_mhz = spectrum.metadata.sfo1 if dim == "f2" else spectrum.metadata.sfo1_indirect
+        # The stashed original axis is the one the reader produced, and
+        # that already carries the file's own SR -- so what gets applied
+        # on top of it is the *difference* from that, not the whole
+        # value. See _recorded_sr.
+        offset_hz = sr_hz - self._recorded_sr(spectrum, dim)
+        original_hz = spectrum.metadata.raw.get(hz_key)
+        original_ppm = spectrum.metadata.raw.get(ppm_key)
         if original_hz is not None:
-            axis.hz = original_hz + sr_hz
-        if original_ppm is not None and spectrum.metadata.sfo1:
-            axis.ppm = original_ppm + sr_hz / spectrum.metadata.sfo1
+            axis.hz = original_hz + offset_hz
+        if original_ppm is not None and base_mhz:
+            axis.ppm = original_ppm + offset_hz / base_mhz
 
-        spectrum.metadata.raw["sr_shift_hz"] = sr_hz
+        spectrum.metadata.raw[shift_key] = sr_hz
         self._restore_sr_control(spectrum)
         self._schedule_sidecar_save(index)
 
@@ -6744,21 +7638,48 @@ class MainWindow(QMainWindow):
         if is_custom:
             self._on_custom_equation_changed(self.custom_equation_edit.text())
 
+    def _fit_equation_constants(self) -> dict:
+        """The selected spectrum's own acquisition parameters, named
+        the way a pulse programme names them (``d1``, ``p1``, ``cnst2``,
+        ``l4``, ``ns``, ...), for use as known values in a custom
+        fitting equation.
+
+        Explicit user request: "it would be good if I can make fitting
+        equations using values from the input data (e.g. delays and
+        constants and L or whatever)". Every parameter is offered
+        rather than a guessed subset -- ``build_custom_model``
+        substitutes only the names an equation actually uses, so an
+        unused one costs nothing, and a symbol nobody supplies stays a
+        fitted parameter exactly as before."""
+        index = self._selected_index()
+        if index is None:
+            return {}
+        return io_bruker.acquisition_constants(self.session.spectra[index])
+
     def _on_custom_equation_changed(self, text: str) -> None:
         """Live preview of the parameters :func:`_build_custom_relaxation_model`
         would detect from the equation typed so far -- lets a typo or a
         missing independent variable be caught before Fit Curve is
-        even clicked, rather than only surfacing as an error dialog."""
+        even clicked, rather than only surfacing as an error dialog.
+
+        Also names which acquisition parameters the equation picked up,
+        so "why is d1 not being fitted?" answers itself."""
         text = text.strip()
         if not text:
             self.custom_params_label.setText("")
             return
         try:
-            spec = processing_relaxation.build_custom_model(text)
+            spec = processing_relaxation.build_custom_model(
+                text, constants=self._fit_equation_constants())
         except ValueError as exc:
             self.custom_params_label.setText(f"Error: {exc}")
             return
-        self.custom_params_label.setText(f"Parameters (in order): {', '.join(spec['params'])}")
+        message = f"Parameters (in order): {', '.join(spec['params'])}"
+        used = spec.get("constants") or {}
+        if used:
+            message += "  |  from the data: " + ", ".join(
+                f"{name}={value:g}" for name, value in sorted(used.items()))
+        self.custom_params_label.setText(message)
 
     def _build_custom_relaxation_model(self) -> dict:
         equation = self.custom_equation_edit.text().strip()
@@ -6766,7 +7687,8 @@ class MainWindow(QMainWindow):
             raise ValueError("Enter an equation for the custom model (e.g. A*exp(-x/T1)+C).")
         p0_text = self.custom_p0_edit.text().strip()
         p0_overrides = [float(tok) for tok in p0_text.split(",") if tok.strip()] if p0_text else None
-        return processing_relaxation.build_custom_model(equation, p0_overrides=p0_overrides)
+        return processing_relaxation.build_custom_model(
+            equation, p0_overrides=p0_overrides, constants=self._fit_equation_constants())
 
     def _on_delay_source_changed(self, index: int) -> None:
         self.manual_delays_edit.setVisible(index == 1)
@@ -7805,6 +8727,7 @@ class MainWindow(QMainWindow):
             gradient_default = probe_config.get("max_gradient_g_per_cm") or 0.0
         self.imaging_max_gradient_spin.setValue(gradient_default)
         self.imaging_max_gradient_spin.blockSignals(False)
+        self._restore_imaging_gradient_percent(spectrum)
         self._refresh_imaging_gradient()
 
         # X-Pulse's own read_2d has no pseudo_2d concept at all (every
@@ -7827,6 +8750,11 @@ class MainWindow(QMainWindow):
         # parameter, and the only vendor whose files record the mode
         # themselves (PH_mod). Shown for 1D as well as 2D: a
         # hard-to-phase 1D is exactly what the manual override is for.
+        # Only an extracted slice with a still-loaded parent can push
+        # its phase back, so the button is hidden otherwise rather than
+        # shown-but-failing.
+        self.apply_slice_phase_button.setVisible(self._slice_source_of(spectrum)[0] is not None)
+
         self.magnitude_button.setVisible(spectrum.metadata.vendor == "bruker")
         self.magnitude_button.blockSignals(True)
         self.magnitude_button.setChecked(bool(spectrum.metadata.raw.get("magnitude_mode")))
@@ -7851,6 +8779,9 @@ class MainWindow(QMainWindow):
 
         self._refresh_fid_processing_controls(spectrum, row)
         self._restore_sr_control(spectrum)
+        self._restore_nq_line_control(spectrum)
+        self._restore_contour_slices(spectrum)
+        self._refresh_peak_slice_control(spectrum)
         self._refresh_analysis_tab(spectrum)
 
         # Which Dimension controls apply depends on the spectrum type --

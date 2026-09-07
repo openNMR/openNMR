@@ -10,6 +10,7 @@ one canvas must never restyle every other open one.
 
 from __future__ import annotations
 
+import copy
 import os
 
 import numpy as np
@@ -19,11 +20,12 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QInputDialog, QMenu, QSpinBox, QVBoxLayout, QWidget,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
 from ...core.registry import find_gamma, NUC_label
-from ...core.spectrum import NMRSpectrum
+from ...core.spectrum import NMRAxis, NMRSpectrum
 from ... import plotting
 from ...processing import slicing as processing_slicing
 
@@ -107,10 +109,18 @@ class MplCanvas(QWidget):
     #: so :meth:`set_style` can override them per-instance (the
     #: Output tab's live style panel) without touching every show_*
     #: call site.
-    _AXIS_LINEWIDTH = 1.4
-    _AXIS_LABELSIZE = 13
+    _AXIS_LINEWIDTH = 1.75
+    _AXIS_LABELSIZE = 16
     _TICK_LENGTH = 5.5
-    _TICK_WIDTH = 1.4
+    _TICK_WIDTH = 1.75
+
+    #: Default **export** figure size, inches. Not applied to the live
+    #: embedded figure at any point -- see :meth:`set_export_settings`
+    #: for why that fights Qt's own canvas resizing. A 2D carrying
+    #: extracted slices gets its own pair, since it is a two-panel
+    #: layout rather than one square contour.
+    _EXPORT_FIG_SIZE = (8.0, 8.0)
+    _EXPORT_FIG_SIZE_WITH_SLICES = (7.5, 10.0)
 
     #: Max pixel movement between a click and its release still counted
     #: as a click (row-select in a "Stacked" Compare view -- see
@@ -135,6 +145,13 @@ class MplCanvas(QWidget):
     #: asks the owner (MainWindow) to handle it.
     referenceShiftRequested = Signal()
 
+    #: Emitted with the right-clicked ``(x, y)`` position when the user
+    #: asks to reference a 2D from the cursor. Carries the position
+    #: rather than letting MainWindow read ``_last_right_click_xy``
+    #: back out, so the handler cannot act on a *different* click than
+    #: the one that opened the menu.
+    referenceCalibrationRequested = Signal(object)
+
     #: Emitted with the right-clicked (x, y) data position when
     #: "Exclude Nearest Point" is chosen from the right-click menu,
     #: while a relaxation/diffusion curve fit (show_relaxation_fit) is
@@ -155,6 +172,21 @@ class MplCanvas(QWidget):
     #: peakPicked's single click.
     regionSelected = Signal(float, float)
 
+    #: An extracted slice the user wants to work on properly (phase,
+    #: fit, compare) rather than just look at. `extract_slice` only
+    #: *displays* a trace -- it never reaches the session, so none of
+    #: the phase controls (which act on session spectra) could touch
+    #: it. Carries the trace itself; `MainWindow` adds it to the
+    #: session and selects it. Real user request: "a method to phase
+    #: on an extracted slice".
+    sliceKeepRequested = Signal(object)
+
+    #: Emitted with the full list of extracted-slice specs whenever
+    #: the user adds or clears one, so MainWindow can store them
+    #: against the spectrum (and persist them) rather than leaving
+    #: them as canvas-local state that a reselection would drop.
+    contourSlicesChanged = Signal(object)
+
     #: Tag applied to every persistent integration-region axvspan (see
     #: :func:`set_regions`) so they can be found and cleared by gid on
     #: the next call, without needing to track a separate reference
@@ -172,6 +204,40 @@ class MplCanvas(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.toolbar)
+
+        # A visible bar for acting on an extracted slice, shown only
+        # while one is being viewed. Real user report: "There is no way
+        # to actually phase the extracted slice as it stands. maybe the
+        # extracted view should have new options to do something with
+        # the slice". The actions already existed in the right-click
+        # menu and worked -- but a context menu on a plot is not
+        # somewhere anyone looks, so in practice the capability may as
+        # well not have been there. Kept in the context menu too, since
+        # removing it would break the habit of anyone who had found it.
+        self._slice_bar = QWidget(self)
+        slice_bar_layout = QHBoxLayout(self._slice_bar)
+        slice_bar_layout.setContentsMargins(4, 0, 4, 0)
+        self._slice_label = QLabel("")
+        slice_bar_layout.addWidget(self._slice_label)
+        slice_bar_layout.addStretch(1)
+
+        self._keep_slice_button = QPushButton("Keep for Phasing/Fitting")
+        self._keep_slice_button.setToolTip(
+            "Add this slice to the spectrum list as its own 1D spectrum, so "
+            "the Phase controls, fitting and Compare can act on it. Viewing "
+            "a slice alone only displays it."
+        )
+        self._keep_slice_button.clicked.connect(self._emit_slice_keep_requested)
+        slice_bar_layout.addWidget(self._keep_slice_button)
+
+        self._back_to_contour_button = QPushButton("Back to Contour")
+        self._back_to_contour_button.setToolTip("Return to the 2D contour this slice came from.")
+        self._back_to_contour_button.clicked.connect(self._show_contour_again)
+        slice_bar_layout.addWidget(self._back_to_contour_button)
+
+        self._slice_bar.setVisible(False)
+        layout.addWidget(self._slice_bar)
+
         layout.addWidget(self.canvas)
 
         self._pan_start = None  # (x_pixel, y_pixel, xlim, ylim) while dragging
@@ -230,6 +296,12 @@ class MplCanvas(QWidget):
         # multiple-quantum correlation (n=2/3/...). Off by default,
         # same as show_nQ_line's own default.
         self._show_nq_line = False
+        # Extracted slices drawn *beside* the contour (dashed line
+        # across it + the trace in a panel to the right), as opposed
+        # to extract_slice's own "replace the view with this trace".
+        # Owned by the spectrum, not the canvas -- MainWindow stores
+        # and restores them via contourSlicesChanged.
+        self._contour_slices: list[dict] = []
         self._nq_values: list[int] = [1]
         self._pick_mode = False
         self._region_select_mode = False
@@ -252,6 +324,14 @@ class MplCanvas(QWidget):
         # own content genuinely changes to something else, since
         # show_spectrum is the only entry point for this canvas.
         self._extracted_from_spectrum: NMRSpectrum | None = None
+        # The extracted trace itself (and a label for it), so
+        # "Keep Slice" can hand exactly what is on screen to the
+        # session rather than recomputing it. Cleared alongside
+        # _extracted_from_spectrum whenever the view changes.
+        self._extracted_trace: NMRSpectrum | None = None
+        self._extracted_label: str = ""
+        self._extracted_axis: str = ""
+        self._extracted_index: int = 0
         self._contour_factor: float | None = None
         # Number of contour levels, and how they're spaced between the
         # noise floor (_contour_factor) and the data's own peak -- see
@@ -423,7 +503,21 @@ class MplCanvas(QWidget):
         if event.x is None or event.y is None:
             return
 
-        for kind, proj_ax in self._proj_axes.items():
+        # The extracted-slice panel is in _proj_axes too, but it is not
+        # a projection strip: its y axis is a normalised 0..1 stack of
+        # evenly-spread traces, so both the intensity zoom below and
+        # the generic fall-through further down would silently rescale
+        # it and break the layout. It also sits exactly where the
+        # contour's own right-hand "y strip" zoom region used to be
+        # unoccupied. A no-op for now, rather than a wrong-op.
+        if self._proj_axes.get("slices") is not None and event.inaxes is self._proj_axes["slices"]:
+            return
+
+        # Named explicitly rather than iterating _proj_axes, so anything
+        # else that dict grows later cannot be mistaken for a
+        # projection strip by this loop.
+        for kind in ("f1", "f2"):
+            proj_ax = self._proj_axes.get(kind)
             if proj_ax is not None and event.inaxes is proj_ax:
                 self._zoom_projection_intensity(proj_ax, kind, event)
                 return
@@ -633,6 +727,41 @@ class MplCanvas(QWidget):
         see :meth:`set_nq_line`."""
         return {"show_nQ_line": self._show_nq_line, "nQ": self._nq_values}
 
+    def _slice_panel_kwargs(self) -> dict:
+        """``slices`` override for
+        :func:`opennmr.plotting.plot_2d_contour`, both call sites --
+        see :meth:`set_contour_slices`."""
+        return {"slices": self._contour_slices or None}
+
+    def set_contour_slices(self, slices: list[dict] | None) -> None:
+        """Replace the set of extracted slices drawn beside the contour
+        -- each a ``{"axis", "index", "label"}`` dict, see
+        :func:`opennmr.plotting.twod._draw_slice_panel`. Redraws right
+        away if a 2D contour is currently shown, same as
+        :meth:`set_nq_line`. Does *not* emit
+        :attr:`contourSlicesChanged`: this is the restore direction
+        (MainWindow pushing a spectrum's stored slices in), and
+        emitting here would write them straight back out again."""
+        self._contour_slices = list(slices or [])
+        if self._contour_spectrum is not None:
+            self.show_spectrum(self._contour_spectrum)
+
+    def _add_contour_slice(self, axis: str, index: int, label: str) -> None:
+        self._contour_slices.append({"axis": axis, "index": int(index), "label": label})
+        self.contourSlicesChanged.emit(list(self._contour_slices))
+        # preserve_view: adding a slice is an annotation, not a change
+        # of subject -- explicit user request, "the scale/view shouldn't
+        # reset when a slice is extracted". show_spectrum would rebuild
+        # from scratch and drop whatever zoom was set.
+        if self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=True)
+
+    def _clear_contour_slices(self) -> None:
+        self._contour_slices = []
+        self.contourSlicesChanged.emit([])
+        if self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=True)
+
     def set_nq_line(self, enabled: bool, values: list[int] | None = None) -> None:
         """Turn the diagonal-line overlay on/off, and/or change which
         ``n`` value(s) it draws (``y = n*x``, e.g. ``[1]`` for the main
@@ -645,20 +774,72 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None:
             self.show_spectrum(self._contour_spectrum)
 
+    def _projection_intensity_limits(self) -> dict:
+        """Each projection strip's own intensity limit -- the F2 (top)
+        strip plots intensity along y, the F1 (left) strip along x.
+        Captured around a rebuild so a scroll-zoom of a projection
+        survives one."""
+        limits = {}
+        if self._proj_axes.get("f2") is not None:
+            limits["f2"] = self._proj_axes["f2"].get_ylim()
+        if self._proj_axes.get("f1") is not None:
+            limits["f1"] = self._proj_axes["f1"].get_xlim()
+        return limits
+
+    def _restore_projection_intensity_limits(self, limits: dict) -> None:
+        if "f2" in limits and self._proj_axes.get("f2") is not None:
+            self._proj_axes["f2"].set_ylim(limits["f2"])
+        if "f1" in limits and self._proj_axes.get("f1") is not None:
+            self._proj_axes["f1"].set_xlim(limits["f1"])
+
     def _redraw_contour(self, preserve_view: bool) -> None:
         xlim, ylim = (self.ax.get_xlim(), self.ax.get_ylim()) if preserve_view else (None, None)
+        # The projection strips are their own Axes with their own
+        # intensity zoom, and a rebuild threw it away -- so scrolling the
+        # contour body to rescale the levels silently reset both
+        # projections at the same time. Real user report: "the 2D
+        # projections shouldn't reset when I scale the contours".
+        projection_limits = self._projection_intensity_limits() if preserve_view else {}
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
+        display_spectrum, unit_xlabel, unit_ylabel = self._contour_for_display()
         _, _, self._proj_axes = plotting.plot_2d_contour(
-            self._contour_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+            display_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+            xlabel=unit_xlabel, ylabel=unit_ylabel,
             clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
             square_aspect=self._aspect_ratio is None,
             **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
+            **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
         )
+        self._apply_current_axis_style()
         if preserve_view:
             self.ax.set_xlim(xlim)
             self.ax.set_ylim(ylim)
+            self._restore_projection_intensity_limits(projection_limits)
         self._apply_view_options()
+        # Same layout pass show_spectrum ends with. Without it a rebuild
+        # kept whatever subplot margins were last in force, and once the
+        # slice panel (which brings its own x-axis label) changed what
+        # the figure needs, the contour's own x label was clipped off
+        # the bottom. Real user report: "the x-axis label got cut off".
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
+    def reset_view(self) -> None:
+        """Back to the view a fresh load gives -- limits *and* layout.
+
+        For a 2D this rebuilds the contour at its natural limits rather
+        than going through ``toolbar.home()``: home only restores axis
+        limits from the navigation stack, and that stack still holds
+        Axes from before any of this canvas's own figure rebuilds, so it
+        cannot restore a layout at all. Explicit user request: "be sure
+        that the contour plot position resets back to the original load
+        position"."""
+        if self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=False)
+            return
+        self.toolbar.home()
+        self.figure.tight_layout()
         self.canvas.draw_idle()
 
     def _on_press(self, event) -> None:
@@ -794,6 +975,17 @@ class MplCanvas(QWidget):
             # fully transparent for the bleed.
             row_ax.patch.set_alpha(1.0 if selected else 0.0)
 
+    def _exec_context_menu(self, menu, pos):
+        """Show ``menu`` modally and return the chosen action.
+
+        A one-line seam, so a test can inspect what the right-click menu
+        offers without a real modal menu blocking the run. Patching
+        ``QMenu.exec`` itself does not work -- PySide6 resolves it
+        through the C++ binding, so the real menu opens anyway and the
+        headless suite hangs rather than fails.
+        """
+        return menu.exec(self.canvas.mapToGlobal(pos))
+
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
 
@@ -811,8 +1003,23 @@ class MplCanvas(QWidget):
         if self._current_1d_spectrum is not None:
             sr_action = menu.addAction("Set Reference Shift (Hz)…")
 
+        # The Hz entry above is gated on a 1D view, so a 2D contour had
+        # no referencing action at all -- and an Hz offset is the wrong
+        # thing to ask for on one anyway, since what a user actually
+        # knows is where a peak *should* be. This asks for that instead:
+        # right-click the peak, type its true shift, and the SR follows.
+        # The click needs no unit conversion because this is offered
+        # only while ppm is displayed -- see the guard below.
+        # ...and only while the contour is actually showing ppm: the
+        # click is read in whatever unit is displayed, so asking for a
+        # shift in ppm against an mm axis would be nonsense.
+        calibrate_action = None
+        if (self._contour_spectrum is not None and self._last_right_click_xy is not None
+                and self._axis_unit == "ppm"):
+            calibrate_action = menu.addAction("Set Reference from Cursor (ppm)…")
+
         unit_actions = {}
-        if self._current_1d_spectrum is not None:
+        if self._current_1d_spectrum is not None or self._contour_spectrum is not None:
             unit_menu = menu.addMenu("Axis Units")
             for label, key in (("ppm", "ppm"), ("Hz", "hz"), ("kHz", "khz")):
                 action = unit_menu.addAction(label)
@@ -832,13 +1039,26 @@ class MplCanvas(QWidget):
 
         contour_levels_action = None
         extract_slice_action = None
+        clear_slices_action = None
         if self._contour_spectrum is not None:
             contour_levels_action = menu.addAction("Set Contour Levels…")
             extract_slice_action = menu.addAction("Extract Slice…")
+            if self._contour_slices:
+                clear_slices_action = menu.addAction(
+                    f"Clear Extracted Slices ({len(self._contour_slices)})"
+                )
 
         show_contour_action = None
+        keep_slice_action = None
         if self._extracted_from_spectrum is not None:
             show_contour_action = menu.addAction("Show Contour")
+            if getattr(self, "_extracted_trace", None) is not None:
+                keep_slice_action = menu.addAction("Keep Slice (for phasing/fitting)")
+                keep_slice_action.setToolTip(
+                    "Add this slice to the spectrum list as its own 1D "
+                    "spectrum, so the Phase controls, fitting and Compare "
+                    "can act on it. Extracting alone only displays it."
+                )
 
         exclude_point_action = None
         reset_points_action = None
@@ -858,7 +1078,7 @@ class MplCanvas(QWidget):
                 "resolution regardless of this)."
             )
 
-        chosen = menu.exec(self.canvas.mapToGlobal(pos))
+        chosen = self._exec_context_menu(menu, pos)
         if chosen in unit_actions:
             self.set_axis_unit(unit_actions[chosen])
         elif chosen is legend_action:
@@ -873,10 +1093,16 @@ class MplCanvas(QWidget):
                 self.set_aspect_ratio(value)
         elif sr_action is not None and chosen is sr_action:
             self.referenceShiftRequested.emit()
+        elif calibrate_action is not None and chosen is calibrate_action:
+            self.referenceCalibrationRequested.emit(self._last_right_click_xy)
         elif contour_levels_action is not None and chosen is contour_levels_action:
             self._prompt_contour_levels()
         elif extract_slice_action is not None and chosen is extract_slice_action:
             self._prompt_extract_slice()
+        elif clear_slices_action is not None and chosen is clear_slices_action:
+            self._clear_contour_slices()
+        elif keep_slice_action is not None and chosen is keep_slice_action:
+            self._emit_slice_keep_requested()
         elif show_contour_action is not None and chosen is show_contour_action:
             # Read out first -- show_spectrum unconditionally clears
             # _extracted_from_spectrum at its own top (correct for
@@ -902,6 +1128,57 @@ class MplCanvas(QWidget):
         self._aspect_ratio = ratio
         self._apply_view_options()
         self.canvas.draw_idle()
+
+    def default_export_size(self) -> tuple[float, float]:
+        """The export figure size to use when the Output tab hasn't
+        been given an explicit one -- :attr:`_EXPORT_FIG_SIZE`, or
+        :attr:`_EXPORT_FIG_SIZE_WITH_SLICES` for a 2D contour that is
+        currently showing extracted slices, which is a two-panel
+        layout rather than one square contour."""
+        if self._contour_spectrum is not None and self._contour_slices:
+            return self._EXPORT_FIG_SIZE_WITH_SLICES
+        return self._EXPORT_FIG_SIZE
+
+    def _contour_style_kwargs(self) -> dict:
+        """The Output tab's own live style, in the form
+        :func:`opennmr.plotting.plot_2d_contour` takes it.
+
+        Real user report: "scrolling the contours redraws the axis with
+        defaults, not the ones set in output". Every contour rebuild --
+        including the one a contour-level scroll triggers -- went
+        through ``plot_2d_contour`` without these, so it fell back to
+        that function's own manuscript defaults (fontsize 12, tick
+        width 1.0) and silently undid the Output tab. The 1D views
+        never had this problem because they read
+        ``self._AXIS_LABELSIZE`` and friends directly."""
+        return {
+            "fontsize": self._AXIS_LABELSIZE,
+            "tick_length": self._TICK_LENGTH,
+            "tick_width": self._TICK_WIDTH,
+        }
+
+    def _apply_current_axis_style(self) -> None:
+        """Apply the current linewidth/tick/label style to every axes
+        on the figure. Called both by :meth:`set_style` (so a change is
+        visible immediately) and after every contour rebuild (so a
+        redraw doesn't revert to ``plot_2d_contour``'s own defaults --
+        ``_contour_style_kwargs`` covers what that function accepts,
+        this covers the rest, spine linewidth and minor ticks)."""
+        for ax in self.figure.get_axes():
+            for spine in ax.spines.values():
+                spine.set_linewidth(self._AXIS_LINEWIDTH)
+            ax.tick_params(which="major", length=self._TICK_LENGTH,
+                           width=self._TICK_WIDTH, labelsize=self._AXIS_LABELSIZE)
+            if self._minor_ticks_visible:
+                ax.minorticks_on()
+                ax.tick_params(which="minor", length=self._TICK_LENGTH * 0.5,
+                               width=self._TICK_WIDTH * 0.75)
+            else:
+                ax.minorticks_off()
+            ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+            ax.yaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+            if ax.get_title():
+                ax.title.set_fontsize(self._AXIS_LABELSIZE)
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
                   minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None) -> None:
@@ -938,23 +1215,14 @@ class MplCanvas(QWidget):
         if compare_colormap is not None:
             self._compare_colormap = compare_colormap
 
+        # Everything except grid/legend is the same "apply the current
+        # style to every axes" the contour rebuild needs, so it lives in
+        # one place rather than being written twice. Applying all of it
+        # unconditionally is equivalent to the old per-argument guards,
+        # since anything not passed in is re-applied at its existing
+        # value.
+        self._apply_current_axis_style()
         for ax in self.figure.get_axes():
-            if linewidth is not None:
-                for spine in ax.spines.values():
-                    spine.set_linewidth(linewidth)
-            if tick_length is not None or tick_width is not None or minor_ticks is not None:
-                ax.tick_params(which="major", length=self._TICK_LENGTH, width=self._TICK_WIDTH)
-                if self._minor_ticks_visible:
-                    ax.minorticks_on()
-                    ax.tick_params(which="minor", length=self._TICK_LENGTH * 0.5, width=self._TICK_WIDTH * 0.75)
-                else:
-                    ax.minorticks_off()
-            if labelsize is not None:
-                ax.tick_params(which="major", labelsize=labelsize)
-                ax.xaxis.label.set_fontsize(labelsize)
-                ax.yaxis.label.set_fontsize(labelsize)
-                if ax.get_title():
-                    ax.title.set_fontsize(labelsize)
             if grid is not None:
                 ax.grid(grid, **({"alpha": 0.3} if grid else {}))
             if legend_loc is not None and ax.get_legend() is not None:
@@ -1038,8 +1306,7 @@ class MplCanvas(QWidget):
             level_mode = "power" if mode_combo.currentIndex() == 0 else "linear"
             self.set_contour_levels(clevels_spin.value(), level_mode, power_spin.value(), start_spin.value())
 
-    @staticmethod
-    def _nearest_slice_index(spectrum: NMRSpectrum, axis: str, cursor_value: float) -> int:
+    def _nearest_slice_index(self, spectrum: NMRSpectrum, axis: str, cursor_value: float) -> int:
         """The 1-based row (``axis="f1"``) or column (``"f2"``) index
         nearest a cursor's data-coordinate value -- ``cursor_value`` is
         the Y position (F1) when fixing a row, or the X position (F2)
@@ -1053,7 +1320,13 @@ class MplCanvas(QWidget):
         spectrum_axis = spectrum.axes[0] if axis == "f1" else spectrum.axes[1]
         n = len(spectrum_axis)
         if spectrum_axis.kind == "frequency":
-            values = spectrum_axis.values("ppm")
+            # In whatever unit is on screen, not always ppm -- the
+            # cursor value comes off the displayed axis, so comparing it
+            # against ppm would pick the wrong row once the contour is
+            # showing Hz, kHz or mm.
+            values = self._axis_values_in_unit(spectrum_axis, self._axis_unit)
+            if values is None:
+                values = spectrum_axis.values("ppm")
             return int(np.argmin(np.abs(values - cursor_value))) + 1
         return int(np.clip(round(cursor_value), 1, n))
 
@@ -1088,6 +1361,24 @@ class MplCanvas(QWidget):
         axis_combo = QComboBox()
         axis_combo.addItem("Row (fix F1, trace along F2)", "f1")
         axis_combo.addItem("Column (fix F2, trace along F1)", "f2")
+        if self._contour_spectrum is not None and self._contour_spectrum.is_pseudo_2d:
+            # Pre-existing crash, found while adding "Keep Slice": for a
+            # pseudo-2D, F1 is a slice *index*, not a frequency, so a
+            # trace along it has an index axis and plot_1d raises
+            # "This axis has no 'ppm' values (kind='index')". Disabled
+            # rather than removed, so the reason is visible instead of
+            # the option silently not being there. (Tracing a pseudo-2D
+            # along F1 is a decay curve, not a spectrum -- the Analysis
+            # tab is where that belongs.)
+            item = axis_combo.model().item(axis_combo.count() - 1)
+            item.setEnabled(False)
+            axis_combo.setItemData(
+                axis_combo.count() - 1,
+                "Not available for a pseudo-2D: F1 is a slice index, not a frequency, "
+                "so a trace along it is a decay curve rather than a spectrum. Use the "
+                "Analysis tab for that.",
+                Qt.ItemDataRole.ToolTipRole,
+            )
         form.addRow("Axis:", axis_combo)
 
         index_spin = QSpinBox()
@@ -1102,6 +1393,30 @@ class MplCanvas(QWidget):
         index_spin.setValue(_default_index("f1"))
         form.addRow("Index:", index_spin)
 
+        # Two genuinely different things to do with a slice, so this is
+        # a mode rather than a second menu entry: "replace" is the
+        # original behaviour (swap the canvas over to the trace, to
+        # phase or fit it); "panel" keeps the contour and draws the
+        # slice beside it. User request: "the option to plot slices from
+        # 2D contours with a dashed line across the contour slice and
+        # then projecting out".
+        mode_combo = QComboBox()
+        mode_combo.addItem("Show beside the contour (keep contour)", "panel")
+        mode_combo.addItem("Replace the view with this slice", "replace")
+        form.addRow("Show as:", mode_combo)
+
+        label_edit = QLineEdit()
+        label_edit.setPlaceholderText("optional, e.g. Impurity")
+        label_edit.setToolTip(
+            "Labels the trace in the panel, in the same colour as its "
+            "dashed line on the contour."
+        )
+        form.addRow("Label:", label_edit)
+
+        def _sync_mode(i: int) -> None:
+            label_edit.setEnabled(mode_combo.itemData(i) == "panel")
+        mode_combo.currentIndexChanged.connect(_sync_mode)
+
         def _sync_range(i: int) -> None:
             axis = axis_combo.itemData(i)
             index_spin.setRange(1, n_f1 if axis == "f1" else n_f2)
@@ -1115,7 +1430,40 @@ class MplCanvas(QWidget):
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self.extract_slice(axis_combo.currentData(), index_spin.value())
+        if mode_combo.currentData() == "panel":
+            self._add_contour_slice(
+                axis_combo.currentData(), index_spin.value(), label_edit.text().strip(),
+            )
+        else:
+            self.extract_slice(axis_combo.currentData(), index_spin.value())
+
+    def _emit_slice_keep_requested(self) -> None:
+        """Hand the displayed slice to whoever is listening (the main
+        window adds it to the session). Shared by the toolbar button
+        and the context-menu action so the two can't diverge."""
+        if self._extracted_trace is not None:
+            self.sliceKeepRequested.emit((
+                self._extracted_trace, self._extracted_label,
+                self._extracted_from_spectrum, self._extracted_axis, self._extracted_index,
+            ))
+
+    def _show_contour_again(self) -> None:
+        """Back to the 2D this slice came from. Reads the source out
+        *before* calling show_spectrum, which clears it at its own top
+        (correct for every other caller, since the content genuinely
+        changes) -- reading afterwards would already see ``None``."""
+        source = self._extracted_from_spectrum
+        if source is not None:
+            self.show_spectrum(source)
+
+    def _refresh_slice_bar(self) -> None:
+        """Show the slice action bar exactly while a slice is being
+        viewed. Driven from one place so the bar can't be left showing
+        over an unrelated view."""
+        showing = self._extracted_trace is not None
+        self._slice_bar.setVisible(showing)
+        if showing:
+            self._slice_label.setText(f"Viewing {self._extracted_label} \u2014 not yet in the spectrum list")
 
     def extract_slice(self, axis: str, index: int) -> None:
         """Pull a single row (``axis="f1"``) or column (``"f2"``) out
@@ -1123,10 +1471,31 @@ class MplCanvas(QWidget):
         :func:`opennmr.processing.slicing.get_trace`, and show it in
         place of the contour -- right-click "Show Contour" (see
         ``_on_context_menu``) gets back to the contour it came from."""
+        # Fall back to the spectrum a slice already on screen came
+        # from, so extracting a *second* slice works while looking at
+        # the first. show_spectrum(trace) clears _contour_spectrum (the
+        # trace is 1D), so before this the source was None on any
+        # re-slice and get_trace raised "expects a 2D NMRSpectrum" --
+        # which made the right-click "Extract Slice..." a one-shot, and
+        # silently pinned peak-picking to whichever slice it started on.
         source = self._contour_spectrum
+        if source is None:
+            source = self._extracted_from_spectrum
+        if source is None:
+            raise ValueError("No 2D spectrum to extract a slice from.")
         trace = processing_slicing.get_trace(source, axis=axis, index=index)
         self.show_spectrum(trace)
         self._extracted_from_spectrum = source
+        # Kept so "Keep Slice (for phasing/fitting)" can hand the exact
+        # trace being displayed to the session, rather than recomputing
+        # it from arguments the context menu would have to carry.
+        self._extracted_trace = trace
+        self._extracted_label = f"{axis.upper()} slice {index}"
+        # Provenance, so a kept slice can feed its phase back into the
+        # 2D it came from rather than being a dead end.
+        self._extracted_axis = axis
+        self._extracted_index = index
+        self._refresh_slice_bar()
 
     @property
     def axis_unit(self) -> str:
@@ -1151,6 +1520,85 @@ class MplCanvas(QWidget):
         self._imaging_gamma_hz_per_t = gamma_hz_per_t
         self._imaging_max_gradient_g_per_cm = max_gradient_g_per_cm
 
+    #: Axis label for each non-ppm display unit. ppm's own label is
+    #: nucleus-dependent and comes from ``NUC_label`` instead.
+    _UNIT_LABELS = {"hz": "Frequency / Hz", "khz": "Frequency / kHz", "mm": "Position / mm"}
+
+    def _imaging_hz_per_mm(self) -> float | None:
+        """Hz per mm for the current imaging gradient, or ``None`` when
+        :meth:`set_imaging_gradient_params` hasn't been given real
+        values. Spelled out in separate unit steps rather than one
+        folded constant, so the conversion is checkable at a glance
+        rather than needing to be trusted."""
+        gamma = self._imaging_gamma_hz_per_t
+        gradient = self._imaging_max_gradient_g_per_cm
+        if not gamma or not gradient:
+            return None
+        gradient_t_per_m = gradient * 1e-2   # G/cm -> T/m (1 G = 1e-4 T, 1 cm = 1e-2 m)
+        hz_per_m = gamma * gradient_t_per_m
+        return hz_per_m * 1e-3
+
+    def _axis_values_in_unit(self, axis, unit: str):
+        """``axis``'s own values in ``unit``, or ``None`` if it cannot
+        be expressed that way (an index axis, or ``"mm"`` with no
+        gradient set)."""
+        if axis is None or axis.kind != "frequency":
+            return None
+        if unit == "ppm":
+            return axis.values("ppm")
+        hz = axis.values("hz")
+        if unit == "hz":
+            return hz
+        if unit == "khz":
+            return hz / 1000.0
+        if unit == "mm":
+            hz_per_mm = self._imaging_hz_per_mm()
+            return hz / hz_per_mm if hz_per_mm else None
+        return None
+
+    def _contour_for_display(self):
+        """``(spectrum, xlabel, ylabel)`` to hand to
+        :func:`plot_2d_contour` for the current display unit.
+
+        For ppm this is the spectrum itself. For anything else it is a
+        shallow copy whose frequency axes carry the *converted* values,
+        because ``plot_2d_contour`` reads ``axes[i].ppm`` directly --
+        so the copy's ``ppm`` field holds Hz/kHz/mm and the labels are
+        passed explicitly to say so. A copy rather than a mutation:
+        ``_contour_spectrum`` stays in ppm, which is what slicing,
+        referencing and everything else still reason in.
+
+        Real user report: "I am not able to right-click and change the
+        axis on a 2D (for imaging)" -- the Axis Units menu was gated on
+        a 1D view, and ``set_axis_unit`` only ever rewrote line data.
+        """
+        spectrum = self._contour_spectrum
+        if spectrum is None or self._axis_unit == "ppm":
+            return spectrum, None, None
+        converted = copy.copy(spectrum)
+        converted.axes = list(spectrum.axes)
+        label = self._UNIT_LABELS.get(self._axis_unit)
+        xlabel = ylabel = None
+        for dim in (0, 1):
+            values = self._axis_values_in_unit(spectrum.axes[dim], self._axis_unit)
+            if values is None:
+                continue
+            axis = spectrum.axes[dim]
+            converted.axes[dim] = NMRAxis(kind="frequency", ppm=values, hz=axis.hz,
+                                          index=axis.index, label=axis.label)
+            if dim == 1:
+                xlabel = label
+            else:
+                ylabel = label
+        return converted, xlabel, ylabel
+
+    def _contour_unit_available(self, unit: str) -> bool:
+        """Whether the current contour can be shown in ``unit`` at all
+        -- its direct axis has to be expressible that way."""
+        if self._contour_spectrum is None:
+            return False
+        return self._axis_values_in_unit(self._contour_spectrum.axes[1], unit) is not None
+
     def set_axis_unit(self, unit: str) -> None:
         """Switch the current 1D view's x-axis between ``"ppm"``,
         ``"hz"``, ``"khz"``, and ``"mm"``, re-using the spectrum's own
@@ -1163,7 +1611,19 @@ class MplCanvas(QWidget):
         (falls through to whatever unit was already showing) if not,
         matching this method's existing "can't do this yet" behaviour
         for every other precondition it checks."""
-        if self._current_1d_spectrum is None or unit not in ("ppm", "hz", "khz", "mm") or not self.ax.lines:
+        if unit not in ("ppm", "hz", "khz", "mm"):
+            return
+        if self._contour_spectrum is not None:
+            # A contour has no lines to rewrite -- its axes come from
+            # the spectrum, so the unit change is a rebuild. Not
+            # preserve_view: the old limits are in the *old* unit, so
+            # keeping them would frame a meaningless region.
+            if not self._contour_unit_available(unit):
+                return
+            self._axis_unit = unit
+            self._redraw_contour(preserve_view=False)
+            return
+        if self._current_1d_spectrum is None or not self.ax.lines:
             return
         axis = self._current_1d_spectrum.axes[0]
         if unit == "ppm":
@@ -1176,19 +1636,11 @@ class MplCanvas(QWidget):
             x = axis.values("hz") / 1000.0
             label = "Frequency / kHz"
         else:
-            gamma = self._imaging_gamma_hz_per_t
-            gradient = self._imaging_max_gradient_g_per_cm
-            if not gamma or not gradient:
+            hz_per_mm = self._imaging_hz_per_mm()
+            if not hz_per_mm:
                 return
-            # G/cm -> T/m (1 G = 1e-4 T, 1 cm = 1e-2 m) -> Hz/m (via
-            # gamma) -> Hz/mm -- spelled out in separate steps rather
-            # than one folded constant, so the unit conversion is
-            # checkable at a glance rather than needing to be trusted.
-            gradient_t_per_m = gradient * 1e-2
-            hz_per_m = gamma * gradient_t_per_m
-            hz_per_mm = hz_per_m * 1e-3
             x = axis.values("hz") / hz_per_mm
-            label = "Position / mm"
+            label = self._UNIT_LABELS["mm"]
 
         for line in self.ax.lines:
             line.set_xdata(x)
@@ -1313,6 +1765,11 @@ class MplCanvas(QWidget):
         rebuild."""
         self.figure.clear()
         self._extracted_from_spectrum = None
+        self._extracted_trace = None
+        self._extracted_label = ""
+        self._extracted_axis = ""
+        self._extracted_index = 0
+        self._refresh_slice_bar()
 
         if spectrum.ndim == 1:
             self._contour_spectrum = None
@@ -1346,12 +1803,16 @@ class MplCanvas(QWidget):
             self._contour_level_mode = self._CONTOUR_LEVEL_MODE_DEFAULT
             self._contour_power = self._CONTOUR_POWER_DEFAULT
             self.ax = self.figure.add_subplot(111)
+            display_spectrum, unit_xlabel, unit_ylabel = self._contour_for_display()
             _, _, self._proj_axes = plotting.plot_2d_contour(
-                spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+                display_spectrum, ax=self.ax, fig=self.figure, factor=self._contour_factor,
+                xlabel=unit_xlabel, ylabel=unit_ylabel,
                 clevels=self._contour_clevels, level_mode=self._contour_level_mode, power=self._contour_power,
                 square_aspect=self._aspect_ratio is None,
                 **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
+                **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
             )
+            self._apply_current_axis_style()
         else:
             raise ValueError(f"Cannot display a spectrum with ndim={spectrum.ndim}")
 
@@ -2065,11 +2526,11 @@ class MplCanvas(QWidget):
         original_size = self.figure.get_size_inches()
         if self._export_dpi is not None:
             self.figure.set_dpi(self._export_dpi)
-        if self._export_fig_width is not None or self._export_fig_height is not None:
-            self.figure.set_size_inches(
-                self._export_fig_width if self._export_fig_width is not None else original_size[0],
-                self._export_fig_height if self._export_fig_height is not None else original_size[1],
-            )
+        default_width, default_height = self.default_export_size()
+        self.figure.set_size_inches(
+            self._export_fig_width if self._export_fig_width is not None else default_width,
+            self._export_fig_height if self._export_fig_height is not None else default_height,
+        )
 
         try:
             save_fn()
