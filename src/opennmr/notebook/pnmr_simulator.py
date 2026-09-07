@@ -28,12 +28,28 @@ Pipeline
 
 Referencing
 -----------
-`find_gamma` and `NUC_label` are ported as-is from nmrtools.utils (the same
-helpers used by NMR1dimport / NMR1dplot in one_d.py), so a CIF-simulated
-spectrum references (BF1/SFO1) and labels its axis identically to an
-imported experimental one. `compute_BF1_SFO1` wraps `find_gamma` to turn a
+`find_gamma`, `NUC_label` and `compute_BF1_SFO1` now live in nmrtools.utils
+(the same helpers used by NMR1dimport / NMR1dplot in one_d.py, and by
+generate_bms_spectrum_dict in bms_spectrum.py), imported from there below,
+so a CIF-simulated spectrum references (BF1/SFO1) and labels its axis
+identically to an imported experimental one -- from one copy of the lookup
+table, not a private one. `compute_BF1_SFO1` wraps `find_gamma` to turn a
 nuclide + field strength into (BF1, SFO1); pass `gamma_MHz_per_T=` to
 override the table lookup entirely if needed.
+
+(Previously this module carried its own private copies of `find_gamma`,
+`NUC_label` and `compute_BF1_SFO1`, despite this same docstring already
+claiming they were "ported as-is" from nmrtools.utils -- they weren't
+imported, they were duplicated. Fixed here: this module now imports them,
+same as bms_spectrum.py does.)
+
+Plotting
+--------
+`plot_spectrum_dict`, `plot_comparison` and `plot_stacked_spectra` have
+moved to nmrtools.plotting (nothing in them was CIF-specific; they work on
+any dict of the shared spectrum shape, including generate_bms_spectrum_dict's
+output) and are re-imported below for backwards compatibility with existing
+`from nmrtools.pnmr_simulator import plot_spectrum_dict`-style code.
 """
 
 from __future__ import annotations
@@ -46,6 +62,11 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+
+from .utils import find_gamma, NUC_label, compute_BF1_SFO1
+from .plotting import (
+    plot_spectrum_dict, plot_comparison, plot_stacked_spectra,  # noqa: F401 (re-exported)
+)
 
 
 # ===========================================================================
@@ -233,6 +254,13 @@ def build_shift_table(local_envs, shift_dict, warn_missing=True, print_table=Fal
             rows.append(row)
 
     df = pd.DataFrame(rows).fillna(0)
+    
+    # The configuration probabilities are normalized independently
+    # for each crystallographic/site instance. Convert them to weights
+    # normalized over the complete shift table so that sum(p) == 1.
+    n_sites = df["Site"].nunique()
+    if n_sites > 0:
+        df["p"] /= n_sites
 
     if print_table:
         with pd.option_context('display.max_rows', None,
@@ -240,249 +268,21 @@ def build_shift_table(local_envs, shift_dict, warn_missing=True, print_table=Fal
                                 'display.precision', 3):
             print(df)
 
+    # Sanity check: probabilities/weights should now sum to 1.
+    p_sum = df["p"].sum()
+    if not np.isclose(p_sum, 1.0, atol=1e-12):
+        raise RuntimeError(
+            f"Shift-table probabilities sum to {p_sum:.12g}, expected 1.0."
+        )
+
     return df
 
 
 # ===========================================================================
 # 7. Referencing: nuclide -> gamma -> BF1 / SFO1, and axis labelling
 # ===========================================================================
-# find_gamma() and NUC_label() below are ported as-is from nmrtools.utils
-# (the same helpers NMR1dimport / NMR1dplot use in one_d.py), so a simulated
-# spectrum references and labels identically to an imported experimental one.
-_GAMMA_TABLE = [
-    ['Name', 'Nuclide', 'Spin', 'Magnetic Moment', 'Gyromagnetic Ratio (MHz/T)', 'Quadrupole Moment (fm^2)'],
-    ['Hydrogen', '1H', '0.5', '4.83735', '42.57746460132430', '---'],
-    ['Deuterium', '2H', '1', '1.21260', '6.53590463949470', '0.28600'],
-    ['Helium', '3He', '0.5', '-3.68515', '-32.43603205003720', '---'],
-    ['Tritium', '3H', '0.5', '5.15971', '45.41483118028370', '---'],
-    ['Lithium', '6Li', '1', '1.16256', '6.26620067293118', '-0.08080'],
-    ['Lithium', '7Li', '1.5', '4.20408', '16.54845000000000', '-4.01000'],
-    ['Beryllium', '9Be', '1.5', '-1.52014', '-5.98370064894306', '5.28800'],
-    ['Boron', '10B', '3', '2.07921', '4.57519531807410', '8.45900'],
-    ['Boron', '11B', '1.5', '3.47103', '13.66297000000000', '4.05900'],
-    ['Carbon', '13C', '0.5', '1.21661', '10.70839020506340', '---'],
-    ['Nitrogen', '14N', '1', '0.57100', '3.07770645852245', '2.04400'],
-    ['Nitrogen', '15N', '0.5', '-0.49050', '-4.31726881729937', '---'],
-    ['Oxygen', '17O', '2.5', '-2.24077', '-5.77426865932844', '-2.55800'],
-    ['Fluorine', '19F', '0.5', '4.55333', '40.07757016369700', '---'],
-    ['Neon', '21Ne', '1.5', '-0.85438', '-3.36307127148622', '10.15500'],
-    ['Sodium', '23Na', '1.5', '2.86298', '11.26952278792250', '10.40000'],
-    ['Magnesium', '25Mg', '2.5', '-1.01220', '-2.60834261585015', '19.94000'],
-    ['Aluminum', '27Al', '2.5', '4.30869', '11.10307854843700', '14.66000'],
-    ['Silicon', '29Si', '0.5', '-0.96179', '-8.46545000000000', '---'],
-    ['Phosphorus', '31P', '0.5', '1.95999', '17.25144000000000', '---'],
-    ['Sulfur', '33S', '1.5', '0.83117', '3.27171633415147', '-6.78000'],
-    ['Chlorine', '35Cl', '1.5', '1.06103', '4.17654000000000', '-8.16500'],
-    ['Chlorine', '37Cl', '1.5', '0.88320', '3.47653283041643', '-6.43500'],
-    ['Potassium', '39K', '1.5', '0.50543', '1.98953228161455', '5.85000'],
-    ['Potassium', '40K', '4', '-1.45132', '-2.47372936498302', '-7.30000'],
-    ['Potassium', '41K', '1.5', '0.27740', '1.09191431807057', '7.11000'],
-    ['Calcium', '43Ca', '3.5', '-1.49407', '-2.86967503240704', '-4.08000'],
-    ['Scandium', '45Sc', '3.5', '5.39335', '10.35908000000000', '-22.00000'],
-    ['Titanium', '47Ti', '2.5', '-0.93294', '-2.40404000000000', '30.20000'],
-    ['Titanium', '49Ti', '3.5', '-1.25201', '-2.40475161264699', '24.70000'],
-    ['Vanadium', '50V', '6', '3.61376', '4.25047148768370', '21.00000'],
-    ['Vanadium', '51V', '3.5', '5.83808', '11.21327743103380', '-5.20000'],
-    ['Chromium', '53Cr', '1.5', '-0.61263', '-2.41152000000000', '-15.00000'],
-    ['Manganese', '55Mn', '2.5', '4.10424', '10.57624385581420', '33.00000'],
-    ['Iron', '57Fe', '0.5', '0.15696', '1.38156039900351', '---'],
-    ['Cobalt', '59Co', '3.5', '5.24700', '10.07769000000000', '42.00000'],
-    ['Nickel', '61Ni', '1.5', '-0.96827', '-3.81144000000000', '16.20000'],
-    ['Copper', '63Cu', '1.5', '2.87549', '11.31876532731510', '-22.00000'],
-    ['Copper', '65Cu', '1.5', '3.07465', '12.10269891500850', '-20.40000'],
-    ['Zinc', '67Zn', '2.5', '1.03556', '2.66853501532750', '15.00000'],
-    ['Gallium', '69Ga', '1.5', '2.60340', '10.24776396876680', '17.10000'],
-    ['Gallium', '71Ga', '1.5', '3.30787', '13.02073645775120', '10.70000'],
-    ['Germanium', '73Ge', '4.5', '-0.97229', '-1.48973801382307', '-19.60000'],
-    ['Arsenic', '75As', '1.5', '1.85835', '7.31501583241246', '31.40000'],
-    ['Selenium', '77Se', '0.5', '0.92678', '8.15731153773769', '---'],
-    ['Bromine', '79Br', '1.5', '2.71935', '10.70415668357710', '31.30000'],
-    ['Bromine', '81Br', '1.5', '2.93128', '11.53838323328760', '26.20000'],
-    ['Krypton', '83Kr', '4.5', '-1.07311', '-1.64423000000000', '25.90000'],
-    ['Rubidium', '85Rb', '2.5', '1.60131', '4.12642612503788', '27.60000'],
-    ['Strontium', '87Sr', '4.5', '-1.20902', '-1.85246804462381', '33.50000'],
-    ['Rubidium', '87Rb', '1.5', '3.55258', '13.98399000000000', '13.35000'],
-    ['Yttrium', '89Y', '0.5', '-0.23801', '-2.09492468493000', '---'],
-    ['Zirconium', '91Zr', '2.5', '-1.54246', '-3.97478329525992', '-17.60000'],
-    ['Niobium', '93Nb', '4.5', '6.82170', '10.45234000000000', '-32.00000'],
-    ['Molybdenium', '95Mo', '2.5', '-1.08200', '-2.78680000000000', '-2.20000'],
-    ['Molybdenium', '97Mo', '2.5', '-1.10500', '-2.84569000000000', '25.50000'],
-    ['Ruthenium', '99Ru', '2.5', '-0.75880', '-1.95601000000000', '7.90000'],
-    ['Technetium', '99Tc', '4.5', '6.28100', '9.62251000000000', '-12.90000'],
-    ['Ruthenium', '101Ru', '2.5', '-0.85050', '-2.19156000000000', '45.70000'],
-    ['Rhodium', '103Rh', '0.5', '-0.15310', '-1.34772000000000', '---'],
-    ['Palladium', '105Pd', '2.5', '-0.76000', '-1.95761000000000', '66.00000'],
-    ['Silver', '107Ag', '0.5', '-0.19690', '-1.73307000631627', '---'],
-    ['Silver', '109Ag', '0.5', '-0.22636', '-1.99239707059020', '---'],
-    ['Cadmium', '111Cd', '0.5', '-1.03037', '-9.06914203769978', '---'],
-    ['Indium', '113In', '4.5', '6.11240', '9.36547000000000', '79.90000'],
-    ['Cadmium', '113Cd', '0.5', '-1.07786', '-9.48709883375341', '---'],
-    ['Indium', '115In', '4.5', '6.12560', '9.38569000000000', '81.00000'],
-    ['Tin', '115Sn', '0.5', '-1.59150', '-14.00770000000000', '---'],
-    ['Tin', '117Sn', '0.5', '-1.73385', '-15.26103326770140', '---'],
-    ['Tin', '119Sn', '0.5', '-1.81394', '-15.96595000000000', '---'],
-    ['Antimony', '121Sb', '2.5', '3.97960', '10.25515000000000', '-36.00000'],
-    ['Antimony', '123Sb', '3.5', '2.89120', '5.55323000000000', '-49.00000'],
-    ['Tellurium', '123Te', '0.5', '-1.27643', '-11.23491000000000', '---'],
-    ['Tellurium', '125Te', '0.5', '-1.53894', '-13.54542255864230', '---'],
-    ['Iodine', '127I', '2.5', '3.32871', '8.57776706639786', '-71.00000'],
-    ['Xenon', '129Xe', '0.5', '-1.34749', '-11.86039000000000', '---'],
-    ['Xenon', '131Xe', '1.5', '0.89319', '3.51586001685444', '-11.40000'],
-    ['Cesium', '133Cs', '3.5', '2.92774', '5.62334202679439', '-0.34300'],
-    ['Barium', '135Ba', '1.5', '1.08178', '4.25819000000000', '16.00000'],
-    ['Barium', '137Ba', '1.5', '1.21013', '4.76342786926888', '24.50000'],
-    ['Lanthanum', '138La', '5', '4.06809', '5.66152329764214', '45.00000'],
-    ['Lanthanum', '139La', '3.5', '3.15568', '6.06114544425158', '20.00000'],
-    ['Praseodymium', '141Pr', '2.5', '5.05870', '13.03590000000000', '-5.89000'],
-    ['Neodymium', '143Nd', '3.5', '-1.20800', '-2.31889000000000', '-63.00000'],
-    ['Neodymium', '145Nd', '3.5', '-0.74400', '-1.42921000000000', '-33.00000'],
-    ['Samarium', '147Sm', '3.5', '-0.92390', '-1.77458000000000', '-25.90000'],
-    ['Samarium', '149Sm', '3.5', '-0.76160', '-1.46295000000000', '7.40000'],
-    ['Europium', '151Eu', '2.5', '4.10780', '10.58540000000000', '90.30000'],
-    ['Europium', '153Eu', '2.5', '1.81390', '4.67422000000000', '241.20000'],
-    ['Gadolinium', '155Gd', '1.5', '-0.33208', '-1.30717137860235', '127.00000'],
-    ['Gadolinium', '157Gd', '1.5', '-0.43540', '-1.71394000000000', '135.00000'],
-    ['Terbium', '159Tb', '1.5', '2.60000', '10.23525000000000', '143.20000'],
-    ['Dysprosium', '161Dy', '0.5', '-0.56830', '-1.46438000000000', '250.70000'],
-    ['Dysprosium', '163Dy', '1', '0.79580', '2.05151000000000', '264.80000'],
-    ['Holmium', '165Ho', '0.5', '4.73200', '9.08775000000000', '358.00000'],
-    ['Erbium', '167Er', '0.5', '-0.63935', '-1.22799179441414', '356.50000'],
-    ['Thulium', '169Tm', '1', '-0.40110', '-3.53006000000000', '---'],
-    ['Ytterbium', '171Yb', '1.5', '0.85506', '7.52612000000000', '---'],
-    ['Ytterbium', '173Yb', '1.5', '-0.80446', '-2.07299000000000', '280.00000'],
-    ['Lutetium', '175Lu', '3', '2.53160', '4.86250000000000', '349.00000'],
-    ['Lutetium', '176Lu', '1.5', '3.38800', '3.45112000000000', '497.00000'],
-    ['Hafnium', '177Hf', '0.5', '0.89970', '1.72842000000000', '336.50000'],
-    ['Hafnium', '179Hf', '1', '-0.70850', '-1.08560000000000', '379.30000'],
-    ['Tantalum', '181Ta', '0.5', '2.68790', '5.16267000000000', '317.00000'],
-    ['Tungsten', '183W', '2.5', '0.20401', '1.79564972994000', '---'],
-    ['Rhenium', '185Re', '0.5', '3.77100', '9.71752000000000', '218.00000'],
-    ['Osmium', '187Os', '1.5', '0.11198', '0.98563064707380', '---'],
-    ['Rhenium', '187Re', '1.5', '3.80960', '9.81700000000000', '207.00000'],
-    ['Osmium', '189Os', '2.5', '0.85197', '3.35360155237225', '85.60000'],
-    ['Iridium', '191Ir', '2.5', '0.19460', '0.76585000000000', '81.60000'],
-    ['Iridium', '193Ir', '0.5', '0.21130', '0.83190000000000', '75.10000'],
-    ['Platinum', '195Pt', '0.5', '1.05570', '9.29226000000000', '---'],
-    ['Gold', '197Au', '1.5', '0.19127', '0.75289837379052', '54.70000'],
-    ['Mercury', '199Hg', '1.5', '0.87622', '7.71231431685275', '---'],
-    ['Mercury', '201Hg', '1.5', '-0.72325', '-2.84691587554490', '38.60000'],
-    ['Thallium', '203Tl', '1.5', '2.80983', '24.73161181836180', '---'],
-    ['Thallium', '205Tl', '4', '2.83747', '24.97488014887780', '---'],
-    ['Lead', '207Pb', '1.5', '1.00906', '8.88157793726598', '---'],
-    ['Bismuth', '209Bi', '3.5', '4.54440', '6.96303000000000', '-51.60000'],
-    ['Uranium', '235U', '3.5', '-0.43000', '-0.82761000000000', '493.60000'],
-]
-
-_GAMMA_DF = pd.DataFrame(_GAMMA_TABLE[1:], columns=_GAMMA_TABLE[0])
-
-
-def find_gamma(isotope, field='', SFO1=''):
-    """
-    results = find_gamma(isotope, field='', SFO1='')
-
-    isotope : str
-        Nuclide as '#X', e.g. '17O', '27Al'. Read from Bruker input as
-        NUC = results['nuclide'].
-
-    field : '' or '100'
-        Set to '100' to search for the actual nuclide observed on
-        100 MHz (1H-equivalent 400 MHz) data, given a 500 MHz-equivalent
-        SFO1. Converts from the 500 MHz equivalent SFO1 back to the
-        actual nuclide/frequency at the true field.
-
-    SFO1 : float
-        Transmitter frequency. Read from Bruker input as
-        SFO1 = results['SFO1'].
-
-    Returns
-    -------
-    dict with keys 'Nuclide' and 'gamma' (in Hz/T, except when field='100',
-    where 'gamma' is left in MHz/T - see the field='100' branch below).
-    """
-
-    df = _GAMMA_DF
-
-    if df['Nuclide'].isin([isotope]).any():
-        gamma = df.loc[df['Nuclide'] == isotope, "Gyromagnetic Ratio (MHz/T)"]
-        gamma = float(gamma.iloc[0]) * 1e6
-    else:
-        print(
-            "Isotope string not recognised, please input a string of "
-            "format e.g., '1H' or '27Al' and ensure it is an NMR active "
-            "nuclide."
-        )
-        return
-
-    if field == '100':
-        gamma = abs(gamma / 1e6)
-        field_strength = 11.75
-        freqactual = SFO1 / (field_strength / 5)
-        sortdf = df.sort_values("Gyromagnetic Ratio (MHz/T)")
-        df_closest = sortdf.iloc[
-            (sortdf['Gyromagnetic Ratio (MHz/T)'].astype(float) - freqactual).abs().argsort()[:1]
-        ]
-
-        gamma = df_closest["Gyromagnetic Ratio (MHz/T)"].iloc[0]
-        isotope = str(df_closest["Nuclide"].iloc[0])
-
-    return {'Nuclide': isotope, 'gamma': gamma}
-
-
-def NUC_label(NUC, x_unit='ppm'):
-    """
-    labeltext = NUC_label(NUC, x_unit='ppm')
-
-    NUC : str
-        Nuclide as '#X', e.g. '17O', '27Al'. Should be read from Bruker
-        input.
-
-    x_unit : 'ppm' or 'Hz'
-        Assigns the x unit for the plot. Default = 'ppm'.
-    """
-    NUCalpha = NUC.strip('0123456789')
-    NUCnum = NUC[:len(NUC) - len(NUCalpha)]
-    labeltext = (
-        r'$\mathregular{\delta \,\, ^{' + NUCnum + r'}}$'
-        + NUCalpha + " (" + x_unit + ")"
-    )
-    return labeltext
-
-
-def compute_BF1_SFO1(nuclide: str, B0_tesla: float, offset_ppm: float = 0.0,
-                      gamma_MHz_per_T: Optional[float] = None
-                      ) -> Tuple[float, float, str]:
-    """
-    Compute (BF1, SFO1, nuclide) in MHz for a given nuclide and field
-    strength, using the same gyromagnetic-ratio lookup (find_gamma) as
-    NMR1dimport / NMR1dplot in one_d.py - so a simulated spectrum
-    references identically to an imported experimental one.
-
-    BF1  - "basic frequency": the reference frequency defining 0 ppm at this
-           field, i.e. gamma/(2*pi) * B0.
-    SFO1 - the carrier/transmitter frequency actually used, i.e. BF1 shifted
-           by `offset_ppm` (0 by default -> SFO1 == BF1, no carrier offset).
-    nuclide - the (possibly canonicalised) nuclide string, as returned by
-           find_gamma; identical to the input unless you also pass a
-           field='100' remapping through **kwargs (not exposed here - call
-           find_gamma directly for that case).
-
-    gamma_MHz_per_T overrides the find_gamma table lookup entirely
-    (useful for an isotope not in the table, or a literature-checked value).
-    """
-    if gamma_MHz_per_T is None:
-        nucgamma = find_gamma(nuclide, field='', SFO1='')
-        if nucgamma is None:
-            raise KeyError(
-                f"No entry for nuclide '{nuclide}' in the gyromagnetic-ratio "
-                f"table (find_gamma). Pass gamma_MHz_per_T=<value> explicitly "
-                f"(gamma/2*pi, in MHz/T) to override."
-            )
-        nuclide = nucgamma['Nuclide']
-        gamma_MHz_per_T = nucgamma['gamma'] / 1e6  # find_gamma returns Hz/T here
-
-    BF1 = gamma_MHz_per_T * B0_tesla
-    SFO1 = BF1 * (1.0 + offset_ppm * 1e-6)
-    return float(BF1), float(SFO1), nuclide
+# find_gamma, NUC_label and compute_BF1_SFO1 are imported from nmrtools.utils
+# at the top of this file (see module docstring) -- no longer defined here.
 
 
 # ===========================================================================
@@ -657,200 +457,3 @@ def generate_spectrum_dict(
     return spectrum_dict, shift_table
 
 
-# ===========================================================================
-# 10. Plotting helpers (work on the shared dict format)
-# ===========================================================================
-#
-# All three plotting functions below share the same "usual plot modifiers":
-#
-#   tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
-#   tick_number=None, xlims='default', pl_width=3.375, pl_height=3.375,
-#   font='Arial', fontsize=12, fname=True
-#
-# xlims : 'default' auto-ranges from the plotted data (inverted per NMR
-#         convention when invert_x=True); pass an explicit (xmin, xmax) to
-#         override (used exactly as given, via ax.set_xlim(*xlims)).
-# pl_width / pl_height : figure size in inches, only used when `ax=None`
-#         (i.e. this call creates its own figure).
-# fname : True  -> auto-name and save next to the spectrum's own 'path'
-#                   (falls back to the current directory if unavailable);
-#         str   -> save to that exact path;
-#         False/None -> don't save.
-
-def _apply_axis_style(ax, tick_dir, tick_length, tick_width, tick_pad,
-                       tick_number, fontsize, show_yaxis):
-    from matplotlib.ticker import MaxNLocator
-
-    ax.tick_params(axis='x', direction=tick_dir, length=tick_length,
-                    width=tick_width, pad=tick_pad, labelsize=fontsize)
-    if tick_number is not None:
-        ax.xaxis.set_major_locator(MaxNLocator(tick_number))
-
-    if show_yaxis:
-        ax.tick_params(axis='y', direction=tick_dir, length=tick_length,
-                        width=tick_width, pad=tick_pad, labelsize=fontsize)
-    else:
-        ax.yaxis.set_visible(False)
-        for spine in ("left", "right", "top"):
-            ax.spines[spine].set_visible(False)
-
-
-def _save_figure(fig, fname, default_dir, default_name):
-    if not fname:
-        return
-    out_path = os.path.join(default_dir or ".", default_name) if fname is True else fname
-    fig.savefig(out_path, dpi=300, bbox_inches="tight")
-
-
-def plot_spectrum_dict(spectrum_dict, ax=None, axis="ppm", channel="real",
-                        normalised=True, invert_x=True, offset=0.0, label=None,
-                        show_yaxis=False,
-                        tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
-                        tick_number=None, xlims='default', pl_width=3.375, pl_height=3.375,
-                        font='Arial', fontsize=12, fname=True, **plot_kwargs):
-    """
-    Plot a spectrum dict (simulated or experimental - same shape) on a
-    Matplotlib Axes.
-
-    axis     : "ppm" or "Hz"
-    channel  : "real" or "imag"
-    normalised : use the normalised_* arrays
-    offset   : constant added to y after selecting the channel/normalisation
-               (e.g. to stack several plot_spectrum_dict calls on one Axes)
-    """
-    import matplotlib.pyplot as plt
-    plt.rcParams['font.family'] = font
-
-    x_key = "x_ppm" if axis == "ppm" else "x_Hz"
-    prefix = "normalised_" if normalised else ""
-    y_key = f"{prefix}{channel}_spectrum"
-
-    x = spectrum_dict[x_key]
-    y = spectrum_dict[y_key] + offset
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(pl_width, pl_height))
-    else:
-        fig = ax.figure
-
-    ax.plot(x, y, label=label, **plot_kwargs)
-
-    _apply_axis_style(ax, tick_dir, tick_length, tick_width, tick_pad,
-                       tick_number, fontsize, show_yaxis)
-
-    if xlims == 'default':
-        if invert_x:
-            ax.set_xlim(max(x), min(x))
-    else:
-        ax.set_xlim(xlims[0], xlims[1])
-
-    nuclide = spectrum_dict.get("nuclide", "")
-    ax.set_xlabel(NUC_label(nuclide, x_unit=axis), fontsize=fontsize)
-
-    if label is not None:
-        ax.legend(fontsize=fontsize * 0.85)
-
-    safe_nuclide = re.sub(r"[^\w\-]", "", nuclide)
-    _save_figure(fig, fname, spectrum_dict.get("path"),
-                 f"{safe_nuclide}_{channel}_{axis}_spectrum.png")
-
-    return ax
-
-
-def plot_comparison(simulated_dict, experimental_dict, ax=None, axis="ppm",
-                     channel="real", normalised=True, invert_x=True,
-                     sim_label="Simulated", exp_label="Experimental", offset=0.0,
-                     show_yaxis=False,
-                     tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
-                     tick_number=None, xlims='default', pl_width=3.375, pl_height=3.375,
-                     font='Arial', fontsize=12, fname=True):
-    """
-    Overlay a simulated spectrum dict and an experimental spectrum dict.
-
-    offset : added to the simulated spectrum's y-values only, so the two
-             traces can be separated vertically (e.g. offset=0.2 with
-             normalised=True plots the simulated trace 0.2 above the
-             experimental one).
-    """
-    import matplotlib.pyplot as plt
-    plt.rcParams['font.family'] = font
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(pl_width, pl_height))
-    else:
-        fig = ax.figure
-
-    common = dict(axis=axis, channel=channel, normalised=normalised, invert_x=False,
-                   show_yaxis=show_yaxis, tick_dir=tick_dir, tick_length=tick_length,
-                   tick_width=tick_width, tick_pad=tick_pad, tick_number=tick_number,
-                   xlims='default', pl_width=pl_width, pl_height=pl_height,
-                   font=font, fontsize=fontsize, fname=False)
-
-    plot_spectrum_dict(experimental_dict, ax=ax, offset=0.0, label=exp_label,
-                        color="tab:gray", **common)
-    plot_spectrum_dict(simulated_dict, ax=ax, offset=offset, label=sim_label,
-                        color="tab:red", **common)
-
-    x_key = "x_ppm" if axis == "ppm" else "x_Hz"
-    if xlims == 'default':
-        if invert_x:
-            x_all = np.concatenate([simulated_dict[x_key], experimental_dict[x_key]])
-            ax.set_xlim(x_all.max(), x_all.min())
-    else:
-        ax.set_xlim(xlims[0], xlims[1])
-
-    nuclide = simulated_dict.get("nuclide") or experimental_dict.get("nuclide") or ""
-    safe_nuclide = re.sub(r"[^\w\-]", "", nuclide)
-    path = simulated_dict.get("path") or experimental_dict.get("path")
-    _save_figure(fig, fname, path, f"{safe_nuclide}_comparison_{channel}_{axis}.png")
-
-    return ax
-
-
-def plot_stacked_spectra(spectra, labels=None, offset_step=0.2, colors=None,
-                          axis="ppm", channel="real", normalised=True, invert_x=True,
-                          ax=None, show_yaxis=False,
-                          tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
-                          tick_number=None, xlims='default', pl_width=3.375, pl_height=3.375,
-                          font='Arial', fontsize=12, fname=True):
-    """
-    Stack any number of spectrum dicts (simulated and/or experimental,
-    freely mixed) vertically, offsetting spectrum i by i * offset_step.
-    Handy for comparing a simulated spectrum against several experimental
-    ones (or several simulated candidate models) at once.
-    """
-    import matplotlib.pyplot as plt
-    plt.rcParams['font.family'] = font
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(pl_width, pl_height))
-    else:
-        fig = ax.figure
-
-    labels = labels or [None] * len(spectra)
-    colors = colors or [None] * len(spectra)
-
-    common = dict(axis=axis, channel=channel, normalised=normalised, invert_x=False,
-                   show_yaxis=show_yaxis, tick_dir=tick_dir, tick_length=tick_length,
-                   tick_width=tick_width, tick_pad=tick_pad, tick_number=tick_number,
-                   xlims='default', pl_width=pl_width, pl_height=pl_height,
-                   font=font, fontsize=fontsize, fname=False)
-
-    for i, (spec, lab, col) in enumerate(zip(spectra, labels, colors)):
-        plot_spectrum_dict(spec, ax=ax, offset=i * offset_step, label=lab,
-                            color=col, **common)
-
-    x_key = "x_ppm" if axis == "ppm" else "x_Hz"
-    if xlims == 'default':
-        if invert_x and spectra:
-            x_all = np.concatenate([s[x_key] for s in spectra])
-            ax.set_xlim(x_all.max(), x_all.min())
-    else:
-        ax.set_xlim(xlims[0], xlims[1])
-
-    nuclide = spectra[0].get("nuclide", "") if spectra else ""
-    safe_nuclide = re.sub(r"[^\w\-]", "", nuclide)
-    path = spectra[0].get("path") if spectra else None
-    _save_figure(fig, fname, path, f"{safe_nuclide}_stack_{channel}_{axis}.png")
-
-    return ax

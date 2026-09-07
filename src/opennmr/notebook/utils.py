@@ -1,15 +1,26 @@
 """
-General-purpose utilities shared by the 1D, 2D and fitting modules.
+General-purpose utilities shared by the 1D, 2D, fitting, pNMR-simulation
+and BMS-simulation modules.
 
 Contains:
 
 - ``find_gamma``            : NMR isotope / gyromagnetic-ratio lookup table
+- ``compute_BF1_SFO1``       : nuclide + field -> (BF1, SFO1) referencing,
+                                built on top of find_gamma. Previously this
+                                lived only inside pnmr_simulator.py (its own
+                                private copy of find_gamma/NUC_label included)
+                                -- moved here so any *_spectrum_dict producer
+                                (experimental, CIF-pNMR, or BMS) references a
+                                simulated spectrum identically, from one
+                                place, instead of drifting copies.
 - ``NUC_label``              : axis-label formatting for a given nuclide
 - ``read_bruker_metadata``   : single source of truth for parsing Bruker
                                 ``acqus``-style JCAMP-DX parameter files
 """
 
 import os
+from typing import Optional, Tuple
+
 import pandas as pd
 import numpy as np
 
@@ -194,6 +205,55 @@ def find_gamma(isotope, field='', SFO1=''):
         isotope = str(df_closest["Nuclide"].iloc[0])
 
     return {'Nuclide': isotope, 'gamma': gamma}
+
+
+def compute_BF1_SFO1(nuclide: str, B0_tesla: float, offset_ppm: float = 0.0,
+                      gamma_MHz_per_T: Optional[float] = None
+                      ) -> Tuple[float, float, str]:
+    """
+    Compute (BF1, SFO1, nuclide) in MHz for a given nuclide and field
+    strength, from the same gyromagnetic-ratio lookup (find_gamma) used
+    by NMR1dimport/NMR1dplot (one_d.py) -- the single place every
+    *_spectrum_dict producer in nmrtools (experimental import, CIF-pNMR
+    prediction, BMS shift simulation) goes for referencing, so a
+    simulated spectrum references identically to an imported experimental
+    one, and adding a new predictor never means adding a new copy of this
+    logic.
+
+    BF1  - "basic frequency": the reference frequency defining 0 ppm at
+           this field, i.e. gamma/(2*pi) * B0.
+    SFO1 - the carrier/transmitter frequency actually used, i.e. BF1
+           shifted by `offset_ppm` (0 by default -> SFO1 == BF1, no
+           carrier offset).
+    nuclide - the (possibly canonicalised) nuclide string, as returned by
+           find_gamma; identical to the input unless you also pass a
+           field='100' remapping through find_gamma directly (not
+           exposed here).
+
+    gamma_MHz_per_T overrides the find_gamma table lookup entirely
+    (useful for an isotope not in the table, or a literature-checked
+    value).
+
+    Raises
+    ------
+    KeyError
+        If `nuclide` is not in the gyromagnetic-ratio table and no
+        `gamma_MHz_per_T` override is given.
+    """
+    if gamma_MHz_per_T is None:
+        nucgamma = find_gamma(nuclide, field='', SFO1='')
+        if nucgamma is None:
+            raise KeyError(
+                f"No entry for nuclide '{nuclide}' in the gyromagnetic-ratio "
+                f"table (find_gamma). Pass gamma_MHz_per_T=<value> explicitly "
+                f"(gamma/2*pi, in MHz/T) to override."
+            )
+        nuclide = nucgamma['Nuclide']
+        gamma_MHz_per_T = nucgamma['gamma'] / 1e6  # find_gamma returns Hz/T here
+
+    BF1 = gamma_MHz_per_T * B0_tesla
+    SFO1 = BF1 * (1.0 + offset_ppm * 1e-6)
+    return float(BF1), float(SFO1), nuclide
 
 
 def NUC_label(NUC, x_unit='ppm'):
