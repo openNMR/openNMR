@@ -365,3 +365,192 @@ def test_apply_magnitude_mode_math():
     np.testing.assert_allclose(bruker._apply_magnitude_mode(spectrum, "magnitude"), [5.0, 5.0, 0.0])
     np.testing.assert_allclose(bruker._apply_magnitude_mode(spectrum, "power"), [25.0, 25.0, 0.0])
     np.testing.assert_array_equal(bruker._apply_magnitude_mode(spectrum, None), spectrum)
+
+
+def test_read_bruker_binary_matches_dtype_and_endianness_rules(tmp_path):
+    # Same rules nmrglue itself applies (confirmed by reading its
+    # source): big-endian only when BYTORDA == 1, float64 only when
+    # DTYPA == 2, int32 otherwise.
+    values = np.array([1, -2, 3, -4, 5, -6], dtype="<i4")
+    path = tmp_path / "fid"
+    path.write_bytes(values.tobytes())
+    got = bruker._read_bruker_binary(str(path), {"acqus": {"BYTORDA": 0, "DTYPA": 0}})
+    np.testing.assert_array_equal(got, np.array([1 - 2j, 3 - 4j, 5 - 6j]))
+
+    big = np.array([1, -2, 3, -4], dtype=">i4")
+    path_big = tmp_path / "fid_big"
+    path_big.write_bytes(big.tobytes())
+    got_big = bruker._read_bruker_binary(str(path_big), {"acqus": {"BYTORDA": 1, "DTYPA": 0}})
+    np.testing.assert_array_equal(got_big, np.array([1 - 2j, 3 - 4j]))
+
+    floats = np.array([1.5, -2.5, 3.5, -4.5], dtype="<f8")
+    path_f = tmp_path / "fid_float"
+    path_f.write_bytes(floats.tobytes())
+    got_f = bruker._read_bruker_binary(str(path_f), {"acqus": {"BYTORDA": 0, "DTYPA": 2}})
+    np.testing.assert_array_equal(got_f, np.array([1.5 - 2.5j, 3.5 - 4.5j]))
+
+
+def test_read_bruker_binary_truncates_a_leftover_tail_without_warning(tmp_path, recwarn):
+    # The whole point of replacing nmrglue's own reshape here: a file
+    # whose length doesn't divide exactly into the requested shape is
+    # the *normal* case for real EXSY data, and used to emit
+    # "UserWarning: (39583744,) cannot be shaped into (1002, 39488)".
+    # Truncating is safe because the shape's element count is derived
+    # from this same file's length by construction.
+    values = np.arange(2 * (3 * 4) + 6, dtype="<i4")  # 3x4 complex, plus a leftover tail
+    path = tmp_path / "ser"
+    path.write_bytes(values.tobytes())
+
+    got = bruker._read_bruker_binary(str(path), {"acqus": {"BYTORDA": 0, "DTYPA": 0}}, (3, 4))
+
+    assert got.shape == (3, 4)
+    assert not [w for w in recwarn if "cannot be shaped" in str(w.message)]
+
+
+def test_read_bruker_binary_raises_when_the_file_is_too_short(tmp_path):
+    # Genuinely truncated/corrupt data must not come back silently
+    # short -- that would produce a plausible-looking but wrong
+    # spectrum rather than an error.
+    values = np.arange(4, dtype="<i4")  # only 2 complex points
+    path = tmp_path / "ser"
+    path.write_bytes(values.tobytes())
+    with pytest.raises(ValueError, match="fewer than"):
+        bruker._read_bruker_binary(str(path), {"acqus": {"BYTORDA": 0, "DTYPA": 0}}, (10, 10))
+
+
+def test_read_2d_processed_missing_2rr_raises_a_clear_error(tmp_path):
+    # Real, pre-existing crash found by sweeping every Bruker dataset in
+    # test_data: `Cyclosporine/206/pdata/1` holds procs, proc2s, clevels
+    # and a thumbnail but no 2rr. _load_block returns None for a missing
+    # file (correct for the optional 2ri/2ii blocks) and that None used
+    # to reach NMRSpectrum's constructor, failing with
+    # "AttributeError: 'NoneType' object has no attribute 'ndim'" --
+    # naming neither the file nor the experiment.
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    for name, params in (
+        ("procs", {"SW_p": 8000.0, "SI": 8, "SF": 400.13, "XDIM": 1}),
+        ("proc2s", {"SW_p": 2000.0, "SI": 4, "SF": 400.13, "XDIM": 1}),
+    ):
+        with open(pdata / name, "w") as f:
+            f.write("\n".join(f"##${k}= {v}" for k, v in params.items()) + "\n")
+    for name in ("acqus", "acqu2s"):
+        with open(expt / name, "w") as f:
+            f.write("##$NUC1= <1H>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    with pytest.raises(FileNotFoundError, match="2rr"):
+        bruker.read_2d_processed(str(expt))
+
+
+def test_read_1d_processed_missing_1r_raises_a_clear_error(tmp_path):
+    # The same guard for the last fallback _read_auto tries -- an
+    # experiment with neither raw nor processed data (test_data's
+    # `.../2010` is a real example) otherwise failed with a bare errno-2
+    # from np.fromfile.
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    with open(pdata / "procs", "w") as f:
+        f.write("##$SW_p= 8000.0\n##$SI= 8\n##$SF= 400.13\n")
+    with open(expt / "acqus", "w") as f:
+        f.write("##$NUC1= <1H>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    with pytest.raises(FileNotFoundError, match="1r"):
+        bruker.read_1d_processed(str(expt))
+
+
+def test_apply_recorded_phase_uses_topspin_index_ramp_convention():
+    # phi(i) = PHC0 + PHC1 * i/(n-1), applied as exp(+i*phi) -- measured
+    # directly against TopSpin, not assumed. Deliberately *not* the
+    # pivot-based model processing.ft.apply_phase uses for a user's
+    # interactive phase: routing the recorded constants through that one
+    # is what left every 2D badly phased.
+    spectrum = np.ones(5, dtype=complex)
+    got = bruker.apply_recorded_phase(spectrum, 30.0, 90.0)
+    expected = np.exp(1j * np.deg2rad(30.0 + 90.0 * np.arange(5) / 4))
+    np.testing.assert_allclose(got, expected)
+
+    # First point carries PHC0 alone; last carries PHC0 + PHC1.
+    assert np.angle(got[0], deg=True) == pytest.approx(30.0)
+    assert np.angle(got[-1], deg=True) == pytest.approx(120.0)
+
+
+def test_apply_recorded_phase_axis_and_noop():
+    data = np.ones((4, 6), dtype=complex)
+    along_f1 = bruker.apply_recorded_phase(data, 0.0, 180.0, axis=0)
+    assert np.angle(along_f1[0, 0], deg=True) == pytest.approx(0.0)
+    assert np.angle(along_f1[-1, 0], deg=True) == pytest.approx(180.0)
+    # constant across the other axis
+    assert np.allclose(along_f1[2, :], along_f1[2, 0])
+    # Zero phase is an exact no-op, not a multiply by ~1.0
+    assert bruker.apply_recorded_phase(data, 0.0, 0.0) is data
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join("test_data", "bruker_PFG", "150")),
+    reason="needs the real bruker_PFG dataset",
+)
+def test_apply_recorded_phase_reproduces_topspin_on_real_xf2_data():
+    # The measurement this convention was derived from, pinned as a
+    # regression test. bruker_PFG/150 is processed by TopSpin with xf2
+    # only (proc2s SI == TD, so F1 was never transformed), which makes
+    # its 2rr a clean F2-only reference.
+    from opennmr.io.jcampdx import parse_jcampdx_params
+
+    path = os.path.join("test_data", "bruker_PFG", "150")
+    procs = parse_jcampdx_params(os.path.join(path, "pdata", "1", "procs"))
+    reference = np.real(bruker.read_2d_processed(path, pseudo_2d=True).data)
+    unphased = bruker.read_2d(path, pseudo_2d=True, autophase=False)
+    complex_spectrum = unphased.data + 1j * unphased.data_imag
+
+    phased = np.real(
+        bruker.apply_recorded_phase(
+            complex_spectrum, float(procs["PHC0"]), float(procs["PHC1"]), axis=-1,
+        )
+    )
+
+    def _corr(a, b):
+        a = np.asarray(a, float).ravel() - np.mean(a)
+        b = np.asarray(b, float).ravel() - np.mean(b)
+        return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+    # Essentially exact agreement with TopSpin's own processed data...
+    assert _corr(phased, reference) > 0.999
+    # ...and read_2d's own default now does exactly this, so a plain
+    # load reproduces TopSpin too (it used to sit at ~0.51, routing
+    # PHC0 through the pivot-based model and dropping PHC1 entirely).
+    assert _corr(bruker.read_2d(path, pseudo_2d=True).data, reference) > 0.999
+
+
+def test_acquisition_constants_names_parameters_the_way_a_pulse_programme_does():
+    # User request: fitting equations should be able to use "values from
+    # the input data (e.g. delays and constants and L or whatever)".
+    # Matching TopSpin's own naming is the point -- someone writing an
+    # equation reaches for d1 and l4 because that is what the pulse
+    # programme calls them.
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    spectrum = bruker.read_2d(path)
+    constants = bruker.acquisition_constants(spectrum)
+
+    assert constants["d1"] == pytest.approx(2.0)          # indexed array entries
+    assert constants["p1"] == pytest.approx(8.01)
+    assert constants["cnst2"] == pytest.approx(145.0)
+    assert constants["gpz1"] == pytest.approx(80.0)
+    assert constants["ns"] == pytest.approx(8.0)          # plain scalars
+    assert constants["td"] == pytest.approx(2048.0)
+    # Values as the vendor recorded them, not rescaled: d1 is seconds
+    # and p1 microseconds, which is what those numbers mean in TopSpin.
+    assert all(isinstance(v, float) for v in constants.values())
+
+
+def test_acquisition_constants_is_empty_without_acqus():
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    spectrum = NMRSpectrum(
+        data=np.zeros(4), axes=[NMRAxis(kind="frequency", ppm=np.arange(4.0))],
+        metadata=NMRMetadata(vendor="test", nucleus="1H"),
+    )
+    assert bruker.acquisition_constants(spectrum) == {}

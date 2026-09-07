@@ -49,7 +49,12 @@ def _synthetic_fid(n=512, sw=8000.0, f0_hz=1000.0, decay=200.0):
 
 def _mock_ng_bruker_read(monkeypatch, acqus, fid):
     dic = {"acqus": acqus}
+    # read_1d takes its parameters from read_acqus_file and its binary
+    # from bruker._read_bruker_binary now, rather than getting both from
+    # a single ng.bruker.read call -- so both seams need mocking.
+    monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda dic, data: data)
 
 
@@ -162,7 +167,11 @@ def test_read_1d_default_phase_mode_uses_recorded_not_apc0(tmp_path, monkeypatch
 
     spectrum = bruker.read_1d(path, autophase=True)  # phase_mode not specified -- uses the default
 
-    assert spectrum.metadata.raw["phase0"] == pytest.approx(37.5)
+    # Stored under its own key now: phase0/phase1 mean the *user's*
+    # phase, recorded_phase0/1 the file's own (they use different
+    # models -- see io.bruker.apply_dimension_phase).
+    assert spectrum.metadata.raw["recorded_phase0"] == pytest.approx(37.5)
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(0.0)
 
 
 def test_read_1d_recorded_phase_mode_ignores_data_entirely(tmp_path, monkeypatch):
@@ -303,6 +312,7 @@ def test_read_2d_unsupported_window_stays_on_raw_fid_path(tmp_path, monkeypatch)
     dic = {"acqus": acqus, "acqu2s": acqu2s}
     monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
     # See test_bruker_raw_2d.py's _mock_2d for why this is needed --
     # _guess_raw_2d_shape's real-file-scale TD/DTYPA/file-size logic
@@ -340,6 +350,7 @@ def test_read_2d_skips_prepare_fid_when_shift_align_lp_all_off(tmp_path, monkeyp
     dic = {"acqus": acqus, "acqu2s": acqu2s}
     monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
     # See test_bruker_raw_2d.py's _mock_2d for why this is needed --
     # _guess_raw_2d_shape's real-file-scale TD/DTYPA/file-size logic

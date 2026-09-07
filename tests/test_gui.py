@@ -18,6 +18,7 @@ from opennmr.gui.session import Session
 from opennmr import io as opennmr_io
 from opennmr.io import bruker as io_bruker
 from opennmr.io import persistence as io_persistence
+from opennmr.processing import slicing as processing_slicing
 from opennmr.processing import ft as processing_ft
 from opennmr.processing.slicing import get_trace
 from opennmr.processing.fitting import gaussian
@@ -44,7 +45,7 @@ def _make_1d_dataset(tmp_path, n=8, name="expt1"):
     expt = tmp_path / name
     pdata = expt / "pdata" / "1"
     pdata.mkdir(parents=True)
-    _write_params(expt / "acqus", {"NUC1": "1H", "BF1": 400.0, "SFO1": 400.13, "O1": 2000.0, "NS": 4})
+    _write_params(expt / "acqus", {"NUC1": "1H", "BF1": 400.13, "SFO1": 400.13, "O1": 2000.0, "NS": 4})
     _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": n, "SF": 400.13, "NC_proc": 0})
     (np.arange(n, dtype="int32") - n // 2).tofile(pdata / "1r")
     np.zeros(n, dtype="int32").tofile(pdata / "1i")
@@ -59,8 +60,8 @@ def _make_2d_dataset(tmp_path, n_f1=4, n_f2=8, name="expt2d", f1_nuc="1H", with_
     expt = tmp_path / name
     pdata = expt / "pdata" / "1"
     pdata.mkdir(parents=True)
-    _write_params(expt / "acqus", {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1})
-    _write_params(expt / "acqu2s", {"NUC1": f1_nuc, "BF1": 400.0, "O1": 0.0})
+    _write_params(expt / "acqus", {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1})
+    _write_params(expt / "acqu2s", {"NUC1": f1_nuc, "BF1": 400.13, "O1": 0.0})
     _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": n_f2, "SF": 400.13})
     _write_params(pdata / "proc2s", {"SW_p": 2000.0, "SI": n_f1, "SF": 400.13})
     data = np.arange(n_f1 * n_f2, dtype="int32").reshape(n_f1, n_f2)
@@ -469,10 +470,20 @@ def test_main_window_process_indirect_button_hidden_for_1d(qapp, tmp_path):
 # Menu bar
 # ============================================================
 
+
+def _menu_by_title(window, title):
+    """A top-level menu by its own name. Positional lookup broke every
+    time a menu was added -- name lookup does not."""
+    for action in window.menuBar().actions():
+        if action.text().replace("&", "") == title:
+            return action.menu()
+    raise AssertionError(f"no {title!r} menu")
+
+
 def test_main_window_has_file_edit_window_menus(qapp):
     window = MainWindow()
     titles = [action.text().replace("&", "") for action in window.menuBar().actions()]
-    assert titles == ["File", "Edit", "Window", "Analysis", "Fitting"]
+    assert titles == ["File", "Edit", "View", "Window", "Analysis", "Fitting"]
 
 
 def test_main_window_menu_open_action_triggers_open_dialog(qapp, monkeypatch):
@@ -557,7 +568,7 @@ def test_main_window_remove_peak_shortcut_is_scoped_to_peak_table(qapp, tmp_path
 
 def test_main_window_menu_window_panel_actions_switch_side_tabs(qapp):
     window = MainWindow()
-    window_menu = window.menuBar().actions()[2].menu()
+    window_menu = _menu_by_title(window, "Window")
     analysis_action = next(a for a in window_menu.actions() if a.text() == "Analysis")
     analysis_action.trigger()
     assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Analysis"
@@ -581,7 +592,7 @@ def test_main_window_spectrum_canvas_defaults_to_full_resolution_others_do_not(q
 
 def test_main_window_menu_window_view_actions_switch_canvas_tabs(qapp):
     window = MainWindow()
-    window_menu = window.menuBar().actions()[2].menu()
+    window_menu = _menu_by_title(window, "Window")
     compare_action = next(a for a in window_menu.actions() if a.text() == "Compare View")
     compare_action.trigger()
     assert window.canvas_tabs.currentWidget() is window.compare_canvas
@@ -792,7 +803,12 @@ def test_main_window_pivot_defaults_to_spectrum_centre(qapp, tmp_path):
     index = window._selected_index()
     freq_ppm = window.session.spectra[index].axis_values(0, "ppm")
     expected_centre = (freq_ppm.min() + freq_ppm.max()) / 2
-    assert window.pivot_spin.value() == pytest.approx(expected_centre)
+    # abs, not the default relative tolerance: pivot_spin displays 3
+    # decimal places, so its value is rounded to 5e-4 regardless of
+    # where the axis sits. The relative default only passed before
+    # because this fixture's axis happened to be centred near -320 ppm,
+    # where 1e-6 relative is larger than that rounding.
+    assert window.pivot_spin.value() == pytest.approx(expected_centre, abs=5e-4)
 
 
 def test_main_window_pivot_slider_change_compensates_phase0_so_data_does_not_jump(qapp, tmp_path):
@@ -1311,11 +1327,13 @@ def test_main_window_pivot_slider_moves_pivot_spin(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
     freq_ppm = window._phase_freq_ppm
 
+    # abs tolerance -- pivot_spin rounds to 3 decimal places (see
+    # test_main_window_pivot_defaults_to_spectrum_centre).
     window.pivot_slider.setValue(0)  # left end of the slider
-    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.max()))
+    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.max()), abs=5e-4)
 
     window.pivot_slider.setValue(1000)  # right end of the slider
-    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.min()))
+    assert window.pivot_spin.value() == pytest.approx(float(freq_ppm.min()), abs=5e-4)
 
 
 def test_main_window_pivot_spin_moves_pivot_slider(qapp, tmp_path):
@@ -2363,20 +2381,27 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=Non
     (expt / "fid").write_bytes(b"\x00")  # existence is all _read_auto checks; content is never read (mocked)
     (expt / "acqus").write_bytes(b"\x00")
 
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1.0}
     if probe is not None:
         acqus["PROBHD"] = probe
     if pulprog is not None:
         acqus["PULPROG"] = pulprog
     fid = _synthetic_raw_fid(n=n)
     dic = {"acqus": acqus}
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
     return str(expt)
 
 
 def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d", f1_nuc="13C", ns=1.0,
-                          fn_mode=None, fid=None):
+                          fn_mode=None, fid=None, f1_o1=0.0):
     from opennmr.io import bruker as bruker_io
 
     expt = tmp_path / name
@@ -2387,11 +2412,11 @@ def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d
     (expt / "ser").write_bytes(b"\x00")
     (expt / "acqus").write_bytes(b"\x00")
 
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": ns}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": ns}
     # `acqu2s` is read from the mocked `ng.bruker.read()` dict, not
     # parsed off disk -- matching real Bruker behaviour (nmrglue reads
     # every acqu*s/proc*s file itself as part of one `read()` call).
-    acqu2s = {"NUC1": f1_nuc, "BF1": 100.6, "O1": 0.0}
+    acqu2s = {"NUC1": f1_nuc, "BF1": 100.6, "O1": f1_o1}
     if fn_mode is not None:
         acqu2s["FnMODE"] = fn_mode
     if fid is None:
@@ -2400,7 +2425,14 @@ def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d
         fid = np.tile(row, (n_f1, 1)).astype(np.complex128)
     dic = {"acqus": acqus, "acqu2s": acqu2s}
     monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
     # _guess_raw_2d_shape's real-file-scale TD/DTYPA/file-size logic
     # (see its own docstring in io/bruker.py) doesn't apply to this
@@ -2783,14 +2815,21 @@ def test_main_window_processing_preview_pseudo2d_uses_only_active_slice(qapp, tm
     _write_params(pdata / "proc2s", {"SW_p": 2000.0, "SI": n_f1, "SF": 100.6, "WDW": 0})
     (expt / "ser").write_bytes(b"\x00")
     (expt / "acqus").write_bytes(b"\x00")
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1.0}
     acqu2s = {"NUC1": "off", "BF1": 100.6, "O1": 0.0}
     t2 = np.arange(n_f2) / 8000.0
     # A different decay rate per row -- slices are visibly distinct.
     fid = np.stack([np.exp(-t2 * 300 * (row + 1)) * np.exp(2j * np.pi * 1000.0 * t2) for row in range(n_f1)])
     dic = {"acqus": acqus, "acqu2s": acqu2s}
     monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
     monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
@@ -3106,10 +3145,17 @@ def test_main_window_unsupported_window_shows_notice_but_stays_reprocessable(qap
     _write_params(pdata / "procs", {"SW_p": 8000.0, "SI": 64, "SF": 400.13, "WDW": 2})
     (expt / "fid").write_bytes(b"\x00")
     (expt / "acqus").write_bytes(b"\x00")
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1.0}
     fid = _synthetic_raw_fid(n=64)
     dic = {"acqus": acqus}
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
 
     shown = []
@@ -3142,10 +3188,14 @@ def test_main_window_2d_shape_guess_failure_falls_back_and_hides_fid_box(qapp, t
     path = _make_2d_dataset(tmp_path, n_f1=4, n_f2=8)
     (tmp_path / "expt2d" / "ser").write_bytes(b"\x00")
 
-    def fake_read(_path, **_kw):
+    def fake_read(*_a, **_kw):
         raise IndexError("tuple index out of range")
 
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", fake_read)
+    # Patched at the binary-read seam, not ng.bruker.read: read_2d reads
+    # the ser itself now (bruker._read_bruker_binary), so that is where a
+    # raw-read failure has to be simulated for _read_auto's
+    # already-processed fallback to be exercised.
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", fake_read)
     monkeypatch.setattr("opennmr.gui.main_window.QMessageBox.information", lambda *a, **kw: None)
 
     window = MainWindow()
@@ -3586,7 +3636,15 @@ def test_main_window_recompute_uses_each_dimensions_own_pivot_not_the_other_ones
     # range doesn't even contain 0, the resulting data was off by
     # ~129% relative to the correct (centre-pivoted) reference; fixed,
     # it matches to floating-point precision.
-    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=32, name="pivotmix2d", f1_nuc="13C")
+    #
+    # f1_o1 puts F1's own centre at ~100 ppm, well clear of F2's range.
+    # It used to be 0 ppm and that was outside F2's range by accident --
+    # the fixture's BF1 disagreed with its SF, which implied a 130 kHz
+    # vendor reference and pushed F2 out to around -320 ppm. Making the
+    # fixture self-consistent brought F2 back to a normal range that
+    # contains 0, so the separation is now arranged deliberately.
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=32, name="pivotmix2d",
+                                f1_nuc="13C", f1_o1=10060.0)
     window = MainWindow()
     window._load(path, vendor="bruker")
     window.process_indirect_button.setChecked(True)
@@ -3595,7 +3653,8 @@ def test_main_window_recompute_uses_each_dimensions_own_pivot_not_the_other_ones
 
     f1_ppm = spectrum.axis_values(0, "ppm")
     f2_ppm = spectrum.axis_values(-1, "ppm")
-    assert not (f2_ppm.min() <= 0.0 <= f2_ppm.max())  # F1's own centre (~0) falls outside F2's range
+    f1_centre = (f1_ppm.min() + f1_ppm.max()) / 2
+    assert not (f2_ppm.min() <= f1_centre <= f2_ppm.max())  # F1's centre is outside F2's range
 
     window.phase1_handle.setValue(50.0)  # commit a real F2 phase1 while F2 is focused
     window.dim_combo.setCurrentIndex(1)  # switch focus to F1 -- pivot_spin recentres onto F1's own range
@@ -3847,7 +3906,7 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
     (pdata / "2rr").write_bytes(b"\x00" * (n_f1 * n_f2 * 4))
     (pdata / "2ii").write_bytes(b"\x00" * (n_f1 * n_f2 * 4))
 
-    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    acqus = {"NUC1": "1H", "BF1": 400.13, "O1": 2000.0, "NS": 1.0}
     t2 = np.arange(n_f2)
     rows = []
     for row_index in range(n_f1):
@@ -3857,9 +3916,16 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
         row += 0.01 * np.exp(-((t2 - peak_at) ** 2) / 8.0)
         rows.append(row)
     fid = np.array(rows)
-    dic = {"acqus": acqus, "acqu2s": {"NUC1": "off", "BF1": 400.0, "O1": 0.0}}
+    dic = {"acqus": acqus, "acqu2s": {"NUC1": "off", "BF1": 400.13, "O1": 0.0}}
+    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    # read_acqus_file too: read_1d/read_2d take their parameters from it
+    # now, rather than from a combined ng.bruker.read call. Without this
+    # the load raises on the placeholder acqus these fixtures write, and
+    # _load answers with a modal QMessageBox -- which hangs the suite
+    # rather than failing it.
     monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
     monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
@@ -4071,20 +4137,23 @@ def test_main_window_multi_selection_shows_compare(qapp, tmp_path):
     assert window.canvas_tabs.currentWidget() is window.compare_canvas
 
 
-def test_main_window_compare_list_has_a_current_row_after_populating(qapp, tmp_path):
-    # Explicit user feedback: "it is no longer obvious which spectrum
-    # is selected" -- nothing ever set an initial current/highlighted
-    # row in this list, only Move Up/Down did (and only after a click
-    # had already set one), so a freshly (re)populated list showed no
-    # current-row highlight at all.
+def test_main_window_compare_list_preserves_a_current_row_but_never_preselects(qapp, tmp_path):
+    # Explicit user request: "in compare, none of the spectra should be
+    # pre-selected like the last one is now." This narrows, rather than
+    # reverses, the earlier feedback that it was "no longer obvious
+    # which spectrum is selected" -- that was about the highlight being
+    # invisible once a row *had* been chosen, which still works below.
+    # What's gone is the choice made on the user's behalf before they
+    # have clicked anything.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     _select_rows(window, [0, 1])
-    assert window.compare_list.currentRow() == 0
+    assert window.compare_list.currentRow() == -1
 
-    # Still current after Move Down shuffles the order, not silently
-    # reset to row 0 again.
+    # Once the user does pick one, it survives a rebuild -- Move
+    # Up/Down and check-state toggles must not lose their place.
+    window.compare_list.setCurrentRow(0)
     window._on_move_compare_item(1)
     assert window.compare_list.currentRow() == 1
     moved_entry = window.compare_list.item(1).data(Qt.ItemDataRole.UserRole)
@@ -4109,7 +4178,13 @@ def test_main_window_compare_list_selection_highlights_matching_plot_row(qapp, t
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     window._load(_make_1d_dataset(tmp_path, name="c"), vendor="bruker")
     _select_rows(window, [0, 1, 2])
-    assert window.compare_list.currentRow() == 0
+    # Nothing pre-selected (see the test above), so no row is tinted
+    # until the user actually picks one.
+    assert window.compare_list.currentRow() == -1
+    assert all(ax.patch.get_alpha() == pytest.approx(0.0)
+               for ax in window.compare_canvas._compare_axes)
+
+    window.compare_list.setCurrentRow(0)
     assert window.compare_canvas._selected_compare_index == 0
     assert window.compare_canvas._compare_axes[0].patch.get_alpha() == pytest.approx(1.0)
     assert window.compare_canvas._compare_axes[1].patch.get_alpha() == pytest.approx(0.0)
@@ -4754,6 +4829,21 @@ def _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05, M0=1.
     f2_axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
     metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True)
     return NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
+
+
+def _isolate_sidecars(monkeypatch, tmp_path):
+    """Point sidecar reads/writes at a scratch directory, keyed per
+    source path. Per-path, not one shared file: a single shared sidecar
+    leaks one dataset's saved state into the next one's load, which
+    silently invalidates any before/after comparison across datasets."""
+    import hashlib
+
+    def _path(source_path, suffix):
+        key = hashlib.sha1(str(source_path).encode()).hexdigest()[:16]
+        return str(tmp_path / f"{key}_{suffix}.json")
+
+    monkeypatch.setattr(io_persistence, "metadata_sidecar_path", lambda p: _path(p, "meta"))
+    monkeypatch.setattr(io_persistence, "processing_sidecar_path", lambda p: _path(p, "proc"))
 
 
 def _load_spectrum_directly(window, spectrum):
@@ -7743,3 +7833,1015 @@ def test_main_window_magnitude_button_hidden_for_non_bruker(qapp, tmp_path):
     spectrum.metadata.vendor = "xpulse"
     _load_spectrum_directly(window, spectrum)
     assert window.magnitude_button.isVisible() is False
+
+
+def test_main_window_zero_phase_zeros_the_applied_phase_not_just_the_delta(qapp, tmp_path, monkeypatch):
+    # Real user report: "Zeroing phases should actually zero the values,
+    # not just reset to the loaded values." The spin box holds only the
+    # delta since the last phase-reference capture; the total in force
+    # is that delta plus whatever is committed in metadata.raw -- which
+    # on a freshly loaded Bruker spectrum is the file's own recorded
+    # PHC0/PHC1. Zeroing the delta therefore returned to the *loaded*
+    # phase, visibly doing nothing on a spectrum not yet dragged.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["phase0"] = 120.0
+    spectrum.metadata.raw["phase1"] = 45.0
+
+    window._on_zero_phase_clicked(0)
+    # The *applied* phase is what must reach zero -- asserted through
+    # _phase_committed_value, which sums the file's own recorded phase
+    # and the user's, since those are stored separately and use
+    # different models.
+    assert window._phase_committed_value(0) == pytest.approx(0.0)
+    assert window.phase0_spin.value() == pytest.approx(0.0)
+    assert window._phase_committed_value(1) == pytest.approx(45.0)  # untouched
+
+    window._on_zero_phase_clicked(1)
+    assert window._phase_committed_value(1) == pytest.approx(0.0)
+
+
+def test_main_window_reset_phase_zeros_both_applied_phases(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["phase0"] = -30.0
+    spectrum.metadata.raw["phase1"] = 200.0
+
+    window._on_reset_phase_clicked()
+
+    assert window._phase_committed_value(0) == pytest.approx(0.0)
+    assert window._phase_committed_value(1) == pytest.approx(0.0)
+
+
+def test_main_window_zero_phase_with_no_committed_phase_is_still_zero(qapp, tmp_path, monkeypatch):
+    # Nothing committed -> the delta that zeros the total is itself 0,
+    # i.e. the old behaviour, so this must not regress the common case.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window.session.spectra[0].metadata.raw["phase0"] = 0.0
+    window.session.spectra[0].metadata.raw["recorded_phase0"] = 0.0
+    window.phase0_spin.setValue(37.0)
+
+    window._on_zero_phase_clicked(0)
+
+    assert window.phase0_spin.value() == pytest.approx(0.0)
+    assert window._phase_committed_value(0) == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("dataset,genuine_2d", [
+    ("bruker_T2/11", False),
+    ("bruker_PFG/150", False),
+    ("Bruker Example Data/Cyclosporine/203", True),      # Echo-Antiecho
+    ("Bruker Example Data/exam_CMCse_3/19", True),       # States-TPPI
+    ("Bruker Example Data/exam_CMCse_3/12", True),       # magnitude mode
+])
+def test_main_window_live_rebuild_reproduces_the_load_exactly(qapp, dataset, genuine_2d, monkeypatch, tmp_path):
+    # THE acceptance test for separating the recorded phase from the
+    # user's. The GUI rebuilds from the cached raw FID, which is the FID
+    # *before* the reader phased anything -- so every reconstruction
+    # path has to re-apply the file's own recorded phase, in the file's
+    # own model, or touching any control makes the spectrum jump.
+    #
+    # This is exactly what blocked shipping the phase-convention fix the
+    # first time: measured at 0.46 (T2) and 0.76 (PFG) relative
+    # difference before the split, and 1.93 for the magnitude-mode COSY
+    # (whose rebuild path dropped magnitude entirely).
+    path = os.path.join("test_data", *dataset.split("/"))
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real {dataset} dataset")
+
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    if genuine_2d:
+        window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    # Baseline correction off: it is a separate, deliberately deferred
+    # step, not part of what this test is pinning.
+    spectrum.metadata.raw["baseline_correct"] = False
+    before = np.array(spectrum.data)
+
+    window._recompute_multi_row_data(spectrum)
+
+    after = np.array(window.session.spectra[0].data)
+    scale = max(np.max(np.abs(before)), 1e-30)
+    assert np.max(np.abs(after - before)) / scale < 1e-6
+
+
+def test_main_window_recorded_and_user_phase_are_stored_separately(qapp, tmp_path, monkeypatch):
+    # They are applied through different models, so merging them into
+    # one number would make neither reproducible.
+    path = _make_raw_1d_dataset(tmp_path, monkeypatch, n=64)
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    raw = window.session.spectra[0].metadata.raw
+
+    assert "recorded_phase0" in raw and "recorded_phase1" in raw
+    assert raw["phase0"] == pytest.approx(0.0)  # the user has dialled nothing yet
+
+
+def test_main_window_pan_is_the_default_mode_once_data_is_loaded(qapp, tmp_path, monkeypatch):
+    # Explicit user request: "Pan should be on by default when the
+    # programme/data is loaded." Applied on load rather than at startup
+    # so it lands on canvases that actually have something plotted.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    assert window._navigation_mode() == ""  # nothing loaded yet
+
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+
+    assert window._navigation_mode() == "pan"
+
+
+def test_main_window_navigation_mode_toggle_and_idempotence(qapp, tmp_path, monkeypatch):
+    # matplotlib's toolbar pan()/zoom() *toggle*, so setting a mode that
+    # is already active would turn it back off -- the helper has to
+    # check first. Pinned because it is an easy and invisible mistake.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+
+    window._toggle_navigation_mode()
+    assert window._navigation_mode() == "zoom"
+    window._toggle_navigation_mode()
+    assert window._navigation_mode() == "pan"
+
+    window._set_navigation_mode("zoom")
+    window._set_navigation_mode("zoom")   # must not toggle back off
+    assert window._navigation_mode() == "zoom"
+
+
+def test_main_window_navigation_mode_applies_to_every_canvas(qapp, tmp_path, monkeypatch):
+    # The mode is a per-toolbar flag, so leaving the other canvases
+    # alone would mean switching canvas tab silently changed the
+    # interaction mode back.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window._set_navigation_mode("zoom")
+
+    modes = {
+        canvas.toolbar.mode.name if hasattr(canvas.toolbar.mode, "name") else str(canvas.toolbar.mode)
+        for canvas in window._all_canvases()
+    }
+    assert len(modes) == 1 and "ZOOM" in modes.pop().upper()
+
+
+def test_main_window_keeping_an_extracted_slice_makes_it_phasable(qapp, tmp_path, monkeypatch):
+    # Real user request: "a method to phase on an extracted slice".
+    # extract_slice only *displayed* a trace -- it never reached the
+    # session, and every phase control acts on session spectra.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    before = len(window.session)
+
+    window.canvas.extract_slice("f1", 1)
+    assert window.canvas._extracted_trace is not None
+    window.canvas._keep_slice_button.click()
+
+    assert len(window.session) == before + 1
+    kept = window.session.spectra[-1]
+    assert kept.ndim == 1
+    # "derived": it has no raw FID to reprocess from, so the FID
+    # controls stay hidden while the phase controls still work.
+    assert kept.metadata.vendor == "derived"
+    # Phasable, which is the whole point -- get_trace carries data_imag.
+    assert kept.data_imag is not None
+    assert window._selected_index() == len(window.session) - 1
+
+    before_data = np.array(window.session.spectra[-1].data)
+    window.phase0_spin.setValue(90.0)
+    assert not np.allclose(before_data, window.session.spectra[-1].data)
+
+
+def _keep_a_slice(window, axis="f1", index=1):
+    """Extract a slice and keep it, returning the kept spectrum."""
+    window.canvas.extract_slice(axis, index)
+    window.canvas._keep_slice_button.click()
+    return window.session.spectra[-1]
+
+
+def test_main_window_kept_slice_records_its_source(qapp, tmp_path, monkeypatch):
+    # The slice is a working copy of part of the 2D, not a dead end --
+    # it keeps a live link back so its phase can be pushed home.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    parent = window.session.spectra[0]
+
+    kept = _keep_a_slice(window)
+
+    assert kept.metadata.raw["slice_parent"] is parent
+    assert kept.metadata.raw["slice_axis"] == "f1"
+    # Fixing F1 traces *along F2*, so the slice's own phase is an F2
+    # phase. Getting this backwards would silently phase the wrong
+    # dimension of the 2D.
+    assert window._slice_source_of(kept) == (parent, "f2")
+
+
+def test_main_window_slice_phase_applies_to_the_source_2d(qapp, tmp_path, monkeypatch):
+    # Real user request: "I don't think the derived slice phasing is
+    # feeding back into the contour... have some way to go back into
+    # the contour data."
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    parent = window.session.spectra[0]
+    parent.metadata.raw["baseline_correct"] = False
+    before = np.array(parent.data)
+
+    kept = _keep_a_slice(window)
+    window.phase0_spin.setValue(60.0)
+    window.apply_slice_phase_button.click()
+
+    # The 2D picked the phase up, and the view returned to it.
+    assert parent.metadata.raw["phase0"] == pytest.approx(60.0)
+    assert window._selected_index() == 0
+    assert not np.allclose(before, window.session.spectra[0].data)
+    # Cleared on the slice, so a second click can't double-apply.
+    assert kept.metadata.raw["phase0"] == pytest.approx(0.0)
+    assert window.phase0_spin.value() == pytest.approx(0.0)
+
+
+def test_main_window_slice_phase_matches_phasing_the_2d_directly(qapp, tmp_path, monkeypatch):
+    # The whole point: routing a phase through a slice must land in
+    # exactly the same place as dialling it on the 2D itself, because
+    # both go through _recompute_multi_row_data rather than one of them
+    # mutating data on its own.
+    _isolate_sidecars(monkeypatch, tmp_path)
+
+    def _settle(window):
+        if window._live_reprocess_timer.isActive():
+            window._live_reprocess_timer.stop()
+            window._run_debounced_multi_row_reprocess()
+
+    via_slice = MainWindow()
+    via_slice._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, name="viaslice"), vendor="bruker")
+    _keep_a_slice(via_slice)
+    via_slice.phase0_spin.setValue(60.0)
+    via_slice.apply_slice_phase_button.click()
+    _settle(via_slice)
+
+    direct = MainWindow()
+    direct._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, name="direct"), vendor="bruker")
+    direct.phase0_spin.setValue(60.0)
+    _settle(direct)
+
+    a = np.asarray(via_slice.session.spectra[0].data)
+    b = np.asarray(direct.session.spectra[0].data)
+    assert np.max(np.abs(a - b)) / max(np.max(np.abs(b)), 1e-30) < 1e-9
+
+
+def test_main_window_apply_slice_phase_button_only_shown_for_a_slice(qapp, tmp_path, monkeypatch):
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    assert window.apply_slice_phase_button.isHidden() is True
+
+    _keep_a_slice(window)
+    assert window.apply_slice_phase_button.isHidden() is False
+
+    # Back on the 2D itself, it is meaningless again.
+    window._select_single_row(0)
+    assert window.apply_slice_phase_button.isHidden() is True
+
+
+def test_main_window_slice_source_is_dropped_if_the_2d_is_removed(qapp, tmp_path, monkeypatch):
+    # Holding a reference to a spectrum no longer in the session would
+    # let the button apply a phase to something the user can't see.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    kept = _keep_a_slice(window)
+    assert window._slice_source_of(kept)[0] is not None
+
+    window.session.remove(0)
+    assert window._slice_source_of(kept) == (None, None)
+
+
+def test_main_window_live_phase_keeps_the_baseline_after_a_settle(qapp, tmp_path, monkeypatch):
+    # Real user report: "The indirect phasing sort of bounces like there
+    # is a mismatch to the current and read phases."
+    #
+    # Mechanism: baseline correction is deliberately NOT applied on
+    # every drag tick (measured at 173 ms for this dataset and 1.5 s for
+    # the EXSY -- far too slow), so it is deferred to a debounced
+    # rebuild. That rebuild fires whenever the drag pauses for 200 ms.
+    # Before this fix the *next* tick re-derived the display from the
+    # pre-drag snapshot, throwing the baseline away again -- so the view
+    # alternated between corrected and uncorrected on every pause.
+    #
+    # The fix makes the rebuild's own result the new reference, so the
+    # drag continues from it. Asserted against the authoritative answer
+    # (a clean rebuild at the same phase) rather than against a raw
+    # difference, since a phase change legitimately alters the data.
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip("needs the real Cyclosporine/203 dataset")
+    _isolate_sidecars(monkeypatch, tmp_path)
+
+    def _build(phases, settle_at):
+        window = MainWindow()
+        window._load(path, vendor="bruker")
+        window._on_process_indirect_toggled(True)
+        spectrum = window.session.spectra[0]
+        spectrum.metadata.raw["baseline_correct"] = True
+        # F1. F2 on a hypercomplex 2D has no live tick to bounce any
+        # more -- see the test below.
+        window.dim_combo.setCurrentIndex(1)
+        for value in phases:
+            window.phase0_spin.setValue(value)
+            if value in settle_at and window._live_reprocess_timer.isActive():
+                window._live_reprocess_timer.stop()
+                window._run_debounced_multi_row_reprocess()
+        return np.asarray(spectrum.data)
+
+    # Settle at 30, then one more tick to 30.5 -- what the user sees.
+    live = _build([30.0, 30.5], {30.0})
+    # The authoritative answer for 30.5.
+    authoritative = _build([30.5], {30.5})
+
+    scale = max(np.max(np.abs(authoritative)), 1e-30)
+    assert np.max(np.abs(live - authoritative)) / scale < 1e-3
+
+
+def test_main_window_pick_mode_shows_a_slice_for_a_pseudo_2d(qapp, tmp_path, monkeypatch):
+    # Real user report: "peak picking on a pseudo 2D is currently
+    # impossible". Manual picking listens on the Spectrum canvas, which
+    # shows the contour/stack for a pseudo-2D -- so a click yielded a 2D
+    # position with no single trace to attach a peak to. Turning pick
+    # mode on now puts the chosen slice up on its own.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._select_single_row(0)
+
+    assert not window.peak_slice_row.isHidden()
+    assert window.peak_slice_spin.maximum() == spectrum.data.shape[0]
+    assert window.peak_slice_spin.value() == 1          # first by default
+
+    assert window.canvas._extracted_from_spectrum is None
+    window.pick_peak_button.setChecked(True)
+    assert window.canvas._extracted_from_spectrum is not None
+    assert window.canvas._extracted_index == 1
+
+    # Changing the slice while picking follows along.
+    window.peak_slice_spin.setValue(4)
+    assert window.canvas._extracted_index == 4
+
+
+def test_main_window_peak_slice_spin_wraps_at_both_ends(qapp, tmp_path, monkeypatch):
+    # Explicit user request: "if there's a box with a number, pressing
+    # down on the lowest should cycle back to the highest".
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._select_single_row(0)
+    n_rows = window.session.spectra[0].data.shape[0]
+
+    assert window.peak_slice_spin.wrapping()
+    window.peak_slice_spin.setValue(1)
+    window.peak_slice_spin.stepBy(-1)
+    assert window.peak_slice_spin.value() == n_rows
+    window.peak_slice_spin.stepBy(1)
+    assert window.peak_slice_spin.value() == 1
+
+
+def test_main_window_peak_slice_row_hidden_for_a_1d(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window._select_single_row(0)
+    assert window.peak_slice_row.isHidden()
+
+
+def test_main_window_auto_pick_uses_the_selected_slice(qapp, tmp_path, monkeypatch):
+    # Auto-Pick was hard-wired to slice 1 with no way to choose another,
+    # and refused a conventional 2D outright.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    # Rows must differ from each other, or "picks on slice 3" and
+    # "picks on slice 1" are indistinguishable -- the default fixture
+    # tiles one identical row, which made an earlier version of this
+    # test pass even with the hard-wired index=1 still in place.
+    n_f1, n_f2 = 8, 32
+    t2 = np.arange(n_f2) / 8000.0
+    fid = np.stack([
+        (k + 1) * np.exp(-t2 * 300) * np.exp(2j * np.pi * (500.0 + 200.0 * k) * t2)
+        for k in range(n_f1)
+    ]).astype(np.complex128)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=n_f1, n_f2=n_f2, fid=fid),
+                 vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._select_single_row(0)
+
+    window.peak_slice_spin.setValue(3)
+    target = window._peak_pick_target(spectrum)
+    expected = processing_slicing.get_trace(spectrum, axis="f1", index=3)
+    np.testing.assert_allclose(target.data, expected.data)
+    slice_one = processing_slicing.get_trace(spectrum, axis="f1", index=1)
+    assert not np.allclose(target.data, slice_one.data)
+
+    # A genuine 2D is no longer refused outright either -- it picks on
+    # one row at a time, exactly like a pseudo-2D.
+    window._on_process_indirect_toggled(True)
+    genuine = window.session.spectra[0]
+    window._refresh_peak_slice_control(genuine)
+    assert not window.peak_slice_row.isHidden()
+    assert window._peak_pick_target(genuine).ndim == 1
+
+
+def test_main_window_contour_slices_are_stored_against_the_spectrum(qapp, tmp_path, monkeypatch):
+    # A slice at F1 index 412 means nothing on any other dataset, so
+    # like the nQ line it belongs to the spectrum, not the canvas.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, name="one"), vendor="bruker")
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, name="two"), vendor="bruker")
+
+    window._select_single_row(0)
+    window.canvas._add_contour_slice("f1", 2, "Impurity")
+    window.canvas._add_contour_slice("f1", 5, "Shift")
+    assert window.session.spectra[0].metadata.raw["contour_slices"] == [
+        {"axis": "f1", "index": 2, "label": "Impurity"},
+        {"axis": "f1", "index": 5, "label": "Shift"},
+    ]
+
+    window._select_single_row(1)
+    assert window.canvas._contour_slices == []
+    assert "contour_slices" not in window.session.spectra[1].metadata.raw
+
+    window._select_single_row(0)
+    assert len(window.canvas._contour_slices) == 2
+
+    window.canvas._clear_contour_slices()
+    assert window.session.spectra[0].metadata.raw["contour_slices"] == []
+
+
+def test_main_window_restoring_contour_slices_does_not_write_back(qapp, tmp_path, monkeypatch):
+    # set_contour_slices deliberately doesn't emit -- otherwise pushing
+    # a spectrum's stored slices onto the canvas would immediately write
+    # the same list straight back out as if the user had just added it.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+
+    emitted = []
+    window.canvas.contourSlicesChanged.connect(emitted.append)
+    window._restore_contour_slices(spectrum)
+    assert emitted == []
+    assert "contour_slices" not in spectrum.metadata.raw
+
+
+def test_main_window_nq_line_is_per_spectrum_not_app_wide(qapp, tmp_path, monkeypatch):
+    # User request: "plotting options like nQ line should be tied to the
+    # loaded spectrum." A diagonal means something on a homonuclear
+    # correlation and nothing on a heteronuclear one, and n is a
+    # property of the experiment -- as one global switch it followed the
+    # user onto every other spectrum, including the ones it was
+    # meaningless on.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, name="first"), vendor="bruker")
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, name="second"), vendor="bruker")
+
+    window._select_single_row(0)
+    window.output_nq_line_checkbox.setChecked(True)
+    window.output_nq_value_spin.setValue(3)
+    assert window.session.spectra[0].metadata.raw["nq_line"] is True
+    assert window.session.spectra[0].metadata.raw["nq_value"] == 3
+
+    # Selecting the other spectrum must not carry it across.
+    window._select_single_row(1)
+    assert not window.output_nq_line_checkbox.isChecked()
+    assert "nq_line" not in window.session.spectra[1].metadata.raw
+
+    # ...and coming back restores it, canvases included.
+    window._select_single_row(0)
+    assert window.output_nq_line_checkbox.isChecked()
+    assert window.output_nq_value_spin.value() == 3
+    assert window.output_nq_value_spin.isEnabled()
+
+
+def test_main_window_nq_line_restore_does_not_write_back(qapp, tmp_path, monkeypatch):
+    # Restoring the control from the spectrum must not look like the
+    # user setting it -- otherwise selecting a spectrum that has never
+    # had an nQ line would stamp a default onto it (and dirty its
+    # sidecar) just by being looked at.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+
+    window._restore_nq_line_control(spectrum)
+    assert "nq_line" not in spectrum.metadata.raw
+    assert "nq_value" not in spectrum.metadata.raw
+
+
+def test_main_window_nq_line_survives_a_reload(qapp, tmp_path, monkeypatch):
+    # It rides along with the rest of the processing state, so it has to
+    # come back on a fresh load of the same experiment.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8)
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._select_single_row(0)
+    window.output_nq_line_checkbox.setChecked(True)
+    window.output_nq_value_spin.setValue(2)
+    io_persistence.save_processing_sidecar(window.session.spectra[0])
+
+    reopened = MainWindow()
+    reopened._load(path, vendor="bruker")
+    reopened._select_single_row(0)
+    assert reopened.output_nq_line_checkbox.isChecked()
+    assert reopened.output_nq_value_spin.value() == 2
+
+
+def test_main_window_custom_equation_uses_acquisition_constants(qapp, tmp_path, monkeypatch):
+    # "It would be good if I can make fitting equations using values
+    # from the input data (e.g. delays and constants and L or
+    # whatever)." Every acquisition parameter is offered rather than a
+    # guessed subset -- build_custom_model substitutes only the names an
+    # equation actually uses, so an unused one costs nothing.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._select_single_row(0)
+
+    window.custom_equation_edit.setText("A*exp(-x*d1/T2)+C")
+    window._on_custom_equation_changed(window.custom_equation_edit.text())
+    label = window.custom_params_label.text()
+    assert "A, T2, C" in label          # d1 is not among them
+    assert "d1=2" in label              # ...and the preview says why
+
+    spec = window._build_custom_relaxation_model()
+    assert spec["params"] == ["A", "T2", "C"]
+    assert spec["constants"] == {"d1": pytest.approx(2.0)}
+
+    # A symbol nobody supplies is still fitted, exactly as before.
+    window.custom_equation_edit.setText("A*exp(-x/Tq)+C")
+    assert window._build_custom_relaxation_model()["params"] == ["A", "Tq", "C"]
+
+
+def test_main_window_sr_box_shows_the_file_s_own_reference(qapp, tmp_path, monkeypatch):
+    # User request: "I want any sr that was noted in the import files to
+    # be applied already and to show in the processing tab." It was
+    # always applied -- _ppm_hz_axis folds (SF - BF1) into every axis it
+    # builds -- but nothing recorded how much, so the box read 0 for a
+    # dataset that plainly was referenced.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = os.path.join("test_data", "2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119", "2019")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    assert spectrum.metadata.raw["sr_recorded_hz"] == pytest.approx(315.3)
+    assert window.sr_shift_spin.value() == pytest.approx(315.3)
+    assert window.sr_shift_indirect_spin.value() == pytest.approx(315.3, abs=1e-6)
+
+
+def test_main_window_sr_box_is_the_total_not_a_delta(qapp, tmp_path, monkeypatch):
+    # Showing the file's own value means the number in the box is the
+    # *total* SR in effect, so _apply_reference_shift_hz applies
+    # value - recorded to the as-loaded axis. Applying the unchanged
+    # value must therefore be a no-op, and typing a different one means
+    # "make the total this".
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = os.path.join("test_data", "2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119", "2019")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+    as_loaded = spectrum.axes[-1].ppm.copy()
+
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(spectrum.axes[-1].ppm, as_loaded)
+
+    window.sr_shift_spin.setValue(415.3)          # +100 Hz on the total
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(spectrum.axes[-1].ppm,
+                               as_loaded + 100.0 / spectrum.metadata.sfo1)
+
+    window.sr_shift_spin.setValue(315.3)          # back to the file's own
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(spectrum.axes[-1].ppm, as_loaded)
+
+
+def test_main_window_imaging_gradient_uses_gpz1_as_a_percentage(qapp, tmp_path, monkeypatch):
+    # Real user report: "the relative gradient strength doesn't seem to
+    # be calculated correctly for my Bruker data (should be gpz1
+    # generally as a percentage value, e.g. gpz1=2 is 2%)". GPZ1 was not
+    # read at all -- the mm axis used the probe's full maximum, so at
+    # gpz1=2 the scale came out 50x too small.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._select_single_row(0)
+    spectrum = window.session.spectra[0]
+
+    assert window._recorded_gradient_percent(spectrum) == pytest.approx(80.0)
+    assert window.imaging_gradient_percent_spin.value() == pytest.approx(80.0)
+
+    window.imaging_max_gradient_spin.setValue(50.0)
+    assert window.canvas._imaging_max_gradient_g_per_cm == pytest.approx(40.0)
+
+    # "generally" is not "always" -- the override wins and is stored.
+    window.imaging_gradient_percent_spin.setValue(2.0)
+    assert window.canvas._imaging_max_gradient_g_per_cm == pytest.approx(1.0)
+    assert spectrum.metadata.raw["imaging_gradient_percent"] == pytest.approx(2.0)
+
+
+def test_main_window_imaging_gradient_percent_defaults_to_full_without_gpz(qapp, tmp_path, monkeypatch):
+    # No GPZ array (a non-Bruker dataset, or one whose parameters were
+    # not retained) falls back to 100%, i.e. exactly the old behaviour.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window._select_single_row(0)
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw.pop("acqus", None)
+
+    assert window._recorded_gradient_percent(spectrum) is None
+    window._restore_imaging_gradient_percent(spectrum)
+    assert window.imaging_gradient_percent_spin.value() == pytest.approx(100.0)
+
+
+def _answer_calibration_dialog(monkeypatch, values, accept=True):
+    """Fill the "Set Reference from Cursor" dialog's ppm boxes and
+    accept (or cancel) it, in creation order: direct, then indirect."""
+    from PySide6.QtWidgets import QDialog, QDoubleSpinBox
+
+    def fake_exec(self):
+        if not accept:
+            return QDialog.DialogCode.Rejected
+        for spin, value in zip(self.findChildren(QDoubleSpinBox), values):
+            spin.setValue(value)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+
+
+def test_main_window_ppm_referencing_sets_both_dimensions(qapp, tmp_path, monkeypatch):
+    # User request: "I need a right click option on the 2D spectra to be
+    # able to set the sr (by setting ppm values)." Both dimensions at
+    # once for a genuine 2D -- a heteronuclear pair needs referencing on
+    # each.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+    f2_before = spectrum.axes[1].ppm.copy()
+    f1_before = spectrum.axes[0].ppm.copy()
+
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0])
+    window._on_reference_calibration_from_plot((2.5, 25.0))
+
+    assert spectrum.metadata.raw["sr_shift_hz"] == pytest.approx(
+        (2.0 - 2.5) * spectrum.metadata.sfo1)
+    assert spectrum.metadata.raw["sr_shift_hz_f1"] == pytest.approx(
+        (20.0 - 25.0) * spectrum.metadata.sfo1_indirect)
+    # The axes really move, by exactly the requested correction.
+    np.testing.assert_allclose(spectrum.axes[1].ppm, f2_before + (2.0 - 2.5))
+    np.testing.assert_allclose(spectrum.axes[0].ppm, f1_before + (20.0 - 25.0))
+
+
+def test_main_window_ppm_referencing_reads_the_current_axis_not_the_original(qapp, tmp_path, monkeypatch):
+    # The clicked position comes off the axis *as displayed*, which
+    # already carries whatever SR is applied -- so the new value is the
+    # existing one plus the correction. _apply_reference_shift_hz is
+    # idempotent against the original as-loaded axis, so treating the
+    # correction as the whole value would be wrong twice over.
+    # Asserted as: re-referencing a peak that already reads correctly
+    # changes nothing.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0])
+    window._on_reference_calibration_from_plot((2.5, 25.0))
+    after_first = (spectrum.metadata.raw["sr_shift_hz"],
+                   spectrum.metadata.raw["sr_shift_hz_f1"],
+                   spectrum.axes[1].ppm.copy(), spectrum.axes[0].ppm.copy())
+
+    # The peak now sits at 2.0 / 20.0; saying so again must be a no-op.
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0])
+    window._on_reference_calibration_from_plot((2.0, 20.0))
+    assert spectrum.metadata.raw["sr_shift_hz"] == pytest.approx(after_first[0])
+    assert spectrum.metadata.raw["sr_shift_hz_f1"] == pytest.approx(after_first[1])
+    np.testing.assert_allclose(spectrum.axes[1].ppm, after_first[2])
+    np.testing.assert_allclose(spectrum.axes[0].ppm, after_first[3])
+
+
+def test_main_window_ppm_referencing_skips_a_pseudo_2d_indirect_axis(qapp, tmp_path, monkeypatch):
+    # A pseudo-2D's indirect axis is a slice index, so there is nothing
+    # to reference against there -- only the direct dimension is offered
+    # or set.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0])
+    window._on_reference_calibration_from_plot((2.5, 4.0))
+
+    assert spectrum.metadata.raw["sr_shift_hz"] == pytest.approx(
+        (2.0 - 2.5) * spectrum.metadata.sfo1)
+    assert "sr_shift_hz_f1" not in spectrum.metadata.raw
+
+
+def test_main_window_ppm_referencing_cancel_changes_nothing(qapp, tmp_path, monkeypatch):
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    before = spectrum.axes[1].ppm.copy()
+
+    _answer_calibration_dialog(monkeypatch, [2.0, 20.0], accept=False)
+    window._on_reference_calibration_from_plot((2.5, 25.0))
+
+    assert "sr_shift_hz" not in spectrum.metadata.raw
+    np.testing.assert_allclose(spectrum.axes[1].ppm, before)
+
+
+def test_main_window_indirect_sr_shifts_only_the_indirect_axis(qapp, tmp_path, monkeypatch):
+    # User request: "we need to add sr for indirect dimension in 2Ds."
+    # The two dimensions need independent SR values against independent
+    # base frequencies -- on a heteronuclear 2D they are different
+    # nuclei, so one Hz offset cannot reference both.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    f1_before = spectrum.axes[0].ppm.copy()
+    f2_before = spectrum.axes[1].ppm.copy()
+
+    window.sr_shift_indirect_spin.setValue(100.0)
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(
+        spectrum.axes[0].ppm, f1_before + 100.0 / spectrum.metadata.sfo1_indirect,
+    )
+    np.testing.assert_allclose(spectrum.axes[1].ppm, f2_before)
+
+    # Independent: a direct-dimension SR moves only F2, and does not
+    # disturb the indirect shift already applied.
+    window.sr_shift_spin.setValue(50.0)
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(
+        spectrum.axes[1].ppm, f2_before + 50.0 / spectrum.metadata.sfo1,
+    )
+    np.testing.assert_allclose(
+        spectrum.axes[0].ppm, f1_before + 100.0 / spectrum.metadata.sfo1_indirect,
+    )
+
+    # A value, not a delta: re-applying is a no-op, and zero restores.
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(
+        spectrum.axes[0].ppm, f1_before + 100.0 / spectrum.metadata.sfo1_indirect,
+    )
+    window.sr_shift_indirect_spin.setValue(0.0)
+    window.sr_shift_spin.setValue(0.0)
+    window._on_apply_sr_clicked()
+    np.testing.assert_allclose(spectrum.axes[0].ppm, f1_before)
+    np.testing.assert_allclose(spectrum.axes[1].ppm, f2_before)
+
+
+def test_main_window_apply_sr_reads_both_boxes_before_applying_either(qapp, tmp_path, monkeypatch):
+    # _apply_reference_shift_hz ends by calling _restore_sr_control,
+    # which rewrites *both* spin boxes from metadata. Reading the second
+    # box after applying the first therefore handed back the stored
+    # value (0) rather than what the user had just typed, and the
+    # indirect shift silently did nothing. Found by running it.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+
+    # Direct first in apply order, indirect second -- the one that got lost.
+    window.sr_shift_spin.setValue(25.0)
+    window.sr_shift_indirect_spin.setValue(75.0)
+    window._on_apply_sr_clicked()
+
+    assert spectrum.metadata.raw["sr_shift_hz"] == pytest.approx(25.0)
+    assert spectrum.metadata.raw["sr_shift_hz_f1"] == pytest.approx(75.0)
+
+
+def test_main_window_indirect_sr_row_hidden_without_an_indirect_frequency_axis(qapp, tmp_path, monkeypatch):
+    # Nothing to reference against on a 1D, or on a pseudo-2D whose
+    # indirect axis is a slice index rather than a frequency.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+
+    window._restore_sr_control(spectrum)          # pseudo-2D by default
+    assert window.sr_shift_indirect_spin.isHidden()
+    assert window.sr_indirect_label.isHidden()
+    assert window._sr_axis(spectrum, "f1") is None
+    # ...and applying one anyway changes nothing.
+    window._apply_reference_shift_hz(100.0, "f1")
+    assert "sr_shift_hz_f1" not in spectrum.metadata.raw
+
+    window._on_process_indirect_toggled(True)
+    genuine = window.session.spectra[0]
+    window._restore_sr_control(genuine)
+    assert not window.sr_shift_indirect_spin.isHidden()
+    assert not window.sr_indirect_label.isHidden()
+
+
+def test_main_window_reprocess_reapplies_both_sr_values(qapp, tmp_path, monkeypatch):
+    # The post-reprocess reapply path used to restore only the direct
+    # dimension's SR, silently dropping the indirect axis's referencing
+    # the first time any FID-processing control was touched.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    window._restore_sr_control(spectrum)
+    window.sr_shift_spin.setValue(40.0)
+    window.sr_shift_indirect_spin.setValue(90.0)
+    window._on_apply_sr_clicked()
+    f1_referenced = spectrum.axes[0].ppm.copy()
+    f2_referenced = spectrum.axes[1].ppm.copy()
+
+    window._apply_loaded_processing_sidecar(spectrum, 0)
+
+    np.testing.assert_allclose(spectrum.axes[0].ppm, f1_referenced)
+    np.testing.assert_allclose(spectrum.axes[1].ppm, f2_referenced)
+
+
+@pytest.mark.parametrize("baseline", [False, True])
+@pytest.mark.parametrize("dim_index,dim", [(0, "F2"), (1, "F1")])
+def test_main_window_phase_settle_preserves_the_2d_zoom(qapp, dim_index, dim, baseline, tmp_path, monkeypatch):
+    # Real user report: "Something is up with the GUI phase control for
+    # the indirect and it's jumping during phasing." The jump was
+    # literal. Two 200 ms debounce timers both restart on every drag
+    # tick, so both fire on a pause; _run_debounced_multi_row_reprocess
+    # used a bare show_spectrum, which rebuilds the contour and resets
+    # the view. A window zoomed to 4..2 x 60..20 ppm snapped back to the
+    # full 12.7..-3.3 x 157.5..-7.5 every time the drag paused.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["baseline_correct"] = baseline
+    window.dim_combo.setCurrentIndex(dim_index)
+
+    zoom = ((4.0, 2.0), (60.0, 20.0))
+    window.canvas.ax.set_xlim(*zoom[0])
+    window.canvas.ax.set_ylim(*zoom[1])
+
+    window.phase0_spin.setValue(5.0)
+    for timer, run in ((window._live_reprocess_timer, window._run_debounced_multi_row_reprocess),
+                       (window._canvas_2d_refresh_timer, window._run_debounced_canvas_2d_refresh)):
+        if timer.isActive():
+            timer.stop()
+            run()
+
+    assert window.canvas.ax.get_xlim() == pytest.approx(zoom[0])
+    assert window.canvas.ax.get_ylim() == pytest.approx(zoom[1])
+
+
+def test_main_window_phase_settle_rebuilds_the_contour_only_once(qapp, tmp_path, monkeypatch):
+    # Both debounce timers are 200 ms and both restart on every drag
+    # tick, so before this they always fired as a pair on a pause and
+    # rebuilt the identical contour twice. Measured at 295 ms per
+    # rebuild for Cyclosporine/203 and 1.34 s for the EXSY -- the whole
+    # cost of a settle, paid twice for one frame.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8), vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["baseline_correct"] = True
+    window.dim_combo.setCurrentIndex(1)
+
+    window.phase0_spin.setValue(5.0)
+    assert window._live_reprocess_timer.isActive()
+
+    calls = []
+    original = window.canvas.show_spectrum
+    window.canvas.show_spectrum = lambda *a, **k: (calls.append(1), original(*a, **k))[1]
+
+    window._live_reprocess_timer.stop()
+    window._run_debounced_multi_row_reprocess()
+    # The reprocess *is* the settle redraw, so it must also have taken
+    # the canvas-refresh timer out of the running.
+    assert not window._canvas_2d_refresh_timer.isActive()
+    assert window._canvas_2d_refresh_pending_index is None
+    assert len(calls) == 1
+
+
+def test_main_window_f2_phase_on_hypercomplex_2d_never_shows_an_invalid_state(qapp, tmp_path, monkeypatch):
+    # The hypercomplex decode consumes each row's F2 imaginary part to
+    # build F1's, so a hypercomplex 2D's stored complex pair is F1's
+    # quadrature. Rotating it by an F2 phase is not an F2 phase
+    # correction -- it is the very absorption/dispersion mixing that
+    # produced the hourglass lineshape in the first place. So the live
+    # tick applies nothing for F2 here and defers to the rebuild, which
+    # phases F2 before the decode where it still means something.
+    #
+    # Asserted as: what the user is shown is always *exactly* a state a
+    # clean rebuild can reproduce -- here the last settled phase, to the
+    # bit -- rather than an invalid intermediate that happens to be
+    # close. Re-enabling the preview (making _f2_quadrature_is_spent
+    # return False) breaks this by ~1e-2 relative.
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip("needs the real Cyclosporine/203 dataset")
+    _isolate_sidecars(monkeypatch, tmp_path)
+
+    def _build(phases, settle_at):
+        window = MainWindow()
+        window._load(path, vendor="bruker")
+        window._on_process_indirect_toggled(True)
+        spectrum = window.session.spectra[0]
+        spectrum.metadata.raw["baseline_correct"] = True
+        window.dim_combo.setCurrentIndex(0)
+        for value in phases:
+            window.phase0_spin.setValue(value)
+            if value in settle_at and window._live_reprocess_timer.isActive():
+                window._live_reprocess_timer.stop()
+                window._run_debounced_multi_row_reprocess()
+        return np.asarray(spectrum.data)
+
+    # Settle at 30, then keep dragging to 30.5 without settling again.
+    shown = _build([30.0, 30.5], {30.0})
+    settled = _build([30.0], {30.0})
+    np.testing.assert_array_equal(shown, settled)
+
+
+def test_main_window_f2_quadrature_is_spent_only_for_hypercomplex_2d(qapp, tmp_path, monkeypatch):
+    # Modes 0-3 keep F2's own imaginary (their F1 point is one raw
+    # complex row, nothing is consumed), and a pseudo-2D never runs an
+    # F1 transform at all -- both must keep the fast live F2 preview.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.pseudo_2d = False
+    for fn_mode, spent in ((1, False), (3, False), (4, True), (5, True), (6, True)):
+        spectrum.metadata.raw["fn_mode"] = fn_mode
+        assert window._f2_quadrature_is_spent(spectrum) is spent, fn_mode
+    spectrum.metadata.pseudo_2d = True
+    spectrum.metadata.raw["fn_mode"] = 6
+    assert window._f2_quadrature_is_spent(spectrum) is False
+
+
+def test_main_window_phase_reference_tracks_what_it_already_contains(qapp, tmp_path, monkeypatch):
+    # The bookkeeping the fix above depends on: after a debounced
+    # rebuild the reference *is* the rebuilt data, and the phase that
+    # data already carries is recorded so the next tick applies only
+    # the remainder. Without the second half, the whole phase would be
+    # re-applied to data that already had it.
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip("needs the real Cyclosporine/203 dataset")
+    _isolate_sidecars(monkeypatch, tmp_path)
+
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    window._on_process_indirect_toggled(True)
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["baseline_correct"] = True
+    window.dim_combo.setCurrentIndex(1)
+
+    assert window._phase_reference_delta_applied == (0.0, 0.0)
+    window.phase0_spin.setValue(30.0)
+    window._live_reprocess_timer.stop()
+    window._run_debounced_multi_row_reprocess()
+
+    assert window._phase_reference_delta_applied == (30.0, 0.0)
+    np.testing.assert_allclose(
+        np.real(window._phase_reference_full), np.real(spectrum.complex_data)
+    )

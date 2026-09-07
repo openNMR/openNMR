@@ -412,11 +412,43 @@ def test_decode_hypercomplex_f1_states_tppi_alternates_sign():
 
 
 def test_decode_hypercomplex_f1_echo_antiecho():
-    echo = np.array([1, 2, 3], dtype=complex)
-    antiecho = np.array([4, 5, 6], dtype=complex)
+    # Solved against TopSpin's own recombined F1 interferogram, not
+    # guessed -- see decode_hypercomplex_f1's docstring for the fit
+    # (residual 0.0172, per-point |corr| 0.997-1.0000, and a scale
+    # whose phase is a constant +90 degrees, which is the 1j here).
+    echo = np.array([1 + 2j, 2 - 1j, 3 + 0j])
+    antiecho = np.array([4 + 1j, 5 + 3j, 6 - 2j])
     decoded = ft.decode_hypercomplex_f1(np.array([echo, antiecho]), fn_mode=6)
-    expected = (echo + antiecho) + 1j * (echo - antiecho)
-    np.testing.assert_allclose(decoded, [expected])
+    np.testing.assert_allclose(decoded, [1j * (np.conj(echo) - antiecho)])
+
+    # The two components the hypercomplex F1 step needs must each be a
+    # single *real* F2 plane -- that is the whole point, and what the
+    # superseded whole-complex-row form got wrong (it left F2's
+    # dispersion mixed into F1, i.e. the hourglass lineshape).
+    np.testing.assert_allclose(np.real(decoded[0]), np.imag(echo) + np.imag(antiecho))
+    np.testing.assert_allclose(np.imag(decoded[0]), np.real(echo) - np.real(antiecho))
+
+
+def test_decode_hypercomplex_f1_states_uses_only_the_f2_real_parts():
+    # Same error class as Echo-Antiecho above: combining whole complex
+    # rows as a + 1j*b silently carries each row's F2 imaginary part
+    # into F1's quadrature, so the F1 transform's real part comes out
+    # as RR - II (the phase twist) instead of RR.
+    cos_row = np.array([1 + 7j, 2 - 5j, 3 + 4j])
+    sin_row = np.array([4 + 1j, 5 + 3j, 6 - 2j])
+    data = np.array([cos_row, sin_row])
+    decoded = ft.decode_hypercomplex_f1(data, fn_mode=4)
+    np.testing.assert_allclose(decoded, [np.real(cos_row) + 1j * np.real(sin_row)])
+
+    # Discriminates against the superseded form, which these rows' own
+    # imaginary parts would otherwise dominate.
+    assert np.max(np.abs(decoded[0] - (cos_row + 1j * sin_row))) > 1.0
+
+    # States-TPPI is the same combination plus (-1)**k.
+    four_rows = np.array([cos_row, sin_row, cos_row, sin_row])
+    tppi = ft.decode_hypercomplex_f1(four_rows, fn_mode=5)
+    np.testing.assert_allclose(tppi[0], np.real(cos_row) + 1j * np.real(sin_row))
+    np.testing.assert_allclose(tppi[1], -(np.real(cos_row) + 1j * np.real(sin_row)))
 
 
 def test_decode_hypercomplex_f1_drops_trailing_unpaired_row():
@@ -690,3 +722,75 @@ def test_available_cpus_prefers_the_process_allowance_over_machine_cores(monkeyp
     # Neither available -> os.cpu_count() is the last resort.
     monkeypatch.delattr(os, "sched_getaffinity", raising=False)
     assert ft._available_cpus() == 64
+
+
+def test_decode_hypercomplex_f1_is_vendor_agnostic():
+    # This module is deliberately vendor-free: the F1 quadrature sense
+    # differs between Bruker and X-Pulse, and that difference is
+    # normalised by the *reader* (io.bruker negates the sine-modulated
+    # rows), not by a flag here. A `conjugate_f1` parameter existed for
+    # one release and was removed for exactly that reason.
+    import inspect
+
+    params = inspect.signature(ft.decode_hypercomplex_f1).parameters
+    assert set(params) == {"data", "fn_mode"}
+
+    rows = np.array([[1 + 0j, 2 + 0j], [3 + 0j, 4 + 0j]])
+    np.testing.assert_allclose(
+        ft.decode_hypercomplex_f1(rows, fn_mode=4), rows[0::2] + 1j * rows[1::2]
+    )
+
+
+def test_negating_sine_rows_matches_the_opposite_quadrature_sense():
+    # The identity the reader-side normalisation relies on:
+    # a - 1j*b == a + 1j*(-b). Pinned so the two can never drift.
+    rows = np.arange(8, dtype=complex).reshape(4, 2)
+    a, b = rows[0::2], rows[1::2]
+
+    normalised = rows.copy()
+    normalised[1::2] *= -1
+    got = ft.decode_hypercomplex_f1(normalised, fn_mode=5)
+
+    expected = (a - 1j * b) * np.array([1.0, -1.0])[:, np.newaxis]
+    np.testing.assert_allclose(got, expected)
+
+
+def test_linear_predict_stabilises_a_divergent_ar_fit():
+    # Real failure on real data: an unconstrained least-squares AR fit
+    # can put poles outside the unit circle, so the "prediction" grows
+    # exponentially instead of extrapolating a decaying signal. Three of
+    # five Bruker datasets whose proc2s asks for F1 linear prediction
+    # came back with peak magnitudes of 1e85 to 1e104 against an
+    # expected ~1e11, which drove their correlation with TopSpin to
+    # exactly 0.0000.
+    #
+    # A short noisy record with a growing component is the reliable way
+    # to provoke it.
+    rng = np.random.default_rng(3)
+    n = 64
+    t = np.arange(n)
+    fid = np.exp(0.02 * t) * np.exp(2j * np.pi * 0.05 * t)
+    fid = fid + 0.05 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+
+    unstable = ft.linear_predict(fid, order=24, n_predict=192, stabilise=False)
+    stabilised = ft.linear_predict(fid, order=24, n_predict=192, stabilise=True)
+
+    input_max = np.max(np.abs(fid))
+    # The stabilised prediction must not blow up past the input's own
+    # scale by orders of magnitude...
+    assert np.max(np.abs(stabilised)) < 100 * input_max
+    # ...and must be dramatically better behaved than the raw fit.
+    assert np.max(np.abs(stabilised)) < np.max(np.abs(unstable))
+    assert np.isfinite(stabilised).all()
+    # The measured points themselves are never altered.
+    np.testing.assert_allclose(stabilised[:n], fid)
+
+
+def test_reflect_unstable_roots_leaves_a_stable_model_alone():
+    # A model whose poles are already inside the unit circle must come
+    # back untouched -- the guard should cost nothing but a root-find
+    # in the common case.
+    decaying = np.exp(-0.1 * np.arange(48)) * np.exp(2j * np.pi * 0.1 * np.arange(48))
+    with_guard = ft.linear_predict(decaying, order=8, n_predict=16, stabilise=True)
+    without = ft.linear_predict(decaying, order=8, n_predict=16, stabilise=False)
+    np.testing.assert_allclose(with_guard, without, rtol=1e-6, atol=1e-9)

@@ -2,6 +2,922 @@
 
 Notes captured from real-data testing, not yet implemented. Grouped by area.
 
+## Axis units on a 2D, projections that survive a rescale, equations that read the data (2026-09-06)
+
+User: "I am not able to right-click and change the axis on a 2D (for imaging) and also the 2D projections shouldn't reset when I scale the contours. It would be good if I can make fitting equations using values from the input data (e.g. delays and constants and L or whatever)."
+
+### Axis units on a contour
+
+The Axis Units menu was gated on `_current_1d_spectrum`, which a contour never sets, and `set_axis_unit` only ever rewrote `Line2D` x-data. A contour takes its axes from the spectrum, so a unit change is a **rebuild**, not a data swap.
+
+`plot_2d_contour` reads `axes[i].ppm` directly, so the display goes through a shallow **copy** whose frequency axes carry the converted values, with the labels passed explicitly to say what they really are. A copy rather than a mutation: `_contour_spectrum` stays in ppm, which is what slicing, referencing and everything else still reason in.
+
+Two consequences that had to be handled rather than left to rot:
+
+- **`_nearest_slice_index` now resolves against the displayed unit.** The cursor value comes off the axis on screen, so comparing it to ppm would pick the wrong row the moment the contour showed Hz. (It stops being a `staticmethod`, since it needs the canvas's unit and gradient.)
+- **"Set Reference from Cursor (ppm)…" stands down off ppm.** Asking for a shift in ppm against an mm axis is nonsense. The comment claiming "a contour's axes are always in ppm" was true when it was written and isn't any more -- replaced with the guard that makes it true.
+
+`mm` needs a gradient, so it is offered only when `set_imaging_gradient_params` has real values -- and the Hz/mm conversion is now one shared helper instead of being written out twice.
+
+### Projections survive a contour rescale
+
+Scrolling the contour body adjusts the levels, which rebuilds the figure -- and the projection strips are their own Axes with their own intensity zoom, which the rebuild threw away. `_redraw_contour(preserve_view=True)` was preserving only the *main* axes' limits. It now captures and restores the F2 strip's ylim and the F1 strip's xlim alongside them.
+
+### Fitting equations can use the acquisition
+
+`build_custom_model` treated every free symbol other than `x` as something to fit. It now takes `constants`, substituted into the expression **before** the free symbols are counted, so a known value becomes a number rather than another parameter.
+
+`io.bruker.acquisition_constants` supplies them under the names a pulse programme uses -- `d1`, `p1`, `cnst2`, `l4` from the indexed arrays, plus every scalar (`ns`, `td`, `te`, ...) -- 781 of them on a real dataset. The GUI passes **all** of them and lets the substitution pick: only names an equation actually uses are substituted, so an unused one costs nothing and a symbol nobody supplies stays a fitted parameter exactly as before. The parameter preview now also names what it took from the data, so "why is d1 not being fitted?" answers itself.
+
+**Values are exactly as the vendor recorded them** -- `d1` in seconds, `p1` in microseconds. Quietly rescaling them would make an equation copied off a pulse programme silently wrong. The independent variable is never substitutable, even if a vendor records a parameter of the same name.
+
+### Fallout, all in tests
+
+`_nearest_slice_index` becoming an instance method broke 8 static call sites; they now go through a canvas showing the spectrum, which is what "resolve against the displayed axis" needs anyway. And `test_set_axis_unit_noop_without_a_1d_spectrum` asserted precisely the limitation being removed -- replaced with tests of the new behaviour.
+
+11 new tests, each verified to fail with its own change reverted. 1038 passing (1027 -> 1038).
+
+## The file's own SR is now visible; imaging gradient reads GPZ1 (2026-09-06)
+
+User: "As far as the sr goes, I want any sr that was noted in the import files to be applied already and to show in the processing tab. Also for imaging, the relative gradient strength doesn't seem to be calculated correctly for my Bruker data (should be gpz1 generally as a percentage value, e.g. gpz1=2 is 2%)."
+
+### The SR was always applied -- nothing said so
+
+`_ppm_hz_axis` has always folded `(SF - BF1) * 1e6` into every axis it builds, so a spectrum arrives already referenced. What was missing is that nothing recorded *how much*, so the Processing tab's SR box read 0.00 Hz for a dataset that plainly was referenced -- **315.3 Hz** on this project's own EXSY (`2p5mm/2019`), 0 on the Cyclosporine sets.
+
+The readers now record it (`sr_recorded_hz`, `sr_recorded_hz_f1`), and it is blocklisted from the sidecar because it is re-derived from the vendor files on every load.
+
+**This changes what the number in the box means**: it is now the **total** SR in effect, not a user-only delta on top of an invisible one. So `_apply_reference_shift_hz` applies `value - recorded` to the as-loaded axis. Leaving the box alone is then a no-op; typing a different number means "make the total this". Same adjustment in the ppm calibration handler and in the post-reprocess reapply, which now only reapplies a value that actually differs from the file's own (a fresh read has already folded that in).
+
+**Known migration gap**: a sidecar written before this change stores `sr_shift_hz` as a user-only delta, and it will now be read as a total. Harmless where the recorded SR is 0 (most datasets); on one with a recorded SR it would shift the axis by that amount. Not worth a versioned migration for a feature this new, but recorded here rather than left to be discovered.
+
+### Imaging gradient: GPZ1 was never read
+
+The mm axis used the probe's **maximum** gradient as the applied one. A Bruker experiment runs at a *percentage* of it, recorded as `GPZ1` in `acqus` -- so at `gpz1=2` the scale came out 50x too small. Now read automatically (`GPZ[1]`; 80% on Cyclosporine/203, for instance) into a new "Gradient used" box, and the effective gradient is `maximum x percent / 100`.
+
+Editable, and stored per spectrum, because the user's own word was "**generally** gpz1" -- another pulse programme may put its imaging gradient on a different channel. Falls back to 100% when there is no `GPZ` array at all, which is exactly the old behaviour.
+
+### Two test fixtures were quietly self-contradictory
+
+`_make_1d_dataset`/`_make_raw_2d_dataset` wrote `BF1: 400.0` alongside `SF: 400.13`. Nothing read both together before, so it never mattered; it now implies a **130 kHz** vendor reference, i.e. a 325 ppm offset, which is not what any test meant. Made self-consistent (`BF1: 400.13`).
+
+That moved the fixtures' axes from about -320 ppm to a normal range, which surfaced two further things that had been passing by accident:
+
+- Two pivot tests compared `pivot_spin.value()` against an exact centre with `pytest.approx`'s **relative** default. The spin box displays 3 decimal places, so its value is rounded to 5e-4 regardless -- at -320 ppm the relative default is larger than that rounding and it passed; at 5 ppm it is not. Now an explicit `abs=5e-4`.
+- `test_..._own_pivot_not_the_other_ones` needed F1's centre to fall outside F2's range, and that held only because the bogus 130 kHz pushed F2 out to -320 ppm. The fixture now takes an `f1_o1`, and the test arranges the separation deliberately instead.
+
+8 new tests. 1027 passing (1023 -> 1027).
+
+## Planned, not built: load speed, and a folder browser in the Data tab
+
+Recorded from a user request to plan rather than implement. Nothing below is done.
+
+### Faster loading of large datasets
+
+The EXSY benchmark (`2p5mm/2019`, 2048 x 65536) reads in **3.7 s** against a 9.268 s starting point, after vectorising the per-row loops, replacing `ng.bruker.read` with a direct binary read, and threading the FFTs. What is left is dominated by three things, and they want different remedies:
+
+1. **The FFTs themselves.** Already `scipy.fft` with a capped worker count. Remaining headroom is in *not transforming what is not looked at* -- see (3).
+2. **Peak memory.** The decoded array is ~1 GB in complex128 and several transient copies exist (window, zero-fill, transpose for F1). `complex64` throughout would halve it at ~7 digits of precision, which is far more than any NMR intensity carries; the risk is that comparisons against TopSpin (currently agreeing at +0.99) get noisier, so this needs measuring against the real-data suite rather than assuming.
+3. **The user's own idea: Bruker's submatrix layout.** TopSpin stores processed 2D data in `XDIM` blocks precisely so a viewer can read *a region* without touching the whole file, and `read_2d_processed` already reconstructs those blocks -- it just reassembles all of them. A tiled reader that loads only the blocks intersecting the current view would make opening a large processed 2D near-instant, at the cost of a re-read on pan/zoom. This applies only to the **processed** path (`2rr`), not to raw `ser`, which has no such structure.
+   A raw-`ser` equivalent exists but is different: transform F2 for every row (unavoidable), then transform **only the F1 columns in view**. That is a real restructure of `read_2d`, not a tweak.
+4. **Sparse matrices** (also the user's idea) are worth being honest about: an NMR 2D is not sparse before thresholding -- every point carries noise. Sparsity only appears *after* a contour threshold is chosen, which is exactly where this project already saves work via `_MAX_CONTOUR_POINTS`. A sparse representation would help a *stored* peak list or a thresholded overlay, not the load.
+
+Order of expected value: submatrix/tiled reads for processed data, then `complex64`, then view-limited F1 transforms. Each needs the real-data agreement suite re-run, not just timings.
+
+### A folder browser in the Data tab
+
+User: "the data tab might be nice to have a built-in file viewer where folders are collapsable tabs (like the MNova and bruker programmes). So a user can note a file directory and then click between folders within to load data."
+
+A `QTreeView` over a `QFileSystemModel` rooted at a user-chosen directory, filtered to things this project can actually open, with the existing `io.load` dispatch on activation. The parts that need thought, not the widget:
+
+- **What counts as a node.** A Bruker experiment is a numbered directory containing `acqus`; its `pdata/N` children are separate loadable procnos. The tree should show experiments, not raw filesystem depth, or it will be unusable on a real dataset directory.
+- **Cost.** Deciding whether a directory is loadable means reading a parameter file. Doing that eagerly for a whole tree would be slow; it wants lazy evaluation per expanded node.
+- **Overlap with what exists.** The Data tab already lists *loaded* spectra. This is a second, different list (things on disk, not yet loaded), so the two need distinguishing clearly rather than looking alike.
+
+## Reference a 2D by clicking a peak and typing its shift (2026-09-06)
+
+User: "I need a right click option on the 2D spectra to be able to set the sr (by setting ppm values)."
+
+### There was no referencing action on a 2D at all
+
+The existing right-click "Set Reference Shift (Hz)…" is gated on `_current_1d_spectrum`, which a contour never sets -- so it simply never appeared on a 2D. And an Hz offset is the wrong question to ask on one anyway: what a user knows is *where a peak should be*, not how many Hz the axis is out by.
+
+New action, "Set Reference from Cursor (ppm)…": right-click the peak, type its true shift, and the SR follows. Both dimensions at once for a genuine 2D (a heteronuclear pair needs referencing on each, against `sfo1` and `sfo1_indirect` respectively); the direct one alone for a pseudo-2D, whose indirect axis is a slice index. No unit conversion is needed on the click, because `set_axis_unit` only ever applies to a 1D view -- a contour's axes are always ppm.
+
+### The part that is easy to get backwards
+
+The clicked position is read off the axis **as currently displayed**, which already carries whatever SR is applied. `_apply_reference_shift_hz` is idempotent *against the original as-loaded axis*, so the value it wants is `existing + (target - clicked) * base_MHz`, not the correction alone. Treating the correction as the whole value would be wrong twice over -- it would both discard the existing reference and re-apply the same correction on every subsequent use.
+
+The regression test asserts this the way a user would notice it: re-referencing a peak that already reads correctly must change nothing.
+
+Both dimensions are worked out before either is applied, for the reason recorded earlier in `_on_apply_sr_clicked` -- applying one calls `_restore_sr_control`, which rewrites the other's spin box from metadata.
+
+### A hung test, and the seam that fixed it
+
+The first version of the menu test patched `QMenu.exec`. That does not take: PySide6 resolves `exec` through the C++ binding, so the real modal menu opened and the headless suite **hung** rather than failing -- the same signature this project has hit before. Added a one-line `_exec_context_menu` seam on `MplCanvas` for the test to patch instead. (`QDialog.exec` *is* patchable at the class level, which is why the dialog tests need no equivalent.)
+
+6 new tests. 1023 passing (1017 -> 1023).
+
+## Slice linewidth, a clipped axis label, and a taller slice panel (2026-09-06)
+
+User: "Linewidths of extracted slices should be 2. Be sure that the contour plot position resets back to the original load position (when I tried, the x-axis label got cut off). The extracted slice plot should be able to reach the top height of the top projection."
+
+### Slice traces at linewidth 2
+
+`slice_linewidth=2.0`, a parameter rather than a literal. The dashed lines on the contour stay thinner deliberately, so they read as annotation over the data rather than competing with it.
+
+### The clipped x label: a rebuild never re-ran the layout
+
+`show_spectrum` ends with `figure.tight_layout()`. `_redraw_contour` -- the preserve-the-view path used by a contour-level scroll and by adding or clearing a slice -- did not. So a rebuild kept whatever subplot margins were last in force, and once the slice panel (which brings its own x-axis label) changed what the figure needs, the contour's own label fell off the bottom. Now both paths run the same layout pass.
+
+### Reset really resets
+
+`_reset_navigation_view` called `toolbar.home()`, which only restores **axis limits** from the navigation stack -- and that stack still holds Axes from before any of this canvas's figure rebuilds, so it cannot restore a *layout* at all. New `MplCanvas.reset_view()`: for a 2D it rebuilds the contour at its natural limits (which now includes the layout pass); otherwise it falls back to `home()` plus a layout pass. Extracted slices survive it -- it resets the view, not the annotations.
+
+### The slice panel reaches the top projection
+
+`divider.append_axes` places the panel alongside the contour cell only. Its locator is now re-pointed at rows `0..n`, giving it the contour's height plus the pad and the F2 strip above it. Self-adapting: with no top projection there is one row and it is a no-op. Verified against the rendered geometry -- panel top matches the strip's top to within 1.5 px, panel bottom matches the contour's base.
+
+### A test that could not fail, twice
+
+The first version of the label test asserted only that the label was still inside the figure -- true either way in the synthetic case, where dropping the layout pass shifts the margins without clipping anything. The second compared a rebuild's axes position against a fresh `show_spectrum`'s, which fails **both** with and without the fix: `tight_layout` is not idempotent on an `AxesDivider` figure, so running it twice in sequence lands a hair off. Settled on asserting that the rebuild *runs* the layout pass, which is the actual invariant and does discriminate.
+
+5 new tests, each verified to fail with its own change reverted. 1017 passing (1012 -> 1017).
+
+## Contour redraws lost the Output style; new style defaults (2026-09-06)
+
+User: "Scrolling the contours redraws the axis with defaults, not the ones set in output. These defaults should probably be: tick and line widths of 1.75 and fontsize of 16, and fig size of 8 by 8 (or 7.5 by 10 for 2D with extracted slices). Also the extracted projections should be normalised."
+
+### The style leak
+
+`set_style` stores the Output tab's choices on the instance and applies them to the axes on screen, and its docstring says "every ``show_*`` method reads ``self._AXIS_LINEWIDTH`` etc., so a future redraw picks these up automatically". True of the 1D views, which set those values directly -- and **not** true of the 2D path, which hands off to `plot_2d_contour` and never passed them. So every contour rebuild fell back to that function's own manuscript defaults (fontsize 12, tick width 1.0). A contour-level scroll triggers exactly such a rebuild, which is where the user hit it.
+
+Fixed in two halves, because `plot_2d_contour` only accepts some of it: `_contour_style_kwargs()` passes `fontsize`/`tick_length`/`tick_width` into the call, and `_apply_current_axis_style()` applies the rest (spine linewidth, minor ticks) to every axes afterwards. `set_style` now delegates its own axis-style half to that same method rather than repeating it -- applying all of it unconditionally is equivalent to the old per-argument guards, since anything not passed in is re-applied at its existing value.
+
+### New defaults
+
+`_AXIS_LINEWIDTH` and `_TICK_WIDTH` 1.4 -> **1.75**, `_AXIS_LABELSIZE` 13 -> **16**. Tick length left at 5.5 (not mentioned).
+
+Export figure size is now a real default rather than an accident: `_EXPORT_FIG_SIZE = (8.0, 8.0)`, and `_EXPORT_FIG_SIZE_WITH_SLICES = (7.5, 10.0)` for a 2D showing extracted slices, picked by `default_export_size()`. Before this the size was left alone entirely unless the Output tab had been edited, so an exported figure inherited whatever size Qt's layout happened to give the live widget; and the Output tab's own spin boxes were initialised from that same live size (6.4 x 4.8) rather than from anything chosen.
+
+**Flagged to the user, implemented as stated**: 7.5 x 10 is taken literally as width x height, i.e. portrait. The sliced layout is contour + panel side by side, which is wider than it is tall, so 10 x 7.5 may have been meant. One number to swap either way.
+
+### Extracted traces are normalised
+
+Each trace now fills its own slot rather than sharing one amplitude scale across the stack. This reverses a deliberate earlier choice (a shared scale keeps relative intensities honest); the user asked for the other trade, which favours comparing lineshape between a weak row and a strong one.
+
+4 new/updated tests, each verified to fail with its own change reverted. 1012 passing (1009 -> 1012).
+
+## Crosshair removed (deferred, not abandoned); slice-panel scroll fixed (2026-09-06)
+
+User: "crosshair is just filling the contour and not going away, and if I try to zoom then there is still an issue. Remove the crosshair for now (I still want it eventually) but keep the other improvements for the slicing."
+
+### The crosshair is out
+
+Removed entirely -- the class, the state, the lazy sync, its call in `_on_motion`, the import, and its tests. The `onmove`-vs-`ignore` fix from the previous entry was necessary but not sufficient: "filling the contour and not going away" is a *second* blit-coherence failure, and one that a headless test cannot see. Both symptoms are the same underlying thing -- a blitting widget and a canvas that also calls `draw_idle()` from its own scroll/pan/level handlers do not reliably agree on what the background is, so stale frames get restored and cursor lines accumulate instead of being erased.
+
+### What a future attempt should start from
+
+- Standing down in pan/zoom belongs in `onmove`, **never** in `ignore` -- `MultiCursor.clear`, the `draw_event` handler that recaptures the blit background, goes through `ignore` too (previous entry).
+- That alone is not enough. The canvas issues `draw_idle()` from `_on_scroll`, the pan drag, and the contour-level adjust. Interleaving those with a widget that blits leaves stale regions on screen. A working version needs the crosshair to own its redraws -- i.e. every one of those paths has to invalidate/recapture the background, or the crosshair has to be drawn as a normal (non-blitted) artist and the redraw cost solved another way.
+- The cost is why blitting was chosen: a plain redraw per mouse-move repaints the whole contour, measured at **295 ms** for a real HSQC and **1.34 s** for the EXSY.
+
+### The real zoom defect that was left behind
+
+Zoom itself was verified working throughout -- scroll on the x-strip, the y-strip and the body, both projection strips, a full toolbar rubber-band drag, and Home, with and without a slice panel. (An earlier sweep reported two projection strips as broken; that was my own crude event helper attributing the event to the wrong Axes, not the code. Rebuilt with properly-formed events, both zoom correctly.)
+
+One genuine defect did survive: the slice panel lives in `_proj_axes` alongside the F1/F2 strips, and `_on_scroll` iterated that dict treating **every** entry as a projection. The panel's y axis is a normalised 0..1 stack of evenly-spread traces, so scrolling over it silently rescaled the stack and broke the layout -- and the panel sits exactly where the contour's right-hand "y strip" zoom region used to be empty. Now an explicit no-op, and the projection loop names `f1`/`f2` rather than iterating, so nothing else that dict grows later can be mistaken for a strip.
+
+### Noted, not changed
+
+`NavigationToolbar2`'s view stack is never cleared when this canvas rebuilds its figure (there is no `toolbar.update()` call anywhere), so it accumulates references to Axes that no longer exist. `home()` still behaves correctly in every case tested, so this is recorded rather than fixed -- clearing the stack on every contour redraw would throw away the user's zoom history, which is a worse trade.
+
+1009 passing (1011 -> 1009: 4 crosshair tests removed, 2 scroll regression tests added).
+
+## The crosshair froze the canvas: standing down belongs in onmove, not ignore (2026-09-06)
+
+User: "zooming on the 2D no longer works. Something has been broken." Regression from the crosshair added an hour earlier, in the same session.
+
+### Not what it looked like
+
+Zooming was working. Every mechanism checked out headless -- scroll zoom on the x-strip and y-strip, contour-level scroll, and a full toolbar rubber-band press/drag/release all changed the limits correctly, with and without a slice panel present. The limits were right; the *picture* was not.
+
+### The mechanism
+
+`_NavigationAwareMultiCursor` stood down in pan/zoom by overriding `ignore()`. That looks like the natural hook -- it is the one `Widget.active` itself goes through -- but `MultiCursor` routes **two** handlers through it:
+
+- `onmove` (motion) -- the one that should stand down, and
+- `clear` (**draw_event**) -- which is what *recaptures the blit background*.
+
+So while pan or zoom was selected, the background was frozen at whatever frame was current when the mode was entered. The next mouse move blitted that stale image straight back over the canvas. The zoom had happened; the display reverted.
+
+**Pan is the default mode on load** (an earlier request in this project), so this was the normal case, not an edge one -- the background was stale from the moment a spectrum appeared.
+
+Fixed by overriding `onmove` instead, leaving `clear` alone. Standing down also hides the lines with a plain `draw_idle` rather than a blit -- the whole point of the override is that the blit background cannot be trusted at the moment the mode changes -- and costs one redraw on the transition only, since after that the lines are already hidden.
+
+### Worth keeping
+
+Blitting widgets have two entry points, and a gate on the shared predicate catches both. When suppressing a blitting widget, suppress the *event handler*, never the background capture. And a "nothing responds" report is not always a broken handler: here every handler was fine and only the frame being painted was wrong, which is invisible to a headless test that asserts on state. The regression test asserts on the cached background itself for that reason.
+
+2 tests (one rewritten, one new), both verified to fail with the `ignore()` gate restored. 1011 passing (1010 -> 1011).
+
+## Slice-panel refinements and a blitted crosshair (2026-09-06)
+
+Six follow-ups on the slice panel plus a cursor request.
+
+### The connector lines are gone
+
+"Drop the lines to the extracted slices, it seems too hard to maintain across different views." Correct call: they looked right in a saved figure, but in the GUI the contour and the panel zoom, pan and change units independently, and a line spanning two Axes has to be re-derived on every one of those. The shared colour is what pairs a line with its trace now. `slice_connect` and the `ConnectionPatch` import are removed rather than left as a disabled option.
+
+### Traces now fill the panel
+
+Was: a fixed offset of `0.55 x` the tallest trace, with the y-limit stretched to whatever the stack happened to reach -- so a short top trace left dead space above it. Now each trace gets one slot of `1/n` across a normalised 0..1 panel, with **a single shared amplitude scale** rather than a per-trace normalisation, so a weak slice still reads as weak next to the diagonal.
+
+### The panel shares the contour's axis, rather than copying it once
+
+Setting `panel.set_xlim(ax.get_xlim())` at draw time was not enough, and the reason is a genuinely subtle interaction: the GUI's own preserve-the-view redraw restores the contour's limits *after* `plot_2d_contour` has returned, so a zoomed contour got a full-range panel beside it. `sharex=ax` makes the two track through every later zoom and pan as well. A *column* panel's x axis is the contour's *y*, which matplotlib cannot share across orientations, so that case still takes a one-time copy.
+
+Also: a matching x-axis label (the contour's own x label for a row panel, its y label for a column panel), no panel title, and the pad raised 0.45 -> 0.95 inches so the panel clears the contour's right-hand y-axis label.
+
+### Adding a slice no longer resets the view
+
+`_add_contour_slice`/`_clear_contour_slices` called `show_spectrum`, which rebuilds from scratch. They use the existing `_redraw_contour(preserve_view=True)` now -- adding a slice is an annotation, not a change of subject.
+
+### Crosshair across the contour and both projections
+
+**Two cursors, not one.** A single `MultiCursor` over all three Axes would also draw a horizontal line across the top strip and a vertical one down the left strip, in those panels' own unrelated intensity coordinates. So: one vertical across the contour + F2 strip, one horizontal across the contour + F1 strip.
+
+**`MultiCursor` rather than a hand-rolled pair of lines, because it blits.** A plain redraw per mouse-move repaints the whole contour -- measured at 295 ms for a real HSQC and 1.34 s for the EXSY, nowhere near interactive.
+
+**It stands down in pan/zoom mode** (`_NavigationAwareMultiCursor.ignore` also consults `toolbar.mode`), per the request: those have their own cursors and drag semantics.
+
+**Rebuilt lazily from `_on_motion`, not from every redraw path.** This canvas clears and rebuilds its figure from about a dozen methods (`show_compare`, `show_fit`, `extract_slice`, ...), and a cursor still holding removed Axes would draw into them. Checking that the Axes it was built for are still the ones on the figure is one hook instead of twelve, and self-heals rather than depending on every future rebuild path remembering to call a teardown.
+
+7 new/rewritten tests, each verified to fail with its own change reverted. 1010 passing (1004 -> 1010).
+
+## Extracted-slice panel, indirect SR, per-spectrum nQ, pseudo-2D peak picking (2026-09-06)
+
+Five requests in one round.
+
+### 1. SR for the indirect dimension
+
+The `Reference (SR)` box worked only on `axes[-1]`. The two dimensions need **independent** values against independent base frequencies (`sfo1` / `sfo1_indirect`) -- on a heteronuclear 2D they are different nuclei, so one Hz offset cannot reference both. Generalised over a dimension key (`_SR_KEYS`, direct keys left unsuffixed so older sidecars still restore), with a second spin box shown only when there is an indirect *frequency* axis to reference -- hidden for 1D and for a pseudo-2D, whose indirect axis is a slice index.
+
+One bug found by running it: `_apply_reference_shift_hz` ends by calling `_restore_sr_control`, which rewrites **both** spin boxes from metadata -- so reading the second box after applying the first handed back the stored value (0) instead of what the user had just typed, and the indirect shift silently did nothing. Both values are now read up front. The post-reprocess reapply path also restored only the direct dimension.
+
+### 2. The nQ line is now the spectrum's, not the app's
+
+It genuinely belongs to the data: a diagonal means something on a homonuclear correlation and nothing on a heteronuclear one, and `n` is a property of the experiment. As one global switch it followed the user onto every other spectrum they selected. Now stored in `metadata.raw`, restored on selection, and persisted with the rest of the processing state. The restore path blocks signals so looking at a spectrum doesn't stamp a default onto it.
+
+### 3. Extracted slices beside the contour
+
+Built to a user-supplied reference figure: a dash-dot line across the contour at each slice's position, the extracted traces stacked in a panel to the right, one colour per slice, and -- the user's clarification -- **each line continues across the gap and joins its own trace's baseline**. Drawn as a `ConnectionPatch` with clipping off, added to the *figure* rather than either Axes, which is the only way to draw a line spanning two panels.
+
+Choices, all the user's: panel on the right; traces stacked with offsets rather than overlaid; placed from the existing right-click "Extract Slice…", which gained a "Show as:" mode (`Show beside the contour` / `Replace the view`) and a label field.
+
+Three things measured rather than assumed:
+
+- **Panel width is relative (`axes_size.Scaled`), not inches.** The same function draws a standalone 7-inch figure and the GUI's embedded canvas; a fixed 3.5-inch panel left the embedded contour a few pixels wide.
+- **Stacking order follows the contour.** The slice whose line sits highest gets the highest trace -- otherwise the connectors cross, which reads as an error even though every line joins the right trace.
+- **The panel-side connector anchor is in axes coordinates, not data.** Data coordinates read `panel.get_xlim()` before the final `set_xlim`, so the endpoint landed outside the finished axis and the connector shot across the whole panel instead of stopping at its edge.
+
+Slices are stored against the spectrum (a slice at F1 index 412 means nothing on another dataset), with `set_contour_slices` deliberately not emitting so restoring doesn't write straight back out.
+
+### 4. Peak picking on a pseudo-2D
+
+It really was impossible. Manual picking listens on the Spectrum canvas, which shows the contour/stack for a pseudo-2D, so a click there yields a 2D position with no single trace to attach a peak to; Auto-Pick was hard-wired to `index=1`; and a conventional 2D was refused outright.
+
+Now there is a "Pick on slice" spinner (first by default, `setWrapping(True)` per the user: "pressing down on the lowest should cycle back to the highest"), turning pick mode on shows that slice on its own so there is something to click, and changing the slice while picking follows along. Both manual and Auto-Pick go through one `_peak_pick_target`.
+
+**A latent bug fell out**: `extract_slice` read `self._contour_spectrum`, which `show_spectrum(trace)` clears because the trace is 1D -- so the source was `None` on any *second* call and `get_trace` raised. The right-click "Extract Slice…" was a one-shot, and picking silently stuck to whichever slice it started on. It now falls back to `_extracted_from_spectrum`. Found only because a broad `except Exception` I had just written was hiding it; narrowed to `IndexError`.
+
+**A test that could not fail**: the first version of the Auto-Pick test passed with the hard-wired `index=1` still in place, because the shared 2D fixture tiles one identical row -- slice 1 and slice 3 are the same array. Rebuilt with per-row-distinct data and re-checked against the reverted fix.
+
+### 5. Nothing pre-selected in Compare
+
+`_rebuild_compare_list` always set a current row. This **narrows** the earlier "it is no longer obvious which spectrum is selected" feedback rather than reversing it: that was about the highlight being invisible once a row had been chosen, which still works. What is gone is the choice made on the user's behalf before any click. A current entry is still preserved across a rebuild, so Move Up/Down and check-state toggles don't lose their place.
+
+18 new tests. Each fix verified to fail with itself reverted, independently. 1004 tests passing (986 -> 1004).
+
+## Phasing a 2D snapped the zoom back to full scale on every pause (2026-09-06)
+
+User: "Something is up with the GUI phase control for the indirect and it's jumping during phasing."
+
+The jump was literal, and it is a view bug rather than a phase one -- the phase values themselves are smooth. Traced a real F1 drag tick by tick on `Cyclosporine/203`: each 0.5-degree tick changes the data by ~0.0102 relative, decreasing smoothly, with no discontinuity at a settle (0.00024) and `_phase_reference_delta_applied` tracking correctly. Nothing wrong there.
+
+### What was actually jumping
+
+Two 200 ms debounce timers -- `_live_reprocess_timer` and `_canvas_2d_refresh_timer` -- both restart on **every** drag tick, so on a pause they always fired as a pair. `_run_debounced_canvas_2d_refresh` carefully saves and restores the axis limits around its contour rebuild ("phase-editing shouldn't silently reset a deliberate zoom"). `_run_debounced_multi_row_reprocess` did not: a bare `show_spectrum`. It runs first, so its reset won.
+
+Measured, with the view zoomed to 4..2 ppm x 60..20 ppm and one drag tick:
+
+| baseline correction | timers that fire | zoom after |
+|---|---|---|
+| off | canvas only | preserved |
+| **on** | reprocess, canvas | **reset to 12.7..-3.3 x 157.5..-7.5** |
+
+Baseline correction is what puts the reprocess timer in play for a phase drag, which is why this shows up while phasing rather than at rest.
+
+### Also: every settle rebuilt the identical contour twice
+
+Both timers redrew, one straight after the other, for one frame. A contour rebuild measures **295 ms** for `Cyclosporine/203` and **1.34 s** for the EXSY (against a 7 ms and 140 ms phase tick), so the entire cost of a settle was being paid twice. The reprocess now cancels the canvas-refresh debounce, since it *is* that redraw.
+
+### Fix
+
+One `_redraw_2d_preserving_view` helper, used by both settle paths -- the zoom-preserving version was already written, it just wasn't shared. 5 new tests (parametrised over both dimensions and baseline on/off), verified to fail with each half of the fix reverted independently.
+
+### Left alone deliberately
+
+During a *continuous* drag the contour still does not redraw at all: both debounces keep restarting, so the update lands only when the drag pauses. That is the existing deliberate trade-off, and at 295 ms / 1.34 s per rebuild it is not obviously wrong -- a throttle would give feedback while dragging but would block the event loop for 1.34 s at a time on the EXSY. Flagged for the user rather than changed unilaterally.
+
+986 tests passing (981 -> 986).
+
+## The hourglass contours: F2's dispersion was leaking into F1 (2026-09-06)
+
+User: "I'm still suffering from this hourglass shape in the contours, I feel like the phases of f2 and f1 are somehow offset from each other's phases."
+
+That reading was right, and it names the artifact precisely. An hourglass (bowtie) contour **is** a phase-twist lineshape -- `Re[(A1 + iD1)(A2 + iD2)] = A1*A2 - D1*D2` -- which is what you get when the two dimensions' absorption and dispersion are mixed 90 degrees apart. Not a phase *setting* that could be dialled out: a structural error in the hypercomplex decode.
+
+### The error, which both hypercomplex modes made
+
+After the F2 FFT each row `a` is complex: `Re(a)` is F2 absorption, `Im(a)` F2 dispersion. The decode combined **whole complex rows** as `a + 1j*b`. That looks like the textbook hypercomplex step, but
+
+```
+a + 1j*b  ==  (Re(a) + 1j*Re(b))  +  1j*(Im(a) + 1j*Im(b))
+```
+
+-- the F2-real hypercomplex series *plus 1j times* the F2-imaginary one. F1-transform that and take the real part and you get `RR - II`, the phase twist. The wanted spectrum is `RR` alone, so the F2 imaginary has to be dropped (States) or cancelled (Echo-Antiecho) **before** the F1 transform.
+
+The tell that this was structural rather than a phase offset: `a + 1j*b` is C-linear, so a global F2 phase commutes straight through it and through the F1 FFT. That accidental commuting property is exactly what let F2's dispersion into F1, and it is gone now -- see "consequence" below.
+
+### Echo-Antiecho had a second, independent bug underneath
+
+The raw "echo" row was conjugated **and time-reversed** before F2 processing. The stated reasoning -- the conjugate's own frequency reversal and the explicit reversal cancel -- is true for a bare FFT. It is false here, because **the window and the zero-fill sit in between**: reversing a decaying FID and then multiplying it by a decaying window applies the window backwards, and the zero-fill pads what is now the head of the signal. The echo rows were not mirrored, they were destroyed.
+
+Measured against TopSpin's own `xf2` output (procno 2 of `Cyclosporine/203`, which the user had already processed that way):
+
+| | our even (echo) rows | our odd (antiecho) rows |
+|---|---|---|
+| with the transform | **0.03** | 0.72 |
+| transform removed | **0.73** | 0.72 |
+
+Undoing it afterwards in the frequency domain recovers nothing (0.0008) -- the tell that information was lost rather than moved. With it removed, all 128 high-SNR rows match their own index.
+
+### How the right answer was found, instead of guessed
+
+Two earlier rounds guessed at sign/order permutations and "verified" the winner. This time the recombination was **solved**. TopSpin's own recombined F1 interferogram is recoverable from any finished 2D: undo `proc2s`'s `PHC0`/`PHC1`, then inverse-FFT along F1. Fitting `interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)` per t1 point then gives, with no ambiguity:
+
+- coefficients **1.0000** on `conj(echo)` and on `antiecho`, **0.0003/0.0004** on the other two
+- median relative residual **0.0172**, per-point `|corr|` **0.997-1.0000**
+- a per-point scale whose phase is a **constant +90 degrees**, its magnitude just the F1 window (halved at k=0 by `FCOR`)
+
+So `interferogram = 1j * (conj(echo) - antiecho)`. That constant 90 degrees is the whole ballgame: it turns F1 absorption into F1 dispersion, and dropping it costs everything -- end-to-end +0.9948 with it, **+0.0010** without. Guessing formulas would never have found a factor that looks like a no-op.
+
+A prerequisite fell out of the same work: **which block is which dimension's imaginary partner had been recorded backwards.** Inverse-transform each candidate pair and only the true one comes back causal:
+
+| pair | along F1 | along F2 |
+|---|---|---|
+| `2rr + 1j*2ir` | 49.55% | **94.32%** |
+| `2rr + 1j*2ri` | **100.00%** | 49.36% |
+| `2rr + 1j*2ii` | 50.20% | 49.66% |
+
+`2ir` is F2's imaginary, `2ri` is **F1's** -- first letter F2, second F1. The 49-50% entries are the signature of a pairing that isn't one (an effectively real spectrum inverse-transforms Hermitian-symmetric, splitting energy between head and tail). An xf2-only dataset is the exception and stores only `2rr`/`2ii`. Recorded as `io.bruker._PROCESSED_BLOCK_NAMING_NOTE`.
+
+### Result, against TopSpin's own `2rr`
+
+| dataset | mode | before | after |
+|---|---|---|---|
+| `Cyclosporine/203` | Echo-Antiecho | +0.4448 | **+0.9948** |
+| `Cyclosporine/204` | Echo-Antiecho | +0.0953 | **+0.9939** |
+| `2p5mm/2011` | States-TPPI | +0.6883 | **+0.9986** |
+| `2p5mm/2016` | States-TPPI | +0.7049 | **+0.9990** |
+| `2p5mm/2019` (EXSY benchmark) | States-TPPI | +0.7021 | **+0.9956** |
+| `2p5mm/2023` | States-TPPI | +0.6721 | **+0.9493** |
+| `2p5mm/6` | States-TPPI | +0.6947 | **+0.9623** |
+
+And the artifact itself, measured as negative/positive intensity in a box around each of the 6 strongest peaks (a phase twist has large negative diagonal wings; pure double absorption has almost none): **0.4227 -> 0.0311**, against TopSpin's own **0.0347**. The hourglass is gone, not reduced.
+
+The EXSY load benchmark is unaffected: 3.7 s best of 3 (ceiling 9.268 s).
+
+### Consequence: F2 phasing on a hypercomplex 2D can no longer be previewed live
+
+The corrected decode is only R-linear, so an F2 phase no longer commutes through it -- correctly. It also means the stored `data`/`data_imag` pair for a hypercomplex 2D is **F1's** quadrature (TopSpin's `2rr`/`2ri`), which is exactly what F1 phasing wants and exactly what F2 phasing cannot use. F2 phase ticks for those spectra now defer to the debounced rebuild, which phases F2 before the decode where it still means something (`MainWindow._f2_quadrature_is_spent`). F1 phasing, the common interactive case, is unaffected and still live.
+
+Not done instead: keeping the second hypercomplex plane (`2ir`/`2ii`) so F2 could be phased from four stored planes the way TopSpin does. That is the textbook answer, rejected on memory -- the EXSY's decoded array is already ~1 GB, and this project caps contour points at a quarter of that same dataset for the same reason.
+
+A pleasant side effect: `read_2d` and `read_2d_processed` now agree on what `data_imag` means for a hypercomplex 2D, since the latter already returned `2ri`.
+
+### Two copies of the deleted transform lived in the GUI
+
+`_recompute_multi_row_data` and the per-row slice path both carried their own copy of the Echo-Antiecho raw-row transform. The suite's live-rebuild-equals-load tests caught both immediately. Worth noting the symmetry: this project's standing "two pipelines quietly diverge" warning is usually about a fix that reaches only one copy -- here it was a *deletion* that had to reach all three.
+
+### Still broken, and not caused by this (both were equally broken before)
+
+- `Cyclosporine/211` (Echo-Antiecho): +0.0143 -> +0.0113. F2 projection +0.71, F1 projection +0.03. Not the F1 LP (disabling it gives +0.0250), not a strip transform (`STSR=0`, `STSI=SI`). Its `proc2s` asks for an 8x LP extrapolation (`LPBIN=2048` from 128 complex points), which is the most suspicious thing about it but not yet demonstrated.
+- `exam_CMCse_3/19` (States-TPPI): +0.0139 -> +0.0164, and its interferogram fits nothing (residual 0.998). Here it is **F2** that is wrong (F2 projection +0.51, F1 projection +0.90). Its `procs` has `TDeff=4096` with `SI=2048`, i.e. TopSpin windows over more points than it transforms -- a window computed over the wrong length changes the lineshape, which fits the symptom. Untested.
+
+Both are single datasets with a specific parameter combination; neither is the hourglass.
+
+5 new discriminating tests (all verified to fail with the fixes reverted) plus 8 real-data agreement tests that pin the table above and skip when the data isn't present. 981 tests passing (971 -> 981).
+
+## Live phasing no longer "bounces" between baseline-corrected and not (2026-09-06)
+
+User: "The indirect phasing sort of bounces like there is a mismatch to the current and read phases."
+
+### It is not indirect-specific, and it is not a phase mismatch
+
+Measured both dimensions with baseline correction on and off, which separates the two candidate causes cleanly:
+
+| dim | baseline | live vs rebuilt |
+|---|---|---|
+| F2 | off | 0.000000 |
+| F2 | **on** | **0.001701** |
+| F1 | off | 0.000000 |
+| F1 | **on** | **0.001701** |
+
+Identical for F2 and F1, and zero without baseline correction. So the cause is **baseline correction**, not the indirect dimension and not a recorded-vs-current phase mismatch. (A double-baseline hypothesis was tested and rejected first -- baseline correction is exactly idempotent here, 0.000000 applied twice.)
+
+### The mechanism
+
+Baseline correction is deliberately **not** applied on every drag tick -- measured at **173 ms** for `Cyclosporine/203` and **1.5 s** for the EXSY, far too slow for a per-tick path, so the existing comment claiming as much is still correct. It is deferred to a debounced rebuild that fires after 200 ms of stillness.
+
+The bug was what happened *next*: the following drag tick re-derived the display from the **pre-drag snapshot**, which has no baseline -- so the correction was thrown away again. Pause, correction appears; move, correction vanishes; pause, it reappears. That is the bouncing, and it repeats for the whole drag.
+
+### The fix
+
+After a rebuild, its result becomes the new phase reference, and the phase that result already carries is recorded (`_phase_reference_delta_applied`) so the next tick applies only the *remainder* rather than re-applying the whole phase to data that already has it. The drag then continues *from* the corrected data.
+
+Live view after a settle, against the authoritative rebuild at the same phase: **0.001701 -> 0.000028**, for both dimensions.
+
+**Restricted to rebuilds that came from the raw FID.** The processed-only fallback (`_recompute_multi_row_phase_and_baseline_only`) *derives* its result from this reference, so overwriting the reference with that result would make it self-referential -- baseline correction could then never be switched back off, because the uncorrected source it reverts to had been replaced by the corrected output. Caught by the existing pseudo-2D apply-all-slices test, which toggles baseline off and on again.
+
+### Two measurement mistakes of my own, worth recording
+
+- An early check called `_commit_pending_phase_to_metadata()` directly and appeared to show the phase doubling on commit. That is not a user-reachable path; re-running with **only real UI actions** showed the values stable. Direct calls to internal commit helpers do not reproduce user behaviour.
+- The first anti-bounce check compared raw before/after magnitudes and "failed" at 0.007 for a 0.5-degree tick. That is the *correct* magnitude -- a phase rotation mixes in the dispersive component, so the change scales as `sin(0.5 deg) ~ 0.0087` of the imaginary part, not linearly with the phase. The meaningful comparison is against the authoritative rebuild, not against the previous frame.
+
+3 new regression tests (parametrised over both dimensions), all verified to fail with the fix disabled. 971 tests passing (968 -> 971).
+
+## Extracted slices now round-trip: phase on a slice, apply to the 2D (2026-09-06)
+
+User: "I don't think the derived slice phasing is feeding back into the contour, it should be more like a temporary file and have some way to go back into the contour data."
+
+Correct -- a kept slice was an independent copy, so phasing it went nowhere. It is now a **working copy with a live link home**.
+
+**Provenance** is recorded when a slice is kept: the parent spectrum (a live object reference, *not* a session index, which shifts when spectra are removed or reordered), the axis, and the index. All three are blocklisted from the sidecar -- a spectrum object is not serialisable, and a within-session relationship means nothing after a reload.
+
+**"Apply Phase to Source 2D"** appears in the Processing tab only for a slice whose parent is still loaded. It adds the phase dialled in on the slice into the parent's own *user* phase keys and rebuilds it through `_recompute_multi_row_data`, then switches back to the 2D. Going through the existing pipeline rather than mutating the parent's data directly is what makes the result **identical to having dialled the same phase on the 2D itself** -- verified to `< 1e-9` relative difference -- and what makes it survive the next rebuild.
+
+**The dimension mapping is the subtle part** and is derived in one place: extracting with `axis="f1"` *fixes* F1 and traces **along F2**, so phasing that trace is an **F2** phase. Backwards would silently phase the wrong dimension of the 2D.
+
+Only the phase added *since extraction* is transferred -- the slice inherited the parent's recorded phase when it was cut, so transferring that as well would apply it twice. The slice's own phase keys are cleared afterwards, so a second click cannot double-apply (it says "No phase to apply" instead).
+
+### Two real bugs found by testing the round trip
+
+- **Selecting the parent re-applied the phase to the slice.** `_capture_phase_reference` commits any pending phase into the *outgoing* target on the way out, so switching to the 2D wrote the still-live spin value straight back onto the slice, undoing the clearing. Fixed by zeroing the spin boxes *before* selecting. Found by running the round trip, not by reading it.
+- **`parent not in self.session.spectra` raised.** `in` and `list.index()` compare with `==`, and `NMRSpectrum` is a dataclass holding numpy arrays, so equality returns an array: *"truth value of an array with more than one element is ambiguous"*. Both lookups now compare by identity. Caught by the test for the removed-parent case.
+
+Also corrected in passing: an earlier equivalence check appeared to fail at 1.1 relative difference, which was my own harness not settling the debounced rebuild before comparing -- the real figure is 0.0.
+
+968 tests passing (963 -> 968).
+
+## Extracted-slice actions made visible (2026-09-06)
+
+User: "There is no way to actually phase the extracted slice as it stands. maybe the extracted view should have new options to do something with the slice."
+
+**The capability was there and worked -- the affordance was not.** Checked first rather than assuming a functional bug: after "Keep Slice", the phase controls are in the *identical* state as for a normally-loaded 1D (`_phase_mode == "1d"`, correct target index, handles enabled, same status text), and phasing genuinely changes the data. The problem was that the only way in was a **right-click context menu on the plot** -- not somewhere anyone looks, so in practice the feature may as well not have existed.
+
+Fixed as suggested: the extracted view now has its own visible bar, shown **only** while a slice is being viewed:
+
+- a label naming the slice and stating it is *not yet in the spectrum list*, so its status is obvious rather than inferred;
+- **"Keep for Phasing/Fitting"** -- adds it to the session and selects it;
+- **"Back to Contour"** -- returns to the 2D it came from.
+
+Both buttons share the same helpers as the context-menu entries, which are kept so anyone who had found them is not broken. `_refresh_slice_bar` is driven from the single set/clear points, so the bar can never be left showing over an unrelated view.
+
+**A real self-inflicted bug, caught by running it rather than by reading it**: a global text replace rewrote the signal emit *inside* `_emit_slice_keep_requested` into a call to the helper itself, so clicking Keep recursed to `RecursionError`. It has its own regression test now. A second, smaller one: the new canvas tests asserted `isVisible()`, which Qt reports as `False` for every child of a widget that was never shown -- `isHidden()` is the right check when the parent is not realised.
+
+963 tests passing (959 -> 963).
+
+## Navigation shortcuts, phasable extracted slices, and softer negative contours (2026-09-06)
+
+Three requests, all done.
+
+### (a) Navigation-mode shortcuts, pan by default
+
+New **View** menu: **Pan Mode** (`Ctrl/Cmd+Shift+P`), **Zoom Mode** (`Ctrl/Cmd+Shift+Z`), **Toggle Pan/Zoom** (`Ctrl/Cmd+Z`, as requested -- there is no undo stack for it to collide with), and **Reset View** (`Ctrl/Cmd+0`). **Pan is switched on automatically once data is loaded**, and only for the first spectrum, so it never overrides a mode the user has since chosen.
+
+Two things worth knowing about the implementation: matplotlib's toolbar owns this state and its `pan()`/`zoom()` methods **toggle**, so the helper checks the current mode first -- calling unconditionally would turn the requested mode straight back off. And the mode is applied to *every* canvas, not just the visible one, because it is a per-toolbar flag: otherwise switching canvas tab would silently change the interaction mode back.
+
+### (b) Extracted slices can now be phased
+
+`MplCanvas.extract_slice` only ever *displayed* a trace -- it never reached the session, and every phase control acts on session spectra, so an extracted slice could be looked at but not worked on. A new right-click **"Keep Slice (for phasing/fitting)"** (on an extracted slice) hands the exact displayed trace to `Session.add_derived` and selects it, so phasing, fitting and Compare all apply through their existing paths with no parallel machinery. `processing.slicing.get_trace` already carries `data_imag` through, which is what makes phasing work; when it is absent (a magnitude-mode or processed-only source) the slice is still kept, with a message explaining why phasing is unavailable rather than leaving the user to find a dead control.
+
+**A pre-existing crash found while building this**: extracting a *column* (trace along F1) from a **pseudo-2D** raised `ValueError: This axis has no 'ppm' values (kind='index')` from `plot_1d` -- F1 there is a slice index, not a frequency. Reachable straight from the Extract Slice dialog. That option is now disabled for pseudo-2D, with a tooltip saying why (a trace along F1 is a decay curve; the Analysis tab is where that belongs) rather than silently removed.
+
+### (c) Negative contours: absolute scaling, and teal
+
+Both fixes to the same complaint -- "the negative contours look really prominent vs the positive".
+
+**Scaling** was the substantive half. The negative side used to be scaled to `amin(data)` *independently* of the positive side, so on a spectrum with a big positive peak and small negative excursions its lowest level sat at `factor * |amin|` -- a far lower **absolute** threshold than the positive side's `factor * amax`. The negative contours therefore started much closer to the noise floor and drew far more rings, reading as prominent when the underlying signal was weaker. Both sides now scale to `max(|data|)`, and the negative levels are the exact mirror of the positive ones. On a 1000-vs-(-60) test spectrum, the negative side now draws **nothing at all**, which is correct: -60 is below the level the positive side itself starts at.
+
+**Colour** changed from red to **teal** (`NEGATIVE_CONTOUR_COLOUR`, one constant so it can be retuned in one place). Red reads as an alarm colour and dominated the black positive contours even at equal intensity; teal stays clearly distinguishable from black -- and remains so under the common red-green colour-vision deficiencies, which red-against-black does not.
+
+### Also cleaned up
+
+- Removed an `_all_canvases` **duplicate I had just introduced** -- the class already had one. Caught by an assertion in my own edit script rather than shipping two methods with the same name.
+- The menu tests looked menus up **positionally** (`menuBar().actions()[2]`), so adding the View menu broke three unrelated tests. Now looked up by name via a `_menu_by_title` helper, which will not break next time.
+
+959 tests passing (953 -> 959).
+
+## F1 linear prediction implemented; contour ceiling corrected to 0.25x (2026-09-06)
+
+### F1 linear prediction
+
+`io.bruker.apply_recorded_f1_linear_prediction` now extends the F1 interferogram exactly as TopSpin recorded, driven by `proc2s`'s `ME_mod`/`NCOEF`/`LPBIN`. **27 of the 54 2D datasets here ask for it and this project applied none.**
+
+`LPBIN` counts **real** points (the same convention as `TD`) -- established by measurement rather than assumption: extending to `LPBIN/2` complex points reproduces TopSpin's F1 FWHM of **4** exactly on `Cyclosporine/203`, while treating `LPBIN` as a complex count over-narrows it to 1.
+
+Effect on the dataset that prompted this (the "slanted" Echo-Antiecho):
+
+| | F1 FWHM | tilt | corr vs TopSpin |
+|---|---|---|---|
+| no LP | 8 rows | -0.1006 | +0.3951 |
+| **with LP** | **4 rows** | **-0.0665** | **+0.4454** |
+| TopSpin | 4 rows | -0.0018 | -- |
+
+So the F1 linewidth now matches TopSpin exactly and the tilt is substantially reduced -- but not eliminated, which is consistent with the recombination still being wrong. Wired into the GUI's live rebuild too, so recompute-vs-load stays **0.000000** across all five real datasets.
+
+Forward-only modes (`ME_mod` 1/2) are implemented; the backward ones (3/4) reconstruct points *before* the start, a different operation, and no dataset here uses one -- deliberately not guessed at. `linear_predict_f1=False` skips it, since it is genuinely expensive (one AR fit per F2 column, ~1.5s for a 4096-column dataset).
+
+### A real bug this exposed: unstable linear prediction
+
+Three of the five LP datasets came back with peak magnitudes of **1e85 to 1e104** against an expected ~1e11, driving their correlation with TopSpin to *exactly* 0.0000. The unconstrained least-squares AR fit was putting poles outside the unit circle, so the "prediction" grew exponentially instead of extrapolating a decaying signal.
+
+Fixed with **root reflection** (`_reflect_unstable_roots`): any pole outside the unit circle is replaced by `1/conj(r)` -- same frequency, decaying magnitude -- and the coefficients rebuilt. This is what TopSpin and NMRPipe do. Magnitudes are now sane (1e11/1e8/1e5) and nothing collapses to zero. Cost is 0.6 -> 0.9 ms per column.
+
+**Scoped to forward prediction only**, and that distinction is subtle enough to be worth stating: backward prediction reverses the FID first, so a normally-decaying signal becomes a *growing* series whose poles legitimately sit outside the circle. Reflecting them predicts a *smaller* signal before t=0 when the true one is larger. Caught by the existing backward-reconstruction test, which reproduces a known signal and started failing by 75%.
+
+### Contour ceiling corrected
+
+`_MAX_CONTOUR_POINTS` is now defined as **a quarter of the EXSY benchmark's own point count** (`1002 * 65536 // 4` = 16,416,768), per direct instruction: "restrict any dataset to 0.25x the EXSY's number of points". It had been briefly set to half on an earlier reading of "at least half"; 0.25x is the preference. The EXSY now renders at 1002 x 16384, and its test asserts the *relationship* to the benchmark rather than a literal, so it survives future edits.
+
+953 tests passing (948 -> 953).
+
+## Positive projections; and the Echo-Antiecho "slant" measured and diagnosed (2026-09-06)
+
+User: "the contours in the echo-antiecho are somehow slanted, and I'm not sure why. Also, the 2D projections should probably just be the positive projections (not the sum)."
+
+### Projections -- done
+
+`projection_mode="auto"` now resolves to `"max"` for **every** 2D, not just pseudo-2D, and `"max"` is the plain positive maximum. A sum projection of a phase-sensitive spectrum cancels its own positive and negative lobes and washes the peaks out, which is what prompted this. `"sum"` remains available explicitly. `_signed_max_magnitude` (added a few rounds ago to make `max` phase-sensitive) is now unused and was **deleted along with its three tests** rather than left as dead code -- `np.max` is phase-sensitive anyway, so the property that helper existed for is retained.
+
+### The slant is real, and now quantified
+
+Measured via the strongest peak's own 2D second moments:
+
+| | F1 width | F2 width | F1-F2 covariance | tilt |
+|---|---|---|---|---|
+| ours | 4.48 rows | 2.41 pts | **-1.083** | **-4.32 deg** |
+| TopSpin | 1.21 rows | 1.42 pts | -0.003 | axis-aligned |
+
+So the observation was correct: our peaks are genuinely tilted (correlation coefficient -0.100) where TopSpin's are square to the axes.
+
+### Root cause 1, confirmed: TopSpin uses linear prediction in F1 and we do not
+
+`proc2s` for Cyclosporine/203 records **`ME_mod=2.0`** (linear prediction) with `NCOEF=32`, `LPBIN=512`, `TDeff=512` -- TopSpin extends F1 from its 128 complex points to 512 by LP before zero-filling to 1024. This project applies no F1 LP at all, which is exactly why our F1 lines are **~4x broader** (4.48 rows against 1.21).
+
+This matters beyond appearance: **it caps how high the correlation against TopSpin can go regardless of whether the recombination is right**, which makes whole-array correlation a poor metric for the remaining Echo-Antiecho work. `processing.ft.linear_predict` already exists, so wiring F1 LP is a well-defined, independent improvement -- and probably the next thing to do.
+
+### Root cause 2: still the unresolved recombination -- and a useful negative result
+
+Tilt is a far more sensitive probe than correlation, so the recombination space was re-searched scoring by tilt. A candidate does reach TopSpin's tilt exactly:
+
+    EA transform OFF, decode = -((a+b) - 1j*(a-b))   ->  tilt +0.0022 (TopSpin: -0.0018)
+
+**But it is wrong**, and the check that caught it is worth keeping: its peaks land at F1 mirror positions (828 -> 196, 789 -> 235, 791 -> 233, 738 -> 286 in a 1024-point F1), matching only **3/8** of TopSpin's strongest peaks against the current form's **5/8**. Zero tilt was achieved by *symmetrising the mirror artifacts*, not by fixing the reconstruction.
+
+**Lesson: tilt is necessary but not sufficient.** Any future candidate has to be scored on tilt **and** peak positions together -- either alone is satisfiable by a wrong answer.
+
+Echo-Antiecho therefore remains unsolved at **+0.395**. The concrete next step is F1 linear prediction, both because it is correct in its own right and because it removes the linewidth confound from every subsequent measurement.
+
+## Vendor conventions normalised at read time: `processing/` is now vendor-free (2026-09-06)
+
+User: "many of the phase conventions etc should be fixed if the GUI reformats any read data into a common file type so it is then agnostic for vendor". Done for the two leaks that existed. Output is **identical on all five real datasets**, so this is purely structural.
+
+### 1. The two phase models were provably redundant -- now one
+
+Measured, not assumed: for the descending ppm axis every reader produces,
+
+    apply_recorded_phase(s, PHC0, PHC1)  ==  apply_phase(s, ppm, -PHC0, +PHC1, pivot_frac=1.0)
+
+to **5e-16**. `pivot_frac=1.0` puts the pivot at the array's first point, which is exactly what an index ramp starting at `PHC0` means; the `-PHC0` accounts for `apply_phase`'s `exp(-i*phi)` against TopSpin's `exp(+i*phi)`.
+
+So `apply_recorded_phase` is no longer a second implementation of phasing -- it is now a thin, named *conversion* onto the single model, verified identical to the old ramp across 1D/2D/3D shapes and both axes. The conversion stays behind a name because the sign and pivot flips are measured rather than obvious, and belong in exactly one place.
+
+### 2. `conjugate_f1` removed -- and it was not what it looked like
+
+The flag looked like a leaked artifact of Bruker's up-front `np.conj(data)`. It is not. Testing a **fully conjugate-free** pipeline (plain F2 reversal after the FFT, no conjugate anywhere, recorded phase negated to absorb the difference) reproduces today's results exactly -- QF **+0.9999**, States-TPPI **+0.7075** -- and **still requires the flag**. So Bruker's F1 quadrature sense genuinely differs from X-Pulse's; it is a real vendor convention, not an artifact.
+
+That makes the right fix a *data* normalisation rather than a flag: the reader now negates the sine-modulated rows before decoding, which is exactly equivalent (`a - 1j*b == a + 1j*(-b)`), and `processing.ft.decode_hypercomplex_f1` is back to `(data, fn_mode)` with **no vendor knowledge at all**. A test asserts its signature stays that way.
+
+Also established along the way, and worth not re-deriving: `FFT(conj(x))` equals `conj(reverse(FFT(x)))` **only with a one-sample roll** -- exact to 1.6e-16 with it, wrong by O(1) without. That is the modular-wrap term this project had hit before.
+
+### A real bug the test suite did not catch
+
+The first version normalised for `fn_mode in (4, 5, 6)`. Echo-Antiecho (6) uses a different recombination that this sign is not part of, so it flipped real Cyclosporine/203 data from **+0.395 to -0.380** -- while **all 948 tests still passed**. Found only by the real-data check that runs alongside the suite. Now scoped to `(4, 5)`, with a regression test covering the distinction.
+
+### Verification
+
+All five real datasets match their pre-refactor values exactly (PFG +0.9999, T2 +0.9972, EXSY +0.7021, babaDQ +0.7049, EA 203 +0.3951), the recompute-vs-load acceptance test is still **0.000000** across 1D, pseudo-2D, both hypercomplex modes and magnitude mode, and 949 tests pass (948 -> 949).
+
+### Not normalised (deliberately, for now)
+
+The **frequency-direction** convention -- Bruker's global `np.conj(data)` versus a post-FFT reversal -- is left as-is. Both were measured as exactly equivalent for QF and the conjugate-free variant is marginally *better* for States-TPPI (+0.7075 vs +0.7021), but switching it changes what "zero phase" means for every existing spectrum and interacts with the recorded phase, so it wants its own pass rather than being bundled here.
+
+## Normalise vendor conventions at read time (original plan, now superseded above)
+
+User: "I think many of the phase conventions etc should be fixed if the GUI reformats any read data into a common file type so it is then agnostic for vendor, like we discussed."
+
+**This is the right diagnosis, and there is now direct evidence for it.** The vendor-agnostic core model (`NMRSpectrum`) has existed since the start, but *conventions* were never normalised -- only the container was. The leaks are concrete and were all hit while debugging 2D:
+
+- `processing.ft.decode_hypercomplex_f1` now takes a **`conjugate_f1` vendor flag** (Bruker `True`, X-Pulse `False`), because `io.bruker` conjugates the whole raw FID up front while `io.xpulse` does not. A "vendor-agnostic" processing function needing a vendor flag is the smell itself.
+- **Two phase models** coexist (`apply_recorded_phase`'s TopSpin index ramp vs `processing.ft.apply_phase`'s pivot model), so `metadata.raw` has to carry `recorded_phase*` and `phase*` separately and `apply_dimension_phase` exists purely to compose them in the right order.
+- Bruker's global `np.conj` (`_CONJUGATE_QUADRATURE_NOTE`) exists to fix F2's frequency direction, and then has knock-on effects on F1 that took several rounds to untangle.
+
+**The proposal**: each reader normalises to one canonical internal convention at read time -- canonical quadrature sense, canonical frequency direction, and the *recorded* phase converted into the single internal phase model -- so `processing/` and the GUI never branch on vendor at all. Readers become the only place vendor knowledge lives, which is what the original layering intended.
+
+**Why it is worth doing now rather than after stage 2**: the unsolved Echo-Antiecho reconstruction is exactly a convention problem (see below -- two coupled sign/direction errors, where each candidate fix interacts with the global conjugate and with the raw-row transform). Normalising first would collapse that search space instead of leaving each hypothesis entangled with three others. It is plausible this is a prerequisite, not a follow-up.
+
+**Not started.** Scope needs its own pass: pick the canonical conventions, convert each reader, remove `conjugate_f1` and ideally one of the two phase models, with the existing byte-identity and recompute-vs-load checks as the acceptance tests.
+
+## Stage 2, part 2: Echo-Antiecho -- raw-row transform proven wrong, decode still unsolved (2026-09-06)
+
+The user supplied **`Cyclosporine/203` reprocessed with `xf2` only into procno 2** -- exactly the F2-only ground truth for hypercomplex data that was missing. Confirmed genuine: **256 nonzero rows** (matching the 256 raw rows) zero-filled to 1024, so its `2rr`/`2ir` really is "F2 processed, F1 untouched".
+
+**Result 1 -- our F2 is correct for Echo-Antiecho, and the `fn_mode == 6` raw-row transform is wrong.** Comparing our F2-processed rows against procno 2 row by row, the ratio to TopSpin is:
+
+| | magnitude ratio, row 0 |
+|---|---|
+| **without** the conj+time-reverse | **0.015 .. 0.016** (constant -> a pure phase difference) |
+| with it | 0.012 .. 0.087 (scattered) |
+
+A constant magnitude ratio with a per-row phase is exactly right: that residual per-row phase *is* the F1 evolution. So F2 is sound, and `data[0::2] = conj(data[0::2])[:, ::-1]` -- added empirically in an earlier round to suppress F1 mirror ghosts -- is not what TopSpin does.
+
+**Result 2 -- removing it alone does not help, because the decode is also wrong.** End-to-end against TopSpin's procno 1, across both settings and six candidate recombinations, the best is **+0.6166** (`-1j*b`, with the transform still on). Every standard Rance-Kay form sits at 0.30-0.55. **`-1j*b` was deliberately not shipped**: it discards the echo row entirely, which would halve SNR in a *sensitivity-enhanced* experiment -- physically implausible, and far more likely an artifact of a second error than a real recombination.
+
+So Echo-Antiecho has **at least two coupled errors** (the raw-row transform and the recombination), and testing them jointly over this candidate set does not reach a credible answer. This is the concrete reason the convention-normalisation above may be a prerequisite rather than a nicety.
+
+**Still open**: Echo-Antiecho at **+0.395** as shipped. States-TPPI at **+0.70** after part 1.
+
+## Stage 2, part 1: States-TPPI F1 quadrature sign identified and fixed (+0.03 -> +0.70) (2026-09-06)
+
+The decode's States/States-TPPI recombination had F1's quadrature sense backwards for Bruker. Found by solving for it against ground truth, not by guessing.
+
+### Two corrections to the previous entry's conclusions
+
+**1. "F2 is wrong for States-TPPI" was wrong -- that was SNR, not a bug.** The dataset used (`exam_CMCse_3/19`) is a natural-abundance INADEQUATE with a **2rr peak SNR of 38.5**, against 13212 for the Cyclosporine HSQC. Ranking every hypercomplex dataset with all four blocks by SNR found far better States-TPPI targets -- the user's own EXSY data at **SNR 1194-2083**. On those, our raw row `2k` matches TopSpin's interferogram row `k` at **+0.999**: F2 was fine all along. **Lesson: check the validation target's own SNR before concluding the code is wrong -- a weak experiment cannot distinguish a correct pipeline from a broken one.**
+
+**2. `TDeff` is not the cause either.** Tested (truncating before windowing, which is what TopSpin does): +0.5272 -> +0.5238 for the INADEQUATE, and 0.997203 -> 0.997225 for `bruker_T2/11`. No meaningful effect; not implemented.
+
+### The actual bug, identified by least squares
+
+Solving `interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)` against TopSpin's recovered F1 interferogram on high-SNR EXSY data fits with **residual 0.0015-0.0022**, and the coefficients come out unambiguous:
+
+| k | coefficients | meaning |
+|---|---|---|
+| 0 | `+a` | (b unidentifiable -- the sine component is ~0 at t1=0) |
+| 1 | `-a + 1j*b` | `-(a - 1j*b)` |
+| 2 | `+a - 1j*b` | `+(a - 1j*b)` |
+
+i.e. **`(-1)**k * (a - 1j*b)`**, where the code computed `(-1)**k * (a + 1j*b)`. The sine-modulated component's sign was inverted.
+
+**Measured end-to-end against TopSpin on three independent datasets**: EXSY 2019 **+0.034 -> +0.702**, EXSY 2011 **+0.121 -> +0.688**, babaDQ 2016 **+0.142 -> +0.705**.
+
+### It is a vendor convention, and the shared tests proved it
+
+Flipping the sign outright broke `test_read_xpulse_ntuples_2d_recovers_known_f1_frequency` -- X-Pulse shares `decode_hypercomplex_f1`, and its own end-to-end test recovers a *known* F1 frequency, so that failure is authoritative rather than incidental. Bruker needs the opposite sense because `io.bruker` conjugates the whole raw FID up front (`_CONJUGATE_QUADRATURE_NOTE`); X-Pulse does not conjugate.
+
+So it is exposed as `decode_hypercomplex_f1(..., conjugate_f1=False)`, **defaulting to the historical behaviour** so X-Pulse is untouched, with Bruker's two call sites (the reader and the GUI's live rebuild, kept in step as always) passing `True`. **Lesson: a shared function's cross-vendor tests are the cheapest possible check that a "fix" is not really a vendor convention in disguise.**
+
+### Still open
+
+**This is a real improvement, not a solution**: +0.70 is not +0.99. Something further remains in the F1 chain (window, zero-fill, or the F1 recorded-phase model). Echo-Antiecho is untouched at **+0.395** -- its own least-squares fit (residual 0.0022) reduced to `interf[k] ~ -1j*b`, the antiecho row alone, for every `k >= 1`, which matches no textbook Rance-Kay form and is still unexplained. Do not implement it without understanding it.
+
+948 tests passing (946 -> 948).
+
+## Rebuild stage 2 (investigation): F1 isolated against ground truth (2026-09-06)
+
+Stage 2 started. **No code changed** -- this round built the diagnostic that isolates F1 and used it to narrow the problem substantially. Two findings are solid enough to build on; the fix itself is not yet identified.
+
+### The diagnostic: recover TopSpin's own F1 interferogram
+
+A fully 2D-processed dataset stores all four hypercomplex blocks (`2rr`, `2ir`, `2ri`, `2ii`), so TopSpin's own **complex** F1 spectrum can be assembled, its recorded F1 phase and window undone, and the result inverse-FFT'd along F1 to recover **the interferogram TopSpin actually fed into its F1 transform**. That is precisely the quantity `decode_hypercomplex_f1` produces, so the decode can be compared against ground truth *in isolation* instead of end-to-end.
+
+### Bruker's block naming, resolved empirically (was guesswork before)
+
+Both orderings were tried and scored by whether `2rr + i*<block>` behaves as a genuine complex pair (smooth phase across a strong row):
+
+| pairing | phase-step std |
+|---|---|
+| `2rr + i*2ri` | **0.0006 rad** |
+| `2rr + i*2ii` | 0.0072 rad |
+| `2rr + i*2ir` | 0.0981 rad |
+
+So **the first letter is F1 and the second is F2**: `2ri` is the F2-imaginary partner, and therefore **`2ir` is the F1-imaginary** -- the block needed for F1 work. Worth recording, because the two orderings are easy to assume and produce plausible-looking but wrong references either way. (Consistent with the xf2-only datasets, where the F2-imaginary lives in `2ii` because F1 has no real/imaginary distinction there at all.)
+
+### Echo-Antiecho: F2 is right, and the recombination is *exactly* linear
+
+- **F2 is correct at row level**: our raw row `2k` matches TopSpin's interferogram row `k` at **+0.999** (row 0), decaying gently to +0.925 by row 5 as signal decays -- i.e. agreement is limited by SNR, not by processing.
+- **The recombination is an exact linear combination.** Solving `interf[k] ~ c1*a + c2*b + c3*conj(a) + c4*conj(b)` per increment (strong-signal points only) fits with **residual 0.0022**. That is a solved-form answer, not a fit that merely looks decent.
+- **But the solution is surprising**: for every `k >= 1` the coefficients collapse to `interf[k] ~ -i * b`, i.e. **the odd (antiecho) row alone**, with `a`, `conj(a)` and `conj(b)` all at ~0.000. `k = 0` is the exception (both rows contribute). This does not match any textbook Rance-Kay recombination and is the concrete lead to chase next -- either TopSpin performs the echo/antiecho combination inside its own transform (so what is recovered here is post-recombination), or the `2ir` block carries something other than assumed. **Do not implement `-i*b` on the strength of this alone**; understand it first.
+- Separately measured: the `fn_mode == 6` conj-and-time-reverse of even raw rows is **near-neutral** for F2 (profile 0.832 with it, 0.840 without). It was arrived at empirically in an earlier round to kill mirror ghosts, and this suggests it may be compensating for something else rather than being correct. Worth re-deriving.
+
+### States-TPPI: fails much earlier, and differently
+
+- **F2 itself is wrong here** -- F2 profile correlation against TopSpin is only **+0.52** (against +0.84 for EA and +0.9999 for the QF/xf2 datasets). Peak positions only partly coincide (bins 1312 and 1686 shared; 713/1472/1478 present in TopSpin but not ours, 1533/1893/1958 in ours but not TopSpin's).
+- **No linear combination of our row pairs explains TopSpin's interferogram, under any pairing tried**: interleaved `(2k, 2k+1)`, blocked `(k, k+N/2)`, and reversed interleave all give residuals of **~0.999** -- i.e. no fit at all, versus 0.0022 for EA. Since a linear model that succeeds for EA fails completely here, **the problem is upstream of the decode**, consistent with the poor F2 profile.
+- Note this dataset has F2 `TD=8192` but `SI=2048`, i.e. TopSpin **truncated** F2 rather than zero-filling it -- unlike every dataset where F2 currently verifies. That asymmetry is the first thing to check.
+
+### Confirmed unchanged
+
+The global `np.conj(data)` is genuinely required for hypercomplex data too: dropping it collapses the F2 profile from +0.84 to **-0.06** (EA) and +0.52 to **+0.02** (States-TPPI).
+
+### Where to resume
+
+1. Explain the Echo-Antiecho `-i * b` result before implementing anything from it.
+2. Fix States-TPPI's **F2** first (start with the `SI < TD` truncation case); its decode cannot be judged until then.
+3. Re-derive the `fn_mode == 6` raw-row transform, now that it is known to be near-neutral for F2.
+
+## Rebuild stage 1 SHIPPED: recorded and user phase separated, F2 now +0.9999 by default (2026-09-06)
+
+User: "start on that. Make sure everything is implemented cleanly and without redundancy." The deferred half of stage 1 is done -- the measured TopSpin convention is now the shipped default, with the GUI consistent with it.
+
+### The design
+
+Two phase models have to coexist, so they are stored and applied separately rather than merged:
+
+* **recorded** -- the file's own `PHC0`/`PHC1` in TopSpin's index-ramp convention (`apply_recorded_phase`). Describes the file's own state.
+* **user** -- whatever the operator has dialled since, in the pivot-based model (`processing.ft.apply_phase`) that makes interactive first-order phasing rotate about a chosen point.
+
+Merging them into one number would make neither reproducible, which is exactly what the old code did (`phase0` held `PHC0` *and* the user's value, applied through the pivot model).
+
+**One composition point**: `io.bruker.apply_dimension_phase(data, ppm, recorded, user, pivot_frac)` -- recorded first, user on top, on the last axis. Called by `read_1d`, `read_2d` (F2), and the GUI's three raw-FID rebuild sites. **One accessor**: `io.bruker.recorded_phase(raw, dim)`, with the key names held in `RECORDED_PHASE_KEYS`/`USER_PHASE_KEYS` so nothing re-derives them. Verified no direct key access survives anywhere outside those.
+
+### Which sites actually needed changing -- three, not six
+
+Auditing the six candidate sites showed only those that **rebuild from the raw FID** need the recorded phase re-applied (the reader's own application lives in the spectrum they replace, not in `fid_raw`):
+
+| site | needs it | why |
+|---|---|---|
+| `_process_raw_fid_row` | **yes** | rebuilds a row from `fid_raw` |
+| `_recompute_multi_row_data` F2 | **yes** | rebuilds every row from `fid_raw` |
+| `_recompute_multi_row_data` F1 | **yes** | rebuilds F1 from `fid_raw` |
+| `_recompute_multi_row_phase_and_baseline_only` | no | the *processed-only* fallback -- TopSpin already baked the phase into `2rr` |
+| per-row live preview | no | applies the live delta to already-phased data |
+| `_reapply_phase_post_reload` | no | runs after a fresh read, so the reader already applied it |
+
+Getting this wrong in either direction double-applies or drops the phase, so the audit mattered more than the edit.
+
+### Results
+
+**Shipped default vs TopSpin, F2-processed datasets (n=17): median +0.9999, best +1.0000, 14/17 above +0.99** -- against a median of **+0.067** before this work. `bruker_PFG/150` went +0.513 -> +0.9999 and `bruker_T2/11` +0.816 -> +0.9972. F2's `PHC1` is now honoured for 2D as well (it was dropped entirely; `read_1d` always read both), and F1 has a recorded-phase step for the first time -- the "indirect phase is for sure not loading across from processing" report.
+
+One outlier remains at +0.0262 (`20200804_NaMgMnO.../31`), not yet investigated.
+
+**The acceptance test that blocked this last time now passes exactly.** Live rebuild vs load, relative difference:
+
+| | before | after |
+|---|---|---|
+| 1D | -- | **0.000000** |
+| T2 pseudo-2D | 0.46 | **0.000000** |
+| PFG pseudo-2D | 0.76 | **0.000000** |
+| Echo-Antiecho genuine-2D | -- | **0.000000** |
+| States-TPPI genuine-2D | -- | **0.000000** |
+| magnitude-mode COSY | 1.93 | **0.000000** |
+
+Pinned as a parametrised regression test over all five real datasets, verified to discriminate (4 of 5 fail when the fix is reverted).
+
+**A third divergence found and fixed while testing**: `_recompute_multi_row_data` never applied **magnitude mode**, so a magnitude-mode spectrum silently reverted to phase-sensitive the moment any control was touched (the 1.93 above). Same class as the phase gap -- a rebuild path not matching the reader -- so it is fixed the same way, calling the reader's own `_apply_magnitude_mode` last.
+
+### Also cleaned up
+
+- **Zeroing is now exact.** "Zero Phase 0/1" and "Reset" clear the *recorded* half at its source instead of trying to cancel it with an equal-and-opposite user phase -- which could never work for first-order phase, since the two use different models. `Reset` is now just both Zero calls rather than a third copy of the same logic. Both trigger a rebuild, since the recorded phase is applied during reconstruction.
+- **The phase display** shows recorded + user + live delta, so "current phase" means what is actually applied.
+- `recorded_phase*` is deliberately **not** blocklisted from the processing sidecar: once Zero can clear it, it is a user choice that has to survive a reload.
+
+946 tests passing (940 -> 946). **Stage 2 (hypercomplex F1) unchanged and still open**: Echo-Antiecho +0.395, States-TPPI +0.034.
+
+## Rebuild stage 1 (investigation): TopSpin's phase convention measured exactly (2026-09-06)
+
+User: "start this rebuild". Stage 1 -- **validate and fix F2 in isolation** -- is solved, and the answer overturns an earlier conclusion in this file.
+
+### The enabler: a genuine F2-only reference
+
+`bruker_T2/11` and `bruker_PFG/150` are processed by TopSpin with **`xf2` only** -- `proc2s`'s `SI` equals its `TD`, so F1 was never transformed. Their `2rr` is therefore exactly "F2 processed, F1 untouched", which makes F2 testable without any F1 involvement. Better still, both store a **`2ii`** block that is the F2 *imaginary* partner (confirmed: identical size to `2rr`, and a smoothly varying phase across a peak), so `2rr + 1j*2ii` is TopSpin's own **complex** F2 spectrum -- and the per-point ratio against our own unphased output gives the applied phase **with no fitting at all**.
+
+### The convention, measured not fitted
+
+On `bruker_PFG/150` that ratio has **constant magnitude** (15.997..16.003 -- a pure phase difference, the 16 being `NC_proc` scaling) and a first-order fit residual of **0.001 degrees**:
+
+| | measured | recorded |
+|---|---|---|
+| p0 | **-10.250** | `PHC0` = 349.742 (= -10.258 mod 360) |
+| p1 | **-80.115** | `PHC1` = -80.100 |
+
+So TopSpin's convention is exactly **`phi(i) = PHC0 + PHC1 * i/(SI-1)`**, applied as `exp(+i*phi)` across the transformed dimension's own points, in array order.
+
+**This overturns the earlier "the recorded PHC values don't transfer" conclusion** (see the entry below). They transfer *exactly*. What was wrong was the **model**: this code routes them through `processing.ft.apply_phase`, which is pivot-based and normalised over the *ppm* range. That earlier round's measurements were correct about that model; the inference drawn from them was too broad. **Lesson: "applying the recorded constants makes it worse" falsifies the model you applied them with, not the constants.**
+
+Applying the measured convention end-to-end:
+
+| dataset | shipped | measured convention |
+|---|---|---|
+| `bruker_PFG/150` | +0.513 | **+0.9999** |
+| `bruker_T2/11` | +0.816 | **+0.9972** |
+
+And across the whole corpus, the F2-only (xf2-style) comparison now reaches **median +0.9999, best +1.0000 over 17 datasets**. F2 is solved.
+
+**A self-inflicted near-miss worth recording**: an intermediate check had T2 apparently unfixable (best 0.087 over a full first-order scan). Cause was my own harness reading `2rr` with a plain `np.fromfile(...).reshape()`, bypassing the **XDIM submatrix block reconstruction** (`procs XDIM=4096`, `proc2s XDIM=4`) that `read_2d_processed` correctly performs. PFG has `proc2s XDIM=1` and so was unaffected, which is why one dataset "worked" and the other didn't. Always compare against `read_2d_processed`, never a raw `fromfile` of `2rr`.
+
+### What shipped, and what deliberately did not
+
+**Shipped**: `io.bruker.apply_recorded_phase(spectrum, phc0, phc1, axis)` -- the convention above, with the full measurement recorded in its docstring, plus regression tests including one that reproduces the +0.999 agreement on real `bruker_PFG/150` data and asserts it beats the shipped path by >0.4.
+
+**Deliberately NOT shipped: the default-behaviour switch.** Wiring it into `read_1d`/`read_2d` was implemented and verified (the numbers above are from that build) and then **reverted**, because it made the GUI's live recompute diverge from the load -- measured at **0.46** (T2) and **0.76** (PFG) relative difference, i.e. touch any control and the spectrum jumps. The GUI applies the committed phase through the pivot model at six separate sites (`main_window.py` 3160, 3381, 3495, 3537, 4247, 4271); making the reader speak a different convention than those without converting them all is precisely this project's recurring "two pipelines quietly diverge" failure. Shipping half of it would have traded a known-wrong-but-stable state for an inconsistent one.
+
+**The remaining work, now well-defined**: separate the *recorded* phase (Bruker convention, from the file) from the *user's* phase (pivot convention, from the controls) -- store them distinctly in `metadata.raw` rather than merged into `phase0`/`phase1` -- and have every reconstruction path apply recorded-then-user in that order. That is a mechanical but wide change across the reader and those six GUI sites, and it needs its own pass with the recompute-vs-load consistency check above as the acceptance test.
+
+### Stage 2 (hypercomplex F1) remains open
+
+With the correct F2 phase applied, `Cyclosporine/203` (Echo-Antiecho) improves from **-0.5433 to +0.395**, and States-TPPI datasets stay near 0. So F2 was a genuine and necessary prerequisite -- exactly as the user predicted ("the F2/F1 phasing doesn't need to be decoupled") -- but it is not sufficient: the hypercomplex F1 construction has its own separate defect still to find.
+
+940 tests passing (937 -> 940).
+
+## 2D-mode robustness survey: EVERY phase-sensitive 2D mode is wrong, not just Echo-Antiecho (2026-09-06)
+
+User: investigate the Cyclosporine 203 HSQC defect, and "search through the sample bruker data for any other 2D processing modes to test our robustness". Plus a design steer: "the F2/F1 phasing doesn't need to be decoupled, maybe this is the difference to the bruker data. However it does need to apply properly in the 2D contour."
+
+### The survey
+
+54 datasets with a raw `ser`. Modes present:
+
+| FnMODE (acqu2s) | MC2 (proc2s) | count |
+|---|---|---|
+| QF | QF | 25 |
+| **Echo-Antiecho** | Echo-Antiecho | **15** |
+| States-TPPI | States-TPPI | 11 |
+| undefined | QF | 3 |
+
+Echo-Antiecho is the **second-largest class**, not an edge case. No TPPI (3) or plain States (4) data exists here, so those two decode branches remain unvalidated against real data.
+
+### The finding: this is much broader than the reported HSQC
+
+Correlating `read_2d`'s genuine-2D output against `read_2d_processed` (TopSpin's own `2rr`), each dataset in its own recorded mode:
+
+| mode | n | median | worst | best |
+|---|---|---|---|---|
+| Echo-Antiecho | 1 | **-0.543** | -0.543 | -0.543 |
+| States-TPPI | 6 | **-0.022** | -0.104 | +0.000 |
+| QF | 20 | +0.067 | -0.304 | **+0.861** |
+
+**Essentially every phase-sensitive 2D reconstruction is uncorrelated with TopSpin.** The single good result (+0.861) is the magnitude-mode COSY -- and it is good *because* magnitude discards phase entirely. This is not a Cyclosporine-203 problem; it is the genuine-2D path in general.
+
+### Hypotheses tested and eliminated
+
+- **Not the recorded F1 phase.** `read_2d` never applies `proc2s`'s `PHC0`/`PHC1`, but applying Cyclosporine 203's own (`PHC0=-1.7`) moves it from -0.5433 to **-0.5464**. Worse.
+- **Not any F1 phase.** Best achievable by a freely fitted F1 `(phase0, phase1)` is **+0.5574** for the HSQC and **+0.0030** for the States-TPPI INADEQUATE. A global F1 phase cannot fix either.
+- **Not axis orientation.** F1-reversed, F2-reversed, both-reversed, half-rolled and fftshifted variants all drop the HSQC to |corr| < 0.01. The current orientation is right.
+- **Not the coupling fix on its own.** The user's steer is well-founded in principle -- nmrglue's and NMRPipe's own order is *phase F2, delete imaginary (`di`), then build F1* -- and this code instead feeds the **complex** F2 data into `decode_hypercomplex_f1`. Implemented that (`Re()` of each F2 component before forming the F1 point) and measured: HSQC -0.5433 -> **-0.4027**, States-TPPI +0.0004 -> **-0.0005**. Better for one, no change for the other; not a fix.
+- **Not phase at all, even jointly.** A full 4-parameter fit over F2 `(p0,p1)` and F1 `(p0,p1)`, tried both coupled and decoupled, tops out at **+0.4104** (coupled) and **+0.5549** (decoupled) for the HSQC.
+
+### The real diagnostic, and where the next attempt should start
+
+For Cyclosporine 203 the **magnitude** correlation is **+0.6074** while the signed correlation is **-0.5433**. Peaks are largely in the right *places* but with wrong signs -- and no global phase fixes that. Critically, even the magnitude only reaches 0.61, so the reconstruction differs beyond phase as well.
+
+That combination (right positions, wrong signs, phase-unfixable, magnitude also imperfect) points at the hypercomplex construction itself rather than at any phase step. **The F2 phase being wrong is the more likely upstream cause**: an earlier round established that F2's recorded `PHC0`/`PHC1` do not transfer to this reconstruction at all (see that entry), and for hypercomplex data F1 is built *from* the F2-phased result -- so an F2 phase error propagates into F1 in a frequency-dependent way that no single F1 phase can undo. Getting F2 right is therefore a prerequisite, not an independent task; the two are coupled exactly as the user said.
+
+**Not fixed.** Four separate hypotheses were measured and none held; shipping any of them would have been a guess. This needs a focused rebuild of the hypercomplex path validated against TopSpin at each stage (F2-only, then decode, then F1), rather than end-to-end correlation fitting.
+
+### Shipped from this round: two real robustness crashes, found by sweeping all 156 Bruker experiments
+
+- **Missing `2rr` crashed with `AttributeError: 'NoneType' object has no attribute 'ndim'`** from inside `NMRSpectrum`'s constructor, naming neither the file nor the experiment. `_load_block` returns `None` for a missing file -- correct for the *optional* `2ri`/`2ii` blocks, wrong for the real block. Real dataset: `Bruker Example Data/Cyclosporine/206/pdata/1` holds `procs`, `proc2s`, `clevels` and a thumbnail but no `2rr`. Now a clear `FileNotFoundError`. **Pre-existing, not introduced by any recent change** (confirmed against `HEAD`).
+- **An experiment with neither raw nor processed data** (`.../2010`: `acqus` and `pdata/1`, but no `fid`, `ser` or `1r` -- an aborted acquisition) failed with a bare errno-2 from `np.fromfile`. Now the same clear message.
+
+After both, **155 of 156 Bruker experiments load cleanly** through `_read_auto`; the one failure is the genuinely empty `2010`, which now says so. 937 tests passing (935 -> 937).
+
+## Four-item round: zero-phase semantics, density cap raised, own binary reader (nmrglue warning gone) (2026-09-06)
+
+Three of four items done; the fourth (Cyclosporine 203's indirect phase) turned up a **bigger, separate defect** than the one reported -- quantified below, not fixed.
+
+- ~~"Zeroing phases should actually zero the values, not just reset to the loaded values."~~ -- done, and the report was exactly right. The Phase spin boxes hold only the *delta* since the last `_capture_phase_reference`; the total in force is that delta **plus** whatever is committed in `metadata.raw` (on a freshly loaded Bruker spectrum, the file's own recorded `PHC0`/`PHC1`). Setting the delta to 0 therefore returned to the *loaded* phase -- on a spectrum not yet dragged, it visibly did nothing at all. Both "Zero Phase 0/1" and "Reset" now set the delta to `-committed`, driving the total to zero while leaving every existing preview/commit/persistence path untouched (rather than reaching into `metadata.raw` behind their back). New `_phase_committed_value(order)` helper reads the same F1/F2-aware keys `_refresh_current_phase_displays` already uses, so the two can't disagree about which dimension is being edited.
+- ~~"Set a max value of data density that is at least half of those EXSYs."~~ -- done. `_MAX_CONTOUR_POINTS` raised from 16,777,216 (2^24) to **33,554,432** (2^25); the pseudo-2D EXSY is 1002x65536 = 65,667,072, so half is 32,833,536 and the new ceiling clears it. The EXSY now renders at 1002x33487 (about half its F2 resolution rather than a quarter), costing ~2.0s of contour time against ~4.0s at full resolution. Every other real dataset remains untouched, as before. A new test pins the "at least half the EXSY" property against the constant so it can't quietly be walked back.
+- ~~"It seems we're still using nmrglue's fileio... I still get these errors"~~ -- **correct, and now fixed for the binary read.** To be precise about what was and wasn't rewritten: the *JCAMP-DX parameter* parser (`io/jcampdx.py`) has been this project's own from the start, but the raw `ser`/`fid` **binary** read still went through `nmrglue.bruker.read`, which warns and returns a flat, unshaped array whenever the requested shape doesn't divide the file exactly -- the `(39583744,) cannot be shaped into (1002, 39488)` message. That was cosmetic (this module immediately truncated and reshaped it, always safe here since the shape's element count is derived from that same array's length) but it surfaced to users on real EXSY data and read as a genuine error. New `_read_bruker_binary` reads the file directly with the same dtype/endianness rules nmrglue itself applies (`BYTORDA == 1` -> big-endian, `DTYPA == 2` -> float64; confirmed by reading its source). **Verified byte-identical to nmrglue on every real Bruker dataset in `test_data`: 54/54 `ser` files and 100/100 `fid` files, zero mismatches** -- and it additionally *succeeds* on one dataset (`.../2019`'s sibling `.../5`) where `ng.bruker.read` itself raises `IndexError`. The warning is confirmed gone on 2011 and 2019. `nmrglue` is still used deliberately for the parts it has genuinely validated against real Bruker output -- digital-filter/group-delay removal and the window functions -- and for the acqus parameter dicts.
+
+**Not fixed -- Cyclosporine 203's HSQC is worse than "the indirect phase isn't loading across".** The recorded F1 phase genuinely isn't read (`proc2s` `PH_mod=1`, `PHC0=-1.7`, `PHC1=0.0`, and `read_2d` has no F1 recorded-phase step at all -- see the entry below). But applying it does **not** fix this dataset, measured: correlation against `read_2d_processed` is **-0.5433** as shipped and **-0.5464** with the recorded `PHC0=-1.7` applied. The output is *anti-correlated* with TopSpin's, and the best achievable by **any** F1 phase is only **+0.5574** -- so unlike the T2/PFG case (where a fitted phase reaches 0.9995), phase alone cannot explain this one. This is `FnMODE=6` (Echo-Antiecho) with `MC2=5`, the hypercomplex path with the documented conjugate-and-time-reverse row-pair handling; the defect is most likely in that reconstruction, not in phasing. **Needs its own focused investigation** -- flagged rather than patched, since applying the recorded F1 phase would have looked like an answer while leaving a 0.55-correlation spectrum in place.
+
+935 tests passing (928 -> 935).
+
 ## Tried applying the recorded `PHC1` to 2D -- it makes things WORSE, not shipped (2026-09-05)
 
 User: "Let's try it" (re: applying F2's recorded `PHC1`, which `read_1d` applies and `read_2d` does not). **Tried, measured, and deliberately abandoned** -- the naive fix is a large regression. No code changed; this entry is the result.

@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
+import types
+
 import numpy as np
+from PySide6.QtCore import QPoint
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QSpinBox
@@ -629,18 +632,28 @@ def test_extract_slice_shows_1d_column(qapp):
     assert len(canvas._current_1d_spectrum.data) == 8  # traced along F1
 
 
+
+def _slice_index_of(spectrum, axis, cursor_value):
+    """_nearest_slice_index is an instance method now -- it resolves the
+    cursor against the axis *as displayed*, which needs the canvas's own
+    unit. These tests all mean "showing this spectrum in ppm"."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(spectrum)
+    return canvas._nearest_slice_index(spectrum, axis, cursor_value)
+
+
 def test_nearest_slice_index_matches_cursor_ppm_on_a_frequency_axis(qapp):
     spec = _make_2d(n_f1=8, n_f2=64)  # F1 ppm: linspace(90, 100, 8); F2 ppm: linspace(0, 10, 64)
-    row = MplCanvas._nearest_slice_index(spec, "f1", 95.0)
+    row = _slice_index_of(spec, "f1", 95.0)
     assert spec.axes[0].ppm[row - 1] == pytest.approx(95.0, abs=0.75)
-    col = MplCanvas._nearest_slice_index(spec, "f2", 5.0)
+    col = _slice_index_of(spec, "f2", 5.0)
     assert spec.axes[1].ppm[col - 1] == pytest.approx(5.0, abs=0.2)
 
 
 def test_nearest_slice_index_clips_to_valid_range(qapp):
     spec = _make_2d(n_f1=8, n_f2=64)
-    assert MplCanvas._nearest_slice_index(spec, "f1", 1000.0) == 8  # far past the axis's own max ppm
-    assert MplCanvas._nearest_slice_index(spec, "f1", -1000.0) == 1
+    assert _slice_index_of(spec, "f1", 1000.0) == 8  # far past the axis's own max ppm
+    assert _slice_index_of(spec, "f1", -1000.0) == 1
 
 
 def test_nearest_slice_index_handles_pseudo_2d_index_axis(qapp):
@@ -656,8 +669,8 @@ def test_nearest_slice_index_handles_pseudo_2d_index_axis(qapp):
     f2_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_ppm * 400.0)
     spec = NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)
 
-    assert MplCanvas._nearest_slice_index(spec, "f1", 3.4) == 3
-    assert MplCanvas._nearest_slice_index(spec, "f1", 100.0) == n_f1  # clipped
+    assert _slice_index_of(spec, "f1", 3.4) == 3
+    assert _slice_index_of(spec, "f1", 100.0) == n_f1  # clipped
 
 
 def test_extract_slice_dialog_defaults_index_to_the_right_clicked_position(qapp):
@@ -689,14 +702,14 @@ def test_extract_slice_dialog_defaults_index_to_the_right_clicked_position(qapp)
 
     # Default axis is "Row (fix F1)" -- its index should default from
     # the cursor's own Y position (95 ppm), not a fixed 1.
-    expected_row = MplCanvas._nearest_slice_index(spec, "f1", 95.0)
+    expected_row = _slice_index_of(spec, "f1", 95.0)
     assert seen["index_spin"].value() == expected_row
     assert expected_row != 1  # confirms this is a real, non-trivial default, not a coincidence
 
     # Switching to "Column (fix F2)" should re-derive from the cursor's
     # X position (5 ppm) instead.
     seen["axis_combo"].setCurrentIndex(1)
-    expected_col = MplCanvas._nearest_slice_index(spec, "f2", 5.0)
+    expected_col = _slice_index_of(spec, "f2", 5.0)
     assert seen["index_spin"].value() == expected_col
 
 
@@ -889,11 +902,76 @@ def test_set_axis_unit_back_to_ppm_restores_original_xdata_and_label(qapp):
     assert canvas.ax.get_xlabel() == original_label
 
 
-def test_set_axis_unit_noop_without_a_1d_spectrum(qapp):
+def test_set_axis_unit_switches_a_contour(qapp):
+    # Real user report: "I am not able to right-click and change the
+    # axis on a 2D (for imaging)". The Axis Units menu was gated on a 1D
+    # view, and set_axis_unit only ever rewrote line data -- a contour
+    # takes its axes from the spectrum, so the unit change is a rebuild.
     canvas = MplCanvas()
-    canvas.show_spectrum(_make_2d())
-    canvas.set_axis_unit("hz")  # must not raise, and must not touch the contour view
-    assert canvas._axis_unit == "ppm"
+    spectrum = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spectrum)
+    ppm_limits = canvas.ax.get_xlim()
+
+    canvas.set_axis_unit("hz")
+    assert canvas._axis_unit == "hz"
+    hz = spectrum.axes[1].values("hz")
+    assert canvas.ax.get_xlim() != ppm_limits
+    # Compared as a span, not as limits: plot_2d_contour pads the view
+    # past the data, so the endpoints are not the data's own.
+    span = abs(canvas.ax.get_xlim()[1] - canvas.ax.get_xlim()[0])
+    assert span == pytest.approx(float(hz.max() - hz.min()), rel=0.25)
+    assert canvas.ax.get_xlabel() == "Frequency / Hz"
+
+    # The underlying spectrum is untouched -- slicing and referencing
+    # still reason in ppm.
+    np.testing.assert_allclose(canvas._contour_spectrum.axes[1].ppm, spectrum.axes[1].ppm)
+
+    canvas.set_axis_unit("ppm")
+    assert canvas.ax.get_xlim() == pytest.approx(ppm_limits)
+
+
+def test_set_axis_unit_mm_on_a_contour_needs_a_gradient(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8, n_f2=64))
+    canvas.set_axis_unit("mm")
+    assert canvas._axis_unit == "ppm"        # no gradient -> nothing to convert with
+
+    canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
+    canvas.set_axis_unit("mm")
+    assert canvas._axis_unit == "mm"
+    assert canvas.ax.get_xlabel() == "Position / mm"
+
+
+def test_nearest_slice_index_follows_the_displayed_unit(qapp):
+    # The cursor value comes off the displayed axis, so resolving it
+    # against ppm would pick the wrong row once the contour shows Hz.
+    canvas = MplCanvas()
+    spectrum = _make_2d(n_f1=8, n_f2=64)
+    canvas.show_spectrum(spectrum)
+    in_ppm = canvas._nearest_slice_index(spectrum, "f1", 95.0)
+
+    canvas.set_axis_unit("hz")
+    hz_at_that_row = float(spectrum.axes[0].values("hz")[in_ppm - 1])
+    assert canvas._nearest_slice_index(spectrum, "f1", hz_at_that_row) == in_ppm
+    # ...and the raw ppm number now resolves somewhere else entirely.
+    assert canvas._nearest_slice_index(spectrum, "f1", 95.0) != in_ppm
+
+
+def test_canvas_offers_axis_units_on_a_contour_but_not_ppm_referencing_off_ppm(qapp, monkeypatch):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8, n_f2=64))
+    canvas._last_right_click_xy = (5.0, 95.0)
+
+    labels = _menu_labels(canvas, monkeypatch)
+    assert "Axis Units" in labels
+    assert "Set Reference from Cursor (ppm)…" in labels
+
+    # Off ppm the click is in another unit, so asking for a shift in ppm
+    # would be nonsense -- the action stands down, the units stay.
+    canvas.set_axis_unit("hz")
+    labels = _menu_labels(canvas, monkeypatch)
+    assert "Axis Units" in labels
+    assert "Set Reference from Cursor (ppm)…" not in labels
 
 
 def test_set_axis_unit_rejects_unknown_unit(qapp):
@@ -1612,3 +1690,378 @@ def test_set_style_compare_colormap_used_on_next_redraw(qapp):
     canvas = MplCanvas()
     canvas.set_style(compare_colormap="plasma")
     assert canvas._compare_colormap == "plasma"
+
+
+def _2d_for_slicing(n_f1=8, n_f2=32):
+    y = np.linspace(150, 100, n_f1)
+    x = np.linspace(10, 0, n_f2)
+    yy, xx = np.meshgrid(np.arange(n_f1), np.arange(n_f2), indexing="ij")
+    data = np.exp(-(((xx - n_f2 / 2) ** 2 + (yy - n_f1 / 2) ** 2)) / 8.0) * 100
+    return NMRSpectrum(
+        data=data,
+        axes=[
+            NMRAxis(kind="frequency", ppm=y, hz=y * 100.0),
+            NMRAxis(kind="frequency", ppm=x, hz=x * 400.0),
+        ],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", nucleus_indirect="13C",
+                             sfo1=400.0, sfo1_indirect=100.0),
+        data_imag=np.zeros_like(data),
+    )
+
+
+def test_canvas_slice_bar_appears_only_while_a_slice_is_viewed(qapp):
+    # Real user report: "There is no way to actually phase the extracted
+    # slice as it stands. maybe the extracted view should have new
+    # options to do something with the slice". The capability existed in
+    # the right-click menu and worked -- but a context menu on a plot is
+    # not somewhere anyone looks, so a visible bar is what makes it real.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_2d_for_slicing())
+    # isHidden(), not isVisible(): this canvas is never shown in a
+    # window here, and Qt reports every child of an unshown widget as
+    # not visible regardless of its own state.
+    assert canvas._slice_bar.isHidden() is True
+
+    canvas.extract_slice("f1", 2)
+    assert canvas._slice_bar.isHidden() is False
+    assert "F1 slice 2" in canvas._slice_label.text()
+
+    # Returning to the contour hides it again -- the bar must never be
+    # left showing over an unrelated view.
+    canvas._back_to_contour_button.click()
+    assert canvas._slice_bar.isHidden() is True
+    assert canvas._contour_spectrum is not None
+
+
+def test_canvas_keep_slice_button_emits_the_displayed_trace(qapp):
+    canvas = MplCanvas()
+    source = _2d_for_slicing()
+    canvas.show_spectrum(source)
+    canvas.extract_slice("f1", 3)
+
+    received = []
+    canvas.sliceKeepRequested.connect(received.append)
+    canvas._keep_slice_button.click()
+
+    assert len(received) == 1
+    # The payload carries provenance too, so a kept slice can push its
+    # phase back into the 2D it came from.
+    trace, label, parent, axis, index = received[0]
+    assert label == "F1 slice 3"
+    assert parent is source
+    assert (axis, index) == ("f1", 3)
+    assert trace.ndim == 1
+    # The trace must carry its imaginary part, or the whole point --
+    # phasing it -- does not work.
+    assert trace.data_imag is not None
+    np.testing.assert_allclose(trace.data, source.data[2])
+
+
+def test_canvas_keep_slice_helper_does_not_recurse(qapp):
+    # Regression test for a real self-inflicted bug: a global text
+    # replace rewrote the emit *inside* the helper into a call to the
+    # helper itself, so clicking Keep recursed until RecursionError.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_2d_for_slicing())
+    canvas.extract_slice("f1", 1)
+    received = []
+    canvas.sliceKeepRequested.connect(received.append)
+    canvas._emit_slice_keep_requested()
+    assert len(received) == 1
+
+
+def test_canvas_keep_slice_is_a_noop_without_a_slice(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_2d_for_slicing())
+    received = []
+    canvas.sliceKeepRequested.connect(received.append)
+    canvas._emit_slice_keep_requested()
+    assert received == []
+
+
+def test_canvas_extract_slice_can_re_slice_while_showing_a_slice(qapp):
+    # show_spectrum(trace) clears _contour_spectrum (the trace is 1D),
+    # so extract_slice's source was None on any second call and
+    # get_trace raised "expects a 2D NMRSpectrum". That made the
+    # right-click "Extract Slice..." a one-shot, and silently pinned
+    # peak-picking to whichever slice it started on.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=6))
+
+    canvas.extract_slice("f1", 1)
+    assert canvas._extracted_index == 1
+    source = canvas._extracted_from_spectrum
+    assert source is not None
+
+    canvas.extract_slice("f1", 4)
+    assert canvas._extracted_index == 4
+    assert canvas._extracted_from_spectrum is source     # same 2D, not lost
+
+
+def test_canvas_adding_a_slice_preserves_the_view(qapp):
+    # "The scale/view shouldn't reset when a slice is extracted" --
+    # adding one is an annotation, not a change of subject.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.ax.set_xlim(6.0, 2.0)
+    canvas.ax.set_ylim(40.0, 10.0)
+    before = (canvas.ax.get_xlim(), canvas.ax.get_ylim())
+
+    canvas._add_contour_slice("f1", 3, "A")
+    assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) == before
+
+    canvas._clear_contour_slices()
+    assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) == before
+
+
+def _scroll_at(canvas, ax, xfrac=0.5, yfrac=0.5, button="up", inaxes=True):
+    bbox = ax.get_window_extent()
+    x, y = bbox.x0 + xfrac * bbox.width, bbox.y0 + yfrac * bbox.height
+    event = types.SimpleNamespace(button=button, step=1, name="scroll_event",
+                                  canvas=canvas.canvas, inaxes=ax if inaxes else None, x=x, y=y)
+    event.xdata, event.ydata = ax.transData.inverted().transform((x, y))
+    return event
+
+
+def test_canvas_scroll_over_the_slice_panel_is_a_no_op(qapp):
+    # The slice panel lives in _proj_axes alongside the F1/F2 strips,
+    # but it is not a projection: its y axis is a normalised 0..1 stack
+    # of evenly-spread traces, so an intensity zoom would silently
+    # rescale it and break the layout. It also sits exactly where the
+    # contour's right-hand "y strip" zoom region used to be empty.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "A")
+    canvas.canvas.draw()
+
+    panel = canvas._proj_axes["slices"]
+    before = (panel.get_xlim(), panel.get_ylim())
+    canvas._on_scroll(_scroll_at(canvas, panel))
+    assert (panel.get_xlim(), panel.get_ylim()) == before
+
+
+def test_canvas_projection_zoom_still_works_with_a_slice_panel(qapp):
+    # ...and the strips it sits beside must keep their own behaviour --
+    # the projection loop is named f1/f2 explicitly now, so nothing else
+    # appearing in _proj_axes can be mistaken for a strip.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "A")
+    canvas.canvas.draw()
+
+    for kind in ("f1", "f2"):
+        ax = canvas._proj_axes[kind]
+        before = (ax.get_xlim(), ax.get_ylim())
+        canvas._on_scroll(_scroll_at(canvas, ax))
+        assert (ax.get_xlim(), ax.get_ylim()) != before, kind
+
+    # The contour's own x zoom keeps working, and the panel follows it.
+    panel = canvas._proj_axes["slices"]
+    before_x = canvas.ax.get_xlim()
+    canvas._on_scroll(_scroll_at(canvas, canvas.ax, yfrac=-0.07, inaxes=False))
+    assert canvas.ax.get_xlim() != before_x
+    assert panel.get_xlim() == canvas.ax.get_xlim()
+
+
+def test_canvas_contour_redraw_keeps_the_output_tab_style(qapp):
+    # Real user report: "scrolling the contours redraws the axis with
+    # defaults, not the ones set in output". Every contour rebuild --
+    # including the one a contour-level scroll triggers -- went through
+    # plot_2d_contour without the style, so it fell back to that
+    # function's own manuscript defaults and silently undid the Output
+    # tab. The 1D views never had this problem because they read
+    # self._AXIS_LABELSIZE and friends directly.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas.set_style(linewidth=3.0, labelsize=22, tick_width=3.0, tick_length=9.0)
+
+    def styled(ax):
+        return (ax.spines["bottom"].get_linewidth(),
+                ax.xaxis.label.get_fontsize(),
+                ax.xaxis.get_major_ticks()[0].tick1line.get_markeredgewidth())
+
+    expected = styled(canvas.ax)
+    assert expected == (3.0, 22.0, 3.0)
+
+    canvas._on_scroll(_scroll_at(canvas, canvas.ax))      # contour-level adjust -> rebuild
+    assert styled(canvas.ax) == expected
+    assert styled(canvas._proj_axes["f2"]) == expected    # projection strips too
+
+    canvas._add_contour_slice("f1", 3, "A")               # another rebuild path
+    assert styled(canvas.ax) == expected
+
+
+def test_canvas_default_export_size_switches_for_a_sliced_2d(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    assert canvas.default_export_size() == (8.0, 8.0)
+
+    canvas._add_contour_slice("f1", 3, "A")
+    assert canvas.default_export_size() == (7.5, 10.0)
+
+    canvas._clear_contour_slices()
+    assert canvas.default_export_size() == (8.0, 8.0)
+
+
+def test_canvas_export_applies_the_default_size_without_an_override(qapp):
+    # The size used to be left alone entirely unless the Output tab had
+    # been edited, so an exported figure inherited whatever size Qt's
+    # layout happened to give the live widget.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=8))
+
+    seen = []
+    canvas.export_full_resolution(lambda: seen.append(tuple(canvas.figure.get_size_inches())))
+    assert seen == [(8.0, 8.0)]
+    # ...and restored afterwards, never left on the live figure.
+    assert tuple(canvas.figure.get_size_inches()) == (9.0, 6.0)
+
+    seen.clear()
+    canvas.set_export_settings(fig_width=12.0)
+    canvas.export_full_resolution(lambda: seen.append(tuple(canvas.figure.get_size_inches())))
+    assert seen == [(12.0, 8.0)]     # explicit width, defaulted height
+
+
+def _xlabel_is_inside_the_figure(canvas, ax):
+    canvas.canvas.draw()
+    label_box = ax.xaxis.label.get_window_extent()
+    return label_box.y0 >= 0 and label_box.x0 >= 0
+
+
+def test_canvas_contour_rebuild_keeps_the_x_label_on_the_figure(qapp):
+    # Real user report: "the x-axis label got cut off". _redraw_contour
+    # never re-ran the layout pass show_spectrum ends with, so a rebuild
+    # kept whatever subplot margins were last in force -- and once the
+    # slice panel (which brings its own x-axis label) changed what the
+    # figure needs, the contour's own label fell off the bottom.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    assert _xlabel_is_inside_the_figure(canvas, canvas.ax)
+
+    canvas._add_contour_slice("f1", 3, "A")
+    assert _xlabel_is_inside_the_figure(canvas, canvas.ax)
+    assert _xlabel_is_inside_the_figure(canvas, canvas._proj_axes["slices"])
+
+    # Asserted as "the rebuild runs the layout pass", not as an exact
+    # axes position: tight_layout is not idempotent on an AxesDivider
+    # figure, so comparing a rebuild's geometry against a fresh
+    # show_spectrum's differs by a hair either way and discriminates
+    # nothing. Whether the label is *visibly* clipped depends on the
+    # figure size and on how much the slice panel's own x label shifts
+    # the margins, which is exactly why the layout has to re-run.
+    calls = []
+    original = canvas.figure.tight_layout
+    canvas.figure.tight_layout = lambda *a, **k: (calls.append(1), original(*a, **k))[1]
+    try:
+        canvas._redraw_contour(preserve_view=True)
+    finally:
+        canvas.figure.tight_layout = original
+    assert calls, "a contour rebuild must re-run the layout, as show_spectrum does"
+
+
+def test_canvas_reset_view_restores_limits_and_layout(qapp):
+    # "Be sure that the contour plot position resets back to the
+    # original load position." toolbar.home() only restores axis limits
+    # from the navigation stack -- and that stack still holds Axes from
+    # before this canvas's own figure rebuilds, so it cannot restore a
+    # layout at all.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    original = (canvas.ax.get_xlim(), canvas.ax.get_ylim())
+
+    canvas._add_contour_slice("f1", 3, "A")
+    canvas.ax.set_xlim(6.0, 2.0)
+    canvas.ax.set_ylim(96.0, 92.0)
+    assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) != original
+
+    canvas.reset_view()
+    assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) == original
+    assert _xlabel_is_inside_the_figure(canvas, canvas.ax)
+    # The slices themselves survive a view reset -- it resets the view,
+    # not the annotations.
+    assert len(canvas._contour_slices) == 1
+
+
+def test_canvas_reset_view_on_a_1d_still_uses_the_toolbar(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.reset_view()          # must not raise without a contour
+    assert canvas._contour_spectrum is None
+
+
+def _menu_labels(canvas, monkeypatch, choose=None):
+    """Open the context menu, capture what it offers, and optionally
+    pick one entry.
+
+    Goes through MplCanvas._exec_context_menu rather than patching
+    QMenu.exec: PySide6 resolves exec through the C++ binding, so a
+    patch on the Qt class does not take and the real modal menu opens
+    -- which hangs the headless suite instead of failing it."""
+    captured = {}
+
+    def fake_exec(self, menu, pos):
+        captured["labels"] = [a.text() for a in menu.actions() if a.text()]
+        if choose is None:
+            return None
+        return next((a for a in menu.actions() if a.text() == choose), None)
+
+    monkeypatch.setattr(MplCanvas, "_exec_context_menu", fake_exec)
+    canvas._on_context_menu(QPoint(5, 5))
+    return captured.get("labels", [])
+
+
+def test_canvas_offers_ppm_referencing_on_a_2d_only(qapp, monkeypatch):
+    # User request: "I need a right click option on the 2D spectra to be
+    # able to set the sr (by setting ppm values)." The existing Hz entry
+    # is gated on a 1D view, so a contour had no referencing action at
+    # all -- and an Hz offset is the wrong thing to ask for on one
+    # anyway, since what a user knows is where a peak should be.
+    label = "Set Reference from Cursor (ppm)…"
+
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    assert label not in _menu_labels(canvas, monkeypatch)
+
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._last_right_click_xy = (5.0, 95.0)
+    assert label in _menu_labels(canvas, monkeypatch)
+
+
+def test_canvas_ppm_referencing_emits_the_clicked_position(qapp, monkeypatch):
+    # The position travels with the signal rather than being read back
+    # out of _last_right_click_xy, so the handler cannot act on a
+    # different click than the one that opened the menu.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._last_right_click_xy = (5.0, 95.0)
+
+    seen = []
+    canvas.referenceCalibrationRequested.connect(seen.append)
+    _menu_labels(canvas, monkeypatch, choose="Set Reference from Cursor (ppm)…")
+    assert seen == [(5.0, 95.0)]
+
+
+def test_canvas_projection_zoom_survives_a_contour_level_change(qapp):
+    # Real user report: "the 2D projections shouldn't reset when I scale
+    # the contours". Scrolling the contour body adjusts the levels,
+    # which rebuilds the figure -- and the projection strips are their
+    # own Axes with their own intensity zoom, which the rebuild threw
+    # away.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas.canvas.draw()
+
+    canvas._on_scroll(_scroll_at(canvas, canvas._proj_axes["f2"]))
+    canvas._on_scroll(_scroll_at(canvas, canvas._proj_axes["f1"]))
+    zoomed = (canvas._proj_axes["f2"].get_ylim(), canvas._proj_axes["f1"].get_xlim())
+
+    canvas._on_scroll(_scroll_at(canvas, canvas.ax))     # contour body -> levels -> rebuild
+    assert (canvas._proj_axes["f2"].get_ylim(), canvas._proj_axes["f1"].get_xlim()) == zoomed

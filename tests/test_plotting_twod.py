@@ -1,5 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import to_rgba
+from matplotlib.patches import ConnectionPatch
 import pytest
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
@@ -100,7 +102,11 @@ def test_plot_2d_contour_draws_negative_contours_in_contrasting_colour(monkeypat
     monkeypatch.setattr(plt.Axes, "contour", spy)
     fig, ax, _ = twod.plot_2d_contour(spec, show_projections=False)
     assert "black" in calls
-    assert "red" in calls
+    # Teal, not red: red read as an alarm colour and dominated the black
+    # positive contours visually. Asserted via the module constant so
+    # the colour can be retuned in one place.
+    assert twod.NEGATIVE_CONTOUR_COLOUR in calls
+    assert twod.NEGATIVE_CONTOUR_COLOUR != "red"
     plt.close(fig)
 
 
@@ -175,10 +181,23 @@ def test_cap_contour_points_leaves_normal_sized_requests_alone():
     for max_x, max_y in [(2048, 2048), (32768, 64), (262144, 16), (1, 1)]:
         assert twod._cap_contour_points(max_x, max_y) == (max_x, max_y)
 
-    # Exactly at the ceiling is still "within" it, not over.
-    at_cap = (16384, 1024)
+    # Exactly at the ceiling is still "within" it, not over. Derived
+    # from the constant rather than hardcoded, so raising the ceiling
+    # (as happened once already, on user request) doesn't leave this
+    # asserting a stale number.
+    at_cap = (twod._MAX_CONTOUR_POINTS // 1024, 1024)
     assert at_cap[0] * at_cap[1] == twod._MAX_CONTOUR_POINTS
     assert twod._cap_contour_points(*at_cap) == at_cap
+
+
+def test_max_contour_points_is_a_quarter_of_the_exsy_benchmark():
+    # Explicit user instruction: "restrict any dataset to 0.25x the
+    # EXSY's number of points". Pinned against the benchmark's own point
+    # count rather than a literal, so the relationship survives any
+    # later edit -- this ceiling has already been moved once (briefly to
+    # half, on an earlier reading) and corrected back.
+    assert twod._EXSY_BENCHMARK_POINTS == 1002 * 65536
+    assert twod._MAX_CONTOUR_POINTS == twod._EXSY_BENCHMARK_POINTS // 4
 
 
 def test_cap_contour_points_never_returns_more_than_the_ceiling():
@@ -337,46 +356,6 @@ def test_projection_max_mode_is_unaffected_by_the_sign_fix():
     assert xlim[0] > xlim[1]
 
 
-def test_signed_max_magnitude_keeps_the_sign_of_the_largest_peak():
-    # Column 0's biggest excursion is negative, column 1's is positive.
-    # max(abs(...)) would report both as positive; plain max(...) would
-    # report column 0 as its least-negative value (the noise floor).
-    data = np.array([
-        [-10.0, 2.0],
-        [3.0, 7.0],
-        [-1.0, -4.0],
-    ])
-    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=0), [-10.0, 7.0])
-    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=1), [-10.0, 7.0, -4.0])
-
-
-def test_signed_max_magnitude_matches_max_abs_for_all_positive_data():
-    # The property that guarantees no visual change for a correctly
-    # phased spectrum: for all-positive data the two rules agree
-    # exactly, so only genuinely negative/dispersive signal is affected.
-    rng = np.random.default_rng(0)
-    data = np.abs(rng.standard_normal((12, 20)))
-    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=0), np.max(np.abs(data), axis=0))
-    np.testing.assert_allclose(twod._signed_max_magnitude(data, axis=1), np.max(np.abs(data), axis=1))
-
-
-def test_signed_max_magnitude_inverts_exactly_under_a_sign_flip():
-    # The core of the user report: a 180-degree phase change negates
-    # every point, and the projection must follow. Under max(abs(...))
-    # this was *exactly* invariant -- the projections did not move at
-    # all while the phase window's own slice inverted completely.
-    rng = np.random.default_rng(1)
-    data = rng.standard_normal((10, 16))
-    for axis in (0, 1):
-        np.testing.assert_allclose(
-            twod._signed_max_magnitude(-data, axis=axis),
-            -twod._signed_max_magnitude(data, axis=axis),
-        )
-        # ...and the old rule provably could not do this, which is what
-        # makes this test discriminating rather than merely descriptive.
-        assert np.allclose(np.max(np.abs(-data), axis=axis), np.max(np.abs(data), axis=axis))
-
-
 def test_max_mode_projections_respond_to_a_phase_inversion():
     # End-to-end through plot_2d_contour, on the pseudo-2D default
     # ('auto' -> 'max'), since that is the path the report came from.
@@ -411,3 +390,251 @@ def test_max_mode_projections_respond_to_a_phase_inversion():
     positive_peak_col = spectrum.data.shape[1] // 4
     assert f2[positive_peak_col] > 0
     assert f2_flipped[positive_peak_col] < 0
+
+
+def test_projections_default_to_the_positive_maximum_not_the_sum():
+    # Real user request: "the 2D projections should probably just be the
+    # positive projections (not the sum)". A sum projection of a
+    # phase-sensitive spectrum cancels its own positive and negative
+    # lobes against each other and washes the peaks out.
+    spectrum = _make_signed_2d()
+    n_f1, n_f2 = spectrum.data.shape
+    fig, ax = plt.subplots()
+    try:
+        _, _, proj = twod.plot_2d_contour(
+            spectrum, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9,   # 'auto'
+        )
+        auto_f2 = proj["f2"].lines[0].get_ydata().copy()
+    finally:
+        plt.close(fig)
+
+    fig, ax = plt.subplots()
+    try:
+        _, _, proj = twod.plot_2d_contour(
+            spectrum, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9, projection_mode="max",
+        )
+        explicit_f2 = proj["f2"].lines[0].get_ydata().copy()
+    finally:
+        plt.close(fig)
+
+    # 'auto' now resolves to 'max' for a conventional 2D as well, not
+    # just pseudo-2D.
+    np.testing.assert_allclose(auto_f2, explicit_f2)
+    # ...and 'max' is the positive maximum, so the positive peak
+    # dominates its column rather than being cancelled by the negative
+    # one a sum would fold in.
+    assert explicit_f2[n_f2 // 4] > 0
+
+
+def test_sum_projection_is_still_available_explicitly():
+    spectrum = _make_signed_2d()
+    fig, ax = plt.subplots()
+    try:
+        _, _, proj = twod.plot_2d_contour(
+            spectrum, ax=ax, contour_fraction_x=1.0, contour_fraction_y=1.0,
+            ncontourpts_x=10**9, ncontourpts_y=10**9, projection_mode="sum",
+        )
+        summed = proj["f2"].lines[0].get_ydata().copy()
+    finally:
+        plt.close(fig)
+    expected = np.sum(spectrum.data, axis=0)
+    np.testing.assert_allclose(summed - summed.min(), (expected - expected.min()), rtol=1e-6, atol=1e-6)
+
+
+def test_contour_levels_are_scaled_to_the_greatest_absolute_value():
+    # Real user report: "the negative contours look really prominent vs
+    # the positive. can the size of the contours be based on the
+    # greatest absolute value, not the greatest negative value?"
+    #
+    # The negative side used to be scaled to amin(data) independently,
+    # so on a spectrum with a big positive peak and a small negative one
+    # its lowest level sat far below the positive side's -- drawing many
+    # more rings and reading as "prominent" when the signal was weaker.
+    spectrum = _make_2d()
+    n_f1, n_f2 = spectrum.data.shape
+    yy, xx = np.mgrid[0:n_f1, 0:n_f2]
+    spectrum.data = (
+        1000 * np.exp(-(((xx - n_f2 // 4) ** 2) / 8 + ((yy - n_f1 // 4) ** 2) / 8))
+        - 60 * np.exp(-(((xx - 3 * n_f2 // 4) ** 2) / 8 + ((yy - 3 * n_f1 // 4) ** 2) / 8))
+    )
+    _, _, _, thresvec, _, neg_thresvec = twod._prepare_contour(
+        spectrum, contour_fraction_x=1.0, contour_fraction_y=1.0,
+        ncontourpts_x=10**9, ncontourpts_y=10**9,
+    )
+    # A -60 excursion against a +1000 peak is below the positive side's
+    # own lowest level, so it draws no negative contours at all.
+    assert neg_thresvec is None
+    assert thresvec[-1] == pytest.approx(1000.0, rel=1e-6)
+
+
+def test_negative_levels_mirror_the_positive_ones_when_they_are_drawn():
+    # With genuinely comparable negative signal, the two sides are exact
+    # mirrors -- a contour at a given level means the same intensity
+    # whichever sign it has.
+    spectrum = _make_2d()
+    n_f1, n_f2 = spectrum.data.shape
+    yy, xx = np.mgrid[0:n_f1, 0:n_f2]
+    spectrum.data = (
+        1000 * np.exp(-(((xx - n_f2 // 4) ** 2) / 8 + ((yy - n_f1 // 4) ** 2) / 8))
+        - 900 * np.exp(-(((xx - 3 * n_f2 // 4) ** 2) / 8 + ((yy - 3 * n_f1 // 4) ** 2) / 8))
+    )
+    _, _, _, thresvec, _, neg_thresvec = twod._prepare_contour(
+        spectrum, contour_fraction_x=1.0, contour_fraction_y=1.0,
+        ncontourpts_x=10**9, ncontourpts_y=10**9,
+    )
+    assert neg_thresvec is not None
+    np.testing.assert_allclose(neg_thresvec, [-level for level in thresvec])
+
+
+# --- Extracted-slice panel -------------------------------------------------
+
+def _slice_test_spectrum(n_f1=32, n_f2=64):
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    y = np.linspace(150.0, 0.0, n_f1)
+    x = np.linspace(12.0, -2.0, n_f2)
+    data = np.zeros((n_f1, n_f2))
+    for row, col in ((5, 10), (16, 30), (26, 50)):
+        data[row, col] = 100.0 * (row + 1)
+    return NMRSpectrum(
+        data=data,
+        axes=[NMRAxis(kind="frequency", ppm=y, hz=y * 100.0),
+              NMRAxis(kind="frequency", ppm=x, hz=x * 400.0)],
+        metadata=NMRMetadata(vendor="test", nucleus="1H", nucleus_indirect="13C",
+                             sfo1=400.0, sfo1_indirect=100.0),
+    )
+
+
+def test_plot_2d_contour_slice_panel_pairs_lines_and_traces_by_colour():
+    # User request: "plot slices from 2D contours with a dashed line
+    # across the contour slice and then projecting out". The shared
+    # colour is what pairs a line with its trace -- the connector lines
+    # an earlier version drew are gone ("drop the lines to the extracted
+    # slices, it seems too hard to maintain across different views").
+    spectrum = _slice_test_spectrum()
+    slices = [{"axis": "f1", "index": 6, "label": "A"},
+              {"axis": "f1", "index": 17, "label": "B"},
+              {"axis": "f1", "index": 27, "label": "C"}]
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=slices)
+
+    panel = panels["slices"]
+    assert panel is not None
+    assert len(panel.lines) == 3                       # one trace per slice
+    assert len(ax.lines) == 3                          # one dashed line per slice
+    for contour_line, trace in zip(ax.lines, panel.lines):
+        assert contour_line.get_color() == trace.get_color()
+    assert {t.get_text() for t in panel.texts} == {"A", "B", "C"}
+
+    # No connectors, and no panel title.
+    assert not [a for a in fig.artists if isinstance(a, ConnectionPatch)]
+    assert panel.get_title() == ""
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_spreads_traces_evenly_over_the_panel():
+    # "The slices ... should spread evenly to fill the space" -- one
+    # slot each across the full panel height, rather than bunched at the
+    # bottom with dead space above.
+    spectrum = _slice_test_spectrum()
+    slices = [{"axis": "f1", "index": i} for i in (6, 17, 27)]
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=slices)
+
+    panel = panels["slices"]
+    assert panel.get_ylim() == pytest.approx((0.0, 1.0))
+    baselines = sorted(float(np.min(line.get_ydata())) for line in panel.lines)
+    np.testing.assert_allclose(baselines, [0.0, 1 / 3, 2 / 3], atol=1e-9)
+
+    # Each trace normalised to its own height ("the extracted
+    # projections should be normalised"), so a weak row can be compared
+    # with a strong one on lineshape -- the synthetic rows differ in
+    # height by construction, and must come out equal here.
+    heights = [float(np.ptp(line.get_ydata())) for line in panel.lines]
+    np.testing.assert_allclose(heights, heights[0])
+    assert heights[0] == pytest.approx(1 / 3 * 0.85)   # slot x offset_fraction
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_labels_and_tracks_the_contour_axis():
+    # "The axis needs a matching axis label", and the traces must stay
+    # aligned under the contour through later zooming -- setting the
+    # limits once at draw time was not enough, because the GUI's
+    # preserve-the-view redraw restores the contour's limits afterwards.
+    spectrum = _slice_test_spectrum()
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=[{"axis": "f1", "index": 6}])
+    panel = panels["slices"]
+
+    assert panel.get_xlabel() == ax.get_xlabel() != ""
+    ax.set_xlim(8.0, 2.0)
+    assert panel.get_xlim() == pytest.approx((8.0, 2.0))
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_stacks_in_contour_order():
+    # The trace whose dashed line sits highest on the contour must be
+    # the highest trace, or the connectors cross each other -- which
+    # reads as an error even though every line joins the right trace.
+    spectrum = _slice_test_spectrum()
+    # Deliberately out of order: index 27 is the *highest* on the
+    # contour (its F1 ppm is lowest, and the F1 axis descends downward).
+    slices = [{"axis": "f1", "index": 17}, {"axis": "f1", "index": 6}, {"axis": "f1", "index": 27}]
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=slices)
+
+    ppm = spectrum.axes[0].ppm
+    lo, hi = ax.get_ylim()
+    baselines = [float(np.min(line.get_ydata())) for line in panels["slices"].lines]
+    screen = [(float(ppm[s["index"] - 1]) - lo) / (hi - lo) for s in slices]
+    # Rank by height on the contour and by height in the panel: same order.
+    assert np.argsort(screen).tolist() == np.argsort(baselines).tolist()
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_skips_out_of_range_and_mixed_axes():
+    # A stale index (dataset reprocessed to a different size) must not
+    # take the whole figure down, and mixing rows with columns would put
+    # two unrelated frequency axes on one panel.
+    spectrum = _slice_test_spectrum()
+    slices = [{"axis": "f1", "index": 6},
+              {"axis": "f1", "index": 9999},     # out of range
+              {"axis": "f2", "index": 10}]       # different axis
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=slices)
+    assert len(panels["slices"].lines) == 1
+    plt.close(fig)
+
+
+def test_plot_2d_contour_without_slices_has_no_panel():
+    spectrum = _slice_test_spectrum()
+    fig, ax, panels = twod.plot_2d_contour(spectrum)
+    assert "slices" not in panels
+    assert len(ax.lines) == 0
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_traces_are_heavier_than_their_contour_lines():
+    # "Linewidths of extracted slices should be 2." The dashed lines on
+    # the contour stay thinner, so they read as annotation over the data
+    # rather than competing with it.
+    spectrum = _slice_test_spectrum()
+    fig, ax, panels = twod.plot_2d_contour(
+        spectrum, slices=[{"axis": "f1", "index": 6}, {"axis": "f1", "index": 17}],
+    )
+    assert {line.get_linewidth() for line in panels["slices"].lines} == {2.0}
+    assert all(line.get_linewidth() < 2.0 for line in ax.lines)
+    plt.close(fig)
+
+
+def test_plot_2d_contour_slice_panel_reaches_the_top_projection():
+    # "The extracted slice plot should be able to reach the top height
+    # of the top projection." append_axes places the panel alongside the
+    # contour cell only, so its locator is re-pointed at every row.
+    spectrum = _slice_test_spectrum()
+    fig, ax, panels = twod.plot_2d_contour(spectrum, slices=[{"axis": "f1", "index": 6}])
+    fig.canvas.draw()
+
+    panel_box = panels["slices"].get_window_extent()
+    top_box = panels["f2"].get_window_extent()
+    contour_box = ax.get_window_extent()
+    assert panel_box.y1 == pytest.approx(top_box.y1, abs=1.5)      # up to the strip's top
+    assert panel_box.y0 == pytest.approx(contour_box.y0, abs=1.5)  # down to the contour's base
+    assert panel_box.y1 > contour_box.y1 + 1.0                     # genuinely taller than before
+    plt.close(fig)

@@ -384,3 +384,47 @@ def test_nmr2d_fit_relaxation_rejects_bad_value_source():
         relaxation.NMR2D_fit_relaxation(
             [{"index": 1}], vdlist={"seconds": [1.0]}, value_source="bogus", show_report=False,
         )
+
+
+# --- Known values from the acquisition, used in a custom equation ---
+
+def test_build_custom_model_substitutes_supplied_constants():
+    # User request: "it would be good if I can make fitting equations
+    # using values from the input data (e.g. delays and constants and L
+    # or whatever)". A symbol that is known must become a number in the
+    # expression, not another thing to fit.
+    spec = relaxation.build_custom_model("A*exp(-x*d1/T2)+C", constants={"d1": 2.0})
+    assert spec["params"] == ["A", "T2", "C"]
+    assert spec["constants"] == {"d1": 2.0}
+
+    # Without it, d1 is just another free parameter -- the old behaviour.
+    assert relaxation.build_custom_model("A*exp(-x*d1/T2)+C")["params"] == ["A", "d1", "T2", "C"]
+
+    # And the substituted value is really in the maths.
+    t = np.linspace(0.0, 1.0, 5)
+    np.testing.assert_allclose(spec["func"](t, 1.0, 0.5, 0.0), np.exp(-t * 2.0 / 0.5))
+
+
+def test_build_custom_model_ignores_constants_the_equation_does_not_use():
+    # The caller passes every acquisition parameter it has rather than
+    # guessing which ones an equation wants, so unused names must be
+    # silently irrelevant -- there are ~780 of them on a real dataset.
+    spec = relaxation.build_custom_model(
+        "A*exp(-x/T2)", constants={"d1": 2.0, "p1": 9.5, "ns": 8.0})
+    assert spec["params"] == ["A", "T2"]
+    assert spec["constants"] == {}
+
+
+def test_build_custom_model_never_substitutes_the_independent_variable():
+    # A vendor could record a parameter called "x"; the independent
+    # variable is not up for substitution regardless.
+    spec = relaxation.build_custom_model("A*exp(-x/T2)", constants={"x": 5.0})
+    assert spec["params"] == ["A", "T2"]
+    assert spec["constants"] == {}
+    t = np.linspace(0.0, 1.0, 4)
+    np.testing.assert_allclose(spec["func"](t, 1.0, 1.0), np.exp(-t))
+
+
+def test_build_custom_model_reports_constants_when_nothing_is_left_to_fit():
+    with pytest.raises(ValueError, match="no free parameters"):
+        relaxation.build_custom_model("A*x", constants={"A": 3.0})

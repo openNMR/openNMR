@@ -5,6 +5,8 @@ approach (real code, synthetic raw data) rather than real Bruker
 files, which aren't available in this environment.
 """
 
+import os
+
 import numpy as np
 import pytest
 
@@ -58,6 +60,10 @@ def _mock_2d(monkeypatch, acqus, fid, acqu2s=None):
         dic["acqu2s"] = acqu2s
     monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
     monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    # read_1d/read_2d read the binary themselves now (see
+    # bruker._read_bruker_binary) rather than via ng.bruker.read, so the
+    # synthetic fid has to be injected at that seam too.
+    monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
     monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
     # _guess_raw_2d_shape's own TD/DTYPA/file-size-based block-rounding
     # (see its own docstring) is real-file-scale logic that doesn't
@@ -292,39 +298,31 @@ def test_read_2d_echo_antiecho_halves_row_count_and_records_fn_mode(tmp_path, mo
     assert spectrum.data.shape[0] == n1
 
 
-def test_read_2d_echo_antiecho_conjugates_and_reverses_the_echo_row(tmp_path, monkeypatch):
-    # Real-data-verified regression guard for the fn_mode==6 fix in
-    # read_2d (see its own comment there, and decode_hypercomplex_f1's
-    # docstring, for the full two-round story). A real Echo-Antiecho
-    # dataset (test_data/Bruker Example Data/Cyclosporine/203) showed
-    # every genuine peak alongside an equal-magnitude ghost at its
-    # F1-mirror position (ratio ~0.8-1.2x) until the "echo" (even) raw
-    # row was conjugated before F2 processing (round 1) -- but a
-    # conjugate-only fix, verified only on F1, turned out to introduce
-    # an equal-magnitude F2-mirror ghost instead (real user report:
-    # "the echo-anti echo data is now mirrored in x") -- round 2 found
-    # conjugating *and reversing* the row fixes both simultaneously.
+def test_read_2d_echo_antiecho_applies_no_raw_row_transform(tmp_path, monkeypatch):
+    # Regression guard for the fn_mode==6 rewrite. Two earlier versions
+    # transformed the raw "echo" row before F2 processing and both were
+    # wrong; the second (conjugate *and* time-reverse) is the one this
+    # test used to lock in. Its reasoning -- that the conjugate's own
+    # frequency reversal and the explicit reversal cancel -- holds for a
+    # bare FFT but not here, because the window and zero-fill sit in
+    # between: reversing a decaying FID and then multiplying it by a
+    # decaying window applies the window backwards, and the zero-fill
+    # pads what is now the head of the signal. Measured against
+    # TopSpin's own xf2 output for Cyclosporine/203: with the transform
+    # the echo rows matched TopSpin at a median |corr| of 0.03, without
+    # it 0.73, and end-to-end agreement went +0.4448 -> +0.9948.
     #
-    # This test locks in that exact code behaviour without needing real
-    # NMR physics in the fixture: every raw ``ser`` row already passes
-    # through one unconditional ``data = np.conj(data)`` (see read_2d's
-    # own _CONJUGATE_QUADRATURE_NOTE) before fn_mode==6's own extra
-    # conjugate-and-reverse of the even rows -- the two conjugates on
-    # the same row cancel, leaving just the reversal, so the net,
-    # verified-correct effect is "the echo row reaches F2 processing
-    # exactly as stored on disk, but time-reversed; the antiecho row
-    # still gets only the one original conjugate, unreversed". Built
-    # with a single t1 point (one row pair) and a zeroed antiecho row
-    # specifically so the resulting F2 row can be compared directly
-    # against processing the known on-disk echo FID through the same
-    # window/zero-fill/FFT pipeline, instead of needing to interpret
-    # the ppm/Hz axis.
-    n2, sw2, f0_hz = 32, 8000.0, 1500.0
+    # So: the rows reach F2 processing exactly as read, and the whole
+    # recombination happens afterwards, on the processed rows, where a
+    # conjugate does not touch F2's frequency axis.
+    n2, sw2 = 32, 8000.0
     t2 = np.arange(n2) / sw2
-    known_fid = np.exp(-t2 * 300) * np.exp(2j * np.pi * f0_hz * t2)
-    # Stored pre-reversed so the net (disk value, reversed by the fix)
-    # lands back on known_fid -- see the comment above.
-    fid = np.array([known_fid[::-1].copy(), np.zeros(n2, dtype=np.complex128)], dtype=np.complex128)
+    echo_fid = np.exp(-t2 * 300) * np.exp(2j * np.pi * 1500.0 * t2)
+    antiecho_fid = np.exp(-t2 * 250) * np.exp(-2j * np.pi * 900.0 * t2)
+    # Stored conjugated, so read_2d's own unconditional per-row
+    # np.conj (see its _CONJUGATE_QUADRATURE_NOTE) hands F2 processing
+    # exactly these two FIDs and the expectation below stays readable.
+    fid = np.array([np.conj(echo_fid), np.conj(antiecho_fid)], dtype=np.complex128)
     path = _make_2d_experiment_dir(tmp_path, proc2s_overrides={"SI": 1, "SW_p": 500.0})
     acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
     acqu2s = {"NUC1": "13C", "BF1": 100.6, "O1": 0.0, "FnMODE": 6}
@@ -333,17 +331,15 @@ def test_read_2d_echo_antiecho_conjugates_and_reverses_the_echo_row(tmp_path, mo
     spectrum = bruker.read_2d(path, homonuclear=False, autophase=False)
     actual_row = spectrum.data[0] + 1j * spectrum.data_imag[0]
 
-    # antiecho row is all-zero, so decoded = echo_f2 + i*echo_f2.
-    expected_f2 = ft.fft_spectrum(ft.zero_fill(known_fid, 64), 1.0 / sw2)[1]
-    expected_row = expected_f2 * (1 + 1j)
-    np.testing.assert_allclose(actual_row, expected_row)
+    echo_f2 = ft.fft_spectrum(ft.zero_fill(echo_fid, 64), 1.0 / sw2)[1]
+    antiecho_f2 = ft.fft_spectrum(ft.zero_fill(antiecho_fid, 64), 1.0 / sw2)[1]
+    np.testing.assert_allclose(actual_row, 1j * (np.conj(echo_f2) - antiecho_f2))
 
-    # Confirms this actually discriminates: conjugating without also
-    # reversing (round 1's own, real-user-reported-broken fix) would
-    # have produced a materially different, not just numerically-close,
-    # row -- the F2-mirrored ghost the real bug report was about.
-    conjugate_only_f2 = ft.fft_spectrum(ft.zero_fill(np.conj(known_fid[::-1]), 64), 1.0 / sw2)[1]
-    assert np.max(np.abs(conjugate_only_f2 - expected_f2)) > 0.9 * np.max(np.abs(expected_f2))
+    # Confirms this discriminates against the transform it replaced:
+    # reversing the echo FID before the window/zero-fill is not a
+    # near-miss, it is a different row entirely.
+    reversed_f2 = ft.fft_spectrum(ft.zero_fill(np.conj(echo_fid)[::-1], 64), 1.0 / sw2)[1]
+    assert np.max(np.abs(reversed_f2 - echo_f2)) > 0.9 * np.max(np.abs(echo_f2))
 
 
 def test_read_2d_default_fn_mode_leaves_row_count_undecoded(tmp_path, monkeypatch):
@@ -428,7 +424,11 @@ def test_read_2d_default_phase_mode_uses_recorded_not_apc0(tmp_path, monkeypatch
 
     spectrum = bruker.read_2d(path, homonuclear=True, autophase=True)
 
-    assert spectrum.metadata.raw["phase0"] == pytest.approx(42.0)
+    # Stored under its own key now: phase0/phase1 mean the *user's*
+    # phase, recorded_phase0/1 the file's own (they use different
+    # models -- see io.bruker.apply_dimension_phase).
+    assert spectrum.metadata.raw["recorded_phase0"] == pytest.approx(42.0)
+    assert spectrum.metadata.raw["phase0"] == pytest.approx(0.0)
 
 
 def test_read_2d_f2_window_override_applies_per_row(tmp_path, monkeypatch):
@@ -603,3 +603,157 @@ def test_read_2d_loads_successfully_from_a_real_ser_file_td_mismatch(tmp_path):
     assert spectrum.data.shape[0] == n_f1  # zero-filled to proc2s's own SI
     assert spectrum.data_imag is not None
     assert spectrum.metadata.raw.get("read_2d_shape_guess_failed") is None
+
+
+def test_read_2d_f1_quadrature_normalisation_applies_only_to_states_modes(tmp_path, monkeypatch):
+    # The reader normalises Bruker's F1 quadrature sense by negating the
+    # sine-modulated rows before decoding. That belongs to States (4)
+    # and States-TPPI (5) ONLY: Echo-Antiecho (6) uses a different
+    # recombination that this sign is not part of.
+    #
+    # Regression test for a real bug this file's own suite did not
+    # catch: applying it to fn_mode 6 as well flipped real
+    # Cyclosporine/203 data from +0.395 to -0.380 against TopSpin, and
+    # was found only by the real-data check.
+    acqus = {"NUC1": "1H", "BF1": 400.0, "O1": 2000.0, "NS": 1.0}
+    fid = _synthetic_2d_fid(n_f1=8, n_f2=16)
+
+    results = {}
+    for fn_mode in (5, 6):
+        path = _make_2d_experiment_dir(tmp_path / f"m{fn_mode}")
+        _mock_2d(monkeypatch, acqus, fid, acqu2s={"NUC1": "13C", "BF1": 100.0, "O1": 0.0, "FnMODE": fn_mode})
+        results[fn_mode] = bruker.read_2d(path, pseudo_2d=False).data
+
+    # States-TPPI: the negation is applied, so the decode sees a - 1j*b.
+    # Echo-Antiecho: it is not, so its own (a+b) + 1j*(a-b) is
+    # untouched. The two must therefore differ -- applying the negation
+    # to both is exactly the bug, and it is what flipped real EA data's
+    # sign against TopSpin.
+    assert not np.allclose(results[5], results[6])
+
+    # And specifically: Echo-Antiecho must match a build where the
+    # sine-row negation is not applied at all.
+    reference = ft.decode_hypercomplex_f1(fid.copy(), fn_mode=6)
+    negated = fid.copy()
+    negated[1::2] *= -1
+    assert not np.allclose(reference, ft.decode_hypercomplex_f1(negated, fn_mode=6))
+
+
+def test_apply_recorded_f1_linear_prediction_follows_me_mod(tmp_path):
+    interferogram = np.exp(-0.05 * np.arange(64))[:, None] * np.ones((64, 4), dtype=complex)
+
+    # ME_mod=0 (none) -> untouched, even though LPBIN/NCOEF are present.
+    off = bruker.apply_recorded_f1_linear_prediction(
+        interferogram, {"ME_mod": 0.0, "LPBIN": 256.0, "NCOEF": 8.0})
+    assert off.shape == interferogram.shape
+
+    # ME_mod=2 (LPfc) -> extended to LPBIN/2 complex points. LPBIN counts
+    # *real* points, the same convention as TD -- established by
+    # measurement: LPBIN/2 reproduces TopSpin's own F1 FWHM of 4 on
+    # Cyclosporine/203, while treating it as a complex count
+    # over-narrows to 1.
+    on = bruker.apply_recorded_f1_linear_prediction(
+        interferogram, {"ME_mod": 2.0, "LPBIN": 256.0, "NCOEF": 8.0})
+    assert on.shape == (128, 4)
+    np.testing.assert_allclose(on[:64], interferogram)  # measured points untouched
+
+
+def test_apply_recorded_f1_linear_prediction_can_be_forced_off(tmp_path):
+    # It is genuinely expensive (one AR fit per F2 column), so a caller
+    # wanting a fast preview needs a way out.
+    interferogram = np.exp(-0.05 * np.arange(64))[:, None] * np.ones((64, 4), dtype=complex)
+    same = bruker.apply_recorded_f1_linear_prediction(
+        interferogram, {"ME_mod": 2.0, "LPBIN": 256.0, "NCOEF": 8.0}, enabled=False)
+    assert same.shape == interferogram.shape
+
+
+def test_apply_recorded_f1_linear_prediction_skips_an_impossible_order():
+    # An AR fit needs order < n-1; a dataset recording an NCOEF too
+    # large for its own F1 point count must be skipped, not raise.
+    short = np.ones((6, 3), dtype=complex)
+    out = bruker.apply_recorded_f1_linear_prediction(
+        short, {"ME_mod": 2.0, "LPBIN": 64.0, "NCOEF": 32.0})
+    assert out.shape == short.shape
+
+
+# --- Real-data agreement with TopSpin, for the hypercomplex modes ---
+#
+# The synthetic tests above pin the *formulas*; these pin the thing
+# that actually matters, on real files, because every wrong version of
+# this code so far also passed a synthetic test. Skipped when the
+# dataset isn't present, so the suite still runs anywhere.
+
+_HYPERCOMPLEX_REFERENCE = [
+    # (path, FnMODE, correlation before the 2026-09-06 fix, floor asserted now)
+    ("Bruker Example Data/Cyclosporine/203", 6, 0.4448, 0.99),
+    ("Bruker Example Data/Cyclosporine/204", 6, 0.0953, 0.99),
+    ("2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119/2011", 5, 0.6883, 0.99),
+    ("2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119/2016", 5, 0.7049, 0.99),
+    # The EXSY loading benchmark's own dataset.
+    ("2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119/2019", 5, 0.7021, 0.99),
+    ("2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119/2023", 5, 0.6721, 0.94),
+    ("2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119/6", 5, 0.6947, 0.95),
+]
+
+
+@pytest.mark.parametrize("relative_path,fn_mode,was,floor", _HYPERCOMPLEX_REFERENCE)
+def test_read_2d_hypercomplex_matches_topspin_on_real_data(relative_path, fn_mode, was, floor):
+    # Both hypercomplex modes used to carry each row's F2 imaginary part
+    # into F1's quadrature, which makes the F1 transform's real part
+    # RR - II (the phase twist) instead of RR -- an hourglass-shaped
+    # contour, reported by a user as "the phases of f2 and f1 are
+    # somehow offset from each other's phases". Echo-Antiecho had a
+    # second, independent bug on top (a raw-row transform that reversed
+    # each FID before the window, applying the window backwards).
+    #
+    # `was` records where each dataset sat before the fix, so the
+    # margin this test defends is visible rather than implied.
+    path = os.path.join("test_data", *relative_path.split("/"))
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    ours = bruker.read_2d(path)
+    topspin = bruker.read_2d_processed(path)
+    assert ours.metadata.raw["fn_mode"] == fn_mode
+    assert ours.data.shape == topspin.data.shape
+
+    a = np.asarray(ours.data, dtype=float).ravel()
+    b = np.asarray(topspin.data, dtype=float).ravel()
+    a = a - a.mean()
+    b = b - b.mean()
+    correlation = float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+    assert correlation > floor, f"{relative_path}: {correlation:+.4f} (was {was:+.4f})"
+
+
+def test_read_2d_processed_f1_imaginary_block_is_2ri_not_2ir():
+    # Which of TopSpin's four blocks is which dimension's imaginary
+    # partner, measured rather than assumed (this project had it
+    # recorded backwards for a while): inverse-transform each candidate
+    # pair along F1 and only the true one comes back causal, with all
+    # its energy in the leading, non-zero-filled points. The 49-50%
+    # split the others give is the signature of a pairing that isn't
+    # one -- an effectively real spectrum inverse-transforms to a
+    # Hermitian-symmetric series. See io.bruker's own
+    # _PROCESSED_BLOCK_NAMING_NOTE.
+    path = os.path.join("test_data", "Bruker Example Data", "Cyclosporine", "203")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+
+    procs = bruker._read_procs(path, 1)
+    proc2s = bruker._read_procs(path, 1, proc2=True)
+    si_f2, si_f1 = int(procs["SI"]), int(proc2s["SI"])
+
+    def _causal_fraction(partner):
+        blocks = []
+        for name in ("2rr", partner):
+            raw = np.fromfile(os.path.join(path, "pdata", "1", name), dtype="<i4")
+            blocks.append(raw.reshape(si_f1, si_f2).astype(float))
+        interferogram = np.fft.ifft(
+            np.fft.ifftshift(blocks[0] + 1j * blocks[1], axes=0), axis=0,
+        )
+        power = np.linalg.norm(interferogram, axis=1)
+        return power[: si_f1 // 4].sum() / power.sum()
+
+    assert _causal_fraction("2ri") > 0.999
+    assert _causal_fraction("2ir") < 0.6
+    assert _causal_fraction("2ii") < 0.6
