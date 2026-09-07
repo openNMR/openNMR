@@ -66,6 +66,13 @@ from .csa_fitting import (
     print_csa_fit_report, NMR1dplot_with_csa_fit, NMRCSAFitWorkflow
 )
 
+from .pnmr_simulator import (
+    read_cif_with_occupancies, get_neighbors_by_shell, 
+    local_environment_distribution, combine_labeled_shells, enumerate_local_environments, 
+    build_shift_table, compute_BF1_SFO1, _broadened_spectrum, generate_spectrum_dict, 
+    plot_spectrum_dict, plot_comparison, shell_distance_histogram
+)
+
 __all__ = [
     # utils
     "find_gamma", "NUC_label", "read_bruker_metadata", "read_vdlist",
@@ -104,4 +111,9 @@ __all__ = [
     # csa_fitting
     "csa_model_full", "build_csa_model", "fit_csa_spectrum", "evaluate_csa_fit",
     "print_csa_fit_report", "NMR1dplot_with_csa_fit", "NMRCSAFitWorkflow",
+    # pnmr_simulator
+    "read_cif_with_occupancies", "get_neighbors_by_shell", 
+    "local_environment_distribution", "combine_labeled_shells", "enumerate_local_environments", 
+    "build_shift_table", "compute_BF1_SFO1", "_broadened_spectrum", "generate_spectrum_dict", 
+    "plot_spectrum_dict", "plot_comparison", "shell_distance_histogram"
 ]
