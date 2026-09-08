@@ -418,6 +418,99 @@ def test_read_bruker_binary_raises_when_the_file_is_too_short(tmp_path):
         bruker._read_bruker_binary(str(path), {"acqus": {"BYTORDA": 0, "DTYPA": 0}}, (10, 10))
 
 
+def test_peek_reports_shape_without_ever_reading_2rr(tmp_path):
+    # Same fixture as test_read_2d_processed_missing_2rr_raises_a_clear_error
+    # (procs/proc2s/clevels/thumbnail but no 2rr at all -- a real
+    # Cyclosporine/206-style experiment) -- peek() must still succeed,
+    # proving it never opens the big (here: nonexistent) data file the
+    # way read_2d_processed itself has to.
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    for name, params in (
+        ("procs", {"SW_p": 8000.0, "SI": 8, "SF": 400.13, "XDIM": 1}),
+        ("proc2s", {"SW_p": 2000.0, "SI": 4, "SF": 400.13, "XDIM": 1}),
+    ):
+        with open(pdata / name, "w") as f:
+            f.write("\n".join(f"##${k}= {v}" for k, v in params.items()) + "\n")
+    for name in ("acqus", "acqu2s"):
+        with open(expt / name, "w") as f:
+            f.write("##$NUC1= <1H>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    result = bruker.peek(str(expt))
+
+    assert result == {
+        "vendor": "bruker", "ndim": 2, "shape": (4, 8),
+        "nucleus": "1H", "nucleus_indirect": "1H", "pseudo_2d": False,
+    }
+    assert "block_shape" not in result  # XDIM=1 -- no real block structure
+
+
+def test_peek_reports_1d_shape_when_there_is_no_proc2s(tmp_path):
+    # A 1D experiment's own pdata directory never has a proc2s at all
+    # (there's no F1 dimension to process) -- that absence, not a
+    # parse failure, is what actually distinguishes 1D from 2D here.
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    with open(pdata / "procs", "w") as f:
+        f.write("##$SW_p= 8000.0\n##$SI= 16\n##$SF= 400.13\n")
+    with open(expt / "acqus", "w") as f:
+        f.write("##$NUC1= <13C>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    assert bruker.peek(str(expt)) == {
+        "vendor": "bruker", "ndim": 1, "shape": (16,),
+        "nucleus": "13C", "nucleus_indirect": None, "pseudo_2d": False,
+    }
+
+
+def _write_submatrix_2rr(path, full_array, xdim_f1, xdim_f2):
+    """Encode ``full_array`` (shape (si2, si1)) into Bruker's own
+    XDIM submatrix block layout and write it as ``path`` -- the exact
+    inverse of ``read_2d_processed``'s own ``_load_block`` reshape/
+    transpose reconstruction, so a round trip through this and
+    ``read_2d_processed`` must reproduce ``full_array`` exactly."""
+    si2, si1 = full_array.shape
+    submatrix_rows, submatrix_cols = si2 // xdim_f1, si1 // xdim_f2
+    raw = (
+        full_array.reshape(submatrix_rows, xdim_f1, submatrix_cols, xdim_f2)
+        .transpose(0, 2, 1, 3)
+        .reshape(-1)
+    )
+    np.asarray(raw, dtype="<i4").tofile(path)
+
+
+def test_read_2d_processed_and_peek_agree_on_block_shape_for_xdim_greater_than_one(tmp_path):
+    # First synthetic coverage of the xdim_f1 != 1 submatrix-
+    # reconstruction branch at all -- previously validated only via
+    # the real-data correlation suite (test_data is gitignored, not
+    # available in every environment this runs in).
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    xdim_f1, xdim_f2 = 2, 4
+    for name, params in (
+        ("procs", {"SW_p": 8000.0, "SI": 8, "SF": 400.13, "XDIM": xdim_f2}),
+        ("proc2s", {"SW_p": 2000.0, "SI": 4, "SF": 400.13, "XDIM": xdim_f1}),
+    ):
+        with open(pdata / name, "w") as f:
+            f.write("\n".join(f"##${k}= {v}" for k, v in params.items()) + "\n")
+    for name in ("acqus", "acqu2s"):
+        with open(expt / name, "w") as f:
+            f.write("##$NUC1= <1H>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    # peek() reports the block layout with no 2rr on disk yet at all.
+    assert bruker.peek(str(expt))["block_shape"] == (xdim_f1, xdim_f2)
+
+    full = np.arange(4 * 8, dtype="<i4").reshape(4, 8)
+    _write_submatrix_2rr(pdata / "2rr", full, xdim_f1, xdim_f2)
+
+    spectrum = bruker.read_2d_processed(str(expt))
+
+    assert np.array_equal(spectrum.data, full.astype(np.float64))
+    assert spectrum.metadata.raw["block_shape"] == (xdim_f1, xdim_f2)
+
+
 def test_read_2d_processed_missing_2rr_raises_a_clear_error(tmp_path):
     # Real, pre-existing crash found by sweeping every Bruker dataset in
     # test_data: `Cyclosporine/206/pdata/1` holds procs, proc2s, clevels
@@ -521,6 +614,71 @@ def test_apply_recorded_phase_reproduces_topspin_on_real_xf2_data():
     # load reproduces TopSpin too (it used to sit at ~0.51, routing
     # PHC0 through the pivot-based model and dropping PHC1 entirely).
     assert _corr(bruker.read_2d(path, pseudo_2d=True).data, reference) > 0.999
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join("test_data", "bruker_PFG", "150")),
+    reason="needs the real bruker_PFG dataset",
+)
+def test_read_2d_raw_fid_cache_reproduces_a_fresh_read():
+    # Real bottleneck on a large EXSY: every reprocess action (window/
+    # zero-fill/procno/phase change) called read_2d fresh, re-reading
+    # the ser file and redoing an expensive digital-filter removal that
+    # doesn't actually depend on any of those parameters -- only on
+    # path. _raw_fid_cache lets a caller skip straight past both. Fast
+    # path must be bit-for-bit equivalent to the slow path, not just fast.
+    path = os.path.join("test_data", "bruker_PFG", "150")
+    baseline = bruker.read_2d(path, pseudo_2d=True, window="hann")
+    cached_fid = baseline.metadata.raw["fid_raw"]
+
+    fast = bruker.read_2d(path, pseudo_2d=True, window="sine", _raw_fid_cache=cached_fid)
+    fresh = bruker.read_2d(path, pseudo_2d=True, window="sine")
+
+    assert np.array_equal(fast.data, fresh.data)
+    if fast.data_imag is not None:
+        assert np.array_equal(fast.data_imag, fresh.data_imag)
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join("test_data", "bruker_PFG", "150")),
+    reason="needs the real bruker_PFG dataset",
+)
+def test_read_2d_raw_fid_cache_skips_the_disk_read_and_filter_removal(monkeypatch):
+    path = os.path.join("test_data", "bruker_PFG", "150")
+    cached_fid = bruker.read_2d(path, pseudo_2d=True).metadata.raw["fid_raw"]
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("should not be called when _raw_fid_cache is given")
+
+    monkeypatch.setattr(bruker, "_read_raw_2d_data", _fail)
+    monkeypatch.setattr(bruker, "_remove_digital_filter", _fail)
+
+    # Would raise via the monkeypatches above if the cache weren't used.
+    bruker.read_2d(path, pseudo_2d=True, window="sine", _raw_fid_cache=cached_fid)
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join("test_data", "bruker_PFG", "150")),
+    reason="needs the real bruker_PFG dataset",
+)
+def test_session_reload_reuses_the_cached_raw_fid(monkeypatch):
+    from opennmr.gui.session import Session
+
+    path = os.path.join("test_data", "bruker_PFG", "150")
+    session = Session()
+    session.add(path, vendor="bruker", pseudo_2d=True)  # the one call allowed to hit disk
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("reload should reuse the cached raw FID, not re-decode it")
+
+    monkeypatch.setattr(bruker, "_read_raw_2d_data", _fail)
+    monkeypatch.setattr(bruker, "_remove_digital_filter", _fail)
+
+    # Both would raise via the monkeypatches above if the cache weren't
+    # reused for a reprocess action (real user-visible actions: window/
+    # zero-fill changes, "Apply Processing", pseudo_2d/magnitude toggles).
+    session.reload(0, window="sine")
+    session.reload(0, zero_fill=4096)
 
 
 def test_acquisition_constants_names_parameters_the_way_a_pulse_programme_does():

@@ -15,6 +15,7 @@ import dataclasses
 import numpy as np
 from scipy.interpolate import interp1d
 
+from ..core.acquisition import acquisition_constants
 from ..core.spectrum import NMRSpectrum
 
 
@@ -71,15 +72,51 @@ def pulse_to_w1(pulse_length_us: float) -> float:
 
 
 def _pulse_length_us(spectrum: NMRSpectrum, pulse: str) -> float:
-    """Look up a pulse length (microseconds) from a spectrum's raw
-    vendor acquisition parameters -- ``P`` table lookup is Bruker-
-    specific (``acqus``'s ``P0``, ``P1``, ...), but everything else in
-    this module is vendor-agnostic."""
-    pulse = pulse.upper()
-    acqus = spectrum.metadata.raw.get("acqus", {})
-    if pulse not in acqus:
-        raise ValueError(f"{pulse} not found in this spectrum's acquisition parameters.")
-    return acqus[pulse]
+    """Look up a pulse length (microseconds) from a spectrum's recorded
+    acquisition parameters, by the name a pulse programme uses for it
+    (``P1``, ``P2``, ...).
+
+    Goes through :func:`opennmr.core.acquisition.acquisition_constants`
+    rather than indexing ``metadata.raw["acqus"]`` directly. **A direct
+    lookup of ``"P1"`` never works** -- the vendor file records ``P``
+    as a 64-entry *array*, so that key does not exist and this used to
+    fail on every real dataset with "P1 not found in this spectrum's
+    acquisition parameters" (real user report: VOCS "can't seem to
+    find P1"). ``acquisition_constants`` is what expands those arrays
+    into ``p1``/``d1``/``cnst2``/``l4``/``gpz1``-style names, and was
+    already doing so for fitting equations.
+
+    A pulse that *exists but is zero* is rejected the same way a
+    missing one is. A real ``acqus`` always carries all 64 ``P`` slots
+    and a sequence typically uses two or three, so most resolve to
+    ``0.0`` -- and ``pulse_to_w1(0)`` is a division by zero, which
+    would surface as a bare ``ZeroDivisionError`` rather than
+    something a user can act on."""
+    key = pulse.strip().lower()
+    constants = acquisition_constants(spectrum)
+    value = constants.get(key)
+    if value is None or value <= 0:
+        if not constants:
+            raise ValueError(
+                f"This spectrum has no recorded acquisition parameters, so {pulse} "
+                f"cannot be looked up (only Bruker data retains an acqus table; a "
+                f"derived spectrum has none)."
+            )
+        # Only the pulses actually set, in index order -- listing all
+        # 64 slots would bury the two or three that are really in use.
+        used = sorted(
+            int(k[1:]) for k, v in constants.items()
+            if k.startswith("p") and k[1:].isdigit() and v > 0
+        )
+        available = ", ".join(f"P{i} ({constants[f'p{i}']:g} us)" for i in used[:12])
+        if len(used) > 12:
+            available += ", ..."
+        was_zero = "" if value is None else " (it is recorded as 0, i.e. unused)"
+        raise ValueError(
+            f"{pulse} is not a usable pulse length on this spectrum{was_zero}. "
+            f"Pulse lengths set on this dataset: {available or 'none'}."
+        )
+    return value
 
 
 def apply_vocs(spectrum: NMRSpectrum, pulse: str = "P1", window_filter: bool = True) -> NMRSpectrum:

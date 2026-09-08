@@ -3,6 +3,7 @@ import dataclasses
 import io
 import json
 import os
+import time
 
 import numpy as np
 import pytest
@@ -8761,6 +8762,100 @@ def test_main_window_phase_settle_rebuilds_the_contour_only_once(qapp, tmp_path,
     assert not window._canvas_2d_refresh_timer.isActive()
     assert window._canvas_2d_refresh_pending_index is None
     assert len(calls) == 1
+
+
+def test_main_window_first_contour_refresh_debounces_before_any_measurement(qapp, tmp_path):
+    # Explicit user choice of adaptive throttling over pure debounce.
+    # The first drag on a given shape must still debounce: nothing has
+    # been measured yet, and assuming "cheap" would be exactly the
+    # wrong guess on the datasets (the EXSY, at 1.34 s a rebuild) that
+    # most need protecting from a live redraw per frame.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window._contour_rebuild_seconds.clear()
+
+    window._schedule_canvas_2d_refresh(0)
+
+    assert window._canvas_2d_refresh_timer.isActive()
+    assert window._canvas_2d_refresh_timer.interval() == 200
+
+
+def test_main_window_cheap_contour_refreshes_live_during_a_drag(qapp, tmp_path):
+    # A contour already measured as cheap redraws *during* the drag,
+    # rather than the user dragging blind until they pause.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    shape = window.session.spectra[0].data.shape
+    window._contour_rebuild_seconds[shape] = 0.01  # well under the live limit
+    window._last_contour_rebuild_at = 0.0          # long ago -- no throttle wait owed
+
+    calls = []
+    original = window._run_debounced_canvas_2d_refresh
+    window._run_debounced_canvas_2d_refresh = lambda: (calls.append(1), original())[1]
+
+    window._schedule_canvas_2d_refresh(0)
+
+    # Redrawn immediately, not left on a timer.
+    assert calls == [1]
+    assert not window._canvas_2d_refresh_timer.isActive()
+
+
+def test_main_window_expensive_contour_still_debounces(qapp, tmp_path):
+    # The EXSY case: a live rebuild would be over a second of frozen UI
+    # per frame, strictly worse than showing nothing until the pause.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    shape = window.session.spectra[0].data.shape
+    window._contour_rebuild_seconds[shape] = 1.34  # measured EXSY rebuild
+    window._last_contour_rebuild_at = 0.0
+
+    calls = []
+    original = window._run_debounced_canvas_2d_refresh
+    window._run_debounced_canvas_2d_refresh = lambda: (calls.append(1), original())[1]
+
+    window._schedule_canvas_2d_refresh(0)
+
+    assert calls == []
+    assert window._canvas_2d_refresh_timer.isActive()
+    assert window._canvas_2d_refresh_timer.interval() == 200
+
+
+def test_main_window_live_contour_refresh_is_throttled_not_per_tick(qapp, tmp_path):
+    # "Live" must not mean "rebuild on every drag tick" -- at one
+    # rebuild per measured duration the drag's own event handling still
+    # gets a share of the main thread.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    shape = window.session.spectra[0].data.shape
+    window._contour_rebuild_seconds[shape] = 0.2
+    window._last_contour_rebuild_at = time.perf_counter()  # one just happened
+
+    calls = []
+    original = window._run_debounced_canvas_2d_refresh
+    window._run_debounced_canvas_2d_refresh = lambda: (calls.append(1), original())[1]
+
+    window._schedule_canvas_2d_refresh(0)
+
+    # Deferred rather than run again straight away, and by less than
+    # the full 200 ms debounce -- it is waiting out the throttle, not
+    # falling back to debounce.
+    assert calls == []
+    assert window._canvas_2d_refresh_timer.isActive()
+    assert 0 < window._canvas_2d_refresh_timer.interval() <= 200
+
+
+def test_main_window_records_how_long_a_contour_rebuild_took(qapp, tmp_path):
+    # The measurement that makes the live-vs-debounce choice
+    # self-calibrating rather than a guess from the data's shape.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._contour_rebuild_seconds.clear()
+
+    window._redraw_2d_preserving_view(spectrum)
+
+    assert spectrum.data.shape in window._contour_rebuild_seconds
+    assert window._contour_rebuild_seconds[spectrum.data.shape] >= 0.0
 
 
 def test_main_window_f2_phase_on_hypercomplex_2d_never_shows_an_invalid_state(qapp, tmp_path, monkeypatch):

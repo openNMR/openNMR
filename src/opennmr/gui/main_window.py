@@ -15,6 +15,7 @@ import dataclasses
 import json
 import os
 import re
+import time
 from io import StringIO
 
 import numpy as np
@@ -230,6 +231,15 @@ class MainWindow(QMainWindow):
         self._canvas_2d_refresh_timer.setSingleShot(True)
         self._canvas_2d_refresh_timer.timeout.connect(self._run_debounced_canvas_2d_refresh)
         self._canvas_2d_refresh_pending_index: int | None = None
+        # How long a contour rebuild actually took, keyed by the
+        # spectrum's own data shape -- what
+        # _schedule_canvas_2d_refresh uses to decide between live
+        # throttling and pure debounce (see its docstring). Keyed by
+        # shape rather than session index because the cost is a
+        # property of the data size, and a shape key stays valid across
+        # the reloads and index shifts that replace a spectrum object.
+        self._contour_rebuild_seconds: dict[tuple, float] = {}
+        self._last_contour_rebuild_at: float = 0.0
         # Each spectrum's own load kwargs immediately after _load's
         # initial pseudo-2D-default handling, before any live
         # FID-processing/phase/baseline control ever touched it --
@@ -4472,14 +4482,66 @@ class MainWindow(QMainWindow):
             elif on_processing_preview:
                 self._refresh_processing_preview_phase_only()
 
+    #: A contour rebuild at or under this (seconds) is cheap enough to
+    #: run *during* a phase drag, giving live feedback; anything slower
+    #: falls back to pure debounce, where nothing moves until the drag
+    #: pauses. Between the two real measurements this was chosen from:
+    #: 295 ms for a Cyclosporine/203 HSQC (live) and 1.34 s for the
+    #: EXSY (debounce). Explicit user choice of adaptive throttling
+    #: over always-debounce.
+    _LIVE_CONTOUR_REBUILD_LIMIT_S = 0.4
+
     def _schedule_canvas_2d_refresh(self, index: int) -> None:
-        """(Re)start the debounce timer for ``self.canvas``'s own 2D/
-        pseudo-2D contour redraw during a live phase drag -- see its
-        timer's own construction comment in ``__init__`` for why this
-        is debounced at all, rather than redrawing on every tick the
-        way the phase correction itself is applied."""
+        """Schedule ``self.canvas``'s own 2D/pseudo-2D contour redraw
+        during a live phase drag -- see the timer's own construction
+        comment in ``__init__`` for why this isn't simply redrawn on
+        every tick the way the phase correction itself is applied.
+
+        **Adaptive, not a fixed debounce.** A contour this canvas has
+        already rebuilt once and measured at or under
+        :attr:`_LIVE_CONTOUR_REBUILD_LIMIT_S` is redrawn *during* the
+        drag, throttled to one rebuild per its own measured duration --
+        so an HSQC phases visibly, instead of the user dragging blind
+        and only seeing the result on a pause. Anything slower (or not
+        yet measured at all) keeps the original 200 ms debounce, since
+        for the EXSY a live rebuild would be 1.34 s of frozen UI per
+        frame and strictly worse than showing nothing until the pause.
+
+        The first drag on a given shape always debounces: there is no
+        measurement yet, and assuming "cheap" would be exactly the
+        wrong guess on the datasets that most need protecting. The
+        settle redraw that pause produces is what records the timing
+        (see :meth:`_redraw_2d_preserving_view`), so a second drag on
+        the same spectrum can go live.
+
+        Either way this only ever *schedules*; the drag's own settle
+        path still does a final authoritative redraw and cancels
+        whatever is pending here, so a throttled frame can never be the
+        last word on screen."""
         self._canvas_2d_refresh_pending_index = index
-        self._canvas_2d_refresh_timer.start(200)
+        measured = self._contour_rebuild_seconds.get(self._contour_shape_for(index))
+        if measured is None or measured > self._LIVE_CONTOUR_REBUILD_LIMIT_S:
+            self._canvas_2d_refresh_timer.start(200)
+            return
+        # One rebuild per measured-duration at most, so the drag's own
+        # event handling keeps getting a share of the main thread
+        # rather than the redraws saturating it.
+        interval = max(0.05, measured)
+        elapsed = time.perf_counter() - self._last_contour_rebuild_at
+        if elapsed >= interval:
+            self._canvas_2d_refresh_timer.stop()
+            self._run_debounced_canvas_2d_refresh()
+            return
+        self._canvas_2d_refresh_timer.start(max(1, int((interval - elapsed) * 1000)))
+
+    def _contour_shape_for(self, index: int) -> tuple | None:
+        """The data shape :attr:`_contour_rebuild_seconds` is keyed by,
+        for session entry ``index`` -- ``None`` when there is no such
+        entry (an index left over from a removed spectrum), which
+        simply reads as "never measured"."""
+        if index is None or index < 0 or index >= len(self.session):
+            return None
+        return self.session.spectra[index].data.shape
 
     def _run_debounced_canvas_2d_refresh(self) -> None:
         index = self._canvas_2d_refresh_pending_index
@@ -4513,6 +4575,7 @@ class MainWindow(QMainWindow):
         drag, where a render failure must never raise (same reasoning
         as :meth:`_apply_phase_preview`'s own "2d" branch) -- skip the
         frame and let the next one catch up."""
+        started = time.perf_counter()
         try:
             xlim, ylim = self.canvas.ax.get_xlim(), self.canvas.ax.get_ylim()
             self.canvas.show_spectrum(spectrum)
@@ -4521,6 +4584,14 @@ class MainWindow(QMainWindow):
             self.canvas.canvas.draw_idle()
         except Exception:  # noqa: BLE001 -- see docstring
             pass
+        # Timed on every rebuild, including a failed one (a frame that
+        # bailed early is not evidence the real thing is cheap, but it
+        # also must not leave a stale fast measurement in place). This
+        # is what makes the live-vs-debounce choice in
+        # _schedule_canvas_2d_refresh self-calibrating rather than a
+        # guess from the data's shape.
+        self._last_contour_rebuild_at = time.perf_counter()
+        self._contour_rebuild_seconds[spectrum.data.shape] = self._last_contour_rebuild_at - started
 
     def _on_reset_processing_clicked(self) -> None:
         """Discard every live *processing* choice for the selected

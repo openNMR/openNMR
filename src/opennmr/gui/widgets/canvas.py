@@ -30,6 +30,122 @@ from ... import plotting
 from ...processing import slicing as processing_slicing
 
 
+class _ContourCrosshair:
+    """A blitted crosshair spanning a 2D contour and its own F1/F2
+    projection strips: one vertical line across the contour + the F2
+    (top) strip, one horizontal line across the contour + the F1
+    (left) strip. Explicit user request: "when the input isn't
+    panning or zooming, the cursor should be a cross with lines
+    covering the entire contour space AND the projections".
+
+    Blitted rather than a plain per-move redraw, which repaints the
+    whole contour -- measured at 295 ms for a real HSQC and 1.34 s for
+    the EXSY, nowhere near interactive.
+
+    **Not two independent :class:`~matplotlib.widgets.MultiCursor`
+    instances** (the first two attempts at this, both reverted -- see
+    TODO.md). Two overlapping cursors bound to the same canvas each
+    keep their *own* cached background, and matplotlib's own
+    ``MultiCursor.onmove`` unconditionally does
+    ``restore_region(own_background)`` before drawing its own line --
+    so whichever cursor's ``motion_notify_event`` callback happens to
+    run second (always the same one, by connection order) wipes the
+    first one's just-drawn line before that frame is ever shown. One
+    shared background here, restored once per move, with both lines
+    drawn onto it before the single blit.
+
+    **Torn down synchronously by the owning canvas, at the same
+    moment its Axes are destroyed** (see ``MplCanvas._clear_figure``)
+    -- never lazily, from a later mouse-move. The previous two
+    attempts rebuilt/tore down from ``_on_motion``, which only runs on
+    real mouse movement; a contour that rebuilds several times with no
+    intervening move (e.g. repeated contour-level-adjust scrolls) left
+    a stale instance connected for that whole stretch. Its Axes are
+    gone from the figure, but matplotlib doesn't clear their
+    ``.figure`` reference just because ``figure.clear()`` dropped
+    them from ``figure.axes`` -- so a stale instance's ``onmove`` kept
+    computing real ``ax.draw_artist`` calls against the *live*
+    renderer, through the *old* Axes' now-meaningless transform. That
+    is what "filling the contour and not going away" actually was:
+    debris from an orphaned cursor, painted with a stale coordinate
+    mapping, that a correctly-scoped redraw never had reason to erase.
+
+    **A second, distinct source of the same symptom, found live after
+    the fix above**: a freshly created instance starts with no cached
+    background at all -- nothing has forced a real ``draw()`` (the
+    only thing that fires ``draw_event`` -> ``_on_draw``) since
+    creation, e.g. right after extracting or clearing a contour slice,
+    which rebuilds the figure and only lazily recreates the crosshair
+    on the next mouse move (see ``MplCanvas._ensure_crosshair``).
+    ``onmove`` with no background can't ``restore_region`` first, so
+    every move drew straight onto whatever the Agg buffer already held
+    -- accumulating lines that only ever got wiped by the *next* real
+    draw, i.e. whenever the cursor left the axes and ``_hide`` called
+    ``draw_idle``. Fixed by forcing a synchronous ``draw()`` inside
+    ``onmove`` itself the first time it finds no background, before
+    touching the lines' position or visibility -- see there.
+    """
+
+    def __init__(self, canvas, ax, f1_ax, f2_ax, toolbar, **lineprops) -> None:
+        self._canvas = canvas
+        self._toolbar = toolbar
+        self.axes = tuple(dict.fromkeys(a for a in (ax, f1_ax, f2_ax) if a is not None))
+        self._background = None
+        self._vline_axes = [a for a in (ax, f2_ax) if a is not None]
+        self._vlines = [a.axvline(0, visible=False, animated=True, **lineprops) for a in self._vline_axes]
+        self._hline_axes = [a for a in (ax, f1_ax) if a is not None]
+        self._hlines = [a.axhline(0, visible=False, animated=True, **lineprops) for a in self._hline_axes]
+        self._cid_motion = canvas.mpl_connect("motion_notify_event", self._onmove)
+        self._cid_draw = canvas.mpl_connect("draw_event", self._on_draw)
+
+    def disconnect(self) -> None:
+        """Stop reacting to this canvas entirely. Must run before the
+        Axes these lines belong to are destroyed -- see the class
+        docstring's "torn down synchronously" note."""
+        self._canvas.mpl_disconnect(self._cid_motion)
+        self._canvas.mpl_disconnect(self._cid_draw)
+
+    def _on_draw(self, event) -> None:
+        self._background = self._canvas.copy_from_bbox(self._canvas.figure.bbox)
+
+    def _hide(self) -> None:
+        lines = (*self._vlines, *self._hlines)
+        if any(line.get_visible() for line in lines):
+            for line in lines:
+                line.set_visible(False)
+            self._canvas.draw_idle()
+
+    def _onmove(self, event) -> None:
+        if getattr(self._toolbar, "mode", "") or event.inaxes not in self.axes:
+            self._hide()
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        if self._background is None:
+            # Nothing has forced a real draw (the only thing that
+            # fires draw_event -> _on_draw) since this instance was
+            # created, so there is nothing to restore_region from --
+            # see the class docstring's second bug note. Force one now
+            # while every line is still invisible, so the captured
+            # background is the correct "clean" frame to restore
+            # before every future move; drawing this move's own
+            # position onto an unset background instead is what
+            # actually caused "filling the contour and not going away".
+            self._canvas.draw()
+        for line in self._vlines:
+            line.set_xdata((event.xdata, event.xdata))
+            line.set_visible(True)
+        for line in self._hlines:
+            line.set_ydata((event.ydata, event.ydata))
+            line.set_visible(True)
+        self._canvas.restore_region(self._background)
+        for ax, line in zip(self._vline_axes, self._vlines):
+            ax.draw_artist(line)
+        for ax, line in zip(self._hline_axes, self._hlines):
+            ax.draw_artist(line)
+        self._canvas.blit()
+
+
 class _Toolbar(NavigationToolbar2QT):
     """The stock toolbar minus the two buttons that pop up a separate
     floating dialog (``Configure subplots``, ``Edit axis, curve and
@@ -120,7 +236,12 @@ class MplCanvas(QWidget):
     #: extracted slices gets its own pair, since it is a two-panel
     #: layout rather than one square contour.
     _EXPORT_FIG_SIZE = (8.0, 8.0)
-    _EXPORT_FIG_SIZE_WITH_SLICES = (7.5, 10.0)
+    #: Landscape, not portrait: the sliced layout puts the trace panel
+    #: *beside* the contour, so the figure is genuinely wider than tall
+    #: and a portrait page squeezes the contour for no reason. (The
+    #: original 7.5 x 10 was taken literally from a request that
+    #: predated the side-by-side panel.)
+    _EXPORT_FIG_SIZE_WITH_SLICES = (10.0, 7.5)
 
     #: Max pixel movement between a click and its release still counted
     #: as a click (row-select in a "Stacked" Compare view -- see
@@ -346,6 +467,12 @@ class MplCanvas(QWidget):
         # zoom over a projection adjust its own intensity scale
         # independently of the main contour (see _on_scroll).
         self._proj_axes: dict = {"f1": None, "f2": None}
+        # The crosshair (see _ContourCrosshair) -- None whenever a
+        # contour isn't the current view. Always torn down through
+        # _clear_figure, never left to notice for itself on a later
+        # mouse-move -- see _ContourCrosshair's own docstring for why
+        # that lazy approach was the actual bug in two earlier attempts.
+        self._crosshair: _ContourCrosshair | None = None
         # Set only for a plain 1D spectrum/slice view -- lets the
         # right-click menu offer ppm/Hz/kHz switching by re-using the
         # spectrum's own stored axis arrays, no recomputation needed.
@@ -396,6 +523,13 @@ class MplCanvas(QWidget):
         # _apply_compare_selection_highlight shows which one, if any,
         # via a tinted background.
         self._selected_compare_index: int | None = None
+        # Pixel position of a left-press while a "Stacked" Compare view
+        # is shown, resolved to a row on release (see _on_press/
+        # _compare_row_index_at_y). Separate from _pan_start because a
+        # press in a row's *margins* -- its tick strip, or the gap to
+        # the next row -- has no `inaxes` at all and so never starts a
+        # pan, but should still select the row it visually belongs to.
+        self._compare_click_start: tuple[float, float] | None = None
         # True only while show_relaxation_fit's plot is the current
         # view -- gates the right-click "Exclude Nearest Point"/"Reset
         # Excluded Points" actions (see _on_context_menu) and the
@@ -774,6 +908,76 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None:
             self.show_spectrum(self._contour_spectrum)
 
+    def _cancel_navigation_drag(self) -> None:
+        """Abandon any half-finished toolbar zoom/pan drag, and take
+        its rubber-band rectangle off screen.
+
+        Real user report: "the zoom dashed line box stays sometimes
+        when switching around". ``NavigationToolbar2.release_zoom``
+        returns immediately when ``_zoom_info`` is ``None`` and is the
+        *only* caller of ``remove_rubberband`` -- so a zoom drag that
+        never gets its release (the figure is rebuilt underneath it by
+        a spectrum/tab switch mid-drag) leaves the Qt backend's
+        ``_draw_rect_callback`` installed, and every later repaint
+        draws the same dashed box again over unrelated content.
+        ``_zoom_info`` is also left holding an Axes that no longer
+        exists.
+
+        Blitting made this far more visible than it used to be (the
+        crosshair repaints on every mouse move, each one re-running
+        that stale callback), but the leak predates it -- so this
+        clears the state rather than papering over the repaints.
+
+        Written defensively with ``getattr``: these are private
+        matplotlib attributes, and a version that renames them should
+        degrade to doing nothing rather than crashing a redraw."""
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is not None:
+            for attr in ("_zoom_info", "_pan_info"):
+                if getattr(toolbar, attr, None) is not None:
+                    setattr(toolbar, attr, None)
+        draw_rectangle = getattr(self.canvas, "drawRectangle", None)
+        if draw_rectangle is not None:
+            draw_rectangle(None)
+
+    def _clear_figure(self) -> None:
+        """``figure.clear()``, but tearing down the crosshair first,
+        and cancelling any in-flight toolbar zoom/pan drag (see
+        :meth:`_cancel_navigation_drag`) whose Axes this is about to
+        destroy.
+
+        Every one of this canvas's own rebuild paths goes through here
+        rather than calling ``self.figure.clear()`` directly -- see
+        :class:`_ContourCrosshair`'s own docstring for why teardown
+        has to happen synchronously, in the same call that destroys
+        the Axes a crosshair is bound to, rather than lazily on a
+        later mouse-move."""
+        if self._crosshair is not None:
+            self._crosshair.disconnect()
+            self._crosshair = None
+        self._cancel_navigation_drag()
+        self.figure.clear()
+
+    def _ensure_crosshair(self) -> None:
+        """Create the crosshair the first time the mouse moves over a
+        freshly (re)drawn contour -- not the moment it's drawn.
+
+        Creating it eagerly, right after ``plot_2d_contour``, would add
+        its (invisible-until-hovered) ``Line2D`` artists to ``ax.lines``
+        for a view nobody has looked at yet -- breaking anything that
+        counts lines on a just-built contour (e.g. the nQ-diagonal
+        toggle asserting ``len(ax.lines) == 1``). Creation timing was
+        never the bug; only teardown timing was -- see
+        :class:`_ContourCrosshair`'s docstring and
+        :meth:`_clear_figure`, which already tears down synchronously
+        on every rebuild regardless of whether one was ever created."""
+        if self._crosshair is not None or self._contour_spectrum is None or self.ax is None:
+            return
+        self._crosshair = _ContourCrosshair(
+            self.canvas, self.ax, self._proj_axes.get("f1"), self._proj_axes.get("f2"),
+            self.toolbar, color="0.35", linewidth=0.8, linestyle="--",
+        )
+
     def _projection_intensity_limits(self) -> dict:
         """Each projection strip's own intensity limit -- the F2 (top)
         strip plots intensity along y, the F1 (left) strip along x.
@@ -800,7 +1004,7 @@ class MplCanvas(QWidget):
         # projections at the same time. Real user report: "the 2D
         # projections shouldn't reset when I scale the contours".
         projection_limits = self._projection_intensity_limits() if preserve_view else {}
-        self.figure.clear()
+        self._clear_figure()
         self.ax = self.figure.add_subplot(111)
         display_spectrum, unit_xlabel, unit_ylabel = self._contour_for_display()
         _, _, self._proj_axes = plotting.plot_2d_contour(
@@ -867,6 +1071,21 @@ class MplCanvas(QWidget):
             self._last_right_click_xy = (float(event.xdata), float(event.ydata))
             if self._fit_mode:
                 return
+        # Captured *before* the inaxes guard below, so a click landing
+        # in a stacked Compare row's own margins -- its y-tick strip,
+        # or the gap to the next row -- still selects that row. Only
+        # the data rectangle is "inaxes", but the whole horizontal band
+        # belongs to the row visually, which is where people click
+        # (explicit user request: the click boxes should "extend all
+        # the way to the next stacked spectrum... to include both the
+        # axis and the plotting spaces"). Resolved to a row by y band
+        # on release, see _compare_row_index_at_y.
+        if (
+            self._compare_axes and event.button == 1 and self.toolbar.mode == ""
+            and not self._pick_mode and not self._region_select_mode
+            and event.x is not None and event.y is not None
+        ):
+            self._compare_click_start = (event.x, event.y, event.inaxes)
         if event.inaxes is None or event.button != 1 or self.toolbar.mode != "":
             return
         if self._pick_mode:
@@ -882,6 +1101,7 @@ class MplCanvas(QWidget):
         self._pan_start = (event.x, event.y, event.inaxes.get_xlim(), event.inaxes.get_ylim(), event.inaxes)
 
     def _on_motion(self, event) -> None:
+        self._ensure_crosshair()
         if self._region_select_start is not None and event.x is not None and self._region_select_ax is not None:
             # Pixel coordinates, not event.xdata directly -- like the
             # pan drag below, this needs to keep tracking smoothly even
@@ -917,15 +1137,27 @@ class MplCanvas(QWidget):
             if hi > lo:
                 self.regionSelected.emit(lo, hi)
             return
-        if self._pan_start is not None and self._compare_axes:
-            x0, y0, _xlim, _ylim, start_ax = self._pan_start
+        if self._compare_click_start is not None and self._compare_axes:
+            x0, y0, start_ax = self._compare_click_start
             if (
                 event.x is not None and event.y is not None
                 and abs(event.x - x0) <= self._CLICK_DRAG_TOLERANCE_PX
                 and abs(event.y - y0) <= self._CLICK_DRAG_TOLERANCE_PX
-                and start_ax in self._compare_axes
             ):
-                self._toggle_compare_selection(start_ax)
+                # The Axes the press actually landed in wins whenever
+                # there is one -- it is exact, and matplotlib already
+                # did the hit-testing. The y-band lookup is only for
+                # resolving a press with no `inaxes` at all, i.e. one
+                # in a row's margins (its tick strip, or the gap to the
+                # next row), which is the case this whole path exists
+                # to add.
+                target = start_ax if start_ax in self._compare_axes else None
+                if target is None:
+                    index = self._compare_row_index_at_y(y0)
+                    target = self._compare_axes[index] if index is not None else None
+                if target is not None:
+                    self._toggle_compare_selection(target)
+        self._compare_click_start = None
         self._pan_start = None
 
     def set_compare_selection(self, index: int | None) -> None:
@@ -946,6 +1178,41 @@ class MplCanvas(QWidget):
         self._selected_compare_index = index
         self._apply_compare_selection_highlight()
         self.canvas.draw_idle()
+
+    def _compare_row_index_at_y(self, y: float) -> int | None:
+        """Which "Stacked" Compare row owns display pixel row ``y``.
+
+        Each row owns a full horizontal band, not just its own data
+        rectangle: the band runs to the midpoint of the gap to the
+        next row (so a click in a row's tick strip, or between two
+        rows, lands on the one it visually belongs to), and the
+        outermost bands run to the figure's own edges. Explicit user
+        request -- the clickable area should "extend all the way to
+        the next stacked spectrum... to include both the axis and the
+        plotting spaces". With the stack's own ``hspace=0`` the gaps
+        are usually zero and this reduces to the data rectangles
+        themselves, but it stays correct if that ever changes.
+
+        Returns ``None`` when no Compare stack is shown, or when ``y``
+        is outside the whole stack (e.g. below the shared x-axis
+        label), rather than snapping a far-away click onto the nearest
+        row."""
+        if not self._compare_axes:
+            return None
+        bounds = [(i, ax.get_window_extent()) for i, ax in enumerate(self._compare_axes)]
+        bounds.sort(key=lambda pair: pair[1].y0)
+        fig_bbox = self.figure.bbox
+        if not (fig_bbox.y0 <= y <= fig_bbox.y1):
+            return None
+        for rank, (index, bbox) in enumerate(bounds):
+            lower = fig_bbox.y0 if rank == 0 else 0.5 * (bounds[rank - 1][1].y1 + bbox.y0)
+            upper = (
+                fig_bbox.y1 if rank == len(bounds) - 1
+                else 0.5 * (bbox.y1 + bounds[rank + 1][1].y0)
+            )
+            if lower <= y <= upper:
+                return index
+        return None
 
     def _toggle_compare_selection(self, ax) -> None:
         """Click a row of a "Stacked" Compare view to make scroll-zoom
@@ -1753,7 +2020,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
-        self.figure.clear()
+        self._clear_figure()
         self.ax = self.figure.add_subplot(111)
         self.canvas.draw_idle()
 
@@ -1763,7 +2030,7 @@ class MplCanvas(QWidget):
         :func:`opennmr.plotting.plot_2d_contour`. Preserves this
         canvas's legend-visible/aspect-lock choices across the
         rebuild."""
-        self.figure.clear()
+        self._clear_figure()
         self._extracted_from_spectrum = None
         self._extracted_trace = None
         self._extracted_label = ""
@@ -1871,7 +2138,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
-        self.figure.clear()
+        self._clear_figure()
         self.ax = self.figure.add_subplot(111)
         self._freeform_zoom_axes = {self.ax}
         if x_unit not in ("time", "points"):
@@ -1934,7 +2201,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
-        self.figure.clear()
+        self._clear_figure()
         fid_ax, spec_ax = self.figure.subplots(2, 1)
         self.ax = spec_ax
         self._freeform_zoom_axes = {fid_ax}
@@ -2077,7 +2344,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
-        self.figure.clear()
+        self._clear_figure()
 
         if mode == "stack" and len(spectra) > 1:
             axes = list(np.atleast_1d(self.figure.subplots(len(spectra), 1, sharex=True)))
@@ -2224,7 +2491,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
-        self.figure.clear()
+        self._clear_figure()
         self.ax = self.figure.add_subplot(111)
         self.ax.plot(x, y_data, color="black", linewidth=1.5, label="Data", zorder=0)
         if components:
@@ -2310,7 +2577,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
-        self.figure.clear()
+        self._clear_figure()
         self.ax = self.figure.add_subplot(111)
 
         t, y, y_fit = result["t"], result["y"], result["y_fit"]

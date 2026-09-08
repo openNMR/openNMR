@@ -1,8 +1,8 @@
 # openNMR -- working notes and backlog
 
-## Where things stand (2026-09-07)
+## Where things stand (2026-09-08)
 
-1038 tests passing. Working tree clean, in sync with `origin/main`.
+1065 tests passing. **Uncommitted** -- four rounds of work (crosshair, reprocessing speedup, the six settled decisions, the VOCS/zoom-rectangle fixes) are in the working tree, not yet committed or pushed.
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -12,22 +12,14 @@
 
 Everything below has been *mentioned* and is *not built*. Ordered by how ready it is to be picked up, not by importance.
 
-### 1. Waiting on a decision -- each is a one-line change either way
+### 1. ~~Waiting on a decision~~ -- all six settled 2026-09-08
 
-| Thing | Currently | The alternative |
-|---|---|---|
-| Export figure size for a 2D **with extracted slices** | 7.5 x 10 (portrait, taken literally from the request) | 10 x 7.5 -- the sliced layout is contour + panel *side by side*, so it is wider than tall |
-| Dashed slice lines **on the contour** | linewidth 1.0 | 2.0, matching their traces ("linewidths of extracted slices should be 2" may have meant both) |
-| Extracted slice traces | normalised **per trace** | one **shared** amplitude scale, which keeps relative intensities honest between a weak row and the diagonal |
-| README banner | opaque | `openNMR_logo_banner_transparent.png` -- rejected because GitHub renders READMEs on dark backgrounds too, where the black "open" text would vanish |
-| Contour redraw **during** a phase drag | pure debounce: nothing moves until you pause | adaptive throttle -- live feedback when a rebuild is cheap (295 ms for an HSQC), debounce when it is not (1.34 s for the EXSY) |
-| Compare-list highlight | none pre-selected; highlight appears once a row is clicked | remove the highlight entirely |
+Decided and built; see *Six settled decisions...* below. Export size for a sliced 2D is now landscape (10 x 7.5); contour slice markers match their traces at linewidth 2.0; slice traces stay **per-trace** normalised (this one needed no change -- the code was already right and an older entry here was stale); the README banner stays opaque; contour redraw during a phase drag is now an adaptive throttle; and the Compare highlight stays, with its clickable area widened to the whole row band.
 
 ### 2. Deferred deliberately, with a written-up starting point
 
-- **The crosshair.** Removed at the user's request ("I still want it eventually"). See *Crosshair removed (deferred, not abandoned)* for why the blitting approach failed twice and what a third attempt has to solve first -- in short, standing down belongs in `onmove` and never in `ignore`, and that alone is not enough because this canvas issues `draw_idle()` from several of its own handlers.
-- **Faster loading of large datasets.** See *Planned, not built: load speed...*. Best idea is the user's own: Bruker's `XDIM` submatrices exist precisely so a viewer can read a *region*, and `read_2d_processed` already reconstructs those blocks -- it just reassembles all of them. Then `complex64` (halves a ~1 GB array), then view-limited F1 transforms for raw `ser`. Sparse matrices are examined there and do **not** apply: a 2D is not sparse before thresholding.
-- **A folder browser for the Data tab** (collapsible, MNova/TopSpin style). Same section. The widget is the easy part; what needs thought is what counts as a node (Bruker experiment directories and their `pdata/N` procnos, not raw filesystem depth), keeping loadability checks lazy, and distinguishing it from the existing *loaded*-spectra list.
+- **True viewport-driven tiled reads** (re-fetch only the Bruker `XDIM` blocks under the current pan/zoom). See *Reprocessing a large 2D no longer re-reads the file...* -- reprocessing's own dominant cost is fixed (below), and the metadata a tiled reader would need (`block_shape`) is now recorded, but the reader itself needs new background-thread infrastructure that doesn't exist anywhere in this codebase (`QThread` background load, next bullet's neighbour in *Loose ends*) and hasn't been built. Also: `complex64` (halves a ~1 GB array) and view-limited F1 transforms for raw `ser` are still just plans, not code -- see *Planned, not built: load speed...*.
+- **A folder browser for the Data tab** (collapsible, MNova/TopSpin style). Same section. The widget is the easy part; what needs thought is what counts as a node (Bruker experiment directories and their `pdata/N` procnos, not raw filesystem depth), keeping loadability checks lazy, and distinguishing it from the existing *loaded*-spectra list. `io.peek()`/`bruker.peek()` (below) now give it a real, fast, metadata-only per-node check to build on.
 
 ### 3. Known-broken, diagnosed but not fixed
 
@@ -39,6 +31,7 @@ Both of the first two were equally broken before the hypercomplex fix; neither i
 
 ### 4. Loose ends
 
+- **Dense tab strips should wrap to multiple rows** rather than scroll out of sight when the window narrows. Raised 2026-09-08: "maybe the subtabs for more dense tabs like analysis need to go over multiple lines so they are always visible when the window is smaller." Worst case is `analysis_sub_tabs` (Peak Picking / Integration / Curve Fitting / VOCS / Imaging -- 5 sub-tabs inside an already-narrow side panel), but `canvas_tabs` has **6** (FID / Processing Preview / Spectrum / Spectral Fit / Fit / Compare) and `side_tabs` 5, so whatever is chosen should apply to all three rather than being special-cased. Qt's own `QTabWidget` does not wrap: `setUsesScrollButtons(False)` only elides, so the real options are a `QToolBox`/flow-layout button row instead of a tab bar, or a `QTabBar` subclass overriding `tabSizeHint`/`paintEvent` to lay out in rows. Not started; no approach chosen.
 - **`NavigationToolbar2`'s view stack is never cleared** when this canvas rebuilds its figure (no `toolbar.update()` anywhere), so it accumulates references to Axes that no longer exist. `home()` behaves correctly in every case tested, and clearing on every contour redraw would throw away the user's zoom history -- so this is recorded, not fixed. If Back/Forward ever misbehave, start here.
 - **`QThread` background load.** There is still zero threading in `src/` outside the FFT worker pool. Would not reduce compute time but would keep the GUI responsive and cancellable. Design already written up in *Threading plan for big-data loading*.
 - **Vectorising `_recompute_multi_row_data`'s per-row loop** -- the same fix already applied to `read_2d`. Its loop also handles echo-alignment and linear prediction, which genuinely are row-dependent, so it likely needs a "fast batched path only when neither is active" split rather than unconditional vectorisation.
@@ -64,6 +57,119 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## VOCS could never find P1; a stranded zoom rectangle (2026-09-08)
+
+User: "the zoom dashed line box stays sometimes when switching around. The VOCS addition doesn't seem to work nicely, it can't seem to find P1. I thought that important parameters like P D L and CNST as well as gradients would be stored somehow in the metadata or something."
+
+### The parameters were already there -- VOCS just wasn't asking properly
+
+The user's expectation was exactly right, and the capability already existed: `acquisition_constants` expands the indexed vendor arrays (`_CONSTANT_ARRAYS` = `D`, `P`, `CNST`, `L`, `IN`, `INF`, `PL`, `PLW`, `SP`, `SPW`, `GPZ`, `GPX`, `GPY`) into pulse-programme names -- **781 constants** on a real dataset, including `p1`, `d1`, `cnst2`, `l4`, `gpz1`. It was built for fitting equations and nothing else ever used it.
+
+`vocs._pulse_length_us` instead did `if pulse not in acqus`. **That can never succeed**: a real `acqus` records `P` as a 64-entry *array*, so there is no `"P1"` key at all. Confirmed directly on the user's own data -- `"P1" in acqus` is `False` on every one of `VOCS_example_Data/.../12-15`. Now resolved through `acquisition_constants`.
+
+**Why no test caught it**: `tests/test_vocs.py`'s own fixture wrote `raw={"acqus": {"P1": p1}}` -- a literal `P1` key no vendor file has. The fixture encoded a format that does not exist, so the suite stayed green while the feature failed on every real dataset. The fixture now builds `P` as a real array. *A fixture that doesn't match the file format tests nothing but itself.*
+
+**Layering**: `acquisition_constants` moved to a new `core/acquisition.py`, because `processing` must not import `io` (`io.bruker` already imports `processing.ft`, so that direction is circular) and `core` imports neither. `io.bruker` re-exports it, keeping `bruker.acquisition_constants` as its established public name.
+
+**A second, real bug found by the tests during the fix**: a Bruker `acqus` carries all 64 `P` slots and a sequence uses two or three, so most resolve to `0.0`. Going through `acquisition_constants` made those *found* rather than missing -- and `pulse_to_w1(0)` is a division by zero, so asking for an unused pulse turned a clear "not found" into a bare `ZeroDivisionError`. A zero pulse is now rejected like a missing one, and the message names the pulses actually set (`P1 (1 us), P2 (2 us)`) rather than listing all 64.
+
+**Verified on the real dataset the user pointed at** (`VOCS_example_Data/15_02_26_Li2MnO3_O17_1_3mm`, experiments 12-15): 17O on Li2MnO3, four offset acquisitions at O1 = +671, +400, -136, -407 kHz -- a genuine VOCS series. All four now load, correct individually, and `vocs_sum` recombines them onto one axis (-13381 .. +17278 ppm, all finite). Pinned as a skipif-guarded real-data test.
+
+### The zoom rectangle that would not go away
+
+`NavigationToolbar2.release_zoom` returns immediately when `_zoom_info is None`, and is the **only** caller of `remove_rubberband`. So a zoom drag that never gets its release -- the figure rebuilt underneath it by a spectrum or tab switch mid-drag -- leaves the Qt backend's `_draw_rect_callback` installed, and every later repaint redraws that same dashed box over unrelated content. `_zoom_info` is also left holding a destroyed Axes.
+
+Cleared in `_clear_figure`, the single choke point every rebuild already goes through (the same one the crosshair teardown uses), via a new `_cancel_navigation_drag`.
+
+**The crosshair did not cause this but made it obvious.** The leak predates it; blitting repaints on every mouse move, and each repaint re-ran the stale callback -- so a box that used to sit there until the next full redraw now gets redrawn continuously. Fixed at the state, not at the repaint.
+
+### The remaining piece, not built
+
+`acquisition_constants` still reads only `acqus` (the pre-existing *Loose ends* entry). Indirect-dimension (`acqu2s`) and processing (`procs`) parameters are still not exposed, and still need a naming scheme that cannot collide with the direct dimension's. Nothing in this round changed that.
+
+6 new tests (4 pulse-resolution incl. one real-data, 1 rubber-band, 1 fixture-correction), 1 fixture rewritten to the real `acqus` format.
+
+## Six settled decisions, and a wider click target for a stacked Compare row (2026-09-08)
+
+User asked for the long-pending "waiting on a decision" list as clickable options, and settled all six in one pass.
+
+**Verified against the code before asking, not just read off this file** -- the standing lesson that an append-only log goes stale silently paid off immediately: the table claimed extracted slice traces were per-trace normalised with "one shared amplitude scale" as the alternative, while an older entry below claims the shared scale was already adopted. The code settles it: `_draw_slice_panel` computes `scale = (slot * offset_fraction) / heights[i]` per trace, with a comment saying so. The table was right, the older entry is stale (it was changed back on the explicit request "the extracted projections should be normalised"). The user independently reached the same conclusion ("this is already done I'm pretty sure"). **No change made for that one** -- the remaining five are below.
+
+### What changed
+
+- **Export size for a 2D with extracted slices: 7.5 x 10 -> 10 x 7.5.** The sliced layout puts the trace panel *beside* the contour, so it is genuinely wider than tall; the portrait default predated the panel actually sitting there.
+- **Contour slice markers now match their traces at linewidth 2.0** (they take `_draw_slice_panel`'s own `linewidth` rather than a hardcoded 1.0). "Linewidths of extracted slices should be 2" meant both the traces and their markers.
+- **README banner stays opaque.** GitHub renders READMEs on dark backgrounds too, where the transparent banner's black "open" text would vanish.
+- **Contour redraw during a phase drag is now adaptive** rather than a flat 200 ms debounce. A contour already measured at or under `_LIVE_CONTOUR_REBUILD_LIMIT_S` (0.4 s -- chosen between the two real measurements, 295 ms for an HSQC and 1.34 s for the EXSY) redraws *during* the drag, throttled to one rebuild per its own measured duration so the drag's event handling keeps a share of the main thread. Anything slower keeps the debounce, where a live rebuild would just be a second-plus of frozen UI per frame.
+  Timings are recorded by `_redraw_2d_preserving_view` itself and keyed by **data shape**, not session index -- the cost is a property of the data size, and a shape key survives the reloads and index shifts that replace a spectrum object. The first drag on a given shape always debounces: nothing is measured yet, and guessing "cheap" would be exactly the wrong guess on the datasets that most need protecting. Either way the drag's own settle path still does a final authoritative redraw and cancels anything pending, so a throttled frame can never be the last word on screen.
+
+### The Compare highlight stays -- and got a bigger click target
+
+Kept (it is the only cue for which row scroll-zoom targets), plus a new request: the click area should "extend all the way to the next stacked spectrum... to include both the axis and the plotting spaces". Only a row's *data rectangle* is `inaxes`, so a click on its y-tick strip previously did nothing at all -- no `inaxes` meant `_on_press` returned before recording anything, so no row was selected.
+
+Now a left-press in a stacked Compare view is recorded before that guard (`_compare_click_start`), and resolved on release. **`event.inaxes` still wins whenever there is one** -- it is exact and matplotlib already did the hit-testing; the new `_compare_row_index_at_y` band lookup only resolves a press that has no `inaxes` at all. Each row's band runs to the midpoint of the gap to the next row, with the outermost bands reaching the figure edges; a click outside the whole stack (e.g. below the shared x-axis label) selects nothing rather than snapping to the nearest row.
+
+**A test caught a real design error here.** The first version resolved *every* compare click by y band, which broke `test_show_compare_stack_click_row_then_scroll_zooms_only_that_row`: its fabricated event says `inaxes=top_ax` but `y=100`, a pixel actually over the *bottom* row. That is an internally inconsistent fixture rather than a real-event scenario -- but it pointed straight at the right design, which is that the band is a *fallback*, never an override of matplotlib's own hit-testing. Fixing it that way made the existing test pass untouched, which is the signal that the change preserves the old behaviour instead of merely satisfying a rewritten assertion.
+
+7 new tests (5 adaptive-throttle, 2 Compare click-band). Two existing tests were updated rather than newly written, both because they asserted precisely the behaviour these decisions reversed: the export-size test (7.5 x 10 -> 10 x 7.5) and `test_plot_2d_contour_slice_traces_are_heavier_than_their_contour_lines`, which asserted markers were *thinner* than their traces and is now `..._slice_markers_match_their_traces`.
+
+## Reprocessing a large 2D no longer re-reads the file or redoes digital-filter removal (2026-09-08)
+
+User: "the EXSY datasets take too long to load and manipulate... plan and prepare the approach and make sure it scales well. This should probably include preparing the data in the bespoke, vendor-agnostic format."
+
+### The measurement that changed the plan
+
+TODO.md's own "load speed" section (below) was written from timing the *first* load and never separately measured reprocessing. Profiling the real EXSY dataset directly (`2p5mm/2019`) found something different was actually dominant: `read_2d` takes ~6.7s, and `_remove_digital_filter` (nmrglue's own `fsh2`-based GRPDLY removal -- two full-array, single-threaded `numpy.fft` calls plus two full-array `np.roll`-based shifts) alone costs **~2.4s** of that -- and it ran on **every** call, including a plain re-window or zero-fill change, because nothing about the raw, digital-filter-removed FID actually depends on any parameter `read_2d` takes except `path` itself (every other parameter is read only *after* the FID is already final). `Session.reload`/`reset`/`preview` -- wired from procno changes, "Apply Processing", pseudo_2d/magnitude toggles -- all call `io.load` fresh each time, so every one of those real, ordinary reprocessing actions was paying this cost from scratch.
+
+The live phase-drag preview (`_compute_processing_preview`) had already independently discovered this and works entirely from a cached `metadata.raw["fid_raw"]`, "no disk I/O" -- a convention already present, vendor-agnostically, in Bruker, Varian and X-Pulse's own readers. It just wasn't reused for a *committed* reload, only the live-drag view.
+
+### Three separable problems, asked about directly rather than assumed
+
+Put to the user as an explicit choice rather than guessed: vectorizing the `XDIM` submatrix reconstruction in `read_2d_processed` (a real ~4.5x win, measured, but declined this round), reusing the cached FID for reprocessing (chosen), lazy metadata-only groundwork in the vendor-agnostic format (chosen), and true viewport-driven tiled re-fetching on pan/zoom (declined -- needs `QThread` background-load infrastructure that doesn't exist anywhere in this codebase, and `NMRSpectrum.data` is a plain array mutated in place throughout the phase/baseline/processing code, so a tiled array could never *be* the authoritative spectrum, only a separate preview). A follow-up question clarified what "structuring the vendor-agnostic metadata" should actually mean: XDIM blocking is a property of Bruker's *processed* `2rr`, not the raw `ser` FID the reprocess fix caches -- a raw time-domain FID has no block structure to preserve -- so the groundwork became recording that on-disk block layout as metadata, not restructuring `.data` itself.
+
+### Reusing the cached FID for reprocessing
+
+`read_2d` gained `_raw_fid_cache` (internal -- not a GUI-facing reprocessing option): given a cached FID, it skips `_read_raw_2d_data` + `_remove_digital_filter` + the `.astype(complex128)`/`conj` copies entirely. `_read_auto` pops this kwarg up front and forwards it only into the raw-`ser` `read_2d` call, never into `read_1d`/`read_2d_processed`/`read_1d_processed`, which don't accept it. `Session._load_with` (backing `reload`/`reset`/`preview`) passes the *currently loaded* spectrum's own `metadata.raw["fid_raw"]` back in, gated on `vendor == "bruker"` -- always valid, since a session slot always reloads the same path, only kwargs change.
+
+Measured on the real EXSY dataset (steady state, after the process's own one-time scipy.fft worker-pool warm-up): a reprocess action (window change, zero-fill change) that used to cost several seconds now takes **~0.08-0.15s**. Verified as equivalence, not just speed: `read_2d(path, window="sine", _raw_fid_cache=cached)` produces bit-identical output to a fresh `read_2d(path, window="sine")` with no cache, and a test asserts `_read_raw_2d_data`/`_remove_digital_filter` are never called when the cache is supplied.
+
+### A metadata-only peek, and block layout as generic metadata
+
+`io.base.peek(path, vendor=None, **kwargs)` -- new, purely additive: dispatches to a vendor's own `peek()` if registered, else falls back to a full `load()` (correct, just not fast), so no existing vendor has to support it to keep working. `bruker.peek()` reads only `acqus`/`acqu2s`/`procs`/`proc2s` -- never `ser`/`fid`/`2rr`/`2ri` -- reusing the exact `si1`/`si2`/`XDIM`/`NUC1` parsing `read_2d_processed` already does (factored into a shared `_processed_2d_params` helper so nothing is duplicated). Direct groundwork for the still-deferred Data-tab folder browser, which needs exactly this: "is this loadable / what shape is it" without reading a potentially huge file per node.
+
+Whether a `pdata/<procno>` is 1D or 2D turned out not to be "does proc2s parse" (an empty/incomplete `proc2s` degrades gracefully to `xdim_f1=1`, same as before) but simply whether a `proc2s` file exists **at all** -- a 1D experiment's own `pdata` directory never has one, there being no F1 dimension to process. Getting this distinction right needed reading `_read_procs`'s actual behaviour, not assuming from `read_2d_processed`'s own control flow.
+
+Block layout: `read_2d_processed` already parsed `XDIM` for both dimensions purely to reshape the on-disk blocks -- now recorded as `metadata.raw["block_shape"]` (`(xdim_f1, xdim_f2)`, `None` when `xdim_f1 == 1`, i.e. no real structure), generically named rather than Bruker-specific, and reported by `peek()` from the identical parsed values. First synthetic test coverage of the `xdim_f1 != 1` submatrix-reconstruction branch at all (previously validated only via the real-data correlation suite, which `test_data` being gitignored makes unavailable in every environment) -- a small fixture encodes a known array into Bruker's own block layout (the literal inverse of `_load_block`'s reshape/transpose) and confirms `read_2d_processed` reconstructs it exactly.
+
+10 new tests (3 raw-FID-cache, 3 peek/1D-vs-2D, 2 block-shape/submatrix-reconstruction, 2 `io.base.peek` dispatch). 1053 passing (1045 -> 1053).
+
+## The crosshair, third attempt: a third distinct bug found and fixed (2026-09-07)
+
+Picked up from *Crosshair removed (deferred, not abandoned)* below, which named two things a working version had to solve: standing down belongs in `onmove`, never `ignore` (already fixed, previously); and that alone is not enough, because this canvas issues `draw_idle()` from a dozen of its own handlers, so a working version needs the crosshair to own its redraws.
+
+### What was actually wrong, once traced through matplotlib's own `MultiCursor` source (not just its docs)
+
+Two independent bugs, not one -- both attempts before this one kept the same two-cursor design throughout, so neither was ever isolated:
+
+1. **Two overlapping `MultiCursor` instances stomp each other.** The vertical cursor (contour + F2 strip) and horizontal cursor (contour + F1 strip) each keep their *own* cached blit background for the same canvas. `MultiCursor.onmove` unconditionally `restore_region`s its own background before drawing its own line -- so whichever cursor's `motion_notify_event` callback ran second (always the same one, by connection order) wiped the first one's just-drawn line before that frame was ever shown.
+2. **Teardown was lazy, keyed to `_on_motion`, which only runs on real mouse movement.** A contour that rebuilds several times with no intervening move -- a repeated contour-level-adjust scroll is the ordinary case, not an edge one -- left the old cursor(s) connected for that whole stretch. Their Axes are gone from `figure.axes` after `figure.clear()`, but matplotlib doesn't null a stale Axes' own `.figure` reference just because a rebuild dropped it from the list -- so a stale cursor's `onmove` kept computing real `ax.draw_artist` calls against the *live* renderer, through the *old* Axes' by-then-meaningless transform. That is what "filling the contour and not going away" actually was.
+
+### The fix
+
+One `_ContourCrosshair` (not two `MultiCursor`s) owning a single shared background, drawing both lines and blitting once per move. Every one of this canvas's own `figure.clear()` sites now goes through `_clear_figure`, which tears the crosshair down *synchronously*, in the same call that destroys the Axes it's bound to -- never waiting for a later `_on_motion` to notice. Created lazily, on the first mouse-move over a freshly built contour (`_ensure_crosshair`, called from `_on_motion`) rather than the moment `plot_2d_contour` returns -- eager creation was tried first and broke `test_set_nq_line_rebuilds_a_currently_shown_2d_contour`: its `axvline`/`axhline` artists land in `ax.lines`, and a contour nobody has hovered yet should show exactly the plotted data, nothing else.
+
+### A third bug, found live, after all headless tests passed
+
+User: "when I extract or clear a slice, until I move the cursor away from the plot it does the same 'solitaire effect', covering the plot." Real regression from the fix above, and exactly the kind of bug the previous entry warned a headless test can't see. A freshly created `_ContourCrosshair` starts with no cached background at all -- nothing has forced a real `draw()` (the only thing that fires `draw_event` -> the handler that captures one) since creation, and lazy creation means that happens *after* the rebuild's own `draw_idle()` has already fired and been consumed. `onmove` with no background skipped `restore_region` and drew straight onto whatever the Agg buffer already held, so lines accumulated on every move -- cleared only when the cursor left the axes, because `_hide` calls `draw_idle` unconditionally. Fixed by `onmove` itself forcing a synchronous `draw()` the first time it finds no background, before touching the lines' own position or visibility, so the captured frame is guaranteed clean.
+
+### What a headless test can and can't say here
+
+All three mechanisms above are covered by regression tests that assert on the *mechanism* (background is `None`/not `None`, a stale instance's `motion_notify_event` cid is disconnected, `restore_region`/`blit`/`draw` call counts) rather than rendered pixels -- each verified to fail with its own fix reverted. But the actual symptom in all three cases is a screen-pixel effect on a real backend, which is exactly why two previous attempts passed every test and still failed live.
+
+**Confirmed working live by the user, 2026-09-07** ("This works") -- hovering a contour, scrolling to adjust levels without moving the mouse, and extracting/clearing a slice. Closed.
+
+7 new tests. 1045 passing (1038 -> 1045).
 
 ## Axis units on a 2D, projections that survive a rescale, equations that read the data (2026-09-06)
 

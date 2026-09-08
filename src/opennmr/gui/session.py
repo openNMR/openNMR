@@ -81,7 +81,20 @@ class Session:
     def _load_with(self, index: int, kwargs: dict) -> NMRSpectrum:
         info = self._load_info[index]
         old_meta = self.spectra[index].metadata
-        spectrum = io.load(info["path"], vendor=info["vendor"], **kwargs)
+        reload_kwargs = dict(kwargs)
+        # Every reload/reset/preview on this slot re-reads the *same*
+        # info["path"] -- only kwargs changes -- and Bruker's raw,
+        # digital-filter-removed FID doesn't depend on any of read_2d's
+        # own parameters except path itself (see its docstring). So
+        # whatever fid_raw the previous load already cached is always
+        # still valid here, and passing it back in skips re-reading a
+        # (often hundreds-of-MB) ser file and redoing an ~2.4s digital-
+        # filter removal on every single reprocess action. Gated on
+        # vendor: no other reader declares (or needs) this kwarg, and
+        # an unexpected one would raise a TypeError if it leaked through.
+        if old_meta.vendor == "bruker" and old_meta.raw.get("fid_raw") is not None:
+            reload_kwargs["_raw_fid_cache"] = old_meta.raw["fid_raw"]
+        spectrum = io.load(info["path"], vendor=info["vendor"], **reload_kwargs)
         spectrum.metadata = dataclasses.replace(
             spectrum.metadata, nucleus=old_meta.nucleus, nucleus_indirect=old_meta.nucleus_indirect,
         )
