@@ -46,6 +46,7 @@ from .session import Session
 from .widgets.canvas import MplCanvas
 from .widgets.drag_control import DragHandle
 from .widgets.relative_spinbox import RelativeDoubleSpinBox
+from .widgets.wrapping_tabs import WrappingTabWidget
 
 #: Genuinely unbounded spinbox range for phase controls -- a slider's
 #: fixed pixel-to-range mapping would force a tradeoff between coarse
@@ -327,7 +328,7 @@ class MainWindow(QMainWindow):
                 lambda labels, tab=name: self._on_labels_clipped(tab, labels)
             )
 
-        self.canvas_tabs = QTabWidget()
+        self.canvas_tabs = WrappingTabWidget()
         self.canvas_tabs.addTab(self.fid_canvas, "FID")
         self.canvas_tabs.addTab(self.processing_preview_canvas, "Processing Preview")
         self.canvas_tabs.addTab(self.canvas, "Spectrum")
@@ -357,7 +358,7 @@ class MainWindow(QMainWindow):
         # that was just drawn to self.canvas.
         self.canvas_tabs.setCurrentWidget(self.canvas)
 
-        self.side_tabs = tabs = QTabWidget()
+        self.side_tabs = tabs = WrappingTabWidget()
         tabs.addTab(self._scrollable(self._build_spectra_tab()), "Data")
         self._processing_tab_index = tabs.addTab(self._scrollable(self._build_processing_tab()), "Processing")
         tabs.addTab(self._scrollable(self._build_analysis_tab()), "Analysis")
@@ -1710,6 +1711,41 @@ class MainWindow(QMainWindow):
         row = self.spectrum_list.currentRow()
         return row if 0 <= row < len(self.session) else None
 
+    def _selected_1d_spectra(self) -> list:
+        """Every 1D spectrum currently selected in the spectrum list,
+        in list order.
+
+        The list is ExtendedSelection, so Ctrl/Shift-picking a VOCS
+        series is one gesture -- this is what lets VOCS run over that
+        selection directly instead of going through the Compare tab."""
+        spectra = []
+        for item in self.spectrum_list.selectedItems():
+            index = self.spectrum_list.row(item)
+            if 0 <= index < len(self.session):
+                spectrum = self.session.spectra[index]
+                if spectrum.ndim == 1:
+                    spectra.append((index, spectrum))
+        return [s for _i, s in sorted(spectra, key=lambda pair: pair[0])]
+
+    def _on_vocs_sum_selection_action(self) -> None:
+        """Correct and combine the *selected* spectra in one step.
+
+        Explicit user request: "I should be able to select multiple
+        spectra and apply VOCS and sum all in one fell swoop, not apply
+        VOCS per spectrum and then select all and sum." Same
+        ``processing.vocs.vocs_sum`` the Compare-stack button uses --
+        that already takes a list, so this is only a different way to
+        choose it."""
+        stack = self._selected_1d_spectra()
+        if len(stack) < 2:
+            QMessageBox.information(
+                self, "Not enough spectra",
+                "Select at least two 1D spectra (Ctrl/Cmd-click or Shift-click) "
+                "to correct and combine in one step.",
+            )
+            return
+        self._run_vocs_sum(stack)
+
     def _on_spectrum_list_context_menu(self, pos) -> None:
         item = self.spectrum_list.itemAt(pos)
         if item is None:
@@ -1734,6 +1770,17 @@ class MainWindow(QMainWindow):
                 if spectrum.metadata.raw.get("loaded_from_processed")
                 else "Use TopSpin's processed data"
             )
+        # Offered straight from the selection, so a VOCS series is
+        # Ctrl-click, right-click, done -- explicit user request: "I
+        # should be able to select multiple spectra and apply VOCS and
+        # sum all in one fell swoop, not apply VOCS per spectrum and
+        # then select all and sum."
+        vocs_sum_action = None
+        if len(self._selected_1d_spectra()) >= 2:
+            menu.addSeparator()
+            vocs_sum_action = menu.addAction(
+                f"VOCS Sum ({len(self._selected_1d_spectra())} selected spectra)…"
+            )
         fit_curve_action = None
         if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
             menu.addSeparator()
@@ -1752,6 +1799,8 @@ class MainWindow(QMainWindow):
             self._on_change_procno_action(index)
         elif use_processed_action is not None and chosen is use_processed_action:
             self._on_use_processed_action(index)
+        elif vocs_sum_action is not None and chosen is vocs_sum_action:
+            self._on_vocs_sum_selection_action()
         elif fit_curve_action is not None and chosen is fit_curve_action:
             self._on_fit_curve_pseudo2d_action(index)
         elif chosen is remove_action:
@@ -6289,7 +6338,7 @@ class MainWindow(QMainWindow):
         # much information at once for a casual user, leaving room for
         # future analysis modes as further sub-tabs without any one
         # panel growing without bound.
-        self.analysis_sub_tabs = QTabWidget()
+        self.analysis_sub_tabs = WrappingTabWidget()
         self.analysis_sub_tabs.addTab(self._build_peak_picking_subtab(), "Peak Picking")
         self.analysis_sub_tabs.addTab(self._build_integration_subtab(), "Integration")
         self.analysis_sub_tabs.addTab(self._build_curve_fitting_subtab(), "Curve Fitting")
@@ -6865,7 +6914,20 @@ class MainWindow(QMainWindow):
         # choice (see processing.vocs.vocs_sum). Removed rather than
         # left as a control with no effect -- same call as the old
         # "Stack gap" spin box.
+        # Two ways in, because the selection route is the fast one but
+        # a context menu is not somewhere people look -- same pairing
+        # as the extracted-slice bar and its right-click equivalent.
+        selection_sum_button = QPushButton("VOCS Sum (selected spectra)")
+        selection_sum_button.setToolTip(
+            "Correct and combine whatever is selected in the spectrum list, "
+            "in one step -- Ctrl/Cmd-click or Shift-click to pick a series. "
+            "No need to apply VOCS per spectrum first."
+        )
+        selection_sum_button.clicked.connect(self._on_vocs_sum_selection_action)
+        sum_layout.addWidget(selection_sum_button)
+
         sum_button = QPushButton("VOCS Sum (Compare stack)")
+        sum_button.setToolTip("Combine whatever is checked on the Compare tab instead.")
         sum_button.clicked.connect(self._on_vocs_sum_clicked)
         sum_layout.addWidget(sum_button)
         layout.addWidget(sum_box)
@@ -7083,9 +7145,19 @@ class MainWindow(QMainWindow):
         if not stack:
             QMessageBox.information(
                 self, "Nothing to combine",
-                "Check at least one 1D spectrum in the Compare tab first.",
+                "Check at least one 1D spectrum in the Compare tab first, "
+                "or select several in the spectrum list and use its right-click "
+                "“VOCS Sum (selected spectra)”.",
             )
             return
+        self._run_vocs_sum(stack)
+
+    def _run_vocs_sum(self, stack: list) -> None:
+        """Correct every spectrum in ``stack`` for its own excitation
+        profile and combine them onto one axis, added as a new
+        spectrum. Shared by both ways of choosing the spectra -- the
+        Compare tab's checked stack and the spectrum list's own
+        selection -- so the two cannot drift apart."""
         try:
             result = processing_vocs.vocs_sum(
                 stack, pulse=self.vocs_pulse_edit.text().strip() or "P1",

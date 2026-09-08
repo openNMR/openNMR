@@ -8992,3 +8992,52 @@ def test_main_window_phase_reference_tracks_what_it_already_contains(qapp, tmp_p
     np.testing.assert_allclose(
         np.real(window._phase_reference_full), np.real(spectrum.complex_data)
     )
+
+
+def test_main_window_vocs_sum_runs_over_the_list_selection_in_one_step(qapp):
+    # "I should be able to select multiple spectra and apply VOCS and
+    # sum all in one fell swoop, not apply VOCS per spectrum and then
+    # select all and sum." No per-spectrum Apply, no Compare-tab round
+    # trip -- select, then one action.
+    window = MainWindow()
+    for offset in (-2.0, 0.0, 2.0):
+        _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=offset))
+    window.spectrum_list.selectAll()
+    before = window.spectrum_list.count()
+
+    window._on_vocs_sum_selection_action()
+
+    assert window.spectrum_list.count() == before + 1
+    derived = window.session.spectra[-1]
+    assert derived.metadata.vendor == "derived"
+    assert "VOCS sum (3 spectra)" in window.session.label(len(window.session) - 1)
+
+
+def test_main_window_vocs_sum_selection_needs_at_least_two(qapp, monkeypatch):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse())
+    window.spectrum_list.selectAll()
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+
+    window._on_vocs_sum_selection_action()
+
+    assert shown.get("called") is True
+    assert window.spectrum_list.count() == 1   # nothing added
+
+
+def test_main_window_selected_1d_spectra_skips_2d_and_keeps_list_order(qapp, tmp_path):
+    # A VOCS series is 1D by definition; a 2D caught in a drag-select
+    # must not be fed to it. Order follows the list, not click order,
+    # so the composite is reproducible.
+    window = MainWindow()
+    for offset in (-2.0, 0.0, 2.0):
+        _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=offset))
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.spectrum_list.selectAll()
+
+    selected = window._selected_1d_spectra()
+
+    assert len(selected) == 3                       # the 2D is skipped
+    assert all(s.ndim == 1 for s in selected)
+    assert selected == [window.session.spectra[i] for i in range(3)]

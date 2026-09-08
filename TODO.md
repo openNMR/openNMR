@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-08)
 
-1089 tests passing. Working tree clean, in sync with `origin/main`.
+1098 tests passing. Working tree clean, in sync with `origin/main`.
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -31,7 +31,6 @@ Both of the first two were equally broken before the hypercomplex fix; neither i
 
 ### 4. Loose ends
 
-- **Dense tab strips should wrap to multiple rows** rather than scroll out of sight when the window narrows. Raised 2026-09-08: "maybe the subtabs for more dense tabs like analysis need to go over multiple lines so they are always visible when the window is smaller." Worst case is `analysis_sub_tabs` (Peak Picking / Integration / Curve Fitting / VOCS / Imaging -- 5 sub-tabs inside an already-narrow side panel), but `canvas_tabs` has **6** (FID / Processing Preview / Spectrum / Spectral Fit / Fit / Compare) and `side_tabs` 5, so whatever is chosen should apply to all three rather than being special-cased. Qt's own `QTabWidget` does not wrap: `setUsesScrollButtons(False)` only elides, so the real options are a `QToolBox`/flow-layout button row instead of a tab bar, or a `QTabBar` subclass overriding `tabSizeHint`/`paintEvent` to lay out in rows. Not started; no approach chosen.
 - **`NavigationToolbar2`'s view stack is never cleared** when this canvas rebuilds its figure (no `toolbar.update()` anywhere), so it accumulates references to Axes that no longer exist. `home()` behaves correctly in every case tested, and clearing on every contour redraw would throw away the user's zoom history -- so this is recorded, not fixed. If Back/Forward ever misbehave, start here.
 - **`QThread` background load.** There is still zero threading in `src/` outside the FFT worker pool. Would not reduce compute time but would keep the GUI responsive and cancellable. Design already written up in *Threading plan for big-data loading*.
 - **`read_2d` still applies the recorded phase on top of `align_echo`.** `read_1d` no longer does -- that double-correction cost it +0.9 of correlation against TopSpin's own echo-aligned data (see *Why the notebook and the GUI disagreed*). The argument is structural and applies to F2 identically, but there is no 2D echo dataset here with a TopSpin-aligned counterpart to verify against, so it was left alone rather than changed blind.
@@ -58,6 +57,30 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Tab strips that wrap, and VOCS over a selection in one step (2026-09-08)
+
+Two smaller items, taken together.
+
+### Wrapping tab strips
+
+Requested earlier: "maybe the subtabs for more dense tabs like analysis need to go over multiple lines so they are always visible when the window is smaller."
+
+**`QTabWidget` cannot do this**, and neither can a `QTabBar` subclass. The bar lays out in one row and, on overflow, either scrolls tabs behind arrows or elides their labels away; `setUsesScrollButtons(False)` only swaps one failure for the other. Subclassing does not rescue it because **`tabRect`/`tabAt` are not virtual** -- painting tabs at wrapped positions would leave hit-testing laid out in a single row, so clicks would select the wrong tab. Verified against the installed Qt rather than assumed.
+
+So `gui/widgets/wrapping_tabs.py`: a `FlowLayout` (Qt's own documented pattern -- `heightForWidth` is what makes wrapping real, since it tells a narrowing parent to grant more vertical space instead of clipping) plus a `WrappingTabWidget` of checkable buttons over a `QStackedWidget`, implementing the slice of `QTabWidget`'s API this project actually uses: `addTab`, `count`, `widget`, `indexOf`, `tabText`, `currentIndex`/`setCurrentIndex`, `currentWidget`/`setCurrentWidget`, `setTabVisible`/`isTabVisible`, and a `currentChanged(int)` signal. Dropped into all three strips (`canvas_tabs` 6 tabs, `side_tabs` 5, `analysis_sub_tabs` 5) rather than special-casing Analysis; all 502 existing GUI tests passed on the swap untouched, which is the evidence the API match is real.
+
+**One bug caught by its own test**: `isTabVisible` first used `QWidget.isVisible()`, which is False for *every* child of a window that has not been shown yet -- so it reported a perfectly visible tab as hidden whenever the tree was off screen. `QTabWidget.isTabVisible` reports the *requested* state, so this now uses `not isHidden()`, which is independent of ancestors.
+
+### VOCS over a selection, in one step
+
+"I should be able to select multiple spectra and apply VOCS and sum all in one fell swoop, not apply VOCS per spectrum and then select all and sum."
+
+The spectrum list is already `ExtendedSelection`, and `processing.vocs.vocs_sum` already takes a list -- so this needed no new machinery, only a second way to choose the inputs. New `_selected_1d_spectra` (skips any 2D caught in a drag-select; returns list order, not click order, so a composite is reproducible) feeding a shared `_run_vocs_sum` that both entry points now use, so the Compare-stack and selection routes cannot drift apart.
+
+Reachable two ways deliberately: a **"VOCS Sum (selected spectra)"** button in the VOCS tab, and a spectrum-list right-click item that names the count. Same pairing rationale as the extracted-slice bar -- the context menu is the fast route, but a context menu is not somewhere people look.
+
+9 new tests.
 
 ## The raw FID ignored Bruker's acquisition `NC`, so experiments were 8x apart (2026-09-08)
 
