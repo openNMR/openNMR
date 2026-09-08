@@ -712,3 +712,167 @@ def test_acquisition_constants_is_empty_without_acqus():
         metadata=NMRMetadata(vendor="test", nucleus="1H"),
     )
     assert bruker.acquisition_constants(spectrum) == {}
+
+
+def test_read_auto_use_processed_takes_topspin_data_over_the_raw_fid(tmp_path, monkeypatch):
+    # Escape hatch for data whose processing the raw path cannot yet
+    # reproduce. Real case: 17O Hahn-echo VOCS experiments, where the
+    # raw path correlates only +0.49..+0.65 with TopSpin's own 1r and
+    # reorders which acquisition is tallest -- so a VOCS combination
+    # built from it looks like a different experiment than the same
+    # data read through nmrtools2, which reads processed spectra.
+    calls = []
+    monkeypatch.setattr(bruker, "read_1d", lambda *a, **k: calls.append("raw"))
+
+    def fake_processed(path, **kwargs):
+        calls.append("processed")
+        return bruker.NMRSpectrum(
+            data=np.zeros(4),
+            axes=[bruker.NMRAxis(kind="frequency", ppm=np.arange(4.0), hz=np.arange(4.0))],
+            metadata=bruker.NMRMetadata(vendor="bruker"),
+        )
+
+    monkeypatch.setattr(bruker, "read_1d_processed", fake_processed)
+
+    expt = tmp_path / "expt"
+    (expt / "pdata" / "1").mkdir(parents=True)
+    (expt / "fid").write_bytes(b"\0" * 64)      # a raw FID *is* present...
+    with open(expt / "acqus", "w") as f:
+        f.write("##$NUC1= <1H>\n")
+
+    spectrum = bruker._read_auto(str(expt), use_processed=True)
+
+    # ...and was still not used.
+    assert calls == ["processed"]
+    assert spectrum.metadata.raw["loaded_from_processed"] == (
+        "requested (use TopSpin's processed data)"
+    )
+
+
+def test_read_auto_still_prefers_the_raw_fid_by_default(tmp_path, monkeypatch):
+    # use_processed is opt-in: reprocessing from raw stays the default,
+    # which is the whole point of this project.
+    calls = []
+    monkeypatch.setattr(bruker, "read_1d", lambda *a, **k: calls.append("raw"))
+    monkeypatch.setattr(bruker, "read_1d_processed", lambda *a, **k: calls.append("processed"))
+
+    expt = tmp_path / "expt"
+    (expt / "pdata" / "1").mkdir(parents=True)
+    (expt / "fid").write_bytes(b"\0" * 64)
+    with open(expt / "acqus", "w") as f:
+        f.write("##$NUC1= <1H>\n")
+
+    bruker._read_auto(str(expt))
+
+    assert calls == ["raw"]
+
+
+_ECHO_VOCS = os.path.join(
+    "test_data", "VOCS_example_Data", "15_02_26_Li2MnO3_O17_1_3mm",
+)
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join(_ECHO_VOCS, "999912")),
+    reason="needs the real 17O Hahn-echo VOCS dataset",
+)
+def test_align_echo_reproduces_topspins_own_echo_aligned_processing():
+    # TopSpin's PHC1 on an echo experiment exists to compensate for
+    # transforming from t=0 of the echo rather than from its top.
+    # Aligning the echo removes the thing that phase corrects, so
+    # applying it as well double-corrects -- and PHC0 no longer applies
+    # either.
+    #
+    # The vendor's own files say exactly this: experiments 12-15 record
+    # PHC1 of 387-419 degrees, while 999912-999915 are the same data
+    # processed with the echo aligned and record PHC1 = 0.00 with a
+    # different PHC0. So they are a direct reference for what
+    # align_echo should produce.
+    def _corr(a, b):
+        a = np.asarray(a, float) - np.mean(a)
+        b = np.asarray(b, float) - np.mean(b)
+        return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+    for raw_expt, aligned_expt in (("12", "999912"), ("13", "999913"),
+                                   ("14", "999914"), ("15", "999915")):
+        reference = bruker.read_1d_processed(os.path.join(_ECHO_VOCS, aligned_expt)).data
+        # Default phase_mode -- the point is that a user does not have
+        # to know to also pass phase_mode="apc0".
+        ours = bruker.read_1d(os.path.join(_ECHO_VOCS, raw_expt), align_echo=True)
+
+        assert "recorded_phase_dropped" in ours.metadata.raw
+        # Was +0.12/+0.10/+0.31/+0.58 while the recorded phase was
+        # still being applied on top of the alignment.
+        assert _corr(ours.data, reference) > 0.9
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join(_ECHO_VOCS, "12")),
+    reason="needs the real 17O Hahn-echo VOCS dataset",
+)
+def test_recorded_phase_is_still_applied_without_echo_alignment():
+    # The drop is scoped to align_echo -- an ordinary load must still
+    # reproduce whatever TopSpin recorded.
+    spectrum = bruker.read_1d(os.path.join(_ECHO_VOCS, "12"))
+
+    assert "recorded_phase_dropped" not in spectrum.metadata.raw
+    assert spectrum.metadata.raw["recorded_phase1"] == pytest.approx(387.2)
+
+
+def test_read_bruker_binary_applies_the_acquisition_nc_scaling(tmp_path):
+    # NC is the acquisition-side counterpart of NC_proc: TopSpin stores
+    # the FID scaled by 2**-NC, so the true amplitude needs multiplying
+    # back. Invisible on one spectrum; glaring when several acquired at
+    # different NC are combined.
+    values = np.arange(8, dtype="<i4")
+    path = tmp_path / "fid"
+    path.write_bytes(values.tobytes())
+
+    unscaled = bruker._read_bruker_binary(str(path), {"acqus": {"NC": 0}})
+    scaled = bruker._read_bruker_binary(str(path), {"acqus": {"NC": -3}})
+
+    np.testing.assert_allclose(scaled, unscaled * 2.0 ** -3)
+
+
+def test_read_bruker_binary_without_nc_is_unscaled(tmp_path):
+    values = np.arange(8, dtype="<i4")
+    path = tmp_path / "fid"
+    path.write_bytes(values.tobytes())
+
+    no_nc = bruker._read_bruker_binary(str(path), {"acqus": {}})
+    zero_nc = bruker._read_bruker_binary(str(path), {"acqus": {"NC": 0}})
+
+    np.testing.assert_allclose(no_nc, zero_nc)
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join(_ECHO_VOCS, "999912")),
+    reason="needs the real 17O Hahn-echo VOCS dataset",
+)
+def test_acquisition_nc_makes_offsets_comparable_to_topspin():
+    # Real user report: "the more negative end of the VOCS is giving
+    # much higher intensities here than in the nmrtools2 version".
+    # Three of these four experiments record NC = -3 and one records
+    # NC = 0, so ignoring NC read those three exactly 2**3 = 8x high
+    # relative to the fourth -- and the two negative-offset ones are
+    # among them, which is what made it look like an asymmetry.
+    #
+    # NOTE: NC must come from `acqus`, not `acqu`. On this very dataset
+    # `acqu` records NC = 0 for all four while `acqus` carries the real
+    # -3/0/-3/-3, so reading the wrong file gives a no-op that looks
+    # like a working fix.
+    from opennmr.io.jcampdx import parse_jcampdx_params
+
+    pairs = [("12", "999912"), ("13", "999913"), ("14", "999914"), ("15", "999915")]
+    ncs = [float(parse_jcampdx_params(os.path.join(_ECHO_VOCS, e, "acqus"))["NC"])
+           for e, _ in pairs]
+    assert set(ncs) == {-3.0, 0.0}          # the spread this test exists for
+
+    ours = np.array([np.max(bruker.read_1d(os.path.join(_ECHO_VOCS, raw), align_echo=True).data)
+                     for raw, _ in pairs])
+    topspin = np.array([np.max(bruker.read_1d_processed(os.path.join(_ECHO_VOCS, ref)).data)
+                        for _, ref in pairs])
+
+    # Relative intensities across the series must track TopSpin's own.
+    # Was [2.39, 1.00, 1.31, 1.17] against [0.28, 1.00, 0.17, 0.14].
+    np.testing.assert_allclose(ours / ours[1], topspin / topspin[1], rtol=0.15)

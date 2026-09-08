@@ -6969,11 +6969,21 @@ def test_main_window_pivot_spin_accepts_relative_expression(qapp, tmp_path):
 # VOCS and spectrum arithmetic (Phase 1 backend-exposure sweep)
 # ============================================================
 
-def _make_1d_peak_spectrum_with_pulse(x0=5.0, fwhm=0.05, amplitude=1.0, n_pts=400, p1=5.0, sfo1=400.0):
-    ppm = np.linspace(3.0, 7.0, n_pts)
+def _make_1d_peak_spectrum_with_pulse(x0=0.0, fwhm=40.0, amplitude=1.0, n_pts=400, p1=5.0, sfo1=400.0):
+    # Deliberately WIDE relative to the pulse's own excitation
+    # bandwidth (w1 = 50 kHz for p1 = 5 us, against a +/-400 kHz
+    # sweep), because that is the regime VOCS exists for. The old
+    # fixture spanned 3-7 ppm = 1600 Hz, over which the excitation
+    # profile is 1.0 to four decimal places -- so a *correct*
+    # correction is indistinguishable from a no-op there, and the only
+    # reason the old test saw a change at all was the x2 bug.
+    ppm = np.linspace(x0 - 1000.0, x0 + 1000.0, n_pts)
     data = gaussian(ppm, x0, fwhm, amplitude)
     axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * sfo1)
-    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=sfo1, raw={"acqus": {"P1": p1}})
+    # `P` as a real indexed array, matching an actual acqus -- see
+    # tests/test_vocs.py's own fixture for why that matters.
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=sfo1,
+                            raw={"acqus": {"P": [0.0, p1, 2 * p1] + [0.0] * 61}})
     return NMRSpectrum(data=data, axes=[axis], metadata=metadata)
 
 
@@ -6988,6 +6998,48 @@ def test_main_window_apply_vocs_adds_derived_spectrum(qapp):
     derived = window.session.spectra[1]
     assert derived.metadata.vendor == "derived"
     assert not np.allclose(derived.data, spectrum.data)
+    # Weighting by the excitation profile can only ever attenuate --
+    # the weight is <= 1 everywhere, and exactly 1 on resonance, so
+    # the scale is preserved rather than amplified. A divide-by-the-
+    # profile deconvolution was tried here and reverted.
+    nonzero = spectrum.data != 0
+    gain = derived.data[nonzero] / spectrum.data[nonzero]
+    assert gain.max() <= 1.0 + 1e-12
+
+
+def test_main_window_check_all_toggles_every_compare_row_at_once(qapp):
+    # "Make it easier to select all and VOCS instead of one at a time"
+    # -- checking a dozen offsets individually is the slow path
+    # everything downstream (VOCS Sum, Fit Curve, the plot) depends on.
+    window = MainWindow()
+    for offset in (-2.0, -1.0, 0.0, 1.0, 2.0):
+        _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=offset))
+    window.spectrum_list.selectAll()
+
+    window._set_all_compare_checked(False)
+    assert window._compare_checked_1d_stack() == []
+
+    window._set_all_compare_checked(True)
+    assert len(window._compare_checked_1d_stack()) == window.compare_list.count()
+
+
+def test_main_window_check_all_replots_once_not_per_row(qapp):
+    # compare_list.itemChanged triggers a full replot, so toggling n
+    # rows individually would rebuild the figure n times.
+    window = MainWindow()
+    for offset in (-2.0, -1.0, 0.0, 1.0, 2.0):
+        _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=offset))
+    window.spectrum_list.selectAll()
+
+    calls = []
+    original = window._refresh_compare_view_if_active
+    window._refresh_compare_view_if_active = lambda: (calls.append(1), original())[1]
+    try:
+        window._set_all_compare_checked(True)
+    finally:
+        window._refresh_compare_view_if_active = original
+
+    assert calls == [1]
 
 
 def test_main_window_apply_vocs_no_selection_shows_message(qapp, monkeypatch):

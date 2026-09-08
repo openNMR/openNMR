@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-08)
 
-1073 tests passing. Working tree clean, in sync with `origin/main` -- most recently the axis-label fitting safeguard, and before it the crosshair, the reprocessing speedup, the six settled decisions and the VOCS/zoom-rectangle fixes.
+1089 tests passing. Working tree clean, in sync with `origin/main`.
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -34,6 +34,7 @@ Both of the first two were equally broken before the hypercomplex fix; neither i
 - **Dense tab strips should wrap to multiple rows** rather than scroll out of sight when the window narrows. Raised 2026-09-08: "maybe the subtabs for more dense tabs like analysis need to go over multiple lines so they are always visible when the window is smaller." Worst case is `analysis_sub_tabs` (Peak Picking / Integration / Curve Fitting / VOCS / Imaging -- 5 sub-tabs inside an already-narrow side panel), but `canvas_tabs` has **6** (FID / Processing Preview / Spectrum / Spectral Fit / Fit / Compare) and `side_tabs` 5, so whatever is chosen should apply to all three rather than being special-cased. Qt's own `QTabWidget` does not wrap: `setUsesScrollButtons(False)` only elides, so the real options are a `QToolBox`/flow-layout button row instead of a tab bar, or a `QTabBar` subclass overriding `tabSizeHint`/`paintEvent` to lay out in rows. Not started; no approach chosen.
 - **`NavigationToolbar2`'s view stack is never cleared** when this canvas rebuilds its figure (no `toolbar.update()` anywhere), so it accumulates references to Axes that no longer exist. `home()` behaves correctly in every case tested, and clearing on every contour redraw would throw away the user's zoom history -- so this is recorded, not fixed. If Back/Forward ever misbehave, start here.
 - **`QThread` background load.** There is still zero threading in `src/` outside the FFT worker pool. Would not reduce compute time but would keep the GUI responsive and cancellable. Design already written up in *Threading plan for big-data loading*.
+- **`read_2d` still applies the recorded phase on top of `align_echo`.** `read_1d` no longer does -- that double-correction cost it +0.9 of correlation against TopSpin's own echo-aligned data (see *Why the notebook and the GUI disagreed*). The argument is structural and applies to F2 identically, but there is no 2D echo dataset here with a TopSpin-aligned counterpart to verify against, so it was left alone rather than changed blind.
 - **Vectorising `_recompute_multi_row_data`'s per-row loop** -- the same fix already applied to `read_2d`. Its loop also handles echo-alignment and linear prediction, which genuinely are row-dependent, so it likely needs a "fast batched path only when neither is active" split rather than unconditional vectorisation.
 - **`acquisition_constants` reads only `acqus`.** Indirect-dimension (`acqu2s`) and processing (`procs`) parameters are not exposed to fitting equations. Needs a naming scheme that cannot collide with the direct dimension's.
 - **Mixed-axis slices on one contour** are skipped: the first slice's axis wins, because the panel has a single x-axis and rows and columns run along different dimensions. A second panel (below, for columns) is the obvious extension.
@@ -58,6 +59,154 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
 
+## The raw FID ignored Bruker's acquisition `NC`, so experiments were 8x apart (2026-09-08)
+
+User: "In general it just seems that the more negative end of the VOCS is giving much higher intensities here than in the nmrtools2 version."
+
+### The bug
+
+`NC` is the **acquisition-side** counterpart of `NC_proc`: TopSpin stores the FID scaled by `2**-NC` so it uses the integer range well, and the true amplitude is recovered by multiplying back. **`_read_bruker_binary` never read it.**
+
+On the 17O VOCS series three of the four experiments record `NC = -3` and one records `NC = 0`, so those three read exactly `2**3 = 8x` high relative to the fourth -- and two of the three are the negative-offset acquisitions, which is what made it present as an asymmetry rather than a uniform error.
+
+| | relative to the 5900 ppm experiment |
+|---|---|
+| TopSpin's own echo-aligned output | `[0.28, 1.00, 0.17, 0.14]` |
+| raw path, before | `[2.39, 1.00, 1.31, 1.17]` |
+| raw path, after | `[0.30, 1.00, 0.16, 0.15]` |
+
+The VOCS composite from the raw path now reads `[0.40, 1.00, 0.26, 0.27]` against nmrtools2's `[0.41, 1.00, 0.27, 0.27]` -- so **the GUI reproduces the notebook**, which is where this whole thread started.
+
+Fixed in `_read_bruker_binary`, which is the shared entry point for `fid` and `ser`, so 1D and 2D are both covered. It changes intensities for any Bruker dataset with `NC != 0`.
+
+### `acqus`, not `acqu` -- flagged by the user, and it mattered
+
+On this very dataset `acqu` records `NC = 0` for **all four** experiments while `acqus` carries the real `-3/0/-3/-3`. Reading the wrong file would have produced a correction that silently did nothing and looked like a working fix. `read_acqus_file` supplies only `acqus`, which is what makes this safe; pinned in a comment and asserted in a test so a future refactor cannot quietly switch files.
+
+### How long it took to find, and why
+
+Three wrong turns, all from comparing the wrong things:
+
+1. **Blamed the VOCS maths.** It was never VOCS -- once both sides were fed the same input, the implementation agreed with nmrtools2 to the digit.
+2. **Blamed the combination's denominator.** Real but separate (see the entry below); it did not cause this.
+3. **Compared against experiments 12-15** -- TopSpin's *unaligned* processing, with `PHC1` of ~400 degrees -- when the correct reference for an echo-aligned read is 999912-999915. Peak heights between differently-phased spectra are not comparable, so the numbers looked inconsistent in a way that hid the clean factor of 8.
+
+What actually settled it was dropping to the **raw FID amplitudes and the acquisition parameters themselves**, rather than any processed comparison. `DTYPA` differing on one experiment (float64 vs int32) was a red herring found on the way; `NC` was two columns over in the same table.
+
+**The general lesson**: when relative intensities between datasets are wrong but each looks individually fine, suspect a per-dataset *storage* scaling exponent before suspecting the processing. Bruker has two (`NC`, `NC_proc`), and this codebase was applying only one.
+
+3 new tests.
+
+## Why the notebook and the GUI disagreed on VOCS: they read different data (2026-09-08)
+
+User: "Why is it that when I use the jupyter notebook in nmrtools2 with the following code, I get what is expected and I am not getting that in the GUI?"
+
+**It was never the VOCS maths.** `nmrtools2.NMR1dimport` reads TopSpin's **already-processed `1r`** ("Import a processed 1D Bruker TopSpin NMR spectrum" -- its own first line). openNMR's `_read_auto` sees a `fid` and takes the **raw-FID path**, reprocessing from scratch. On this dataset those are not close:
+
+| exp | corr(raw-reprocessed, TopSpin `1r`) |
+|---|---|
+| 12 | +0.615 |
+| 13 | +0.654 |
+| 14 | +0.544 |
+| 15 | +0.493 |
+
+And -- what actually ruins a VOCS combination -- **the relative scaling across the series inverts**. TopSpin's processed peaks are `[1077, 3542, 702, 517]`, i.e. relative `[0.30, 1.00, 0.20, 0.15]` with exp 13 dominant; the raw path gives `[6971, 2505, 6637, 4017]`, relative `[1.00, 0.36, 0.95, 0.58]` with exp 12 dominant. Combining those cannot look like the same experiment.
+
+**Proved by running both.** `nmrtools2.VOCSSum` on these four gives per-slice relative peaks `[0.41, 1.00, 0.27, 0.27]`. openNMR's own `vocs_sum` fed from `read_1d_processed` gives **exactly** `[0.41, 1.00, 0.27, 0.27]`; fed from the raw path it gives `[1.00, 0.26, 0.69, 0.66]`. So the VOCS implementation agrees with the reference to the digit once both are given the same input. (Absolute values differ by 2x, which is the deliberate profile normalisation from the entry below.)
+
+**Not a magnitude-mode miss**: `PH_mod=1` on all four ("apply the recorded PHC0/PHC1"), and `read_1d` does apply both. The raw path simply does not yet reproduce TopSpin's handling of these Hahn echoes (`hahnecho_d7.ids30`, `PHC1` of 387-419 degrees). Measured for the record, since it says where the remaining gap is: forcing magnitude mode correlates +0.98/+0.98/+0.73/+0.96, and `align_echo` + `apc0` gives +0.95/+0.95/+0.86/+0.90 -- both far better than the +0.49..+0.65 default, neither yet a reproduction.
+
+### The escape hatch
+
+New `use_processed=True` on the Bruker reader, and a spectrum-list right-click item that toggles between **"Use TopSpin's processed data"** and **"Reprocess from the raw FID"**. Verified through `io.load` end to end: it reproduces the notebook's `[0.41, 1.00, 0.27, 0.27]` exactly.
+
+Reprocessing from raw stays the default -- it is the point of the project -- and the menu label always names what the click will *do* rather than the current state. The GUI already *reported* `loaded_from_processed` in its info panel but had no way to *ask* for it; now it does, and a requested switch is tagged with its own reason string.
+
+### And then the real bug: a recorded phase cannot survive echo alignment
+
+The user pointed at experiments **999912-999915** -- "the equivalent of align echo in processing" -- i.e. TopSpin's own echo-aligned processing of the same four datasets. That is a direct reference for what `align_echo` should produce, and the vendor's own parameters state the physics outright:
+
+| | `PHC0` | `PHC1` |
+|---|---|---|
+| 12 / 13 / 14 / 15 | -253 / -195 / -59 / -239 | **387 / 410 / 419 / 419** |
+| 999912 / .../ 999915 | -80 / +14 / +165 / -50 | **0.00** |
+
+TopSpin's `PHC1` on an echo experiment exists *precisely* to compensate for transforming from `t = 0` of the echo instead of from its top. Aligning the echo removes the thing that phase corrects -- so applying it as well is a **double correction**, and the recorded `PHC0` no longer applies either (it differs completely between the two sets).
+
+`read_1d` was doing exactly that: `align_echo=True` with the default `phase_mode="recorded"` aligned the echo *and* applied the recorded `PHC0`/`PHC1`. Measured against 999912-999915:
+
+| | before | after |
+|---|---|---|
+| exp 12 | +0.1203 | **+0.9175** |
+| exp 13 | +0.0987 | **+0.9883** |
+| exp 14 | +0.3148 | **+0.9825** |
+| exp 15 | +0.5756 | **+0.9908** |
+
+Aligning the echo was *worse than not aligning at all* (+0.75/+0.65/+0.62/+0.46 for a plain load), which is why the earlier sweep in the entry above made `align_echo` look useless -- the alignment was fine, the phase applied on top of it was not.
+
+Now, when `align_echo` is on and the phase mode is `"recorded"`, the recorded phase is dropped and a zero-order phase re-derived instead (`apc0`), with `metadata.raw["recorded_phase_dropped"]` saying so. Scoped strictly to that combination -- an ordinary load still reproduces TopSpin's recorded phase exactly, asserted by its own test.
+
+**This is the same class of bug as the `align_echo`/`baseline_correct` interaction found on X-Pulse imaging data** (see the 2026-08-28 entry): one processing choice silently invalidating a *different* recorded parameter. Worth checking for wherever a recorded vendor parameter meets a processing option that changes what that parameter was measured against.
+
+### Still open
+
+`read_2d` takes `align_echo` too and applies the recorded F2 phase the same way, so the same double-correction is structurally present there. Not changed here: there is no 2D echo dataset with a TopSpin-aligned counterpart to measure against, and this round's whole point is that the measurement is what settled it.
+
+4 new tests.
+
+## VOCS scale: keep the original weighting, fix what it was scaled by (2026-09-08)
+
+User: "the intensities are not quite right. Is anything being normalised before being added or during the VOCS calculation? The spectra should maintain their original intensities." Then, after two attempts that overshot: "revert back to the original methodology, but just make sure that the scale of each individual spectrum is preserved properly across processing and addition steps."
+
+### The actual defect
+
+Two scale errors, both measured on the user's own 17O data (`VOCS_example_Data/15_02_26_Li2MnO3_O17_1_3mm`, experiments 12-15):
+
+1. **`vocs_power` peaks at 2.0, not 1.0.** Weighting by it directly multiplied every intensity by up to 2 (6971 -> 11908).
+2. **The sum had no denominator.** A bare `sum(S_i * w_i)`; the summed weight ranged **0 to 2.94** across the axis, so a peak could read nearly 3x taller purely for sitting where two acquisitions overlapped.
+
+Both are faithful ports of `nmrtools2`. Neither showed there because that package's plotting normalised every trace for display (`normalize=True`: `y_sum / max|y_sum|`). openNMR shows real intensities, so both surfaced at once. *A port can be exactly right about the maths and still wrong in a context whose conventions differ.*
+
+### What it does now
+
+Unchanged methodology -- **weight by the profile and combine** -- with the scale corrected in the two places it was wrong:
+
+- `apply_vocs` multiplies by `excitation_profile`, which is `vocs_power` normalised to **1.0 on resonance**. So a spectrum keeps its own intensity where the pulse excited it fully and is only ever attenuated off resonance. Measured: on-resonance ratio exactly 1.000000 on all four experiments, maximum gain anywhere exactly 1.0000.
+- `vocs_sum` is `sum(S_i * w_i) / plateau`, where `plateau = max(sum(w_i**2))` -- **nmrtools2's original bare sum, divided by one scalar.**
+
+**Why a scalar, not a per-point denominator** (this was got wrong twice before landing here). Feed a flat spectrum in and the bare sum reports `sum(w**2)`. *Where the offsets tile the range that is already flat*, so the bare sum is the true lineshape times a constant and only the constant needs removing. Measured between the outermost carriers on this project's own 17O geometry with the coverage gap filled: bare sum ripples **1.06x (1.3% rms)**, while the `sum(S*w)/sum(w)` weighted mean that briefly replaced it ripples **1.17x (3.5% rms)** -- i.e. the per-point denominator made an already-flat response *worse*, by imposing structure of its own. Dividing by the plateau leaves the lineshape untouched and makes the best-covered shift read true amplitude (verified: exactly 1000.0 for a synthetic flat spectrum of amplitude 1000).
+
+**The ripple that started all this was an acquisition problem, not an arithmetic one.** The four offsets sit at -6010, -2010, 5900 and 9900 ppm: spacings of 4000, **7910** and 4000 ppm against an excitation half-width of ~3687 ppm. That middle gap is wider than the pulse can reach, so there is a genuine dead zone, and the bare sum's response ripples **8.72x** across it. Adding one offset near 1950 ppm collapses that to **1.06x**. Every attempt to flatten it arithmetically -- matched filter, per-spectrum deconvolution, Wiener regularisation, weighted mean -- traded the ripple for a worse artifact, because no denominator can invent signal that was never excited. *The measurement to make first, when a VOCS composite looks wrong, is whether `sum(w**2)` is flat.*
+
+`vocs_power` is untouched, still exactly as ported.
+
+**Nothing divides by a small number anywhere.** The weights are at most 1.0 and the composite is a weighted mean, so no threshold, floor or regularisation is needed -- the whole class of failure below simply cannot arise.
+
+### Two reverted attempts, and why they are worth recording
+
+Both were mathematically defensible and both were wrong in practice. Recorded so a later session does not re-derive them.
+
+**Attempt 1 -- deconvolve: `apply_vocs` divides by the profile, `vocs_sum` as a matched filter `sum(S*w)/sum(w**2)`.** Recovers true amplitude in principle, and did: verified against synthetic ground truth to **4.5e-13**. But the profile has genuine nulls *inside* its own `|x| < 1.73` bandwidth window -- `sqrt(f1**2 + f2**2)` has both terms vanish together, reaching **2e-6** on real data -- so dividing amplifies whatever sits there by up to ~500,000x. The window bounds nothing, which is what the attempt assumed.
+
+**Attempt 2 -- the same, with a hard floor at 5% excitation.** Produced exactly what the user then reported: *"whatever you did with the windowing, I think it was inverted"*, then *"signal is large at the edges and suddenly drops to zero and has low intensity at the centres"*. Reproduced precisely: on exp 12 the true peak sits at `x = -0.40` (raw 5607), but the corrected maximum landed at `x = -1.35`, where raw is only -3457 and the profile 0.076 -- amplified 13x to -45455. The output's envelope was the mirror image of the excitation profile. The composite's own maximum sat at a coverage weight of **0.0028** while well-covered regions sat 4x lower, and 2288 contiguous hard-zeroed points gave the "sudden drop".
+
+A Wiener-regularised third form fixed the cliff and bounded the gain, but still traded a few percent of intensity bias for it. **The lesson is that the deconvolution was solving a problem VOCS does not have**: an individual offset acquisition is not meant to be valid across its whole sweep, so there is nothing to recover at the edges -- only noise to amplify. Weighting says "trust this where it was excited", which is the actual physics of the experiment.
+
+### Verified with `align_echo`, as the user asked
+
+`pulprog = hahnecho_d7.ids30`, so echo alignment is genuinely the right processing here. Both paths work and are pinned by a skipif-guarded real-data test over experiments 12-15.
+
+### Easier multi-select
+
+"Make it easier to select all and VOCS instead of one at a time": **Check All / Uncheck All** on the Compare tab, which is what VOCS Sum, Fit Curve and the compare plot all read from. Signals are blocked across the loop and the view refreshed once, since `itemChanged` triggers a full replot -- a dozen offsets would otherwise be a dozen redraws for one click.
+
+The **"Average instead of sum" checkbox is removed**: the combination is now itself an average, so the control no longer named a real choice. Removed rather than left with no effect -- same call as the old "Stack gap" spin box. `vocs_sum` still accepts `average=` and documents it as ignored.
+
+### Fixture rot, again
+
+`test_gui.py`'s VOCS fixture had the same fake `{"acqus": {"P1": p1}}` shape fixed in `test_vocs.py` last round (it survived only because `acquisition_constants` lowercases scalar keys). It also spanned 1600 Hz against a 50 kHz excitation bandwidth -- a range over which the profile is 1.0 to four decimals, so *any* correct behaviour is indistinguishable from a no-op there, and the only reason its assertion passed was the x2 bug it was unknowingly testing. Now a genuinely wide fixture with `P` as a real array.
+
+8 new tests, 2 rewritten.
 ## Axis labels no longer get cut off: shrink to fit, then say so (2026-09-08)
 
 User: "Add some better safeguards to the plotting to ensure that the axis labels don't get cut off. Maybe some kind of warning or push to resize the font etc."

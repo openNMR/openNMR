@@ -1723,8 +1723,17 @@ class MainWindow(QMainWindow):
         suggest_action = menu.addAction("Suggest nucleus (500 MHz console / 100 MHz magnet)…")
         mass_action = menu.addAction("Set sample mass…")
         procno_action = None
+        use_processed_action = None
         if spectrum.metadata.vendor == "bruker":
             procno_action = menu.addAction("Change proc number…")
+            # Label says what the click will *do*, not the current
+            # state -- a menu item that reads as a description is
+            # ambiguous about whether clicking it toggles or confirms.
+            use_processed_action = menu.addAction(
+                "Reprocess from the raw FID"
+                if spectrum.metadata.raw.get("loaded_from_processed")
+                else "Use TopSpin's processed data"
+            )
         fit_curve_action = None
         if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
             menu.addSeparator()
@@ -1741,6 +1750,8 @@ class MainWindow(QMainWindow):
             self._on_set_mass_action(index)
         elif procno_action is not None and chosen is procno_action:
             self._on_change_procno_action(index)
+        elif use_processed_action is not None and chosen is use_processed_action:
+            self._on_use_processed_action(index)
         elif fit_curve_action is not None and chosen is fit_curve_action:
             self._on_fit_curve_pseudo2d_action(index)
         elif chosen is remove_action:
@@ -1820,6 +1831,34 @@ class MainWindow(QMainWindow):
         self.spectrum_list.item(index).setText(self.session.label(index))
         if index == self._selected_index():
             self._on_selection_changed(index)
+
+    def _on_use_processed_action(self, index: int) -> None:
+        """Reload this spectrum from TopSpin's own processed data
+        instead of reprocessing its raw FID (and back again).
+
+        Reprocessing from raw is the default and the point of this
+        project, but the two genuinely disagree wherever this reader
+        cannot yet reproduce what TopSpin did -- on 17O Hahn-echo VOCS
+        data the raw path correlates only +0.49..+0.65 with TopSpin's
+        own ``1r``, and reorders which acquisition is tallest, so a
+        VOCS combination built from it looks like a different
+        experiment. This is the escape hatch for that, and for
+        comparing against anything that reads processed data (a
+        TopSpin plot, or an nmrtools2 notebook)."""
+        spectrum = self.session.spectra[index]
+        currently = bool(spectrum.metadata.raw.get("loaded_from_processed"))
+        try:
+            self.session.reload(index, use_processed=not currently)
+        except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
+            QMessageBox.critical(self, "Failed to switch data source", str(exc))
+            return
+        self.spectrum_list.item(index).setText(self.session.label(index))
+        if index == self._selected_index():
+            self._on_selection_changed(index)
+        self.statusBar().showMessage(
+            "Now showing TopSpin's own processed data." if not currently
+            else "Back to reprocessing the raw FID.", 6000,
+        )
 
     def _on_process_indirect_toggled(self, checked: bool) -> None:
         """Checked = process the indirect (F1) dimension as a real
@@ -2027,6 +2066,22 @@ class MainWindow(QMainWindow):
         self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
         layout.addWidget(self.compare_list)
+
+        # Checking a long list one row at a time is the slow path
+        # everything downstream depends on (Fit Curve, VOCS Sum, the
+        # plot itself) -- explicit user request while combining a VOCS
+        # series: "make it easier to select all ... instead of one at
+        # a time".
+        check_row = QHBoxLayout()
+        check_all_button = QPushButton("Check All")
+        check_all_button.setToolTip("Include every spectrum listed here in the comparison.")
+        check_all_button.clicked.connect(lambda: self._set_all_compare_checked(True))
+        uncheck_all_button = QPushButton("Uncheck All")
+        uncheck_all_button.setToolTip("Exclude every spectrum listed here from the comparison.")
+        uncheck_all_button.clicked.connect(lambda: self._set_all_compare_checked(False))
+        check_row.addWidget(check_all_button)
+        check_row.addWidget(uncheck_all_button)
+        layout.addLayout(check_row)
 
         reorder_row = QHBoxLayout()
         move_up_button = QPushButton("Move Up")
@@ -2639,6 +2694,23 @@ class MainWindow(QMainWindow):
 
     def _compare_checked_entries(self) -> list[tuple[int, int | None]]:
         return [entry for _row, entry in self._compare_checked_rows_and_entries()]
+
+    def _set_all_compare_checked(self, checked: bool) -> None:
+        """Check or uncheck every row of the Compare list at once.
+
+        Signals are blocked across the loop and the view refreshed
+        once at the end: ``compare_list.itemChanged`` triggers a full
+        replot, so toggling n rows individually would rebuild the
+        figure n times -- on a VOCS series of a dozen offsets that is
+        a dozen redraws for one click."""
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        blocked = self.compare_list.blockSignals(True)
+        try:
+            for row in range(self.compare_list.count()):
+                self.compare_list.item(row).setCheckState(state)
+        finally:
+            self.compare_list.blockSignals(blocked)
+        self._refresh_compare_view_if_active()
 
     def _on_move_compare_item(self, delta: int) -> None:
         """Reorders rows within the Compare tab's own list -- this is
@@ -6779,12 +6851,20 @@ class MainWindow(QMainWindow):
         sum_intro = QLabel(
             "Corrects and combines every spectrum checked in the "
             "Compare tab onto one common ppm axis, added as a new "
-            "spectrum."
+            "spectrum. Intensities are preserved: each offset "
+            "contributes in proportion to how well it excited that "
+            "shift, so overlapping regions gain signal-to-noise "
+            "rather than amplitude. Use Check All on the Compare tab "
+            "to include a whole VOCS series at once."
         )
         sum_intro.setWordWrap(True)
         sum_layout.addWidget(sum_intro)
-        self.vocs_average_checkbox = QCheckBox("Average instead of sum")
-        sum_layout.addWidget(self.vocs_average_checkbox)
+        # No "Average instead of sum" control any more: the matched
+        # filter returns an intensity estimate rather than an
+        # accumulation, so sum-versus-average no longer names a real
+        # choice (see processing.vocs.vocs_sum). Removed rather than
+        # left as a control with no effect -- same call as the old
+        # "Stack gap" spin box.
         sum_button = QPushButton("VOCS Sum (Compare stack)")
         sum_button.clicked.connect(self._on_vocs_sum_clicked)
         sum_layout.addWidget(sum_button)
@@ -7009,7 +7089,6 @@ class MainWindow(QMainWindow):
         try:
             result = processing_vocs.vocs_sum(
                 stack, pulse=self.vocs_pulse_edit.text().strip() or "P1",
-                average=self.vocs_average_checkbox.isChecked(),
                 window_filter=self.vocs_window_filter_checkbox.isChecked(),
             )
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
@@ -7020,8 +7099,7 @@ class MainWindow(QMainWindow):
                         hz=result["ppm"] * ref.metadata.sfo1 if ref.metadata.sfo1 else None)
         metadata = dataclasses.replace(ref.metadata, raw={})
         combined = NMRSpectrum(data=result["vocs_sum"], axes=[axis], metadata=metadata)
-        op = "average" if self.vocs_average_checkbox.isChecked() else "sum"
-        self._add_derived_spectrum(combined, f"VOCS {op} ({len(stack)} spectra)")
+        self._add_derived_spectrum(combined, f"VOCS sum ({len(stack)} spectra)")
 
     def _build_region_box(self) -> QGroupBox:
         """Integration regions -- the "most basic" way to turn a

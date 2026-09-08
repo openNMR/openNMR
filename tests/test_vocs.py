@@ -45,13 +45,153 @@ def _make_1d(n=64, center_ppm=5.0, sfo1=400.0, p1=5.0):
     return NMRSpectrum(data=data, axes=[axis], metadata=metadata)
 
 
-def test_apply_vocs_scales_data_and_records_scaling():
-    spec = _make_1d()
+def test_apply_vocs_weights_and_never_amplifies():
+    # The original methodology: multiply by the excitation profile, so
+    # each offset counts where its own pulse actually excited. The
+    # weight is <= 1 everywhere, so this can only ever attenuate --
+    # which is what makes the scale safe with no threshold anywhere.
+    #
+    # A divide-by-the-profile deconvolution was tried and reverted: it
+    # amplified the sweep edges until they dominated the real peak
+    # ("signal is large at the edges and suddenly drops to zero and
+    # has low intensity at the centres").
+    spec = _make_1d_wide()
+    weighted = vocs.apply_vocs(spec, pulse="P1")
+
+    assert "vocs_profile" in weighted.metadata.raw
+    assert len(weighted.data) == len(spec.data)
+    nonzero = spec.data != 0
+    gain = weighted.data[nonzero] / spec.data[nonzero]
+    assert gain.max() <= 1.0 + 1e-12      # never amplifies, anywhere
+    assert gain.min() >= 0.0
+    assert not np.allclose(weighted.data, spec.data)   # did do something
+
+
+def test_apply_vocs_leaves_the_on_resonance_intensity_alone():
+    # The profile is 1.0 on resonance, so the peak a VOCS experiment
+    # is centred on comes back unchanged -- a correction must not
+    # rescale the data it corrects. Before the fix this point was
+    # multiplied by 2.0.
+    spec = _make_1d_wide()
     corrected = vocs.apply_vocs(spec, pulse="P1")
-    assert "vocs_scaling" in corrected.metadata.raw
-    assert len(corrected.data) == len(spec.data)
-    # Some scaling was actually applied (not a no-op).
-    assert not np.allclose(corrected.data, spec.data)
+
+    centre = len(spec.data) // 2
+    assert corrected.data[centre] == pytest.approx(spec.data[centre], rel=1e-6)
+
+
+def test_excitation_profile_is_one_on_resonance():
+    # vocs_power itself peaks at 2.0 (faithful to nmrtools2 and left
+    # that way); excitation_profile is the normalised, physical one.
+    hz = np.linspace(-50000, 50000, 1001)
+    w1 = 50000.0
+    assert vocs.vocs_power(hz, w1)[500] == pytest.approx(2.0)
+    assert vocs.excitation_profile(hz, w1)[500] == pytest.approx(1.0)
+    assert vocs.excitation_profile(hz, w1).max() == pytest.approx(1.0)
+
+
+def _make_1d_wide(n=512, center_hz=0.0, sfo1=67.8, p1=1.0, amplitude=1000.0):
+    """A spectrum genuinely wide relative to its own excitation
+    bandwidth -- the regime VOCS exists for. Over a narrow sweep the
+    profile is 1.0 to several decimals and every correction looks like
+    a no-op, which tests nothing."""
+    hz = np.linspace(center_hz - 300000, center_hz + 300000, n)
+    data = np.full(n, amplitude) * vocs.excitation_profile(hz, vocs.pulse_to_w1(p1))
+    metadata = NMRMetadata(vendor="bruker", nucleus="17O", sfo1=sfo1,
+                            raw={"acqus": {"P": [0.0, p1, 2 * p1] + [0.0] * 61}})
+    return NMRSpectrum(data=data, axes=[NMRAxis(kind="frequency", ppm=hz / sfo1, hz=hz)],
+                        metadata=metadata)
+
+
+def test_vocs_sum_reads_true_amplitude_where_coverage_is_best():
+    # The scalar plateau divide is what puts the bare sum back on the
+    # spectra's own scale: sum(S*w) responds to a flat true spectrum as
+    # sum(w**2), so dividing by that quantity's own maximum makes the
+    # best-covered shift read the true amplitude -- without touching
+    # the lineshape, which a per-point denominator would.
+    amplitude = 1000.0
+    specs = [_make_1d_wide(center_hz=c, amplitude=amplitude)
+             for c in (-150000.0, 0.0, 150000.0)]
+
+    result = vocs.vocs_sum(specs, pulse="P1")
+
+    assert result["plateau"] > 0
+    assert np.max(result["vocs_sum"]) == pytest.approx(amplitude, rel=1e-6)
+    # Never scaled *up* past the truth -- coverage only ever falls off
+    # from the plateau.
+    assert np.max(result["vocs_sum"]) <= amplitude + 1e-6
+
+
+def test_vocs_sum_scalar_divide_leaves_the_lineshape_alone():
+    # The reason a scalar beats a per-point denominator: dividing by
+    # sum(w) point-by-point imposes its own structure on a response
+    # that the offsets had already made flat. Measured on this
+    # project's own 17O geometry with the coverage gap filled, the
+    # weighted mean rippled 1.17x (3.5% rms) where the bare sum
+    # rippled 1.06x (1.3% rms) -- i.e. it made a flat response worse.
+    # Here: the composite must stay exactly proportional to the bare
+    # sum, differing only by one constant.
+    specs = [_make_1d_wide(center_hz=c) for c in (-150000.0, 0.0, 150000.0)]
+
+    result = vocs.vocs_sum(specs, pulse="P1")
+
+    bare = result["vocs_sum"] * result["plateau"]
+    nonzero = np.abs(bare) > 1e-9
+    ratio = result["vocs_sum"][nonzero] / bare[nonzero]
+    assert np.allclose(ratio, ratio[0])   # one constant, not a per-point curve
+
+
+def test_vocs_sum_never_exceeds_the_spectra_that_went_into_it():
+    # A weighted mean is bounded by its inputs, which is what "the
+    # scale of each individual spectrum is preserved across the
+    # addition step" means in practice -- overlapping offsets improve
+    # the average rather than stacking up amplitude.
+    specs = [_make_1d_wide(center_hz=c, amplitude=1000.0)
+             for c in (-200000.0, 0.0, 200000.0)]
+
+    result = vocs.vocs_sum(specs, pulse="P1")
+
+    biggest_input = max(np.abs(s.data).max() for s in specs)
+    assert np.abs(result["vocs_sum"]).max() <= biggest_input + 1e-9
+    assert np.isfinite(result["vocs_sum"]).all()
+
+
+def test_vocs_sum_peaks_where_coverage_is_good_not_at_the_edges():
+    # The failure this guards against: "signal is large at the edges
+    # and suddenly drops to zero and has low intensity at the centres".
+    # A deconvolution put the composite's own maximum out where almost
+    # nothing was excited (measured on real data: max at a coverage
+    # weight of 0.0028, four times higher than the well-covered
+    # regions). A weighted mean cannot do that -- it is bounded by its
+    # inputs everywhere.
+    specs = [_make_1d_wide(center_hz=c) for c in (-200000.0, 200000.0)]
+
+    result = vocs.vocs_sum(specs, pulse="P1")
+    y, weight = result["vocs_sum"], result["weight"]
+
+    assert np.isfinite(y).all()
+    # Nothing is reported where nothing was excited...
+    assert np.all(y[weight == 0.0] == 0.0)
+    # ...and the composite's own maximum sits in a well-covered region,
+    # not out at a poorly-covered edge.
+    assert weight[np.argmax(np.abs(y))] > 0.5
+
+
+def test_vocs_weighting_rolls_off_smoothly_from_resonance():
+    # The weight is the excitation profile itself: 1.0 on resonance,
+    # falling away monotonically with offset, no step anywhere. The
+    # hard-floored deconvolution this replaced stepped straight to zero
+    # at its threshold, which is the "suddenly drops to zero" half of
+    # the reported bug.
+    spec = _make_1d_wide()
+    weighted = vocs.apply_vocs(spec, pulse="P1")
+
+    nonzero = spec.data != 0
+    gain = weighted.data[nonzero] / spec.data[nonzero]
+    centre = len(gain) // 2
+    assert gain[centre] == pytest.approx(1.0, rel=1e-6)
+    # Falls away from resonance, in small steps rather than a cliff.
+    assert np.all(np.diff(gain[centre:]) <= 1e-9)
+    assert np.abs(np.diff(gain)).max() < 0.05
 
 
 def test_apply_vocs_missing_pulse_raises():

@@ -246,6 +246,32 @@ def _read_bruker_binary(binary_path: str, dic: dict, shape: tuple[int, int] | No
     # value rather than letting the complex view fail on an odd count.
     complex_data = flat[: (flat.size // 2) * 2].astype(np.float64).view(np.complex128)
 
+    # Undo the receiver's own stored scaling exponent. `NC` is the
+    # acquisition-side counterpart of `NC_proc`: TopSpin stores the FID
+    # scaled by 2**-NC so it uses the integer range well, and the true
+    # amplitude is recovered by multiplying back. Ignoring it made two
+    # datasets acquired at different NC incomparable -- which is not
+    # visible at all on a single spectrum, and glaring the moment
+    # several are combined.
+    #
+    # Real user report, on a 17O VOCS series: "the more negative end of
+    # the VOCS is giving much higher intensities here than in the
+    # nmrtools2 version". Three of its four experiments record NC = -3
+    # and one records NC = 0, so those three read exactly 2**3 = 8x
+    # high relative to the fourth. Against TopSpin's own processed
+    # output the relative intensities were [2.39, 1.00, 1.31, 1.17]
+    # where they should be [0.28, 1.00, 0.17, 0.14]; with NC applied
+    # they come out [0.30, 1.00, 0.16, 0.15].
+    #
+    # **From `acqus`, never `acqu`.** On that same dataset `acqu`
+    # records NC = 0 for every experiment while `acqus` carries the
+    # real -3/-3/-3/0 -- so reading the wrong file yields a correction
+    # that silently does nothing and looks like a working fix.
+    # `read_acqus_file` supplies only `acqus`, which is the point.
+    nc = acqus.get("NC")
+    if nc is not None:
+        complex_data = complex_data * 2.0 ** float(nc)
+
     if shape is None:
         return complex_data
     n_rows, n_complex_per_row = shape
@@ -727,6 +753,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, si)
 
     recorded_f2 = (0.0, 0.0)
+    recorded_phase_dropped = False
     if autophase:
         if phase_mode == "joint":
             phase0, phase1 = processing_ft.autophase01(
@@ -735,6 +762,24 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             )
         elif phase_mode == "apc0":
             phase0 = processing_ft.apc0(spectrum, x_ppm, phase0_inc)
+        elif phase_mode == "recorded" and align_echo:
+            # **A recorded phase does not survive echo alignment.**
+            # TopSpin's PHC1 on an echo experiment exists precisely to
+            # compensate for transforming from t=0 of an echo instead
+            # of from its top; aligning the echo removes the very thing
+            # that phase was correcting, so applying it as well is a
+            # double correction, and PHC0 no longer applies either.
+            #
+            # Measured on real 17O Hahn-echo data (hahnecho_d7.ids30)
+            # against TopSpin's own echo-aligned processing of the same
+            # four experiments (999912-999915, which record PHC1 = 0.00
+            # and a *different* PHC0 -- exactly this argument, in the
+            # vendor's own files): align_echo with the recorded phase
+            # still applied correlates +0.12/+0.10/+0.31/+0.58, worse
+            # than not aligning at all, while re-deriving a zero-order
+            # phase gives +0.92/+0.99/+0.98/+0.99.
+            phase0 = processing_ft.apc0(spectrum, x_ppm, phase0_inc)
+            recorded_phase_dropped = True
         elif phase_mode == "recorded":
             # Kept as the *recorded* phase, in TopSpin's own model,
             # rather than folded into phase0/phase1 (the user's own, in
@@ -759,6 +804,11 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             "acqus": acqus, "procs": procs, "phase0": phase0, "phase1": phase1,
             _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs),
             "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
+            **({"recorded_phase_dropped":
+                "Echo alignment replaces TopSpin's recorded PHC0/PHC1 -- that phase "
+                "compensates for transforming from t=0 of an echo, which aligning "
+                "already does, so a zero-order phase was re-derived instead."}
+               if recorded_phase_dropped else {}),
             # The exact (shift/echo-align/LP/windowed/zero-filled) FID
             # fed into the FFT above -- an optional GUI preview of what
             # FID-domain processing actually did, kept alongside (not
@@ -1753,6 +1803,31 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     # (see read_2d's own docstring for what it's for), and would raise
     # a TypeError on an unexpected keyword if it leaked through.
     raw_fid_cache = kwargs.pop("_raw_fid_cache", None)
+    # Take TopSpin's own already-processed spectrum instead of
+    # reprocessing the raw FID, even though a fid/ser is sitting right
+    # there. Not the default -- reprocessing from raw is this project's
+    # whole point -- but the two genuinely disagree on data whose
+    # processing this reader cannot yet reproduce, and the user needs
+    # to be able to say "give me what TopSpin shows".
+    #
+    # Real case: 17O Hahn-echo VOCS data (hahnecho_d7.ids30). The raw
+    # path correlates only +0.49..+0.65 with TopSpin's own 1r on those
+    # four experiments, and -- worse for VOCS specifically -- it
+    # reorders which acquisition is the tallest, so the combination
+    # comes out looking nothing like the same experiment. nmrtools2's
+    # notebook reads processed data and was the reference the user was
+    # comparing against.
+    if kwargs.pop("use_processed", False):
+        one_d = {k: v for k, v in kwargs.items() if k != "pseudo_2d"}
+        if os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr")):
+            spectrum = read_2d_processed(path, **{
+                k: v for k, v in kwargs.items()
+                if k in ("procno", "homonuclear", "pseudo_2d", "magnitude")
+            })
+        else:
+            spectrum = read_1d_processed(path, **one_d)
+        spectrum.metadata.raw["loaded_from_processed"] = "requested (use TopSpin's processed data)"
+        return spectrum
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
     has_2rr = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
