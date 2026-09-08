@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from opennmr.plotting import style
 from opennmr.plotting.style import downsample_2d
 
 
@@ -106,3 +107,109 @@ def test_downsample_2d_output_shape_matches_requested_caps():
     assert data_ds.shape == (256, 16384)
     assert len(x_ds) == 16384
     assert len(y_ds) == 256
+
+
+# ============================================================
+# fit_labels_within_figure -- axis labels must not fall off the
+# figure when the canvas is small (see its own docstring)
+# ============================================================
+
+def _labelled_figure(width, height):
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(width, height))
+    ax.plot(np.arange(10), np.arange(10))
+    ax.set_xlabel("Chemical shift / ppm")
+    ax.set_ylabel("Intensity")
+    return fig, ax
+
+
+def _font_sizes(fig):
+    return {round(a.get_fontsize(), 2) for a in style._shrinkable_text_artists(fig)}
+
+
+def test_fit_labels_leaves_a_roomy_figure_untouched():
+    # The safeguard must cost nothing when nothing is wrong -- an
+    # earlier version tested tick labels too and drove a perfectly good
+    # 6x4in plot to the 5pt floor, because the label at either end of
+    # an axis routinely overhangs the figure edge by a pixel or two.
+    import matplotlib.pyplot as plt
+
+    fig, _ax = _labelled_figure(6, 4)
+    before = _font_sizes(fig)
+
+    result = style.fit_labels_within_figure(fig)
+
+    assert result["fitted"]
+    assert result["steps"] == 0
+    assert _font_sizes(fig) == before
+    plt.close(fig)
+
+
+def test_fit_labels_shrinks_only_as_far_as_it_has_to():
+    import matplotlib.pyplot as plt
+
+    fig, _ax = _labelled_figure(1.4, 0.9)
+    before = max(_font_sizes(fig))
+    assert style.clipped_labels(fig)  # genuinely clipped to start with
+
+    result = style.fit_labels_within_figure(fig)
+
+    assert result["fitted"]
+    assert style.clipped_labels(fig) == []
+    after = max(_font_sizes(fig))
+    assert after < before                               # did shrink...
+    assert after > style.LABEL_FIT_MIN_FONTSIZE         # ...but not to the floor
+    plt.close(fig)
+
+
+def test_fit_labels_reports_what_it_still_cannot_fit():
+    # Below a certain size no font helps, and that is a real "make this
+    # bigger" situation the caller has to be able to surface rather
+    # than silently render labels off the edge.
+    import matplotlib.pyplot as plt
+
+    fig, _ax = _labelled_figure(0.7, 0.45)
+
+    result = style.fit_labels_within_figure(fig)
+
+    assert not result["fitted"]
+    assert result["clipped"]
+    assert min(_font_sizes(fig)) == pytest.approx(style.LABEL_FIT_MIN_FONTSIZE)
+    plt.close(fig)
+
+
+def test_fit_labels_does_not_let_tight_layouts_warning_escape():
+    # matplotlib's "Tight layout not applied" UserWarning names no
+    # spectrum and offers no remedy; it is the *condition* this
+    # function exists to answer, so it is captured and acted on rather
+    # than printed at the user.
+    import warnings
+
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(12, 1, figsize=(6, 2.5))
+    for ax in axes:
+        ax.set_xlabel("Chemical shift / ppm")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        style.fit_labels_within_figure(fig)
+
+    assert not [w for w in caught if "ight layout" in str(w.message)]
+    plt.close(fig)
+
+
+def test_clipped_labels_ignores_tick_labels():
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(np.arange(10), np.arange(10))
+    ax.set_xlabel("")   # no axis labels at all...
+    ax.set_ylabel("")
+    fig.tight_layout()
+
+    # ...so whatever the tick labels are doing at the axis ends, there
+    # is nothing here that counts as clipped.
+    assert style.clipped_labels(fig) == []
+    plt.close(fig)

@@ -302,6 +302,16 @@ class MplCanvas(QWidget):
     #: on an extracted slice".
     sliceKeepRequested = Signal(object)
 
+    #: Emitted when the layout pass could not keep every axis label on
+    #: the figure even after shrinking the text to its floor -- i.e.
+    #: the panel is genuinely too small for what it has to show, and
+    #: only the user can fix it (make the window bigger, or the side
+    #: panel narrower). Carries the list of label texts still cut off.
+    #: Emitted only on a *change* of state, so a phase drag that
+    #: relayouts continuously doesn't repeat itself; a matching empty
+    #: emission says the problem has cleared.
+    labelsClipped = Signal(object)
+
     #: Emitted with the full list of extracted-slice specs whenever
     #: the user adds or clears one, so MainWindow can store them
     #: against the spectrum (and persist them) rather than leaving
@@ -530,6 +540,10 @@ class MplCanvas(QWidget):
         # the next row -- has no `inaxes` at all and so never starts a
         # pan, but should still select the row it visually belongs to.
         self._compare_click_start: tuple[float, float] | None = None
+        # Label texts reported by the last _apply_layout as still cut
+        # off after shrinking -- kept so labelsClipped only fires on a
+        # change of state rather than on every relayout.
+        self._last_clipped_labels: list[str] = []
         # True only while show_relaxation_fit's plot is the current
         # view -- gates the right-click "Exclude Nearest Point"/"Reset
         # Excluded Points" actions (see _on_context_menu) and the
@@ -908,6 +922,31 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None:
             self.show_spectrum(self._contour_spectrum)
 
+    def _apply_layout(self) -> None:
+        """The layout pass every ``show_*``/rebuild ends with.
+
+        Replaces a bare ``figure.tight_layout()``. ``tight_layout``
+        reserves room for decorations *when the figure is big enough*
+        and quietly gives up when it is not -- and a GUI canvas is
+        sized by the window, so "not big enough" is an ordinary state.
+        Real user report: "the x-axis label got cut off", and later a
+        request for "better safeguards... maybe some kind of warning or
+        push to resize the font".
+
+        :func:`opennmr.plotting.fit_labels_within_figure` does both:
+        shrink the text as far as needed (and no further -- a figure
+        with room to spare is left exactly as it was), then report
+        whether that was enough. When it wasn't, :attr:`labelsClipped`
+        tells the owner so a person can be told, rather than the
+        figure silently rendering with its labels off the edge."""
+        result = plotting.fit_labels_within_figure(self.figure)
+        clipped = result["clipped"] if not result["fitted"] else []
+        # Only on a change: a phase drag relayouts continuously, and
+        # re-announcing the same thing every frame is noise.
+        if clipped != self._last_clipped_labels:
+            self._last_clipped_labels = clipped
+            self.labelsClipped.emit(list(clipped))
+
     def _cancel_navigation_drag(self) -> None:
         """Abandon any half-finished toolbar zoom/pan drag, and take
         its rubber-band rectangle off screen.
@@ -1026,7 +1065,7 @@ class MplCanvas(QWidget):
         # slice panel (which brings its own x-axis label) changed what
         # the figure needs, the contour's own x label was clipped off
         # the bottom. Real user report: "the x-axis label got cut off".
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def reset_view(self) -> None:
@@ -1043,7 +1082,7 @@ class MplCanvas(QWidget):
             self._redraw_contour(preserve_view=False)
             return
         self.toolbar.home()
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def _on_press(self, event) -> None:
@@ -2086,7 +2125,7 @@ class MplCanvas(QWidget):
         self._apply_view_options()
         if spectrum.ndim == 1:
             self._pivot_marker_ax = self.ax
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def show_fid(self, fid, dt: float, title: str = "", window_envelope=None, tdeff_index: int | None = None,
@@ -2168,7 +2207,7 @@ class MplCanvas(QWidget):
         plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
         self._apply_view_options()
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def show_processing_preview(self, fid, dt: float, spectrum: NMRSpectrum, *, title: str = "",
@@ -2244,7 +2283,7 @@ class MplCanvas(QWidget):
 
         self._apply_view_options()
         self._pivot_marker_ax = spec_ax
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def update_processing_preview_spectrum(self, spectrum: NMRSpectrum) -> None:
@@ -2406,7 +2445,7 @@ class MplCanvas(QWidget):
             self.ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
 
         self._apply_view_options()
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def show_2d_overlay(self, spectra: list[NMRSpectrum], labels: list[str] | None = None) -> None:
@@ -2432,7 +2471,7 @@ class MplCanvas(QWidget):
             self.ax.legend()
             self._legend_visible = True
         self._apply_view_options()
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def show_1d_heatmap(self, spectra: list[NMRSpectrum]) -> None:
@@ -2449,7 +2488,7 @@ class MplCanvas(QWidget):
         self.clear()  # already leaves self.ax as a fresh, single subplot
         plotting.plot_1d_heatmap(spectra, ax=self.ax, fig=self.figure)
         self._apply_view_options()
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def show_slice_fit(self, x, y_data, y_fit, components=None, peak_labels=None, title: str = "",
@@ -2531,7 +2570,7 @@ class MplCanvas(QWidget):
                                    labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
         self._apply_view_options()
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def show_relaxation_fit(self, result: dict, uncertainty: tuple | None = None,
@@ -2606,7 +2645,7 @@ class MplCanvas(QWidget):
                                    labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
         self._apply_view_options()
-        self.figure.tight_layout()
+        self._apply_layout()
         self.canvas.draw_idle()
 
     def update_data(self, spectrum: NMRSpectrum) -> None:

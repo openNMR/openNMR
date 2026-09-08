@@ -313,6 +313,20 @@ class MainWindow(QMainWindow):
         # FID-processing choice.
         self.processing_preview_canvas = MplCanvas()
 
+        # Every canvas, not just the Spectrum one: a label falling off
+        # the figure is worth saying so wherever it happens, and each
+        # canvas lays itself out independently. The handler names which
+        # tab it came from, since only one is visible at a time.
+        for name, canvas in (
+            ("Spectrum", self.canvas), ("FID", self.fid_canvas),
+            ("Compare", self.compare_canvas), ("Fit", self.fit_canvas),
+            ("Spectral Fit", self.spectral_fit_canvas),
+            ("Processing Preview", self.processing_preview_canvas),
+        ):
+            canvas.labelsClipped.connect(
+                lambda labels, tab=name: self._on_labels_clipped(tab, labels)
+            )
+
         self.canvas_tabs = QTabWidget()
         self.canvas_tabs.addTab(self.fid_canvas, "FID")
         self.canvas_tabs.addTab(self.processing_preview_canvas, "Processing Preview")
@@ -661,6 +675,31 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Kept {label}. Phase it, then use \u201cApply Phase to Source 2D\u201d "
             f"to push that phase back into the 2D.", 8000,
+        )
+
+    def _on_labels_clipped(self, tab: str, labels) -> None:
+        """Say so when a canvas cannot fit its own axis labels.
+
+        The layout pass already shrinks the text as far as it usefully
+        can (see ``MplCanvas._apply_layout``); reaching here means even
+        the floor was not enough, which only the user can resolve -- a
+        taller/wider window, or a narrower side panel. Silence would
+        just leave a figure rendering with its labels off the edge,
+        which is the thing being guarded against.
+
+        An empty ``labels`` is the all-clear, emitted when a previously
+        clipped canvas fits again -- clear the message rather than
+        leaving a stale warning on screen."""
+        if not labels:
+            self.statusBar().clearMessage()
+            return
+        names = ", ".join(str(text) for text in labels[:3])
+        if len(labels) > 3:
+            names += ", ..."
+        self.statusBar().showMessage(
+            f"{tab}: not enough room for the axis labels ({names}) even at the "
+            f"smallest font — make the window taller/wider, or narrow the side panel.",
+            8000,
         )
 
     def _slice_source_of(self, spectrum):

@@ -2187,6 +2187,59 @@ def _xlabel_is_inside_the_figure(canvas, ax):
     return label_box.y0 >= 0 and label_box.x0 >= 0
 
 
+def test_canvas_shrinks_labels_rather_than_clipping_them(qapp):
+    # User request for "better safeguards to ensure that the axis
+    # labels don't get cut off... maybe some kind of warning or push to
+    # resize the font". tight_layout alone reserves room only when the
+    # figure is big enough and quietly gives up when it is not -- and a
+    # GUI canvas is sized by the window, so that is an ordinary state.
+    from opennmr.plotting import clipped_labels
+
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(1.4, 0.9)
+    canvas.show_spectrum(_make_1d())
+
+    assert clipped_labels(canvas.figure) == []
+    # Shrunk to achieve it, rather than the label being left hanging
+    # off the bottom.
+    assert canvas.ax.xaxis.label.get_fontsize() < canvas._AXIS_LABELSIZE
+
+
+def test_canvas_reports_labels_it_cannot_fit_at_any_size(qapp):
+    # Below a certain size no font helps; that is a real "make this
+    # bigger" situation only the user can fix, so it is announced
+    # rather than silently rendered with labels off the edge.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(0.7, 0.45)
+    seen = []
+    canvas.labelsClipped.connect(seen.append)
+
+    canvas.show_spectrum(_make_1d())
+
+    assert seen and seen[-1]  # non-empty: named the labels that don't fit
+
+
+def test_canvas_labels_clipped_only_fires_on_a_change(qapp):
+    # A phase drag relayouts continuously; re-announcing the same
+    # problem every frame would be noise. And when the canvas has room
+    # again, an empty emission clears the message rather than leaving a
+    # stale warning up.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(0.7, 0.45)
+    canvas.show_spectrum(_make_1d())
+
+    seen = []
+    canvas.labelsClipped.connect(seen.append)
+
+    canvas._apply_layout()
+    canvas._apply_layout()
+    assert seen == []  # already clipped, unchanged -- says nothing again
+
+    canvas.figure.set_size_inches(8, 6)
+    canvas._apply_layout()
+    assert seen == [[]]  # one all-clear, exactly once
+
+
 def test_canvas_contour_rebuild_keeps_the_x_label_on_the_figure(qapp):
     # Real user report: "the x-axis label got cut off". _redraw_contour
     # never re-ran the layout pass show_spectrum ends with, so a rebuild

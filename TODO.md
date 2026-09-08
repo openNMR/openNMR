@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-08)
 
-1065 tests passing. Working tree clean, in sync with `origin/main` through `9642549` (crosshair, reprocessing speedup, the six settled decisions, and the VOCS/zoom-rectangle fixes -- four rounds in one commit, since they overlap in the same files).
+1073 tests passing. Working tree clean, in sync with `origin/main` -- most recently the axis-label fitting safeguard, and before it the crosshair, the reprocessing speedup, the six settled decisions and the VOCS/zoom-rectangle fixes.
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -57,6 +57,43 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Axis labels no longer get cut off: shrink to fit, then say so (2026-09-08)
+
+User: "Add some better safeguards to the plotting to ensure that the axis labels don't get cut off. Maybe some kind of warning or push to resize the font etc."
+
+### Why `tight_layout` was never a safeguard
+
+It reserves room for decorations *when the figure is big enough*, and quietly gives up when it is not -- emitting a `UserWarning` that names no spectrum, offers no remedy, and in a GUI nobody ever sees. A canvas is sized by the window, so "not big enough" is an ordinary state rather than an edge case.
+
+**Measured, not assumed** -- three real failures reproduced before writing anything:
+
+| Case | Result |
+|---|---|
+| 12-row stacked Compare @ 2.5 in tall | x label at **y0 = -37 px**, and `tight_layout` warned |
+| 1D canvas @ 1.4 x 0.9 in | x label at **y0 = -54 px** |
+| 1D canvas @ 1.0 x 0.7 in | x label at **y0 = -57 px, x0 = -17 px** |
+
+That `tight_layout` warning was already visible in this project's own test output (`test_main_window_compare_view_renders_once_tab_is_visited`) and had simply never been chased.
+
+### The fix
+
+`plotting.style.fit_labels_within_figure` replaces the bare `figure.tight_layout()` at all ten `MplCanvas` call sites (via a new `_apply_layout`): lay out, measure, and if an axis label is off the figure, shrink every label/tick/title by 0.85 and lay out again -- down to a 5 pt floor. Then report whether that was enough.
+
+- **Measured against a renderer, never by drawing.** A full draw of a large 2D contour costs 0.3-1.3 s; `Text.get_window_extent(renderer)` is under a millisecond. The whole pass costs 3-18 ms, and **0 steps / no change at all** on a figure with room to spare.
+- **Font sizes change on the artists, never on the canvas's own style settings**, so this is a display-time accommodation: the next rebuild re-applies the user's chosen sizes and a canvas made larger again comes back at full size.
+- **When even the floor isn't enough** (below roughly 0.8 x 0.5 in) the new `MplCanvas.labelsClipped` signal fires and `MainWindow` puts it in the status bar, naming the tab and the labels. Emitted only on a *change* of state -- a phase drag relayouts continuously and would otherwise repeat every frame -- with an empty emission as the all-clear that clears the message.
+- matplotlib's own "Tight layout not applied" warning is now captured rather than printed: it is the *condition* being answered, so it is acted on instead of leaked.
+
+### The false positive that shaped the design
+
+The first version tested **tick** labels for clipping too, and drove a perfectly good 6 x 4 in plot all the way to the 5 pt floor. The label at either end of an axis routinely overhangs the figure edge by a pixel or two -- ordinary matplotlib behaviour, not a defect. So `clipped_labels` triggers on **axis labels and titles only**, while tick labels are still *shrunk* as part of the remedy (their height is usually what pushes an axis label off in the first place). There is also a 2 px tolerance. Pinned by `test_fit_labels_leaves_a_roomy_figure_untouched`, which asserts `steps == 0` and unchanged fonts.
+
+### Not done
+
+Only `MplCanvas` routes through this. The standalone `plotting.oned`/`twod`/`fit` figure helpers still call `fig.tight_layout()` directly -- fine for a script picking its own figure size, and left alone rather than changed speculatively.
+
+8 new tests (5 style-level, 3 canvas-level).
 
 ## VOCS could never find P1; a stranded zoom rectangle (2026-09-08)
 
