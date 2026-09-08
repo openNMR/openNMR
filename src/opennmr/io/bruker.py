@@ -74,6 +74,7 @@ import nmrglue as ng
 from . import base
 from .jcampdx import parse_jcampdx_params
 from ..processing import ft as processing_ft
+from ..processing import windows as processing_windows
 from ..core.registry import find_gamma
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 # Re-exported deliberately: this lives in ``core`` so ``processing`` can
@@ -503,18 +504,18 @@ def apply_recorded_f1_linear_prediction(interferogram: np.ndarray, proc2s: dict,
 
 def _apply_bruker_window(fid: np.ndarray, procs: dict, sw_hz: float) -> np.ndarray:
     """Apply the window TopSpin recorded in ``procs`` (``WDW``, with
-    ``LB``/``SSB`` as needed), via ``nmrglue.proc_base``."""
+    ``LB``/``SSB`` as needed), via :mod:`opennmr.processing.windows`."""
     wdw = int(procs.get("WDW", 0))
     if wdw == 0:
         return fid
     if wdw == 1:
         lb_hz = float(procs.get("LB", 0.0))
-        return ng.proc_base.em(fid, lb=lb_hz / sw_hz)
+        return processing_windows.em(fid, lb=lb_hz / sw_hz)
     if wdw in (3, 4):
         ssb = float(procs.get("SSB", 0.0))
         off = 1.0 / ssb if ssb >= 2 else 0.0
         power = 1.0 if wdw == 3 else 2.0
-        return ng.proc_base.sp(fid, off=off, end=1.0, pow=power)
+        return processing_windows.sp(fid, off=off, end=1.0, pow=power)
     raise NotImplementedError(
         f"Bruker window WDW={wdw} ({_WDW_NAMES.get(wdw, 'unknown')}) is not yet "
         f"supported for raw-FID reprocessing (supported: 0/none, 1/EM, 3/SINE, "

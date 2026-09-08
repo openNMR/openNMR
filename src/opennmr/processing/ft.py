@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 
 import numpy as np
-import nmrglue.process.proc_base as _proc_base
+from . import windows as _windows
 import scipy.fft as _scipy_fft
 from scipy.optimize import minimize
 
@@ -232,7 +232,7 @@ def _window_exponential(n: int, dt: float, lb: float = 0.0) -> np.ndarray:
     shared with ``io.bruker``'s own "Recorded" ``WDW`` path rather than
     a second hand-rolled formula that could quietly drift from it."""
     sw_hz = 1.0 / dt
-    weights = _proc_base.em(np.ones(n, dtype=complex), lb=lb / sw_hz)
+    weights = _windows.em(np.ones(n, dtype=complex), lb=lb / sw_hz)
     return np.real(weights)
 
 
@@ -289,7 +289,7 @@ def _window_gaussian(n: int, dt: float, lb: float = 0.0, gb: float = 0.0) -> np.
     sw_hz = 1.0 / dt
     g1 = -lb / sw_hz
     g2 = gb / sw_hz
-    weights = _proc_base.gm(np.ones(n, dtype=complex), g1=g1, g2=g2, g3=0.5)
+    weights = _windows.gm(np.ones(n, dtype=complex), g1=g1, g2=g2, g3=0.5)
     return np.real(weights)
 
 
@@ -304,7 +304,7 @@ def _window_sine(n: int, dt: float, ssb: float = 0.0) -> np.ndarray:
     has real-data-validated) for Bruker's own recorded ``WDW``
     3/SINE."""
     off = 1.0 / ssb if ssb >= 2 else 0.0
-    weights = _proc_base.sp(np.ones(n, dtype=complex), off=off, end=1.0, pow=1.0)
+    weights = _windows.sp(np.ones(n, dtype=complex), off=off, end=1.0, pow=1.0)
     return np.real(weights)
 
 
@@ -313,7 +313,7 @@ def _window_qsine(n: int, dt: float, ssb: float = 0.0) -> np.ndarray:
     ``ssb`` convention, matching Bruker's own recorded ``WDW`` 4/QSINE
     (:func:`opennmr.io.bruker._apply_bruker_window`)."""
     off = 1.0 / ssb if ssb >= 2 else 0.0
-    weights = _proc_base.sp(np.ones(n, dtype=complex), off=off, end=1.0, pow=2.0)
+    weights = _windows.sp(np.ones(n, dtype=complex), off=off, end=1.0, pow=2.0)
     return np.real(weights)
 
 
