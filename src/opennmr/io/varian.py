@@ -7,11 +7,12 @@ are -- so every spectrum goes through this project's shared
 :mod:`opennmr.processing.ft` pipeline (apodize -> zero-fill -> FFT ->
 phase -> baseline) in Python.
 
-The raw binary ``fid``/``procpar`` read itself uses ``nmrglue.varian``
-(the same reasoning as :mod:`opennmr.io.bruker`'s use of nmrglue for
-its raw-data read: reproducing Varian's block-header binary format and
-hypercomplex-2D interleaving by hand is exactly the kind of DSP code
-where a subtle bug produces a plausible-looking but wrong result).
+The raw binary ``fid``/``procpar`` read is :mod:`opennmr.io.varian_binary`,
+this project's own -- no ``nmrglue``. It is pinned by a test asserting
+**byte-identical** output against ``nmrglue`` on the real datasets in
+``test_data``, which is the standard this kind of format code has to
+meet: a subtle error in header offsets or real/imaginary interleaving
+produces a plausible-looking but wrong spectrum rather than a crash.
 
 **Axis-referencing caveat**: the ppm axis below treats Varian's ``tof``
 (transmitter offset frequency) the same way :mod:`opennmr.io.xpulse`
@@ -32,10 +33,10 @@ from __future__ import annotations
 import os
 import re
 
-import nmrglue as ng
 import numpy as np
 
 from . import base
+from . import varian_binary
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from ..processing import ft as processing_ft
 
@@ -96,7 +97,7 @@ def read_1d(path: str, mass: float = 1.0,
     vendors hand back a raw FID and share this project's one
     processing pipeline (:mod:`opennmr.processing.ft`).
     """
-    dic, fid = ng.varian.read(path)
+    dic, fid = varian_binary.read(path)
     procpar = dic["procpar"]
     fid = np.asarray(fid, dtype=np.complex128)
     fid_raw = fid  # the truly raw FID -- see metadata.raw["fid_raw"]'s own comment below
@@ -224,7 +225,7 @@ def read_2d(path: str, mass: float = 1.0, pseudo_2d: bool | None = None,
     # nmrglue's own shape/torder auto-detection, which both warns and
     # falls back to unreshaped raw data for this kind of phase-arrayed
     # acquisition anyway.
-    dic, fid = ng.varian.read(path, as_2d=True)
+    dic, fid = varian_binary.read(path, as_2d=True)
     procpar = dic["procpar"]
 
     ni = _procpar_value(procpar, "ni", cast=int)
@@ -351,7 +352,7 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     increments, always recorded even for a 1D experiment, as ``1``)
     distinguishes 1D from 2D without needing to read the (potentially
     large) binary FID itself just to check its shape."""
-    procpar = ng.varian.read_procpar(os.path.join(path, "procpar"))
+    procpar = varian_binary.read_procpar(os.path.join(path, "procpar"))
     ni = _procpar_value(procpar, "ni", default=1, cast=int)
     if ni and ni > 1:
         return read_2d(path, **kwargs)

@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-08)
 
-1098 tests passing. Working tree clean, in sync with `origin/main`.
+1104 tests passing. Working tree clean, in sync with `origin/main`.
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -57,6 +57,33 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Dropping nmrglue, part 1: the Varian reader (2026-09-08)
+
+User: "Another big task is to remove our dependence on NMRglue... adding our own filter process and anything else that enables us to omit NMRglue entirely is a solid step forwards", then "we want to ensure we're byte comparable. Start with a varian reader replacement and then go for the filter."
+
+### The survey
+
+Smaller than it looks: **11 call sites in 4 files**, in five groups -- the digital filter (bruker x2, jeol x1), `read_acqus_file` (x2, and this project already has `parse_jcampdx_params`), `bruker.read` (x1, mostly superseded by `_read_bruker_binary`), `proc_base.em`/`sp` (x2, both already in `processing.ft.apodize`), and the Varian reader (x3).
+
+### Varian: done, and byte-identical
+
+`io/varian_binary.py` replaces `nmrglue.varian.read`/`read_procpar`. Verified against `nmrglue` on both real datasets: **identical shape, identical dtype, identical bytes**, and every one of the ~790 procpar entries equal *in all fields*, not just values. `varian.py` no longer imports nmrglue at all; its 25 existing tests pass untouched.
+
+Deliberately not a full reimplementation: nmrglue's `find_shape`/`find_torder`/`reorder_data` handle 3D/4D and imaging trace orderings this project never asks for (it passes `as_2d=True` for 2D and squeezes single-block data for 1D). Multi-trace blocks (`ntraces != 1`) raise a message naming nmrglue's own `read_fid_ntraces` rather than guessing -- there is no data here to check such a reader against.
+
+### The filter: written, measured, and **deliberately not shipped**
+
+`io/digital_filter.py` exists and is complete -- algorithm, the DSP lookup table, all three modes -- but **nothing imports it**, and its own docstring says why. Two unresolved findings:
+
+- **Not byte-identical on real data**, only within **1 ULP** (1.37e-16 relative, deterministic: 0/20 runs identical). On synthetic data it *was* exact -- 102 comparisons across all 37 real `(DECIM, DSPFVS, GRPDLY)` combinations in `test_data` x three modes, 0 mismatches. Every intermediate step matches nmrglue's byte-for-byte in isolation; both implementations are self-stable and neither mutates its input; the composition still differs by one bit. Not isolated.
+- **Wiring it in broke 24 tests**, several with "acqus does not contain a DECIM parameter" -- although nmrglue raises for a missing `DECIM` too and those same tests pass against it. So the two are reached differently, and that is not understood either.
+
+A 1-ULP difference cannot change a scientific conclusion. It was *unexplained* that mattered: an unexplained discrepancy inside a digital filter is precisely the silent, plausible, wrong failure this replacement is supposed to avoid, and the user set the bar at byte-comparable. Reverted rather than shipped with a loosened tolerance.
+
+**Where to pick it up**: the algorithm and the table are the slow part and they are done. What is needed is (a) isolating the one-bit composition difference, and (b) diagnosing why the missing-`DECIM` path is reached differently from nmrglue's. Start with (b) -- it is a plain control-flow question and may well explain (a).
+
+6 new tests (Varian byte-comparability).
 
 ## Tab strips that wrap, and VOCS over a selection in one step (2026-09-08)
 
