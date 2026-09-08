@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-08)
 
-1065 tests passing. **Uncommitted** -- four rounds of work (crosshair, reprocessing speedup, the six settled decisions, the VOCS/zoom-rectangle fixes) are in the working tree, not yet committed or pushed.
+1065 tests passing. Working tree clean, in sync with `origin/main` through `9642549` (crosshair, reprocessing speedup, the six settled decisions, and the VOCS/zoom-rectangle fixes -- four rounds in one commit, since they overlap in the same files).
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
