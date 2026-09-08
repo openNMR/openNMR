@@ -1,4 +1,4 @@
-from opennmr.io.jcampdx import parse_jcampdx_params
+from opennmr.io.jcampdx import parse_jcampdx_params, read_acqus_files
 
 ACQUS_FIXTURE = """\
 ##TITLE= Parameter file, synthetic test fixture
@@ -61,3 +61,45 @@ def test_parses_multiline_array_of_bracketed_names(tmp_path):
     path.write_text(ACQUS_FIXTURE)
     params = parse_jcampdx_params(str(path))
     assert params["GPNAM"] == ["", "SINE.100", "", "DiffBB_OW_2023-10-06_LP30_04G_150"]
+
+
+def test_bracketed_value_wrapped_across_lines(tmp_path):
+    # Bruker wraps long <...> values, putting the closing bracket on the
+    # next line. PROBHD really does this on real data, and getting it
+    # wrong returned '<2.5 mm MAS 1H/BB H9558/0002' -- opening bracket
+    # kept, tail lost. metadata.probe is what the probe gradient-default
+    # config is keyed by, so the two read paths disagreed on the same
+    # probe.
+    path = tmp_path / "acqus"
+    path.write_text("##$PROBHD= <2.5 mm MAS 1H/BB H9558/0002\n>\n##$NS= 4\n")
+
+    params = parse_jcampdx_params(str(path))
+
+    assert params["PROBHD"] == "2.5 mm MAS 1H/BB H9558/0002"
+    assert params["NS"] == 4.0          # parsing resumed correctly after it
+
+
+def test_inline_array_values_on_the_same_line(tmp_path):
+    # `##$QS= (0..7)83 83 ...` puts the size marker and the values on one
+    # line, unlike the commoner form where values start on the next.
+    # Missing this returned the whole thing as one meaningless string.
+    path = tmp_path / "acqus"
+    path.write_text("##$QS= (0..7)83 83 83 83 83 83 83 22 \n##$NS= 8\n")
+
+    params = parse_jcampdx_params(str(path))
+
+    assert params["QS"] == [83, 83, 83, 83, 83, 83, 83, 22]
+    assert params["NS"] == 8.0
+
+
+def test_read_acqus_files_collects_every_dimension(tmp_path):
+    expt = tmp_path / "expt"
+    expt.mkdir()
+    (expt / "acqus").write_text("##$NUC1= <1H>\n")
+    (expt / "acqu2s").write_text("##$NUC1= <13C>\n")
+
+    params = read_acqus_files(str(expt))
+
+    assert set(params) == {"acqus", "acqu2s"}      # acqu3s/4s absent, not invented
+    assert params["acqus"]["NUC1"] == "1H"
+    assert params["acqu2s"]["NUC1"] == "13C"

@@ -2394,10 +2394,9 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=Non
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
     return str(expt)
 
 
@@ -2425,16 +2424,15 @@ def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d
         row = np.exp(-t2 * 300) * np.exp(2j * np.pi * 1000.0 * t2)
         fid = np.tile(row, (n_f1, 1)).astype(np.complex128)
     dic = {"acqus": acqus, "acqu2s": acqu2s}
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     # read_acqus_file too: read_1d/read_2d take their parameters from it
     # now, rather than from a combined ng.bruker.read call. Without this
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
     # _guess_raw_2d_shape's real-file-scale TD/DTYPA/file-size logic
     # (see its own docstring in io/bruker.py) doesn't apply to this
     # small synthetic fixture -- bypass it so the mocked `fid` above
@@ -2822,16 +2820,15 @@ def test_main_window_processing_preview_pseudo2d_uses_only_active_slice(qapp, tm
     # A different decay rate per row -- slices are visibly distinct.
     fid = np.stack([np.exp(-t2 * 300 * (row + 1)) * np.exp(2j * np.pi * 1000.0 * t2) for row in range(n_f1)])
     dic = {"acqus": acqus, "acqu2s": acqu2s}
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     # read_acqus_file too: read_1d/read_2d take their parameters from it
     # now, rather than from a combined ng.bruker.read call. Without this
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
     monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
     window = MainWindow()
@@ -3154,10 +3151,9 @@ def test_main_window_unsupported_window_shows_notice_but_stays_reprocessable(qap
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
 
     shown = []
     monkeypatch.setattr(
@@ -3918,16 +3914,15 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
         rows.append(row)
     fid = np.array(rows)
     dic = {"acqus": acqus, "acqu2s": {"NUC1": "off", "BF1": 400.13, "O1": 0.0}}
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     # read_acqus_file too: read_1d/read_2d take their parameters from it
     # now, rather than from a combined ng.bruker.read call. Without this
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
     monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
     window = MainWindow()

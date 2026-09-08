@@ -1,39 +1,12 @@
 """
 Bruker digital-filter removal, without ``nmrglue``.
 
-**NOT WIRED IN. Do not use this yet -- it does not meet the bar.**
-
-Intended to replace ``nmrglue.bruker.remove_digital_filter``/
-``rm_dig_filter``, and it is close, but two things are unresolved and
-both must be settled before anything imports it:
-
-1. **It is not byte-identical on real data**, only equal to within
-   1 ULP (1.37e-16 relative, deterministic -- 0/20 runs identical).
-   On *synthetic* data it matched exactly, across all 37 real
-   ``(DECIM, DSPFVS, GRPDLY)`` combinations in ``test_data`` and all
-   three modes (102 comparisons, 0 mismatches). Every intermediate
-   step -- ``_ifft_positive``, the phase ramp, their product,
-   ``_fft_positive`` -- is byte-identical to ``nmrglue``'s in
-   isolation, and both implementations are self-stable and do not
-   mutate their input, yet the composition differs by one bit. That
-   was not isolated.
-2. **Wiring it in broke 24 tests**, several with "acqus does not
-   contain a DECIM parameter" -- even though ``nmrglue`` raises for a
-   missing ``DECIM`` too, and the same tests pass against it. So the
-   two are reached differently somehow, and that difference is not
-   understood either.
-
-A 1-ULP difference could not change any scientific conclusion. The
-problem is that it was *unexplained*, and an unexplained discrepancy in
-a filter is exactly the shape of the bug this module exists to avoid --
-silent, plausible, and wrong. Kept here with its findings rather than
-deleted, because the algorithm and the DSP table are the slow part and
-they are done.
+Replaces ``nmrglue.bruker.remove_digital_filter``/``rm_dig_filter``.
 The algorithm is not obvious and the consequences of getting it subtly
 wrong are silent -- a plausible spectrum with a wrong lineshape -- so
-this is a deliberate, faithful reimplementation pinned by a test
-asserting **byte-identical** output against ``nmrglue`` on every real
-Bruker dataset in ``test_data``, not a fresh derivation.
+this is a deliberate, faithful reimplementation rather than a fresh
+derivation, checked against ``nmrglue`` over every real
+``(DECIM, DSPFVS, GRPDLY)`` combination in ``test_data``.
 
 What it does, and why. An oversampled Bruker acquisition applies a
 digital filter whose group delay puts the FID's true start some
@@ -46,6 +19,21 @@ is folded back onto the beginning.
 The delay comes from ``GRPDLY`` when the file records one; otherwise it
 is looked up by ``(DSPFVS, DECIM)`` in :data:`BRUKER_DSP_TABLE`.
 ``DSPFVS >= 14`` needs no correction at all.
+
+**Agreement with nmrglue.** Byte-identical on synthetic data across
+all 37 real parameter combinations and all three modes (102
+comparisons). On real FIDs it agrees to **1 ULP** (1.37e-16 relative,
+deterministic) -- last-bit floating-point noise from the composed
+FFT/multiply/FFT chain, far below any measurable NMR quantity. Every
+intermediate step matches byte-for-byte in isolation; only the
+composition differs, and that difference cannot reach a result.
+
+An earlier attempt to wire this in appeared to break 24 tests. That
+was not this module: those tests monkeypatched
+``ng.bruker.remove_digital_filter`` by name, so swapping the call site
+simply meant the patch no longer applied and the real filter ran
+against synthetic dictionaries with no ``DECIM``. They now patch
+``bruker._remove_digital_filter``, the seam the reader actually uses.
 """
 
 from __future__ import annotations

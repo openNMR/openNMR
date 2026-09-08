@@ -1,5 +1,5 @@
 """
-Mocked-`ng.bruker.read`/`remove_digital_filter` coverage for `read_2d`
+Mocked-reader/`_remove_digital_filter` coverage for `read_2d`
 -- see test_bruker_raw_fid.py's module docstring for why this
 approach (real code, synthetic raw data) rather than real Bruker
 files, which aren't available in this environment.
@@ -58,13 +58,12 @@ def _mock_2d(monkeypatch, acqus, fid, acqu2s=None):
     dic = {"acqus": acqus}
     if acqu2s is not None:
         dic["acqu2s"] = acqu2s
-    monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker, "read_acqus_files", lambda path: dic)
     # read_1d/read_2d read the binary themselves now (see
     # bruker._read_bruker_binary) rather than via ng.bruker.read, so the
     # synthetic fid has to be injected at that seam too.
     monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker, "_remove_digital_filter", lambda d, data: data)
     # _guess_raw_2d_shape's own TD/DTYPA/file-size-based block-rounding
     # (see its own docstring) is real-file-scale logic that doesn't
     # apply to these small synthetic fixtures -- bypass it so the mock
@@ -593,12 +592,12 @@ def test_read_2d_loads_successfully_from_a_real_ser_file_td_mismatch(tmp_path):
         return data
 
     import opennmr.io.bruker as bruker_module
-    orig = bruker_module.ng.bruker.remove_digital_filter
-    bruker_module.ng.bruker.remove_digital_filter = _no_digital_filter
+    orig = bruker_module._remove_digital_filter
+    bruker_module._remove_digital_filter = _no_digital_filter
     try:
         spectrum = bruker.read_2d(str(expt), homonuclear=False, autophase=False, pseudo_2d=False)
     finally:
-        bruker_module.ng.bruker.remove_digital_filter = orig
+        bruker_module._remove_digital_filter = orig
 
     assert spectrum.data.shape[0] == n_f1  # zero-filled to proc2s's own SI
     assert spectrum.data_imag is not None

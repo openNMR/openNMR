@@ -52,10 +52,9 @@ def _mock_ng_bruker_read(monkeypatch, acqus, fid):
     # read_1d takes its parameters from read_acqus_file and its binary
     # from bruker._read_bruker_binary now, rather than getting both from
     # a single ng.bruker.read call -- so both seams need mocking.
-    monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda dic, data: data)
+    monkeypatch.setattr(bruker, "_remove_digital_filter", lambda dic, data: data)
 
 
 def test_read_1d_shape_and_scaling(tmp_path, monkeypatch):
@@ -310,10 +309,9 @@ def test_read_2d_unsupported_window_stays_on_raw_fid_path(tmp_path, monkeypatch)
     row = _synthetic_fid(n=32)
     fid = np.tile(row, (4, 1)).astype(np.complex128)
     dic = {"acqus": acqus, "acqu2s": acqu2s}
-    monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker, "_remove_digital_filter", lambda d, data: data)
     # See test_bruker_raw_2d.py's _mock_2d for why this is needed --
     # _guess_raw_2d_shape's real-file-scale TD/DTYPA/file-size logic
     # doesn't apply to this small synthetic fixture.
@@ -348,10 +346,9 @@ def test_read_2d_skips_prepare_fid_when_shift_align_lp_all_off(tmp_path, monkeyp
     row = _synthetic_fid(n=32)
     fid = np.tile(row, (4, 1)).astype(np.complex128)
     dic = {"acqus": acqus, "acqu2s": acqu2s}
-    monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker, "_remove_digital_filter", lambda d, data: data)
     # See test_bruker_raw_2d.py's _mock_2d for why this is needed --
     # _guess_raw_2d_shape's real-file-scale TD/DTYPA/file-size logic
     # doesn't apply to this small synthetic fixture.

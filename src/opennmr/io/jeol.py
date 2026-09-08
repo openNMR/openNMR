@@ -40,10 +40,10 @@ import os
 import re
 import struct
 
-import nmrglue as ng
 import numpy as np
 
 from . import base
+from . import digital_filter
 from ..processing import ft as processing_ft
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 
@@ -395,7 +395,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     # since FILTER_FACTOR is always already a known point count.
     filter_factor_param = _get_param(params, "FILTER_FACTOR")
     if filter_factor_param is not None and filter_factor_param["value"]:
-        fid = ng.bruker.rm_dig_filter(fid, decim=0, dspfvs=0, grpdly=float(filter_factor_param["value"]))
+        fid = digital_filter.rm_dig_filter(fid, decim=0, dspfvs=0, grpdly=float(filter_factor_param["value"]))
 
     fid_raw = fid  # the truly raw FID (post digital-filter removal only) -- see metadata.raw["fid_raw"]'s own comment below
     original_length = len(fid)

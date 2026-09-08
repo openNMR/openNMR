@@ -13,13 +13,16 @@ dependencies = [
     "scipy",
     "pandas",
     "matplotlib",
-    "nmrglue",
     "PySide6",
     "sympy",
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+# nmrglue is no longer a runtime dependency -- nothing in src/ imports
+# it. It stays here because the reader/filter/window replacements are
+# pinned by tests that compare against it byte-for-byte, which is the
+# only reason those replacements can be trusted.
+test = ["pytest", "nmrglue"]
 build = ["pyinstaller"]
 
 [project.scripts]

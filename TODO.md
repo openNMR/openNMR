@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-08)
 
-1173 tests passing. Working tree clean, in sync with `origin/main`.
+1179 tests passing. Working tree clean, in sync with `origin/main`. **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -58,25 +58,39 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
 
-## Dropping nmrglue, part 2: the apodization windows (2026-09-08)
+## nmrglue is gone (2026-09-08)
 
-`processing/windows.py` replaces `nmrglue.process.proc_base`'s `em`, `gm` and `sp` -- six call sites (four in `processing/ft.py`, two in `io/bruker.py`). **256 byte-identical comparisons, 0 mismatches**, over both complex dtypes, four array sizes, and the `inv`/`rev` flags -- *including* the degenerate `inv=True` case, where dividing by an apodization that decays to zero overflows: the inf/NaN patterns match too, which an implementation that merely avoided the warning would not manage.
+`src/` no longer imports `nmrglue` anywhere. It moved from a runtime dependency to a test-only one in `pyproject.toml`, kept solely because the replacements are pinned by tests that compare against it.
 
-They are short closed-form expressions, so these are transcriptions rather than reinterpretations: parameter names, flag order and the exact placement of `.astype(data.dtype)` are all preserved, since moving the cast alone shifts the last bits. `processing/ft.py` no longer imports nmrglue at all.
+### What replaced what
 
-### Blocked: `read_acqus_file`, and a real parser bug found on the way
+| was | now | agreement |
+|---|---|---|
+| `varian.read` / `read_procpar` | `io/varian_binary.py` | **byte-identical**, both real datasets, all ~790 procpar fields |
+| `proc_base.em` / `gm` / `sp` | `processing/windows.py` | **byte-identical**, 256 comparisons incl. inf/NaN overflow cases |
+| `bruker.read_acqus_file` | `jcampdx.read_acqus_files` | same values, three deliberate differences (below) |
+| `bruker.remove_digital_filter` / `rm_dig_filter` | `io/digital_filter.py` | byte-identical on synthetic (102 comparisons); **1 ULP** on real FIDs |
 
-This looked like the easy one -- `parse_jcampdx_params` already exists -- and it is 243/245 keys with no value differences on a typical dataset. But surveying **all** datasets turned up ten keys that genuinely differ, in three classes:
+### The "24 broken tests" was a red herring -- and it cost a round
 
-- **`PROBHD` is parsed wrongly by our own parser.** Its value can span two lines, with the closing `>` on the next one, and `parse_jcampdx_params` does not handle that: it returns `'<2.5 mm MAS 1H/BB H9558/0002'` -- opening bracket kept, closing one lost -- where nmrglue gives the stripped `'2.5 mm MAS 1H/BB H9558/0002\n'`. **This is a live bug, not just a swap blocker**: `metadata.probe` is what the probe gradient-default config is keyed by, and the raw-FID path (nmrglue) and the processed path (`parse_jcampdx_params`, e.g. `read_2d_processed`) therefore produce *different probe strings for the same probe* on any dataset whose PROBHD wraps.
-- **Booleans**: `LOCKED`, `LOCSHFT`, `NusFPNZ`, `PROSOL`, `scaledByNS`, `scaledByRG` -- nmrglue converts `yes`/`no` to `True`/`False`; ours leaves the strings.
-- **Indexed arrays**: `QS`, `QSB`, `WS` come back as a raw `'(0..7)83 83 ...'` string rather than a list.
+Wiring in the filter appeared to break 24 tests with "acqus does not contain a DECIM parameter", which looked like a real behavioural difference and was the reason it was reverted rather than shipped. It was not. **Those tests monkeypatched `ng.bruker.remove_digital_filter` by name**, so moving the call site meant the patch no longer applied and the real filter ran against synthetic dictionaries that never carried a `DECIM`. The same thing then happened again, at scale -- 150 failures -- the moment the last `import nmrglue` came out of `bruker.py`, because `bruker.ng` stopped existing.
 
-Plus `_comments`/`_coreheader`, which nmrglue synthesises and nothing here reads.
+Every one of those patches now targets the seam the reader actually uses (`bruker.read_acqus_files`, `bruker._remove_digital_filter`, `bruker._read_bruker_binary`), which is where they should have pointed all along: patching a third-party symbol by name silently stops testing anything the moment the code stops calling it by that name.
 
-Not swapped in this pass: a naive substitution would silently change `metadata.probe` and the boolean parameters. The PROBHD fix is worth doing on its own merits first, then the swap becomes safe. Note that matching nmrglue *exactly* there would mean reproducing its trailing-`\n` artifact, which is not worth preserving -- so this one will be "same result, deliberately cleaner", not byte-identical, and probe strings already stored in a probe config may need re-keying.
+With that understood, the filter's only remaining difference is **1 ULP** (1.37e-16 relative) on real FIDs -- last-bit noise from the composed FFT/multiply/FFT chain, orders of magnitude below any NMR quantity. Every intermediate step is byte-identical in isolation. Shipped, with the tolerance stated in its own tests.
 
-5 new test files' worth of coverage: 69 window tests.
+### Two real parser bugs found while replacing `read_acqus_file`
+
+Both in this project's own `parse_jcampdx_params`, both live before this change:
+
+- **A `<...>` value wrapped across lines was mangled.** `PROBHD` really does wrap, and it came back as `'<2.5 mm MAS 1H/BB H9558/0002'` -- opening bracket kept, tail lost. This mattered beyond the swap: `metadata.probe` keys the probe gradient-default config, and the raw-FID path (nmrglue) and the processed path (`parse_jcampdx_params`) therefore produced *different probe strings for the same probe*. Both now agree on the clean value.
+- **Inline arrays were not parsed at all.** `##$QS= (0..7)83 83 ...` puts the size marker and values on one line; only the values-on-the-next-line form was handled, so these came back as one meaningless string.
+
+### Deliberate differences from nmrglue
+
+- Six `yes`/`no` parameters (`LOCKED`, `LOCSHFT`, `NusFPNZ`, `PROSOL`, `scaledByNS`, `scaledByRG`) stay strings rather than becoming booleans. Nothing here reads them.
+- A wrapped `<...>` value comes back stripped rather than carrying nmrglue's trailing newline. A trailing newline in a probe name is an artifact, and this value is a config key -- **probe strings already saved in a probe config may need re-keying**.
+- `SPNAM`-style arrays containing `< >` (a bracketed *space*) parse as one value. nmrglue splits it into `'<'` and `'>'`, giving 65 entries for a 64-entry array. That one is simply a bug there.
 
 ## Dropping nmrglue, part 1: the Varian reader (2026-09-08)
 

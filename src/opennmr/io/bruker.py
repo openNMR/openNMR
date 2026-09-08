@@ -69,10 +69,10 @@ from __future__ import annotations
 import os
 
 import numpy as np
-import nmrglue as ng
 
 from . import base
-from .jcampdx import parse_jcampdx_params
+from . import digital_filter
+from .jcampdx import parse_jcampdx_params, read_acqus_files
 from ..processing import ft as processing_ft
 from ..processing import windows as processing_windows
 from ..core.registry import find_gamma
@@ -88,17 +88,16 @@ _WDW_NAMES = {0: "none", 1: "em", 2: "gm", 3: "sine", 4: "qsine"}
 
 
 def _remove_digital_filter(dic: dict, data: np.ndarray) -> np.ndarray:
-    """``ng.bruker.remove_digital_filter``, skipped when ``DECIM==1``
-    (no oversampling -- common for wideline/quadrupolar acquisitions
-    needing a very large SW, e.g. a Hahn-echo on a low-gamma nucleus).
-    There is then no digital filter to remove, and ``DECIM=1`` isn't
-    in nmrglue's own DECIM/DSPFVS lookup table -- it raises
-    ``ValueError: decim not in lookup table`` rather than treating
-    this as a no-op."""
+    """:func:`opennmr.io.digital_filter.remove_digital_filter`, skipped
+    when ``DECIM==1`` (no oversampling -- common for wideline/
+    quadrupolar acquisitions needing a very large SW, e.g. a Hahn-echo
+    on a low-gamma nucleus). There is then no digital filter to remove,
+    and ``DECIM=1`` isn't in the DECIM/DSPFVS lookup table -- it raises
+    rather than treating this as a no-op."""
     decim = dic.get("acqus", {}).get("DECIM")
     if decim is not None and float(decim) == 1.0:
         return data
-    return ng.bruker.remove_digital_filter(dic, data)
+    return digital_filter.remove_digital_filter(dic, data)
 
 
 def _guess_raw_2d_shape(dic: dict, ser_path: str) -> tuple[int, int]:
@@ -707,7 +706,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     # produced the reshape warning that motivated the 2D change; done
     # here too so both paths read their binary the same single way
     # rather than splitting into two conventions that could drift.
-    dic = ng.bruker.read_acqus_file(path)
+    dic = read_acqus_files(path)
     data = _read_bruker_binary(os.path.join(path, "fid"), dic)
     fid = _remove_digital_filter(dic, data).astype(np.complex128)
     fid = np.conj(fid)  # see _CONJUGATE_QUADRATURE_NOTE below
@@ -973,7 +972,7 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # uses nmrglue for the acqus/acqu2s parameter dicts themselves
     # (read_acqus_file, no pulse-program dependency) and the actual
     # digital-filter removal below (remove_digital_filter).
-    dic = ng.bruker.read_acqus_file(path)
+    dic = read_acqus_files(path)
     if _raw_fid_cache is not None:
         data = _raw_fid_cache
     else:
