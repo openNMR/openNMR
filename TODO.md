@@ -1,8 +1,8 @@
 # openNMR -- working notes and backlog
 
-## Where things stand (2026-09-08)
+## Where things stand (2026-09-09)
 
-1179 tests passing. Working tree clean, in sync with `origin/main`. **`src/` no longer imports nmrglue.**
+1182 tests passing. Working tree clean, in sync with `origin/main`. **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -33,7 +33,6 @@ Both of the first two were equally broken before the hypercomplex fix; neither i
 
 - **`NavigationToolbar2`'s view stack is never cleared** when this canvas rebuilds its figure (no `toolbar.update()` anywhere), so it accumulates references to Axes that no longer exist. `home()` behaves correctly in every case tested, and clearing on every contour redraw would throw away the user's zoom history -- so this is recorded, not fixed. If Back/Forward ever misbehave, start here.
 - **`QThread` background load.** There is still zero threading in `src/` outside the FFT worker pool. Would not reduce compute time but would keep the GUI responsive and cancellable. Design already written up in *Threading plan for big-data loading*.
-- **`read_2d` still applies the recorded phase on top of `align_echo`.** `read_1d` no longer does -- that double-correction cost it +0.9 of correlation against TopSpin's own echo-aligned data (see *Why the notebook and the GUI disagreed*). The argument is structural and applies to F2 identically, but there is no 2D echo dataset here with a TopSpin-aligned counterpart to verify against, so it was left alone rather than changed blind.
 - **Vectorising `_recompute_multi_row_data`'s per-row loop** -- the same fix already applied to `read_2d`. Its loop also handles echo-alignment and linear prediction, which genuinely are row-dependent, so it likely needs a "fast batched path only when neither is active" split rather than unconditional vectorisation.
 - **`acquisition_constants` reads only `acqus`.** Indirect-dimension (`acqu2s`) and processing (`procs`) parameters are not exposed to fitting equations. Needs a naming scheme that cannot collide with the direct dimension's.
 - **Mixed-axis slices on one contour** are skipped: the first slice's axis wins, because the panel has a single x-axis and rows and columns run along different dimensions. A second panel (below, for columns) is the obvious extension.
@@ -57,6 +56,31 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## read_2d drops the recorded phase when aligning an echo, too (2026-09-09)
+
+The other half of the 2026-09-08 `read_1d` fix. TopSpin's `PHC1` on an echo experiment compensates for transforming from `t = 0` of the echo rather than from its top; aligning the echo removes what that phase corrects, so applying it as well corrects the same thing twice. `read_2d`'s F2 branch was still doing it.
+
+**This is where it bites hardest.** The T2 echo series -- `hahnecho2d.enb`, `satrec2decho3.enb`, `hahn-echo.rjm` -- are exactly the 2D experiments that need Align Echo, and they record `PHC1` of **800-2000 degrees** (908.8 on `bruker_T2/11`, 812.5 on `7Li/11`, -1183 on `2p5mm/2005`).
+
+### Verified on a synthetic echo, because no 2D reference exists
+
+The 1D half was settled against TopSpin's own echo-aligned processing (999912-999915, `PHC1 = 0.00`): +0.12 -> +0.92 correlation. **There is no 2D equivalent in `test_data`** -- every `PHC1 = 0` experiment in that folder is 1D, checked -- so this half is proved on a synthetic echo with known ground truth instead, scored as the fraction of `|S|` the real part carries:
+
+| processing | score |
+|---|---|
+| aligned, no phase | **+0.545** (the target) |
+| unaligned + recorded PHC1 | +0.518 (TopSpin's own route -- fine) |
+| unaligned, no phase | +0.280 |
+| **aligned + recorded PHC1** | **+0.266** (worse than doing nothing) |
+
+The double correction lands *below* leaving the echo unaligned and unphased entirely.
+
+**Two real-data metrics were tried first and both were too weak to discriminate** -- correlation of the real part with the phase-independent magnitude, averaged over rows and then per-row, sat at ~0.55 for every variant because noise regions dominate it (the magnitude of noise is always positive). Worth recording so the next person does not repeat it: for a phasing question, score against known ground truth, not against a noisy self-consistency measure.
+
+Scoped strictly to `align_echo`, with `metadata.raw["recorded_phase_dropped"]` saying so; an ordinary 2D load still reproduces TopSpin's recorded first-order term, asserted by its own test.
+
+3 new tests.
 
 ## nmrglue is gone (2026-09-08)
 

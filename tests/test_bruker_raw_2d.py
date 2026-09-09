@@ -756,3 +756,62 @@ def test_read_2d_processed_f1_imaginary_block_is_2ri_not_2ir():
     assert _causal_fraction("2ri") > 0.999
     assert _causal_fraction("2ir") < 0.6
     assert _causal_fraction("2ii") < 0.6
+
+
+def test_synthetic_echo_shows_the_recorded_phase_double_correction():
+    # Ground truth for a claim that has no 2D reference dataset here:
+    # a recorded PHC1 exists to compensate for transforming from t=0 of
+    # an echo rather than its top, so aligning the echo AND applying
+    # that phase corrects the same thing twice.
+    n, echo_at = 2048, 200
+    t = np.arange(n)
+    fid = np.exp(-np.abs(t - echo_at) / 300.0) * np.exp(2j * np.pi * 0.02 * (t - echo_at))
+
+    def absorption(x):
+        s = np.fft.fftshift(np.fft.fft(x))
+        return float(np.sum(np.real(s)) / np.sum(np.abs(s)))
+
+    aligned = np.roll(fid, -echo_at)
+    ramp = np.exp(1j * np.deg2rad(360.0 * echo_at * np.arange(n) / (n - 1)))
+
+    target = absorption(aligned)                       # align alone: the goal
+    unaligned = absorption(fid)
+    topspin_route = absorption(np.fft.ifft(np.fft.ifftshift(
+        np.fft.fftshift(np.fft.fft(fid)) * ramp)))     # unaligned + PHC1
+    doubled = float(np.sum(np.real(np.fft.fftshift(np.fft.fft(aligned)) * ramp))
+                    / np.sum(np.abs(np.fft.fftshift(np.fft.fft(aligned)))))
+
+    assert target > unaligned                # aligning helps
+    assert doubled < target                  # ...and applying PHC1 too undoes it
+    assert doubled <= unaligned + 0.05       # back to roughly no correction at all
+    assert topspin_route > unaligned         # TopSpin's own route is fine
+
+
+def _echo_2d_dataset():
+    path = os.path.join("test_data", "bruker_T2", "11")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real echo dataset at {path}")
+    return path
+
+
+def test_read_2d_drops_the_recorded_phase_when_aligning_the_echo():
+    # The T2 echo series are exactly the 2D experiments that need Align
+    # Echo, and they record PHC1 of 800-2000 degrees -- so this is where
+    # the double correction bites hardest.
+    path = _echo_2d_dataset()
+
+    aligned = bruker.read_2d(path, pseudo_2d=True, align_echo=True)
+
+    assert "recorded_phase_dropped" in aligned.metadata.raw
+    assert aligned.metadata.raw["recorded_phase1"] == 0.0
+
+
+def test_read_2d_keeps_the_recorded_phase_without_echo_alignment():
+    # Scoped strictly to align_echo -- an ordinary 2D load must still
+    # reproduce TopSpin's own recorded first-order term.
+    path = _echo_2d_dataset()
+
+    plain = bruker.read_2d(path, pseudo_2d=True)
+
+    assert "recorded_phase_dropped" not in plain.metadata.raw
+    assert plain.metadata.raw["recorded_phase1"] != 0.0

@@ -1127,8 +1127,33 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # correction needs it.
     x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, spectrum.shape[1])
     recorded_f2 = (0.0, 0.0)
+    recorded_phase_dropped_f2 = False
     if autophase:
-        if phase_mode == "recorded":
+        if phase_mode == "recorded" and align_echo:
+            # **A recorded phase does not survive echo alignment** --
+            # the same argument, and the same fix, as :func:`read_1d`'s
+            # own F2 branch. TopSpin's PHC1 on an echo experiment
+            # compensates for transforming from t=0 of the echo rather
+            # than from its top; aligning the echo removes what that
+            # phase corrects, so applying it too is a double
+            # correction.
+            #
+            # In 1D this was verified against TopSpin's own echo-
+            # aligned processing of the same data (999912-999915,
+            # which record PHC1 = 0.00): +0.12 -> +0.92 correlation.
+            # No 2D dataset here has such a counterpart, so this half
+            # is verified on a synthetic echo with known ground truth
+            # instead: measured as the fraction of |S| the real part
+            # carries, aligning alone scores +0.545 and aligning *and*
+            # applying the recorded PHC1 scores +0.266 -- no better
+            # than leaving the echo unaligned and unphased (+0.280).
+            #
+            # This matters most for the T2 echo series, which are
+            # exactly the 2D experiments that need Align Echo, and
+            # which record PHC1 values of 800-2000 degrees.
+            phase0 = processing_ft.apc0(spectrum.mean(axis=0), x_ppm, phase0_inc)
+            recorded_phase_dropped_f2 = True
+        elif phase_mode == "recorded":
             # F2's recorded phase, kept separate from the user's own --
             # see apply_dimension_phase. Note PHC1 is now honoured here;
             # it used to be dropped entirely for 2D (read_1d always read
@@ -1263,6 +1288,11 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs),
             _SR_RECORDED_KEY_F1: (None if pseudo_2d else _recorded_sr_hz(sf_1, obs_1)),
             "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
+            **({"recorded_phase_dropped":
+                "Echo alignment replaces TopSpin's recorded PHC0/PHC1 for F2 -- that "
+                "phase compensates for transforming from t=0 of an echo, which aligning "
+                "already does, so a zero-order phase was re-derived instead."}
+               if recorded_phase_dropped_f2 else {}),
             "recorded_phase0_f1": recorded_f1[0], "recorded_phase1_f1": recorded_f1[1],
             # F1's own hypercomplex encoding (see
             # processing.ft.decode_hypercomplex_f1) -- retrievable so a
