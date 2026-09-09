@@ -18,14 +18,7 @@ Decided and built; see *Six settled decisions...* below. Export size for a slice
 
 ### 2. Deferred deliberately, with a written-up starting point
 
-- **True viewport-driven tiled reads** (re-fetch only the Bruker `XDIM` blocks under the current pan/zoom). See *Reprocessing a large 2D no longer re-reads the file...* -- reprocessing's own dominant cost is fixed (below), and the metadata a tiled reader would need (`block_shape`) is now recorded, but the reader itself needs new background-thread infrastructure that doesn't exist anywhere in this codebase (`QThread` background load, next bullet's neighbour in *Loose ends*) and hasn't been built. Also: `complex64` (halves a ~1 GB array) and view-limited F1 transforms for raw `ser` are still just plans, not code -- see *Planned, not built: load speed...*.
-
-### 3. ~~Known-broken~~ -- not bugs, resolved 2026-09-09
-
-`Cyclosporine/211`, `exam_CMCse_3/19` and `20200804_NaMgMnO.../31` were tracked as TopSpin-agreement failures (+0.011, +0.016, +0.026). The user identified them: **they are experiments that were never actually run, or NUS data** -- so there is no correct spectrum to agree with, and the low correlations are the honest answer rather than a defect. The LP-extrapolation and `TDeff`-windowing hypotheses recorded here were chasing a problem that does not exist. Genuinely sub-100%-sampled NUS still needs reconstruction, which is its own entry under *Loose ends*.
-
-### 4. Loose ends
-
+- **Load speed for large 2D datasets.** Re-profiled 2026-09-09 -- see *Planned, not built: load speed, re-measured*. The old plan is stale: the read is now 24% of a 19s load, while **reprocessing the data a second time right after loading it is 50%**. Ordered plan there, biggest item first (fold the saved processing into the initial read, measured at +0.18s against a 7.94s recompute). Tiled `XDIM` reads are deliberately deprioritised.
 - **`NavigationToolbar2`'s view stack is never cleared** when this canvas rebuilds its figure (no `toolbar.update()` anywhere), so it accumulates references to Axes that no longer exist. `home()` behaves correctly in every case tested, and clearing on every contour redraw would throw away the user's zoom history -- so this is recorded, not fixed. If Back/Forward ever misbehave, start here.
 - **Vectorising `_recompute_multi_row_data`'s per-row loop** -- the same fix already applied to `read_2d`. Its loop also handles echo-alignment and linear prediction, which genuinely are row-dependent, so it likely needs a "fast batched path only when neither is active" split rather than unconditional vectorisation.
 - **`acquisition_constants` reads only `acqus`.** Indirect-dimension (`acqu2s`) and processing (`procs`) parameters are not exposed to fitting equations. Needs a naming scheme that cannot collide with the direct dimension's.
@@ -50,6 +43,64 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Planned, not built: load speed, re-measured (2026-09-09)
+
+User: "plan out some other methods of improving the load speed of large 2D datasets. If topspin can do it faster than ca 10s then surely we can do it here too."
+
+**Re-profiled first, because the 2026-09-05 plan is now stale.** That plan said the render was 48% and the read 44%. Neither is true any more -- the duplicate read, `scipy.fft` workers and the raw-FID cache all landed since. Current EXSY (2048 x 65536, 633 MB `ser`):
+
+| stage | time | share |
+|---|---|---|
+| `_apply_loaded_processing_sidecar` -> `_recompute_multi_row_data` | **7.94 s** | **50%** |
+| `session.add` -> `read_2d` | 3.75 s | 24% |
+| `plot_2d_contour` (called **twice**) | 3.18 s | 20% |
+| widgets, sidecars, selection cascade | ~1 s | 6% |
+| **total** | **19.0 s wall** (15.8 s profiled) | |
+
+The read is no longer the bottleneck. **The single largest cost is reprocessing the data a second time, immediately after loading it.**
+
+### First, the TopSpin comparison, honestly
+
+TopSpin is not doing the same work. It displays its own **already-processed `2rr`** and never reprocesses from the raw `ser`. This project already has that path -- `read_2d_processed` reads the same dataset in **0.95 s**, and `use_processed=True` exposes it. So "TopSpin does it in ~10 s" is not evidence that reprocessing can be made that fast; it is a different task. Worth deciding separately whether openNMR should *offer* the fast path more prominently (below), but the reprocessing path should be judged on its own.
+
+### A. Fold the saved processing into the initial read (biggest win, ~7.8 s)
+
+`_load` reads with default settings, then `_apply_loaded_processing_sidecar` recomputes **every row** to apply what the sidecar saved. Measured: passing the sidecar's own `phase0`/`phase1` straight into `read_2d` costs **+0.18 s**, against a **7.94 s** recompute afterwards.
+
+This is exactly the fix that already worked for `pseudo_2d` and `magnitude` -- decide before the read, not after -- and `_initial_load_kwargs` (added for the background loader) is already the place it belongs.
+
+**What needs checking before building it**: only `phase0`/`phase1` currently overlap between the sidecar's keys and `read_2d`'s signature. Baseline correction, window/zero-fill overrides and the F1 terms are applied post-read today, so each needs classifying as *foldable* (a `read_2d` parameter) or *genuinely post-read*. The recompute cannot be deleted, only skipped when nothing is left for it to do -- and the result must be verified byte-identical to today's, the same standard the nmrglue replacements met.
+
+### B. Render the contour once, not twice (~1.6 s)
+
+`plot_2d_contour` is called **twice** per load. The two call sites were never traced (the 2026-09-05 plan guessed main canvas + Processing preview and never confirmed it). Trace first. Options once known: render once and share, or defer the non-visible one the way `_compare_view_stale` already defers Compare -- an established pattern here.
+
+### C. Vectorise `_recompute_multi_row_data` (helps every live reprocess, not just load)
+
+66,540 individual `fft_spectrum` calls in the profile: this path still loops per row, while `read_2d` was vectorised long ago (3-4x on the FFT). Even after (A) removes it from the load, it runs on every live reprocess, so the win is recurring. Its loop also does echo-alignment and linear prediction, which genuinely are row-dependent -- so it likely needs a batched fast path used only when neither is active, rather than unconditional vectorisation.
+
+### D. Vectorise `baseline_correct` across rows (~2.5 s within C)
+
+2,048 separate calls, 2.50 s. A polynomial baseline fit is a least-squares solve per row; `np.linalg.lstsq` handles a stack of right-hand sides in one call. Same "batched path when nothing row-dependent is on" shape as (C).
+
+### E. Offer the processed-data path as a real choice (0.95 s)
+
+`use_processed=True` already exists but is buried in a right-click menu. If someone just wants to look at what TopSpin shows, this is a **20x** faster load. Worth surfacing -- a preference, or a prompt on very large datasets -- but **not** as a silent default: the whole point of this project is reprocessing from raw, and quietly showing vendor-processed data instead would be a correctness surprise, not a speed feature.
+
+### F. Deprioritised: tiled/XDIM reads
+
+The previous plan's headline idea. `block_shape` metadata is recorded and ready, but the read is now 24% of the load and a tiled reader needs viewport-driven refetching on top. **(A) alone is worth more than eliminating the entire read**, so this should wait.
+
+### Suggested order
+
+1. **(A)** -- biggest measured win, and the pattern is already proven twice in this codebase.
+2. **(B)** -- trace the double render first, then decide.
+3. **(C)+(D)** -- one batched path, benefiting live reprocessing too.
+4. **(E)** -- a UI decision more than a performance one.
+5. **(F)** -- only if the read becomes the bottleneck again.
+
+Nothing above is implemented. Each step must be verified byte-identical against today's output before it counts, since every one of them changes when arithmetic happens rather than what it computes.
 
 ## A folder browser for the Data tab (2026-09-09)
 
