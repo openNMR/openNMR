@@ -40,6 +40,140 @@ CONTOUR_CMAP_NAMES = [
 ]
 
 
+#: Never shrink a label below this (points) trying to make it fit --
+#: past here it is unreadable, so a warning is more use than a smaller
+#: font. See :func:`fit_labels_within_figure`.
+LABEL_FIT_MIN_FONTSIZE = 5.0
+
+#: Multiplier per shrink attempt, and how many attempts before giving
+#: up. 0.85^6 ~ 0.38, i.e. a 16 pt label can reach ~6 pt.
+_LABEL_FIT_FACTOR = 0.85
+_LABEL_FIT_MAX_STEPS = 6
+
+
+def _layout_quietly(fig) -> bool:
+    """``fig.tight_layout()``, without letting matplotlib's own "Tight
+    layout not applied" ``UserWarning`` reach the user.
+
+    Returns whether the layout pass ran cleanly. That warning is not
+    noise -- it is matplotlib saying the decorations do not fit, which
+    is exactly the condition :func:`fit_labels_within_figure` then
+    acts on -- but it names no spectrum and offers no remedy, so it is
+    captured and answered rather than printed."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            fig.tight_layout()
+        except Exception:  # noqa: BLE001 -- a layout pass must never take a redraw down
+            return False
+    return not any("ight layout" in str(w.message) for w in caught)
+
+
+#: Slack (pixels) before a label counts as clipped. A tick label at
+#: the very end of an axis legitimately overhangs the figure edge by a
+#: pixel or two, and matplotlib does not treat that as a problem.
+_LABEL_FIT_TOLERANCE_PX = 2.0
+
+
+def _shrinkable_text_artists(fig):
+    """Every text artist worth shrinking to win back space -- tick
+    labels included, since their height is usually what pushes an axis
+    label off the figure in the first place."""
+    for ax in fig.axes:
+        for artist in (ax.xaxis.label, ax.yaxis.label, ax.title):
+            if artist.get_text():
+                yield artist
+        for artist in (*ax.get_xticklabels(), *ax.get_yticklabels()):
+            if artist.get_text() and artist.get_visible():
+                yield artist
+
+
+def clipped_labels(fig) -> list:
+    """Axis labels and titles falling outside ``fig``'s own bounds --
+    i.e. the ones a viewer would see cut off at an edge.
+
+    **Deliberately not tick labels.** The label at either end of an
+    axis routinely overhangs the figure edge slightly -- that is
+    ordinary matplotlib behaviour, not a defect -- so testing them
+    would report a perfectly good figure as clipped and shrink it for
+    no reason (measured: a plain 6 x 4 inch plot, driven to the 5 pt
+    floor by two end-of-axis tick labels). They are still *shrunk* as
+    part of the remedy; they just do not *trigger* it.
+
+    Measured against a renderer directly rather than by drawing the
+    figure: a full draw of a large 2D contour costs 0.3-1.3 s, far too
+    much to spend on a layout check, while measuring a text artist is
+    well under a millisecond."""
+    try:
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:
+        try:
+            renderer = fig._get_renderer()
+        except Exception:  # noqa: BLE001 -- no renderer, nothing measurable
+            return []
+    bounds = fig.bbox
+    tol = _LABEL_FIT_TOLERANCE_PX
+    clipped = []
+    for ax in fig.axes:
+        for artist in (ax.xaxis.label, ax.yaxis.label, ax.title):
+            if not artist.get_text():
+                continue
+            try:
+                box = artist.get_window_extent(renderer)
+            except Exception:  # noqa: BLE001 -- an unmeasurable artist is not a clip
+                continue
+            if (box.x0 < bounds.x0 - tol or box.y0 < bounds.y0 - tol
+                    or box.x1 > bounds.x1 + tol or box.y1 > bounds.y1 + tol):
+                clipped.append(artist)
+    return clipped
+
+
+def fit_labels_within_figure(fig, *, min_fontsize: float = LABEL_FIT_MIN_FONTSIZE) -> dict:
+    """Lay ``fig`` out so its axis labels are not cut off, shrinking
+    the text as far as necessary (and no further) to achieve it.
+
+    ``tight_layout`` alone is not a safeguard: it reserves room for
+    decorations *if the figure is big enough*, and simply gives up
+    (with a warning nobody sees) when it is not. A GUI canvas is sized
+    by the window, so "not big enough" is an ordinary state, not an
+    edge case -- measured, a 1D canvas below about 1.4 x 0.9 inches
+    and a 12-row stacked Compare below about 2.5 inches tall both put
+    the x label off the bottom of the figure entirely.
+
+    So: lay out, measure, and if anything is clipped, shrink every
+    label/tick/title by :data:`_LABEL_FIT_FACTOR` and lay out again,
+    down to ``min_fontsize``. Returns
+    ``{"fitted": bool, "steps": int, "clipped": [str, ...]}`` --
+    ``fitted`` False means the text is at the floor and *still* does
+    not fit, which is a real "make this panel bigger" situation the
+    caller should surface rather than silently accept.
+
+    Font sizes are changed on the *artists*, never on the caller's own
+    style settings, so this is a display-time accommodation: the next
+    rebuild re-applies the user's chosen sizes from scratch and a
+    canvas that has been made larger again comes back at full size.
+    """
+    _layout_quietly(fig)
+    clipped = clipped_labels(fig)
+    steps = 0
+    while clipped and steps < _LABEL_FIT_MAX_STEPS:
+        artists = list(_shrinkable_text_artists(fig))
+        if all(a.get_fontsize() <= min_fontsize for a in artists):
+            break
+        for artist in artists:
+            artist.set_fontsize(max(min_fontsize, artist.get_fontsize() * _LABEL_FIT_FACTOR))
+        _layout_quietly(fig)
+        clipped = clipped_labels(fig)
+        steps += 1
+    return {
+        "fitted": not clipped,
+        "steps": steps,
+        "clipped": sorted({a.get_text() for a in clipped}),
+    }
+
+
 def apply_tick_style(ax, direction='in', length=4.0, width=1.0, pad=4.0,
                       num_ticks=None, axis='both', minor=True, labelsize=None):
     """Apply consistent tick styling to an ``ax``: direction, size,

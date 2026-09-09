@@ -1,8 +1,8 @@
 # openNMR -- working notes and backlog
 
-## Where things stand (2026-09-07)
+## Where things stand (2026-09-09)
 
-1038 tests passing. Working tree clean, in sync with `origin/main`.
+1196 tests passing. Working tree clean, in sync with `origin/main`. **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -12,35 +12,14 @@
 
 Everything below has been *mentioned* and is *not built*. Ordered by how ready it is to be picked up, not by importance.
 
-### 1. Waiting on a decision -- each is a one-line change either way
+### 1. ~~Waiting on a decision~~ -- all six settled 2026-09-08
 
-| Thing | Currently | The alternative |
-|---|---|---|
-| Export figure size for a 2D **with extracted slices** | 7.5 x 10 (portrait, taken literally from the request) | 10 x 7.5 -- the sliced layout is contour + panel *side by side*, so it is wider than tall |
-| Dashed slice lines **on the contour** | linewidth 1.0 | 2.0, matching their traces ("linewidths of extracted slices should be 2" may have meant both) |
-| Extracted slice traces | normalised **per trace** | one **shared** amplitude scale, which keeps relative intensities honest between a weak row and the diagonal |
-| README banner | opaque | `openNMR_logo_banner_transparent.png` -- rejected because GitHub renders READMEs on dark backgrounds too, where the black "open" text would vanish |
-| Contour redraw **during** a phase drag | pure debounce: nothing moves until you pause | adaptive throttle -- live feedback when a rebuild is cheap (295 ms for an HSQC), debounce when it is not (1.34 s for the EXSY) |
-| Compare-list highlight | none pre-selected; highlight appears once a row is clicked | remove the highlight entirely |
+Decided and built; see *Six settled decisions...* below. Export size for a sliced 2D is now landscape (10 x 7.5); contour slice markers match their traces at linewidth 2.0; slice traces stay **per-trace** normalised (this one needed no change -- the code was already right and an older entry here was stale); the README banner stays opaque; contour redraw during a phase drag is now an adaptive throttle; and the Compare highlight stays, with its clickable area widened to the whole row band.
 
 ### 2. Deferred deliberately, with a written-up starting point
 
-- **The crosshair.** Removed at the user's request ("I still want it eventually"). See *Crosshair removed (deferred, not abandoned)* for why the blitting approach failed twice and what a third attempt has to solve first -- in short, standing down belongs in `onmove` and never in `ignore`, and that alone is not enough because this canvas issues `draw_idle()` from several of its own handlers.
-- **Faster loading of large datasets.** See *Planned, not built: load speed...*. Best idea is the user's own: Bruker's `XDIM` submatrices exist precisely so a viewer can read a *region*, and `read_2d_processed` already reconstructs those blocks -- it just reassembles all of them. Then `complex64` (halves a ~1 GB array), then view-limited F1 transforms for raw `ser`. Sparse matrices are examined there and do **not** apply: a 2D is not sparse before thresholding.
-- **A folder browser for the Data tab** (collapsible, MNova/TopSpin style). Same section. The widget is the easy part; what needs thought is what counts as a node (Bruker experiment directories and their `pdata/N` procnos, not raw filesystem depth), keeping loadability checks lazy, and distinguishing it from the existing *loaded*-spectra list.
-
-### 3. Known-broken, diagnosed but not fixed
-
-- **`Cyclosporine/211`** (Echo-Antiecho): +0.0113. F2 projection +0.71, **F1** +0.03. Ruled out: F1 linear prediction (disabling it gives +0.0250) and strip transform (`STSR=0`, `STSI=SI`). Most suspicious: `proc2s` asks for an **8x** LP extrapolation (`LPBIN=2048` from 128 complex points). Not demonstrated.
-- **`exam_CMCse_3/19`** (States-TPPI): +0.0164, and its interferogram fits nothing (residual 0.998). Here it is **F2** that is wrong (F2 projection +0.51, F1 +0.90). Most suspicious: `procs` has `TDeff=4096` with `SI=2048`, i.e. TopSpin windows over more points than it transforms -- a window computed over the wrong length changes the lineshape, which fits the symptom. Untested.
-- **`20200804_NaMgMnO.../31`**: an F2 agreement outlier at **+0.0262**, never investigated.
-
-Both of the first two were equally broken before the hypercomplex fix; neither is the hourglass.
-
-### 4. Loose ends
-
+- **Load speed for large 2D datasets.** Re-profiled 2026-09-09 -- see *Planned, not built: load speed, re-measured*. The old plan is stale: the read is now 24% of a 19s load, while **reprocessing the data a second time right after loading it is 50%**. Ordered plan there, biggest item first (fold the saved processing into the initial read, measured at +0.18s against a 7.94s recompute). Tiled `XDIM` reads are deliberately deprioritised.
 - **`NavigationToolbar2`'s view stack is never cleared** when this canvas rebuilds its figure (no `toolbar.update()` anywhere), so it accumulates references to Axes that no longer exist. `home()` behaves correctly in every case tested, and clearing on every contour redraw would throw away the user's zoom history -- so this is recorded, not fixed. If Back/Forward ever misbehave, start here.
-- **`QThread` background load.** There is still zero threading in `src/` outside the FFT worker pool. Would not reduce compute time but would keep the GUI responsive and cancellable. Design already written up in *Threading plan for big-data loading*.
 - **Vectorising `_recompute_multi_row_data`'s per-row loop** -- the same fix already applied to `read_2d`. Its loop also handles echo-alignment and linear prediction, which genuinely are row-dependent, so it likely needs a "fast batched path only when neither is active" split rather than unconditional vectorisation.
 - **`acquisition_constants` reads only `acqus`.** Indirect-dimension (`acqu2s`) and processing (`procs`) parameters are not exposed to fitting equations. Needs a naming scheme that cannot collide with the direct dimension's.
 - **Mixed-axis slices on one contour** are skipped: the first slice's axis wins, because the panel has a single x-axis and rows and columns run along different dimensions. A second panel (below, for columns) is the obvious extension.
@@ -64,6 +43,522 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Planned, not built: load speed, re-measured (2026-09-09)
+
+User: "plan out some other methods of improving the load speed of large 2D datasets. If topspin can do it faster than ca 10s then surely we can do it here too."
+
+**Re-profiled first, because the 2026-09-05 plan is now stale.** That plan said the render was 48% and the read 44%. Neither is true any more -- the duplicate read, `scipy.fft` workers and the raw-FID cache all landed since. Current EXSY (2048 x 65536, 633 MB `ser`):
+
+| stage | time | share |
+|---|---|---|
+| `_apply_loaded_processing_sidecar` -> `_recompute_multi_row_data` | **7.94 s** | **50%** |
+| `session.add` -> `read_2d` | 3.75 s | 24% |
+| `plot_2d_contour` (called **twice**) | 3.18 s | 20% |
+| widgets, sidecars, selection cascade | ~1 s | 6% |
+| **total** | **19.0 s wall** (15.8 s profiled) | |
+
+The read is no longer the bottleneck. **The single largest cost is reprocessing the data a second time, immediately after loading it.**
+
+### First, the TopSpin comparison, honestly
+
+TopSpin is not doing the same work. It displays its own **already-processed `2rr`** and never reprocesses from the raw `ser`. This project already has that path -- `read_2d_processed` reads the same dataset in **0.95 s**, and `use_processed=True` exposes it. So "TopSpin does it in ~10 s" is not evidence that reprocessing can be made that fast; it is a different task. Worth deciding separately whether openNMR should *offer* the fast path more prominently (below), but the reprocessing path should be judged on its own.
+
+### A. Fold the saved processing into the initial read (biggest win, ~7.8 s)
+
+`_load` reads with default settings, then `_apply_loaded_processing_sidecar` recomputes **every row** to apply what the sidecar saved. Measured: passing the sidecar's own `phase0`/`phase1` straight into `read_2d` costs **+0.18 s**, against a **7.94 s** recompute afterwards.
+
+This is exactly the fix that already worked for `pseudo_2d` and `magnitude` -- decide before the read, not after -- and `_initial_load_kwargs` (added for the background loader) is already the place it belongs.
+
+**What needs checking before building it**: only `phase0`/`phase1` currently overlap between the sidecar's keys and `read_2d`'s signature. Baseline correction, window/zero-fill overrides and the F1 terms are applied post-read today, so each needs classifying as *foldable* (a `read_2d` parameter) or *genuinely post-read*. The recompute cannot be deleted, only skipped when nothing is left for it to do -- and the result must be verified byte-identical to today's, the same standard the nmrglue replacements met.
+
+### B. Render the contour once, not twice (~1.6 s)
+
+`plot_2d_contour` is called **twice** per load. The two call sites were never traced (the 2026-09-05 plan guessed main canvas + Processing preview and never confirmed it). Trace first. Options once known: render once and share, or defer the non-visible one the way `_compare_view_stale` already defers Compare -- an established pattern here.
+
+### C. Vectorise `_recompute_multi_row_data` (helps every live reprocess, not just load)
+
+66,540 individual `fft_spectrum` calls in the profile: this path still loops per row, while `read_2d` was vectorised long ago (3-4x on the FFT). Even after (A) removes it from the load, it runs on every live reprocess, so the win is recurring. Its loop also does echo-alignment and linear prediction, which genuinely are row-dependent -- so it likely needs a batched fast path used only when neither is active, rather than unconditional vectorisation.
+
+### D. Vectorise `baseline_correct` across rows (~2.5 s within C)
+
+2,048 separate calls, 2.50 s. A polynomial baseline fit is a least-squares solve per row; `np.linalg.lstsq` handles a stack of right-hand sides in one call. Same "batched path when nothing row-dependent is on" shape as (C).
+
+### E. Offer the processed-data path as a real choice (0.95 s)
+
+`use_processed=True` already exists but is buried in a right-click menu. If someone just wants to look at what TopSpin shows, this is a **20x** faster load. Worth surfacing -- a preference, or a prompt on very large datasets -- but **not** as a silent default: the whole point of this project is reprocessing from raw, and quietly showing vendor-processed data instead would be a correctness surprise, not a speed feature.
+
+### F. Deprioritised: tiled/XDIM reads
+
+The previous plan's headline idea. `block_shape` metadata is recorded and ready, but the read is now 24% of the load and a tiled reader needs viewport-driven refetching on top. **(A) alone is worth more than eliminating the entire read**, so this should wait.
+
+### Suggested order
+
+1. **(A)** -- biggest measured win, and the pattern is already proven twice in this codebase.
+2. **(B)** -- trace the double render first, then decide.
+3. **(C)+(D)** -- one batched path, benefiting live reprocessing too.
+4. **(E)** -- a UI decision more than a performance one.
+5. **(F)** -- only if the read becomes the bottleneck again.
+
+Nothing above is implemented. Each step must be verified byte-identical against today's output before it counts, since every one of them changes when arithmetic happens rather than what it computes.
+
+## A folder browser for the Data tab (2026-09-09)
+
+User: "make sure that the bruker experiment folders are the appropriate 'destinations' because people generally won't know to click the fid/ser. Or at least only show those relevant files in the viewer."
+
+`gui/widgets/data_browser.py` -- pick a folder once, then click between its experiments instead of going back through Open... every time.
+
+### Experiments are the leaves
+
+A Bruker experiment is one node; its `fid`, `ser` and `pdata` never appear at all, because none of them is something a person should have to know to click. Same for X-Pulse: the leaf is the `.jdx` that is actually loadable, and the per-scan `..._raw.jdx` siblings are not offered.
+
+**Discovery is not reimplemented here** -- the tree is built from `MainWindow._scan_for_spectra`, the same scan Open... and drag-and-drop already use. That is what guarantees the browser cannot offer something Open would refuse, or hide something Open would find, and it already knew to stop at a recognised experiment rather than descending into it. Reusing it was the whole reason this was cheap.
+
+### Annotated without opening anything
+
+Each experiment carries a summary -- `203 · 1H, 2D, 1024x4096` -- from `io.peek`, which reads only the small parameter files: **~1 ms**, against seconds for a real load. (`peek` existed from the reprocessing round but was never exported from `opennmr.io`; it is now.)
+
+Peeking is **deferred until a folder is expanded**, so pointing this at a large archive costs nothing up front -- verified on a 75-experiment tree, where nested leaves stay unannotated until their folder opens. An experiment `peek` cannot read is still listed, just without a summary: it is still loadable, and hiding it would be worse.
+
+Loading goes through the same path as Open..., background read included. Placed below the loaded-spectra list and labelled "Browse a folder", because the two lists are easy to confuse -- this one is what is on disk, that one is what is open.
+
+7 new tests.
+
+## Background loading: the read comes off the GUI thread (2026-09-09)
+
+The first concurrency in this project outside the FFT worker pool, implementing part 4 of the 2026-09-05 threading plan (parts 1 and 3 -- the duplicate read and `scipy.fft` workers -- already landed).
+
+**Responsiveness, not speed, and the plan was explicit about why.** A large load spends roughly half its time in `plot_2d_contour`, and matplotlib figures and Qt widgets must stay on the GUI thread -- a hard Qt/Cocoa rule, not a tuning choice. So moving the read off leaves the window alive and cancellable without making anything finish sooner. Nothing here is sold as making loads faster.
+
+### Shape
+
+`gui/loader.py`: a `SpectrumReader` (plain `QObject`, moved with `moveToThread` rather than subclassing `QThread`, so it stays an ordinary object a test can call directly with no thread at all) and a `BackgroundLoader` owning one long-lived thread reused across loads.
+
+The boundary is the point: **the worker only calls `io.load`**. It never touches `Session`, whose two lists are mutable shared state, and never touches a widget or a figure. It hands the finished spectrum back by signal; the GUI thread then calls the new `Session.adopt`, which appends an already-read spectrum with the same bookkeeping `add` would have recorded, so `reload`/`reset`/`preview` still work afterwards.
+
+`MainWindow._load` gained an optional `preloaded=`; every existing synchronous caller is unchanged. The three open paths try `_load_async` first and **fall back to synchronous `_load`** if background loading is off or a thread cannot be started.
+
+`_initial_load_kwargs` was extracted so the worker reads with exactly the kwargs `_load` would have used -- both call it, so they agree by construction rather than by being kept in step by hand. This matters: it carries the pre-read pseudo-2D and magnitude decisions that exist to avoid reading a 2D twice.
+
+### Contract items honoured
+
+- **Threads, never `multiprocessing`** -- `spawn` (macOS/Windows) re-imports the parent module, would need every spectrum to pickle, and behaves differently again inside the PyInstaller bundle this project builds.
+- **`OPENNMR_BACKGROUND_LOAD=0`** forces the synchronous path, which is the same code called directly. An unparseable value is treated as "on" rather than raising -- a bad environment variable must not stop a spectrum loading, the same rule `fft_workers` follows.
+- **Cancellation is between stages**, not mid-FFT: a flag checked before and after the read, with the result discarded. Interrupting a running transform is not something this can honestly promise.
+- **Lifecycle**: a new `closeEvent` shuts the thread down. Without it Qt prints `QThread: Destroyed while thread is still running` and can abort the process on exit.
+- **No sleeps in the tests.** Waiting is signal-driven with a generous timeout; a timer-based test passes on a fast machine and flakes on a slow one, which is exactly the platform-dependent failure the contract forbids.
+
+Verified end to end on real data: the read genuinely runs on a different thread id from the GUI's, the session stays empty until it lands, and the window closes cleanly.
+
+7 new tests.
+
+## read_2d drops the recorded phase when aligning an echo, too (2026-09-09)
+
+The other half of the 2026-09-08 `read_1d` fix. TopSpin's `PHC1` on an echo experiment compensates for transforming from `t = 0` of the echo rather than from its top; aligning the echo removes what that phase corrects, so applying it as well corrects the same thing twice. `read_2d`'s F2 branch was still doing it.
+
+**This is where it bites hardest.** The T2 echo series -- `hahnecho2d.enb`, `satrec2decho3.enb`, `hahn-echo.rjm` -- are exactly the 2D experiments that need Align Echo, and they record `PHC1` of **800-2000 degrees** (908.8 on `bruker_T2/11`, 812.5 on `7Li/11`, -1183 on `2p5mm/2005`).
+
+### Verified on a synthetic echo, because no 2D reference exists
+
+The 1D half was settled against TopSpin's own echo-aligned processing (999912-999915, `PHC1 = 0.00`): +0.12 -> +0.92 correlation. **There is no 2D equivalent in `test_data`** -- every `PHC1 = 0` experiment in that folder is 1D, checked -- so this half is proved on a synthetic echo with known ground truth instead, scored as the fraction of `|S|` the real part carries:
+
+| processing | score |
+|---|---|
+| aligned, no phase | **+0.545** (the target) |
+| unaligned + recorded PHC1 | +0.518 (TopSpin's own route -- fine) |
+| unaligned, no phase | +0.280 |
+| **aligned + recorded PHC1** | **+0.266** (worse than doing nothing) |
+
+The double correction lands *below* leaving the echo unaligned and unphased entirely.
+
+**Two real-data metrics were tried first and both were too weak to discriminate** -- correlation of the real part with the phase-independent magnitude, averaged over rows and then per-row, sat at ~0.55 for every variant because noise regions dominate it (the magnitude of noise is always positive). Worth recording so the next person does not repeat it: for a phasing question, score against known ground truth, not against a noisy self-consistency measure.
+
+Scoped strictly to `align_echo`, with `metadata.raw["recorded_phase_dropped"]` saying so; an ordinary 2D load still reproduces TopSpin's recorded first-order term, asserted by its own test.
+
+3 new tests.
+
+## nmrglue is gone (2026-09-08)
+
+`src/` no longer imports `nmrglue` anywhere. It moved from a runtime dependency to a test-only one in `pyproject.toml`, kept solely because the replacements are pinned by tests that compare against it.
+
+### What replaced what
+
+| was | now | agreement |
+|---|---|---|
+| `varian.read` / `read_procpar` | `io/varian_binary.py` | **byte-identical**, both real datasets, all ~790 procpar fields |
+| `proc_base.em` / `gm` / `sp` | `processing/windows.py` | **byte-identical**, 256 comparisons incl. inf/NaN overflow cases |
+| `bruker.read_acqus_file` | `jcampdx.read_acqus_files` | same values, three deliberate differences (below) |
+| `bruker.remove_digital_filter` / `rm_dig_filter` | `io/digital_filter.py` | byte-identical on synthetic (102 comparisons); **1 ULP** on real FIDs |
+
+### The "24 broken tests" was a red herring -- and it cost a round
+
+Wiring in the filter appeared to break 24 tests with "acqus does not contain a DECIM parameter", which looked like a real behavioural difference and was the reason it was reverted rather than shipped. It was not. **Those tests monkeypatched `ng.bruker.remove_digital_filter` by name**, so moving the call site meant the patch no longer applied and the real filter ran against synthetic dictionaries that never carried a `DECIM`. The same thing then happened again, at scale -- 150 failures -- the moment the last `import nmrglue` came out of `bruker.py`, because `bruker.ng` stopped existing.
+
+Every one of those patches now targets the seam the reader actually uses (`bruker.read_acqus_files`, `bruker._remove_digital_filter`, `bruker._read_bruker_binary`), which is where they should have pointed all along: patching a third-party symbol by name silently stops testing anything the moment the code stops calling it by that name.
+
+With that understood, the filter's only remaining difference is **1 ULP** (1.37e-16 relative) on real FIDs -- last-bit noise from the composed FFT/multiply/FFT chain, orders of magnitude below any NMR quantity. Every intermediate step is byte-identical in isolation. Shipped, with the tolerance stated in its own tests.
+
+### Two real parser bugs found while replacing `read_acqus_file`
+
+Both in this project's own `parse_jcampdx_params`, both live before this change:
+
+- **A `<...>` value wrapped across lines was mangled.** `PROBHD` really does wrap, and it came back as `'<2.5 mm MAS 1H/BB H9558/0002'` -- opening bracket kept, tail lost. This mattered beyond the swap: `metadata.probe` keys the probe gradient-default config, and the raw-FID path (nmrglue) and the processed path (`parse_jcampdx_params`) therefore produced *different probe strings for the same probe*. Both now agree on the clean value.
+- **Inline arrays were not parsed at all.** `##$QS= (0..7)83 83 ...` puts the size marker and values on one line; only the values-on-the-next-line form was handled, so these came back as one meaningless string.
+
+### Deliberate differences from nmrglue
+
+- Six `yes`/`no` parameters (`LOCKED`, `LOCSHFT`, `NusFPNZ`, `PROSOL`, `scaledByNS`, `scaledByRG`) stay strings rather than becoming booleans. Nothing here reads them.
+- A wrapped `<...>` value comes back stripped rather than carrying nmrglue's trailing newline. A trailing newline in a probe name is an artifact, and this value is a config key -- **probe strings already saved in a probe config may need re-keying**.
+- `SPNAM`-style arrays containing `< >` (a bracketed *space*) parse as one value. nmrglue splits it into `'<'` and `'>'`, giving 65 entries for a 64-entry array. That one is simply a bug there.
+
+## Dropping nmrglue, part 1: the Varian reader (2026-09-08)
+
+User: "Another big task is to remove our dependence on NMRglue... adding our own filter process and anything else that enables us to omit NMRglue entirely is a solid step forwards", then "we want to ensure we're byte comparable. Start with a varian reader replacement and then go for the filter."
+
+### The survey
+
+Smaller than it looks: **11 call sites in 4 files**, in five groups -- the digital filter (bruker x2, jeol x1), `read_acqus_file` (x2, and this project already has `parse_jcampdx_params`), `bruker.read` (x1, mostly superseded by `_read_bruker_binary`), `proc_base.em`/`sp` (x2, both already in `processing.ft.apodize`), and the Varian reader (x3).
+
+### Varian: done, and byte-identical
+
+`io/varian_binary.py` replaces `nmrglue.varian.read`/`read_procpar`. Verified against `nmrglue` on both real datasets: **identical shape, identical dtype, identical bytes**, and every one of the ~790 procpar entries equal *in all fields*, not just values. `varian.py` no longer imports nmrglue at all; its 25 existing tests pass untouched.
+
+Deliberately not a full reimplementation: nmrglue's `find_shape`/`find_torder`/`reorder_data` handle 3D/4D and imaging trace orderings this project never asks for (it passes `as_2d=True` for 2D and squeezes single-block data for 1D). Multi-trace blocks (`ntraces != 1`) raise a message naming nmrglue's own `read_fid_ntraces` rather than guessing -- there is no data here to check such a reader against.
+
+### The filter: written, measured, and **deliberately not shipped**
+
+`io/digital_filter.py` exists and is complete -- algorithm, the DSP lookup table, all three modes -- but **nothing imports it**, and its own docstring says why. Two unresolved findings:
+
+- **Not byte-identical on real data**, only within **1 ULP** (1.37e-16 relative, deterministic: 0/20 runs identical). On synthetic data it *was* exact -- 102 comparisons across all 37 real `(DECIM, DSPFVS, GRPDLY)` combinations in `test_data` x three modes, 0 mismatches. Every intermediate step matches nmrglue's byte-for-byte in isolation; both implementations are self-stable and neither mutates its input; the composition still differs by one bit. Not isolated.
+- **Wiring it in broke 24 tests**, several with "acqus does not contain a DECIM parameter" -- although nmrglue raises for a missing `DECIM` too and those same tests pass against it. So the two are reached differently, and that is not understood either.
+
+A 1-ULP difference cannot change a scientific conclusion. It was *unexplained* that mattered: an unexplained discrepancy inside a digital filter is precisely the silent, plausible, wrong failure this replacement is supposed to avoid, and the user set the bar at byte-comparable. Reverted rather than shipped with a loosened tolerance.
+
+**Where to pick it up**: the algorithm and the table are the slow part and they are done. What is needed is (a) isolating the one-bit composition difference, and (b) diagnosing why the missing-`DECIM` path is reached differently from nmrglue's. Start with (b) -- it is a plain control-flow question and may well explain (a).
+
+6 new tests (Varian byte-comparability).
+
+## Tab strips that wrap, and VOCS over a selection in one step (2026-09-08)
+
+Two smaller items, taken together.
+
+### Wrapping tab strips
+
+Requested earlier: "maybe the subtabs for more dense tabs like analysis need to go over multiple lines so they are always visible when the window is smaller."
+
+**`QTabWidget` cannot do this**, and neither can a `QTabBar` subclass. The bar lays out in one row and, on overflow, either scrolls tabs behind arrows or elides their labels away; `setUsesScrollButtons(False)` only swaps one failure for the other. Subclassing does not rescue it because **`tabRect`/`tabAt` are not virtual** -- painting tabs at wrapped positions would leave hit-testing laid out in a single row, so clicks would select the wrong tab. Verified against the installed Qt rather than assumed.
+
+So `gui/widgets/wrapping_tabs.py`: a `FlowLayout` (Qt's own documented pattern -- `heightForWidth` is what makes wrapping real, since it tells a narrowing parent to grant more vertical space instead of clipping) plus a `WrappingTabWidget` of checkable buttons over a `QStackedWidget`, implementing the slice of `QTabWidget`'s API this project actually uses: `addTab`, `count`, `widget`, `indexOf`, `tabText`, `currentIndex`/`setCurrentIndex`, `currentWidget`/`setCurrentWidget`, `setTabVisible`/`isTabVisible`, and a `currentChanged(int)` signal. Dropped into all three strips (`canvas_tabs` 6 tabs, `side_tabs` 5, `analysis_sub_tabs` 5) rather than special-casing Analysis; all 502 existing GUI tests passed on the swap untouched, which is the evidence the API match is real.
+
+**One bug caught by its own test**: `isTabVisible` first used `QWidget.isVisible()`, which is False for *every* child of a window that has not been shown yet -- so it reported a perfectly visible tab as hidden whenever the tree was off screen. `QTabWidget.isTabVisible` reports the *requested* state, so this now uses `not isHidden()`, which is independent of ancestors.
+
+### VOCS over a selection, in one step
+
+"I should be able to select multiple spectra and apply VOCS and sum all in one fell swoop, not apply VOCS per spectrum and then select all and sum."
+
+The spectrum list is already `ExtendedSelection`, and `processing.vocs.vocs_sum` already takes a list -- so this needed no new machinery, only a second way to choose the inputs. New `_selected_1d_spectra` (skips any 2D caught in a drag-select; returns list order, not click order, so a composite is reproducible) feeding a shared `_run_vocs_sum` that both entry points now use, so the Compare-stack and selection routes cannot drift apart.
+
+Reachable two ways deliberately: a **"VOCS Sum (selected spectra)"** button in the VOCS tab, and a spectrum-list right-click item that names the count. Same pairing rationale as the extracted-slice bar -- the context menu is the fast route, but a context menu is not somewhere people look.
+
+9 new tests.
+
+## The raw FID ignored Bruker's acquisition `NC`, so experiments were 8x apart (2026-09-08)
+
+User: "In general it just seems that the more negative end of the VOCS is giving much higher intensities here than in the nmrtools2 version."
+
+### The bug
+
+`NC` is the **acquisition-side** counterpart of `NC_proc`: TopSpin stores the FID scaled by `2**-NC` so it uses the integer range well, and the true amplitude is recovered by multiplying back. **`_read_bruker_binary` never read it.**
+
+On the 17O VOCS series three of the four experiments record `NC = -3` and one records `NC = 0`, so those three read exactly `2**3 = 8x` high relative to the fourth -- and two of the three are the negative-offset acquisitions, which is what made it present as an asymmetry rather than a uniform error.
+
+| | relative to the 5900 ppm experiment |
+|---|---|
+| TopSpin's own echo-aligned output | `[0.28, 1.00, 0.17, 0.14]` |
+| raw path, before | `[2.39, 1.00, 1.31, 1.17]` |
+| raw path, after | `[0.30, 1.00, 0.16, 0.15]` |
+
+The VOCS composite from the raw path now reads `[0.40, 1.00, 0.26, 0.27]` against nmrtools2's `[0.41, 1.00, 0.27, 0.27]` -- so **the GUI reproduces the notebook**, which is where this whole thread started.
+
+Fixed in `_read_bruker_binary`, which is the shared entry point for `fid` and `ser`, so 1D and 2D are both covered. It changes intensities for any Bruker dataset with `NC != 0`.
+
+### `acqus`, not `acqu` -- flagged by the user, and it mattered
+
+On this very dataset `acqu` records `NC = 0` for **all four** experiments while `acqus` carries the real `-3/0/-3/-3`. Reading the wrong file would have produced a correction that silently did nothing and looked like a working fix. `read_acqus_file` supplies only `acqus`, which is what makes this safe; pinned in a comment and asserted in a test so a future refactor cannot quietly switch files.
+
+### How long it took to find, and why
+
+Three wrong turns, all from comparing the wrong things:
+
+1. **Blamed the VOCS maths.** It was never VOCS -- once both sides were fed the same input, the implementation agreed with nmrtools2 to the digit.
+2. **Blamed the combination's denominator.** Real but separate (see the entry below); it did not cause this.
+3. **Compared against experiments 12-15** -- TopSpin's *unaligned* processing, with `PHC1` of ~400 degrees -- when the correct reference for an echo-aligned read is 999912-999915. Peak heights between differently-phased spectra are not comparable, so the numbers looked inconsistent in a way that hid the clean factor of 8.
+
+What actually settled it was dropping to the **raw FID amplitudes and the acquisition parameters themselves**, rather than any processed comparison. `DTYPA` differing on one experiment (float64 vs int32) was a red herring found on the way; `NC` was two columns over in the same table.
+
+**The general lesson**: when relative intensities between datasets are wrong but each looks individually fine, suspect a per-dataset *storage* scaling exponent before suspecting the processing. Bruker has two (`NC`, `NC_proc`), and this codebase was applying only one.
+
+3 new tests.
+
+## Why the notebook and the GUI disagreed on VOCS: they read different data (2026-09-08)
+
+User: "Why is it that when I use the jupyter notebook in nmrtools2 with the following code, I get what is expected and I am not getting that in the GUI?"
+
+**It was never the VOCS maths.** `nmrtools2.NMR1dimport` reads TopSpin's **already-processed `1r`** ("Import a processed 1D Bruker TopSpin NMR spectrum" -- its own first line). openNMR's `_read_auto` sees a `fid` and takes the **raw-FID path**, reprocessing from scratch. On this dataset those are not close:
+
+| exp | corr(raw-reprocessed, TopSpin `1r`) |
+|---|---|
+| 12 | +0.615 |
+| 13 | +0.654 |
+| 14 | +0.544 |
+| 15 | +0.493 |
+
+And -- what actually ruins a VOCS combination -- **the relative scaling across the series inverts**. TopSpin's processed peaks are `[1077, 3542, 702, 517]`, i.e. relative `[0.30, 1.00, 0.20, 0.15]` with exp 13 dominant; the raw path gives `[6971, 2505, 6637, 4017]`, relative `[1.00, 0.36, 0.95, 0.58]` with exp 12 dominant. Combining those cannot look like the same experiment.
+
+**Proved by running both.** `nmrtools2.VOCSSum` on these four gives per-slice relative peaks `[0.41, 1.00, 0.27, 0.27]`. openNMR's own `vocs_sum` fed from `read_1d_processed` gives **exactly** `[0.41, 1.00, 0.27, 0.27]`; fed from the raw path it gives `[1.00, 0.26, 0.69, 0.66]`. So the VOCS implementation agrees with the reference to the digit once both are given the same input. (Absolute values differ by 2x, which is the deliberate profile normalisation from the entry below.)
+
+**Not a magnitude-mode miss**: `PH_mod=1` on all four ("apply the recorded PHC0/PHC1"), and `read_1d` does apply both. The raw path simply does not yet reproduce TopSpin's handling of these Hahn echoes (`hahnecho_d7.ids30`, `PHC1` of 387-419 degrees). Measured for the record, since it says where the remaining gap is: forcing magnitude mode correlates +0.98/+0.98/+0.73/+0.96, and `align_echo` + `apc0` gives +0.95/+0.95/+0.86/+0.90 -- both far better than the +0.49..+0.65 default, neither yet a reproduction.
+
+### The escape hatch
+
+New `use_processed=True` on the Bruker reader, and a spectrum-list right-click item that toggles between **"Use TopSpin's processed data"** and **"Reprocess from the raw FID"**. Verified through `io.load` end to end: it reproduces the notebook's `[0.41, 1.00, 0.27, 0.27]` exactly.
+
+Reprocessing from raw stays the default -- it is the point of the project -- and the menu label always names what the click will *do* rather than the current state. The GUI already *reported* `loaded_from_processed` in its info panel but had no way to *ask* for it; now it does, and a requested switch is tagged with its own reason string.
+
+### And then the real bug: a recorded phase cannot survive echo alignment
+
+The user pointed at experiments **999912-999915** -- "the equivalent of align echo in processing" -- i.e. TopSpin's own echo-aligned processing of the same four datasets. That is a direct reference for what `align_echo` should produce, and the vendor's own parameters state the physics outright:
+
+| | `PHC0` | `PHC1` |
+|---|---|---|
+| 12 / 13 / 14 / 15 | -253 / -195 / -59 / -239 | **387 / 410 / 419 / 419** |
+| 999912 / .../ 999915 | -80 / +14 / +165 / -50 | **0.00** |
+
+TopSpin's `PHC1` on an echo experiment exists *precisely* to compensate for transforming from `t = 0` of the echo instead of from its top. Aligning the echo removes the thing that phase corrects -- so applying it as well is a **double correction**, and the recorded `PHC0` no longer applies either (it differs completely between the two sets).
+
+`read_1d` was doing exactly that: `align_echo=True` with the default `phase_mode="recorded"` aligned the echo *and* applied the recorded `PHC0`/`PHC1`. Measured against 999912-999915:
+
+| | before | after |
+|---|---|---|
+| exp 12 | +0.1203 | **+0.9175** |
+| exp 13 | +0.0987 | **+0.9883** |
+| exp 14 | +0.3148 | **+0.9825** |
+| exp 15 | +0.5756 | **+0.9908** |
+
+Aligning the echo was *worse than not aligning at all* (+0.75/+0.65/+0.62/+0.46 for a plain load), which is why the earlier sweep in the entry above made `align_echo` look useless -- the alignment was fine, the phase applied on top of it was not.
+
+Now, when `align_echo` is on and the phase mode is `"recorded"`, the recorded phase is dropped and a zero-order phase re-derived instead (`apc0`), with `metadata.raw["recorded_phase_dropped"]` saying so. Scoped strictly to that combination -- an ordinary load still reproduces TopSpin's recorded phase exactly, asserted by its own test.
+
+**This is the same class of bug as the `align_echo`/`baseline_correct` interaction found on X-Pulse imaging data** (see the 2026-08-28 entry): one processing choice silently invalidating a *different* recorded parameter. Worth checking for wherever a recorded vendor parameter meets a processing option that changes what that parameter was measured against.
+
+### Still open
+
+`read_2d` takes `align_echo` too and applies the recorded F2 phase the same way, so the same double-correction is structurally present there. Not changed here: there is no 2D echo dataset with a TopSpin-aligned counterpart to measure against, and this round's whole point is that the measurement is what settled it.
+
+4 new tests.
+
+## VOCS scale: keep the original weighting, fix what it was scaled by (2026-09-08)
+
+User: "the intensities are not quite right. Is anything being normalised before being added or during the VOCS calculation? The spectra should maintain their original intensities." Then, after two attempts that overshot: "revert back to the original methodology, but just make sure that the scale of each individual spectrum is preserved properly across processing and addition steps."
+
+### The actual defect
+
+Two scale errors, both measured on the user's own 17O data (`VOCS_example_Data/15_02_26_Li2MnO3_O17_1_3mm`, experiments 12-15):
+
+1. **`vocs_power` peaks at 2.0, not 1.0.** Weighting by it directly multiplied every intensity by up to 2 (6971 -> 11908).
+2. **The sum had no denominator.** A bare `sum(S_i * w_i)`; the summed weight ranged **0 to 2.94** across the axis, so a peak could read nearly 3x taller purely for sitting where two acquisitions overlapped.
+
+Both are faithful ports of `nmrtools2`. Neither showed there because that package's plotting normalised every trace for display (`normalize=True`: `y_sum / max|y_sum|`). openNMR shows real intensities, so both surfaced at once. *A port can be exactly right about the maths and still wrong in a context whose conventions differ.*
+
+### What it does now
+
+Unchanged methodology -- **weight by the profile and combine** -- with the scale corrected in the two places it was wrong:
+
+- `apply_vocs` multiplies by `excitation_profile`, which is `vocs_power` normalised to **1.0 on resonance**. So a spectrum keeps its own intensity where the pulse excited it fully and is only ever attenuated off resonance. Measured: on-resonance ratio exactly 1.000000 on all four experiments, maximum gain anywhere exactly 1.0000.
+- `vocs_sum` is `sum(S_i * w_i) / plateau`, where `plateau = max(sum(w_i**2))` -- **nmrtools2's original bare sum, divided by one scalar.**
+
+**Why a scalar, not a per-point denominator** (this was got wrong twice before landing here). Feed a flat spectrum in and the bare sum reports `sum(w**2)`. *Where the offsets tile the range that is already flat*, so the bare sum is the true lineshape times a constant and only the constant needs removing. Measured between the outermost carriers on this project's own 17O geometry with the coverage gap filled: bare sum ripples **1.06x (1.3% rms)**, while the `sum(S*w)/sum(w)` weighted mean that briefly replaced it ripples **1.17x (3.5% rms)** -- i.e. the per-point denominator made an already-flat response *worse*, by imposing structure of its own. Dividing by the plateau leaves the lineshape untouched and makes the best-covered shift read true amplitude (verified: exactly 1000.0 for a synthetic flat spectrum of amplitude 1000).
+
+**The ripple that started all this was an acquisition problem, not an arithmetic one.** The four offsets sit at -6010, -2010, 5900 and 9900 ppm: spacings of 4000, **7910** and 4000 ppm against an excitation half-width of ~3687 ppm. That middle gap is wider than the pulse can reach, so there is a genuine dead zone, and the bare sum's response ripples **8.72x** across it. Adding one offset near 1950 ppm collapses that to **1.06x**. Every attempt to flatten it arithmetically -- matched filter, per-spectrum deconvolution, Wiener regularisation, weighted mean -- traded the ripple for a worse artifact, because no denominator can invent signal that was never excited. *The measurement to make first, when a VOCS composite looks wrong, is whether `sum(w**2)` is flat.*
+
+`vocs_power` is untouched, still exactly as ported.
+
+**Nothing divides by a small number anywhere.** The weights are at most 1.0 and the composite is a weighted mean, so no threshold, floor or regularisation is needed -- the whole class of failure below simply cannot arise.
+
+### Two reverted attempts, and why they are worth recording
+
+Both were mathematically defensible and both were wrong in practice. Recorded so a later session does not re-derive them.
+
+**Attempt 1 -- deconvolve: `apply_vocs` divides by the profile, `vocs_sum` as a matched filter `sum(S*w)/sum(w**2)`.** Recovers true amplitude in principle, and did: verified against synthetic ground truth to **4.5e-13**. But the profile has genuine nulls *inside* its own `|x| < 1.73` bandwidth window -- `sqrt(f1**2 + f2**2)` has both terms vanish together, reaching **2e-6** on real data -- so dividing amplifies whatever sits there by up to ~500,000x. The window bounds nothing, which is what the attempt assumed.
+
+**Attempt 2 -- the same, with a hard floor at 5% excitation.** Produced exactly what the user then reported: *"whatever you did with the windowing, I think it was inverted"*, then *"signal is large at the edges and suddenly drops to zero and has low intensity at the centres"*. Reproduced precisely: on exp 12 the true peak sits at `x = -0.40` (raw 5607), but the corrected maximum landed at `x = -1.35`, where raw is only -3457 and the profile 0.076 -- amplified 13x to -45455. The output's envelope was the mirror image of the excitation profile. The composite's own maximum sat at a coverage weight of **0.0028** while well-covered regions sat 4x lower, and 2288 contiguous hard-zeroed points gave the "sudden drop".
+
+A Wiener-regularised third form fixed the cliff and bounded the gain, but still traded a few percent of intensity bias for it. **The lesson is that the deconvolution was solving a problem VOCS does not have**: an individual offset acquisition is not meant to be valid across its whole sweep, so there is nothing to recover at the edges -- only noise to amplify. Weighting says "trust this where it was excited", which is the actual physics of the experiment.
+
+### Verified with `align_echo`, as the user asked
+
+`pulprog = hahnecho_d7.ids30`, so echo alignment is genuinely the right processing here. Both paths work and are pinned by a skipif-guarded real-data test over experiments 12-15.
+
+### Easier multi-select
+
+"Make it easier to select all and VOCS instead of one at a time": **Check All / Uncheck All** on the Compare tab, which is what VOCS Sum, Fit Curve and the compare plot all read from. Signals are blocked across the loop and the view refreshed once, since `itemChanged` triggers a full replot -- a dozen offsets would otherwise be a dozen redraws for one click.
+
+The **"Average instead of sum" checkbox is removed**: the combination is now itself an average, so the control no longer named a real choice. Removed rather than left with no effect -- same call as the old "Stack gap" spin box. `vocs_sum` still accepts `average=` and documents it as ignored.
+
+### Fixture rot, again
+
+`test_gui.py`'s VOCS fixture had the same fake `{"acqus": {"P1": p1}}` shape fixed in `test_vocs.py` last round (it survived only because `acquisition_constants` lowercases scalar keys). It also spanned 1600 Hz against a 50 kHz excitation bandwidth -- a range over which the profile is 1.0 to four decimals, so *any* correct behaviour is indistinguishable from a no-op there, and the only reason its assertion passed was the x2 bug it was unknowingly testing. Now a genuinely wide fixture with `P` as a real array.
+
+8 new tests, 2 rewritten.
+## Axis labels no longer get cut off: shrink to fit, then say so (2026-09-08)
+
+User: "Add some better safeguards to the plotting to ensure that the axis labels don't get cut off. Maybe some kind of warning or push to resize the font etc."
+
+### Why `tight_layout` was never a safeguard
+
+It reserves room for decorations *when the figure is big enough*, and quietly gives up when it is not -- emitting a `UserWarning` that names no spectrum, offers no remedy, and in a GUI nobody ever sees. A canvas is sized by the window, so "not big enough" is an ordinary state rather than an edge case.
+
+**Measured, not assumed** -- three real failures reproduced before writing anything:
+
+| Case | Result |
+|---|---|
+| 12-row stacked Compare @ 2.5 in tall | x label at **y0 = -37 px**, and `tight_layout` warned |
+| 1D canvas @ 1.4 x 0.9 in | x label at **y0 = -54 px** |
+| 1D canvas @ 1.0 x 0.7 in | x label at **y0 = -57 px, x0 = -17 px** |
+
+That `tight_layout` warning was already visible in this project's own test output (`test_main_window_compare_view_renders_once_tab_is_visited`) and had simply never been chased.
+
+### The fix
+
+`plotting.style.fit_labels_within_figure` replaces the bare `figure.tight_layout()` at all ten `MplCanvas` call sites (via a new `_apply_layout`): lay out, measure, and if an axis label is off the figure, shrink every label/tick/title by 0.85 and lay out again -- down to a 5 pt floor. Then report whether that was enough.
+
+- **Measured against a renderer, never by drawing.** A full draw of a large 2D contour costs 0.3-1.3 s; `Text.get_window_extent(renderer)` is under a millisecond. The whole pass costs 3-18 ms, and **0 steps / no change at all** on a figure with room to spare.
+- **Font sizes change on the artists, never on the canvas's own style settings**, so this is a display-time accommodation: the next rebuild re-applies the user's chosen sizes and a canvas made larger again comes back at full size.
+- **When even the floor isn't enough** (below roughly 0.8 x 0.5 in) the new `MplCanvas.labelsClipped` signal fires and `MainWindow` puts it in the status bar, naming the tab and the labels. Emitted only on a *change* of state -- a phase drag relayouts continuously and would otherwise repeat every frame -- with an empty emission as the all-clear that clears the message.
+- matplotlib's own "Tight layout not applied" warning is now captured rather than printed: it is the *condition* being answered, so it is acted on instead of leaked.
+
+### The false positive that shaped the design
+
+The first version tested **tick** labels for clipping too, and drove a perfectly good 6 x 4 in plot all the way to the 5 pt floor. The label at either end of an axis routinely overhangs the figure edge by a pixel or two -- ordinary matplotlib behaviour, not a defect. So `clipped_labels` triggers on **axis labels and titles only**, while tick labels are still *shrunk* as part of the remedy (their height is usually what pushes an axis label off in the first place). There is also a 2 px tolerance. Pinned by `test_fit_labels_leaves_a_roomy_figure_untouched`, which asserts `steps == 0` and unchanged fonts.
+
+### Not done
+
+Only `MplCanvas` routes through this. The standalone `plotting.oned`/`twod`/`fit` figure helpers still call `fig.tight_layout()` directly -- fine for a script picking its own figure size, and left alone rather than changed speculatively.
+
+8 new tests (5 style-level, 3 canvas-level).
+
+## VOCS could never find P1; a stranded zoom rectangle (2026-09-08)
+
+User: "the zoom dashed line box stays sometimes when switching around. The VOCS addition doesn't seem to work nicely, it can't seem to find P1. I thought that important parameters like P D L and CNST as well as gradients would be stored somehow in the metadata or something."
+
+### The parameters were already there -- VOCS just wasn't asking properly
+
+The user's expectation was exactly right, and the capability already existed: `acquisition_constants` expands the indexed vendor arrays (`_CONSTANT_ARRAYS` = `D`, `P`, `CNST`, `L`, `IN`, `INF`, `PL`, `PLW`, `SP`, `SPW`, `GPZ`, `GPX`, `GPY`) into pulse-programme names -- **781 constants** on a real dataset, including `p1`, `d1`, `cnst2`, `l4`, `gpz1`. It was built for fitting equations and nothing else ever used it.
+
+`vocs._pulse_length_us` instead did `if pulse not in acqus`. **That can never succeed**: a real `acqus` records `P` as a 64-entry *array*, so there is no `"P1"` key at all. Confirmed directly on the user's own data -- `"P1" in acqus` is `False` on every one of `VOCS_example_Data/.../12-15`. Now resolved through `acquisition_constants`.
+
+**Why no test caught it**: `tests/test_vocs.py`'s own fixture wrote `raw={"acqus": {"P1": p1}}` -- a literal `P1` key no vendor file has. The fixture encoded a format that does not exist, so the suite stayed green while the feature failed on every real dataset. The fixture now builds `P` as a real array. *A fixture that doesn't match the file format tests nothing but itself.*
+
+**Layering**: `acquisition_constants` moved to a new `core/acquisition.py`, because `processing` must not import `io` (`io.bruker` already imports `processing.ft`, so that direction is circular) and `core` imports neither. `io.bruker` re-exports it, keeping `bruker.acquisition_constants` as its established public name.
+
+**A second, real bug found by the tests during the fix**: a Bruker `acqus` carries all 64 `P` slots and a sequence uses two or three, so most resolve to `0.0`. Going through `acquisition_constants` made those *found* rather than missing -- and `pulse_to_w1(0)` is a division by zero, so asking for an unused pulse turned a clear "not found" into a bare `ZeroDivisionError`. A zero pulse is now rejected like a missing one, and the message names the pulses actually set (`P1 (1 us), P2 (2 us)`) rather than listing all 64.
+
+**Verified on the real dataset the user pointed at** (`VOCS_example_Data/15_02_26_Li2MnO3_O17_1_3mm`, experiments 12-15): 17O on Li2MnO3, four offset acquisitions at O1 = +671, +400, -136, -407 kHz -- a genuine VOCS series. All four now load, correct individually, and `vocs_sum` recombines them onto one axis (-13381 .. +17278 ppm, all finite). Pinned as a skipif-guarded real-data test.
+
+### The zoom rectangle that would not go away
+
+`NavigationToolbar2.release_zoom` returns immediately when `_zoom_info is None`, and is the **only** caller of `remove_rubberband`. So a zoom drag that never gets its release -- the figure rebuilt underneath it by a spectrum or tab switch mid-drag -- leaves the Qt backend's `_draw_rect_callback` installed, and every later repaint redraws that same dashed box over unrelated content. `_zoom_info` is also left holding a destroyed Axes.
+
+Cleared in `_clear_figure`, the single choke point every rebuild already goes through (the same one the crosshair teardown uses), via a new `_cancel_navigation_drag`.
+
+**The crosshair did not cause this but made it obvious.** The leak predates it; blitting repaints on every mouse move, and each repaint re-ran the stale callback -- so a box that used to sit there until the next full redraw now gets redrawn continuously. Fixed at the state, not at the repaint.
+
+### The remaining piece, not built
+
+`acquisition_constants` still reads only `acqus` (the pre-existing *Loose ends* entry). Indirect-dimension (`acqu2s`) and processing (`procs`) parameters are still not exposed, and still need a naming scheme that cannot collide with the direct dimension's. Nothing in this round changed that.
+
+6 new tests (4 pulse-resolution incl. one real-data, 1 rubber-band, 1 fixture-correction), 1 fixture rewritten to the real `acqus` format.
+
+## Six settled decisions, and a wider click target for a stacked Compare row (2026-09-08)
+
+User asked for the long-pending "waiting on a decision" list as clickable options, and settled all six in one pass.
+
+**Verified against the code before asking, not just read off this file** -- the standing lesson that an append-only log goes stale silently paid off immediately: the table claimed extracted slice traces were per-trace normalised with "one shared amplitude scale" as the alternative, while an older entry below claims the shared scale was already adopted. The code settles it: `_draw_slice_panel` computes `scale = (slot * offset_fraction) / heights[i]` per trace, with a comment saying so. The table was right, the older entry is stale (it was changed back on the explicit request "the extracted projections should be normalised"). The user independently reached the same conclusion ("this is already done I'm pretty sure"). **No change made for that one** -- the remaining five are below.
+
+### What changed
+
+- **Export size for a 2D with extracted slices: 7.5 x 10 -> 10 x 7.5.** The sliced layout puts the trace panel *beside* the contour, so it is genuinely wider than tall; the portrait default predated the panel actually sitting there.
+- **Contour slice markers now match their traces at linewidth 2.0** (they take `_draw_slice_panel`'s own `linewidth` rather than a hardcoded 1.0). "Linewidths of extracted slices should be 2" meant both the traces and their markers.
+- **README banner stays opaque.** GitHub renders READMEs on dark backgrounds too, where the transparent banner's black "open" text would vanish.
+- **Contour redraw during a phase drag is now adaptive** rather than a flat 200 ms debounce. A contour already measured at or under `_LIVE_CONTOUR_REBUILD_LIMIT_S` (0.4 s -- chosen between the two real measurements, 295 ms for an HSQC and 1.34 s for the EXSY) redraws *during* the drag, throttled to one rebuild per its own measured duration so the drag's event handling keeps a share of the main thread. Anything slower keeps the debounce, where a live rebuild would just be a second-plus of frozen UI per frame.
+  Timings are recorded by `_redraw_2d_preserving_view` itself and keyed by **data shape**, not session index -- the cost is a property of the data size, and a shape key survives the reloads and index shifts that replace a spectrum object. The first drag on a given shape always debounces: nothing is measured yet, and guessing "cheap" would be exactly the wrong guess on the datasets that most need protecting. Either way the drag's own settle path still does a final authoritative redraw and cancels anything pending, so a throttled frame can never be the last word on screen.
+
+### The Compare highlight stays -- and got a bigger click target
+
+Kept (it is the only cue for which row scroll-zoom targets), plus a new request: the click area should "extend all the way to the next stacked spectrum... to include both the axis and the plotting spaces". Only a row's *data rectangle* is `inaxes`, so a click on its y-tick strip previously did nothing at all -- no `inaxes` meant `_on_press` returned before recording anything, so no row was selected.
+
+Now a left-press in a stacked Compare view is recorded before that guard (`_compare_click_start`), and resolved on release. **`event.inaxes` still wins whenever there is one** -- it is exact and matplotlib already did the hit-testing; the new `_compare_row_index_at_y` band lookup only resolves a press that has no `inaxes` at all. Each row's band runs to the midpoint of the gap to the next row, with the outermost bands reaching the figure edges; a click outside the whole stack (e.g. below the shared x-axis label) selects nothing rather than snapping to the nearest row.
+
+**A test caught a real design error here.** The first version resolved *every* compare click by y band, which broke `test_show_compare_stack_click_row_then_scroll_zooms_only_that_row`: its fabricated event says `inaxes=top_ax` but `y=100`, a pixel actually over the *bottom* row. That is an internally inconsistent fixture rather than a real-event scenario -- but it pointed straight at the right design, which is that the band is a *fallback*, never an override of matplotlib's own hit-testing. Fixing it that way made the existing test pass untouched, which is the signal that the change preserves the old behaviour instead of merely satisfying a rewritten assertion.
+
+7 new tests (5 adaptive-throttle, 2 Compare click-band). Two existing tests were updated rather than newly written, both because they asserted precisely the behaviour these decisions reversed: the export-size test (7.5 x 10 -> 10 x 7.5) and `test_plot_2d_contour_slice_traces_are_heavier_than_their_contour_lines`, which asserted markers were *thinner* than their traces and is now `..._slice_markers_match_their_traces`.
+
+## Reprocessing a large 2D no longer re-reads the file or redoes digital-filter removal (2026-09-08)
+
+User: "the EXSY datasets take too long to load and manipulate... plan and prepare the approach and make sure it scales well. This should probably include preparing the data in the bespoke, vendor-agnostic format."
+
+### The measurement that changed the plan
+
+TODO.md's own "load speed" section (below) was written from timing the *first* load and never separately measured reprocessing. Profiling the real EXSY dataset directly (`2p5mm/2019`) found something different was actually dominant: `read_2d` takes ~6.7s, and `_remove_digital_filter` (nmrglue's own `fsh2`-based GRPDLY removal -- two full-array, single-threaded `numpy.fft` calls plus two full-array `np.roll`-based shifts) alone costs **~2.4s** of that -- and it ran on **every** call, including a plain re-window or zero-fill change, because nothing about the raw, digital-filter-removed FID actually depends on any parameter `read_2d` takes except `path` itself (every other parameter is read only *after* the FID is already final). `Session.reload`/`reset`/`preview` -- wired from procno changes, "Apply Processing", pseudo_2d/magnitude toggles -- all call `io.load` fresh each time, so every one of those real, ordinary reprocessing actions was paying this cost from scratch.
+
+The live phase-drag preview (`_compute_processing_preview`) had already independently discovered this and works entirely from a cached `metadata.raw["fid_raw"]`, "no disk I/O" -- a convention already present, vendor-agnostically, in Bruker, Varian and X-Pulse's own readers. It just wasn't reused for a *committed* reload, only the live-drag view.
+
+### Three separable problems, asked about directly rather than assumed
+
+Put to the user as an explicit choice rather than guessed: vectorizing the `XDIM` submatrix reconstruction in `read_2d_processed` (a real ~4.5x win, measured, but declined this round), reusing the cached FID for reprocessing (chosen), lazy metadata-only groundwork in the vendor-agnostic format (chosen), and true viewport-driven tiled re-fetching on pan/zoom (declined -- needs `QThread` background-load infrastructure that doesn't exist anywhere in this codebase, and `NMRSpectrum.data` is a plain array mutated in place throughout the phase/baseline/processing code, so a tiled array could never *be* the authoritative spectrum, only a separate preview). A follow-up question clarified what "structuring the vendor-agnostic metadata" should actually mean: XDIM blocking is a property of Bruker's *processed* `2rr`, not the raw `ser` FID the reprocess fix caches -- a raw time-domain FID has no block structure to preserve -- so the groundwork became recording that on-disk block layout as metadata, not restructuring `.data` itself.
+
+### Reusing the cached FID for reprocessing
+
+`read_2d` gained `_raw_fid_cache` (internal -- not a GUI-facing reprocessing option): given a cached FID, it skips `_read_raw_2d_data` + `_remove_digital_filter` + the `.astype(complex128)`/`conj` copies entirely. `_read_auto` pops this kwarg up front and forwards it only into the raw-`ser` `read_2d` call, never into `read_1d`/`read_2d_processed`/`read_1d_processed`, which don't accept it. `Session._load_with` (backing `reload`/`reset`/`preview`) passes the *currently loaded* spectrum's own `metadata.raw["fid_raw"]` back in, gated on `vendor == "bruker"` -- always valid, since a session slot always reloads the same path, only kwargs change.
+
+Measured on the real EXSY dataset (steady state, after the process's own one-time scipy.fft worker-pool warm-up): a reprocess action (window change, zero-fill change) that used to cost several seconds now takes **~0.08-0.15s**. Verified as equivalence, not just speed: `read_2d(path, window="sine", _raw_fid_cache=cached)` produces bit-identical output to a fresh `read_2d(path, window="sine")` with no cache, and a test asserts `_read_raw_2d_data`/`_remove_digital_filter` are never called when the cache is supplied.
+
+### A metadata-only peek, and block layout as generic metadata
+
+`io.base.peek(path, vendor=None, **kwargs)` -- new, purely additive: dispatches to a vendor's own `peek()` if registered, else falls back to a full `load()` (correct, just not fast), so no existing vendor has to support it to keep working. `bruker.peek()` reads only `acqus`/`acqu2s`/`procs`/`proc2s` -- never `ser`/`fid`/`2rr`/`2ri` -- reusing the exact `si1`/`si2`/`XDIM`/`NUC1` parsing `read_2d_processed` already does (factored into a shared `_processed_2d_params` helper so nothing is duplicated). Direct groundwork for the still-deferred Data-tab folder browser, which needs exactly this: "is this loadable / what shape is it" without reading a potentially huge file per node.
+
+Whether a `pdata/<procno>` is 1D or 2D turned out not to be "does proc2s parse" (an empty/incomplete `proc2s` degrades gracefully to `xdim_f1=1`, same as before) but simply whether a `proc2s` file exists **at all** -- a 1D experiment's own `pdata` directory never has one, there being no F1 dimension to process. Getting this distinction right needed reading `_read_procs`'s actual behaviour, not assuming from `read_2d_processed`'s own control flow.
+
+Block layout: `read_2d_processed` already parsed `XDIM` for both dimensions purely to reshape the on-disk blocks -- now recorded as `metadata.raw["block_shape"]` (`(xdim_f1, xdim_f2)`, `None` when `xdim_f1 == 1`, i.e. no real structure), generically named rather than Bruker-specific, and reported by `peek()` from the identical parsed values. First synthetic test coverage of the `xdim_f1 != 1` submatrix-reconstruction branch at all (previously validated only via the real-data correlation suite, which `test_data` being gitignored makes unavailable in every environment) -- a small fixture encodes a known array into Bruker's own block layout (the literal inverse of `_load_block`'s reshape/transpose) and confirms `read_2d_processed` reconstructs it exactly.
+
+10 new tests (3 raw-FID-cache, 3 peek/1D-vs-2D, 2 block-shape/submatrix-reconstruction, 2 `io.base.peek` dispatch). 1053 passing (1045 -> 1053).
+
+## The crosshair, third attempt: a third distinct bug found and fixed (2026-09-07)
+
+Picked up from *Crosshair removed (deferred, not abandoned)* below, which named two things a working version had to solve: standing down belongs in `onmove`, never `ignore` (already fixed, previously); and that alone is not enough, because this canvas issues `draw_idle()` from a dozen of its own handlers, so a working version needs the crosshair to own its redraws.
+
+### What was actually wrong, once traced through matplotlib's own `MultiCursor` source (not just its docs)
+
+Two independent bugs, not one -- both attempts before this one kept the same two-cursor design throughout, so neither was ever isolated:
+
+1. **Two overlapping `MultiCursor` instances stomp each other.** The vertical cursor (contour + F2 strip) and horizontal cursor (contour + F1 strip) each keep their *own* cached blit background for the same canvas. `MultiCursor.onmove` unconditionally `restore_region`s its own background before drawing its own line -- so whichever cursor's `motion_notify_event` callback ran second (always the same one, by connection order) wiped the first one's just-drawn line before that frame was ever shown.
+2. **Teardown was lazy, keyed to `_on_motion`, which only runs on real mouse movement.** A contour that rebuilds several times with no intervening move -- a repeated contour-level-adjust scroll is the ordinary case, not an edge one -- left the old cursor(s) connected for that whole stretch. Their Axes are gone from `figure.axes` after `figure.clear()`, but matplotlib doesn't null a stale Axes' own `.figure` reference just because a rebuild dropped it from the list -- so a stale cursor's `onmove` kept computing real `ax.draw_artist` calls against the *live* renderer, through the *old* Axes' by-then-meaningless transform. That is what "filling the contour and not going away" actually was.
+
+### The fix
+
+One `_ContourCrosshair` (not two `MultiCursor`s) owning a single shared background, drawing both lines and blitting once per move. Every one of this canvas's own `figure.clear()` sites now goes through `_clear_figure`, which tears the crosshair down *synchronously*, in the same call that destroys the Axes it's bound to -- never waiting for a later `_on_motion` to notice. Created lazily, on the first mouse-move over a freshly built contour (`_ensure_crosshair`, called from `_on_motion`) rather than the moment `plot_2d_contour` returns -- eager creation was tried first and broke `test_set_nq_line_rebuilds_a_currently_shown_2d_contour`: its `axvline`/`axhline` artists land in `ax.lines`, and a contour nobody has hovered yet should show exactly the plotted data, nothing else.
+
+### A third bug, found live, after all headless tests passed
+
+User: "when I extract or clear a slice, until I move the cursor away from the plot it does the same 'solitaire effect', covering the plot." Real regression from the fix above, and exactly the kind of bug the previous entry warned a headless test can't see. A freshly created `_ContourCrosshair` starts with no cached background at all -- nothing has forced a real `draw()` (the only thing that fires `draw_event` -> the handler that captures one) since creation, and lazy creation means that happens *after* the rebuild's own `draw_idle()` has already fired and been consumed. `onmove` with no background skipped `restore_region` and drew straight onto whatever the Agg buffer already held, so lines accumulated on every move -- cleared only when the cursor left the axes, because `_hide` calls `draw_idle` unconditionally. Fixed by `onmove` itself forcing a synchronous `draw()` the first time it finds no background, before touching the lines' own position or visibility, so the captured frame is guaranteed clean.
+
+### What a headless test can and can't say here
+
+All three mechanisms above are covered by regression tests that assert on the *mechanism* (background is `None`/not `None`, a stale instance's `motion_notify_event` cid is disconnected, `restore_region`/`blit`/`draw` call counts) rather than rendered pixels -- each verified to fail with its own fix reverted. But the actual symptom in all three cases is a screen-pixel effect on a real backend, which is exactly why two previous attempts passed every test and still failed live.
+
+**Confirmed working live by the user, 2026-09-07** ("This works") -- hovering a contour, scrolling to adjust levels without moving the mouse, and extracting/clearing a slice. Closed.
+
+7 new tests. 1045 passing (1038 -> 1045).
 
 ## Axis units on a 2D, projections that survive a rescale, equations that read the data (2026-09-06)
 

@@ -610,16 +610,18 @@ def test_plot_2d_contour_without_slices_has_no_panel():
     plt.close(fig)
 
 
-def test_plot_2d_contour_slice_traces_are_heavier_than_their_contour_lines():
-    # "Linewidths of extracted slices should be 2." The dashed lines on
-    # the contour stay thinner, so they read as annotation over the data
-    # rather than competing with it.
+def test_plot_2d_contour_slice_markers_match_their_traces():
+    # "Linewidths of extracted slices should be 2" -- settled
+    # 2026-09-08 as meaning both the traces *and* their dashed markers
+    # on the contour, so a marker and its own trace read as one object.
+    # (These markers were previously a thinner 1.0, deliberately, as
+    # annotation over the data; the heavier pairing was chosen instead.)
     spectrum = _slice_test_spectrum()
     fig, ax, panels = twod.plot_2d_contour(
         spectrum, slices=[{"axis": "f1", "index": 6}, {"axis": "f1", "index": 17}],
     )
     assert {line.get_linewidth() for line in panels["slices"].lines} == {2.0}
-    assert all(line.get_linewidth() < 2.0 for line in ax.lines)
+    assert {line.get_linewidth() for line in ax.lines} == {2.0}
     plt.close(fig)
 
 

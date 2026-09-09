@@ -15,6 +15,7 @@ import dataclasses
 import json
 import os
 import re
+import time
 from io import StringIO
 
 import numpy as np
@@ -45,6 +46,9 @@ from .session import Session
 from .widgets.canvas import MplCanvas
 from .widgets.drag_control import DragHandle
 from .widgets.relative_spinbox import RelativeDoubleSpinBox
+from .widgets.data_browser import DataBrowser
+from .widgets.wrapping_tabs import WrappingTabWidget
+from .loader import background_load_enabled
 
 #: Genuinely unbounded spinbox range for phase controls -- a slider's
 #: fixed pixel-to-range mapping would force a tradeoff between coarse
@@ -230,6 +234,15 @@ class MainWindow(QMainWindow):
         self._canvas_2d_refresh_timer.setSingleShot(True)
         self._canvas_2d_refresh_timer.timeout.connect(self._run_debounced_canvas_2d_refresh)
         self._canvas_2d_refresh_pending_index: int | None = None
+        # How long a contour rebuild actually took, keyed by the
+        # spectrum's own data shape -- what
+        # _schedule_canvas_2d_refresh uses to decide between live
+        # throttling and pure debounce (see its docstring). Keyed by
+        # shape rather than session index because the cost is a
+        # property of the data size, and a shape key stays valid across
+        # the reloads and index shifts that replace a spectrum object.
+        self._contour_rebuild_seconds: dict[tuple, float] = {}
+        self._last_contour_rebuild_at: float = 0.0
         # Each spectrum's own load kwargs immediately after _load's
         # initial pseudo-2D-default handling, before any live
         # FID-processing/phase/baseline control ever touched it --
@@ -239,6 +252,11 @@ class MainWindow(QMainWindow):
         # that index, so the index is the stable handle here, same as
         # Session's own _load_info).
         self._original_load_kwargs: dict[int, dict] = {}
+        # Background-load thread (see gui.loader), created on first
+        # use, plus how many reads are still in flight so the status
+        # message clears only when the last one lands.
+        self._loader = None
+        self._pending_loads = 0
         # The per-slice pseudo-Voigt fit results from the most recent
         # Analysis-tab fit (NMR2D_fit_slices's own "rows" output) --
         # lets "Spectrum fit (slice #)" browse the intermediate spectral
@@ -303,7 +321,21 @@ class MainWindow(QMainWindow):
         # FID-processing choice.
         self.processing_preview_canvas = MplCanvas()
 
-        self.canvas_tabs = QTabWidget()
+        # Every canvas, not just the Spectrum one: a label falling off
+        # the figure is worth saying so wherever it happens, and each
+        # canvas lays itself out independently. The handler names which
+        # tab it came from, since only one is visible at a time.
+        for name, canvas in (
+            ("Spectrum", self.canvas), ("FID", self.fid_canvas),
+            ("Compare", self.compare_canvas), ("Fit", self.fit_canvas),
+            ("Spectral Fit", self.spectral_fit_canvas),
+            ("Processing Preview", self.processing_preview_canvas),
+        ):
+            canvas.labelsClipped.connect(
+                lambda labels, tab=name: self._on_labels_clipped(tab, labels)
+            )
+
+        self.canvas_tabs = WrappingTabWidget()
         self.canvas_tabs.addTab(self.fid_canvas, "FID")
         self.canvas_tabs.addTab(self.processing_preview_canvas, "Processing Preview")
         self.canvas_tabs.addTab(self.canvas, "Spectrum")
@@ -333,7 +365,7 @@ class MainWindow(QMainWindow):
         # that was just drawn to self.canvas.
         self.canvas_tabs.setCurrentWidget(self.canvas)
 
-        self.side_tabs = tabs = QTabWidget()
+        self.side_tabs = tabs = WrappingTabWidget()
         tabs.addTab(self._scrollable(self._build_spectra_tab()), "Data")
         self._processing_tab_index = tabs.addTab(self._scrollable(self._build_processing_tab()), "Processing")
         tabs.addTab(self._scrollable(self._build_analysis_tab()), "Analysis")
@@ -651,6 +683,31 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Kept {label}. Phase it, then use \u201cApply Phase to Source 2D\u201d "
             f"to push that phase back into the 2D.", 8000,
+        )
+
+    def _on_labels_clipped(self, tab: str, labels) -> None:
+        """Say so when a canvas cannot fit its own axis labels.
+
+        The layout pass already shrinks the text as far as it usefully
+        can (see ``MplCanvas._apply_layout``); reaching here means even
+        the floor was not enough, which only the user can resolve -- a
+        taller/wider window, or a narrower side panel. Silence would
+        just leave a figure rendering with its labels off the edge,
+        which is the thing being guarded against.
+
+        An empty ``labels`` is the all-clear, emitted when a previously
+        clipped canvas fits again -- clear the message rather than
+        leaving a stale warning on screen."""
+        if not labels:
+            self.statusBar().clearMessage()
+            return
+        names = ", ".join(str(text) for text in labels[:3])
+        if len(labels) > 3:
+            names += ", ..."
+        self.statusBar().showMessage(
+            f"{tab}: not enough room for the axis labels ({names}) even at the "
+            f"smallest font — make the window taller/wider, or narrow the side panel.",
+            8000,
         )
 
     def _slice_source_of(self, spectrum):
@@ -1011,6 +1068,19 @@ class MainWindow(QMainWindow):
         self.spectrum_list.customContextMenuRequested.connect(self._on_spectrum_list_context_menu)
         layout.addWidget(self.spectrum_list)
 
+        # Browse a folder's experiments without going back through
+        # Open… each time. Deliberately *below* the loaded-spectra list
+        # and labelled, because the two are easy to confuse: this one
+        # is what is on disk, that one is what is open.
+        browser_box = QGroupBox("Browse a folder")
+        browser_layout = QVBoxLayout(browser_box)
+        browser_layout.setContentsMargins(4, 4, 4, 4)
+        self.data_browser = DataBrowser()
+        self.data_browser.browseRequested.connect(self._on_browse_folder_clicked)
+        self.data_browser.spectrumActivated.connect(self._on_browser_spectrum_activated)
+        browser_layout.addWidget(self.data_browser)
+        layout.addWidget(browser_box, 1)
+
         remove_button = QPushButton("Remove")
         remove_button.clicked.connect(self._on_remove_clicked)
         clear_button = QPushButton("Clear All")
@@ -1140,7 +1210,8 @@ class MainWindow(QMainWindow):
             except ValueError:
                 unrecognised.append(path)
                 continue
-            self._load(path, vendor)
+            if not self._load_async(path, vendor):
+                self._load(path, vendor)
 
         if unrecognised and report_unrecognised:
             QMessageBox.critical(
@@ -1163,11 +1234,13 @@ class MainWindow(QMainWindow):
             return
 
         if len(matches) == 1:
-            self._load(*matches[0])
+            if not self._load_async(*matches[0]):
+                self._load(*matches[0])
             return
 
         for path, vendor in self._prompt_select_spectra(matches, directory):
-            self._load(path, vendor)
+            if not self._load_async(path, vendor):
+                self._load(path, vendor)
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 -- Qt override
         if event.mimeData().hasUrls():
@@ -1322,7 +1395,93 @@ class MainWindow(QMainWindow):
             return []
         return [matches[list_widget.row(item)] for item in list_widget.selectedItems()]
 
-    def _load(self, path: str, vendor: str) -> None:
+    def closeEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        """Stop the background-load thread before the window goes away.
+
+        Without this Qt prints ``QThread: Destroyed while thread is
+        still running`` and can abort the process on exit -- the thread
+        outlives the widget that owns it otherwise."""
+        if self._loader is not None:
+            self._loader.shutdown()
+            self._loader = None
+        super().closeEvent(event)
+
+    def _load_async(self, path: str, vendor: str) -> bool:
+        """Read ``path`` off the GUI thread, then finish the load here.
+
+        Returns whether the read was actually dispatched -- ``False``
+        means the caller should fall back to the synchronous
+        :meth:`_load` (background loading disabled, or a loader that
+        could not be started). The *only* thing that moves off the GUI
+        thread is the read itself; every widget, canvas and session
+        mutation still happens in the slot below, on the GUI thread.
+        See :mod:`opennmr.gui.loader` for why that boundary is where
+        it is."""
+        if not background_load_enabled():
+            return False
+        loader = self._background_loader()
+        if loader is None:
+            return False
+        self._pending_loads += 1
+        self.statusBar().showMessage(f"Loading {os.path.basename(path)}…")
+        loader.load(path, vendor, self._initial_load_kwargs(path, vendor))
+        return True
+
+    def _background_loader(self):
+        """The window's own loader thread, started on first use.
+
+        Lazily created so a session that never opens a file never
+        starts a thread, and so a failure to start one degrades to
+        synchronous loading rather than breaking the window."""
+        if self._loader is None:
+            try:
+                from .loader import BackgroundLoader
+
+                self._loader = BackgroundLoader(self)
+                self._loader.finished.connect(self._on_background_load_finished)
+                self._loader.failed.connect(self._on_background_load_failed)
+            except Exception:  # noqa: BLE001 -- fall back to loading synchronously
+                self._loader = None
+        return self._loader
+
+    def _on_background_load_finished(self, path: str, vendor: str, spectrum) -> None:
+        self._pending_loads = max(0, self._pending_loads - 1)
+        if not self._pending_loads:
+            self.statusBar().clearMessage()
+        self._load(path, vendor, preloaded=spectrum)
+
+    def _on_background_load_failed(self, path: str, vendor: str, message: str) -> None:
+        self._pending_loads = max(0, self._pending_loads - 1)
+        if not self._pending_loads:
+            self.statusBar().clearMessage()
+        QMessageBox.critical(self, "Failed to load spectrum", message)
+
+    def _initial_load_kwargs(self, path: str, vendor: str) -> dict:
+        """The reader kwargs a *first* load of ``path`` should use,
+        decided from its sidecars before any reading happens.
+
+        Split out so the background loader can read with exactly the
+        same kwargs :meth:`_load` would have used -- both call this, and
+        it is pure sidecar lookup, so the two agree by construction
+        rather than by being kept in step by hand."""
+        add_kwargs: dict = {}
+        if vendor == "bruker":
+            presel = io_persistence.load_metadata_sidecar(path)
+            add_kwargs["pseudo_2d"] = (presel or {}).get("pseudo_2d") is not False
+            # Magnitude mode has to be decided here too, for the same
+            # reason: it is applied by the *reader* (there is
+            # deliberately no second in-memory implementation, see
+            # _on_magnitude_toggled), so the sidecar-restore path --
+            # which recomputes from the cached raw FID rather than
+            # re-reading -- cannot apply it afterwards. Only an
+            # explicit saved choice is honoured; with none, the reader
+            # follows the file's own recorded PH_mod as usual.
+            saved_processing = io_persistence.load_processing_sidecar(path) or {}
+            if "magnitude_override" in saved_processing:
+                add_kwargs["magnitude"] = bool(saved_processing["magnitude_override"])
+        return add_kwargs
+
+    def _load(self, path: str, vendor: str, preloaded=None) -> None:
         # Decide the pseudo-2D treatment *before* the read, not after.
         # Every vendor reader sets metadata.source_path to exactly the
         # path handed to it, so this experiment's own saved preference
@@ -1341,23 +1500,15 @@ class MainWindow(QMainWindow):
         # readers this trace never measured. io.bruker._read_auto drops
         # `pseudo_2d` for the 1D branches, so passing it here is safe
         # without knowing yet whether `path` is 1D or 2D.
-        add_kwargs = {}
-        if vendor == "bruker":
-            presel = io_persistence.load_metadata_sidecar(path)
-            add_kwargs["pseudo_2d"] = (presel or {}).get("pseudo_2d") is not False
-            # Magnitude mode has to be decided here too, for the same
-            # reason: it is applied by the *reader* (there is
-            # deliberately no second in-memory implementation, see
-            # _on_magnitude_toggled), so the sidecar-restore path --
-            # which recomputes from the cached raw FID rather than
-            # re-reading -- cannot apply it afterwards. Only an
-            # explicit saved choice is honoured; with none, the reader
-            # follows the file's own recorded PH_mod as usual.
-            saved_processing = io_persistence.load_processing_sidecar(path) or {}
-            if "magnitude_override" in saved_processing:
-                add_kwargs["magnitude"] = bool(saved_processing["magnitude_override"])
+        add_kwargs = self._initial_load_kwargs(path, vendor)
         try:
-            spectrum = self.session.add(path, vendor=vendor, **add_kwargs)
+            if preloaded is not None:
+                # Already read, off the GUI thread (see gui.loader). The
+                # session's own lists are mutated here, on the GUI
+                # thread, and nowhere else.
+                spectrum = self.session.adopt(path, vendor, add_kwargs, preloaded)
+            else:
+                spectrum = self.session.add(path, vendor=vendor, **add_kwargs)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to load spectrum", str(exc))
             return
@@ -1604,6 +1755,24 @@ class MainWindow(QMainWindow):
         # pseudo-2D Compare-population step that follows it.
         self._on_list_selection_changed()
 
+    def _on_browse_folder_clicked(self) -> None:
+        """Point the Data-tab browser at a folder.
+
+        Deliberately does not load anything -- picking a folder to
+        browse and choosing what to open from it are separate acts,
+        which is the difference between this and Open Folder…."""
+        directory = QFileDialog.getExistingDirectory(self, "Choose a folder to browse")
+        if not directory:
+            return
+        matches = self._scan_for_spectra(directory)
+        self.data_browser.set_matches(directory, matches)
+
+    def _on_browser_spectrum_activated(self, path: str, vendor: str) -> None:
+        """Load an experiment picked in the browser -- the same path
+        Open… takes, background read included."""
+        if not self._load_async(path, vendor):
+            self._load(path, vendor)
+
     def _on_remove_clicked(self) -> None:
         row = self.spectrum_list.currentRow()
         if row < 0:
@@ -1661,6 +1830,41 @@ class MainWindow(QMainWindow):
         row = self.spectrum_list.currentRow()
         return row if 0 <= row < len(self.session) else None
 
+    def _selected_1d_spectra(self) -> list:
+        """Every 1D spectrum currently selected in the spectrum list,
+        in list order.
+
+        The list is ExtendedSelection, so Ctrl/Shift-picking a VOCS
+        series is one gesture -- this is what lets VOCS run over that
+        selection directly instead of going through the Compare tab."""
+        spectra = []
+        for item in self.spectrum_list.selectedItems():
+            index = self.spectrum_list.row(item)
+            if 0 <= index < len(self.session):
+                spectrum = self.session.spectra[index]
+                if spectrum.ndim == 1:
+                    spectra.append((index, spectrum))
+        return [s for _i, s in sorted(spectra, key=lambda pair: pair[0])]
+
+    def _on_vocs_sum_selection_action(self) -> None:
+        """Correct and combine the *selected* spectra in one step.
+
+        Explicit user request: "I should be able to select multiple
+        spectra and apply VOCS and sum all in one fell swoop, not apply
+        VOCS per spectrum and then select all and sum." Same
+        ``processing.vocs.vocs_sum`` the Compare-stack button uses --
+        that already takes a list, so this is only a different way to
+        choose it."""
+        stack = self._selected_1d_spectra()
+        if len(stack) < 2:
+            QMessageBox.information(
+                self, "Not enough spectra",
+                "Select at least two 1D spectra (Ctrl/Cmd-click or Shift-click) "
+                "to correct and combine in one step.",
+            )
+            return
+        self._run_vocs_sum(stack)
+
     def _on_spectrum_list_context_menu(self, pos) -> None:
         item = self.spectrum_list.itemAt(pos)
         if item is None:
@@ -1674,8 +1878,28 @@ class MainWindow(QMainWindow):
         suggest_action = menu.addAction("Suggest nucleus (500 MHz console / 100 MHz magnet)…")
         mass_action = menu.addAction("Set sample mass…")
         procno_action = None
+        use_processed_action = None
         if spectrum.metadata.vendor == "bruker":
             procno_action = menu.addAction("Change proc number…")
+            # Label says what the click will *do*, not the current
+            # state -- a menu item that reads as a description is
+            # ambiguous about whether clicking it toggles or confirms.
+            use_processed_action = menu.addAction(
+                "Reprocess from the raw FID"
+                if spectrum.metadata.raw.get("loaded_from_processed")
+                else "Use TopSpin's processed data"
+            )
+        # Offered straight from the selection, so a VOCS series is
+        # Ctrl-click, right-click, done -- explicit user request: "I
+        # should be able to select multiple spectra and apply VOCS and
+        # sum all in one fell swoop, not apply VOCS per spectrum and
+        # then select all and sum."
+        vocs_sum_action = None
+        if len(self._selected_1d_spectra()) >= 2:
+            menu.addSeparator()
+            vocs_sum_action = menu.addAction(
+                f"VOCS Sum ({len(self._selected_1d_spectra())} selected spectra)…"
+            )
         fit_curve_action = None
         if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
             menu.addSeparator()
@@ -1692,6 +1916,10 @@ class MainWindow(QMainWindow):
             self._on_set_mass_action(index)
         elif procno_action is not None and chosen is procno_action:
             self._on_change_procno_action(index)
+        elif use_processed_action is not None and chosen is use_processed_action:
+            self._on_use_processed_action(index)
+        elif vocs_sum_action is not None and chosen is vocs_sum_action:
+            self._on_vocs_sum_selection_action()
         elif fit_curve_action is not None and chosen is fit_curve_action:
             self._on_fit_curve_pseudo2d_action(index)
         elif chosen is remove_action:
@@ -1771,6 +1999,34 @@ class MainWindow(QMainWindow):
         self.spectrum_list.item(index).setText(self.session.label(index))
         if index == self._selected_index():
             self._on_selection_changed(index)
+
+    def _on_use_processed_action(self, index: int) -> None:
+        """Reload this spectrum from TopSpin's own processed data
+        instead of reprocessing its raw FID (and back again).
+
+        Reprocessing from raw is the default and the point of this
+        project, but the two genuinely disagree wherever this reader
+        cannot yet reproduce what TopSpin did -- on 17O Hahn-echo VOCS
+        data the raw path correlates only +0.49..+0.65 with TopSpin's
+        own ``1r``, and reorders which acquisition is tallest, so a
+        VOCS combination built from it looks like a different
+        experiment. This is the escape hatch for that, and for
+        comparing against anything that reads processed data (a
+        TopSpin plot, or an nmrtools2 notebook)."""
+        spectrum = self.session.spectra[index]
+        currently = bool(spectrum.metadata.raw.get("loaded_from_processed"))
+        try:
+            self.session.reload(index, use_processed=not currently)
+        except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
+            QMessageBox.critical(self, "Failed to switch data source", str(exc))
+            return
+        self.spectrum_list.item(index).setText(self.session.label(index))
+        if index == self._selected_index():
+            self._on_selection_changed(index)
+        self.statusBar().showMessage(
+            "Now showing TopSpin's own processed data." if not currently
+            else "Back to reprocessing the raw FID.", 6000,
+        )
 
     def _on_process_indirect_toggled(self, checked: bool) -> None:
         """Checked = process the indirect (F1) dimension as a real
@@ -1978,6 +2234,22 @@ class MainWindow(QMainWindow):
         self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
         layout.addWidget(self.compare_list)
+
+        # Checking a long list one row at a time is the slow path
+        # everything downstream depends on (Fit Curve, VOCS Sum, the
+        # plot itself) -- explicit user request while combining a VOCS
+        # series: "make it easier to select all ... instead of one at
+        # a time".
+        check_row = QHBoxLayout()
+        check_all_button = QPushButton("Check All")
+        check_all_button.setToolTip("Include every spectrum listed here in the comparison.")
+        check_all_button.clicked.connect(lambda: self._set_all_compare_checked(True))
+        uncheck_all_button = QPushButton("Uncheck All")
+        uncheck_all_button.setToolTip("Exclude every spectrum listed here from the comparison.")
+        uncheck_all_button.clicked.connect(lambda: self._set_all_compare_checked(False))
+        check_row.addWidget(check_all_button)
+        check_row.addWidget(uncheck_all_button)
+        layout.addLayout(check_row)
 
         reorder_row = QHBoxLayout()
         move_up_button = QPushButton("Move Up")
@@ -2590,6 +2862,23 @@ class MainWindow(QMainWindow):
 
     def _compare_checked_entries(self) -> list[tuple[int, int | None]]:
         return [entry for _row, entry in self._compare_checked_rows_and_entries()]
+
+    def _set_all_compare_checked(self, checked: bool) -> None:
+        """Check or uncheck every row of the Compare list at once.
+
+        Signals are blocked across the loop and the view refreshed
+        once at the end: ``compare_list.itemChanged`` triggers a full
+        replot, so toggling n rows individually would rebuild the
+        figure n times -- on a VOCS series of a dozen offsets that is
+        a dozen redraws for one click."""
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        blocked = self.compare_list.blockSignals(True)
+        try:
+            for row in range(self.compare_list.count()):
+                self.compare_list.item(row).setCheckState(state)
+        finally:
+            self.compare_list.blockSignals(blocked)
+        self._refresh_compare_view_if_active()
 
     def _on_move_compare_item(self, delta: int) -> None:
         """Reorders rows within the Compare tab's own list -- this is
@@ -4472,14 +4761,66 @@ class MainWindow(QMainWindow):
             elif on_processing_preview:
                 self._refresh_processing_preview_phase_only()
 
+    #: A contour rebuild at or under this (seconds) is cheap enough to
+    #: run *during* a phase drag, giving live feedback; anything slower
+    #: falls back to pure debounce, where nothing moves until the drag
+    #: pauses. Between the two real measurements this was chosen from:
+    #: 295 ms for a Cyclosporine/203 HSQC (live) and 1.34 s for the
+    #: EXSY (debounce). Explicit user choice of adaptive throttling
+    #: over always-debounce.
+    _LIVE_CONTOUR_REBUILD_LIMIT_S = 0.4
+
     def _schedule_canvas_2d_refresh(self, index: int) -> None:
-        """(Re)start the debounce timer for ``self.canvas``'s own 2D/
-        pseudo-2D contour redraw during a live phase drag -- see its
-        timer's own construction comment in ``__init__`` for why this
-        is debounced at all, rather than redrawing on every tick the
-        way the phase correction itself is applied."""
+        """Schedule ``self.canvas``'s own 2D/pseudo-2D contour redraw
+        during a live phase drag -- see the timer's own construction
+        comment in ``__init__`` for why this isn't simply redrawn on
+        every tick the way the phase correction itself is applied.
+
+        **Adaptive, not a fixed debounce.** A contour this canvas has
+        already rebuilt once and measured at or under
+        :attr:`_LIVE_CONTOUR_REBUILD_LIMIT_S` is redrawn *during* the
+        drag, throttled to one rebuild per its own measured duration --
+        so an HSQC phases visibly, instead of the user dragging blind
+        and only seeing the result on a pause. Anything slower (or not
+        yet measured at all) keeps the original 200 ms debounce, since
+        for the EXSY a live rebuild would be 1.34 s of frozen UI per
+        frame and strictly worse than showing nothing until the pause.
+
+        The first drag on a given shape always debounces: there is no
+        measurement yet, and assuming "cheap" would be exactly the
+        wrong guess on the datasets that most need protecting. The
+        settle redraw that pause produces is what records the timing
+        (see :meth:`_redraw_2d_preserving_view`), so a second drag on
+        the same spectrum can go live.
+
+        Either way this only ever *schedules*; the drag's own settle
+        path still does a final authoritative redraw and cancels
+        whatever is pending here, so a throttled frame can never be the
+        last word on screen."""
         self._canvas_2d_refresh_pending_index = index
-        self._canvas_2d_refresh_timer.start(200)
+        measured = self._contour_rebuild_seconds.get(self._contour_shape_for(index))
+        if measured is None or measured > self._LIVE_CONTOUR_REBUILD_LIMIT_S:
+            self._canvas_2d_refresh_timer.start(200)
+            return
+        # One rebuild per measured-duration at most, so the drag's own
+        # event handling keeps getting a share of the main thread
+        # rather than the redraws saturating it.
+        interval = max(0.05, measured)
+        elapsed = time.perf_counter() - self._last_contour_rebuild_at
+        if elapsed >= interval:
+            self._canvas_2d_refresh_timer.stop()
+            self._run_debounced_canvas_2d_refresh()
+            return
+        self._canvas_2d_refresh_timer.start(max(1, int((interval - elapsed) * 1000)))
+
+    def _contour_shape_for(self, index: int) -> tuple | None:
+        """The data shape :attr:`_contour_rebuild_seconds` is keyed by,
+        for session entry ``index`` -- ``None`` when there is no such
+        entry (an index left over from a removed spectrum), which
+        simply reads as "never measured"."""
+        if index is None or index < 0 or index >= len(self.session):
+            return None
+        return self.session.spectra[index].data.shape
 
     def _run_debounced_canvas_2d_refresh(self) -> None:
         index = self._canvas_2d_refresh_pending_index
@@ -4513,6 +4854,7 @@ class MainWindow(QMainWindow):
         drag, where a render failure must never raise (same reasoning
         as :meth:`_apply_phase_preview`'s own "2d" branch) -- skip the
         frame and let the next one catch up."""
+        started = time.perf_counter()
         try:
             xlim, ylim = self.canvas.ax.get_xlim(), self.canvas.ax.get_ylim()
             self.canvas.show_spectrum(spectrum)
@@ -4521,6 +4863,14 @@ class MainWindow(QMainWindow):
             self.canvas.canvas.draw_idle()
         except Exception:  # noqa: BLE001 -- see docstring
             pass
+        # Timed on every rebuild, including a failed one (a frame that
+        # bailed early is not evidence the real thing is cheap, but it
+        # also must not leave a stale fast measurement in place). This
+        # is what makes the live-vs-debounce choice in
+        # _schedule_canvas_2d_refresh self-calibrating rather than a
+        # guess from the data's shape.
+        self._last_contour_rebuild_at = time.perf_counter()
+        self._contour_rebuild_seconds[spectrum.data.shape] = self._last_contour_rebuild_at - started
 
     def _on_reset_processing_clicked(self) -> None:
         """Discard every live *processing* choice for the selected
@@ -6107,7 +6457,7 @@ class MainWindow(QMainWindow):
         # much information at once for a casual user, leaving room for
         # future analysis modes as further sub-tabs without any one
         # panel growing without bound.
-        self.analysis_sub_tabs = QTabWidget()
+        self.analysis_sub_tabs = WrappingTabWidget()
         self.analysis_sub_tabs.addTab(self._build_peak_picking_subtab(), "Peak Picking")
         self.analysis_sub_tabs.addTab(self._build_integration_subtab(), "Integration")
         self.analysis_sub_tabs.addTab(self._build_curve_fitting_subtab(), "Curve Fitting")
@@ -6669,13 +7019,34 @@ class MainWindow(QMainWindow):
         sum_intro = QLabel(
             "Corrects and combines every spectrum checked in the "
             "Compare tab onto one common ppm axis, added as a new "
-            "spectrum."
+            "spectrum. Intensities are preserved: each offset "
+            "contributes in proportion to how well it excited that "
+            "shift, so overlapping regions gain signal-to-noise "
+            "rather than amplitude. Use Check All on the Compare tab "
+            "to include a whole VOCS series at once."
         )
         sum_intro.setWordWrap(True)
         sum_layout.addWidget(sum_intro)
-        self.vocs_average_checkbox = QCheckBox("Average instead of sum")
-        sum_layout.addWidget(self.vocs_average_checkbox)
+        # No "Average instead of sum" control any more: the matched
+        # filter returns an intensity estimate rather than an
+        # accumulation, so sum-versus-average no longer names a real
+        # choice (see processing.vocs.vocs_sum). Removed rather than
+        # left as a control with no effect -- same call as the old
+        # "Stack gap" spin box.
+        # Two ways in, because the selection route is the fast one but
+        # a context menu is not somewhere people look -- same pairing
+        # as the extracted-slice bar and its right-click equivalent.
+        selection_sum_button = QPushButton("VOCS Sum (selected spectra)")
+        selection_sum_button.setToolTip(
+            "Correct and combine whatever is selected in the spectrum list, "
+            "in one step -- Ctrl/Cmd-click or Shift-click to pick a series. "
+            "No need to apply VOCS per spectrum first."
+        )
+        selection_sum_button.clicked.connect(self._on_vocs_sum_selection_action)
+        sum_layout.addWidget(selection_sum_button)
+
         sum_button = QPushButton("VOCS Sum (Compare stack)")
+        sum_button.setToolTip("Combine whatever is checked on the Compare tab instead.")
         sum_button.clicked.connect(self._on_vocs_sum_clicked)
         sum_layout.addWidget(sum_button)
         layout.addWidget(sum_box)
@@ -6893,13 +7264,22 @@ class MainWindow(QMainWindow):
         if not stack:
             QMessageBox.information(
                 self, "Nothing to combine",
-                "Check at least one 1D spectrum in the Compare tab first.",
+                "Check at least one 1D spectrum in the Compare tab first, "
+                "or select several in the spectrum list and use its right-click "
+                "“VOCS Sum (selected spectra)”.",
             )
             return
+        self._run_vocs_sum(stack)
+
+    def _run_vocs_sum(self, stack: list) -> None:
+        """Correct every spectrum in ``stack`` for its own excitation
+        profile and combine them onto one axis, added as a new
+        spectrum. Shared by both ways of choosing the spectra -- the
+        Compare tab's checked stack and the spectrum list's own
+        selection -- so the two cannot drift apart."""
         try:
             result = processing_vocs.vocs_sum(
                 stack, pulse=self.vocs_pulse_edit.text().strip() or "P1",
-                average=self.vocs_average_checkbox.isChecked(),
                 window_filter=self.vocs_window_filter_checkbox.isChecked(),
             )
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
@@ -6910,8 +7290,7 @@ class MainWindow(QMainWindow):
                         hz=result["ppm"] * ref.metadata.sfo1 if ref.metadata.sfo1 else None)
         metadata = dataclasses.replace(ref.metadata, raw={})
         combined = NMRSpectrum(data=result["vocs_sum"], axes=[axis], metadata=metadata)
-        op = "average" if self.vocs_average_checkbox.isChecked() else "sum"
-        self._add_derived_spectrum(combined, f"VOCS {op} ({len(stack)} spectra)")
+        self._add_derived_spectrum(combined, f"VOCS sum ({len(stack)} spectra)")
 
     def _build_region_box(self) -> QGroupBox:
         """Integration regions -- the "most basic" way to turn a

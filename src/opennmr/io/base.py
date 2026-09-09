@@ -17,6 +17,7 @@ from ..core.spectrum import NMRSpectrum
 
 Detector = Callable[[str], bool]
 Reader = Callable[..., NMRSpectrum]
+Peeker = Callable[..., dict]
 
 
 @dataclass
@@ -24,16 +25,23 @@ class VendorReader:
     name: str
     detect: Detector
     read: Reader
+    #: Optional fast, metadata-only probe: shape/nucleus/etc. from a
+    #: dataset's (tiny) parameter files alone, never touching its large
+    #: data file(s). None for a vendor that hasn't implemented one yet
+    #: -- peek() below falls back to a full load rather than requiring
+    #: every vendor to support this from day one.
+    peek: Peeker | None = None
 
 
 _REGISTRY: dict[str, VendorReader] = {}
 
 
-def register(name: str, detect: Detector, read: Reader) -> None:
+def register(name: str, detect: Detector, read: Reader, peek: Peeker | None = None) -> None:
     """Register a vendor. ``detect(path)`` returns True if ``path``
     looks like this vendor's data; ``read(path, **kwargs)`` returns an
-    :class:`NMRSpectrum`."""
-    _REGISTRY[name] = VendorReader(name=name, detect=detect, read=read)
+    :class:`NMRSpectrum`; ``peek(path, **kwargs)``, if given, returns a
+    metadata-only dict (see :func:`peek`)."""
+    _REGISTRY[name] = VendorReader(name=name, detect=detect, read=read, peek=peek)
 
 
 def registered_vendors() -> list[str]:
@@ -73,6 +81,37 @@ def load(path: str, vendor: str | None = None, **kwargs) -> NMRSpectrum:
             f"Unknown vendor {vendor!r}. Registered vendors: {registered_vendors()}."
         )
     return _REGISTRY[vendor].read(path, **kwargs)
+
+
+def peek(path: str, vendor: str | None = None, **kwargs) -> dict:
+    """Learn what ``path`` holds (shape, nucleus, dimensionality, ...)
+    without necessarily reading its large data file(s) -- for a Data-
+    tab folder browser deciding whether/what a directory holds, or any
+    other caller that just needs to know what's there before committing
+    to a full :func:`load`.
+
+    Falls back to a full ``load()`` (correct, just not fast) for a
+    vendor that hasn't registered its own ``peek`` -- this is purely
+    additive, so no existing vendor has to support it to keep working.
+    """
+    if vendor is None:
+        vendor = detect_vendor(path)
+    if vendor not in _REGISTRY:
+        raise ValueError(
+            f"Unknown vendor {vendor!r}. Registered vendors: {registered_vendors()}."
+        )
+    entry = _REGISTRY[vendor]
+    if entry.peek is not None:
+        return entry.peek(path, **kwargs)
+    spectrum = entry.read(path, **kwargs)
+    return {
+        "vendor": spectrum.metadata.vendor,
+        "ndim": spectrum.data.ndim,
+        "shape": spectrum.data.shape,
+        "nucleus": spectrum.metadata.nucleus,
+        "nucleus_indirect": spectrum.metadata.nucleus_indirect,
+        "pseudo_2d": spectrum.metadata.pseudo_2d,
+    }
 
 
 def _exists(*parts: str) -> Callable[[str], bool]:

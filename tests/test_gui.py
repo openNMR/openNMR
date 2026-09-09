@@ -3,6 +3,7 @@ import dataclasses
 import io
 import json
 import os
+import time
 
 import numpy as np
 import pytest
@@ -2393,10 +2394,9 @@ def _make_raw_1d_dataset(tmp_path, monkeypatch, n=64, name="rawexpt1", probe=Non
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
     return str(expt)
 
 
@@ -2424,16 +2424,15 @@ def _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=32, name="rawexpt2d
         row = np.exp(-t2 * 300) * np.exp(2j * np.pi * 1000.0 * t2)
         fid = np.tile(row, (n_f1, 1)).astype(np.complex128)
     dic = {"acqus": acqus, "acqu2s": acqu2s}
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     # read_acqus_file too: read_1d/read_2d take their parameters from it
     # now, rather than from a combined ng.bruker.read call. Without this
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
     # _guess_raw_2d_shape's real-file-scale TD/DTYPA/file-size logic
     # (see its own docstring in io/bruker.py) doesn't apply to this
     # small synthetic fixture -- bypass it so the mocked `fid` above
@@ -2821,16 +2820,15 @@ def test_main_window_processing_preview_pseudo2d_uses_only_active_slice(qapp, tm
     # A different decay rate per row -- slices are visibly distinct.
     fid = np.stack([np.exp(-t2 * 300 * (row + 1)) * np.exp(2j * np.pi * 1000.0 * t2) for row in range(n_f1)])
     dic = {"acqus": acqus, "acqu2s": acqu2s}
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     # read_acqus_file too: read_1d/read_2d take their parameters from it
     # now, rather than from a combined ng.bruker.read call. Without this
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
     monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
     window = MainWindow()
@@ -3153,10 +3151,9 @@ def test_main_window_unsupported_window_shows_notice_but_stays_reprocessable(qap
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
 
     shown = []
     monkeypatch.setattr(
@@ -3917,16 +3914,15 @@ def test_main_window_align_echo_on_pseudo2d_does_not_break_phasing(qapp, tmp_pat
         rows.append(row)
     fid = np.array(rows)
     dic = {"acqus": acqus, "acqu2s": {"NUC1": "off", "BF1": 400.13, "O1": 0.0}}
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     # read_acqus_file too: read_1d/read_2d take their parameters from it
     # now, rather than from a combined ng.bruker.read call. Without this
     # the load raises on the placeholder acqus these fixtures write, and
     # _load answers with a modal QMessageBox -- which hangs the suite
     # rather than failing it.
-    monkeypatch.setattr(bruker_io.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker_io.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker_io, "read_acqus_files", lambda path: dic)
     monkeypatch.setattr(bruker_io, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker_io.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker_io, "_remove_digital_filter", lambda d, data: data)
     monkeypatch.setattr(bruker_io, "_guess_raw_2d_shape", lambda dic, ser_path: fid.shape)
 
     window = MainWindow()
@@ -6968,11 +6964,21 @@ def test_main_window_pivot_spin_accepts_relative_expression(qapp, tmp_path):
 # VOCS and spectrum arithmetic (Phase 1 backend-exposure sweep)
 # ============================================================
 
-def _make_1d_peak_spectrum_with_pulse(x0=5.0, fwhm=0.05, amplitude=1.0, n_pts=400, p1=5.0, sfo1=400.0):
-    ppm = np.linspace(3.0, 7.0, n_pts)
+def _make_1d_peak_spectrum_with_pulse(x0=0.0, fwhm=40.0, amplitude=1.0, n_pts=400, p1=5.0, sfo1=400.0):
+    # Deliberately WIDE relative to the pulse's own excitation
+    # bandwidth (w1 = 50 kHz for p1 = 5 us, against a +/-400 kHz
+    # sweep), because that is the regime VOCS exists for. The old
+    # fixture spanned 3-7 ppm = 1600 Hz, over which the excitation
+    # profile is 1.0 to four decimal places -- so a *correct*
+    # correction is indistinguishable from a no-op there, and the only
+    # reason the old test saw a change at all was the x2 bug.
+    ppm = np.linspace(x0 - 1000.0, x0 + 1000.0, n_pts)
     data = gaussian(ppm, x0, fwhm, amplitude)
     axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * sfo1)
-    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=sfo1, raw={"acqus": {"P1": p1}})
+    # `P` as a real indexed array, matching an actual acqus -- see
+    # tests/test_vocs.py's own fixture for why that matters.
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=sfo1,
+                            raw={"acqus": {"P": [0.0, p1, 2 * p1] + [0.0] * 61}})
     return NMRSpectrum(data=data, axes=[axis], metadata=metadata)
 
 
@@ -6987,6 +6993,48 @@ def test_main_window_apply_vocs_adds_derived_spectrum(qapp):
     derived = window.session.spectra[1]
     assert derived.metadata.vendor == "derived"
     assert not np.allclose(derived.data, spectrum.data)
+    # Weighting by the excitation profile can only ever attenuate --
+    # the weight is <= 1 everywhere, and exactly 1 on resonance, so
+    # the scale is preserved rather than amplified. A divide-by-the-
+    # profile deconvolution was tried here and reverted.
+    nonzero = spectrum.data != 0
+    gain = derived.data[nonzero] / spectrum.data[nonzero]
+    assert gain.max() <= 1.0 + 1e-12
+
+
+def test_main_window_check_all_toggles_every_compare_row_at_once(qapp):
+    # "Make it easier to select all and VOCS instead of one at a time"
+    # -- checking a dozen offsets individually is the slow path
+    # everything downstream (VOCS Sum, Fit Curve, the plot) depends on.
+    window = MainWindow()
+    for offset in (-2.0, -1.0, 0.0, 1.0, 2.0):
+        _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=offset))
+    window.spectrum_list.selectAll()
+
+    window._set_all_compare_checked(False)
+    assert window._compare_checked_1d_stack() == []
+
+    window._set_all_compare_checked(True)
+    assert len(window._compare_checked_1d_stack()) == window.compare_list.count()
+
+
+def test_main_window_check_all_replots_once_not_per_row(qapp):
+    # compare_list.itemChanged triggers a full replot, so toggling n
+    # rows individually would rebuild the figure n times.
+    window = MainWindow()
+    for offset in (-2.0, -1.0, 0.0, 1.0, 2.0):
+        _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=offset))
+    window.spectrum_list.selectAll()
+
+    calls = []
+    original = window._refresh_compare_view_if_active
+    window._refresh_compare_view_if_active = lambda: (calls.append(1), original())[1]
+    try:
+        window._set_all_compare_checked(True)
+    finally:
+        window._refresh_compare_view_if_active = original
+
+    assert calls == [1]
 
 
 def test_main_window_apply_vocs_no_selection_shows_message(qapp, monkeypatch):
@@ -8763,6 +8811,100 @@ def test_main_window_phase_settle_rebuilds_the_contour_only_once(qapp, tmp_path,
     assert len(calls) == 1
 
 
+def test_main_window_first_contour_refresh_debounces_before_any_measurement(qapp, tmp_path):
+    # Explicit user choice of adaptive throttling over pure debounce.
+    # The first drag on a given shape must still debounce: nothing has
+    # been measured yet, and assuming "cheap" would be exactly the
+    # wrong guess on the datasets (the EXSY, at 1.34 s a rebuild) that
+    # most need protecting from a live redraw per frame.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window._contour_rebuild_seconds.clear()
+
+    window._schedule_canvas_2d_refresh(0)
+
+    assert window._canvas_2d_refresh_timer.isActive()
+    assert window._canvas_2d_refresh_timer.interval() == 200
+
+
+def test_main_window_cheap_contour_refreshes_live_during_a_drag(qapp, tmp_path):
+    # A contour already measured as cheap redraws *during* the drag,
+    # rather than the user dragging blind until they pause.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    shape = window.session.spectra[0].data.shape
+    window._contour_rebuild_seconds[shape] = 0.01  # well under the live limit
+    window._last_contour_rebuild_at = 0.0          # long ago -- no throttle wait owed
+
+    calls = []
+    original = window._run_debounced_canvas_2d_refresh
+    window._run_debounced_canvas_2d_refresh = lambda: (calls.append(1), original())[1]
+
+    window._schedule_canvas_2d_refresh(0)
+
+    # Redrawn immediately, not left on a timer.
+    assert calls == [1]
+    assert not window._canvas_2d_refresh_timer.isActive()
+
+
+def test_main_window_expensive_contour_still_debounces(qapp, tmp_path):
+    # The EXSY case: a live rebuild would be over a second of frozen UI
+    # per frame, strictly worse than showing nothing until the pause.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    shape = window.session.spectra[0].data.shape
+    window._contour_rebuild_seconds[shape] = 1.34  # measured EXSY rebuild
+    window._last_contour_rebuild_at = 0.0
+
+    calls = []
+    original = window._run_debounced_canvas_2d_refresh
+    window._run_debounced_canvas_2d_refresh = lambda: (calls.append(1), original())[1]
+
+    window._schedule_canvas_2d_refresh(0)
+
+    assert calls == []
+    assert window._canvas_2d_refresh_timer.isActive()
+    assert window._canvas_2d_refresh_timer.interval() == 200
+
+
+def test_main_window_live_contour_refresh_is_throttled_not_per_tick(qapp, tmp_path):
+    # "Live" must not mean "rebuild on every drag tick" -- at one
+    # rebuild per measured duration the drag's own event handling still
+    # gets a share of the main thread.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    shape = window.session.spectra[0].data.shape
+    window._contour_rebuild_seconds[shape] = 0.2
+    window._last_contour_rebuild_at = time.perf_counter()  # one just happened
+
+    calls = []
+    original = window._run_debounced_canvas_2d_refresh
+    window._run_debounced_canvas_2d_refresh = lambda: (calls.append(1), original())[1]
+
+    window._schedule_canvas_2d_refresh(0)
+
+    # Deferred rather than run again straight away, and by less than
+    # the full 200 ms debounce -- it is waiting out the throttle, not
+    # falling back to debounce.
+    assert calls == []
+    assert window._canvas_2d_refresh_timer.isActive()
+    assert 0 < window._canvas_2d_refresh_timer.interval() <= 200
+
+
+def test_main_window_records_how_long_a_contour_rebuild_took(qapp, tmp_path):
+    # The measurement that makes the live-vs-debounce choice
+    # self-calibrating rather than a guess from the data's shape.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    window._contour_rebuild_seconds.clear()
+
+    window._redraw_2d_preserving_view(spectrum)
+
+    assert spectrum.data.shape in window._contour_rebuild_seconds
+    assert window._contour_rebuild_seconds[spectrum.data.shape] >= 0.0
+
+
 def test_main_window_f2_phase_on_hypercomplex_2d_never_shows_an_invalid_state(qapp, tmp_path, monkeypatch):
     # The hypercomplex decode consumes each row's F2 imaginary part to
     # build F1's, so a hypercomplex 2D's stored complex pair is F1's
@@ -8845,3 +8987,52 @@ def test_main_window_phase_reference_tracks_what_it_already_contains(qapp, tmp_p
     np.testing.assert_allclose(
         np.real(window._phase_reference_full), np.real(spectrum.complex_data)
     )
+
+
+def test_main_window_vocs_sum_runs_over_the_list_selection_in_one_step(qapp):
+    # "I should be able to select multiple spectra and apply VOCS and
+    # sum all in one fell swoop, not apply VOCS per spectrum and then
+    # select all and sum." No per-spectrum Apply, no Compare-tab round
+    # trip -- select, then one action.
+    window = MainWindow()
+    for offset in (-2.0, 0.0, 2.0):
+        _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=offset))
+    window.spectrum_list.selectAll()
+    before = window.spectrum_list.count()
+
+    window._on_vocs_sum_selection_action()
+
+    assert window.spectrum_list.count() == before + 1
+    derived = window.session.spectra[-1]
+    assert derived.metadata.vendor == "derived"
+    assert "VOCS sum (3 spectra)" in window.session.label(len(window.session) - 1)
+
+
+def test_main_window_vocs_sum_selection_needs_at_least_two(qapp, monkeypatch):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse())
+    window.spectrum_list.selectAll()
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+
+    window._on_vocs_sum_selection_action()
+
+    assert shown.get("called") is True
+    assert window.spectrum_list.count() == 1   # nothing added
+
+
+def test_main_window_selected_1d_spectra_skips_2d_and_keeps_list_order(qapp, tmp_path):
+    # A VOCS series is 1D by definition; a 2D caught in a drag-select
+    # must not be fed to it. Order follows the list, not click order,
+    # so the composite is reproducible.
+    window = MainWindow()
+    for offset in (-2.0, 0.0, 2.0):
+        _load_spectrum_directly(window, _make_1d_peak_spectrum_with_pulse(x0=offset))
+    window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
+    window.spectrum_list.selectAll()
+
+    selected = window._selected_1d_spectra()
+
+    assert len(selected) == 3                       # the 2D is skipped
+    assert all(s.ndim == 1 for s in selected)
+    assert selected == [window.session.spectra[i] for i in range(3)]

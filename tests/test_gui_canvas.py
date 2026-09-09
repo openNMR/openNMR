@@ -1466,6 +1466,48 @@ def test_show_compare_stack_click_row_then_scroll_zooms_only_that_row(qapp):
     assert canvas._selected_compare_index is None
 
 
+def test_show_compare_stack_click_in_a_rows_margin_selects_it(qapp):
+    # Explicit user request: the clickable area should "extend all the
+    # way to the next stacked spectrum... to include both the axis and
+    # the plotting spaces". Only the data rectangle is `inaxes`, so a
+    # click on a row's own y-tick strip used to do nothing at all --
+    # there was no `inaxes`, so no pan started and no row was selected.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
+    canvas.show_compare(specs, mode="stack")
+    canvas.canvas.draw()
+    canvas.toolbar.mode = ""
+    middle_ax = canvas._compare_axes[1]
+
+    # Left of the middle row's data rectangle -- its tick strip -- at
+    # that row's own height. inaxes is None, as it is for a real click
+    # there.
+    bbox = middle_ax.get_window_extent()
+    x = bbox.x0 - 5
+    y = 0.5 * (bbox.y0 + bbox.y1)
+    canvas._on_press(SimpleNamespace(inaxes=None, button=1, x=x, y=y))
+    canvas._on_release(SimpleNamespace(x=x, y=y))
+
+    assert canvas._selected_compare_index == 1
+
+
+def test_compare_row_index_at_y_ignores_a_click_outside_the_stack(qapp):
+    # A click well below the bottom row (the shared x-axis label area)
+    # should select nothing rather than snapping onto the nearest row.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    specs = [_make_1d_at(c) for c in (3.0, 5.0, 7.0)]
+    canvas.show_compare(specs, mode="stack")
+    canvas.canvas.draw()
+
+    assert canvas._compare_row_index_at_y(canvas.figure.bbox.y1 + 50) is None
+    # ...and every row's own centre still resolves to itself.
+    for i, ax in enumerate(canvas._compare_axes):
+        bbox = ax.get_window_extent()
+        assert canvas._compare_row_index_at_y(0.5 * (bbox.y0 + bbox.y1)) == i
+
+
 def test_show_compare_stack_drag_does_not_select_a_row(qapp):
     # A real pan drag (press then release somewhere else) must not
     # also be treated as a row-select click.
@@ -1814,6 +1856,216 @@ def test_canvas_adding_a_slice_preserves_the_view(qapp):
     assert (canvas.ax.get_xlim(), canvas.ax.get_ylim()) == before
 
 
+def _motion_at(canvas, ax, xfrac=0.5, yfrac=0.5):
+    bbox = ax.get_window_extent()
+    x, y = bbox.x0 + xfrac * bbox.width, bbox.y0 + yfrac * bbox.height
+    event = types.SimpleNamespace(name="motion_notify_event", canvas=canvas.canvas,
+                                  inaxes=ax, x=x, y=y)
+    event.xdata, event.ydata = ax.transData.inverted().transform((x, y))
+    return event
+
+
+def test_canvas_crosshair_is_not_created_until_the_mouse_moves(qapp):
+    # Creating it the moment plot_2d_contour returns would add its
+    # (invisible-until-hovered) Line2D artists to ax.lines for a view
+    # nobody has looked at yet -- breaking anything that counts lines
+    # on a freshly built contour (see the nQ-diagonal toggle test).
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    assert canvas._crosshair is None
+    assert len(canvas.ax.lines) == 0
+
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    assert canvas._crosshair is not None
+
+
+def test_canvas_crosshair_spans_the_contour_and_both_projections(qapp):
+    # "When the input isn't panning or zooming, the cursor should be a
+    # cross with lines covering the entire contour space AND the
+    # projections."
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+
+    crosshair = canvas._crosshair
+    assert set(crosshair.axes) == {canvas.ax, canvas._proj_axes["f1"], canvas._proj_axes["f2"]}
+    assert set(crosshair._vline_axes) == {canvas.ax, canvas._proj_axes["f2"]}
+    assert set(crosshair._hline_axes) == {canvas.ax, canvas._proj_axes["f1"]}
+
+
+def test_canvas_crosshair_establishes_its_own_background_on_first_move(qapp):
+    # Real, live user report: "when I extract or clear a slice, until I
+    # move the cursor away from the plot it does the same 'solitaire
+    # effect', covering the plot." A freshly created instance starts
+    # with no cached background -- extracting/clearing a slice rebuilds
+    # the figure and only lazily recreates the crosshair on the next
+    # mouse move, so nothing has forced a real draw() (the only thing
+    # that fires draw_event -> _on_draw) since creation. Without a
+    # background, onmove can't restore_region before drawing, so every
+    # move painted directly onto whatever the Agg buffer already held
+    # -- accumulating lines that only ever got wiped by leaving the
+    # axes (_hide's own draw_idle). Fixed by onmove forcing a
+    # synchronous draw() itself the first time it finds no background.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.canvas.draw()
+    canvas._add_contour_slice("f1", 3, "A")  # rebuilds; no motion in between
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    crosshair = canvas._crosshair
+    assert crosshair._background is None
+
+    draw_calls = []
+    real_draw = canvas.canvas.draw
+    canvas.canvas.draw = lambda *a, **k: (draw_calls.append(1), real_draw(*a, **k))[1]
+    try:
+        crosshair._onmove(_motion_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.3))
+        assert draw_calls == [1]
+        assert crosshair._background is not None
+
+        crosshair._onmove(_motion_at(canvas, canvas.ax, xfrac=0.6, yfrac=0.6))
+        assert draw_calls == [1]  # not called again -- the background is reused
+    finally:
+        canvas.canvas.draw = real_draw
+
+
+def test_canvas_crosshair_draws_both_lines_through_one_shared_background(qapp):
+    # Real user report: "crosshair is just filling the contour and not
+    # going away". Traced to two independent MultiCursor instances
+    # (the first two attempts at this) each keeping their own blit
+    # background for the same overlapping Axes -- matplotlib's own
+    # MultiCursor.onmove unconditionally restore_regions its own
+    # background before drawing its own line, so whichever cursor's
+    # motion callback ran second always wiped out the first one's line
+    # before that frame was ever shown. One widget, one background,
+    # one restore + both lines drawn + one blit per move -- checked
+    # here by call count, since the wipe-out itself is a screen-pixel
+    # effect a headless test can't see directly.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.canvas.draw()
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    crosshair = canvas._crosshair
+    crosshair._background = canvas.canvas.copy_from_bbox(canvas.figure.bbox)
+
+    restore_calls = []
+    blit_calls = []
+    real_restore = canvas.canvas.restore_region
+    real_blit = canvas.canvas.blit
+    canvas.canvas.restore_region = lambda *a, **k: (restore_calls.append(1), real_restore(*a, **k))[1]
+    canvas.canvas.blit = lambda *a, **k: (blit_calls.append(1), real_blit(*a, **k))[1]
+    try:
+        crosshair._onmove(_motion_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.7))
+    finally:
+        canvas.canvas.restore_region = real_restore
+        canvas.canvas.blit = real_blit
+
+    assert restore_calls == [1]
+    assert blit_calls == [1]
+    assert all(line.get_visible() for line in (*crosshair._vlines, *crosshair._hlines))
+
+
+def test_canvas_crosshair_stands_down_during_pan_and_zoom(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.canvas.draw()
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    crosshair = canvas._crosshair
+    event = _motion_at(canvas, canvas.ax)
+
+    canvas.toolbar.mode = ""
+    crosshair._onmove(event)
+    assert crosshair._vlines[0].get_visible()
+
+    for mode in ("pan/zoom", "zoom rect"):
+        canvas.toolbar.mode = mode
+        crosshair._onmove(event)
+        assert not crosshair._vlines[0].get_visible(), mode
+    canvas.toolbar.mode = ""
+
+
+def test_canvas_crosshair_is_torn_down_synchronously_by_a_rebuild(qapp):
+    # The actual bug behind "filling the contour and not going away",
+    # once traced through matplotlib's own MultiCursor: the previous
+    # design tore a stale crosshair down only lazily, the next time
+    # _on_motion ran -- and a contour can rebuild several times with
+    # no mouse movement in between (e.g. repeated contour-level-adjust
+    # scrolls). A crosshair still connected across that gap keeps
+    # receiving real callbacks and drawing through its old Axes' own
+    # (by-then meaningless) transform, straight onto the live renderer.
+    # Teardown must happen in the same call that destroys the Axes --
+    # never wait for the next motion event to notice.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    stale = canvas._crosshair
+    assert stale is not None
+    motion_cid = stale._cid_motion
+
+    def connected() -> bool:
+        return motion_cid in canvas.canvas.callbacks.callbacks.get("motion_notify_event", {})
+
+    assert connected()
+
+    # Two rebuilds in a row, exactly the "no intervening mouse move"
+    # case a scroll-wheel contour-level adjust produces.
+    canvas._redraw_contour(preserve_view=True)
+    assert canvas._crosshair is None
+    assert not connected()
+    canvas._redraw_contour(preserve_view=True)
+    assert canvas._crosshair is None
+    assert not connected()
+
+    # A later motion event gets a fresh crosshair bound to the axes
+    # actually on screen now, not the ones from before the rebuilds.
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    assert canvas._crosshair is not None
+    assert canvas._crosshair is not stale
+    assert all(a in canvas.figure.axes for a in canvas._crosshair.axes)
+
+
+def test_canvas_rebuild_cancels_an_interrupted_zoom_rubberband(qapp):
+    # Real user report: "the zoom dashed line box stays sometimes when
+    # switching around". NavigationToolbar2.release_zoom returns early
+    # when _zoom_info is None and is the only caller of
+    # remove_rubberband -- so a zoom drag whose release never arrives
+    # (the figure is rebuilt under it by a spectrum/tab switch) leaves
+    # the Qt backend's _draw_rect_callback installed, and every later
+    # repaint draws that same dashed box over unrelated content.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.canvas.draw()
+
+    # Stand in for a zoom drag that got interrupted mid-flight.
+    canvas.toolbar._zoom_info = SimpleNamespace(axes=canvas.ax, cid=None, start_xy=(0, 0), cbar=None)
+    canvas.canvas.drawRectangle((10, 10, 40, 40))
+    assert canvas.canvas._draw_rect_callback is not None
+
+    rect_calls = []
+    canvas.canvas._draw_rect_callback = lambda painter: rect_calls.append(1)
+
+    canvas.show_spectrum(_make_2d(n_f1=8))  # the switch that used to strand it
+
+    assert canvas.toolbar._zoom_info is None
+    # The callback was replaced with the backend's own no-op, so a
+    # later repaint draws nothing: calling it must not reach ours.
+    canvas.canvas._draw_rect_callback(None)
+    assert rect_calls == []
+
+
+def test_canvas_crosshair_is_torn_down_when_the_view_changes_away_from_a_contour(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    assert canvas._crosshair is not None
+
+    canvas.show_spectrum(_make_1d())
+    assert canvas._crosshair is None
+
+
 def _scroll_at(canvas, ax, xfrac=0.5, yfrac=0.5, button="up", inaxes=True):
     bbox = ax.get_window_extent()
     x, y = bbox.x0 + xfrac * bbox.width, bbox.y0 + yfrac * bbox.height
@@ -1899,8 +2151,11 @@ def test_canvas_default_export_size_switches_for_a_sliced_2d(qapp):
     canvas.show_spectrum(_make_2d(n_f1=8))
     assert canvas.default_export_size() == (8.0, 8.0)
 
+    # Landscape: the sliced layout is contour + trace panel side by
+    # side, so it is wider than tall (the earlier 7.5 x 10 portrait
+    # predated the panel actually sitting beside the contour).
     canvas._add_contour_slice("f1", 3, "A")
-    assert canvas.default_export_size() == (7.5, 10.0)
+    assert canvas.default_export_size() == (10.0, 7.5)
 
     canvas._clear_contour_slices()
     assert canvas.default_export_size() == (8.0, 8.0)
@@ -1930,6 +2185,59 @@ def _xlabel_is_inside_the_figure(canvas, ax):
     canvas.canvas.draw()
     label_box = ax.xaxis.label.get_window_extent()
     return label_box.y0 >= 0 and label_box.x0 >= 0
+
+
+def test_canvas_shrinks_labels_rather_than_clipping_them(qapp):
+    # User request for "better safeguards to ensure that the axis
+    # labels don't get cut off... maybe some kind of warning or push to
+    # resize the font". tight_layout alone reserves room only when the
+    # figure is big enough and quietly gives up when it is not -- and a
+    # GUI canvas is sized by the window, so that is an ordinary state.
+    from opennmr.plotting import clipped_labels
+
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(1.4, 0.9)
+    canvas.show_spectrum(_make_1d())
+
+    assert clipped_labels(canvas.figure) == []
+    # Shrunk to achieve it, rather than the label being left hanging
+    # off the bottom.
+    assert canvas.ax.xaxis.label.get_fontsize() < canvas._AXIS_LABELSIZE
+
+
+def test_canvas_reports_labels_it_cannot_fit_at_any_size(qapp):
+    # Below a certain size no font helps; that is a real "make this
+    # bigger" situation only the user can fix, so it is announced
+    # rather than silently rendered with labels off the edge.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(0.7, 0.45)
+    seen = []
+    canvas.labelsClipped.connect(seen.append)
+
+    canvas.show_spectrum(_make_1d())
+
+    assert seen and seen[-1]  # non-empty: named the labels that don't fit
+
+
+def test_canvas_labels_clipped_only_fires_on_a_change(qapp):
+    # A phase drag relayouts continuously; re-announcing the same
+    # problem every frame would be noise. And when the canvas has room
+    # again, an empty emission clears the message rather than leaving a
+    # stale warning up.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(0.7, 0.45)
+    canvas.show_spectrum(_make_1d())
+
+    seen = []
+    canvas.labelsClipped.connect(seen.append)
+
+    canvas._apply_layout()
+    canvas._apply_layout()
+    assert seen == []  # already clipped, unchanged -- says nothing again
+
+    canvas.figure.set_size_inches(8, 6)
+    canvas._apply_layout()
+    assert seen == [[]]  # one all-clear, exactly once
 
 
 def test_canvas_contour_rebuild_keeps_the_x_label_on_the_figure(qapp):

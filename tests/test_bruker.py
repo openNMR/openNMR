@@ -418,6 +418,99 @@ def test_read_bruker_binary_raises_when_the_file_is_too_short(tmp_path):
         bruker._read_bruker_binary(str(path), {"acqus": {"BYTORDA": 0, "DTYPA": 0}}, (10, 10))
 
 
+def test_peek_reports_shape_without_ever_reading_2rr(tmp_path):
+    # Same fixture as test_read_2d_processed_missing_2rr_raises_a_clear_error
+    # (procs/proc2s/clevels/thumbnail but no 2rr at all -- a real
+    # Cyclosporine/206-style experiment) -- peek() must still succeed,
+    # proving it never opens the big (here: nonexistent) data file the
+    # way read_2d_processed itself has to.
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    for name, params in (
+        ("procs", {"SW_p": 8000.0, "SI": 8, "SF": 400.13, "XDIM": 1}),
+        ("proc2s", {"SW_p": 2000.0, "SI": 4, "SF": 400.13, "XDIM": 1}),
+    ):
+        with open(pdata / name, "w") as f:
+            f.write("\n".join(f"##${k}= {v}" for k, v in params.items()) + "\n")
+    for name in ("acqus", "acqu2s"):
+        with open(expt / name, "w") as f:
+            f.write("##$NUC1= <1H>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    result = bruker.peek(str(expt))
+
+    assert result == {
+        "vendor": "bruker", "ndim": 2, "shape": (4, 8),
+        "nucleus": "1H", "nucleus_indirect": "1H", "pseudo_2d": False,
+    }
+    assert "block_shape" not in result  # XDIM=1 -- no real block structure
+
+
+def test_peek_reports_1d_shape_when_there_is_no_proc2s(tmp_path):
+    # A 1D experiment's own pdata directory never has a proc2s at all
+    # (there's no F1 dimension to process) -- that absence, not a
+    # parse failure, is what actually distinguishes 1D from 2D here.
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    with open(pdata / "procs", "w") as f:
+        f.write("##$SW_p= 8000.0\n##$SI= 16\n##$SF= 400.13\n")
+    with open(expt / "acqus", "w") as f:
+        f.write("##$NUC1= <13C>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    assert bruker.peek(str(expt)) == {
+        "vendor": "bruker", "ndim": 1, "shape": (16,),
+        "nucleus": "13C", "nucleus_indirect": None, "pseudo_2d": False,
+    }
+
+
+def _write_submatrix_2rr(path, full_array, xdim_f1, xdim_f2):
+    """Encode ``full_array`` (shape (si2, si1)) into Bruker's own
+    XDIM submatrix block layout and write it as ``path`` -- the exact
+    inverse of ``read_2d_processed``'s own ``_load_block`` reshape/
+    transpose reconstruction, so a round trip through this and
+    ``read_2d_processed`` must reproduce ``full_array`` exactly."""
+    si2, si1 = full_array.shape
+    submatrix_rows, submatrix_cols = si2 // xdim_f1, si1 // xdim_f2
+    raw = (
+        full_array.reshape(submatrix_rows, xdim_f1, submatrix_cols, xdim_f2)
+        .transpose(0, 2, 1, 3)
+        .reshape(-1)
+    )
+    np.asarray(raw, dtype="<i4").tofile(path)
+
+
+def test_read_2d_processed_and_peek_agree_on_block_shape_for_xdim_greater_than_one(tmp_path):
+    # First synthetic coverage of the xdim_f1 != 1 submatrix-
+    # reconstruction branch at all -- previously validated only via
+    # the real-data correlation suite (test_data is gitignored, not
+    # available in every environment this runs in).
+    expt = tmp_path / "expt"
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    xdim_f1, xdim_f2 = 2, 4
+    for name, params in (
+        ("procs", {"SW_p": 8000.0, "SI": 8, "SF": 400.13, "XDIM": xdim_f2}),
+        ("proc2s", {"SW_p": 2000.0, "SI": 4, "SF": 400.13, "XDIM": xdim_f1}),
+    ):
+        with open(pdata / name, "w") as f:
+            f.write("\n".join(f"##${k}= {v}" for k, v in params.items()) + "\n")
+    for name in ("acqus", "acqu2s"):
+        with open(expt / name, "w") as f:
+            f.write("##$NUC1= <1H>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+
+    # peek() reports the block layout with no 2rr on disk yet at all.
+    assert bruker.peek(str(expt))["block_shape"] == (xdim_f1, xdim_f2)
+
+    full = np.arange(4 * 8, dtype="<i4").reshape(4, 8)
+    _write_submatrix_2rr(pdata / "2rr", full, xdim_f1, xdim_f2)
+
+    spectrum = bruker.read_2d_processed(str(expt))
+
+    assert np.array_equal(spectrum.data, full.astype(np.float64))
+    assert spectrum.metadata.raw["block_shape"] == (xdim_f1, xdim_f2)
+
+
 def test_read_2d_processed_missing_2rr_raises_a_clear_error(tmp_path):
     # Real, pre-existing crash found by sweeping every Bruker dataset in
     # test_data: `Cyclosporine/206/pdata/1` holds procs, proc2s, clevels
@@ -523,6 +616,71 @@ def test_apply_recorded_phase_reproduces_topspin_on_real_xf2_data():
     assert _corr(bruker.read_2d(path, pseudo_2d=True).data, reference) > 0.999
 
 
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join("test_data", "bruker_PFG", "150")),
+    reason="needs the real bruker_PFG dataset",
+)
+def test_read_2d_raw_fid_cache_reproduces_a_fresh_read():
+    # Real bottleneck on a large EXSY: every reprocess action (window/
+    # zero-fill/procno/phase change) called read_2d fresh, re-reading
+    # the ser file and redoing an expensive digital-filter removal that
+    # doesn't actually depend on any of those parameters -- only on
+    # path. _raw_fid_cache lets a caller skip straight past both. Fast
+    # path must be bit-for-bit equivalent to the slow path, not just fast.
+    path = os.path.join("test_data", "bruker_PFG", "150")
+    baseline = bruker.read_2d(path, pseudo_2d=True, window="hann")
+    cached_fid = baseline.metadata.raw["fid_raw"]
+
+    fast = bruker.read_2d(path, pseudo_2d=True, window="sine", _raw_fid_cache=cached_fid)
+    fresh = bruker.read_2d(path, pseudo_2d=True, window="sine")
+
+    assert np.array_equal(fast.data, fresh.data)
+    if fast.data_imag is not None:
+        assert np.array_equal(fast.data_imag, fresh.data_imag)
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join("test_data", "bruker_PFG", "150")),
+    reason="needs the real bruker_PFG dataset",
+)
+def test_read_2d_raw_fid_cache_skips_the_disk_read_and_filter_removal(monkeypatch):
+    path = os.path.join("test_data", "bruker_PFG", "150")
+    cached_fid = bruker.read_2d(path, pseudo_2d=True).metadata.raw["fid_raw"]
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("should not be called when _raw_fid_cache is given")
+
+    monkeypatch.setattr(bruker, "_read_raw_2d_data", _fail)
+    monkeypatch.setattr(bruker, "_remove_digital_filter", _fail)
+
+    # Would raise via the monkeypatches above if the cache weren't used.
+    bruker.read_2d(path, pseudo_2d=True, window="sine", _raw_fid_cache=cached_fid)
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join("test_data", "bruker_PFG", "150")),
+    reason="needs the real bruker_PFG dataset",
+)
+def test_session_reload_reuses_the_cached_raw_fid(monkeypatch):
+    from opennmr.gui.session import Session
+
+    path = os.path.join("test_data", "bruker_PFG", "150")
+    session = Session()
+    session.add(path, vendor="bruker", pseudo_2d=True)  # the one call allowed to hit disk
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("reload should reuse the cached raw FID, not re-decode it")
+
+    monkeypatch.setattr(bruker, "_read_raw_2d_data", _fail)
+    monkeypatch.setattr(bruker, "_remove_digital_filter", _fail)
+
+    # Both would raise via the monkeypatches above if the cache weren't
+    # reused for a reprocess action (real user-visible actions: window/
+    # zero-fill changes, "Apply Processing", pseudo_2d/magnitude toggles).
+    session.reload(0, window="sine")
+    session.reload(0, zero_fill=4096)
+
+
 def test_acquisition_constants_names_parameters_the_way_a_pulse_programme_does():
     # User request: fitting equations should be able to use "values from
     # the input data (e.g. delays and constants and L or whatever)".
@@ -554,3 +712,167 @@ def test_acquisition_constants_is_empty_without_acqus():
         metadata=NMRMetadata(vendor="test", nucleus="1H"),
     )
     assert bruker.acquisition_constants(spectrum) == {}
+
+
+def test_read_auto_use_processed_takes_topspin_data_over_the_raw_fid(tmp_path, monkeypatch):
+    # Escape hatch for data whose processing the raw path cannot yet
+    # reproduce. Real case: 17O Hahn-echo VOCS experiments, where the
+    # raw path correlates only +0.49..+0.65 with TopSpin's own 1r and
+    # reorders which acquisition is tallest -- so a VOCS combination
+    # built from it looks like a different experiment than the same
+    # data read through nmrtools2, which reads processed spectra.
+    calls = []
+    monkeypatch.setattr(bruker, "read_1d", lambda *a, **k: calls.append("raw"))
+
+    def fake_processed(path, **kwargs):
+        calls.append("processed")
+        return bruker.NMRSpectrum(
+            data=np.zeros(4),
+            axes=[bruker.NMRAxis(kind="frequency", ppm=np.arange(4.0), hz=np.arange(4.0))],
+            metadata=bruker.NMRMetadata(vendor="bruker"),
+        )
+
+    monkeypatch.setattr(bruker, "read_1d_processed", fake_processed)
+
+    expt = tmp_path / "expt"
+    (expt / "pdata" / "1").mkdir(parents=True)
+    (expt / "fid").write_bytes(b"\0" * 64)      # a raw FID *is* present...
+    with open(expt / "acqus", "w") as f:
+        f.write("##$NUC1= <1H>\n")
+
+    spectrum = bruker._read_auto(str(expt), use_processed=True)
+
+    # ...and was still not used.
+    assert calls == ["processed"]
+    assert spectrum.metadata.raw["loaded_from_processed"] == (
+        "requested (use TopSpin's processed data)"
+    )
+
+
+def test_read_auto_still_prefers_the_raw_fid_by_default(tmp_path, monkeypatch):
+    # use_processed is opt-in: reprocessing from raw stays the default,
+    # which is the whole point of this project.
+    calls = []
+    monkeypatch.setattr(bruker, "read_1d", lambda *a, **k: calls.append("raw"))
+    monkeypatch.setattr(bruker, "read_1d_processed", lambda *a, **k: calls.append("processed"))
+
+    expt = tmp_path / "expt"
+    (expt / "pdata" / "1").mkdir(parents=True)
+    (expt / "fid").write_bytes(b"\0" * 64)
+    with open(expt / "acqus", "w") as f:
+        f.write("##$NUC1= <1H>\n")
+
+    bruker._read_auto(str(expt))
+
+    assert calls == ["raw"]
+
+
+_ECHO_VOCS = os.path.join(
+    "test_data", "VOCS_example_Data", "15_02_26_Li2MnO3_O17_1_3mm",
+)
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join(_ECHO_VOCS, "999912")),
+    reason="needs the real 17O Hahn-echo VOCS dataset",
+)
+def test_align_echo_reproduces_topspins_own_echo_aligned_processing():
+    # TopSpin's PHC1 on an echo experiment exists to compensate for
+    # transforming from t=0 of the echo rather than from its top.
+    # Aligning the echo removes the thing that phase corrects, so
+    # applying it as well double-corrects -- and PHC0 no longer applies
+    # either.
+    #
+    # The vendor's own files say exactly this: experiments 12-15 record
+    # PHC1 of 387-419 degrees, while 999912-999915 are the same data
+    # processed with the echo aligned and record PHC1 = 0.00 with a
+    # different PHC0. So they are a direct reference for what
+    # align_echo should produce.
+    def _corr(a, b):
+        a = np.asarray(a, float) - np.mean(a)
+        b = np.asarray(b, float) - np.mean(b)
+        return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+    for raw_expt, aligned_expt in (("12", "999912"), ("13", "999913"),
+                                   ("14", "999914"), ("15", "999915")):
+        reference = bruker.read_1d_processed(os.path.join(_ECHO_VOCS, aligned_expt)).data
+        # Default phase_mode -- the point is that a user does not have
+        # to know to also pass phase_mode="apc0".
+        ours = bruker.read_1d(os.path.join(_ECHO_VOCS, raw_expt), align_echo=True)
+
+        assert "recorded_phase_dropped" in ours.metadata.raw
+        # Was +0.12/+0.10/+0.31/+0.58 while the recorded phase was
+        # still being applied on top of the alignment.
+        assert _corr(ours.data, reference) > 0.9
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join(_ECHO_VOCS, "12")),
+    reason="needs the real 17O Hahn-echo VOCS dataset",
+)
+def test_recorded_phase_is_still_applied_without_echo_alignment():
+    # The drop is scoped to align_echo -- an ordinary load must still
+    # reproduce whatever TopSpin recorded.
+    spectrum = bruker.read_1d(os.path.join(_ECHO_VOCS, "12"))
+
+    assert "recorded_phase_dropped" not in spectrum.metadata.raw
+    assert spectrum.metadata.raw["recorded_phase1"] == pytest.approx(387.2)
+
+
+def test_read_bruker_binary_applies_the_acquisition_nc_scaling(tmp_path):
+    # NC is the acquisition-side counterpart of NC_proc: TopSpin stores
+    # the FID scaled by 2**-NC, so the true amplitude needs multiplying
+    # back. Invisible on one spectrum; glaring when several acquired at
+    # different NC are combined.
+    values = np.arange(8, dtype="<i4")
+    path = tmp_path / "fid"
+    path.write_bytes(values.tobytes())
+
+    unscaled = bruker._read_bruker_binary(str(path), {"acqus": {"NC": 0}})
+    scaled = bruker._read_bruker_binary(str(path), {"acqus": {"NC": -3}})
+
+    np.testing.assert_allclose(scaled, unscaled * 2.0 ** -3)
+
+
+def test_read_bruker_binary_without_nc_is_unscaled(tmp_path):
+    values = np.arange(8, dtype="<i4")
+    path = tmp_path / "fid"
+    path.write_bytes(values.tobytes())
+
+    no_nc = bruker._read_bruker_binary(str(path), {"acqus": {}})
+    zero_nc = bruker._read_bruker_binary(str(path), {"acqus": {"NC": 0}})
+
+    np.testing.assert_allclose(no_nc, zero_nc)
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(os.path.join(_ECHO_VOCS, "999912")),
+    reason="needs the real 17O Hahn-echo VOCS dataset",
+)
+def test_acquisition_nc_makes_offsets_comparable_to_topspin():
+    # Real user report: "the more negative end of the VOCS is giving
+    # much higher intensities here than in the nmrtools2 version".
+    # Three of these four experiments record NC = -3 and one records
+    # NC = 0, so ignoring NC read those three exactly 2**3 = 8x high
+    # relative to the fourth -- and the two negative-offset ones are
+    # among them, which is what made it look like an asymmetry.
+    #
+    # NOTE: NC must come from `acqus`, not `acqu`. On this very dataset
+    # `acqu` records NC = 0 for all four while `acqus` carries the real
+    # -3/0/-3/-3, so reading the wrong file gives a no-op that looks
+    # like a working fix.
+    from opennmr.io.jcampdx import parse_jcampdx_params
+
+    pairs = [("12", "999912"), ("13", "999913"), ("14", "999914"), ("15", "999915")]
+    ncs = [float(parse_jcampdx_params(os.path.join(_ECHO_VOCS, e, "acqus"))["NC"])
+           for e, _ in pairs]
+    assert set(ncs) == {-3.0, 0.0}          # the spread this test exists for
+
+    ours = np.array([np.max(bruker.read_1d(os.path.join(_ECHO_VOCS, raw), align_echo=True).data)
+                     for raw, _ in pairs])
+    topspin = np.array([np.max(bruker.read_1d_processed(os.path.join(_ECHO_VOCS, ref)).data)
+                        for _, ref in pairs])
+
+    # Relative intensities across the series must track TopSpin's own.
+    # Was [2.39, 1.00, 1.31, 1.17] against [0.28, 1.00, 0.17, 0.14].
+    np.testing.assert_allclose(ours / ours[1], topspin / topspin[1], rtol=0.15)

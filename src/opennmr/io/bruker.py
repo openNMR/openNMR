@@ -69,29 +69,35 @@ from __future__ import annotations
 import os
 
 import numpy as np
-import nmrglue as ng
 
 from . import base
-from .jcampdx import parse_jcampdx_params
+from . import digital_filter
+from .jcampdx import parse_jcampdx_params, read_acqus_files
 from ..processing import ft as processing_ft
+from ..processing import windows as processing_windows
 from ..core.registry import find_gamma
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+# Re-exported deliberately: this lives in ``core`` so ``processing`` can
+# use it too (``processing`` must not import ``io`` -- this module
+# already imports ``processing.ft``, so that direction is circular), but
+# callers reach for it as the Bruker reader's own companion, and
+# ``bruker.acquisition_constants`` is its established public name.
+from ..core.acquisition import acquisition_constants  # noqa: F401
 
 _WDW_NAMES = {0: "none", 1: "em", 2: "gm", 3: "sine", 4: "qsine"}
 
 
 def _remove_digital_filter(dic: dict, data: np.ndarray) -> np.ndarray:
-    """``ng.bruker.remove_digital_filter``, skipped when ``DECIM==1``
-    (no oversampling -- common for wideline/quadrupolar acquisitions
-    needing a very large SW, e.g. a Hahn-echo on a low-gamma nucleus).
-    There is then no digital filter to remove, and ``DECIM=1`` isn't
-    in nmrglue's own DECIM/DSPFVS lookup table -- it raises
-    ``ValueError: decim not in lookup table`` rather than treating
-    this as a no-op."""
+    """:func:`opennmr.io.digital_filter.remove_digital_filter`, skipped
+    when ``DECIM==1`` (no oversampling -- common for wideline/
+    quadrupolar acquisitions needing a very large SW, e.g. a Hahn-echo
+    on a low-gamma nucleus). There is then no digital filter to remove,
+    and ``DECIM=1`` isn't in the DECIM/DSPFVS lookup table -- it raises
+    rather than treating this as a no-op."""
     decim = dic.get("acqus", {}).get("DECIM")
     if decim is not None and float(decim) == 1.0:
         return data
-    return ng.bruker.remove_digital_filter(dic, data)
+    return digital_filter.remove_digital_filter(dic, data)
 
 
 def _guess_raw_2d_shape(dic: dict, ser_path: str) -> tuple[int, int]:
@@ -239,6 +245,32 @@ def _read_bruker_binary(binary_path: str, dic: dict, shape: tuple[int, int] | No
     # Interleaved real/imaginary pairs -- drop a trailing unpaired
     # value rather than letting the complex view fail on an odd count.
     complex_data = flat[: (flat.size // 2) * 2].astype(np.float64).view(np.complex128)
+
+    # Undo the receiver's own stored scaling exponent. `NC` is the
+    # acquisition-side counterpart of `NC_proc`: TopSpin stores the FID
+    # scaled by 2**-NC so it uses the integer range well, and the true
+    # amplitude is recovered by multiplying back. Ignoring it made two
+    # datasets acquired at different NC incomparable -- which is not
+    # visible at all on a single spectrum, and glaring the moment
+    # several are combined.
+    #
+    # Real user report, on a 17O VOCS series: "the more negative end of
+    # the VOCS is giving much higher intensities here than in the
+    # nmrtools2 version". Three of its four experiments record NC = -3
+    # and one records NC = 0, so those three read exactly 2**3 = 8x
+    # high relative to the fourth. Against TopSpin's own processed
+    # output the relative intensities were [2.39, 1.00, 1.31, 1.17]
+    # where they should be [0.28, 1.00, 0.17, 0.14]; with NC applied
+    # they come out [0.30, 1.00, 0.16, 0.15].
+    #
+    # **From `acqus`, never `acqu`.** On that same dataset `acqu`
+    # records NC = 0 for every experiment while `acqus` carries the
+    # real -3/-3/-3/0 -- so reading the wrong file yields a correction
+    # that silently does nothing and looks like a working fix.
+    # `read_acqus_file` supplies only `acqus`, which is the point.
+    nc = acqus.get("NC")
+    if nc is not None:
+        complex_data = complex_data * 2.0 ** float(nc)
 
     if shape is None:
         return complex_data
@@ -471,18 +503,18 @@ def apply_recorded_f1_linear_prediction(interferogram: np.ndarray, proc2s: dict,
 
 def _apply_bruker_window(fid: np.ndarray, procs: dict, sw_hz: float) -> np.ndarray:
     """Apply the window TopSpin recorded in ``procs`` (``WDW``, with
-    ``LB``/``SSB`` as needed), via ``nmrglue.proc_base``."""
+    ``LB``/``SSB`` as needed), via :mod:`opennmr.processing.windows`."""
     wdw = int(procs.get("WDW", 0))
     if wdw == 0:
         return fid
     if wdw == 1:
         lb_hz = float(procs.get("LB", 0.0))
-        return ng.proc_base.em(fid, lb=lb_hz / sw_hz)
+        return processing_windows.em(fid, lb=lb_hz / sw_hz)
     if wdw in (3, 4):
         ssb = float(procs.get("SSB", 0.0))
         off = 1.0 / ssb if ssb >= 2 else 0.0
         power = 1.0 if wdw == 3 else 2.0
-        return ng.proc_base.sp(fid, off=off, end=1.0, pow=power)
+        return processing_windows.sp(fid, off=off, end=1.0, pow=power)
     raise NotImplementedError(
         f"Bruker window WDW={wdw} ({_WDW_NAMES.get(wdw, 'unknown')}) is not yet "
         f"supported for raw-FID reprocessing (supported: 0/none, 1/EM, 3/SINE, "
@@ -597,46 +629,6 @@ def _recorded_sr_hz(sf: float, obs: float) -> float:
 #: ``cnst0, ...``, and so on. Matching TopSpin's own naming is the
 #: whole point -- someone writing a fitting equation reaches for ``d1``
 #: and ``l4`` because that is what the pulse programme calls them.
-_CONSTANT_ARRAYS = ("D", "P", "CNST", "L", "IN", "INF", "PL", "PLW",
-                    "SP", "SPW", "GPZ", "GPX", "GPY")
-
-
-def acquisition_constants(spectrum) -> dict[str, float]:
-    """Every numeric acquisition parameter of ``spectrum``, named the
-    way a pulse programme names it, for use as a known value in a
-    fitting equation (see
-    :func:`opennmr.processing.relaxation.build_custom_model`).
-
-    Explicit user request: "it would be good if I can make fitting
-    equations using values from the input data (e.g. delays and
-    constants and L or whatever)". So ``d1``, ``p1``, ``cnst2``, ``l4``
-    from the indexed arrays, plus every scalar (``ns``, ``td``, ``te``,
-    ``sw``, ...) under its own lowercase name.
-
-    **Values are exactly as the vendor recorded them, not converted**
-    -- ``d1`` in seconds, ``p1`` in microseconds, because that is what
-    those numbers mean in TopSpin and on the spectrometer, and quietly
-    rescaling them would make an equation copied off a pulse programme
-    silently wrong. Only ``acqus`` is read: these are acquisition
-    facts, not processing choices.
-
-    Returns an empty dict for a spectrum with no retained ``acqus``
-    (a non-Bruker dataset, or a derived trace).
-    """
-    acqus = (getattr(spectrum.metadata, "raw", None) or {}).get("acqus")
-    if not isinstance(acqus, dict):
-        return {}
-    constants: dict[str, float] = {}
-    for key, value in acqus.items():
-        if key in _CONSTANT_ARRAYS and isinstance(value, (list, tuple)):
-            for index, item in enumerate(value):
-                if isinstance(item, (int, float)) and not isinstance(item, bool):
-                    constants[f"{key.lower()}{index}"] = float(item)
-        elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            constants[key.lower()] = float(value)
-    return constants
-
-
 def _ppm_hz_axis(o1: float, sf: float, obs: float, sw: float, si: int) -> tuple[np.ndarray, np.ndarray]:
     """The ppm/Hz axis formula used throughout ``nmrtools2`` -- kept
     identical here (for both the raw-FID and processed-fallback paths)
@@ -714,7 +706,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     # produced the reshape warning that motivated the 2D change; done
     # here too so both paths read their binary the same single way
     # rather than splitting into two conventions that could drift.
-    dic = ng.bruker.read_acqus_file(path)
+    dic = read_acqus_files(path)
     data = _read_bruker_binary(os.path.join(path, "fid"), dic)
     fid = _remove_digital_filter(dic, data).astype(np.complex128)
     fid = np.conj(fid)  # see _CONJUGATE_QUADRATURE_NOTE below
@@ -761,6 +753,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, si)
 
     recorded_f2 = (0.0, 0.0)
+    recorded_phase_dropped = False
     if autophase:
         if phase_mode == "joint":
             phase0, phase1 = processing_ft.autophase01(
@@ -769,6 +762,24 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             )
         elif phase_mode == "apc0":
             phase0 = processing_ft.apc0(spectrum, x_ppm, phase0_inc)
+        elif phase_mode == "recorded" and align_echo:
+            # **A recorded phase does not survive echo alignment.**
+            # TopSpin's PHC1 on an echo experiment exists precisely to
+            # compensate for transforming from t=0 of an echo instead
+            # of from its top; aligning the echo removes the very thing
+            # that phase was correcting, so applying it as well is a
+            # double correction, and PHC0 no longer applies either.
+            #
+            # Measured on real 17O Hahn-echo data (hahnecho_d7.ids30)
+            # against TopSpin's own echo-aligned processing of the same
+            # four experiments (999912-999915, which record PHC1 = 0.00
+            # and a *different* PHC0 -- exactly this argument, in the
+            # vendor's own files): align_echo with the recorded phase
+            # still applied correlates +0.12/+0.10/+0.31/+0.58, worse
+            # than not aligning at all, while re-deriving a zero-order
+            # phase gives +0.92/+0.99/+0.98/+0.99.
+            phase0 = processing_ft.apc0(spectrum, x_ppm, phase0_inc)
+            recorded_phase_dropped = True
         elif phase_mode == "recorded":
             # Kept as the *recorded* phase, in TopSpin's own model,
             # rather than folded into phase0/phase1 (the user's own, in
@@ -793,6 +804,11 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             "acqus": acqus, "procs": procs, "phase0": phase0, "phase1": phase1,
             _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs),
             "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
+            **({"recorded_phase_dropped":
+                "Echo alignment replaces TopSpin's recorded PHC0/PHC1 -- that phase "
+                "compensates for transforming from t=0 of an echo, which aligning "
+                "already does, so a zero-order phase was re-derived instead."}
+               if recorded_phase_dropped else {}),
             # The exact (shift/echo-align/LP/windowed/zero-filled) FID
             # fed into the FFT above -- an optional GUI preview of what
             # FID-domain processing actually did, kept alongside (not
@@ -845,9 +861,24 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward",
             magnitude: bool | None = None,
-            linear_predict_f1: bool | None = None) -> NMRSpectrum:
+            linear_predict_f1: bool | None = None,
+            _raw_fid_cache: np.ndarray | None = None) -> NMRSpectrum:
     """Read the raw ``ser`` and reprocess it (F2 then F1) using the
     parameters TopSpin recorded in ``procs``/``proc2s``.
+
+    ``_raw_fid_cache`` : internal fast path, not a GUI-facing
+    reprocessing option (leading underscore). The digital-filter-
+    removed raw FID depends on nothing below this docstring except
+    ``path`` itself -- every other parameter here only affects what
+    happens *after* it's read. Reprocessing (a window/zero-fill/procno/
+    phase change) still calls this function fresh each time, so
+    :class:`~opennmr.gui.session.Session` passes the previous call's
+    own ``metadata.raw["fid_raw"]`` back in here to skip re-reading the
+    (often hundreds-of-MB) ``ser`` file and redoing digital-filter
+    removal -- measured at ~2.4s of a ~6.7s read on a real 2048x65536
+    EXSY, entirely wasted work when only, say, the window function
+    changed. Skips straight to the procno-dependent stage below when
+    given.
 
     Raw ``ser`` shape comes from :func:`_guess_raw_2d_shape`/
     :func:`_read_raw_2d_data` -- not ``nmrglue.bruker.read``'s own
@@ -941,10 +972,13 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # uses nmrglue for the acqus/acqu2s parameter dicts themselves
     # (read_acqus_file, no pulse-program dependency) and the actual
     # digital-filter removal below (remove_digital_filter).
-    dic = ng.bruker.read_acqus_file(path)
-    data = _read_raw_2d_data(path, dic)
-    data = _remove_digital_filter(dic, data).astype(np.complex128)
-    data = np.conj(data)  # see _CONJUGATE_QUADRATURE_NOTE below
+    dic = read_acqus_files(path)
+    if _raw_fid_cache is not None:
+        data = _raw_fid_cache
+    else:
+        data = _read_raw_2d_data(path, dic)
+        data = _remove_digital_filter(dic, data).astype(np.complex128)
+        data = np.conj(data)  # see _CONJUGATE_QUADRATURE_NOTE below
     fid_raw = data  # the truly raw FID (every row/slice) -- see metadata.raw["fid_raw"]'s own comment below
     original_length = data.shape[1]  # NP (F2): acquired points, before shift/align/LP/window/zero-fill
 
@@ -1093,8 +1127,33 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # correction needs it.
     x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, spectrum.shape[1])
     recorded_f2 = (0.0, 0.0)
+    recorded_phase_dropped_f2 = False
     if autophase:
-        if phase_mode == "recorded":
+        if phase_mode == "recorded" and align_echo:
+            # **A recorded phase does not survive echo alignment** --
+            # the same argument, and the same fix, as :func:`read_1d`'s
+            # own F2 branch. TopSpin's PHC1 on an echo experiment
+            # compensates for transforming from t=0 of the echo rather
+            # than from its top; aligning the echo removes what that
+            # phase corrects, so applying it too is a double
+            # correction.
+            #
+            # In 1D this was verified against TopSpin's own echo-
+            # aligned processing of the same data (999912-999915,
+            # which record PHC1 = 0.00): +0.12 -> +0.92 correlation.
+            # No 2D dataset here has such a counterpart, so this half
+            # is verified on a synthetic echo with known ground truth
+            # instead: measured as the fraction of |S| the real part
+            # carries, aligning alone scores +0.545 and aligning *and*
+            # applying the recorded PHC1 scores +0.266 -- no better
+            # than leaving the echo unaligned and unphased (+0.280).
+            #
+            # This matters most for the T2 echo series, which are
+            # exactly the 2D experiments that need Align Echo, and
+            # which record PHC1 values of 800-2000 degrees.
+            phase0 = processing_ft.apc0(spectrum.mean(axis=0), x_ppm, phase0_inc)
+            recorded_phase_dropped_f2 = True
+        elif phase_mode == "recorded":
             # F2's recorded phase, kept separate from the user's own --
             # see apply_dimension_phase. Note PHC1 is now honoured here;
             # it used to be dropped entirely for 2D (read_1d always read
@@ -1229,6 +1288,11 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs),
             _SR_RECORDED_KEY_F1: (None if pseudo_2d else _recorded_sr_hz(sf_1, obs_1)),
             "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
+            **({"recorded_phase_dropped":
+                "Echo alignment replaces TopSpin's recorded PHC0/PHC1 for F2 -- that "
+                "phase compensates for transforming from t=0 of an echo, which aligning "
+                "already does, so a zero-order phase was re-derived instead."}
+               if recorded_phase_dropped_f2 else {}),
             "recorded_phase0_f1": recorded_f1[0], "recorded_phase1_f1": recorded_f1[1],
             # F1's own hypercomplex encoding (see
             # processing.ft.decode_hypercomplex_f1) -- retrievable so a
@@ -1369,24 +1433,21 @@ def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float 
     return NMRSpectrum(data=real, axes=[axis], metadata=metadata, data_imag=imag)
 
 
-def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
-                       pseudo_2d: bool | None = None, magnitude: bool | None = None) -> NMRSpectrum:
-    """Read TopSpin's own already-processed ``2rr`` directly -- ported
-    from ``nmrtools2``'s ``NMR2dimport``, including its Bruker XDIM
-    submatrix-block reconstruction and ``GRPDLY`` roll, both of which
-    apply only to this processed-data storage format (not to raw
-    ``ser`` data, which :func:`read_2d` never needs them for).
+def _processed_2d_params(path: str, procno: int, homonuclear: bool) -> dict:
+    """The parameter-file-only parsing :func:`read_2d_processed` and
+    :func:`peek` both need -- shape, nucleus and on-disk block layout,
+    from ``acqus``/``acqu2s``/``procs``/``proc2s`` alone. Never touches
+    ``2rr``/``2ri`` themselves, so :func:`peek` can report exactly what
+    a full :func:`read_2d_processed` would without reading its
+    (potentially huge) data file.
 
-    ``pseudo_2d`` : see :func:`read_2d` -- ``None`` (default)
-    auto-detects from ``acqu2s``'s ``NUC1``; pass ``True``/``False``
-    to override.
-    """
-    real_path = os.path.join(path, "pdata", str(procno), "2rr")
-    imag_path = os.path.join(path, "pdata", str(procno), "2ri")
-    acqus_path = os.path.join(path, "acqus")
-    acqu2s_path = os.path.join(path, "acqu2s")
-
-    acqus = parse_jcampdx_params(acqus_path)
+    Assumes ``pdata/<procno>/proc2s`` exists -- i.e. this really is a
+    processed 2D (see :func:`peek`'s own ``has_proc2s`` check, which is
+    what actually distinguishes a 2D dataset from a 1D one; an empty/
+    partially-missing ``proc2s`` here still degrades gracefully to
+    ``xdim_f1=1``, same as before this was split out, but is not itself
+    the 1D-vs-2D signal)."""
+    acqus = parse_jcampdx_params(os.path.join(path, "acqus"))
     procs = _read_procs(path, procno)
 
     obs = float(acqus.get("BF1"))
@@ -1395,7 +1456,6 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
     sw = float(procs.get("SW_p"))
     si1_val = float(procs.get("SI"))
     xdim_f2 = int(procs.get("XDIM", 0))
-    grpdly = float(procs.get("GRPDLY", 0.0))
 
     # F1's own processed-data block size (SI/XDIM) always comes from
     # the real on-disk proc2s, regardless of homonuclear -- that flag
@@ -1416,7 +1476,7 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
     if homonuclear:
         nuc2, obs_1, o1_1, sf_1, sw_1 = acqus.get("NUC1"), obs, o1, sf, sw
     else:
-        acqu2s = parse_jcampdx_params(acqu2s_path)
+        acqu2s = parse_jcampdx_params(os.path.join(path, "acqu2s"))
         nuc2 = acqu2s.get("NUC1")
         obs_1 = float(acqu2s.get("BF1"))
         o1_1 = float(acqu2s.get("O1"))
@@ -1425,6 +1485,80 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
 
     si2_val = float(proc2s.get("SI", si1_val))
     xdim_f1 = int(proc2s.get("XDIM", 1)) if proc2s else 1
+
+    return {
+        "acqus": acqus, "procs": procs, "proc2s": proc2s,
+        "obs": obs, "o1": o1, "sf": sf, "sw": sw,
+        "obs_1": obs_1, "o1_1": o1_1, "sf_1": sf_1, "sw_1": sw_1,
+        "nuc1": acqus.get("NUC1"), "nuc2": nuc2,
+        "si1": si1_val, "si2": si2_val,
+        "xdim_f1": xdim_f1, "xdim_f2": xdim_f2,
+    }
+
+
+def peek(path: str, procno: int = 1, homonuclear: bool = False) -> dict:
+    """Metadata-only probe: shape/nucleus/block-layout from
+    ``acqus``/``acqu2s``/``procs``/``proc2s`` alone, never touching
+    ``ser``/``fid``/``2rr``/``2ri`` -- see :func:`opennmr.io.base.peek`
+    for what this is for (e.g. a Data-tab folder browser deciding what
+    a directory holds, without reading a potentially huge file just to
+    find out).
+
+    Reports a genuine 2D's own processed shape ``(si2, si1)`` -- the
+    same (SI-based) shape :func:`read_2d_processed` would produce --
+    whenever ``pdata/<procno>`` has a ``proc2s`` file; every 1D
+    experiment's own ``pdata`` directory lacks one (there's no F1
+    dimension to process), which is what actually distinguishes the
+    two cases here, not merely whether it parses. 1D shape comes from
+    ``procs``'s own ``SI``, falling back to ``acqus``'s ``TD`` if a 1D
+    experiment hasn't been processed at all yet.
+    """
+    acqus = parse_jcampdx_params(os.path.join(path, "acqus"))
+    procs = _read_procs(path, procno)
+    has_proc2s = os.path.exists(os.path.join(path, "pdata", str(procno), "proc2s"))
+    if not has_proc2s:
+        si = int(float(procs.get("SI", acqus.get("TD", 0))))
+        return {
+            "vendor": "bruker", "ndim": 1, "shape": (si,),
+            "nucleus": acqus.get("NUC1"), "nucleus_indirect": None,
+            "pseudo_2d": False,
+        }
+
+    info = _processed_2d_params(path, procno, homonuclear)
+    result = {
+        "vendor": "bruker", "ndim": 2,
+        "shape": (int(info["si2"]), int(info["si1"])),
+        "nucleus": info["nuc1"], "nucleus_indirect": info["nuc2"],
+        "pseudo_2d": (info["nuc2"] == "off"),
+    }
+    if info["xdim_f1"] > 1:
+        result["block_shape"] = (info["xdim_f1"], info["xdim_f2"])
+    return result
+
+
+def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
+                       pseudo_2d: bool | None = None, magnitude: bool | None = None) -> NMRSpectrum:
+    """Read TopSpin's own already-processed ``2rr`` directly -- ported
+    from ``nmrtools2``'s ``NMR2dimport``, including its Bruker XDIM
+    submatrix-block reconstruction and ``GRPDLY`` roll, both of which
+    apply only to this processed-data storage format (not to raw
+    ``ser`` data, which :func:`read_2d` never needs them for).
+
+    ``pseudo_2d`` : see :func:`read_2d` -- ``None`` (default)
+    auto-detects from ``acqu2s``'s ``NUC1``; pass ``True``/``False``
+    to override.
+    """
+    real_path = os.path.join(path, "pdata", str(procno), "2rr")
+    imag_path = os.path.join(path, "pdata", str(procno), "2ri")
+
+    info = _processed_2d_params(path, procno, homonuclear)
+    acqus, procs, proc2s = info["acqus"], info["procs"], info["proc2s"]
+    obs, o1, sf, sw = info["obs"], info["o1"], info["sf"], info["sw"]
+    obs_1, o1_1, sf_1, sw_1 = info["obs_1"], info["o1_1"], info["sf_1"], info["sw_1"]
+    nuc2 = info["nuc2"]
+    si1_val, si2_val = info["si1"], info["si2"]
+    xdim_f1, xdim_f2 = info["xdim_f1"], info["xdim_f2"]
+    grpdly = float(procs.get("GRPDLY", 0.0))
 
     if pseudo_2d is None:
         pseudo_2d = (nuc2 == "off")
@@ -1491,7 +1625,14 @@ def read_2d_processed(path: str, procno: int = 1, homonuclear: bool = False,
         probe=acqus.get("PROBHD"), pulse_program=acqus.get("PULPROG"),
         raw={"acqus": acqus, "procs": procs, "proc2s": proc2s,
              _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs),
-             _SR_RECORDED_KEY_F1: (None if pseudo_2d else _recorded_sr_hz(sf_1, obs_1))},
+             _SR_RECORDED_KEY_F1: (None if pseudo_2d else _recorded_sr_hz(sf_1, obs_1)),
+             # The on-disk block size this 2rr/2ri was stored in --
+             # generic, vendor-agnostic name (see peek()'s own use of
+             # the same key) rather than the Bruker-specific "xdim_f1/
+             # f2", since a future tiled/region reader shouldn't have
+             # to know this came from Bruker to use it. xdim_f1==1 is
+             # the degenerate single-block case (no real structure).
+             "block_shape": (xdim_f1, xdim_f2) if xdim_f1 > 1 else None},
     )
     x_axis = NMRAxis(kind="frequency", ppm=x_ppm, hz=x_hz)
     # See read_1d_processed's own matching block. proc2s votes too,
@@ -1686,6 +1827,37 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     file unaccounted for" -- tried once, reverted, see
     :func:`_read_raw_2d_data`'s own docstring for why that turned out
     to be a false signal, not a real one, for this vendor's data."""
+    # Popped off up front and only ever handed back to read_2d below --
+    # every other branch here (the processed-data fallback, both 1D
+    # readers) neither accepts nor needs this internal fast-path kwarg
+    # (see read_2d's own docstring for what it's for), and would raise
+    # a TypeError on an unexpected keyword if it leaked through.
+    raw_fid_cache = kwargs.pop("_raw_fid_cache", None)
+    # Take TopSpin's own already-processed spectrum instead of
+    # reprocessing the raw FID, even though a fid/ser is sitting right
+    # there. Not the default -- reprocessing from raw is this project's
+    # whole point -- but the two genuinely disagree on data whose
+    # processing this reader cannot yet reproduce, and the user needs
+    # to be able to say "give me what TopSpin shows".
+    #
+    # Real case: 17O Hahn-echo VOCS data (hahnecho_d7.ids30). The raw
+    # path correlates only +0.49..+0.65 with TopSpin's own 1r on those
+    # four experiments, and -- worse for VOCS specifically -- it
+    # reorders which acquisition is the tallest, so the combination
+    # comes out looking nothing like the same experiment. nmrtools2's
+    # notebook reads processed data and was the reference the user was
+    # comparing against.
+    if kwargs.pop("use_processed", False):
+        one_d = {k: v for k, v in kwargs.items() if k != "pseudo_2d"}
+        if os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr")):
+            spectrum = read_2d_processed(path, **{
+                k: v for k, v in kwargs.items()
+                if k in ("procno", "homonuclear", "pseudo_2d", "magnitude")
+            })
+        else:
+            spectrum = read_1d_processed(path, **one_d)
+        spectrum.metadata.raw["loaded_from_processed"] = "requested (use TopSpin's processed data)"
+        return spectrum
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
     has_2rr = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
@@ -1701,7 +1873,7 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     one_d_kwargs = {k: v for k, v in kwargs.items() if k != "pseudo_2d"}
     if has_ser:
         try:
-            return read_2d(path, **kwargs)
+            return read_2d(path, **kwargs, _raw_fid_cache=raw_fid_cache)
         except (IndexError, KeyError) as exc:
             if not has_2rr:
                 raise
@@ -1728,4 +1900,4 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     return spectrum
 
 
-base.register("bruker", _detect, _read_auto)
+base.register("bruker", _detect, _read_auto, peek=peek)

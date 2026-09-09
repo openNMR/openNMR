@@ -343,11 +343,15 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
                        fontname=font, fontsize=fontsize - 2, va="bottom", ha="left",
                        clip_on=False)
 
+        # Same weight as the trace the marker is paired with, rather
+        # than the thinner annotation weight this used to have -- so a
+        # marker and its own trace read as one object at a glance
+        # ("linewidths of extracted slices should be 2" meant both).
         position = positions[i]
         if axis_kind == "f1":
-            ax.axhline(position, color=colour, linestyle=_SLICE_DASHES, linewidth=1.0)
+            ax.axhline(position, color=colour, linestyle=_SLICE_DASHES, linewidth=linewidth)
         else:
-            ax.axvline(position, color=colour, linestyle=_SLICE_DASHES, linewidth=1.0)
+            ax.axvline(position, color=colour, linestyle=_SLICE_DASHES, linewidth=linewidth)
 
     # Match the contour's own limits on the shared dimension, so a peak
     # in a trace sits directly under the same shift in the contour.

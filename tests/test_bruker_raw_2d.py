@@ -1,5 +1,5 @@
 """
-Mocked-`ng.bruker.read`/`remove_digital_filter` coverage for `read_2d`
+Mocked-reader/`_remove_digital_filter` coverage for `read_2d`
 -- see test_bruker_raw_fid.py's module docstring for why this
 approach (real code, synthetic raw data) rather than real Bruker
 files, which aren't available in this environment.
@@ -58,13 +58,12 @@ def _mock_2d(monkeypatch, acqus, fid, acqu2s=None):
     dic = {"acqus": acqus}
     if acqu2s is not None:
         dic["acqu2s"] = acqu2s
-    monkeypatch.setattr(bruker.ng.bruker, "read_acqus_file", lambda path: dic)
-    monkeypatch.setattr(bruker.ng.bruker, "read", lambda path, **kw: (dic, fid))
+    monkeypatch.setattr(bruker, "read_acqus_files", lambda path: dic)
     # read_1d/read_2d read the binary themselves now (see
     # bruker._read_bruker_binary) rather than via ng.bruker.read, so the
     # synthetic fid has to be injected at that seam too.
     monkeypatch.setattr(bruker, "_read_bruker_binary", lambda p, d, shape=None: fid)
-    monkeypatch.setattr(bruker.ng.bruker, "remove_digital_filter", lambda d, data: data)
+    monkeypatch.setattr(bruker, "_remove_digital_filter", lambda d, data: data)
     # _guess_raw_2d_shape's own TD/DTYPA/file-size-based block-rounding
     # (see its own docstring) is real-file-scale logic that doesn't
     # apply to these small synthetic fixtures -- bypass it so the mock
@@ -593,12 +592,12 @@ def test_read_2d_loads_successfully_from_a_real_ser_file_td_mismatch(tmp_path):
         return data
 
     import opennmr.io.bruker as bruker_module
-    orig = bruker_module.ng.bruker.remove_digital_filter
-    bruker_module.ng.bruker.remove_digital_filter = _no_digital_filter
+    orig = bruker_module._remove_digital_filter
+    bruker_module._remove_digital_filter = _no_digital_filter
     try:
         spectrum = bruker.read_2d(str(expt), homonuclear=False, autophase=False, pseudo_2d=False)
     finally:
-        bruker_module.ng.bruker.remove_digital_filter = orig
+        bruker_module._remove_digital_filter = orig
 
     assert spectrum.data.shape[0] == n_f1  # zero-filled to proc2s's own SI
     assert spectrum.data_imag is not None
@@ -757,3 +756,62 @@ def test_read_2d_processed_f1_imaginary_block_is_2ri_not_2ir():
     assert _causal_fraction("2ri") > 0.999
     assert _causal_fraction("2ir") < 0.6
     assert _causal_fraction("2ii") < 0.6
+
+
+def test_synthetic_echo_shows_the_recorded_phase_double_correction():
+    # Ground truth for a claim that has no 2D reference dataset here:
+    # a recorded PHC1 exists to compensate for transforming from t=0 of
+    # an echo rather than its top, so aligning the echo AND applying
+    # that phase corrects the same thing twice.
+    n, echo_at = 2048, 200
+    t = np.arange(n)
+    fid = np.exp(-np.abs(t - echo_at) / 300.0) * np.exp(2j * np.pi * 0.02 * (t - echo_at))
+
+    def absorption(x):
+        s = np.fft.fftshift(np.fft.fft(x))
+        return float(np.sum(np.real(s)) / np.sum(np.abs(s)))
+
+    aligned = np.roll(fid, -echo_at)
+    ramp = np.exp(1j * np.deg2rad(360.0 * echo_at * np.arange(n) / (n - 1)))
+
+    target = absorption(aligned)                       # align alone: the goal
+    unaligned = absorption(fid)
+    topspin_route = absorption(np.fft.ifft(np.fft.ifftshift(
+        np.fft.fftshift(np.fft.fft(fid)) * ramp)))     # unaligned + PHC1
+    doubled = float(np.sum(np.real(np.fft.fftshift(np.fft.fft(aligned)) * ramp))
+                    / np.sum(np.abs(np.fft.fftshift(np.fft.fft(aligned)))))
+
+    assert target > unaligned                # aligning helps
+    assert doubled < target                  # ...and applying PHC1 too undoes it
+    assert doubled <= unaligned + 0.05       # back to roughly no correction at all
+    assert topspin_route > unaligned         # TopSpin's own route is fine
+
+
+def _echo_2d_dataset():
+    path = os.path.join("test_data", "bruker_T2", "11")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real echo dataset at {path}")
+    return path
+
+
+def test_read_2d_drops_the_recorded_phase_when_aligning_the_echo():
+    # The T2 echo series are exactly the 2D experiments that need Align
+    # Echo, and they record PHC1 of 800-2000 degrees -- so this is where
+    # the double correction bites hardest.
+    path = _echo_2d_dataset()
+
+    aligned = bruker.read_2d(path, pseudo_2d=True, align_echo=True)
+
+    assert "recorded_phase_dropped" in aligned.metadata.raw
+    assert aligned.metadata.raw["recorded_phase1"] == 0.0
+
+
+def test_read_2d_keeps_the_recorded_phase_without_echo_alignment():
+    # Scoped strictly to align_echo -- an ordinary 2D load must still
+    # reproduce TopSpin's own recorded first-order term.
+    path = _echo_2d_dataset()
+
+    plain = bruker.read_2d(path, pseudo_2d=True)
+
+    assert "recorded_phase_dropped" not in plain.metadata.raw
+    assert plain.metadata.raw["recorded_phase1"] != 0.0
