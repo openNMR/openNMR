@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-09)
 
-1182 tests passing. Working tree clean, in sync with `origin/main`. **`src/` no longer imports nmrglue.**
+1196 tests passing. Working tree clean, in sync with `origin/main`. **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -19,20 +19,14 @@ Decided and built; see *Six settled decisions...* below. Export size for a slice
 ### 2. Deferred deliberately, with a written-up starting point
 
 - **True viewport-driven tiled reads** (re-fetch only the Bruker `XDIM` blocks under the current pan/zoom). See *Reprocessing a large 2D no longer re-reads the file...* -- reprocessing's own dominant cost is fixed (below), and the metadata a tiled reader would need (`block_shape`) is now recorded, but the reader itself needs new background-thread infrastructure that doesn't exist anywhere in this codebase (`QThread` background load, next bullet's neighbour in *Loose ends*) and hasn't been built. Also: `complex64` (halves a ~1 GB array) and view-limited F1 transforms for raw `ser` are still just plans, not code -- see *Planned, not built: load speed...*.
-- **A folder browser for the Data tab** (collapsible, MNova/TopSpin style). Same section. The widget is the easy part; what needs thought is what counts as a node (Bruker experiment directories and their `pdata/N` procnos, not raw filesystem depth), keeping loadability checks lazy, and distinguishing it from the existing *loaded*-spectra list. `io.peek()`/`bruker.peek()` (below) now give it a real, fast, metadata-only per-node check to build on.
 
-### 3. Known-broken, diagnosed but not fixed
+### 3. ~~Known-broken~~ -- not bugs, resolved 2026-09-09
 
-- **`Cyclosporine/211`** (Echo-Antiecho): +0.0113. F2 projection +0.71, **F1** +0.03. Ruled out: F1 linear prediction (disabling it gives +0.0250) and strip transform (`STSR=0`, `STSI=SI`). Most suspicious: `proc2s` asks for an **8x** LP extrapolation (`LPBIN=2048` from 128 complex points). Not demonstrated.
-- **`exam_CMCse_3/19`** (States-TPPI): +0.0164, and its interferogram fits nothing (residual 0.998). Here it is **F2** that is wrong (F2 projection +0.51, F1 +0.90). Most suspicious: `procs` has `TDeff=4096` with `SI=2048`, i.e. TopSpin windows over more points than it transforms -- a window computed over the wrong length changes the lineshape, which fits the symptom. Untested.
-- **`20200804_NaMgMnO.../31`**: an F2 agreement outlier at **+0.0262**, never investigated.
-
-Both of the first two were equally broken before the hypercomplex fix; neither is the hourglass.
+`Cyclosporine/211`, `exam_CMCse_3/19` and `20200804_NaMgMnO.../31` were tracked as TopSpin-agreement failures (+0.011, +0.016, +0.026). The user identified them: **they are experiments that were never actually run, or NUS data** -- so there is no correct spectrum to agree with, and the low correlations are the honest answer rather than a defect. The LP-extrapolation and `TDeff`-windowing hypotheses recorded here were chasing a problem that does not exist. Genuinely sub-100%-sampled NUS still needs reconstruction, which is its own entry under *Loose ends*.
 
 ### 4. Loose ends
 
 - **`NavigationToolbar2`'s view stack is never cleared** when this canvas rebuilds its figure (no `toolbar.update()` anywhere), so it accumulates references to Axes that no longer exist. `home()` behaves correctly in every case tested, and clearing on every contour redraw would throw away the user's zoom history -- so this is recorded, not fixed. If Back/Forward ever misbehave, start here.
-- **`QThread` background load.** There is still zero threading in `src/` outside the FFT worker pool. Would not reduce compute time but would keep the GUI responsive and cancellable. Design already written up in *Threading plan for big-data loading*.
 - **Vectorising `_recompute_multi_row_data`'s per-row loop** -- the same fix already applied to `read_2d`. Its loop also handles echo-alignment and linear prediction, which genuinely are row-dependent, so it likely needs a "fast batched path only when neither is active" split rather than unconditional vectorisation.
 - **`acquisition_constants` reads only `acqus`.** Indirect-dimension (`acqu2s`) and processing (`procs`) parameters are not exposed to fitting equations. Needs a naming scheme that cannot collide with the direct dimension's.
 - **Mixed-axis slices on one contour** are skipped: the first slice's axis wins, because the panel has a single x-axis and rows and columns run along different dimensions. A second panel (below, for columns) is the obvious extension.
@@ -56,6 +50,56 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## A folder browser for the Data tab (2026-09-09)
+
+User: "make sure that the bruker experiment folders are the appropriate 'destinations' because people generally won't know to click the fid/ser. Or at least only show those relevant files in the viewer."
+
+`gui/widgets/data_browser.py` -- pick a folder once, then click between its experiments instead of going back through Open... every time.
+
+### Experiments are the leaves
+
+A Bruker experiment is one node; its `fid`, `ser` and `pdata` never appear at all, because none of them is something a person should have to know to click. Same for X-Pulse: the leaf is the `.jdx` that is actually loadable, and the per-scan `..._raw.jdx` siblings are not offered.
+
+**Discovery is not reimplemented here** -- the tree is built from `MainWindow._scan_for_spectra`, the same scan Open... and drag-and-drop already use. That is what guarantees the browser cannot offer something Open would refuse, or hide something Open would find, and it already knew to stop at a recognised experiment rather than descending into it. Reusing it was the whole reason this was cheap.
+
+### Annotated without opening anything
+
+Each experiment carries a summary -- `203 · 1H, 2D, 1024x4096` -- from `io.peek`, which reads only the small parameter files: **~1 ms**, against seconds for a real load. (`peek` existed from the reprocessing round but was never exported from `opennmr.io`; it is now.)
+
+Peeking is **deferred until a folder is expanded**, so pointing this at a large archive costs nothing up front -- verified on a 75-experiment tree, where nested leaves stay unannotated until their folder opens. An experiment `peek` cannot read is still listed, just without a summary: it is still loadable, and hiding it would be worse.
+
+Loading goes through the same path as Open..., background read included. Placed below the loaded-spectra list and labelled "Browse a folder", because the two lists are easy to confuse -- this one is what is on disk, that one is what is open.
+
+7 new tests.
+
+## Background loading: the read comes off the GUI thread (2026-09-09)
+
+The first concurrency in this project outside the FFT worker pool, implementing part 4 of the 2026-09-05 threading plan (parts 1 and 3 -- the duplicate read and `scipy.fft` workers -- already landed).
+
+**Responsiveness, not speed, and the plan was explicit about why.** A large load spends roughly half its time in `plot_2d_contour`, and matplotlib figures and Qt widgets must stay on the GUI thread -- a hard Qt/Cocoa rule, not a tuning choice. So moving the read off leaves the window alive and cancellable without making anything finish sooner. Nothing here is sold as making loads faster.
+
+### Shape
+
+`gui/loader.py`: a `SpectrumReader` (plain `QObject`, moved with `moveToThread` rather than subclassing `QThread`, so it stays an ordinary object a test can call directly with no thread at all) and a `BackgroundLoader` owning one long-lived thread reused across loads.
+
+The boundary is the point: **the worker only calls `io.load`**. It never touches `Session`, whose two lists are mutable shared state, and never touches a widget or a figure. It hands the finished spectrum back by signal; the GUI thread then calls the new `Session.adopt`, which appends an already-read spectrum with the same bookkeeping `add` would have recorded, so `reload`/`reset`/`preview` still work afterwards.
+
+`MainWindow._load` gained an optional `preloaded=`; every existing synchronous caller is unchanged. The three open paths try `_load_async` first and **fall back to synchronous `_load`** if background loading is off or a thread cannot be started.
+
+`_initial_load_kwargs` was extracted so the worker reads with exactly the kwargs `_load` would have used -- both call it, so they agree by construction rather than by being kept in step by hand. This matters: it carries the pre-read pseudo-2D and magnitude decisions that exist to avoid reading a 2D twice.
+
+### Contract items honoured
+
+- **Threads, never `multiprocessing`** -- `spawn` (macOS/Windows) re-imports the parent module, would need every spectrum to pickle, and behaves differently again inside the PyInstaller bundle this project builds.
+- **`OPENNMR_BACKGROUND_LOAD=0`** forces the synchronous path, which is the same code called directly. An unparseable value is treated as "on" rather than raising -- a bad environment variable must not stop a spectrum loading, the same rule `fft_workers` follows.
+- **Cancellation is between stages**, not mid-FFT: a flag checked before and after the read, with the result discarded. Interrupting a running transform is not something this can honestly promise.
+- **Lifecycle**: a new `closeEvent` shuts the thread down. Without it Qt prints `QThread: Destroyed while thread is still running` and can abort the process on exit.
+- **No sleeps in the tests.** Waiting is signal-driven with a generous timeout; a timer-based test passes on a fast machine and flakes on a slow one, which is exactly the platform-dependent failure the contract forbids.
+
+Verified end to end on real data: the read genuinely runs on a different thread id from the GUI's, the session stays empty until it lands, and the window closes cleanly.
+
+7 new tests.
 
 ## read_2d drops the recorded phase when aligning an echo, too (2026-09-09)
 

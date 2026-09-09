@@ -46,7 +46,9 @@ from .session import Session
 from .widgets.canvas import MplCanvas
 from .widgets.drag_control import DragHandle
 from .widgets.relative_spinbox import RelativeDoubleSpinBox
+from .widgets.data_browser import DataBrowser
 from .widgets.wrapping_tabs import WrappingTabWidget
+from .loader import background_load_enabled
 
 #: Genuinely unbounded spinbox range for phase controls -- a slider's
 #: fixed pixel-to-range mapping would force a tradeoff between coarse
@@ -250,6 +252,11 @@ class MainWindow(QMainWindow):
         # that index, so the index is the stable handle here, same as
         # Session's own _load_info).
         self._original_load_kwargs: dict[int, dict] = {}
+        # Background-load thread (see gui.loader), created on first
+        # use, plus how many reads are still in flight so the status
+        # message clears only when the last one lands.
+        self._loader = None
+        self._pending_loads = 0
         # The per-slice pseudo-Voigt fit results from the most recent
         # Analysis-tab fit (NMR2D_fit_slices's own "rows" output) --
         # lets "Spectrum fit (slice #)" browse the intermediate spectral
@@ -1061,6 +1068,19 @@ class MainWindow(QMainWindow):
         self.spectrum_list.customContextMenuRequested.connect(self._on_spectrum_list_context_menu)
         layout.addWidget(self.spectrum_list)
 
+        # Browse a folder's experiments without going back through
+        # Open… each time. Deliberately *below* the loaded-spectra list
+        # and labelled, because the two are easy to confuse: this one
+        # is what is on disk, that one is what is open.
+        browser_box = QGroupBox("Browse a folder")
+        browser_layout = QVBoxLayout(browser_box)
+        browser_layout.setContentsMargins(4, 4, 4, 4)
+        self.data_browser = DataBrowser()
+        self.data_browser.browseRequested.connect(self._on_browse_folder_clicked)
+        self.data_browser.spectrumActivated.connect(self._on_browser_spectrum_activated)
+        browser_layout.addWidget(self.data_browser)
+        layout.addWidget(browser_box, 1)
+
         remove_button = QPushButton("Remove")
         remove_button.clicked.connect(self._on_remove_clicked)
         clear_button = QPushButton("Clear All")
@@ -1190,7 +1210,8 @@ class MainWindow(QMainWindow):
             except ValueError:
                 unrecognised.append(path)
                 continue
-            self._load(path, vendor)
+            if not self._load_async(path, vendor):
+                self._load(path, vendor)
 
         if unrecognised and report_unrecognised:
             QMessageBox.critical(
@@ -1213,11 +1234,13 @@ class MainWindow(QMainWindow):
             return
 
         if len(matches) == 1:
-            self._load(*matches[0])
+            if not self._load_async(*matches[0]):
+                self._load(*matches[0])
             return
 
         for path, vendor in self._prompt_select_spectra(matches, directory):
-            self._load(path, vendor)
+            if not self._load_async(path, vendor):
+                self._load(path, vendor)
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 -- Qt override
         if event.mimeData().hasUrls():
@@ -1372,7 +1395,93 @@ class MainWindow(QMainWindow):
             return []
         return [matches[list_widget.row(item)] for item in list_widget.selectedItems()]
 
-    def _load(self, path: str, vendor: str) -> None:
+    def closeEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        """Stop the background-load thread before the window goes away.
+
+        Without this Qt prints ``QThread: Destroyed while thread is
+        still running`` and can abort the process on exit -- the thread
+        outlives the widget that owns it otherwise."""
+        if self._loader is not None:
+            self._loader.shutdown()
+            self._loader = None
+        super().closeEvent(event)
+
+    def _load_async(self, path: str, vendor: str) -> bool:
+        """Read ``path`` off the GUI thread, then finish the load here.
+
+        Returns whether the read was actually dispatched -- ``False``
+        means the caller should fall back to the synchronous
+        :meth:`_load` (background loading disabled, or a loader that
+        could not be started). The *only* thing that moves off the GUI
+        thread is the read itself; every widget, canvas and session
+        mutation still happens in the slot below, on the GUI thread.
+        See :mod:`opennmr.gui.loader` for why that boundary is where
+        it is."""
+        if not background_load_enabled():
+            return False
+        loader = self._background_loader()
+        if loader is None:
+            return False
+        self._pending_loads += 1
+        self.statusBar().showMessage(f"Loading {os.path.basename(path)}…")
+        loader.load(path, vendor, self._initial_load_kwargs(path, vendor))
+        return True
+
+    def _background_loader(self):
+        """The window's own loader thread, started on first use.
+
+        Lazily created so a session that never opens a file never
+        starts a thread, and so a failure to start one degrades to
+        synchronous loading rather than breaking the window."""
+        if self._loader is None:
+            try:
+                from .loader import BackgroundLoader
+
+                self._loader = BackgroundLoader(self)
+                self._loader.finished.connect(self._on_background_load_finished)
+                self._loader.failed.connect(self._on_background_load_failed)
+            except Exception:  # noqa: BLE001 -- fall back to loading synchronously
+                self._loader = None
+        return self._loader
+
+    def _on_background_load_finished(self, path: str, vendor: str, spectrum) -> None:
+        self._pending_loads = max(0, self._pending_loads - 1)
+        if not self._pending_loads:
+            self.statusBar().clearMessage()
+        self._load(path, vendor, preloaded=spectrum)
+
+    def _on_background_load_failed(self, path: str, vendor: str, message: str) -> None:
+        self._pending_loads = max(0, self._pending_loads - 1)
+        if not self._pending_loads:
+            self.statusBar().clearMessage()
+        QMessageBox.critical(self, "Failed to load spectrum", message)
+
+    def _initial_load_kwargs(self, path: str, vendor: str) -> dict:
+        """The reader kwargs a *first* load of ``path`` should use,
+        decided from its sidecars before any reading happens.
+
+        Split out so the background loader can read with exactly the
+        same kwargs :meth:`_load` would have used -- both call this, and
+        it is pure sidecar lookup, so the two agree by construction
+        rather than by being kept in step by hand."""
+        add_kwargs: dict = {}
+        if vendor == "bruker":
+            presel = io_persistence.load_metadata_sidecar(path)
+            add_kwargs["pseudo_2d"] = (presel or {}).get("pseudo_2d") is not False
+            # Magnitude mode has to be decided here too, for the same
+            # reason: it is applied by the *reader* (there is
+            # deliberately no second in-memory implementation, see
+            # _on_magnitude_toggled), so the sidecar-restore path --
+            # which recomputes from the cached raw FID rather than
+            # re-reading -- cannot apply it afterwards. Only an
+            # explicit saved choice is honoured; with none, the reader
+            # follows the file's own recorded PH_mod as usual.
+            saved_processing = io_persistence.load_processing_sidecar(path) or {}
+            if "magnitude_override" in saved_processing:
+                add_kwargs["magnitude"] = bool(saved_processing["magnitude_override"])
+        return add_kwargs
+
+    def _load(self, path: str, vendor: str, preloaded=None) -> None:
         # Decide the pseudo-2D treatment *before* the read, not after.
         # Every vendor reader sets metadata.source_path to exactly the
         # path handed to it, so this experiment's own saved preference
@@ -1391,23 +1500,15 @@ class MainWindow(QMainWindow):
         # readers this trace never measured. io.bruker._read_auto drops
         # `pseudo_2d` for the 1D branches, so passing it here is safe
         # without knowing yet whether `path` is 1D or 2D.
-        add_kwargs = {}
-        if vendor == "bruker":
-            presel = io_persistence.load_metadata_sidecar(path)
-            add_kwargs["pseudo_2d"] = (presel or {}).get("pseudo_2d") is not False
-            # Magnitude mode has to be decided here too, for the same
-            # reason: it is applied by the *reader* (there is
-            # deliberately no second in-memory implementation, see
-            # _on_magnitude_toggled), so the sidecar-restore path --
-            # which recomputes from the cached raw FID rather than
-            # re-reading -- cannot apply it afterwards. Only an
-            # explicit saved choice is honoured; with none, the reader
-            # follows the file's own recorded PH_mod as usual.
-            saved_processing = io_persistence.load_processing_sidecar(path) or {}
-            if "magnitude_override" in saved_processing:
-                add_kwargs["magnitude"] = bool(saved_processing["magnitude_override"])
+        add_kwargs = self._initial_load_kwargs(path, vendor)
         try:
-            spectrum = self.session.add(path, vendor=vendor, **add_kwargs)
+            if preloaded is not None:
+                # Already read, off the GUI thread (see gui.loader). The
+                # session's own lists are mutated here, on the GUI
+                # thread, and nowhere else.
+                spectrum = self.session.adopt(path, vendor, add_kwargs, preloaded)
+            else:
+                spectrum = self.session.add(path, vendor=vendor, **add_kwargs)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to load spectrum", str(exc))
             return
@@ -1653,6 +1754,24 @@ class MainWindow(QMainWindow):
         # selection branch already calls _on_selection_changed plus the
         # pseudo-2D Compare-population step that follows it.
         self._on_list_selection_changed()
+
+    def _on_browse_folder_clicked(self) -> None:
+        """Point the Data-tab browser at a folder.
+
+        Deliberately does not load anything -- picking a folder to
+        browse and choosing what to open from it are separate acts,
+        which is the difference between this and Open Folder…."""
+        directory = QFileDialog.getExistingDirectory(self, "Choose a folder to browse")
+        if not directory:
+            return
+        matches = self._scan_for_spectra(directory)
+        self.data_browser.set_matches(directory, matches)
+
+    def _on_browser_spectrum_activated(self, path: str, vendor: str) -> None:
+        """Load an experiment picked in the browser -- the same path
+        Open… takes, background read included."""
+        if not self._load_async(path, vendor):
+            self._load(path, vendor)
 
     def _on_remove_clicked(self) -> None:
         row = self.spectrum_list.currentRow()

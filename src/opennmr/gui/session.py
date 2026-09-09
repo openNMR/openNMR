@@ -38,6 +38,19 @@ class Session:
         self._load_info.append({"path": path, "vendor": resolved_vendor, "kwargs": dict(kwargs)})
         return spectrum
 
+    def adopt(self, path: str, vendor: str, kwargs: dict, spectrum: NMRSpectrum) -> NMRSpectrum:
+        """Append an *already-read* spectrum, recording how it was
+        loaded exactly as :meth:`add` would.
+
+        For the background loader: the worker thread does the read and
+        hands the spectrum over, and this -- called on the GUI thread --
+        is what puts it in the session. The two lists here are mutable
+        shared state, so only one thread may ever touch them, which is
+        why the worker cannot simply call :meth:`add` itself."""
+        self.spectra.append(spectrum)
+        self._load_info.append({"path": path, "vendor": vendor, "kwargs": dict(kwargs)})
+        return spectrum
+
     def reload(self, index: int, **override_kwargs) -> NMRSpectrum:
         """Re-load spectrum ``index`` from its original path, with
         ``override_kwargs`` merged into (and remembered alongside) the
