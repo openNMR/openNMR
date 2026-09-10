@@ -50,6 +50,13 @@ around that fit:
                                  that's less likely to be degenerate), and
                                  report how far each fitted centre drifted
                                  from its CIF-predicted starting point
+    9. add_dominant_environment_labels - optional plot overlay (default
+                                 OFF, via show_composition_labels on
+                                 fit_predicted_spectrum/refit_merged_groups)
+                                 shading each fitted peak and labelling it
+                                 with its shift and the full species
+                                 breakdown of its single most-probable
+                                 member environment
 
 Worked caveats (read before trusting the output)
 -------------------------------------------------
@@ -94,6 +101,12 @@ Worked caveats (read before trusting the output)
   directly -- this makes it agnostic to fitting.py's internal parameter
   ordering, but it's still a point estimate on a finite grid and its
   precision is capped by the spectrum's digital resolution.
+* add_dominant_environment_labels labels each peak with its SINGLE most
+  probable member environment -- for a peak genuinely dominated by one
+  environment this is a fair summary, but for one assembled from several
+  comparably-probable environments (check the printed "(NN% of peak)")
+  it's a simplification, not the whole story; the full breakdown is
+  always available in that peak's `members`/environment_report row.
 """
 
 from __future__ import annotations
@@ -102,6 +115,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from .pnmr_simulator import (
     read_cif_with_occupancies, get_neighbors_by_shell,
@@ -127,14 +141,22 @@ def predict_environments(cif_filename, atom_of_interest, shell_bins, shift_dict,
     sites in `cif_filename`, and the total shift/probability predicted for
     each -- the same underlying calculation as
     pnmr_simulator.generate_spectrum_dict, but returned as a flat,
-    unbroadened table (no spectrum is built here), with an added
-    human-readable `label` column describing the shell composition, e.g.
-    "NN:5Fe+1Mn NNN:6Fe".
+    unbroadened table (no spectrum is built here), with two added columns
+    describing the shell composition:
+      * `label`       - compact, human-readable, nonzero counts only,
+                        e.g. "NN:5Fe+1Mn NNN:6Fe"
+      * `composition` - a dict {shell: {species: count, ...}, ...}
+                        listing EVERY species in `shift_dict[shell]` for
+                        that shell, including zeros -- used wherever a
+                        full breakdown is wanted (see
+                        add_dominant_environment_labels) rather than the
+                        abbreviated `label` string.
 
     Returns
     -------
     DataFrame with columns Site, Config, <shell>_<species> counts,
-    Total_shift, p (probability, summed to 1 over the whole table), label.
+    Total_shift, p (probability, summed to 1 over the whole table), label,
+    composition.
     """
     structure, site_data = read_cif_with_occupancies(
         cif_filename, atom_of_interest=atom_of_interest,
@@ -174,8 +196,21 @@ def predict_environments(cif_filename, atom_of_interest, shell_bins, shift_dict,
                 parts.append(f"{shell}:" + "+".join(comp))
         return " ".join(parts) if parts else "bare"
 
+    def _composition(row):
+        comp = {}
+        for shell in shell_names:
+            prefix = f"{shell}_"
+            species_counts = {}
+            for species in shift_dict.get(shell, {}):
+                col = f"{prefix}{species}"
+                n = row[col] if col in row.index else 0
+                species_counts[species] = int(n) if pd.notna(n) else 0
+            comp[shell] = species_counts
+        return comp
+
     shift_table = shift_table.copy()
     shift_table["label"] = shift_table.apply(_label, axis=1)
+    shift_table["composition"] = shift_table.apply(_composition, axis=1)
     return shift_table
 
 
@@ -239,9 +274,11 @@ def group_environments(shift_table: pd.DataFrame, tolerance: Optional[float] = N
 
     groups_df columns: group_shift (probability-weighted mean of members),
     group_p (summed probability), n_members, members (list of dicts with
-    label/shift/p/fraction_in_group, the last being each member's
-    probability as a fraction of the group total -- this is what later
-    gets used to split a fitted peak's integral back out per environment).
+    label/shift/p/fraction_in_group/composition, "fraction_in_group" being
+    each member's probability as a fraction of the group total -- this is
+    what later gets used to split a fitted peak's integral back out per
+    environment, and "composition" the full per-shell/species breakdown
+    from predict_environments, used by add_dominant_environment_labels).
     """
     if tolerance is None:
         if shift_dict is None:
@@ -300,6 +337,7 @@ def group_environments(shift_table: pd.DataFrame, tolerance: Optional[float] = N
                 "label": r["label"], "shift": float(r["Total_shift"]),
                 "p": float(r["p"]),
                 "fraction_in_group": float(r["p"] / total_p) if total_p > 0 else np.nan,
+                "composition": r.get("composition", {}),
             }
             for _, r in sub.iterrows()
         ]
@@ -495,7 +533,116 @@ def print_environment_report(env_df: pd.DataFrame, dropped: Optional[pd.DataFram
 
 
 # ===========================================================================
-# Shared low-level fit step (used by both fit_predicted_spectrum and
+# Optional plot overlay (used by both fit_predicted_spectrum and
+# refit_merged_groups via `show_composition_labels`, default OFF): shade
+# each fitted peak's component and label it with its fitted shift and the
+# composition of its DOMINANT member environment -- the single CIF
+# environment contributing the largest share of that peak's probability.
+# ===========================================================================
+def dominant_environment(members: List[dict]) -> dict:
+    """The member (from a `members` list, as stored in `kept`/
+    `merged_groups`) contributing the largest `fraction_in_group` to its
+    peak -- i.e. the single CIF environment most responsible for that
+    peak. Ties broken by raw probability `p`."""
+    def _key(m):
+        frac = m.get("fraction_in_group")
+        if frac is None or (isinstance(frac, float) and np.isnan(frac)):
+            frac = 0.0
+        return (frac, m.get("p", 0.0))
+    return max(members, key=_key)
+
+
+def format_environment_label(shift: float, composition: Dict[str, Dict[str, int]],
+                              dominant_fraction: Optional[float] = None,
+                              decimals: int = 0) -> str:
+    """
+    Multi-line label for one fitted peak, e.g.::
+
+        Shift = 1300 ppm  (54% of peak)
+        NN: Mn = 2, Ru = 3, Co = 1
+        NNN: Mn = 6, Ru = 0, Co = 0
+
+    One line per shell, listing EVERY species present in that shell's
+    `composition` entry (i.e. every species predict_environments knew
+    about for that shell, via shift_dict) -- including zeros -- unlike
+    the compact `label` string, which only lists nonzero counts.
+
+    dominant_fraction : float, optional
+        If given (e.g. a member's `fraction_in_group`), appended to the
+        shift line as "(NN% of peak)" -- how much of this peak's
+        probability the environment being labelled actually accounts
+        for, since for a merged peak it may be well under 100%.
+    """
+    shift_line = f"Shift = {shift:.{decimals}f} ppm"
+    if dominant_fraction is not None and np.isfinite(dominant_fraction):
+        shift_line += f"  ({100 * dominant_fraction:.0f}% of peak)"
+    lines = [shift_line]
+    for shell, counts in composition.items():
+        parts = ", ".join(f"{species} = {n}" for species, n in counts.items())
+        lines.append(f"{shell}: {parts}")
+    return "\n".join(lines)
+
+
+def add_dominant_environment_labels(
+    ax, x_fit: np.ndarray, components, kept: pd.DataFrame,
+    shade: bool = True, shade_alpha: float = 0.25, fontsize: int = 8,
+    decimals: int = 0, show_dominant_fraction: bool = True,
+    colors: Optional[Sequence] = None,
+) -> None:
+    """
+    Overlay each fitted peak's component with a text label giving its
+    (rounded) fitted shift and the full composition of its DOMINANT
+    member environment (see dominant_environment) -- off by default
+    everywhere it's wired in (`show_composition_labels` on
+    fit_predicted_spectrum / refit_merged_groups); call this directly on
+    the `axes` a driver already returned if you want the labels after the
+    fact without re-fitting, e.g.::
+
+        out = fit_predicted_spectrum(..., show_composition_labels=False)
+        add_dominant_environment_labels(
+            out["axes"], out["peak_defs"] and ..., out["kept"]
+        )
+
+    (in practice it's simplest to just pass show_composition_labels=True
+    to the driver, which already has x_fit/components on hand.)
+
+    Each peak's shaded fill and its label text share one colour, drawn
+    from `colors` (default: matplotlib's current colour cycle, repeated
+    if there are more peaks than colours) -- so a colour and its label
+    always correspond visually. If `shade=False`, no fill is drawn and
+    every label defaults to black.
+
+    x_fit, components : as returned inside fit_predicted_spectrum's /
+    refit_merged_groups' internals (`out["peak_defs"]` alone isn't
+    enough -- these come from the same fit, matched 1:1 with `kept`'s
+    rows in order).
+    """
+    if colors is None:
+        colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
+
+    x_fit = np.asarray(x_fit)
+    for i, ((_, row), component) in enumerate(zip(kept.iterrows(), components)):
+        color = colors[i % len(colors)] if shade else "black"
+        y = np.asarray(component)
+
+        if shade:
+            ax.fill_between(x_fit, 0.0, y, color=color, alpha=shade_alpha, linewidth=0)
+
+        dom = dominant_environment(row["members"])
+        frac = dom.get("fraction_in_group") if show_dominant_fraction else None
+        fitted_shift = _peak_center_from_component(x_fit, y)
+        text = format_environment_label(
+            fitted_shift, dom.get("composition", {}), dominant_fraction=frac, decimals=decimals,
+        )
+
+        k = int(np.argmax(np.abs(y)))
+        ax.annotate(
+            text, xy=(x_fit[k], y[k]), xytext=(0, 6), textcoords="offset points",
+            ha="center", va="bottom", fontsize=fontsize, color=color, linespacing=1.3,
+        )
+
+
+
 # refit_merged_groups): run fit_spectrum on a peak_defs list, expand and
 # bound-check the result, integrate each peak, and split those integrals
 # back out per-environment against `kept`. Pulled out so the "maximal fit"
@@ -556,6 +703,7 @@ def fit_predicted_spectrum(
     baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
     vacancy_tol=5, warn_missing_shifts=True, verbose=False,
     show_plot=True, show_components=True, show_report=True,
+    show_composition_labels=False, composition_label_kwargs=None,
     xlims="default", xlabel=None,
 ):
     """
@@ -588,6 +736,14 @@ def fit_predicted_spectrum(
     baseline_max_iter : see fitting.fit_spectrum.
     show_plot, show_components, show_report, xlims, xlabel :
         Forwarded to fitting.NMR1dplot_with_fit / print_fit_report.
+    show_composition_labels : bool, default False
+        If True (and show_plot), shade each fitted peak and label it with
+        its fitted shift and the full composition of its dominant member
+        environment -- see add_dominant_environment_labels. Off by
+        default since it can get crowded with many peaks; try it, then
+        tune via composition_label_kwargs (dict forwarded to
+        add_dominant_environment_labels, e.g. {"fontsize": 6,
+        "shade_alpha": 0.15}) if it's too busy.
 
     Returns
     -------
@@ -663,6 +819,10 @@ def fit_predicted_spectrum(
             x_unit=x_unit, show_components=show_components, use_normalised=use_normalised,
             xlims=xlims, xlabel=xlabel,
         )
+        if show_composition_labels:
+            add_dominant_environment_labels(
+                ax, x_fit, components, kept, **(composition_label_kwargs or {})
+            )
 
     if show_report:
         y_full = results["normalised_real_spectrum"] if use_normalised else results["real_spectrum"]
@@ -696,11 +856,15 @@ def _aggregate_members(rows: pd.DataFrame) -> dict:
     """Flatten the `members` lists of several `kept` rows into one merged
     group, recomputing group_shift/group_p/span/fraction_in_group exactly
     as group_environments would for a single group containing all of
-    these environments together."""
+    these environments together. Each member's `composition` (full
+    per-shell/species breakdown) is carried through unchanged."""
     all_members = []
     for _, r in rows.iterrows():
         for m in r["members"]:
-            all_members.append({"label": m["label"], "shift": m["shift"], "p": m["p"]})
+            all_members.append({
+                "label": m["label"], "shift": m["shift"], "p": m["p"],
+                "composition": m.get("composition", {}),
+            })
 
     total_p = sum(m["p"] for m in all_members)
     shifts = [m["shift"] for m in all_members]
@@ -1026,7 +1190,8 @@ def refit_merged_groups(
     positive_intensity: bool = True, allow_negative_intensity: bool = False,
     baseline_regions=None, baseline_sigma: float = 2.5, baseline_max_iter: int = 10,
     use_normalised: bool = True, show_plot: bool = True, show_components: bool = True,
-    show_report: bool = True, xlims="default", xlabel=None,
+    show_report: bool = True, show_composition_labels: bool = False,
+    composition_label_kwargs: Optional[dict] = None, xlims="default", xlabel=None,
 ) -> dict:
     """
     Re-fit a simplified peak set (from merge_low_integral_peaks or
@@ -1048,7 +1213,11 @@ def refit_merged_groups(
     All other parameters mirror fit_predicted_spectrum's (see there) and
     are forwarded to select_groups/groups_to_peak_defs/fit_spectrum in the
     same way, just starting from `merged_groups` instead of a freshly
-    predicted-and-grouped CIF table.
+    predicted-and-grouped CIF table. show_composition_labels /
+    composition_label_kwargs work the same way too -- the dominant
+    environment reported for a merged peak may now represent a smaller
+    fraction of it than it would have pre-merge, which is exactly what
+    the "(NN% of peak)" annotation is there to show.
 
     Returns
     -------
@@ -1105,6 +1274,11 @@ def refit_merged_groups(
             x_unit=x_unit, show_components=show_components, use_normalised=use_normalised,
             xlims=xlims, xlabel=xlabel,
         )
+        if show_composition_labels:
+            add_dominant_environment_labels(
+                ax, fitted["x_fit"], fitted["components"], kept,
+                **(composition_label_kwargs or {})
+            )
 
     if show_report:
         y_full = results["normalised_real_spectrum"] if use_normalised else results["real_spectrum"]
