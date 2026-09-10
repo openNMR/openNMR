@@ -588,6 +588,11 @@ def add_dominant_environment_labels(
     shade: bool = True, shade_alpha: float = 0.25, fontsize: int = 8,
     decimals: int = 0, show_dominant_fraction: bool = True,
     colors: Optional[Sequence] = None,
+    integrals_norm: Optional[Sequence[float]] = None,
+    max_labels: Optional[int] = None, min_peak_fraction: Optional[float] = None,
+    avoid_overlap: bool = True, label_gap_points: float = 6.0,
+    bbox_pad_points: float = 2.0, leader_lw: float = 0.6,
+    max_stack_iter: int = 60,
 ) -> None:
     """
     Overlay each fitted peak's component with a text label giving its
@@ -600,11 +605,13 @@ def add_dominant_environment_labels(
 
         out = fit_predicted_spectrum(..., show_composition_labels=False)
         add_dominant_environment_labels(
-            out["axes"], out["peak_defs"] and ..., out["kept"]
+            out["axes"], out["x_fit_ARGS..."], out["components_ARGS..."], out["kept"],
+            integrals_norm=out["integrals_norm"],
         )
 
     (in practice it's simplest to just pass show_composition_labels=True
-    to the driver, which already has x_fit/components on hand.)
+    to the driver, which already has x_fit/components/integrals_norm on
+    hand.)
 
     Each peak's shaded fill and its label text share one colour, drawn
     from `colors` (default: matplotlib's current colour cycle, repeated
@@ -612,19 +619,84 @@ def add_dominant_environment_labels(
     always correspond visually. If `shade=False`, no fill is drawn and
     every label defaults to black.
 
+    Which peaks get a label at all
+    -------------------------------
+    No layout algorithm makes 30-90 multi-line labels readable in one
+    axes -- that's a labels-per-plot problem, not a placement problem.
+    Two independent filters (both off by default; combine with AND if
+    both given) cut the label set down to what's worth showing, ranked
+    by fitted integral (falling back to CIF probability `group_p` if
+    `integrals_norm` isn't supplied):
+
+    max_labels : int, optional
+        Only label the `max_labels` peaks with the largest integral.
+    min_peak_fraction : float, optional
+        Only label peaks whose integral is >= this fraction (0-1) of the
+        single largest peak's integral.
+    Peaks that fail the filter are still shaded (if shade=True), just
+    left unlabelled -- nothing about the fit itself changes.
+
+    Overlap avoidance
+    ------------------
+    avoid_overlap : bool, default True
+        Each label starts just above its own peak's apex. Labels are
+        then placed left-to-right; before a label is drawn, its actual
+        rendered bounding box (via the figure's renderer -- real text
+        metrics, not a guess) is checked against every already-placed
+        label's box, and if it collides the new label is pushed upward
+        (never sideways -- its shift stays under its own peak) until
+        clear, then a thin leader line is drawn from the peak's apex up
+        to the label so the association stays legible even once a label
+        has been pushed well above its own peak. This needs a live
+        renderer, so it forces one `fig.canvas.draw()` the first time
+        it's called -- fine interactively or before `savefig`, but don't
+        call it on an axes that hasn't been drawn onto yet.
+    label_gap_points, bbox_pad_points : float
+        Initial gap above the peak apex, and the extra padding (in
+        points) kept between any two labels' boxes, respectively.
+    max_stack_iter : int
+        Safety cap on how many times one label can be bumped upward
+        looking for a clear spot before it's placed anyway (a genuinely
+        pathological cluster of >max_stack_iter overlapping labels would
+        otherwise loop indefinitely) -- lower `max_labels` /raise
+        `min_peak_fraction` if you're hitting this.
+
     x_fit, components : as returned inside fit_predicted_spectrum's /
     refit_merged_groups' internals (`out["peak_defs"]` alone isn't
     enough -- these come from the same fit, matched 1:1 with `kept`'s
-    rows in order).
+    rows in order, as is `integrals_norm`).
     """
     if colors is None:
         colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
 
     x_fit = np.asarray(x_fit)
-    for i, ((_, row), component) in enumerate(zip(kept.iterrows(), components)):
+    components = list(components)
+    rows = list(kept.iterrows())
+
+    if integrals_norm is None:
+        importance = [row.get("group_p", 0.0) for _, row in rows]
+    else:
+        importance = list(integrals_norm)
+
+    # -- decide which peaks get a label, and prepare (index, text, colour) --
+    order = sorted(range(len(rows)), key=lambda i: importance[i], reverse=True)
+    label_set = set(order)
+    if max_labels is not None:
+        label_set &= set(order[:max_labels])
+    if min_peak_fraction is not None and importance:
+        top = max(importance)
+        thresh = min_peak_fraction * top if top > 0 else 0.0
+        label_set &= {i for i in order if importance[i] >= thresh}
+
+    to_label = []  # (x_data, y_data, text, color)
+    for i, ((_, row), component) in enumerate(zip(rows, components)):
+        if i not in label_set:
+            if shade:
+                ax.fill_between(x_fit, 0.0, np.asarray(component),
+                                 color=colors[i % len(colors)], alpha=shade_alpha, linewidth=0)
+            continue
         color = colors[i % len(colors)] if shade else "black"
         y = np.asarray(component)
-
         if shade:
             ax.fill_between(x_fit, 0.0, y, color=color, alpha=shade_alpha, linewidth=0)
 
@@ -634,12 +706,61 @@ def add_dominant_environment_labels(
         text = format_environment_label(
             fitted_shift, dom.get("composition", {}), dominant_fraction=frac, decimals=decimals,
         )
-
         k = int(np.argmax(np.abs(y)))
-        ax.annotate(
-            text, xy=(x_fit[k], y[k]), xytext=(0, 6), textcoords="offset points",
-            ha="center", va="bottom", fontsize=fontsize, color=color, linespacing=1.3,
-        )
+        to_label.append((x_fit[k], y[k], text, color))
+
+    if not to_label:
+        return
+
+    fig = ax.figure
+    if avoid_overlap:
+        fig.canvas.draw()  # ensure a renderer exists with real font metrics
+        renderer = fig.canvas.get_renderer()
+        pt_to_px = fig.dpi / 72.0
+
+    # left-to-right placement so ties/near-neighbours stack predictably
+    to_label.sort(key=lambda t: t[0])
+    placed_bboxes = []
+
+    def _boxes_overlap(b1, b2, pad_px):
+        return not (b1.x1 + pad_px < b2.x0 or b2.x1 + pad_px < b1.x0
+                    or b1.y1 + pad_px < b2.y0 or b2.y1 + pad_px < b1.y0)
+
+    for x_data, y_data, text, color in to_label:
+        x_disp, y_disp = ax.transData.transform((x_data, y_data))
+        y_disp += label_gap_points * pt_to_px if avoid_overlap else label_gap_points * (fig.dpi / 72.0)
+        x_label, y_label = ax.transData.inverted().transform((x_disp, y_disp))
+
+        txt = ax.text(x_label, y_label, text, ha="center", va="bottom",
+                       fontsize=fontsize, color=color, linespacing=1.3, zorder=5)
+
+        if avoid_overlap:
+            pad_px = bbox_pad_points * pt_to_px
+            for _ in range(max_stack_iter):
+                bbox = txt.get_window_extent(renderer=renderer)
+                conflict = next((b for b in placed_bboxes if _boxes_overlap(bbox, b, pad_px)), None)
+                if conflict is None:
+                    break
+                new_y_disp = conflict.y1 + pad_px
+                new_x_label, new_y_label = ax.transData.inverted().transform((x_disp, new_y_disp))
+                txt.set_position((new_x_label, new_y_label))
+            bbox = txt.get_window_extent(renderer=renderer)
+            placed_bboxes.append(bbox)
+
+            label_anchor_disp = ((bbox.x0 + bbox.x1) / 2.0, bbox.y0)
+            ax_x, ax_y = ax.transData.inverted().transform(label_anchor_disp)
+            ax.plot([x_data, ax_x], [y_data, ax_y], color=color, lw=leader_lw,
+                    solid_capstyle="round", zorder=4)
+
+    if avoid_overlap and placed_bboxes:
+        # Stacking can push the tallest cluster of labels above whatever
+        # the axes' automatic y-limit was -- expand it (a few % headroom)
+        # rather than let the top label(s) get clipped.
+        top_disp = max(b.y1 for b in placed_bboxes) + 4.0
+        _, top_data = ax.transData.inverted().transform((0.0, top_disp))
+        ymin, ymax = ax.get_ylim()
+        if top_data > ymax:
+            ax.set_ylim(ymin, top_data)
 
 
 
@@ -692,6 +813,27 @@ def _fit_peak_defs(results: Dict, peak_defs: List[dict], kept: pd.DataFrame,
 # ===========================================================================
 # 6. End-to-end driver
 # ===========================================================================
+def _resolve_figsize(show_composition_labels, pl_width, pl_height):
+    """Default figure size is NMR1dplot_with_fit's own default (3.375in
+    square, a single-column-journal default) -- fine for a plain fit
+    plot, but far too cramped to lay composition labels out on: label
+    placement has to run against the figure's FINAL size, since text
+    boxes are measured in real screen pixels, so resizing the figure
+    after the fact just stretches an already-bad layout rather than
+    fixing it. If composition labels are on and the caller hasn't
+    overridden pl_width/pl_height, switch to a much wider default;
+    passing your own pl_width/pl_height always wins."""
+    if show_composition_labels:
+        if pl_width is None:
+            pl_width = 12.0
+        if pl_height is None:
+            pl_height = 6.0
+    else:
+        pl_width = 3.375 if pl_width is None else pl_width
+        pl_height = 3.375 if pl_height is None else pl_height
+    return pl_width, pl_height
+
+
 def fit_predicted_spectrum(
     spectrum, cif_filename, atom_of_interest, shell_bins, shift_dict,
     ignore_species=None, fit_regions=None, tolerance=None, group_method="probability",
@@ -704,7 +846,7 @@ def fit_predicted_spectrum(
     vacancy_tol=5, warn_missing_shifts=True, verbose=False,
     show_plot=True, show_components=True, show_report=True,
     show_composition_labels=False, composition_label_kwargs=None,
-    xlims="default", xlabel=None,
+    xlims="default", xlabel=None, pl_width=None, pl_height=None,
 ):
     """
     End-to-end: predict environments from a CIF, group/filter them against
@@ -739,11 +881,22 @@ def fit_predicted_spectrum(
     show_composition_labels : bool, default False
         If True (and show_plot), shade each fitted peak and label it with
         its fitted shift and the full composition of its dominant member
-        environment -- see add_dominant_environment_labels. Off by
-        default since it can get crowded with many peaks; try it, then
-        tune via composition_label_kwargs (dict forwarded to
-        add_dominant_environment_labels, e.g. {"fontsize": 6,
-        "shade_alpha": 0.15}) if it's too busy.
+        environment -- see add_dominant_environment_labels. Labels now
+        get a real collision-avoidance pass by default (rendered text
+        boxes, stacked vertically with leader lines back to their peak),
+        but with many peaks that's still a lot of text -- tune via
+        composition_label_kwargs (dict forwarded to
+        add_dominant_environment_labels), e.g. {"max_labels": 10} or
+        {"min_peak_fraction": 0.05} to only label the biggest peaks,
+        or {"fontsize": 6, "shade_alpha": 0.15} to shrink everything.
+    pl_width, pl_height : float, optional
+        Figure size in inches, forwarded to NMR1dplot_with_fit. Defaults
+        to 3.375x3.375in (NMR1dplot_with_fit's own default) normally, but
+        auto-widens to 12x6in when show_composition_labels=True, since
+        label layout is computed against the figure's actual final size
+        -- see _resolve_figsize. Set these yourself for a specific
+        target (e.g. a journal figure width); an explicit value here
+        always overrides the auto-widen.
 
     Returns
     -------
@@ -814,14 +967,16 @@ def fit_predicted_spectrum(
     # -- optional plot / reports ---------------------------------------------
     fig = ax = None
     if show_plot:
+        pw, ph = _resolve_figsize(show_composition_labels, pl_width, pl_height)
         fig, ax = NMR1dplot_with_fit(
             results=results, popt=popt, peak_defs=peak_defs, fit_regions=fit_regions,
             x_unit=x_unit, show_components=show_components, use_normalised=use_normalised,
-            xlims=xlims, xlabel=xlabel,
+            xlims=xlims, xlabel=xlabel, pl_width=pw, pl_height=ph,
         )
         if show_composition_labels:
             add_dominant_environment_labels(
-                ax, x_fit, components, kept, **(composition_label_kwargs or {})
+                ax, x_fit, components, kept, integrals_norm=integrals_norm,
+                **(composition_label_kwargs or {})
             )
 
     if show_report:
@@ -1192,6 +1347,7 @@ def refit_merged_groups(
     use_normalised: bool = True, show_plot: bool = True, show_components: bool = True,
     show_report: bool = True, show_composition_labels: bool = False,
     composition_label_kwargs: Optional[dict] = None, xlims="default", xlabel=None,
+    pl_width=None, pl_height=None,
 ) -> dict:
     """
     Re-fit a simplified peak set (from merge_low_integral_peaks or
@@ -1269,14 +1425,16 @@ def refit_merged_groups(
 
     fig = ax = None
     if show_plot:
+        pw, ph = _resolve_figsize(show_composition_labels, pl_width, pl_height)
         fig, ax = NMR1dplot_with_fit(
             results=results, popt=fitted["popt"], peak_defs=peak_defs, fit_regions=fit_regions,
             x_unit=x_unit, show_components=show_components, use_normalised=use_normalised,
-            xlims=xlims, xlabel=xlabel,
+            xlims=xlims, xlabel=xlabel, pl_width=pw, pl_height=ph,
         )
         if show_composition_labels:
             add_dominant_environment_labels(
                 ax, fitted["x_fit"], fitted["components"], kept,
+                integrals_norm=fitted["integrals_norm"],
                 **(composition_label_kwargs or {})
             )
 
