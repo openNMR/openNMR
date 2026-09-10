@@ -35,7 +35,21 @@ around that fit:
                                  environments, in proportion to their CIF
                                  probabilities
     6. fit_predicted_spectrum - end-to-end driver wiring 1-5 together and
-                                 handing off to fitting.fit_spectrum
+                                 handing off to fitting.fit_spectrum, giving
+                                 the "maximal fit" (one peak per surviving
+                                 CIF-predicted environment group)
+    7. merge_low_integral_peaks / merge_groups_to_picks - two ways to
+                                 simplify a maximal fit into far fewer peaks:
+                                 automatically, by absorbing low-integral
+                                 peaks into their nearest neighbour, or
+                                 manually, by naming the peak centres you
+                                 want and merging everything onto them
+    8. refit_merged_groups   - re-fit the simplified peak set from either
+                                 of the above, this time with shift FREE to
+                                 move (there are far fewer peaks now, so
+                                 that's less likely to be degenerate), and
+                                 report how far each fitted centre drifted
+                                 from its CIF-predicted starting point
 
 Worked caveats (read before trusting the output)
 -------------------------------------------------
@@ -69,6 +83,17 @@ Worked caveats (read before trusting the output)
   can't resolve them. This is likely fine when the grouping tolerance is
   small relative to the fitted FWHM, and increasingly shaky as tolerance
   approaches FWHM.
+* merge_low_integral_peaks' cascade (a low peak merges into its nearest
+  neighbour, which can then itself become a merge target) is a greedy,
+  order-dependent simplification, not a unique answer -- inspect
+  ``merge_log`` before trusting it, same as ``members``/``dropped``
+  elsewhere. A low peak with nothing else within ``merge_tolerance`` is
+  left alone rather than forced onto a distant peak.
+* refit_merged_groups reads each fitted peak's centre off the fitted
+  component itself (a parabola-refined argmax), not off ``popt``
+  directly -- this makes it agnostic to fitting.py's internal parameter
+  ordering, but it's still a point estimate on a finite grid and its
+  precision is capped by the spectrum's digital resolution.
 """
 
 from __future__ import annotations
@@ -470,6 +495,54 @@ def print_environment_report(env_df: pd.DataFrame, dropped: Optional[pd.DataFram
 
 
 # ===========================================================================
+# Shared low-level fit step (used by both fit_predicted_spectrum and
+# refit_merged_groups): run fit_spectrum on a peak_defs list, expand and
+# bound-check the result, integrate each peak, and split those integrals
+# back out per-environment against `kept`. Pulled out so the "maximal fit"
+# driver and the "refit a simplified peak set" driver below can't drift
+# apart from each other.
+# ===========================================================================
+def _fit_peak_defs(results: Dict, peak_defs: List[dict], kept: pd.DataFrame,
+                    fit_regions, x_unit: str, use_normalised: bool,
+                    positive_intensity: bool, allow_negative_intensity: bool,
+                    baseline_regions, baseline_sigma: float, baseline_max_iter: int) -> dict:
+    popt, pcov_free, is_free, scale, x_ref = fit_spectrum(
+        results, peak_defs, fit_regions=fit_regions, use_normalised=use_normalised,
+        x_unit=x_unit, baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
+        baseline_max_iter=baseline_max_iter, positive_intensity=positive_intensity,
+        allow_negative_intensity=allow_negative_intensity,
+    )
+    pcov = expand_pcov(pcov_free, is_free, len(popt))
+
+    if positive_intensity and not allow_negative_intensity:
+        popt = enforce_positive_intensity(popt, peak_defs)
+
+    lower, upper = build_bounds(peak_defs, positive_intensity=positive_intensity,
+                                 allow_negative_intensity=allow_negative_intensity)
+    bound_warnings = check_bound_hits(popt, pcov, is_free, lower, upper, peak_defs)
+
+    x_full = results["x_ppm"] if x_unit == "ppm" else results["x_Hz"]
+    mask = build_region_mask(np.asarray(x_full), fit_regions)
+    x_fit = np.asarray(x_full)[mask]
+
+    y_model, components = evaluate_fit(x_fit, popt, peak_defs, x_ref=x_ref, return_components=True)
+    integrals, integrals_norm = compute_integrals(x_fit, components)
+    integral_errors = compute_integral_errors(popt, pcov, peak_defs, integrals)
+
+    environment_report = split_integrals_by_environment(
+        kept, integrals, integrals_norm, integral_errors,
+    )
+
+    return {
+        "popt": popt, "pcov": pcov, "is_free": is_free, "x_ref": x_ref,
+        "bound_warnings": bound_warnings, "x_fit": x_fit, "mask": mask,
+        "y_model": y_model, "components": components, "integrals": integrals,
+        "integrals_norm": integrals_norm, "integral_errors": integral_errors,
+        "environment_report": environment_report,
+    }
+
+
+# ===========================================================================
 # 6. End-to-end driver
 # ===========================================================================
 def fit_predicted_spectrum(
@@ -568,33 +641,19 @@ def fit_predicted_spectrum(
         float_shift_window=float_shift_window,
     )
 
-    popt, pcov_free, is_free, scale, x_ref = fit_spectrum(
-        results, peak_defs, fit_regions=fit_regions, use_normalised=use_normalised,
-        x_unit=x_unit, baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
-        baseline_max_iter=baseline_max_iter, positive_intensity=positive_intensity,
+    fitted = _fit_peak_defs(
+        results, peak_defs, kept, fit_regions=fit_regions, x_unit=x_unit,
+        use_normalised=use_normalised, positive_intensity=positive_intensity,
         allow_negative_intensity=allow_negative_intensity,
+        baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
+        baseline_max_iter=baseline_max_iter,
     )
-    pcov = expand_pcov(pcov_free, is_free, len(popt))
-
-    if positive_intensity and not allow_negative_intensity:
-        popt = enforce_positive_intensity(popt, peak_defs)
-
-    lower, upper = build_bounds(peak_defs, positive_intensity=positive_intensity,
-                                 allow_negative_intensity=allow_negative_intensity)
-    bound_warnings = check_bound_hits(popt, pcov, is_free, lower, upper, peak_defs)
-
-    # -- 5. integrals, split by environment ----------------------------------
-    x_full = results["x_ppm"] if x_unit == "ppm" else results["x_Hz"]
-    mask = build_region_mask(np.asarray(x_full), fit_regions)
-    x_fit = np.asarray(x_full)[mask]
-
-    y_model, components = evaluate_fit(x_fit, popt, peak_defs, x_ref=x_ref, return_components=True)
-    integrals, integrals_norm = compute_integrals(x_fit, components)
-    integral_errors = compute_integral_errors(popt, pcov, peak_defs, integrals)
-
-    environment_report = split_integrals_by_environment(
-        kept, integrals, integrals_norm, integral_errors,
-    )
+    popt, pcov = fitted["popt"], fitted["pcov"]
+    is_free, bound_warnings = fitted["is_free"], fitted["bound_warnings"]
+    x_fit, components = fitted["x_fit"], fitted["components"]
+    integrals, integrals_norm = fitted["integrals"], fitted["integrals_norm"]
+    integral_errors = fitted["integral_errors"]
+    environment_report = fitted["environment_report"]
 
     # -- optional plot / reports ---------------------------------------------
     fig = ax = None
@@ -607,7 +666,7 @@ def fit_predicted_spectrum(
 
     if show_report:
         y_full = results["normalised_real_spectrum"] if use_normalised else results["real_spectrum"]
-        y_fit_data = np.asarray(y_full)[mask]
+        y_fit_data = np.asarray(y_full)[fitted["mask"]]
         print_fit_report(x_fit, y_fit_data, popt, pcov, peak_defs, bound_warnings, is_free,
                           components=components)
         print_environment_report(environment_report, dropped)
@@ -623,7 +682,453 @@ def fit_predicted_spectrum(
 
 
 # ===========================================================================
-# 7. Alternative to groups_to_peak_defs + fit_spectrum: fit the WHOLE
+# 7. Simplify a maximal fit into far fewer peaks, two ways, before
+#    refitting with shift free (see refit_merged_groups below). Both take
+#    `kept` (the maximal fit's group table, e.g. fit_predicted_spectrum's
+#    "kept") and return a new groups-shaped table -- same
+#    group_shift/group_p/n_members/span/members columns as
+#    group_environments' output, so it slots straight into
+#    select_groups/groups_to_peak_defs/split_integrals_by_environment --
+#    plus provenance columns recording which maximal-fit peak(s) fed into
+#    each merged group.
+# ===========================================================================
+def _aggregate_members(rows: pd.DataFrame) -> dict:
+    """Flatten the `members` lists of several `kept` rows into one merged
+    group, recomputing group_shift/group_p/span/fraction_in_group exactly
+    as group_environments would for a single group containing all of
+    these environments together."""
+    all_members = []
+    for _, r in rows.iterrows():
+        for m in r["members"]:
+            all_members.append({"label": m["label"], "shift": m["shift"], "p": m["p"]})
+
+    total_p = sum(m["p"] for m in all_members)
+    shifts = [m["shift"] for m in all_members]
+    if total_p > 0:
+        weighted_shift = sum(m["shift"] * m["p"] for m in all_members) / total_p
+        for m in all_members:
+            m["fraction_in_group"] = m["p"] / total_p
+    else:
+        weighted_shift = float(np.mean(shifts)) if shifts else np.nan
+        for m in all_members:
+            m["fraction_in_group"] = np.nan
+
+    return {
+        "group_shift": float(weighted_shift), "group_p": float(total_p),
+        "n_members": len(all_members),
+        "span": float(max(shifts) - min(shifts)) if shifts else 0.0,
+        "members": all_members,
+    }
+
+
+def merge_low_integral_peaks(
+    kept: pd.DataFrame, integrals: Sequence[float],
+    integral_errors: Optional[Sequence[float]] = None,
+    integral_threshold: Optional[float] = None, relative_threshold: float = 0.05,
+    merge_insignificant: bool = True, n_sigma: float = 2.0,
+    merge_tolerance: Optional[float] = None, tolerance: Optional[float] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Automatically simplify a maximal fit by absorbing low-integral peaks
+    into their nearest neighbour, so the result has far fewer peaks --
+    intended to be re-fitted afterwards with shift free (see
+    refit_merged_groups): unlike the CIF-locked maximal fit, a merged
+    peak's centre is no longer forced to a single environment's predicted
+    shift, so floating it lets the refit find where the data actually
+    puts it.
+
+    `kept` and `integrals` must be in the SAME order (i.e. exactly the
+    peak_defs order used to produce `integrals` -- as returned together by
+    fit_predicted_spectrum's "kept"/"integrals").
+
+    A peak counts as "low integral" (a merge candidate) if ANY of:
+      * `integral_threshold` is given and integral < integral_threshold
+      * integral < relative_threshold * (largest integral in the fit)
+        (default: below 5% of the biggest peak)
+      * `merge_insignificant` (default True) and `integral_errors` is
+        given and integral < n_sigma * that peak's integral_abs_err --
+        i.e. statistically indistinguishable from zero. This check only
+        ever applies to an original, un-merged peak's own error; once two
+        peaks have merged there's no single error estimate to reuse, so
+        only the threshold checks above apply to a merged bucket.
+
+    Algorithm: repeatedly take the lowest-integral candidate peak still
+    unmerged, and merge it into whichever OTHER peak (candidate or not) is
+    nearest to it in shift -- provided that nearest peak is within
+    `merge_tolerance` ppm. The merged peak's shift is the integral-weighted
+    mean of the two and its integral is their sum; the merged peak then
+    re-enters the pool, so merges can cascade (one peak absorbing several
+    low neighbours in turn). A low peak with nothing else within
+    `merge_tolerance` is left alone, rather than forced onto a distant
+    peak.
+
+    merge_tolerance : float, optional
+        Defaults to `tolerance` (e.g. reuse the tolerance the maximal fit
+        was grouped with) if given.
+
+    Returns
+    -------
+    (merged_groups, merge_log)
+
+    merged_groups : DataFrame, group_shift/group_p/n_members/span/members
+    as in group_environments' output, PLUS n_source_peaks, source_shifts,
+    source_integrals (which maximal-fit peaks/integrals fed into this
+    group) and source_span (their shift spread, i.e. how far apart the
+    merged peaks originally were).
+
+    merge_log : DataFrame, one row per merge event actually performed --
+    inspect this (like `members`/`dropped` elsewhere) before trusting the
+    result; the cascade is a greedy, order-dependent simplification, not
+    a unique answer.
+    """
+    if merge_tolerance is None:
+        if tolerance is None:
+            raise ValueError(
+                "Supply merge_tolerance explicitly, or tolerance (e.g. the "
+                "tolerance the maximal fit was grouped with) to use as a "
+                "default merge_tolerance."
+            )
+        merge_tolerance = tolerance
+
+    kept = kept.reset_index(drop=True)
+    integrals = np.asarray(integrals, dtype=float)
+    if len(integrals) != len(kept):
+        raise ValueError("integrals must be the same length as kept (same order as peak_defs).")
+    if integral_errors is not None:
+        integral_errors = np.asarray(integral_errors, dtype=float)
+    max_integral = integrals.max() if len(integrals) else 0.0
+
+    def _is_low(bucket):
+        low = False
+        if integral_threshold is not None:
+            low = low or bucket["integral"] < integral_threshold
+        low = low or bucket["integral"] < relative_threshold * max_integral
+        if merge_insignificant and bucket["error"] is not None:
+            low = low or bucket["integral"] < n_sigma * bucket["error"]
+        return low
+
+    next_id = 0
+    buckets = []
+    for i in range(len(kept)):
+        err_i = None
+        if integral_errors is not None and np.isfinite(integral_errors[i]):
+            err_i = float(integral_errors[i])
+        buckets.append({
+            "id": next_id, "shift": float(kept.loc[i, "group_shift"]),
+            "integral": float(integrals[i]), "error": err_i, "row_indices": [i],
+        })
+        next_id += 1
+
+    merge_log = []
+    skip_ids = set()
+    while True:
+        low = [b for b in buckets if b["id"] not in skip_ids and _is_low(b)]
+        if not low:
+            break
+        bi = min(low, key=lambda b: b["integral"])
+        others = [b for b in buckets if b["id"] != bi["id"]]
+        if not others:
+            break
+        bj = min(others, key=lambda b: abs(b["shift"] - bi["shift"]))
+        if abs(bj["shift"] - bi["shift"]) > merge_tolerance:
+            skip_ids.add(bi["id"])
+            continue
+
+        merged_integral = bi["integral"] + bj["integral"]
+        merged_shift = (
+            (bi["shift"] * bi["integral"] + bj["shift"] * bj["integral"]) / merged_integral
+            if merged_integral > 0 else 0.5 * (bi["shift"] + bj["shift"])
+        )
+        merge_log.append({
+            "absorbed_shift": bi["shift"], "absorbed_integral": bi["integral"],
+            "into_shift": bj["shift"], "into_integral": bj["integral"],
+            "merged_shift": merged_shift, "merged_integral": merged_integral,
+        })
+        buckets = [b for b in buckets if b["id"] not in (bi["id"], bj["id"])]
+        buckets.append({
+            "id": next_id, "shift": merged_shift, "integral": merged_integral,
+            "error": None, "row_indices": bi["row_indices"] + bj["row_indices"],
+        })
+        next_id += 1
+        skip_ids.clear()  # geometry changed -- a locked bucket may now have a new neighbour
+
+    rows = []
+    for b in sorted(buckets, key=lambda b: b["shift"]):
+        sub = kept.loc[b["row_indices"]]
+        agg = _aggregate_members(sub)
+        source_shifts = [float(kept.loc[i, "group_shift"]) for i in b["row_indices"]]
+        source_integrals = [float(integrals[i]) for i in b["row_indices"]]
+        agg.update({
+            "n_source_peaks": len(b["row_indices"]), "source_shifts": source_shifts,
+            "source_integrals": source_integrals,
+            "source_span": float(max(source_shifts) - min(source_shifts)),
+        })
+        rows.append(agg)
+
+    merged_groups = pd.DataFrame(rows).sort_values("group_shift").reset_index(drop=True)
+    return merged_groups, pd.DataFrame(merge_log)
+
+
+def merge_groups_to_picks(
+    kept: pd.DataFrame, picks: Sequence[float],
+    integrals: Optional[Sequence[float]] = None,
+    max_distance: Optional[float] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Manual alternative to merge_low_integral_peaks: instead of an
+    automatic integral threshold, YOU name the peak centres you want
+    (`picks`, a list of shifts -- e.g. read off the maximal fit or the raw
+    spectrum by eye), and every maximal-fit peak in `kept` is merged into
+    whichever pick is nearest to it. Intended to be re-fitted afterwards
+    with shift free to move, exactly like merge_low_integral_peaks (see
+    refit_merged_groups).
+
+    integrals : optional, same order/length as `kept`
+        Purely for provenance (recorded per pick in `source_integrals`, so
+        you can see how much intensity ended up assigned to each pick) --
+        it plays no role in the assignment, which is by shift only.
+    max_distance : float, optional
+        If given, a maximal-fit peak more than max_distance ppm from
+        EVERY pick is excluded rather than force-assigned to the nearest
+        (distant) pick -- it's recorded in `assignment_report` with
+        assigned=False, not folded into any group. Default (None): always
+        assign to the nearest pick, however far.
+
+    Returns
+    -------
+    (merged_groups, assignment_report)
+
+    merged_groups : same shape as merge_low_integral_peaks' output, one
+    row per pick that received at least one peak, PLUS `pick_shift` (the
+    value you supplied) alongside `group_shift` (the CIF-probability-
+    weighted prediction for what got assigned to it -- compare the two
+    before refitting: a pick far from its own group_shift is a sign you
+    picked a point the CIF prediction doesn't actually support). Picks
+    that received nothing are skipped (with a printed warning), not
+    silently included as an empty peak.
+
+    assignment_report : one row per input peak in `kept`, recording which
+    pick (if any) it was assigned to and the distance.
+    """
+    if len(picks) == 0:
+        raise ValueError("picks must be a non-empty list of shifts.")
+    picks = list(picks)
+
+    kept = kept.reset_index(drop=True)
+    if integrals is not None:
+        integrals = np.asarray(integrals, dtype=float)
+        if len(integrals) != len(kept):
+            raise ValueError("integrals must be the same length as kept.")
+
+    assign_rows = []
+    pick_members: Dict[int, List[int]] = {k: [] for k in range(len(picks))}
+    for i, row in kept.iterrows():
+        shift = float(row["group_shift"])
+        dists = [abs(shift - p) for p in picks]
+        k = int(np.argmin(dists))
+        d = dists[k]
+        assigned = max_distance is None or d <= max_distance
+        assign_rows.append({
+            "peak_shift": shift, "nearest_pick": picks[k], "distance": d,
+            "assigned": assigned,
+        })
+        if assigned:
+            pick_members[k].append(i)
+
+    rows = []
+    for k, pick in enumerate(picks):
+        idxs = pick_members[k]
+        if not idxs:
+            print(f"merge_groups_to_picks: pick at {pick:.3f} ppm received no "
+                  f"maximal-fit peaks -- skipped.")
+            continue
+        sub = kept.loc[idxs]
+        agg = _aggregate_members(sub)
+        source_shifts = [float(kept.loc[i, "group_shift"]) for i in idxs]
+        source_integrals = [float(integrals[i]) for i in idxs] if integrals is not None else []
+        agg.update({
+            "pick_shift": float(pick), "n_source_peaks": len(idxs),
+            "source_shifts": source_shifts, "source_integrals": source_integrals,
+            "source_span": float(max(source_shifts) - min(source_shifts)),
+        })
+        rows.append(agg)
+
+    if not rows:
+        raise ValueError("None of the picks received any maximal-fit peaks -- nothing to merge.")
+
+    merged_groups = pd.DataFrame(rows).sort_values("pick_shift").reset_index(drop=True)
+    assignment_report = pd.DataFrame(assign_rows)
+    return merged_groups, assignment_report
+
+
+# ===========================================================================
+# 8. Re-fit a simplified (merged) peak set with shift now FREE to move,
+#    and report how far each fitted centre drifted from the CIF-predicted
+#    shift it was built around.
+# ===========================================================================
+def _peak_center_from_component(x_fit: np.ndarray, component: np.ndarray) -> float:
+    """Model-agnostic fitted-centre estimate for one fitted peak: a
+    parabola-refined argmax of the fitted component itself, rather than
+    reading a 'shift' parameter out of popt -- this way it works the same
+    for gaussian/lorentzian/pseudo_voigt without needing to know
+    fitting.py's internal parameter ordering."""
+    y = np.abs(np.asarray(component))
+    k = int(np.argmax(y))
+    if k == 0 or k == len(y) - 1:
+        return float(x_fit[k])
+    y0, y1, y2 = y[k - 1], y[k], y[k + 1]
+    denom = y0 - 2 * y1 + y2
+    if denom == 0:
+        return float(x_fit[k])
+    delta = 0.5 * (y0 - y2) / denom
+    dx = x_fit[k + 1] - x_fit[k]
+    return float(x_fit[k] + delta * dx)
+
+
+def _build_shift_report(kept: pd.DataFrame, x_fit: np.ndarray, components) -> pd.DataFrame:
+    """One row per fitted peak: the CIF-predicted group_shift it started
+    from vs. its fitted centre, and the difference between them."""
+    rows = []
+    for (_, row), component in zip(kept.iterrows(), components):
+        predicted = float(row["group_shift"])
+        fitted = _peak_center_from_component(x_fit, component)
+        rows.append({
+            "predicted_shift": predicted, "fitted_shift": fitted,
+            "shift_delta": fitted - predicted,
+            "n_members": row.get("n_members", np.nan),
+            "n_source_peaks": row.get("n_source_peaks", np.nan),
+        })
+    return pd.DataFrame(rows)
+
+
+def print_shift_drift_report(shift_report: pd.DataFrame):
+    """Human-readable print of _build_shift_report's output: how far each
+    merged/simplified peak's fitted centre moved from the CIF-predicted
+    shift it was built around."""
+    print("\n" + "=" * 70)
+    print("FITTED SHIFT vs. CIF-PREDICTED SHIFT (merged/simplified peaks)")
+    print("=" * 70)
+    for _, r in shift_report.sort_values("predicted_shift").iterrows():
+        n_src = r.get("n_source_peaks", np.nan)
+        src_txt = f", merged from {int(n_src)} maximal-fit peak(s)" if pd.notna(n_src) else ""
+        print(f"    predicted {r['predicted_shift']:8.3f} ppm  ->  "
+              f"fitted {r['fitted_shift']:8.3f} ppm   "
+              f"(delta {r['shift_delta']:+.3f} ppm{src_txt})")
+    print("=" * 70 + "\n")
+
+
+def refit_merged_groups(
+    merged_groups: pd.DataFrame, results: Dict, shift_float_window: float,
+    fit_regions=None, x_unit: str = "ppm", snr_threshold: float = 3.0,
+    noise_region=None, window: Optional[float] = None,
+    peak_type: str = "gaussian", fwhm_init: float = 5.0, fwhm_bounds=(0.1, 100.0),
+    eta_init: float = 0.5, eta_bounds=(0.0, 1.0), amplitude_bounds=(0.0, np.inf),
+    positive_intensity: bool = True, allow_negative_intensity: bool = False,
+    baseline_regions=None, baseline_sigma: float = 2.5, baseline_max_iter: int = 10,
+    use_normalised: bool = True, show_plot: bool = True, show_components: bool = True,
+    show_report: bool = True, xlims="default", xlabel=None,
+) -> dict:
+    """
+    Re-fit a simplified peak set (from merge_low_integral_peaks or
+    merge_groups_to_picks) against the SAME experimental spectrum the
+    maximal fit used -- this time with each peak's shift FREE to move by
+    +/- shift_float_window ppm, since there are now far fewer, better-
+    separated peaks and floating the centre is much less likely to
+    produce a degenerate fit than it would have been on the maximal,
+    one-peak-per-environment fit.
+
+    shift_float_window : float
+        Required, no default -- how far, in ppm, each peak's fitted
+        centre is allowed to move from `group_shift` (the CIF-
+        probability-weighted prediction for the environments merged into
+        it). There's no universally sensible default; pick something you
+        can justify (e.g. the tolerance/merge_tolerance used to build the
+        merged groups, or your estimate of plausible referencing error).
+
+    All other parameters mirror fit_predicted_spectrum's (see there) and
+    are forwarded to select_groups/groups_to_peak_defs/fit_spectrum in the
+    same way, just starting from `merged_groups` instead of a freshly
+    predicted-and-grouped CIF table.
+
+    Returns
+    -------
+    dict with the same keys as fit_predicted_spectrum's return (results,
+    kept, dropped, noise, peak_defs, popt, pcov, is_free, bound_warnings,
+    integrals, integrals_norm, integral_errors, environment_report,
+    figure, axes) -- "predicted"/"groups" are replaced by the single
+    `merged_groups` you started from -- PLUS `shift_report`: one row per
+    fitted peak comparing its fitted centre to the CIF-predicted
+    group_shift it started from. `shift_report['shift_delta']` is the
+    number to quote when telling users how far this simplified fit moved
+    a peak from its original CIF prediction.
+    """
+    if shift_float_window is None or shift_float_window <= 0:
+        raise ValueError(
+            "shift_float_window must be a positive ppm value -- the whole "
+            "point of refitting a merged/simplified peak set is to let its "
+            "centre move; pass e.g. the tolerance/merge_tolerance used to "
+            "build the merged groups, or your estimate of referencing "
+            "uncertainty."
+        )
+
+    kept, dropped, noise = select_groups(
+        merged_groups, results, fit_regions=fit_regions, x_unit=x_unit,
+        snr_threshold=snr_threshold, noise_region=noise_region,
+        window=window, tolerance=None, use_normalised=False,
+    )
+    if kept.empty:
+        raise ValueError(
+            "No merged group survived region/S:N filtering -- nothing to "
+            "fit. Inspect `dropped` or loosen fit_regions/snr_threshold."
+        )
+
+    peak_defs = groups_to_peak_defs(
+        kept, peak_type=peak_type, fwhm_init=fwhm_init, fwhm_bounds=fwhm_bounds,
+        eta_init=eta_init, eta_bounds=eta_bounds, amplitude_bounds=amplitude_bounds,
+        float_shift_window=shift_float_window,
+    )
+
+    fitted = _fit_peak_defs(
+        results, peak_defs, kept, fit_regions=fit_regions, x_unit=x_unit,
+        use_normalised=use_normalised, positive_intensity=positive_intensity,
+        allow_negative_intensity=allow_negative_intensity,
+        baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
+        baseline_max_iter=baseline_max_iter,
+    )
+
+    shift_report = _build_shift_report(kept, fitted["x_fit"], fitted["components"])
+
+    fig = ax = None
+    if show_plot:
+        fig, ax = NMR1dplot_with_fit(
+            results=results, popt=fitted["popt"], peak_defs=peak_defs, fit_regions=fit_regions,
+            x_unit=x_unit, show_components=show_components, use_normalised=use_normalised,
+            xlims=xlims, xlabel=xlabel,
+        )
+
+    if show_report:
+        y_full = results["normalised_real_spectrum"] if use_normalised else results["real_spectrum"]
+        y_fit_data = np.asarray(y_full)[fitted["mask"]]
+        print_fit_report(fitted["x_fit"], y_fit_data, fitted["popt"], fitted["pcov"],
+                          peak_defs, fitted["bound_warnings"], fitted["is_free"],
+                          components=fitted["components"])
+        print_environment_report(fitted["environment_report"], dropped)
+        print_shift_drift_report(shift_report)
+
+    return {
+        "results": results, "merged_groups": merged_groups,
+        "kept": kept, "dropped": dropped, "noise": noise,
+        "peak_defs": peak_defs, "popt": fitted["popt"], "pcov": fitted["pcov"],
+        "is_free": fitted["is_free"], "bound_warnings": fitted["bound_warnings"],
+        "integrals": fitted["integrals"], "integrals_norm": fitted["integrals_norm"],
+        "integral_errors": fitted["integral_errors"],
+        "environment_report": fitted["environment_report"],
+        "shift_report": shift_report, "figure": fig, "axes": ax,
+    }
+
+
+# ===========================================================================
+# 9. Alternative to groups_to_peak_defs + fit_spectrum: fit the WHOLE
 #    predicted envelope shape (no discretisation into separate peaks at
 #    all). Appropriate when the CIF predicts a dense, quasi-continuous
 #    comb/manifold of shifts (heavy combinatorial disorder, or pathway
