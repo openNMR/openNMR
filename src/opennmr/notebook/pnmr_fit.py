@@ -79,8 +79,8 @@ from .pnmr_simulator import (
 from .fitting import (
     fit_spectrum, evaluate_fit, compute_integrals, compute_integral_errors,
     check_bound_hits, build_bounds, build_region_mask, expand_pcov,
-    enforce_positive_intensity, estimate_noise_level, print_fit_report,
-    NMR1dplot_with_fit,
+    enforce_positive_intensity, estimate_noise_level, estimate_baseline_robust,
+    print_fit_report, NMR1dplot_with_fit,
 )
 from .one_d import NMR1dimport
 
@@ -583,4 +583,127 @@ def fit_predicted_spectrum(
         "bound_warnings": bound_warnings, "integrals": integrals,
         "integrals_norm": integrals_norm, "integral_errors": integral_errors,
         "environment_report": environment_report, "figure": fig, "axes": ax,
+    }
+
+
+# ===========================================================================
+# 7. Alternative to groups_to_peak_defs + fit_spectrum: fit the WHOLE
+#    predicted envelope shape (no discretisation into separate peaks at
+#    all). Appropriate when the CIF predicts a dense, quasi-continuous
+#    comb/manifold of shifts (heavy combinatorial disorder, or pathway
+#    constants with near-commensurate ratios -- see group_environments'
+#    chaining caveat) rather than a handful of well-separated sites.
+# ===========================================================================
+def _envelope_model(x, shifts, p, shift_scale, x_offset, sigma, intensity_scale,
+                     b0, b1, x_ref):
+    """intensity_scale * sum_i p_i * Gaussian(x; shifts_i*shift_scale + x_offset, sigma)
+    + linear baseline. Vectorised over all predicted sticks at once."""
+    shifted = shifts * shift_scale + x_offset
+    z = (x[:, None] - shifted[None, :]) / sigma
+    y = intensity_scale * (p[None, :] * np.exp(-0.5 * z ** 2)).sum(axis=1)
+    return y + b0 + b1 * (x - x_ref)
+
+
+def fit_cif_envelope(
+    spectrum, cif_filename, atom_of_interest, shell_bins, shift_dict,
+    ignore_species=None, fit_regions=None, x_unit="ppm", procno=1,
+    use_normalised=True, sigma_init=15.0, sigma_bounds=(1.0, 300.0),
+    shift_scale_init=1.0, shift_scale_bounds=(0.5, 1.5),
+    x_offset_init=0.0, x_offset_bounds=(-100.0, 100.0),
+    baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
+    vacancy_tol=5, warn_missing_shifts=True, verbose=False,
+):
+    """
+    Fit an experimental spectrum to the CIF-predicted shift distribution
+    as a single continuous envelope, rather than discretising it into
+    separate peaks (see group_environments/select_groups/
+    groups_to_peak_defs/fit_predicted_spectrum for that alternative).
+
+    Free parameters: an inhomogeneous broadening sigma (ppm), a
+    multiplicative scale on ALL shift_dict pathway constants at once
+    (shift_scale -- corrects a systematically over/under-estimated
+    contact-shift magnitude without needing you to re-guess every
+    pathway constant by hand), a rigid referencing offset (x_offset),
+    and an overall intensity scale. Baseline is estimated robustly and
+    held fixed, exactly as in fitting.fit_spectrum.
+
+    This sidesteps grouping entirely, so it has none of
+    group_environments' chaining failure modes -- but it also can't tell
+    you "this peak is environment X" the way fit_predicted_spectrum can,
+    because there ARE no discrete peaks in this model. Use it to (a)
+    sanity-check/calibrate shift_dict against real data, and/or (b) as
+    the appropriate fit itself when the CIF predicts a dense manifold of
+    shifts rather than a few resolvable sites (which
+    group_environments/select_groups will tell you, via a small
+    `n_groups` for a sane tolerance and/or a `max_group_span` error).
+
+    Returns
+    -------
+    dict with keys: results, shifts, p (the raw, ungrouped sticks used),
+    popt (dict of fitted values), pcov, x_fit, y_fit, y_model, rmse.
+    """
+    if isinstance(spectrum, str):
+        results = NMR1dimport(spectrum, procno=procno)
+    else:
+        results = spectrum
+
+    predicted = predict_environments(
+        cif_filename, atom_of_interest, shell_bins, shift_dict,
+        ignore_species=ignore_species, vacancy_tol=vacancy_tol,
+        warn_missing_shifts=warn_missing_shifts, verbose=verbose,
+    )
+    shifts = predicted["Total_shift"].to_numpy()
+    p = predicted["p"].to_numpy()
+
+    x_full = np.asarray(results["x_ppm"] if x_unit == "ppm" else results["x_Hz"], dtype=float)
+    y_full_raw = np.asarray(
+        results["normalised_real_spectrum"] if use_normalised else results["real_spectrum"],
+        dtype=float,
+    )
+    scale_norm = np.max(np.abs(results["real_spectrum"])) if use_normalised else 1.0
+    scale_norm = scale_norm if scale_norm != 0 else 1.0
+
+    mask = build_region_mask(x_full, fit_regions)
+    x_fit = x_full[mask]
+    y_fit = y_full_raw[mask]
+    x_ref = np.mean(x_fit)
+
+    b0_init, b1_init, _ = estimate_baseline_robust(
+        x_full, y_full_raw, baseline_regions=baseline_regions,
+        sigma=baseline_sigma, max_iter=baseline_max_iter, x_ref=x_ref,
+    )
+
+    # Rough intensity_scale starting guess: ratio of data amplitude to
+    # unscaled-envelope amplitude at sigma_init.
+    trial = _envelope_model(x_fit, shifts, p, shift_scale_init, x_offset_init,
+                             sigma_init, 1.0, 0.0, 0.0, x_ref)
+    trial_peak = np.max(np.abs(trial))
+    data_peak = np.max(np.abs(y_fit - (b0_init + b1_init * (x_fit - x_ref))))
+    intensity_scale_init = data_peak / trial_peak if trial_peak > 0 else 1.0
+
+    from scipy.optimize import curve_fit
+
+    def wrapper(x, shift_scale, x_offset, sigma, intensity_scale):
+        return _envelope_model(x, shifts, p, shift_scale, x_offset, sigma,
+                                intensity_scale, b0_init, b1_init, x_ref)
+
+    p0 = [shift_scale_init, x_offset_init, sigma_init, intensity_scale_init]
+    lower = [shift_scale_bounds[0], x_offset_bounds[0], sigma_bounds[0], 0.0]
+    upper = [shift_scale_bounds[1], x_offset_bounds[1], sigma_bounds[1], np.inf]
+
+    popt, pcov = curve_fit(wrapper, x_fit, y_fit, p0=p0, bounds=(lower, upper), maxfev=20000)
+
+    y_model = wrapper(x_fit, *popt)
+    rmse = float(np.sqrt(np.mean((y_fit - y_model) ** 2)))
+
+    popt_named = {
+        "shift_scale": popt[0], "x_offset": popt[1],
+        "sigma": popt[2], "intensity_scale": popt[3],
+        "b0": b0_init, "b1": b1_init,
+    }
+
+    return {
+        "results": results, "shifts": shifts, "p": p,
+        "popt": popt_named, "pcov": pcov,
+        "x_fit": x_fit, "y_fit": y_fit, "y_model": y_model, "rmse": rmse,
     }
