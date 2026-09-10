@@ -288,27 +288,49 @@ def group_environments(shift_table: pd.DataFrame, tolerance: Optional[float] = N
     df = shift_table.sort_values("Total_shift").reset_index(drop=True)
 
     if method == "probability":
+        # Vectorised, numpy-only equivalent of the seed/claim algorithm
+        # described above. `df` is already sorted by shift, so for any
+        # seed, "everything within +/- half_tol of it" is a contiguous
+        # index range in the (fixed) sorted array, found in O(log n) via
+        # searchsorted -- no need to rescan a shrinking pandas remainder
+        # on every iteration (which is what made this O(n^2) with heavy
+        # per-call pandas overhead on top; at 30,000 environments that
+        # was already ~2s, headed somewhere much worse at the "10,000s of
+        # sites" scale this tool is meant to handle).
+        #
+        # Equivalence argument: processing candidates in a FIXED
+        # probability-descending order, skipping any already claimed,
+        # gives exactly the same sequence of seeds as repeatedly taking
+        # argmax(p) over the shrinking remaining set -- whichever
+        # candidate is first (highest p) and still unclaimed at the point
+        # we reach it in that fixed order is, by construction, the
+        # highest-p element still remaining, since every higher-p
+        # candidate before it in the order has already been resolved
+        # (claimed or is the current one).
+        shifts_arr = df["Total_shift"].to_numpy()
+        p_arr = df["p"].to_numpy()
+        n = len(df)
         half_tol = 0.5 * tolerance
-        group_id = pd.Series(-1, index=df.index)
-        remaining = df.index.to_series()
+        assigned = np.zeros(n, dtype=bool)
+        group_id = np.full(n, -1, dtype=np.int64)
+        seed_order = np.argsort(-p_arr, kind="stable")
         next_group = 0
-        while len(remaining) > 0:
-            # Most probable environment left becomes this group's seed.
-            seed_idx = df.loc[remaining, "p"].idxmax()
-            seed_shift = df.loc[seed_idx, "Total_shift"]
-            in_group = remaining[
-                (df.loc[remaining, "Total_shift"] >= seed_shift - half_tol)
-                & (df.loc[remaining, "Total_shift"] <= seed_shift + half_tol)
-            ]
-            group_id.loc[in_group] = next_group
-            remaining = remaining.drop(in_group)
+        for idx in seed_order:
+            if assigned[idx]:
+                continue
+            seed_shift = shifts_arr[idx]
+            lo = np.searchsorted(shifts_arr, seed_shift - half_tol, side="left")
+            hi = np.searchsorted(shifts_arr, seed_shift + half_tol, side="right")
+            window_unassigned = ~assigned[lo:hi]
+            local_idx = np.nonzero(window_unassigned)[0] + lo
+            group_id[local_idx] = next_group
+            assigned[local_idx] = True
             next_group += 1
-        df["_group"] = group_id.to_numpy()
+        df["_group"] = group_id
     elif method == "sequential":
-        group_id = [0]
-        for i in range(1, len(df)):
-            gap = df.loc[i, "Total_shift"] - df.loc[i - 1, "Total_shift"]
-            group_id.append(group_id[-1] + (1 if gap > tolerance else 0))
+        shifts_arr = df["Total_shift"].to_numpy()
+        gaps = np.diff(shifts_arr)
+        group_id = np.concatenate(([0], np.cumsum(gaps > tolerance)))
         df["_group"] = group_id
     elif method == "hierarchical":
         from scipy.cluster.hierarchy import linkage, fcluster
