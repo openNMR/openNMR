@@ -40,14 +40,20 @@ around that fit:
 Worked caveats (read before trusting the output)
 -------------------------------------------------
 * Grouping is inherently a modelling choice, not a fact about the physics.
-  The default "sequential/gap" method can chain: if A-B and B-C are each
-  within tolerance but A-C is not, all three still end up in one group,
-  because grouping is decided pairwise along the sorted shift axis. This
-  is the standard behaviour of single-linkage clustering, and
-  ``method='hierarchical'`` exposed by group_environments is exactly
-  single-linkage clustering (scipy) -- it will chain in the same way. If
-  that's not what you want, cap group *span* (see ``max_group_span``) or
-  post-hoc inspect ``members`` on any group you don't trust.
+  The default method, ``method='probability'``, builds each group around
+  the most probable remaining environment: it takes that environment,
+  pulls in every remaining environment within +/- 0.5*tolerance of its
+  shift, removes them from the pool, then repeats with whatever is most
+  probable among what's left, until every environment has been assigned.
+  Each group is therefore anchored to one seed shift and can't exceed
+  `tolerance` in span. The two alternative methods, 'sequential' and
+  'hierarchical', instead decide grouping pairwise along the sorted shift
+  axis (single-linkage clustering) and so CAN chain: if A-B and B-C are
+  each within tolerance but A-C is not, all three still end up in one
+  group. ``method='hierarchical'`` is scipy single-linkage clustering and
+  will chain the same way 'sequential' does. If you use one of those and
+  chaining isn't what you want, cap group *span* (see ``max_group_span``)
+  or post-hoc inspect ``members`` on any group you don't trust.
 * The S/N based rejection in select_groups compares the local maximum of
   the experimental spectrum near a predicted shift to a global noise
   estimate. It cannot distinguish "there is genuinely no peak here" from
@@ -163,7 +169,7 @@ def default_tolerance(shift_dict: Dict[str, Dict[str, float]]) -> float:
 
 
 def group_environments(shift_table: pd.DataFrame, tolerance: Optional[float] = None,
-                        shift_dict: Optional[Dict] = None, method: str = "sequential",
+                        shift_dict: Optional[Dict] = None, method: str = "probability",
                         max_group_span: Optional[float] = None) -> Tuple[pd.DataFrame, float]:
     """
     Merge rows of `shift_table` (as returned by predict_environments) whose
@@ -176,14 +182,27 @@ def group_environments(shift_table: pd.DataFrame, tolerance: Optional[float] = N
         non-zero pathway contribution supplied, per the brief ("group
         anything closer together than the smallest bond pathway can
         resolve").
-    method : {'sequential', 'hierarchical'}
-        'sequential' (default) walks the sorted shifts and starts a new
-        group whenever the gap to the previous point exceeds tolerance.
+    method : {'probability', 'sequential', 'hierarchical'}
+        'probability' (default) is seed-based rather than chained: take
+        the single most probable environment remaining, form a group out
+        of every remaining environment within +/- 0.5*tolerance of *that*
+        seed's shift, remove them from the pool, then repeat with the
+        most probable environment still left, until none remain. Because
+        each group is defined by its distance to one fixed seed (not to
+        its neighbour along the sorted axis), it can't chain the way the
+        other two methods can -- a group's full span is capped at
+        `tolerance` by construction. The trade-off is that it's now
+        order-dependent on `p`: a low-probability environment can end up
+        in a different group than it would under sequential/hierarchical
+        if it sits between two seeds.
+        'sequential' walks the sorted shifts and starts a new group
+        whenever the gap to the previous point exceeds tolerance.
         'hierarchical' is scipy single-linkage clustering with a distance
-        threshold of `tolerance`. Both are single-linkage and can chain
-        (see module docstring) -- they will usually agree, but
-        'hierarchical' is a genuine second opinion since it doesn't rely
-        on the data already being processed in shift order.
+        threshold of `tolerance`. Both 'sequential' and 'hierarchical' are
+        single-linkage and can chain (see module docstring) -- they will
+        usually agree with each other, and 'hierarchical' is a genuine
+        second opinion on 'sequential' since it doesn't rely on the data
+        already being processed in shift order.
     max_group_span : float, optional
         If set, reject (raise) any group whose max-min shift exceeds this,
         as a guard against chaining silently producing an implausibly wide
@@ -206,7 +225,24 @@ def group_environments(shift_table: pd.DataFrame, tolerance: Optional[float] = N
 
     df = shift_table.sort_values("Total_shift").reset_index(drop=True)
 
-    if method == "sequential":
+    if method == "probability":
+        half_tol = 0.5 * tolerance
+        group_id = pd.Series(-1, index=df.index)
+        remaining = df.index.to_series()
+        next_group = 0
+        while len(remaining) > 0:
+            # Most probable environment left becomes this group's seed.
+            seed_idx = df.loc[remaining, "p"].idxmax()
+            seed_shift = df.loc[seed_idx, "Total_shift"]
+            in_group = remaining[
+                (df.loc[remaining, "Total_shift"] >= seed_shift - half_tol)
+                & (df.loc[remaining, "Total_shift"] <= seed_shift + half_tol)
+            ]
+            group_id.loc[in_group] = next_group
+            remaining = remaining.drop(in_group)
+            next_group += 1
+        df["_group"] = group_id.to_numpy()
+    elif method == "sequential":
         group_id = [0]
         for i in range(1, len(df)):
             gap = df.loc[i, "Total_shift"] - df.loc[i - 1, "Total_shift"]
@@ -218,7 +254,7 @@ def group_environments(shift_table: pd.DataFrame, tolerance: Optional[float] = N
         Z = linkage(shifts, method="single")
         df["_group"] = fcluster(Z, t=tolerance, criterion="distance")
     else:
-        raise ValueError("method must be 'sequential' or 'hierarchical'.")
+        raise ValueError("method must be 'probability', 'sequential' or 'hierarchical'.")
 
     rows = []
     for _, sub in df.groupby("_group"):
@@ -438,7 +474,7 @@ def print_environment_report(env_df: pd.DataFrame, dropped: Optional[pd.DataFram
 # ===========================================================================
 def fit_predicted_spectrum(
     spectrum, cif_filename, atom_of_interest, shell_bins, shift_dict,
-    ignore_species=None, fit_regions=None, tolerance=None, group_method="sequential",
+    ignore_species=None, fit_regions=None, tolerance=None, group_method="probability",
     max_group_span=None, snr_threshold=3.0, noise_region=None, snr_window=None,
     peak_type="gaussian", fwhm_init=5.0, fwhm_bounds=(0.1, 100.0),
     eta_init=0.5, eta_bounds=(0.0, 1.0), amplitude_bounds=(0.0, np.inf),
