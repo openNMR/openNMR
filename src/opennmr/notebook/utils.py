@@ -193,7 +193,6 @@ def find_gamma(isotope, field='', SFO1=''):
         return
 
     if field == '100':
-        gamma = abs(gamma / 1e6)
         field_strength = 11.75
         freqactual = SFO1 / (field_strength / 5)
         sortdf = df.sort_values("Gyromagnetic Ratio (MHz/T)")
@@ -201,7 +200,7 @@ def find_gamma(isotope, field='', SFO1=''):
             (sortdf['Gyromagnetic Ratio (MHz/T)'].astype(float) - freqactual).abs().argsort()[:1]
         ]
 
-        gamma = df_closest["Gyromagnetic Ratio (MHz/T)"].iloc[0]
+        gamma = float(df_closest["Gyromagnetic Ratio (MHz/T)"].iloc[0]) * 1e6
         isotope = str(df_closest["Nuclide"].iloc[0])
 
     return {'Nuclide': isotope, 'gamma': gamma}
