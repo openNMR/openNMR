@@ -43,13 +43,11 @@ import matplotlib.colors as cl
 from matplotlib import cm
 from matplotlib.ticker import MaxNLocator
 
-<<<<<<< HEAD
 from .utils import NUC_label
 =======
 # One implementation of the too-light-colour rule, in the live
 # plotting package; this legacy copy delegates rather than repeating it.
 from ..plotting.style import readable_cmap
->>>>>>> upstream/main
 
 # Output formats every save-capable plotting function in nmrtools
 # accepts for its ``save_format`` argument.
