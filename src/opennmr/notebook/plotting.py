@@ -44,7 +44,7 @@ from matplotlib import cm
 from matplotlib.ticker import MaxNLocator
 
 from .utils import NUC_label
-=======
+
 # One implementation of the too-light-colour rule, in the live
 # plotting package; this legacy copy delegates rather than repeating it.
 from ..plotting.style import readable_cmap
