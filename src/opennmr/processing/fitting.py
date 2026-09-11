@@ -1268,6 +1268,7 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
                       show_components=True, positive_intensity=True,
                       allow_negative_intensity=False, sn_threshold=3,
                       show_report=False, show_warnings=True, seed_mode: str = "independent",
+                      anchor_slice: int | None = None,
                       amplitude_bound_regions=None) -> dict:
     """
     Fit one or more extracted 2D NMR slices (rows and/or columns).
@@ -1306,6 +1307,23 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
     show_report, show_warnings : bool, optional
         Print a per-slice fit report / bound-hit warnings as each
         slice is fitted.
+    anchor_slice : int or {"first", "last"}, optional
+        Which slice ``seed_mode="apply_first"`` takes its fixed
+        lineshape from, as a 1-based slice number. Default (``None``)
+        is the first, which is this function's own long-standing
+        behaviour.
+
+        Worth choosing rather than accepting: the anchor should be the
+        slice with the **best signal**, since every other slice is
+        pinned to its lineshape. That is the first slice of a PFG or T2
+        series (least attenuated) but the *last* of an inversion- or
+        saturation-recovery series (fully recovered) -- anchoring an
+        inversion recovery on its first slice pins every peak to a
+        lineshape measured near the null, where there is almost no
+        signal to measure it from.
+
+        Ignored for the other two seed modes, which have no fixed
+        lineshape to take from anywhere.
     seed_mode : {"independent", "propagate", "apply_first"}, optional
         How each slice after the first gets its own starting
         shift/FWHM/eta -- never amplitude, which is expected to vary
@@ -1325,9 +1343,10 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
         a closer starting point than the first slice's own guess to
         converge reliably at all.
 
-        ``"apply_first"``: the first slice fits normally (from
-        ``peak_defs``, shift/FWHM/eta free); every slice after that
-        has shift/FWHM/eta *fixed* at the first slice's own converged
+        ``"apply_first"``: the anchor slice (the first by default --
+        see ``anchor_slice``) fits normally (from
+        ``peak_defs``, shift/FWHM/eta free); every other slice
+        has shift/FWHM/eta *fixed* at the anchor slice's own converged
         values (added into that slice's own ``fixed`` dict, without
         overwriting whatever the caller's own ``peak_defs`` already
         marked fixed there) -- only amplitude (and the baseline) is
@@ -1394,6 +1413,25 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
 
     if not selected:
         raise ValueError("No slices available for fitting.")
+
+    # The anchor is fitted *first* whatever its position, so every
+    # other slice can be fixed to its converged lineshape -- including
+    # the slices before it, which a plain in-order pass could not have
+    # done. Results are put back in the original order afterwards, so
+    # nothing downstream (the delay/b-value pairing above all) can tell
+    # the difference; getting that wrong would silently pair each
+    # intensity with the wrong delay.
+    # NOT called `order`: the per-slice loop below already binds that
+    # name to a numpy argsort of the x-axis, so a plain `order` here is
+    # silently rebound on the first slice and the restore at the end
+    # then compares an array against a list -- ValueError: the truth
+    # value of an array with more than one element is ambiguous, raised
+    # out of a fit that had otherwise completed.
+    slice_order = list(range(len(selected)))
+    if seed_mode == "apply_first" and anchor_slice is not None:
+        position = _anchor_position(anchor_slice, len(selected))
+        slice_order = [position] + [i for i in slice_order if i != position]
+        selected = [selected[i] for i in slice_order]
 
     fitted = {"rows": [], "columns": []}
 
@@ -1553,7 +1591,27 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
 
         fitted["rows" if slice_type == "row" else "columns"].append(fit_result)
 
+    if slice_order != list(range(len(slice_order))):
+        for key in ("rows", "columns"):
+            if len(fitted[key]) == len(slice_order):
+                restored = [None] * len(slice_order)
+                for fitted_position, original_position in enumerate(slice_order):
+                    restored[original_position] = fitted[key][fitted_position]
+                fitted[key] = restored
+
     return fitted
+
+
+def _anchor_position(anchor_slice, n_slices: int) -> int:
+    """Resolve an anchor to a 0-based position among the slices being
+    fitted. Accepts ``"first"``, ``"last"``, or a 1-based slice number
+    (clamped, so a stale anchor left over from a longer series does not
+    raise -- it just falls on the nearest real slice)."""
+    if anchor_slice == "first":
+        return 0
+    if anchor_slice == "last":
+        return n_slices - 1
+    return int(np.clip(int(anchor_slice) - 1, 0, n_slices - 1))
 
 
 # ============================================================

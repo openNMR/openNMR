@@ -24,6 +24,7 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 from . import base
+from . import cloud
 from ..processing import ft as processing_ft
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 
@@ -394,9 +395,52 @@ def _read_xpulse_jcamp(filepath: str, verbose: bool = False, timegrid_warning: b
 # NMRSpectrum-producing reader
 # ============================================================
 
+def _phase_metadata(phase0: float, phase1: float, autophased: bool,
+                    pivot_frac: float = 0.5) -> dict:
+    """Where a just-applied phase belongs in ``metadata.raw``.
+
+    A phase the reader **computed** (autophase) is a *recorded* base:
+    it describes this file as read, and every later rebuild from the
+    raw FID has to reapply it before anything the user adds on top. A
+    phase the **caller supplied** is already the user's own, and goes
+    in the user slot so it is not double-counted.
+
+    Keyed through :data:`opennmr.io.bruker.RECORDED_PHASE_KEYS` /
+    ``USER_PHASE_KEYS`` rather than literal strings, so the two vendors
+    cannot drift apart on which key means what -- the GUI reads both
+    through the same accessors.
+
+    **The bug this fixes.** X-Pulse files record no phase of their own,
+    so the base is whatever autophase finds at read time -- and that
+    was being stored in the *user* slot, where a saved sidecar's own
+    ``phase0`` overwrote it on load. The rebuild-from-raw then applied
+    the user's correction with no base under it. Measured on
+    ``test_data/xpulse_PFG/4``: autophase finds -177.2 deg (real-part
+    peak 0.992 of the magnitude peak); the sidecar holds the user's
+    +38.33; reloading applied 38.33 alone and gave 0.118, i.e.
+    essentially unphased. Recorded + user restores 0.92. Reported as
+    the phase "not working on the PFG experiment", and as needing to
+    "jump start it by changing the phase".
+    """
+    from . import bruker
+
+    recorded0, recorded1 = bruker.RECORDED_PHASE_KEYS["f2"]
+    user0, user1 = bruker.USER_PHASE_KEYS["f2"]
+    if autophased:
+        # **Converted, not copied.** The recorded slot means TopSpin's
+        # index ramp applied as exp(+i*phi); autophase returns a
+        # pivot-model phase applied as exp(-i*phi). Writing the raw
+        # value here made the two cancel on every rebuild from the raw
+        # FID -- see bruker.recorded_phase_from_pivot_model for the
+        # measurement.
+        phc0, phc1 = bruker.recorded_phase_from_pivot_model(phase0, phase1, pivot_frac)
+        return {recorded0: phc0, recorded1: phc1, user0: 0.0, user1: 0.0}
+    return {recorded0: 0.0, recorded1: 0.0, user0: float(phase0), user1: float(phase1)}
+
+
 def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | None = None,
             zero_fill: int | bool | None = None, truncate: int | bool | None = None,
-            fid_shift: float = 0.0, align_echo: bool = False,
+            fid_shift: float = 0.0, align_echo: bool = False, echo_offset: float = 0.0,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward",
             baseline_correct: bool | None = None, normalize: bool = False,
@@ -496,7 +540,8 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     # here, now shared with the GUI's own live Processing-preview so
     # there's exactly one implementation of it.
     fid = processing_ft.prepare_fid(
-        fid, fid_shift=fid_shift, align_echo_enabled=align_echo, truncate=tdeff_points,
+        fid, fid_shift=fid_shift, align_echo_enabled=align_echo, echo_offset=echo_offset,
+        truncate=tdeff_points,
         linear_predict_points=linear_predict_points, linear_predict_order=linear_predict_order,
         linear_predict_direction=linear_predict_direction,
     )
@@ -523,6 +568,9 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     freq_hz, spectrum = processing_ft.fft_spectrum(fid, dt)
     freq_ppm = (freq_hz - o1_hz - (sf_hz - sfo1_hz)) / sfo1_hz * 1e6
 
+    # Whether the phase about to be applied was *computed here* or
+    # supplied by the caller -- see _phase_metadata.
+    autophased = bool(autophase)
     if autophase:
         if phase_mode == "joint":
             phase0, phase1 = processing_ft.autophase01(
@@ -556,7 +604,10 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
         source_path=path,
         probe=exp_params.get("Probe"), pulse_program=params.get(".PULSESEQUENCE"),
         raw={
-            "params": params, "exp_params": exp_params, "phase0": phase0, "phase1": phase1,
+            "params": params, "exp_params": exp_params,
+            # Recorded (autophase's own base) vs user phase -- see
+            # _phase_metadata for why the split matters on reload.
+            **_phase_metadata(phase0, phase1, autophased, pivot_frac),
             # The fully processed (pre-FFT) FID -- an optional GUI
             # preview of what FID-domain processing actually did.
             "fid": fid, "fid_dt": dt, "fid_original_length": original_length,
@@ -904,6 +955,7 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     spectrum = np.array(f2_rows)
     freq_ppm = tx_ppm_f2 + freq_hz / (sfo1_hz / 1e6)
 
+    autophased = bool(autophase)
     if autophase:
         mean_spectrum = spectrum.mean(axis=0)
         if phase_mode == "apc0":
@@ -941,7 +993,10 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
         source_path=path,
         probe=exp_params.get("Probe"), pulse_program=params.get(".PULSESEQUENCE"),
         raw={
-            "params": params, "exp_params": exp_params, "phase0": phase0, "phase1": phase1,
+            "params": params, "exp_params": exp_params,
+            # Recorded (autophase's own base) vs user phase -- see
+            # _phase_metadata for why the split matters on reload.
+            **_phase_metadata(phase0, phase1, autophased, pivot_frac),
             "fn_mode": 5,
             "fid": f2_rows, "fid_dt": dt2, "fid_original_length": raw_rows.shape[1],
             "fid_dt_f1": dt1,
@@ -1103,6 +1158,17 @@ def _detect(path: str) -> bool:
         return False
     if os.path.splitext(path)[1].lower() not in (".jdx", ".dx"):
         return False
+    # A cloud placeholder is accepted on its extension alone. Reading
+    # even the first 4 KB of one makes the sync client materialise the
+    # *whole* file (file providers fetch files, not byte ranges), so
+    # scanning a OneDrive folder of these would download every one of
+    # them just to decide what to list. Being optimistic here is the
+    # cheap mistake: a `.jdx` that turns out not to be X-Pulse fails
+    # at load, by which point it has been downloaded anyway -- whereas
+    # reading now costs the download unconditionally, for every file,
+    # before the user has asked for anything.
+    if cloud.is_dataless(path):
+        return True
     try:
         with open(path, "r", errors="ignore") as f:
             head = f.read(4096)

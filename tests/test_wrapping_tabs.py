@@ -1,5 +1,5 @@
 import pytest
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from opennmr.gui.widgets.wrapping_tabs import WrappingTabWidget
 
@@ -107,3 +107,42 @@ def test_every_tab_stays_reachable_when_narrow(qapp):
             assert widget.currentWidget() is page
     finally:
         widget.hide()
+
+
+def test_wrapping_tabs_strip_actually_wraps_when_narrow(qapp):
+    """The point of the widget: a strip too narrow for one row uses
+    more rows rather than clipping or scrolling.
+
+    Asserted through the buttons' own y positions, not the layout's
+    arithmetic -- a `heightForWidth` that Qt never consults produces
+    exactly the right number and still clips on screen, which is the
+    bug this covers (the strip's size policy has to opt in with
+    `setHeightForWidth(True)` before a parent layout will ask)."""
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    widget, _pages = _tabs(qapp, ("Peak Picking", "Integration", "Curve Fitting", "VOCS", "Imaging"))
+    layout.addWidget(widget)
+    host.show()
+
+    def rows(width):
+        host.resize(width, 500)
+        qapp.processEvents()
+        return len({button.y() for button in widget._buttons if not button.isHidden()})
+
+    wide_rows = rows(900)
+    narrow_rows = rows(240)
+
+    assert wide_rows == 1
+    assert narrow_rows > wide_rows
+    # And the strip was actually given the height those rows need,
+    # rather than being left one row tall with the rest cut off.
+    assert widget._bar.height() >= widget._bar.heightForWidth(widget._bar.width())
+
+
+def test_wrapping_tabs_strip_reports_height_for_width(qapp):
+    """The strip must opt in to height-for-width, or a parent layout
+    never asks and the wrapping is invisible."""
+    widget, _pages = _tabs(qapp, ("Peak Picking", "Integration", "Curve Fitting", "VOCS", "Imaging"))
+
+    assert widget._bar.sizePolicy().hasHeightForWidth()
+    assert widget._bar.heightForWidth(200) > widget._bar.heightForWidth(2000)

@@ -522,3 +522,106 @@ def test_nmr2d_fit_slices_amplitude_bound_regions_skips_a_nonpositive_integral()
     result = fitted["rows"][0]
     assert "amplitude" not in result["peak_defs"][0].get("bounds", {})
     assert result["popt"][2] == pytest.approx(true_A, abs=1e-2)  # unaffected, correctly recovers the true value
+
+
+# ============================================================
+# Anchor slice for seed_mode="apply_first"
+# ============================================================
+
+def _series_with_a_clean_slice(clean_index, n_slices=5, n_points=400):
+    """A pseudo-2D whose peak is well-defined in ``clean_index`` and
+    buried in noise everywhere else -- so a fit anchored on the right
+    slice recovers the true position and one anchored elsewhere does
+    not."""
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    from opennmr.processing.fitting import lorentzian
+
+    ppm = np.linspace(0.0, 10.0, n_points)
+    rng = np.random.default_rng(0)
+    rows = []
+    for k in range(n_slices):
+        amplitude = 100.0 if k == clean_index else 1.5
+        rows.append(lorentzian(ppm, 5.0, 0.1, amplitude) + rng.normal(0, 0.25, n_points))
+    return NMRSpectrum(
+        data=np.array(rows),
+        axes=[NMRAxis(kind="index", index=np.arange(1, n_slices + 1)),
+              NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True),
+    )
+
+
+def _fit_with_anchor(spectrum, anchor_slice):
+    from opennmr.processing import slicing as processing_slicing
+
+    n = spectrum.data.shape[0]
+    entries = processing_slicing.get_slices(spectrum, rows=list(range(1, n + 1)))["rows"]
+    return fitting.NMR2D_fit_slices(
+        {"rows": entries}, [{"shift": 5.0, "fwhm": 0.1, "type": "lorentzian"}],
+        mode="rows", show_report=False, show_warnings=False,
+        seed_mode="apply_first", anchor_slice=anchor_slice,
+    )["rows"]
+
+
+def _fitted_shift(result):
+    peak = fitting.extract_params_and_errors(
+        result["popt"], result["pcov"], result["peak_defs"], result["is_free"])[0]
+    return dict(zip(peak["names"], peak["params"]))["shift"]
+
+
+def test_anchor_slice_takes_the_lineshape_from_the_chosen_slice():
+    # The last slice is the only clean one -- an inversion-recovery-
+    # shaped case, where anchoring on the first slice pins every peak
+    # to a lineshape measured where there is almost no signal.
+    spectrum = _series_with_a_clean_slice(clean_index=4)
+    anchored_last = _fit_with_anchor(spectrum, anchor_slice=5)
+    shifts = [_fitted_shift(r) for r in anchored_last]
+    # Every slice is pinned to the clean slice's own converged position.
+    assert len(set(np.round(shifts, 9))) == 1
+    assert shifts[0] == pytest.approx(5.0, abs=0.02)
+
+
+def test_anchor_slice_defaults_to_the_first_slice():
+    spectrum = _series_with_a_clean_slice(clean_index=0)
+    default = _fit_with_anchor(spectrum, anchor_slice=None)
+    explicit = _fit_with_anchor(spectrum, anchor_slice=1)
+    assert [_fitted_shift(r) for r in default] == pytest.approx([_fitted_shift(r) for r in explicit])
+
+
+def test_anchor_slice_accepts_first_and_last_by_name():
+    spectrum = _series_with_a_clean_slice(clean_index=4, n_slices=4)
+    by_name = _fit_with_anchor(spectrum, anchor_slice="last")
+    by_number = _fit_with_anchor(spectrum, anchor_slice=4)
+    assert [_fitted_shift(r) for r in by_name] == pytest.approx([_fitted_shift(r) for r in by_number])
+
+
+def test_anchor_slice_returns_results_in_the_original_slice_order():
+    # The anchor is fitted out of order internally. If the results came
+    # back in *that* order, every intensity would be paired with the
+    # wrong delay/b-value downstream -- silently, and wrongly.
+    spectrum = _series_with_a_clean_slice(clean_index=2, n_slices=5)
+    results = _fit_with_anchor(spectrum, anchor_slice=3)
+    assert [r["index"] for r in results] == [1, 2, 3, 4, 5]
+
+
+def test_anchor_slice_out_of_range_is_clamped_not_an_error():
+    # A stale anchor left over from a longer series should land on the
+    # nearest real slice rather than raising mid-fit.
+    spectrum = _series_with_a_clean_slice(clean_index=2, n_slices=3)
+    results = _fit_with_anchor(spectrum, anchor_slice=99)
+    assert len(results) == 3
+    assert [r["index"] for r in results] == [1, 2, 3]
+
+
+def test_anchor_slice_fixes_shift_and_fwhm_but_never_amplitude():
+    # The whole point of a series: only intensity may vary.
+    spectrum = _series_with_a_clean_slice(clean_index=0, n_slices=4)
+    results = _fit_with_anchor(spectrum, anchor_slice=1)
+    amplitudes = []
+    for result in results:
+        peak = fitting.extract_params_and_errors(
+            result["popt"], result["pcov"], result["peak_defs"], result["is_free"])[0]
+        amplitudes.append(dict(zip(peak["names"], peak["params"]))["amplitude"])
+    assert len(set(np.round(amplitudes, 6))) > 1        # amplitude varied
+    for result in results[1:]:
+        assert result["peak_defs"][0]["fixed"]["shift"] is True
+        assert result["peak_defs"][0]["fixed"]["fwhm"] is True

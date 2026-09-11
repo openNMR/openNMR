@@ -19,7 +19,10 @@ from matplotlib.ticker import MaxNLocator
 from ..core.registry import find_gamma, NUC_label
 from ..core.spectrum import NMRSpectrum
 from ..processing.arithmetic import combine_spectra
-from .style import setup_plotting, apply_tick_style, apply_spine_style, get_contour_cmap, save_figure
+from .style import (
+    setup_plotting, apply_tick_style, apply_spine_style, get_contour_cmap,
+    readable_cmap, save_figure,
+)
 
 
 def plot_1d(ax, spectrum: NMRSpectrum, x_unit: str = "ppm", normalize: bool = True,
@@ -209,7 +212,10 @@ def plot_1d_heatmap(spectra: list[NMRSpectrum], ax=None, fig=None, x_unit: str =
     try:
         cmap_obj = get_contour_cmap(cmap)
     except ValueError:
-        cmap_obj = plt.get_cmap(cmap)
+        # A name outside CONTOUR_CMAP_NAMES still goes through the
+        # luminance filter -- the point is that no colour this package
+        # draws with is invisible, not that only the listed ones are.
+        cmap_obj = readable_cmap(cmap)
 
     row_positions = np.arange(len(spectra))
     im = ax.pcolormesh(x_common, row_positions, data_matrix, cmap=cmap_obj,

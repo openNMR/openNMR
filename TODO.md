@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-09)
 
-1196 tests passing. Working tree clean, in sync with `origin/main`. **`src/` no longer imports nmrglue.**
+1612 tests passing. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, and the series-fitting/phase round below). **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -36,12 +36,886 @@ Decided and built; see *Six settled decisions...* below. Export size for a slice
 Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- four entries that were still marked open had in fact been implemented (Analysis sub-tabs, F1 zero-fill/truncate GUI controls, multicomponent Stejskal-Tanner, independent F1 window) and are now struck through in place, along with a note that the X-Pulse NTUPLES parser landed. What follows is still genuinely open:
 
 - *nmrtools2/leonmr survey* -- named functions in the two predecessor codebases not yet ported (2D summary/slice-stack plots, one-call workflows, X-Pulse and Bruker imaging-profile import, DMFit/XRD readers, Bloch simulator, diffusion planning aids).
-- *PFG / diffusion fitting* -- Bruker's `diff.xml` gives b-values directly; X-Pulse needs the per-probe gradient calibration table, which exists only in a working notebook.
+- ~~*PFG / diffusion fitting* -- Bruker's `diff.xml` gives b-values directly; X-Pulse needs the per-probe gradient calibration table, which exists only in a working notebook.~~ **Built 2026-09-09** -- see *PFG generalised, uncertainty typed, DOSY via ILT, global fitting*. `processing/diffusion.py` computes b from gradient amplitudes and timings for any vendor, and `calibrate_max_gradient` measures the calibration itself from a known standard rather than needing the table. Still open there: nothing reads δ/Δ out of an X-Pulse parameter file automatically.
 - *Installer / update framework*, *Beautification / workflows*, *Varian/Agilent importer* gaps, and the *GUI polish batch* lists.
 
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+
+## Per-axis probe gradients, and the phase reset that was three separate bugs (2026-09-10)
+
+User: "Consider that each probe might have different gradient axes (x,y,z) and I should be able to save values for all of them independently. Also the values saved for imaging should be identical to the ones for diffusion so should read/write the same value. I still have a lot of phasing being reset in the x-pulse PFG when I switch between slices or in and out of the processing view. It seems like the pseudo-2D phase is not what I see in the processing window."
+
+Then, mid-round: "DOSY looks bad aesthetically. It should be plotted as a normal contour plot (not filled) and match the styles accordingly."
+
+### The phase reset was three independent bugs, not one
+
+Reproduced against `test_data/xpulse_PFG/2026.08.22/4` before touching anything.
+
+**1. The X-Pulse base was applied backwards.** `_phase_metadata` (added the previous round) stores the reader's own autophase result in `recorded_phase0`. That slot has a fixed meaning -- TopSpin's index ramp, applied as `exp(+i*phi)` -- while autophase returns the pivot model, `exp(-i*phi)`. Copied across verbatim, the base and the user's phase **cancelled** on every rebuild from the raw FID instead of composing. Measured: the same data loaded *without* its sidecar came back perfectly phased (residual 0 deg on every row); loaded *with* it, every row still wanted ~-90 deg.
+
+`io.bruker.recorded_phase_from_pivot_model` (and its inverse) do the conversion, derived from `apply_recorded_phase`'s own stated equivalence and checked against it to 2e-16 across three pivots: `PHC0 = -(p0 + p1*(1-pf))`, `PHC1 = p1`. The docstring on `RECORDED_PHASE_KEYS` already warned that the two models must not be merged; this is that warning taken seriously.
+
+Existing sidecars are version-1 and carry the old values, so `load_processing_sidecar` now takes the vendor and migrates: the recorded phase is dropped for every vendor (both readers re-derive it on every load anyway) and, for X-Pulse only, so is the user's own. That second half is not tidiness -- with the base applied backwards, any phase a user dialled in was dialled in against a spectrum already rotated the wrong way, so it corrects a bug rather than the data. On `test_data/xpulse_PFG/4`, carrying the saved +38.33 deg forward left row 0 needing another -132 deg; dropping it lands on the answer exactly.
+
+**2. Per-slice phase had nowhere durable to live.** With "Apply to every slice" off, a drag wrote the corrected numbers into `spectrum.data` and nothing else: `_commit_pending_phase_to_metadata` deliberately returned early, on the reasoning that `metadata.raw` describes the dataset and not one row. The consequences were exactly the report -- the Phase readout reset to zero on the next slice change, the Processing tab (which rebuilds from the raw FID plus `metadata.raw`) drew the row unphased, and any reprocess discarded it. "Autophase (each slice independently)" had the same hole.
+
+`metadata.raw["slice_phase0"/"slice_phase1"]`, one entry per row, in the same pivot model as the dataset-wide pair and applied on top of it. Plain lists of floats, so the sidecar persists them with no special handling. Written by the per-slice commit and by autophase-each-slice; read by the Processing preview, the whole-dataset rebuild, the post-reload restore and the phase readout.
+
+Two things fell out of doing this properly. `_recompute_multi_row_data` was adding the *pending* spin-box delta to every row even when it belonged to one -- so a debounced rebuild landing mid-drag rotated the whole series by a correction aimed at a single slice. And `_reapply_phase_post_reload` could only ever restore the row being looked at, because the spin boxes were the only record; every other individually-phased slice was flattened back to the shared phase on any reload.
+
+**3. The phase reference went stale at the same shape.** `_capture_phase_reference` snapshots the data when a row is selected; `_apply_loaded_processing_sidecar` then replaces `spectrum.data` behind it. `_phase_reference_is_stale` compares shapes and the frequency axis, so a same-shape replacement is invisible to it -- and the next phase tick writes the stale snapshot back over every row. Measured on this dataset (whose reader applies a baseline correction that its saved recipe then turns off): touching any phase control, with a zero delta, rotated the whole series by 9.3 deg and rescaled it by 1.043. This is the half of the report about going "in and out of the processing view", and the mirror image of the earlier "jump start it by changing the phase" one -- the spectrum jumped *back*. Fixed by re-anchoring at the end of `_apply_loaded_processing_sidecar`, the same thing `_settle_live_fid_processing` already does for its own resize.
+
+**Rejected**: skipping baseline correction on the single-row drag branch, on the theory that it was re-correcting already-corrected data. It measured as the culprit (a nominal +45 deg drag landing at -35.7 deg, magnitude 1.043) but was not one: the 1.043 was bug 3's stale reference, and once that was fixed the drag applied exactly -45.0 at unit magnitude with the baseline call still in place. Reverted. The lesson is the ordinary one -- a measurement that fingers the wrong line still narrows the search, provided the fix is measured too.
+
+After all three: drag, Processing preview and rebuild agree exactly (0.0 deg apart), per-slice phase survives a slice round trip, and a rebuild reproduces it bit-for-bit.
+
+### One gradient value, per axis
+
+The maximum gradient was two separate `metadata.raw` keys (`imaging_max_gradient_g_per_cm`, `pfg_max_gradient_g_per_cm`), so calibrating in one tab left the other on a stale number. It is one physical property of the coil, so it is now one key, `max_gradient_g_per_cm`, mirrored into both boxes by `_on_max_gradient_changed`; the two old keys are read once as a fallback and cleared on the next write.
+
+The probe store is now `{probe: {"max_gradient_g_per_cm": {axis: value}}}`. Saving one axis leaves the others alone, and switching axis swaps in that axis's own value -- leaving z's 300 G/cm in force while the axis box says y is precisely the silent error worth preventing. A pre-per-axis config holds a bare number with no axis recorded; it answers for any axis rather than being discarded, migrated lazily on read so an older build reading the same file still finds what it wrote.
+
+The one place the two tabs still differ is what they show when *nothing* is set: 0 in the Imaging tab (which is what disables the mm axis) and the generic 50 G/cm in the PFG controls. What is never carried across is another experiment's value -- a max gradient silently inherited from the last spectrum scales every D with no sign of it in the fit. That changed one existing test, which had asserted the old carry-forward.
+
+### The DOSY map, restyled
+
+Filled contours, open frame, standalone-default fonts and a row of ticks floating above the map with no spine to belong to. Now: unfilled black lines, a full frame, the same power-law level spacing as `plot_2d_contour` (imported, not reimplemented), the canvas's own `_contour_style_kwargs`, and a projection strip with no ticks on either axis -- exactly what `plot_2d_contour` does with its own strips.
+
+`_AXIS_LINEWIDTH` is deliberately *not* forwarded as the contour line width: it styles axis furniture, and at its 1.75 default the rings merged into blobs.
+
+One thing not asked for but done: the D axis now fits the populated range, padded half a decade either side. The ILT grid spans several decades more than any sample occupies -- it has to, since where the populations lie is what is being solved for -- and plotting all of it squashed every peak into the corner of a blank panel. Scrolling the D axis still reaches the rest of the grid, and an empty map falls back to the whole thing rather than collapsing.
+
+### Not built
+
+- **Varian and JEOL are unchecked** for the same recorded-vs-user phase problem. Neither reader was read this round.
+- **The gradient axis is chosen, never read.** Nothing looks for a recorded axis in any vendor's parameters, so `z` is simply the default. X-Pulse's `exp_params` may well say.
+- **`_initial_load_kwargs` is still Bruker-only**, so an X-Pulse load still reads with defaults and then recomputes -- the reason its autophase base is found against different processing than the saved recipe asks for.
+- **Per-slice phase is F2-only** and has no equivalent for a genuine 2D's F1.
+- **The v1 sidecar migration is one-way and silent.** A user who had deliberately zeroed a recorded phase loses that, once, with no message.
+
+
+## The DOSY map behaves like a contour (2026-09-10)
+
+User: "Next update the DOSY plot so it works more like a contour: extractable slices, contour plot where the levels can be scaled up and down, independently scrollable axes for scaling".
+
+All three of those already existed for a 2D contour and none of them reached the DOSY, because every one is gated on `_contour_spectrum`/`_contour_factor` and `show_dosy` set neither. The DOSY now carries its own equivalents.
+
+**Deliberately its own state, not the contour's.** A DOSY is not an `NMRSpectrum` and its redraw goes through `plot_dosy`, not `plot_2d_contour`; putting it in `_contour_spectrum` would send every contour path down the wrong branch. `_dosy_result`/`_dosy_factor` mirror the pair instead, and are cleared in `_clear_figure` so "is this a DOSY?" stays a reliable question for the scroll and right-click handlers.
+
+* **Levels scale by scroll**, same gesture and same meaning as a contour: up raises the floor (fewer, stronger levels), down reveals weaker components. `plot_dosy` gained the `factor` that the 2D contour already had.
+* **Each axis scrolls independently.** The D axis is a *position* axis like a contour's F1, so it gets the same right-hand strip rather than the 1D pin-bottom intensity behaviour. **It also had to be zoomed in log space**: half a decade is not half the distance in data units, and the linear arithmetic the contour uses walks a log view toward zero until matplotlib refuses to draw it. Tested by scrolling six times and asserting the limits stay positive.
+* **Slices extract**, and there are genuinely two kinds, which is why the request carries which:
+  * a **row** at one D -- the spectrum of whatever diffuses at that rate. Its x axis is chemical shift, so it is an ordinary 1D spectrum and peak fitting, Compare and export all work on it.
+  * a **column** at one shift -- how that peak's intensity is spread over D, which is what the ILT actually computed. Carried on an **index** axis, not a frequency one: the values along it are diffusion coefficients, and calling them ppm would be a lie that every downstream ppm calculation would then act on.
+
+Extracting where the map is empty (a baseline column that was never inverted) says so rather than adding a row of zeros.
+
+### A modal turned into a status message
+
+The autophase "slices disagree" warning added earlier this session was a modal dialog, and it hung the suite: my own X-Pulse round-trip test autophases the real PFG data with apply-to-all, which now warns. That is the **third** modal-caused hang this session.
+
+It is now written to `processing_status_label` -- which sits directly beside the phase controls, i.e. what is being looked at when it fires -- plus the status bar. Non-blocking, at least as visible, and does not have to be dismissed before the result can be seen. Autophase is a one-keystroke action a user may repeat while trying settings; a dialog on each one is an obstruction rather than information.
+
+### Not built
+
+* **No DOSY level dialog.** A 2D has "Set Contour Levels…" for the count/spacing/power; the DOSY only has the scroll-adjustable floor and a "Reset Contour Levels" menu item.
+* **Extracted profiles are not fittable as diffusion curves.** A profile is already a distribution over D, so the existing curve fitting (which fits *against* b) does not apply to it; reading its mode/width off `distribution_moments` is what it is for.
+
+Tests: 7 in `tests/test_gui.py` (levels scale both ways; the two axes zoom independently without disturbing each other; the log y zoom stays positive; extracting a row gives a shift-axis spectrum carrying the right component; extracting a column gives an index-axis profile peaking at the right D; empty-region extraction says so; DOSY state cleared when another view replaces it).
+
+
+## x-axis scroll-zoom reached only the bottom panel (2026-09-10)
+
+User: "Also did you add the fid axis scrolling yet?" -- **not previously asked for in this session, and not built.** Checked before answering, and there was a real gap.
+
+`_on_scroll` decided "is the cursor on an x-tick strip?" with `self._hovering_x_axis(self.ax, event)`. `self.ax` is the **last** Axes a multi-panel view creates -- the spectrum panel of the Processing tab's dual preview, the bottom row of a stack. So a panel *above* it could never have its own strip hovered, and its x axis could not be scroll-zoomed at all, however precisely you aimed at its labels.
+
+The FID panel does have a real strip: the dual preview is a plain `subplots(2, 1)` and sets its own "Time (s)" x label. It was simply never consulted. Measured before the fix: scrolling the FID panel's strip changed y (falling through to the intensity zoom) and never x.
+
+Now every Axes' own strip is checked, with two constraints that matter:
+
+* **Only when the cursor is in a margin** (`inaxes is None`). Inside a data rectangle the intensity zoom owns the gesture, and one panel's strip region can overlap another's plot area in a tight layout.
+* **The nearest panel above the cursor wins.** A point below the bottom panel is also below every panel over it, so taking the first match zoomed the *top* panel whenever the bottom one's own strip was aimed at -- which is exactly what the first version did, caught by testing both panels rather than only the newly-fixed one.
+
+Tests: 4 in `tests/test_gui_canvas.py` (each panel zooms its own x and leaves the other alone, both directions; a body scroll still zooms intensity rather than x; a single-panel view unchanged).
+
+
+## Autophase on a series whose slices disagree; trapezoid b-values; PFG timings from file; the processing view holds (2026-09-10)
+
+User, one round: "Autophase on x-pulse pfg still not doing anything. Also please add trapezoidal gradient shapes (with ramp) to the b-value calc, and have that read (and save) the max gradient strength associated with that probe. And maybe have some place where I can pull the delta and Delta values from the acquisition file"; then "Also I'd like the view to be kept in the processing window between slices and during the periodic saves".
+
+### Autophase was doing something, and the something was wrong
+
+Not "nothing": it applied a phase and made the spectrum **worse**. The cause is in the data, not the code -- **the slices genuinely disagree about their own phase**. Measured per row on `test_data/xpulse_PFG/4`:
+
+| row | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| best phase | -177° | +134 | +94 | +74 | +57 | +46 | +43 | +40 | +38 | +38 |
+
+A smooth ~220° drift across the gradient series, not noise -- rows 1 and 2 are the *strongest* in the set. Optimising one shared phase against the **stacked block** then lands on a compromise (+111°) that suits the middle and ruins the ends: slice 1 went from a real-part fraction of 0.99 down to **0.73**.
+
+Two changes:
+
+* **Apply-to-all now targets the strongest row**, not the stacked block. Summing a score over rows that do not share a phase is not a meaningful objective. This makes the rule predictable and explainable -- "phase to the best slice" -- rather than a compromise that suits no row.
+* **The disagreement is detected and reported.** `_pseudo2d_phase_spread` measures the *circular* spread of the per-slice optimum (phase wraps: -179 and +179 are two degrees apart, not 358), over at most six rows above 25% of the peak, on a deliberately coarse 2° grid -- it only has to distinguish "a few degrees" from "tens". Above 20° the user is told no single phase can serve every slice, and pointed at "Autophase (each slice independently)".
+
+**That control already worked and was the answer all along**: on this dataset it takes every row to 0.99-1.00. The failure was silent, which is why it read as "not doing anything".
+
+Rows below 25% of the peak are excluded from the spread: a near-noise row's own best phase is arbitrary and would manufacture a disagreement that is not there.
+
+### Trapezoidal gradients
+
+`b = γ²G²[δ²(Δ − δ/3) + ξ³/30 − δξ²/6]` (Price, *Concepts Magn. Reson.* 1997). **The ramp correction is additive, not a scaling of δ**, so it could not be expressed as another entry in `GRADIENT_SHAPE_FACTORS` -- `b_value` now routes through `_timing_term`, which returns the timing part in s³ for either kind of shape. Verified: `ramp=0` is bit-identical to the ideal rectangle, and the closed form matches to 1e-12.
+
+The bipolar `−τ/2` composes into the same diffusion-time factor the `δ²` multiplies, which is where it belongs; the ramp terms are unaffected. The published expression is stated for a spin echo, so that composition is an extension and is documented as one.
+
+A ramp longer than δ is rejected -- δ is the flat top **plus one ramp**, so a longer ramp describes no real pulse.
+
+### δ, Δ and the ramp, read from the acquisition file
+
+X-Pulse records all three, with self-describing names, and they were already parsed into `metadata.raw["exp_params"]` -- nothing was reading them. `pfg_params_from_metadata` now does, in seconds, and a "Read δ/Δ from file" button fills the boxes.
+
+**The trap this closes**: the file's own comment says `delta` is `"Gradient Duration [μs] -- Stejskal-Tanner δ (plateau only, ramps separate)"`, while the trapezoid expression wants the plateau **plus one ramp**. Reading the number straight into a δ box would understate the weighting on exactly the sequences whose ramps matter enough to model. `effective_delta` does that arithmetic once, and the button reports what it did (`δ = 4.5 ms (plateau 4 + ramp 0.5)`). A recorded ramp time is also taken as the statement that the gradients *are* trapezoidal, so the shape is switched to match rather than the number being read and then ignored.
+
+Nothing is guessed: a value absent from the file is absent from the result, so a caller can tell "the file says 4 ms" from "the file does not say".
+
+### The probe's maximum gradient
+
+There was already a probe-keyed store (`~/.opennmr/probe_config.json`) that the Imaging tab wrote and read. The PFG b-value controls now use **the same store** -- it is one physical property of the probe, so setting it in either place sets it for both, and the Imaging button was rewritten to call the shared helper rather than keeping its own copy of the write.
+
+The PFG box prefills from the probe default **only** when this spectrum has no saved value of its own and the box is still at its own generic starting value: a probe default is a starting point, and silently replacing a number the user typed with it would be worse than not offering it.
+
+### The processing view holds
+
+Two paths reset it, and they needed different fixes:
+
+* **Slice changes.** `_on_slice_spin_changed` calls `_on_phase_target_changed` first, which re-anchors the phase controls and redraws the preview itself without preserving. A preserve flag on the *later* refresh alone would only re-capture limits that call had already reset -- so the capture/restore brackets **the whole handler**. (Found by the test failing with the flag threaded through and passing once bracketed.)
+* **The settled reprocess** -- the "periodic saves". Its non-pseudo-2D sibling already preserved, via `_refresh_processing_preview_phase_only`; the pseudo-2D branch did a full non-preserving rebuild. It now preserves, which is right because the *control change* that may have rescaled the axes already refreshed without preserving when it happened.
+
+`processing_preview_limits` is gated on the canvas actually showing a dual preview, not merely on it having two Axes: a contour with its two projection strips has three, and handing those back as "the preview's" would restore a contour's framing onto a later FID panel.
+
+### Two test-fixture lessons
+
+* An **all-zero** synthetic spectrum cannot be plotted, and `_draw_selected_spectrum` reports that through a modal dialog -- which *hangs* a headless test instead of failing it. Second time this session that a modal has cost real time; it is already recorded as a thing worth changing.
+* The dual FID+spectrum preview only exists for a spectrum reprocessable from its raw FID, which a synthetic in-memory 2D is not -- those tests use `test_data/bruker_T2/11`.
+
+### Not built
+
+* **Per-slice phase is still not durable** through a reprocess (long-standing). It matters more now that this dataset is known to need per-slice phasing.
+* **Nothing offers to run the per-slice autophase** when the disagreement is detected -- it names the control, but does not do it.
+* **The Oneshot unbalancing factor** is still unmodelled, and Bruker's `diff.xml` remains the only automatic b-value source for that vendor.
+
+Tests: 6 in `tests/test_gui.py` for the autophase disagreement (strongest-row targeting, the warning firing and naming the control, no warning when slices agree, circular spread, near-noise rows ignored, and the per-slice control actually fixing a drifting series), 10 in `tests/test_diffusion.py` (ramp=0 identical to the rectangle, the closed form to 1e-12, a ramp reducing b, bipolar composition, ramp validation, ramp ignored by the other shapes, forwarding through the relative-gradient and calibration paths, the real X-Pulse timings, `effective_delta` both ways, and no invention for a vendor that records none), and 10 in `tests/test_gui.py` for the PFG controls and the view preservation.
+
+
+## X-Pulse phase persistence: an autophase result is a recorded base, not a user phase (2026-09-10)
+
+User: "Check the phase persistence of the x-pulse data again. I don't think it was working on the PFG experiment. And for some other pseudo-2Ds I've needed to 'jump start' it by changing the phase and letting the plotted spectrum catch up, so ensure that phase is being factored in before the first plotting".
+
+**Both symptoms were one cause**, and the fix is a two-line change in what key the reader writes to.
+
+### What was happening
+
+This project already separates two phases, and Bruker gets it right: the file's own recorded `PHC0`/`PHC1` live in `recorded_phase0/1`, the user's correction lives in `phase0/1`, and every rebuild-from-raw reapplies recorded-then-user (`io.bruker.apply_dimension_phase`).
+
+**X-Pulse files record no phase at all.** Their base is whatever `apc0` finds at read time -- and `read_1d` stored that computed value in the **user** slot. So on load:
+
+1. the reader autophased and wrote its result into `raw["phase0"]`;
+2. the saved sidecar was merged over `metadata.raw`, **overwriting it** with the user's own saved `phase0`;
+3. `_recompute_multi_row_data` rebuilt from the raw (unphased) FID and applied `recorded_phase(0,0) + user(38.33)` -- the user's correction with no base under it.
+
+Measured on `test_data/xpulse_PFG/4` (real-part peak as a fraction of the magnitude peak; 1.0 is perfectly phased):
+
+| | fraction |
+|---|---|
+| reader's own autophase (-177.2°) | **0.992** |
+| the sidecar's user phase alone (+38.33°) | **0.118** |
+| recorded + user | **0.92** |
+
+0.118 is the signal essentially all still on the imaginary channel -- which is exactly "the phase persistence isn't working", and exactly why touching a phase control appeared to "jump start" it: that finally applied enough correction by hand to look right.
+
+### The fix
+
+`_phase_metadata(phase0, phase1, autophased)` in `io/xpulse.py` routes a **computed** phase to the recorded slot and a **caller-supplied** one to the user slot -- the latter already *is* the user's, and recording it as a base too would double-count it on the next rebuild. Keyed through `io.bruker.RECORDED_PHASE_KEYS`/`USER_PHASE_KEYS` rather than literal strings, so the two vendors cannot drift apart about which key means what.
+
+Applied to `read_1d` (and so to `read_array`, which forwards to it per step) and to the NTUPLES `read_2d`.
+
+### Result
+
+Loading the PFG dataset with **no user interaction at all**: 0.118 -> **0.806**, and the base is now where a rebuild will find it. The residual gap from 0.992 is because the base is re-derived under the saved processing state rather than the state it was originally measured in -- and it closes entirely on the next save, because `recorded_phase0/1` are ordinary `metadata.raw` keys and the sidecar persists everything not blocklisted. Verified: save, reopen, and the phase comes back to within 3e-5.
+
+Not bit-exact, and the test says so rather than claiming otherwise: the in-session spectrum was phased by applying a delta to already-phased data, while a reload rebuilds from the raw FID and applies recorded-plus-user in one step. Different arithmetic, same answer to ~3e-5 -- orders of magnitude below anything visible.
+
+### "Before the first plotting"
+
+Already correct, and now verified rather than assumed. `_load` sets `defer_draw = bool(saved_processing) and self._fid_reprocessable(spectrum)`, so when a saved recipe is about to change `spectrum.data` the initial draw is skipped and `_apply_loaded_processing_sidecar` does the only draw, after the recompute. A test now spies on every `_draw_selected_spectrum` call during a load and asserts **every** one saw phased data -- there is no intermediate unphased render to catch up from. It passed only because of the fix above; before it, the single deferred draw was itself drawing unphased data.
+
+### Not built
+
+* **The base is re-derived, not pinned, for sidecars written before this change.** They have no `recorded_phase0`, so the first load after upgrading re-runs autophase under the saved processing state (0.806 rather than 0.992). One save pins it. No migration was written -- the re-derived value is a reasonable base and the user's own correction still applies on top.
+* **`_initial_load_kwargs` is still Bruker-only**, so X-Pulse reads with vendor defaults and then recomputes, doing the work twice. That is a speed matter rather than a correctness one now, but it is why the re-derived base is measured under a different processing state than the read that produced it.
+* **Varian and JEOL have the same shape of problem** if they autophase at read time -- not checked, and not fixed here.
+
+Tests: 3 in `tests/test_xpulse.py` (an autophase result lands in the recorded slot and leaves the user slot at zero; a supplied phase does the reverse; both go through the shared key accessors) and 3 in `tests/test_gui.py` (the PFG dataset is phased on load with no interaction, a save/reload round trip preserves the phase, and every draw during a load sees phased data).
+
+
+## SCORE on-plot annotations, an Analysis-tab entry, true relative heights, and units on a stack (2026-09-10)
+
+User, one round: "I want the SCORE annotations on the plot as an option with the fitted values and ratios/percentages. Also the whole SCORE thing should be accessible from the analysis tab, rather than just the menu, and it would be good to see the relative scales of each in the compare plot rather than just normalised directly (if this isn't too complicated)"; then "Oh and I should be able to switch the axis to mm or kHz if I want".
+
+### Relative heights: the stack was hiding them, and not by normalising
+
+Worth stating precisely, because the diagnosis was not what the symptom suggested. `show_compare` already defaulted to `normalize=False`, so the *data* was never rescaled. The stack draws **one subplot per spectrum**, and each subplot autoscales to its own data -- so a component carrying 10% of the signal fills its own row exactly like one carrying 100%. Turning normalisation off would have changed nothing.
+
+`show_compare(..., shared_scale=True)` gives every row one common y-range instead. Measured on a deliberately 10:1 pair: default, the two rows' y-ranges differ by more than 5x (each filling itself); shared, they are equal and the small one is drawn small.
+
+**Off by default for an ordinary Compare stack, on by default for SCORE components.** A Compare stack of separately-acquired spectra has no shared intensity scale to be meaningful *on* -- different receiver gain, different sample -- and forcing one there would bury every trace but the strongest. Resolved components share a scale by construction, having come from one dataset. It is a checkbox either way.
+
+A no-op when `normalize` is on: that has already put every trace at the same peak, so there are no relative heights left to show, and applying a shared range on top would just be ambiguous about which setting is in force.
+
+### On-plot annotations
+
+`show_compare(..., row_labels=[...])` writes each row's label onto the row, in the row's own colour, pinned to the axes rather than the data so it survives pan/zoom. For SCORE each label carries the fitted constant, the share, **and** the ratio to the largest component:
+
+```
+1: 9.93e-10 m^2/s  ·  26.1%  ·  0.35× the largest
+2: 1.05e-09 m^2/s  ·  73.9%  ·  1.00× the largest
+```
+
+All three deliberately. The constant says what the component is; the share says how much of it there is, and is the number that stops a 2%-of-the-sample artefact being read as a real second species; the ratio is how a minor species is actually described out loud ("about a third of the main one"), arithmetic the percentage alone leaves to the reader.
+
+The label box is **opaque**. Translucent was tried first and a peak spike went straight through the text -- with a shared scale the tallest row's peaks reach the top of their axes, and there is no corner of a spectrum reliably empty enough to place a label into instead.
+
+The component list beside the plot still exists; the annotations exist because that list stops identifying anything the moment the figure is exported.
+
+### Reachable from the Analysis tab
+
+A "Resolve Components (SCORE/OUTSCORE)…" button in the Curve Fitting sub-tab, next to the Values-source controls it depends on. Same handler as the menu action, which stays.
+
+### Axis units on a stack
+
+The Axis Units menu was gated on `_current_1d_spectrum or _contour_spectrum`, and a Compare/component stack sets neither -- so the menu simply never appeared there. Worse, `set_axis_unit`'s 1D path rewrites `self.ax.lines`, and for a stack `self.ax` is **only the last row**: had the menu been shown, it would have converted one row and left the rest silently in the old unit.
+
+`_set_axis_unit_for_stack` converts every row, each from **its own** spectrum's axis rather than a shared one -- a Compare stack can hold different nuclei or point counts, and reusing one row's axis for all of them would mislabel the rest. A row that cannot express the requested unit (an index axis, or mm with no gradient) is skipped rather than vetoing the switch for the others.
+
+The crosshair is torn down on the switch for the same reason the 1D path does it: its lines live on those Axes and would otherwise be rewritten by the conversion loop.
+
+**mm needed one more fix.** `set_imaging_gradient_params` was only ever called on the Spectrum canvas, so the Fit canvas's units menu offered a permanently greyed-out "mm (Imaging)" with nothing the user could do about it from there. Now pushed to every canvas that can show a frequency axis.
+
+### A process note
+
+The clear-`_compare_spectra`-everywhere edit was first done as a blanket string replacement across all eight sites `_compare_axes` is reset, which broke indentation and left the module unimportable. Reverted and redone at `_clear_figure` -- the single choke point every rebuild path already goes through, the same place the crosshair and measurement artists are cleared. One site instead of eight, and it cannot be missed by a future rebuild path.
+
+### Not built
+
+* **Labels are not repositioned to avoid data.** They sit top-right of their row and win over whatever is beneath. Collision-aware placement would need to know where the peaks are, which varies per row and per zoom.
+* **Shared scale is all-or-nothing.** A stack with one component three orders of magnitude below the rest makes the weak one invisible; a log or per-row-capped option would help and is not written.
+
+Tests: 10 in `tests/test_gui_canvas.py` (default autoscaling hides relative heights, shared scale shows them, the normalise no-op, labels drawn on their own rows and absent without them, unit switching converting **every** row, the round trip, mm gated on a gradient, and the stored spectra not outliving their figure) and 7 in `tests/test_gui.py` (annotations present with value and share, the ratio, the off switch, relative heights on by default and off on demand, running from the Analysis-tab button, the toggles hidden until there is a result, and unit switching on the resolved components).
+
+
+## Truncate un-gated from X-Pulse; the echo position is adjustable (2026-09-09)
+
+User: "'Truncate to:' in the pseudo-2D is generally greyed out. It would also be nice to be able to tweak the align echo position".
+
+### Truncate was X-Pulse-only, and needn't have been
+
+`_refresh_fid_processing_controls` did `self.tdeff_spin.setEnabled(reprocessable and is_xpulse)`, so the control was greyed out for **every Bruker dataset** -- which is most of them, and all of the pseudo-2Ds in this repo's own test data.
+
+The capability was already there. `processing.ft.prepare_fid` has always taken `truncate` and applied it in the right place in the shift -> echo-align -> truncate -> linear-predict order. The Bruker readers simply never exposed the parameter: `read_1d` had none at all, and `read_2d` had only `truncate_f1` plus an *internal* `truncate_cap` computed for echo alignment. So the GUI gate was accurate about what the readers did, and wrong about what they could do.
+
+`read_1d`/`read_2d` now take `truncate` and pass it through, and the control is enabled for any raw-FID-reprocessable spectrum. Verified on real data: `bruker_T2/11` loads with the control enabled, maximum 4096, prefilled at the true per-FID point count.
+
+Two details that came with it:
+
+* **The maximum falls back to the plotted point count** when there is no cached raw FID (a Bruker 1D load caches one only on the 2D path), rather than to an arbitrary 2^20 ceiling the user would have to count down from.
+* **A user truncate and the echo wrap cap now compose** in `read_2d`. Previously `truncate_cap` was either the wrap limit or nothing; now it is the tighter of the two, because a row truncated past its own wrap point keeps exactly the mirror-image tail that cap exists to remove.
+
+The control correctly stays disabled for a processed-only load, which has no raw FID to truncate -- that is the case the X-Pulse gate was standing in for, now tested directly.
+
+### The echo position is adjustable
+
+`find_echo_top` takes the largest-magnitude sample and parabolically interpolates around it. That is right for a clean symmetric echo and can be a point or two out for a noisy or asymmetric one -- and **being out by one point puts a first-order phase ramp across the whole spectrum**, because the echo top is what defines t=0. There was no way to correct it; the only recourse was Phase 1, which fixes the symptom.
+
+`find_echo_top(fid, offset=...)`, `align_echo(..., echo_offset=...)` and `prepare_fid(..., echo_offset=...)` now take a nudge in points, fractional allowed (the roll interpolates, so the correction need not land on a sample boundary), clamped to the array so a large offset cannot index outside the data. Exposed in the GUI as an "Echo position" spin box that appears only while Align Echo is on, and persists per spectrum like every other processing control.
+
+**One detection, reused.** `prepare_fid` computes the top once with the offset applied and uses that same value for both the roll *and* the wrap limit that caps `truncate`. Computing them separately would leave the cap describing where the pre-echo portion *would* have wrapped without the offset, silently reinstating the mirror-image tail -- tested directly (`prepare_fid` with a +10 offset returns a 10-point-shorter FID, not the same length).
+
+The FID plot's green echo-top marker is drawn from the offset value too, in both preview paths, so the correction is visible as it is dialled in rather than only in the result.
+
+Both settings map onto real reader parameters (`truncate`, `echo_offset`) via `_SAVED_TO_READER_KEYS`, so a reopened spectrum is *read* already in that state instead of read with defaults and recomputed row by row.
+
+### Not built
+
+* **The echo offset is one value for a whole pseudo-2D**, applied to every row. Rows whose echoes genuinely sit at different places would need a per-row offset, which nothing here provides.
+* **Nothing suggests an offset.** Detecting that a fitted first-order phase is really a mis-set echo top -- and converting it to points -- is derivable and would make the control self-correcting, but is not written.
+
+Tests: 3 rewritten and 2 added in `tests/test_gui.py` for the truncate un-gating (a stale test asserted the greyed-out behaviour as correct; the real-data pseudo-2D case is now parameterised over `bruker_T2/11` and `bruker_PFG/150`, since a synthetic in-memory 2D is legitimately not reprocessable and cannot exercise it), 4 in `tests/test_gui.py` for the echo control (visibility follows Align Echo, the marker moves, it round-trips through reselection, and it reaches the reader kwargs), and 7 in `tests/test_ft.py` (offset shifts the reported top, accepts fractions, is clamped both ways, moves where the peak lands, **the roll and the wrap cap use the same top**, truncate still composes, and zero is a no-op).
+
+
+## Too-light colours removed from every colormap (2026-09-09)
+
+User: "I want every colour that's way too light removed from the colour maps if possible".
+
+### The threshold is derived, not picked
+
+WCAG 1.4.11 sets **3:1** as the minimum contrast for a graphical object, and contrast against white is `1.05 / (L + 0.05)`, so 3:1 means **relative luminance <= 0.30**. That is `MAX_LINE_LUMINANCE`.
+
+The colours this removes are not marginal. Measured across every colormap this package offers, the *lightest* entry of each sits at:
+
+| | lightest colour, contrast vs white |
+|---|---|
+| Greys, Spectral, RdYlBu, YlGn, YlOrRd, Blues, GnBu | **1.0-1.04 : 1** |
+| inferno, magma | 1.05 : 1 |
+| plasma, cividis, viridis | 1.15-1.26 : 1 |
+| coolwarm | 1.36 : 1 |
+| tab10 (qualitative) | 2.01 : 1 |
+
+At 1.0:1 the colour *is* the background. On paper or a projector those traces simply are not there.
+
+### Luminance, not a channel average
+
+`relative_luminance` linearises the sRGB channels before weighting them 0.2126/0.7152/0.0722. That is what makes it perceptual rather than arithmetic, and it matters here specifically: pure yellow and pure blue have the **same mean channel value** and luminances of 0.93 and 0.07. A naive channel average would keep yellow and discard blue -- exactly backwards, and yellow is precisely the colour causing the problem in viridis/plasma/YlGn.
+
+### Position-based, not range-based
+
+`usable_cmap_positions` returns the *positions* along a map whose colour clears the cap, rather than trimming a fixed fraction off one end. Where the too-light part sits depends entirely on the map:
+
+* the **top** of `viridis` (yellow),
+* the **bottom** of `Greys` (white),
+* the **middle** of every diverging map (`coolwarm`, `RdYlBu`, `Spectral`).
+
+A "trim the last 20%" rule would have fixed one of those three and silently done nothing for the other two. All three are now tested explicitly.
+
+### What changed where
+
+* **`stack_colors`** (Compare rows, slice stacks, SCORE components, `plot_1d_stack`) samples evenly *within the usable part* of the map rather than across the whole of it. The spacing is no longer even in the map as a whole -- which is the point: the discarded stretch was contributing invisible traces, not distinguishable ones.
+* **`get_contour_cmap`** returns the map rebuilt from only its usable colours, as a drop-in of the same length, so `levels`/`norm` handling is untouched. For a diverging map this removes the pale middle and the two dark halves meet. Deliberate, and documented: contour levels are never drawn at zero anyway (they start above the noise threshold), and the two sides stay distinguishable by hue.
+* **`qualitative_colors`** is new, and both `tab10` call sites now use it -- the peak-component shading in the GUI canvas and `plot_score_components`. Two of tab10's own ten entries (the olive and the cyan) only reach 2.0:1 unaided.
+* **`readable_cmap`** is the reusable core, so `plot_1d_heatmap`'s fallback for a colormap name outside `CONTOUR_CMAP_NAMES` is filtered too. The point is that no colour this package draws with is invisible, not that only the listed ones are.
+* **A single trace** now gets the *darkest* usable colour rather than the map's own start -- for a light-ended map like `Greys` that was previously the worst available choice, and one trace has nothing to be distinguished from anyway.
+
+Nothing is ever returned unusable: a map with nothing dark enough anywhere in it (an all-white one) has its darkest colour scaled toward black by `_darkened`. Scaling RGB uniformly rather than clipping channels preserves hue -- a clipped colour no longer identifies the same trace it did before.
+
+### The legacy notebook API
+
+`opennmr.notebook` is publicly exported and carried its **own duplicated copies** of `get_stack_colormap`/`get_contour_cmap`, so it would have kept drawing with the near-white ends. It now delegates to `plotting.style.readable_cmap` rather than repeating the rule -- two copies of a rule like this drift.
+
+### Escape hatches
+
+Set `MAX_LINE_LUMINANCE = 1.0` to disable filtering globally; every function also takes a `max_luminance` argument for a one-off override. Both are tested.
+
+### Not built
+
+* **Only white backgrounds are considered.** The cap is derived against white specifically. A dark-mode canvas would want the mirror rule (a *minimum* luminance), and nothing here is parameterised on background colour.
+* **Hue collision is not checked.** Removing the light end of a map compresses the remaining hues, so two adjacent traces in a long stack are closer in colour than they were. Distinctness is tested (no two identical) but not perceptual separation.
+* **The diverging-map seam is abrupt.** Dropping the pale middle leaves a visible join in the colorbar. Fine for contour lines; would look odd on a filled image.
+
+Tests: 22 in `tests/test_plotting_style.py` -- the luminance function against known colours; the threshold matching its own derivation; **every one of the 35 contour colormaps clearing 3:1** (parameterised), plus a companion test that those maps really were too light before, so the first cannot become vacuous; the dark end staying put; filtering being disableable; stack colours dark enough and still distinct across five maps and four counts; the single-trace case; black untouched; the all-white fallback; light-at-top/bottom/middle detection; qualitative colours; and the legacy notebook delegation.
+
+
+## SCORE output as a Compare-style selectable stack; peak ppm in every fit label (2026-09-09)
+
+User: "For the SCORE/OUTSCORE output - this should look like the compare tab where we have multiple selectable spectra. Also the regular fitting canvases should note the peak ppm in the output".
+
+### The resolved components are now a Compare stack
+
+Not an imitation of one -- the *same* `MplCanvas.show_compare` the Compare tab uses, fed `NMRSpectrum` objects built from the resolved components. So the stacked per-component axes, each row's own independent y-zoom, and the click-to-select row highlight all behave identically for free, rather than being reproduced and then drifting.
+
+A new checkable list in the Curve Fitting panel drives it: one row per component labelled with its own decay constant and share, plus a "Measured (lowest gradient level)" row. Unchecking a row drops it from the plot; clicking one highlights it there via the existing `set_compare_selection`.
+
+Two details worth stating:
+
+* **The measured spectrum starts unchecked.** It is there for comparing what went in against what came out, and having it on by default would put the thing being explained beside the explanation on every run.
+* **The highlight is indexed among the *checked* rows, not among every listed one.** The plot only holds what is checked, so selecting an unchecked component correctly highlights nothing rather than tinting the wrong trace.
+
+The old fixed stacked drawing (`MplCanvas.show_score_components`) is **removed**, not left beside the new path -- 22 lines that nothing called any more. `plotting.plot_score_components` stays: it is the standalone/notebook figure function and is still exported and tested.
+
+### Peak ppm in every fit label
+
+`NMR2D_fit_relaxation` labelled peaks `"Peak 1"`, `"Peak 2"`, ... A curve fit reports one number per peak, and without its position there is nothing tying that number back to the spectrum it came from -- worst in exactly the case labels matter, a fit over several peaks whose order in the table is not obvious from the plot. (The *spectral* fit view already did this; the curve fit did not, so the two views disagreed about what to call the same peak.)
+
+Now `"Peak 1 (5.023 ppm)"`, taken from the **first slice's own fitted shift** rather than from the starting guess in `peak_defs` -- the guess is what the user typed, the fitted value is where the peak actually is, and under the default across-slices mode every slice shares one shift anyway. An integrated series gets `"Region 1 (4.5-5.5 ppm)"` instead, because it *is* a region and its bounds are what identify it; a caller-supplied `region_labels` still wins over both.
+
+Done in `processing/relaxation.py` rather than in the GUI, so the library, the Fit tab, the report and the CSV export all get it from one place. Falls back to the bare number whenever the position cannot be recovered -- a label is never worth raising for.
+
+Four existing tests asserted the bare `"Peak 1"`; three now ask the result for its own label rather than hard-coding one, and the integration test asserts the region form.
+
+### The derived-label truncation, again
+
+`MplCanvas._spectrum_label` had the same `os.path.basename()` bug on derived labels that `Session.label` did (fixed last round) -- so a component labelled with `m^2/s` would have displayed as `s)` on the canvas too. Both read the same field the same way; both now special-case a derived spectrum's `source_path` as the label it is.
+
+### Not built
+
+* **Components still are not re-imported** -- a kept component has no sidecar, so it does not survive a session reload.
+* **The component list does not persist** across a reselection: re-running the resolution rebuilds it. The result itself is on `metadata.raw["score_result"]`, so restoring the list on reselection is a small follow-up rather than a missing capability.
+
+Tests: 4 new/rewritten in `tests/test_gui.py` (the Compare-style stacked axes; the list's contents and default check states; unchecking dropping a trace, including the single-trace case where `show_compare` correctly uses one axes rather than a stack of one; and the highlight being indexed among checked rows) and 1 in `tests/test_plotting_fit.py` asserting peak labels carry their shift.
+
+
+## OUTSCORE, component export, and what these methods need to work (2026-09-09)
+
+User: "I was mistaken and meant OUTSCORE, can this be added? Please build the export too. Make sure it is clear what is needed for getting good data from those methods, either in the gui and/or in the readme."
+
+(HiSCORE, from the previous round, was the mistake -- it does not exist. OUTSCORE does: Colbourne, Meier, Morris & Nilsson, *Chem. Commun.* 2013, 49, 10510, "Unmixing the NMR spectra of similar species -- vive la difference".)
+
+### OUTSCORE
+
+Same bilinear model and the same inner loop as SCORE. The difference is entirely in the **outer objective**: SCORE minimises the residual `||X - C S^T||²`, OUTSCORE minimises the **cross-talk** between the resolved spectra -- the pairwise overlap, i.e. how much of one component has leaked into another. Not "does this fit?" but "are these actually separate species?".
+
+Why that is worth having: separating overlapped spectra by residual needs the diffusion coefficients to differ by ~30%. Below that the residual surface has a large flat region around its minimum and the optimiser has nothing to steer by. The cross-talk surface is much sharper over the same data. Reproduced directly on synthetic mixtures with **distinct peaks and near-equal D**:
+
+| D ratio | SCORE err / spectral corr | OUTSCORE err / corr |
+|---|---|---|
+| 1.30 | 0.5% / 0.9991 | 0.1% / 0.9993 |
+| 1.10 | 1.4% / 0.9876 | 0.2% / 0.9973 |
+| 1.05 | 3.1% / 0.8924 | 0.3% / 0.9911 |
+| 1.03 | 5.8% / **0.7635** | 0.3% / **0.9810** |
+
+That is the claimed near-order-of-magnitude improvement (30% -> ~3%), measured rather than assumed.
+
+**Three implementation decisions, each forced by something measured:**
+
+* **Nelder-Mead, not `least_squares`.** The objective is a single scalar rather than a residual vector, and the absolute values in it make it non-smooth. With only *k* parameters a simplex is cheap, and the sharp minimum is exactly what a simplex is good at descending into.
+* **The cross-talk is normalised** (cosine similarity), not the bare dot product the method is usually stated with. The bare product is degenerate at the edges of the search: a component whose decay constant runs off to where it contributes nothing has a near-zero spectrum and therefore near-zero overlap with everything -- a perfect score for having resolved nothing. The normalised form is scale-invariant, and a collapsed component returns the *worst* value rather than `0/0`.
+* **OUTSCORE is seeded from a SCORE run, and this is required, not an optimisation.** The sharp minimum that gives it its resolving power is what makes it unfindable cold: from the automatic decade-spaced guesses it converged to **69-100% errors** on cases SCORE got to within 5%. SCORE's flat surface is good at finding the right basin; OUTSCORE's sharp one is good at finding the bottom of it. The seed run is kept on the result so the pair can be compared without running SCORE twice.
+
+### The most important finding: R² cannot tell you whether the answer is right
+
+Measured on the shared-resonance case: an OUTSCORE run whose diffusion coefficients were **69% wrong** reported **R² = 0.99940**, against **0.99937** for the SCORE run that got them right. The residual is *better* for the wrong answer. The error surface really is that flat -- wildly different answers reproduce the data equally well -- so a user reading fit quality alone would conclude a badly wrong answer was excellent.
+
+An R²-based warning was tried first and is useless for exactly this reason. Two diagnostics that *do* work were built instead, and are raised in a dialog rather than only written to the report:
+
+1. **Cross-talk still high after minimising it.** Successful separations left 0.01-0.11; a pair genuinely sharing their strongest resonance never got below 0.37. High residual cross-talk means the components share resonances -- the case OUTSCORE's assumption does not cover, where minimising overlap pulls *away* from the truth. The warning names SCORE as the right choice for that sample.
+2. **OUTSCORE and its SCORE seed disagreeing while fitting equally well.** That means the data does not determine the answer to that precision, whichever method is right.
+
+The report now also states which objective the run actually optimised, and that the other number is "for comparison, not as independent corroboration" -- a low cross-talk from OUTSCORE is what it was *told* to achieve.
+
+### Export
+
+* **"Keep components as spectra"** adds each resolved component to the session as a real 1D `NMRSpectrum` on the parent's own axis, labelled with its decay constant and carrying its provenance in `metadata.raw`. A resolved component *is* a spectrum; this makes peak fitting, integration, Compare and every existing export work on it through their existing paths instead of it being a picture. Real rather than complex, deliberately: there is no imaginary part to a fitted component, so the phase controls correctly stay unavailable -- the phase was fixed before the resolution ran.
+* **"Export components (CSV)"** writes a header block (method, literature reference, each component's constant/share/R²/cross-talk, and any warnings) followed by one shift column and one column per component. The constants travel *with* the spectra because a bare table of columns is not a result -- separating them is how a resolved component ends up mislabelled later.
+
+**A latent bug found doing this.** `Session.add_derived` stores its label in `metadata.source_path`, and `Session.label` ran `os.path.basename()` on it -- so any derived label containing a `/` was silently truncated at it. A component labelled `"... (2.50e-10 m^2/s)"` displayed as `"s)"`. Fixed generally rather than by avoiding the slash: a derived spectrum's `source_path` is a label, not a path, and any derived label with a slash in it (a ratio from spectrum arithmetic, a unit) had the same problem.
+
+### What good data needs, said where it is needed
+
+The methods here fail *quietly* -- that is the whole point of the R² finding above -- so the requirements are stated in three places rather than assumed:
+
+* **The SCORE/OUTSCORE dialog** carries a "What this needs to work" block: 8-10 gradient levels minimum and 15+ preferred; attenuate the fastest component to ~10%; phase and baseline-correct first (non-negativity is the most stabilising constraint available and means nothing on a dispersive spectrum); consistent referencing and no peak drift, since a bilinear model says each component has one *fixed* spectrum; good S/N on every level including the last.
+* **The method combo's tooltip** says when each objective is the right choice, and names the case OUTSCORE's assumption does not cover.
+* **A new README section**, "Getting good data for diffusion and relaxation analysis", with a per-method requirements table, acquisition advice (space the levels evenly in *b*, not in gradient amplitude), the processing prerequisites, and a "choosing a method" decision list. It leads with the R² finding, because it is the thing most likely to mislead.
+
+The README also repeats the two numbers that turn a plausible-looking result into a wrong one: a gradient shape factor treated as rectangular when it is `SMSQ10` overestimates *b* by 23%, and a maximum gradient 10% wrong makes every D 21% wrong.
+
+### Not built
+
+* **`OUTSCORE`'s published objective is the un-normalised dot product**; this ships the normalised form for the degeneracy reason above. They agree on where the minimum is for well-scaled data, but this is a deliberate deviation and is documented as one.
+* **No automatic method choice.** Deciding between SCORE and OUTSCORE from the data (rather than from the user's knowledge of the sample) would need a reliable test for "do these species share resonances", which is the thing being resolved in the first place.
+* **Components are exported but not re-imported** -- a kept component has no sidecar of its own, so it does not survive a session reload.
+
+Tests: 22 new in `tests/test_score.py` (cross-talk zero for disjoint spectra and 1.0 for identical ones; scale-invariance and the vanished-component case; OUTSCORE beating SCORE at a 1.03x ratio; recovery at 1.10/1.05/1.03; lower achieved cross-talk; the self-seeding and its bypass; both numbers reported by both methods; the two-component minimum; the share-resonances warning; a clean run raising none; **the measurement that R² cannot distinguish a wrong answer**; and four export cases) and 10 in `tests/test_gui.py`.
+
+
+## SCORE: real multivariate component resolution (2026-09-09)
+
+User: "What about multivariate processing for curve fits?" -- and, when asked which sense was meant, "I mean the kind used in the score and HISCORE methods like: https://pubs.acs.org/ancham/article-abstract/80/10/3777/..." (Nilsson & Morris, *Anal. Chem.* 2008, 80, 3777-3782).
+
+**I had read "multivariate" too narrowly.** Last round I built shared-parameter global fitting (`fit_relaxation_global`) and said in this file that I was *interpreting* the one-line backlog entry that way. That interpretation was wrong. Global fitting still measures one number per peak per spectrum and then ties parameters across peaks; SCORE never extracts a per-peak intensity at all.
+
+### What SCORE actually is
+
+The data matrix is modelled bilinearly, `X = C S^T + E`, with `X` `(m gradient levels x n spectral points)`, `C` `(m x k)` the decays (column *j* is `exp(-b_i D_j)`), and `S` `(n x k)` the pure spectrum of each component.
+
+The key -- and the whole reason it beats CORE, which is otherwise the same model -- is that **`C` is entirely determined by the k decay constants**, so for any trial set of them the optimal `S` follows from a *linear* least-squares solve. The nonlinear search runs over only the *k* decay constants, however many thousands of spectral points there are. That is separable nonlinear least squares (variable projection); CORE optimised the spectra nonlinearly too, which is why it was slow and guess-sensitive.
+
+`processing/score.py` implements it: variable projection, non-negativity on the spectra (via NNLS, as the method specifies), and the decay constants searched in **log10 space** for the same measured reason every other diffusion coefficient in this package is.
+
+### Verified against synthetic ground truth, on the case that matters
+
+Two species deliberately sharing a peak at 5.0 ppm -- which no per-peak fit can separate, because the intensity measured there is the sum of two decays:
+
+| | recovered | true |
+|---|---|---|
+| slow component | 2.50e-10 | 2.5e-10 |
+| fast component | 1.80e-09 | 1.8e-09 |
+
+R² 0.99936, in **8 function evaluations**. The resolved spectra correlate 1.0000 and 0.9999 with the true pure spectra. The decisive check, and now a test: component 1 has height **0.000** at 2.0 ppm (the fast species' exclusive peak) and **1.000** at 6.5 ppm (the slow species' exclusive peak), with the shared 5.0 ppm peak split between them at 0.81/0.80. Three components resolve too.
+
+### Choosing k, which the method does not do for you
+
+The paper gives no method. `estimate_components` offers an SVD *suggestion* -- a rank-*k* mixture spans a rank-*k* subspace -- and is labelled as a suggestion everywhere it appears, including in the dialog.
+
+**A fixed fraction of the largest singular value was tried first and is not good enough.** It depends on how much total signal happens to be present: a single-component series was reported as **8 components** by a 1%-of-largest rule. Replaced by a noise-floor rule -- the median of the lower half of the singular values is, for any realistic rank, entirely noise -- which reports 1 correctly and is invariant to scaling the whole matrix by 50x (both now tested).
+
+### The threshold is not only a speed setting
+
+Spectral points below a fraction of the maximum are excluded from the *fit*. A noise-only point carries no information about any component's decay but does add its noise to the residual being minimised, and with 16k points and a handful of real peaks that can dominate the objective. The component spectra are still reconstructed over **every** point afterwards -- a spectrum with holes punched in it wherever signal was weak would be useless to look at.
+
+### Honesty constraints, as with the ILT
+
+The report and the dialog both state that **k was an input, not a result**: a good R² says that many components fit, never that it is the right number. Ask for too many and SCORE will split one species into two near-identical spectra with near-identical D. The module docstring also states what breaks the bilinear model (a polydisperse component, or one whose lineshape changes across the series) and that the fit will not warn you -- it will distribute the misfit over the components you asked for.
+
+The GUI action refuses to run when the Values source has fallen back to slice indices, for the same reason the DOSY action does.
+
+### HiSCORE
+
+**Not built, and not confirmed.** The user named it alongside SCORE, but it does not appear in the literature searches I could reach (SCORE, CORE, OUTSCORE, DECRA and RECORD all do). Rather than guess at a method's details and ship something half-understood under its name, this is recorded as an open question -- the specifics are worth getting from the user or the paper directly.
+
+`OUTSCORE` is also not built: the source describes it as maximising spectral difference through dot-product minimisation rather than minimising residual, which is a plausible one-line change to the objective here, but not one I could pin down precisely enough to ship.
+
+### Where it sits
+
+**Analysis ▸ Resolve Components (SCORE)…**, with a settings dialog (component count prefilled from the SVD suggestion, fit threshold, non-negativity and a slower strictly-constrained mode). Results draw into the Fit canvas as a stack of component spectra with the measured spectrum above them, each labelled with its decay constant and share. `plotting.plot_score_components` draws it; the labels carry an opaque backing box because the first real plot put one straight on top of a peak.
+
+### Not built
+
+* **HiSCORE and OUTSCORE** -- see above.
+* **SCORE results are not exported** -- the component spectra live on `metadata.raw["score_result"]` but nothing writes them to file, and they are the obvious thing to want out (each resolved component is a 1D spectrum in its own right, and arguably should be addable to the session).
+* **No automatic k selection** -- deliberately, but a fit-quality-versus-k sweep would make the comparison the report recommends much easier to actually do.
+
+Tests: 26 in `tests/test_score.py` (rank suggestion including the scaling invariance that broke the first rule; both diffusion coefficients; **spectra of overlapping species separated**; correlation against the true pure spectra; stable slowest-first ordering; insensitivity to the starting guess across three decades, which is the method's headline claim; the evaluation count; fractions; non-negativity; strict-versus-final constraint agreement; three components; the relaxation kernel reporting a time constant; full-grid reconstruction under thresholding; six validation cases; and a test documenting that a component decaying only 8% across the sampled range is recovered only to a factor, which is a property of the experiment and not of the algorithm) and 6 in `tests/test_gui.py`.
+
+
+## Slice-anchored series fitting, per-peak guesses, and a stale phase reference (2026-09-09)
+
+User, one round: "Fits probably by peak need to have some way to choose parameters for each. It isn't clear if the fitted spectra are being used in the curve fits. Fitting spectra should be its own tab, and for pseudo-2D data, we should be able to pick a slice to fit (default first or last) and then the position and width should generally stay fixed and let intensity vary across slices"; and separately, "In the x-pulse PFG data, the phase is being reset when switching between slices and not applying to the pseudo-2D, in the same way I feel like the autophase isn't working here".
+
+### The phase report was a crash, on real data in this repo
+
+Not a UI quirk. `test_data/xpulse_PFG/4` carries a saved `opennmr_processing.json` with `live_zero_fill: 16384` against an 8192-point FID. The load re-anchors the phase controls against the as-read spectrum and *then* applies the saved zero-fill, doubling its width -- leaving `_phase_reference_full` at `(10, 8192)` describing data that is now `(10, 16384)`. Every subsequent slice change raised
+
+```
+ValueError: operands could not be broadcast together with shapes (8192,) (16384,)
+```
+
+out of `apply_phase`. Qt swallows a slot's exception to stderr, so from the GUI nothing happened at all: the phase never applied, the controls appeared to reset, and autophase (which reads the same reference directly) computed against an array that no longer matched. That is all three reported symptoms from one cause.
+
+Confirmed by loading the dataset directly: `stale? True`, reference `(10, 8192)` against data `(10, 16384)`.
+
+**Fixed with a check at the point of use, not at each resize site.** Individual paths that resize a spectrum already re-anchor for themselves (the live-reprocess settle has a long comment about exactly this, added after an earlier user-reported traceback). The *load* path did not. Rather than add a fourth site, `_phase_reference_is_stale` is checked in `_apply_phase_preview` and `_on_autophase_clicked`, which self-heals for every path, present and future -- the same "one hook instead of twelve" reasoning the crosshair teardown uses. After the fix, on the real dataset: autophase moves row 0 from 2.48e8 to 2.09e9, slice switching preserves per-slice phase, and apply-to-all gives a monotonically decaying series.
+
+**A regression this first introduced, caught by an existing test.** The first version compared the ppm axis against `reference.shape[-1]` unconditionally. F1 phasing on a conventional 2D walks the *rows*, so its axis is as long as `shape[0]` -- every F1 session was declared stale and re-anchored mid-drag, silently zeroing the phase being dragged. `test_main_window_recompute_reflects_live_phase_drag_not_just_committed` caught it; the check now picks the dimension actually being phased.
+
+### Fitting spectra is its own tab
+
+Peak Picking and Integration were sub-tabs of Analysis sitting *beside* Curve Fitting, which put a prerequisite and its consumer at the same level and made the order between them invisible. They are now a top-level **Spectral Fitting** tab, placed before Analysis, and each tab's status line names its own step ("Step 1 — measure an intensity per spectrum", "Step 2 — fit a curve to those intensities").
+
+The Window menu's panel shortcuts were resolved by *index*, so adding a tab silently repointed them -- Ctrl+3 "Analysis" opened Spectral Fitting. Now resolved by tab name, which cannot drift when the order changes again.
+
+### "It isn't clear if the fitted spectra are being used in the curve fits"
+
+They always were -- Fit Curve never re-fits peaks, it consumes whatever Fit Spectrum or Integrate Regions last produced -- but nothing said so, and moving the two steps to separate tabs would have made that worse. The Curve Fitting panel now opens with a line naming exactly what is staged:
+
+```
+Will fit: 3 peaks × 10 slices, from the last peak fit on the Spectral Fitting tab.
+```
+
+or, with nothing measured, `No measured intensities yet — run Fit Spectrum or Integrate Regions on the Spectral Fitting tab first. Fit Curve fits those results; it never re-fits peaks itself.` It distinguishes a peak fit from a region integration, since those are different measurements and the label used to be the only way to tell them apart at all (it wasn't).
+
+### Pick a slice to fit; hold position and width across the rest
+
+`seed_mode="apply_first"` already existed and already did most of this -- but it was **always the first slice**, and it lived inside a collapsed "Advanced" disclosure, which is why it may as well not have existed.
+
+* `NMR2D_fit_slices` gained `anchor_slice` (1-based, or `"first"`/`"last"`). The anchor is fitted **first whatever its position**, so the slices *before* it can be pinned to it too -- something a plain in-order pass could not do. Results are restored to the original order afterwards, because otherwise every intensity would be paired with the wrong delay/b-value, silently.
+* The control moved out of Advanced into a visible **"Across a pseudo-2D series"** group, shown only for a pseudo-2D, with an anchor spin box and First/Last buttons.
+* **The default changed** from `independent` to `apply_first`, on the explicit instruction that position and width "should generally stay fixed". That is what a relaxation or diffusion series *is*.
+
+The anchor is worth choosing rather than accepting, and both the tooltip and the docstring say why: it should be the slice with the best signal, since every other slice is pinned to its lineshape. That is the *first* slice of a PFG or T2 decay but the *last* of an inversion recovery -- anchoring an inversion recovery on slice 1 pins every peak to a lineshape measured near the null, where there is almost no signal to measure it from.
+
+**A real bug this introduced, and the reason the suite hung.** The new reordering bound a local called `order` -- a name the per-slice loop below already rebinds to a `np.argsort`. The restore at the end then compared an array against a list and raised `ValueError: the truth value of an array with more than one element is ambiguous`, out of a fit that had otherwise completed. Because `_on_fit_spectrum_clicked` reports a failure through a modal `QMessageBox.critical`, the headless test blocked forever rather than failing -- which is why this presented as a hang partway through `tests/test_gui.py` rather than as an error. Renamed to `slice_order`, with a comment saying why it is not called `order`. Found by dumping the stack with `faulthandler` after `kill -ABRT`.
+
+### Per-peak curve-fit parameters
+
+The starting-values table added last round was one set for every peak, which assumes every peak is the same physics. It often isn't in the case that matters most: a solvent line and a solute line in the same PFG series diffuse at genuinely different rates, so one shared starting D is a poor guess for at least one of them.
+
+`NMR2D_fit_relaxation`'s `p0`/`bounds`/`fixed` now each accept either one shared value or a `{peak_index: value}` dict. The GUI grew an "Applies to" selector above the guess table -- "All peaks" plus one entry per peak, named by its shift, since "Peak 2" alone is not something anyone can match against a spectrum.
+
+The subtlety worth stating: **merely clicking through the peaks must not pin them.** Storing whatever is on screen under each peak as you browse would turn every peak into an override, freezing them all against a later change to the shared set. A peak whose table matches the shared set exactly is therefore not stored as an override at all.
+
+`fixed` is itself a dict, so "shared or per-peak?" cannot be decided by type -- it is decided on the keys (integers mean per-peak, parameter names mean shared), with mixed keys read as shared, the older and safer reading.
+
+### Not built
+
+* **Per-slice phase is still not durable.** With "Apply to every slice" off, a slice's own phase lives only in `spectrum.data`; `_commit_pending_phase_to_metadata` deliberately skips that case because `metadata.raw` describes the whole dataset. It survives slice switches (verified), but any reprocess that rebuilds from the raw FID discards it. Storing a per-row phase list and having `_recompute_multi_row_data` apply it is the fix, and is not written.
+* **A global fit still takes the shared starting values only** -- a joint fit optimises one parameter vector, so a per-peak guess has nowhere to go for the shared parameters.
+* **`_on_fit_spectrum_clicked` reports failures through a modal dialog**, which blocks a headless test into a hang rather than a failure. That cost real time here. A non-modal status-line path for fit failures would make the test suite fail honestly.
+
+Tests: 6 in `tests/test_fitting.py` (anchor takes the chosen slice's lineshape; defaults to first; accepts `"first"`/`"last"`; **returns results in the original slice order**; clamps an out-of-range anchor; fixes shift/FWHM but never amplitude) and 12 in `tests/test_gui.py` (the tab split; the staged-measurement line for both peak fits and integrations; the per-peak combo, overrides, no-pin-on-browse, and clearing; per-peak guesses reaching the fit and recovering two genuinely different D's; the anchor reaching the fit; no anchor for a 1D spectrum; the anchor controls' visibility and First/Last buttons). Three existing tests were updated for the changed default and the added tab.
+
+
+## PFG generalised, uncertainty typed, DOSY via ILT, global fitting (2026-09-09)
+
+User: "Start work on the PFG fitting generalisation, and while doing that, make the type of uncertainty clear, make the outputs a lot nicer and offer somewhere for guess values. Consider the multivariate processing we previously discussed too. Maybe we also need to add a way to make a DOSY plot (ppm vs. D, via the ILT)".
+
+"The multivariate processing we previously discussed" is the last line of the *Fitting wizard and beyond* backlog entry: **"Longer-term: multivariate fitting, specifically named for PFG and T1/T2."** Built as a shared-parameter joint fit — see *Global fitting* below.
+
+Two new modules: `processing/diffusion.py` and `processing/ilt.py`. Nothing was removed; every existing model, name and result key still works.
+
+### The single most important thing found: D has to be searched in log space
+
+Not part of the ask, and it invalidates how multi-component diffusion fitting worked before. A diffusion coefficient is ~1e-9 sitting in the same parameter vector as an amplitude of ~1, over five decades of interesting range. Measured on **noise-free** two-component synthetic data with the starting guess **already at the true values**:
+
+| search space | recovered D | truth | R² |
+|---|---|---|---|
+| linear, `x_scale="jac"` | 5.48e-09 / 6.17e-10 | 3e-09 / 2e-10 | 0.929 |
+| linear, default scaling | did not move off p0 at all | | |
+| linear, `x_scale` = p0 magnitudes | 6.19e-09 / 6.13e-10 | | |
+| **log10** | **3.000e-09 / 2.000e-10** | | **1.000** |
+
+A three-component fit in log space recovers all three to 6 significant figures; nothing else tried recovered two. So `fit_relaxation` gained `LOG_FITTED_PARAMS` and a spec-level `log_params` key: named parameters are searched as log10, with guesses and bounds transformed in and the covariance pushed back out through the transform's Jacobian (`d(10**x)/dx = 10**x·ln10`). **Nothing outside the `curve_fit` call sees it** — p0, bounds, reported values, errors and covariance are all in m²/s. Applied to the three existing `stejskal_tanner*` models too, which were quietly suffering the same conditioning; `fit_relaxation`'s old `x_scale="jac"` comment describes a real fix for the *mono*exponential case and is kept, it just was never enough for two components.
+
+The same transform is in `fit_relaxation_global`, where it matters more: a joint fit holds one shared D against several amplitudes, so the conditioning that made a single fit imprecise made the joint one land on the wrong answer outright — a shared D of **1.05e-09** against a synthetic truth of **8.50e-10**, with every amplitude ~14% high to compensate. In log space: 8.505e-10, amplitudes 10.04/3.99/1.49 against 10/4/1.5.
+
+### PFG generalisation
+
+Before this, **a real b-value could only come from a Bruker `diff.xml`**. Everything else — X-Pulse above all, which records nothing but relative gradient fractions in `G1_valueslist.txt` — could be fitted against gradient *fraction*, giving a decay constant in no physical unit at all while the model called it D in m²/s.
+
+`processing/diffusion.py` closes that:
+
+* **`b_value`** — `b = (2π·γ·g·δ·σ)²·C(δ,Δ,τ)` for any vendor, with `GRADIENT_SHAPE_FACTORS` (rect / half-sine / Bruker's SMSQ10 at 0.9 / Gaussian) and `DIFFUSION_SEQUENCES` (PGSE, PGSTE, bipolar, Oneshot). The shape factor is not cosmetic: treating a stock Bruker SMSQ10 sequence as rectangular overestimates b by 1/0.81 = **23%**, landing directly on D. Rejects timings where the correction term goes non-positive, rather than returning a negative b and hence a negative D downstream.
+* **`b_values_from_relative`** — the X-Pulse path, reading 0–1 or 0–100 either way.
+* **`calibrate_max_gradient`** — the standard "run DI water and solve for G_max" experiment, with `CALIBRATION_LIQUIDS` for the reference values. **D is held fixed on purpose**: D and G_max enter only as the product `D·G_max²`, so a fit that frees both is not a calibration but an unconstrained curve. Recovers a synthetic G_max exactly, and to 3% under 1% noise. `PROBE_MAX_GRADIENT_G_PER_CM` carries diffBB/diff50, previously inline magic numbers in `leonmr`.
+* **`build_diffusion_model`** — N components, each optionally stretched, generalising the three hand-written entries (which are the (1), (1, stretched) and (2) cases). Bounds are anchored to each component's own guess, and the automatic guesses are spread a decade apart per component: started close together, `curve_fit` reliably converges with both components on the same D and the amplitudes split arbitrarily — a fit that looks converged and means nothing.
+* **`component_weights`** — amplitudes as population fractions, which is how a multi-component result is actually quoted; raw `I` values are on the data's arbitrary intensity scale and are not comparable between datasets.
+
+`Oneshot`'s unbalancing factor is deliberately **not** modelled — it is a few percent whose exact form depends on the α used, and getting it silently wrong is worse than not offering it. The module docstring says outright: **use the vendor's own b-values when they exist**, because `diff.xml` already accounts for pre-emphasis calibration that nothing here can read.
+
+### The type of uncertainty
+
+`fit_relaxation` was already doing the right thing and saying nothing about it: with per-point errors it runs `absolute_sigma=True` (errors on the scale those errors set); without them, `absolute_sigma=False`, and scipy rescales the covariance by the reduced χ². **These answer different questions** and the same data can report a D with a 2% "error" one way and 8% the other. Both were printed as a bare `±`.
+
+Now every result carries an `uncertainty` block naming which of `UNCERTAINTY_KINDS` it holds — `measured` ("independent of how well the model happens to fit") or `scatter` ("assumes the model is correct; a systematic misfit is absorbed as if it were noise, making it optimistic") — and every report, the GUI panels and the CSV export state it.
+
+### Nicer outputs
+
+`print_relaxation_report` was a `print` of one line per parameter as a bare float. Replaced by **`format_relaxation_report`**, a string builder (so the GUI shows it, the CSV embeds it, and a test asserts on it), with `print_relaxation_report` now a one-line wrapper. It adds: every value through `format_param_value`, which picks the unit from the parameter's own name (a T2 reads "12.4 ± 0.3 ms", a D reads "2.03e-09 ± 0.05e-09 m²/s", a β gets no invented unit); population weights for multi-component models; the uncertainty kind spelled out; and R² alongside reduced χ² and the point/d.o.f. count, rather than RMSE on the data's arbitrary intensity scale as the only quality number. `fit_quality` gained `r_squared`, `dof` and `n_points`.
+
+In the GUI both report panels are now monospaced and selectable — the tables align with spaces. A single-peak fit shows the full report; several peaks get a compact table naming the uncertainty kind once at the bottom.
+
+### Somewhere for guess values
+
+`fit_relaxation` has always taken `p0`/`bounds`/`fixed`; **nothing in the GUI ever passed them**, so every fit ran from the automatic guess and a fit that converged somewhere silly could only be argued with by editing code. New "Starting values (optional)" group: one row per model parameter with Guess/Min/Max, and a tick on the Parameter cell to hold it fixed. Off by default, so existing behaviour is unchanged; blank cells fall back to the automatic value, so one parameter can be pinned without filling in the rest. "Reset to auto" and "Adopt last fit" buttons. Guess-outside-its-own-bounds is caught here, because scipy's own message for it (`Initial guess is outside of provided bounds`) does not say which parameter.
+
+A generalised diffusion model is *built around* the typed D guesses rather than having them applied afterwards, since `build_diffusion_model` derives each component's bounds from its guess.
+
+**A real bug found while testing this**: `_restore_analysis_state` resets the fit-type/model combos, which rebuilt the guess table — so selecting the very row you were about to fit silently discarded everything typed. The whole Curve Fitting panel is siloed per spectrum and the new controls were not. Now captured and restored with the rest of it, guess rows matched by parameter *name* so a spectrum restored under a different model gets the automatic values rather than another model's guesses pasted into its rows.
+
+### Global (multivariate) fitting
+
+`fit_relaxation_global(datasets, model, shared=[...])` fits every curve at once with named parameters tied across all of them. The question a per-curve fit cannot answer: *these peaks belong to the same molecule, so they share one D — what is it, and how well is it determined by all the data together?* Fitting each separately and averaging is not the same thing and understates the uncertainty, which is asserted directly (the joint error is smaller than the worst separate one). Datasets need not share an x-grid or point count, so a Compare-tab stack of separately-loaded 1D spectra works. Per-dataset results are shaped exactly like ordinary `fit_relaxation` results, so the Fit tab's plot, the peak spinner, the point-exclusion machinery and the CSV export all work on a joint fit unchanged — the only difference is that some of the numbers are now the *same* number, which the CSV's new `shared` column says outright (several rows carrying an identical D otherwise read as a remarkable coincidence).
+
+### DOSY via the ILT
+
+`processing/ilt.py`: Tikhonov-regularised NNLS (the augmented-matrix trick, so one solver imposes both non-negativity and regularisation), an L-curve α chooser, and `dosy_map`, which runs one inversion per chemical shift.
+
+Verified against synthetic ground truth: one component recovered at 1.04e-09 against 1e-09; two well-separated ones at 4.58e-11 / 1.99e-09 against 5e-11 / 2e-09 with weights 0.39/0.60 against 0.4/0.6; a three-peak DOSY map placing every peak within 7% of its own D.
+
+**The honesty constraints are the design.** The module docstring states that the problem is ill-posed, that peak *width* in an ILT is set by α rather than by the sample, and that a discrete fit should be preferred wherever it applies because it yields a D with a real uncertainty. The GUI summary states α outright for the same reason — quoting a spread without it reports a setting as a measurement. `threshold` skips low-intensity columns because an ILT of a noise-only column returns whatever the regularisation likes best, painting a band of meaningless "population" across the map; `auto_alpha` uses **one** α for the whole map, since a per-column α would make neighbouring shifts incomparable. The GUI refuses to build a DOSY when the Values source has fallen back to slice indices, rather than drawing a "D" axis in no physical unit and labelling it m²/s.
+
+`plotting.plot_dosy` draws it: shift high-to-low, D on a log axis small-at-the-bottom, the ordinary spectrum along the top from the lowest-gradient row. Filled contours rather than an image — the map is smooth along D by construction (the ILT reconstructs onto a grid finer than the data can resolve), so contours state the resolution honestly.
+
+### Not built
+
+* **`diff.xml` is still the only automatic b-value source.** `b from gradients` needs δ/Δ/G typed in; nothing reads them from an X-Pulse parameter file yet, though `io.xpulse` already parses the relative gradient list.
+* **Oneshot unbalancing** — see above.
+* **A DOSY is not exportable as data**, only as a figure. The map is on `metadata.raw["dosy_result"]`; a CSV/2D-file writer for it was not built.
+* **The gradient calibration uses peak 1's series**, not a chosen peak — fine for a single-line standard like water, which is what a calibration sample is.
+* **`fit_curve_uncertainty` still defaults to a 3σ band** and the plot legend does not say "3σ". The band is correct; only its label is vague.
+
+Tests: 31 in `tests/test_diffusion.py`, 21 in `tests/test_ilt.py`, 35 in `tests/test_relaxation_reporting.py`, and 22 in `tests/test_gui.py`. Two existing tests were updated rather than worked around: one asserted the old terse `"A="` results label, and one assumed the CSV's curve-fit header sat immediately after its section title (an uncertainty line now precedes it).
+
+
+## Measurement built for real; crosshair survives a unit switch (2026-09-09)
+
+User, one round: "Some recent additions of crosshair and measurements just completely don't work. Measurement isn't coming up, the cmd + d option to go to measurement mode was changed just to d, I'd prefer cmd+d. The crosshair button disappeared in the last round. The crosshair still disappears when changing between axes and the following error wasn't addressed" -- with a `ValueError: shape mismatch: objects cannot be broadcast to a single shape. Mismatch is between arg 0 with shape (512,) and arg 1 with shape (2,)` out of `Line2D.recache`, repeating on every mouse move.
+
+### The broadcast error: `set_axis_unit` was overwriting the crosshair's own lines
+
+`set_axis_unit` ends with `for line in self.ax.lines: line.set_xdata(x)`. **The crosshair's `axvline`/`axhline` are lines on that Axes too.** They came out of that loop holding the spectrum's full-length (512-point) x array against their own two-point y -- which is exactly the shape mismatch, raised on the next mouse move when `_onmove` set a 2-element `ydata` against it. Not a drawing bug at all; the artists were structurally broken before anything tried to draw them.
+
+The previous attempt at this set `crosshair._background = None` afterwards, which addresses a *stale blit background* -- a real problem, but not this one, and it left the corrupted line data untouched. That is why "the crosshair still disappears when changing between axes".
+
+Fixed with a new `_ContourCrosshair.remove()`: disconnect **and** take the lines back out of their Axes, called from `set_axis_unit` *before* the loop. `_ensure_crosshair` then rebuilds it against the new unit on the next mouse move. `_clear_figure` deliberately still uses plain `disconnect` -- it destroys the Axes in the same call, so removing the artists first would be busywork. Any completed measurement annotation is cleared at the same point and for the same reason: it is pinned to data coordinates in the *old* unit.
+
+### The crosshair button
+
+There was never one. `_ensure_crosshair` was unconditional, so there was nothing to turn it off with. Added a checkable **Crosshair** button on each canvas's own matplotlib toolbar, beside pan/zoom, plus a matching **View > Crosshair** menu item; either drives the other, and the menu item applies to every canvas. Turning it off *removes* the crosshair rather than hiding its lines, so nothing stays connected to the canvas's motion/draw events and nothing is left in `ax.lines` for the paths that walk it.
+
+`QToolButton`s set to `ToolButtonTextOnly`, **not** `QAction`s added to the toolbar: a `QToolBar` renders an icon-less action inconsistently across platforms (macOS can show nothing at all), and there are no icons for these two.
+
+### Cmd+D
+
+The shortcut was a matplotlib `key_press_event` binding on a bare `"d"` -- so it fired on any keystroke over the canvas, and was never Cmd+D at all (matplotlib's key name for the macOS Command key is backend-dependent). Replaced by a `QKeySequence("Ctrl+D")` on the Analysis menu action, which Qt maps to Cmd+D on macOS and Ctrl+D elsewhere for free. The matplotlib binding is gone entirely rather than kept alongside: both firing would toggle twice per press and cancel out.
+
+### "Measurement isn't coming up"
+
+Three separate reasons, all real:
+
+1. **It only ever reached the Spectrum canvas.** `_on_measurement_toggle_clicked` called `self.canvas.set_measurement_mode(...)`. Only one tab is visible at a time, so on the FID, Compare, Fit, Spectral-fit or Processing view the toggle silently did nothing. Now applied to all six.
+2. **Nothing was drawn.** Two clicks left no mark on the plot, so there was no way to tell the mode was even on. Now: a `+` marker on the first click, and on the second a double-headed arrow between the points with the summary labelled at its midpoint. Annotations persist so several can stand at once (a J-coupling analysis is rarely one measurement), and clear when measurement mode is switched off.
+3. **The result went to `print()`.** Now the status bar, via the same summary string the on-plot label uses -- one formatting site, so the two cannot disagree about units.
+
+### The units were wrong, which mattered more than the UI
+
+`dx_hz` was `abs(x2 - x1)` -- **the raw difference in whatever unit the axis is currently displayed in**, labelled as Hz. With the view in ppm, two points 2 ppm apart on a 400 MHz spectrum were reported as "2.00 Hz". `dx_ppm` then divided that by `sfo1`, compounding it. This is precisely the failure the plan below called "the one real risk": *a delta computed in display units while labelled in ppm is worse than no measurement at all*.
+
+Now `_delta_in_units` takes every separation to Hz first, using the axis's **own stored ppm and Hz arrays** (not `sfo1`, which is the transmitter frequency and stops matching the axis once referencing has moved it), and derives ppm/kHz/mm from there. One conversion, one place to be wrong. `_measurement_axes_for` picks the right `NMRAxis` per direction and per Axes -- F2 and F1 on a contour, F2-only on the top projection strip, F1-only on the left one -- so a 2D reports each dimension through its own frequency rather than one shared value. A direction with no spectral axis behind it (a 1D's intensity, a pseudo-2D's slice index) is reported as a plain difference and never given a unit it was not converted into.
+
+Reported in every applicable unit at once, mm first where imaging parameters are set, otherwise ppm and Hz side by side -- the "two units at once, not a switch between them" requirement from the plan.
+
+### One unrelated regression fixed in passing
+
+`_redraw_contour` had gained explicit `xlims`/`ylims` computed from the data range (to stop a zero-filled F1 drawing far larger than its signal), but `show_spectrum`'s first contour draw had not. The two therefore framed the same data differently, so a contour visibly jumped the first time anything rebuilt it -- a level scroll, a unit switch, adding a slice -- and `test_set_axis_unit_switches_a_contour` failed. Both paths now go through one `_contour_display_limits`.
+
+Tests: 8 new in `tests/test_gui_canvas.py` (unit switch leaves no broken crosshair and moving again does not raise; the crosshair toggle; a measurement reports the same ppm whether taken in a ppm or a Hz view; it draws itself and stacks; a 2D reports both dimensions through their own axes; a second click in another Axes restarts; mm when a gradient is set) and 3 in `tests/test_gui.py` (Cmd+D and all-canvas reach; the crosshair toggle round-trip; the result reaching the status bar). The stale `test_measurement_records_two_points_and_emits_signal` asserted `dx_hz == 2.0` for a 2 ppm separation -- i.e. it asserted the unit bug -- and now asserts 800 Hz.
+
+
+## Planned, not built: spectral measuring in ppm/Hz/mm (2026-09-09)
+
+User: "Ideally I'd also like crosshairs on the 1D spectra and make a plan for spectral measuring in both ppm and Hz (and mm for imaging)". The 1D crosshair is built (see the entry below); this is the plan for the measuring half.
+
+### What already exists, and what is actually missing
+
+Most of the machinery is in place and should not be rebuilt:
+
+* **`MplCanvas._axis_values_in_unit`** already converts a frequency axis to ppm / Hz / kHz / mm, and `_imaging_hz_per_mm()` already derives mm from the Imaging sub-tab's max-gradient input. **One conversion point, already correct** -- every part of this plan should route through it rather than doing its own arithmetic.
+* **`_axis_unit`** and the right-click "Axis Units" menu already switch the *displayed* unit.
+* **`_region_select_start` / `_update_region_select_patch`** already implement a click-drag over an x-range, with a patch drawn during the drag.
+* **The crosshair** now exists on both 1D and 2D, and already tracks the cursor in data coordinates.
+
+What is missing is not conversion or interaction -- it is that **nothing ever reports a number to the user**. The displayed unit is all-or-nothing (switching to Hz to read a coupling loses the ppm view), and a separation between two points cannot be read off at all.
+
+### The core requirement, stated plainly
+
+NMR needs **two units at once, not a switch between them**: a peak's position is quoted in ppm (field-independent), while a splitting or a linewidth is quoted in Hz (field-dependent, and what J actually is). A user measuring a doublet wants "5.23 ppm, and the two lines are 7.4 Hz apart" from one gesture. The existing unit *switch* is the wrong shape for that; a simultaneous *readout* is the right one.
+
+### A. Live cursor readout (small, and the foundation)
+
+Override `ax.format_coord` on every spectrum Axes to report all applicable units at once:
+
+```
+5.231 ppm | 2092.4 Hz | 1.24e6        (and "| 12.3 mm" when imaging params are set)
+```
+
+**No new UI at all**: `NavigationToolbar2QT` already has a coordinate display (`locLabel`) that it fills from `ax.format_coord` on every mouse move -- verified directly. So this is a formatting function plus one assignment per Axes, and it immediately works for 1D, 2D contours, and the projection strips.
+
+The intensity is worth including: it is the other thing people read off a cursor, and for a 2D it is the contour value under the crosshair.
+
+### B. Two-point delta measurement (the actual "measuring" ask)
+
+A modifier-drag (shift-drag, keeping the existing plain drag as pan and the existing region-select gesture untouched) that draws a horizontal span between two x-positions and labels it **in both units simultaneously**:
+
+```
+|<--------->|  0.0185 ppm / 7.42 Hz
+```
+
+Reuse `_region_select_start`'s existing pixel-tracking drag (which already survives the cursor briefly leaving the Axes) rather than writing a second drag handler. On release, keep the annotation on the plot until dismissed, so several can be placed -- a J-coupling analysis is rarely one measurement.
+
+For a **2D**, the same gesture on the contour should report delta in both dimensions (F2 and F1 separately, each in its own pair of units), since a cross-peak separation matters in both.
+
+### C. mm for imaging
+
+`_axis_values_in_unit` already handles `"mm"`, so both A and B get it for free **as long as they ask that function rather than converting themselves**. The only extra work is conditional display: mm appears in the readout only when `_imaging_gamma_hz_per_t` and `_imaging_max_gradient_g_per_cm` are both set, exactly as the "mm (Imaging)" menu item is already enabled/disabled today.
+
+For imaging the useful delta is a distance ("that feature is 3.2 mm across"), so B's label should lead with mm when mm is available, and with ppm otherwise.
+
+### D. A measurement table (optional, decide after A and B are used)
+
+Collected measurements into a small table on the Analysis tab, exportable as CSV alongside the existing peak table. **Deliberately deferred**: it is only worth building once A and B have been used on real data and it is clear whether people want measurements kept or just read off and discarded. Building the table first would be guessing.
+
+### Sequencing and risk
+
+A is small, self-contained, and immediately useful, and B depends on the same formatting helper -- so A first, then B, then C falls out of both. **The one real risk is unit confusion**: a number shown without its unit, or a delta computed in display units while labelled in ppm, is worse than no measurement at all. Every value this feature reports must carry its unit in the same string, and every conversion must go through `_axis_values_in_unit` so there is one place that can be wrong. Worth a test that a delta measured while the display is in Hz reports the same ppm value as one measured while the display is in ppm.
+
+
+## 1D crosshair, Open button removed, browser double-load fix (2026-09-09)
+
+User: "The open button should be relegated to a menu item and removed from the data tab now we have the folder browser. Also the folder browser shows each data set twice, I hope this isn't a double load." Then: "Ideally I'd also like crosshairs on the 1D spectra".
+
+### The double load was real
+
+`DataBrowser` connected **both** `itemActivated` and `itemDoubleClicked` to the same handler. Qt emits both for one double-click, so every double-click in the browser loaded the same experiment **twice** -- two identical rows in the list, and for a large 2D the entire multi-second read done twice over. Confirmed directly before fixing: one double-click emitted `spectrumActivated` twice.
+
+Fixed by keeping `itemActivated` alone, which is also the *correct* single signal: it is the platform's own notion of activation, so it covers double-click and Return, and honours desktops configured for single-click activation -- none of which `itemDoubleClicked` does.
+
+Worth noting what this was **not**: the folder scan returns no duplicate paths (checked on 203 real experiments across `test_data`), and the tree builds one leaf per match. The duplication was entirely at the point of loading.
+
+### The rest
+
+* **Open… button removed from the Data tab.** Both dialogs it fronted were already File-menu actions with shortcuts (Cmd+O, Cmd+Shift+O), so nothing was lost; the browser is the primary way in now. Its old test asserted the button's dropdown menu, and is replaced by one asserting the File menu still offers both -- removing the button is only safe while that holds.
+* **Crosshair on 1D spectra.** `_ContourCrosshair` already handled a lone Axes (`f1_ax`/`f2_ax` of `None`), so this is only a relaxed gate in `_ensure_crosshair`: it now also fires when `_current_1d_spectrum` is set. Deliberately still off for the FID/preview/compare views, which set neither spectrum -- a crosshair there would be a measurement cue on axes measuring nothing the user asked about. Lazy creation is unchanged, so nothing counting `ax.lines` on a freshly drawn plot is affected.
+
+Tests: 3 in `tests/test_gui_canvas.py` (1D crosshair spans the single Axes; it tracks and hides; absent on the FID view), 2 in `tests/test_data_browser.py` (one double-click loads exactly once -- emitting both signals as Qt does; Return still activates), and the replaced Open-button test in `tests/test_gui.py`.
+
+
+## Cloud-backed data, projection heights, tab reflow, Data/Processing layout (2026-09-09)
+
+User, one round: "For 2Ds, I'd rather the projection plots were about half their current heights so that the contour plot can be generally bigger. Also with the data viewer, there needs to be some way to handle data that is on the cloud and not local to the machine. I would move the browse folder to the top and the open experiment navigator below with the related remove and clear all buttons directly below that. But in between I would have the selected spectrum info. The process indirect dimension and magnitude mode buttons really should be in processing. Also the new tab buttons can reflow but the subtabs aren't currently reflowing".
+
+### Cloud-backed ("files on demand") data
+
+New `opennmr/io/cloud.py`. OneDrive/iCloud/Dropbox present a complete directory tree whose files have real names and real sizes but no local contents; the first read blocks for the length of a download. **Checked against the user's own OneDrive: 132 of 403 sampled files are placeholders**, so this is live, not hypothetical.
+
+Detection never reads anything -- `os.stat` is safe on a placeholder. Three signals: macOS's own `UF_DATALESS` flag (authoritative, and what the File Provider API sets for all three services on current macOS), zero allocated blocks against a nonzero size (the portable fallback), and an iCloud `.name.icloud` sibling (older evictions remove the real name entirely).
+
+Two places actually needed it, both of which would otherwise download data *nobody asked for*:
+
+* **`DataBrowser._describe`** calls `io.peek` on every experiment to label it. On a cloud folder that materialises every parameter file, turning "expand a folder" into hundreds of sequential downloads. Now a cloud experiment lists immediately as `in cloud, 633 MB -- double-click to download`, and its tooltip says what opening it will fetch.
+* **`io.xpulse._detect`** reads the first 4 KB of every `.jdx`/`.dx` to check for an X-Pulse marker. A file provider fetches *whole files*, not byte ranges, so scanning a cloud folder downloaded every one of them just to decide what to list. A placeholder is now accepted on its extension alone -- optimistic on purpose: a `.jdx` that turns out not to be X-Pulse fails at load, by which point it was downloaded anyway, whereas reading now costs the download unconditionally and up front. `io.bruker._detect` was already stat-only and needed nothing.
+
+Nothing refuses to open anything; a cloud file loads exactly as before. The only change is that the user is told beforehand.
+
+### The rest
+
+* **2D projection panels halved** -- `plot_2d_contour`'s `projection_size` 2.0 -> 1.0. The divider gives the contour whatever the projections do not take, so this is the single knob that trades between them; no caller overrode the default.
+* **Sub-tab strips now actually reflow.** `FlowLayout` had implemented `heightForWidth` since it was written, but **Qt only consults it when the widget's size policy opts in** with `setHeightForWidth(True)`, which the strip never did -- so a parent sized it from `sizeHint` (one row) and clipped every wrapped row. The top-level strips hid the bug by sitting directly in the window at full width, where they rarely need a second row; the Analysis sub-tabs, five buttons in a narrow side panel, always do. Now a `_TabBar` widget that opts in, forwards `heightForWidth` to its layout, and re-invalidates on resize. Verified: 1 row at 420 px, 2 at 300 px, 3 at 220 px.
+* **Data tab reordered** to Open… -> Browse a folder -> Selected spectrum -> Open experiments (with Remove/Clear All directly beneath), which also puts the two easily-confused lists at opposite ends rather than adjacent.
+* **Process Indirect Dimension and Magnitude Mode moved to Processing.** Both reprocess from the original file when toggled, which is what makes them processing controls rather than descriptions of the selection. Only the parent layout moved -- their visibility logic is untouched.
+
+Tests: 15 in the new `tests/test_cloud.py` (both detection signals simulated at the `os.stat` boundary, since real placeholders cannot be created in a test), 2 in `tests/test_data_browser.py` (a cloud experiment lists without `peek` being called at all; a local one still is), 2 in `tests/test_wrapping_tabs.py` (the strip wraps when narrow, and reports height-for-width -- the property whose absence was the bug). Suite green.
+
+
+## Load speed A+B: fold the saved processing into the read, draw once (2026-09-09)
+
+User: "Start on A then continue to B C and D", against the plan in the entry below.
+
+**Result: the EXSY benchmark (2048 x 65536, 633 MB `ser`) went from 19.04 s to 7.57 s -- 2.5x.** Items A and B of that plan; C and D still open.
+
+### A. Fold the saved processing into the read (-8.0 s)
+
+`_saved_processing_read_kwargs` translates a saved `opennmr_processing.json` into reader keyword arguments, and `_initial_load_kwargs` now passes them to `io.load`, so a spectrum is *read* in its saved state instead of being read with defaults and then rebuilt row-by-row from the raw FID. `_read_already_applied_saved_processing` then skips `_recompute_multi_row_data` entirely, and `_apply_baseline_to_loaded_spectrum` applies the one thing with no reader equivalent.
+
+**The whole risk here is silently changing numbers**, so the fast path was A/B-tested against the recompute on real data (Cyclosporine/204) across 14 saved states -- windows, zero-fill, FID shift, baseline, phases, combinations. That found **two genuine divergences, neither of them introduced by this change**:
+
+* **The pivot came from a widget's display precision.** `_recompute_multi_row_data` re-derived its first-order pivot fraction from `pivot_spin`, which shows ppm to 3 decimals -- so a true centre of 4.700000000101711 came back as 4.7, giving pivot_frac 0.49999999998962 instead of 0.5. The *spectrum depended on how many decimals a spin box displays*. Fixed at the root in `_pivot_fraction`: an untouched box means exactly 0.5, a dragged one still reads back normally. Worth 2.7e-9 of full scale on PHC1 = 44.5.
+* **A rebuilt axis, amplified by linear prediction.** The recompute rebuilt F2's axis as `linspace(ppm[0], ppm[-1], n)`, which is *not* bit-identical to the reader's (the reader interpolates in Hz and divides by SF; a linspace interpolates in ppm) -- 1.8e-15 of difference. Harmless on its own, but F1 linear prediction is a least-squares solve and amplified it to ~2e-9 in the finished spectrum. Now the loaded axis is reused outright whenever the point count is unchanged.
+
+With both fixed, all 14 states agree to <= 1e-15 of full scale, and 13 take the fast path. **`align_echo` is the one deliberate exclusion**: `read_2d` drops a recorded PHC0/PHC1 when aligning (a recorded phase does not survive echo alignment -- verified against TopSpin's 999912-999915) and `_recompute_multi_row_data` still applies it unconditionally, so the two differ by the full scale of the data. That is a real pre-existing recompute bug; it is excluded rather than fixed here, because a speed change should not quietly alter numerical output. **Left open below.**
+
+### B. Draw the contour once, not twice (-1.8 s)
+
+`_load` selected the row (which redraws) and *then* applied the saved processing (which redraws again) -- the first contour was rendered from data already known to be superseded. `_defer_spectrum_draw` suppresses it across exactly that window. Safe only because every path through `_apply_loaded_processing_sidecar` past its `_fid_reprocessable` guard ends in a draw, so that guard is repeated at the deferral site; without it, an unreprocessable spectrum with a sidecar would skip the first draw and never get a second. `_set_navigation_mode("pan")` moved below the sidecar apply, so it still lands on a canvas with something plotted.
+
+### Where the remaining 7.57 s goes
+
+| stage | time |
+|---|---|
+| `read_2d` | 3.58 s |
+| `plot_2d_contour` (now once) | 1.5 s |
+| `baseline_correct`, 2048 rows | 2.47 s |
+| everything else | ~1 s |
+
+Item C (vectorise `_recompute_multi_row_data`) no longer fires on this benchmark at all, since the recompute is skipped -- it now matters only for the cases that still fall back to it. Item D (vectorise `baseline_correct` across rows) is unchanged and is now the largest remaining non-read cost. Profiled: no single hotspot, the 2.47 s is spread across per-row `median`/`lstsq`/`polyval` calls, so it needs a genuinely batched sigma-clip-and-fit, not a micro-optimisation.
+
+### Still open from this
+
+* **`_recompute_multi_row_data` applies a recorded phase that `read_2d` correctly drops when `align_echo` is on.** The reader was fixed earlier (see the align-echo entry); the recompute was not, so the two disagree by the full scale of the data on an echo-aligned 2D. Until it is fixed, an echo-aligned spectrum cannot take the folded-read fast path.
+
+Tests: 15 new in `tests/test_gui.py` -- the 14-state A/B matrix (`test_main_window_folded_read_matches_the_recompute_exactly`, parametrised, each state asserting both the agreement *and* whether the fast path fires) plus two on the folding itself, since a broken fold would otherwise leave both paths slow and still agreeing. Suite green.
 
 
 ## Planned, not built: load speed, re-measured (2026-09-09)

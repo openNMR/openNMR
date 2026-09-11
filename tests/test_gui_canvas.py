@@ -849,6 +849,48 @@ def test_show_spectrum_scroll_zoom_still_pins_the_bottom(qapp):
 
 
 # ============================================================
+# Measurement tool (Cmd/Ctrl+D)
+# ============================================================
+
+def test_measurement_mode_toggle_changes_cursor(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    assert canvas._measurement_mode is False
+    canvas.set_measurement_mode(True)
+    assert canvas._measurement_mode is True
+    canvas.set_measurement_mode(False)
+    assert canvas._measurement_mode is False
+
+
+def test_measurement_records_two_points_and_emits_signal(qapp):
+    from unittest.mock import MagicMock
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas.set_measurement_mode(True)
+    assert canvas._measurement_points == []
+    # Record first point
+    canvas._record_measurement_point(canvas.ax, 1.0, 0.5)
+    assert canvas._measurement_points == [(canvas.ax, 1.0, 0.5)]
+    # Record second point and emit signal
+    signal_mock = MagicMock()
+    canvas.measurementCompleted.connect(signal_mock)
+    canvas._record_measurement_point(canvas.ax, 3.0, 0.8)
+    assert canvas._measurement_points == []  # Points cleared after emit
+    signal_mock.assert_called_once()
+    result = signal_mock.call_args[0][0]
+    assert result["x1"] == 1.0
+    assert result["x2"] == 3.0
+    # 2 ppm apart on a 400 MHz axis is 800 Hz. This used to report the
+    # raw display-unit difference (2.0) labelled as Hz -- the exact
+    # unit confusion the measuring plan called the one real risk.
+    assert result["dx_display"] == 2.0
+    assert result["dx"]["ppm"] == pytest.approx(2.0)
+    assert result["dx"]["hz"] == pytest.approx(800.0)
+
+
+# ============================================================
 # Axis unit switching (ppm / Hz / kHz)
 # ============================================================
 
@@ -2373,3 +2415,423 @@ def test_canvas_projection_zoom_survives_a_contour_level_change(qapp):
 
     canvas._on_scroll(_scroll_at(canvas, canvas.ax))     # contour body -> levels -> rebuild
     assert (canvas._proj_axes["f2"].get_ylim(), canvas._proj_axes["f1"].get_xlim()) == zoomed
+
+
+def test_canvas_crosshair_on_a_1d_spectrum(qapp):
+    """1D gets a crosshair too -- one vertical and one horizontal line
+    across the single Axes ("ideally I'd also like crosshairs on the 1D
+    spectra").
+
+    The same class as the 2D one, with no projection strips to span, so
+    there is nothing separate to keep in step."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    assert canvas._crosshair is None
+
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+
+    crosshair = canvas._crosshair
+    assert crosshair is not None
+    assert set(crosshair.axes) == {canvas.ax}
+    assert crosshair._vline_axes == [canvas.ax]
+    assert crosshair._hline_axes == [canvas.ax]
+
+
+def test_canvas_crosshair_1d_tracks_and_hides(qapp):
+    """It follows the cursor while over the plot and disappears when
+    the cursor leaves -- the same contract the 2D one has."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    event = _motion_at(canvas, canvas.ax)
+    canvas._on_motion(event)
+    crosshair = canvas._crosshair
+    crosshair._onmove(event)
+
+    assert crosshair._vlines[0].get_visible()
+    assert crosshair._vlines[0].get_xdata() == (event.xdata, event.xdata)
+    assert crosshair._hlines[0].get_ydata() == (event.ydata, event.ydata)
+
+    crosshair._onmove(types.SimpleNamespace(inaxes=None, xdata=None, ydata=None, x=0, y=0))
+
+    assert not crosshair._vlines[0].get_visible()
+    assert not crosshair._hlines[0].get_visible()
+
+
+def test_canvas_crosshair_absent_on_views_with_no_spectrum(qapp):
+    """The FID view is not a spectrum view -- a crosshair there would
+    be a measurement cue on axes that measure nothing the user asked
+    about."""
+    canvas = MplCanvas()
+    canvas.show_fid(np.exp(-np.arange(256) / 50.0) + 0j, dt=1e-5)
+
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+
+    assert canvas._crosshair is None
+
+
+def _press_at(canvas, ax, xfrac=0.5, yfrac=0.5, button=1):
+    bbox = ax.get_window_extent()
+    x, y = bbox.x0 + xfrac * bbox.width, bbox.y0 + yfrac * bbox.height
+    event = types.SimpleNamespace(name="button_press_event", canvas=canvas.canvas,
+                                  inaxes=ax, x=x, y=y, button=button)
+    event.xdata, event.ydata = ax.transData.inverted().transform((x, y))
+    return event
+
+
+def test_switching_axis_unit_does_not_leave_a_broken_crosshair(qapp):
+    # Real user report: "The crosshair still disappears when changing
+    # between axes", with a ValueError: shape mismatch out of
+    # Line2D.recache on every mouse move afterwards. set_axis_unit
+    # rewrites the x data of every line on the Axes -- and the
+    # crosshair's own axvline/axhline are lines on that Axes, so they
+    # came out of it holding a full-length x array against their own
+    # two-point y, which cannot broadcast.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    assert canvas._crosshair is not None
+
+    canvas.set_axis_unit("hz")
+    assert canvas._crosshair is None                       # removed, not corrupted
+    assert len(canvas.ax.lines) == 1                       # and taken back out of the Axes
+
+    # The next move rebuilds it against the new unit, and moving again
+    # is what used to raise.
+    canvas._on_motion(_motion_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.3))
+    assert canvas._crosshair is not None
+    canvas._crosshair._onmove(_motion_at(canvas, canvas.ax, xfrac=0.6, yfrac=0.4))
+    for line in canvas._crosshair._vlines:
+        assert len(line.get_xdata()) == 2
+    for line in canvas._crosshair._hlines:
+        assert len(line.get_ydata()) == 2
+
+
+def test_crosshair_can_be_switched_off_and_back_on(qapp):
+    # The Crosshair toggle on the canvas's own toolbar -- reported
+    # missing entirely.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    assert canvas._crosshair is not None
+
+    canvas._crosshair_button.setChecked(False)
+    assert canvas._crosshair_enabled is False
+    assert canvas._crosshair is None
+    canvas._on_motion(_motion_at(canvas, canvas.ax, xfrac=0.3))
+    assert canvas._crosshair is None                       # stays off
+
+    canvas._crosshair_button.setChecked(True)
+    canvas._on_motion(_motion_at(canvas, canvas.ax, xfrac=0.4))
+    assert canvas._crosshair is not None
+
+
+def test_measurement_reports_ppm_and_hz_together_whatever_unit_is_displayed(qapp):
+    # The core requirement: a separation is quoted in ppm *and* Hz at
+    # once, and switching the displayed unit to read one must not
+    # change the other. The raw x difference is in display units, so a
+    # measurement taken in Hz and the same one taken in ppm have to
+    # agree after conversion -- that is the whole risk in this feature.
+    results = []
+
+    def measure(unit):
+        canvas = MplCanvas()
+        canvas.figure.set_size_inches(8, 6)
+        canvas.show_spectrum(_make_1d())
+        canvas.canvas.draw()
+        canvas.set_axis_unit(unit)
+        canvas.set_measurement_mode(True)
+        got = []
+        canvas.measurementCompleted.connect(got.append)
+        canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.5))
+        assert not got                                     # one click is not a measurement
+        canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.7, yfrac=0.5))
+        assert len(got) == 1
+        return got[0]
+
+    for unit in ("ppm", "hz"):
+        results.append(measure(unit))
+
+    in_ppm, in_hz = results
+    assert in_ppm["display_unit"] == "ppm" and in_hz["display_unit"] == "hz"
+    # sfo1 = 400 MHz in _make_1d, so the axis is 400 Hz per ppm.
+    assert in_ppm["dx"]["hz"] == pytest.approx(in_ppm["dx"]["ppm"] * 400.0, rel=1e-6)
+    assert in_hz["dx"]["ppm"] == pytest.approx(in_hz["dx"]["hz"] / 400.0, rel=1e-6)
+    assert in_ppm["dx"]["ppm"] == pytest.approx(in_hz["dx"]["ppm"], rel=1e-6)
+    # And every number reported carries its unit in the same string.
+    assert "ppm" in in_hz["summary"] and "Hz" in in_hz["summary"]
+
+
+def test_measurement_draws_itself_on_the_plot(qapp):
+    # "Measurement isn't coming up" -- two clicks used to leave no mark
+    # on the plot at all, and printed to stdout.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas.set_measurement_mode(True)
+
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.5))
+    assert len(canvas._measurement_artists) == 1           # the pending first-point marker
+
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.7, yfrac=0.5))
+    labels = [a for a in canvas._measurement_artists if hasattr(a, "get_text") and a.get_text()]
+    assert labels and "ppm" in labels[0].get_text()
+    assert not any(a.get_gid() == canvas._MEASUREMENT_PENDING_GID
+                   for a in canvas._measurement_artists)
+
+    # Several can stand at once -- a J-coupling analysis is rarely one.
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.4, yfrac=0.6))
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.5, yfrac=0.6))
+    labelled = [a for a in canvas._measurement_artists
+                if hasattr(a, "get_text") and a.get_text()]
+    assert len(labelled) == 2
+
+    canvas.set_measurement_mode(False)
+    assert canvas._measurement_artists == []
+
+
+def test_measurement_on_a_2d_reports_both_dimensions(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.canvas.draw()
+    canvas.set_measurement_mode(True)
+    got = []
+    canvas.measurementCompleted.connect(got.append)
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.3))
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.7, yfrac=0.7))
+
+    result = got[0]
+    # F2 is 400 Hz/ppm, F1 is 100 Hz/ppm -- each converted through its
+    # own axis, not through one shared frequency.
+    assert result["dx"]["hz"] == pytest.approx(result["dx"]["ppm"] * 400.0, rel=1e-6)
+    assert result["dy"]["hz"] == pytest.approx(result["dy"]["ppm"] * 100.0, rel=1e-6)
+    assert "Δx" in result["summary"] and "Δy" in result["summary"]
+
+
+def test_measurement_restarts_when_the_second_click_is_in_another_axes(qapp):
+    # A separation across two unrelated coordinate systems is not a
+    # measurement of anything.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d(n_f1=8))
+    canvas.canvas.draw()
+    canvas.set_measurement_mode(True)
+    got = []
+    canvas.measurementCompleted.connect(got.append)
+
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.3))
+    canvas._on_press(_press_at(canvas, canvas._proj_axes["f2"], xfrac=0.7, yfrac=0.5))
+    assert not got
+    assert len(canvas._measurement_points) == 1
+    assert canvas._measurement_points[0][0] is canvas._proj_axes["f2"]
+
+
+def test_measurement_in_mm_when_imaging_gradient_params_are_set(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
+    canvas.set_measurement_mode(True)
+    got = []
+    canvas.measurementCompleted.connect(got.append)
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.5))
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.7, yfrac=0.5))
+
+    result = got[0]
+    assert result["dx"]["mm"] == pytest.approx(result["dx"]["hz"] / canvas._imaging_hz_per_mm())
+    assert result["summary"].startswith("Δx = ") and "mm" in result["summary"]
+
+
+# ============================================================
+# Compare stack: row labels, shared scale, unit switching
+# ============================================================
+
+def _stack_pair(qapp, big=1.0, small=0.1):
+    """Two 1D spectra of deliberately different intensity, for checking
+    whether a stack shows their relative heights or hides them."""
+    ppm = np.linspace(0, 10, 200)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    return [
+        NMRSpectrum(data=amp * np.exp(-((ppm - 5) ** 2)), axes=[axis], metadata=metadata)
+        for amp in (big, small)
+    ]
+
+
+def test_compare_stack_autoscales_each_row_by_default(qapp):
+    canvas = MplCanvas()
+    canvas.show_compare(_stack_pair(qapp), mode="stack")
+    ranges = [abs(ax.get_ylim()[1] - ax.get_ylim()[0]) for ax in canvas._compare_axes]
+    # A tenth-height trace still fills its own row, so the two ranges
+    # differ by about the same factor -- which is exactly what hides
+    # the relative amplitudes.
+    assert ranges[0] / ranges[1] > 5
+
+
+def test_compare_stack_shared_scale_shows_relative_heights(qapp):
+    canvas = MplCanvas()
+    canvas.show_compare(_stack_pair(qapp), mode="stack", shared_scale=True)
+    ranges = [abs(ax.get_ylim()[1] - ax.get_ylim()[0]) for ax in canvas._compare_axes]
+    assert ranges[0] == pytest.approx(ranges[1])
+
+
+def test_shared_scale_is_a_no_op_when_normalising(qapp):
+    # Normalising has already put every trace at the same peak, so
+    # there are no relative heights left to show.
+    canvas = MplCanvas()
+    canvas.show_compare(_stack_pair(qapp), mode="stack", normalize=True, shared_scale=True)
+    ranges = [abs(ax.get_ylim()[1] - ax.get_ylim()[0]) for ax in canvas._compare_axes]
+    assert ranges[0] == pytest.approx(ranges[1], rel=0.2)
+
+
+def test_compare_stack_row_labels_are_drawn_on_their_own_rows(qapp):
+    canvas = MplCanvas()
+    canvas.show_compare(_stack_pair(qapp), mode="stack", row_labels=["first", "second"])
+    for axes, expected in zip(canvas._compare_axes, ("first", "second")):
+        assert any(t.get_text() == expected for t in axes.texts)
+
+
+def test_compare_stack_without_labels_draws_none(qapp):
+    canvas = MplCanvas()
+    canvas.show_compare(_stack_pair(qapp), mode="stack")
+    assert all(not axes.texts for axes in canvas._compare_axes)
+
+
+def test_compare_stack_unit_switch_converts_every_row(qapp):
+    # self.ax is only the last row -- converting that alone would leave
+    # every other row silently in the old unit.
+    canvas = MplCanvas()
+    spectra = _stack_pair(qapp)
+    canvas.show_compare(spectra, mode="stack")
+    canvas.set_axis_unit("hz")
+
+    expected = spectra[0].axes[0].values("hz")
+    for axes in canvas._compare_axes:
+        np.testing.assert_allclose(axes.lines[0].get_xdata(), expected)
+    assert canvas.axis_unit == "hz"
+
+
+def test_compare_stack_unit_switch_round_trips(qapp):
+    canvas = MplCanvas()
+    spectra = _stack_pair(qapp)
+    canvas.show_compare(spectra, mode="stack")
+    canvas.set_axis_unit("khz")
+    canvas.set_axis_unit("ppm")
+    np.testing.assert_allclose(canvas._compare_axes[0].lines[0].get_xdata(),
+                               spectra[0].axes[0].values("ppm"))
+
+
+def test_compare_stack_mm_needs_a_gradient(qapp):
+    canvas = MplCanvas()
+    spectra = _stack_pair(qapp)
+    canvas.show_compare(spectra, mode="stack")
+    canvas.set_axis_unit("mm")
+    # No gradient set, so nothing converts and the unit does not change.
+    assert canvas.axis_unit == "ppm"
+
+    canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
+    canvas.set_axis_unit("mm")
+    assert canvas.axis_unit == "mm"
+    expected = spectra[0].axes[0].values("hz") / canvas._imaging_hz_per_mm()
+    np.testing.assert_allclose(canvas._compare_axes[0].lines[0].get_xdata(), expected)
+
+
+def test_compare_spectra_do_not_outlive_their_figure(qapp):
+    # A stale list would have set_axis_unit rewriting rows that no
+    # longer exist.
+    canvas = MplCanvas()
+    canvas.show_compare(_stack_pair(qapp), mode="stack")
+    assert canvas._compare_spectra
+    canvas.show_spectrum(_make_1d())
+    assert canvas._compare_spectra == []
+
+
+# ============================================================
+# x-axis scroll-zoom on a stacked multi-panel view
+# ============================================================
+
+def _margin_scroll(canvas, ax, below=6.0):
+    """A scroll event in ``ax``'s own x-tick-label strip -- below its
+    plot area, and in no axes' data rectangle (``inaxes is None``),
+    which is what matplotlib reports for a margin."""
+    bbox = ax.get_window_extent()
+    return types.SimpleNamespace(
+        name="scroll_event", canvas=canvas.canvas, inaxes=None,
+        x=bbox.x0 + 0.5 * bbox.width, y=bbox.y0 - below, step=1, button="up",
+    )
+
+
+def _dual_panel_canvas(qapp):
+    """A canvas showing two stacked panels with their own x axes --
+    the shape of the Processing tab's FID + spectrum preview."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    # Clear first, as every real view does: MplCanvas.__init__ leaves a
+    # full-figure Axes behind, and building panels on top of it gives
+    # the figure three Axes rather than two.
+    canvas._clear_figure()
+    top, bottom = canvas.figure.subplots(2, 1)
+    top.plot(np.linspace(0, 1, 50), np.random.default_rng(0).normal(size=50))
+    bottom.plot(np.linspace(0, 10, 50), np.random.default_rng(1).normal(size=50))
+    canvas.ax = bottom          # what every multi-panel view sets
+    canvas.canvas.draw()
+    return canvas, top, bottom
+
+
+def test_each_panel_scroll_zooms_its_own_x_axis(qapp):
+    # The gap this closes: the strip check only ever consulted
+    # self.ax -- the *last* Axes a multi-panel view creates -- so a
+    # panel above it could never have its own x-tick strip hovered,
+    # and its x axis could not be scroll-zoomed at all.
+    canvas, top, bottom = _dual_panel_canvas(qapp)
+
+    top_before, bottom_before = top.get_xlim(), bottom.get_xlim()
+    canvas._on_scroll(_margin_scroll(canvas, top))
+    assert top.get_xlim() != top_before
+    assert bottom.get_xlim() == bottom_before      # the other panel untouched
+
+
+def test_the_bottom_panel_still_zooms_its_own_x_axis(qapp):
+    # A point below the bottom panel is also below every panel above
+    # it, so taking the *first* strip match zoomed the top panel
+    # whenever the bottom one's own strip was aimed at. The nearest
+    # panel above the cursor wins.
+    canvas, top, bottom = _dual_panel_canvas(qapp)
+
+    top_before, bottom_before = top.get_xlim(), bottom.get_xlim()
+    canvas._on_scroll(_margin_scroll(canvas, bottom))
+    assert bottom.get_xlim() != bottom_before
+    assert top.get_xlim() == top_before
+
+
+def test_scrolling_a_panel_body_still_zooms_intensity_not_x(qapp):
+    # The strip search must not steal the gesture from the intensity
+    # zoom -- it only runs when the cursor is in a margin.
+    canvas, top, _bottom = _dual_panel_canvas(qapp)
+    bbox = top.get_window_extent()
+    event = types.SimpleNamespace(
+        name="scroll_event", canvas=canvas.canvas, inaxes=top,
+        x=bbox.x0 + 0.5 * bbox.width, y=bbox.y0 + 0.5 * bbox.height, step=1, button="up",
+    )
+    event.xdata, event.ydata = top.transData.inverted().transform((event.x, event.y))
+
+    x_before, y_before = top.get_xlim(), top.get_ylim()
+    canvas._on_scroll(event)
+    assert top.get_xlim() == x_before
+    assert top.get_ylim() != y_before
+
+
+def test_a_single_panel_view_is_unaffected(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    before = canvas.ax.get_xlim()
+    canvas._on_scroll(_margin_scroll(canvas, canvas.ax))
+    assert canvas.ax.get_xlim() != before

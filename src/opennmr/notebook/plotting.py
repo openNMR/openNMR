@@ -43,7 +43,13 @@ import matplotlib.colors as cl
 from matplotlib import cm
 from matplotlib.ticker import MaxNLocator
 
+<<<<<<< HEAD
 from .utils import NUC_label
+=======
+# One implementation of the too-light-colour rule, in the live
+# plotting package; this legacy copy delegates rather than repeating it.
+from ..plotting.style import readable_cmap
+>>>>>>> upstream/main
 
 # Output formats every save-capable plotting function in nmrtools
 # accepts for its ``save_format`` argument.
@@ -242,7 +248,13 @@ def get_stack_colormap(color='black'):
         )
 
     try:
-        return plt.get_cmap(color)
+        # Through the shared luminance filter, so this legacy notebook
+        # API draws with the same readable colours the live plotting
+        # package does rather than quietly keeping the near-white ends
+        # -- see opennmr.plotting.style.MAX_LINE_LUMINANCE. Delegated
+        # rather than reimplemented: two copies of a rule like this
+        # drift.
+        return readable_cmap(plt.get_cmap(color))
     except (ValueError, KeyError):
         print(f"Colour scheme '{color}' not recognised; defaulting to black.")
         return cl.LinearSegmentedColormap.from_list(
@@ -273,9 +285,10 @@ def get_contour_cmap(name):
             f"Available options: {sorted(CONTOUR_CMAP_NAMES)}"
         )
     try:
-        return plt.get_cmap(name)  # modern matplotlib
+        base = plt.get_cmap(name)  # modern matplotlib
     except AttributeError:  # pragma: no cover - very old matplotlib
-        return cm.get_cmap(name)
+        base = cm.get_cmap(name)
+    return readable_cmap(base)
 
 
 # ============================================================

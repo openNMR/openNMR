@@ -345,7 +345,9 @@ def test_nmr2d_integrate_and_fit_relaxation_recovers_t1():
 
     assert len(fits) == 1
     assert fits[0]["params"]["T1"] == pytest.approx(T1_true, rel=0.02)
-    assert fits[0]["peak_label"] == "Peak 1"
+    # An integrated series is labelled by its own region, not "Peak 1"
+    # -- it is a region, and its bounds are what identify it.
+    assert fits[0]["peak_label"] == "Region 1 (4.5-5.5 ppm)"
 
 
 def test_nmr2d_fit_relaxation_value_source_amplitude_recovers_t1():
