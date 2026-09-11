@@ -794,3 +794,68 @@ def test_reflect_unstable_roots_leaves_a_stable_model_alone():
     with_guard = ft.linear_predict(decaying, order=8, n_predict=16, stabilise=True)
     without = ft.linear_predict(decaying, order=8, n_predict=16, stabilise=False)
     np.testing.assert_allclose(with_guard, without, rtol=1e-6, atol=1e-9)
+
+
+# ============================================================
+# Echo position offset
+# ============================================================
+
+def _echo(n=256, top=90, width=12.0):
+    """A symmetric full echo peaking at ``top``."""
+    t = np.arange(n)
+    return (np.exp(-((t - top) / width) ** 2)).astype(complex)
+
+
+def test_find_echo_top_offset_shifts_the_reported_top():
+    fid = _echo(top=90)
+    assert ft.find_echo_top(fid) == pytest.approx(90.0, abs=0.05)
+    assert ft.find_echo_top(fid, offset=4.0) == pytest.approx(94.0, abs=0.05)
+    assert ft.find_echo_top(fid, offset=-4.0) == pytest.approx(86.0, abs=0.05)
+
+
+def test_find_echo_top_offset_accepts_fractions():
+    fid = _echo(top=90)
+    assert ft.find_echo_top(fid, offset=0.5) == pytest.approx(90.5, abs=0.05)
+
+
+def test_find_echo_top_offset_is_clamped_to_the_array():
+    # A large offset must not roll the top outside the data it indexes.
+    fid = _echo(n=128, top=60)
+    assert ft.find_echo_top(fid, offset=1e6) == pytest.approx(127.0)
+    assert ft.find_echo_top(fid, offset=-1e6) == pytest.approx(0.0)
+
+
+def test_align_echo_offset_moves_where_the_peak_lands():
+    fid = _echo(top=90)
+    aligned = ft.align_echo(fid)
+    # Without an offset the peak lands at index 0.
+    assert int(np.argmax(np.abs(aligned))) == 0
+    # An offset of +4 rolls 4 points further, so the true peak ends up
+    # 4 samples from the end (wrapped), i.e. deliberately mis-set --
+    # which is the point: the control exists to correct a detector that
+    # landed in the wrong place.
+    offset_aligned = ft.align_echo(fid, echo_offset=4.0)
+    assert int(np.argmax(np.abs(offset_aligned))) == len(fid) - 4
+
+
+def test_prepare_fid_uses_the_same_top_for_the_roll_and_the_wrap_cap():
+    # The wrap limit that caps truncate has to come from the offset
+    # top, or the cap no longer matches where the pre-echo portion
+    # actually wrapped to.
+    fid = _echo(n=256, top=90)
+    plain = ft.prepare_fid(fid, align_echo_enabled=True)
+    nudged = ft.prepare_fid(fid, align_echo_enabled=True, echo_offset=10.0)
+    assert len(plain) == 256 - 90
+    assert len(nudged) == 256 - 100
+
+
+def test_prepare_fid_truncate_still_applies_alongside_an_offset():
+    fid = _echo(n=256, top=90)
+    result = ft.prepare_fid(fid, align_echo_enabled=True, echo_offset=10.0, truncate=50)
+    assert len(result) == 50
+
+
+def test_prepare_fid_echo_offset_defaults_to_no_change():
+    fid = _echo()
+    np.testing.assert_allclose(ft.prepare_fid(fid, align_echo_enabled=True),
+                               ft.prepare_fid(fid, align_echo_enabled=True, echo_offset=0.0))

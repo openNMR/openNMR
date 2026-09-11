@@ -381,6 +381,53 @@ def apply_recorded_phase(spectrum: np.ndarray, phc0: float, phc1: float, axis: i
     return np.moveaxis(phased, -1, axis)
 
 
+def recorded_phase_from_pivot_model(phase0: float, phase1: float,
+                                    pivot_frac: float = 0.5) -> tuple[float, float]:
+    """Express a phase given in this project's own pivot model
+    (:func:`opennmr.processing.ft.apply_phase`) as the ``(PHC0, PHC1)``
+    pair :func:`apply_recorded_phase` would have to be handed to
+    produce exactly the same rotation.
+
+    Needed because the *recorded* slot has a fixed meaning -- TopSpin's
+    index ramp, ``exp(+i*phi)`` -- while a phase this project computes
+    itself (autophase) comes out in the pivot model, ``exp(-i*phi)``.
+    Storing one as the other silently flips the sign.
+
+    **The bug this exists for.** X-Pulse records no phase of its own,
+    so its base comes from autophase at read time, and that value was
+    being written straight into ``recorded_phase0``. On any rebuild
+    from the raw FID the two conventions then cancelled instead of
+    composing: measured on ``test_data/xpulse_PFG/2026.08.22/4``, a
+    saved -83.4 deg base plus the user's own -83.4 deg left the
+    reloaded series still needing ~-90 deg, i.e. essentially unphased,
+    while a first (sidecar-free) load of the same data needed none.
+
+    Derived, not fitted, from :func:`apply_recorded_phase`'s own stated
+    equivalence and verified against it to 2e-16 across pivots: for a
+    descending axis, ``apply_phase(p0, p1, pivot_frac=pf)`` writes
+    ``phi = p0 + p1*(1 - pf) - p1*u`` over the normalised index ``u``,
+    and ``apply_recorded_phase(PHC0, PHC1)`` writes ``-PHC0 - PHC1*u``
+    for the same ``u``, so ``PHC0 = -(p0 + p1*(1 - pf))`` and
+    ``PHC1 = p1``.
+    """
+    return -(float(phase0) + float(phase1) * (1.0 - float(pivot_frac))), float(phase1)
+
+
+def pivot_model_from_recorded_phase(phc0: float, phc1: float,
+                                    pivot_frac: float = 0.5) -> tuple[float, float]:
+    """The inverse of :func:`recorded_phase_from_pivot_model` -- a
+    recorded ``(PHC0, PHC1)`` as the ``(phase0, phase1)`` that
+    :func:`opennmr.processing.ft.apply_phase` would apply at
+    ``pivot_frac`` for the same result.
+
+    Used where a recorded phase has to be shown alongside, or added to,
+    a user phase (the Phase panel's own "current phase" readout):
+    adding the two raw numbers would be adding quantities from two
+    different models.
+    """
+    return -float(phc0) - float(phc1) * (1.0 - float(pivot_frac)), float(phc1)
+
+
 #: ``metadata.raw`` keys holding the phase TopSpin itself recorded, per
 #: dimension. Kept **separate** from ``phase0``/``phase1`` (and their
 #: ``_f1`` siblings), which mean the *user's* own phase: the two are
@@ -652,7 +699,8 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             phase0_inc: float = 0.1, phase1_max: float = 20.0, phase1_improvement: float = 0.15,
             phase_penalty: str = "magnitude",
             window: str | None = None, window_kwargs: dict | None = None, zero_fill: int | None = None,
-            fid_shift: float = 0.0, align_echo: bool = False,
+            fid_shift: float = 0.0, align_echo: bool = False, echo_offset: float = 0.0,
+            truncate: int | None = None,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward",
             magnitude: bool | None = None) -> NMRSpectrum:
@@ -729,7 +777,8 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     # the full step-ordering rationale, shared with X-Pulse's read_1d
     # and the GUI's own live Processing-preview).
     fid = processing_ft.prepare_fid(
-        fid, fid_shift=fid_shift, align_echo_enabled=align_echo,
+        fid, fid_shift=fid_shift, align_echo_enabled=align_echo, echo_offset=echo_offset,
+        truncate=truncate,
         linear_predict_points=linear_predict_points, linear_predict_order=linear_predict_order,
         linear_predict_direction=linear_predict_direction,
     )
@@ -857,7 +906,8 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             window: str | None = None, window_kwargs: dict | None = None, zero_fill: int | None = None,
             window_f1: str | None = None, window_kwargs_f1: dict | None = None,
             zero_fill_f1: int | None = None, truncate_f1: int | None = None,
-            fid_shift: float = 0.0, align_echo: bool = False,
+            truncate: int | None = None,
+            fid_shift: float = 0.0, align_echo: bool = False, echo_offset: float = 0.0,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward",
             magnitude: bool | None = None,
@@ -1082,15 +1132,22 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
         # truncate= for all of them, so every row ends up the same
         # final length regardless of where each one's own echo top
         # happened to land.
-        truncate_cap = None
+        truncate_cap = truncate
         if align_echo:
             echo_wrap_limits = [
-                row.shape[0] - int(np.ceil(processing_ft.find_echo_top(row))) for row in data
+                row.shape[0] - int(np.ceil(processing_ft.find_echo_top(row, offset=echo_offset)))
+                for row in data
             ]
-            truncate_cap = min(echo_wrap_limits)
+            # The user's own truncate, if any, still applies -- it is
+            # just additionally capped at the shared wrap point, since
+            # a row truncated past its own wrap keeps the mirror-image
+            # tail this cap exists to remove.
+            wrap_cap = min(echo_wrap_limits)
+            truncate_cap = wrap_cap if truncate is None else min(truncate, wrap_cap)
         fid_f2 = np.apply_along_axis(
             lambda row: processing_ft.prepare_fid(
-                row, fid_shift=fid_shift, align_echo_enabled=align_echo, truncate=truncate_cap,
+                row, fid_shift=fid_shift, align_echo_enabled=align_echo,
+                echo_offset=echo_offset, truncate=truncate_cap,
                 linear_predict_points=linear_predict_points, linear_predict_order=linear_predict_order,
                 linear_predict_direction=linear_predict_direction,
             ),

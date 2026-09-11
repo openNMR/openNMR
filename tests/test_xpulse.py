@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from opennmr.io import xpulse
 
@@ -526,3 +527,63 @@ def test_read_auto_dispatches_ntuples_file_to_read_2d(tmp_path):
     spectrum = xpulse._read_auto(path, autophase=False)
     assert spectrum.ndim == 2
     assert spectrum.metadata.nucleus_indirect == "13C"
+
+
+# ============================================================
+# Recorded (autophase) vs user phase
+# ============================================================
+
+def _phase_state(raw):
+    return (
+        float(raw.get("recorded_phase0", 0.0)), float(raw.get("recorded_phase1", 0.0)),
+        float(raw.get("phase0", 0.0)), float(raw.get("phase1", 0.0)),
+    )
+
+
+def test_autophase_result_is_recorded_not_a_user_phase():
+    # The bug this fixes: an autophase result stored in the *user* slot
+    # is overwritten by a saved sidecar's own phase0 on load, and the
+    # rebuild-from-raw then applies the user's correction with no base
+    # under it -- leaving the spectrum essentially unphased.
+    import os
+
+    path = "test_data/xpulse_PFG/4/array1"
+    if not os.path.isdir(path):
+        pytest.skip(f"{path} not available")
+    spectrum = xpulse.read_array("test_data/xpulse_PFG/4")
+    recorded0, _r1, user0, user1 = _phase_state(spectrum.metadata.raw)
+    assert recorded0 != 0.0          # autophase found something
+    assert user0 == 0.0 and user1 == 0.0   # and it is not a user phase
+
+
+def test_a_supplied_phase_is_a_user_phase_not_a_recorded_one():
+    # The mirror case: a caller-supplied phase already *is* the user's,
+    # and recording it as a base too would double-count it on rebuild.
+    import os
+
+    if not os.path.isdir("test_data/xpulse_PFG/4"):
+        pytest.skip("test data not available")
+    spectrum = xpulse.read_array("test_data/xpulse_PFG/4", autophase=False,
+                                  phase0=31.0, phase1=2.0)
+    recorded0, recorded1, user0, user1 = _phase_state(spectrum.metadata.raw)
+    assert (recorded0, recorded1) == (0.0, 0.0)
+    assert (user0, user1) == (31.0, 2.0)
+
+
+def test_recorded_and_user_phase_use_the_shared_key_names():
+    # Keyed through io.bruker's own accessors so the two vendors cannot
+    # drift apart about which key means what.
+    from opennmr.io import bruker
+
+    # Converted into the recorded slot's own model, not copied into it:
+    # that slot means TopSpin's index ramp (exp(+i*phi)) and autophase
+    # returns the pivot model (exp(-i*phi)), so a verbatim copy applies
+    # the correction backwards.
+    applied = xpulse._phase_metadata(12.0, 3.0, autophased=True)
+    assert applied[bruker.RECORDED_PHASE_KEYS["f2"][0]] == pytest.approx(-13.5)
+    assert applied[bruker.USER_PHASE_KEYS["f2"][0]] == 0.0
+    assert bruker.recorded_phase(applied, "f2") == pytest.approx((-13.5, 3.0))
+
+    supplied = xpulse._phase_metadata(12.0, 3.0, autophased=False)
+    assert bruker.recorded_phase(supplied, "f2") == (0.0, 0.0)
+    assert supplied[bruker.USER_PHASE_KEYS["f2"][0]] == 12.0

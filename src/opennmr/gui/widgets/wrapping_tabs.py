@@ -69,7 +69,21 @@ class FlowLayout(QLayout):
         self._layout(rect, apply=True)
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return self.minimumSize()
+        """One row's worth, as a *starting* hint only.
+
+        The real height always comes from :meth:`heightForWidth`; a
+        flow layout has no single natural size, since its height is
+        entirely a function of the width it is given."""
+        width = 0
+        height = 0
+        spacing = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            width += hint.width() + spacing
+            height = max(height, hint.height())
+        margins = self.contentsMargins()
+        return QSize(max(0, width - spacing) + margins.left() + margins.right(),
+                     height + margins.top() + margins.bottom())
 
     def minimumSize(self) -> QSize:  # noqa: N802
         size = QSize()
@@ -101,6 +115,45 @@ class FlowLayout(QLayout):
         return y + row_height + margins.bottom() - rect.y()
 
 
+class _TabBar(QWidget):
+    """The strip itself -- a widget whose height genuinely depends on
+    its width.
+
+    Both overrides are load-bearing, and their absence is what stopped
+    nested strips wrapping. Qt only consults ``heightForWidth`` when
+    the widget's **size policy** says to (``setHeightForWidth(True)``);
+    without it a parent layout sizes the strip from ``sizeHint`` alone,
+    which is one row tall, and every wrapped row is simply clipped.
+    That went unnoticed for the top-level strips because they sit
+    directly in the window and get their full width, so they rarely
+    needed a second row -- the Analysis sub-tabs, five buttons inside
+    an already-narrow side panel, always do.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        layout = self.layout()
+        return layout.heightForWidth(width) if layout else super().heightForWidth(width)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """Re-ask the parent layout for space when the width changes.
+
+        A flow layout's height is a function of its width, so a resize
+        that rewraps the buttons changes how much vertical space this
+        strip needs -- without invalidating, the parent keeps the
+        height it computed for the old width."""
+        super().resizeEvent(event)
+        self.updateGeometry()
+
+
 class WrappingTabWidget(QWidget):
     """``QTabWidget``'s API, with a tab strip that wraps.
 
@@ -113,10 +166,8 @@ class WrappingTabWidget(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._bar = QWidget(self)
+        self._bar = _TabBar(self)
         self._bar_layout = FlowLayout(self._bar)
-        self._bar.setSizePolicy(QSizePolicy.Policy.Preferred,
-                                 QSizePolicy.Policy.Minimum)
         self._buttons: list[QToolButton] = []
         self._labels: list[str] = []
         self._group = QButtonGroup(self)

@@ -9,6 +9,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from opennmr.gui.widgets import data_browser as browser_module
 from opennmr.gui.widgets.data_browser import _PATH_ROLE, _VENDOR_ROLE, DataBrowser
 
 
@@ -145,3 +146,93 @@ def test_undescribable_experiment_still_lists(qapp, tmp_path):
     leaves = _leaves(browser._tree.invisibleRootItem())
     assert len(leaves) == 1
     assert leaves[0].data(0, _PATH_ROLE) == str(expt)
+
+
+def test_cloud_experiment_is_listed_without_being_peeked(qapp, tmp_path, monkeypatch):
+    """The reason cloud detection exists: peeking reads the parameter
+    files, and on a OneDrive/iCloud folder that *downloads* them -- so
+    expanding a folder of a hundred cloud experiments would become a
+    hundred sequential downloads. The experiment must still list, and
+    must say plainly what it is."""
+    from opennmr.io import cloud
+
+    expt = tmp_path / "10"
+    expt.mkdir()
+    (expt / "acqus").write_text("##$NS= 16\n")
+    monkeypatch.setattr(cloud, "parameters_are_local", lambda path: False)
+    monkeypatch.setattr(cloud, "pending_download_bytes", lambda path: 633 * 1024**2)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("peek() must not touch a cloud-backed experiment")
+
+    monkeypatch.setattr(browser_module.io, "peek", fail)
+
+    browser = DataBrowser()
+    browser.set_matches(str(tmp_path), [(str(expt), "bruker")])
+
+    leaf = _leaves(browser._tree.invisibleRootItem())[0]
+    assert "in cloud" in leaf.text(0)
+    assert "633 MB" in leaf.text(0)
+
+
+def test_local_experiment_is_still_peeked(qapp, tmp_path, monkeypatch):
+    """Cloud detection must not stop ordinary local data being
+    described -- that is the common case."""
+    from opennmr.io import cloud
+
+    expt = tmp_path / "10"
+    expt.mkdir()
+    monkeypatch.setattr(cloud, "parameters_are_local", lambda path: True)
+    monkeypatch.setattr(
+        browser_module.io, "peek",
+        lambda path, vendor=None: {"nucleus": "1H", "ndim": 2, "shape": (256, 1024)},
+    )
+
+    browser = DataBrowser()
+    browser.set_matches(str(tmp_path), [(str(expt), "bruker")])
+
+    leaf = _leaves(browser._tree.invisibleRootItem())[0]
+    assert "1H" in leaf.text(0) and "256x1024" in leaf.text(0)
+    assert "in cloud" not in leaf.text(0)
+
+
+def test_double_click_loads_an_experiment_exactly_once(qapp, tmp_path):
+    """One double-click is one load.
+
+    `itemActivated` and `itemDoubleClicked` were both connected to the
+    same handler, and a double-click emits *both* -- so every
+    double-click in the browser loaded the same experiment twice: two
+    identical rows in the list, and for a large 2D the whole
+    multi-second read done twice. Real user report: "the folder browser
+    shows each data set twice, I hope this isn't a double load."
+
+    Both signals are emitted here, which is what Qt itself does for one
+    double-click; the handler must respond to that gesture once."""
+    expt = tmp_path / "10"
+    expt.mkdir()
+    browser = DataBrowser()
+    activated = []
+    browser.spectrumActivated.connect(lambda path, vendor: activated.append(path))
+    browser.set_matches(str(tmp_path), [(str(expt), "bruker")])
+    item = browser._tree.topLevelItem(0)
+
+    browser._tree.itemDoubleClicked.emit(item, 0)
+    browser._tree.itemActivated.emit(item, 0)
+
+    assert activated == [str(expt)]
+
+
+def test_return_key_also_activates(qapp, tmp_path):
+    """`itemActivated` is kept rather than `itemDoubleClicked` because
+    it is the platform's own activation signal -- Return counts, and so
+    does a single click on a desktop configured for it."""
+    expt = tmp_path / "10"
+    expt.mkdir()
+    browser = DataBrowser()
+    activated = []
+    browser.spectrumActivated.connect(lambda path, vendor: activated.append(path))
+    browser.set_matches(str(tmp_path), [(str(expt), "bruker")])
+
+    browser._tree.itemActivated.emit(browser._tree.topLevelItem(0), 0)
+
+    assert activated == [str(expt)]

@@ -289,14 +289,17 @@ RELAXATION_MODELS = {
     "stejskal_tanner": {
         "func": stejskal_tanner_decay, "params": ["I0", "D"],
         "p0": _p0_diffusion, "bounds": _bounds_diffusion, "rate_param": "D",
+        "log_params": ("D",),
     },
     "stejskal_tanner_stretched": {
         "func": stejskal_tanner_decay_stretched, "params": ["I0", "D", "beta"],
         "p0": _p0_diffusion_stretched, "bounds": _bounds_diffusion_stretched, "rate_param": "D",
+        "log_params": ("D",),
     },
     "stejskal_tanner_biexponential": {
         "func": stejskal_tanner_decay_biexponential, "params": ["I0a", "Da", "I0b", "Db"],
         "p0": _p0_diffusion_biexp, "bounds": _bounds_diffusion_biexp, "rate_param": None,
+        "log_params": ("Da", "Db"),
     },
 }
 
@@ -431,6 +434,138 @@ def build_custom_model(equation: str, independent_var: str = "x",
 # Fitting
 # ============================================================
 
+#: What a reported "+/- x" from a least-squares fit actually *is*.
+#: There are two genuinely different quantities here and they answer
+#: different questions, so every result carries which one it holds
+#: (see :func:`describe_uncertainty`) and every report says so.
+#:
+#: ``measured``  -- per-point measurement errors were supplied, so
+#:   scipy is run with ``absolute_sigma=True`` and the covariance is
+#:   on the scale those errors set. This is the uncertainty **on the
+#:   parameter given the known noise**: it answers "how well does my
+#:   data pin this number down", and it does not shrink just because
+#:   the model happens to fit tidily.
+#:
+#: ``scatter``   -- no measurement errors were supplied, so scipy is
+#:   run with ``absolute_sigma=False`` and rescales the covariance by
+#:   the reduced chi-squared. This is the uncertainty **assuming the
+#:   model is correct** and attributing all residual scatter to noise:
+#:   it answers "how tightly is this number determined by the shape of
+#:   the curve", and it is optimistic whenever the model is wrong,
+#:   because a systematic misfit is absorbed as if it were noise.
+#:
+#: The distinction is not pedantic. The same dataset can report a D
+#: with a 2% "error" one way and 8% the other, and only one of those
+#: is a claim about the measurement.
+UNCERTAINTY_KINDS = {
+    "measured": {
+        "short": "1σ (from supplied point errors)",
+        "long": (
+            "1σ, propagated from the per-point measurement errors supplied with the data "
+            "(absolute_sigma=True). Independent of how well the model happens to fit."
+        ),
+    },
+    "scatter": {
+        "short": "1σ (from residual scatter)",
+        "long": (
+            "1σ, from the scatter of the data about the fitted curve, rescaled by the reduced "
+            "chi-squared (absolute_sigma=False). Assumes the model is correct -- any systematic "
+            "misfit is absorbed into this number as if it were noise, making it optimistic."
+        ),
+    },
+}
+
+
+#: Parameters that a model spec may ask to be **searched in log10
+#: space**, listed in its own ``log_params`` key.
+#:
+#: A diffusion coefficient is ~1e-9 sitting in the same parameter
+#: vector as an amplitude of ~1, and the interesting range spans five
+#: decades. Searched linearly, that is close to hopeless: measured
+#: directly on noise-free two-component synthetic data with the
+#: starting guess *already at the true values*, a linear search
+#: converged to D = 5.5e-09 / 6.2e-10 against a truth of 3e-09 /
+#: 2e-10 (R² 0.93), and moving the guess a decade away made it worse.
+#: The same fits in log10 space recovered 3.000e-09 / 2.000e-10
+#: exactly, from every starting point tried, and a three-component fit
+#: recovered all three components to 6 significant figures.
+#:
+#: Nothing outside :func:`fit_relaxation`'s own curve_fit call sees
+#: this: guesses, bounds, reported values, errors and covariance are
+#: all in natural units, with the covariance pushed back through the
+#: transform's Jacobian (see :func:`_undo_log_space`). It is a change
+#: of search coordinates, not a change of what is reported.
+LOG_FITTED_PARAMS = ("D", "Da", "Db", "D1", "D2", "D3", "D4", "D5", "D6")
+
+#: Smallest value a log-space lower bound is allowed to reach. A
+#: bound of 0 (or -inf) has no logarithm, and a diffusion coefficient
+#: below 1e-20 m^2/s is not a physical answer anyone is looking for --
+#: it is the fit having collapsed a component to nothing.
+_LOG_FLOOR = 1e-20
+
+
+def _to_log_space(values, log_indices, what: str, floor: bool = False):
+    """``values`` with the entries at ``log_indices`` replaced by their
+    base-10 logarithms. ``floor``: clamp a non-positive lower bound up
+    to :data:`_LOG_FLOOR` rather than raising, since ``0`` is the
+    natural way to write "no lower bound" for a positive quantity."""
+    out = list(values)
+    for i in log_indices:
+        value = float(out[i])
+        if value <= 0:
+            if floor:
+                value = _LOG_FLOOR
+            else:
+                raise ValueError(
+                    f"{what} for a log-fitted parameter must be positive, got {value:g}."
+                )
+        out[i] = np.log10(value) if np.isfinite(value) else np.inf
+    return out
+
+
+def _from_log_space(values, log_indices):
+    """Inverse of :func:`_to_log_space` for a single parameter vector."""
+    out = list(values)
+    for i in log_indices:
+        out[i] = 10.0 ** out[i]
+    return out
+
+
+def _undo_log_space(popt, pcov, log_indices):
+    """Take a fitted vector and its covariance back to natural units.
+
+    The values are just ``10**x``. The covariance needs the Jacobian
+    of that map -- ``d(10**x)/dx = 10**x * ln(10)`` -- applied as
+    ``J @ pcov @ J.T`` with ``J`` diagonal, which is ordinary linear
+    error propagation and exactly what makes the reported ± come out
+    in m^2/s rather than in decades."""
+    if not log_indices:
+        return np.asarray(popt, dtype=float), np.asarray(pcov, dtype=float)
+    popt = np.asarray(popt, dtype=float).copy()
+    jacobian = np.ones_like(popt)
+    for i in log_indices:
+        popt[i] = 10.0 ** popt[i]
+        jacobian[i] = popt[i] * np.log(10.0)
+    pcov = np.asarray(pcov, dtype=float) * np.outer(jacobian, jacobian)
+    return popt, pcov
+
+
+def describe_uncertainty(from_measurement_errors: bool, dof: int) -> dict:
+    """The ``uncertainty`` block every :func:`fit_relaxation` result
+    carries: which of :data:`UNCERTAINTY_KINDS` its ``errors`` are,
+    spelled out, plus the degrees of freedom they were computed on."""
+    kind = "measured" if from_measurement_errors else "scatter"
+    return {
+        "kind": kind,
+        "sigma_level": 1.0,
+        "from_measurement_errors": bool(from_measurement_errors),
+        "dof": int(dof),
+        "short": UNCERTAINTY_KINDS[kind]["short"],
+        "description": UNCERTAINTY_KINDS[kind]["long"],
+    }
+
+
+
 def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
                     bounds=None, fixed=None, maxfev=20000, custom_model: dict | None = None) -> dict:
     """
@@ -521,9 +656,18 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
     lo_free = [lo_full[i] for i in free_idx]
     hi_free = [hi_full[i] for i in free_idx]
 
+    # Parameters the spec asks to be *searched* in log10 space (see
+    # LOG_FITTED_PARAMS). Everything outside this block -- p0, bounds,
+    # the returned params/errors, the report -- stays in natural units;
+    # only the numbers handed to curve_fit are transformed.
+    log_free = [i for i, name in enumerate(free_names) if name in set(spec.get("log_params", ()))]
+    p0_free = _to_log_space(p0_free, log_free, "initial guess")
+    lo_free = _to_log_space(lo_free, log_free, "lower bound", floor=True)
+    hi_free = _to_log_space(hi_free, log_free, "upper bound")
+
     def wrapper(t, *free_vals):
         full = dict(fixed)
-        full.update(zip(free_names, free_vals))
+        full.update(zip(free_names, _from_log_space(free_vals, log_free)))
         return func(t, *[full[p] for p in param_names])
 
     sigma = y_err if (y_err is not None and np.all(np.isfinite(y_err)) and np.all(y_err > 0)) else None
@@ -540,6 +684,7 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
         sigma=sigma, absolute_sigma=sigma is not None, maxfev=maxfev, x_scale="jac",
     )
 
+    popt, pcov = _undo_log_space(popt, pcov, log_free)
     perr = np.sqrt(np.diag(pcov))
 
     params = dict(fixed)
@@ -552,15 +697,368 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
     residual = y - y_fit
     rmse = np.sqrt(np.mean(residual ** 2))
     chi2 = np.sum((residual / sigma) ** 2) if sigma is not None else np.sum(residual ** 2)
-    red_chi2 = chi2 / max(len(y) - len(free_names), 1)
+    dof = max(len(y) - len(free_names), 1)
+    red_chi2 = chi2 / dof
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r_squared = 1.0 - float(np.sum(residual ** 2)) / ss_tot if ss_tot > 0 else np.nan
 
     return {
         "model": model, "param_names": param_names, "rate_param": spec["rate_param"],
         "params": params, "errors": errors,
         "popt": popt, "pcov": pcov, "free_names": free_names,
+        "fixed": dict(fixed), "p0": list(p0_full), "bounds": (list(lo_full), list(hi_full)),
+        # The spec itself, not just its name: a custom_model (a typed
+        # equation, or build_diffusion_model's N-component spec) exists
+        # nowhere in RELAXATION_MODELS, so anything wanting to
+        # re-evaluate the curve later -- fit_curve_uncertainty, the
+        # report, a refit after excluding a point -- cannot get at the
+        # function by looking the name up. Carrying it costs nothing
+        # and removes a whole class of "works for named models only".
+        "spec": spec,
         "t": t, "y": y, "y_err": y_err, "y_fit": y_fit,
-        "fit_quality": {"rmse": rmse, "chi2": chi2, "reduced_chi2": red_chi2},
+        "uncertainty": describe_uncertainty(sigma is not None, dof),
+        "fit_quality": {"rmse": rmse, "chi2": chi2, "reduced_chi2": red_chi2,
+                         "r_squared": r_squared, "dof": dof, "n_points": int(len(y))},
     }
+
+
+def fit_relaxation_global(datasets, model: str = "exponential_decay", shared=(),
+                          custom_model: dict | None = None, p0=None, bounds=None,
+                          fixed=None, maxfev=40000, labels=None) -> dict:
+    """Fit several curves **at once**, with some parameters tied
+    across all of them and the rest free per curve.
+
+    The multivariate fit named on the roadmap for PFG and T1/T2. The
+    question it answers is the one a per-curve fit cannot: *these
+    peaks belong to the same molecule, so they share one diffusion
+    coefficient -- what is it, and how well determined is it by all of
+    the data together?* Fitting each peak separately and averaging the
+    answers is not the same thing, and understates the uncertainty,
+    because it throws away the constraint that they were never allowed
+    to disagree in the first place.
+
+    The same shape covers the other standard cases: one T2 across
+    several integration regions of one species; a shared inversion
+    efficiency ``C`` across every peak of an inversion-recovery series
+    (the pulse was equally imperfect for all of them) while each peak
+    keeps its own ``M0`` and ``T1``; a shared stretch exponent with
+    per-peak ``D``.
+
+    Parameters
+    ----------
+    datasets : sequence
+        One entry per curve. Each is either ``(t, y)``, ``(t, y,
+        y_err)``, or a dict with ``t``/``y``/optional ``y_err`` and
+        ``label`` keys. Every curve is fit with the same model, but
+        they need not share an x-grid or even a point count.
+    model : str
+        A :data:`RELAXATION_MODELS` key, as :func:`fit_relaxation`.
+    shared : sequence of str
+        Parameter names held to a single common value across every
+        dataset. Anything not listed gets its own value per dataset.
+        An empty ``shared`` is legal and simply fits them all
+        independently in one call -- useful as the null comparison.
+    custom_model : dict, optional
+        As :func:`fit_relaxation` -- e.g.
+        :func:`opennmr.processing.diffusion.build_diffusion_model`'s
+        N-component spec.
+    p0, bounds : optional
+        Starting guesses and ``(lo, hi)`` bounds **in model parameter
+        order**, applied to the shared parameters and used as each
+        dataset's starting point for the per-dataset ones. Omit for
+        the model's own data-driven defaults, computed from the
+        concatenated data.
+    fixed : dict, optional
+        ``{param: value}`` held fixed for every dataset.
+    labels : sequence of str, optional
+        Names for the datasets in the result. Defaults to the dicts'
+        own ``label`` keys, else ``"1"``, ``"2"``, ...
+
+    Returns
+    -------
+    dict with:
+        ``shared`` / ``shared_errors`` : the tied parameters and their
+            uncertainties -- **one** number each, determined by all
+            the data jointly.
+        ``per_dataset`` : list of per-curve dicts, each shaped like a
+            :func:`fit_relaxation` result (``params``, ``errors``,
+            ``t``, ``y``, ``y_fit``, ``fit_quality``) so every
+            existing consumer -- the report, the plot, the CSV -- works
+            on one unchanged.
+        ``uncertainty``, ``fit_quality`` : for the joint fit, over
+            every point of every curve.
+
+    Raises
+    ------
+    ValueError
+        If ``datasets`` is empty, a ``shared`` name isn't a model
+        parameter, or every parameter is both shared and fixed
+        (nothing left to fit).
+    """
+    if custom_model is not None:
+        spec = custom_model
+    elif model not in RELAXATION_MODELS:
+        raise ValueError(f"Unknown relaxation model '{model}'. Available: {sorted(RELAXATION_MODELS)}")
+    else:
+        spec = RELAXATION_MODELS[model]
+
+    func, param_names = spec["func"], spec["params"]
+    prepared = _prepare_global_datasets(datasets, labels)
+    if not prepared:
+        raise ValueError("fit_relaxation_global needs at least one dataset.")
+
+    fixed = dict(fixed or {})
+    shared = [name for name in dict.fromkeys(shared)]
+    unknown = [name for name in shared if name not in param_names]
+    if unknown:
+        raise ValueError(
+            f"shared names {unknown} are not parameters of model '{model}' "
+            f"(it has {param_names})."
+        )
+    shared_free = [name for name in shared if name not in fixed]
+    local_free = [name for name in param_names if name not in fixed and name not in shared]
+    if not shared_free and not local_free:
+        raise ValueError("Every parameter is fixed -- nothing to fit.")
+
+    # Defaults come from the pooled data: a per-dataset default would
+    # give each curve a different starting point for a parameter they
+    # are about to be forced to agree on, which is a needlessly bad
+    # place to start a joint fit from.
+    t_all = np.concatenate([d["t"] for d in prepared])
+    y_all = np.concatenate([d["y"] for d in prepared])
+    order_all = np.argsort(t_all)
+    p0_full = list(spec["p0"](t_all[order_all], y_all[order_all])) if p0 is None else list(p0)
+    if bounds is None:
+        lo_full, hi_full = spec["bounds"](t_all[order_all], y_all[order_all])
+    else:
+        lo_full, hi_full = bounds
+    lo_full, hi_full = list(lo_full), list(hi_full)
+    index_of = {name: i for i, name in enumerate(param_names)}
+
+    # Vector layout: every shared free parameter once, then every
+    # local free parameter repeated per dataset. Kept as an explicit
+    # index map rather than reconstructed by arithmetic at each use,
+    # so unpacking the result cannot drift out of step with packing.
+    vector_names: list[str] = list(shared_free)
+    slots: list[tuple[int, str]] = [(-1, name) for name in shared_free]
+    for d_index in range(len(prepared)):
+        for name in local_free:
+            vector_names.append(name)
+            slots.append((d_index, name))
+
+    guess = [p0_full[index_of[name]] for _d, name in slots]
+    lower = [lo_full[index_of[name]] for _d, name in slots]
+    upper = [hi_full[index_of[name]] for _d, name in slots]
+
+    # Same log10 search space as the single-curve fit -- see
+    # LOG_FITTED_PARAMS. It matters *more* here: a joint fit has to
+    # hold one shared D against several amplitudes at once, so the
+    # conditioning that makes a single Stejskal-Tanner fit merely
+    # imprecise makes this one land on the wrong answer outright
+    # (measured: a shared D of 1.05e-09 recovered against a synthetic
+    # truth of 8.50e-10, with every amplitude ~14% high to match).
+    log_names = set(spec.get("log_params", ()))
+    log_slots = [i for i, (_d, name) in enumerate(slots) if name in log_names]
+    guess = _to_log_space(guess, log_slots, "initial guess")
+    lower = _to_log_space(lower, log_slots, "lower bound", floor=True)
+    upper = _to_log_space(upper, log_slots, "upper bound")
+
+    def unpack(values, from_log: bool = True):
+        """The flat parameter vector -> one full {name: value} dict per
+        dataset. ``from_log`` undoes the log10 search transform on the
+        way out; the error-vector caller passes ``False``, since a
+        standard deviation is not exponentiated the way a value is (it
+        is propagated through the Jacobian instead -- see
+        :func:`_undo_log_space`)."""
+        if from_log:
+            values = _from_log_space(values, log_slots)
+        shared_values = {name: values[i] for i, name in enumerate(shared_free)}
+        out = []
+        cursor = len(shared_free)
+        for _d in prepared:
+            full = dict(fixed)
+            full.update(shared_values)
+            for name in local_free:
+                full[name] = values[cursor]
+                cursor += 1
+            out.append(full)
+        return out
+
+    # One concatenated "x" over every dataset, evaluated piecewise --
+    # curve_fit works on a single 1-D residual, and the datasets are
+    # deliberately allowed to have different x-grids and lengths.
+    lengths = [len(d["t"]) for d in prepared]
+    x_concat = np.concatenate([d["t"] for d in prepared])
+    y_concat = np.concatenate([d["y"] for d in prepared])
+    errs = [d.get("y_err") for d in prepared]
+    if all(e is not None and np.all(np.isfinite(e)) and np.all(e > 0) for e in errs):
+        sigma_concat = np.concatenate(errs)
+    else:
+        sigma_concat = None
+
+    def joint(_x, *values):
+        per_dataset = unpack(values)
+
+        pieces = []
+        for data, full in zip(prepared, per_dataset):
+            pieces.append(func(data["t"], *[full[name] for name in param_names]))
+        return np.concatenate(pieces)
+
+    popt_log, pcov_log = curve_fit(
+        joint, x_concat, y_concat, p0=guess, bounds=(lower, upper),
+        sigma=sigma_concat, absolute_sigma=sigma_concat is not None,
+        maxfev=maxfev, x_scale="jac",
+    )
+    popt, pcov = _undo_log_space(popt_log, pcov_log, log_slots)
+    perr = np.sqrt(np.diag(pcov))
+
+    resolved = unpack(popt, from_log=False)
+    error_vectors = unpack(perr, from_log=False)
+    # A fixed parameter has no uncertainty, and unpack() filled it with
+    # its *value*; overwrite so nothing downstream reads a held-constant
+    # number as an error bar.
+    for errors in error_vectors:
+        for name in fixed:
+            errors[name] = np.nan
+
+    y_fit_concat = joint(x_concat, *popt_log)
+    residual_all = y_concat - y_fit_concat
+    n_free = len(popt)
+    dof = max(len(y_concat) - n_free, 1)
+    chi2 = float(np.sum((residual_all / sigma_concat) ** 2)) if sigma_concat is not None \
+        else float(np.sum(residual_all ** 2))
+    ss_tot_all = float(np.sum((y_concat - np.mean(y_concat)) ** 2))
+
+    per_dataset = []
+    cursor = 0
+    for data, full, errors, length in zip(prepared, resolved, error_vectors, lengths):
+        y_fit = y_fit_concat[cursor:cursor + length]
+        cursor += length
+        residual = data["y"] - y_fit
+        ss_tot = float(np.sum((data["y"] - np.mean(data["y"])) ** 2))
+        per_dataset.append({
+            "label": data["label"], "peak_label": data["label"],
+            "model": model, "param_names": param_names, "rate_param": spec["rate_param"],
+            "spec": spec, "params": dict(full), "errors": dict(errors),
+            "t": data["t"], "y": data["y"], "y_err": data.get("y_err"), "y_fit": y_fit,
+            "shared": list(shared_free), "fixed": dict(fixed),
+            "uncertainty": describe_uncertainty(sigma_concat is not None, dof),
+            "fit_quality": {
+                "rmse": float(np.sqrt(np.mean(residual ** 2))),
+                "chi2": float(np.sum(residual ** 2)),
+                "reduced_chi2": chi2 / dof,
+                "r_squared": 1.0 - float(np.sum(residual ** 2)) / ss_tot if ss_tot > 0 else np.nan,
+                "dof": dof, "n_points": int(length),
+            },
+        })
+
+    return {
+        "model": model, "param_names": param_names, "spec": spec,
+        "shared": {name: float(popt[i]) for i, name in enumerate(shared_free)},
+        "shared_errors": {name: float(perr[i]) for i, name in enumerate(shared_free)},
+        "local_names": local_free, "fixed": dict(fixed),
+        "per_dataset": per_dataset, "labels": [d["label"] for d in prepared],
+        "popt": popt, "pcov": pcov, "vector_names": vector_names, "log_slots": log_slots,
+        "uncertainty": describe_uncertainty(sigma_concat is not None, dof),
+        "fit_quality": {
+            "rmse": float(np.sqrt(np.mean(residual_all ** 2))),
+            "chi2": chi2, "reduced_chi2": chi2 / dof,
+            "r_squared": 1.0 - float(np.sum(residual_all ** 2)) / ss_tot_all if ss_tot_all > 0 else np.nan,
+            "dof": dof, "n_points": int(len(y_concat)), "n_datasets": len(prepared),
+        },
+    }
+
+
+def _prepare_global_datasets(datasets, labels) -> list[dict]:
+    """Normalise :func:`fit_relaxation_global`'s several accepted
+    dataset spellings into one list of ``{t, y, y_err, label}``, each
+    sorted by t (the same ordering :func:`fit_relaxation` imposes, so
+    a joint fit and a per-curve one see the data the same way)."""
+    prepared = []
+    for i, entry in enumerate(datasets):
+        if isinstance(entry, dict):
+            t, y = entry["t"], entry["y"]
+            y_err = entry.get("y_err")
+            label = entry.get("label") or entry.get("peak_label")
+        else:
+            items = list(entry)
+            if len(items) == 2:
+                (t, y), y_err = items, None
+            elif len(items) == 3:
+                t, y, y_err = items
+            else:
+                raise ValueError(
+                    f"dataset {i} has {len(items)} elements -- expected (t, y) or (t, y, y_err)."
+                )
+            label = None
+        t = np.asarray(t, dtype=float)
+        y = np.asarray(y, dtype=float)
+        if t.size != y.size:
+            raise ValueError(f"dataset {i}: {t.size} x-values against {y.size} y-values.")
+        y_err = None if y_err is None else np.asarray(y_err, dtype=float)
+        order = np.argsort(t)
+        prepared.append({
+            "t": t[order], "y": y[order],
+            "y_err": None if y_err is None else y_err[order],
+            "label": (labels[i] if labels is not None and i < len(labels) else None) or label or f"{i + 1}",
+        })
+    return prepared
+
+
+def format_global_report(result: dict, width: int = 66) -> str:
+    """A readable summary of a :func:`fit_relaxation_global` result:
+    the shared parameters first (they are the answer the joint fit
+    exists to produce), then one line per dataset for the parameters
+    that stayed local."""
+    rule = "=" * width
+    n_shared = len(result["shared"])
+    lines = [rule, f"GLOBAL CURVE FIT — {result['model']}".center(width).rstrip(), rule]
+
+    quality = result["fit_quality"]
+    lines.append("")
+    lines.append(f"  {quality['n_datasets']} curve(s), {quality['n_points']} points, "
+                  f"{n_shared} shared parameter(s)")
+
+    if result["shared"]:
+        lines.append("")
+        lines.append("  Shared across every curve")
+        lines.append("  " + "-" * (width - 4))
+        for name, value in result["shared"].items():
+            error = result["shared_errors"].get(name)
+            lines.append(f"    {name:<10} {format_param_value(name, value, error)}")
+    else:
+        lines.append("")
+        lines.append("  No shared parameters — every curve fitted independently.")
+
+    if result["local_names"]:
+        lines.append("")
+        lines.append("  Per curve")
+        lines.append("  " + "-" * (width - 4))
+        for entry in result["per_dataset"]:
+            parts = [
+                f"{name}={format_param_value(name, entry['params'][name], entry['errors'].get(name))}"
+                for name in result["local_names"]
+            ]
+            lines.append(f"    {entry['label']}: " + ",  ".join(parts))
+
+    uncertainty = result["uncertainty"]
+    lines.append("")
+    lines.append("  Uncertainty")
+    lines.append("  " + "-" * (width - 4))
+    lines.append(f"    {uncertainty['short']}")
+    for chunk in _wrap(uncertainty["description"], width - 6):
+        lines.append(f"    {chunk}")
+
+    lines.append("")
+    lines.append("  Fit quality (joint, over every curve)")
+    lines.append("  " + "-" * (width - 4))
+    if np.isfinite(quality.get("r_squared", np.nan)):
+        lines.append(f"    R²             = {quality['r_squared']:.5f}")
+    lines.append(f"    RMSE           = {quality['rmse']:.4g}")
+    lines.append(f"    reduced χ²     = {quality['reduced_chi2']:.4g}")
+    lines.append(f"    points / d.o.f = {quality['n_points']} / {quality['dof']}")
+    lines.append(rule)
+    return "\n".join(lines)
 
 
 def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 3.0):
@@ -582,7 +1080,7 @@ def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 
     Returns ``(t_fine, y_fine, y_band)`` -- plot the shaded region as
     ``y_fine - y_band`` to ``y_fine + y_band``.
     """
-    spec = RELAXATION_MODELS[fit_result["model"]]
+    spec = fit_result.get("spec") or RELAXATION_MODELS[fit_result["model"]]
     func, param_names = spec["func"], spec["params"]
     free_names = fit_result["free_names"]
     params = fit_result["params"]
@@ -693,26 +1191,151 @@ def format_diffusion_value(value, error=None, sig_figs=3):
     return f"{val_str} m^2/s"
 
 
-def print_relaxation_report(fit):
-    """Print a human-readable summary of a :func:`fit_relaxation` result."""
-    print("\n" + "=" * 50)
-    print(f"RELAXATION FIT REPORT ({fit['model']})")
-    print("=" * 50)
+#: Parameters whose value is a *time* in seconds, and so should be
+#: shown through :func:`format_time_value`'s automatic ms/us/ns
+#: scaling rather than as a bare float. Matched by exact name against
+#: a model's own parameter list.
+_TIME_PARAMS = frozenset({"T1", "T2", "T1rho", "T1a", "T1b", "T2a", "T2b", "tau", "tau_c"})
+
+#: Parameters whose value is a *diffusion coefficient* in m^2/s, and
+#: so belong in scientific notation with the unit attached (see
+#: :func:`format_diffusion_value`). Covers the named registry models'
+#: ``D``/``Da``/``Db`` and :func:`opennmr.processing.diffusion.build_diffusion_model`'s
+#: numbered ``D1``, ``D2``, ... alike.
+_DIFFUSION_PARAM_PREFIX = "D"
+
+
+def _is_diffusion_param(name: str) -> bool:
+    return name == "D" or (name.startswith(_DIFFUSION_PARAM_PREFIX) and name[1:].isdigit()) \
+        or name in ("Da", "Db")
+
+
+def format_param_value(name: str, value, error=None, sig_figs: int = 3) -> str:
+    """One parameter, formatted the way its own physical dimension
+    wants: a relaxation time through :func:`format_time_value` (auto
+    ms/us/ns), a diffusion coefficient through
+    :func:`format_diffusion_value` (scientific, m^2/s), anything else
+    -- amplitudes, stretch exponents, inversion efficiency -- as a
+    plain significant-figures number, because those are dimensionless
+    or on the data's own arbitrary intensity scale and inventing a
+    unit for them would be worse than showing none.
+
+    The point of routing every printed number through one function is
+    that a value and its unit can never come apart: the unit is chosen
+    from the same name that selected the value."""
+    if value is None or not np.isfinite(value):
+        return "n/a"
+    if name in _TIME_PARAMS:
+        return format_time_value(value, error, sig_figs=sig_figs)
+    if _is_diffusion_param(name):
+        return format_diffusion_value(value, error, sig_figs=sig_figs)
+    if error is None or not np.isfinite(error):
+        return f"{value:.{sig_figs + 1}g}"
+    return f"{value:.{sig_figs + 1}g} ± {error:.{sig_figs}g}"
+
+
+def format_relaxation_report(fit, title: str | None = None, width: int = 66) -> str:
+    """A readable, self-describing summary of one
+    :func:`fit_relaxation` result, as a string.
+
+    Deliberately a **string builder**, not a printer: the GUI shows
+    this in a panel, the CSV export embeds it, and a test can assert
+    on it directly. :func:`print_relaxation_report` is now a one-line
+    wrapper that prints what this returns.
+
+    Three things the old one-line-per-parameter dump left the reader
+    to work out for themselves, and this states outright:
+
+    * **What kind of uncertainty** the ± is (see
+      :data:`UNCERTAINTY_KINDS`). Two fits of the same data can quote
+      very different errors depending only on whether per-point errors
+      were supplied, and nothing said which was which.
+    * **Units.** Every value goes through :func:`format_param_value`,
+      so a T2 reads "12.4 ± 0.3 ms" and a D reads
+      "2.03e-09 ± 0.05e-09 m^2/s" instead of both being bare floats.
+    * **Whether the fit is any good** -- R², reduced chi-squared and
+      the point count together, rather than RMSE on the data's own
+      arbitrary intensity scale as the only quality number.
+
+    A multi-component diffusion model additionally gets each
+    component's population weight, which is the form those results are
+    actually quoted in (see
+    :func:`opennmr.processing.diffusion.component_weights`).
+    """
+    from .diffusion import component_weights  # local: diffusion imports nothing from here
+
+    rule = "=" * width
+    lines = [rule, (title or f"CURVE FIT REPORT — {fit['model']}").center(width).rstrip(), rule]
+
+    quality = fit.get("fit_quality", {})
+    uncertainty = fit.get("uncertainty") or describe_uncertainty(fit.get("y_err") is not None,
+                                                                 quality.get("dof", 1))
+
+    rate_param = fit.get("rate_param")
+    if rate_param and rate_param in fit["params"]:
+        lines.append("")
+        lines.append(f"  {rate_param} = {format_param_value(rate_param, fit['params'][rate_param], fit['errors'].get(rate_param))}")
+
+    spec = fit.get("spec") or {}
+    n_components = spec.get("n_components")
+    weights = component_weights(fit["params"], n_components) if n_components else None
+
+    lines.append("")
+    lines.append("  Parameters")
+    lines.append("  " + "-" * (width - 4))
     for name in fit["param_names"]:
-        val, err = fit["params"][name], fit["errors"][name]
-        if np.isnan(err):
-            print(f"  {name:<8}= {val:.6g} (fixed)")
+        value = fit["params"].get(name)
+        error = fit["errors"].get(name)
+        fixed_note = "  (fixed)" if error is None or not np.isfinite(error) else ""
+        lines.append(f"    {name:<10} {format_param_value(name, value, None if fixed_note else error)}{fixed_note}")
+
+    if weights and n_components > 1:
+        lines.append("")
+        lines.append("  Population weights (amplitude as a fraction of the total)")
+        lines.append("  " + "-" * (width - 4))
+        for i, weight in enumerate(weights, start=1):
+            d_value = fit["params"].get(f"D{i}")
+            lines.append(f"    component {i}: {weight * 100:6.2f}%   D{i} = {format_param_value(f'D{i}', d_value)}")
+
+    lines.append("")
+    lines.append("  Uncertainty")
+    lines.append("  " + "-" * (width - 4))
+    lines.append(f"    {uncertainty['short']}")
+    for chunk in _wrap(uncertainty["description"], width - 6):
+        lines.append(f"    {chunk}")
+
+    lines.append("")
+    lines.append("  Fit quality")
+    lines.append("  " + "-" * (width - 4))
+    if np.isfinite(quality.get("r_squared", np.nan)):
+        lines.append(f"    R²             = {quality['r_squared']:.5f}")
+    lines.append(f"    RMSE           = {quality.get('rmse', float('nan')):.4g}")
+    lines.append(f"    reduced χ²     = {quality.get('reduced_chi2', float('nan')):.4g}")
+    lines.append(f"    points / d.o.f = {quality.get('n_points', len(fit.get('t', [])))} / {quality.get('dof', '?')}")
+    lines.append(rule)
+    return "\n".join(lines)
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Greedy word wrap. Local rather than ``textwrap`` only so the
+    report's own line width is the single thing controlling layout."""
+    words, lines, current = text.split(), [], ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = word
         else:
-            print(f"  {name:<8}= {val:.6g} ± {err:.4g}")
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
 
-    rate_param = fit["rate_param"]
-    if rate_param:
-        print(f"\n  {rate_param} = {format_time_value(fit['params'][rate_param], fit['errors'][rate_param])}")
 
-    mq = fit["fit_quality"]
-    print(f"\n  RMSE          = {mq['rmse']:.4g}")
-    print(f"  Reduced chi^2 = {mq['reduced_chi2']:.4g}")
-    print("=" * 50 + "\n")
+def print_relaxation_report(fit):
+    """Print :func:`format_relaxation_report`'s summary of a
+    :func:`fit_relaxation` result."""
+    print("\n" + format_relaxation_report(fit) + "\n")
 
 
 # ============================================================
@@ -869,6 +1492,64 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
 # Convenience: fit directly from NMR2D_fit_slices/NMR2D_integrate_slices output
 # ============================================================
 
+def _default_peak_label(fits, peak_index: int, value_source: str) -> str:
+    """``"Peak 3 (4.213 ppm)"`` -- or ``"Region 2 (2.42-4.55 ppm)"``
+    for an integrated series -- rather than a bare ``"Peak 3"``.
+
+    Explicit user request: the fitting canvases should say where each
+    peak actually is. A curve fit reports one number per peak, and
+    without its position there is nothing tying that number back to
+    the spectrum it came from -- which matters most in exactly the
+    case the labels are needed for, a fit over several peaks whose
+    order in the table is not obvious from the plot.
+
+    Taken from the **first slice's own fitted shift**, not from the
+    starting guess in ``peak_defs``: the guess is what the user typed
+    and the fitted value is where the peak actually is, and with the
+    default across-slices mode every slice shares one shift anyway.
+    Falls back to the bare number whenever the position cannot be
+    recovered -- a label is never worth raising for.
+    """
+    number = peak_index + 1
+    if not fits:
+        return f"Peak {number}"
+    first = fits[0]
+
+    if value_source == "integral" and "regions" in first:
+        regions = first.get("regions") or []
+        labels = first.get("region_labels") or []
+        if peak_index < len(labels) and labels[peak_index]:
+            return str(labels[peak_index])
+        if peak_index < len(regions):
+            low, high = regions[peak_index][:2]
+            return f"Region {number} ({min(low, high):.4g}-{max(low, high):.4g} ppm)"
+        return f"Region {number}"
+
+    try:
+        per_peak = extract_params_and_errors(
+            first["popt"], first["pcov"], first["peak_defs"], first["is_free"])
+        values = dict(zip(per_peak[peak_index]["names"], per_peak[peak_index]["params"]))
+        return f"Peak {number} ({values['shift']:.4g} ppm)"
+    except (KeyError, IndexError, TypeError, ValueError):
+        return f"Peak {number}"
+
+
+def _per_peak(value, peak_index: int):
+    """One peak's own ``p0``/``bounds``/``fixed``, from a value that may
+    be either shared across every peak or a ``{peak_index: value}``
+    dict of per-peak overrides.
+
+    A ``fixed`` argument is itself a dict, so "is this a per-peak
+    mapping or one shared value?" cannot be answered by type alone --
+    it is decided on the keys: a per-peak mapping is keyed by integers,
+    a shared ``fixed`` by parameter *names*. Mixed keys would be
+    ambiguous and are treated as shared, which is the older, safer
+    reading."""
+    if isinstance(value, dict) and value and all(isinstance(key, int) for key in value):
+        return value.get(peak_index)
+    return value
+
+
 def _get_delays(fits, vdlist):
     """
     Resolve delay times (seconds), sorted with the fits, for a
@@ -913,7 +1594,8 @@ def _get_delays(fits, vdlist):
 def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
                           peak_labels=None, normalised=False, value_source="integral",
                           use_errors=True, fixed=None, show_report=True,
-                          custom_model: dict | None = None) -> list:
+                          custom_model: dict | None = None, p0=None, bounds=None,
+                          return_series: bool = False):
     """
     Fit relaxation curves to every peak's/region's integral series
     across a :func:`opennmr.processing.fitting.NMR2D_fit_slices` (or
@@ -962,12 +1644,36 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
     custom_model : dict, optional
         Forwarded to :func:`fit_relaxation` for every peak -- see its
         own ``custom_model`` parameter and :func:`build_custom_model`.
+    p0, bounds, fixed : optional
+        Starting guesses, ``(lo, hi)`` bounds and held-fixed values,
+        forwarded to :func:`fit_relaxation`.
+
+        Each may be given **once for every peak**, or **per peak** as a
+        ``{peak_index: value}`` dict keyed by 0-based peak number. A
+        dict may name only some peaks; the rest fall back to the
+        model's own automatic defaults.
+
+        Per-peak matters more than it first looks: the peaks of one
+        series often are *not* the same physics. A solvent line and a
+        solute line in the same PFG series diffuse at genuinely
+        different rates, so one shared starting D is a poor guess for
+        at least one of them; and a peak that has decayed into the
+        noise by mid-series may need its own bounds to stop the fit
+        chasing it.
+    return_series : bool
+        Return ``(results, series)`` instead of just ``results``, where
+        ``series`` is the ``[{t, y, y_err, label}, ...]`` this
+        assembled on the way -- exactly the shape
+        :func:`fit_relaxation_global` takes. Lets a caller do a joint
+        fit over the same extracted series without re-deriving them
+        from the slice results a second time.
 
     Returns
     -------
     list of dict
         One :func:`fit_relaxation` result per peak, with an added
-        ``"peak_label"`` key.
+        ``"peak_label"`` key. Or ``(results, series)`` when
+        ``return_series``.
     """
 
     if value_source not in ("integral", "amplitude"):
@@ -980,6 +1686,12 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
     order = np.argsort(t)
 
     if value_source == "amplitude":
+        if not fits or "popt" not in fits[0]:
+            raise ValueError(
+                "value_source='amplitude' requires fitted peaks from NMR2D_fit_slices, "
+                "not integrated regions from NMR2D_integrate_slices. Use value_source='integral' "
+                "for integrated data, or fit peaks instead of integrating."
+            )
         per_fit_amplitudes = []
         per_fit_amplitude_errors = []
         for fit in fits:
@@ -993,6 +1705,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
         n_peaks = max(len(fit.get(source, [])) for fit in fits)
 
     results = []
+    series = []
 
     for peak_i in range(n_peaks):
 
@@ -1022,15 +1735,22 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
 
         fit_result = fit_relaxation(t_peak[valid], y[valid], model=model,
                                      y_err=None if y_err is None else y_err[valid],
-                                     fixed=fixed, custom_model=custom_model)
+                                     fixed=_per_peak(fixed, peak_i),
+                                     custom_model=custom_model,
+                                     p0=_per_peak(p0, peak_i),
+                                     bounds=_per_peak(bounds, peak_i))
 
         label = (peak_labels[peak_i] if peak_labels is not None and peak_i < len(peak_labels)
-                 else f"Peak {peak_i + 1}")
+                 else _default_peak_label(fits, peak_i, value_source))
         fit_result["peak_label"] = label
         results.append(fit_result)
+        series.append({
+            "t": t_peak[valid], "y": y[valid],
+            "y_err": None if y_err is None else y_err[valid], "label": label,
+        })
 
         if show_report:
             print(f"\n--- {label} ---")
             print_relaxation_report(fit_result)
 
-    return results
+    return (results, series) if return_series else results

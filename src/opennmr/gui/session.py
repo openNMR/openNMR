@@ -197,7 +197,20 @@ class Session:
         folder name, nucleus, vendor, and procno."""
         spectrum = self.spectra[index]
         meta = spectrum.metadata
-        name = os.path.basename(meta.source_path.rstrip("/")) if meta.source_path else f"spectrum {index}"
+        if meta.vendor == "derived" and meta.source_path:
+            # A derived spectrum's source_path is a *label* that
+            # add_derived put there, not a path -- basename()ing it
+            # silently truncates at any "/" the label happens to
+            # contain. Found with a resolved SCORE component labelled
+            # with its diffusion coefficient: "... (2.50e-10 m^2/s)"
+            # came out as "s)". Any derived label with a slash in it --
+            # a ratio from spectrum arithmetic, a unit -- had the same
+            # problem.
+            name = meta.source_path
+        elif meta.source_path:
+            name = os.path.basename(meta.source_path.rstrip("/"))
+        else:
+            name = f"spectrum {index}"
         bits = [name]
         if meta.nucleus:
             bits.append(meta.nucleus)

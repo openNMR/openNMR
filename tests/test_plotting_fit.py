@@ -171,6 +171,23 @@ def _fit_t1_series():
                                             vdlist=vdlist, show_report=False), T1
 
 
+def _peak_label(fits, index=0):
+    """The label a fit actually carries. Peak labels now include the
+    fitted shift ("Peak 1 (5.02 ppm)") rather than a bare number, so
+    tests ask the result rather than hard-coding it."""
+    return fits[index]["peak_label"]
+
+
+def test_peak_labels_carry_the_fitted_shift():
+    # Explicit user request: the fitting canvases should note the peak
+    # ppm. Without it a curve fit reports a number with nothing tying
+    # it back to the spectrum it came from.
+    fits, _ = _fit_t1_series()
+    label = _peak_label(fits)
+    assert label.startswith("Peak 1 (")
+    assert label.endswith("ppm)")
+
+
 def test_plot_relaxation_draws_data_points_and_matching_fit_curve():
     fits, T1_true = _fit_t1_series()
     fig, ax = fitplot.plot_relaxation(fits)
@@ -178,7 +195,7 @@ def test_plot_relaxation_draws_data_points_and_matching_fit_curve():
     # An unlabelled artist (label=None) reports matplotlib's own
     # auto-generated "_child0"-style name from get_label(), not "None".
     data_artist = next(a for a in ax.lines if a.get_label().startswith("_"))
-    fit_artist = next(a for a in ax.lines if a.get_label() == "Peak 1")
+    fit_artist = next(a for a in ax.lines if a.get_label() == _peak_label(fits))
     assert data_artist.get_linestyle() == "None"
     assert fit_artist.get_marker() in ("None", "")
     # The plotted curve should match evaluating the model function
@@ -210,12 +227,12 @@ def test_plot_relaxation_annotate_shows_the_correct_fitted_t1():
 
 def test_plot_relaxation_show_series_filters_by_label_and_index():
     fits, _ = _fit_t1_series()
-    fig1, ax1 = fitplot.plot_relaxation(fits, show_series=["Peak 1"])
+    fig1, ax1 = fitplot.plot_relaxation(fits, show_series=[_peak_label(fits)])
     fig2, ax2 = fitplot.plot_relaxation(fits, show_series=[0])
     # Selecting the same single series by label vs. by index must
     # produce the identical plotted fit curve.
-    curve1 = next(a for a in ax1.lines if a.get_label() == "Peak 1")
-    curve2 = next(a for a in ax2.lines if a.get_label() == "Peak 1")
+    curve1 = next(a for a in ax1.lines if a.get_label() == _peak_label(fits))
+    curve2 = next(a for a in ax2.lines if a.get_label() == _peak_label(fits))
     np.testing.assert_allclose(curve1.get_ydata(), curve2.get_ydata())
     plt.close(fig1)
     plt.close(fig2)
@@ -244,7 +261,7 @@ def test_plot_relaxation_fit_curve_defaults_to_a_paler_tint_of_the_data_colour()
     fits, _ = _fit_t1_series()
     fig, ax = fitplot.plot_relaxation(fits, colors=["red"])
     data_artist = next(a for a in ax.lines if a.get_label().startswith("_"))
-    fit_artist = next(a for a in ax.lines if a.get_label() == "Peak 1")
+    fit_artist = next(a for a in ax.lines if a.get_label() == _peak_label(fits))
     import matplotlib.colors as mcolors
     data_rgb = mcolors.to_rgb(data_artist.get_color())
     fit_rgb = mcolors.to_rgb(fit_artist.get_color())
@@ -252,3 +269,68 @@ def test_plot_relaxation_fit_curve_defaults_to_a_paler_tint_of_the_data_colour()
     assert fit_rgb != data_rgb
     assert all(f >= d for f, d in zip(fit_rgb, data_rgb))  # lighter, not darker/different hue
     plt.close(fig)
+
+
+# ============================================================
+# The DOSY map's own styling
+# ============================================================
+
+def _dosy_fixture():
+    from opennmr.processing import ilt
+
+    b = np.linspace(0, 4e9, 24)
+    ppm = np.linspace(0, 10, 128)
+    data = np.zeros((b.size, ppm.size))
+    for shift, d, amplitude in [(2.0, 1.5e-9, 1.0), (7.5, 1.2e-10, 1.2)]:
+        data += np.outer(np.exp(-d * b), amplitude / (1.0 + ((ppm - shift) / 0.06) ** 2))
+    return ilt.dosy_map(b, data, ppm, alpha=1e-3, threshold=0.05)
+
+
+def test_plot_dosy_draws_line_contours_not_filled_ones():
+    # Reported directly: it "should be plotted as a normal contour plot
+    # (not filled) and match the styles accordingly" -- the same kind
+    # of plot as plot_2d_contour, which has always drawn lines.
+    from matplotlib.collections import PathCollection
+
+    fig, (contour_ax, _projection_ax) = fitplot.plot_dosy(_dosy_fixture())
+    assert contour_ax.collections
+    assert not [c for c in contour_ax.collections if isinstance(c, PathCollection)]
+    plt.close(fig)
+
+
+def test_plot_dosy_uses_the_font_size_it_is_given():
+    fig, (contour_ax, _projection_ax) = fitplot.plot_dosy(_dosy_fixture(), fontsize=17)
+    assert contour_ax.xaxis.label.get_fontsize() == pytest.approx(17)
+    assert contour_ax.yaxis.label.get_fontsize() == pytest.approx(17)
+    plt.close(fig)
+
+
+def test_plot_dosy_closes_the_frame_around_the_map():
+    # A contour is read as a box: with the top and right spines hidden,
+    # a peak near either edge trails off into nothing.
+    fig, (contour_ax, projection_ax) = fitplot.plot_dosy(_dosy_fixture())
+    assert all(contour_ax.spines[side].get_visible()
+               for side in ("top", "right", "bottom", "left"))
+    # ...and the strip above it has no frame, so it must have no ticks
+    # either -- they would float above the map belonging to nothing.
+    assert not any(spine.get_visible() for spine in projection_ax.spines.values())
+    assert all(not tick.tick1line.get_visible() and not tick.tick2line.get_visible()
+               for tick in projection_ax.xaxis.get_major_ticks())
+    plt.close(fig)
+
+
+def test_plot_dosy_d_limits_fit_the_populated_range_but_stay_inside_the_grid():
+    dosy = _dosy_fixture()
+    low, high = fitplot._dosy_d_limits(dosy["Z"], dosy["D"], factor=0.02)
+    grid_low, grid_high = float(np.min(dosy["D"])), float(np.max(dosy["D"]))
+    assert grid_low <= low < high <= grid_high
+    assert (high / low) < (grid_high / grid_low)
+
+
+def test_plot_dosy_d_limits_fall_back_to_the_whole_grid_when_empty():
+    # An empty map has no populated range to fit; collapsing to a
+    # degenerate one would be worse than showing everything.
+    d_grid = np.logspace(-13, -8, 32)
+    assert fitplot._dosy_d_limits(np.zeros((32, 8)), d_grid, factor=0.02) == (
+        pytest.approx(float(d_grid.min())), pytest.approx(float(d_grid.max())),
+    )

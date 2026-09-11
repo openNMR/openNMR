@@ -1,6 +1,10 @@
 import numpy as np
 import pytest
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from opennmr.plotting import style
 from opennmr.plotting.style import downsample_2d
 
@@ -213,3 +217,165 @@ def test_clipped_labels_ignores_tick_labels():
     # is nothing here that counts as clipped.
     assert style.clipped_labels(fig) == []
     plt.close(fig)
+
+
+# ============================================================
+# Too-light colours removed from every colormap
+# ============================================================
+
+_SWEEP = np.linspace(0.0, 1.0, 256)
+
+
+def _luminances(cmap):
+    return np.array([style.relative_luminance(cmap(x)[:3]) for x in _SWEEP])
+
+
+def test_relative_luminance_is_perceptual_not_a_channel_average():
+    # The whole reason for the weighted-linear form: yellow and blue
+    # have the same mean channel value and wildly different apparent
+    # brightness. A naive average would keep yellow and discard blue --
+    # exactly backwards.
+    assert style.relative_luminance("#FFFF00") > 0.9
+    assert style.relative_luminance("#0000FF") < 0.1
+    assert style.relative_luminance("#000000") == pytest.approx(0.0)
+    assert style.relative_luminance("#FFFFFF") == pytest.approx(1.0)
+
+
+def test_contrast_against_white_matches_the_threshold_derivation():
+    # MAX_LINE_LUMINANCE is defined as the luminance giving 3:1.
+    at_cap = style.contrast_against_white("#000000")
+    assert at_cap == pytest.approx(21.0)
+    assert 1.05 / (style.MAX_LINE_LUMINANCE + 0.05) == pytest.approx(3.0)
+
+
+def test_is_too_light_uses_the_shared_cap():
+    assert style.is_too_light("#FDE725") is True      # viridis' yellow end
+    assert style.is_too_light("#440154") is False     # viridis' purple end
+    # And is overridable per call.
+    assert style.is_too_light("#440154", max_luminance=0.0) is True
+
+
+@pytest.mark.parametrize("name", style.CONTOUR_CMAP_NAMES)
+def test_every_contour_colormap_clears_three_to_one(name):
+    # The headline guarantee: no colour this package draws a contour
+    # with is invisible on white. Before this, the lightest entries of
+    # these maps sat at 1.0-1.4:1.
+    worst = _luminances(style.get_contour_cmap(name)).max()
+    assert worst <= style.MAX_LINE_LUMINANCE + 1e-9
+
+
+@pytest.mark.parametrize("name", ["viridis", "coolwarm", "Greys", "YlGn", "Spectral"])
+def test_contour_colormaps_were_actually_too_light_before(name):
+    # Guards the test above from becoming vacuous: these maps really do
+    # contain colours the filter has to remove.
+    assert _luminances(plt.get_cmap(name)).max() > style.MAX_LINE_LUMINANCE
+
+
+def test_filtered_contour_colormap_keeps_its_dark_end():
+    # Trimming must not shift the map wholesale -- the dark end is the
+    # part that was fine, and it stays put.
+    base, filtered = plt.get_cmap("viridis"), style.get_contour_cmap("viridis")
+    np.testing.assert_allclose(filtered(0.0)[:3], base(0.0)[:3], atol=0.02)
+
+
+def test_filtering_can_be_disabled():
+    full = style.get_contour_cmap("viridis", max_luminance=1.0)
+    np.testing.assert_allclose(full(1.0)[:3], plt.get_cmap("viridis")(1.0)[:3], atol=0.02)
+
+
+@pytest.mark.parametrize("name", ["viridis", "coolwarm", "Greys", "YlGn", "plasma"])
+@pytest.mark.parametrize("n", [1, 2, 5, 12])
+def test_stack_colors_are_all_dark_enough(name, n):
+    colors = style.stack_colors(n, name)
+    assert len(colors) == n
+    for color in colors:
+        assert style.relative_luminance(color[:3]) <= style.MAX_LINE_LUMINANCE + 1e-9
+
+
+def test_stack_colors_remain_distinguishable():
+    # Filtering must not collapse a stack onto one colour -- the point
+    # of a stack is telling the traces apart.
+    colors = style.stack_colors(6, "viridis")
+    assert len({tuple(np.round(c, 4)) for c in colors}) == 6
+
+
+def test_a_single_trace_gets_the_darkest_usable_colour():
+    # One trace has nothing to be distinguished from, so it should not
+    # be handed a map's own lightest usable end.
+    only = style.stack_colors(1, "Greys")[0]
+    darkest = min(style.relative_luminance(c[:3]) for c in style.stack_colors(8, "Greys"))
+    assert style.relative_luminance(only[:3]) == pytest.approx(darkest, abs=0.1)
+
+
+def test_black_stack_is_untouched():
+    assert all(style.relative_luminance(c[:3]) == pytest.approx(0.0)
+               for c in style.stack_colors(4, "black"))
+
+
+def test_stack_colors_of_zero_is_empty():
+    assert style.stack_colors(0, "viridis") == []
+
+
+def test_an_all_white_colormap_is_darkened_rather_than_returned_unusable():
+    # The last-resort path: nothing in the map clears the cap, so
+    # scaling toward black is the only way to return something usable.
+    import matplotlib.colors as mcolors
+
+    white = mcolors.LinearSegmentedColormap.from_list("white", ["#ffffff", "#fefefe"])
+    colors = [style._darkened(white(x)) for x in (0.0, 1.0)]
+    for color in colors:
+        assert style.relative_luminance(color[:3]) <= style.MAX_LINE_LUMINANCE + 1e-9
+
+
+def test_usable_positions_never_come_back_empty():
+    import matplotlib.colors as mcolors
+
+    white = mcolors.LinearSegmentedColormap.from_list("white", ["#ffffff", "#ffffff"])
+    assert style.usable_cmap_positions(white).size >= 1
+
+
+def test_usable_positions_find_the_light_part_wherever_it_sits():
+    # Light at the top (viridis), at the bottom (Greys) and in the
+    # middle (coolwarm) -- a fixed "trim the last 20%" rule would fix
+    # only the first.
+    assert style.usable_cmap_positions(plt.get_cmap("viridis")).max() < 0.95
+    assert style.usable_cmap_positions(plt.get_cmap("Greys")).min() > 0.05
+    middle = style.usable_cmap_positions(plt.get_cmap("coolwarm"))
+    assert np.max(np.diff(middle)) > 0.05   # a gap, i.e. the pale middle is gone
+
+
+def test_qualitative_colors_are_distinct_and_dark_enough():
+    colors = style.qualitative_colors(10)
+    assert len({tuple(np.round(c, 4)) for c in colors}) == 10
+    for color in colors:
+        assert style.relative_luminance(color[:3]) <= style.MAX_LINE_LUMINANCE + 1e-9
+    # tab10's own olive and cyan only reach 2.0:1 unaided, so at least
+    # one entry must actually have been darkened.
+    raw = [plt.get_cmap("tab10")(i) for i in range(10)]
+    assert any(style.relative_luminance(c[:3]) > style.MAX_LINE_LUMINANCE for c in raw)
+
+
+def test_qualitative_colors_cycle_past_the_palette_length():
+    colors = style.qualitative_colors(12)
+    assert len(colors) == 12
+    np.testing.assert_allclose(colors[10], colors[0])
+
+
+def test_readable_cmap_accepts_a_name_or_an_object():
+    from_name = style.readable_cmap("viridis")
+    from_object = style.readable_cmap(plt.get_cmap("viridis"))
+    np.testing.assert_allclose(from_name(0.5)[:3], from_object(0.5)[:3])
+
+
+def test_the_legacy_notebook_api_uses_the_same_filter():
+    # opennmr.notebook is publicly exported and had its own duplicated
+    # copies of these functions. It now delegates, so the rule lives in
+    # one place and the two cannot drift.
+    from opennmr.notebook.plotting import get_contour_cmap as legacy_contour
+    from opennmr.notebook.plotting import get_stack_colormap as legacy_stack
+
+    assert _luminances(legacy_contour("viridis")).max() <= style.MAX_LINE_LUMINANCE + 1e-9
+    assert _luminances(legacy_stack("Greys")).max() <= style.MAX_LINE_LUMINANCE + 1e-9
+    # And its two special cases are untouched.
+    assert style.relative_luminance(legacy_stack("black")(0.5)[:3]) == pytest.approx(0.0)
+    assert legacy_stack("diverging") is not None

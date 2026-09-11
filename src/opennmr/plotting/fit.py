@@ -26,7 +26,15 @@ import matplotlib.pyplot as plt
 
 from ..core.registry import find_gamma, NUC_label
 from ..processing.relaxation import RELAXATION_MODELS, format_time_value
-from .style import setup_plotting, apply_tick_style, apply_spine_style, save_figure
+from .style import (
+    setup_plotting, apply_tick_style, apply_spine_style, save_figure, qualitative_colors,
+)
+# The 2D contour panel's own level spacing, reused rather than
+# reimplemented: a DOSY map is a contour plot, and having its levels
+# bunch differently from every other contour in the app is exactly the
+# kind of quiet divergence that makes two plots of the same data look
+# like different measurements.
+from .twod import _contour_levels
 
 
 def plot_1d_with_fit(fit_result: dict, x_unit: str = "ppm", show_components: bool = True,
@@ -450,3 +458,249 @@ def plot_relaxation(fit_results: list[dict], show_series=None, annotate: bool = 
             save_figure(fig, fig_name=fig_name, save_format=save_format)
 
     return fig, ax
+
+
+def _dosy_d_limits(z, d_grid, factor: float, pad_decades: float = 0.5):
+    """The D range worth showing: whatever carries signal above the
+    lowest contour level, padded by ``pad_decades`` either side.
+
+    The ILT grid deliberately spans several decades more than any real
+    sample occupies -- it has to, since where the populations lie is
+    what is being solved for. Plotting all of it squashed every peak
+    into a corner of an otherwise blank panel. The 2D contour panel
+    fits itself to its data for the same reason; scrolling the D axis
+    still reaches the rest of the grid.
+
+    Falls back to the whole grid when nothing clears the threshold,
+    rather than collapsing to a degenerate range.
+    """
+    d_grid = np.asarray(d_grid, dtype=float)
+    full = (float(np.min(d_grid)), float(np.max(d_grid)))
+    z = np.asarray(z, dtype=float)
+    peak = float(np.nanmax(z)) if z.size else 0.0
+    if peak <= 0:
+        return full
+    rows = np.flatnonzero(np.nanmax(z, axis=1) > peak * max(float(factor), 1e-6))
+    if rows.size == 0:
+        return full
+    low = float(d_grid[rows.min()]) * 10.0 ** -pad_decades
+    high = float(d_grid[rows.max()]) * 10.0 ** pad_decades
+    return max(low, full[0]), min(high, full[1])
+
+
+def plot_dosy(dosy: dict, ax=None, fig=None, contour_ax=None, projection_ax=None,
+              clevels: int = 8, factor: float = 0.02, cmap: str | None = None,
+              level_mode: str = "power", power: float = 1.25,
+              d_lims=None, ppm_lims=None,
+              # mathtext, not the Unicode superscripts: Arial (this
+              # package's default face) has no U+207B SUPERSCRIPT MINUS,
+              # so "m²s⁻¹" renders with a missing-glyph box and emits a
+              # warning on every draw.
+              xlabel: str = "δ / ppm", ylabel: str = r"D / $\mathregular{m^{2}\,s^{-1}}$",
+              show_projection: bool = True, projection_height: float = 0.22,
+              projection_color: str = "black", linewidths: float = 0.8,
+              pl_width: float = 5.0, pl_height: float = 5.0,
+              font: str = "Arial", fontsize: float = 12,
+              tick_dir: str = "in", tick_length: float = 4.0, tick_width: float = 1.0,
+              save_fig: bool = False, fig_name: str = "nmr_dosy_plot", save_format: str = "png"):
+    """Draw a DOSY map -- chemical shift across, diffusion coefficient
+    down a log axis -- from :func:`opennmr.processing.ilt.dosy_map`'s
+    own output dict.
+
+    Conventions this follows because they are what a DOSY *is*, not
+    because they are configurable preferences:
+
+    * **The shift axis runs high-to-low**, like every other NMR
+      spectrum in this package.
+    * **The D axis is logarithmic and runs small-at-the-bottom**, so
+      slowly-diffusing (large, aggregated) species sit low and fast
+      small molecules sit high. That is the orientation of every
+      published DOSY, and flipping it would make the plot unreadable
+      to anyone who has seen one before.
+    * **The ordinary 1D spectrum is drawn along the top**, from the
+      map's own lowest-gradient row -- a DOSY with no reference
+      spectrum above it is very hard to assign.
+
+    Drawn as contour lines rather than an image: the map is smooth
+    along D by construction (the ILT reconstructs onto a grid finer
+    than the data can resolve), so contours state the resolution
+    honestly where a pixel image would imply detail that isn't there.
+
+    Styled to match :func:`opennmr.plotting.twod.plot_2d_contour` --
+    unfilled black lines on a full frame, at the same font size and
+    line width, with the levels spaced the same power-law way. It is
+    the same kind of plot, and an earlier filled-contour version read
+    as a different (and worse-looking) thing sitting in the same app.
+    ``cmap`` colours the lines by level instead, for the cases where a
+    2D would take ``colour_spectra``.
+
+    ``ax`` : plot the contour into an existing axis; the projection
+    strip is then only drawn if ``projection_ax`` is also supplied.
+    Returns ``fig, (contour_ax, projection_ax)`` -- the second is
+    ``None`` when no strip was drawn.
+    """
+    z = np.asarray(dosy["Z"], dtype=float)
+    d_grid = np.asarray(dosy["D"], dtype=float)
+    ppm = np.asarray(dosy["ppm"], dtype=float)
+
+    external_axis = ax is not None
+    if external_axis:
+        contour_ax = ax
+        fig = fig if fig is not None else contour_ax.get_figure()
+    else:
+        setup_plotting(font=font, fontsize=fontsize)
+        fig = plt.figure(figsize=(pl_width, pl_height))
+        if show_projection:
+            # A shared x so panning/zooming the map keeps the spectrum
+            # above it lined up -- the whole point of the strip.
+            grid = fig.add_gridspec(2, 1, height_ratios=[projection_height, 1.0], hspace=0.04)
+            projection_ax = fig.add_subplot(grid[0])
+            contour_ax = fig.add_subplot(grid[1], sharex=projection_ax)
+        else:
+            contour_ax = fig.add_subplot(111)
+            projection_ax = None
+
+    peak = float(np.nanmax(z)) if z.size else 0.0
+    if peak > 0:
+        # Levels start above zero: the map is exactly zero everywhere
+        # the ILT was not run (below the intensity threshold), and a
+        # level at zero would draw a contour right around that entire
+        # background region.
+        #
+        # ``factor`` is the lowest level as a fraction of the map's own
+        # peak -- the same "start" a 2D contour's own scroll adjusts,
+        # so a DOSY's levels scale the same way and by the same
+        # gesture -- and they are spaced by the same power law, so the
+        # two kinds of plot read alike.
+        levels = _contour_levels(peak * max(float(factor), 1e-6), peak, clevels, level_mode, power)
+        if cmap:
+            contour_ax.contour(ppm, d_grid, z, levels=levels, cmap=cmap, linewidths=linewidths)
+        else:
+            contour_ax.contour(ppm, d_grid, z, levels=levels, colors="black", linewidths=linewidths)
+
+    contour_ax.set_yscale("log")
+    contour_ax.set_xlabel(xlabel, fontsize=fontsize)
+    contour_ax.set_ylabel(ylabel, fontsize=fontsize)
+    contour_ax.set_xlim(*(ppm_lims if ppm_lims else (float(np.max(ppm)), float(np.min(ppm)))))
+    contour_ax.set_ylim(*(d_lims if d_lims else _dosy_d_limits(z, d_grid, factor)))
+    contour_ax.tick_params(
+        axis="both", which="both", direction=tick_dir, labelsize=fontsize,
+        length=tick_length, width=tick_width, bottom=True, left=True, top=True, right=True,
+    )
+    # A full frame, like the 2D contour panel -- and unlike the rest of
+    # this module's open-sided line plots. A contour is read as a box:
+    # with the top and right spines hidden, a peak near either edge
+    # trails off into nothing and the D axis has no closing edge to
+    # measure against.
+    apply_spine_style(contour_ax, top=True, right=True, bottom=True, left=True,
+                      linewidth=tick_width)
+
+    if projection_ax is not None:
+        projection = np.asarray(dosy["projection"], dtype=float)
+        projection_ax.plot(ppm, projection, color=projection_color, linewidth=linewidths)
+        projection_ax.set_xlim(contour_ax.get_xlim())
+        # No ticks at all, on either axis, and no frame -- exactly what
+        # plot_2d_contour does with its own projection strips. Leaving
+        # the x ticks on drew a row of marks floating above the contour
+        # with no spine to belong to, and the strip's own intensity
+        # scale is arbitrary, so its y ticks say nothing either.
+        projection_ax.tick_params(axis="x", which="both", bottom=False, top=False,
+                                   labelbottom=False, labeltop=False)
+        projection_ax.tick_params(axis="y", which="both", left=False, right=False,
+                                   labelleft=False, labelright=False)
+        apply_spine_style(projection_ax, top=False, right=False, left=False, bottom=False)
+
+    if not external_axis and save_fig:
+        save_figure(fig, fig_name=fig_name, save_format=save_format)
+
+    return fig, (contour_ax, projection_ax)
+
+
+def plot_score_components(result: dict, ppm, ax=None, fig=None, reference=None,
+                          offset: float = 1.15, normalise: bool = True,
+                          colors=None, annotate: bool = True, xlims=None,
+                          xlabel: str = "δ / ppm",
+                          pl_width: float = 5.0, pl_height: float = 5.0,
+                          font: str = "Arial", fontsize: float = 12,
+                          tick_dir: str = "in", tick_length: float = 4.0, tick_width: float = 1.0,
+                          save_fig: bool = False, fig_name: str = "nmr_score_plot",
+                          save_format: str = "png"):
+    """Stack the component spectra resolved by
+    :func:`opennmr.processing.score.score`, one per row, each labelled
+    with its own decay constant and share of the signal.
+
+    A stack rather than an overlay: the point of SCORE is that these
+    are *separate species*, and overlaying them re-creates exactly the
+    superposition the method just undid. The measured spectrum can be
+    drawn above them (``reference``, normally the lowest-gradient row)
+    so it is visible which peaks went to which component -- the useful
+    check being whether an overlapped peak has been split sensibly
+    rather than assigned wholesale to one component.
+
+    Normalised per component by default: the components' absolute
+    scales are set by the arbitrary intensity units of the data, and a
+    weak component drawn to scale is simply invisible. The *share* of
+    each is in its label instead, which is the honest place for it.
+    """
+    spectra = np.asarray(result["spectra"], dtype=float)
+    ppm = np.asarray(ppm, dtype=float)
+    n_components = spectra.shape[0]
+
+    external_axis = ax is not None
+    if external_axis:
+        fig = fig if fig is not None else ax.get_figure()
+    else:
+        setup_plotting(font=font, fontsize=fontsize)
+        fig, ax = plt.subplots(figsize=(pl_width, pl_height))
+
+    if colors is None:
+        colors = qualitative_colors(n_components)
+    elif isinstance(colors, str):
+        colors = [colors] * n_components
+
+    rows = []
+    if reference is not None:
+        rows.append((np.asarray(reference, dtype=float), "black", "measured"))
+    for index in range(n_components):
+        label = _score_component_label(result, index)
+        rows.append((spectra[index], colors[index], label))
+
+    for position, (trace, color, label) in enumerate(rows):
+        peak = float(np.max(np.abs(trace))) if trace.size else 0.0
+        scaled = trace / peak if (normalise and peak > 0) else trace
+        baseline = position * offset
+        ax.plot(ppm, scaled + baseline, color=color, linewidth=1.0)
+        if annotate:
+            # Just above its own trace's baseline, with an opaque
+            # backing box: a label placed mid-height lands on top of
+            # whichever peak happens to be at that end of the spectrum
+            # (it did, on the first real component plot), and there is
+            # no edge that is reliably empty for every dataset.
+            ax.text(0.995, baseline + offset * 0.06, label, color=color, fontsize=fontsize * 0.8,
+                    ha="right", va="bottom", transform=ax.get_yaxis_transform(), zorder=5,
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                              edgecolor="none", alpha=0.85))
+
+    ax.set_yticks([])
+    ax.set_xlabel(xlabel)
+    ax.set_xlim(*(xlims if xlims else (float(np.max(ppm)), float(np.min(ppm)))))
+    apply_tick_style(ax, axis="x", direction=tick_dir, length=tick_length, width=tick_width)
+    apply_spine_style(ax, top=False, right=False, left=False, bottom=True)
+
+    if not external_axis and save_fig:
+        save_figure(fig, fig_name=fig_name, save_format=save_format)
+    return fig, ax
+
+
+def _score_component_label(result: dict, index: int) -> str:
+    """One component's legend text: its decay constant in its own unit,
+    plus its share -- the two numbers a resolved component is quoted
+    by."""
+    from ..processing.relaxation import format_diffusion_value, format_time_value
+
+    share = result["fractions"][index]
+    if result.get("kind") == "diffusion":
+        value = format_diffusion_value(result["constants"][index])
+    else:
+        value = format_time_value(result["T"][index])
+    return f"{index + 1}: {value}  ({share * 100:.0f}%)"

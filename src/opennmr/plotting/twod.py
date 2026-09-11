@@ -374,7 +374,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                      pl_height=7.0, pl_width=7.0, factor=0.07, clevels=7,
                      level_mode="power", power=1.25,
                      proj_scale=1.0, projection_mode="auto", show_projections=True,
-                     projection_size=2.0, projection_pad=0.1, square_aspect=True,
+                     projection_size=1.0, projection_pad=0.1, square_aspect=True,
                      field='', xlabel=None, ylabel=None, xlims=None, ylims=None,
                      font='Arial', fontsize=12, output_format='',
                      colour_spectra=None, equal_tickspacing=False, tick_number=None,
@@ -596,6 +596,12 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             raise ValueError("projection_mode must be 'auto', 'sum', or 'max'")
 
         if show_f2_projection:
+            # projection_size halved from 2.0 on explicit request ("for
+            # 2Ds, I'd rather the projection plots were about half their
+            # current heights so that the contour plot can be generally
+            # bigger") -- the divider gives the contour whatever the
+            # projections don't take, so this is the one knob that
+            # trades between them.
             ax_f2 = divider.append_axes("top", projection_size, pad=projection_pad, sharex=ax)
             ax_f2.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False, labeltop=False)
             ax_f2.tick_params(axis='y', which='both', left=False, right=False, labelleft=False, labelright=False)

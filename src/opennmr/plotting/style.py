@@ -31,6 +31,29 @@ from matplotlib.ticker import MaxNLocator
 
 VALID_SAVE_FORMATS = ("png", "pdf", "svg")
 
+#: Relative luminance above which a colour is treated as **too light to
+#: use for a line on a white background**, and dropped from every
+#: colormap this module hands out.
+#:
+#: Derived rather than picked: WCAG 1.4.11 sets 3:1 as the minimum
+#: contrast for a graphical object, and contrast against white is
+#: ``1.05 / (L + 0.05)``, so 3:1 means ``L <= 0.30``.
+#:
+#: The colours this removes are not marginal. Measured across the
+#: colormaps this package offers, their lightest entries sit at
+#: **1.0-1.4:1** against white -- pale yellow, near-white blue, the
+#: white middle of every diverging map. On paper or a projector they
+#: are simply not there. Even ``tab10``'s lightest manages only 2.0:1.
+#:
+#: Set to ``1.0`` to disable the filtering entirely; every function
+#: below also takes a ``max_luminance`` argument for a one-off
+#: override.
+MAX_LINE_LUMINANCE = 0.30
+
+#: How finely a colormap is sampled when working out which parts of it
+#: are usable. 256 matches matplotlib's own default resolution.
+_LUMINANCE_SAMPLES = 256
+
 CONTOUR_CMAP_NAMES = [
     'magma', 'coolwarm', 'cividis', 'viridis', 'plasma', 'inferno',
     'PiYG', 'PRGn', 'BrBG', 'PuOr', 'RdGy', 'RdBu', 'RdYlBu', 'RdYlGn',
@@ -297,6 +320,84 @@ def setup_plotting(font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
     }
 
 
+def relative_luminance(color) -> float:
+    """WCAG relative luminance of ``color``, 0 (black) to 1 (white).
+
+    The sRGB channels are linearised before weighting, which is what
+    makes this a *perceptual* measure rather than a naive channel
+    average: pure yellow and pure blue have the same mean channel
+    value and wildly different apparent brightness (0.93 against 0.07),
+    and only the weighted-linear form gets that right. Averaging
+    channels instead would keep yellow and discard blue -- exactly
+    backwards.
+    """
+    red, green, blue = cl.to_rgb(color)
+    channels = np.array([red, green, blue], dtype=float)
+    linear = np.where(channels <= 0.03928, channels / 12.92,
+                      ((channels + 0.055) / 1.055) ** 2.4)
+    return float(linear @ np.array([0.2126, 0.7152, 0.0722]))
+
+
+def contrast_against_white(color) -> float:
+    """Contrast ratio of ``color`` against a white background -- the
+    number :data:`MAX_LINE_LUMINANCE` is derived from, exposed so a
+    caller can check a colour it chose itself."""
+    return 1.05 / (relative_luminance(color) + 0.05)
+
+
+def is_too_light(color, max_luminance: float = None) -> bool:
+    """Whether ``color`` is too light to read as a line on white."""
+    cap = MAX_LINE_LUMINANCE if max_luminance is None else max_luminance
+    return relative_luminance(color) > cap
+
+
+def usable_cmap_positions(cmap, max_luminance: float = None,
+                          samples: int = _LUMINANCE_SAMPLES) -> np.ndarray:
+    """Positions along ``cmap`` whose colour is dark enough to use.
+
+    Returns positions rather than colours so callers can resample the
+    map at whatever resolution they need.
+
+    **Position-based, not range-based**, and that matters: where the
+    too-light part of a map sits depends entirely on the map. It is at
+    the top of ``viridis`` (yellow), the bottom of ``Greys``, and the
+    *middle* of every diverging map (``coolwarm``, ``RdYlBu``). A
+    fixed "trim the last 20%" rule would fix one of those three and
+    silently do nothing for the others.
+
+    Empty is never returned: a map with nothing dark enough in it
+    yields its single darkest position, so callers always have
+    something to work with and :func:`_darkened` can take it from
+    there.
+    """
+    positions = np.linspace(0.0, 1.0, int(samples))
+    luminance = np.array([relative_luminance(cmap(p)[:3]) for p in positions])
+    cap = MAX_LINE_LUMINANCE if max_luminance is None else max_luminance
+    usable = positions[luminance <= cap]
+    if usable.size:
+        return usable
+    return positions[[int(np.argmin(luminance))]]
+
+
+def _darkened(color, max_luminance: float = None):
+    """``color`` scaled toward black until it clears the cap, keeping
+    its alpha and as much of its hue as scaling allows.
+
+    The last-resort path, for a colormap with nothing dark enough
+    anywhere in it. Scaling RGB uniformly preserves hue and saturation
+    ratios while dropping brightness -- the alternative, clipping
+    individual channels, shifts the hue instead, which is worse: the
+    colour then no longer identifies the same trace it did before.
+    """
+    cap = MAX_LINE_LUMINANCE if max_luminance is None else max_luminance
+    rgba = list(cl.to_rgba(color))
+    for _attempt in range(24):
+        if relative_luminance(rgba[:3]) <= cap:
+            break
+        rgba[:3] = [channel * 0.85 for channel in rgba[:3]]
+    return tuple(rgba)
+
+
 def get_stack_colormap(color='black'):
     """Colour map used to distinguish a stack of traces (multiple 1D
     spectra, or extracted 2D row/column slices).
@@ -324,31 +425,110 @@ def get_stack_colormap(color='black'):
         )
 
 
-def stack_colors(n, color='black'):
-    """``n`` RGBA colours evenly spaced along :func:`get_stack_colormap`
-    -- the exact colour-resolving logic ``plot_1d_stack`` uses per
-    trace, factored out so other stacked-trace views (e.g. a GUI
-    canvas plotting each trace on its own subplot rather than
-    ``plot_1d_stack``'s own single shared axes) can match it without
-    duplicating the ``Normalize``/``ScalarMappable`` setup."""
-    values = range(n)
-    norm = plt.Normalize(vmin=values[0], vmax=values[-1]) if n > 1 else plt.Normalize(vmin=0, vmax=1)
-    scalar_map = cm.ScalarMappable(norm=norm, cmap=get_stack_colormap(color))
-    return [scalar_map.to_rgba(v) for v in values]
+def stack_colors(n, color='black', max_luminance: float = None):
+    """``n`` RGBA colours spread along :func:`get_stack_colormap`, with
+    the too-light part of the map skipped -- the colour-resolving logic
+    ``plot_1d_stack`` uses per trace, factored out so other
+    stacked-trace views (a GUI canvas plotting each trace on its own
+    subplot, the Compare stack, resolved SCORE components) match it
+    without duplicating the setup.
+
+    Colours are taken from :func:`usable_cmap_positions` rather than
+    from an even sweep of the whole map, so a stack never contains a
+    trace nobody can see. That does mean the spacing is even *in the
+    usable part of the map*, not in the map as a whole -- which is the
+    point: the discarded stretch was contributing invisible traces, not
+    distinguishable ones.
+
+    Every returned colour is guaranteed under the cap: a map with
+    nothing dark enough in it (an all-white one) has its darkest colour
+    scaled toward black rather than being handed back unusable.
+    """
+    if n <= 0:
+        return []
+    cmap = get_stack_colormap(color)
+    usable = usable_cmap_positions(cmap, max_luminance)
+    if n == 1:
+        # One trace has nothing to be distinguished *from*, so it takes
+        # the darkest usable colour rather than the map's own start,
+        # which for a light-ended map is the worst available choice.
+        picks = [usable[0] if relative_luminance(cmap(usable[0])[:3])
+                 <= relative_luminance(cmap(usable[-1])[:3]) else usable[-1]]
+    else:
+        picks = np.interp(np.linspace(0.0, 1.0, n),
+                          np.linspace(0.0, 1.0, usable.size), usable)
+    return [_darkened(cmap(p), max_luminance) for p in picks]
 
 
-def get_contour_cmap(name):
-    """Look up a named colormap for 2D contour plots, restricted to
-    :data:`CONTOUR_CMAP_NAMES`."""
+def get_contour_cmap(name, max_luminance: float = None):
+    """A named colormap for 2D contour plots, restricted to
+    :data:`CONTOUR_CMAP_NAMES`, **rebuilt from only its usable
+    colours**.
+
+    A contour plot here draws *lines*, so the same visibility problem
+    applies as to a trace stack: a near-white contour on a white
+    background is a contour nobody can see. The map is resampled over
+    :func:`usable_cmap_positions` and handed back as a new colormap of
+    the same length, so it is a drop-in for the original everywhere --
+    ``levels``/``norm`` handling is untouched, only the colours change.
+
+    For a sequential map this trims the light end. **For a diverging
+    map it removes the pale middle**, and the two dark halves meet:
+    that is deliberate. The middle of a diverging map is where its
+    colours are lightest, contour levels are never drawn at zero
+    anyway (they start above the noise threshold), and the two sides
+    stay distinguishable by hue.
+    """
     if name not in CONTOUR_CMAP_NAMES:
         raise ValueError(
             f"Unknown contour colour scheme '{name}'. "
             f"Available options: {sorted(CONTOUR_CMAP_NAMES)}"
         )
     try:
-        return plt.get_cmap(name)
+        base = plt.get_cmap(name)
     except AttributeError:  # pragma: no cover - very old matplotlib
-        return cm.get_cmap(name)
+        base = cm.get_cmap(name)
+
+    return readable_cmap(base, max_luminance)
+
+
+def readable_cmap(cmap, max_luminance: float = None):
+    """``cmap`` resampled over only its usable colours -- the reusable
+    core of :func:`get_contour_cmap`, for any colormap rather than only
+    the named contour ones.
+
+    Accepts a colormap object or a matplotlib name, and returns a new
+    colormap of the standard length, so it substitutes for the original
+    anywhere without touching ``levels``/``norm`` handling.
+    """
+    if isinstance(cmap, str):
+        cmap = plt.get_cmap(cmap)
+    usable = usable_cmap_positions(cmap, max_luminance)
+    resampled = np.interp(np.linspace(0.0, 1.0, _LUMINANCE_SAMPLES),
+                          np.linspace(0.0, 1.0, usable.size), usable)
+    colors = [_darkened(cmap(p), max_luminance) for p in resampled]
+    return cl.LinearSegmentedColormap.from_list(f"{cmap.name}_readable", colors)
+
+
+def qualitative_colors(n, name: str = "tab10", max_luminance: float = None):
+    """``n`` visually distinct colours for things that are *categories*
+    rather than points on a scale -- the components of a SCORE
+    resolution, the individual peaks under a fitted lineshape.
+
+    A qualitative palette, deliberately, not a sample of a continuous
+    map: a diverging or sequential map washes out at one end or in the
+    middle, which made a peak of middling rank nearly invisible once
+    shaded. ``tab10`` has no such midpoint -- but two of its ten
+    entries (the olive and the cyan) still only reach 2.0:1 against
+    white, so each colour is put through the same luminance cap as
+    everything else here and darkened if it misses.
+
+    Cycles once past the palette's own length, as its callers already
+    did.
+    """
+    palette = plt.get_cmap(name)
+    count = getattr(palette, "N", 10)
+    return [_darkened(palette(i % count), max_luminance) for i in range(int(n))]
 
 
 def save_figure(fig, fig_name='nmr_plot', save_format='png', dpi=300):

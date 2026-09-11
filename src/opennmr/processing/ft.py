@@ -114,11 +114,23 @@ def roll_fid(fid: np.ndarray, shift: float) -> np.ndarray:
     return np.fft.ifft(np.fft.fft(fid) * np.exp(-2j * np.pi * freqs * shift))
 
 
-def find_echo_top(complex_fid: np.ndarray) -> float:
+def find_echo_top(complex_fid: np.ndarray, offset: float = 0.0) -> float:
     """Fractional sample index of a full echo's peak, via parabolic
     interpolation of ``|complex_fid|`` around its maximum -- for
     signals that rise then fall (a full echo) rather than a one-sided
-    decaying FID."""
+    decaying FID.
+
+    ``offset`` : points added to the detected top, to correct it by
+    hand. The detector takes the largest magnitude sample, which is
+    the right answer for a clean symmetric echo and can be a few
+    points out for a noisy or asymmetric one -- and being out by even
+    one point puts a first-order phase ramp across the whole spectrum,
+    since the echo top is what defines t=0. Fractional values are
+    allowed: :func:`roll_fid` interpolates, so the correction does not
+    have to land on a sample boundary.
+
+    Clamped to the array, so a large offset cannot roll the echo top
+    outside the data it is meant to index."""
     magnitude = np.abs(complex_fid)
     i = int(np.argmax(magnitude))
     if 0 < i < len(magnitude) - 1:
@@ -127,10 +139,10 @@ def find_echo_top(complex_fid: np.ndarray) -> float:
         delta = 0.5 * (y0 - y2) / denom if denom != 0 else 0.0
     else:
         delta = 0.0
-    return i + delta
+    return float(np.clip(i + delta + offset, 0.0, max(len(magnitude) - 1, 0)))
 
 
-def align_echo(fid: np.ndarray, target_index: int = 0) -> np.ndarray:
+def align_echo(fid: np.ndarray, target_index: int = 0, echo_offset: float = 0.0) -> np.ndarray:
     """Roll a full-echo FID so its peak lands at ``target_index``
     (default: 0, i.e. t=0) -- :func:`find_echo_top` followed by a
     (possibly fractional) :func:`roll_fid`.
@@ -149,12 +161,13 @@ def align_echo(fid: np.ndarray, target_index: int = 0) -> np.ndarray:
     not what "aligned like an FID" means for the window/zero-fill/FFT
     steps that follow.
     """
-    top = find_echo_top(fid)
+    top = find_echo_top(fid, offset=echo_offset)
     return roll_fid(fid, target_index - top)
 
 
 def prepare_fid(fid: np.ndarray, *, fid_shift: float = 0.0, align_echo_enabled: bool = False,
-                 truncate: int | None = None, linear_predict_points: int = 0,
+                 echo_offset: float = 0.0, truncate: int | None = None,
+                 linear_predict_points: int = 0,
                  linear_predict_order: int = 20, linear_predict_direction: str = "forward") -> np.ndarray:
     """Shift -> echo-align -> truncate -> linear-predict, in that
     order, on a raw time-domain FID -- everything that happens to the
@@ -185,14 +198,23 @@ def prepare_fid(fid: np.ndarray, *, fid_shift: float = 0.0, align_echo_enabled: 
 
     ``align_echo_enabled`` -- named this way, not ``align_echo``, so
     it doesn't shadow the :func:`align_echo` function this same
-    function calls."""
+    function calls.
+
+    ``echo_offset`` : points added to the detected echo top before
+    rolling -- see :func:`find_echo_top`. The wrap limit that caps
+    ``truncate`` is recomputed from the offset top, so nudging the
+    alignment cannot silently leave the mirror-image tail in."""
     if fid_shift:
         fid = roll_fid(fid, fid_shift)
 
     echo_wrap_limit = None
     if align_echo_enabled:
-        top = find_echo_top(fid)
-        fid = align_echo(fid)
+        # One detection, reused: the wrap limit below has to be
+        # computed from the *same* top the roll used, offset included,
+        # or the truncation cap no longer matches where the pre-echo
+        # portion actually wrapped to.
+        top = find_echo_top(fid, offset=echo_offset)
+        fid = align_echo(fid, echo_offset=echo_offset)
         echo_wrap_limit = len(fid) - int(np.ceil(top))
 
     tdeff_points = truncate

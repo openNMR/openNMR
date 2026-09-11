@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import io
+from ...io import cloud
 
 #: Item data roles: the loadable path and its vendor, set only on leaves.
 _PATH_ROLE = Qt.ItemDataRole.UserRole
@@ -85,8 +86,20 @@ class DataBrowser(QWidget):
             "Double-click an experiment to load it. Folders group experiments; "
             "only things this app can actually open are listed."
         )
+        # `itemActivated` only -- **not** also `itemDoubleClicked`.
+        # A double-click emits both, so connecting both ran this
+        # handler twice for one gesture and loaded the same experiment
+        # twice: two identical entries in the list, and for a large 2D,
+        # the whole multi-second read done twice over. Real user
+        # report: "the folder browser shows each data set twice, I hope
+        # this isn't a double load."
+        #
+        # `itemActivated` is also the correct single signal to keep: it
+        # is the platform's own notion of activation, so it fires on
+        # double-click *and* on Return, and follows the setting on
+        # desktops configured for single-click activation --
+        # `itemDoubleClicked` does none of that.
         self._tree.itemActivated.connect(self._on_item_activated)
-        self._tree.itemDoubleClicked.connect(self._on_item_activated)
         self._tree.itemExpanded.connect(self._describe_children)
         layout.addWidget(self._tree, 1)
 
@@ -137,6 +150,14 @@ class DataBrowser(QWidget):
             leaf.setData(0, _PATH_ROLE, path)
             leaf.setData(0, _VENDOR_ROLE, vendor)
             leaf.setToolTip(0, path)
+            # Say up front what opening this will cost, rather than
+            # letting the first click block on a silent download.
+            pending = cloud.pending_download_bytes(path)
+            if pending:
+                leaf.setToolTip(
+                    0, f"{path}\n\nNot downloaded yet -- opening this will "
+                       f"fetch {cloud.format_bytes(pending)} from the cloud.",
+                )
             if parent is None:
                 self._tree.addTopLevelItem(leaf)
             else:
@@ -177,6 +198,16 @@ class DataBrowser(QWidget):
         Never raises: a folder that cannot be described is still
         loadable, and a browser that refused to list it would be worse
         than one that lists it without a summary."""
+        # Cloud-backed data is described from its name alone. Peeking
+        # reads the parameter files, and on a OneDrive/iCloud folder
+        # that *downloads* them -- so describing a folder of a hundred
+        # experiments would silently become a hundred sequential
+        # downloads on expand. See opennmr.io.cloud: the stat this uses
+        # is free and never materialises anything.
+        if not cloud.parameters_are_local(path):
+            pending = cloud.pending_download_bytes(path)
+            size = f", {cloud.format_bytes(pending)}" if pending else ""
+            return f"· in cloud{size} -- double-click to download"
         try:
             info = io.peek(path, vendor=vendor)
         except Exception:  # noqa: BLE001 -- an undescribable experiment still lists

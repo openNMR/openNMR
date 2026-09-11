@@ -39,7 +39,7 @@ import os
 #: reads this back to gate behaviour, but it costs nothing to have in
 #: place before it's actually needed.
 _METADATA_VERSION = 1
-_PROCESSING_VERSION = 1
+_PROCESSING_VERSION = 2
 
 #: Keys in ``NMRSpectrum.metadata.raw`` deliberately never written to
 #: the processing-parameters sidecar: full vendor parameter dumps
@@ -178,15 +178,76 @@ def save_processing_sidecar(spectrum) -> None:
     _write_json(processing_sidecar_path(source_path), payload)
 
 
-def load_processing_sidecar(source_path: str) -> dict | None:
+def load_processing_sidecar(source_path: str, vendor: str | None = None) -> dict | None:
     """The saved ``state`` dict from ``opennmr_processing.json`` (see
     :func:`save_processing_sidecar`) -- ready to merge straight into a
     freshly-loaded spectrum's own ``metadata.raw``. ``None`` under the
-    same conditions as :func:`load_metadata_sidecar`."""
+    same conditions as :func:`load_metadata_sidecar`.
+
+    ``vendor`` lets an older file be migrated correctly where the fix
+    depends on which reader wrote it -- see
+    :func:`_migrate_v1_phase`. Optional, so a caller that only wants
+    the settings (and not to reason about phase provenance) need not
+    supply it; omitting it is the conservative choice, keeping
+    whatever a version-1 file recorded.
+    """
     if not source_path:
         return None
     payload = _read_json(processing_sidecar_path(source_path))
     if payload is None:
         return None
     state = payload.get("state")
-    return state if isinstance(state, dict) else None
+    if not isinstance(state, dict):
+        return None
+    if vendor is not None and payload.get("opennmr_processing_version", 1) < 2:
+        state = _migrate_v1_phase(state, vendor)
+    return state
+
+
+#: The recorded-phase keys dropped when reading a version-1 processing
+#: sidecar, and the user-phase keys dropped alongside them for the one
+#: vendor whose base was mis-modelled -- see :func:`_migrate_v1_phase`.
+_V1_STALE_RECORDED_PHASE_KEYS = (
+    "recorded_phase0", "recorded_phase1", "recorded_phase0_f1", "recorded_phase1_f1",
+)
+_V1_STALE_USER_PHASE_KEYS = ("phase0", "phase1")
+
+#: Vendors whose recorded phase is not read from the file at all but
+#: computed by the reader (autophase), and so was written in the wrong
+#: model by version-1 code.
+_V1_COMPUTED_BASE_VENDORS = frozenset({"xpulse"})
+
+
+def _migrate_v1_phase(state: dict, vendor: str) -> dict:
+    """Drop phase that a version-1 sidecar cannot express correctly.
+
+    **The recorded phase, for every vendor.** It is re-derived on every
+    read regardless (Bruker from ``procs``'s ``PHC0``, X-Pulse from
+    autophase), so a saved copy is at best redundant -- and a
+    version-1 X-Pulse copy is actively wrong, written into a slot that
+    means TopSpin's index ramp (``exp(+i*phi)``) while autophase
+    returns the pivot model (``exp(-i*phi)``). See
+    :func:`opennmr.io.bruker.recorded_phase_from_pivot_model`. Dropped
+    rather than converted: the conversion needs the pivot the phase was
+    found at, which a version-1 file does not record.
+
+    **The user's own phase, for X-Pulse only.** With the base applied
+    backwards, any phase a user dialled in was dialled in against a
+    spectrum that was already rotated the wrong way -- so it is a
+    correction to a bug, not to the data, and carrying it forward
+    lands further from the right answer than starting clean does.
+    Measured on ``test_data/xpulse_PFG/4``: reloading with the saved
+    +38.33 deg on top of a correctly-composed base leaves row 0 needing
+    another -132 deg, while the same read with no saved user phase at
+    all lands on it exactly. Bruker's recorded phase was always applied
+    correctly, so a user phase saved against it still means what it
+    said and is kept.
+
+    What is lost, once, on the first load after this upgrade: a saved
+    "Zero Phase 0/1" on the recorded half, and an X-Pulse user phase
+    that happened to be right anyway. Both are one re-autophase away.
+    """
+    drop = set(_V1_STALE_RECORDED_PHASE_KEYS)
+    if vendor in _V1_COMPUTED_BASE_VENDORS:
+        drop |= set(_V1_STALE_USER_PHASE_KEYS)
+    return {key: value for key, value in state.items() if key not in drop}
