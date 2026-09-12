@@ -49,7 +49,8 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
                     convention="Haeberlen", static=True,
                     larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                     n_theta=60, n_phi=120, use_octant_symmetry=True,
-                    n_time=1024, n_sidebands=15, subtract_residual_mean=True):
+                    n_time=1024, n_sidebands=15, subtract_residual_mean=True,
+                    powder_scheme='rectangular', n_zcw=None):
     """
     Simulate a unit-amplitude, normalised CSA lineshape on
     ``x_ppm_sorted`` (must be ascending and evenly spaced -- the axis
@@ -66,12 +67,24 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
         :func:`nmrtools.csa_quad_simulator.finite_mas_csa_spectrum`,
         which requires ``larmor_Hz`` and ``mas_Hz``.
     n_theta, n_phi, use_octant_symmetry : optional
-        Powder-grid size for the static case.
+        Powder-grid size for the static case. Only used when
+        ``powder_scheme='rectangular'``.
     n_theta, n_phi, n_time, n_sidebands, rotor_angle,
     subtract_residual_mean : optional
         Powder-grid/FFT size and gamma-averaging options for the
         finite-MAS case. See
         :func:`nmrtools.csa_quad_simulator.finite_mas_csa_spectrum`.
+    powder_scheme : {'rectangular', 'zcw'}, optional
+        Powder-averaging scheme, forwarded to the simulator (see
+        :func:`nmrtools.csa_quad_simulator.get_powder_grid`). 'zcw'
+        typically converges with far fewer orientations for the
+        finite-MAS case (each orientation costs an FFT, and this
+        function is called ~100x per fit via curve_fit's Jacobian) --
+        it's a smaller win for the static case, where
+        ``use_octant_symmetry`` already gives an exact 8x reduction.
+    n_zcw : int, optional
+        Minimum ZCW orientation count; only used when
+        ``powder_scheme='zcw'``. Defaults to ``n_theta * n_phi``.
 
     Returns
     -------
@@ -85,6 +98,7 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
         spec = make_static_csa_spectrum(
             csa, x_ppm_sorted, fwhm=fwhm, n_theta=n_theta, n_phi=n_phi,
             use_octant_symmetry=use_octant_symmetry,
+            powder_scheme=powder_scheme, n_zcw=n_zcw,
         )
     else:
         if larmor_Hz is None or mas_Hz is None:
@@ -94,6 +108,7 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
             rotor_angle=rotor_angle, n_theta=n_theta, n_phi=n_phi,
             n_time=n_time, n_sidebands=n_sidebands, fwhm=fwhm,
             subtract_residual_mean=subtract_residual_mean,
+            powder_scheme=powder_scheme, n_zcw=n_zcw,
         )
 
     return spec["normalised_real_spec"]
@@ -225,6 +240,7 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
                       larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                       n_theta=60, n_phi=120, use_octant_symmetry=True,
                       n_time=1024, n_sidebands=15, subtract_residual_mean=True,
+                      powder_scheme='rectangular', n_zcw=None,
                       fit_regions=None, use_normalised=True,
                       baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
                       bounds=None, fixed=None,
@@ -265,6 +281,12 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
         and refine for the final plot -- the powder-average loop, not
         the ppm-axis length, dominates the cost of each ``curve_fit``
         iteration.
+    powder_scheme, n_zcw : optional
+        Powder-averaging scheme -- see :func:`csa_model_full`. Worth
+        trying ``powder_scheme='zcw'`` for finite-MAS fits (``static=
+        False``) since that's where each ``curve_fit`` iteration is
+        most expensive; check the fit result is unchanged when you
+        raise ``n_zcw`` before trusting a low value.
     fit_regions : list of tuple, optional
         ``[(xmin, xmax), ...]`` in ppm. If None, the complete spectrum
         is fitted.
@@ -342,6 +364,7 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
         rotor_angle=rotor_angle, n_theta=n_theta, n_phi=n_phi,
         use_octant_symmetry=use_octant_symmetry, n_time=n_time,
         n_sidebands=n_sidebands, subtract_residual_mean=subtract_residual_mean,
+        powder_scheme=powder_scheme, n_zcw=n_zcw,
     )
 
     lower, upper = build_csa_bounds(
@@ -624,6 +647,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
                        larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                        n_theta=60, n_phi=120, use_octant_symmetry=True,
                        n_time=1024, n_sidebands=15, subtract_residual_mean=True,
+                       powder_scheme='rectangular', n_zcw=None,
                        fit_regions=None, baseline_regions=None,
                        baseline_sigma=2.5, baseline_max_iter=10, normalize=True,
                        bounds=None, fixed=None,
@@ -656,6 +680,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
     procno : int, optional
     convention, static, larmor_Hz, mas_Hz, rotor_angle, n_theta, n_phi,
     use_octant_symmetry, n_time, n_sidebands, subtract_residual_mean,
+    powder_scheme, n_zcw,
     fit_regions, baseline_regions, baseline_sigma, baseline_max_iter,
     bounds, fixed, positive_intensity, allow_negative_intensity :
         See :func:`fit_csa_spectrum`.
@@ -691,6 +716,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
         n_theta=n_theta, n_phi=n_phi, use_octant_symmetry=use_octant_symmetry,
         n_time=n_time, n_sidebands=n_sidebands,
         subtract_residual_mean=subtract_residual_mean,
+        powder_scheme=powder_scheme, n_zcw=n_zcw,
         fit_regions=fit_regions, use_normalised=normalize,
         baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
         baseline_max_iter=baseline_max_iter, bounds=bounds, fixed=fixed,
