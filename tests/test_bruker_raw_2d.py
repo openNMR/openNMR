@@ -815,3 +815,57 @@ def test_read_2d_keeps_the_recorded_phase_without_echo_alignment():
 
     assert "recorded_phase_dropped" not in plain.metadata.raw
     assert plain.metadata.raw["recorded_phase1"] != 0.0
+
+
+# ============================================================
+# Row count is capped at F1 TD
+# ============================================================
+
+def test_guess_raw_2d_shape_never_exceeds_f1_td(tmp_path):
+    # The floor division exists only to find a shape the file can be
+    # reshaped to at all. Anything past TD is whatever the file carried
+    # beyond the data, not extra t1 increments -- so it is dropped.
+    # Real motivation: a pseudo-2D whose rows *are* the slices loaded
+    # 19 of them against a 16-entry vdlist.
+    ser = tmp_path / "ser"
+    dic = {"acqus": {"TD": 256, "DTYPA": 0}, "acqu2s": {"TD": 10}}
+    row_bytes = 256 * 4  # TD already a multiple of the 256-word block
+    ser.write_bytes(b"\0" * (row_bytes * 13))   # three rows of surplus
+
+    n_rows, _n_complex = bruker._guess_raw_2d_shape(dic, str(ser))
+    assert n_rows == 10
+
+
+def test_guess_raw_2d_shape_still_floors_a_short_file(tmp_path):
+    # The fallback's original job is unchanged: a file with *fewer*
+    # rows than TD must still reshape rather than crash.
+    ser = tmp_path / "ser"
+    dic = {"acqus": {"TD": 256, "DTYPA": 0}, "acqu2s": {"TD": 10}}
+    ser.write_bytes(b"\0" * (256 * 4 * 7))
+
+    n_rows, _n_complex = bruker._guess_raw_2d_shape(dic, str(ser))
+    assert n_rows == 7
+
+
+def test_guess_raw_2d_shape_without_acqu2s_is_unchanged(tmp_path):
+    ser = tmp_path / "ser"
+    dic = {"acqus": {"TD": 256, "DTYPA": 0}}
+    ser.write_bytes(b"\0" * (256 * 4 * 13))
+
+    n_rows, _n_complex = bruker._guess_raw_2d_shape(dic, str(ser))
+    assert n_rows == 13
+
+
+def test_pseudo_2d_slice_count_matches_f1_td_on_real_data():
+    # The dataset that motivated the cap: 19 rows read, TD1 = 16, and a
+    # 16-entry vdlist it could not be fitted against.
+    path = os.path.join("test_data",
+                        "2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_20260119", "2005")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+    from opennmr.io import lists as io_lists
+
+    spectrum = bruker.read_2d(path, pseudo_2d=True)
+    assert spectrum.data.shape[0] == 16
+    vdlist = io_lists.read_value_list(os.path.join(path, "vdlist"))
+    assert len(vdlist["values"]) == spectrum.data.shape[0]

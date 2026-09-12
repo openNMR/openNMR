@@ -35,12 +35,14 @@ from .. import plotting
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRSpectrum
 from ..io import bruker as io_bruker
+from ..io import lists as io_lists
 from ..io import persistence as io_persistence
 from ..processing import arithmetic as processing_arithmetic
 from ..processing import diffusion as processing_diffusion
 from ..processing import fitting as processing_fitting
 from ..processing import ilt as processing_ilt
 from ..processing import ft as processing_ft
+from ..processing import enmr as processing_enmr
 from ..processing import relaxation as processing_relaxation
 from ..processing import score as processing_score
 from ..processing import slicing as processing_slicing
@@ -287,6 +289,31 @@ class MainWindow(QMainWindow):
         # message clears only when the last one lands.
         self._loader = None
         self._pending_loads = 0
+        #: Canonical paths whose background read has been dispatched
+        #: but has not reached the session yet -- see _open_one.
+        self._pending_load_paths: set[str] = set()
+        #: The experiment the list-file combo currently holds the
+        #: candidates for, so a refresh can tell "same experiment,
+        #: keep the user's pick" from "new experiment, start from its
+        #: own folder" -- see _refresh_list_file_candidates.
+        self._list_file_combo_source: str | None = None
+        #: The last eNMR fit, and the gradient-reversed repeats kept
+        #: for combining -- see _on_enmr_keep_repeat_clicked.
+        self._enmr_result: dict | None = None
+        self._enmr_result_label: str = ""
+        self._enmr_repeats: list[dict] = []
+        #: Raw-series indices the user has right-clicked off the eNMR
+        #: fit. Points, not pairs: a single polarised electrode bubbles
+        #: and distorts one polarity only.
+        self._enmr_excluded: set[int] = set()
+        #: Suppresses the eNMR panel's modal error boxes while a refit
+        #: the user did not explicitly ask for is running.
+        self._enmr_quiet = False
+        #: Which fit the Fit tab is currently showing, so right-click
+        #: "Exclude Nearest Point" acts on it. Without this the eNMR
+        #: plot's right-click reaches into whatever relaxation fit ran
+        #: earlier in the session and silently re-fits *that*.
+        self._fit_canvas_owner: str | None = None
         #: Set only inside _load's select-then-apply-sidecar window, to
         #: skip a draw that a following one is about to supersede.
         self._defer_spectrum_draw = False
@@ -563,7 +590,7 @@ class MainWindow(QMainWindow):
         view_menu = menu_bar.addMenu("&View")
         pan_action = QAction("&Pan Mode", self)
         pan_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
-        pan_action.setToolTip("Drag to pan the spectrum. On by default when data is loaded.")
+        pan_action.setToolTip("Drag to pan the spectrum.")
         pan_action.triggered.connect(lambda: self._set_navigation_mode("pan"))
         view_menu.addAction(pan_action)
 
@@ -1337,8 +1364,7 @@ class MainWindow(QMainWindow):
             except ValueError:
                 unrecognised.append(path)
                 continue
-            if not self._load_async(path, vendor):
-                self._load(path, vendor)
+            self._open_one(path, vendor)
 
         if unrecognised and report_unrecognised:
             QMessageBox.critical(
@@ -1361,13 +1387,11 @@ class MainWindow(QMainWindow):
             return
 
         if len(matches) == 1:
-            if not self._load_async(*matches[0]):
-                self._load(*matches[0])
+            self._open_one(*matches[0])
             return
 
         for path, vendor in self._prompt_select_spectra(matches, directory):
-            if not self._load_async(path, vendor):
-                self._load(path, vendor)
+            self._open_one(path, vendor)
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802 -- Qt override
         if event.mimeData().hasUrls():
@@ -1533,6 +1557,41 @@ class MainWindow(QMainWindow):
             self._loader = None
         super().closeEvent(event)
 
+    def _open_one(self, path: str, vendor: str) -> None:
+        """Open ``path``, or switch to it if it is already open.
+
+        Every route into the session goes through here -- the Open
+        dialog, a dropped folder, the multi-experiment prompt, the Data
+        tab's own browser -- so opening the same experiment twice
+        selects the one row it already has instead of appending a
+        second, identical one. A duplicate row is not harmless
+        bookkeeping: the two copies drift apart the moment either is
+        processed, the Compare list offers both under the same label,
+        and a re-open silently discards the peak table and processing
+        the user had built up on the copy they were already looking at.
+
+        A read already *in flight* counts as open too. A background
+        load only reaches the session when it finishes on the GUI
+        thread, so without this a second drop (or an impatient
+        double-click in the browser) of the same folder would queue a
+        second read of it and land two rows anyway -- the duplicate
+        this exists to prevent, arriving by the one route that gets
+        past a check on the session alone.
+        """
+        key = Session._path_key(path)
+        if key in self._pending_load_paths:
+            self.statusBar().showMessage(
+                f"{os.path.basename(path.rstrip('/'))} is already loading.", 5000)
+            return
+        existing = self.session.index_for_path(path, vendor=vendor)
+        if existing is not None:
+            self._select_single_row(existing)
+            self.statusBar().showMessage(
+                f"{os.path.basename(path.rstrip('/'))} is already open — switched to it.", 5000)
+            return
+        if not self._load_async(path, vendor):
+            self._load(path, vendor)
+
     def _load_async(self, path: str, vendor: str) -> bool:
         """Read ``path`` off the GUI thread, then finish the load here.
 
@@ -1550,6 +1609,7 @@ class MainWindow(QMainWindow):
         if loader is None:
             return False
         self._pending_loads += 1
+        self._pending_load_paths.add(Session._path_key(path))
         self.statusBar().showMessage(f"Loading {os.path.basename(path)}…")
         loader.load(path, vendor, self._initial_load_kwargs(path, vendor))
         return True
@@ -1573,12 +1633,14 @@ class MainWindow(QMainWindow):
 
     def _on_background_load_finished(self, path: str, vendor: str, spectrum) -> None:
         self._pending_loads = max(0, self._pending_loads - 1)
+        self._pending_load_paths.discard(Session._path_key(path))
         if not self._pending_loads:
             self.statusBar().clearMessage()
         self._load(path, vendor, preloaded=spectrum)
 
     def _on_background_load_failed(self, path: str, vendor: str, message: str) -> None:
         self._pending_loads = max(0, self._pending_loads - 1)
+        self._pending_load_paths.discard(Session._path_key(path))
         if not self._pending_loads:
             self.statusBar().clearMessage()
         QMessageBox.critical(self, "Failed to load spectrum", message)
@@ -1723,15 +1785,20 @@ class MainWindow(QMainWindow):
         # override that default rather than being silently reset by it
         # on every reopen -- see the pseudo_2d branch just below.
         saved_metadata = io_persistence.load_metadata_sidecar(spectrum.metadata.source_path)
-        # X-Pulse's own read_2d has no pseudo_2d parameter at all --
-        # every genuine 2D load from it is unconditionally the real
-        # thing, so there is nothing to opt out of here (see
-        # _refresh_selection_display's own matching guard on the
-        # "Process Indirect Dimension" button for the full story). The
-        # reload attempt below would always raise TypeError for it --
-        # harmlessly swallowed by the except below today, but skipping
-        # it outright avoids a guaranteed-to-fail call on every X-Pulse
-        # 2D load.
+        # X-Pulse keeps loading its NTUPLES 2Ds as genuine 2Ds, unlike
+        # Bruker, whose own auto-detection is known-unreliable and is
+        # overridden below. That is deliberate and narrower than it
+        # looks: every X-Pulse NTUPLES dataset in evidence here really
+        # is a correlation experiment (the NUS HSQC), and forcing them
+        # all to pseudo-2D to catch a series nobody has produced yet
+        # would break the case that does exist.
+        #
+        # What *was* wrong is now fixed one level up: read_2d takes a
+        # `pseudo_2d` argument, so the Process Indirect Dimension
+        # toggle is offered for X-Pulse too and a mislabelled series
+        # can be corrected -- previously it could not be, which is the
+        # half of "some pseudo-2Ds are being noted as regular 2Ds"
+        # that applied to this vendor.
         # Skipped entirely when the pre-read decision above already
         # applied this experiment's own preference (Bruker): the read
         # has already honoured it, so re-reading could only ever
@@ -1855,16 +1922,12 @@ class MainWindow(QMainWindow):
             # apply the restored recipe now.
             self._apply_loaded_processing_sidecar(spectrum, index)
 
-        # Pan is the default interaction once there is data to pan --
-        # explicit user request. Applied on load rather than at startup
-        # so it lands on canvases that actually have something plotted,
-        # and only for the first spectrum, so it never overrides a mode
-        # the user has since chosen for themselves. Sequenced after the
-        # sidecar apply for that same "something plotted" reason, now
-        # that the draw above can be deferred to it.
-        if len(self.session) == 1:
-            self._set_navigation_mode("pan")
-
+        # No navigation mode is forced on load. Pan used to be switched
+        # on for the first spectrum (an earlier explicit request) and
+        # was withdrawn by a later one: a mode the application turns on
+        # for you is a mode you have to notice and turn off, and the
+        # matplotlib toolbar already makes pan one click away. View >
+        # Pan Mode and its shortcut are unchanged.
         shape_note = spectrum.metadata.raw.get("read_2d_shape_guess_failed")
         if shape_note:
             QMessageBox.information(
@@ -2092,9 +2155,8 @@ class MainWindow(QMainWindow):
 
     def _on_browser_spectrum_activated(self, path: str, vendor: str) -> None:
         """Load an experiment picked in the browser -- the same path
-        Open… takes, background read included."""
-        if not self._load_async(path, vendor):
-            self._load(path, vendor)
+        Open… takes, background read and already-open check included."""
+        self._open_one(path, vendor)
 
     def _on_remove_clicked(self) -> None:
         row = self.spectrum_list.currentRow()
@@ -2149,6 +2211,7 @@ class MainWindow(QMainWindow):
         self.relaxation_fit_params_label.setText("")
         self._relaxation_fit_results = None
         self.view_relaxation_peak_spin.setEnabled(False)
+        self._refresh_curve_fit_export_button()
 
     def _selected_index(self) -> int | None:
         row = self.spectrum_list.currentRow()
@@ -7287,6 +7350,7 @@ class MainWindow(QMainWindow):
         # that acts on an already-measured series.
         self.analysis_sub_tabs = WrappingTabWidget()
         self.analysis_sub_tabs.addTab(self._build_curve_fitting_subtab(), "Curve Fitting")
+        self.analysis_sub_tabs.addTab(self._build_enmr_subtab(), "eNMR")
         self.analysis_sub_tabs.addTab(self._build_vocs_subtab(), "VOCS")
         self.analysis_sub_tabs.addTab(self._build_imaging_subtab(), "Imaging")
         layout.addWidget(self.analysis_sub_tabs)
@@ -7773,10 +7837,33 @@ class MainWindow(QMainWindow):
         )
         relax_form.addRow("Value source:", self.value_source_combo)
 
+        # How many slices of the series to use at all. Bruker's own
+        # convention, and the user's: "you can make e.g. a vdlist that
+        # is 24 points long and then set the F1 TD to be 10 and you
+        # will just use the first 10 values." 0 means every slice.
+        self.slice_limit_spin = QSpinBox()
+        self.slice_limit_spin.setRange(0, 100000)
+        self.slice_limit_spin.setValue(0)
+        self.slice_limit_spin.setSpecialValueText("all")
+        self.slice_limit_spin.setToolTip(
+            "Use only the first N slices of the series, ignoring the rest — "
+            "\"all\" (0) uses every one.\n\n"
+            "Applies to the whole analysis: Fit Spectrum, Fit Curve, DOSY and "
+            "SCORE all see the same slices, so they cannot end up fitting "
+            "different amounts of the same series.\n\n"
+            "For a series whose last points are noise, or to match a value "
+            "list shorter than the data. A list *longer* than the data needs "
+            "nothing set here: its extra entries are simply unused, the same "
+            "way TopSpin uses the first TD entries of a longer vdlist."
+        )
+        self.slice_limit_spin.valueChanged.connect(self._on_slice_limit_changed)
+        self.slice_limit_row_label = QLabel("Slices:")
+        relax_form.addRow(self.slice_limit_row_label, self.slice_limit_spin)
+
         self.delays_row_label = QLabel("Values:")
         self.delay_source_combo = QComboBox()
         self.delay_source_combo.addItems([
-            "Auto", "Manual list", "Start + step", "vclist × factor", "Relative gradient (valueslist)",
+            "Auto", "Manual list", "Start + step", "List file × factor", "Relative gradient (valueslist)",
             "b from gradients (δ/Δ/G)",
         ])
         self._narrow_combo(self.delay_source_combo)
@@ -7787,9 +7874,11 @@ class MainWindow(QMainWindow):
             "evenly-spaced series starting at Start and incrementing "
             "by Step, one value per slice (the count is already known "
             "from the data, so there's no separate End to enter). "
-            "vclist × factor: Bruker's variable-counter list, scaled "
-            "by a constant (e.g. a per-count delay or gradient "
-            "increment). Relative gradient: an X-Pulse arrayed PFG "
+            "List file × factor: any one-column text file of numbers "
+            "sitting with the data, scaled by a constant -- a Bruker "
+            "vdlist/vclist/difflist, an X-Pulse "
+            "parameters/..._valueslist.txt, or your own delays.txt. "
+            "Relative gradient: an X-Pulse arrayed PFG "
             "experiment's own relative gradient-strength fractions "
             "(0-1, from valueslist.txt) -- not an absolute b-value, "
             "useful for judging attenuation trends or as a fit x-axis "
@@ -7800,9 +7889,52 @@ class MainWindow(QMainWindow):
         self.delay_source_combo.currentIndexChanged.connect(self._on_delay_source_changed)
         relax_form.addRow(self.delays_row_label, self.delay_source_combo)
 
+        # The unit typed values are *in*, and the unit everything is
+        # displayed in. Explicit user request ("the time factor would
+        # be best as ms not s"): relaxation delays are read, written
+        # and talked about in milliseconds, and a panel that insisted
+        # on seconds made every entry an exercise in counting zeros.
+        #
+        # Internally everything stays in seconds -- the models, the
+        # fitted T1/T2, every stored result. This converts on the way
+        # in and formats on the way out, and nowhere else, so the unit
+        # is a presentation choice that cannot reach the numerics.
+        self.delay_unit_combo = QComboBox()
+        for label, scale in self._DELAY_UNITS:
+            self.delay_unit_combo.addItem(label, scale)
+        self.delay_unit_combo.setCurrentIndex(
+            [scale for _label, scale in self._DELAY_UNITS].index(self._DEFAULT_DELAY_SCALE))
+        self._narrow_combo(self.delay_unit_combo)
+        self.delay_unit_combo.setToolTip(
+            "The unit for typed delays (Manual list, Start + step) and for "
+            "every value shown in this panel. Fits are always done in "
+            "seconds; this converts on the way in and out.\n\n"
+            "An explicit suffix in a typed list wins over this — \"10m\" is "
+            "10 ms whatever this says, the same convention a Bruker vdlist "
+            "uses. A list *file* is never rescaled by this either: its values "
+            "are the vendor's own, and the Factor is what converts those."
+        )
+        self.delay_unit_combo.currentIndexChanged.connect(self._on_delay_unit_changed)
+        self.delay_unit_row_label = QLabel("Unit:")
+        relax_form.addRow(self.delay_unit_row_label, self.delay_unit_combo)
+
         self.manual_delays_edit = QLineEdit()
         self.manual_delays_edit.setPlaceholderText("e.g. 0.001, 0.01, 0.1, 1.0")
-        relax_form.addRow("List:", self.manual_delays_edit)
+        self.manual_delays_edit.setToolTip(
+            "The values to fit against, comma- or whitespace-separated, one "
+            "per slice in slice order. Read at the moment Fit Curve runs -- "
+            "the Values preview line below shows exactly what they resolve "
+            "to, so there is never a question of whether they were used."
+        )
+        self.manual_delays_edit.textChanged.connect(self._refresh_values_preview)
+        # The label is tracked, not passed as a bare string: a
+        # QFormLayout built from `addRow("List:", widget)` keeps its own
+        # QLabel that nothing can later hide, so hiding the field alone
+        # left an orphaned "List:" hanging in the panel under every
+        # other source. Same reason every other optional row here
+        # (Start/Step/Factor) already keeps its label in an attribute.
+        self.manual_delays_row_label = QLabel("List:")
+        relax_form.addRow(self.manual_delays_row_label, self.manual_delays_edit)
 
         # Stacked (one per row), not side by side -- crammed into one
         # row in this narrow side panel, the two boxes were too
@@ -7819,22 +7951,91 @@ class MainWindow(QMainWindow):
         self.delay_step_spin.setFixedWidth(120)
         self.delay_step_spin.setValue(0.1)
         self.delay_step_spin.setToolTip("Step")
+        self.delay_start_spin.valueChanged.connect(self._refresh_values_preview)
+        self.delay_step_spin.valueChanged.connect(self._refresh_values_preview)
         self.delay_start_row_label = QLabel("Start:")
         self.delay_step_row_label = QLabel("Step:")
         relax_form.addRow(self.delay_start_row_label, self.delay_start_spin)
         relax_form.addRow(self.delay_step_row_label, self.delay_step_spin)
 
-        self.vclist_factor_spin = QDoubleSpinBox()
-        self.vclist_factor_spin.setRange(-1.0e12, 1.0e12)
-        self.vclist_factor_spin.setDecimals(6)
-        self.vclist_factor_spin.setValue(1.0)
-        self.vclist_factor_spin.setToolTip(
-            "Each vclist entry (an integer counter) is multiplied by "
-            "this factor to get the actual delay (s) or b-value "
-            "(s/m^2) -- e.g. a per-count time increment or gradient step."
+        # --- Any one-column list file, x factor --------------------
+        # Was "vclist x factor", Bruker-only and hard-coded to that one
+        # filename. Every vendor writes the same thing under a
+        # different name (Bruker vdlist/vclist/difflist, X-Pulse
+        # parameters/G1_valueslist.txt, a user's own delays.txt), so
+        # what varies is *which file*, not what to do with it -- see
+        # opennmr.io.lists. The combo is populated by
+        # _refresh_list_file_candidates from whatever is actually
+        # sitting with the selected experiment, with Browse... for
+        # anything it did not find.
+        self.list_file_combo = QComboBox()
+        self.list_file_combo.setMinimumContentsLength(14)
+        self.list_file_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.list_file_combo.setToolTip(
+            "A one-column text file of numbers, one per slice. Auto-filled "
+            "with the list files found with this experiment (its own folder, "
+            "Bruker's lists/ sub-folders, X-Pulse's parameters/, and the "
+            "parent folder); pick Browse… for one anywhere else.\n\n"
+            "Bruker time suffixes (10m = 10 ms) are honoured; blank lines and "
+            "# comments are skipped. Nothing is inferred from the filename -- "
+            "what the numbers mean is set by the Factor below."
         )
-        self.vclist_factor_row_label = QLabel("Factor:")
-        relax_form.addRow(self.vclist_factor_row_label, self.vclist_factor_spin)
+        self.list_file_combo.currentIndexChanged.connect(self._on_list_file_changed)
+        self.list_file_row_label = QLabel("List file:")
+        relax_form.addRow(self.list_file_row_label, self.list_file_combo)
+
+        # A line edit rather than a spin box, because a factor is often
+        # a *parameter of the experiment* rather than a number the user
+        # knows offhand. Explicit request: "for X-Pulse, I might want
+        # the TAU value to multiply with the arrayed number of echoes
+        # to fit the T2" -- the list file supplies the echo counts and
+        # TAU is the factor, read from the file rather than looked up
+        # and retyped.
+        self.list_factor_edit = QLineEdit()
+        self.list_factor_edit.setPlaceholderText("1.0, or e.g. TAU*2")
+        self.list_factor_edit.setToolTip(
+            "Every entry in the list file is multiplied by this. The product "
+            "is in the Unit selected above.\n\n"
+            "A number, or an expression in this experiment's own acquisition "
+            "parameters — TAU, P90, D70 for X-Pulse; d1, p1, cnst2, l4 for "
+            "Bruker. The same names a custom fitting equation uses. So a CPMG "
+            "echo-count list becomes a T2 delay series with a factor of "
+            "TAU*2, with no arithmetic done by hand.\n\n"
+            "Parameters are used exactly as the vendor recorded them, in the "
+            "vendor's own unit — an X-Pulse TAU is in µs, so with the Unit on "
+            "µs the factor is simply TAU*2 and needs no conversion; in ms or s "
+            "it carries one (TAU*2*1e-3, TAU*2*1e-6). The resolved value is "
+            "shown below."
+        )
+        self.list_factor_edit.textChanged.connect(self._on_list_factor_changed)
+        self.list_factor_row_label = QLabel("Factor:")
+        relax_form.addRow(self.list_factor_row_label, self.list_factor_edit)
+
+        # What the expression came out as, and which parameters it
+        # picked up -- the same feedback _on_custom_equation_changed
+        # gives a typed fitting equation, for the same reason: a factor
+        # silently resolving to something unintended scales every
+        # fitted time constant with nothing on screen to show it.
+        self.list_factor_value_label = QLabel("")
+        self.list_factor_value_label.setWordWrap(True)
+        relax_form.addRow("", self.list_factor_value_label)
+
+        # What the source above actually resolves to, right now. The
+        # panel previously gave no feedback at all, so a typed list
+        # sitting under a source combo still set to Auto looked exactly
+        # like a typed list that was being ignored -- the report this
+        # line exists to answer ("the manual list doesn't seem to be
+        # used"). It is computed by the same
+        # _resolve_independent_values the fit itself calls, never a
+        # parallel reimplementation of it.
+        self.values_preview_label = QLabel("")
+        self.values_preview_label.setWordWrap(True)
+        self.values_preview_label.setToolTip(
+            "The x-values Fit Curve, DOSY and SCORE will all use, resolved "
+            "from the Values source above against the selected experiment."
+        )
+        relax_form.addRow("", self.values_preview_label)
 
         # --- b from gradient amplitudes + timings -------------------
         # The PFG generalisation. Until now a real b-value could only
@@ -7973,6 +8174,10 @@ class MainWindow(QMainWindow):
         # multi-component diffusion fit in particular is decided by its
         # starting D's -- see processing.diffusion._component_d_guesses.
         self.guess_group = QGroupBox("Starting values (optional)")
+        # Title, not the row names: those are matched against the
+        # model's own parameter list (see _restore_guess_table), so
+        # appending a unit to them would break the match.
+        self._guess_group_base_title = "Starting values (optional)"
         self.guess_group.setCheckable(True)
         self.guess_group.setChecked(False)
         self.guess_group.setToolTip(
@@ -8197,6 +8402,7 @@ class MainWindow(QMainWindow):
         relax_form.addRow(score_row)
 
         self._populate_fit_model_combo()
+        self._on_fit_type_changed(self.fit_type_combo.currentIndex())
         self._on_delay_source_changed(0)
         self._on_global_fit_toggled(False)
         self._refresh_score_export_buttons()
@@ -8241,6 +8447,24 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.relaxation_uncertainty_checkbox)
 
+        # The data behind the plot, not just the fitted parameters --
+        # the report already gives those. Explicit user request: "I
+        # need the curve fit results to be exportable as integral/peak
+        # height vs whatever x is".
+        self.export_curve_fit_button = QPushButton("Export curve fit (CSV)…")
+        self.export_curve_fit_button.setEnabled(False)
+        self.export_curve_fit_button.setToolTip(
+            "Write the fitted series to a CSV: the x-axis (delay or b-value), "
+            "then every peak's measured integral or amplitude at each point, "
+            "with the fitted curve beside it.\n\n"
+            "The x column is in the unit this panel is showing, and the "
+            "measured column is whichever Value source the fit used — both "
+            "named in the header, so the file says what it holds without "
+            "needing this window open."
+        )
+        self.export_curve_fit_button.clicked.connect(self._on_export_curve_fit_clicked)
+        layout.addWidget(self.export_curve_fit_button)
+
         self.relaxation_fit_params_label = QLabel("")
         self.relaxation_fit_params_label.setWordWrap(True)
         # Monospaced: format_relaxation_report aligns its parameter and
@@ -8254,6 +8478,530 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         return tab
+
+    def _build_enmr_subtab(self) -> QWidget:
+        """Electrophoretic NMR: the phase a resonance picks up against
+        the applied voltage, and the slope of it.
+
+        A separate sub-tab rather than a third Fit-type on the Curve
+        Fitting panel, because its x-axis is **volts** -- neither a time
+        nor a b-value, so none of that panel's Values sources, unit
+        machinery or relaxation models apply to it. Sharing the panel
+        would have meant every control there growing a third meaning.
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        region_box = QGroupBox("Resonance")
+        region_form = QFormLayout(region_box)
+        self.enmr_low_spin = QDoubleSpinBox()
+        self.enmr_high_spin = QDoubleSpinBox()
+        for spin, default in ((self.enmr_low_spin, 3.18), (self.enmr_high_spin, 3.42)):
+            spin.setRange(-1.0e6, 1.0e6)
+            spin.setDecimals(3)
+            spin.setSuffix(" ppm")
+            spin.setValue(default)
+        self.enmr_low_spin.setToolTip(
+            "The resonance whose phase is measured, as a ppm range.\n\n"
+            "Phase is read as the argument of the complex integral over this "
+            "window, so it should cover the line and as little else as "
+            "possible — anything else inside it contributes its own phase."
+        )
+        self.enmr_high_spin.setToolTip(self.enmr_low_spin.toolTip())
+        region_form.addRow("From:", self.enmr_low_spin)
+        region_form.addRow("To:", self.enmr_high_spin)
+        layout.addWidget(region_box)
+
+        volt_box = QGroupBox("Voltages (from this experiment's vdlist)")
+        volt_form = QFormLayout(volt_box)
+        self.enmr_offset_spin = QDoubleSpinBox()
+        self.enmr_offset_spin.setRange(-1.0e6, 1.0e6)
+        self.enmr_offset_spin.setDecimals(4)
+        self.enmr_offset_spin.setSuffix(" µs")
+        self.enmr_offset_spin.setValue(0.5)
+        self.enmr_scale_spin = QDoubleSpinBox()
+        self.enmr_scale_spin.setRange(-1.0e6, 1.0e6)
+        self.enmr_scale_spin.setDecimals(4)
+        self.enmr_scale_spin.setSuffix(" V/µs")
+        self.enmr_scale_spin.setValue(2.0)
+        for spin in (self.enmr_offset_spin, self.enmr_scale_spin):
+            spin.setToolTip(
+                "The vdlist carries the applied voltage as a time:\n"
+                "    V = (vdlist[µs] − offset) × scale\n\n"
+                "The defaults are one cell's convention (0.5 µs = 0 V, "
+                "10.5 µs = 20 V). They belong to the amplifier, not to the "
+                "file format, so check them against your own setup — the "
+                "voltages resolved below are what will actually be fitted."
+            )
+            spin.valueChanged.connect(self._refresh_enmr_voltage_preview)
+        volt_form.addRow("Zero at:", self.enmr_offset_spin)
+        volt_form.addRow("Scale:", self.enmr_scale_spin)
+
+        self.enmr_max_voltage_spin = QDoubleSpinBox()
+        self.enmr_max_voltage_spin.setRange(0.0, 1.0e6)
+        self.enmr_max_voltage_spin.setDecimals(1)
+        self.enmr_max_voltage_spin.setSuffix(" V")
+        self.enmr_max_voltage_spin.setValue(0.0)
+        self.enmr_max_voltage_spin.setSpecialValueText("all points")
+        self.enmr_max_voltage_spin.setToolTip(
+            "Fit only the points with |V| at or below this, both "
+            "polarities together.\n\n"
+            "The phase ramp goes nonlinear at the top of the range — the "
+            "field heats the sample, and what that starts is not "
+            "proportional to the voltage — so the highest points can pull "
+            "a slope the rest of the series determines perfectly well.\n\n"
+            "Excluded points are still plotted, as grey crosses, and the "
+            "fitted line is extrapolated across them: the deviation stays "
+            "visible instead of disappearing. The same cutoff applies to "
+            "every kept repeat, so combining them compares the same range."
+        )
+        volt_form.addRow("Fit up to:", self.enmr_max_voltage_spin)
+        self.enmr_voltage_label = QLabel("")
+        self.enmr_voltage_label.setWordWrap(True)
+        volt_form.addRow("", self.enmr_voltage_label)
+        layout.addWidget(volt_box)
+
+        cell_box = QGroupBox("Cell and sequence")
+        cell_form = QFormLayout(cell_box)
+        self.enmr_gap_spin = QDoubleSpinBox()
+        self.enmr_gap_spin.setRange(0.0, 1000.0)
+        self.enmr_gap_spin.setDecimals(2)
+        self.enmr_gap_spin.setSuffix(" mm")
+        self.enmr_gap_spin.setValue(0.0)
+        self.enmr_gap_spin.setSpecialValueText("not set — slope only")
+        self.enmr_gap_spin.setToolTip(
+            "Electrode separation. The one number no vendor file records, and "
+            "the mobility scales directly with it — so it has no default and "
+            "nothing is computed from it until you set one.\n\n"
+            "Left unset, the fit reports the slope in rad/V, which is what the "
+            "data actually determines."
+        )
+        cell_form.addRow("Electrode gap:", self.enmr_gap_spin)
+
+        self.enmr_polarity_combo = QComboBox()
+        self.enmr_polarity_combo.addItem("−1  (+ electrode toward −z)", -1)
+        self.enmr_polarity_combo.addItem("+1  (+ electrode toward +z)", 1)
+        self.enmr_polarity_combo.setToolTip(
+            "Which way the cell's positive electrode faces relative to the "
+            "gradient. Dimensionless, and the last thing here that no file "
+            "records — acqus and diff.xml fix the gradient's sign and the "
+            "vdlist fixes the polarity order, but nothing records the "
+            "wiring.\n\n"
+            "It sets the sign of the mobility and nothing else; the slope is "
+            "unaffected. Defaults to −1, which is what this cell measures: "
+            "with the vdlist's first-is-positive order and the calibration's "
+            "own +0.3 T/m gradient, −1 is what returns the accepted "
+            "+3.79e-8 m²/Vs for TMA⁺, a cation."
+        )
+        cell_form.addRow("Cell polarity:", self.enmr_polarity_combo)
+        self.enmr_constants_label = QLabel("")
+        self.enmr_constants_label.setWordWrap(True)
+        self.enmr_constants_label.setToolTip(
+            "γ, gradient, δ and Δ read from this experiment's own diff.xml. "
+            "Δ is cross-checked against acqus's d20."
+        )
+        cell_form.addRow("", self.enmr_constants_label)
+        layout.addWidget(cell_box)
+
+        self.enmr_unfold_checkbox = QCheckBox("Unfold ±V — plot the ramp through zero")
+        self.enmr_unfold_checkbox.setChecked(True)
+        self.enmr_unfold_checkbox.setToolTip(
+            "A vdlist records the voltage magnitude and each one is acquired "
+            "twice at opposite polarity, so the recorded axis folds every "
+            "point onto its partner: 0, 0, 8, 8, 16, 16…\n\n"
+            "Unfolding gives the first of each pair +|V| and the second −|V|, "
+            "which spreads the series across −Vmax…+Vmax as one ramp through "
+            "the origin — so the zero crossing is visible, and each polarity "
+            "can be read on its own before they are averaged.\n\n"
+            "The dashed line is fitted to each arm separately: if it kinks at "
+            "the origin, the two polarities disagree. Untick to plot the "
+            "pair-differenced measurement against |V| instead."
+        )
+        self.enmr_unfold_checkbox.toggled.connect(self._on_enmr_unfold_toggled)
+        layout.addWidget(self.enmr_unfold_checkbox)
+
+        fit_button = QPushButton("Fit eNMR")
+        fit_button.setToolTip(
+            "Fit phase against voltage for the resonance above.\n\n"
+            "Within one experiment the +V/−V pairs are differenced, which "
+            "cancels every phase error that is not driven by the field."
+        )
+        fit_button.clicked.connect(self._on_fit_enmr_clicked)
+        layout.addWidget(fit_button)
+
+        repeat_row = QHBoxLayout()
+        self.enmr_keep_repeat_button = QPushButton("Keep as repeat")
+        self.enmr_keep_repeat_button.setEnabled(False)
+        self.enmr_keep_repeat_button.setToolTip(
+            "Set this fit aside as one of the gradient-reversed repeats.\n\n"
+            "The experiment is generally run twice with the gradients "
+            "switched. Fit each, keep both, then Combine."
+        )
+        self.enmr_keep_repeat_button.clicked.connect(self._on_enmr_keep_repeat_clicked)
+        repeat_row.addWidget(self.enmr_keep_repeat_button)
+
+        self.enmr_combine_button = QPushButton("Combine repeats")
+        self.enmr_combine_button.setEnabled(False)
+        self.enmr_combine_button.setToolTip(
+            "Average the kept repeats, aligning their signs first — reversing "
+            "the gradient flips the slope, so a plain average would cancel the "
+            "measurement away.\n\n"
+            "The spread across repeats is reported with the result: two runs of "
+            "one sample should agree well within their own errors."
+        )
+        self.enmr_combine_button.clicked.connect(self._on_enmr_combine_clicked)
+        repeat_row.addWidget(self.enmr_combine_button)
+
+        self.enmr_clear_repeats_button = QPushButton("Clear")
+        self.enmr_clear_repeats_button.setEnabled(False)
+        self.enmr_clear_repeats_button.clicked.connect(self._on_enmr_clear_repeats_clicked)
+        repeat_row.addWidget(self.enmr_clear_repeats_button)
+        layout.addLayout(repeat_row)
+
+        self.enmr_results_label = QLabel("")
+        self.enmr_results_label.setWordWrap(True)
+        self.enmr_results_label.setFont(QFontDatabase.systemFont(
+            QFontDatabase.SystemFont.FixedFont))
+        self.enmr_results_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.enmr_results_label)
+
+        layout.addStretch(1)
+        return tab
+
+    def _enmr_voltages(self, spectrum, n_slices: int):
+        """The applied voltages for ``spectrum``, from its own vdlist.
+
+        ``V = (vdlist[µs] − offset) × scale``, with both taken from the
+        panel: the conversion belongs to the amplifier, not to the file
+        format, so it is exposed rather than hard-coded.
+        """
+        source_path = spectrum.metadata.source_path
+        if not source_path:
+            raise ValueError("This spectrum has no source path to read a vdlist from.")
+        candidates = [path for path in io_lists.find_value_lists(source_path)
+                      if os.path.basename(path).lower().startswith("vdlist")]
+        if not candidates:
+            raise ValueError(
+                f"No vdlist found with this experiment. eNMR reads the applied "
+                f"voltages from it."
+            )
+        values = io_lists.read_value_list(candidates[0])["values"]
+        volts = (values * 1e6 - self.enmr_offset_spin.value()) * self.enmr_scale_spin.value()
+        return volts[:n_slices]
+
+    def _refresh_enmr_voltage_preview(self, *_args) -> None:
+        """Show the voltages the vdlist conversion actually produces --
+        the same check the Values preview does for a curve fit, and for
+        the same reason: the conversion is a setting, so what it comes
+        out as should not be a guess."""
+        if not hasattr(self, "enmr_voltage_label"):
+            return
+        index = self._selected_index()
+        if index is None:
+            self.enmr_voltage_label.setText("")
+            return
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim != 2:
+            self.enmr_voltage_label.setText("Select a pseudo-2D eNMR series.")
+            return
+        try:
+            volts = self._enmr_voltages(spectrum, self._fit_slice_count(spectrum))
+        except Exception as exc:  # noqa: BLE001 -- shown here, not raised
+            self.enmr_voltage_label.setText(f"Voltages: {exc}")
+            return
+        shown = ", ".join(f"{v:g}" for v in volts[:6])
+        if volts.size > 6:
+            shown += f", …, {volts[-1]:g}"
+        self.enmr_voltage_label.setText(f"{volts.size} voltages [V]: {shown}")
+
+        try:
+            params = processing_enmr.pfg_params(spectrum)
+        except Exception as exc:  # noqa: BLE001
+            self.enmr_constants_label.setText(f"Constants: {exc}")
+            return
+        self.enmr_constants_label.setText(
+            f"g = {params['gradient']:g} T/m,  δ = {params['delta'] * 1e3:g} ms,  "
+            f"Δ = {params['big_delta'] * 1e3:g} ms,  γ = {params['gamma']:.4g} rad/s/T\n"
+            f"read from {params['sources']['big_delta']}"
+        )
+
+    def _enmr_problem(self, message: str, title: str = "eNMR failed",
+                       severity: str = "critical") -> None:
+        """Report an eNMR failure -- modally when the user asked for the
+        action, through the status bar when they did not.
+
+        A refit triggered by right-clicking a point off the plot must
+        not be able to put up a modal box: nothing is waiting to
+        dismiss it, and it blocks."""
+        if getattr(self, "_enmr_quiet", False):
+            self.statusBar().showMessage(f"{title}: {message}", 8000)
+            return
+        if severity == "information":
+            QMessageBox.information(self, title, message)
+        else:
+            QMessageBox.critical(self, title, message)
+
+    def _on_fit_enmr_clicked(self) -> None:
+        """The Fit button: a fresh fit, so anything previously
+        right-clicked off is back in. Exclusions survive the refits
+        that excluding itself triggers, not a deliberate new fit."""
+        self._enmr_excluded = set()
+        self._run_enmr_fit()
+
+    def _run_enmr_fit(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
+            self._enmr_problem(
+                "eNMR needs a pseudo-2D series (one row per applied voltage) "
+                "selected in the Data tab.", title="Not supported",
+                severity="information")
+            return
+        if spectrum.data_imag is None:
+            self._enmr_problem(
+                "This spectrum has no imaginary part, so there is no phase to "
+                "measure. Reload it without discarding the imaginary data.")
+            return
+
+        n_slices = self._fit_slice_count(spectrum)
+        region = (self.enmr_low_spin.value(), self.enmr_high_spin.value())
+        try:
+            volts = self._enmr_voltages(spectrum, n_slices)
+            ppm = spectrum.axes[1].values("ppm")
+            rows = (spectrum.data + 1j * spectrum.data_imag)[:n_slices]
+            phases = processing_enmr.phase_ramp(rows, ppm, region, volts)
+            gap = self.enmr_gap_spin.value()
+            # The gradient's *sign* is what pairs two experiments as a
+            # reversed repeat, and diff.xml records it -- so read it
+            # whether or not a gap was given, since it is needed for
+            # the pairing and not for the mobility. Missing diff.xml is
+            # not a reason to fail a fit that needs none of it.
+            try:
+                gradient = processing_enmr.pfg_params(spectrum)["gradient"]
+            except Exception:  # noqa: BLE001 -- optional, reported when combining
+                gradient = None
+            cutoff = self.enmr_max_voltage_spin.value() or None
+            result = processing_enmr.fit_enmr(
+                volts, phases, max_voltage=cutoff,
+                exclude=sorted(self._enmr_excluded) or None,
+                cell_polarity=self.enmr_polarity_combo.currentData(),
+                # Only when a gap is set: without it the slope is the
+                # result, which is what the data determines.
+                **({"spectrum": spectrum, "electrode_gap": gap / 1000.0} if gap > 0 else {}),
+            )
+        except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
+            self._enmr_problem(str(exc))
+            return
+
+        label = f"{self.session.label(index)}  —  {region[0]:g} to {region[1]:g} ppm"
+        self._enmr_result = result
+        self._enmr_result_label = label
+        # Kept so a gradient-reversed partner can be averaged against
+        # this one *ramp by ramp* rather than only slope by slope.
+        self._enmr_series = {"voltages": volts, "phases": phases,
+                              "gradient": gradient,
+                              "label": self.session.label(index)}
+        report = processing_enmr.format_enmr_report(result, label=label, width=58)
+        # The arm-by-arm comparison in full, under the fit it qualifies:
+        # deciding whether to trust the average is the reason to run both
+        # polarities, so it should not need a second click to see.
+        if result.get("branches") is not None:
+            report += "\n\n" + processing_enmr.format_branch_report(
+                result["branches"], width=58)
+        self.enmr_results_label.setText(report)
+        self.enmr_keep_repeat_button.setEnabled(True)
+        self._show_enmr_fit(result, label)
+
+    def _show_enmr_fit(self, result: dict, label: str) -> None:
+        """Plot phase against voltage in the Fit tab.
+
+        Shaped as a relaxation-fit result so it goes through the same
+        canvas method -- one plotting path, so the crosshair, styling
+        and export all work here without a parallel implementation.
+
+        Two views of the same fit, chosen by the Unfold checkbox:
+
+        * **unfolded** (the default) -- every slice at its own signed
+          voltage, so the series is one ramp from -Vmax to +Vmax and
+          the zero crossing is on screen. The fit line is drawn *per
+          arm*, which is what makes a disagreement between the two
+          polarities visible as a kink at the origin rather than as a
+          number in a report.
+        * **folded** -- the pair-differenced measurement against |V|,
+          which is what ``fit_enmr`` actually fitted.
+
+        ``show_relaxation_fit`` sorts by x before drawing the fit line,
+        so the unfolded points need no reordering here."""
+        branches = result.get("branches")
+        unfolded = (branches is not None
+                    and getattr(self, "enmr_unfold_checkbox", None) is not None
+                    and self.enmr_unfold_checkbox.isChecked())
+        if unfolded:
+            keep = np.asarray(branches["used"], dtype=bool)
+            voltages = np.asarray(branches["voltages"], dtype=float)
+            phases = np.asarray(branches["phases"], dtype=float)
+            # Degrees on screen: the shift is quoted against the 0 V
+            # measurement, so the ramp passes through the origin and
+            # reads in the unit phase is set in at the spectrometer.
+            # The fit itself stays in radians.
+            phases, voltages = np.degrees(phases), voltages
+            series = {"t": voltages[keep], "y": phases[keep],
+                      # Each arm's own slope, drawn through the shared
+                      # zero crossing: a disagreement is still a kink,
+                      # without a vertical jump that reads as a spike.
+                      # Extrapolated across the excluded points too, so
+                      # how far they deviate stays legible.
+                      "y_fit": np.degrees(
+                          np.asarray(branches["fit_joined"], dtype=float))[keep]}
+            excluded = (voltages[~keep], phases[~keep])
+        else:
+            keep = np.asarray(result["used"], dtype=bool)
+            series = {"t": np.asarray(result["voltages"], dtype=float),
+                      "y": np.asarray(result["dphi"], dtype=float),
+                      "y_fit": np.asarray(result["fit"], dtype=float)}
+            excluded = (np.asarray(result["all_voltages"], dtype=float)[~keep],
+                        np.asarray(result["all_dphi"], dtype=float)[~keep])
+        self.fit_canvas.show_relaxation_fit(
+            {**series, "peak_label": label, "model": "enmr"},
+            xlabel="Voltage (V)" if unfolded else "|Voltage| (V)",
+            ylabel="Phase shift (°)" if unfolded else "Δφ per pair (rad)",
+            excluded_points=excluded if len(excluded[0]) else None,
+        )
+        self._fit_canvas_owner = "enmr" if unfolded else "enmr-folded"
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _on_enmr_unfold_toggled(self, _checked: bool) -> None:
+        """Redraw the last fit in the other view. Switching between the
+        two is a display choice, so it must not need a refit -- and
+        must not silently do nothing when there is no fit yet."""
+        if getattr(self, "_enmr_result", None) is None:
+            return
+        self._show_enmr_fit(self._enmr_result, self._enmr_result_label)
+
+    def _on_enmr_keep_repeat_clicked(self) -> None:
+        if getattr(self, "_enmr_result", None) is None:
+            return
+        self._enmr_repeats.append({
+            "label": self._enmr_result_label, "result": self._enmr_result,
+            **getattr(self, "_enmr_series", {}),
+        })
+        self.enmr_combine_button.setEnabled(len(self._enmr_repeats) >= 2)
+        self.enmr_clear_repeats_button.setEnabled(True)
+        kept = "\n".join(
+            f"  {i}: {kept_entry['result']['slope']:+.5g} rad/V"
+            f"   g = {kept_entry['gradient']:+g} T/m" if kept_entry.get("gradient")
+            else f"  {i}: {kept_entry['result']['slope']:+.5g} rad/V   (no gradient read)"
+            for i, kept_entry in enumerate(self._enmr_repeats, start=1))
+        self.statusBar().showMessage(
+            f"Kept {len(self._enmr_repeats)} repeat(s).", 5000)
+        self.enmr_results_label.setText(
+            self.enmr_results_label.text() + f"\n\nKept repeats:\n{kept}")
+
+    #: Marker and colour per kept repeat on the combined plot, so the
+    #: two gradient directions are tellable apart behind their average.
+    _ENMR_REPEAT_STYLES = (("o", "tab:blue"), ("s", "tab:orange"),
+                            ("^", "tab:green"), ("D", "tab:purple"))
+
+    def _on_enmr_combine_clicked(self) -> None:
+        """Average the kept repeats, and plot them **with** the average.
+
+        Prefers :func:`average_gradient_pair`, which averages the phase
+        ramps themselves: it corrects each by the sign of its own
+        recorded gradient rather than inferring the sign from the
+        slopes, and it keeps both inputs so the plot can show the two
+        directions and what they averaged to on one axes.
+
+        Falls back to combining the slopes alone when that is not
+        possible -- no gradient in the file, or repeats measured at
+        different voltages -- and says which it did, because the two
+        answer slightly different questions.
+        """
+        if len(self._enmr_repeats) < 2:
+            return
+
+        paired = None
+        if all(entry.get("gradient") for entry in self._enmr_repeats):
+            try:
+                paired = processing_enmr.average_gradient_pair(
+                    self._enmr_repeats,
+                    max_voltage=self.enmr_max_voltage_spin.value() or None,
+                    exclude=sorted(self._enmr_excluded) or None)
+            except ValueError as exc:
+                # A real mismatch (different voltages) is worth saying
+                # rather than silently dropping to the slope average.
+                self.statusBar().showMessage(f"Averaging the ramps: {exc}", 8000)
+
+        if paired is not None:
+            report = processing_enmr.format_gradient_pair_report(paired, width=58)
+            slope, reference = paired["slope"], self._enmr_repeats[0]["result"]
+            self._show_enmr_gradient_pair(paired)
+        else:
+            try:
+                combined = processing_enmr.combine_experiments(
+                    [entry["result"] for entry in self._enmr_repeats])
+            except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
+                self._enmr_problem(str(exc), title="Combine failed")
+                return
+            report = processing_enmr.format_combined_report(combined, width=58)
+            report += ("\n  Slopes only — the ramps could not be averaged point by"
+                        "\n  point (no recorded gradient, or different voltages).")
+            slope, reference = combined["slope"], self._enmr_repeats[0]["result"]
+
+        gap = self.enmr_gap_spin.value()
+        if gap > 0 and reference.get("gamma"):
+            mobility = processing_enmr.mobility_from_slope(
+                slope, gap / 1000.0, reference["gamma"],
+                # The pair average is already on the +g frame, so the
+                # gradient's magnitude is what converts it.
+                abs(reference["gradient"]) if paired is not None else reference["gradient"],
+                reference["delta"], reference["big_delta"])
+            report += (f"\n  µ from the combined slope = {mobility:.4g} m²/Vs"
+                        f"\n  (electrode gap {gap:g} mm)")
+        self.enmr_results_label.setText(report)
+
+    def _show_enmr_gradient_pair(self, paired: dict) -> None:
+        """Both gradient directions and their average, on one axes.
+
+        The average is the main series with the fitted line through it;
+        each direction's own sign-corrected ramp is drawn faintly
+        behind, so how far apart the two were is visible at the same
+        time as what they averaged to. Two directions that disagree
+        look like two separated ramps with the average stranded between
+        them -- which is the thing to notice before using it."""
+        extras = [
+            {"x": paired["voltages"], "y": np.degrees(entry["corrected"]),
+             "label": f"{entry['label']}  (g = {entry['gradient']:+g} T/m)",
+             "marker": marker, "color": colour}
+            for entry, (marker, colour) in zip(paired["experiments"],
+                                                self._ENMR_REPEAT_STYLES * 4)
+        ]
+        keep = np.asarray(paired["used"], dtype=bool)
+        voltages = np.asarray(paired["voltages"], dtype=float)
+        average = np.degrees(np.asarray(paired["average"], dtype=float))
+        self.fit_canvas.show_relaxation_fit(
+            {"t": voltages[keep], "y": average[keep],
+             "y_fit": np.degrees(np.asarray(paired["fit"], dtype=float))[keep],
+             "peak_label": f"Average of {paired['n']} gradient directions",
+             "model": "enmr"},
+            xlabel="Voltage (V)", ylabel="Phase shift, sign-corrected (°)",
+            extra_series=extras,
+            excluded_points=((voltages[~keep], average[~keep])
+                              if not keep.all() else None),
+        )
+        self._enmr_paired = paired
+        self._fit_canvas_owner = "enmr-pair"
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _on_enmr_clear_repeats_clicked(self) -> None:
+        self._enmr_repeats = []
+        self.enmr_combine_button.setEnabled(False)
+        self.enmr_clear_repeats_button.setEnabled(False)
+        self.statusBar().showMessage("Cleared the kept repeats.", 5000)
 
     def _build_vocs_subtab(self) -> QWidget:
         """Variable Offset Cumulative Spectroscopy -- corrects a 1D
@@ -8788,15 +9536,20 @@ class MainWindow(QMainWindow):
             return
         regions = self._read_region_defs()
         if not regions:
-            QMessageBox.critical(self, "Integrate failed", "Add at least one region to integrate.")
+            QMessageBox.critical(
+                self, "Integrate failed",
+                "Add at least one region to integrate.\n\n"
+                "The region table belongs to the selected spectrum — regions "
+                "drawn on another one are still there, on that one.",
+            )
             return
 
         try:
             if spectrum.ndim == 1:
                 entries = [spectrum]
             else:
-                n_slices = spectrum.data.shape[0]
-                entries = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))["rows"]
+                entries = processing_slicing.get_slices(
+                    spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
             # NMR2D_integrate_slices reads metadata.raw["slice"] off
             # every entry (get_slices already tags it for a pseudo-2D's
             # own slices; a plain 1D spectrum has no such thing yet --
@@ -9384,9 +10137,15 @@ class MainWindow(QMainWindow):
     def _on_fit_type_changed(self, _index: int) -> None:
         self._populate_fit_model_combo()
         self.delays_row_label.setText("b-values:" if self._is_diffusion_fit() else "Delays:")
-        unit = "s/m²" if self._is_diffusion_fit() else "s"
-        self.manual_delays_edit.setPlaceholderText(f"e.g. 1e8, 5e8, 2e9 ({unit})" if self._is_diffusion_fit()
-                                                     else "e.g. 0.001, 0.01, 0.1, 1.0 (s)")
+        # A b-value has no SI-prefix convention to choose from, so the
+        # Unit row only exists for a relaxation fit (see _delay_scale).
+        is_time = not self._is_diffusion_fit()
+        self.delay_unit_row_label.setVisible(is_time)
+        self.delay_unit_combo.setVisible(is_time)
+        self._update_delay_unit_hints()
+        # Auto resolves to a different file (diff.xml vs vdlist) and
+        # the unit in the preview changes with it.
+        self._refresh_values_preview()
 
     def _on_relaxation_model_changed(self, _index: int) -> None:
         key = self.relaxation_model_combo.currentData()
@@ -9584,10 +10343,87 @@ class MainWindow(QMainWindow):
                                 | Qt.ItemFlag.ItemIsUserCheckable)
             name_item.setCheckState(Qt.CheckState.Unchecked)
             name_item.setToolTip(f"Tick to hold {name} fixed at its Guess instead of fitting it.")
+            # The model works in seconds; this table shows (and reads
+            # back) whatever unit the panel is set to, so a T2 guess is
+            # typed as "50" alongside a "50 ms" delay list rather than
+            # as 0.05. _resolve_guess_rows converts back.
+            scale = self._param_display_scale(name)
+            name_item.setToolTip(
+                name_item.toolTip()
+                + (f"\n\nIn {self.delay_unit_combo.currentText()}, matching the Unit "
+                   f"above." if scale != 1.0 else ""))
             self.guess_table.setItem(row, 0, name_item)
-            self.guess_table.setItem(row, 1, QTableWidgetItem(_format_guess(p0[row])))
-            self.guess_table.setItem(row, 2, QTableWidgetItem(_format_guess(lo[row])))
-            self.guess_table.setItem(row, 3, QTableWidgetItem(_format_guess(hi[row])))
+            self.guess_table.setItem(row, 1, QTableWidgetItem(_format_guess(p0[row] / scale)))
+            self.guess_table.setItem(row, 2, QTableWidgetItem(_format_guess(lo[row] / scale)))
+            self.guess_table.setItem(row, 3, QTableWidgetItem(_format_guess(hi[row] / scale)))
+
+    def _match_values_to_slices(self, values, n_slices: int, noun: str):
+        """``values`` cut to ``n_slices``, or ``None`` after reporting
+        that there are too few.
+
+        **Longer than the data is not an error.** That is Bruker's own
+        convention and the user's: a 24-entry vdlist with F1 TD set to
+        10 uses the first 10 values, and TopSpin does not complain.
+        Shorter genuinely cannot be fitted -- there is no value for the
+        last slices and nothing to invent one from -- so it is reported,
+        with the Slices box named as the way out, since trimming the
+        series to the values you have is exactly what it is for.
+        """
+        values = np.asarray(values, dtype=float)
+        if values.size >= n_slices:
+            return values[:n_slices]
+        QMessageBox.critical(
+            self, "Not enough values",
+            f"{values.size} {noun}(s) for {n_slices} slice(s).\n\n"
+            f"A list longer than the data is fine — its extra entries are "
+            f"ignored. This one is shorter, so the last "
+            f"{n_slices - values.size} slice(s) have no {noun}.\n\n"
+            f"Set Slices to {values.size} in the Curve Fitting sub-tab to fit "
+            f"only the slices you have values for, or choose a different "
+            f"Values source.",
+        )
+        return None
+
+    def _fit_slice_count(self, spectrum) -> int:
+        """How many slices of ``spectrum`` the analysis should use.
+
+        Every slice unless the Slices box says fewer, and never more
+        than the data actually has -- a limit larger than the series is
+        the same as no limit, not an error, because it usually means
+        the box was set for a different experiment.
+        """
+        available = spectrum.data.shape[0] if spectrum.ndim == 2 else 1
+        limit = self.slice_limit_spin.value() if hasattr(self, "slice_limit_spin") else 0
+        return min(limit, available) if limit else available
+
+    def _fit_slice_rows(self, spectrum) -> list[int]:
+        """The 1-based slice indices the analysis should fit -- the one
+        place that decides, so Fit Spectrum, Fit Curve, DOSY and SCORE
+        cannot disagree about how much of a series is being used."""
+        return list(range(1, self._fit_slice_count(spectrum) + 1))
+
+    def _on_slice_limit_changed(self, _value: int) -> None:
+        self._refresh_values_preview()
+        self._refresh_staged_measurement_label()
+
+    def _param_display_scale(self, name: str) -> float:
+        """Seconds per displayed unit for parameter ``name`` -- the Unit
+        combo's factor for a relaxation *time*, and 1.0 for everything
+        else.
+
+        Amplitudes are on the data's own intensity scale, a stretch
+        exponent and an inversion efficiency are dimensionless, and a
+        diffusion coefficient is in m²/s with no prefix convention --
+        scaling any of those by a time unit would be nonsense. The set
+        of time parameters is
+        :data:`opennmr.processing.relaxation._TIME_PARAMS`, the same one
+        ``format_param_value`` uses to decide which values get a time
+        unit printed after them, so the table and the report cannot
+        disagree about what is a time.
+        """
+        if name in processing_relaxation._TIME_PARAMS:
+            return self._delay_scale()
+        return 1.0
 
     def _guess_reference_series(self):
         """An ``(x, y)`` pair for the model's automatic guess/bounds
@@ -9660,6 +10496,11 @@ class MainWindow(QMainWindow):
         fixed = {}
         for entry in captured_rows:
             name = entry[0]
+            # Typed cells are in the panel's display unit; the model
+            # wants seconds. Only what the *user* typed is converted --
+            # the automatic fallbacks below come straight from the
+            # model and are already in seconds.
+            scale = self._param_display_scale(name)
             cells = []
             for value, what in zip(entry[1:4], ("Guess", "Min", "Max")):
                 text = (value or "").strip()
@@ -9667,7 +10508,7 @@ class MainWindow(QMainWindow):
                     cells.append(None)
                     continue
                 try:
-                    cells.append(float(text))
+                    cells.append(float(text) * scale)
                 except ValueError as exc:
                     raise ValueError(f"{name} {what}: {text!r} is not a number.") from exc
             rows[name] = cells
@@ -9687,11 +10528,19 @@ class MainWindow(QMainWindow):
             value = auto_p0[index] if guess is None else guess
             low = auto_lo[index] if low is None else low
             high = auto_hi[index] if high is None else high
+            # Quoted back in the unit the table is showing, not the
+            # seconds they were converted to -- an error naming numbers
+            # the user cannot find on screen is worse than no error.
+            scale = self._param_display_scale(name)
+            shown = f" {self.delay_unit_combo.currentText()}" if scale != 1.0 else ""
             if low > high:
-                raise ValueError(f"{name}: Min ({low:g}) is above Max ({high:g}).")
+                raise ValueError(
+                    f"{name}: Min ({low / scale:g}{shown}) is above Max ({high / scale:g}{shown})."
+                )
             if not (low <= value <= high):
                 raise ValueError(
-                    f"{name}: Guess ({value:g}) is outside its own bounds [{low:g}, {high:g}]."
+                    f"{name}: Guess ({value / scale:g}{shown}) is outside its own bounds "
+                    f"[{low / scale:g}, {high / scale:g}]{shown}."
                 )
             p0.append(value)
             lo.append(low)
@@ -9713,9 +10562,13 @@ class MainWindow(QMainWindow):
             name_item = self.guess_table.item(row, 0)
             if name_item is None:
                 continue
-            value = result["params"].get(name_item.text())
+            name = name_item.text()
+            value = result["params"].get(name)
             if value is not None and np.isfinite(value):
-                self.guess_table.setItem(row, 1, QTableWidgetItem(_format_guess(value)))
+                # The fit's own parameters are in seconds; the table is
+                # in the display unit.
+                self.guess_table.setItem(row, 1, QTableWidgetItem(
+                    _format_guess(value / self._param_display_scale(name))))
 
     def _fit_equation_constants(self) -> dict:
         """The selected spectrum's own acquisition parameters, named
@@ -9774,14 +10627,27 @@ class MainWindow(QMainWindow):
     #: from gradient amplitudes and timings rather than reading one.
     _B_FROM_GRADIENTS_SOURCE = 5
 
+    #: "Manual list" -- values typed straight into the panel.
+    _MANUAL_LIST_SOURCE = 1
+
+    #: "List file × factor". Kept at the index the Bruker-only
+    #: "vclist × factor" it replaced occupied, so a saved analysis
+    #: state from before the generalisation still restores to the
+    #: source it meant.
+    _LIST_FILE_SOURCE = 3
+
     def _on_delay_source_changed(self, index: int) -> None:
-        self.manual_delays_edit.setVisible(index == 1)
+        self.manual_delays_row_label.setVisible(index == self._MANUAL_LIST_SOURCE)
+        self.manual_delays_edit.setVisible(index == self._MANUAL_LIST_SOURCE)
         self.delay_start_row_label.setVisible(index == 2)
         self.delay_start_spin.setVisible(index == 2)
         self.delay_step_row_label.setVisible(index == 2)
         self.delay_step_spin.setVisible(index == 2)
-        self.vclist_factor_row_label.setVisible(index == 3)
-        self.vclist_factor_spin.setVisible(index == 3)
+        self.list_file_row_label.setVisible(index == self._LIST_FILE_SOURCE)
+        self.list_file_combo.setVisible(index == self._LIST_FILE_SOURCE)
+        self.list_factor_row_label.setVisible(index == self._LIST_FILE_SOURCE)
+        self.list_factor_edit.setVisible(index == self._LIST_FILE_SOURCE)
+        self.list_factor_value_label.setVisible(index == self._LIST_FILE_SOURCE)
         for label, widget in getattr(self, "pfg_widgets", ()):
             label.setVisible(index == self._B_FROM_GRADIENTS_SOURCE)
             widget.setVisible(index == self._B_FROM_GRADIENTS_SOURCE)
@@ -9789,6 +10655,296 @@ class MainWindow(QMainWindow):
             # The ramp row has a second condition of its own on top of
             # the source -- it only exists for the trapezoid.
             self._on_pfg_shape_changed(self.pfg_shape_combo.currentIndex())
+        if index == self._LIST_FILE_SOURCE:
+            self._refresh_list_file_candidates()
+            self._on_list_factor_changed()
+        self._refresh_values_preview()
+
+    #: Sentinel for the "Browse…" entry at the end of the list-file
+    #: combo -- a real path is stored as itself, so ``None`` cannot
+    #: collide with one.
+    _BROWSE_LIST_FILE = None
+
+    #: Units a typed/displayed *time* may be in, with the factor that
+    #: converts one of them to the second everything is fitted in.
+    #: Only times: a b-value has no comparable prefix convention (see
+    #: :func:`opennmr.processing.relaxation.format_diffusion_value`),
+    #: so a diffusion fit ignores this entirely.
+    _DELAY_UNITS = (("s", 1.0), ("ms", 1e-3), ("µs", 1e-6))
+
+    #: Milliseconds, by explicit request -- the unit relaxation delays
+    #: are actually written and discussed in. Applied to a *new*
+    #: spectrum only; an analysis state saved before this existed
+    #: restores as seconds (see :meth:`_restore_analysis_state`),
+    #: because reinterpreting a saved "0.01" as 0.01 ms would be a
+    #: silent 1000x error in someone's existing work.
+    _DEFAULT_DELAY_SCALE = 1e-3
+
+    def _set_delay_scale(self, scale: float) -> None:
+        """Select the unit whose factor is ``scale``, quietly -- used by
+        state restore, which must not fire the handler's own refresh
+        into a half-restored panel."""
+        scales = [value for _label, value in self._DELAY_UNITS]
+        try:
+            index = scales.index(scale)
+        except ValueError:
+            index = scales.index(self._DEFAULT_DELAY_SCALE)
+        self.delay_unit_combo.blockSignals(True)
+        self.delay_unit_combo.setCurrentIndex(index)
+        self.delay_unit_combo.blockSignals(False)
+        self._update_delay_unit_hints()
+
+    def _delay_scale(self) -> float:
+        """Seconds per displayed/typed time unit. 1.0 for a diffusion
+        fit, whose x-axis is a b-value in s/m² and has no unit choice
+        to make."""
+        if self._is_diffusion_fit():
+            return 1.0
+        return self.delay_unit_combo.currentData() or 1.0
+
+    def _delay_unit_label(self) -> str:
+        return "s/m²" if self._is_diffusion_fit() else self.delay_unit_combo.currentText()
+
+    def _on_delay_unit_changed(self, _index: int) -> None:
+        self._update_delay_unit_hints()
+        self._refresh_values_preview()
+        # Everything else in the panel that carries a time: the guess
+        # table's own numbers and the Fit tab's x-axis. Changing the
+        # unit and having half the panel follow would be worse than not
+        # offering the choice at all.
+        self._refresh_guess_table(force=True)
+        if self._relaxation_fit_results:
+            self._display_relaxation_peak(self.view_relaxation_peak_spin.value() - 1)
+
+    def _update_delay_unit_hints(self) -> None:
+        """Keep the placeholders, the Start/Step suffixes and the
+        guess-table title naming the unit currently in force, so a
+        typed number's meaning is never something to remember."""
+        unit = self._delay_unit_label()
+        if hasattr(self, "guess_group"):
+            self.guess_group.setTitle(
+                self._guess_group_base_title if self._is_diffusion_fit()
+                else f"{self._guess_group_base_title} — times in {unit}")
+        if self._is_diffusion_fit():
+            self.manual_delays_edit.setPlaceholderText(f"e.g. 1e8, 5e8, 2e9 ({unit})")
+        else:
+            # An example in the actual unit, not a fixed one in
+            # seconds: "0.001, 0.01" under a ms heading reads as
+            # microseconds-worth of delay and looks like a mistake.
+            example = {1.0: "0.01, 0.1, 1", 1e-3: "10, 100, 1000", 1e-6: "10000, 100000, 1000000"}
+            self.manual_delays_edit.setPlaceholderText(
+                f"e.g. {example.get(self._delay_scale(), '10, 100, 1000')} ({unit})")
+        for spin in (self.delay_start_spin, self.delay_step_spin):
+            spin.setSuffix(f" {unit}")
+
+    def _refresh_list_file_candidates(self, keep: str | None = None) -> None:
+        """Fill the list-file combo with the value lists actually
+        sitting with the selected experiment (see
+        :func:`opennmr.io.lists.find_value_lists`), plus a Browse…
+        entry.
+
+        ``keep`` : a path to select afterwards even if discovery did
+        not turn it up -- a file the user browsed to, or one restored
+        from this spectrum's saved analysis state. It is added to the
+        list rather than silently dropped, so a restored choice is
+        still the selected one after a reselect.
+
+        **What is already in the combo is kept only while the
+        experiment has not changed.** Explicit user report: "the list
+        file should be from the relevant folder, not remembered from
+        the previous". Falling back to whatever was selected carried
+        the *previous* experiment's file onto the next one and
+        pre-selected it -- a fit against another dataset's delays,
+        offered as if it were this one's. On a new experiment the
+        combo starts from that experiment's own folder and nothing
+        else; `keep` is the one deliberate exception, and it only ever
+        carries a value this spectrum's own saved state supplied.
+        """
+        index = self._selected_index()
+        source_path = self.session.spectra[index].metadata.source_path if index is not None else None
+        same_experiment = (source_path is not None
+                           and source_path == self._list_file_combo_source)
+        current = keep or (self.selected_list_file() if same_experiment else None)
+
+        candidates: list[str] = []
+        if index is not None:
+            try:
+                candidates = io_lists.find_value_lists(source_path)
+            except OSError:
+                candidates = []
+        if current and current not in candidates:
+            candidates.insert(0, current)
+        self._list_file_combo_source = source_path
+
+        self.list_file_combo.blockSignals(True)
+        self.list_file_combo.clear()
+        for path in candidates:
+            # Labelled by filename with the folder as a suffix: two
+            # experiments in one sample folder can both have a
+            # "vdlist", and a bare basename would make them
+            # indistinguishable in the closed combo.
+            parent = os.path.basename(os.path.dirname(path.rstrip("/")))
+            self.list_file_combo.addItem(f"{os.path.basename(path)}  ({parent})", path)
+        if not candidates:
+            self.list_file_combo.addItem("(no list file found)", None)
+        self.list_file_combo.addItem(self._BROWSE_LIST_FILE_TEXT, self._BROWSE_LIST_FILE)
+        if current:
+            position = self.list_file_combo.findData(current)
+            if position >= 0:
+                self.list_file_combo.setCurrentIndex(position)
+        self.list_file_combo.blockSignals(False)
+
+    @staticmethod
+    def _first_list_file_for(spectrum) -> str | None:
+        """The likeliest value list sitting with ``spectrum``'s own
+        data, or ``None``.
+
+        The fallback for "List file × factor" when nothing has been
+        picked in the panel -- which is the normal case for a fit
+        driven from the Data tab's context menu, or for the very first
+        use on a freshly-selected experiment. Without it, the
+        generalised source would be strictly worse than the
+        Bruker-only vclist source it replaced, which always found its
+        own file.
+        """
+        try:
+            candidates = io_lists.find_value_lists(spectrum.metadata.source_path)
+        except OSError:
+            return None
+        return candidates[0] if candidates else None
+
+    def _resolve_list_factor(self) -> float:
+        """The Factor box as a number -- a literal, or an expression in
+        this experiment's own acquisition parameters.
+
+        Empty means 1.0, so a list already in the right unit (a
+        vdlist, a difflist) needs nothing typed.
+        """
+        text = self.list_factor_edit.text().strip()
+        if not text:
+            return 1.0
+        return processing_relaxation.evaluate_expression(
+            text, constants=self._fit_equation_constants())["value"]
+
+    def _on_list_factor_changed(self, _text: str = "") -> None:
+        """Live feedback for the Factor box: what it evaluates to, and
+        which of the experiment's parameters went into it."""
+        if not hasattr(self, "list_factor_value_label"):
+            return
+        text = self.list_factor_edit.text().strip()
+        if not text:
+            self.list_factor_value_label.setText("")
+            self._refresh_values_preview()
+            return
+        try:
+            resolved = processing_relaxation.evaluate_expression(
+                text, constants=self._fit_equation_constants())
+        except ValueError as exc:
+            self.list_factor_value_label.setText(f"Factor: {exc}")
+            self._refresh_values_preview()
+            return
+        message = f"Factor = {resolved['value']:g}"
+        if resolved["used"]:
+            message += "  |  from the data: " + ", ".join(
+                f"{name}={value:g}" for name, value in sorted(resolved["used"].items()))
+        self.list_factor_value_label.setText(message)
+        self._refresh_values_preview()
+
+    def selected_list_file(self) -> str | None:
+        """The list file currently chosen, or ``None`` -- the Browse…
+        and no-candidates entries both carry ``None`` as their data,
+        which is exactly "nothing chosen"."""
+        if not hasattr(self, "list_file_combo"):
+            return None
+        return self.list_file_combo.currentData()
+
+    #: The Browse… entry's own text, matched to tell it from the
+    #: "(no list file found)" placeholder -- both carry ``None`` as
+    #: their data, since both mean "no file chosen".
+    _BROWSE_LIST_FILE_TEXT = "Browse…"
+
+    def _on_list_file_changed(self, _index: int) -> None:
+        """Browse… opens a picker; any other entry is just the choice."""
+        if self.list_file_combo.currentText() != self._BROWSE_LIST_FILE_TEXT:
+            self._refresh_values_preview()
+            return
+        start = ""
+        index = self._selected_index()
+        if index is not None:
+            source_path = self.session.spectra[index].metadata.source_path or ""
+            start = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Choose a value list (one number per line)", start,
+            filter="Text and list files (*.txt *.list *.dat *.csv);;All files (*)",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        # Cancelled: fall back to whatever was selected before rather
+        # than leaving "Browse…" itself selected, which would read as a
+        # chosen file that resolves to nothing.
+        self._refresh_list_file_candidates(keep=path or None)
+        self._refresh_values_preview()
+
+    def _refresh_values_preview(self, *_args) -> None:
+        """Update the line under the Values row with what the current
+        source actually resolves to.
+
+        Calls the same :meth:`_resolve_independent_values` the fit
+        does, so this cannot drift from it -- an error there is shown
+        here as the reason no values are available, rather than waiting
+        to surface as a dialog when Fit Curve is clicked.
+        """
+        if not hasattr(self, "values_preview_label"):
+            return
+        index = self._selected_index()
+        if index is None:
+            self.values_preview_label.setText("")
+            return
+        spectrum = self.session.spectra[index]
+        # How many values are wanted. A pseudo-2D says so itself; a
+        # stack of separate 1D spectra checked in the Compare tab is
+        # the other thing Fit Curve runs on, and its count is the
+        # checked spectra. A lone 1D is neither, and passing its
+        # *point* count as a slice count would make "Start + step"
+        # generate thousands of values.
+        if spectrum.ndim == 2:
+            n_slices = self._fit_slice_count(spectrum)
+        else:
+            checked = len(self._compare_checked_1d_stack())
+            n_slices = checked if checked >= 2 else None
+        if n_slices is None:
+            self.values_preview_label.setText("")
+            return
+        try:
+            values = self._resolve_independent_values(
+                spectrum, self._is_diffusion_fit(), n_slices=n_slices)
+            values = np.asarray(
+                values["seconds"] if isinstance(values, dict) else values, dtype=float)
+        except Exception as exc:  # noqa: BLE001 -- shown in the label, not raised at the user
+            self.values_preview_label.setText(f"Values: {exc}")
+            return
+
+        # "13 values [ms]: 10, 20, 40, …, 320" -- the user's own
+        # wording. The old "Values (13 × s): …" read as a multiplication
+        # and put the count and the unit in the same bracket as if they
+        # belonged together.
+        scale = self._delay_scale()
+        # The ellipsis only where something is actually skipped -- with
+        # exactly six values, "…, 320" sat between two consecutive
+        # entries and read as though a gap had been elided.
+        if values.size <= 6:
+            shown = ", ".join(f"{value / scale:.4g}" for value in values)
+        else:
+            shown = ", ".join(f"{value / scale:.4g}" for value in values[:5])
+            shown += f", …, {values[-1] / scale:.4g}"
+        text = f"{values.size} values [{self._delay_unit_label()}]: {shown}"
+        if n_slices is not None and values.size > n_slices:
+            # Not a warning: the surplus is simply unused, which is how
+            # Bruker treats a vdlist longer than F1 TD.
+            text += f"   — first {n_slices} used ({n_slices} slices)"
+        elif n_slices is not None and values.size < n_slices:
+            text += (f"   ⚠ {n_slices} slices — set Slices to {values.size} "
+                     f"to fit only these")
+        self.values_preview_label.setText(text)
 
     def _resolve_independent_values(self, spectrum, is_diffusion: bool, n_slices: int | None = None) -> np.ndarray | dict:
         """Resolve the x-axis values (delays in seconds, or b-values in
@@ -9803,17 +10959,36 @@ class MainWindow(QMainWindow):
         source = self.delay_source_combo.currentIndex()
         n_slices = n_slices if n_slices is not None else spectrum.data.shape[0]
 
-        if source == 1:  # Manual list
+        if source == self._MANUAL_LIST_SOURCE:
             text = self.manual_delays_edit.text().strip()
             if not text:
-                raise ValueError("Enter a comma-separated list of values, or switch Values to Auto/Start-End-Step/vclist.")
+                raise ValueError(
+                    "Enter a list of values, or switch Values to Auto / Start + step / List file."
+                )
+            # Commas or whitespace: a list pasted from a vdlist, a
+            # spreadsheet column or a Python array arrives
+            # newline/space-separated as often as comma-separated, and
+            # rejecting those was a pointless retyping tax.
+            tokens = [token for token in text.replace(",", " ").split() if token]
             try:
-                return np.array([float(v) for v in text.split(",")], dtype=float)
+                # A token carrying its own unit suffix ("10m") is
+                # already an absolute time and is taken at face value;
+                # a bare number is in whatever the Unit combo says.
+                # Mixing the two in one list is odd but unambiguous,
+                # and silently rescaling an explicit "10m" by the combo
+                # would be the worse of the two behaviours.
+                return np.array([io_lists.parse_value(token) if io_lists.has_unit_suffix(token)
+                                  else io_lists.parse_value(token) * self._delay_scale()
+                                  for token in tokens], dtype=float)
             except ValueError as exc:
-                raise ValueError("Manual values must be a comma-separated list of numbers.") from exc
+                raise ValueError(
+                    f"Manual values must be numbers separated by commas or spaces ({exc})."
+                ) from exc
 
         if source == 2:  # Start + step
-            start, step = self.delay_start_spin.value(), self.delay_step_spin.value()
+            scale = self._delay_scale()
+            start = self.delay_start_spin.value() * scale
+            step = self.delay_step_spin.value() * scale
             if step == 0:
                 raise ValueError("Step must be nonzero.")
             # One value per slice -- the count is already fixed by the
@@ -9821,12 +10996,40 @@ class MainWindow(QMainWindow):
             # of an off-by-one/roundoff mismatch against n_slices).
             return start + step * np.arange(n_slices, dtype=float)
 
-        if source == 3:  # vclist x factor
-            source_path = spectrum.metadata.source_path
-            if spectrum.metadata.vendor != "bruker" or not source_path:
-                raise ValueError("vclist is only available for Bruker experiments.")
-            vclist = io_bruker.read_vclist(source_path)
-            return vclist["seconds"] * self.vclist_factor_spin.value()
+        if source == self._LIST_FILE_SOURCE:
+            # Any vendor, any filename: the file is chosen in the
+            # panel, parsed by opennmr.io.lists, and scaled by the
+            # Factor box. Nothing here looks at the vendor at all --
+            # that was the whole limitation of the Bruker-only vclist
+            # source this replaced.
+            list_path = self.selected_list_file() or self._first_list_file_for(spectrum)
+            if not list_path:
+                raise ValueError(
+                    "No list file found with this experiment, and none chosen -- pick "
+                    "one with Browse…. It should be a one-column text file of numbers, "
+                    "one per slice (a Bruker vdlist/vclist/difflist, an X-Pulse "
+                    "parameters/…_valueslist.txt, or your own)."
+                )
+            # The Unit says what the numbers in this file *are*, not
+            # only how to display them. Explicit user report: "when I
+            # set ms it seems to multiply the value by 1e3 because it
+            # assumes that the read value is s, whereas the unit should
+            # set the unit for the read value" -- a file holding
+            # 10, 20, 40 meant milliseconds and was read as 10, 20, 40
+            # *seconds*, so the panel showed 1e+04 ms.
+            #
+            # The scale applies to the whole product, list x factor, so
+            # everything typed or pointed at in this panel is in one
+            # unit. For an X-Pulse CPMG that makes the natural factor
+            # simpler, not harder: with the Unit on µs, an echo-count
+            # list takes a factor of plain "TAU*2", since TAU is
+            # already recorded in µs.
+            parsed = io_lists.read_value_list(list_path)
+            # ... unless the file names its own units. A vdlist writing
+            # "10m" has already said what it means, and applying the
+            # combo on top would scale an absolute time a second time.
+            scale = 1.0 if parsed["units_explicit"] else self._delay_scale()
+            return parsed["values"] * self._resolve_list_factor() * scale
 
         if source == self._B_FROM_GRADIENTS_SOURCE:
             return self._b_values_from_gradients(spectrum, n_slices)
@@ -10367,8 +11570,8 @@ class MainWindow(QMainWindow):
             if spectrum.ndim == 1:
                 entries = [spectrum]
             else:
-                n_slices = spectrum.data.shape[0]
-                entries = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))["rows"]
+                entries = processing_slicing.get_slices(
+                    spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
             results = self._fit_peaks(entries)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Fit failed", str(exc))
@@ -10446,6 +11649,7 @@ class MainWindow(QMainWindow):
         self.view_relaxation_peak_spin.setMaximum(max(1, len(results)))
         self.view_relaxation_peak_spin.setValue(1)
         self.view_relaxation_peak_spin.blockSignals(False)
+        self._refresh_curve_fit_export_button()
         self._display_relaxation_peak(0)
         # Force the tab visible: a Compare-stack fit has no single
         # "owning" spectrum, so it can run while the Data tab's own
@@ -10515,8 +11719,16 @@ class MainWindow(QMainWindow):
                     rate, result["params"][rate], result["errors"].get(rate))
                 summary = f"{rate} = {value}"
             else:
+                # A model with no single rate (a biexponential) lists
+                # every parameter here. An amplitude is quoted as its
+                # share rather than its absolute value: this line is a
+                # compact table for comparing peaks against each other,
+                # and an intensity on the data's own arbitrary scale is
+                # the one number in it that cannot be compared.
+                shares = processing_relaxation.amplitude_fractions(result["params"])
                 summary = ", ".join(
-                    f"{name}={processing_relaxation.format_param_value(name, result['params'][name])}"
+                    f"{name}={shares[name] * 100:.1f}%" if name in shares
+                    else f"{name}={processing_relaxation.format_param_value(name, result['params'][name])}"
                     for name in result["param_names"]
                 )
             r_squared = result.get("fit_quality", {}).get("r_squared")
@@ -10550,7 +11762,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        n_slices = spectrum.data.shape[0]
+        n_slices = self._fit_slice_count(spectrum)
         try:
             b_values = self._resolve_independent_values(spectrum, is_diffusion=True, n_slices=n_slices)
             b_values = np.asarray(
@@ -10558,11 +11770,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
             QMessageBox.critical(self, "DOSY failed", str(exc))
             return
-        if b_values.size != n_slices:
-            QMessageBox.critical(
-                self, "DOSY failed",
-                f"Got {b_values.size} b-value(s) for {n_slices} gradient step(s).",
-            )
+        b_values = self._match_values_to_slices(b_values, n_slices, "b-value")
+        if b_values is None:
             return
         if np.allclose(b_values, np.arange(1, n_slices + 1)):
             QMessageBox.warning(
@@ -10579,7 +11788,10 @@ class MainWindow(QMainWindow):
             return
         settings = dialog.values()
 
-        data = np.real(spectrum.data)
+        # The same rows the b-values were resolved for: a slice limit
+        # has to cut the data matrix too, or the map would be built
+        # from more rows than there are b-values.
+        data = np.real(spectrum.data)[:n_slices]
         ppm = spectrum.axes[1].values("ppm")
         self.statusBar().showMessage("Building DOSY map (inverse Laplace transform)…")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -10639,6 +11851,30 @@ class MainWindow(QMainWindow):
 
     # ---- SCORE (multivariate component resolution) ----------------
 
+    def _score_model(self):
+        """The curve-fit model SCORE should resolve against -- whatever
+        the Fit Curve panel's own Model combo names, validated as a
+        SCORE kernel before anything else happens.
+
+        Going through :meth:`_current_model_spec` (not a second reading
+        of the combo) is the point: the guess table, Fit Curve and now
+        SCORE all get their model from that one method, so they cannot
+        disagree about what is being fitted.
+        """
+        spec = self._current_model_spec()
+        key = self.relaxation_model_combo.currentData()
+        # A registry model is passed by name so the result says
+        # "stejskal_tanner" rather than "custom"; anything built here
+        # (a typed equation, a generalised N-component model) has no
+        # name to pass and goes as the spec itself.
+        model = key if key in processing_relaxation.RELAXATION_MODELS else spec
+        # Raises with the reason if this model cannot be a kernel --
+        # checked now, while it can still be reported against the Model
+        # combo the user would have to change.
+        processing_score.build_kernel(
+            model, kind="diffusion" if self._is_diffusion_fit() else "relaxation")
+        return model
+
     def _on_score_clicked(self) -> None:
         """Resolve the selected series into component spectra by SCORE.
 
@@ -10661,7 +11897,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        n_slices = spectrum.data.shape[0]
+        n_slices = self._fit_slice_count(spectrum)
         is_diffusion = self._is_diffusion_fit()
         try:
             x_values = self._resolve_independent_values(spectrum, is_diffusion, n_slices=n_slices)
@@ -10670,11 +11906,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
             QMessageBox.critical(self, "SCORE failed", str(exc))
             return
-        if x_values.size != n_slices:
-            QMessageBox.critical(
-                self, "SCORE failed",
-                f"Got {x_values.size} value(s) for {n_slices} row(s).",
-            )
+        x_values = self._match_values_to_slices(x_values, n_slices, "value")
+        if x_values is None:
             return
         if is_diffusion and np.allclose(x_values, np.arange(1, n_slices + 1)):
             QMessageBox.warning(
@@ -10685,10 +11918,25 @@ class MainWindow(QMainWindow):
             )
             return
 
-        data = np.real(spectrum.data)
+        # The same model the Fit Curve panel is set to -- SCORE
+        # evaluates the curve-fit model's own function per component
+        # (see processing.score.build_kernel), so a resolution and a
+        # Stejskal-Tanner fit of the same series cannot be two
+        # different exponentials. A model SCORE cannot use (a
+        # biexponential -- it already describes the populations SCORE's
+        # own component count describes) is reported here, before the
+        # settings dialog, rather than after the user has filled it in.
+        try:
+            model = self._score_model()
+        except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
+            QMessageBox.critical(self, "SCORE failed", str(exc))
+            return
+
+        data = np.real(spectrum.data)[:n_slices]
         suggestion = processing_score.estimate_components(data)
         dialog = _ScoreSettingsDialog(self, suggested=suggestion["n_components"],
-                                       is_diffusion=is_diffusion)
+                                       is_diffusion=is_diffusion,
+                                       model_label=self.relaxation_model_combo.currentText())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         settings = dialog.values()
@@ -10699,7 +11947,7 @@ class MainWindow(QMainWindow):
             result = processing_score.score(
                 x_values, data, n_components=settings["n_components"],
                 kind="diffusion" if is_diffusion else "relaxation",
-                method=settings["method"],
+                method=settings["method"], model=model,
                 threshold=settings["threshold"], non_negative=settings["non_negative"],
                 non_negative_during_fit=settings["non_negative_during_fit"],
             )
@@ -10915,10 +12163,59 @@ class MainWindow(QMainWindow):
             session_index = self.session.add_derived(spectrum, self._component_label(index))
             self.spectrum_list.addItem(self.session.label(session_index))
             added.append(session_index)
-        if added:
-            self._select_single_row(added[0])
+        # The selection deliberately stays on the series. Jumping to the
+        # first component used to swap the whole analysis panel out from
+        # under the user -- the peak and region tables are siloed per
+        # spectrum, and a freshly-derived component has neither, so the
+        # regions drawn on the series vanished and Integrate Regions
+        # then failed with "Add at least one region". Reported as
+        # "integration on a pseudo-2D is sometimes not possible after
+        # running the SCORE/OUTSCORE deconvolution"; the components are
+        # already on screen in the plot and listed in Data, so nothing
+        # is hidden by leaving the selection where it was.
         self.statusBar().showMessage(
-            f"Added {len(added)} resolved component(s) to the spectrum list.", 5000)
+            f"Added {len(added)} resolved component(s) to the spectrum list — "
+            f"select one in Data to work on it.", 8000)
+
+    def _refresh_curve_fit_export_button(self) -> None:
+        """Enable Export curve fit exactly when there is one -- the
+        same three moments the peak spinner is enabled/disabled at (a
+        fresh fit, a reselect that restores one, and the reset that
+        clears it), so the button cannot offer to export nothing."""
+        if hasattr(self, "export_curve_fit_button"):
+            self.export_curve_fit_button.setEnabled(bool(self._relaxation_fit_results))
+
+    def _on_export_curve_fit_clicked(self) -> None:
+        """Write the last Fit Curve's measured series and fitted curve
+        to a CSV."""
+        if not self._relaxation_fit_results:
+            QMessageBox.information(self, "Nothing to export", "Run Fit Curve first.")
+            return
+        # The same axis the Fit tab is plotting, so the file and the
+        # plot cannot be in different units -- and derived from what was
+        # actually fitted rather than the fit-type combo's current
+        # position, which may have moved since.
+        plot_label, scale = self._fit_plot_axis()
+        x_label = plot_label.replace("s/m²", "s/m^2").lower()
+        value_label = "amplitude" if self.value_source_combo.currentData() == "amplitude" else "integral"
+
+        default = f"curve_fit_{value_label}.csv"
+        path, _selected = QFileDialog.getSaveFileName(
+            self, "Export curve fit", default, "CSV files (*.csv)",
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        if not path:
+            return
+        try:
+            text = processing_relaxation.curve_fit_to_csv(
+                self._relaxation_fit_results, x_label=x_label, x_scale=scale,
+                value_label=value_label)
+            with open(path, "w", newline="") as handle:
+                handle.write(text)
+        except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Wrote {os.path.basename(path)}", 5000)
 
     def _on_export_components_clicked(self) -> None:
         if self._score_result is None or self._score_ppm is None:
@@ -11116,6 +12413,23 @@ class MainWindow(QMainWindow):
     def _on_view_relaxation_peak_changed(self, value: int) -> None:
         self._display_relaxation_peak(value - 1)
 
+    def _fit_plot_axis(self) -> tuple[str, float]:
+        """``(xlabel, x_scale)`` for the Fit tab's own axis.
+
+        Derived from the *stored* xlabel rather than the fit-type combo,
+        so a restored fit is drawn on the axis it was actually fitted
+        against even if the combo has since been changed. A b-value
+        keeps its own label and is never rescaled (no SI-prefix
+        convention); a delay follows the Unit combo, so the plot reads
+        in the same milliseconds the panel does instead of showing
+        0.001 where the user typed 1.
+        """
+        stored = self._relaxation_fit_xlabel or "Delay (s)"
+        if stored.startswith("b-value") or stored.startswith("Voltage"):
+            return stored, 1.0
+        unit = self.delay_unit_combo.currentText()
+        return f"Delay ({unit})", self.delay_unit_combo.currentData() or 1.0
+
     def _display_relaxation_peak(self, index: int) -> None:
         """Show peak ``index`` (0-based) of :attr:`_relaxation_fit_results`
         in the Fit tab, with an uncertainty band if the checkbox for it
@@ -11140,9 +12454,16 @@ class MainWindow(QMainWindow):
             idx_array = sorted(excluded_idx)
             excluded_points = (original["t"][idx_array], original["y"][idx_array])
 
+        xlabel, x_scale = self._fit_plot_axis()
         self.fit_canvas.show_relaxation_fit(
-            result, uncertainty=uncertainty, xlabel=self._relaxation_fit_xlabel, excluded_points=excluded_points,
+            result, uncertainty=uncertainty, xlabel=xlabel, excluded_points=excluded_points,  # noqa: E501
+            x_scale=x_scale,
         )
+        # Claim the canvas, so a later right-click reaches this fit and
+        # not whichever eNMR series was last plotted here. Both
+        # directions matter: the owner has to be *set* by every writer,
+        # not only read by one of them.
+        self._fit_canvas_owner = "relaxation"
 
         # The full report, not a single line: this panel sits directly
         # under the plotted curve, which is exactly where someone is
@@ -11167,6 +12488,9 @@ class MainWindow(QMainWindow):
         and this is the direct, standard way to deal with that in NMR
         curve fitting -- exclude the specific known-bad point, not
         guess at a more "robust" automatic fitting method instead."""
+        if str(self._fit_canvas_owner or "").startswith("enmr"):
+            self._exclude_enmr_point(x, y)
+            return
         if not self._relaxation_fit_original:
             return
         index = self.view_relaxation_peak_spin.value() - 1
@@ -11174,6 +12498,13 @@ class MainWindow(QMainWindow):
             return
         original = self._relaxation_fit_original[index]
         t_orig, y_orig = original["t"], original["y"]
+        # The axis is drawn in the panel's own unit (see
+        # _fit_plot_axis), so a coordinate read back off it is in that
+        # unit too and has to come back to seconds before being
+        # compared with the stored series. Without this, "nearest"
+        # would be measured against a number 1000x off and would always
+        # pick the same end point.
+        x = float(x) * self._fit_plot_axis()[1]
         excluded = self._excluded_relaxation_indices.setdefault(index, set())
         candidates = [i for i in range(len(t_orig)) if i not in excluded]
         if not candidates:
@@ -11188,9 +12519,94 @@ class MainWindow(QMainWindow):
         if not self._refit_relaxation_peak(index):
             excluded.discard(nearest)  # not enough points left -- undo
 
+    def _exclude_enmr_point(self, x: float, y: float) -> None:
+        """Right-click "Exclude Nearest Point" on an eNMR plot.
+
+        **Points, not pairs.** A single polarised electrode bubbles and
+        shifts the phase in one direction only, so the damaged points
+        arrive one at a time; dropping the +-V partner as well would
+        throw away good data to preserve a symmetry the artefact has
+        already broken. The arm fit uses each point on its own and
+        keeps the survivor, which is why it is the fit to read once
+        points have been removed singly -- a pair half-difference
+        needs both polarities and simply loses that pair.
+
+        The excluded set indexes the **slice list**, so it means the
+        same thing for one experiment and for a gradient pair's
+        average.
+        """
+        if self._fit_canvas_owner == "enmr-folded":
+            self.statusBar().showMessage(
+                "Excluding single points needs the unfolded view — each folded "
+                "point is a +V/−V pair. Tick 'Unfold ±V'.", 8000)
+            return
+        if self._fit_canvas_owner == "enmr-pair":
+            source = getattr(self, "_enmr_paired", None)
+            if source is None:
+                return
+            voltages = np.asarray(source["voltages"], dtype=float)
+            values = np.asarray(source["average"], dtype=float)
+        else:
+            branches = (self._enmr_result or {}).get("branches")
+            if branches is None:
+                return
+            voltages = np.asarray(branches["voltages"], dtype=float)
+            values = np.asarray(branches["phases"], dtype=float)
+
+        candidates = [i for i in range(voltages.size) if i not in self._enmr_excluded]
+        if not candidates:
+            return
+        # Normalised by each axis's own range, so volts and radians --
+        # on very different numeric scales -- both count toward
+        # "nearest" instead of one dominating it.
+        x_range = float(np.ptp(voltages)) or 1.0
+        y_range = float(np.ptp(values)) or 1.0
+        distances = [((voltages[i] - float(x)) / x_range) ** 2
+                      + ((values[i] - float(y)) / y_range) ** 2 for i in candidates]
+        nearest = candidates[int(np.argmin(distances))]
+
+        self._enmr_excluded.add(nearest)
+        if not self._rerun_enmr_after_exclusion():
+            self._enmr_excluded.discard(nearest)   # not enough left -- undo
+            self.statusBar().showMessage(
+                "That would leave too few points to fit; kept it in.", 6000)
+            return
+        self.statusBar().showMessage(
+            f"Excluded the point at {voltages[nearest]:g} V "
+            f"({len(self._enmr_excluded)} excluded).", 5000)
+
+    def _rerun_enmr_after_exclusion(self) -> bool:
+        """Redo whichever eNMR fit is on screen with the current
+        exclusions. Returns whether it worked, so the caller can roll
+        the exclusion back rather than leaving the panel showing a fit
+        that no longer exists.
+
+        Runs with the panel's error dialogs suppressed. A refit the
+        user did not ask for must never be able to raise a **modal**
+        box: nothing is waiting to dismiss it, and the status bar says
+        the same thing without blocking."""
+        self._enmr_quiet = True
+        try:
+            if self._fit_canvas_owner == "enmr-pair":
+                self._on_enmr_combine_clicked()
+            else:
+                self._run_enmr_fit()
+        except Exception:  # noqa: BLE001 -- the rollback is the report
+            return False
+        finally:
+            self._enmr_quiet = False
+        return True
+
     def _on_fit_points_reset_requested(self) -> None:
         """Right-click "Reset Excluded Points" -- re-includes every
         point of the currently-viewed peak and re-fits."""
+        if str(self._fit_canvas_owner or "").startswith("enmr"):
+            if not self._enmr_excluded:
+                return
+            self._enmr_excluded = set()
+            self._rerun_enmr_after_exclusion()
+            self.statusBar().showMessage("Re-included every eNMR point.", 5000)
+            return
         if not self._relaxation_fit_original:
             return
         index = self.view_relaxation_peak_spin.value() - 1
@@ -11269,8 +12685,8 @@ class MainWindow(QMainWindow):
         try:
             slice_results = spectrum.metadata.raw.get("slice_fit_results")
             if not slice_results:
-                n_slices = spectrum.data.shape[0]
-                entries = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))["rows"]
+                entries = processing_slicing.get_slices(
+                    spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
                 slice_results = self._fit_peaks(entries)
                 self._warn_if_fit_near_region_edge(slice_results)
                 self._show_spectral_fit_results(spectrum, slice_results)
@@ -11495,7 +12911,16 @@ class MainWindow(QMainWindow):
             "delay_source": self.delay_source_combo.currentIndex(),
             "manual_text": self.manual_delays_edit.text(),
             "start": self.delay_start_spin.value(),
-            "step": self.delay_step_spin.value(), "vclist_factor": self.vclist_factor_spin.value(),
+            "step": self.delay_step_spin.value(),
+            # "vclist_factor" keeps its pre-generalisation spelling: it
+            # is a persisted sidecar key, and renaming it would silently
+            # reset the factor on every state saved before this. It is
+            # now only *read*, for a state saved before the factor
+            # could be an expression; "list_factor" is what is written.
+            "list_factor": self.list_factor_edit.text(),
+            "list_file": self.selected_list_file(),
+            "delay_scale": self.delay_unit_combo.currentData(),
+            "slice_limit": self.slice_limit_spin.value(),
             "position_tolerance": self.position_tolerance_spin.value(),
             "seed_mode": self.seed_mode_combo.currentIndex(),
             "anchor_slice": self.anchor_slice_spin.value(),
@@ -11582,7 +13007,10 @@ class MainWindow(QMainWindow):
             self.manual_delays_edit.clear()
             self.delay_start_spin.setValue(0.0)
             self.delay_step_spin.setValue(0.1)
-            self.vclist_factor_spin.setValue(1.0)
+            self.list_factor_edit.clear()
+            self.slice_limit_spin.setValue(0)
+            self._set_delay_scale(self._DEFAULT_DELAY_SCALE)
+            self._refresh_list_file_candidates(keep=None)
             self.position_tolerance_spin.setValue(0.5)
             self.seed_mode_combo.setCurrentIndex(0)
             self.anchor_slice_spin.setValue(1)
@@ -11625,7 +13053,25 @@ class MainWindow(QMainWindow):
             self.manual_delays_edit.setText(state["manual_text"])
             self.delay_start_spin.setValue(state["start"])
             self.delay_step_spin.setValue(state["step"])
-            self.vclist_factor_spin.setValue(state["vclist_factor"])
+            # A state saved before the factor could be an expression
+            # carries it as a float under the old key; a state saved
+            # since carries the text. Neither is guessed at.
+            if "list_factor" in state:
+                self.list_factor_edit.setText(state["list_factor"])
+            else:
+                legacy = state.get("vclist_factor", 1.0)
+                self.list_factor_edit.setText("" if legacy == 1.0 else f"{legacy:g}")
+            # Seconds for a state saved before the Unit combo existed:
+            # every number in it was typed in seconds, and defaulting
+            # it to the new ms would reinterpret it as a 1000x smaller
+            # delay with nothing on screen to say so.
+            self._set_delay_scale(state.get("delay_scale", 1.0))
+            self.slice_limit_spin.setValue(state.get("slice_limit", 0))
+            # `keep` rather than a plain re-scan: a list file the user
+            # browsed to somewhere else entirely is not something
+            # find_value_lists will turn up again, and dropping it here
+            # would silently reset the source on every reselect.
+            self._refresh_list_file_candidates(keep=state.get("list_file"))
             self.position_tolerance_spin.setValue(state.get("position_tolerance", 0.5))
             self.seed_mode_combo.setCurrentIndex(state.get("seed_mode", 0))
             self.anchor_slice_spin.setValue(state.get("anchor_slice", 1))
@@ -11687,6 +13133,12 @@ class MainWindow(QMainWindow):
         else:
             self.view_relaxation_peak_spin.setEnabled(False)
         self.view_relaxation_peak_spin.blockSignals(False)
+        self._refresh_curve_fit_export_button()
+
+        # Last, so it reflects the fully-restored panel rather than
+        # whatever half of it had been set when it ran.
+        self._on_delay_source_changed(self.delay_source_combo.currentIndex())
+        self._refresh_enmr_voltage_preview()
 
     # ============================================================
     # Selection handling (shared by both tabs)
@@ -11915,8 +13367,13 @@ class MainWindow(QMainWindow):
         # 'pseudo_2d' -- confirmed directly against a real X-Pulse HSQC
         # dataset. Hidden here the same way it already is for 1D data,
         # rather than shown-but-broken.
-        supports_pseudo_2d_toggle = spectrum.metadata.vendor != "xpulse"
-        self.process_indirect_button.setVisible(spectrum.ndim == 2 and supports_pseudo_2d_toggle)
+        # Every 2D vendor supports the toggle now. It used to be hidden
+        # for X-Pulse because io.xpulse.read_2d had no `pseudo_2d`
+        # parameter at all, so reaching _on_process_indirect_toggled's
+        # reload raised TypeError; read_2d takes one now, which is what
+        # made an X-Pulse series reported as a conventional 2D
+        # unfixable rather than merely mislabelled.
+        self.process_indirect_button.setVisible(spectrum.ndim == 2)
         self.process_indirect_button.blockSignals(True)
         self.process_indirect_button.setChecked(not spectrum.is_pseudo_2d)
         self.process_indirect_button.blockSignals(False)
@@ -12231,7 +13688,8 @@ class _ScoreSettingsDialog(QDialog):
     easiest way to get a wrong answer that still fits well.
     """
 
-    def __init__(self, parent=None, suggested: int = 2, is_diffusion: bool = True) -> None:
+    def __init__(self, parent=None, suggested: int = 2, is_diffusion: bool = True,
+                  model_label: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Resolve components (SCORE)")
         layout = QVBoxLayout(self)
@@ -12247,6 +13705,21 @@ class _ScoreSettingsDialog(QDialog):
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
+
+        if model_label:
+            # Says outright which model is about to be evaluated, and
+            # that it is the panel's own -- the model is no longer a
+            # fixed exponential buried in this method, so leaving it
+            # unstated would make it invisible which curve each
+            # component is being fitted to.
+            model_note = QLabel(
+                f"Each component decays as <b>{model_label}</b> — the Model set in the "
+                f"Curve Fitting sub-tab, with its amplitude carried by the component's "
+                f"own resolved spectrum. Change it there to resolve against a different "
+                f"curve."
+            )
+            model_note.setWordWrap(True)
+            layout.addWidget(model_note)
 
         form = QFormLayout()
 

@@ -19,7 +19,18 @@ from .relaxation import (
     format_relaxation_report, format_global_report, print_relaxation_report,
     NMR2D_integrate_slices, NMR2D_fit_relaxation,
 )
-from . import diffusion, ilt, score
+from . import diffusion, ilt, score, refdeconv, enmr
+from .refdeconv import (
+    reference_deconvolve, isolate_reference, ideal_reference, reference_position,
+    REGULARISATIONS,
+)
+from .enmr import (
+    pfg_params, phase_series, phase_ramp, polarity_pairs, unfold_polarity, branch_slopes,
+    combine_experiments, average_gradient_pair, cutoff_sweep, fit_enmr, fit_mobility,
+    mobility_from_slope, format_enmr_report, format_combined_report, format_branch_report,
+    format_gradient_pair_report,
+    format_mobility_report,
+)
 from .diffusion import (
     b_value, b_values_from_relative, calibrate_max_gradient, build_diffusion_model,
     component_weights, g_per_cm_to_t_per_m, t_per_m_to_g_per_cm,
@@ -33,6 +44,14 @@ from .score import (
 )
 
 __all__ = [
+    "refdeconv", "enmr",
+    "reference_deconvolve", "isolate_reference", "ideal_reference",
+    "reference_position", "REGULARISATIONS",
+    "pfg_params", "phase_series", "phase_ramp", "polarity_pairs", "unfold_polarity",
+    "branch_slopes", "combine_experiments", "average_gradient_pair",
+    "cutoff_sweep", "fit_enmr",
+    "fit_mobility", "mobility_from_slope", "format_enmr_report", "format_combined_report", "format_branch_report", "format_gradient_pair_report",
+    "format_mobility_report",
     "ft",
     "vocs_f1", "vocs_f2", "vocs_power", "pulse_to_w1", "apply_vocs", "vocs_sum",
     "combine_spectra",

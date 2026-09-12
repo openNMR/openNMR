@@ -1,8 +1,8 @@
 # openNMR -- working notes and backlog
 
-## Where things stand (2026-09-09)
+## Where things stand (2026-09-12)
 
-1612 tests passing. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, and the series-fitting/phase round below). **`src/` no longer imports nmrglue.**
+**1864 tests passing** (full suite, 13m12s). Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -42,6 +42,489 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+
+## Both eNMR pairings: unfolded ±V, the gradient-reversed repeat, and a voltage cutoff (2026-09-12, seventh round)
+
+User, in four parts over the round:
+
+1. *"unfold the voltages so the positive and negative (always positive first, negative second in the pairs). I want to see the zero crossing and then I want to be able to compare the two before averaging them. What often happens is some kind of bubble formation results in convection going only in a single direction, hence the need for the gradient direction switch and averaging."*
+2. *"You misunderstood, there are two sets of pairs: the voltage pairs from the vdlist, and the opposite gradient data, doesn't always exist but is often needed. In the LiAc data there are pairs in experiments 20/21, and 560/561 as examples"*
+3. *"once the data is paired, there should be a third plot with the average between the two gradient signs"* — then *"Maybe they can all be on the same plot"*.
+4. *"With the voltage too large there might be a large deviation so probably some points need to be removed to get the fit from the average"*
+
+**The correction in (2) is the important one and an earlier draft of this entry had it wrong.** There are two independent pairings and they are not the same operation:
+
+| | what varies | where it lives | function |
+|---|---|---|---|
+| **voltage pairs** | polarity, within one experiment | the vdlist: each magnitude twice | `unfold_polarity`, `branch_slopes` |
+| **gradient pair** | `+g` vs `-g`, two whole experiments | different experiment numbers | `average_gradient_pair` |
+
+### 1. Unfolding the voltage pairs (`unfold_polarity`, `branch_slopes`)
+
+The vdlist records magnitudes, so the recorded axis is `0, 0, 8, 8, 16, 16…` and every point sits on its partner. Unfolding gives the first of each pair `+|V|` and the second `−|V|`: one ramp from `−Vmax` to `+Vmax` with the zero crossing on screen.
+
+**The `V = 0` pair unfolds to `+0.0` and `−0.0`, and `-0.0 >= 0` is True in numpy.** Splitting the arms by a sign comparison puts both zero points in the positive arm. The masks come from the acquisition order; there is a test.
+
+On the signed axis both arms carry the same slope, so their **mean is the measurement** and their **half-difference is what did not reverse with the voltage**. That is identically the slope of the pairwise half-sum against `|V|` — one number, two views, asserted as an identity so nobody reports it twice.
+
+Measured, worst first: Li/acetate 560 +6.92e-3 (R² 0.990) against −1.07e-2 (R² **0.559**), 465% apart; 20 −9.08e-4/−2.40e-2, 93%; 572 +9.59e-3/+5.38e-3 with **both arms above R² 0.98**, 28%; TMABr calibration −7.64e-3/−8.16e-3, 3%. 572 is the case that matters for design: judging a run by fit quality alone passes it.
+
+### 2. The gradient-reversed repeat (`average_gradient_pair`)
+
+**The gradient sign is recorded, not inferred.** `diff.xml` carries a *signed* `gmax`, and so does the `acqus` gradient percentage: +4.05/−4.05 T/m on 20/21, ±0.9 on 550/551, 560/561, 570/571, 572/573. `read_diff_xml` already returned it signed; nothing was reading the sign.
+
+That retires a stale claim: `combine_experiments`'s docstring said "this project has no dataset that settles" whether a gradient reversal flips the fitted slope. It was reading the magnitude. **The two agreeing repeats it cited (−7.29e-3 and −7.55e-3) are 570 and 572, which were both run at +0.9 T/m** — a same-direction repeat, not a reversed pair. Docstring corrected and the function demoted to the no-gradient-recorded case.
+
+`average_gradient_pair` averages the **ramps**, not the slopes: each is multiplied by the sign of its own gradient, centred on its own fitted zero crossing (receiver phase differs between acquisitions for no physical reason), and averaged point by point. Voltage axes must match — they are identical in every available pair — rather than silently interpolating.
+
+**The estimator had to be fixed to make this work.** A single least-squares line through every unfolded point is *not* the arms' mean: when something did not reverse the arms have different intercepts, and one shared intercept drags the slope. On experiment 20 the single line gives −9.37e-3 rad/V against the arms' −1.24e-2, a 25% error from the estimator alone. `_measure_ramp` is now the one estimator used at both levels.
+
+Real pairs, sign-corrected: **20/21 agree** (−1.244e-2 and −1.396e-2, spread 8%); **560/561 do not** (−1.897e-3 against −9.459e-3, 94%); **572/573 are opposite in sign** after correction (+7.48e-3 and −3.13e-3, 344%).
+
+**An observation worth returning to.** On 20/21 the ±V arm asymmetry is large in *both* directions and **reproduces after sign correction** — the two ramps lie on top of each other, V-shape included. A phase encoded by the gradient flips when the gradient flips and is restored by the sign correction, so a gradient-reversed pair does not cancel it. If that asymmetry is convection, reversing the gradient does not remove it; only reversing the **field** leaves it common to a pair, where the ±V half-difference takes it out. Flagged for the user rather than concluded here.
+
+### 3. Plotting: all of it on one axes
+
+`show_relaxation_fit` grew `extra_series` — further series drawn faintly behind the main one. Combining now draws **both directions and their average together**: two sign-corrected ramps as open markers, the average in black with its fitted line. Two directions that disagree look like two separated ramps with the average stranded between them.
+
+It also grew `ylabel` (default `"Intensity"`, unchanged for every relaxation and diffusion caller). The eNMR fit plots a *phase*; labelling it "Intensity" was wrong.
+
+The per-arm fit line is drawn through the **shared** zero crossing (`fit_joined`), so a disagreement is a kink and not a vertical jump reading as a spike. `branch_gap` is reported as a number instead.
+
+### 4. The voltage cutoff — and why it is not a free parameter
+
+`max_voltage` on `branch_slopes`, `fit_enmr` and `average_gradient_pair`, plus `exclude` for named points. **A ±V pair is kept or dropped together** — an unbalanced pair makes the arms measure different ranges and the comparison reads that as an asymmetry. The same cutoff applies to every repeat, or the spread between them is a range difference. Excluded points stay in the result, are drawn as grey crosses, and the fitted line is extrapolated across them.
+
+**The cutoff moves the answer a long way**, so `cutoff_sweep` exists to show that before one is chosen. On 20/21, averaged:
+
+| \|V\| ≤ | slope (rad/V) | R² | spread |
+|---|---|---|---|
+| all (120) | −1.32e-2 | 0.882 | 8% |
+| 100 | −1.04e-2 | 0.849 | 10% |
+| 80 | −7.04e-3 | 0.818 | 14% |
+| 60 | −3.64e-3 | 0.959 | 44% |
+| 40 | −2.66e-3 | 0.982 | 113% |
+
+A **sevenfold** change in the answer with R² *improving* throughout: a cutoff picked by fit quality alone picks the result. The ramp is nonlinear well below the top of the range — most of the curvature is on the negative-voltage side — so this is not a matter of trimming one bad pair.
+
+### Round 8 (same day): points not pairs, and the sign convention settled
+
+User: *"Because of the bubbles forming as a result of a single electrode polarisation, the phase shift is constant in one direction so I should be able to remove points not pairs."* and *"The first of each pair in the list will be positive voltages"*.
+
+#### The polarity order is now known, so the code reads it literally
+
+`polarity_pairs` computed `(φ_second − φ_first)/2`. With **positive first** confirmed, that is `−(φ_+ − φ_−)/2`; it now computes `(φ_+ − φ_−)/2`, matching its own docstring, and `fit_enmr`'s slope agrees with `branch_slopes`'s arm mean outright instead of being its negative. The TMABr standard's slope is therefore **−7.90e-3 rad/V**, not +7.90e-3.
+
+**That leaves exactly one unrecorded sign, and it is now a named parameter rather than a hidden minus.** `cell_polarity` (±1): which way the cell's positive electrode faces relative to the gradient's +z. `acqus` and `diff.xml` fix the gradient's sign, the vdlist fixes the polarity order, and nothing records the wiring.
+
+Measured for this cell: **−1**. With first-is-positive and the calibration's own `gmax = +0.3 T/m`, the raw formula gives TMA⁺ — a cation — a mobility of the right magnitude and a negative sign. The API default is the literal `+1` (a compensating minus does not belong buried in a formula); the GUI combo and the calibration test both set −1, which recovers the accepted +3.79e-8. A test asserts that flipping it moves the mobility and nothing else.
+
+#### Points, not pairs
+
+`_fit_mask` used to widen every exclusion to its ±V partner, to keep the arms covering the same range. **That was wrong for the physics described**: one polarised electrode bubbles and shifts one polarity's phase only, so the damaged points arrive singly, and widening discards good data to preserve a symmetry the artefact has already broken. `exclude` is now point-level; `balance_pairs=True` opts back in. `max_voltage` also accepts a `(low, high)` pair on the signed axis, for trimming one side.
+
+**Measured on experiment 560, and it is not a marginal preference.** Its −V arm is clean to −60 V and then breaks upward: −2.649, then **+3.081, +3.867, +4.483** at −80, −100, −120 V. The +V arm is a good line across the whole range.
+
+| | +V arm | −V arm | asymmetry | points |
+|---|---|---|---|---|
+| everything | +6.92e-3 (R² 0.989) | −1.07e-2 (R² **0.559**) | **465%** | 16 |
+| \|V\| ≤ 60 — drops pairs | +8.22e-3 (R² 0.996) | +6.57e-3 (R² 0.996) | 11% | 10 |
+| drop −80/−100/−120 — points | +6.92e-3 (R² 0.989) | +6.57e-3 (R² 0.996) | **3%** | 13 |
+
+Removing three points beats removing three pairs on both counts: better agreement from more data. The positive arm is untouched, byte for byte.
+
+**The honest cost, reported rather than hidden.** A pair half-difference needs both polarities, so a pair that loses one point contributes nothing to `fit_enmr`'s slope — while the arm fit uses each point on its own and keeps the survivor. `fit_enmr` now reports `broken_pairs` and the report says to read the arms instead. `branch_slopes` reports `balanced`, and when it is False the report says part of the asymmetry is the range difference and to read the arm you kept rather than the difference between them.
+
+#### GUI
+
+- **Right-click → Exclude Nearest Point** now works on eNMR plots (single experiment and gradient-pair average alike), removing **one point**. Reset re-includes. The excluded set indexes the slice list, so it means the same thing in both views. Excluding in the folded view is refused with a message — each folded point is a pair.
+- A latent bug found doing it: `_fit_mode` is on for every fit plot, so an eNMR plot's right-click was reaching into whatever relaxation fit ran earlier in the session and silently re-fitting *that*. `_fit_canvas_owner` now says whose plot it is.
+- **Cell polarity** combo, defaulting to this cell's measured −1, with the reasoning in the tooltip.
+- The Fit button clears exclusions (a deliberate new fit); the refits that excluding itself triggers keep them.
+
+#### Tests
+
+`test_enmr.py` 74 → 80, `test_gui.py` +3 (16 eNMR GUI tests). New: the point-level exclusion keeping its partner and `balance_pairs` widening it again; the one-sided signed range; `cell_polarity` rejecting anything but ±1 and moving only the mobility; `broken_pairs` against the arm fit keeping the survivor; and the real-data check that dropping 560's three bad negative points beats the symmetric cutoff.
+
+
+### Round 9 (same day): the shift quoted against 0 V, in degrees
+
+User: *"Also the phase shift should be reported as relative to the 0V data (no shift). Ideally 0V = 0 degrees"*.
+
+`zero_phase` reads the field-off measurement -- the mean of the `0 V` pair, since at zero volts the polarity means nothing and they are two measurements of the same thing. `branch_slopes` now subtracts it by default (`reference="zero"`; `None` for the raw phase), so **`V = 0` reads zero** and every number below is a *shift* rather than a phase carrying the receiver's along with it. `average_gradient_pair` references each repeat to **its own** zero before averaging, which is also better than the fitted offset it used before: two acquisitions carry unrelated receiver phases, and the measured zero does not move when the fit does.
+
+It is a change of origin and cannot move the measurement: slope, asymmetry and R² are identical either way, asserted directly. The two `0 V` points are *not* forced onto zero individually -- their mean is zero and each sits at ±0.8° on the calibration, which is their own noise and worth seeing.
+
+**Degrees**: the reports give the slope in both units (`-0.0079015 rad/V = -0.45272 °/V`) and put the zero crossing and the arm gap in degrees; both GUI plots are in degrees with the axis labelled *Phase shift (°)*. Radians stay the primary unit internally -- the mobility formula needs them and a stray 180/π there is invisible.
+
+#### A bug this round introduced and caught
+
+`average_gradient_pair` already had a local named `reference` holding the shared voltage axis, so the new `reference` parameter collided with it and `reference == "zero"` compared an array and raised. `_measure_ramp`'s **bare `except ValueError`** then silently fell back to the single-line estimator -- the biased one replaced in round 7 for exactly this reason -- and moved the real 20/21 answer from **-1.32e-2 to -1.05e-2 with nothing to say so**. The fallback now branches on whether the series *has* arms rather than on catching whatever was thrown, so a real error surfaces; there is a regression test.
+
+The lesson is the one the module already states about silent wrongness, and it applies to `except` clauses as much as to physics: the fallback was reachable by any error, not only the one it was written for.
+
+#### And a second one, which hung the suite rather than failing it
+
+Round 8 added `_fit_canvas_owner` so an eNMR plot's right-click would stop reaching into a stale relaxation fit — but only the **eNMR** side set it. A relaxation exclusion after any eNMR fit in the same session therefore went down the eNMR path, refitted a spectrum that was not an eNMR series, and raised a **modal** `QMessageBox` with nothing waiting to dismiss it. Under pytest that is not a failure, it is a stop: the suite sat at 0% CPU on `test_main_window_excluding_a_point_uses_the_displayed_axis` for six hours before anyone looked at the CPU column.
+
+Two fixes, because either alone leaves a trap. Every writer of that canvas now sets the owner, not just one of them. And the eNMR panel's dialogs go through `_enmr_problem`, which reports to the status bar instead when a refit the user did not ask for is running — a refit nobody requested must never be able to block. Regression tests for both.
+
+**A diagnostic note worth keeping**: a stalled background suite in this harness was twice a `| tail` pipeline, not the tests. Redirect to a file and read that; and check the `%cpu` column before assuming "slow".
+
+
+### Still open
+
+- ~~**The polarity sign convention.**~~ **Settled 2026-09-12** — the user confirmed the first of each pair is the positive voltage. See *Round 8* above: `polarity_pairs` now reads it literally, and the one remaining unrecorded sign is the explicit `cell_polarity`, measured as −1 for this cell.
+- **The Li/acetate data is not worked up.** Three of four gradient pairs disagree, and the nonlinearity above applies to all of them.
+- `pfg_params(path)` on a bare path with no `nucleus=` used to raise a bare `TypeError` from `2*pi*None`; it now says what to pass.
+
+### Tests
+
+`test_enmr.py` 24 → 74. Unfolding and its `−0.0` trap; the separation of measurement from non-reversing term on synthetic data; the two identities (arm mean = −paired slope, asymmetry = half-sum slope); the gradient pair including receiver-phase removal, the refusals (different voltages, missing or zero gradient, fewer than two), and the same-direction-repeat flag; the cutoff keeping pairs balanced, widening an explicit exclusion to its partner, applying to headline and arms alike, and the sweep. Real-data checks: the calibration's arms agreeing, 560 as one direction failing, 572 as two clean arms disagreeing, the gradient signs read from `diff.xml`, 20/21 agreeing against 560/561 not, the single-line estimator's 25% error on experiment 20, and the cutoff's sevenfold swing. `test_gui.py` +8.
+
+
+## Reference deconvolution, and eNMR mobility validated against a literature value (2026-09-11, sixth round)
+
+User supplied `eNMR_Trials.ipynb` (their own prior fitting), real eNMR data, the voltage convention (`V = (vdlist[us] - 0.5u) * 2`), then a TMABr calibration standard with an accepted literature mobility (`mu(TMA+) = 3.79e-8 m^2/Vs`) and confirmation that the cell's electrode gap "should be around 38.5 mm".
+
+This unblocked the reference-deconvolution scope written last round, whose stated blocker was the absence of any eNMR dataset.
+
+### Reference deconvolution (`processing/refdeconv.py`)
+
+FIDDLE: isolate a reference resonance's FID, divide the ideal FID by it, multiply the whole FID by the result. Plus `ft.ifft_spectrum`, the public inverse the scope identified as the one missing primitive (round-trips against `fft_spectrum` to 1e-15).
+
+**Validated against a constructed truth** -- build an FID, distort it, transform -- rather than against an assumption about what a corrected spectrum should look like:
+
+| distortion | FID survives | distorted | corrected | truth |
+|---|---|---|---|---|
+| phase wobble only | 0.175 s | 0.244 | **0.159** | 0.147 |
+| + mild decay | 0.130 s | 0.281 | 0.171 | |
+| + decay t=0.03 | 0.105 s | 0.330 | 0.195 | |
+| + harsh gaussian | 0.067 s | 0.342 | 0.208 | |
+| destroys the signal | 0.031 s | 0.574 | 0.366 | |
+
+The correction **transfers to peaks outside the reference region** -- the method's entire claim -- and recovery degrades with how much signal the distortion destroyed. That limit is information-theoretic, not implementational, and the sweep is in the tests so nobody re-litigates it.
+
+**Two things measured wrong first, both fixed and recorded in the code:**
+
+- **The ideal FID must be built in the time domain.** Inverse-transforming a *real* Lorentzian profile gives a signal symmetric about `t = 0`, half of which wraps to the end of the array and corrupts exactly the late points the regularisation exists to protect. Until this was made causal, a 4x broadening was only half-corrected -- it looked like a regularisation problem and was not.
+- **The default target position is the magnitude maximum, not a centroid.** These distortions drag an asymmetric tail; on a line whose true position is 0.000 ppm, the maximum lands at -0.024, a half-height centroid at -0.107, and the full-region centroid at -0.283. The first draft used the last of those and visibly shifted corrected spectra.
+
+Regularisation (`REGULARISATIONS`) is the method, not a detail: `wiener` (default), `truncate`, and `none` -- the last present so the divergence it causes can be demonstrated rather than described.
+
+### eNMR mobility (`processing/enmr.py`) -- recovers the literature value
+
+The physics: `dphi = gamma * g * delta * DELTA * mu * V / d`. Everything but `mu` and `V` is fixed, so phase is linear in voltage and the slope is the mobility.
+
+**Read off the real data before any code was written**, which is what made the module short:
+
+- **Two levels of pairing, and I conflated them.** The first reading was +V/-V within an experiment. The user then said the pairs were gradient direction, so that was rebuilt -- and then corrected again: "no wait, the pairs in each experiment are voltage polarity, but the experiments are generally run twice to switch the gradients". Both are real and they are different things:
+
+  * **Within one experiment**: +V/-V voltage polarity. `(phi+ - phi-)/2` doubles the field-driven phase and cancels receiver phase, drift and the electrodes' own lineshape effect. `polarity_pairs`.
+  * **Across two experiments**: the gradient is reversed by re-running the whole thing. `combine_experiments` averages the repeat slopes.
+
+  The detour was avoidable -- the first reading was right and the data was available to check before rebuilding. Worth recording as a lesson: *verify a correction against the data before acting on it*, exactly as is done for everything else here.
+
+  **Reversing the gradient does flip the fitted slope's sign**, confirmed on the pair the user pointed at (LiAc 20/21): +1.244e-2 and -1.396e-2 rad/V, combining to +1.320e-2 ± 1.5e-3 with an 8% spread. So repeats are sign-aligned before averaging; a plain average would have returned -3.8e-3, cancelling the measurement away. `spread` is reported because two runs of one sample agreeing is the evidence that either of them measured anything.
+
+- **A real bug, found because expt 21 looked dead.** It fitted at R^2 = 0.009 -- apparently a sample with no mobility. It was not: `phase_series` unwrapped the **interleaved** series, whose consecutive points are *opposite polarity* and legitimately far apart, so `np.unwrap` read a genuine polarity jump as a wrap and inserted a 2*pi step that was never there (-1.588 -> +4.695 rad on the last point). Unwrapping each polarity as its own series gives slope -1.396e-2 at R^2 = 0.883.
+
+  This is the failure mode worth remembering: it does not look like a broken calculation, it looks like a negative result. New `phase_ramp` takes the voltages and picks the stride itself so the correct path is the default one; `phase_series` keeps a `stride` argument for manual use, documented with the measured numbers. The calibration dataset was unaffected (no wrap in it), so the literature validation stands unchanged.
+- A **plain complex integral over the peak region** is enough: R^2 = 0.995 with no lineshape fit at all. The notebook's Dysonian `complex_fit` is needed for *overlapped* peaks, not for phase accuracy as such. Worth knowing before porting it.
+
+**End-to-end against the standard** (`eNMR/Diff50_1H_eNMR_Calibration_2024-05-13/21`, constants from its own `diff.xml`: g = 0.3 T/m, delta = 1 ms, DELTA = 100 ms, gamma = 42.577 MHz/T):
+
+| species | slope | R^2 | mu |
+|---|---|---|---|
+| TMA+ (3.30 ppm) | 7.90e-3 +/- 2.2e-4 rad/V | 0.9954 | **3.79e-8 +/- 1.1e-9 m^2/Vs** |
+| water (4.92 ppm) | 3.3e-5 +/- 8.8e-5 rad/V | 0.023 | 1.6e-10 (zero to within error) |
+
+That is the accepted literature value to three significant figures, with the water in the same tube as an internal control that does not drift. **Only an external value can catch this class of error** -- a wrong `2*pi`, a wrong drift time or a unit slip all still produce a beautiful straight line, which is why the test asserts the literature number rather than self-consistency.
+
+The user's 38.5 mm gap also settles a question raised last round: the `ENMR_DSTE` sequence's drift time is the recorded `DELTA` itself, **not** `2*DELTA`. Had the gap been ~19 mm the double stimulated echo would have needed that factor.
+
+**The PFG constants are read from the experiment** (`pfg_params`), so only the electrode gap needs typing. Which source each comes from was **measured across five real PFG/eNMR datasets** rather than taken from the pulse programme's own legend, and the legend is not enough:
+
+* `Delta = d20` reproduces `diff.xml`'s `DELTA` **exactly** on all five, so it is read from `acqus` and used as a cross-check.
+* **delta does not.** `d17 + d18` matches on the calibration alone and is 67-83% too large on the other four, whose `diff.xml` all report 1 ms against `d18` values of 0.896-1.568 ms. The sequence composes shape and ramp in a way the parameter list does not expose, so delta comes from `diff.xml`.
+* **The gradient cannot come from there at all**: `acqus` records a *percentage* of the probe maximum, and the calibration that turns it into T/m is only in `diff.xml`/`diffConf.xml`. Without one, `pfg_params` raises and says so rather than guessing.
+
+gamma is converted from the recorded Hz/T to rad/s/T once, on the way out, which is where a stray factor of 2*pi would otherwise get in.
+
+**The slope is the headline, not the mobility** -- a second correction from the user: "the most reasonable outcome from the eNMR data would be the gradient of the straight line, where the user can figure out the mobility with their measured D, L and whatever." The first draft required an electrode gap to return anything, which forces a number into the calculation whether or not the user has a trustworthy one. `fit_enmr` now returns the slope from the data alone and computes a mobility **only when every constant is supplied** -- and rejects a half-supplied set rather than silently falling back to the slope-only path, which would hide a typo.
+
+`electrode_gap` still has no default: `mu` scales directly with it, no vendor file records it, and a plausible-looking default would silently rescale every result. It is named in the report beside the mobility for the same reason.
+
+### Data observations
+
+- The calibration folder's expt 20 has **14 slices against 16 voltages** -- handled by the "longer list is fine" rule added in the fourth round, and its phases are flat, so it reads as a control or an aborted run.
+- `Diff50_eNMR_Li_Ac_6p25M` experiments show phase spans of 2-5 rad, so they are live measurements; they have not been worked up here.
+
+### GUI: eNMR wired, reference deconvolution deliberately not
+
+**eNMR is a new Analysis sub-tab**, not a third Fit-type on the Curve Fitting panel. Its x-axis is volts -- neither a time nor a b-value -- so none of that panel's Values sources, unit machinery or relaxation models apply to it; sharing it would have meant every control there growing a third meaning. The tab reads voltages from the vdlist (with the `(µs - 0.5) x 2` conversion exposed as two spin boxes, since it belongs to the amplifier and not the file format) and the PFG constants from `diff.xml`, shows what both resolve to, and defaults the electrode gap to "not set -- slope only". Keep-as-repeat / Combine-repeats handle the gradient-reversed pair. End to end on the calibration standard it recovers mu = 3.76e-8 against the literature 3.79e-8 -- ~1% off the processing-level number because the GUI's load path autophases, and inside the fit's own ±3%.
+
+`Session.replace_data` was added for it: a processing step that *transforms* a spectrum, keeping metadata intact. `add_derived` would have set `source_path` to a display label and cut the result off from its own `vdlist` and `diff.xml`.
+
+**Reference deconvolution was wired, tested on the real data, and the GUI box removed again** -- because it destroyed the spectrum. On the calibration series the water line went from a peak of 2397 spanning 0.0159 ppm to a peak of **16** spanning **0.536 ppm**.
+
+The cause is an assumption the module states but the GUI violated: every function there inverse-transforms the spectrum back to its FID, which requires the spectrum to *be* the transform of a **causal** FID. A TopSpin-processed `2rr`/`2ii` is not -- it carries the digital-filter group delay (`GRPDLY` = 76 on this data) and has apodisation and baseline correction already folded in. Confirmed directly: the isolated reference FID peaks at index **150**, not 0. A Hann taper on the region was tried first, on the theory that the hard boxcar's sinc was responsible; it changed the result not at all (identical to four decimals), which is what ruled that out.
+
+The module and its 21 tests remain valid -- they build their own FIDs, where the assumption holds. **The fix is to apply the correction to `metadata.raw["fid_raw"]`**, which every vendor's reader retains, rather than to the processed spectrum: that means wiring it into the live FID-reprocessing pipeline the Processing tab already runs, which is a different piece of work and is not done. The limitation is now documented at the top of `refdeconv.py` with these numbers so it is not rediscovered.
+
+### Tests
+
+`test_refdeconv.py` (21, new): the causal-FID and centroid-vs-maximum findings, the regularisations, position/width round-trips, end-to-end recovery, transfer to non-reference peaks, the severity sweep, and that the correction moves neither the spectrum nor relative intensities. `test_enmr.py` (24, new): per-direction fitting and the detection of pairing, the measurement-versus-artefact separation that justifies the half-difference, a misbehaving direction staying visible, the mobility formula and its required gap, the rejection of a half-supplied conversion, phase extraction including unwrapping past pi, and the two real-data checks -- the literature mobility (plus that the two directions genuinely oppose and the residual is small) and the neutral control.
+
+
+## SCORE selection jump, X-Pulse/Bruker pseudo-2D detection, crosshairs everywhere (2026-09-11, fifth round)
+
+User: "Integration on a pseudo-2D is sometimes not possible after running the SCORE/OUTSCORE deconvolution. It would be good to have crosshairs available on all plots including compare, spectral fit, and fit. Some pseudo-2Ds are being noted as regular 2Ds in the data viewer and I'm not sure why. It would be nice to consider adding some kind of reference deconvolution..." Then: "The pseudo issue I'm seeing mostly in bruker data viewer."
+
+### Integration after SCORE: the selection was jumping
+
+Reproduced rather than guessed. Integration on the pseudo-2D itself works fine before *and* after a SCORE run, and the round trip away and back restores the regions correctly. What fails is the step in between: **"Keep components" called `_select_single_row(added[0])`**, moving the selection onto a freshly-derived 1D component. The peak and region tables are siloed per spectrum and a new component has neither, so the regions drawn on the series vanished from the panel and Integrate Regions then failed with a bare "Add at least one region to integrate" -- with the regions still safely on the series the user had just navigated away from.
+
+Fixed by leaving the selection on the series. The components are already visible in the plot and listed in Data, so nothing is hidden; the status message now says to select one to work on it. The empty-region error also says outright that the table belongs to the selected spectrum.
+
+### "Pseudo-2Ds noted as regular 2Ds" -- two separate causes
+
+**Bruker (the one the user is hitting).** `bruker.peek` -- which is what the Data browser labels rows from -- decided `pseudo_2d` from `acqu2s`'s `NUC1 == "off"` alone. Plenty of series do not record "off" there: measured across this project's own data, `20200804/.../11` (`satrec2Decho3`, a saturation-recovery series with a `vdlist`) and `bruker_PFG/150` (`diffSte` with a `difflist`) both name a real indirect nucleus and were labelled conventional 2Ds.
+
+**`FnMODE` was tried first and had to be discarded**, which is worth recording because it looks like the obvious signal: every pseudo-2D in the corpus has `FnMODE = 1`, but so do real COSY and HMBC datasets (`cosygpppqf`, `hmbcgpndqf`, `cosygpmfqf`) -- QF acquisition has no F1 quadrature either. It does not separate the two cases at all.
+
+What does separate them cleanly on the same corpus is **the presence of one of Bruker's own variable-list files** (`vdlist`/`vclist`/`vplist`/`difflist`) in the experiment folder -- exactly the files a pulse programme reads to vary something between rows. New `bruker.has_variable_list`, or-ed into `peek`. Checked against every Bruker 2D in `test_data`: every genuine 2D (HSQC, HMBC, COSY, TOCSY, ROESY, INADEQUATE, HNCACB) stays False and every list-bearing series becomes True.
+
+**Still not detectable, and stated rather than papered over**: a series with no list file *and* a real indirect nucleus (`bruker_T2/11`, `hahn-echo.rjm`; two `hahnecho_d7` VOCS datasets) has no metadata-only evidence at all. Pulse-programme name matching would catch them but is site-specific and fragile -- the same experiment appears as `hahnecho2D.enb`, `hahn-echo.rjm` and `hahnecho_d7.ids30` across three instruments. The Process Indirect Dimension toggle remains the per-experiment fix.
+
+**A second, separate cause -- X-Pulse.** `xpulse.read_2d` had no `pseudo_2d` parameter at all, so *every* NTUPLES 2D came back as a genuine 2D; the Process Indirect toggle was hidden for this vendor (it would have raised `TypeError` -- that hiding was itself an earlier fix for "Importing 2D x-pulse causes a crash"). An X-Pulse series read through that path was a conventional 2D **with no way to say otherwise**. `read_2d` now takes `pseudo_2d` like every other vendor, skipping the F1 decode/zero-fill/FFT and giving the F1 axis `kind="index"` -- the same shape `read_array` already produces, so a series read either way behaves identically downstream. The toggle is now shown for X-Pulse and round-trips both ways.
+
+**An over-reach, caught by the existing tests and reverted.** Having given `read_2d` the parameter, the obvious next step looked like dropping X-Pulse's exclusion from `_load`'s pseudo-2D-by-default override, for consistency with Bruker. Three tests failed on the shape, and they were right to: Bruker's default is forced *because its own auto-detection is known-unreliable*, and no such evidence exists for X-Pulse -- every NTUPLES dataset here is a genuine correlation experiment (the NUS HSQC). Forcing them all to pseudo-2D to catch a series nobody has produced yet would have broken the case that does exist. The exclusion stays; only the toggle changed.
+
+### Crosshairs on every plot worth reading a value off
+
+The gate was `self._contour_spectrum is None and self._current_1d_spectrum is None` -- i.e. contours and 1D spectra only, which is precisely why Compare, the spectral fit and the curve fit had none. Replaced with an opt-in `_crosshair_ready` flag, cleared by `_clear_figure` on every rebuild and set by each view that wants one: 1D/contour, Compare, spectral fit, curve fit, DOSY, heatmap and 2D overlay. The FID and processing-preview views deliberately do not opt in.
+
+One subtlety the existing tests caught immediately: `_redraw_contour` rebuilds without going back through `show_spectrum`, so it has to re-arm the flag itself or a contour loses its crosshair after any level scroll.
+
+### Scoped, not built: reference deconvolution for eNMR
+
+User: "My goal is to include eNMR fitting but often the lineshapes are warped by the electrodes, making the spectra hard to accurately fit. Is this something that can be scoped out for a fix?" Checked `nmrtools2`/`leonmr` first per the standing reuse-first rule -- **neither has any reference-deconvolution code**, so this is genuinely new.
+
+**The method** (FIDDLE, Morris et al.): pick an isolated reference resonance, isolate its experimental FID, divide the *ideal* FID of that same resonance by it, and multiply the whole FID by the resulting correction. Every distortion common to the whole spectrum -- which is what electrode-induced B0 inhomogeneity is -- cancels, because it is present in the reference too.
+
+Concretely, against what already exists here:
+
+1. **Isolate the reference.** Zero the spectrum outside a user-picked ppm region and inverse-FFT it -> `fid_ref_measured`. `processing.ft` has `fft_spectrum` but **no public inverse**; `decode_hypercomplex_f1`'s neighbours already do `np.fft.ifft` inline, so this is a small addition, not a gap.
+2. **Synthesise the ideal.** The target lineshape at the same position with a chosen width -- `processing.fitting.lorentzian`/`gaussian`/`pseudo_voigt` already exist and are what the peak fitter uses, so the target is specified in the same terms as a fit.
+3. **Correction = ideal / measured**, elementwise in the time domain.
+4. **Regularise.** This is the whole difficulty and must not be hand-waved: the reference FID decays toward noise, so the late points divide by ~0 and amplify noise without limit. Standard treatments are a Wiener-style `conj(m)/(|m|^2 + eps)`, truncating the correction where the reference has decayed below a threshold, or apodising it. Which to use should be *measured* on a real eNMR dataset, not chosen from the literature -- there is no such dataset in `test_data` yet, and **that is the blocker**.
+5. **Apply and reprocess.** `metadata.raw["fid"]`/`fid_raw` is retained for every vendor and the Processing tab already reprocesses from the raw FID live, so this slots in as one more step in that pipeline with a checkbox and a region picker.
+
+**What it will and will not fix.** It corrects a *lineshape* distortion common to the whole spectrum -- static B0 inhomogeneity from the electrodes, the case described. It does **not** fix convection or electro-osmotic flow (a per-scan phase/frequency modulation, not a fixed lineshape), and it needs an isolated reference resonance that is not itself overlapped. On an eNMR series the honest design is to derive the correction **per slice** (each field step has its own distortion) rather than once for the whole series.
+
+**Estimate**: `processing/refdeconv.py` plus an inverse-FFT helper is perhaps a day's work; the regularisation choice and its validation need a real distorted dataset, and until one exists any number quoted for accuracy would be invented. Suggest starting by adding one eNMR experiment to `test_data`.
+
+
+## Slices capped at F1 TD, a longer list is not an error, and pan is no longer forced (2026-09-11, fourth round)
+
+User: "A real bug: if the file for fitting doesn't match the length of the data, there is an error but no way to change. The number of slices in a pseudo-2D should be limited to TD for the F1 dimension in bruker data from the acqus file (always use the status parameter acqu file "acqus"). And there should be an easy way to limit the number of slices used. If the list is longer than the data, just use only as many values on the list to match, that's how Bruker does it: you can make eg a vdlist that is 24 points long and then set the F1 TD to be 10 and you will just use the first 10 values." Then, mid-round: "and actually stop having pan as the default mode".
+
+### The extra rows were never data -- this closes a standing mystery
+
+`_guess_raw_2d_shape` already used `acqu2s`'s `TD` when it divided the `ser` file exactly, and fell back to `file_size // row_bytes` when it did not. Its own docstring recorded the leftover as "a small, so-far-unexplained handful of extra rows beyond TD ... see TODO.md". The user has now answered it: **TD is authoritative and the excess is not data.** The floor division stays -- it is what finds a shape the file can be reshaped to at all -- but the result is capped at TD.
+
+Surveyed every real 2D in `test_data` first. Seven datasets carry excess rows, and two of them carry a lot: `2023` (215 rows for TD1=80) and `6` (409 for 310).
+
+**A hypothesis that was measured and turned out wrong, recorded so nobody re-runs it.** Those same two are the worst-correlating against TopSpin's own `2rr` (+0.9493 and +0.9623, against ≥0.99 for the rest), which looked like cause and effect. It is not. Measured before and after:
+
+| | 203 | 204 | 2011 | 2016 | 2019 | 2023 | 6 |
+|---|---|---|---|---|---|---|---|
+| before | 0.9948 | 0.9939 | 0.9986 | 0.9990 | 0.9956 | 0.9493 | 0.9623 |
+| after | 0.9948 | 0.9939 | 0.9985 | 0.9989 | 0.9956 | 0.9493 | 0.9623 |
+
+Unchanged to four decimals bar two that move by 0.0001. The F1 transform zero-fills to `SI` anyway, so a handful of junk rows at the end contributes almost nothing to a genuine 2D. **The justification for the cap is Bruker semantics and the pseudo-2D slice count, not 2D fidelity** -- and the poor correlation on `2023`/`6` remains unexplained, still open.
+
+Where it does matter is a pseudo-2D, whose rows *are* the slices with no F1 transform to absorb them: `2p5mm/.../2005` loaded **19 slices against its own 16-entry vdlist**, and `2004` 19 against TD1=15. Both now load exactly TD1, and 2005's slice count matches its vdlist exactly. That is the reported bug's root cause.
+
+### A longer list is not an error -- and never was, quite
+
+Indexing by slice number already meant a surplus was simply never read, so the "24-entry vdlist with TD 10" case worked by construction. What did not work was the *shorter* case, which surfaced as a bare `IndexError` rephrased into "check the vdlist matches this dataset" -- true, but no help. `_get_delays` now names both counts, says outright that a longer list would have been fine, and points at the way out. `_match_values_to_slices` does the same for DOSY and SCORE, which previously hard-errored on any inequality including a longer list.
+
+### The way out: a Slices box
+
+`slice_limit_spin` ("all" at 0) in the Curve Fitting panel, with **one** helper -- `_fit_slice_rows` -- feeding every consumer, so Fit Spectrum, Fit Curve, DOSY and SCORE cannot disagree about how much of a series is in use. DOSY and SCORE cut the data matrix with it too, not only the x-values: a map built from more rows than there are b-values would be meaningless. Siloed per spectrum like the rest of the analysis state. A limit larger than the series is not an error -- it usually means the box was set for a different experiment.
+
+The Values preview now distinguishes the two directions: a longer list reads "— first 8 used (8 slices)" with no warning, a shorter one "⚠ 10 slices — set Slices to 8 to fit only these".
+
+The pseudo-2D **stack and heatmap views are deliberately not limited**: they are "look at the data" views, and hiding rows from them because a fitting control was set would be surprising.
+
+### Pan is no longer forced on load
+
+Added in an earlier round on an explicit request ("Pan should be on by default when the programme/data is loaded"), withdrawn by this one. A mode the application turns on for you is a mode you have to notice and turn off. View ▸ Pan Mode and Ctrl+Shift+P are unchanged; only the automatic switch on first load is gone. Its test now asserts the opposite, and the toggle test sets pan explicitly since it no longer arrives that way.
+
+### Tests
+
+`test_bruker_raw_2d.py` +4 (the cap, the short-file fallback it must not break, no-`acqu2s` unchanged, and the real `2005` slice count matching its vdlist). `test_relaxation.py` +3 (longer list truncates, shorter reports with the way out, lookup follows slice index not order). `test_gui.py` +7 (slice limit trims the fit, 0 means all, an oversized limit is harmless, siloed per spectrum, a curve fit against a longer list, DOSY cutting b-values and data together, and the preview's two directions) plus the two pan tests inverted.
+
+
+## Relative amplitudes in the fit report (2026-09-11, third round)
+
+User: "When outputting the report for the fitting, it would be good to have relative ratios instead of absolute intensity values so numbers can be more easily compared in multi-component fits."
+
+A "Population weights" section already existed -- but only for `spec["n_components"]`, i.e. `build_diffusion_model`'s generalised N-component model. Every *other* multi-component model in the registry -- `biexponential_decay` (A1/A2), `biexponential_recovery`, `stejskal_tanner_biexponential` (I0a/I0b) -- printed bare amplitudes on the data's own arbitrary intensity scale, which is exactly the case the request is about.
+
+New `relaxation.amplitude_fractions(params)`, driving all of it. Shares appear twice, deliberately: appended to the amplitude's **own row** (so the comparison is where the number is) and in a **section pairing each share with the rate it belongs to** (`I3` with `D3`, `A1` with `T2a`) -- a population share means nothing without the D or T it belongs to, and hunting for the pairing in the parameter block is the work the section removes.
+
+Decisions worth recording:
+
+- **The absolute value stays.** The request said "instead of", but the report is the record of what was actually fitted, and an amplitude with its uncertainty is part of that. The absolute is kept in the Parameters block with the share beside it; the places that exist purely for *comparison* -- the compact per-peak summary and `format_global_report`'s per-curve block -- do quote amplitudes as shares only, because there an intensity on an arbitrary scale is the one number that cannot be compared.
+- **Matched by name, not measured.** `_AMPLITUDE_PARAM_RE` covers `M0`, `A`/`A1`/`A2`, `I0`/`I0a`/`I0b`, `I1`..`In`, the same way `_TIME_PARAMS` and `_is_diffusion_param` already decide how a number is presented. The cost is that a **custom equation gets no ratios** -- its parameters are whatever the user named them (`a1`, `scale`, `P`), and silently treating the wrong symbol as an amplitude would be worse than showing nothing. Verified: a typed `a1*exp(-x/t1)+a2*exp(-x/t2)` reports no shares.
+- **One amplitude means no ratios at all.** A single-amplitude fit would report a constant 100%, which is not a result.
+- **Signed denominator, matching `component_weights`.** Pinned by a test that the two agree on the same fit, so the diffusion helper and the report can never quote different numbers. The consequence is that opposite-sign components give a share outside 0-100% (measured: 125% / -25%) -- **flagged with the reason rather than hidden**, since that is usually an over-parameterised model and is precisely what an absolute amplitude conceals.
+- **Ordered the way the model orders its parameters**, not alphabetically: a 10-component fit sorts as I1, I10, I2, ... alphabetically.
+
+Verified across every shape: `biexponential_decay` (70/30 with T2a/T2b), `stejskal_tanner_biexponential` (75/25 with Da/Db), a 4-component `build_diffusion_model` (agreeing with `component_weights`), a mono-exponential (no section), and a custom equation (no section).
+
+`test_relaxation.py` +12, `test_gui.py` +1 (two peaks with opposite dominant components, the comparison the shares exist to make readable).
+
+
+## Per-experiment fit parameters, a factor that can be a pulse-programme parameter, and the curve fit as data (2026-09-11, second round)
+
+User: "The fit parameters should be context-driven for the experiment they were run on, so I should get an analysis page with matching parameters (e.g. list file should be from the relevant folder, not remembered from the previous). It would also be nice if the listfile x factor thing had an option to use an experimental parameter (or a combination). For example, for x-pulse, I might want the TAU value to multiply with the arrayed number of echoes to fit the T2. Additionally, I need the curve fit results to be exportable as integral/peak height vs whatever x is. Also the time factor would be best as ms not s. and where it says Values (# x s): ... is confusing to read. It should be more like "13 values [ms]: #1, #2,..."
+
+### The list file was leaking between experiments -- a real bug, introduced by the previous round
+
+`_refresh_list_file_candidates` read `current = keep or self.selected_list_file()`. On a spectrum with no saved analysis state, `keep` is None, so it fell back to **whatever was still in the combo** -- the *previous* experiment's file -- inserted it at the top of the new experiment's candidate list and pre-selected it. A fit against another dataset's delays, offered as if it belonged to this one. Everything else in the panel was already siloed per spectrum through `_capture_analysis_state`/`_restore_analysis_state`; the list file was the one thing that escaped, because the combo's contents are rebuilt rather than restored.
+
+Fixed by tracking `_list_file_combo_source` -- the experiment the combo currently holds candidates for. A refresh keeps the user's pick only while that still matches; on a new experiment it starts from that experiment's own folder and nothing else. Both halves are pinned: a test that a second experiment never offers the first's `vdlist`, and a test that a deliberate pick on *this* experiment survives a refresh of its own combo (the failure the naive fix would introduce).
+
+### The Factor can be an acquisition parameter
+
+`processing.relaxation.evaluate_expression(text, constants)` -- the sibling of `build_custom_model` for when the answer must be a *number*. Same sympy parsing, same `acquisition_constants` dict, so a name means the same thing in a factor as in a fitting equation. **One deliberate difference: an unknown symbol is an error naming it, not a free parameter.** There is nothing to fit a factor against, so a mistyped `TAO` must not quietly become anything; the error names it and lists what the experiment does record.
+
+The Factor spin box became a line edit taking either. The panel shows what it resolved to and which parameters went in, the same feedback a typed fitting equation already gets and for the same reason: a factor silently resolving to something unintended scales every fitted time constant with nothing on screen to show it.
+
+**`acquisition_constants` had to stop being Bruker-only.** It read `metadata.raw["acqus"]` and nothing else, so the user's own example -- an X-Pulse `TAU` -- was unreachable. It now also reads X-Pulse's `exp_params` and the `$`-prefixed JCAMP `params`.
+
+Naming needed care rather than a second lowercase pass: **X-Pulse parameter names are case-significant**, and a real PFG file (`test_data/xpulse_PFG/4`) records both `delta` (gradient duration, 4000) and `DELTA` (diffusion delay, 50000). Lowercasing the way the Bruker branch does would have resolved one to the other's value -- a 12x error in a b-value, with nothing to show for it. So X-Pulse names are kept exactly as recorded, with a lowercase alias added only where no other key differs from it by case alone. Verified on that dataset: both survive, `P90`/`p90` both available.
+
+Units are **not** converted -- an X-Pulse `TAU` in µs stays in µs, the same rule `acquisition_constants` already documented for Bruker's `p1`. Converting is the expression's job (`TAU*2*1e-6`), because only the person reading the pulse programme knows which unit it was written in. Guessing from a name is how a T2 comes out 10^6 too large.
+
+### ms, and the preview wording
+
+New Unit combo (s / ms / µs), **defaulting to ms**, governing typed delays (Manual list, Start + step) and every displayed value. Internally everything stays in seconds -- the models, the fitted T1/T2, every stored result -- so the unit converts on the way in and formats on the way out and cannot reach the numerics.
+
+Three things this had to get right, none of them obvious:
+
+- **A saved analysis state from before the combo existed restores as seconds, not the new ms default.** Every number in such a state was typed in seconds; defaulting it to ms would reinterpret it as a 1000x smaller delay with nothing on screen to say so. The key's absence is the signal.
+
+  **The test suite demonstrated the hazard this guard exists for.** Three tests typed second-valued delays into the manual list and asserted a known T2; under the new ms default they fitted a 1000x smaller series and recovered `T2 = -7328` instead of `0.05`. Nothing was wrong with the code -- the tests were relying on a default that had changed, which is exactly what a *saved state* would have done without the guard. Every relaxation test that types an absolute delay now calls `_set_delay_unit(window, "s")` and says so, including the ones that happened to pass because they assert on labels rather than values (a silently-rescaled fit inside a helper called `_fit_a_t2_curve` is a trap waiting for the next assertion added to it).
+- **An explicit suffix beats the combo.** `10m` is 10 ms whatever the combo says -- the vdlist convention, and the only unambiguous reading. Rescaling it by the combo as well would be a silent double conversion.
+- **A list *file* is never rescaled by the combo.** Its values are the vendor's own (a vdlist is already seconds, a valueslist is unitless) and the Factor is exactly the mechanism for converting them. Scaling both would apply two conversions to one list.
+
+  **This one was wrong, and was corrected in the same session.** Follow-up report: "when I set ms it seems to multiply the value by 1e3 because it assumes that the read value is s, whereas the unit should set the unit for the read value." Exactly right: a file holding `10, 20, 40` meaning milliseconds was read as 10, 20, 40 *seconds* and then displayed at `1e+04` ms. The reasoning above only holds for a vendor list that writes its own units; it does not hold for the bare-number list a user points the source at, which is the common case. The rule is now **the Unit says what the numbers are**, applied to the whole product (list × Factor) so everything typed or pointed at in this panel is in one unit -- with `read_value_list` reporting `units_explicit` so a suffixed `vdlist` is still taken at its word, and Auto still never rescaled. It also makes the X-Pulse CPMG case *simpler*: with the Unit on µs the factor is plain `TAU*2`, since `TAU` is recorded in µs, instead of `TAU*2*1e-6`.
+
+The Unit row is hidden for a diffusion fit: a b-value has no comparable SI-prefix convention (the reason `format_diffusion_value` exists at all). Placeholders and the Start/Step suffixes name the unit in force, with the example written in that unit -- "0.001, 0.01" under a ms heading reads as microseconds of delay and looks like a typo.
+
+Preview rewritten to the user's own wording: `13 values [ms]: 10, 20, 40, 80, 160, …, 320`. The old `Values (13 × s): …` read as a multiplication and put the count and the unit in one bracket as if they belonged together. The ellipsis now appears only where something is actually skipped -- with exactly six values it sat between two consecutive entries and read as an elided gap.
+
+### The unit had to reach the whole panel, not just the conversion
+
+Follow-up report: "while the unit is selected and does the calculation correctly, the curve fit and resultant values just take the values naively in seconds."
+
+Checked before changing anything. The conversion **was** reaching the fit -- typing 1, 1.885, 3.552 … ms recovered `T2 = 50.07 ms` against a true 50 ms, and the report already read "50.1 ± 0.1 ms" because `format_time_value` auto-scales. What stayed in seconds was everything the user then *looks at and types into*:
+
+- **The Fit tab's x-axis.** Hard-coded `xlabel = "Delay (s)"` and `result["t"]` plotted raw, so a series typed as `1, 1.885, 3.552` was drawn at `0.001, 0.0019, 0.0036`. The single most visible half of the report.
+- **The guess table.** Built from the model's own `p0`/`bounds` callables, which work in seconds -- an automatic T2 guess showed as `0.0182` with a lower bound of `1e-09`, and a user typing `50` next to a 50 ms delay list got 50 *seconds*.
+
+`show_relaxation_fit` gained `x_scale`, applied to **every** x on the axes -- data, fit curve, uncertainty band and excluded markers alike, so nothing can end up on a different scale from the rest. The result dict is never modified: the stored fit stays in seconds and this is purely a display transform.
+
+Three consequences that had to be followed through, none of them visible from the original report:
+
+- **A coordinate read back off that axes is in display units.** The right-click "Exclude Nearest Point" compares the clicked x against the stored series, so it now multiplies by the same factor first. Without it, "nearest" is measured against a number 1000x off and always picks the same end point.
+- **The axis is derived from the *stored* xlabel, not the fit-type combo** (`_fit_plot_axis`). A restored fit must be drawn on the axis it was actually fitted against even if the combo has moved since; a b-value keeps its own label and is never rescaled. The CSV export now goes through the same method, so the file and the plot cannot disagree.
+- **Only *time* parameters scale.** `_param_display_scale` uses `relaxation._TIME_PARAMS` -- the same set `format_param_value` uses to decide which values get a time unit printed after them, so the table and the report cannot disagree about what is a time. An amplitude is on the data's own intensity scale, a stretch exponent and an inversion efficiency are dimensionless, and a diffusion coefficient is in m²/s: scaling any of those by a time unit would be nonsense.
+
+Conversion happens at exactly two points -- `_refresh_guess_table` divides on the way out, `_resolve_guess_rows` multiplies on the way in (and only the cells the *user typed*; the automatic fallbacks come from the model already in seconds). "Adopt fit as guess" divides, and the bounds error messages quote the displayed unit, because an error naming numbers the user cannot find on screen is worse than no error.
+
+The unit is named in the guess group's **title** rather than in the row names, which are matched against the model's parameter list by `_restore_guess_table` -- appending a unit there would break the match.
+
+`format_time_value`'s auto-scaling in the report is deliberately left alone: it already prints "50.1 ms" for a 50 ms result and is never wrong, and forcing it to a chosen unit would print a 2 s result as "2000 ms".
+
+**Two more stale tests, same cause as the ms default.** Two guess-table tests typed `0.25`/`0.07` meaning seconds; under the new behaviour they are ms. Made explicit with `_set_delay_unit(window, "s")`, along with the two that type times but do not assert on them.
+
+### The curve fit as data, not just parameters
+
+`processing.relaxation.curve_fit_to_csv(results, ...)` -- the x-axis, then each peak's measured integral or amplitude at every point with the fitted curve beside it. Nothing is recomputed: `fit_relaxation` already returns `t`/`y`/`y_err`/`y_fit` per peak, so the file cannot disagree with what was fitted.
+
+**Peaks are not assumed to share an x-axis.** They normally do -- but a point excluded from one peak's fit (the existing right-click exclusion) leaves that peak shorter. The union of every peak's x is used and a missing measurement is an **empty cell**, not a dropped row and not a padded number. The header names the x unit and which Value source produced the measured column, so the file stands on its own.
+
+GUI: "Export curve fit (CSV)…" under the uncertainty checkbox, enabled at exactly the three moments the peak spinner is (a fresh fit, a reselect that restores one, the reset that clears it), and exporting x in the unit the panel is showing.
+
+### Tests
+
+`test_relaxation.py` +13 (expression evaluation including the unknown-symbol error and what-is-available hint; the CSV's columns, x scaling, value labelling, the ragged-peak gap, error columns, and the empty case). `test_xpulse.py` +4 (X-Pulse `exp_params`, the `delta`/`DELTA` case collision, the JCAMP header, and a real-dataset check). `test_gui.py` +22 (unit conversion for manual and Start+step, suffix-beats-combo, the unit row hidden for diffusion, factor-as-parameter with its live feedback, the unknown-parameter error, empty factor meaning 1.0, list file not carrying between experiments *and* surviving a same-experiment refresh, the reworded preview and its ellipsis rule, and the export end-to-end plus its nothing-to-export path; then the panel-wide unit: the plot's axis and label, a unit change redrawing rather than refitting, a diffusion axis never rescaled, guess-table times in the chosen unit both ways, non-time parameters left alone, adopt-as-guess, the bound error quoting the displayed unit, point exclusion against the displayed axis, and the export x matching the plot).
+
+
+## Any vendor's value list, SCORE on the curve-fit model, and no duplicate rows (2026-09-11)
+
+User: "The manual list doesn't seem to be used in the plot/fit. The list*factor should be more generalised to any one-column list in a text file (usually co-located in the same parent folder as the data), this will make it more accessible to different vendors, e.g. bruker data might use a vdlist or vclist, x-pulse might have ##_valueslist.txt and so on. I want to also make sure that the SCORE methods will utilise the same fitting functions as the model for the curve fit. Separately, in the data tab, there shouldn't be duplication of open experiment data files. Add a check to see if that one is already open and then just switch to that file if so rather than reloading."
+
+### The manual list *was* being used -- what was missing was any way to tell
+
+Checked before changing anything, because "doesn't seem to be used" and "is not used" call for different fixes. `_resolve_independent_values` has always returned the typed list, `_run_curve_fit` has always passed it to `NMR2D_fit_relaxation`, and DOSY and SCORE both resolve their x-axis through the same method -- there are existing tests (`test_main_window_fit_curve_custom_equation_recovers_known_t2` among others) that recover a known T2 from a typed list and would fail if it were ignored. So the wiring was right and the **feedback was absent**:
+
+- **An orphaned "List:" label.** The row was built as `addRow("List:", widget)`, whose QLabel is owned by the layout and cannot be hidden; `_on_delay_source_changed` hid the field alone. So every other source showed a "List:" caption with nothing beside it -- the visible half of the report. Every other optional row here (Start/Step/Factor) already kept its label in an attribute; this one now does too.
+- **Nothing anywhere said what the fit would use.** Added `values_preview_label` under the Values row: it calls the same `_resolve_independent_values` the fit calls (never a parallel implementation) and shows the count, the unit and the first few values, live. A source error appears there as the reason no values are available, instead of waiting to surface as a dialog on Fit Curve. A list whose length disagrees with the slice count is flagged in the same line -- the failure that previously showed up as a confusing `IndexError` from `_get_delays`.
+
+Manual entry also now accepts whitespace as well as commas (a column pasted from a vdlist or a spreadsheet arrives newline-separated) and Bruker time suffixes (`10m`), via the same parser everything else uses.
+
+### `vclist x factor` -> `List file x factor`, for any vendor
+
+The old source was Bruker-only and hard-coded to one filename, with an explicit `if vendor != "bruker": raise`. Every vendor writes the same file under a different name, so what varies is *which file*, not what to do with it.
+
+New `opennmr/io/lists.py`:
+
+- `read_value_list(path)` -- one column of numbers, skipping blanks and `#`/`;`/`$$`/`//` comments, taking the first token of each line (so a second column of notes is fine), honouring Bruker time suffixes. An unparseable entry **raises naming the line** rather than being skipped: a silently short list is the one failure mode that produces a plausible-looking wrong fit. `1e5` is not mistaken for a milli-suffix.
+- `find_value_lists(datapath)` -- what is actually sitting with the data: the experiment folder, Bruker's `lists/vd|vc|vp|f1` tree, X-Pulse's `parameters/`, and the parent folder ("usually co-located in the same parent folder as the data"). Accepts a file path as the dataset, for the vendors whose experiment *is* a file.
+- `io.bruker.read_vdlist`/`read_vclist` now delegate their parsing here and keep their own contract (`name`/`raw`/`seconds`); what stays in `bruker.py` is Bruker's *where to look* convention.
+
+**Discovery had to be filtered, measured on real data rather than assumed.** A Bruker experiment folder is full of extensionless text files that parse perfectly well as columns of numbers -- on `test_data/bruker_PFG/150`, the first pass offered `gpnam5`, `scon2`, `EA`, a preemphasis table and two shim files alongside the `difflist` actually wanted. Extensionless files are now offered only when the name says so (a known vendor list name, or containing "list"); a file with a text extension is offered on its contents alone, which is where a user's own `delays.txt` lives. Plus a two-entry minimum (one number is a parameter, not a series) and a contents check, which drops a `README.txt`. After that: `bruker_PFG/150` -> `difflist`, `1p3mm_.../11` -> `vdlist`, `xpulse_PFG/4` -> `parameters/G1_valueslist.txt`, one each.
+
+GUI: the source keeps combo index 3, so a saved analysis state from before this restores to the source it meant. The list-file combo is auto-filled per selected experiment, remembers a browsed-to file across reselects (`keep=`, since `find_value_lists` will not turn up a file from elsewhere), and **falls back to discovery when nothing has been picked** -- without that the generalised source would be strictly worse than the Bruker-only one it replaced, which always found its own file. `vclist_factor_spin` stays as an alias for the same widget.
+
+### SCORE now evaluates the curve-fit model
+
+`score.py` carried its own `DECAY_KERNELS`, two hard-coded `exp(-x*constant)` lambdas independent of `RELAXATION_MODELS`. New `build_kernel(model, kind, x_values, y_values)` builds the kernel from a curve-fit spec instead -- a registry key, or a spec dict from `build_custom_model`/`build_diffusion_model`, i.e. exactly what `MainWindow._current_model_spec()` already returns for the Model combo. `score(..., model=...)` takes it; the GUI passes the panel's own model and names it in the settings dialog and the report.
+
+**The amplitude parameter is pinned at 1, not fitted.** SCORE's model is bilinear: each component contributes spectrum x decay, the spectrum is solved for linearly, and a scale parameter in the decay as well is exactly redundant with it -- the optimiser would wander along that ridge. Which parameter it is, is **measured, not matched against a list of names**: each is doubled in turn and the one that doubles the whole curve is the amplitude. A name-based rule would silently pin the wrong parameter in a custom equation, where the names are whatever the user typed (verified: `scale*exp(-x/tau)` resolves `scale`).
+
+That measurement also produces the right refusal for free. A biexponential has *no* single amplitude, **because it already describes two populations** -- which is the job SCORE's own component count is doing; a 2-component SCORE with a biexponential kernel would be asking for four. Rejected with that reason, reported against the Model combo before the settings dialog opens.
+
+Two things the generalisation forced, both real:
+
+- **Ordering can no longer be `argsort(constants)`.** That only works for a rate-like constant. `RELAXATION_MODELS` is written in T1/T2, so a relaxation kernel's constant is now a *time* -- a larger D decays faster, a larger T2 decays slower. Components are ranked by how much each has actually attenuated at the largest x, which is kernel-agnostic and reproduces the old order exactly for diffusion.
+- **Bounds are the model's own, windowed.** A model's bounds on a rate parameter are deliberately open-ended (`[1e-9, inf]` for a T2), which is right for a curve fit and wrong for a k-component search that has to stay where the components remain distinguishable. The rate parameter keeps this module's own four-decades-either-side window around each component's guess, intersected with what the model allows; every other parameter (a beta, an inversion efficiency) uses the model's bounds directly. Guesses likewise come from the model's own `p0` callable, evaluated against the total signal per level -- the best single decay curve available before any component has been separated.
+
+Backwards compatible by construction and by measurement: `stejskal_tanner` with `I0` pinned *is* `exp(-b D)`, and all 48 pre-existing `test_score.py` tests pass untouched. New capability, from the same registry: `stejskal_tanner_stretched` resolves a beta per component (recovered 0.700 against a true 0.70 on the component that actually decays across the sampled range).
+
+**Deleting the old `DECAY_KERNELS` table found a bug it had been hiding.** It was left behind as a back-compat shim first; nothing imported it, so it went -- and `components_to_csv` turned out to be reading its `unit` key, writing `1/s` next to a constant that is now the model's time constant in seconds. Exactly the two-tables-that-drift-apart failure this round exists to remove, one layer down. The CSV now reads `DECAY_KINDS` and names the model in its header, with a test.
+
+### No duplicate rows in the Data tab
+
+`Session.index_for_path(path, vendor=...)` compares `realpath(normpath(path.rstrip("/")))`, so a symlinked folder and its target match, and the trailing slash a folder picker adds (and a drop does not) cannot make one experiment look like two. Case is deliberately **not** folded: Linux is case-sensitive and folding would wrongly merge two genuinely different folders there. `vendor` is part of the match because one folder can legitimately be read by two vendors' readers, and those are two spectra rather than a duplicate. Derived spectra have no path and never match.
+
+New `MainWindow._open_one(path, vendor)` is the single choke point every route now goes through -- the Open dialog, a dropped folder, the multi-experiment prompt, and the Data tab's own browser each previously repeated `if not self._load_async(...): self._load(...)`. Already open: select that row and say so in the status bar.
+
+**A check on the session alone is not enough**, because of the background loader added last round: a read only reaches the session when it finishes on the GUI thread, so a second drop (or an impatient double-click in the browser) of the same folder would queue a second read and land two rows anyway -- past the check, by the one route that can get past it. `_pending_load_paths` tracks dispatched-but-not-landed reads alongside the existing `_pending_loads` counter, cleared on both the finished and failed slots. Tested with a fake loader, so the race is pinned rather than argued about.
+
+Worth stating why this is not cosmetic: the two copies drift apart the moment either is processed, the Compare list offers both under the same label, and -- the one that actually costs the user work -- a re-open silently discards the peak table and processing built up on the copy they were already looking at. Pinned by a test.
+
+### Tests
+
+`tests/test_lists.py` (19, new): parsing, suffixes, the `1e5` case, comment/blank handling, the raise-don't-skip contract, discovery across all three vendors' layouts, the extensionless-clutter filter, ordering, and that `read_vdlist`'s own contract is unchanged. `test_score.py` +9: kernel construction, custom-equation amplitude detection, the biexponential refusal, explicit-model equivalence with the default, a per-component beta, relaxation constants as times, the report naming the model, and the CSV unit. `test_gui.py` +22: the generalised source on Bruker/X-Pulse layouts and its error text, whitespace-separated manual entry, the label hiding with its field, the candidate combo's contents and auto-selection, the Values preview (contents, a length mismatch, a source error shown in place), SCORE using and naming the panel's model and refusing a multi-component one, and ten covering the duplicate-open check across every route (including a read still in flight) plus `Session.index_for_path`.
 
 
 ## Per-axis probe gradients, and the phase reset that was three separate bugs (2026-09-10)

@@ -2835,3 +2835,62 @@ def test_a_single_panel_view_is_unaffected(qapp):
     before = canvas.ax.get_xlim()
     canvas._on_scroll(_margin_scroll(canvas, canvas.ax))
     assert canvas.ax.get_xlim() != before
+
+
+# ============================================================
+# Crosshairs on every plot worth reading a value off
+# ============================================================
+# "It would be good to have crosshairs available on all plots including
+# compare, spectral fit, and fit." The gate used to require a contour
+# or a 1D spectrum, which kept it off exactly those three.
+
+def _crosshair_after_move(canvas):
+    canvas.figure.set_size_inches(8, 6)
+    canvas._on_motion(_motion_at(canvas, canvas.ax))
+    return canvas._crosshair
+
+
+def test_canvas_crosshair_on_the_compare_view(qapp):
+    canvas = MplCanvas()
+    canvas.show_compare([_make_1d(), _make_1d()], mode="stack")
+    assert _crosshair_after_move(canvas) is not None
+
+
+def test_canvas_crosshair_on_the_spectral_fit_view(qapp):
+    canvas = MplCanvas()
+    x = np.linspace(0.0, 10.0, 200)
+    y = np.exp(-0.5 * ((x - 5.0) / 0.2) ** 2)
+    canvas.show_slice_fit(x, y, y)
+    assert _crosshair_after_move(canvas) is not None
+
+
+def test_canvas_crosshair_on_the_curve_fit_view(qapp):
+    canvas = MplCanvas()
+    t = np.geomspace(0.01, 1.0, 8)
+    y = np.exp(-t / 0.1)
+    canvas.show_relaxation_fit(
+        {"t": t, "y": y, "y_fit": y, "peak_label": "Peak 1", "model": "exponential_decay"})
+    assert _crosshair_after_move(canvas) is not None
+
+
+def test_canvas_crosshair_stays_off_the_fid_view(qapp):
+    # Not every plot: the FID and the processing preview are deliberate
+    # exclusions, and a view that never opts in must not inherit the
+    # flag from whatever was on this canvas before.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    assert _crosshair_after_move(canvas) is not None
+
+    canvas.show_fid(np.exp(-np.arange(64) * 0.1), dt=1e-4)
+    assert canvas._crosshair is None
+    assert _crosshair_after_move(canvas) is None
+
+
+def test_canvas_crosshair_toggle_still_governs_every_view(qapp):
+    canvas = MplCanvas()
+    canvas.set_crosshair_enabled(False)
+    canvas.show_compare([_make_1d(), _make_1d()], mode="stack")
+    assert _crosshair_after_move(canvas) is None
+
+    canvas.set_crosshair_enabled(True)
+    assert _crosshair_after_move(canvas) is not None

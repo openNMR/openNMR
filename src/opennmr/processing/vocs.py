@@ -129,8 +129,8 @@ def _pulse_length_us(spectrum: NMRSpectrum, pulse: str) -> float:
         if not constants:
             raise ValueError(
                 f"This spectrum has no recorded acquisition parameters, so {pulse} "
-                f"cannot be looked up (only Bruker data retains an acqus table; a "
-                f"derived spectrum has none)."
+                f"cannot be looked up (a derived spectrum has none, and neither "
+                f"does a vendor whose reader retains no parameter table)."
             )
         # Only the pulses actually set, in index order -- listing all
         # 64 slots would bury the two or three that are really in use.

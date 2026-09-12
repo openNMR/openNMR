@@ -851,7 +851,7 @@ def _read_xpulse_ntuples_2d(filepath: str, timegrid_warning: bool = False) -> di
 
 def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | None = None,
             zero_fill: int | bool | None = None, zero_fill_f1: int | bool | None = None,
-            truncate_f1: int | bool | None = None,
+            truncate_f1: int | bool | None = None, pseudo_2d: bool | None = None,
             autophase: bool = True, phase_mode: str = "apc0",
             phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5, phase0_inc: float = 0.1,
             timegrid_warning: bool = False) -> NMRSpectrum:
@@ -966,19 +966,37 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
         spectrum = processing_ft.apply_phase(spectrum, freq_ppm, phase0, phase1, pivot_frac=pivot_frac)
 
     # F1 (indirect): hypercomplex decode (States-TPPI -- see this
-    # function's own docstring) then optional zero-fill then FFT.
-    spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode=5)
-    if zero_fill_f1 is True:
-        si1 = int(2 ** np.ceil(np.log2(max(spectrum.shape[0], 1))))
-    elif isinstance(zero_fill_f1, int):
-        si1 = zero_fill_f1
+    # function's own docstring) then optional zero-fill then FFT --
+    # unless this is a pseudo-2D, whose F1 axis is a *series index*
+    # (delay, gradient level) and not a frequency at all. Transforming
+    # it would turn a set of independent spectra into one meaningless
+    # 2D map.
+    #
+    # Added so X-Pulse matches every other vendor here. Without it,
+    # `read_2d` produced only genuine 2Ds, the GUI hid its own "Process
+    # Indirect Dimension" toggle for this vendor (it would have raised
+    # TypeError), and an X-Pulse relaxation series read through the
+    # NTUPLES path was reported as a conventional 2D with no way to say
+    # otherwise -- "some pseudo-2Ds are being noted as regular 2Ds and
+    # I'm not sure why".
+    is_pseudo_2d = bool(pseudo_2d)
+    if is_pseudo_2d:
+        # The rows are the slices. Each is already F2-transformed and
+        # phased above; only the F1 half is skipped.
+        freq_ppm_f1 = None
     else:
-        si1 = None
-    if si1 is not None and si1 > spectrum.shape[0]:
-        spectrum = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, spectrum)
-    freq_hz_f1, spectrum = processing_ft.fft_spectrum(spectrum.T, dt1)
-    spectrum = spectrum.T
-    freq_ppm_f1 = tx_ppm_f1 + freq_hz_f1 / (sfo1_hz_f1 / 1e6)
+        spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode=5)
+        if zero_fill_f1 is True:
+            si1 = int(2 ** np.ceil(np.log2(max(spectrum.shape[0], 1))))
+        elif isinstance(zero_fill_f1, int):
+            si1 = zero_fill_f1
+        else:
+            si1 = None
+        if si1 is not None and si1 > spectrum.shape[0]:
+            spectrum = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, spectrum)
+        freq_hz_f1, spectrum = processing_ft.fft_spectrum(spectrum.T, dt1)
+        spectrum = spectrum.T
+        freq_ppm_f1 = tx_ppm_f1 + freq_hz_f1 / (sfo1_hz_f1 / 1e6)
 
     ns = float(exp_params.get("NS", 1.0))
     spectrum = spectrum / ns  # match read_1d's own convention: data is always per-scan
@@ -1002,8 +1020,14 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
             "fid_dt_f1": dt1,
             "fid_raw": fid_raw,
         },
+        pseudo_2d=is_pseudo_2d,
     )
-    y_axis = NMRAxis(kind="frequency", ppm=freq_ppm_f1, hz=freq_hz_f1)
+    # A pseudo-2D's F1 is the slice number, matching read_array's own
+    # convention for an arrayed series -- the same axis kind, so every
+    # consumer (slicing, the stack view, curve fitting) treats an
+    # X-Pulse series read either way identically.
+    y_axis = (NMRAxis(kind="index", index=np.arange(1, spectrum.shape[0] + 1))
+              if is_pseudo_2d else NMRAxis(kind="frequency", ppm=freq_ppm_f1, hz=freq_hz_f1))
     x_axis = NMRAxis(kind="frequency", ppm=freq_ppm, hz=freq_hz)
 
     return NMRSpectrum(

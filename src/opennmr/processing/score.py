@@ -114,26 +114,213 @@ RESOLUTION_METHODS = {
     },
 }
 
-#: Decay kernels SCORE can resolve against, keyed the way the rest of
-#: this package names them. Each maps ``(x, constant)`` to the
-#: attenuation of a component at that gradient level or delay.
-#:
-#: The x variable is whatever the experiment actually varied: a b-value
-#: in s/m^2 for diffusion (constant = D, m^2/s), a delay in seconds for
-#: relaxation (constant = a rate, 1/s -- **not** a time constant, so
-#: that every kernel here is a plain decaying exponential in its own
-#: constant and the log-space search below behaves identically for all
-#: of them; :func:`score` converts to T1/T2 on the way out).
-DECAY_KERNELS = {
-    "diffusion": {
-        "func": lambda x, constant: np.exp(-np.outer(x, constant)),
-        "label": "Diffusion", "constant": "D", "unit": "m^2/s",
-    },
-    "relaxation": {
-        "func": lambda x, constant: np.exp(-np.outer(x, constant)),
-        "label": "Relaxation (decay)", "constant": "rate", "unit": "1/s",
-    },
+#: Default curve-fit model per ``kind``, when :func:`score` is not
+#: given one explicitly. Both are the plain single-exponential the
+#: method was published with -- ``stejskal_tanner`` is exactly
+#: ``exp(-b D)`` once its amplitude is absorbed into the component
+#: spectrum, and ``exponential_decay`` exactly ``exp(-t/T)``.
+DEFAULT_MODELS = {"diffusion": "stejskal_tanner", "relaxation": "exponential_decay"}
+
+#: What each ``kind`` is measuring, for labels and reports. The decay
+#: *function* is no longer defined here: it comes from
+#: :data:`opennmr.processing.relaxation.RELAXATION_MODELS`, the same
+#: registry the Fit Curve panel fits with -- see :func:`build_kernel`.
+DECAY_KINDS = {
+    "diffusion": {"label": "Diffusion", "unit": "m^2/s"},
+    "relaxation": {"label": "Relaxation (decay)", "unit": "s"},
 }
+
+#: Smallest positive value a log-space bound is allowed to reach --
+#: a bound of 0 has no logarithm, and 1e-20 is well below any physical
+#: answer for either a diffusion coefficient or a relaxation time.
+#: Matches :data:`opennmr.processing.relaxation._LOG_FLOOR`.
+_LOG_FLOOR = 1e-20
+
+#: How far either side of its automatic guess a component's rate
+#: parameter is allowed to travel, when the model's own bounds are
+#: open-ended (as they are for every model in the registry: a T2 is
+#: bounded only by ``[1e-9, inf]``). Four decades each way, which is
+#: the window this module has always searched.
+_RATE_DECADES = 1e4
+
+
+def build_kernel(model=None, kind: str = "diffusion", x_values=None, y_values=None) -> dict:
+    """A SCORE decay kernel built from a **curve-fit model**.
+
+    This is what makes SCORE and Fit Curve agree. Both now evaluate the
+    same function from the same registry
+    (:data:`opennmr.processing.relaxation.RELAXATION_MODELS`, or a spec
+    built by :func:`~opennmr.processing.relaxation.build_custom_model`
+    or :func:`~opennmr.processing.diffusion.build_diffusion_model`), so
+    a Stejskal-Tanner fit and a SCORE resolution of the same series are
+    the same model asked two different questions -- not two
+    independently-written exponentials that could drift apart.
+
+    **The amplitude parameter is dropped, not fitted.** SCORE's model is
+    bilinear: each component contributes ``spectrum x decay``, and the
+    component's overall size lives entirely in its spectrum, which is
+    solved for linearly. A scale parameter in the decay as well would
+    be exactly redundant with it -- the product ``I0 * S`` has infinitely
+    many splits, and the optimiser would wander along that ridge. So the
+    model's own amplitude is pinned at 1 and every *other* parameter is
+    searched per component.
+
+    Which parameter that is, is **measured, not assumed from its name**:
+    each is doubled in turn and the one that doubles the whole curve is
+    the amplitude. A model with no such parameter is rejected, and that
+    rejection is the useful behaviour rather than a limitation -- a
+    biexponential model has no single amplitude *because it already
+    describes two populations*, which is the job SCORE's own component
+    count is doing. Asking for a 2-component SCORE with a biexponential
+    kernel would be asking for four.
+
+    ``model`` : a key into ``RELAXATION_MODELS``, a spec dict, or
+    ``None`` for ``DEFAULT_MODELS[kind]``.
+    ``x_values``/``y_values`` : the series being fit, used only to
+    evaluate the model's own ``p0``/``bounds`` callables (which are
+    data-driven) and to probe for the amplitude parameter.
+
+    Returns a dict with ``spec``, ``name``, ``amplitude`` (the pinned
+    parameter), ``params`` (the free ones, in order), ``rate_param``
+    (the one whose per-component spread separates the components),
+    ``log_params`` (searched in log10 space), ``p0``/``bounds`` for the
+    free parameters, and ``func(x, values)`` mapping an ``(k, p)``
+    array of per-component free parameters to the ``(m, k)`` decay
+    matrix.
+    """
+    from .relaxation import RELAXATION_MODELS
+
+    if kind not in DECAY_KINDS:
+        raise ValueError(f"Unknown kind '{kind}'. Available: {sorted(DECAY_KINDS)}")
+    if model is None:
+        model = DEFAULT_MODELS[kind]
+    if isinstance(model, str):
+        name = model
+        if model not in RELAXATION_MODELS:
+            raise ValueError(
+                f"Unknown model '{model}'. Available: {sorted(RELAXATION_MODELS)}"
+            )
+        spec = RELAXATION_MODELS[model]
+    else:
+        spec = model
+        name = spec.get("name") or "custom"
+
+    param_names = list(spec["params"])
+    func = spec["func"]
+
+    x_probe = np.asarray(x_values, dtype=float) if x_values is not None else np.linspace(0.0, 1.0, 8)
+    y_probe = np.asarray(y_values, dtype=float) if y_values is not None else np.ones_like(x_probe)
+    start = _model_p0(spec, x_probe, y_probe, param_names)
+
+    amplitude = _amplitude_parameter(func, param_names, start, x_probe)
+    if amplitude is None:
+        raise ValueError(
+            f"The model '{name}' has no single amplitude parameter, so it cannot be a "
+            f"SCORE kernel: its parameters are {', '.join(param_names)}. A model that "
+            f"already describes several populations (a biexponential, an N-component "
+            f"Stejskal-Tanner) is doing the job SCORE's component count does -- use the "
+            f"single-component form of it and ask SCORE for that many components."
+        )
+
+    free = [p for p in param_names if p != amplitude]
+    if not free:
+        raise ValueError(f"The model '{name}' has nothing left to fit once its amplitude is pinned.")
+
+    rate_param = spec.get("rate_param") or free[0]
+    if rate_param not in free:
+        rate_param = free[0]
+
+    declared_log = set(spec.get("log_params", ()))
+    # The rate parameter is always searched in log10 space, declared or
+    # not: it spans decades (a D from 1e-13 to 1e-8, a T from ms to
+    # minutes) and a linear search on it converges to the wrong answer
+    # even from a good starting point. That was already true of this
+    # module's own hard-coded search; it is stated here now that the
+    # parameter comes from the model.
+    log_params = tuple(p for p in free if p in declared_log or p == rate_param)
+
+    lo, hi = _model_bounds(spec, x_probe, y_probe, param_names)
+    index_of = {p: param_names.index(p) for p in param_names}
+
+    def evaluate(x, values):
+        """``values`` : (k, p) free parameters per component -> (m, k)."""
+        values = np.atleast_2d(np.asarray(values, dtype=float))
+        columns = []
+        for row in values:
+            arguments = dict(zip(free, row))
+            arguments[amplitude] = 1.0
+            columns.append(np.asarray(func(x, *[arguments[p] for p in param_names]), dtype=float))
+        return np.column_stack(columns)
+
+    return {
+        "spec": spec,
+        "name": name,
+        "amplitude": amplitude,
+        "params": free,
+        "rate_param": rate_param,
+        "log_params": log_params,
+        "p0": [float(start[index_of[p]]) for p in free],
+        "bounds": ([float(lo[index_of[p]]) for p in free],
+                   [float(hi[index_of[p]]) for p in free]),
+        "func": evaluate,
+        "kind": kind,
+        "unit": DECAY_KINDS[kind]["unit"],
+    }
+
+
+def _model_p0(spec, x, y, param_names) -> list:
+    """The model's own automatic starting guesses, or 1.0 each when it
+    does not supply a ``p0`` callable (a custom equation carries a
+    plain list instead)."""
+    guess = spec.get("p0")
+    if callable(guess):
+        return [float(v) for v in guess(x, y)]
+    if guess is not None:
+        values = list(guess)
+        return [float(values[i]) if i < len(values) else 1.0 for i in range(len(param_names))]
+    return [1.0] * len(param_names)
+
+
+def _model_bounds(spec, x, y, param_names):
+    """The model's own bounds, or unbounded when it supplies none."""
+    bounds = spec.get("bounds")
+    if callable(bounds):
+        lo, hi = bounds(x, y)
+    elif bounds is not None:
+        lo, hi = bounds
+    else:
+        lo = [-np.inf] * len(param_names)
+        hi = [np.inf] * len(param_names)
+    return list(lo), list(hi)
+
+
+def _amplitude_parameter(func, param_names, start, x) -> str | None:
+    """Which parameter scales the whole curve, found by doubling each
+    one and checking whether the output doubles.
+
+    Measured rather than matched against a list of names (``M0``,
+    ``I0``, ``A``, ...), because a custom equation someone typed into
+    the Fit Curve panel has whatever parameter names they chose, and a
+    name-based guess there would pin the wrong parameter silently.
+    """
+    # A guess of zero (or a negative one) makes the doubling test
+    # meaningless -- 0 doubled is still 0, and every parameter would
+    # look like a scale. Probe from a strictly positive vector instead.
+    probe = [value if value > 0 else 1.0 for value in start]
+    baseline = np.asarray(func(x, *probe), dtype=float)
+    scale = np.max(np.abs(baseline))
+    if not np.isfinite(scale) or scale <= 0:
+        return None
+    for index, name in enumerate(param_names):
+        doubled = list(probe)
+        doubled[index] = probe[index] * 2.0
+        try:
+            candidate = np.asarray(func(x, *doubled), dtype=float)
+        except Exception:  # noqa: BLE001 -- a parameter this model cannot take is simply not the amplitude
+            continue
+        if np.allclose(candidate, 2.0 * baseline, rtol=1e-9, atol=scale * 1e-12):
+            return name
+    return None
 
 
 def estimate_components(data, max_components: int = 8, noise_factor: float = 4.0) -> dict:
@@ -274,7 +461,7 @@ def _solve_spectra(decays, matrix, non_negative: bool):
 def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
           method: str = "score", initial=None, bounds=None, threshold: float = 0.02,
           non_negative: bool = True, non_negative_during_fit: bool = False,
-          max_nfev: int = 2000) -> dict:
+          max_nfev: int = 2000, model=None) -> dict:
     """Resolve a diffusion or relaxation series into ``n_components``
     component spectra and their decay constants, by SCORE or OUTSCORE.
 
@@ -287,6 +474,18 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
         whose decays differ by only a few percent, where ``"score"``
         needs about 30%, but is only meaningful when the components
         genuinely have different peaks.
+    model : str or spec dict, optional
+        The **curve-fit model** whose decay each component follows --
+        a key into
+        :data:`opennmr.processing.relaxation.RELAXATION_MODELS`, or a
+        spec dict from ``build_custom_model``. Defaults to
+        ``DEFAULT_MODELS[kind]``, the plain single
+        exponential the method was published with. The model's
+        amplitude parameter is pinned at 1 (SCORE's component spectra
+        already carry the amplitudes) and every other parameter is
+        fitted per component -- so a stretched model gives each
+        component its own beta, and an inversion-recovery model its own
+        inversion efficiency. See :func:`build_kernel`.
     x_values : array, shape (m,)
         b-values (s/m^2) for ``kind="diffusion"``, delays (s) for
         ``kind="relaxation"`` -- one per row of ``data``.
@@ -343,8 +542,8 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
         than components (the model is then underdetermined), or an
         all-zero matrix.
     """
-    if kind not in DECAY_KERNELS:
-        raise ValueError(f"Unknown kind '{kind}'. Available: {sorted(DECAY_KERNELS)}")
+    if kind not in DECAY_KINDS:
+        raise ValueError(f"Unknown kind '{kind}'. Available: {sorted(DECAY_KINDS)}")
     if method not in RESOLUTION_METHODS:
         raise ValueError(f"Unknown method '{method}'. Available: {sorted(RESOLUTION_METHODS)}")
     x_values = np.asarray(x_values, dtype=float)
@@ -385,51 +584,97 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
     # ratio in D, spectral correlation 0.981 against SCORE's 0.764).
     # SCORE's flat error surface is good at finding the right basin;
     # OUTSCORE's sharp one is good at finding the bottom of it.
+    # The kernel comes from the curve-fit model registry, so SCORE and
+    # Fit Curve evaluate the same function -- see build_kernel. The
+    # total signal per level is what the model's own data-driven p0 and
+    # bounds callables are evaluated against: it is the decay of the
+    # whole series, which is the best single curve available before any
+    # component has been separated out.
+    total_signal = np.sum(np.abs(matrix), axis=1)
+    kernel = build_kernel(model, kind=kind, x_values=x_values, y_values=total_signal)
+
     seeded_from = None
     if method == "outscore" and initial is None:
         seed_run = score(
             x_values, matrix, n_components=n_components, kind=kind, method="score",
             bounds=bounds, threshold=threshold, non_negative=non_negative,
             non_negative_during_fit=non_negative_during_fit, max_nfev=max_nfev,
+            model=model,
         )
         initial = seed_run["constants"]
         seeded_from = seed_run
 
-    guesses = _initial_constants(x_values, initial, n_components)
-    if bounds is None:
-        lo = [g * 1e-4 for g in guesses]
-        hi = [g * 1e4 for g in guesses]
-    else:
-        lo, hi = (list(bounds[0]), list(bounds[1]))
+    rate_index = kernel["params"].index(kernel["rate_param"])
+    rate_guesses = _initial_constants(
+        x_values, initial, n_components, centre=kernel["p0"][rate_index])
 
-    kernel = DECAY_KERNELS[kind]["func"]
+    # One row of free parameters per component. Every parameter starts
+    # from the model's own automatic guess; only the rate parameter is
+    # spread across decades, because that spread is what gives the
+    # optimiser something to tell the components apart by (see
+    # _initial_constants).
+    guesses = np.tile(np.asarray(kernel["p0"], dtype=float), (n_components, 1))
+    guesses[:, rate_index] = rate_guesses
+
+    model_lo, model_hi = kernel["bounds"]
+    lo = np.tile(np.asarray(model_lo, dtype=float), (n_components, 1))
+    hi = np.tile(np.asarray(model_hi, dtype=float), (n_components, 1))
+    if bounds is None:
+        # The model's own bounds on a rate parameter are deliberately
+        # open-ended (a T2 is bounded only by [1e-9, inf]), which is
+        # right for a curve fit with real data behind each point and
+        # wrong for a k-component search that has to stay in a region
+        # where the components remain distinguishable. Window it around
+        # each component's own guess, as this module always has, but
+        # never outside what the model itself allows.
+        lo[:, rate_index] = np.maximum(rate_guesses / _RATE_DECADES, model_lo[rate_index])
+        hi[:, rate_index] = np.minimum(rate_guesses * _RATE_DECADES, model_hi[rate_index])
+    else:
+        lo[:, rate_index] = np.asarray(bounds[0], dtype=float)
+        hi[:, rate_index] = np.asarray(bounds[1], dtype=float)
+
+    log_mask = np.array([name in kernel["log_params"] for name in kernel["params"]], dtype=bool)
     inner_non_negative = non_negative and non_negative_during_fit
 
+    def _pack(values):
+        """(k, p) natural parameters -> flat search vector, with the
+        log-searched columns in log10 space."""
+        out = np.array(values, dtype=float, copy=True)
+        out[:, log_mask] = np.log10(np.maximum(out[:, log_mask], _LOG_FLOOR))
+        return out.ravel()
+
+    def _unpack(vector):
+        """Inverse of :func:`_pack`."""
+        out = np.asarray(vector, dtype=float).reshape(n_components, -1).copy()
+        out[:, log_mask] = 10.0 ** out[:, log_mask]
+        return out
+
     # Both methods share this inner half exactly: for a trial set of
-    # decay constants, the best spectra follow from a *linear* solve.
-    # Searched in log10 space for the same reason every diffusion
-    # coefficient in this package is (see
-    # opennmr.processing.relaxation.LOG_FITTED_PARAMS): the constants
-    # span decades, and a linear search on them converges to the wrong
+    # decay parameters, the best spectra follow from a *linear* solve.
+    # The log-space columns are searched in log10 for the same reason
+    # every diffusion coefficient in this package is (see
+    # opennmr.processing.relaxation.LOG_FITTED_PARAMS): they span
+    # decades, and a linear search on them converges to the wrong
     # answer even from a good starting point.
-    def spectra_for(log_constants):
-        decays = kernel(x_values, 10.0 ** np.asarray(log_constants))
+    def spectra_for(vector):
+        decays = kernel["func"](x_values, _unpack(vector))
         return decays, _solve_spectra(decays, fitted_block, inner_non_negative)
 
-    log_lo, log_hi = np.log10(lo), np.log10(hi)
+    search_lo, search_hi = _pack(lo), _pack(hi)
+    start = np.clip(_pack(guesses), search_lo, search_hi)
 
     if method == "score":
-        def residuals(log_constants):
-            decays, spectra = spectra_for(log_constants)
+        def residuals(vector):
+            decays, spectra = spectra_for(vector)
             return (fitted_block - decays @ spectra).ravel()
 
         solution = least_squares(
-            residuals, np.log10(guesses), bounds=(log_lo, log_hi), max_nfev=max_nfev,
+            residuals, start, bounds=(search_lo, search_hi), max_nfev=max_nfev,
         )
-        log_constants, n_evaluations, success = solution.x, solution.nfev, solution.success
+        vector, n_evaluations, success = solution.x, solution.nfev, solution.success
     else:
-        def objective(log_constants):
-            _decays, spectra = spectra_for(log_constants)
+        def objective(vector):
+            _decays, spectra = spectra_for(vector)
             return crosstalk(spectra)
 
         # Nelder-Mead, not least_squares: the cross-talk objective is a
@@ -439,21 +684,27 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
         # the sharper minimum this objective is chosen for is exactly
         # what a simplex is good at descending into.
         solution = minimize(
-            objective, np.log10(guesses), method="Nelder-Mead",
-            bounds=list(zip(log_lo, log_hi)),
+            objective, start, method="Nelder-Mead",
+            bounds=list(zip(search_lo, search_hi)),
             options={"maxfev": max_nfev, "xatol": 1e-4, "fatol": 1e-10},
         )
-        log_constants, n_evaluations, success = solution.x, solution.nfev, solution.success
+        vector, n_evaluations, success = solution.x, solution.nfev, solution.success
 
-    constants = 10.0 ** np.asarray(log_constants)
+    values = _unpack(vector)
     # Slowest-decaying first, so component 1 is the largest/most
     # aggregated species -- the order these are quoted in, and stable
     # across runs regardless of where the optimiser happened to place
-    # each one.
-    ranking = np.argsort(constants)
-    constants = constants[ranking]
+    # each one. Ranked by *how much each component has actually decayed*
+    # at the largest x rather than by the raw constant, because the two
+    # only agree for a rate-like parameter: a larger D decays faster, a
+    # larger T2 decays slower, and the model now decides which of those
+    # its constant is.
+    attenuation = kernel["func"](x_values, values)[-1]
+    ranking = np.argsort(-np.asarray(attenuation, dtype=float), kind="stable")
+    values = values[ranking]
+    constants = values[:, rate_index]
 
-    decays = kernel(x_values, constants)
+    decays = kernel["func"](x_values, values)
     # The final spectra are solved on *every* point, not only the
     # fitted ones: the decay constants are what the threshold protects,
     # and a component spectrum with holes punched in it wherever the
@@ -484,6 +735,16 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
         "success": bool(success),
         "n_evaluations": int(n_evaluations),
         "method": method,
+        # Which curve-fit model this resolution used, and every
+        # component's full parameter set under it -- so a stretched or
+        # inversion-recovery kernel's extra per-component parameters
+        # (beta, C) are reported rather than silently discarded, and so
+        # a result can say which model produced it.
+        "model": kernel["name"],
+        "model_params": list(kernel["params"]),
+        "amplitude_param": kernel["amplitude"],
+        "rate_param": kernel["rate_param"],
+        "component_params": [dict(zip(kernel["params"], row)) for row in values],
         # The SCORE run OUTSCORE started from, when it was made here --
         # so the pair can be compared without running SCORE twice, and
         # so it is visible what the refinement actually changed.
@@ -498,12 +759,15 @@ def score(x_values, data, n_components: int = 2, kind: str = "diffusion",
     if kind == "diffusion":
         result["D"] = constants
     else:
-        result["rates"] = constants
-        # Reported as a time constant too, because that is what anyone
-        # reads a relaxation result as -- the fit itself stays in rate
-        # space so the log search behaves the same as for diffusion.
+        # The model's own rate parameter for a relaxation kernel is a
+        # time constant (RELAXATION_MODELS is written in T1/T2, not in
+        # rates), so `constants` are seconds and the rate is its
+        # reciprocal. Both are reported, as they always were -- which
+        # one `constants` itself holds now follows the model rather
+        # than this module's own former convention.
+        result["T"] = constants
         with np.errstate(divide="ignore"):
-            result["T"] = np.where(constants > 0, 1.0 / constants, np.inf)
+            result["rates"] = np.where(constants > 0, 1.0 / constants, np.inf)
     return result
 
 
@@ -558,10 +822,13 @@ def _diagnose(result: dict, seed: dict | None) -> list[str]:
     return warnings
 
 
-def _initial_constants(x_values, initial, n_components: int) -> np.ndarray:
+def _initial_constants(x_values, initial, n_components: int, centre=None) -> np.ndarray:
     """Starting decay constants: whatever the caller supplied, else a
-    decade-spaced spread around the constant that would decay by 1/e
-    across the sampled range.
+    decade-spaced spread around ``centre`` -- the model's own automatic
+    guess for its rate parameter (see
+    :data:`opennmr.processing.relaxation.RELAXATION_MODELS`), falling
+    back to the constant that would decay by 1/e across the sampled
+    range when no model guess is available.
 
     The *spread* is what matters. Two components started at similar
     values give the optimiser nothing to tell them apart, and it
@@ -580,8 +847,9 @@ def _initial_constants(x_values, initial, n_components: int) -> np.ndarray:
         if np.any(values <= 0):
             raise ValueError("Starting decay constants must be positive.")
         return values
-    positive = x_values[x_values > 0]
-    centre = 1.0 / float(np.max(positive)) if positive.size else 1.0
+    if centre is None or not np.isfinite(centre) or centre <= 0:
+        positive = x_values[x_values > 0]
+        centre = 1.0 / float(np.max(positive)) if positive.size else 1.0
     return np.array([centre * 10.0 ** ((n_components - 1) / 2.0 - i)
                      for i in range(n_components)])
 
@@ -617,10 +885,19 @@ def components_to_csv(result: dict, ppm) -> str:
     method = RESOLUTION_METHODS[result.get("method", "score")]
     writer.writerow([f"{method['label']} — {result['n_components']} components"])
     writer.writerow([method["reference"]])
+    if result.get("model"):
+        # Which curve-fit model produced these constants -- a column of
+        # decay constants means something different under a stretched
+        # kernel than under a plain exponential, and a spreadsheet has
+        # nowhere else to record that.
+        writer.writerow([f"Model: {result['model']}"])
     writer.writerow([])
     writer.writerow(["Component", "Decay constant", "Unit", "Share",
                       "R^2", "Cross-talk", "Non-negative"])
-    unit = DECAY_KERNELS[result["kind"]]["unit"]
+    # DECAY_KINDS, not a unit of this function's own: a relaxation
+    # kernel's constant is the model's time constant (seconds), which
+    # is what the "1/s" this line used to write no longer describes.
+    unit = DECAY_KINDS[result["kind"]]["unit"]
     for index in range(result["n_components"]):
         if result["kind"] == "diffusion":
             pretty = format_diffusion_value(result["constants"][index])
@@ -658,8 +935,19 @@ def format_score_report(result: dict, width: int = 66) -> str:
     rule = "=" * width
     name = RESOLUTION_METHODS[result.get("method", "score")]["label"].split(" (")[0]
     lines = [rule, f"{name} — {result['n_components']} components".center(width).rstrip(), rule, ""]
+    model = result.get("model")
+    if model:
+        # Named outright, because it is the same model the Fit Curve
+        # panel is set to -- a resolution and a curve fit of the same
+        # series are now the same function, and a report that did not
+        # say which one would leave that invisible.
+        amplitude = result.get("amplitude_param")
+        note = f" (amplitude {amplitude} is the component spectrum)" if amplitude else ""
+        lines.append(f"  Model: {model}{note}")
+        lines.append("")
     lines.append("  Component        share    decay constant")
     lines.append("  " + "-" * (width - 4))
+    extra = [p for p in result.get("model_params", []) if p != result.get("rate_param")]
     for index in range(result["n_components"]):
         share = result["fractions"][index]
         if result["kind"] == "diffusion":
@@ -667,6 +955,13 @@ def format_score_report(result: dict, width: int = 66) -> str:
         else:
             value = f"{format_time_value(result['T'][index])} (T)"
         lines.append(f"    {index + 1:<12} {share * 100:6.2f}%    {value}")
+        # A stretched or inversion-recovery kernel fits more than one
+        # parameter per component; reporting only the rate would hide
+        # the beta that is holding up the fit.
+        if extra:
+            values = result.get("component_params", [{}] * result["n_components"])[index]
+            lines.append("                           "
+                          + ",  ".join(f"{p} = {values.get(p, float('nan')):.4g}" for p in extra))
 
     lines.append("")
     lines.append("  Fit quality")

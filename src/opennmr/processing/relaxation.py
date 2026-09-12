@@ -303,6 +303,86 @@ RELAXATION_MODELS = {
     },
 }
 
+def evaluate_expression(expression: str, constants: dict | None = None) -> dict:
+    """Evaluate a **fully-determined** numeric expression over named
+    acquisition parameters -- ``"TAU*2"``, ``"d1"``, ``"p90*1e-6"``,
+    ``"tau*ne"``.
+
+    The sibling of :func:`build_custom_model` for the case where the
+    answer must be a *number*, not a curve: the Values-source factor
+    for a list file, where the user's request was "it would be nice if
+    the list file x factor had an option to use an experimental
+    parameter (or a combination) -- for X-Pulse I might want the TAU
+    value to multiply with the arrayed number of echoes to fit the T2".
+
+    The same sympy parsing and the same ``constants`` dict
+    (:func:`opennmr.core.acquisition.acquisition_constants`) as a
+    custom fitting equation, so a name means the same thing in both
+    places. The one difference is the failure mode, and it is
+    deliberate: an unknown symbol here is an **error naming it**, not a
+    free parameter. There is nothing to fit a factor against, so a
+    mistyped ``TAO`` must not quietly become anything at all.
+
+    ``constants`` values are used **exactly as the vendor recorded
+    them** -- an X-Pulse ``TAU`` in microseconds stays in microseconds.
+    Converting is the expression's job (``TAU*1e-6``), because only the
+    person reading the pulse programme knows which unit it was written
+    in.
+
+    Returns ``{"value", "used"}`` -- the number, and the constants that
+    actually went into it (so the GUI can show *which* parameters a
+    factor picked up, the same way a custom equation does).
+
+    Raises
+    ------
+    ValueError
+        If the expression doesn't parse, names something the
+        experiment doesn't record, or doesn't reduce to a finite real
+        number.
+    """
+    import sympy
+
+    text = (expression or "").strip()
+    if not text:
+        raise ValueError("Enter a factor -- a number, or an expression in this experiment's parameters.")
+    try:
+        expr = sympy.sympify(text, evaluate=True)
+    except (sympy.SympifyError, TypeError, SyntaxError) as exc:
+        raise ValueError(f"Could not parse factor '{text}': {exc}") from exc
+
+    substitutions = {}
+    for name, value in (constants or {}).items():
+        if value is None:
+            continue
+        symbol = sympy.Symbol(str(name))
+        if symbol in expr.free_symbols:
+            substitutions[symbol] = float(value)
+    if substitutions:
+        expr = expr.subs(substitutions)
+
+    unknown = sorted(str(symbol) for symbol in expr.free_symbols)
+    if unknown:
+        # Named, and the available names offered alongside: "TAU is not
+        # recorded" is only half an answer when the file spells it
+        # "Tau" or the user is on a vendor that records nothing at all.
+        available = sorted(constants or {})
+        hint = (f" This experiment records: {', '.join(available[:20])}"
+                + (", …" if len(available) > 20 else "") + ".") if available else (
+            " This experiment has no recorded acquisition parameters to use.")
+        raise ValueError(
+            f"Factor '{text}' uses {', '.join(unknown)}, which this experiment does not record.{hint}"
+        )
+
+    try:
+        value = float(expr)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Factor '{text}' did not reduce to a number.") from exc
+    if not np.isfinite(value):
+        raise ValueError(f"Factor '{text}' evaluated to {value}.")
+    return {"value": value,
+            "used": {str(symbol): float(val) for symbol, val in substitutions.items()}}
+
+
 def build_custom_model(equation: str, independent_var: str = "x",
                         p0_overrides: list[float] | tuple[float, ...] | None = None,
                         constants: dict | None = None) -> dict:
@@ -1035,8 +1115,14 @@ def format_global_report(result: dict, width: int = 66) -> str:
         lines.append("  Per curve")
         lines.append("  " + "-" * (width - 4))
         for entry in result["per_dataset"]:
+            # Amplitudes as shares, for the same reason the per-peak
+            # summary uses them: this block exists to compare curves
+            # against each other, and each curve's absolute intensity
+            # is the one number that cannot be.
+            shares = amplitude_fractions(entry["params"])
             parts = [
-                f"{name}={format_param_value(name, entry['params'][name], entry['errors'].get(name))}"
+                f"{name}={shares[name] * 100:.1f}%" if name in shares
+                else f"{name}={format_param_value(name, entry['params'][name], entry['errors'].get(name))}"
                 for name in result["local_names"]
             ]
             lines.append(f"    {entry['label']}: " + ",  ".join(parts))
@@ -1110,6 +1196,86 @@ def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 
     y_band = sigma * np.sqrt(np.clip(variance, 0.0, None))
 
     return t_fine, y_fine, y_band
+
+
+def curve_fit_to_csv(results, x_label: str = "x", x_scale: float = 1.0,
+                      value_label: str = "value", include_fit: bool = True) -> str:
+    """A curve fit as CSV: the x-axis, then each peak's **measured**
+    value at every point, with the fitted curve alongside.
+
+    Explicit user request: "I need the curve fit results to be
+    exportable as integral/peak height vs whatever x is". That is the
+    data behind the plot -- the per-slice intensities the Spectral
+    Fitting tab produced and the curve that was fitted through them --
+    rather than only the fitted parameters, which the report already
+    gives.
+
+    ``results`` : the list :func:`NMR2D_fit_relaxation` returns, one
+    entry per peak. Each already carries its own ``t``/``y``/``y_fit``
+    (and ``y_err`` where the measurement supplied one), so nothing is
+    recomputed here and the file cannot disagree with what was fitted.
+
+    **Peaks are not assumed to share an x-axis.** They normally do, but
+    a point excluded from one peak's fit (see the GUI's own
+    point-exclusion) leaves that peak shorter than the others. The
+    union of every peak's x-values is used, and a peak with no
+    measurement at some x is written as an empty cell rather than
+    being silently dropped or padded with a number.
+
+    ``x_scale`` : seconds per unit of the *written* x column, so a
+    delay series exports in the same millisecond unit the panel
+    displays. 1.0 leaves the values as fitted.
+    ``value_label`` : what the measured column is -- "integral" or
+    "amplitude", per the Value-source setting.
+
+    A pure string builder (no file I/O), so it can be tested against
+    its own output rather than against "did a file appear".
+    """
+    import csv
+    from io import StringIO
+
+    results = list(results or [])
+    if not results:
+        raise ValueError("No curve fit to export -- run Fit Curve first.")
+
+    x_values = sorted({round(float(value), 12)
+                       for result in results for value in np.asarray(result["t"], dtype=float)})
+    has_errors = any(result.get("y_err") is not None for result in results)
+
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    header = [x_label]
+    for result in results:
+        label = result.get("peak_label") or result.get("label") or "peak"
+        header.append(f"{label} {value_label}")
+        if has_errors:
+            header.append(f"{label} {value_label} error")
+        if include_fit:
+            header.append(f"{label} fit")
+    writer.writerow(header)
+
+    columns = []
+    for result in results:
+        t = np.asarray(result["t"], dtype=float)
+        y_err = result.get("y_err")
+        columns.append((
+            {round(float(value), 12): index for index, value in enumerate(t)},
+            np.asarray(result["y"], dtype=float),
+            np.asarray(result["y_fit"], dtype=float),
+            np.asarray(y_err, dtype=float) if y_err is not None else None,
+        ))
+
+    for x in x_values:
+        row = [f"{x / x_scale:.10g}"]
+        for index_map, y, y_fit, y_err in columns:
+            position = index_map.get(x)
+            row.append("" if position is None else f"{y[position]:.10g}")
+            if has_errors:
+                row.append("" if position is None or y_err is None else f"{y_err[position]:.10g}")
+            if include_fit:
+                row.append("" if position is None else f"{y_fit[position]:.10g}")
+        writer.writerow(row)
+    return buffer.getvalue()
 
 
 def format_time_value(value, error=None, sig_figs=3):
@@ -1205,6 +1371,61 @@ _TIME_PARAMS = frozenset({"T1", "T2", "T1rho", "T1a", "T1b", "T2a", "T2b", "tau"
 _DIFFUSION_PARAM_PREFIX = "D"
 
 
+#: Parameters whose value is an **amplitude** -- a signal intensity on
+#: the data's own arbitrary scale. Covers every amplitude the named
+#: registry models use (``M0``; ``A``/``A1``/``A2``; ``I0`` and its
+#: ``I0a``/``I0b`` pair) and
+#: :func:`opennmr.processing.diffusion.build_diffusion_model`'s
+#: numbered ``I1``, ``I2``, ....
+#:
+#: Matched by name, the same way :data:`_TIME_PARAMS` and
+#: :func:`_is_diffusion_param` are, and for the same reason: this
+#: decides how a number is *presented*, and a presentation rule has to
+#: be predictable from the model you picked. The cost is that a
+#: **custom equation gets no ratios** -- its parameters are whatever
+#: the user named them, and there is no way to know which of them is an
+#: amplitude without guessing. Silently treating the wrong symbol as
+#: one would be worse than showing nothing.
+_AMPLITUDE_PARAM_RE = re.compile(r"^(?:M0|A\d*|I0[ab]?|I\d+)$")
+
+
+def _is_amplitude_param(name: str) -> bool:
+    return bool(_AMPLITUDE_PARAM_RE.match(name))
+
+
+def amplitude_fractions(params: dict) -> dict[str, float]:
+    """Each amplitude parameter as a fraction of the total amplitude.
+
+    Explicit user request: "it would be good to have relative ratios
+    instead of absolute intensity values so numbers can be more easily
+    compared in multi-component fits". A fitted ``A1 = 0.0532`` means
+    nothing on its own -- it is on whatever arbitrary scale the spectra
+    happened to be processed on -- while "63% / 37%" is the form a
+    multi-component result is actually quoted and compared in.
+
+    Returns ``{}`` unless the model has **more than one** amplitude:
+    a single-amplitude fit would report a constant 100%, which is not
+    a result. Also ``{}`` when the amplitudes sum to zero, and for a
+    custom equation (see :data:`_AMPLITUDE_PARAM_RE`).
+
+    The denominator is the **signed** sum, matching
+    :func:`opennmr.processing.diffusion.component_weights` so the two
+    cannot quote different numbers for the same fit. A fit whose
+    components have opposite signs can therefore produce a fraction
+    outside 0-100%; that is a real signal -- usually an
+    over-parameterised model -- and rounding it away into an absolute
+    value would hide it.
+    """
+    amplitudes = {name: float(value) for name, value in params.items()
+                  if _is_amplitude_param(name) and value is not None and np.isfinite(value)}
+    if len(amplitudes) < 2:
+        return {}
+    total = sum(amplitudes.values())
+    if not total:
+        return {}
+    return {name: value / total for name, value in amplitudes.items()}
+
+
 def _is_diffusion_param(name: str) -> bool:
     return name == "D" or (name.startswith(_DIFFUSION_PARAM_PREFIX) and name[1:].isdigit()) \
         or name in ("Da", "Db")
@@ -1234,6 +1455,36 @@ def format_param_value(name: str, value, error=None, sig_figs: int = 3) -> str:
     return f"{value:.{sig_figs + 1}g} ± {error:.{sig_figs}g}"
 
 
+#: How each amplitude's name maps to the rate parameter of the same
+#: component, for the named registry models. ``A1`` belongs with
+#: ``T2a``/``T1a``, ``I0a`` with ``Da``, ``I3`` with ``D3`` -- the
+#: pairing is by the vendor of the model, not by position, because the
+#: parameter order differs between them.
+_AMPLITUDE_RATE_SUFFIX = {"A1": ("a", "1"), "A2": ("b", "2"),
+                           "I0a": ("a",), "I0b": ("b",)}
+
+
+def _paired_rate_param(amplitude: str, param_names) -> str | None:
+    """The rate parameter belonging to the same component as
+    ``amplitude``, or ``None`` when there is no unambiguous pairing.
+
+    ``I3`` -> ``D3`` and ``A1`` -> ``T2a``/``T1a`` are the two real
+    conventions in this registry. ``None`` rather than a guess when
+    neither applies: a wrongly-paired D next to a population share is
+    worse than no D at all, since it reads as a measured fact.
+    """
+    names = list(param_names)
+    if amplitude.startswith("I") and amplitude[1:].isdigit():
+        candidate = f"D{amplitude[1:]}"
+        return candidate if candidate in names else None
+    for suffix in _AMPLITUDE_RATE_SUFFIX.get(amplitude, ()):
+        for stem in ("T1", "T2", "D"):
+            candidate = f"{stem}{suffix}"
+            if candidate in names:
+                return candidate
+    return None
+
+
 def format_relaxation_report(fit, title: str | None = None, width: int = 66) -> str:
     """A readable, self-describing summary of one
     :func:`fit_relaxation` result, as a string.
@@ -1257,13 +1508,14 @@ def format_relaxation_report(fit, title: str | None = None, width: int = 66) -> 
       the point count together, rather than RMSE on the data's own
       arbitrary intensity scale as the only quality number.
 
-    A multi-component diffusion model additionally gets each
-    component's population weight, which is the form those results are
-    actually quoted in (see
-    :func:`opennmr.processing.diffusion.component_weights`).
+    Any model with **more than one amplitude** additionally gets each
+    one as a fraction of the total (see :func:`amplitude_fractions`) --
+    on the parameter's own row and again in a section pairing it with
+    the rate it belongs to. That is the form a multi-component result
+    is actually quoted and compared in; the raw amplitudes are on
+    whatever arbitrary intensity scale the spectra were processed on
+    and say nothing on their own.
     """
-    from .diffusion import component_weights  # local: diffusion imports nothing from here
-
     rule = "=" * width
     lines = [rule, (title or f"CURVE FIT REPORT — {fit['model']}").center(width).rstrip(), rule]
 
@@ -1278,7 +1530,13 @@ def format_relaxation_report(fit, title: str | None = None, width: int = 66) -> 
 
     spec = fit.get("spec") or {}
     n_components = spec.get("n_components")
-    weights = component_weights(fit["params"], n_components) if n_components else None
+    # One source for the ratios, whatever shape the model is: a
+    # generalised N-component diffusion fit (I1..In), a biexponential
+    # (A1/A2, I0a/I0b), anything with more than one amplitude. The
+    # numbers agree with component_weights by construction -- same
+    # signed-sum denominator -- so the two cannot disagree about the
+    # same fit.
+    fractions = amplitude_fractions(fit["params"])
 
     lines.append("")
     lines.append("  Parameters")
@@ -1287,15 +1545,50 @@ def format_relaxation_report(fit, title: str | None = None, width: int = 66) -> 
         value = fit["params"].get(name)
         error = fit["errors"].get(name)
         fixed_note = "  (fixed)" if error is None or not np.isfinite(error) else ""
-        lines.append(f"    {name:<10} {format_param_value(name, value, None if fixed_note else error)}{fixed_note}")
+        # The ratio sits on the amplitude's own row, not only in the
+        # section below, so the comparison is where the number is.
+        share = fractions.get(name)
+        share_note = f"   ({share * 100:.1f}%)" if share is not None else ""
+        lines.append(
+            f"    {name:<10} {format_param_value(name, value, None if fixed_note else error)}"
+            f"{fixed_note}{share_note}"
+        )
 
-    if weights and n_components > 1:
+    if fractions:
         lines.append("")
-        lines.append("  Population weights (amplitude as a fraction of the total)")
+        # Both terms, deliberately. "Population weights" is what a
+        # multi-component diffusion result is actually quoted as and is
+        # the phrase a reader looks for; "relative amplitudes" is what
+        # the section shows for every other multi-amplitude model,
+        # where "population" is a claim about the sample that the
+        # numbers alone do not make.
+        lines.append("  Relative amplitudes (population weights — fraction of the total)")
         lines.append("  " + "-" * (width - 4))
-        for i, weight in enumerate(weights, start=1):
-            d_value = fit["params"].get(f"D{i}")
-            lines.append(f"    component {i}: {weight * 100:6.2f}%   D{i} = {format_param_value(f'D{i}', d_value)}")
+        # In the model's own parameter order, not alphabetical: a
+        # 10-component fit sorts as I1, I10, I2, ... alphabetically,
+        # and the model's order is the one the rest of the report uses.
+        for name in [n for n in fit["param_names"] if n in fractions]:
+            share = fractions[name]
+            # Paired with whatever rate the same component was fitted
+            # with -- a population share is only meaningful next to the
+            # D or T it belongs to, and hunting for the pairing in the
+            # block above is exactly the work this section removes.
+            rate_name = _paired_rate_param(name, fit["param_names"])
+            rate = ""
+            if rate_name is not None:
+                rate = f"   {rate_name} = {format_param_value(rate_name, fit['params'].get(rate_name))}"
+            lines.append(f"    {name:<10} {share * 100:6.2f}%{rate}")
+        if any(share < 0 or share > 1 for share in fractions.values()):
+            # Not arithmetic noise: components of opposite sign are
+            # usually an over-parameterised model, and an absolute
+            # amplitude would have hidden it.
+            lines.append("")
+            for chunk in _wrap(
+                "A share outside 0-100% means the components have opposite signs, "
+                "which usually indicates more components than the data supports.",
+                width - 6,
+            ):
+                lines.append(f"    {chunk}")
 
     lines.append("")
     lines.append("  Uncertainty")
@@ -1578,17 +1871,28 @@ def _get_delays(fits, vdlist):
     else:
         vdlist_seconds = np.asarray(vdlist, dtype=float)
 
-    indices = [fit["index"] for fit in fits]
-    try:
-        delays = np.array([vdlist_seconds[int(i) - 1] for i in indices], dtype=float)
-    except IndexError:
+    indices = [int(fit["index"]) for fit in fits]
+    # A list *longer* than the series is not a problem and never was:
+    # each slice looks up its own entry and the surplus is simply never
+    # read. That is Bruker's own convention -- a 24-entry vdlist with F1
+    # TD set to 10 uses the first 10 -- and it falls out of indexing by
+    # slice number for free.
+    #
+    # Shorter is the real failure, and it used to surface as a bare
+    # IndexError turned into "check the vdlist matches this dataset",
+    # which says what is wrong but not what to do. Name both counts and
+    # the way out.
+    missing = [i for i in indices if not (1 <= i <= len(vdlist_seconds))]
+    if missing:
         raise ValueError(
-            f"vdlist has {len(vdlist_seconds)} entries, but a fitted "
-            f"slice index falls outside that range -- check the vdlist "
-            f"matches this dataset."
+            f"The value list has {len(vdlist_seconds)} entries but this fit "
+            f"covers slice {max(missing)} -- {len(missing)} slice(s) have no "
+            f"value. A longer list would be fine (the surplus is ignored); a "
+            f"shorter one cannot be fitted. Limit the analysis to the first "
+            f"{len(vdlist_seconds)} slices, or use a list that covers them all."
         )
 
-    return delays
+    return np.array([vdlist_seconds[i - 1] for i in indices], dtype=float)
 
 
 def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,

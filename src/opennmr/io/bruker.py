@@ -72,6 +72,7 @@ import numpy as np
 
 from . import base
 from . import digital_filter
+from . import lists as io_lists
 from .jcampdx import parse_jcampdx_params, read_acqus_files
 from ..processing import ft as processing_ft
 from ..processing import windows as processing_windows
@@ -131,15 +132,16 @@ def _guess_raw_2d_shape(dic: dict, ser_path: str) -> tuple[int, int]:
     loop structure writes exactly ``TD`` total rows (``trunc(TD/2)``
     t1 steps, each writing a real/imaginary States pair of 2 rows).
     On real data this doesn't always land on the file's own exact byte
-    count -- a small, so-far-unexplained handful of extra rows beyond
-    ``TD`` even on acquisitions with a clean (non-aborted-and-restarted)
-    audit trail, see TODO.md's own write-up of this investigation.
-    Rather than fail, falls back to ``file_size // row_bytes`` (floor
-    division, always in-bounds) whenever ``TD`` itself doesn't divide
-    the file exactly, so a real acquisition with this small
-    discrepancy still loads -- capturing every genuinely-present row
-    -- instead of crashing outright the way relying on ``TD`` alone
-    (and nmrglue's own guess) both currently do."""
+    count -- there are extra rows beyond ``TD`` even on acquisitions
+    with a clean (non-aborted-and-restarted) audit trail, on seven of
+    the real 2D datasets this project tests against. Rather than fail,
+    falls back to ``file_size // row_bytes`` (floor division, always
+    in-bounds) whenever ``TD`` itself doesn't divide the file exactly,
+    so such an acquisition still loads instead of crashing outright the
+    way relying on ``TD`` alone (and nmrglue's own guess) both do --
+    and then **caps the result at TD**, because those extra rows are
+    not acquired data. The fallback finds a shape the file can be
+    reshaped to; ``TD`` says how much of it to keep."""
     acqus = dic["acqus"]
     td0 = int(float(acqus["TD"]))
     td1 = int(float(dic.get("acqu2s", {}).get("TD", 0))) or None
@@ -154,6 +156,34 @@ def _guess_raw_2d_shape(dic: dict, ser_path: str) -> tuple[int, int]:
         n_rows = td1
     else:
         n_rows = fsize // row_bytes  # floor -- always a valid, in-bounds reshape
+        if td1:
+            # ...and then back down to TD, which is how many rows the
+            # acquisition actually wrote. The floor division above only
+            # exists to find a shape the file can be reshaped to at
+            # all; anything past TD is whatever the file happened to
+            # carry beyond the data, not extra t1 increments.
+            #
+            # This is the resolution of the "small, unexplained handful
+            # of extra rows" this function's docstring used to record
+            # as a mystery: TD is authoritative and the excess is not
+            # data.
+            #
+            # **It does not measurably change a genuine 2D**, and a
+            # first guess that it would -- that the two datasets with
+            # the largest excess (2023, 409 rows for TD1=310; 6, 215
+            # for 80) being the two worst-correlating against TopSpin
+            # was cause and effect -- was measured and is wrong. Every
+            # correlation is unchanged to four decimals bar two that
+            # move by 0.0001. The F1 transform zero-fills to SI anyway,
+            # so a handful of junk rows at the end contributes almost
+            # nothing there.
+            #
+            # Where it matters is a **pseudo-2D**, whose rows are the
+            # slices themselves with no F1 transform to absorb them:
+            # 2p5mm/.../2005 loaded 19 slices against a 16-entry
+            # vdlist, which is a fit against three rows of nothing and
+            # a length mismatch the user cannot resolve.
+            n_rows = min(n_rows, td1)
     return n_rows, per_row_words // 2
 
 
@@ -1553,6 +1583,39 @@ def _processed_2d_params(path: str, procno: int, homonuclear: bool) -> dict:
     }
 
 
+#: Bruker's own per-experiment list files. A 2D that carries one is a
+#: *series* -- one row per delay, counter or gradient level -- not a
+#: correlation experiment, because these are exactly the files a
+#: pulse programme reads to vary something between rows.
+_VARIABLE_LIST_NAMES = ("vdlist", "vclist", "vplist", "difflist")
+
+
+def has_variable_list(path: str) -> bool:
+    """Whether ``path`` holds one of Bruker's own variable-list files
+    -- the metadata-only signal that a 2D is a pseudo-2D series.
+
+    Needed because the obvious signal is not enough. ``acqu2s``'s
+    ``NUC1 == "off"`` catches a series acquired with the indirect
+    channel off, but plenty are not: measured across this project's
+    own datasets, ``20200804/.../11`` (a saturation-recovery series
+    with a ``vdlist``) and ``bruker_PFG/150`` (``diffSte`` with a
+    ``difflist``) both record a real nucleus there and were reported
+    as conventional 2Ds in the Data browser -- the user's own
+    "some pseudo-2Ds are being noted as regular 2Ds".
+
+    **``FnMODE`` was tried first and is not usable**: real COSY and
+    HMBC datasets (``cosygpppqf``, ``hmbcgpndqf``) are genuine 2Ds
+    recorded with ``FnMODE = 1`` (QF, no F1 quadrature), the same
+    value every pseudo-2D here carries. A list file separates the two
+    cleanly on the same corpus; ``FnMODE`` does not separate them at
+    all.
+
+    Only the experiment folder itself is checked, not the parent: a
+    sibling experiment's list says nothing about this one.
+    """
+    return any(os.path.isfile(os.path.join(path, name)) for name in _VARIABLE_LIST_NAMES)
+
+
 def peek(path: str, procno: int = 1, homonuclear: bool = False) -> dict:
     """Metadata-only probe: shape/nucleus/block-layout from
     ``acqus``/``acqu2s``/``procs``/``proc2s`` alone, never touching
@@ -1586,7 +1649,7 @@ def peek(path: str, procno: int = 1, homonuclear: bool = False) -> dict:
         "vendor": "bruker", "ndim": 2,
         "shape": (int(info["si2"]), int(info["si1"])),
         "nucleus": info["nuc1"], "nucleus_indirect": info["nuc2"],
-        "pseudo_2d": (info["nuc2"] == "off"),
+        "pseudo_2d": (info["nuc2"] == "off") or has_variable_list(path),
     }
     if info["xdim_f1"] > 1:
         result["block_shape"] = (info["xdim_f1"], info["xdim_f2"])
@@ -1751,21 +1814,12 @@ def read_vdlist(datapath: str, vdlist_name: str = "vdlist") -> dict:
                 f"(looked in: {candidates})."
             )
 
-    unit_scale = {"n": 1e-9, "u": 1e-6, "m": 1e-3, "s": 1.0}
-    raw, seconds = [], []
-
-    with open(list_path, "r", errors="ignore") as inp:
-        for line in inp:
-            line = line.strip()
-            if not line:
-                continue
-            raw.append(line)
-            if line[-1] in unit_scale:
-                seconds.append(float(line[:-1]) * unit_scale[line[-1]])
-            else:
-                seconds.append(float(line))
-
-    return {"name": vdlist_name, "raw": raw, "seconds": np.array(seconds, dtype=float)}
+    # The parsing itself lives in io.lists, which every vendor's list
+    # goes through -- Bruker's time suffixes were always the only
+    # vendor-specific part of this, and they are handled there. What
+    # stays here is Bruker's own *where to look* convention.
+    parsed = io_lists.read_value_list(list_path)
+    return {"name": vdlist_name, "raw": parsed["raw"], "seconds": parsed["values"]}
 
 
 def read_vclist(datapath: str, vclist_name: str = "vclist") -> dict:

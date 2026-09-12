@@ -430,3 +430,265 @@ def test_build_custom_model_never_substitutes_the_independent_variable():
 def test_build_custom_model_reports_constants_when_nothing_is_left_to_fit():
     with pytest.raises(ValueError, match="no free parameters"):
         relaxation.build_custom_model("A*x", constants={"A": 3.0})
+
+
+# ============================================================
+# Factor expressions over acquisition parameters
+# ============================================================
+
+def test_evaluate_expression_plain_number():
+    assert relaxation.evaluate_expression("0.5")["value"] == pytest.approx(0.5)
+
+
+def test_evaluate_expression_uses_acquisition_parameters():
+    # The user's own case: an X-Pulse CPMG echo list times TAU.
+    result = relaxation.evaluate_expression("TAU*2*1e-6", {"TAU": 1500.0, "P90": 8.78})
+    assert result["value"] == pytest.approx(0.003)
+    # Only the parameters actually used are reported back, so the GUI
+    # can show which ones a factor picked up.
+    assert result["used"] == {"TAU": 1500.0}
+
+
+def test_evaluate_expression_unknown_symbol_is_an_error_not_a_parameter():
+    # The one place this must differ from build_custom_model: there is
+    # nothing to fit a factor against, so a mistyped name cannot
+    # quietly become a free parameter.
+    with pytest.raises(ValueError, match="TAO"):
+        relaxation.evaluate_expression("TAO*2", {"TAU": 1500.0})
+
+
+def test_evaluate_expression_names_what_is_available():
+    with pytest.raises(ValueError, match="TAU"):
+        relaxation.evaluate_expression("nope", {"TAU": 1500.0})
+
+
+def test_evaluate_expression_says_when_nothing_is_recorded():
+    with pytest.raises(ValueError, match="no recorded acquisition parameters"):
+        relaxation.evaluate_expression("TAU", {})
+
+
+def test_evaluate_expression_rejects_empty_and_nonsense():
+    with pytest.raises(ValueError, match="Enter a factor"):
+        relaxation.evaluate_expression("   ")
+    with pytest.raises(ValueError, match="Could not parse"):
+        relaxation.evaluate_expression("2 +* 3")
+
+
+# ============================================================
+# Curve fit as CSV
+# ============================================================
+
+def _two_peak_curve_fit():
+    t = np.geomspace(0.01, 0.5, 6)
+    fits = [
+        {"index": i + 1,
+         "integrals": [float(relaxation.exponential_decay(ti, 10.0, 0.1)),
+                        float(relaxation.exponential_decay(ti, 5.0, 0.3))]}
+        for i, ti in enumerate(t)
+    ]
+    return t, relaxation.NMR2D_fit_relaxation(
+        fits, model="exponential_decay", vdlist=t, show_report=False,
+        peak_labels=["A", "B"])
+
+
+def test_curve_fit_to_csv_writes_each_peaks_measured_values_against_x():
+    t, results = _two_peak_curve_fit()
+    rows = [row.split(",") for row in
+            relaxation.curve_fit_to_csv(results, x_label="delay (s)").splitlines()]
+    header, body = rows[0], rows[1:]
+    assert header == ["delay (s)", "A value", "A fit", "B value", "B fit"]
+    assert len(body) == len(t)
+    np.testing.assert_allclose([float(r[0]) for r in body], t, rtol=1e-9)
+    np.testing.assert_allclose([float(r[1]) for r in body],
+                                relaxation.exponential_decay(t, 10.0, 0.1), rtol=1e-6)
+
+
+def test_curve_fit_to_csv_scales_x_to_the_requested_unit():
+    t, results = _two_peak_curve_fit()
+    rows = relaxation.curve_fit_to_csv(
+        results, x_label="delay (ms)", x_scale=1e-3).splitlines()
+    np.testing.assert_allclose(
+        [float(row.split(",")[0]) for row in rows[1:]], t * 1e3, rtol=1e-9)
+
+
+def test_curve_fit_to_csv_names_the_value_source():
+    _t, results = _two_peak_curve_fit()
+    header = relaxation.curve_fit_to_csv(results, value_label="amplitude").splitlines()[0]
+    assert "A amplitude" in header and "B amplitude" in header
+
+
+def test_curve_fit_to_csv_leaves_a_gap_where_a_peak_has_no_point():
+    # Peaks normally share an x-axis, but excluding a point from one
+    # peak's fit leaves it shorter. The union of x is used and the
+    # missing cell is empty -- not dropped, and not padded with a
+    # number that was never measured.
+    _t, results = _two_peak_curve_fit()
+    for key in ("t", "y", "y_fit"):
+        results[1][key] = np.asarray(results[1][key])[1:]
+    rows = [row.split(",") for row in
+            relaxation.curve_fit_to_csv(results).splitlines()[1:]]
+    assert rows[0][3] == "" and rows[0][4] == ""
+    assert rows[1][3] != ""
+    assert len(rows) == 6  # every x still present
+
+
+def test_curve_fit_to_csv_includes_errors_when_the_fit_had_them():
+    _t, results = _two_peak_curve_fit()
+    for result in results:
+        result["y_err"] = np.full(len(result["y"]), 0.1)
+    header = relaxation.curve_fit_to_csv(results).splitlines()[0]
+    assert "A value error" in header
+
+
+def test_curve_fit_to_csv_with_no_results_raises():
+    with pytest.raises(ValueError, match="run Fit Curve"):
+        relaxation.curve_fit_to_csv([])
+
+
+# ============================================================
+# Relative amplitudes
+# ============================================================
+# "It would be good to have relative ratios instead of absolute
+# intensity values so numbers can be more easily compared in
+# multi-component fits."
+
+def test_amplitude_fractions_of_a_two_component_fit():
+    fractions = relaxation.amplitude_fractions(
+        {"A1": 3.0, "T2a": 0.03, "A2": 1.0, "T2b": 0.4})
+    assert fractions == {"A1": pytest.approx(0.75), "A2": pytest.approx(0.25)}
+
+
+def test_amplitude_fractions_recognises_every_registry_naming():
+    # M0/A/A1/A2 for relaxation, I0/I0a/I0b and I1..In for diffusion.
+    assert set(relaxation.amplitude_fractions({"I0a": 6.0, "I0b": 2.0})) == {"I0a", "I0b"}
+    assert set(relaxation.amplitude_fractions({"I1": 5.0, "I2": 3.0, "I3": 2.0})) == {"I1", "I2", "I3"}
+
+
+def test_amplitude_fractions_needs_more_than_one_amplitude():
+    # A single-amplitude fit would report a constant 100%, which is not
+    # a result.
+    assert relaxation.amplitude_fractions({"M0": 5.0, "T2": 0.1}) == {}
+    assert relaxation.amplitude_fractions({"I0": 5.0, "D": 1e-9}) == {}
+
+
+def test_amplitude_fractions_ignores_rates_and_shape_parameters():
+    fractions = relaxation.amplitude_fractions(
+        {"A1": 3.0, "T2a": 0.03, "A2": 1.0, "T2b": 0.4, "beta": 0.8, "C": 2.0, "D1": 1e-9})
+    assert set(fractions) == {"A1", "A2"}
+
+
+def test_amplitude_fractions_of_a_custom_equation_is_empty():
+    # Its parameters are whatever the user named them; treating the
+    # wrong symbol as an amplitude would be worse than showing nothing.
+    assert relaxation.amplitude_fractions({"a1": 3.0, "t1": 0.03, "a2": 1.0, "t2": 0.4}) == {}
+
+
+def test_amplitude_fractions_zero_total_is_empty():
+    assert relaxation.amplitude_fractions({"A1": 1.0, "A2": -1.0}) == {}
+
+
+def test_amplitude_fractions_agree_with_component_weights():
+    # The two must never quote different numbers for the same fit.
+    from opennmr.processing.diffusion import component_weights
+
+    params = {"I1": 5.0, "D1": 3e-9, "I2": 3.0, "D2": 5e-10, "I3": 2.0, "D3": 4e-11}
+    fractions = relaxation.amplitude_fractions(params)
+    np.testing.assert_allclose(
+        [fractions[f"I{i}"] for i in (1, 2, 3)], component_weights(params, 3))
+
+
+def _biexponential_fit():
+    t = np.geomspace(0.002, 1.0, 20)
+    y = relaxation.biexponential_decay(t, 7.0, 0.03, 3.0, 0.4)
+    return relaxation.fit_relaxation(t, y, model="biexponential_decay")
+
+
+def test_report_shows_the_share_on_the_amplitude_row():
+    report = relaxation.format_relaxation_report(_biexponential_fit())
+    amplitude_row = next(line for line in report.splitlines() if line.strip().startswith("A1 "))
+    assert "(70.0%)" in amplitude_row
+
+
+def test_report_pairs_each_share_with_its_own_rate():
+    report = relaxation.format_relaxation_report(_biexponential_fit())
+    assert "Relative amplitudes" in report
+    section = report.split("Relative amplitudes")[1]  # heading also names "population weights"
+    assert "T2a = 30.0 ms" in section
+    assert "T2b = 400 ms" in section
+
+
+def test_report_keeps_the_absolute_amplitude_and_its_error():
+    # The ratio is for comparing; the report is still the record of
+    # what was actually fitted.
+    report = relaxation.format_relaxation_report(_biexponential_fit())
+    amplitude_row = next(line for line in report.splitlines() if line.strip().startswith("A1 "))
+    assert "7" in amplitude_row.split("(")[0]
+
+
+def test_report_has_no_share_section_for_a_single_amplitude():
+    t = np.geomspace(0.002, 1.0, 15)
+    fit = relaxation.fit_relaxation(
+        t, relaxation.exponential_decay(t, 4.0, 0.1), model="exponential_decay")
+    assert "Relative amplitudes" not in relaxation.format_relaxation_report(fit)
+
+
+def test_report_flags_shares_outside_zero_to_one_hundred():
+    # Opposite-sign components are usually an over-parameterised model,
+    # and an absolute amplitude would have hidden it.
+    t = np.geomspace(0.002, 1.0, 20)
+    y = relaxation.biexponential_decay(t, 5.0, 0.03, -1.0, 0.4)
+    fit = relaxation.fit_relaxation(t, y, model="biexponential_decay",
+                                     p0=[5.0, 0.03, -1.0, 0.4])
+    report = relaxation.format_relaxation_report(fit)
+    assert "125.00%" in report
+    # The note is word-wrapped, so compare on collapsed whitespace.
+    assert "opposite signs" in " ".join(report.split())
+
+
+def test_report_orders_shares_the_way_the_model_does():
+    # Alphabetical would sort a 10-component fit as I1, I10, I2, ...
+    params = {f"I{i}": float(11 - i) for i in range(1, 11)}
+    params.update({f"D{i}": 1e-9 / i for i in range(1, 11)})
+    fit = {
+        "model": "diffusion_n", "param_names": [n for i in range(1, 11)
+                                                 for n in (f"I{i}", f"D{i}")],
+        "params": params, "errors": {}, "rate_param": None, "spec": {},
+        "fit_quality": {}, "y_err": None,
+    }
+    section = relaxation.format_relaxation_report(fit).split("Relative amplitudes")[1]
+    shown = [line.split()[0] for line in section.splitlines()
+             if line.strip().startswith("I")]
+    assert shown == [f"I{i}" for i in range(1, 11)]
+
+
+# ============================================================
+# A value list longer than the data
+# ============================================================
+
+def test_get_delays_uses_the_first_entries_of_a_longer_list():
+    # Bruker's own convention: a 24-entry vdlist with F1 TD set to 10
+    # uses the first 10 values, and TopSpin does not complain.
+    fits = [{"index": i} for i in range(1, 4)]
+    delays = relaxation._get_delays(fits, np.array([1.0, 2.0, 3.0, 4.0, 5.0]))
+    np.testing.assert_allclose(delays, [1.0, 2.0, 3.0])
+
+
+def test_get_delays_reports_a_shorter_list_with_the_way_out():
+    # Shorter genuinely cannot be fitted -- there is no value for the
+    # last slices. It used to surface as a bare IndexError rephrased as
+    # "check the vdlist matches this dataset", which says what is wrong
+    # but not what to do.
+    fits = [{"index": i} for i in range(1, 4)]
+    with pytest.raises(ValueError) as excinfo:
+        relaxation._get_delays(fits, np.array([1.0, 2.0]))
+    message = str(excinfo.value)
+    assert "2 entries" in message and "slice 3" in message
+    assert "first 2 slices" in message
+
+
+def test_get_delays_follows_the_slice_indices_not_their_order():
+    # Entries are looked up by slice number, so a reordered or
+    # partial set of fits still gets its own values.
+    fits = [{"index": 3}, {"index": 1}]
+    np.testing.assert_allclose(
+        relaxation._get_delays(fits, np.array([10.0, 20.0, 30.0, 40.0])), [30.0, 10.0])
