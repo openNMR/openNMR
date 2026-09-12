@@ -438,6 +438,30 @@ def fft_spectrum(fid: np.ndarray, dt: float) -> tuple[np.ndarray, np.ndarray]:
     return freq_hz, spectrum
 
 
+def ifft_spectrum(spectrum: np.ndarray) -> np.ndarray:
+    """Inverse of :func:`fft_spectrum`: a frequency-domain spectrum
+    back to the time-domain FID it came from.
+
+    Exactly undoes that function's own ``fftshift`` + ``fft`` pair, in
+    the reverse order, so ``ifft_spectrum(fft_spectrum(fid)[1])``
+    returns ``fid`` to numerical precision. There is no ``dt``
+    parameter and no frequency axis returned, because neither is
+    needed to invert: the shift and the transform are both purely
+    positional.
+
+    Added for reference deconvolution (:mod:`opennmr.processing.refdeconv`),
+    which isolates a reference resonance *in the frequency domain* and
+    then needs its FID back. Written here rather than inline there so
+    the forward and inverse conventions live side by side -- getting
+    the ``fftshift`` half wrong is silent, and shows up only as a
+    correction function that is a mirrored or rotated version of the
+    right one.
+    """
+    return _scipy_fft.ifft(
+        _scipy_fft.ifftshift(spectrum, axes=-1), axis=-1, workers=fft_workers(),
+    )
+
+
 # ============================================================
 # Phasing
 # ============================================================

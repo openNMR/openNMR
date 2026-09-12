@@ -20,11 +20,13 @@ from opennmr.gui.main_window import (
     MainWindow, _DosySettingsDialog, _GradientCalibrationDialog, _ScoreSettingsDialog,
 )
 from opennmr.gui.session import Session
+import opennmr.gui.main_window as main_window_module
 from opennmr import io as opennmr_io
 from opennmr.io import bruker as io_bruker
 from opennmr.io import persistence as io_persistence
 from opennmr.processing import diffusion as processing_diffusion
 from opennmr.processing import fitting as processing_fitting
+from opennmr.processing import ilt as processing_ilt
 from opennmr.processing import slicing as processing_slicing
 from opennmr.processing import ft as processing_ft
 from opennmr.processing.slicing import get_trace
@@ -35,6 +37,16 @@ from opennmr.processing.fitting import gaussian
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+def _set_delay_unit(window, unit: str) -> None:
+    """Put the Curve Fitting panel's Unit combo on ``unit`` ("s", "ms"
+    or "µs"). Tests that care about absolute delays set it explicitly
+    rather than relying on the default, so what a typed number means is
+    visible in the test itself."""
+    index = window.delay_unit_combo.findText(unit)
+    assert index >= 0, f"no {unit!r} unit in the combo"
+    window.delay_unit_combo.setCurrentIndex(index)
 
 
 def _write_params(path, params):
@@ -2997,18 +3009,16 @@ def test_main_window_xpulse_2d_phase_drag_does_not_crash(qapp, tmp_path, monkeyp
     assert window.session.spectra[index].data.shape[0] == 4
 
 
-def test_main_window_process_indirect_button_hidden_for_xpulse_2d(qapp, tmp_path, monkeypatch):
+def test_main_window_process_indirect_button_works_for_xpulse_2d(qapp, tmp_path, monkeypatch):
     # Real user report: "Importing 2D x-pulse causes a crash." Root
-    # cause: io.xpulse.read_2d has no pseudo_2d parameter at all (every
-    # genuine 2D load from it is unconditionally the real thing) --
-    # unlike Bruker/Varian, which both accept one. The "Process
-    # Indirect Dimension" button was shown regardless, so unchecking it
-    # (or the button's own state ever needing a reload) reached
-    # _on_process_indirect_toggled's reload call, which forwards
-    # pseudo_2d= straight into read_2d and raised
-    # "TypeError: read_2d() got an unexpected keyword argument
-    # 'pseudo_2d'" -- confirmed directly. Fixed by hiding the button
-    # for this vendor, the same way it's already hidden for 1D data.
+    # cause: io.xpulse.read_2d had no pseudo_2d parameter, so reaching
+    # _on_process_indirect_toggled's reload raised "TypeError:
+    # read_2d() got an unexpected keyword argument 'pseudo_2d'". That
+    # was first fixed by *hiding* the button for this vendor -- which
+    # stopped the crash but left a second report behind it: "some
+    # pseudo-2Ds are being noted as regular 2Ds", with no way to
+    # correct one. read_2d takes pseudo_2d now, so the toggle is shown
+    # and works like every other vendor's.
     from PySide6.QtWidgets import QMessageBox
 
     path = _make_xpulse_ntuples_2d_dataset(tmp_path)
@@ -3019,7 +3029,20 @@ def test_main_window_process_indirect_button_hidden_for_xpulse_2d(qapp, tmp_path
     window._load(path, vendor="xpulse")
 
     assert critical_calls == []
-    assert window.process_indirect_button.isHidden()
+    # Shown, and it round-trips without the TypeError that started all
+    # this -- which is what the hiding was standing in for.
+    assert not window.process_indirect_button.isHidden()
+    # X-Pulse still *loads* a NTUPLES 2D as a genuine 2D (unlike
+    # Bruker, whose auto-detection is overridden): every one in
+    # evidence is a real correlation experiment. The toggle is the way
+    # to correct a series that is not.
+    assert not window.session.spectra[0].is_pseudo_2d
+    window.process_indirect_button.setChecked(False)   # -> pseudo-2D
+    assert critical_calls == []
+    assert window.session.spectra[0].is_pseudo_2d
+    window.process_indirect_button.setChecked(True)    # -> back to genuine 2D
+    assert critical_calls == []
+    assert not window.session.spectra[0].is_pseudo_2d
 
     # A genuine (non-pseudo) Bruker 2D must still show and support it.
     bruker_path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=16, name="stillworks2d", f1_nuc="13C")
@@ -4586,6 +4609,7 @@ def test_main_window_fit_curve_compare_stack_recovers_known_t2(qapp):
     _load_spectrum_directly(window, spectrum)  # also auto-populates compare_list
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    _set_delay_unit(window, "s")  # these delays are in seconds
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
 
@@ -4609,6 +4633,7 @@ def test_main_window_fit_curve_custom_equation_recovers_known_t2(qapp):
     _load_spectrum_directly(window, spectrum)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    _set_delay_unit(window, "s")
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     custom_index = window.relaxation_model_combo.findData("custom")
     window.relaxation_model_combo.setCurrentIndex(custom_index)
@@ -4708,6 +4733,7 @@ def test_main_window_view_relaxation_peak_spin_switches_between_peaks(qapp):
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window._add_peak_row(shift=6.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    _set_delay_unit(window, "s")  # these delays are in seconds
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
 
@@ -4747,6 +4773,7 @@ def test_main_window_relaxation_uncertainty_checkbox_shows_shaded_band(qapp):
     _load_spectrum_directly(window, spectrum)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")  # these delays are in seconds
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
 
@@ -4765,6 +4792,8 @@ def _fit_a_t2_curve(window, delays, true_t2, noise=0.0, seed=0):
     _load_spectrum_directly(window, spectrum)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)
+    # These delays are in seconds; the panel's own default is ms.
+    _set_delay_unit(window, "s")
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
     window._on_fit_curve_button_clicked()
@@ -5294,6 +5323,7 @@ def test_main_window_integrate_regions_feeds_fit_curve_recovers_known_t2(qapp):
     assert window.value_source_combo.currentData() == "integral"
 
     window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
     window._on_fit_curve_button_clicked()
@@ -5607,9 +5637,54 @@ def test_main_window_resolve_delays_manual_list(qapp, tmp_path):
     window = MainWindow()
     spectrum = _make_pseudo2d_relaxation_spectrum([0.001, 0.01, 0.1])
     window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    _set_delay_unit(window, "s")
     window.manual_delays_edit.setText("1, 2, 3")
     delays = window._resolve_independent_values(spectrum, is_diffusion=False)
     np.testing.assert_allclose(delays, [1.0, 2.0, 3.0])
+
+
+def test_main_window_manual_list_is_read_in_the_selected_unit(qapp):
+    # Typed values are in whatever the Unit combo says; the fit is
+    # always in seconds. Milliseconds is the default, by request.
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.001, 0.01, 0.1])
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText("10, 100, 1000")
+
+    assert window.delay_unit_combo.currentText() == "ms"
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False), [0.01, 0.1, 1.0])
+
+    _set_delay_unit(window, "s")
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False), [10.0, 100.0, 1000.0])
+
+    _set_delay_unit(window, "µs")
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False), [1e-5, 1e-4, 1e-3])
+
+
+def test_main_window_manual_list_suffix_beats_the_unit_combo(qapp):
+    # "10m" is 10 ms whatever the combo says -- the vdlist convention.
+    # Rescaling an explicit suffix by the combo as well would be the
+    # one genuinely ambiguous reading.
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.001, 0.01, 0.1])
+    window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "µs")
+    window.manual_delays_edit.setText("10m, 100m, 1s")
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False), [0.01, 0.1, 1.0])
+
+
+def test_main_window_delay_unit_is_hidden_for_a_diffusion_fit(qapp):
+    # A b-value has no SI-prefix convention to pick from.
+    window = MainWindow()
+    window.fit_type_combo.setCurrentIndex(1)  # Diffusion (PFG)
+    assert window.delay_unit_combo.isHidden()
+    assert window.delay_unit_row_label.isHidden()
+    window.fit_type_combo.setCurrentIndex(0)
+    assert not window.delay_unit_combo.isHidden()
 
 
 def test_main_window_resolve_delays_auto_falls_back_to_slice_index(qapp, tmp_path):
@@ -5638,13 +5713,30 @@ def test_main_window_resolve_delays_start_step(qapp, tmp_path):
     window = MainWindow()
     spectrum = _make_pseudo2d_relaxation_spectrum([0.001, 0.01, 0.1])
     window.delay_source_combo.setCurrentIndex(2)  # Start + step
+    _set_delay_unit(window, "s")
     window.delay_start_spin.setValue(0.0)
     window.delay_step_spin.setValue(0.25)
     delays = window._resolve_independent_values(spectrum, is_diffusion=False)
     np.testing.assert_allclose(delays, [0.0, 0.25, 0.5])
 
 
+def test_main_window_start_step_is_read_in_the_selected_unit(qapp):
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.001, 0.01, 0.1])
+    window.delay_source_combo.setCurrentIndex(2)
+    _set_delay_unit(window, "ms")
+    window.delay_start_spin.setValue(10.0)
+    window.delay_step_spin.setValue(10.0)
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False), [0.01, 0.02, 0.03])
+    # The spin boxes name the unit they are in.
+    assert window.delay_start_spin.suffix().strip() == "ms"
+
+
 def test_main_window_resolve_delays_vclist_times_factor(qapp, tmp_path):
+    # Nothing picked in the panel: the source finds the experiment's
+    # own list file, exactly as the Bruker-only vclist source it
+    # generalises always did.
     expt = tmp_path / "expt"
     expt.mkdir()
     (expt / "vclist").write_text("1\n2\n4\n8\n")
@@ -5654,11 +5746,90 @@ def test_main_window_resolve_delays_vclist_times_factor(qapp, tmp_path):
     spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
         spectrum.metadata, source_path=str(expt),
     ))
-    window.delay_source_combo.setCurrentIndex(3)  # vclist x factor
-    window.vclist_factor_spin.setValue(0.5)
+    window.delay_source_combo.setCurrentIndex(3)  # List file x factor
+    # Bare counters, so list x factor is in the panel's Unit; seconds here.
+    _set_delay_unit(window, "s")
+    window.list_factor_edit.setText("0.5")
 
     delays = window._resolve_independent_values(spectrum, is_diffusion=False)
     np.testing.assert_allclose(delays, [0.5, 1.0, 2.0, 4.0])
+
+
+def test_main_window_resolve_delays_list_file_any_vendor_filename(qapp, tmp_path):
+    # The point of the generalisation: an X-Pulse-style valueslist in
+    # the vendor's own parameters/ folder, read by the same source that
+    # reads a Bruker vclist, with no vendor check anywhere.
+    expt = tmp_path / "4"
+    (expt / "parameters").mkdir(parents=True)
+    (expt / "parameters" / "G1_valueslist.txt").write_text("0.1\n0.5\n0.9\n")
+
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.001, 0.01, 0.1])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, vendor="xpulse", source_path=str(expt),
+    ))
+    window.delay_source_combo.setCurrentIndex(3)
+    _set_delay_unit(window, "s")
+    window.list_factor_edit.setText("2")
+
+    values = window._resolve_independent_values(spectrum, is_diffusion=True)
+    np.testing.assert_allclose(values, [0.2, 1.0, 1.8])
+
+
+def test_main_window_resolve_delays_list_file_honours_time_suffixes(qapp, tmp_path):
+    expt = tmp_path / "expt"
+    expt.mkdir()
+    (expt / "vdlist").write_text("# a comment\n10m\n\n100m\n1s\n")
+
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.001, 0.01, 0.1])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, source_path=str(expt),
+    ))
+    window.delay_source_combo.setCurrentIndex(3)
+
+    delays = window._resolve_independent_values(spectrum, is_diffusion=False)
+    np.testing.assert_allclose(delays, [0.01, 0.1, 1.0])
+
+
+def test_main_window_resolve_delays_list_file_none_found_explains_itself(qapp, tmp_path):
+    expt = tmp_path / "empty"
+    expt.mkdir()
+
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.001, 0.01, 0.1])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, source_path=str(expt),
+    ))
+    window.delay_source_combo.setCurrentIndex(3)
+
+    with pytest.raises(ValueError, match="No list file found"):
+        window._resolve_independent_values(spectrum, is_diffusion=False)
+
+
+def test_main_window_manual_list_accepts_whitespace_separated_values(qapp):
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.001, 0.01, 0.1])
+    window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    window.manual_delays_edit.setText("10m 100m 1s")
+
+    delays = window._resolve_independent_values(spectrum, is_diffusion=False)
+    np.testing.assert_allclose(delays, [0.01, 0.1, 1.0])
+
+
+def test_main_window_manual_list_row_label_hides_with_its_field(qapp):
+    # The orphaned "List:" label was the visible half of the report
+    # that the manual list "doesn't seem to be used": the field it
+    # belongs to was hidden under every other source while the label
+    # stayed put.
+    window = MainWindow()
+    window.delay_source_combo.setCurrentIndex(0)  # Auto
+    assert window.manual_delays_row_label.isHidden()
+    assert window.manual_delays_edit.isHidden()
+
+    window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    assert not window.manual_delays_row_label.isHidden()
+    assert not window.manual_delays_edit.isHidden()
 
 
 def test_main_window_resolve_delays_relative_gradient(qapp):
@@ -5726,6 +5897,7 @@ def test_main_window_build_fit_report_csv_includes_curve_fit_section(qapp):
     _load_spectrum_directly(window, spectrum)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    _set_delay_unit(window, "s")
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
 
@@ -6070,6 +6242,7 @@ def test_main_window_fit_spectrum_then_curve_recovers_known_t2(qapp):
     _load_spectrum_directly(window, spectrum)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)  # eta=0 -> pure Gaussian, matches true shape
     window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    _set_delay_unit(window, "s")  # these delays are in seconds
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
 
@@ -6093,6 +6266,7 @@ def test_main_window_fit_canvas_siloed_per_spectrum(qapp):
     _load_spectrum_directly(window, spectrum_a)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    _set_delay_unit(window, "s")  # these delays are in seconds
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)  # "Exponential decay (T2)"
     _fit_spectrum_then_curve(window)
@@ -6114,6 +6288,7 @@ def test_main_window_spectral_fit_canvas_siloed_per_spectrum(qapp):
     _load_spectrum_directly(window, spectrum_a)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")  # these delays are in seconds
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
     window._on_fit_spectrum_clicked()  # spectral fit alone -- curve fit not needed here
@@ -6143,6 +6318,7 @@ def test_main_window_view_slice_fit_does_not_touch_spectrum_canvas(qapp):
     _load_spectrum_directly(window, spectrum)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")  # these delays are in seconds
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
     window._on_fit_spectrum_clicked()
@@ -6189,7 +6365,7 @@ def test_main_window_peak_picking_and_integration_are_separate_subtabs(qapp):
     # test_main_window_spectral_fitting_is_its_own_top_level_tab. They
     # are still two separate sub-tabs, which is what this test is
     # actually about; only their parent changed.
-    assert labels == ["Curve Fitting", "VOCS", "Imaging"]
+    assert labels == ["Curve Fitting", "eNMR", "VOCS", "Imaging"]
     spectral = [window.spectral_fitting_sub_tabs.tabText(i)
                 for i in range(window.spectral_fitting_sub_tabs.count())]
     assert spectral == ["Peak Picking", "Integration"]
@@ -6803,6 +6979,7 @@ def test_main_window_analysis_results_siloed_per_spectrum(qapp):
     window._select_single_row(0)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")  # these delays are in seconds
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
     _fit_spectrum_then_curve(window)
@@ -6835,6 +7012,7 @@ def test_main_window_view_slice_fit_shows_data_and_fit_curve(qapp):
     _load_spectrum_directly(window, spectrum)
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
     window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")  # these delays are in seconds
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
     window._on_fit_spectrum_clicked()  # spectral fit alone -- curve fit not needed here
@@ -8142,16 +8320,21 @@ def test_main_window_recorded_and_user_phase_are_stored_separately(qapp, tmp_pat
     assert raw["phase0"] == pytest.approx(0.0)  # the user has dialled nothing yet
 
 
-def test_main_window_pan_is_the_default_mode_once_data_is_loaded(qapp, tmp_path, monkeypatch):
-    # Explicit user request: "Pan should be on by default when the
-    # programme/data is loaded." Applied on load rather than at startup
-    # so it lands on canvases that actually have something plotted.
+def test_main_window_loading_does_not_force_a_navigation_mode(qapp, tmp_path, monkeypatch):
+    # Pan used to be switched on for the first spectrum loaded (an
+    # earlier explicit request) and was withdrawn by a later one:
+    # "actually stop having pan as the default mode". A mode the
+    # application turns on for you is a mode you have to notice and
+    # turn off.
     _isolate_sidecars(monkeypatch, tmp_path)
     window = MainWindow()
-    assert window._navigation_mode() == ""  # nothing loaded yet
+    assert window._navigation_mode() == ""
 
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
 
+    assert window._navigation_mode() == ""
+    # Still one click (or Ctrl+Shift+P) away, just not automatic.
+    window._set_navigation_mode("pan")
     assert window._navigation_mode() == "pan"
 
 
@@ -8162,6 +8345,7 @@ def test_main_window_navigation_mode_toggle_and_idempotence(qapp, tmp_path, monk
     _isolate_sidecars(monkeypatch, tmp_path)
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window._set_navigation_mode("pan")  # no longer automatic on load
 
     window._toggle_navigation_mode()
     assert window._navigation_mode() == "zoom"
@@ -9398,7 +9582,11 @@ def test_main_window_generalised_diffusion_model_recovers_two_components(qapp):
     recovered = sorted([result["params"]["D1"], result["params"]["D2"]], reverse=True)
     assert recovered[0] == pytest.approx(3e-9, rel=0.05)
     assert recovered[1] == pytest.approx(2e-10, rel=0.05)
-    assert "Population weights" in window.analysis_results_label.text()
+    # Each component's share of the total, paired with its own D --
+    # the form a multi-component result is quoted in.
+    report = window.analysis_results_label.text()
+    assert "population weights" in report
+    assert "%" in report.split("Relative amplitudes")[1]
 
 
 def test_main_window_component_controls_only_shown_for_the_generalised_model(qapp):
@@ -9456,6 +9644,8 @@ def test_main_window_guess_table_supplies_p0_bounds_and_fixed(qapp):
     window.relaxation_model_combo.setCurrentIndex(
         window.relaxation_model_combo.findData("inversion_recovery"))
     window.guess_group.setChecked(True)
+    # Time rows in this table are in the panel's Unit; these are seconds.
+    _set_delay_unit(window, "s")
     window.guess_table.setItem(1, 1, QTableWidgetItem("0.25"))   # T1 guess
     window.guess_table.setItem(1, 2, QTableWidgetItem("0.01"))   # T1 min
     window.guess_table.setItem(1, 3, QTableWidgetItem("5"))      # T1 max
@@ -9474,6 +9664,7 @@ def test_main_window_blank_guess_cells_fall_back_to_the_automatic_value(qapp):
     window.relaxation_model_combo.setCurrentIndex(
         window.relaxation_model_combo.findData("exponential_decay"))
     window.guess_group.setChecked(True)
+    _set_delay_unit(window, "s")
     window.guess_table.setItem(0, 1, QTableWidgetItem(""))
     window.guess_table.setItem(1, 1, QTableWidgetItem("0.07"))
     p0, _bounds, _fixed = window._read_guess_table(["M0", "T2"])
@@ -9486,6 +9677,7 @@ def test_main_window_guess_table_rejects_nonsense_before_the_fit_runs(qapp):
     window.relaxation_model_combo.setCurrentIndex(
         window.relaxation_model_combo.findData("exponential_decay"))
     window.guess_group.setChecked(True)
+    _set_delay_unit(window, "s")
 
     window.guess_table.setItem(1, 1, QTableWidgetItem("not a number"))
     with pytest.raises(ValueError, match="is not a number"):
@@ -9777,7 +9969,7 @@ def test_main_window_spectral_fitting_is_its_own_top_level_tab(qapp):
     assert spectral == ["Peak Picking", "Integration"]
     analysis = [window.analysis_sub_tabs.tabText(i)
                 for i in range(window.analysis_sub_tabs.count())]
-    assert analysis == ["Curve Fitting", "VOCS", "Imaging"]
+    assert analysis == ["Curve Fitting", "eNMR", "VOCS", "Imaging"]
 
 
 def test_main_window_curve_fit_names_what_it_will_fit(qapp, tmp_path):
@@ -9862,6 +10054,7 @@ def test_main_window_clear_peak_override_returns_it_to_the_shared_set(qapp):
     window.relaxation_model_combo.setCurrentIndex(
         window.relaxation_model_combo.findData("exponential_decay"))
     window.guess_group.setChecked(True)
+    _set_delay_unit(window, "s")
     window.guess_table.setItem(1, 1, QTableWidgetItem("0.02"))
     window.guess_peak_combo.setCurrentIndex(2)
     window.guess_table.setItem(1, 1, QTableWidgetItem("0.9"))
@@ -10010,6 +10203,68 @@ def test_main_window_score_resolves_overlapping_species(qapp, monkeypatch):
     assert "peak table" in window.analysis_results_label.text()
     assert "SCORE" in window.analysis_results_label.text()
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
+
+
+def test_main_window_score_uses_the_curve_fit_panels_model(qapp, monkeypatch):
+    # "the SCORE methods should utilise the same fitting functions as
+    # the model for the curve fit" -- SCORE now evaluates whatever
+    # RELAXATION_MODELS entry the Model combo names, not a private
+    # exponential of its own.
+    window, _b, _ppm = _overlapping_pfg_window(qapp)
+    monkeypatch.setattr(_ScoreSettingsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+
+    index = window.relaxation_model_combo.findData("stejskal_tanner_stretched")
+    assert index >= 0
+    window.relaxation_model_combo.setCurrentIndex(index)
+
+    window._on_score_clicked()
+
+    result = window._score_result
+    assert result["model"] == "stejskal_tanner_stretched"
+    # Each component carries the model's own extra parameter.
+    assert all("beta" in entry for entry in result["component_params"])
+    assert "stejskal_tanner_stretched" in window.analysis_results_label.text()
+
+
+def test_main_window_score_default_model_is_the_plain_stejskal_tanner(qapp, monkeypatch):
+    window, _b, _ppm = _overlapping_pfg_window(qapp)
+    monkeypatch.setattr(_ScoreSettingsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    window._on_score_clicked()
+    assert window._score_result["model"] == "stejskal_tanner"
+
+
+def test_main_window_score_rejects_a_multi_component_model_with_the_reason(qapp, monkeypatch):
+    # A biexponential already describes the populations SCORE's own
+    # component count describes; asking for both is asking for four.
+    # Reported against the Model combo, before the settings dialog.
+    window, _b, _ppm = _overlapping_pfg_window(qapp)
+    index = window.relaxation_model_combo.findData("stejskal_tanner_biexponential")
+    assert index >= 0
+    window.relaxation_model_combo.setCurrentIndex(index)
+
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "critical",
+                        lambda *args, **kwargs: shown.update(title=args[1], text=args[2]))
+    monkeypatch.setattr(_ScoreSettingsDialog, "exec",
+                        lambda self: pytest.fail("the settings dialog should not open"))
+
+    window._on_score_clicked()
+
+    assert "no single amplitude parameter" in shown["text"]
+    assert window._score_result is None
+
+
+def test_main_window_score_dialog_names_the_model_it_will_use(qapp, monkeypatch):
+    window, _b, _ppm = _overlapping_pfg_window(qapp)
+    seen = {}
+
+    def capture(self):
+        seen["labels"] = [w.text() for w in self.findChildren(QLabel)]
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(_ScoreSettingsDialog, "exec", capture)
+    window._on_score_clicked()
+    assert any("Curve Fitting sub-tab" in text for text in seen["labels"])
 
 
 def test_main_window_score_dialog_prefills_the_svd_suggestion(qapp, monkeypatch):
@@ -11228,3 +11483,1153 @@ def test_dosy_state_is_cleared_when_another_view_replaces_it(qapp, monkeypatch):
     assert window.fit_canvas._dosy_result is not None
     window.fit_canvas.show_spectrum(_make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     assert window.fit_canvas._dosy_result is None
+
+
+# ============================================================
+# Opening the same experiment twice
+# ============================================================
+
+def _bruker_1d_folder(tmp_path, name="1"):
+    """A minimal loadable Bruker 1D experiment, copied from the real
+    test data so every reader path behaves as it does in use."""
+    source = os.path.join("test_data", "Bruker Example Data")
+    matches = MainWindow._scan_for_spectra(source)
+    assert matches, "expected a loadable Bruker experiment in test_data"
+    target = tmp_path / name
+    shutil.copytree(matches[0][0], target)
+    return str(target), matches[0][1]
+
+
+def test_main_window_opening_the_same_folder_twice_switches_instead_of_reloading(qapp, tmp_path):
+    path, vendor = _bruker_1d_folder(tmp_path)
+    window = MainWindow()
+
+    window._open_paths([path])
+    assert len(window.session) == 1
+
+    window._open_paths([path])
+    assert len(window.session) == 1
+    assert window.spectrum_list.count() == 1
+    assert window.spectrum_list.currentRow() == 0
+    assert "already open" in window.statusBar().currentMessage()
+
+
+def test_main_window_reopening_selects_the_existing_row(qapp, tmp_path):
+    first, vendor = _bruker_1d_folder(tmp_path, name="1")
+    second, _vendor = _bruker_1d_folder(tmp_path, name="2")
+    window = MainWindow()
+
+    window._open_paths([first, second])
+    assert len(window.session) == 2
+    assert window.spectrum_list.currentRow() == 1
+
+    window._open_paths([first])
+    assert len(window.session) == 2
+    # Switched back to the one already open, rather than appending a
+    # third row -- the whole point, since the user's peak table and
+    # processing live on that row.
+    assert window.spectrum_list.currentRow() == 0
+
+
+def test_main_window_reopen_does_not_discard_work_on_the_open_copy(qapp, tmp_path):
+    path, _vendor = _bruker_1d_folder(tmp_path)
+    window = MainWindow()
+    window._open_paths([path])
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    assert window.peak_table.rowCount() == 1
+
+    window._open_paths([path])
+
+    assert len(window.session) == 1
+    assert window.peak_table.rowCount() == 1
+
+
+def test_main_window_dropping_an_already_open_folder_does_not_duplicate(qapp, tmp_path):
+    path, _vendor = _bruker_1d_folder(tmp_path)
+    window = MainWindow()
+    window._handle_dropped_paths([path])
+    window._handle_dropped_paths([path])
+    assert len(window.session) == 1
+
+
+def test_main_window_browser_activation_does_not_duplicate(qapp, tmp_path):
+    path, vendor = _bruker_1d_folder(tmp_path)
+    window = MainWindow()
+    window._on_browser_spectrum_activated(path, vendor)
+    window._on_browser_spectrum_activated(path, vendor)
+    assert len(window.session) == 1
+
+
+def test_main_window_a_removed_spectrum_can_be_opened_again(qapp, tmp_path):
+    path, _vendor = _bruker_1d_folder(tmp_path)
+    window = MainWindow()
+    window._open_paths([path])
+    window.spectrum_list.setCurrentRow(0)
+    window._on_remove_clicked()
+    assert len(window.session) == 0
+
+    window._open_paths([path])
+    assert len(window.session) == 1
+
+
+def test_session_index_for_path_normalises_spellings(tmp_path):
+    session = Session()
+    path, _vendor = _bruker_1d_folder(tmp_path)
+    session.add(path)
+    # A trailing slash (what a folder picker returns) and a "." segment
+    # are the same experiment.
+    assert session.index_for_path(path + "/") == 0
+    assert session.index_for_path(os.path.join(path, ".")) == 0
+    assert session.index_for_path(str(tmp_path / "nowhere")) is None
+
+
+def test_session_index_for_path_separates_vendors(tmp_path):
+    session = Session()
+    path, vendor = _bruker_1d_folder(tmp_path)
+    session.add(path, vendor=vendor)
+    assert session.index_for_path(path, vendor=vendor) == 0
+    # The same folder read by a different reader is a different
+    # spectrum, not a duplicate.
+    assert session.index_for_path(path, vendor="jcampdx") is None
+
+
+def test_session_index_for_path_ignores_derived_spectra(qapp, tmp_path):
+    session = Session()
+    path, _vendor = _bruker_1d_folder(tmp_path)
+    spectrum = session.add(path)
+    session.add_derived(spectrum, "Measured")
+    assert session.index_for_path(path) == 0
+    assert session.index_for_path("Measured") is None
+
+
+def test_main_window_does_not_queue_a_second_read_of_a_loading_folder(qapp, tmp_path, monkeypatch):
+    # A background read only reaches the session when it finishes on
+    # the GUI thread, so a check on the session alone would let a
+    # second drop of the same folder queue a second read of it.
+    path, vendor = _bruker_1d_folder(tmp_path)
+    window = MainWindow()
+
+    dispatched = []
+
+    class _FakeLoader:
+        def load(self, path, vendor, kwargs):
+            dispatched.append(path)
+
+    monkeypatch.setattr(window, "_background_loader", lambda: _FakeLoader())
+    monkeypatch.setattr(main_window_module, "background_load_enabled", lambda: True)
+
+    window._open_one(path, vendor)
+    window._open_one(path, vendor)
+
+    assert dispatched == [path]
+    assert "already loading" in window.statusBar().currentMessage()
+
+    # Once the read lands, the path is no longer pending -- and the
+    # session check takes over from there.
+    window._on_background_load_finished(path, vendor, opennmr_io.load(path, vendor=vendor))
+    assert len(window.session) == 1
+    window._open_one(path, vendor)
+    assert dispatched == [path]
+    assert len(window.session) == 1
+
+
+def test_main_window_list_file_combo_offers_what_is_beside_the_data(qapp, tmp_path):
+    # The panel offers the experiment's own list files, labelled by
+    # folder so two experiments' identically-named vdlists are
+    # distinguishable, with Browse… for anything else.
+    sample = tmp_path / "sample"
+    expt = sample / "11"
+    expt.mkdir(parents=True)
+    (expt / "vdlist").write_text("10m\n20m\n40m\n")
+    (sample / "extra_delays.txt").write_text("1\n2\n3\n")
+
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, source_path=str(expt)))
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.delay_source_combo.setCurrentIndex(3)  # List file x factor
+
+    labels = [window.list_file_combo.itemText(i) for i in range(window.list_file_combo.count())]
+    assert labels[0].startswith("vdlist")
+    assert "(11)" in labels[0]
+    assert any(text.startswith("extra_delays.txt") for text in labels)
+    assert labels[-1] == "Browse…"
+    # The likeliest one is selected, so the source works without a click.
+    assert window.selected_list_file().endswith("vdlist")
+
+
+def test_main_window_values_preview_shows_what_will_be_fit(qapp):
+    delays = [0.01, 0.02, 0.04, 0.08, 0.16, 0.32]
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum(delays))
+    window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    window.manual_delays_edit.setText("10, 20, 40, 80, 160, 320")  # ms
+
+    text = window.values_preview_label.text()
+    assert text.startswith("6 values [ms]:")
+    # Displayed in the unit they were typed in, not silently converted.
+    assert text.endswith("10, 20, 40, 80, 160, 320")
+
+
+def test_main_window_values_preview_elides_only_a_real_gap(qapp):
+    # With exactly six values, "…, 320" used to sit between two
+    # consecutive entries and read as though a gap had been elided.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum([0.01] * 6))
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText("1, 2, 3, 4, 5, 6")
+    assert "…" not in window.values_preview_label.text()
+
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum([0.01] * 7))
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText("1, 2, 3, 4, 5, 6, 7")
+    text = window.values_preview_label.text()
+    assert text.endswith("1, 2, 3, 4, 5, …, 7")
+
+
+def test_main_window_values_preview_flags_a_length_mismatch(qapp):
+    # A list that does not match the slice count used to surface only
+    # as an IndexError from _get_delays, after Fit Curve was clicked.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04]))
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText("1, 2")
+    # Too few: flagged, and the way out is named.
+    text = window.values_preview_label.text()
+    assert "⚠ 3 slices" in text and "set Slices to 2" in text
+
+
+def test_main_window_values_preview_does_not_warn_about_a_longer_list(qapp):
+    # A list longer than the data is Bruker's own convention, not a
+    # problem: the surplus is simply unused.
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04]))
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText("1, 2, 3, 4, 5")
+    text = window.values_preview_label.text()
+    assert "⚠" not in text
+    assert "first 3 used" in text
+
+
+def test_main_window_values_preview_reports_a_source_error_in_place(qapp):
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04]))
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText("")
+    assert window.values_preview_label.text().startswith("Values: Enter a list of values")
+
+
+def test_main_window_list_factor_can_be_an_experiment_parameter(qapp, tmp_path):
+    # The user's own case: a CPMG echo-count list times TAU, so a T2
+    # series is fitted without doing the arithmetic by hand.
+    expt = tmp_path / "cpmg"
+    expt.mkdir()
+    (expt / "echo_valueslist.txt").write_text("2\n4\n8\n16\n")
+
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04, 0.08])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, vendor="xpulse", source_path=str(expt),
+        raw={"exp_params": {"TAU": 1500.0, "P90": 8.78}}))
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.delay_source_combo.setCurrentIndex(3)  # List file x factor
+    # TAU is recorded in microseconds, and the Unit says the whole
+    # product is in microseconds -- so the factor needs no conversion
+    # at all, which is the point of the unit applying to the product.
+    _set_delay_unit(window, "µs")
+    window.list_factor_edit.setText("TAU*2")
+
+    values = window._resolve_independent_values(spectrum, is_diffusion=False)
+    np.testing.assert_allclose(values, [0.006, 0.012, 0.024, 0.048])
+
+    # The panel says what it resolved to and which parameter it used.
+    assert "Factor = 3000" in window.list_factor_value_label.text()
+    assert "TAU=1500" in window.list_factor_value_label.text()
+
+    # The same series, asked for in seconds: the factor then carries
+    # the conversion instead.
+    _set_delay_unit(window, "s")
+    window.list_factor_edit.setText("TAU*2*1e-6")
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False),
+        [0.006, 0.012, 0.024, 0.048])
+
+
+def test_main_window_list_factor_reports_an_unknown_parameter(qapp, tmp_path):
+    expt = tmp_path / "cpmg"
+    expt.mkdir()
+    (expt / "echo_valueslist.txt").write_text("2\n4\n8\n")
+
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, vendor="xpulse", source_path=str(expt),
+        raw={"exp_params": {"TAU": 1500.0}}))
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.delay_source_combo.setCurrentIndex(3)
+    window.list_factor_edit.setText("TAO*2")
+
+    # Named, not silently treated as a free parameter -- there is
+    # nothing to fit a factor against.
+    assert "TAO" in window.list_factor_value_label.text()
+    assert "TAU" in window.list_factor_value_label.text()  # what is available
+    with pytest.raises(ValueError, match="does not record"):
+        window._resolve_independent_values(spectrum, is_diffusion=False)
+
+
+def test_main_window_list_factor_empty_means_one(qapp, tmp_path):
+    expt = tmp_path / "1"
+    expt.mkdir()
+    (expt / "vdlist").write_text("10m\n20m\n40m\n")
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, source_path=str(expt)))
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.delay_source_combo.setCurrentIndex(3)
+    assert window.list_factor_edit.text() == ""
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False), [0.01, 0.02, 0.04])
+
+
+def test_main_window_list_file_does_not_carry_over_between_experiments(qapp, tmp_path):
+    # "the list file should be from the relevant folder, not remembered
+    # from the previous" -- selecting a second experiment must offer
+    # *its* list, not re-offer the first one's.
+    first = tmp_path / "11"
+    first.mkdir()
+    (first / "vdlist").write_text("10m\n20m\n40m\n")
+    second = tmp_path / "12"
+    second.mkdir()
+    (second / "vdlist").write_text("100m\n200m\n400m\n")
+
+    window = MainWindow()
+    for path in (first, second):
+        spectrum = _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04])
+        spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+            spectrum.metadata, source_path=str(path)))
+        _load_spectrum_directly(window, spectrum)
+
+    window.delay_source_combo.setCurrentIndex(3)  # List file x factor
+    assert window.selected_list_file() == str(second / "vdlist")
+    paths = [window.list_file_combo.itemData(i) for i in range(window.list_file_combo.count())]
+    assert str(first / "vdlist") not in paths
+
+    window.spectrum_list.setCurrentRow(0)
+    window.delay_source_combo.setCurrentIndex(3)
+    assert window.selected_list_file() == str(first / "vdlist")
+    paths = [window.list_file_combo.itemData(i) for i in range(window.list_file_combo.count())]
+    assert str(second / "vdlist") not in paths
+
+
+def test_main_window_list_file_choice_survives_reselecting_the_same_spectrum(qapp, tmp_path):
+    # The other half of the same rule: a deliberate pick on *this*
+    # experiment must not be thrown away by a refresh of its own combo.
+    expt = tmp_path / "11"
+    expt.mkdir()
+    (expt / "vdlist").write_text("10m\n20m\n40m\n")
+    (expt / "other_list.txt").write_text("1\n2\n3\n")
+
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, source_path=str(expt)))
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.delay_source_combo.setCurrentIndex(3)
+
+    chosen = window.list_file_combo.findData(str(expt / "other_list.txt"))
+    assert chosen >= 0
+    window.list_file_combo.setCurrentIndex(chosen)
+    window._refresh_list_file_candidates()
+    assert window.selected_list_file() == str(expt / "other_list.txt")
+
+
+def test_main_window_exports_the_curve_fit_as_values_vs_x(qapp, tmp_path, monkeypatch):
+    # "I need the curve fit results to be exportable as integral/peak
+    # height vs whatever x is."
+    true_t2 = 0.05
+    delays = np.geomspace(0.001, 0.3, 8)
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum(
+        delays, x0=5.0, fwhm=0.05, T2=true_t2))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)  # Manual list
+    _set_delay_unit(window, "ms")
+    window.manual_delays_edit.setText(", ".join(f"{d * 1e3:.6g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(2)  # Exponential decay (T2)
+
+    assert not window.export_curve_fit_button.isEnabled()
+    window._on_fit_spectrum_clicked()
+    window._on_fit_curve_button_clicked()
+    assert window.export_curve_fit_button.isEnabled()
+
+    target = tmp_path / "curve.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        lambda *args, **kwargs: (str(target), "CSV files (*.csv)"))
+    window._on_export_curve_fit_clicked()
+
+    rows = list(csv.reader(target.read_text().splitlines()))
+    header, body = rows[0], rows[1:]
+    # The x column names the unit the panel is showing, and the measured
+    # column names which Value source produced it.
+    assert header[0] == "delay (ms)"
+    assert any("integral" in name for name in header[1:])
+    assert any("fit" in name for name in header[1:])
+    assert len(body) == len(delays)
+    # Written in that unit, not in seconds. (rtol covers the %.6g the
+    # test itself typed the list with, not the export.)
+    np.testing.assert_allclose([float(row[0]) for row in body], delays * 1e3, rtol=1e-5)
+    # The measured column decays the way the series does.
+    measured = [float(row[1]) for row in body]
+    assert measured[0] > measured[-1]
+
+
+def test_main_window_export_curve_fit_with_nothing_fitted_says_so(qapp, monkeypatch):
+    window = MainWindow()
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information",
+                        lambda *args, **kwargs: shown.update(text=args[2]))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        lambda *args, **kwargs: pytest.fail("should not ask for a filename"))
+    window._on_export_curve_fit_clicked()
+    assert "Fit Curve" in shown["text"]
+
+
+# ============================================================
+# The delay unit reaches the whole curve-fitting panel
+# ============================================================
+# Report: "while the unit is selected and does the calculation
+# correctly, the curve fit and resultant values just take the values
+# naively in seconds". The conversion always reached the fit; what
+# stayed in seconds was everything the user then *looked at and typed
+# into* -- the Fit tab's x-axis and the guess table.
+
+def _fitted_t2_window(qapp, unit="ms"):
+    delays = np.geomspace(0.001, 0.3, 10)
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum(
+        delays, x0=5.0, fwhm=0.05, T2=0.05))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, unit)
+    scale = {"s": 1.0, "ms": 1e3, "µs": 1e6}[unit]
+    window.manual_delays_edit.setText(", ".join(f"{d * scale:.8g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(2)  # Exponential decay (T2)
+    window._on_fit_spectrum_clicked()
+    window._on_fit_curve_button_clicked()
+    return window, delays
+
+
+def test_main_window_fit_plot_is_drawn_in_the_selected_unit(qapp):
+    window, delays = _fitted_t2_window(qapp, "ms")
+    assert window.fit_canvas.ax.get_xlabel() == "Delay (ms)"
+    # The x-axis reads in the same numbers that were typed, not 0.001.
+    np.testing.assert_allclose(
+        window.fit_canvas.ax.lines[-1].get_xdata(), delays * 1e3, rtol=1e-6)
+    # The stored fit is untouched -- the unit is a display transform.
+    np.testing.assert_allclose(
+        window._relaxation_fit_results[0]["t"], delays, rtol=1e-6)
+    assert window._relaxation_fit_results[0]["params"]["T2"] == pytest.approx(0.05, rel=0.1)
+
+
+def test_main_window_changing_the_unit_redraws_the_fit_without_refitting(qapp):
+    window, delays = _fitted_t2_window(qapp, "ms")
+    before = window._relaxation_fit_results[0]["params"]["T2"]
+
+    _set_delay_unit(window, "s")
+    assert window.fit_canvas.ax.get_xlabel() == "Delay (s)"
+    np.testing.assert_allclose(
+        window.fit_canvas.ax.lines[-1].get_xdata(), delays, rtol=1e-6)
+    # Same fit, redrawn -- not refitted on rescaled data.
+    assert window._relaxation_fit_results[0]["params"]["T2"] == before
+
+
+def test_main_window_diffusion_fit_plot_is_never_rescaled(qapp):
+    # A b-value has no prefix convention; the Unit combo must not touch it.
+    window, b_values, _spectrum = _pfg_series_window(qapp, true_D=2.0e-9)
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText(", ".join(f"{b:.8g}" for b in b_values))
+    window.relaxation_model_combo.setCurrentIndex(0)  # Stejskal-Tanner
+    window._on_fit_spectrum_clicked()
+    window._on_fit_curve_button_clicked()
+
+    assert "b-value" in window.fit_canvas.ax.get_xlabel()
+    np.testing.assert_allclose(
+        window.fit_canvas.ax.lines[-1].get_xdata(), b_values, rtol=1e-6)
+
+
+def test_main_window_guess_table_times_are_in_the_selected_unit(qapp):
+    window, _delays = _fitted_t2_window(qapp, "ms")
+    window.guess_group.setChecked(True)
+    window._refresh_guess_table(force=True)
+
+    rows = {window.guess_table.item(r, 0).text(): r for r in range(window.guess_table.rowCount())}
+    # The automatic T2 guess, shown in ms rather than as 0.018.
+    assert float(window.guess_table.item(rows["T2"], 1).text()) > 1.0
+    assert "times in ms" in window.guess_group.title()
+
+    # A typed guess is read back in that unit.
+    window.guess_table.setItem(rows["T2"], 1, QTableWidgetItem("40"))
+    window._store_current_guess_edits()
+    p0, _bounds, _fixed = window._read_guess_table(["M0", "T2"])
+    assert p0[1] == pytest.approx(0.04)
+
+
+def test_main_window_guess_table_leaves_non_time_parameters_alone(qapp):
+    # An amplitude is on the data's own intensity scale and a stretch
+    # exponent is dimensionless -- scaling either by a time unit would
+    # be nonsense.
+    window, _delays = _fitted_t2_window(qapp, "ms")
+    window.relaxation_model_combo.setCurrentIndex(
+        window.relaxation_model_combo.findData("stretched_decay"))
+    window.guess_group.setChecked(True)
+    window._refresh_guess_table(force=True)
+
+    rows = {window.guess_table.item(r, 0).text(): r for r in range(window.guess_table.rowCount())}
+    window.guess_table.setItem(rows["M0"], 1, QTableWidgetItem("3"))
+    window.guess_table.setItem(rows["beta"], 1, QTableWidgetItem("0.8"))
+    window.guess_table.setItem(rows["T2"], 1, QTableWidgetItem("40"))
+    window._store_current_guess_edits()
+
+    p0, _bounds, _fixed = window._read_guess_table(["M0", "T2", "beta"])
+    assert p0[0] == pytest.approx(3.0)      # amplitude, unscaled
+    assert p0[1] == pytest.approx(0.04)     # T2, ms -> s
+    assert p0[2] == pytest.approx(0.8)      # beta, dimensionless
+
+
+def test_main_window_adopt_fit_as_guess_writes_in_the_selected_unit(qapp):
+    window, _delays = _fitted_t2_window(qapp, "ms")
+    window._on_adopt_fit_as_guess_clicked()
+    rows = {window.guess_table.item(r, 0).text(): r for r in range(window.guess_table.rowCount())}
+    # ~50 ms, not 0.05.
+    assert float(window.guess_table.item(rows["T2"], 1).text()) == pytest.approx(50.0, rel=0.1)
+
+
+def test_main_window_guess_bound_error_quotes_the_displayed_unit(qapp):
+    # An error naming numbers the user cannot find on screen is worse
+    # than no error.
+    window, _delays = _fitted_t2_window(qapp, "ms")
+    window.guess_group.setChecked(True)
+    window._refresh_guess_table(force=True)
+    rows = {window.guess_table.item(r, 0).text(): r for r in range(window.guess_table.rowCount())}
+    window.guess_table.setItem(rows["T2"], 1, QTableWidgetItem("900"))
+    window.guess_table.setItem(rows["T2"], 2, QTableWidgetItem("1"))
+    window.guess_table.setItem(rows["T2"], 3, QTableWidgetItem("100"))
+    window._store_current_guess_edits()
+
+    with pytest.raises(ValueError, match=r"900 ms"):
+        window._read_guess_table(["M0", "T2"])
+
+
+def test_main_window_excluding_a_point_uses_the_displayed_axis(qapp):
+    # The click arrives in display units; matching it against the
+    # stored seconds series would always pick the same end point.
+    window, delays = _fitted_t2_window(qapp, "ms")
+    target = delays[4]
+    result = window._relaxation_fit_results[0]
+    y_at_target = float(result["y"][int(np.argmin(np.abs(result["t"] - target)))])
+
+    window._on_fit_point_exclude_requested(target * 1e3, y_at_target)
+
+    excluded = window._excluded_relaxation_indices.get(0, set())
+    assert len(excluded) == 1
+    original = window._relaxation_fit_original[0]
+    assert original["t"][next(iter(excluded))] == pytest.approx(target, rel=1e-6)
+
+
+def test_main_window_a_relaxation_fit_takes_the_canvas_back_from_enmr(qapp):
+    # Regression, and it hung the suite rather than failing it. The
+    # right-click owner has to be *set* by every writer of this canvas,
+    # not only read by one of them: with only the eNMR side setting it,
+    # a relaxation exclusion after any eNMR fit went down the eNMR
+    # path, refitted a spectrum that was not an eNMR series, and put up
+    # a modal error box with nothing waiting to dismiss it.
+    window, delays = _fitted_t2_window(qapp, "ms")
+    assert window._fit_canvas_owner == "relaxation"
+
+    window._fit_canvas_owner = "enmr"          # as if an eNMR fit ran
+    window._display_relaxation_peak(0)
+    assert window._fit_canvas_owner == "relaxation"
+
+    target = delays[4]
+    result = window._relaxation_fit_results[0]
+    y_at_target = float(result["y"][int(np.argmin(np.abs(result["t"] - target)))])
+    window._on_fit_point_exclude_requested(target * 1e3, y_at_target)
+
+    assert len(window._excluded_relaxation_indices.get(0, set())) == 1
+    assert window._enmr_excluded == set()
+
+
+def test_main_window_enmr_refit_after_exclusion_never_blocks_on_a_dialog(qapp,
+                                                                          monkeypatch):
+    # A refit the user did not ask for reports through the status bar.
+    window = MainWindow()
+    shown = []
+    monkeypatch.setattr(QMessageBox, "critical",
+                        lambda *args, **kwargs: shown.append(args))
+    window._enmr_quiet = True
+    window._enmr_problem("something went wrong")
+    assert shown == []
+    window._enmr_quiet = False
+    window._enmr_problem("something went wrong")
+    assert len(shown) == 1
+
+
+def test_main_window_curve_fit_export_x_matches_the_plot(qapp, tmp_path, monkeypatch):
+    window, delays = _fitted_t2_window(qapp, "ms")
+    target = tmp_path / "curve.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        lambda *args, **kwargs: (str(target), "CSV files (*.csv)"))
+    window._on_export_curve_fit_clicked()
+
+    rows = list(csv.reader(target.read_text().splitlines()))
+    assert rows[0][0] == "delay (ms)"
+    np.testing.assert_allclose(
+        [float(r[0]) for r in rows[1:]],
+        window.fit_canvas.ax.lines[-1].get_xdata(), rtol=1e-6)
+
+
+def test_main_window_list_file_bare_values_are_in_the_selected_unit(qapp, tmp_path):
+    # "when I set ms it seems to multiply the value by 1e3 because it
+    # assumes that the read value is s, whereas the unit should set the
+    # unit for the read value". A file holding 10, 20, 40 meant
+    # milliseconds and was read as 10, 20, 40 seconds.
+    expt = tmp_path / "1"
+    expt.mkdir()
+    (expt / "delays_valueslist.txt").write_text("10\n20\n40\n")
+
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, source_path=str(expt)))
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.delay_source_combo.setCurrentIndex(3)
+
+    _set_delay_unit(window, "ms")
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False), [0.01, 0.02, 0.04])
+    # And it reads back as what is in the file, not 1000x it.
+    assert window.values_preview_label.text().endswith("10, 20, 40")
+
+    _set_delay_unit(window, "µs")
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False), [1e-5, 2e-5, 4e-5])
+
+    _set_delay_unit(window, "s")
+    np.testing.assert_allclose(
+        window._resolve_independent_values(spectrum, is_diffusion=False), [10.0, 20.0, 40.0])
+
+
+def test_main_window_list_file_with_its_own_units_ignores_the_combo(qapp, tmp_path):
+    # A vdlist writing "10m" has already said what it means; applying
+    # the combo on top would scale an absolute time a second time.
+    expt = tmp_path / "1"
+    expt.mkdir()
+    (expt / "vdlist").write_text("10m\n20m\n40m\n")
+
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, source_path=str(expt)))
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.delay_source_combo.setCurrentIndex(3)
+
+    for unit in ("s", "ms", "µs"):
+        _set_delay_unit(window, unit)
+        np.testing.assert_allclose(
+            window._resolve_independent_values(spectrum, is_diffusion=False),
+            [0.01, 0.02, 0.04], err_msg=f"rescaled a suffixed list under {unit}")
+
+
+def test_main_window_auto_source_is_never_rescaled_by_the_combo(qapp, tmp_path):
+    # Auto is the vendor's own values, in the vendor's own unit -- it is
+    # not something the user is declaring a unit for.
+    expt = tmp_path / "1"
+    expt.mkdir()
+    (expt / "vdlist").write_text("0.01\n0.02\n0.04\n")
+
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01, 0.02, 0.04])
+    spectrum = dataclasses.replace(spectrum, metadata=dataclasses.replace(
+        spectrum.metadata, vendor="bruker", source_path=str(expt)))
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.delay_source_combo.setCurrentIndex(0)  # Auto
+
+    for unit in ("s", "ms", "µs"):
+        _set_delay_unit(window, unit)
+        values = window._resolve_independent_values(spectrum, is_diffusion=False)
+        values = values["seconds"] if isinstance(values, dict) else values
+        np.testing.assert_allclose(values, [0.01, 0.02, 0.04],
+                                    err_msg=f"rescaled Auto under {unit}")
+
+
+def test_main_window_multi_peak_summary_quotes_amplitudes_as_shares(qapp):
+    # The compact per-peak table exists to compare peaks against each
+    # other, and an intensity on the data's own arbitrary scale is the
+    # one number in it that cannot be compared.
+    delays = np.geomspace(0.002, 0.5, 14)
+    ppm = np.linspace(0.0, 10.0, 1200)
+    from opennmr.processing.fitting import lorentzian
+    from opennmr.processing.relaxation import biexponential_decay
+
+    data = np.zeros((len(delays), ppm.size))
+    for i, t in enumerate(delays):
+        data[i] = (lorentzian(ppm, 3.0, 0.05, biexponential_decay(t, 7.0, 0.02, 3.0, 0.3))
+                   + lorentzian(ppm, 7.0, 0.05, biexponential_decay(t, 2.0, 0.02, 8.0, 0.3)))
+    spectrum = NMRSpectrum(
+        data=data,
+        axes=[NMRAxis(kind="index", index=np.arange(1, len(delays) + 1)),
+              NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True),
+    )
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=3.0, fwhm=0.05, eta=0.0)
+    window._add_peak_row(shift=7.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")
+    window.manual_delays_edit.setText(", ".join(f"{d:.8g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(
+        window.relaxation_model_combo.findData("biexponential_decay"))
+
+    window._on_fit_spectrum_clicked()
+    window._on_fit_curve_button_clicked()
+
+    summary = window.analysis_results_label.text()
+    assert "A1=" in summary and "%" in summary
+    # The two peaks have opposite dominant components, which is exactly
+    # the comparison the shares make readable.
+    peak_lines = [line for line in summary.splitlines() if line.startswith("Peak")]
+    assert len(peak_lines) == 2
+    shares = [float(line.split("A1=")[1].split("%")[0]) for line in peak_lines]
+    assert shares[0] > 50.0 > shares[1]
+
+
+# ============================================================
+# Limiting how many slices the analysis uses
+# ============================================================
+
+def test_main_window_slice_limit_trims_what_the_fit_uses(qapp):
+    # "There should be an easy way to limit the number of slices used."
+    delays = np.geomspace(0.001, 0.3, 10)
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum(
+        delays, x0=5.0, fwhm=0.05, T2=0.05))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")
+    window.manual_delays_edit.setText(", ".join(f"{d:.8g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(2)
+
+    window.slice_limit_spin.setValue(6)
+    window._on_fit_spectrum_clicked()
+    window._on_fit_curve_button_clicked()
+
+    # Six points fitted, not ten -- and they are the first six.
+    result = window._relaxation_fit_results[0]
+    assert len(result["t"]) == 6
+    np.testing.assert_allclose(result["t"], delays[:6], rtol=1e-6)
+
+
+def test_main_window_slice_limit_of_zero_means_every_slice(qapp):
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01] * 8)
+    _load_spectrum_directly(window, spectrum)
+    assert window.slice_limit_spin.value() == 0
+    assert window.slice_limit_spin.specialValueText() == "all"
+    assert window._fit_slice_count(spectrum) == 8
+    assert window._fit_slice_rows(spectrum) == list(range(1, 9))
+
+
+def test_main_window_slice_limit_larger_than_the_series_is_not_an_error(qapp):
+    # Usually means the box was set for a different experiment.
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum([0.01] * 5)
+    _load_spectrum_directly(window, spectrum)
+    window.slice_limit_spin.setValue(50)
+    assert window._fit_slice_count(spectrum) == 5
+
+
+def test_main_window_slice_limit_is_siloed_per_spectrum(qapp):
+    window = MainWindow()
+    for _ in range(2):
+        _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum([0.01] * 8))
+    window.slice_limit_spin.setValue(4)
+
+    window.spectrum_list.setCurrentRow(0)
+    assert window.slice_limit_spin.value() == 0   # this one was never limited
+    window.spectrum_list.setCurrentRow(1)
+    assert window.slice_limit_spin.value() == 4
+
+
+def test_main_window_curve_fit_survives_a_longer_value_list(qapp):
+    # The whole point: a list longer than the data must just work.
+    delays = np.geomspace(0.001, 0.3, 8)
+    window = MainWindow()
+    _load_spectrum_directly(window, _make_pseudo2d_relaxation_spectrum(
+        delays, x0=5.0, fwhm=0.05, T2=0.05))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")
+    # Twelve values for eight slices.
+    longer = list(delays) + [0.4, 0.5, 0.6, 0.7]
+    window.manual_delays_edit.setText(", ".join(f"{d:.8g}" for d in longer))
+    window.relaxation_model_combo.setCurrentIndex(2)
+
+    window._on_fit_spectrum_clicked()
+    window._on_fit_curve_button_clicked()
+
+    result = window._relaxation_fit_results[0]
+    assert len(result["t"]) == 8
+    assert result["params"]["T2"] == pytest.approx(0.05, rel=0.1)
+
+
+def test_main_window_dosy_uses_only_the_limited_slices(qapp, monkeypatch):
+    window, b_values, _spectrum = _pfg_series_window(qapp, true_D=2.0e-9)
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText(", ".join(f"{b:.8g}" for b in b_values))
+    window.slice_limit_spin.setValue(6)
+
+    captured = {}
+    real = processing_ilt.dosy_map
+
+    def spy(b, data, ppm, **kwargs):
+        captured["n_b"] = len(b)
+        captured["rows"] = data.shape[0]
+        return real(b, data, ppm, **kwargs)
+
+    monkeypatch.setattr(processing_ilt, "dosy_map", spy)
+    monkeypatch.setattr(_DosySettingsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    window._on_dosy_clicked()
+
+    # The b-values and the data matrix are cut together -- a map built
+    # from more rows than there are b-values would be meaningless.
+    assert captured["n_b"] == 6
+    assert captured["rows"] == 6
+
+
+# ============================================================
+# eNMR sub-tab
+# ============================================================
+
+ENMR_CALIBRATION = os.path.join(
+    "test_data", "eNMR", "Diff50_1H_eNMR_Calibration_2024-05-13", "21")
+
+
+def _enmr_window(qapp, path=ENMR_CALIBRATION):
+    window = MainWindow()
+    window._load(path, vendor="bruker")
+    return window
+
+
+def test_main_window_has_an_enmr_subtab(qapp):
+    window = MainWindow()
+    titles = [window.analysis_sub_tabs.tabText(i)
+              for i in range(window.analysis_sub_tabs.count())]
+    assert "eNMR" in titles
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_reads_voltages_and_constants_from_the_experiment(qapp):
+    window = _enmr_window(qapp)
+    # The vdlist conversion is a setting, so what it resolves to is shown.
+    assert "voltages [V]" in window.enmr_voltage_label.text()
+    assert "0, 0, 8, 8, 16, 16" in window.enmr_voltage_label.text()
+    # And the PFG constants come from diff.xml, with provenance.
+    constants = window.enmr_constants_label.text()
+    assert "0.3 T/m" in constants and "δ = 1 ms" in constants and "Δ = 100 ms" in constants
+    assert "diff.xml" in constants
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_fit_recovers_the_literature_mobility(qapp):
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+    window.enmr_gap_spin.setValue(38.5)
+
+    window._on_fit_enmr_clicked()
+
+    # The literature value for TMA+, through the GUI's own load path
+    # (which autophases, unlike the processing-level test) -- so a few
+    # percent rather than an exact string.
+    assert window._enmr_result["mobility"] == pytest.approx(3.79e-8, rel=0.05)
+    # Negative: the vdlist puts the positive polarity first, so the
+    # slope is read the literal way round. The panel's cell-polarity
+    # setting -- which way the + electrode faces, recorded nowhere --
+    # is what turns it into a positive mobility for a cation.
+    assert window._enmr_result["slope"] == pytest.approx(-7.90e-3, rel=0.05)
+    assert window.enmr_polarity_combo.currentData() == -1
+    assert window._enmr_result["cell_polarity"] == -1
+    report = window.enmr_results_label.text()
+    assert "m²/Vs" in report and "electrode gap = 38.5 mm" in report
+    # Plotted against volts, and never rescaled by the delay-unit combo.
+    assert window.fit_canvas.ax.get_xlabel() == "Voltage (V)"
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_without_a_gap_reports_the_slope_only(qapp):
+    # The gap is the one number no file records; without it the slope
+    # is the result, which is what the data determines.
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+    assert window.enmr_gap_spin.value() == 0
+    assert "slope only" in window.enmr_gap_spin.specialValueText()
+
+    window._on_fit_enmr_clicked()
+
+    report = window.enmr_results_label.text()
+    assert "rad/V" in report
+    assert "Mobility not computed" in report
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_combines_gradient_reversed_repeats(qapp):
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+
+    assert not window.enmr_keep_repeat_button.isEnabled()
+    window._on_fit_enmr_clicked()
+    assert window.enmr_keep_repeat_button.isEnabled()
+
+    window._on_enmr_keep_repeat_clicked()
+    assert not window.enmr_combine_button.isEnabled()   # one is not a pair
+    window._on_enmr_keep_repeat_clicked()
+    assert window.enmr_combine_button.isEnabled()
+
+    window._on_enmr_combine_clicked()
+    report = window.enmr_results_label.text()
+    assert "spread across 2 repeats" in report
+
+    window._on_enmr_clear_repeats_clicked()
+    assert not window.enmr_combine_button.isEnabled()
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_unfolds_the_pairs_onto_a_signed_axis(qapp):
+    # The recorded axis folds every point onto its partner
+    # (0, 0, 8, 8, ...). Unfolded, the series is one ramp through the
+    # origin, so the zero crossing is on screen.
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+    assert window.enmr_unfold_checkbox.isChecked()
+
+    window._on_fit_enmr_clicked()
+
+    plotted = sorted(window.fit_canvas.ax.lines[1].get_xdata())
+    assert plotted[0] == pytest.approx(-56.0)
+    assert plotted[-1] == pytest.approx(56.0)
+    assert len(plotted) == 16                      # every slice, not 8 pairs
+    assert window.fit_canvas.ax.get_xlabel() == "Voltage (V)"
+    # A phase shift in degrees, and no longer labelled "Intensity".
+    assert window.fit_canvas.ax.get_ylabel() == "Phase shift (°)"
+    # Quoted against the field-off measurement: the 0 V pair averages
+    # to zero. The two members differ by their own noise -- they are
+    # not forced onto it, which would hide that difference.
+    branches = window._enmr_result["branches"]
+    at_zero = branches["voltages"] == 0
+    assert branches["phases"][at_zero].mean() == pytest.approx(0.0, abs=1e-12)
+    assert np.degrees(np.abs(branches["phases"][at_zero])).max() < 2.0
+    assert branches["referenced_to"] == "V = 0"
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_unfold_toggles_without_refitting(qapp):
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+    window._on_fit_enmr_clicked()
+    slope = window._enmr_result["slope"]
+
+    window.enmr_unfold_checkbox.setChecked(False)
+
+    # Folded: the pair-differenced measurement against |V|.
+    folded = sorted(window.fit_canvas.ax.lines[1].get_xdata())
+    assert len(folded) == 8 and folded[0] == pytest.approx(0.0)
+    assert window.fit_canvas.ax.get_xlabel() == "|Voltage| (V)"
+    # A display choice only -- the fit itself is untouched.
+    assert window._enmr_result["slope"] == slope
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_reports_the_two_polarity_arms(qapp):
+    # Whether averaging the polarities was justified is the reason to
+    # run both, so it is in the report without a second click.
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+    window._on_fit_enmr_clicked()
+
+    report = window.enmr_results_label.text()
+    assert "polarity arms" in report
+    assert "did not reverse" in report
+    assert "Zero crossing" in report
+    # The calibration standard's arms agree, so no warning on it.
+    assert "DISAGREE" not in report
+
+
+def test_main_window_enmr_unfold_toggle_is_harmless_before_any_fit(qapp):
+    window = MainWindow()
+    window.enmr_unfold_checkbox.setChecked(False)
+    window.enmr_unfold_checkbox.setChecked(True)
+    assert window._enmr_result is None
+
+
+LIAC_PAIR = os.path.join("test_data", "Diff50_eNMR_Li_Ac_6p25M_2024-09-03")
+
+
+@pytest.mark.skipif(not os.path.isdir(LIAC_PAIR), reason="needs the real eNMR dataset")
+def test_main_window_enmr_averages_a_real_gradient_reversed_pair(qapp):
+    # The second pairing: two whole experiments, one at +g and one at
+    # -g. 560/561 is such a pair, and it disagrees.
+    window = MainWindow()
+    for expt in ("560", "561"):
+        window._load(os.path.join(LIAC_PAIR, expt), vendor="bruker")
+    window.enmr_low_spin.setValue(1.34)
+    window.enmr_high_spin.setValue(1.60)
+
+    for row in (0, 1):
+        window.spectrum_list.setCurrentRow(row)
+        window._on_fit_enmr_clicked()
+        window._on_enmr_keep_repeat_clicked()
+
+    # Each repeat carries the gradient sign its own diff.xml recorded.
+    gradients = [entry["gradient"] for entry in window._enmr_repeats]
+    assert np.sign(gradients[0]) == -np.sign(gradients[1])
+
+    window._on_enmr_combine_clicked()
+    report = window.enmr_results_label.text()
+    assert "g (T/m)" in report and "average" in report
+    assert "DISAGREE" in report
+
+    # All three on one axes: both directions behind their average.
+    labels = [line.get_label() for line in window.fit_canvas.ax.lines]
+    assert sum("g = " in str(label) for label in labels) == 2
+    assert any("Average of 2 gradient directions" in str(label) for label in labels)
+    assert window.fit_canvas.ax.get_ylabel() == "Phase shift, sign-corrected (°)"
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_falls_back_to_slopes_when_ramps_cannot_be_averaged(qapp):
+    # Repeats measured at different voltages cannot be averaged point
+    # by point; combining their slopes still works, and says so.
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+    window._on_fit_enmr_clicked()
+    window._on_enmr_keep_repeat_clicked()
+    window._on_enmr_keep_repeat_clicked()
+    # Shorten one of them so the voltage axes no longer match.
+    window._enmr_repeats[1] = {
+        **window._enmr_repeats[1],
+        "voltages": window._enmr_repeats[1]["voltages"][:8],
+        "phases": window._enmr_repeats[1]["phases"][:8],
+    }
+
+    window._on_enmr_combine_clicked()
+
+    report = window.enmr_results_label.text()
+    assert "Slopes only" in report
+    assert "spread across 2 repeats" in report
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_voltage_cutoff_trims_the_fit_and_keeps_the_points(qapp):
+    # The ramp goes nonlinear at the top of the range, so the highest
+    # points need keeping off the fit -- but on the plot, where the
+    # deviation stays visible.
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+    assert window.enmr_max_voltage_spin.value() == 0
+    assert "all points" in window.enmr_max_voltage_spin.specialValueText()
+
+    window.enmr_max_voltage_spin.setValue(32.0)
+    window._on_fit_enmr_clicked()
+
+    branches = window._enmr_result["branches"]
+    assert int(branches["used"].sum()) == 10       # 0-32 V at both polarities
+    assert np.all(np.abs(branches["voltages"][branches["used"]]) <= 32)
+    report = window.enmr_results_label.text()
+    assert "|V| ≤ 32 V" in report
+
+    # Fitted points as circles, the trimmed ones as grey crosses.
+    labels = [line.get_label() for line in window.fit_canvas.ax.lines]
+    assert "Excluded" in labels
+    excluded = window.fit_canvas.ax.lines[labels.index("Excluded")]
+    assert len(excluded.get_xdata()) == 6          # 40, 48, 56 V, both polarities
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_cell_polarity_flips_only_the_mobility(qapp):
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+    window.enmr_gap_spin.setValue(38.5)
+    window._on_fit_enmr_clicked()
+    measured = window._enmr_result
+
+    window.enmr_polarity_combo.setCurrentIndex(
+        window.enmr_polarity_combo.findData(1))
+    window._on_fit_enmr_clicked()
+
+    assert window._enmr_result["slope"] == pytest.approx(measured["slope"])
+    assert window._enmr_result["mobility"] == pytest.approx(-measured["mobility"])
+    assert "cell polarity = +1" in window.enmr_results_label.text()
+
+
+@pytest.mark.skipif(not os.path.isdir(ENMR_CALIBRATION), reason="needs the real eNMR dataset")
+def test_main_window_enmr_right_click_excludes_one_point_not_its_pair(qapp):
+    # A single polarised electrode distorts one polarity only, so the
+    # damaged points come one at a time.
+    window = _enmr_window(qapp)
+    window.enmr_low_spin.setValue(3.18)
+    window.enmr_high_spin.setValue(3.42)
+    window._on_fit_enmr_clicked()
+    branches = window._enmr_result["branches"]
+    assert branches["balanced"] is True
+
+    # Right-click near the +56 V point.
+    target = int(np.argmax(branches["voltages"]))
+    window._on_fit_point_exclude_requested(
+        float(branches["voltages"][target]), float(branches["phases"][target]))
+
+    assert window._enmr_excluded == {target}
+    after = window._enmr_result["branches"]
+    assert after["used"][target] is np.False_ or not after["used"][target]
+    # Its −56 V partner is still in the fit.
+    partner = int(np.argmin(after["voltages"]))
+    assert after["used"][partner]
+    assert after["balanced"] is False
+    # The half-difference lost that pair, and the report says to read
+    # the arms instead.
+    assert window._enmr_result["broken_pairs"] == 1
+    assert "could not" in window.enmr_results_label.text()
+
+    window._on_fit_points_reset_requested()
+    assert window._enmr_excluded == set()
+    assert window._enmr_result["branches"]["balanced"] is True
+
+
+def test_main_window_enmr_right_click_does_not_reach_into_a_stale_relaxation_fit(qapp):
+    # _fit_mode is on for every fit plot, so without an owner the eNMR
+    # plot's right-click would silently re-fit whatever relaxation run
+    # happened earlier in the session.
+    window = MainWindow()
+    assert window._fit_canvas_owner is None
+    window._on_fit_point_exclude_requested(1.0, 1.0)
+    assert window._excluded_relaxation_indices == {}
+
+
+def test_main_window_enmr_needs_a_pseudo_2d(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information",
+                        lambda *args, **kwargs: shown.update(text=args[2]))
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window._on_fit_enmr_clicked()
+    assert "pseudo-2D" in shown["text"]

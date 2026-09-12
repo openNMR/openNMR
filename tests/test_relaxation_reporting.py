@@ -137,8 +137,15 @@ def test_report_shows_population_weights_for_a_multi_component_model():
     spec = dif.build_diffusion_model(2, expected_D=[3e-9, 2e-10])
     report = format_relaxation_report(
         fit_relaxation(b, y, model="diffusion_n", custom_model=spec))
-    assert "Population weights" in report
+    # The section is now "Relative amplitudes (population weights — …)":
+    # it covers every multi-amplitude model, not only the generalised
+    # diffusion one this test uses. The numbers are the substance.
+    assert "population weights" in report
     assert "70.00%" in report and "30.00%" in report
+    # Each share paired with the D it belongs to, rather than left for
+    # the reader to match up against the parameter block.
+    section = report.split("Relative amplitudes")[1]
+    assert "D1 =" in section and "D2 =" in section
 
 
 def test_report_accepts_a_custom_title():

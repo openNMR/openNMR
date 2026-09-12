@@ -588,6 +588,11 @@ class MplCanvas(QWidget):
         # mouse-move -- see _ContourCrosshair's own docstring for why
         # that lazy approach was the actual bug in two earlier attempts.
         self._crosshair: _ContourCrosshair | None = None
+        # Whether the *current* plot is one a crosshair belongs on.
+        # Set by each show_* that draws one; cleared on every figure
+        # rebuild, so a view that never opts in cannot inherit it from
+        # whatever was on this canvas before.
+        self._crosshair_ready = False
         # Set only for a plain 1D spectrum/slice view -- lets the
         # right-click menu offer ppm/Hz/kHz switching by re-using the
         # spectrum's own stored axis arrays, no recomputation needed.
@@ -1240,6 +1245,9 @@ class MplCanvas(QWidget):
         if self._crosshair is not None:
             self._crosshair.disconnect()
             self._crosshair = None
+        # Opt-in per view: a rebuild starts from "no crosshair" and the
+        # next show_* says whether it wants one.
+        self._crosshair_ready = False
         # The Axes these were drawn on are about to go; the Python-side
         # list would otherwise keep handing out artists belonging to a
         # figure that no longer contains them.
@@ -1287,9 +1295,17 @@ class MplCanvas(QWidget):
         # on the 1D spectra"). The class already handles a lone Axes --
         # with no projection strips to span, `f1_ax`/`f2_ax` are None
         # and it draws a single vertical and horizontal line across the
-        # plot. Gated on there being a spectrum shown at all, so it
-        # stays off the FID/preview/compare views that set neither.
-        if self._contour_spectrum is None and self._current_1d_spectrum is None:
+        # plot.
+        #
+        # Gated on `_crosshair_ready` rather than on which *kind* of
+        # spectrum is shown: it used to require a contour or a 1D
+        # spectrum, which kept it off Compare, the spectral fit and the
+        # curve fit -- all views where reading a value off the plot is
+        # exactly what you are doing ("it would be good to have
+        # crosshairs available on all plots including compare, spectral
+        # fit, and fit"). Each view that wants one now says so; the FID
+        # and processing-preview views deliberately do not.
+        if not self._crosshair_ready:
             return
         self._crosshair = _ContourCrosshair(
             self.canvas, self.ax, self._proj_axes.get("f1"), self._proj_axes.get("f2"),
@@ -1346,6 +1362,10 @@ class MplCanvas(QWidget):
         # projections shouldn't reset when I scale the contours".
         projection_limits = self._projection_intensity_limits() if preserve_view else {}
         self._clear_figure()
+        # _clear_figure resets this; a contour rebuild is still a
+        # contour, so it opts straight back in rather than waiting
+        # for a show_spectrum that will not come.
+        self._crosshair_ready = True
         self.ax = self.figure.add_subplot(111)
         display_spectrum, unit_xlabel, unit_ylabel = self._contour_for_display()
         xlims, ylims = self._contour_display_limits(display_spectrum)
@@ -2533,6 +2553,9 @@ class MplCanvas(QWidget):
         self._apply_view_options()
         if spectrum.ndim == 1:
             self._pivot_marker_ax = self.ax
+        # Crosshairs here too: reading a value off this plot is
+        # exactly what it is for (1D spectra and 2D contours).
+        self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
 
@@ -2914,6 +2937,9 @@ class MplCanvas(QWidget):
             self.ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
 
         self._apply_view_options()
+        # Crosshairs here too: reading a value off this plot is
+        # exactly what it is for (Compare).
+        self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
 
@@ -2993,6 +3019,9 @@ class MplCanvas(QWidget):
             self.ax.legend()
             self._legend_visible = True
         self._apply_view_options()
+        # Crosshairs here too: reading a value off this plot is
+        # exactly what it is for (2D overlay).
+        self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
 
@@ -3010,6 +3039,9 @@ class MplCanvas(QWidget):
         self.clear()  # already leaves self.ax as a fresh, single subplot
         plotting.plot_1d_heatmap(spectra, ax=self.ax, fig=self.figure)
         self._apply_view_options()
+        # Crosshairs here too: reading a value off this plot is
+        # exactly what it is for (heatmap).
+        self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
 
@@ -3094,6 +3126,9 @@ class MplCanvas(QWidget):
                                    labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
         self._apply_view_options()
+        # Crosshairs here too: reading a value off this plot is
+        # exactly what it is for (spectral fit).
+        self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
 
@@ -3159,6 +3194,8 @@ class MplCanvas(QWidget):
         if limits:
             self.ax.set_xlim(limits[0])
             self.ax.set_ylim(limits[1])
+        # Crosshairs here too: a DOSY map is read off the plot.
+        self._crosshair_ready = True
         self.canvas.draw_idle()
 
     def _adjust_dosy_levels(self, event) -> None:
@@ -3173,7 +3210,9 @@ class MplCanvas(QWidget):
         self._draw_dosy(preserve_view=True)
 
     def show_relaxation_fit(self, result: dict, uncertainty: tuple | None = None,
-                             xlabel: str = "Delay (s)", excluded_points: tuple | None = None) -> None:
+                             xlabel: str = "Delay (s)", excluded_points: tuple | None = None,
+                             x_scale: float = 1.0, ylabel: str = "Intensity",
+                             extra_series: list | None = None) -> None:
         """Plot ONE peak's relaxation/diffusion series (data points)
         and fitted curve, from a single ``relaxation.fit_relaxation``-
         shaped dict (one entry of
@@ -3204,7 +3243,32 @@ class MplCanvas(QWidget):
         faint grey X markers instead of just disappearing, so it stays
         visible *what* was excluded and *that* something was, not only
         that the fit curve changed. Sets :attr:`_fit_mode`, gating the
-        right-click actions themselves."""
+        right-click actions themselves.
+
+        ``ylabel`` : what the y axis is measuring. Defaults to the
+        intensity every relaxation and diffusion fit plots, and exists
+        because the eNMR fit goes through this same method and plots a
+        *phase* -- labelling that "Intensity" is simply wrong, and the
+        one plotting path is worth keeping.
+
+        ``extra_series`` : further series drawn faintly *behind* the
+        main one, each a dict of ``x``, ``y``, ``label`` and optional
+        ``marker``/``color``/``alpha``. For a result that is an
+        average of several measurements: the inputs stay on the plot
+        beside it, so how far apart they were is visible at the same
+        time as what they averaged to. Drawn first and at a lower
+        zorder, so the main series and its fit always read on top.
+
+        ``x_scale`` : seconds per displayed x unit, so a fit done in
+        seconds can be *drawn* in the millisecond (or microsecond) unit
+        the Curve Fitting panel is set to. Every x on this axes goes
+        through it -- data, fit curve, uncertainty band and excluded
+        markers alike -- so nothing can end up plotted on a different
+        scale from the rest. **The result dict itself is never
+        modified**: this is a display transform, and the stored fit
+        stays in seconds. A caller reading an x back off this axes (the
+        right-click "Exclude Nearest Point") has to multiply by the
+        same factor."""
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
@@ -3218,9 +3282,20 @@ class MplCanvas(QWidget):
         self._clear_figure()
         self.ax = self.figure.add_subplot(111)
 
-        t, y, y_fit = result["t"], result["y"], result["y_fit"]
+        x_scale = float(x_scale) or 1.0
+        for extra in (extra_series or []):
+            self.ax.plot(
+                np.asarray(extra["x"], dtype=float) / x_scale,
+                np.asarray(extra["y"], dtype=float),
+                extra.get("marker", "o"), color=extra.get("color", "grey"),
+                markersize=6.0, alpha=extra.get("alpha", 0.45),
+                markerfacecolor="none", label=extra.get("label"), zorder=1.5,
+            )
+        t = np.asarray(result["t"], dtype=float) / x_scale
+        y, y_fit = result["y"], result["y_fit"]
         if uncertainty is not None:
             t_fine, y_fine, y_band = uncertainty
+            t_fine = np.asarray(t_fine, dtype=float) / x_scale
             self.ax.fill_between(
                 t_fine, y_fine - y_band, y_fine + y_band,
                 color="grey", alpha=0.4, label="Uncertainty", zorder=1,
@@ -3228,22 +3303,27 @@ class MplCanvas(QWidget):
             self.ax.plot(t_fine, y_fine, "--", color="red", linewidth=2.0, label="Fit", zorder=3)
         else:
             order = np.argsort(t)
-            self.ax.plot(t[order], y_fit[order], "--", color="red", linewidth=2.0, label="Fit", zorder=3)
+            self.ax.plot(t[order], np.asarray(y_fit)[order], "--", color="red",
+                          linewidth=2.0, label="Fit", zorder=3)
         self.ax.plot(t, y, "o", color="black", markersize=8.0,
                       label=result.get("peak_label", result.get("model", "Data")), zorder=2)
         if excluded_points is not None and len(excluded_points[0]):
             t_excluded, y_excluded = excluded_points
-            self.ax.plot(t_excluded, y_excluded, "x", color="grey", markersize=8.0,
+            self.ax.plot(np.asarray(t_excluded, dtype=float) / x_scale, y_excluded,
+                          "x", color="grey", markersize=8.0,
                           markeredgewidth=2.0, alpha=0.7, label="Excluded", zorder=2)
 
         self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
-        self.ax.set_ylabel("Intensity", fontsize=self._AXIS_LABELSIZE)
+        self.ax.set_ylabel(ylabel, fontsize=self._AXIS_LABELSIZE)
         plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=True,
                                     linewidth=self._AXIS_LINEWIDTH)
         plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
         self._apply_view_options()
+        # Crosshairs here too: reading a value off this plot is
+        # exactly what it is for (curve fit).
+        self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
 

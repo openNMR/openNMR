@@ -504,3 +504,120 @@ def test_components_csv_rejects_a_mismatched_axis():
     result = score_mod.score(b, matrix, n_components=2)
     with pytest.raises(ValueError, match="shifts against"):
         score_mod.components_to_csv(result, PPM[:10])
+
+
+# ============================================================
+# The kernel is a curve-fit model
+# ============================================================
+# SCORE used to carry its own hard-coded exponential, independent of
+# the model registry the Fit Curve panel fits with. The two could drift
+# apart, and only one of them could ever be a stretched or
+# inversion-recovery decay. These cover the shared path.
+
+
+def test_build_kernel_defaults_to_the_published_exponential():
+    kernel = score_mod.build_kernel(kind="diffusion")
+    assert kernel["name"] == "stejskal_tanner"
+    assert kernel["amplitude"] == "I0"
+    assert kernel["params"] == ["D"]
+    assert kernel["rate_param"] == "D"
+    # ... and evaluates to exactly exp(-b D): the amplitude is pinned
+    # at 1 because the component spectrum carries it.
+    b = np.linspace(0.0, 2e9, 5)
+    np.testing.assert_allclose(
+        kernel["func"](b, [[1.0e-9]]).ravel(), np.exp(-b * 1.0e-9))
+
+
+def test_build_kernel_finds_the_amplitude_of_a_custom_equation():
+    # A typed equation has whatever parameter names the user chose, so
+    # the amplitude is found by measurement, not by matching a name.
+    from opennmr.processing.relaxation import build_custom_model
+
+    kernel = score_mod.build_kernel(
+        build_custom_model("scale*exp(-x/tau)"), kind="relaxation",
+        x_values=np.linspace(0.01, 1.0, 8), y_values=np.ones(8))
+    assert kernel["amplitude"] == "scale"
+    assert kernel["params"] == ["tau"]
+
+
+def test_build_kernel_refuses_a_model_that_already_has_components():
+    with pytest.raises(ValueError, match="no single amplitude parameter"):
+        score_mod.build_kernel("stejskal_tanner_biexponential", kind="diffusion")
+
+
+def test_build_kernel_rejects_an_unknown_model():
+    with pytest.raises(ValueError, match="Unknown model"):
+        score_mod.build_kernel("not_a_model", kind="diffusion")
+
+
+def test_score_with_an_explicit_model_matches_the_default():
+    b, matrix = _overlapping_series()
+    default = score_mod.score(b, matrix, n_components=2, kind="diffusion")
+    named = score_mod.score(b, matrix, n_components=2, kind="diffusion",
+                             model="stejskal_tanner")
+    np.testing.assert_allclose(named["constants"], default["constants"], rtol=1e-9)
+    assert named["model"] == "stejskal_tanner"
+
+
+def test_score_resolves_a_stretched_model_with_a_beta_per_component():
+    # The capability the hard-coded kernel could not have: each
+    # component gets its own stretch exponent, from the same
+    # stejskal_tanner_stretched the Fit Curve panel offers.
+    beta = 0.7
+    b = np.linspace(0.0, 3e9, 24)
+    matrix = sum(
+        np.outer(np.exp(-((b * constant) ** beta)), spectrum)
+        for spectrum, constant in [(FAST, D_FAST), (SLOW, D_SLOW)]
+    )
+    result = score_mod.score(b, matrix, n_components=2, kind="diffusion",
+                              model="stejskal_tanner_stretched", threshold=0.02)
+    assert result["model"] == "stejskal_tanner_stretched"
+    assert result["model_params"] == ["D", "beta"]
+    assert len(result["component_params"]) == 2
+    assert all("beta" in entry for entry in result["component_params"])
+    # The faster component is the one the stretch is best determined
+    # from -- it actually decays across the sampled range.
+    assert result["component_params"][1]["beta"] == pytest.approx(beta, rel=0.15)
+
+
+def test_score_relaxation_constants_are_the_models_time_constant():
+    # The relaxation registry is written in T1/T2, not in rates, so the
+    # constant the model fits is a time. Both are still reported.
+    t = np.linspace(0.0, 1.0, 24)
+    matrix = (np.outer(np.exp(-t / 0.30), SLOW) + np.outer(np.exp(-t / 0.05), FAST))
+    result = score_mod.score(t, matrix, n_components=2, kind="relaxation")
+    assert result["model"] == "exponential_decay"
+    assert result["rate_param"] == "T2"
+    np.testing.assert_allclose(result["constants"], result["T"])
+    np.testing.assert_allclose(result["rates"], 1.0 / result["T"])
+    # Slowest-decaying first, whichever way round the model's own
+    # constant runs.
+    assert result["T"][0] > result["T"][1]
+
+
+def test_score_report_names_the_model_and_its_extra_parameters():
+    beta = 0.8
+    b = np.linspace(0.0, 3e9, 20)
+    matrix = sum(
+        np.outer(np.exp(-((b * constant) ** beta)), spectrum)
+        for spectrum, constant in [(FAST, D_FAST), (SLOW, D_SLOW)]
+    )
+    report = score_mod.format_score_report(
+        score_mod.score(b, matrix, n_components=2, kind="diffusion",
+                        model="stejskal_tanner_stretched"))
+    assert "stejskal_tanner_stretched" in report
+    assert "amplitude I0" in report
+    assert "beta =" in report
+
+
+def test_components_csv_reports_a_relaxation_constant_in_seconds():
+    # The CSV's unit column used to be hard-coded to the old kernel
+    # table's "1/s" while the constant written beside it is the model's
+    # own time constant. Caught by removing that table.
+    t = np.linspace(0.0, 1.0, 20)
+    matrix = (np.outer(np.exp(-t / 0.30), SLOW) + np.outer(np.exp(-t / 0.05), FAST))
+    result = score_mod.score(t, matrix, n_components=2, kind="relaxation")
+    csv_text = score_mod.components_to_csv(result, PPM)
+    header, *_rest = [row for row in csv_text.splitlines() if row.startswith("1,")]
+    assert ",s," in header
+    assert "Model: exponential_decay" in csv_text

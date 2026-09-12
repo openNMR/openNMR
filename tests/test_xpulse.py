@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pytest
 
@@ -587,3 +589,65 @@ def test_recorded_and_user_phase_use_the_shared_key_names():
     supplied = xpulse._phase_metadata(12.0, 3.0, autophased=False)
     assert bruker.recorded_phase(supplied, "f2") == (0.0, 0.0)
     assert supplied[bruker.USER_PHASE_KEYS["f2"][0]] == 12.0
+
+
+# ============================================================
+# Acquisition parameters, for fitting equations and factors
+# ============================================================
+
+def _bare_spectrum(raw):
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    return NMRSpectrum(
+        data=np.zeros(4), axes=[NMRAxis(kind="frequency", ppm=np.arange(4.0))],
+        metadata=NMRMetadata(vendor="xpulse", nucleus="1H", raw=raw),
+    )
+
+
+def test_acquisition_constants_reads_xpulse_exp_params():
+    # The user's own case needs TAU by name, from an X-Pulse file --
+    # acquisition_constants used to read Bruker's acqus only.
+    from opennmr.core.acquisition import acquisition_constants
+
+    constants = acquisition_constants(_bare_spectrum(
+        {"exp_params": {"TAU": 1500.0, "P90": 8.78, "NS": 16.0, "Probe": "HFX"}}))
+    assert constants["TAU"] == pytest.approx(1500.0)
+    assert constants["P90"] == pytest.approx(8.78)
+    # A lowercase alias too, since "tau" is what anyone types.
+    assert constants["tau"] == pytest.approx(1500.0)
+    # Non-numeric parameters are not quantities and are left out.
+    assert "Probe" not in constants
+
+
+def test_acquisition_constants_keeps_case_when_xpulse_needs_it():
+    # A real PFG file records both "delta" (gradient duration) and
+    # "DELTA" (diffusion delay) -- different numbers. Lowercasing
+    # everything the Bruker branch's way would resolve one to the
+    # other with nothing on screen to show it.
+    from opennmr.core.acquisition import acquisition_constants
+
+    constants = acquisition_constants(_bare_spectrum(
+        {"exp_params": {"delta": 4000.0, "DELTA": 50000.0}}))
+    assert constants["delta"] == pytest.approx(4000.0)
+    assert constants["DELTA"] == pytest.approx(50000.0)
+
+
+def test_acquisition_constants_reads_the_jcamp_header_too():
+    from opennmr.core.acquisition import acquisition_constants
+
+    constants = acquisition_constants(_bare_spectrum(
+        {"params": {"$NS": 16.0, "$P1": 8.0, ".PULSESEQUENCE": "cpmg"}}))
+    assert constants["NS"] == pytest.approx(16.0)
+    assert constants["P1"] == pytest.approx(8.0)
+    assert ".PULSESEQUENCE" not in constants
+
+
+def test_acquisition_constants_on_a_real_xpulse_pfg_dataset():
+    from opennmr.core.acquisition import acquisition_constants
+
+    path = os.path.join("test_data", "xpulse_PFG", "4")
+    if not os.path.isdir(path):
+        pytest.skip(f"needs the real dataset at {path}")
+    constants = acquisition_constants(xpulse.read_array(path))
+    assert constants["delta"] == pytest.approx(4000.0)
+    assert constants["DELTA"] == pytest.approx(50000.0)
+    assert constants["P90"] == pytest.approx(8.78)

@@ -51,6 +51,46 @@ class Session:
         self._load_info.append({"path": path, "vendor": vendor, "kwargs": dict(kwargs)})
         return spectrum
 
+    @staticmethod
+    def _path_key(path: str | None) -> str | None:
+        """One canonical spelling of ``path``, for comparing two loads.
+
+        ``realpath`` (not ``abspath``) so a symlinked data folder and
+        its target are recognised as the same experiment, and a
+        trailing slash -- which a folder picker adds and a drag-and-drop
+        does not -- is stripped first so it cannot make two spellings of
+        one Bruker experiment folder look different. Case is left alone:
+        macOS and Windows are usually case-insensitive and Linux is not,
+        and folding it here would wrongly merge two genuinely different
+        folders on Linux.
+        """
+        if not path:
+            return None
+        return os.path.realpath(os.path.normpath(path.rstrip("/")))
+
+    def index_for_path(self, path: str, vendor: str | None = None) -> int | None:
+        """The index of the already-loaded spectrum read from ``path``,
+        or ``None``.
+
+        ``vendor`` : when given, only a match loaded by that same
+        reader counts -- one folder can legitimately be opened by two
+        vendors' readers (a Bruker directory that also holds a JCAMP
+        export), and those are two different spectra, not a duplicate.
+
+        Derived spectra (VOCS output, spectrum arithmetic, a resolved
+        SCORE component) have no path at all and can never match.
+        """
+        key = self._path_key(path)
+        if key is None:
+            return None
+        for index, info in enumerate(self._load_info):
+            if self._path_key(info.get("path")) != key:
+                continue
+            if vendor is not None and info.get("vendor") != vendor:
+                continue
+            return index
+        return None
+
     def reload(self, index: int, **override_kwargs) -> NMRSpectrum:
         """Re-load spectrum ``index`` from its original path, with
         ``override_kwargs`` merged into (and remembered alongside) the
@@ -120,6 +160,27 @@ class Session:
         applied when the user reselects a previously-reprocessed
         spectrum, instead of resetting them to defaults every time."""
         return dict(self._load_info[index]["kwargs"])
+
+    def replace_data(self, index: int, data, data_imag=None) -> NMRSpectrum:
+        """Swap spectrum ``index``'s data arrays, keeping everything
+        else about it.
+
+        For a processing step that *transforms* a spectrum rather than
+        producing a new one -- reference deconvolution is the first.
+        Deliberately not :meth:`add_derived`: that sets
+        ``source_path`` to a display label, which would cut the result
+        off from the experiment's own files. A reference-deconvolved
+        eNMR series still has to be able to find its ``vdlist`` and
+        ``diff.xml``, so the metadata has to survive intact.
+
+        The original is still one click away: this session's own
+        Reset re-reads from the file, and the load kwargs are
+        untouched.
+        """
+        spectrum = self.spectra[index]
+        self.spectra[index] = dataclasses.replace(
+            spectrum, data=data, data_imag=data_imag)
+        return self.spectra[index]
 
     def add_derived(self, spectrum: NMRSpectrum, label: str) -> int:
         """Append a spectrum computed from already-loaded data (VOCS,
