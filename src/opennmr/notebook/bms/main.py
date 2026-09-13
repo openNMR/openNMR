@@ -58,6 +58,45 @@ def _run_one_particle(sim_part):
     return r["demag_tensor"], r["shift_tensor"]
 
 
+def _run_chunk(chunk):
+    """Runs an entire slice of particles inside ONE worker call and sums
+    them there, so only one (demag_sum, shift_sum) pair -- not one pair
+    per particle -- ever crosses the process boundary back to the parent.
+
+    This matters because each pair is a full (n_evalpoints, 3, 3) float64
+    array -- e.g. ~144 MB apiece at a 128**3 grid -- and
+    ProcessPoolExecutor.map submits every particle's task up front. With
+    n_jobs=1 previously, that's n_particles separate large payloads
+    pickled through the OS pipe essentially back-to-back; on Windows this
+    exhausts pipe-buffer/non-paged-pool resources well before it's a
+    Python-level memory problem, surfacing as
+    `OSError: [WinError 1450] Insufficient system resources...` rather
+    than a normal MemoryError. Chunking by worker cuts the number (and
+    total volume) of cross-process transfers from n_particles down to
+    n_jobs, with no change to the arithmetic itself."""
+    demag_sum = None
+    shift_sum = None
+    for sim_part in chunk:
+        d, s = _run_one_particle(sim_part)
+        demag_sum = d if demag_sum is None else demag_sum + d
+        shift_sum = s if shift_sum is None else shift_sum + s
+    return demag_sum, shift_sum
+
+
+def _chunk_particles(particles, n_chunks):
+    """Split into n_chunks near-equal-sized contiguous slices (last
+    chunks absorb the remainder), so each worker gets one balanced batch
+    rather than one task per particle."""
+    n_chunks = max(1, min(n_chunks, len(particles)))
+    base, rem = divmod(len(particles), n_chunks)
+    chunks, i = [], 0
+    for c in range(n_chunks):
+        size = base + (1 if c < rem else 0)
+        chunks.append(particles[i:i + size])
+        i += size
+    return [c for c in chunks if c]
+
+
 def run(input_data, out_dir=None, n_jobs=None):
     """
     input_data: either a dict with the same shape as the BMS_input*.json
@@ -86,16 +125,16 @@ def run(input_data, out_dir=None, n_jobs=None):
 
     if n_jobs == 1:
         _init_worker(sim_str)
-        for part in particles:
-            d, s = _run_one_particle(part)
-            demag_sum = d if demag_sum is None else demag_sum + d
-            shift_sum = s if shift_sum is None else shift_sum + s
+        d, s = _run_chunk(particles)
+        demag_sum = d if demag_sum is None else demag_sum + d
+        shift_sum = s if shift_sum is None else shift_sum + s
     else:
+        chunks = _chunk_particles(particles, n_jobs)
         ctx = mp.get_context("spawn")  # 'spawn' is the only option on Windows anyway;
                                         # used everywhere for consistent behaviour.
-        with ProcessPoolExecutor(max_workers=n_jobs, mp_context=ctx,
+        with ProcessPoolExecutor(max_workers=len(chunks), mp_context=ctx,
                                   initializer=_init_worker, initargs=(sim_str,)) as ex:
-            for d, s in ex.map(_run_one_particle, particles):
+            for d, s in ex.map(_run_chunk, chunks):
                 demag_sum = d if demag_sum is None else demag_sum + d
                 shift_sum = s if shift_sum is None else shift_sum + s
 
