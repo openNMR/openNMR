@@ -219,7 +219,7 @@ def _peak_param_names(peak):
         else ["shift", "fwhm", "A", "eta"]
 
 
-def initialize_params_with_map(x, y, peak_defs, b0_init, b1_init,
+def initialise_params_with_map(x, y, peak_defs, b0_init, b1_init,
                                 positive_intensity=True, allow_negative_intensity=False):
     """
     Build the initial parameter vector ``p0`` and a boolean ``is_free``
@@ -320,7 +320,7 @@ def build_model(x, params, peak_defs, x_ref=None):
     return y
 
 
-def normalize_bound(b, param_name, idx):
+def normalise_bound(b, param_name, idx):
     """
     Ensure a user-supplied ``(lower, upper)`` bound is correctly
     ordered, silently swapping it (with a warning) if reversed.
@@ -350,21 +350,21 @@ def build_bounds(peak_defs, positive_intensity=True, allow_negative_intensity=Fa
 
         b = peak.get("bounds", {})
 
-        amp_bounds = normalize_bound(
+        amp_bounds = normalise_bound(
             b.get("amplitude", b.get("A", (-np.inf, np.inf))), "amplitude", i,
         )
 
         amp_lower = 0.0 if (positive_intensity and not allow_negative_intensity) else amp_bounds[0]
         amp_upper = amp_bounds[1]
 
-        shift_b = normalize_bound(b.get("shift", (-np.inf, np.inf)), "shift", i)
-        fwhm_b = normalize_bound(b.get("fwhm", (1e-6, np.inf)), "fwhm", i)
+        shift_b = normalise_bound(b.get("shift", (-np.inf, np.inf)), "shift", i)
+        fwhm_b = normalise_bound(b.get("fwhm", (1e-6, np.inf)), "fwhm", i)
 
         if peak["type"] in ["gaussian", "lorentzian"]:
             lower.extend([shift_b[0], fwhm_b[0], amp_lower])
             upper.extend([shift_b[1], fwhm_b[1], amp_upper])
         else:
-            eta_b = normalize_bound(b.get("eta", (0.0, 1.0)), "eta", i)
+            eta_b = normalise_bound(b.get("eta", (0.0, 1.0)), "eta", i)
             lower.extend([shift_b[0], fwhm_b[0], amp_lower, eta_b[0]])
             upper.extend([shift_b[1], fwhm_b[1], amp_upper, eta_b[1]])
 
@@ -429,7 +429,7 @@ def fit_spectrum(results, peak_defs, fit_regions=None, use_normalised=True, x_un
         Constrain fitted peak amplitudes to be non-negative (default).
         Also used to floor each peak's *initial* amplitude guess to 0
         when its true starting value is negative but the fit is locked
-        positive anyway (see :func:`initialize_params_with_map`).
+        positive anyway (see :func:`initialise_params_with_map`).
 
     allow_negative_intensity : bool, optional
         Overrides ``positive_intensity`` to unlock negative amplitudes
@@ -449,6 +449,19 @@ def fit_spectrum(results, peak_defs, fit_regions=None, use_normalised=True, x_un
     pcov_free : ndarray
         Covariance matrix for the free parameters only -- expand with
         :func:`expand_pcov` before indexing by full parameter position.
+        CAVEAT: unlike ``popt``, this is NOT rescaled back to raw
+        units when ``use_normalised=True`` -- it still reflects
+        curve_fit's fit in the internally-normalised intensity scale.
+        Since ``popt``'s amplitude and baseline entries ARE rescaled,
+        any uncertainty reported from ``pcov`` (error bars, bound-hit
+        warnings, integral errors) is systematically too small by
+        roughly a factor of ``scale`` whenever ``use_normalised=True``.
+        This is a separate, pre-existing issue from the popt/baseline
+        rescale bug fixed above; it's flagged here rather than fixed,
+        since correcting it touches every downstream consumer of pcov
+        (:func:`compute_integral_errors`, :func:`check_bound_hits`,
+        :func:`print_fit_report`, and the 2D equivalents) and deserves
+        its own review.
     is_free : ndarray(bool)
     scale : float
         Intensity normalisation factor applied (1.0 if
@@ -484,7 +497,7 @@ def fit_spectrum(results, peak_defs, fit_regions=None, use_normalised=True, x_un
         sigma=baseline_sigma, max_iter=baseline_max_iter, x_ref=x_ref,
     )
 
-    p0, is_free = initialize_params_with_map(
+    p0, is_free = initialise_params_with_map(
         x, y, peak_defs, b0_init, b1_init,
         positive_intensity=positive_intensity,
         allow_negative_intensity=allow_negative_intensity,
@@ -517,12 +530,22 @@ def fit_spectrum(results, peak_defs, fit_regions=None, use_normalised=True, x_un
     popt = reconstruct_full(p0, popt_free, is_free)
 
     def rescale_params(popt, scale):
+        # Rescales every intensity-axis quantity in popt back from the
+        # curve_fit-internal normalised scale to raw units -- peak
+        # amplitudes AND the linear baseline (b0, b1), which are also
+        # intensity-axis quantities. Bugfix: this previously rescaled
+        # only the amplitudes and left the baseline in the normalised
+        # scale, so final_popt silently mixed units whenever
+        # use_normalised=True (raw-scale peaks, normalised-scale
+        # baseline) -- correct amplitudes, wrong baseline, and wrong
+        # anywhere the two were combined (e.g. the fitted curve).
         popt = popt.copy()
         idx = 0
         for peak in peak_defs:
             step = 3 if peak["type"] in ["gaussian", "lorentzian"] else 4
             popt[idx + 2] *= scale
             idx += step
+        popt[idx:idx + 2] *= scale  # baseline b0, b1
         return popt
 
     final_popt = rescale_params(popt, scale) if use_normalised else popt
@@ -834,7 +857,7 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
         (``lw_data=2.2``) and the fit line thinner (``lw_fit=1.2``),
         so deviations between data and fit are easier to see.
     use_normalised : bool, optional
-        Must match the ``use_normalised``/``normalize`` value used
+        Must match the ``use_normalised``/``normalise`` value used
         when fitting, so the data and model are plotted on the same
         intensity scale.
     tick_dir : {'in', 'out', 'inout'}, optional
@@ -869,8 +892,10 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
 
     if use_normalised:
         scale = np.max(np.abs(results['real_spectrum']))
+        scale = scale if scale != 0 else 1.0
         y = results['real_spectrum'] / scale
     else:
+        scale = 1.0
         y = results['real_spectrum']
 
     x_fit = x[mask]
@@ -880,11 +905,24 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
     if xmin > xmax:
         xmin, xmax = xmax, xmin
 
+    # popt (from fit_spectrum) is always in raw intensity units,
+    # regardless of use_normalised -- it rescales amplitudes and
+    # baseline back after fitting (see fit_spectrum/rescale_params).
+    # So the evaluated model is in raw units too, and must be divided
+    # by the same `scale` as the data above to land on the same axis.
+    # Previously this division was missing: when use_normalised=True,
+    # the data line was plotted on the normalised scale but the fit
+    # (and its components) were left in raw units -- the two would
+    # only coincide by chance (scale == 1), and would otherwise show
+    # a fit line at the wrong height/scale relative to the data.
     if show_components:
         y_fit, components = evaluate_fit(x_fit, popt, peak_defs, x_ref=x_ref, return_components=True)
+        components = [comp / scale for comp in components]
     else:
         y_fit = evaluate_fit(x_fit, popt, peak_defs, x_ref=x_ref)
         components = None
+
+    y_fit = y_fit / scale
 
     fig, ax = plt.subplots()
 
@@ -1003,7 +1041,7 @@ def estimate_noise_level(x, y, noise_region=None):
 
 
 def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_regions=None,
-                    baseline_sigma=2.5, baseline_max_iter=10, x_unit='ppm', normalize=True,
+                    baseline_sigma=2.5, baseline_max_iter=10, x_unit='ppm', normalise=True,
                     show_plot=True, xlims='default', xlabel=None, pl_width=3.375, pl_height=3.375,
                     font='Arial', fontsize=12, output_format='',
                     tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
@@ -1035,7 +1073,7 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
     fit_regions : list of tuple, optional
         ``[(xmin, xmax), ...]``. If None, the complete spectrum is fitted.
     x_unit : {'ppm', 'Hz'}, optional
-    normalize : bool, optional
+    normalise : bool, optional
         Fit (and plot) the spectrum normalised to its maximum absolute
         intensity.
     show_plot, show_components, show_report : bool, optional
@@ -1093,13 +1131,25 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
     results = NMR1dimport(datapath, procno=procno)
 
     x = results['x_ppm'] if x_unit == 'ppm' else results['x_Hz']
-    y = results['normalised_real_spectrum'] if normalize else results['real_spectrum']
+    # popt (below) is always returned in raw intensity units regardless
+    # of `normalise` -- fit_spectrum only uses use_normalised as an
+    # internal numerical-conditioning trick and rescales the fitted
+    # parameters back afterwards. So the data used for the report and
+    # CSV export must also be raw units to match popt for residuals
+    # etc. `results['normalised_real_spectrum']` is a *different*
+    # normalisation (min-max to [0, 1], for heatmap/stacked-plot
+    # display -- see NMR1dimport/NMR1dheatmap) and was never on the
+    # same scale as popt; using it here silently compared the model
+    # against the wrong version of the data whenever normalise=True.
+    # `normalise` still controls the *plotted* display scale, via
+    # use_normalised below and in NMR1dplot_with_fit.
+    y = results['real_spectrum']
 
     mask = build_region_mask(x, fit_regions) if fit_regions is not None else np.ones_like(x, dtype=bool)
     x_fit, y_fit = x[mask], y[mask]
 
     popt, pcov_free, is_free, scale, x_ref = fit_spectrum(
-        results, peak_defs, fit_regions=fit_regions, use_normalised=normalize,
+        results, peak_defs, fit_regions=fit_regions, use_normalised=normalise,
         baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
         baseline_max_iter=baseline_max_iter, x_unit=x_unit,
         positive_intensity=positive_intensity, allow_negative_intensity=allow_negative_intensity,
@@ -1136,7 +1186,7 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
     if show_plot:
         fig, ax = NMR1dplot_with_fit(
             results=results, popt=popt, peak_defs=peak_defs, fit_regions=fit_regions,
-            x_unit=x_unit, show_components=show_components, use_normalised=normalize, 
+            x_unit=x_unit, show_components=show_components, use_normalised=normalise, 
             xlims=xlims, xlabel=xlabel, pl_width=pl_width, pl_height=pl_height,
             font=font, fontsize=fontsize, output_format=output_format,
             color_data=color_data, color_fit=color_fit, color_components=color_components,
@@ -1246,7 +1296,7 @@ def select_2d_traces(dataset, axis="f1", indices=None, shifts=None,
 
 def NMR2D_fit_slices(slices, peak_defs, mode="rows", fit_regions=None,
                       baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
-                      x_unit='ppm', noise_region=None, normalize=False,
+                      x_unit='ppm', noise_region=None, normalise=False,
                       show_components=True, positive_intensity=True,
                       allow_negative_intensity=False, sn_threshold=3,
                       show_report=False, show_warnings=True,
@@ -1270,7 +1320,7 @@ def NMR2D_fit_slices(slices, peak_defs, mode="rows", fit_regions=None,
         a given slice are fixed to zero amplitude for that slice's fit
         (useful for a pseudo-2D series where a peak decays into the
         noise).
-    normalize : bool, optional
+    normalise : bool, optional
         Normalise each trace before fitting.
     show_components : bool, optional
         Compute individual fitted peak components (needed for
@@ -1322,7 +1372,11 @@ def NMR2D_fit_slices(slices, peak_defs, mode="rows", fit_regions=None,
 
     for slice_type, s in selected:
 
-        results = prepare_trace_for_fit(s, normalize=normalize)
+        # NOTE: prepare_trace_for_fit is defined in two_d.py (not
+        # touched by this rename), so its own keyword is still spelt
+        # the American way -- only the value passed to it, and every
+        # name on this side of the boundary, use the British spelling.
+        results = prepare_trace_for_fit(s, normalize=normalise)
         x = results["x_ppm"]
         y = results["real_spectrum"]
 
@@ -1363,7 +1417,7 @@ def NMR2D_fit_slices(slices, peak_defs, mode="rows", fit_regions=None,
 
         popt, pcov_free, is_free, scale, x_ref = fit_spectrum(
             results, local_peak_defs, fit_regions=fit_regions,
-            use_normalised=normalize, baseline_regions=baseline_regions,
+            use_normalised=normalise, baseline_regions=baseline_regions,
             baseline_sigma=baseline_sigma, baseline_max_iter=baseline_max_iter,
             x_unit=x_unit,
             positive_intensity=positive_intensity, allow_negative_intensity=allow_negative_intensity,
@@ -1385,7 +1439,10 @@ def NMR2D_fit_slices(slices, peak_defs, mode="rows", fit_regions=None,
         integrals, integrals_norm = compute_integrals(x, components)
         errors = compute_integral_errors(popt, pcov, local_peak_defs, integrals)
 
-        y_fit_data = results["normalised_real_spectrum"] if normalize else results["real_spectrum"]
+        # Same fix as NMRFitWorkflow: popt/y_fit are always raw-unit,
+        # so the comparison data must be too, not the unrelated
+        # min-max-normalised field (see the note there for why).
+        y_fit_data = results["real_spectrum"]
         metrics = fit_quality(y_fit_data, y_fit, len(popt))
 
         lower, upper = build_bounds(local_peak_defs, positive_intensity=positive_intensity,
@@ -1725,7 +1782,7 @@ def NMR2D_workflow(datapath, peak_defs=None, procno=1,
                     row_shifts=None, column_shifts=None,
                     fit=True, integrate=True,
                     fit_regions=None, baseline_regions=None, baseline_sigma=2.5,
-                    baseline_max_iter=10, normalize=True,
+                    baseline_max_iter=10, normalise=True,
                     positive_intensity=True, allow_negative_intensity=False,
                     show_slices=True, show_fits=True, show_components=False,
                     show_integrals=True, show_report=False, show_warnings=True,
@@ -1814,7 +1871,7 @@ def NMR2D_workflow(datapath, peak_defs=None, procno=1,
                 slices, peak_defs=peak_defs, mode=mode,
                 fit_regions=fit_regions, baseline_regions=baseline_regions,
                 baseline_sigma=baseline_sigma, baseline_max_iter=baseline_max_iter,
-                normalize=normalize, positive_intensity=positive_intensity,
+                normalise=normalise, positive_intensity=positive_intensity,
                 allow_negative_intensity=allow_negative_intensity,
                 # Reports/warnings are printed here (per-slice, right
                 # after fitting) so the workflow-level switches control

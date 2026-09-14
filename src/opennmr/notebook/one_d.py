@@ -36,7 +36,7 @@ def NMR1dimport(data_path, procno=1, mass=1, f1p=0, f2p=0, VOCS=False,
 
     Reads processed spectral data directly from a Bruker experiment
     directory and returns the frequency axes, real and imaginary
-    spectrum, normalized spectrum, and key acquisition parameters.
+    spectrum, normalised spectrum, and key acquisition parameters.
 
     The function can optionally apply a Variable Offset Cumulative
     Spectroscopy (VOCS) correction using the specified pulse length.
@@ -226,7 +226,7 @@ def NMR1dimport(data_path, procno=1, mass=1, f1p=0, f2p=0, VOCS=False,
 
 def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
               xlims='default', xlabel=None, pl_width=3.375, pl_height=3.375,
-              normalize=True, yoffset=0.2, font='Arial', fontsize=12, fname=True,
+              normalise=True, yoffset=0.2, font='Arial', fontsize=12, fname=True,
               x_unit='ppm', output_format='',
               vocs_sum=False, plot_vocs_parts=False, vocs_average=False, heteronuclear_2d_slice=False,
               vocs_pulse="P1", vocs_npoints=8192, vocs_colors=None, vocs_yoffset=0.2,
@@ -280,8 +280,8 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
     pl_width, pl_height : float, optional
         Figure size in inches.
 
-    normalize : bool, optional
-        If True, normalize each plotted spectrum to its maximum
+    normalise : bool, optional
+        If True, normalise each plotted spectrum to its maximum
         absolute intensity.
 
     yoffset : float, optional
@@ -412,7 +412,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
             ylabel=ylabel, y_values=y_values, y_ticks=y_ticks,
             y_tick_number=y_tick_number, common_range=common_range,
             npoints=heatmap_npoints, interp_kind=interp_kind,
-            normalize=normalize, cmap=heatmap_cmap, vmin=heatmap_vmin,
+            normalise=normalise, cmap=heatmap_cmap, vmin=heatmap_vmin,
             vmax=heatmap_vmax, colorbar=heatmap_colorbar,
             colorbar_label=heatmap_colorbar_label,
             pl_width=pl_width, pl_height=pl_height, font=font, fontsize=fontsize,
@@ -471,7 +471,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
         plotted_slices = []
 
         for y in interpolated:
-            if normalize:
+            if normalise:
                 max_signal = np.max(np.abs(y))
                 y_plot = y / max_signal if max_signal != 0 else y
             else:
@@ -480,7 +480,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
 
         y_sum = vocs_results["VOCS_sum"]
 
-        if normalize:
+        if normalise:
             max_signal = np.max(np.abs(y_sum))
             if max_signal != 0:
                 y_sum = y_sum / max_signal
@@ -527,7 +527,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
             results = NMR1dimport(expt, procno=procno[cnt], mass=mass[cnt], f1p=f1p, f2p=f2p)
 
             x = results['x_ppm'] if x_unit == 'ppm' else results['x_Hz']
-            y = results['normalised_real_spectrum'] if normalize else results['real_spectrum']
+            y = results['normalised_real_spectrum'] if normalise else results['real_spectrum']
 
             this_xmin, this_xmax = x[0], x[-1]
             if this_xmin > this_xmax:
@@ -583,7 +583,7 @@ def NMR1dheatmap(data_paths, mass=[1], procno=[1], f1p=0, f2p=0,
                   xlims='default', xlabel=None, x_unit='ppm',
                   ylabel=None, y_values=None, y_ticks='none', y_tick_number=5,
                   common_range='intersection', npoints=None, interp_kind='linear',
-                  normalize=True, cmap='viridis', vmin=None, vmax=None,
+                  normalise=True, cmap='viridis', vmin=None, vmax=None,
                   colorbar=False, colorbar_label=None,
                   pl_width=3.375, pl_height=3.375, font='Arial', fontsize=12,
                   output_format='', heteronuclear_2d_slice=False,
@@ -669,8 +669,8 @@ def NMR1dheatmap(data_paths, mass=[1], procno=[1], f1p=0, f2p=0,
         Passed to ``scipy.interpolate.interp1d`` for building the
         common x-axis. Default ``'linear'``.
 
-    normalize : bool, optional
-        If True (default), normalize each spectrum to [0, 1] before
+    normalise : bool, optional
+        If True (default), normalise each spectrum to [0, 1] before
         interpolation (matches :func:`NMR1dimport`'s
         ``normalised_real_spectrum``), so no single spectrum's
         intensity dominates the colour scale.
@@ -800,9 +800,9 @@ def NMR1dheatmap(data_paths, mass=[1], procno=[1], f1p=0, f2p=0,
     # onto the common axis (before any signed combination) in
     # 'interpolated_spectra', shape (n_spectra, npoints) -- exactly
     # the matrix a heatmap needs. Feed it the normalised or raw
-    # spectrum depending on `normalize`, and ignore the combined sum.
+    # spectrum depending on `normalise`, and ignore the combined sum.
 
-    key = 'normalised_real_spectrum' if normalize else 'real_spectrum'
+    key = 'normalised_real_spectrum' if normalise else 'real_spectrum'
     stack_input = [
         {'x_ppm': r['x_ppm'], 'x_Hz': r['x_Hz'], 'real_spectrum': r[key]}
         for r in imported
