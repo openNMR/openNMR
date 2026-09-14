@@ -775,7 +775,9 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
                         xlims='default', xlabel=None, pl_width=3.375, pl_height=3.375,
                         font='Arial', fontsize=12, output_format='',
                         show_components=False, color_data='black', color_fit='red',
-                        color_components='gray',
+                        color_components=None, peak_labels=None, show_component_labels=False,
+                        component_fill=True, component_fill_alpha=0.25,
+                        lw_data=2.2, lw_fit=1.2, lw_components=1.2,
                         tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
                         tick_number=None,
                         field='', use_normalised=True, 
@@ -789,7 +791,9 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
     results : dict
         Output of :func:`nmrtools.one_d.NMR1dimport`.
     popt, peak_defs :
-        As returned by / passed to :func:`fit_spectrum`.
+        As returned by / passed to :func:`fit_spectrum`. If an entry
+        in ``peak_defs`` has a ``"label"`` key, it is used as that
+        peak's default label (overridden by ``peak_labels`` if given).
     xlims : 'default' or [left, right], optional
         X-axis display limits.
     xlabel : str, optional
@@ -799,6 +803,36 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
         Figure size in inches.
     font, fontsize : optional
         Typeface settings, see :func:`nmrtools.plotting.setup_plotting`.
+    color_data, color_fit : optional
+        Colours for the data and overall fit lines.
+    color_components : str, list of str, or None, optional
+        Colours for the individual peak components (only used when
+        ``show_components=True``). A single colour is applied to all
+        components; a list gives one colour per peak, in ``peak_defs``
+        order. If None (default), colours are drawn from matplotlib's
+        current colour cycle, one per peak.
+    peak_labels : list of str, optional
+        One label per peak, in ``peak_defs`` order. Falls back to
+        ``peak_defs[i]["label"]`` if present, else ``"Peak i+1"``.
+        Only shown in the legend when ``show_component_labels=True``.
+    show_component_labels : bool, optional
+        If True, each peak component gets its own legend entry using
+        ``peak_labels`` (or the fallback above). Default False, since
+        with many peaks this can crowd the legend -- consider
+        annotating peaks directly on the plot instead in that case.
+    component_fill : bool or list of bool, optional
+        Whether to shade each component with ``fill_between`` (between
+        the baseline and the component + baseline). A single bool
+        applies to all peaks; a list gives one flag per peak. Default
+        True. The fill colour always matches that peak's line colour,
+        distinguished only by ``component_fill_alpha``.
+    component_fill_alpha : float, optional
+        Opacity of the component fill. Default 0.25.
+    lw_data, lw_fit, lw_components : float, optional
+        Line widths for the data, overall fit, and individual
+        components. Defaults make the data line the thickest
+        (``lw_data=2.2``) and the fit line thinner (``lw_fit=1.2``),
+        so deviations between data and fit are easier to see.
     use_normalised : bool, optional
         Must match the ``use_normalised``/``normalize`` value used
         when fitting, so the data and model are plotted on the same
@@ -854,13 +888,56 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
 
     fig, ax = plt.subplots()
 
-    ax.plot(x_fit, y_fit_data, color=color_data, lw=1.5, label='Data')
-    ax.plot(x_fit, y_fit, color=color_fit, lw=2, label='Fit')
+    ax.plot(x_fit, y_fit_data, color=color_data, lw=lw_data, label='Data', zorder=2)
+    ax.plot(x_fit, y_fit, color=color_fit, lw=lw_fit, label='Fit', zorder=3)
 
     if show_components:
         baseline = components[-1]
-        for comp in components[:-1]:
-            ax.plot(x_fit, comp + baseline, color=color_components, lw=1, alpha=0.6)
+        n_peaks = len(components) - 1
+
+        # Per-peak colours: explicit single colour, explicit list, or
+        # fall back to matplotlib's own colour cycle (public API, not
+        # the current axes' internal cycle state).
+        if color_components is None:
+            cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+            comp_colors = [cycle_colors[i % len(cycle_colors)] for i in range(n_peaks)]
+        elif isinstance(color_components, str):
+            comp_colors = [color_components] * n_peaks
+        else:
+            comp_colors = list(color_components)
+            if len(comp_colors) < n_peaks:
+                raise ValueError(
+                    f"color_components has {len(comp_colors)} entries but "
+                    f"there are {n_peaks} peaks."
+                )
+
+        # Per-peak fill toggle.
+        if isinstance(component_fill, bool):
+            comp_fill = [component_fill] * n_peaks
+        else:
+            comp_fill = list(component_fill)
+            if len(comp_fill) < n_peaks:
+                raise ValueError(
+                    f"component_fill has {len(comp_fill)} entries but "
+                    f"there are {n_peaks} peaks."
+                )
+
+        # Per-peak labels: explicit peak_labels > peak_defs[i]["label"] > "Peak i+1".
+        comp_labels = []
+        for i in range(n_peaks):
+            if peak_labels is not None and i < len(peak_labels):
+                comp_labels.append(peak_labels[i])
+            else:
+                comp_labels.append(peak_defs[i].get('label', f'Peak {i + 1}'))
+
+        for i, comp in enumerate(components[:-1]):
+            y_comp = comp + baseline
+            ax.plot(x_fit, y_comp, color=comp_colors[i], lw=lw_components,
+                    label=comp_labels[i] if show_component_labels else None,
+                    zorder=1)
+            if comp_fill[i]:
+                ax.fill_between(x_fit, baseline, y_comp, color=comp_colors[i],
+                                 alpha=component_fill_alpha, lw=0, zorder=0)
 
     if xlims == 'default':
         ax.set_xlim(xmin, xmax)
@@ -932,6 +1009,10 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
                     tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
                     tick_number=None,
                     show_components=False, show_report=True,
+                    color_data='black', color_fit='red', color_components=None,
+                    peak_labels=None, show_component_labels=False,
+                    component_fill=True, component_fill_alpha=0.25,
+                    lw_data=2.2, lw_fit=1.2, lw_components=1.2,
                     positive_intensity=True, allow_negative_intensity=False,
                     save_csv=False, csv_filename="fit_results.csv",
                     save_report=False, report_filename="fit_report.txt",
@@ -971,6 +1052,10 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
     tick_length, tick_width, tick_pad : float, optional
     tick_number : int, optional
         Forwarded to :func:`NMR1dplot_with_fit`.
+    color_data, color_fit, color_components, peak_labels,
+    show_component_labels, component_fill, component_fill_alpha,
+    lw_data, lw_fit, lw_components :
+        Forwarded to :func:`NMR1dplot_with_fit`; see there for details.
     positive_intensity : bool, optional
         Constrain peak amplitudes to be non-negative (default).
     allow_negative_intensity : bool, optional
@@ -1054,6 +1139,10 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
             x_unit=x_unit, show_components=show_components, use_normalised=normalize, 
             xlims=xlims, xlabel=xlabel, pl_width=pl_width, pl_height=pl_height,
             font=font, fontsize=fontsize, output_format=output_format,
+            color_data=color_data, color_fit=color_fit, color_components=color_components,
+            peak_labels=peak_labels, show_component_labels=show_component_labels,
+            component_fill=component_fill, component_fill_alpha=component_fill_alpha,
+            lw_data=lw_data, lw_fit=lw_fit, lw_components=lw_components,
             tick_dir=tick_dir, tick_length=tick_length, tick_width=tick_width,
             tick_pad=tick_pad, tick_number=tick_number,
         )
