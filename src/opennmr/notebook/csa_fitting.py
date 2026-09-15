@@ -140,7 +140,7 @@ def build_csa_model(x_ppm_sorted, params, x_ref=None, **sim_kwargs):
 # Model construction (initial parameters, bounds)
 # ============================================================
 
-def initialize_csa_params(p0, b0_init, b1_init, x=None, y=None, fixed=None):
+def initialise_csa_params(p0, b0_init, b1_init, x=None, y=None, fixed=None):
     """
     Build the initial parameter vector and free-parameter mask for a
     CSA fit.
@@ -262,7 +262,7 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
     results : dict
         Output of :func:`nmrtools.one_d.NMR1dimport`.
     p0 : dict
-        Initial guess, see :func:`initialize_csa_params`.
+        Initial guess, see :func:`initialise_csa_params`.
     convention : {'Haeberlen', 'Herzfeld-Berger'}, optional
     static : bool, optional
         If False, fit a finite-speed-MAS sideband pattern instead of a
@@ -312,6 +312,13 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
     pcov_free : ndarray
         Covariance of the free parameters only -- expand with
         :func:`nmrtools.fitting.expand_pcov`.
+        CAVEAT: unlike ``popt``, this is NOT rescaled back to raw
+        units when ``use_normalised=True`` (same caveat as
+        :func:`nmrtools.fitting.fit_spectrum`'s ``pcov_free`` --
+        flagged there in more detail). Uncertainties derived from it
+        (``check_csa_bound_hits``, ``print_csa_fit_report``) are
+        systematically too small by roughly a factor of ``scale``
+        whenever ``use_normalised=True``.
     is_free : ndarray(bool)
     scale : float
     x_ref : float
@@ -351,7 +358,7 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
         sigma=baseline_sigma, max_iter=baseline_max_iter, x_ref=x_ref,
     )
 
-    p0_arr, is_free = initialize_csa_params(
+    p0_arr, is_free = initialise_csa_params(
         p0, b0_init, b1_init, x=x_fit, y=y_fit, fixed=fixed,
     )
     is_free[-2:] = False  # baseline held fixed, as in fit_spectrum
@@ -400,7 +407,15 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
 
     if use_normalised:
         popt = popt.copy()
-        popt[4] *= scale  # amplitude
+        # Bugfix: previously only the amplitude (index 4) was rescaled
+        # back to raw intensity units here; the baseline (b0, b1,
+        # indices 5-6 -- also intensity-axis quantities) was left in
+        # curve_fit's internal normalised scale, silently mixing units
+        # within a single popt vector whenever use_normalised=True
+        # (raw-scale amplitude, normalised-scale baseline). Same bug,
+        # same fix, as nmrtools.fitting.fit_spectrum's rescale_params.
+        popt[4] *= scale        # amplitude
+        popt[5:7] *= scale      # baseline b0, b1
 
     return popt, pcov_free, is_free, scale, x_ref, sim_kwargs
 
@@ -526,8 +541,8 @@ def print_csa_fit_report(x, y, y_fit, popt, pcov, is_free, convention="Haeberlen
 def NMR1dplot_with_csa_fit(results, popt, sim_kwargs, x_ref=None, fit_regions=None,
                             xlims='default', xlabel=None, pl_width=3.375, pl_height=3.375,
                             font='Arial', fontsize=12, output_format='',
-                            show_components=False, color_data='black', color_fit='red',
-                            color_baseline='gray',
+                            show_components=False, colour_data='black', colour_fit='red',
+                            colour_baseline='gray',
                             tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
                             tick_number=None, field='', use_normalised=True,
                             save_fig=False, fig_name='nmr_csa_fit_plot', save_format='png'):
@@ -580,6 +595,7 @@ def NMR1dplot_with_csa_fit(results, popt, sim_kwargs, x_ref=None, fit_regions=No
         scale = scale if scale != 0 else 1.0
         y_sorted = (results['real_spectrum'] / scale)[order]
     else:
+        scale = 1.0
         y_sorted = results['real_spectrum'][order]
 
     mask = build_region_mask(x_sorted, fit_regions) if fit_regions is not None \
@@ -589,25 +605,34 @@ def NMR1dplot_with_csa_fit(results, popt, sim_kwargs, x_ref=None, fit_regions=No
 
     x_ref = np.mean(x_fit) if x_ref is None else x_ref
 
+    # popt (from fit_csa_spectrum) is always in raw intensity units,
+    # regardless of use_normalised -- amplitude and baseline are both
+    # rescaled back after fitting (see fit_csa_spectrum). So the
+    # evaluated model is in raw units too, and must be divided by the
+    # same `scale` as the data above to land on the same axis.
+    # Previously this division was missing here, so the fit line (and
+    # the baseline component) were plotted at the wrong height/scale
+    # relative to the data whenever use_normalised=True.
     if show_components:
         y_model_full, components = evaluate_csa_fit(
             x_sorted, popt, x_ref=x_ref, return_components=True, **sim_kwargs,
         )
-        y_model = y_model_full[mask]
+        y_model = y_model_full[mask] / scale
+        components = [c[mask] / scale for c in components]
     else:
-        y_model = evaluate_csa_fit(x_sorted, popt, x_ref=x_ref, **sim_kwargs)[mask]
+        y_model = evaluate_csa_fit(x_sorted, popt, x_ref=x_ref, **sim_kwargs)[mask] / scale
         components = None
 
     xmin, xmax = x_fit[0], x_fit[-1]
 
     fig, ax = plt.subplots()
 
-    ax.plot(x_fit, y_data, color=color_data, lw=1.5, label='Data')
-    ax.plot(x_fit, y_model, color=color_fit, lw=2, label='Fit')
+    ax.plot(x_fit, y_data, color=colour_data, lw=1.5, label='Data')
+    ax.plot(x_fit, y_model, color=colour_fit, lw=2, label='Fit')
 
     if show_components:
-        baseline = components[1][mask]
-        ax.plot(x_fit, baseline, color=color_baseline, lw=1, alpha=0.6, label='Baseline')
+        baseline = components[1]
+        ax.plot(x_fit, baseline, color=colour_baseline, lw=1, alpha=0.6, label='Baseline')
 
     if xlims == 'default':
         ax.set_xlim(xmin, xmax)
@@ -649,7 +674,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
                        n_time=1024, n_sidebands=15, subtract_residual_mean=True,
                        powder_scheme='rectangular', n_zcw=None,
                        fit_regions=None, baseline_regions=None,
-                       baseline_sigma=2.5, baseline_max_iter=10, normalize=True,
+                       baseline_sigma=2.5, baseline_max_iter=10, normalise=True,
                        bounds=None, fixed=None,
                        positive_intensity=True, allow_negative_intensity=False,
                        show_plot=True, xlims='default', xlabel=None,
@@ -676,7 +701,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
     datapath : str
         Path to the Bruker experiment directory.
     p0 : dict
-        Initial guess -- see :func:`initialize_csa_params`.
+        Initial guess -- see :func:`initialise_csa_params`.
     procno : int, optional
     convention, static, larmor_Hz, mas_Hz, rotor_angle, n_theta, n_phi,
     use_octant_symmetry, n_time, n_sidebands, subtract_residual_mean,
@@ -684,7 +709,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
     fit_regions, baseline_regions, baseline_sigma, baseline_max_iter,
     bounds, fixed, positive_intensity, allow_negative_intensity :
         See :func:`fit_csa_spectrum`.
-    normalize : bool, optional
+    normalise : bool, optional
         Fit (and plot) the spectrum normalised to its maximum absolute
         intensity.
     show_plot, show_components, show_report : bool, optional
@@ -717,7 +742,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
         n_time=n_time, n_sidebands=n_sidebands,
         subtract_residual_mean=subtract_residual_mean,
         powder_scheme=powder_scheme, n_zcw=n_zcw,
-        fit_regions=fit_regions, use_normalised=normalize,
+        fit_regions=fit_regions, use_normalised=normalise,
         baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
         baseline_max_iter=baseline_max_iter, bounds=bounds, fixed=fixed,
         positive_intensity=positive_intensity,
@@ -739,11 +764,18 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
     order = np.argsort(x_full)
     x_sorted = x_full[order]
 
-    if normalize:
-        scale_for_plot = scale if scale else 1.0
-        y_sorted = (results['real_spectrum'] / scale_for_plot)[order]
-    else:
-        y_sorted = results['real_spectrum'][order]
+    # popt/y_model (below) are always raw intensity units regardless
+    # of `normalise` -- fit_csa_spectrum only uses use_normalised as
+    # an internal numerical-conditioning trick and rescales amplitude
+    # and baseline back afterwards (see fit_csa_spectrum). So the data
+    # used for the report and CSV export must also be raw units to
+    # match popt/y_model, not divided by `scale` (that division was
+    # previously applied here but never undone before comparing
+    # against y_model, which stayed in raw/mixed units -- the same
+    # bug as NMRFitWorkflow's, see nmrtools.fitting). `normalise`
+    # still controls the *plotted* display scale, via use_normalised
+    # in NMR1dplot_with_csa_fit below.
+    y_sorted = results['real_spectrum'][order]
 
     mask = build_region_mask(x_sorted, fit_regions) if fit_regions is not None \
         else np.ones_like(x_sorted, dtype=bool)
@@ -765,7 +797,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
         fig, ax = NMR1dplot_with_csa_fit(
             results=results, popt=popt, sim_kwargs=sim_kwargs, x_ref=x_ref,
             fit_regions=fit_regions, show_components=show_components,
-            use_normalised=normalize, xlims=xlims, xlabel=xlabel,
+            use_normalised=normalise, xlims=xlims, xlabel=xlabel,
             pl_width=pl_width, pl_height=pl_height, font=font, fontsize=fontsize,
             output_format=output_format, tick_dir=tick_dir, tick_length=tick_length,
             tick_width=tick_width, tick_pad=tick_pad, tick_number=tick_number,

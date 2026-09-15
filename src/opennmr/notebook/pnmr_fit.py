@@ -609,7 +609,7 @@ def add_dominant_environment_labels(
     ax, x_fit: np.ndarray, components, kept: pd.DataFrame,
     shade: bool = True, shade_alpha: float = 0.25, fontsize: int = 8,
     decimals: int = 0, show_dominant_fraction: bool = True,
-    colors: Optional[Sequence] = None,
+    colours: Optional[Sequence] = None,
     integrals_norm: Optional[Sequence[float]] = None,
     max_labels: Optional[int] = None, min_peak_fraction: Optional[float] = None,
     avoid_overlap: bool = True, label_gap_points: float = 6.0,
@@ -636,7 +636,7 @@ def add_dominant_environment_labels(
     hand.)
 
     Each peak's shaded fill and its label text share one colour, drawn
-    from `colors` (default: matplotlib's current colour cycle, repeated
+    from `colours` (default: matplotlib's current colour cycle, repeated
     if there are more peaks than colours) -- so a colour and its label
     always correspond visually. If `shade=False`, no fill is drawn and
     every label defaults to black.
@@ -688,8 +688,8 @@ def add_dominant_environment_labels(
     enough -- these come from the same fit, matched 1:1 with `kept`'s
     rows in order, as is `integrals_norm`).
     """
-    if colors is None:
-        colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
+    if colours is None:
+        colours = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0"])
 
     x_fit = np.asarray(x_fit)
     components = list(components)
@@ -710,17 +710,17 @@ def add_dominant_environment_labels(
         thresh = min_peak_fraction * top if top > 0 else 0.0
         label_set &= {i for i in order if importance[i] >= thresh}
 
-    to_label = []  # (x_data, y_data, text, color)
+    to_label = []  # (x_data, y_data, text, colour)
     for i, ((_, row), component) in enumerate(zip(rows, components)):
         if i not in label_set:
             if shade:
                 ax.fill_between(x_fit, 0.0, np.asarray(component),
-                                 color=colors[i % len(colors)], alpha=shade_alpha, linewidth=0)
+                                 color=colours[i % len(colours)], alpha=shade_alpha, linewidth=0)
             continue
-        color = colors[i % len(colors)] if shade else "black"
+        colour = colours[i % len(colours)] if shade else "black"
         y = np.asarray(component)
         if shade:
-            ax.fill_between(x_fit, 0.0, y, color=color, alpha=shade_alpha, linewidth=0)
+            ax.fill_between(x_fit, 0.0, y, color=colour, alpha=shade_alpha, linewidth=0)
 
         dom = dominant_environment(row["members"])
         frac = dom.get("fraction_in_group") if show_dominant_fraction else None
@@ -729,7 +729,7 @@ def add_dominant_environment_labels(
             fitted_shift, dom.get("composition", {}), dominant_fraction=frac, decimals=decimals,
         )
         k = int(np.argmax(np.abs(y)))
-        to_label.append((x_fit[k], y[k], text, color))
+        to_label.append((x_fit[k], y[k], text, colour))
 
     if not to_label:
         return
@@ -748,13 +748,13 @@ def add_dominant_environment_labels(
         return not (b1.x1 + pad_px < b2.x0 or b2.x1 + pad_px < b1.x0
                     or b1.y1 + pad_px < b2.y0 or b2.y1 + pad_px < b1.y0)
 
-    for x_data, y_data, text, color in to_label:
+    for x_data, y_data, text, colour in to_label:
         x_disp, y_disp = ax.transData.transform((x_data, y_data))
         y_disp += label_gap_points * pt_to_px if avoid_overlap else label_gap_points * (fig.dpi / 72.0)
         x_label, y_label = ax.transData.inverted().transform((x_disp, y_disp))
 
         txt = ax.text(x_label, y_label, text, ha="center", va="bottom",
-                       fontsize=fontsize, color=color, linespacing=1.3, zorder=5)
+                       fontsize=fontsize, color=colour, linespacing=1.3, zorder=5)
 
         if avoid_overlap:
             pad_px = bbox_pad_points * pt_to_px
@@ -771,7 +771,7 @@ def add_dominant_environment_labels(
 
             label_anchor_disp = ((bbox.x0 + bbox.x1) / 2.0, bbox.y0)
             ax_x, ax_y = ax.transData.inverted().transform(label_anchor_disp)
-            ax.plot([x_data, ax_x], [y_data, ax_y], color=color, lw=leader_lw,
+            ax.plot([x_data, ax_x], [y_data, ax_y], color=colour, lw=leader_lw,
                     solid_capstyle="round", zorder=4)
 
     if avoid_overlap and placed_bboxes:

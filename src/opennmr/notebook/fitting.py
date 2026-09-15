@@ -797,8 +797,8 @@ def print_fit_report(x, y, popt, pcov, peak_defs, warnings, is_free, components=
 def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
                         xlims='default', xlabel=None, pl_width=3.375, pl_height=3.375,
                         font='Arial', fontsize=12, output_format='',
-                        show_components=False, color_data='black', color_fit='red',
-                        color_components=None, peak_labels=None, show_component_labels=False,
+                        show_components=False, colour_data='black', colour_fit='red',
+                        colour_components=None, peak_labels=None, show_component_labels=False,
                         component_fill=True, component_fill_alpha=0.25,
                         lw_data=2.2, lw_fit=1.2, lw_components=1.2,
                         tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
@@ -826,9 +826,9 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
         Figure size in inches.
     font, fontsize : optional
         Typeface settings, see :func:`nmrtools.plotting.setup_plotting`.
-    color_data, color_fit : optional
+    colour_data, colour_fit : optional
         Colours for the data and overall fit lines.
-    color_components : str, list of str, or None, optional
+    colour_components : str, list of str, or None, optional
         Colours for the individual peak components (only used when
         ``show_components=True``). A single colour is applied to all
         components; a list gives one colour per peak, in ``peak_defs``
@@ -926,8 +926,8 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
 
     fig, ax = plt.subplots()
 
-    ax.plot(x_fit, y_fit_data, color=color_data, lw=lw_data, label='Data', zorder=2)
-    ax.plot(x_fit, y_fit, color=color_fit, lw=lw_fit, label='Fit', zorder=3)
+    ax.plot(x_fit, y_fit_data, color=colour_data, lw=lw_data, label='Data', zorder=2)
+    ax.plot(x_fit, y_fit, color=colour_fit, lw=lw_fit, label='Fit', zorder=3)
 
     if show_components:
         baseline = components[-1]
@@ -936,16 +936,16 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
         # Per-peak colours: explicit single colour, explicit list, or
         # fall back to matplotlib's own colour cycle (public API, not
         # the current axes' internal cycle state).
-        if color_components is None:
-            cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-            comp_colors = [cycle_colors[i % len(cycle_colors)] for i in range(n_peaks)]
-        elif isinstance(color_components, str):
-            comp_colors = [color_components] * n_peaks
+        if colour_components is None:
+            cycle_colours = plt.rcParams['axes.prop_cycle'].by_key()['color']
+            comp_colours = [cycle_colours[i % len(cycle_colours)] for i in range(n_peaks)]
+        elif isinstance(colour_components, str):
+            comp_colours = [colour_components] * n_peaks
         else:
-            comp_colors = list(color_components)
-            if len(comp_colors) < n_peaks:
+            comp_colours = list(colour_components)
+            if len(comp_colours) < n_peaks:
                 raise ValueError(
-                    f"color_components has {len(comp_colors)} entries but "
+                    f"colour_components has {len(comp_colours)} entries but "
                     f"there are {n_peaks} peaks."
                 )
 
@@ -970,11 +970,11 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
 
         for i, comp in enumerate(components[:-1]):
             y_comp = comp + baseline
-            ax.plot(x_fit, y_comp, color=comp_colors[i], lw=lw_components,
+            ax.plot(x_fit, y_comp, color=comp_colours[i], lw=lw_components,
                     label=comp_labels[i] if show_component_labels else None,
                     zorder=1)
             if comp_fill[i]:
-                ax.fill_between(x_fit, baseline, y_comp, color=comp_colors[i],
+                ax.fill_between(x_fit, baseline, y_comp, color=comp_colours[i],
                                  alpha=component_fill_alpha, lw=0, zorder=0)
 
     if xlims == 'default':
@@ -1047,7 +1047,7 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
                     tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
                     tick_number=None,
                     show_components=False, show_report=True,
-                    color_data='black', color_fit='red', color_components=None,
+                    colour_data='black', colour_fit='red', colour_components=None,
                     peak_labels=None, show_component_labels=False,
                     component_fill=True, component_fill_alpha=0.25,
                     lw_data=2.2, lw_fit=1.2, lw_components=1.2,
@@ -1090,7 +1090,7 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
     tick_length, tick_width, tick_pad : float, optional
     tick_number : int, optional
         Forwarded to :func:`NMR1dplot_with_fit`.
-    color_data, color_fit, color_components, peak_labels,
+    colour_data, colour_fit, colour_components, peak_labels,
     show_component_labels, component_fill, component_fill_alpha,
     lw_data, lw_fit, lw_components :
         Forwarded to :func:`NMR1dplot_with_fit`; see there for details.
@@ -1189,7 +1189,7 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
             x_unit=x_unit, show_components=show_components, use_normalised=normalise, 
             xlims=xlims, xlabel=xlabel, pl_width=pl_width, pl_height=pl_height,
             font=font, fontsize=fontsize, output_format=output_format,
-            color_data=color_data, color_fit=color_fit, color_components=color_components,
+            colour_data=colour_data, colour_fit=colour_fit, colour_components=colour_components,
             peak_labels=peak_labels, show_component_labels=show_component_labels,
             component_fill=component_fill, component_fill_alpha=component_fill_alpha,
             lw_data=lw_data, lw_fit=lw_fit, lw_components=lw_components,
@@ -1536,7 +1536,7 @@ def NMR2D_print_fit_report(fit, peak_defs=None, slice_index=None, slice_shift=No
 
 def NMR2D_plot_integrals(fits, mode="rows", x_axis="shift", normalised=False,
                           show_errors=True, peak_labels=None, dataset_label=None,
-                          colors=None, ax=None, xlabel=None, ylabel=None, title=None,
+                          colours=None, ax=None, xlabel=None, ylabel=None, title=None,
                           xlims=None, ylims=None,
                           show_top_spine=False, show_right_spine=False,
                           pl_width=3.375, pl_height=3.375, font='Arial', fontsize=12,
@@ -1578,7 +1578,7 @@ def NMR2D_plot_integrals(fits, mode="rows", x_axis="shift", normalised=False,
         datasets plotted onto the same ``ax`` by calling this function
         more than once.
 
-    colors : list, optional
+    colours : list, optional
         Explicit colour per peak (matched to ``peak_labels`` order).
         If None, matplotlib's automatic colour cycle is used -- so
         repeated calls onto the same ``ax`` for different datasets get
@@ -1732,7 +1732,7 @@ def NMR2D_plot_integrals(fits, mode="rows", x_axis="shift", normalised=False,
             peak_labels[peak_i] if peak_labels is not None and peak_i < len(peak_labels)
             else f"Peak {peak_i + 1}"
         )
-        colour = colors[peak_i] if colors is not None and peak_i < len(colors) else None
+        colour = colours[peak_i] if colours is not None and peak_i < len(colours) else None
 
         have_errors = show_errors and all(
             err is not None and len(err) > peak_i and np.isfinite(err[peak_i]) for err in errors

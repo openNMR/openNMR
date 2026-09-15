@@ -224,12 +224,12 @@ def NMR1dimport(data_path, procno=1, mass=1, f1p=0, f2p=0, VOCS=False,
 # Plotting
 # ============================================================
 
-def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
+def NMR1dplot(data_paths, mass=[1], procno=[1], colour='black', f1p=0, f2p=0,
               xlims='default', xlabel=None, pl_width=3.375, pl_height=3.375,
               normalise=True, yoffset=0.2, font='Arial', fontsize=12, fname=True,
               x_unit='ppm', output_format='',
               vocs_sum=False, plot_vocs_parts=False, vocs_average=False, heteronuclear_2d_slice=False,
-              vocs_pulse="P1", vocs_npoints=8192, vocs_colors=None, vocs_yoffset=0.2,
+              vocs_pulse="P1", vocs_npoints=8192, vocs_colours=None, vocs_yoffset=0.2,
               tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0, tick_number=None,
               field='', save_fig=False, fig_name='nmr_1d_plot', save_format='png',
               heatmap=False, heatmap_cmap='viridis', heatmap_vmin=None, heatmap_vmax=None,
@@ -259,7 +259,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
         ``data_paths``. A single-element list is broadcast to all
         spectra.
 
-    color : {'black', 'diverging', <matplotlib colormap name>}, optional
+    colour : {'black', 'diverging', <matplotlib colormap name>}, optional
         Colour scheme used for ordinary (non-VOCS) spectra.
 
     f1p, f2p : float, optional
@@ -299,7 +299,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
         :func:`nmrtools.plotting.setup_plotting`.
 
     vocs_sum, plot_vocs_parts, vocs_average, vocs_pulse, vocs_npoints,
-    vocs_colors, vocs_yoffset, heteronuclear_2d_slice : optional
+    vocs_colours, vocs_yoffset, heteronuclear_2d_slice : optional
         See :func:`VOCSSum`. When ``vocs_sum=True``, spectra are
         VOCS-corrected, interpolated onto a common axis, and summed or
         averaged instead of being plotted as independent spectra.
@@ -336,7 +336,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
         dispatch to :func:`NMR1dheatmap`, which interpolates every
         spectrum in ``data_paths`` onto a common axis and displays
         them as rows of a 2D heatmap instead of an offset stack. When
-        True, ``color``/``yoffset``/the VOCS options above are not
+        True, ``colour``/``yoffset``/the VOCS options above are not
         used; use the ``heatmap_*``, ``ylabel``, ``y_values``,
         ``y_ticks``, ``y_tick_number``, ``common_range``,
         ``heatmap_npoints`` and ``interp_kind`` parameters below
@@ -440,7 +440,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
 
     values = range(len(data_paths))
     norm = plt.Normalize(vmin=values[0], vmax=values[-1])
-    cmap = get_stack_colormap(color)
+    cmap = get_stack_colormap(colour)
     scalarMap = cmx.ScalarMappable(norm=norm, cmap=cmap)
 
     fig, ax = plt.subplots()
@@ -459,11 +459,11 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
 
         x = vocs_results["ppm"]
 
-        if vocs_colors is None:
-            vocs_colors = ['black'] * len(data_paths)
-        elif len(vocs_colors) != len(data_paths):
+        if vocs_colours is None:
+            vocs_colours = ['black'] * len(data_paths)
+        elif len(vocs_colours) != len(data_paths):
             raise ValueError(
-                "vocs_colors must contain one colour for each VOCS spectrum."
+                "vocs_colours must contain one colour for each VOCS spectrum."
             )
 
         interpolated = vocs_results["interpolated_slices"]
@@ -493,7 +493,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], color='black', f1p=0, f2p=0,
         if plot_vocs_parts:
             for cnt, y_plot in enumerate(plotted_slices):
                 yBase = cnt * vocs_yoffset
-                ax.plot(x, y_plot + yBase, color=vocs_colors[cnt],
+                ax.plot(x, y_plot + yBase, color=vocs_colours[cnt],
                         linewidth=1.0, alpha=0.8)
 
         sum_index = len(plotted_slices) if plot_vocs_parts else 0

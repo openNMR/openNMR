@@ -420,7 +420,7 @@ def _select_series(fit_results, show_series):
 # ============================================================
 
 def NMR2D_integrate_slices(slices, regions, mode="rows", region_labels=None,
-                            normalize=False, x_unit='ppm',
+                            normalise=False, x_unit='ppm',
                             subtract_baseline=True, baseline_regions=None,
                             baseline_sigma=2.5, baseline_max_iter=10,
                             noise_region=None):
@@ -447,7 +447,7 @@ def NMR2D_integrate_slices(slices, regions, mode="rows", region_labels=None,
         Labels for the region series -- forwarded to downstream
         functions as ``peak_labels`` (the argument name is unchanged
         there since it accepts either kind of series).
-    normalize : bool, optional
+    normalise : bool, optional
         Normalise each trace (to its own max) before integrating.
     subtract_baseline : bool, optional
         Estimate and subtract a robust linear baseline (see
@@ -493,7 +493,7 @@ def NMR2D_integrate_slices(slices, regions, mode="rows", region_labels=None,
 
     for slice_type, s in selected:
 
-        results = prepare_trace_for_fit(s, normalize=normalize)
+        results = prepare_trace_for_fit(s, normalise=normalise)
         x = results["x_ppm"] if x_unit == "ppm" else results["x_Hz"]
         y = results["real_spectrum"]
 
@@ -691,15 +691,15 @@ def NMR2D_fit_relaxation(fits, model="inversion_recovery", vdlist=None,
     return results
 
 
-def _lighten_color(color, amount=0.45):
+def _lighten_colour(colour, amount=0.45):
     """
-    Blend ``color`` toward white by ``amount`` (0 = unchanged, 1 =
+    Blend ``colour`` toward white by ``amount`` (0 = unchanged, 1 =
     white). Used to derive a relaxation fit curve's colour from its
     data points' colour, so the two are visibly related rather than
     identical or (as previously) uncoordinated.
     """
     import matplotlib.colors as mcolors
-    r, g, b = mcolors.to_rgb(color)
+    r, g, b = mcolors.to_rgb(colour)
     amount = min(max(amount, 0.0), 1.0)
     return (r + (1 - r) * amount, g + (1 - g) * amount, b + (1 - b) * amount)
 
@@ -756,7 +756,7 @@ def NMR2D_plot_relaxation(fit_results, show_series=None, annotate=False,
                            logplot=False,
                            pl_width=3.375, pl_height=3.375, font='Arial', fontsize=12,
                            output_format='',
-                           colors=None, fit_colors=None, fit_shade=0.45,
+                           colours=None, fit_colours=None, fit_shade=0.45,
                            annotate_position='end', annotate_offset=(5, 0),
                            annotate_ha='left', annotate_va='center',
                            tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
@@ -792,7 +792,7 @@ def NMR2D_plot_relaxation(fit_results, show_series=None, annotate=False,
     logplot : {False, 'x', 'y', 'both'}, optional
     pl_width, pl_height, font, fontsize, output_format : optional
         See :func:`nmrtools.plotting.setup_plotting`.
-    colors : colour or list of colours, optional
+    colours : colour or list of colours, optional
         Colour for each series' data points (markers/error bars). A
         single colour applies to every series; a list gives one colour
         per series (must match the number of series being plotted). If
@@ -801,7 +801,7 @@ def NMR2D_plot_relaxation(fit_results, show_series=None, annotate=False,
         and fit curve are reliably matched rather than each
         independently advancing the cycle (which is what happened
         previously when both were plotted with ``color=None``).
-    fit_colors : colour or list of colours, optional
+    fit_colours : colour or list of colours, optional
         Explicit colour for each series' fitted curve, overriding the
         automatic pale tint. If None (default), each fit curve is
         drawn in a paler shade of that series' own data colour (see
@@ -812,7 +812,7 @@ def NMR2D_plot_relaxation(fit_results, show_series=None, annotate=False,
     fit_shade : float, optional
         How much lighter the automatic fit-curve colour is than its
         data colour, in [0, 1] (0 = identical, 1 = white). Default
-        0.45. Ignored for any series with an explicit ``fit_colors``
+        0.45. Ignored for any series with an explicit ``fit_colours``
         entry.
     annotate_position : {'start', 'middle', 'end'}, float, or list, optional
         Where each label sits along its fit curve: ``'start'``,
@@ -848,8 +848,8 @@ def NMR2D_plot_relaxation(fit_results, show_series=None, annotate=False,
     fit_results = _select_series(fit_results, show_series)
     n = len(fit_results)
 
-    data_colors = _broadcast(colors, n, "colors")
-    fit_colors = _broadcast(fit_colors, n, "fit_colors")
+    data_colours = _broadcast(colours, n, "colours")
+    fit_colours = _broadcast(fit_colours, n, "fit_colours")
     positions = _broadcast(annotate_position, n, "annotate_position")
     offsets = _broadcast(annotate_offset, n, "annotate_offset")
     ha_list = _broadcast(annotate_ha, n, "annotate_ha")
@@ -861,7 +861,7 @@ def NMR2D_plot_relaxation(fit_results, show_series=None, annotate=False,
 
     fig, ax = plt.subplots()
 
-    prop_cycle_colors = plt.rcParams['axes.prop_cycle'].by_key().get('color', ['C0'])
+    prop_cycle_colours = plt.rcParams['axes.prop_cycle'].by_key().get('color', ['C0'])
 
     for i, fit in enumerate(fit_results):
 
@@ -869,10 +869,10 @@ def NMR2D_plot_relaxation(fit_results, show_series=None, annotate=False,
         # separate plot calls -- so the data points and fit curve for
         # a given series are reliably related, rather than each
         # silently advancing matplotlib's colour cycle independently.
-        data_colour = data_colors[i] if data_colors[i] is not None \
-            else prop_cycle_colors[i % len(prop_cycle_colors)]
-        curve_colour = fit_colors[i] if fit_colors[i] is not None \
-            else _lighten_color(data_colour, fit_shade)
+        data_colour = data_colours[i] if data_colours[i] is not None \
+            else prop_cycle_colours[i % len(prop_cycle_colours)]
+        curve_colour = fit_colours[i] if fit_colours[i] is not None \
+            else _lighten_colour(data_colour, fit_shade)
 
         label = fit.get("peak_label", f"Fit {i + 1}")
 
@@ -948,7 +948,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
                                peak_labels=None, region_labels=None,
                                fit_regions=None, baseline_regions=None, baseline_sigma=2.5,
                                baseline_max_iter=10, subtract_baseline=True,
-                               normalize=False, positive_intensity=True,
+                               normalise=False, positive_intensity=True,
                                allow_negative_intensity=False, sn_threshold=3,
                                noise_region=None,
                                model="inversion_recovery", vdlist=None, fixed=None,
@@ -958,7 +958,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
                                show_report=True, show_warnings=True,
                                colour_spectra="coolwarm", offset_scale=1.05, xlims=None,
                                logplot=False,
-                               colors=None, fit_colors=None, fit_shade=0.45,
+                               colours=None, fit_colours=None, fit_shade=0.45,
                                annotate_position='end', annotate_offset=(5, 0),
                                annotate_ha='left', annotate_va='center',
                                font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
@@ -1013,7 +1013,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
     subtract_baseline : bool, optional
         Only used when ``integration='regions'`` -- see
         :func:`NMR2D_integrate_slices`.
-    normalize : bool, optional
+    normalise : bool, optional
         Normalise each slice before fitting/integrating.
     positive_intensity, allow_negative_intensity, sn_threshold : optional
         Only used when ``integration='peaks'``.
@@ -1054,7 +1054,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
     colour_spectra, offset_scale, xlims : optional
         Forwarded to :func:`nmrtools.two_d.NMR2D_plot_slices` when
         ``show_slices=True``.
-    colors, fit_colors, fit_shade, annotate_position, annotate_offset,
+    colours, fit_colours, fit_shade, annotate_position, annotate_offset,
     annotate_ha, annotate_va : optional
         Forwarded to :func:`NMR2D_plot_relaxation` when
         ``show_fit=True`` -- see that function for details. By default
@@ -1115,7 +1115,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
             slices, peak_defs=peak_defs, mode=mode,
             fit_regions=fit_regions, baseline_regions=baseline_regions,
             baseline_sigma=baseline_sigma, baseline_max_iter=baseline_max_iter,
-            normalize=normalize, positive_intensity=positive_intensity,
+            normalise=normalise, positive_intensity=positive_intensity,
             allow_negative_intensity=allow_negative_intensity,
             sn_threshold=sn_threshold, noise_region=noise_region,
             show_report=False, show_warnings=show_warnings,
@@ -1123,7 +1123,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
     else:
         series = NMR2D_integrate_slices(
             slices, regions=regions, mode=mode, region_labels=region_labels,
-            normalize=normalize, subtract_baseline=subtract_baseline,
+            normalise=normalise, subtract_baseline=subtract_baseline,
             baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
             baseline_max_iter=baseline_max_iter, noise_region=noise_region,
         )[mode]
@@ -1154,7 +1154,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
     if show_fit:
         fig, ax = NMR2D_plot_relaxation(
             relaxation_fits_shown, annotate=annotate, font=font, fontsize=fontsize, logplot=logplot,
-            colors=colors, fit_colors=fit_colors, fit_shade=fit_shade,
+            colours=colours, fit_colours=fit_colours, fit_shade=fit_shade,
             annotate_position=annotate_position, annotate_offset=annotate_offset,
             annotate_ha=annotate_ha, annotate_va=annotate_va,
             pl_width=pl_width, pl_height=pl_height, tick_dir=tick_dir, tick_length=tick_length, 

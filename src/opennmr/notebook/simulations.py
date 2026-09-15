@@ -84,7 +84,7 @@ from scipy.ndimage import gaussian_filter1d
 #   - ZCW (Zaremba-Conroy-Wolfsberg) powder averaging is now available
 #     as an alternative to the rectangular (theta,phi) product grid,
 #     which oversamples near the poles and needs far more points than
-#     an optimized angle set for the same convergence. See zcw_angles()
+#     an optimised angle set for the same convergence. See zcw_angles()
 #     and get_powder_grid(); every *_spectrum* function below now takes
 #     powder_scheme='rectangular' (default, unchanged behaviour) or
 #     'zcw' (+ n_zcw). Biggest win is finite_mas_csa_spectrum, where
@@ -102,7 +102,7 @@ from scipy.ndimage import gaussian_filter1d
 #     (N,n)), which would remove the Python-loop overhead; not done
 #     here because the variable number of allowed transitions per
 #     orientation makes the transition-selection step awkward to
-#     vectorize cleanly, and I did not want to introduce a subtle
+#     vectorise cleanly, and I did not want to introduce a subtle
 #     indexing bug under time pressure. Flagged as the next efficiency
 #     step if the exact quadrupolar functions turn out to be a
 #     bottleneck.

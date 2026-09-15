@@ -255,9 +255,9 @@ def build_shift_table(local_envs, shift_dict, warn_missing=True, print_table=Fal
 
     df = pd.DataFrame(rows).fillna(0)
     
-    # The configuration probabilities are normalized independently
+    # The configuration probabilities are normalised independently
     # for each crystallographic/site instance. Convert them to weights
-    # normalized over the complete shift table so that sum(p) == 1.
+    # normalised over the complete shift table so that sum(p) == 1.
     n_sites = df["Site"].nunique()
     if n_sites > 0:
         df["p"] /= n_sites

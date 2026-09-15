@@ -216,14 +216,14 @@ def setup_plotting(font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
 # Colour mapping
 # ============================================================
 
-def get_stack_colormap(color='black'):
+def get_stack_colormap(colour='black'):
     """
     Return a matplotlib colormap used to colour a stack of traces
     (multiple 1D spectra, or extracted 2D row/column slices).
 
     Parameters
     ----------
-    color : str
+    colour : str
         ``'black'``     : every trace plotted in black.
         ``'diverging'``  : a four-stop brown/teal diverging colormap.
         any other string : looked up as a standard matplotlib colormap
@@ -235,12 +235,12 @@ def get_stack_colormap(color='black'):
     matplotlib.colors.Colormap
     """
 
-    if color == 'diverging':
+    if colour == 'diverging':
         return cl.LinearSegmentedColormap.from_list(
             "", ["#a6611a", "#dfc27d", "#80cdc1", "#018571"]
         )
 
-    if color == 'black':
+    if colour == 'black':
         return cl.LinearSegmentedColormap.from_list(
             "", ["#000000", "#000000", "#000000", "#000000"]
         )
@@ -252,9 +252,9 @@ def get_stack_colormap(color='black'):
         # -- see opennmr.plotting.style.MAX_LINE_LUMINANCE. Delegated
         # rather than reimplemented: two copies of a rule like this
         # drift.
-        return readable_cmap(plt.get_cmap(color))
+        return readable_cmap(plt.get_cmap(colour))
     except (ValueError, KeyError):
-        print(f"Colour scheme '{color}' not recognised; defaulting to black.")
+        print(f"Colour scheme '{colour}' not recognised; defaulting to black.")
         return cl.LinearSegmentedColormap.from_list(
             "", ["#000000", "#000000", "#000000", "#000000"]
         )
@@ -541,7 +541,7 @@ def plot_comparison(simulated_dict, experimental_dict, ax=None, axis="ppm",
     return ax
 
 
-def plot_stacked_spectra(spectra, labels=None, offset_step=0.2, colors=None,
+def plot_stacked_spectra(spectra, labels=None, offset_step=0.2, colours=None,
                           axis="ppm", channel="real", normalised=True, invert_x=True,
                           ax=None, show_yaxis=False,
                           tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
@@ -562,7 +562,7 @@ def plot_stacked_spectra(spectra, labels=None, offset_step=0.2, colors=None,
         fig = ax.figure
 
     labels = labels or [None] * len(spectra)
-    colors = colors or [None] * len(spectra)
+    colours = colours or [None] * len(spectra)
 
     common = dict(axis=axis, channel=channel, normalised=normalised, invert_x=False,
                    show_yaxis=show_yaxis, tick_dir=tick_dir, tick_length=tick_length,
@@ -570,9 +570,9 @@ def plot_stacked_spectra(spectra, labels=None, offset_step=0.2, colors=None,
                    xlims='default', pl_width=pl_width, pl_height=pl_height,
                    font=font, fontsize=fontsize, fname=False)
 
-    for i, (spec, lab, col) in enumerate(zip(spectra, labels, colors)):
+    for i, (spec, lab, colour) in enumerate(zip(spectra, labels, colours)):
         plot_spectrum_dict(spec, ax=ax, offset=i * offset_step, label=lab,
-                            color=col, **common)
+                            color=colour, **common)
 
     x_key = "x_ppm" if axis == "ppm" else "x_Hz"
     if xlims == 'default':
