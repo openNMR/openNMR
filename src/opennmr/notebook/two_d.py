@@ -1998,7 +1998,9 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
             xmax = hi if xmax is None else max(xmax, hi)
 
     if xlims is not None:
-        ax.set_xlim(xlims)
+        ax.set_xlim(min(xlims), max(xlims))
+        if x_is_ppm:
+            ax.invert_xaxis()
     elif xmin is not None:
         ax.set_xlim(xmin, xmax)
         if x_is_ppm:
