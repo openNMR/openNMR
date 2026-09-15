@@ -2023,18 +2023,19 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
     apply_spine_style(ax, top=False, right=False, bottom=True, left=False)
     apply_tick_style(ax, direction=tick_dir, length=tick_length, width=tick_width,
                       pad=tick_pad, num_ticks=tick_number, axis='x')
+    ax.tick_params(axis='x', labelsize=fontsize)
 
     if show_labels and label_style == 'legend':
         ax.legend(**(legend_kwargs or {}))
 
     label_nuclide = traces[0].get("nuclide")
     if xlabel is not None:
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel(xlabel, fontsize=fontsize)
     elif x_is_ppm and label_nuclide:
         nucgamma = find_gamma(label_nuclide, field=field, SFO1=traces[0].get("SFO1", 0))
-        ax.set_xlabel(NUC_label(nucgamma['Nuclide'], x_unit='ppm'))
+        ax.set_xlabel(NUC_label(nucgamma['Nuclide'], x_unit='ppm'), fontsize=fontsize)
     elif not x_is_ppm:
-        ax.set_xlabel("Slice number")
+        ax.set_xlabel("Slice number", fontsize=fontsize)
 
     ax.set_title(f"Extracted {mode}")
 
@@ -2240,9 +2241,13 @@ def NMR2D_summary_plot(dataset, slices=None, fits=None, integrals=None,
 
     font, fontsize : optional
         Typeface settings, see :func:`nmrtools.plotting.setup_plotting`.
-        Applied to the whole (shared) figure -- individual panels'
-        ``font``/``fontsize`` in ``contour_kwargs`` etc. are ignored,
-        since matplotlib's font rcParams are figure-wide.
+        Applied to the whole (shared) figure via ``setup_plotting``,
+        and also forwarded as the default ``font``/``fontsize`` for
+        the contour and slices panels (an explicit ``font``/
+        ``fontsize`` already present in ``contour_kwargs``/
+        ``slices_kwargs`` takes precedence). The integrals panel has
+        no ``font``/``fontsize`` of its own and always follows the
+        shared rcParams.
 
     output_format : {'', 'manuscript', 'presentation'}, optional
         Predefined figure formatting, see
@@ -2276,6 +2281,19 @@ def NMR2D_summary_plot(dataset, slices=None, fits=None, integrals=None,
     contour_kwargs = dict(contour_kwargs or {})
     slices_kwargs = dict(slices_kwargs or {})
     integrals_kwargs = dict(integrals_kwargs or {})
+
+    # Explicitly forward the resolved typeface settings to each panel
+    # rather than relying solely on the (figure-wide) rcParams that
+    # setup_plotting() configures above -- individual panel kwargs
+    # can still override these via contour_kwargs/slices_kwargs.
+    # (_plot_integral_curves has no font/fontsize parameters of its
+    # own -- it always follows the shared rcParams.)
+    if fontsize is not None:
+        contour_kwargs.setdefault("fontsize", fontsize)
+        slices_kwargs.setdefault("fontsize", fontsize)
+    if font is not None:
+        contour_kwargs.setdefault("font", font)
+        slices_kwargs.setdefault("font", font)
 
     if show_slices is None:
         show_slices = slices is not None
