@@ -445,7 +445,7 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
                   proj_scale=1.0, projection_mode="auto", show_projections=True,
                   projection_size=2.0, projection_pad=0.1,
                   field='400', xlabel=None, ylabel=None, xlims=None, ylims=None,
-                  font='Arial', fontsize=12, output_format='',
+                  font='Arial', fontsize=None, output_format='',
                   colour_spectra=None, equal_tickspacing=False, tick_number=None,
                   tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
                   show_nQ_line=False, nQ=1, nQ_colours=None,
@@ -1566,6 +1566,17 @@ def prepare_trace_for_fit(trace, normalise=True):
 # Slice plotting
 # ============================================================
 
+def _hyphen_to_minus(text):
+    """
+    Replace a leading ASCII hyphen-minus with a proper Unicode minus
+    sign (U+2212), so negative shift values in labels render with a
+    typographic minus rather than a hyphen.
+    """
+    if text.startswith("-"):
+        return "\u2212" + text[1:]
+    return text
+
+
 def _default_slice_label(tr):
     """
     Default per-slice label: ``"F1 = <shift> ppm"`` / ``"F2 = <shift>
@@ -1577,8 +1588,10 @@ def _default_slice_label(tr):
     axis_name = tr.get("axis", "f1").upper()
     shift = tr.get("shift", 0.0)
     if tr.get("shift_unit") == "index":
-        return f"{axis_name} = {shift:.0f}"
-    return f"{axis_name} = {shift:.2f} ppm"
+        value = f"{shift:.0f}"
+        return f"{axis_name} = {_hyphen_to_minus(value)}"
+    value = f"{shift:.2f}"
+    return f"{axis_name} = {_hyphen_to_minus(value)} ppm"
 
 
 def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
