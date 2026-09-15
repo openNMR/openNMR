@@ -1372,11 +1372,7 @@ def NMR2D_fit_slices(slices, peak_defs, mode="rows", fit_regions=None,
 
     for slice_type, s in selected:
 
-        # NOTE: prepare_trace_for_fit is defined in two_d.py (not
-        # touched by this rename), so its own keyword is still spelt
-        # the American way -- only the value passed to it, and every
-        # name on this side of the boundary, use the British spelling.
-        results = prepare_trace_for_fit(s, normalize=normalise)
+        results = prepare_trace_for_fit(s, normalise=normalise)
         x = results["x_ppm"]
         y = results["real_spectrum"]
 
