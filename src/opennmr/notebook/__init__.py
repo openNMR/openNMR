@@ -86,9 +86,9 @@ from .pnmr_fit import (
 )
 
 from .simpson import (
-    SIMPSONimport, CSDMimport, SIMPSONread_shape, SIMPSONapodization_window, SIMPSONread_fid
+    SIMPSONimport, CSDMimport, SIMPSONread_shape, SIMPSONapodization_window, SIMPSONread_fid,
     SIMPSONplot_fid, SIMPSONread_single_point_fid, SIMPSONread_fid_series, SIMPSONplot_1d_stack, SIMPSONplot_shape,
-    SIMPSONplot_fid_series
+    SIMPSONplot_fid_series,
 )
 
 # NOTE: compute_BF1_SFO1, plot_spectrum_dict and plot_comparison used to be
