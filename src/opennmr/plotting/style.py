@@ -113,6 +113,41 @@ def _shrinkable_text_artists(fig):
                 yield artist
 
 
+def _settle_label_positions(fig) -> None:
+    """Put every axis label and title where the *current* layout
+    actually puts it, before anything measures one.
+
+    Matplotlib positions these during ``Axis.draw``, not when the Axes
+    move. Between a ``tight_layout`` that repositioned the Axes and the
+    next real draw, ``label.get_window_extent()`` therefore reports
+    where the label was under the *previous* layout -- which for a
+    freshly rebuilt figure is a position no layout ever chose.
+
+    Measuring that reports a clip that is not there, and
+    :func:`fit_labels_within_figure` then shrinks the whole figure's
+    text trying to fix it. Measured on a DOSY map, whose Axes are
+    rebuilt from a new gridspec on every redraw: at 8 x 6 inches, with
+    both axis labels comfortably inside the figure, every label and
+    tick came out at 6 pt against a requested 16. Reported as "ILT axes
+    have tiny text". A 2D contour rebuilt by a level scroll had the
+    same problem at a large label size.
+
+    ``draw_without_rendering`` rather than poking
+    ``Axis._update_label_position`` directly: that updates the label
+    from tick boxes that are themselves stale, and measured *still*
+    disagreed with a real draw by ~190 px on a shared-axis figure. A
+    full artist walk is the only thing that agrees with what will be
+    drawn, and it is cheap -- the expensive part of a contour is
+    building its paths, which has already happened by the time this
+    runs. Measured at 16 ms for a 512 x 4096 contour, against 0.3 s for
+    the ``canvas.draw()`` this used to be assumed to cost.
+    """
+    try:
+        fig.draw_without_rendering()
+    except Exception:  # noqa: BLE001 -- a layout check must never take a redraw down
+        pass
+
+
 def clipped_labels(fig) -> list:
     """Axis labels and titles falling outside ``fig``'s own bounds --
     i.e. the ones a viewer would see cut off at an edge.
@@ -136,6 +171,7 @@ def clipped_labels(fig) -> list:
             renderer = fig._get_renderer()
         except Exception:  # noqa: BLE001 -- no renderer, nothing measurable
             return []
+    _settle_label_positions(fig)
     bounds = fig.bbox
     tol = _LABEL_FIT_TOLERANCE_PX
     clipped = []

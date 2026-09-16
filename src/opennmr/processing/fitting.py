@@ -33,6 +33,9 @@ straight into :func:`fit_spectrum` -- ``nmrtools2``'s
 
 from __future__ import annotations
 
+from functools import lru_cache
+from math import comb
+
 import numpy as np
 from scipy.interpolate import UnivariateSpline
 from scipy.optimize import curve_fit
@@ -371,6 +374,209 @@ def evaluate_baseline_sinusoidal(coeffs, period, x):
         a_k, b_k = coeffs[2 * k - 1], coeffs[2 * k]
         total = total + a_k * np.cos(w * x) + b_k * np.sin(w * x)
     return total
+
+
+#: Default Whittaker penalty, for a spectrum of
+#: :data:`_WHITTAKER_REFERENCE_POINTS` points. The penalty acts on
+#: differences between *neighbouring points*, so the same physical
+#: stiffness needs a larger lambda as the point spacing gets finer --
+#: hence the rescaling in :func:`estimate_baseline_whittaker` rather
+#: than one fixed number.
+#:
+#: Measured, not guessed. Swept over 1e4..1e13 against a synthetic
+#: rolling baseline (a 0.35-amplitude sine plus a slope, span 0.67)
+#: carrying a solvent peak 100x the analyte peaks, at 4k/8k/16k/32k
+#: points. Best recovery was at 1e9, 1e10, 1e11-1e12 and 1e12-1e13
+#: respectively -- i.e. the optimum moves by about a factor of ten per
+#: doubling, which is what the ``2 * d - 1`` exponent below predicts
+#: (the penalty sums n-d terms each scaling as h**-2d, and h goes as
+#: 1/n). At this value every one of those four sizes recovers the
+#: baseline to under 3% of its own span while keeping at least 99% of
+#: the weakest analyte peak.
+_WHITTAKER_DEFAULT_LAM = 1.0e11
+_WHITTAKER_REFERENCE_POINTS = 16384
+
+
+def whittaker_smooth(y, w, lam: float, d: int = 2):
+    """One Whittaker smoother solve: the ``z`` minimising
+    ``sum(w * (y - z)**2) + lam * sum(diff(z, d)**2)``.
+
+    That is, the weighted least-squares fit to ``y`` that is also
+    penalised for its own ``d``-th differences -- ``lam`` sets how
+    much smoother-than-the-data the answer has to be. The solution
+    satisfies ``(W + lam * D'D) z = W y``, which is symmetric,
+    positive-definite and banded with ``d`` superdiagonals.
+
+    Solved with :func:`scipy.linalg.solveh_banded` rather than a
+    general sparse solve: banded Cholesky is O(n) here, which matters
+    because a baseline fit re-solves this once per reweighting
+    iteration on a spectrum that is routinely tens of thousands of
+    points.
+    """
+    from scipy.linalg import solveh_banded
+
+    y = np.asarray(y, dtype=float)
+    w = np.asarray(w, dtype=float)
+    n = y.size
+    if n <= d + 1:
+        raise ValueError(f"Need more than {d + 1} points for a {d}-order Whittaker smoother.")
+
+    # Copied, because the cached bands are shared with every other call
+    # at this (n, lam, d) -- including, on a pseudo-2D, every other row.
+    ab = _whittaker_penalty_bands(n, float(lam), d).copy()
+    ab[d] += w
+    return solveh_banded(ab, w * y, lower=False)
+
+
+@lru_cache(maxsize=8)
+def _whittaker_penalty_bands(n: int, lam: float, d: int):
+    """``lam * D'D`` in ``solveh_banded``'s upper-banded form, where
+    ``D`` is the ``d``-th difference operator.
+
+    Cached: it depends only on ``(n, lam, d)``, all of which are fixed
+    for an entire baseline fit -- and for every row of a pseudo-2D,
+    since they share a point count. Rebuilding it inside the solve
+    meant forming a sparse matrix product once per reweighting
+    iteration, i.e. ~30 times per row and ~15,000 times for a 512-row
+    series, to arrive at the same array each time.
+
+    The cache holds a ``(d+1, n)`` float array per entry -- 1.5 MB at
+    64k points -- so the size is deliberately small. Callers must copy
+    before adding their weights to the diagonal.
+    """
+    from scipy.sparse import diags
+
+    # The d-th difference operator, as the (n-d, n) banded matrix whose
+    # rows are the binomial coefficients with alternating signs -- the
+    # same thing np.diff(z, d) computes.
+    coefficients = np.array([(-1) ** k * comb(d, k) for k in range(d + 1)], dtype=float)
+    D = diags([np.full(n - d, c) for c in coefficients], offsets=list(range(d + 1)),
+              shape=(n - d, n))
+    penalty = (lam * (D.T @ D)).tocsr()
+
+    # Upper-triangular banded form: ab[u + i - j, j] == A[i, j], so the
+    # main diagonal is ab[u] and superdiagonal k sits in ab[u - k].
+    ab = np.zeros((d + 1, n))
+    for k in range(d + 1):
+        ab[d - k, k:] = penalty.diagonal(k)
+    return ab
+
+
+def estimate_baseline_whittaker(x, y, lam: float | None = None, p: float = 0.001,
+                                 d: int = 2, max_iter: int = 30, tol: float = 1e-4,
+                                 method: str = "arpls"):
+    """Estimate a baseline with an asymmetrically reweighted Whittaker
+    smoother -- the "Whittaker filter" baseline, explicitly requested.
+
+    Unlike every other estimator in this module, **this one is not
+    given a set of candidate baseline points**. It fits a smooth curve
+    to the *whole* spectrum and then iteratively down-weights whatever
+    sits above it, so the fit falls to the bottom of the data on its
+    own. That is the reason to want it: the sigma-clipped estimators
+    all start from "the first and last few percent of the spectrum are
+    baseline", which is wrong for a crowded spectrum, one with signal
+    at the edges, or one whose baseline rolls in the middle where
+    there are no candidate points to see it.
+
+    ``method`` :
+
+    - ``"arpls"`` (default) -- asymmetrically reweighted penalised
+      least squares (Baek et al., *Analyst* 2015). Weights come from
+      a logistic function of each residual measured against the
+      *noise* of the points currently below the fit, so how hard a
+      point is pushed down scales with the baseline's own scatter and
+      there is no asymmetry parameter to guess. This is the one to use
+      on a spectrum with a dominant solvent peak: a fixed asymmetry
+      lets an enormous peak drag the baseline up under its own feet,
+      while this adapts.
+    - ``"asls"`` -- the original asymmetric least squares (Eilers &
+      Boelens 2005): points above the fit get weight ``p``, points
+      below get ``1 - p``. Simpler and faster to converge, and worth
+      having when a specific ``p`` is already known to suit a
+      particular kind of spectrum.
+
+    ``lam`` : the smoothness penalty. Higher is stiffer -- follows less
+    structure, and eventually becomes a straight line; lower follows
+    more, and eventually starts following the peaks it is supposed to
+    run underneath. ``None`` (default) uses
+    :data:`_WHITTAKER_DEFAULT_LAM`, **rescaled for this spectrum's own
+    point count** (as ``lam * (n / 16384) ** (2 * d - 1)``): the
+    penalty is on differences between neighbouring points, so a fixed
+    number means a very different stiffness at 4k points than at 64k,
+    and a default that had to be re-tuned per dataset would not be a
+    usable default. See that constant for the measurements the
+    exponent and the value come from.
+
+    ``p`` : ``method="asls"`` only -- the weight given to points above
+    the current fit. Small (0.001-0.05).
+
+    ``d`` : order of the difference penalty. 2 (default) penalises
+    curvature, which is what "smooth baseline" usually means; 1
+    penalises slope and gives a flatter, more piecewise-constant
+    result.
+
+    ``tol`` : stop once the weights change by less than this, relative
+    to their own magnitude.
+
+    ``x`` is accepted for signature compatibility with the other
+    estimators and is **not used** -- the penalty is on differences
+    between successive points, which assumes they are evenly spaced.
+    An NMR frequency axis always is.
+
+    Returns the baseline itself, evaluated at every point of ``y``
+    (not a callable, unlike :func:`estimate_baseline_spline`: there is
+    no closed form to evaluate anywhere else).
+    """
+    if method not in ("arpls", "asls"):
+        raise ValueError(f"method must be 'arpls' or 'asls', got {method!r}")
+    y = np.asarray(y, dtype=float)
+    n = y.size
+    if n <= d + 1:
+        raise ValueError(f"Need more than {d + 1} points for a {d}-order Whittaker baseline.")
+
+    if lam is None:
+        lam = _WHITTAKER_DEFAULT_LAM * (n / _WHITTAKER_REFERENCE_POINTS) ** (2 * d - 1)
+    if lam <= 0:
+        raise ValueError("lam must be positive.")
+
+    # Solved on a unit-scaled copy purely for conditioning: the system
+    # is linear in y for fixed weights, and both weighting rules are
+    # scale-free, so this changes nothing about the answer.
+    scale = float(np.max(np.abs(y)))
+    if scale == 0:
+        return np.zeros_like(y)
+    y_scaled = y / scale
+
+    w = np.ones(n)
+    z = y_scaled
+    for _ in range(max_iter):
+        z = whittaker_smooth(y_scaled, w, lam, d=d)
+        residual = y_scaled - z
+        negative = residual[residual < 0]
+        if negative.size == 0:
+            # Nothing below the fit at all -- there is no scatter to
+            # measure an asymmetry against, and another iteration
+            # cannot move anywhere useful.
+            break
+        if method == "asls":
+            w_new = np.where(residual > 0, p, 1.0 - p)
+        else:
+            mean, std = float(negative.mean()), float(negative.std())
+            if std == 0:
+                break
+            # Baek et al.'s own logistic: a point well below the fit
+            # keeps full weight, one well above it loses essentially
+            # all of it, and the transition is measured in units of
+            # the below-fit scatter. Clipped before exp() because a
+            # strong peak makes the exponent enormous and numpy warns
+            # about the overflow on its way to the 0 this wants.
+            exponent = np.clip(2.0 * (residual - (2.0 * std - mean)) / std, -500.0, 500.0)
+            w_new = 1.0 / (1.0 + np.exp(exponent))
+        if np.linalg.norm(w_new - w) < tol * max(np.linalg.norm(w), 1.0):
+            w = w_new
+            break
+        w = w_new
+    return z * scale
 
 
 def estimate_baseline_spline(x, y, baseline_regions=None, frac=0.05, sigma=2.5,

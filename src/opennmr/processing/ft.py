@@ -605,11 +605,83 @@ def autophase01(spectrum: np.ndarray, freq: np.ndarray, phase0_range: tuple[floa
 # Baseline
 # ============================================================
 
+def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
+                     baseline_regions: list[tuple[float, float]] | tuple[float, float] | None = None,
+                     frac: float = 0.05, sigma: float = 2.5, max_iter: int = 10,
+                     method: str = "linear", smoothing: float | None = None,
+                     degree: int = 2, n_harmonics: int = 1, period: float | None = None,
+                     lam: float | None = None, asymmetry: float | None = None,
+                     diff_order: int = 2) -> np.ndarray:
+    """The baseline :func:`baseline_correct` would subtract, returned
+    instead of subtracted.
+
+    Same parameters, same estimators, same result -- ``baseline_
+    correct`` is literally ``spectrum - compute_baseline(...)``. Split
+    out so the GUI can *draw* the baseline over the spectrum before
+    committing to it (explicit user request: "add a processing overlay
+    to the plot showing the baseline corrections before they are
+    committed"), without either recomputing it a second time to
+    recover it by subtraction or risking the drawn curve and the
+    subtracted one drifting apart.
+
+    Returns a real array, whatever ``spectrum``'s own dtype: every
+    estimator here fits the real part, which is the only part a
+    baseline is defined on.
+    """
+    from .fitting import (
+        estimate_baseline_polynomial, estimate_baseline_sinusoidal,
+        estimate_baseline_spline, estimate_baseline_whittaker,
+        evaluate_baseline_sinusoidal,
+    )
+    freq = np.asarray(freq, dtype=float)
+    if method == "whittaker":
+        # Before the candidate-region setup below, which this method
+        # has no use for -- see its own docstring.
+        return estimate_baseline_whittaker(
+            freq, np.real(spectrum), lam=lam, d=diff_order,
+            method="arpls" if asymmetry is None else "asls",
+            p=0.001 if asymmetry is None else asymmetry,
+        )
+    if baseline_regions is None:
+        # Guarantee a handful of candidate baseline points per edge even
+        # for a short spectrum -- frac=0.05 alone rounds down to under 3
+        # points (the estimators' own minimum) well before a real
+        # (thousands-of-points) spectrum's usual size would ever need
+        # this.
+        min_edge_points = min(5, max(1, len(freq) // 2))
+        frac = max(frac, min_edge_points / len(freq))
+    if method == "spline":
+        spline = estimate_baseline_spline(
+            freq, np.real(spectrum), baseline_regions=baseline_regions,
+            frac=frac, sigma=sigma, max_iter=max_iter, smoothing=smoothing,
+        )
+        return spline(freq)
+    if method in ("linear", "polynomial"):
+        coeffs, x_ref = estimate_baseline_polynomial(
+            freq, np.real(spectrum), baseline_regions=baseline_regions,
+            frac=frac, sigma=sigma, max_iter=max_iter,
+            degree=(1 if method == "linear" else degree),
+        )
+        return np.polyval(coeffs, freq - x_ref)
+    if method == "sinusoidal":
+        coeffs, fitted_period = estimate_baseline_sinusoidal(
+            freq, np.real(spectrum), baseline_regions=baseline_regions,
+            frac=frac, sigma=sigma, max_iter=max_iter, n_harmonics=n_harmonics, period=period,
+        )
+        return evaluate_baseline_sinusoidal(coeffs, fitted_period, freq)
+    raise ValueError(
+        "method must be 'linear', 'polynomial', 'sinusoidal', 'spline' or "
+        f"'whittaker', got {method!r}"
+    )
+
+
 def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
                       baseline_regions: list[tuple[float, float]] | tuple[float, float] | None = None,
                       frac: float = 0.05, sigma: float = 2.5, max_iter: int = 10,
                       method: str = "linear", smoothing: float | None = None,
-                      degree: int = 2, n_harmonics: int = 1, period: float | None = None) -> np.ndarray:
+                      degree: int = 2, n_harmonics: int = 1, period: float | None = None,
+                      lam: float | None = None, asymmetry: float | None = None,
+                      diff_order: int = 2) -> np.ndarray:
     """Subtract a robust baseline fit to the real part, via
     :mod:`opennmr.processing.fitting`'s baseline estimators -- the same
     ones ``fit_spectrum`` already uses to hold a baseline fixed under a
@@ -654,6 +726,17 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
       not well-described by a low-order polynomial or a single
       sinusoid, at the cost of being the easiest to overfit to noise
       between sparse candidate points.
+    - ``"whittaker"`` (:func:`opennmr.processing.fitting.
+      estimate_baseline_whittaker`) -- **the one that does not need
+      candidate regions at all.** Every method above starts from "the
+      first and last ``frac`` of the spectrum are baseline" and
+      sigma-clips from there, which is wrong for a crowded spectrum,
+      one with signal at the edges, or one whose baseline rolls in
+      the middle where there are no candidate points to see it. This
+      fits a penalised smooth curve to the *whole* spectrum and
+      iteratively down-weights whatever sits above it, so it falls to
+      the bottom of the data on its own. ``baseline_regions``/``frac``/
+      ``sigma`` do not apply to it.
 
     ``smoothing`` : ``method="spline"`` only -- see
     :func:`estimate_baseline_spline`'s own ``smoothing`` parameter
@@ -667,45 +750,25 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
     names (``period=None`` picks a data-driven default: twice the
     candidate points' own x-range).
 
+    ``lam``/``asymmetry``/``diff_order`` : ``method="whittaker"`` only.
+    ``lam`` is the smoothness penalty (``None`` picks a point-count-
+    scaled default); ``asymmetry`` is ``None`` for adaptive arPLS
+    weighting (the default, and the right choice with a dominant
+    solvent peak) or a small number for fixed-``p`` AsLS;
+    ``diff_order`` is which order of difference is penalised (2 =
+    curvature). See :func:`estimate_baseline_whittaker`.
+
     ``baseline_regions`` : explicit (lo, hi) ppm window(s) known to be
     peak-free -- e.g. from the Analysis tab's own peak table, expanded
     a little past each peak's FWHM -- for a spectrum where the default
     edge-only assumption doesn't hold (a peak near either end, or a
     baseline that isn't well represented by just the two edges)."""
-    from .fitting import (
-        estimate_baseline_polynomial, estimate_baseline_sinusoidal,
-        estimate_baseline_spline, evaluate_baseline_sinusoidal,
+    return spectrum - compute_baseline(
+        freq, spectrum, baseline_regions=baseline_regions, frac=frac, sigma=sigma,
+        max_iter=max_iter, method=method, smoothing=smoothing, degree=degree,
+        n_harmonics=n_harmonics, period=period, lam=lam, asymmetry=asymmetry,
+        diff_order=diff_order,
     )
-    freq = np.asarray(freq, dtype=float)
-    if baseline_regions is None:
-        # Guarantee a handful of candidate baseline points per edge even
-        # for a short spectrum -- frac=0.05 alone rounds down to under 3
-        # points (the estimators' own minimum) well before a real
-        # (thousands-of-points) spectrum's usual size would ever need
-        # this.
-        min_edge_points = min(5, max(1, len(freq) // 2))
-        frac = max(frac, min_edge_points / len(freq))
-    if method == "spline":
-        spline = estimate_baseline_spline(
-            freq, np.real(spectrum), baseline_regions=baseline_regions,
-            frac=frac, sigma=sigma, max_iter=max_iter, smoothing=smoothing,
-        )
-        baseline = spline(freq)
-    elif method in ("linear", "polynomial"):
-        coeffs, x_ref = estimate_baseline_polynomial(
-            freq, np.real(spectrum), baseline_regions=baseline_regions,
-            frac=frac, sigma=sigma, max_iter=max_iter, degree=(1 if method == "linear" else degree),
-        )
-        baseline = np.polyval(coeffs, freq - x_ref)
-    elif method == "sinusoidal":
-        coeffs, fitted_period = estimate_baseline_sinusoidal(
-            freq, np.real(spectrum), baseline_regions=baseline_regions,
-            frac=frac, sigma=sigma, max_iter=max_iter, n_harmonics=n_harmonics, period=period,
-        )
-        baseline = evaluate_baseline_sinusoidal(coeffs, fitted_period, freq)
-    else:
-        raise ValueError(f"method must be 'linear', 'polynomial', 'sinusoidal' or 'spline', got {method!r}")
-    return spectrum - baseline
 
 
 # ============================================================

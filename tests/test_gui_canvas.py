@@ -2188,6 +2188,81 @@ def test_canvas_contour_redraw_keeps_the_output_tab_style(qapp):
     assert styled(canvas.ax) == expected
 
 
+def test_canvas_export_lays_out_at_the_size_it_writes(qapp):
+    # Reported directly: "saved png/pdf cuts off bottom of x-axis label
+    # below like 10x10 in". Subplot margins are stored as *fractions*
+    # of the figure and were computed against whatever size Qt gave the
+    # live widget -- but the text keeps its absolute point size, so a
+    # layout done while the widget was large leaves too little room for
+    # the same label at a smaller export size.
+    from opennmr.plotting.style import clipped_labels
+
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(16, 11)          # a large live widget
+    canvas.show_spectrum(_make_1d())
+    canvas.set_export_settings(fig_width=6.0, fig_height=4.5)
+
+    captured = {}
+
+    def fake_save():
+        canvas.figure.draw_without_rendering()
+        captured["size"] = tuple(canvas.figure.get_size_inches())
+        captured["clipped"] = [t.get_text() for t in clipped_labels(canvas.figure)]
+
+    canvas.export_full_resolution(fake_save)
+
+    assert captured["size"] == pytest.approx((6.0, 4.5))
+    assert captured["clipped"] == []          # nothing written off the edge
+
+
+def test_canvas_export_restores_the_on_screen_layout(qapp):
+    # The export's own margins must not be left behind on the live view.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(16, 11)
+    canvas.show_spectrum(_make_1d())
+    before = canvas.figure.subplotpars.bottom
+    canvas.set_export_settings(fig_width=5.0, fig_height=4.0)
+
+    canvas.export_full_resolution(lambda: None)
+
+    assert tuple(canvas.figure.get_size_inches()) == pytest.approx((16.0, 11.0))
+    assert canvas.figure.subplotpars.bottom == pytest.approx(before, abs=0.02)
+
+
+def test_canvas_text_comes_back_when_the_widget_grows(qapp):
+    # Reported directly: "DOSY axes are still reverting to the small
+    # fonts sometimes". fit_labels_within_figure only ever shrinks, so
+    # a figure laid out once while its tab was hidden (and therefore
+    # tiny) kept that shrunken text however large the widget later got.
+    canvas = MplCanvas()
+    # Below ~1.4 x 0.9 in, a 1D canvas genuinely cannot fit its x label
+    # -- the measured threshold in fit_labels_within_figure's own
+    # docstring, and the size a not-yet-shown tab behaves like.
+    canvas.figure.set_size_inches(1.2, 0.8)
+    canvas.show_spectrum(_make_1d())
+    shrunk = canvas.ax.xaxis.label.get_fontsize()
+    assert shrunk < canvas._AXIS_LABELSIZE        # it really did shrink
+
+    canvas.figure.set_size_inches(10, 7)
+    canvas._run_debounced_resize_layout()         # what the resize event triggers
+
+    assert canvas.ax.xaxis.label.get_fontsize() == pytest.approx(canvas._AXIS_LABELSIZE)
+    assert all(t.get_fontsize() == pytest.approx(canvas._AXIS_LABELSIZE)
+               for t in canvas.ax.get_xticklabels())
+
+
+def test_canvas_resize_relayout_is_debounced(qapp):
+    # A window drag fires a resize per pixel, and each layout pass is a
+    # real cost on a large contour.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    assert canvas._resize_layout_timer.isActive() is False
+    canvas._on_canvas_resized()
+    assert canvas._resize_layout_timer.isActive() is True
+    canvas._on_canvas_resized()                   # restarts, does not stack
+    assert canvas._resize_layout_timer.isActive() is True
+
+
 def test_canvas_default_export_size_switches_for_a_sliced_2d(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_2d(n_f1=8))

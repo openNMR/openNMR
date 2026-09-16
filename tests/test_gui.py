@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.main_window import (
-    MainWindow, _DosySettingsDialog, _GradientCalibrationDialog, _ScoreSettingsDialog,
+    MainWindow, _DosySettingsDialog, _GradientCalibrationDialog,
+    _ProcessingReportDialog, _ScoreSettingsDialog,
 )
 from opennmr.gui.session import Session
 import opennmr.gui.main_window as main_window_module
@@ -30,7 +31,7 @@ from opennmr.processing import ilt as processing_ilt
 from opennmr.processing import slicing as processing_slicing
 from opennmr.processing import ft as processing_ft
 from opennmr.processing.slicing import get_trace
-from opennmr.processing.fitting import gaussian
+from opennmr.processing.fitting import gaussian, lorentzian
 
 
 @pytest.fixture(scope="module")
@@ -475,8 +476,8 @@ def test_main_window_load_and_plot(qapp, tmp_path):
     window._load(path, vendor="bruker")
     assert window.spectrum_list.count() == 1
     assert window.spectrum_list.currentRow() == 0
-    # Selection triggers a plot; canvas should now have a line drawn.
-    assert len(window.canvas.ax.lines) == 1
+    # Selection triggers a plot; canvas should now have a trace drawn.
+    assert len(_trace_lines(window.canvas.ax)) == 1
 
 
 def test_main_window_process_indirect_button_hidden_for_1d(qapp, tmp_path):
@@ -2247,7 +2248,7 @@ def test_main_window_pseudo2d_apply_to_all_slices(qapp, tmp_path):
     np.testing.assert_allclose(np.abs(updated), np.abs(original), atol=1e-6)
 
 
-def test_main_window_autophase_slices_button_phases_independently(qapp, tmp_path):
+def test_main_window_autophase_with_apply_all_phases_slices_independently(qapp, tmp_path):
     window = MainWindow()
     window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=8), vendor="bruker")
     index = window._selected_index()
@@ -2259,7 +2260,9 @@ def test_main_window_autophase_slices_button_phases_independently(qapp, tmp_path
     window.phase0_handle.setValue(65.0)
     distorted = _complex(window.session.spectra[index]).copy()
 
-    window._on_autophase_slices_clicked()
+    # One Autophase button; "Apply to every slice" is what makes it
+    # per-slice rather than this-slice-only.
+    window._on_autophase_clicked()
 
     updated = _complex(window.session.spectra[index])
     assert not np.allclose(distorted, updated)
@@ -2271,10 +2274,13 @@ def test_main_window_autophase_slices_button_phases_independently(qapp, tmp_path
         assert np.sum(np.real(updated[row])) >= np.sum(np.real(distorted[row])) - 1e-6
 
 
-def test_main_window_autophase_slices_button_hidden_for_1d(qapp, tmp_path):
+def test_main_window_apply_all_slices_checkbox_hidden_for_1d(qapp, tmp_path):
+    # There is exactly one Autophase button, and the per-slice option
+    # it offers is this checkbox -- which has nothing to mean on a 1D.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path), vendor="bruker")
-    assert window.autophase_slices_button.isHidden() is True
+    assert window.apply_all_slices_checkbox.isHidden() is True
+    assert not hasattr(window, "autophase_slices_button")
 
 
 def test_main_window_pseudo2d_unchecking_apply_all_reverts_other_slices(qapp, tmp_path):
@@ -2580,6 +2586,66 @@ def test_main_window_zero_fill_change_updates_spectrum_length_live(qapp, tmp_pat
     assert len(window.session.spectra[index].data) == 128
 
 
+def test_main_window_zoom_survives_a_window_function_change(qapp, tmp_path, monkeypatch):
+    # Reported directly: "there are still instances where the view is
+    # being reset, probably when the fid is being recomputed after
+    # windowing etc., can the stored view just be applied to the new
+    # plot each time?"
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    canvas = window.canvas
+    canvas.ax.set_xlim(6.0, 4.0)
+    canvas.ax.set_ylim(0.1, 0.4)
+
+    hann = next(i for i in range(window.window_combo.count())
+                if window.window_combo.itemData(i) == "hann")
+    window.window_combo.setCurrentIndex(hann)
+
+    assert canvas.ax.get_xlim() == pytest.approx((6.0, 4.0))
+    assert canvas.ax.get_ylim() == pytest.approx((0.1, 0.4))
+
+
+def test_main_window_zoom_survives_a_zero_fill_change(qapp, tmp_path, monkeypatch):
+    # The harder half: zero-fill changes the point count, which sends
+    # update_data down its rebuild path. That path restored x only, so
+    # the same edit kept or discarded the intensity zoom depending
+    # purely on whether the length happened to change.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    canvas = window.canvas
+    canvas.ax.set_xlim(6.0, 4.0)
+    canvas.ax.set_ylim(0.1, 0.4)
+
+    window._set_zero_fill_value(128)
+    window._on_fid_processing_control_changed()
+
+    assert len(window.session.spectra[0].data) == 128
+    assert canvas.ax.get_xlim() == pytest.approx((6.0, 4.0))
+    assert canvas.ax.get_ylim() == pytest.approx((0.1, 0.4))
+
+
+def test_main_window_processing_preview_zoom_survives_a_control_change(qapp, tmp_path, monkeypatch):
+    # Same complaint, on the tab where FID processing is actually done.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
+    window.canvas_tabs.setCurrentWidget(window.processing_preview_canvas)
+    preview = window.processing_preview_canvas
+    assert preview._processing_preview_spec_ax is not None
+
+    preview._processing_preview_spec_ax.set_xlim(6.0, 4.0)
+
+    def flat():
+        return [v for panel in preview.processing_preview_limits() for lim in panel for v in lim]
+
+    before = flat()
+
+    hann = next(i for i in range(window.window_combo.count())
+                if window.window_combo.itemData(i) == "hann")
+    window.window_combo.setCurrentIndex(hann)
+
+    assert flat() == pytest.approx(before)
+
+
 def test_main_window_clicking_fid_tab_switches_canvas_to_time_domain(qapp, tmp_path, monkeypatch):
     # No more "Preview as FID" checkbox -- clicking the FID tab itself
     # is what shows it (and switching back to Spectrum shows that).
@@ -2704,7 +2770,7 @@ def test_main_window_selecting_processing_tab_shows_processing_preview(qapp, tmp
     assert window.canvas_tabs.currentWidget() is window.processing_preview_canvas
     fid_ax, spec_ax = window.processing_preview_canvas.figure.axes
     assert len(fid_ax.lines) >= 1
-    assert len(spec_ax.lines) == 1
+    assert len(_trace_lines(spec_ax)) == 1
 
 
 def test_main_window_leaving_processing_tab_switches_back_to_spectrum(qapp, tmp_path, monkeypatch):
@@ -4159,6 +4225,19 @@ def _select_rows(window, rows):
         window.spectrum_list.item(row).setSelected(True)
 
 
+def _trace_lines(ax):
+    """The plotted data traces on ``ax``, excluding the baseline
+    preview overlay.
+
+    That overlay is a real Line2D on the same axes (see
+    ``MplCanvas.set_baseline_preview``) and is drawn by default, so a
+    bare ``len(ax.lines)`` no longer counts what these assertions mean
+    by it: how many *spectra* are drawn."""
+    from opennmr.gui.widgets.canvas import MplCanvas
+
+    return [line for line in ax.lines if line.get_gid() != MplCanvas._BASELINE_PREVIEW_GID]
+
+
 def _compare_line_count(canvas):
     """Total plotted-trace count for a Compare/pseudo-2D-stack canvas
     -- "Stacked" mode (more than one spectrum) uses one subplot per
@@ -4186,7 +4265,7 @@ def test_main_window_single_selection_does_not_trigger_compare(qapp, tmp_path):
     _select_rows(window, [0])
     assert window.compare_status_label.text() == "Select at least two 1D spectra to compare."
     # Canvas shows the single spectrum, not a multi-line comparison.
-    assert len(window.canvas.ax.lines) == 1
+    assert len(_trace_lines(window.canvas.ax)) == 1
 
 
 def test_main_window_multi_selection_shows_compare(qapp, tmp_path):
@@ -4284,7 +4363,7 @@ def test_main_window_deselecting_back_to_single_restores_single_view(qapp, tmp_p
     assert _compare_line_count(window.compare_canvas) == 2
 
     _select_rows(window, [0])
-    assert len(window.canvas.ax.lines) == 1
+    assert len(_trace_lines(window.canvas.ax)) == 1
     assert window.canvas_tabs.currentWidget() is window.canvas
 
 
@@ -4356,6 +4435,93 @@ def test_main_window_compare_superimposed_layout_runs(qapp, tmp_path):
 
     window.layout_mode_combo.setCurrentIndex(1)  # Superimposed
     assert len(window.compare_canvas.ax.lines) == 2
+
+
+def test_main_window_compare_stays_primed_when_the_experiment_changes(qapp, tmp_path):
+    # Reported directly: "the compare tab should be primed and ready to
+    # go and not need to be turned off and on again (switch between
+    # superimposed and stacked and then back again)".
+    #
+    # Selecting another pseudo-2D while Compare was the visible tab
+    # force-switched to Spectrum -- because the "is Compare already
+    # showing this spectrum's stack?" check ran while the list still
+    # held the *previous* spectrum's slices. Compare was then left
+    # unrendered, since its refresh defers the draw whenever it isn't
+    # the visible tab.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path / "c", n_f1=4, n_f2=32), vendor="bruker")
+    window._load(_make_2d_dataset(tmp_path / "d", n_f1=6, n_f2=32), vendor="bruker")
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
+    assert len(window.compare_canvas._compare_axes) == 6
+
+    window._select_single_row(0)
+
+    # Still on Compare, and already showing the newly selected
+    # spectrum's own slices -- no mode toggle needed to wake it up.
+    assert window.canvas_tabs.currentWidget() is window.compare_canvas
+    assert window._compare_view_stale is False
+    assert len(window.compare_canvas._compare_axes) == 4
+
+    window._select_single_row(1)
+    assert window.canvas_tabs.currentWidget() is window.compare_canvas
+    assert len(window.compare_canvas._compare_axes) == 6
+
+
+def test_main_window_selecting_a_1d_still_leaves_the_compare_tab(qapp, tmp_path):
+    # The other half of the same rule: a plain 1D has no slice stack to
+    # put in Compare, so staying there would leave a blank panel up.
+    window = MainWindow()
+    window._load(_make_2d_dataset(tmp_path / "e", n_f1=4, n_f2=32), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="plain"), vendor="bruker")
+    window._select_single_row(0)
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
+
+    window._select_single_row(1)
+    assert window.canvas_tabs.currentWidget() is window.canvas
+
+
+def test_main_window_click_modes_reset_when_the_experiment_changes(qapp, tmp_path):
+    # Reported directly: "a lot of specific buttons for example stay
+    # selected after switching experiment file". Pick Peak and Select
+    # Region arm the Spectrum canvas to treat the next click as
+    # something other than a click -- left latched across a selection
+    # change, that click lands on the wrong dataset.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="one"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="two"), vendor="bruker")
+
+    window.pick_peak_button.setChecked(True)
+    window.select_region_button.setChecked(True)
+    window.measurement_menu_action.setChecked(True)
+    assert window.canvas._pick_mode is True
+
+    window._select_single_row(0)
+
+    assert window.pick_peak_button.isChecked() is False
+    assert window.select_region_button.isChecked() is False
+    assert window.measurement_menu_action.isChecked() is False
+    # The canvas is disarmed too, not just the button un-drawn.
+    assert window.canvas._pick_mode is False
+    assert window.canvas._region_select_mode is False
+
+
+def test_main_window_per_spectrum_settings_survive_the_experiment_change(qapp, tmp_path):
+    # The reset above is for unfinished gestures only -- it must not
+    # take saved per-spectrum work with it.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="keep1"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="keep2"), vendor="bruker")
+    window._select_single_row(0)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window._add_region_row(4.0, 6.0)
+    n_peaks = window.peak_table.rowCount()
+    n_regions = window.region_table.rowCount()
+
+    window._select_single_row(1)
+    window._select_single_row(0)
+
+    assert window.peak_table.rowCount() == n_peaks
+    assert window.region_table.rowCount() == n_regions
 
 
 def test_main_window_compare_normalize_by_mass_skips_unset(qapp, tmp_path):
@@ -4820,6 +4986,93 @@ def test_main_window_exclude_nearest_point_removes_it_and_refits(qapp):
     assert len(window._relaxation_fit_original[index]["t"]) == n_before
 
 
+def test_main_window_exclude_keeps_the_starting_values_the_fit_used(qapp):
+    # Reported directly: "when fit points are excluded, the parameters
+    # set in starting values get ignored". The refit fell back to
+    # fit_relaxation's own automatic p0/bounds, on a since-outdated
+    # assumption that the GUI had no way to set them.
+    delays = np.geomspace(0.001, 0.3, 10)
+    window = MainWindow()
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(1)
+    _set_delay_unit(window, "s")
+    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
+    window.relaxation_model_combo.setCurrentIndex(
+        window.relaxation_model_combo.findData("exponential_decay"))
+
+    window.guess_group.setChecked(True)
+    window.guess_table.setItem(1, 1, QTableWidgetItem("0.04"))   # T2 guess
+    window.guess_table.setItem(1, 2, QTableWidgetItem("0.02"))   # T2 min
+    window.guess_table.setItem(1, 3, QTableWidgetItem("0.09"))   # T2 max
+    window._on_fit_curve_button_clicked()
+
+    original = window._relaxation_fit_original[0]
+    window._on_fit_point_exclude_requested(float(original["t"][0]), float(original["y"][0]))
+
+    refit = window._relaxation_fit_results[0]
+    assert len(refit["t"]) == len(original["t"]) - 1      # the point really went
+    # The bounds the panel asked for are the bounds it was refitted in.
+    assert refit["bounds"][0][1] == pytest.approx(0.02)
+    assert refit["bounds"][1][1] == pytest.approx(0.09)
+    assert refit["p0"][1] == pytest.approx(0.04)
+
+
+def test_main_window_exclude_works_on_a_multicomponent_diffusion_fit(qapp):
+    # The refit passed model="diffusion_n" with no spec to go with it,
+    # which fit_relaxation rejects outright -- so excluding a point
+    # from a multicomponent fit could not work at all.
+    b = np.linspace(0.0, 3.0e9, 12)
+    ppm = np.linspace(0.0, 10.0, 200)
+    data = np.array([
+        lorentzian(ppm, 5.0, 0.08, 1.0) * (0.6 * np.exp(-2.0e-9 * bi) + 0.4 * np.exp(-2.0e-10 * bi))
+        for bi in b
+    ])
+    spectrum = NMRSpectrum(
+        data=data,
+        axes=[NMRAxis(kind="index", index=np.arange(1, b.size + 1)),
+              NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True),
+    )
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.08, eta=0.0)
+    window.fit_type_combo.setCurrentIndex(1)                 # Diffusion
+    window.delay_source_combo.setCurrentIndex(1)
+    window.manual_delays_edit.setText(", ".join(f"{v:.8g}" for v in b))
+    window.relaxation_model_combo.setCurrentIndex(
+        window.relaxation_model_combo.findData("diffusion_n"))
+    window.diffusion_components_spin.setValue(2)
+    window._on_fit_curve_button_clicked()
+    assert window._relaxation_fit_results
+
+    original = window._relaxation_fit_original[0]
+    n_before = len(original["t"])
+    window._on_fit_point_exclude_requested(float(original["t"][-1]), float(original["y"][-1]))
+
+    assert len(window._relaxation_fit_results[0]["t"]) == n_before - 1
+
+
+def test_main_window_exclude_marker_follows_the_spectrum_it_belongs_to(qapp):
+    # Selecting another spectrum swapped in its own siloed fit results
+    # but left the exclusion machinery pointing at the previous one's
+    # series -- so the next right-click refitted the wrong data.
+    delays = np.geomspace(0.001, 0.3, 10)
+    window = MainWindow()
+    _fit_a_t2_curve(window, delays, true_t2=0.05)
+    original = window._relaxation_fit_original[0]
+    window._on_fit_point_exclude_requested(float(original["t"][0]), float(original["y"][0]))
+    assert window._excluded_relaxation_indices.get(0) == {0}
+
+    other = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.02)
+    _load_spectrum_directly(window, other)
+
+    # The new selection carries no fit and no exclusions of its own.
+    assert window._excluded_relaxation_indices == {}
+    assert window._relaxation_fit_original is None or not window._relaxation_fit_original
+
+
 def test_main_window_exclude_nearest_point_shows_excluded_marker(qapp):
     delays = np.geomspace(0.001, 0.3, 10)
     window = MainWindow()
@@ -5149,7 +5402,7 @@ def test_main_window_auto_pick_peaks_not_supported_for_conventional_2d(qapp, tmp
 
 def test_main_window_auto_pick_peaks_uses_prominence_spin(qapp):
     # A strong peak (4.0) plus a much weaker one (6.5, 8% the height) --
-    # the default prominence (0.1) should drop the weak one as noise,
+    # the default prominence (10%) should drop the weak one as noise,
     # while a lower one picks up both.
     ppm = np.linspace(3.0, 8.0, 2000)
     data = gaussian(ppm, 4.0, 0.05, 1.0) + gaussian(ppm, 6.5, 0.05, 0.08)
@@ -5159,13 +5412,331 @@ def test_main_window_auto_pick_peaks_uses_prominence_spin(qapp):
 
     window = MainWindow()
     _load_spectrum_directly(window, spectrum)
-    assert window.auto_pick_prominence_spin.value() == pytest.approx(0.1)  # the raised default
+    # In percent now, not a fraction of 1 -- see the box's own comment.
+    assert window.auto_pick_prominence_spin.value() == pytest.approx(10.0)
     window._on_auto_pick_peaks_clicked()
     assert window.peak_table.rowCount() == 1  # weak peak dropped at the default
 
-    window.auto_pick_prominence_spin.setValue(0.03)
+    window.auto_pick_prominence_spin.setValue(3.0)
     window._on_auto_pick_peaks_clicked()
     assert window.peak_table.rowCount() == 2  # both found at a lower threshold
+
+
+def test_main_window_peak_pick_threshold_reaches_below_a_solvent_peak(qapp):
+    # Reported directly: "minimum value for e.g. peak picking
+    # threshold, 0.1% is not small enough with dominant solvent peaks".
+    # Prominence is measured against the spectrum's own peak-to-peak
+    # range, so a solvent peak a thousand times taller than the analyte
+    # puts every real peak far below a tenth of a percent of it.
+    ppm = np.linspace(0.0, 10.0, 8000)
+    data = (gaussian(ppm, 4.7, 0.03, 1000.0)      # solvent
+            + gaussian(ppm, 2.0, 0.03, 0.5)       # analyte, 0.05% of it
+            + gaussian(ppm, 7.5, 0.03, 0.4))
+    spectrum = NMRSpectrum(
+        data=data, axes=[NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0))
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    # The box can actually express the number needed...
+    assert window.auto_pick_prominence_spin.minimum() <= 0.001
+    window.auto_pick_prominence_spin.setValue(0.01)
+    assert window.auto_pick_prominence_spin.value() == pytest.approx(0.01)
+
+    window._on_auto_pick_peaks_clicked()
+    # ...and finds the analyte peaks the old 1% floor could not reach.
+    found = sorted(float(window.peak_table.item(r, 0).text())
+                   for r in range(window.peak_table.rowCount()))
+    assert any(abs(shift - 2.0) < 0.1 for shift in found)
+    assert any(abs(shift - 7.5) < 0.1 for shift in found)
+
+
+def test_main_window_whittaker_is_offered_and_recorded(qapp, tmp_path, monkeypatch):
+    # Explicitly requested, and flagged as the priority of its round.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=256), vendor="bruker")
+    index = window._selected_index()
+
+    assert window.baseline_method_combo.findData("whittaker") >= 0
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("whittaker"))
+
+    raw = window.session.spectra[index].metadata.raw
+    assert raw["baseline_method"] == "whittaker"
+    # Its own knob is the one shown; the others belong to other methods.
+    assert window.baseline_lam_spin.isHidden() is False
+    assert window.baseline_degree_spin.isHidden() is True
+    assert window.baseline_smoothing_spin.isHidden() is True
+
+
+def test_main_window_whittaker_lambda_is_auto_until_set(qapp, tmp_path, monkeypatch):
+    # "Auto" has to reach baseline_correct as None, so it picks its own
+    # point-count-scaled default rather than being pinned at 10**0.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=256), vendor="bruker")
+    index = window._selected_index()
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("whittaker"))
+
+    assert window.baseline_lam_spin.value() == 0.0
+    assert window.session.spectra[index].metadata.raw["baseline_lam"] is None
+
+    window.baseline_lam_spin.setValue(9.0)
+    assert window.session.spectra[index].metadata.raw["baseline_lam"] == pytest.approx(1e9)
+
+
+def _pseudo2d_with_differing_baselines(n=1024, rows=6):
+    """Rows whose baselines genuinely differ from one another -- the
+    case a per-row fit must handle and a single shared fit cannot."""
+    ppm = np.linspace(-2.0, 12.0, n)
+    rng = np.random.default_rng(0)
+
+    def lor(centre, width, amp):
+        return amp / (1.0 + ((ppm - centre) / width) ** 2)
+
+    peaks = lor(4.7, 0.02, 50.0) + lor(1.2, 0.01, 1.0) + lor(7.3, 0.01, 0.8)
+    truths, data = [], []
+    for r in range(rows):
+        base = (0.1 + 0.05 * r) * np.sin(2 * np.pi * (ppm + 2.0) / (18.0 + r)) + 0.01 * r * ppm
+        truths.append(base)
+        data.append(peaks * np.exp(-0.15 * r) + base + rng.normal(0.0, 0.003, n))
+    spectrum = NMRSpectrum(
+        data=np.array(data),
+        axes=[NMRAxis(kind="index", index=np.arange(1, rows + 1)),
+              NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True),
+    )
+    return ppm, spectrum, np.array(truths)
+
+
+def test_baseline_across_a_pseudo2d_fits_every_row_on_its_own(qapp):
+    # Asked directly: "check how the new baselining works across
+    # pseudo-2D data". Each row gets its own fit, and a row fitted
+    # inside the series must equal that row fitted alone.
+    ppm, spectrum, truths = _pseudo2d_with_differing_baselines()
+    spectrum.metadata.raw.update({"baseline_correct": True, "baseline_method": "whittaker"})
+
+    corrected = MainWindow._baseline_correct_if_enabled_multi_row(
+        spectrum.data, ppm, spectrum)
+    alone = MainWindow._baseline_correct_if_enabled(spectrum.data[3], ppm, spectrum)
+    np.testing.assert_allclose(corrected[3], alone)
+
+    # And each row's own baseline is actually recovered, not one
+    # compromise shared across rows that disagree.
+    fitted = spectrum.data - corrected
+    for row in range(spectrum.data.shape[0]):
+        error = np.sqrt(np.mean((fitted[row] - truths[row]) ** 2))
+        assert error < 0.05 * np.ptp(truths[row])
+
+
+def test_whittaker_beats_the_others_across_a_pseudo2d(qapp):
+    ppm, spectrum, truths = _pseudo2d_with_differing_baselines()
+
+    def worst_row_error(method, **extra):
+        spectrum.metadata.raw.update(
+            {"baseline_correct": True, "baseline_method": method, **extra})
+        corrected = MainWindow._baseline_correct_if_enabled_multi_row(
+            spectrum.data, ppm, spectrum)
+        fitted = spectrum.data - corrected
+        return max(np.sqrt(np.mean((fitted[r] - truths[r]) ** 2))
+                   for r in range(spectrum.data.shape[0]))
+
+    whittaker = worst_row_error("whittaker")
+    assert whittaker < worst_row_error("linear")
+    assert whittaker < worst_row_error("polynomial", baseline_degree=3)
+
+
+def test_main_window_baseline_overlay_matches_what_would_be_subtracted(qapp, tmp_path, monkeypatch):
+    # Asked directly: "add a processing overlay to the plot showing the
+    # baseline corrections before they are committed".
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
+    # Uncommitted is the whole point: with the correction switched off,
+    # the baseline is still drawn so it can be judged first.
+    window.baseline_correct_button.setChecked(False)
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("polynomial"))
+    assert window.session.spectra[0].metadata.raw["baseline_correct"] is False
+
+    lines = [ln for ln in window.canvas.ax.lines
+             if ln.get_gid() == window.canvas._BASELINE_PREVIEW_GID]
+    assert len(lines) == 1, "the baseline should be drawn without committing to it"
+
+    # It is the real thing, on the trace's own scale -- not a sketch.
+    spectrum = window.session.spectra[0]
+    ppm = spectrum.axis_values(0, "ppm")
+    expected = processing_ft.compute_baseline(
+        ppm, np.real(spectrum.data), **MainWindow._baseline_kwargs(spectrum))
+    scale = float(np.max(np.abs(np.real(spectrum.data))))
+    np.testing.assert_allclose(lines[0].get_ydata(), expected / scale)
+
+
+def test_main_window_baseline_overlay_can_be_turned_off(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
+
+    def overlay_count():
+        return len([ln for ln in window.canvas.ax.lines
+                    if ln.get_gid() == window.canvas._BASELINE_PREVIEW_GID])
+
+    assert overlay_count() == 1
+    window.baseline_preview_checkbox.setChecked(False)
+    assert overlay_count() == 0
+    window.baseline_preview_checkbox.setChecked(True)
+    assert overlay_count() == 1
+
+
+def test_main_window_baseline_overlay_follows_the_method(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
+
+    def overlay_y():
+        line = next(ln for ln in window.canvas.ax.lines
+                    if ln.get_gid() == window.canvas._BASELINE_PREVIEW_GID)
+        return np.array(line.get_ydata())
+
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("linear"))
+    linear = overlay_y()
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("whittaker"))
+    assert not np.allclose(linear, overlay_y())
+
+
+def test_main_window_sinusoidal_options_are_exposed_and_recorded(qapp, tmp_path, monkeypatch):
+    # Asked directly: "add some controllable options to adjust the
+    # polynomial and sinusoidal baselines".
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("sinusoidal"))
+    raw = window.session.spectra[0].metadata.raw
+
+    assert window.baseline_harmonics_spin.isHidden() is False
+    assert window.baseline_period_spin.isHidden() is False
+    assert window.baseline_degree_spin.isHidden() is True
+
+    window.baseline_harmonics_spin.setValue(3)
+    assert raw["baseline_harmonics"] == 3
+    assert raw["baseline_period"] is None          # 0.0 means Auto
+    window.baseline_period_spin.setValue(4.0)
+    assert raw["baseline_period"] == pytest.approx(4.0)
+
+
+def test_main_window_baseline_options_are_restored_per_spectrum(qapp, tmp_path, monkeypatch):
+    # Lambda was never restored when it was added, so it carried the
+    # previous spectrum's stiffness onto the next one.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512, name="a"), vendor="bruker")
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512, name="b"), vendor="bruker")
+
+    window._select_single_row(0)
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("whittaker"))
+    window.baseline_lam_spin.setValue(9.0)
+
+    window._select_single_row(1)
+    assert window.baseline_lam_spin.value() == 0.0          # b's own default
+    window._select_single_row(0)
+    assert window.baseline_lam_spin.value() == pytest.approx(9.0)
+
+
+def test_main_window_warns_about_a_high_polynomial_degree(qapp, tmp_path, monkeypatch):
+    # Asked directly: "add appropriate warnings for any of the more
+    # automated steps that outline the potential issues or concerns".
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("polynomial"))
+
+    window.baseline_degree_spin.setValue(2)
+    assert "oscillates" not in window.processing_status_label.text()
+
+    window.baseline_degree_spin.setValue(8)
+    assert "oscillates" in window.processing_status_label.text()
+
+
+def test_main_window_warns_when_a_peak_sits_in_the_edge_region(qapp):
+    # Every method except Whittaker takes its baseline points from the
+    # spectrum's own edges. Whether that is safe is a checkable
+    # property of the data, not a standing caveat.
+    ppm = np.linspace(0.0, 10.0, 2000)
+    at_edge = gaussian(ppm, 9.8, 0.05, 1.0) + gaussian(ppm, 5.0, 0.05, 1.0)
+    window = MainWindow()
+    _load_spectrum_directly(window, NMRSpectrum(
+        data=at_edge, axes=[NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)))
+
+    # Whittaker first: it does not use edge points, so it does not get
+    # the warning -- and going via it guarantees the *next* setCurrentIndex
+    # actually emits, since "linear" is the combo's own default.
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("whittaker"))
+    assert "edge region" not in window.processing_status_label.text()
+
+    window.baseline_method_combo.setCurrentIndex(
+        window.baseline_method_combo.findData("linear"))
+    assert "edge region" in window.processing_status_label.text()
+
+
+def test_main_window_warns_when_auto_pick_is_asked_to_pick_noise(qapp):
+    # The prominence floor was lowered to 0.001% on purpose; the same
+    # setting will happily pick noise, and the table gives no hint.
+    rng = np.random.default_rng(0)
+    ppm = np.linspace(0.0, 10.0, 4000)
+    data = gaussian(ppm, 5.0, 0.04, 1.0) + rng.normal(0.0, 0.01, ppm.size)
+    window = MainWindow()
+    _load_spectrum_directly(window, NMRSpectrum(
+        data=data, axes=[NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)))
+
+    window.auto_pick_prominence_spin.setValue(10.0)
+    window._on_auto_pick_peaks_clicked()
+    assert "likely noise" not in window.analysis_status_label.text()
+
+    window.auto_pick_prominence_spin.setValue(0.05)     # well under the noise
+    window._on_auto_pick_peaks_clicked()
+    status = window.analysis_status_label.text()
+    assert "likely noise" in status
+    assert "σ" in status                                 # it says what the noise is
+
+
+def test_main_window_processing_report_states_what_was_applied(qapp, tmp_path, monkeypatch):
+    # Reported directly: "maybe a processing report for consistency
+    # and/or for publication comparison".
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=256), vendor="bruker")
+    exponential = next(i for i in range(window.window_combo.count())
+                       if window.window_combo.itemData(i) == "exponential")
+    window.window_combo.setCurrentIndex(exponential)
+    window.lb_spin.setValue(5.0)
+
+    shown = {}
+    monkeypatch.setattr(_ProcessingReportDialog, "exec",
+                        lambda self: shown.setdefault("text", self.text_edit.toPlainText()))
+    window._on_processing_report_clicked()
+
+    assert "5 Hz of line broadening" in shown["text"]
+    assert "exponential (EM)" in shown["text"]
+
+
+def test_main_window_processing_report_compares_a_multi_selection(qapp, tmp_path, monkeypatch):
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=256, name="one"), vendor="bruker")
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=256, name="two"), vendor="bruker")
+    exponential = next(i for i in range(window.window_combo.count())
+                       if window.window_combo.itemData(i) == "exponential")
+    window.window_combo.setCurrentIndex(exponential)
+    window.lb_spin.setValue(3.0)          # applies to the selected one only
+    _select_rows(window, [0, 1])
+
+    shown = {}
+    monkeypatch.setattr(_ProcessingReportDialog, "exec",
+                        lambda self: shown.setdefault("text", self.text_edit.toPlainText()))
+    window._on_processing_report_clicked()
+
+    # The "for consistency" half: the setting they disagree on is marked.
+    assert "differs" in shown["text"]
 
 
 def test_main_window_clear_all_peaks_button(qapp):
@@ -7518,7 +8089,7 @@ def test_main_window_nq_line_draws_and_removes_a_line_on_a_real_2d_contour(qapp,
     assert len(window.canvas.ax.lines) == 0
 
     window.output_nq_line_checkbox.setChecked(True)
-    assert len(window.canvas.ax.lines) == 1
+    assert len(_trace_lines(window.canvas.ax)) == 1
 
     window.output_nq_line_checkbox.setChecked(False)
     assert len(window.canvas.ax.lines) == 0
@@ -9489,7 +10060,7 @@ def _pfg_series_window(qapp, true_D=2.0e-9, n_gradients=14, relative=None,
     Gaussian peak per entry in ``shifts``, all decaying with ``true_D``.
     ``relative`` (0-1 gradient fractions) is stored the way an X-Pulse
     arrayed experiment records its own."""
-    from opennmr.processing.fitting import gaussian
+    from opennmr.processing.fitting import gaussian, lorentzian
 
     b_values = np.linspace(0.0, 3.0e9, n_gradients)
     ppm = np.linspace(0.0, 10.0, 900)
@@ -9552,7 +10123,7 @@ def test_main_window_pfg_inputs_only_shown_for_the_gradient_source(qapp):
 
 
 def test_main_window_generalised_diffusion_model_recovers_two_components(qapp):
-    from opennmr.processing.fitting import gaussian
+    from opennmr.processing.fitting import gaussian, lorentzian
 
     b_values = np.linspace(0.0, 4.0e9, 24)
     ppm = np.linspace(0.0, 10.0, 900)
@@ -9812,7 +10383,7 @@ def test_main_window_shared_field_only_shown_when_global_fitting(qapp):
 # ---- DOSY ------------------------------------------------------
 
 def test_main_window_dosy_map_places_peaks_at_their_own_d(qapp, monkeypatch):
-    from opennmr.processing.fitting import gaussian
+    from opennmr.processing.fitting import gaussian, lorentzian
 
     b_values = np.linspace(0.0, 4.0e9, 24)
     ppm = np.linspace(0.0, 10.0, 400)
@@ -9897,7 +10468,7 @@ def test_main_window_gradient_calibration_recovers_a_known_maximum(qapp, monkeyp
         relative, true_g_max_g_per_cm, 2e-3, 100e-3, nucleus="1H", shape="smsq10",
         max_gradient_unit="G/cm")
 
-    from opennmr.processing.fitting import gaussian
+    from opennmr.processing.fitting import gaussian, lorentzian
     ppm = np.linspace(0.0, 10.0, 700)
     data = np.array([gaussian(ppm, 5.0, 0.05, np.exp(-known_d * bi)) for bi in b])
     spectrum = NMRSpectrum(
@@ -10071,7 +10642,7 @@ def test_main_window_per_peak_guesses_reach_the_fit(qapp):
     # Two peaks with genuinely different diffusion coefficients -- a
     # single shared starting D is a poor guess for at least one of them,
     # which is the case per-peak overrides exist for.
-    from opennmr.processing.fitting import gaussian
+    from opennmr.processing.fitting import gaussian, lorentzian
 
     b_values = np.linspace(0.0, 4.0e9, 20)
     ppm = np.linspace(0.0, 10.0, 900)
@@ -10811,7 +11382,8 @@ def test_main_window_autophase_each_slice_records_what_it_applied(qapp, tmp_path
     window = MainWindow()
     window._load(_pfg_workdir(tmp_path), vendor="xpulse")
     spectrum = window.session.spectra[0]
-    window._on_autophase_slices_clicked()
+    window.apply_all_slices_checkbox.setChecked(True)
+    window._on_autophase_clicked()
 
     recorded = spectrum.metadata.raw["slice_phase0"]
     assert len(recorded) == spectrum.data.shape[0]
@@ -10938,13 +11510,14 @@ def _real_fraction(spectrum, row):
     return float(np.real(z).max() / np.abs(z).max())
 
 
-def test_main_window_autophase_all_slices_targets_the_strongest_row(qapp):
-    # Optimising one shared phase against the *stacked* block is only
-    # meaningful if the rows share a phase. When they do not, the
-    # compromise can be worse than doing nothing -- measured on real
-    # X-Pulse PFG data, where it took slice 1 from 0.99 to 0.73.
+def test_main_window_autophase_all_slices_phases_every_row(qapp):
+    # There is no shared-phase compromise left to get wrong: with
+    # "Apply to every slice" ticked, Autophase gives each row its own
+    # phase0. Optimising one shared phase against the stacked block
+    # used to take slice 1 of a real X-Pulse PFG from 0.99 to 0.73.
     spectrum = _drifting_phase_series()
-    # Make one row unambiguously the strongest.
+    # One row unambiguously the strongest -- which used to decide the
+    # single phase every other row then had to live with.
     spectrum.data[2] *= 5.0
     spectrum.data_imag[2] *= 5.0
 
@@ -10953,16 +11526,18 @@ def test_main_window_autophase_all_slices_targets_the_strongest_row(qapp):
     window.apply_all_slices_checkbox.setChecked(True)
     window._on_autophase_clicked()
 
-    # The strongest slice ends up properly phased -- a predictable,
-    # explainable rule, rather than a compromise that suits no row.
-    assert _real_fraction(window.session.spectra[0], 2) > 0.99
+    result = window.session.spectra[0]
+    for row in range(result.data.shape[0]):
+        assert _real_fraction(result, row) > 0.98
 
 
 def test_main_window_warns_when_slices_disagree_about_phase(qapp):
     spectrum = _drifting_phase_series(drift_deg=120.0)
     window = MainWindow()
     _load_spectrum_directly(window, spectrum)
-    window.apply_all_slices_checkbox.setChecked(True)
+    # Phasing *this* slice only -- which is right for it and says
+    # nothing about the rest.
+    window.apply_all_slices_checkbox.setChecked(False)
 
     window._on_autophase_clicked()
 
@@ -10972,14 +11547,14 @@ def test_main_window_warns_when_slices_disagree_about_phase(qapp):
     message = window.processing_status_label.text()
     assert "disagree about their phase" in message
     # And it names the control that can actually do the job.
-    assert "each slice independently" in message
+    assert "Apply to every slice" in message
 
 
 def test_main_window_does_not_warn_when_slices_agree(qapp):
     spectrum = _drifting_phase_series(drift_deg=0.0)   # every row the same phase
     window = MainWindow()
     _load_spectrum_directly(window, spectrum)
-    window.apply_all_slices_checkbox.setChecked(True)
+    window.apply_all_slices_checkbox.setChecked(False)
 
     window._on_autophase_clicked()
     assert "disagree about their phase" not in window.processing_status_label.text()
@@ -11012,7 +11587,8 @@ def test_main_window_per_slice_autophase_fixes_a_drifting_series(qapp):
     spectrum = _drifting_phase_series(drift_deg=150.0)
     window = MainWindow()
     _load_spectrum_directly(window, spectrum)
-    window._on_autophase_slices_clicked()
+    window.apply_all_slices_checkbox.setChecked(True)
+    window._on_autophase_clicked()
     result = window.session.spectra[0]
     for row in range(result.data.shape[0]):
         assert _real_fraction(result, row) > 0.98
@@ -11021,6 +11597,80 @@ def test_main_window_per_slice_autophase_fixes_a_drifting_series(qapp):
 # ============================================================
 # PFG: ramp, reading timings from file, probe gradient store
 # ============================================================
+
+def test_main_window_b_from_gradients_opens_no_stray_window(qapp):
+    # Reported directly: "a (sometimes tiny) blank popup box appears
+    # when the 'b from gradients' item is selected". One entry in
+    # pfg_widgets paired the Save-gradient button with a brand-new
+    # QLabel("") that was never added to any layout -- and
+    # setVisible(True) on a parentless widget makes Qt show it as its
+    # own top-level window.
+    window = MainWindow()
+    window.fit_type_combo.setCurrentIndex(1)
+    window.delay_source_combo.setCurrentIndex(window._B_FROM_GRADIENTS_SOURCE)
+
+    for label, widget in window.pfg_widgets:
+        for part in (label, widget):
+            assert part.parentWidget() is not None, (
+                f"{part!r} has no parent, so showing it opens a window of its own")
+
+
+def test_main_window_warns_when_no_value_list_was_found(qapp):
+    # Reported directly: "there should be some kind of warning if the
+    # values are not found from the file". Auto quietly fell back to
+    # slice indices, and a T2 fitted against 1, 2, 3, ... reports a
+    # per-slice rate that looks exactly like a real one.
+    delays = np.geomspace(0.001, 0.3, 8)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+    spectrum.metadata.source_path = None
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window.delay_source_combo.setCurrentIndex(0)      # Auto
+    window._refresh_values_preview()
+
+    preview = window.values_preview_label.text()
+    assert "⚠" in preview
+    assert "no value list found" in preview
+
+    # And it travels with the result, which is where the number that
+    # gets written down is read from.
+    window._on_fit_curve_button_clicked()
+    assert "no value list found" in window.analysis_results_label.text()
+
+
+def test_main_window_does_not_warn_when_the_values_are_real(qapp):
+    delays = np.geomspace(0.001, 0.3, 8)
+    window = MainWindow()
+    _fit_a_t2_curve(window, delays, true_t2=0.05)
+    assert "⚠" not in window.values_preview_label.text()
+    assert "no value list found" not in window.analysis_results_label.text()
+
+
+def test_main_window_warns_when_no_gradient_list_was_found(qapp):
+    # The other silent assumption: with no recorded gradient list,
+    # b-from-gradients invents an even 0->100% ramp.
+    b = np.linspace(0.0, 3.0e9, 8)
+    ppm = np.linspace(0.0, 10.0, 128)
+    data = np.array([lorentzian(ppm, 5.0, 0.08, 1.0) * np.exp(-1.0e-9 * bi) for bi in b])
+    spectrum = NMRSpectrum(
+        data=data,
+        axes=[NMRAxis(kind="index", index=np.arange(1, b.size + 1)),
+              NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True),
+    )
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window.fit_type_combo.setCurrentIndex(1)
+    window.delay_source_combo.setCurrentIndex(window._B_FROM_GRADIENTS_SOURCE)
+    window.pfg_max_gradient_spin.setValue(50.0)
+    window.pfg_delta_spin.setValue(1.0)
+    window.pfg_big_delta_spin.setValue(50.0)
+    window._refresh_values_preview()
+
+    preview = window.values_preview_label.text()
+    assert "no gradient list found" in preview
+
 
 def test_main_window_ramp_box_only_shown_for_the_trapezoid(qapp):
     window = MainWindow()
@@ -11387,6 +12037,90 @@ def test_dosy_scroll_scales_the_contour_levels(qapp, monkeypatch):
     body_scroll("down")
     body_scroll("down")
     assert canvas._dosy_factor < before          # and down lowers it
+
+
+def test_dosy_display_panel_sets_levels_without_re_inverting(qapp, monkeypatch):
+    # Reported directly: the ILT had "no way to update the contour
+    # levels etc. except for scrolling".
+    window = _dosy_window(qapp, monkeypatch)
+    canvas = window.fit_canvas
+    assert window.dosy_display_box.isVisible() or not window.isVisible()
+
+    computed = canvas._dosy_result
+    window.dosy_levels_spin.setValue(20)
+    window.dosy_floor_spin.setValue(10.0)
+
+    assert canvas._dosy_clevels == 20
+    assert canvas._dosy_factor == pytest.approx(0.10)
+    # Display-only: the map itself is the one already computed, not a
+    # fresh (and slow) inversion.
+    assert canvas._dosy_result is computed
+
+
+def test_dosy_floor_box_follows_the_scroll_gesture(qapp, monkeypatch):
+    # The panel control and the scroll gesture reach the same quantity,
+    # so they must not drift apart.
+    window = _dosy_window(qapp, monkeypatch)
+    canvas = window.fit_canvas
+    ax = canvas.ax
+    bbox = ax.get_window_extent()
+    event = types.SimpleNamespace(
+        name="scroll_event", canvas=canvas.canvas, inaxes=ax,
+        x=bbox.x0 + 0.5 * bbox.width, y=bbox.y0 + 0.5 * bbox.height,
+        step=1, button="up")
+    event.xdata, event.ydata = ax.transData.inverted().transform((event.x, event.y))
+    canvas._on_scroll(event)
+
+    assert window.dosy_floor_spin.value() == pytest.approx(canvas._dosy_factor * 100.0)
+
+
+def test_dosy_d_axis_can_be_pinned_to_the_requested_range(qapp, monkeypatch):
+    # Reported directly: the ILT "resets the D axis limits based on the
+    # data and ignores the values set by the user".
+    window = _dosy_window(qapp, monkeypatch)
+    canvas = window.fit_canvas
+    grid = canvas._dosy_result["D"]
+
+    # Seeded from the grid the map was actually computed on -- i.e. the
+    # range asked for in the settings dialog.
+    assert window.dosy_d_min_spin.value() == pytest.approx(np.log10(grid.min()), abs=1e-6)
+    assert window.dosy_d_max_spin.value() == pytest.approx(np.log10(grid.max()), abs=1e-6)
+
+    fitted = canvas.ax.get_ylim()
+    window.dosy_fit_d_axis_check.setChecked(False)
+    pinned = canvas.ax.get_ylim()
+
+    assert pinned != fitted
+    assert pinned[0] == pytest.approx(grid.min(), rel=1e-6)
+    assert pinned[1] == pytest.approx(grid.max(), rel=1e-6)
+
+    # And a range typed in by hand is used exactly as given.
+    window.dosy_d_min_spin.setValue(-11.0)
+    window.dosy_d_max_spin.setValue(-9.0)
+    low, high = canvas.ax.get_ylim()
+    assert low == pytest.approx(1e-11, rel=1e-6)
+    assert high == pytest.approx(1e-9, rel=1e-6)
+
+    # Ticking it back on returns to fitting the axis to the data.
+    window.dosy_fit_d_axis_check.setChecked(True)
+    assert canvas.ax.get_ylim() == pytest.approx(fitted, rel=1e-6)
+
+
+def test_dosy_text_is_not_shrunk_when_it_already_fits(qapp, monkeypatch):
+    # Reported directly: "ILT axes have tiny text". The DOSY rebuilds
+    # its Axes from a fresh gridspec on every redraw, so its axis
+    # labels had no valid previous position -- and the layout pass
+    # measured that stale position, called it clipped, and shrank every
+    # label and tick to the 5 pt floor against a requested 16.
+    window = _dosy_window(qapp, monkeypatch)
+    canvas = window.fit_canvas
+    canvas.figure.set_size_inches(8, 6)
+    canvas._draw_dosy(preserve_view=True)
+
+    assert canvas.ax.xaxis.label.get_fontsize() == pytest.approx(canvas._AXIS_LABELSIZE)
+    assert canvas.ax.yaxis.label.get_fontsize() == pytest.approx(canvas._AXIS_LABELSIZE)
+    assert all(t.get_fontsize() == pytest.approx(canvas._AXIS_LABELSIZE)
+               for t in canvas.ax.get_yticklabels())
 
 
 def test_dosy_axes_scroll_independently(qapp, monkeypatch):
