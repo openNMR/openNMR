@@ -26,6 +26,14 @@ ppm points, dominates the simulation cost, so this is cheap relative
 to a finer ppm grid but NOT cheap relative to ``n_theta * n_phi`` (or,
 for the finite-MAS model, ``n_theta * n_phi * n_time``): keep those
 coarse while fitting and only refine them for the final plot/report.
+
+Multi-peak fits
+---------------
+
+``p0`` accepts either a single peak dict (the original interface --
+kept working unchanged) or a list of such dicts, one per overlapping
+CSA site, all sharing one linear baseline. See
+:func:`_normalise_peak_defs` and :func:`initialise_csa_params`.
 """
 
 import numpy as np
@@ -114,71 +122,134 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
     return spec["normalised_real_spec"]
 
 
-def build_csa_model(x_ppm_sorted, params, x_ref=None, **sim_kwargs):
+def build_csa_model(x_ppm_sorted, params, n_peaks=1, x_ref=None, **sim_kwargs):
     """
-    Full model: ``amplitude * csa_model_full(...) + b0 + b1*(x - x_ref)``.
+    Full model: sum of ``n_peaks`` CSA lineshapes (each its own
+    ``amplitude * csa_model_full(...)``) plus one shared linear
+    baseline ``b0 + b1*(x - x_ref)``.
 
     Parameters
     ----------
     params : ndarray
-        Ordered ``(d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude,
-        b0, b1)``.
+        For each peak, in order, ``(d_iso, span_or_Delta, skew_or_eta,
+        fwhm, amplitude)``, followed by the shared baseline
+        ``(b0, b1)``. Length must be ``5 * n_peaks + 2``.
+    n_peaks : int, optional
+        Number of CSA peaks packed into ``params``. Default 1 (the
+        original single-peak layout).
     sim_kwargs :
         Forwarded to :func:`csa_model_full` (``convention``,
-        ``static``, ``larmor_Hz``, ``mas_Hz``, grid sizes, etc).
+        ``static``, ``larmor_Hz``, ``mas_Hz``, grid sizes, etc) --
+        the same simulation settings are used for every peak.
     """
-    d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude, b0, b1 = params
+    x_ppm_sorted = np.asarray(x_ppm_sorted)
+    y = np.zeros_like(x_ppm_sorted, dtype=float)
 
-    shape = csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta,
-                            fwhm, **sim_kwargs)
+    for i in range(n_peaks):
+        d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude = params[5 * i:5 * i + 5]
+        shape = csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta,
+                                fwhm, **sim_kwargs)
+        y += amplitude * shape
 
+    b0, b1 = params[5 * n_peaks:5 * n_peaks + 2]
     x_ref = np.mean(x_ppm_sorted) if x_ref is None else x_ref
-    return amplitude * shape + b0 + b1 * (np.asarray(x_ppm_sorted) - x_ref)
+    y += b0 + b1 * (x_ppm_sorted - x_ref)
+
+    return y
 
 
 # ============================================================
 # Model construction (initial parameters, bounds)
 # ============================================================
 
-def initialise_csa_params(p0, b0_init, b1_init, x=None, y=None, fixed=None):
+def _normalise_peak_defs(p0, fixed=None):
+    """
+    Accept either the original single-peak ``p0`` interface (a dict,
+    optionally paired with a top-level ``fixed`` argument) or the
+    multi-peak interface (a list of such dicts, each optionally
+    carrying its own ``"fixed"`` and/or ``"bounds"`` entry -- mirrors
+    ``peak_defs`` in :mod:`nmrtools.fitting`), and always return a
+    list of peak dicts with ``"fixed"`` embedded per-peak.
+
+    Raises
+    ------
+    ValueError
+        If a top-level ``fixed`` is supplied together with a list
+        ``p0`` -- ambiguous (which peak(s) would it apply to?); give
+        each peak its own ``"fixed"`` entry instead.
+    """
+    if isinstance(p0, dict):
+        peak = dict(p0)
+        if fixed is not None:
+            peak["fixed"] = fixed
+        return [peak]
+
+    if fixed is not None:
+        raise ValueError(
+            "fixed=... is ambiguous when p0 is a list of peaks -- give each "
+            'peak its own "fixed" entry instead.'
+        )
+
+    return [dict(peak) for peak in p0]
+
+
+def initialise_csa_params(peak_defs, b0_init, b1_init, x=None, y=None):
     """
     Build the initial parameter vector and free-parameter mask for a
-    CSA fit.
+    (possibly multi-peak) CSA fit.
 
     Parameters
     ----------
-    p0 : dict
-        ``{"d_iso": ..., "span_or_Delta": ..., "skew_or_eta": ...,
-        "fwhm": ..., ["amplitude": ...]}``. If ``"amplitude"`` is
-        omitted, it is estimated as ``max(abs(y))`` over the fit
-        region (``x``/``y`` must then be supplied).
-    fixed : list or dict, optional
-        Names from
-        ``["d_iso","span_or_Delta","skew_or_eta","fwhm","amplitude"]``
-        to hold fixed at their ``p0`` value.
+    peak_defs : list of dict
+        One dict per CSA site: ``{"d_iso": ..., "span_or_Delta": ...,
+        "skew_or_eta": ..., "fwhm": ..., ["amplitude": ...],
+        ["fixed": {...}]}``. Use :func:`_normalise_peak_defs` first if
+        you may instead have the original single-peak-dict ``p0``.
+        If a peak's ``"amplitude"`` is omitted, it is estimated from
+        the ``y`` value nearest that peak's ``d_iso`` (``x``/``y``
+        must then be supplied) -- for overlapping peaks this is only
+        a starting guess, not a fit.
+    x, y : ndarray, optional
+        Fit-region spectrum, only needed to estimate an omitted
+        ``"amplitude"``.
 
     Returns
     -------
     params0 : ndarray
+        For each peak, in order, ``(d_iso, span_or_Delta, skew_or_eta,
+        fwhm, amplitude)``, followed by the shared baseline
+        ``(b0, b1)``.
     is_free : ndarray(bool)
     """
-    if "amplitude" in p0:
-        amplitude = p0["amplitude"]
-    else:
-        if x is None or y is None:
-            raise ValueError(
-                'p0["amplitude"] must be given, or x and y supplied to estimate it.'
-            )
-        amplitude = np.max(np.abs(y))
+    values = []
+    is_free = []
 
-    values = [p0["d_iso"], p0["span_or_Delta"], p0["skew_or_eta"], p0["fwhm"], amplitude]
+    for peak in peak_defs:
+        if "amplitude" in peak:
+            amplitude = peak["amplitude"]
+        else:
+            if x is None or y is None:
+                raise ValueError(
+                    'peak["amplitude"] must be given, or x and y supplied to estimate it.'
+                )
+            idx = np.argmin(np.abs(np.asarray(x) - peak["d_iso"]))
+            amplitude = y[idx]
 
-    if fixed is None:
-        fixed = []
-    if isinstance(fixed, dict):
-        fixed = [name for name, is_fixed in fixed.items() if is_fixed]
+        peak_values = {
+            "d_iso": peak["d_iso"],
+            "span_or_Delta": peak["span_or_Delta"],
+            "skew_or_eta": peak["skew_or_eta"],
+            "fwhm": peak["fwhm"],
+            "amplitude": amplitude,
+        }
 
-    is_free = [name not in fixed for name in _CSA_PARAM_NAMES]
+        fixed = peak.get("fixed", [])
+        if isinstance(fixed, dict):
+            fixed = [name for name, is_fixed in fixed.items() if is_fixed]
+
+        for name in _CSA_PARAM_NAMES:
+            values.append(peak_values[name])
+            is_free.append(name not in fixed)
 
     values.extend([b0_init, b1_init])
     is_free.extend([True, True])  # flipped to fixed by fit_csa_spectrum, cf. fit_spectrum
@@ -186,11 +257,13 @@ def initialise_csa_params(p0, b0_init, b1_init, x=None, y=None, fixed=None):
     return np.array(values, dtype=float), np.array(is_free, dtype=bool)
 
 
-def build_csa_bounds(convention="Haeberlen", bounds=None,
+def build_csa_bounds(peak_defs, convention="Haeberlen", bounds=None,
                       positive_intensity=True, allow_negative_intensity=False):
     """
-    Construct lower/upper bounds for
-    ``(d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude)``.
+    Construct lower/upper bounds for every peak in ``peak_defs``,
+    ``(d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude)`` repeated
+    per peak (baseline bounds are appended separately, see
+    :func:`fit_csa_spectrum`).
 
     Defaults: ``d_iso`` and ``span_or_Delta`` unbounded (Haeberlen's
     ``Delta`` can be signed; pass ``bounds={"span_or_Delta": (0,
@@ -203,12 +276,15 @@ def build_csa_bounds(convention="Haeberlen", bounds=None,
 
     Parameters
     ----------
+    peak_defs : list of dict
+        See :func:`initialise_csa_params`. A peak's own ``"bounds"``
+        entry (same shape as ``bounds`` below) overrides ``bounds``
+        for that peak only, parameter by parameter.
     bounds : dict, optional
-        Per-parameter ``(lower, upper)`` overrides, keyed by name from
+        Per-parameter ``(lower, upper)`` overrides applied to every
+        peak that doesn't specify its own, keyed by name from
         ``["d_iso","span_or_Delta","skew_or_eta","fwhm","amplitude"]``.
     """
-    bounds = bounds or {}
-
     default_skew_or_eta = (0.0, 1.0) if convention == "Haeberlen" else (-1.0, 1.0)
     amp_lower = 0.0 if (positive_intensity and not allow_negative_intensity) else -np.inf
 
@@ -221,13 +297,16 @@ def build_csa_bounds(convention="Haeberlen", bounds=None,
     }
 
     lower, upper = [], []
-    for name in _CSA_PARAM_NAMES:
-        lo, hi = bounds.get(name, defaults[name])
-        if lo > hi:
-            print(f"Warning: swapped bounds for {name}: {(lo, hi)} -> fixing order")
-            lo, hi = hi, lo
-        lower.append(lo)
-        upper.append(hi)
+    for i, peak in enumerate(peak_defs):
+        peak_bounds = {**(bounds or {}), **peak.get("bounds", {})}
+        for name in _CSA_PARAM_NAMES:
+            lo, hi = peak_bounds.get(name, defaults[name])
+            if lo > hi:
+                label = f"{name} @ peak {i + 1}" if len(peak_defs) > 1 else name
+                print(f"Warning: swapped bounds for {label}: {(lo, hi)} -> fixing order")
+                lo, hi = hi, lo
+            lower.append(lo)
+            upper.append(hi)
 
     return np.array(lower), np.array(upper)
 
