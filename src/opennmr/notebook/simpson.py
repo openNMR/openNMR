@@ -12,11 +12,11 @@ Workflow
     SIMPSONapodization_window -> compute an apodization window on its own
     SIMPSONplot_fid          -> plot a FID, optionally with its apodization window
     SIMPSONread_single_point_fid -> first point of one single-point FID file
-    SIMPSONSIMPSONread_fid_series   -> first point of a series of single-point FID files
+    SIMPSONread_fid_series   -> first point of a series of single-point FID files
     SIMPSONplot_1d_stack     -> stacked-spectrum plot from a list of result dicts
                         (mix NMR1dimport / SIMPSONimport / CSDMimport freely)
     SIMPSONplot_shape        -> amplitude/phase plot of a pulse-shape file
-    SIMPSONSIMPSONplot_fid_series   -> plot first-point intensity vs a swept quantity
+    SIMPSONplot_fid_series   -> plot first-point intensity vs a swept quantity
 
 Design notes
 ------------
@@ -634,12 +634,12 @@ def SIMPSONread_single_point_fid(path):
             'magnitude': float(np.hypot(real0, imag0)), 'path': path}
 
 
-def SIMPSONSIMPSONread_fid_series(paths, x=None, xlabel=None):
+def SIMPSONread_fid_series(paths, x=None, xlabel=None):
     """
     Read the first point of each FID file in `paths` -- e.g. a series
     of single-point pulse-sequence-efficiency acquisitions collected
     across a swept parameter (pulse length, RF power, offset, ...) --
-    and collect them into arrays ready for SIMPSONSIMPSONplot_fid_series.
+    and collect them into arrays ready for SIMPSONplot_fid_series.
 
     Parameters
     ----------
@@ -650,7 +650,7 @@ def SIMPSONSIMPSONread_fid_series(paths, x=None, xlabel=None):
         in \u00b5s, or RF amplitudes in kHz). If omitted, x is
         1..len(paths).
     xlabel : str, optional
-        Axis label carried through to SIMPSONSIMPSONplot_fid_series (e.g.
+        Axis label carried through to SIMPSONplot_fid_series (e.g.
         'Pulse length (\u00b5s)').
 
     Returns
@@ -946,20 +946,20 @@ def SIMPSONplot_fid(fid, apodization=None, apod_params=None, show_imag=True,
 # Plotting: single-point FID series (e.g. pulse-sequence efficiency)
 # ============================================================
 
-def SIMPSONSIMPSONplot_fid_series(series, y='magnitude', xlabel=None, ylabel=None,
+def SIMPSONplot_fid_series(series, y='magnitude', xlabel=None, ylabel=None,
                      normalise=False, marker='o', linestyle='-', color='black',
                      pl_width=3.375, pl_height=2.5, font='Arial', fontsize=12,
                      tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
                      save_fig=False, fig_name='fid_series', save_format='png'):
     """
     Plot the first-point intensity from a series of single-point FIDs
-    (see SIMPSONSIMPSONread_fid_series) against the swept quantity -- e.g. a
+    (see SIMPSONread_fid_series) against the swept quantity -- e.g. a
     nutation curve, an RF power-efficiency curve, an offset profile.
 
     Parameters
     ----------
     series : dict
-        Output of SIMPSONSIMPSONread_fid_series.
+        Output of SIMPSONread_fid_series.
     y : {'magnitude', 'real', 'imag'}, optional
         Which component of the first point to plot. Default
         'magnitude' (sign-insensitive, usually what you want for a
