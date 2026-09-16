@@ -7,21 +7,21 @@ Workflow
 --------
     SIMPSONimport     -> import a SIMPSON .spe/.dat/.csdf(SIMP-text) spectrum
     CSDMimport        -> import a *genuine* CSDM/JSON file (needs csdmpy)
-    read_shape        -> import a SIMPSON pulse-shape (.shape) file
-    read_fid          -> import a raw SIMPSON FID (time domain, no FFT)
-    apodization_window -> compute an apodization window on its own
-    plot_fid          -> plot a FID, optionally with its apodization window
-    read_single_point_fid -> first point of one single-point FID file
-    read_fid_series   -> first point of a series of single-point FID files
-    plot_1d_stack     -> stacked-spectrum plot from a list of result dicts
+    SIMPSONread_shape        -> import a SIMPSON pulse-shape (.shape) file
+    SIMPSONread_fid          -> import a raw SIMPSON FID (time domain, no FFT)
+    SIMPSONapodization_window -> compute an apodization window on its own
+    SIMPSONplot_fid          -> plot a FID, optionally with its apodization window
+    SIMPSONread_single_point_fid -> first point of one single-point FID file
+    SIMPSONSIMPSONread_fid_series   -> first point of a series of single-point FID files
+    SIMPSONplot_1d_stack     -> stacked-spectrum plot from a list of result dicts
                         (mix NMR1dimport / SIMPSONimport / CSDMimport freely)
-    plot_shape        -> amplitude/phase plot of a pulse-shape file
-    plot_fid_series   -> plot first-point intensity vs a swept quantity
+    SIMPSONplot_shape        -> amplitude/phase plot of a pulse-shape file
+    SIMPSONSIMPSONplot_fid_series   -> plot first-point intensity vs a swept quantity
 
 Design notes
 ------------
 NMR1dplot (in one_d.py) is left untouched: it still only accepts
-Bruker directory paths and calls NMR1dimport internally. plot_1d_stack
+Bruker directory paths and calls NMR1dimport internally. SIMPSONplot_1d_stack
 below re-implements its stacking/offset/colour/label logic against a
 list of *already-imported* result dicts instead, so spectra from any
 importer that produces a compatible dict can be plotted together.
@@ -167,7 +167,7 @@ def _read_dat_text(path):
     return {'NP': len(freq), 'x_Hz': freq, 'TYPE': 'SPE', 'real': real, 'imag': imag, 'path': path}
 
 
-def read_shape(path):
+def SIMPSONread_shape(path):
     """
     Read a SIMPSON pulse-shape file: two columns per line (amplitude,
     phase in degrees), no header, one row per point.
@@ -187,12 +187,12 @@ def read_shape(path):
 # FID processing (only used if a file's TYPE is FID, not SPE)
 # ============================================================
 
-def apodization_window(npoints, dt, kind='exponential', lb=0.0, gb=0.0,
+def SIMPSONapodization_window(npoints, dt, kind='exponential', lb=0.0, gb=0.0,
                         sine_offset=0.0, sine_end=1.0):
     """
     Compute a time-domain apodization (window) function on its own --
     split out from fft_simpson_fid so it can be inspected/plotted
-    (see plot_fid) before deciding what to apply.
+    (see SIMPSONplot_fid) before deciding what to apply.
 
     Parameters
     ----------
@@ -214,7 +214,7 @@ def apodization_window(npoints, dt, kind='exponential', lb=0.0, gb=0.0,
                                 and `gb`; if `gb` is too small relative
                                 to `lb` and the acquisition time, this
                                 blows up rather than tapering the end
-                                of the FID -- check with plot_fid).
+                                of the FID -- check with SIMPSONplot_fid).
         'sine'              -- sin(pi*(sine_offset + (sine_end -
                                 sine_offset)*t/t_max)); `sine_offset`/
                                 `sine_end` in units of pi (0 = start of
@@ -262,7 +262,7 @@ def apodization_window(npoints, dt, kind='exponential', lb=0.0, gb=0.0,
 
 def apply_apodization(real, imag, SW, kind='exponential', **kwargs):
     """
-    Multiply a FID by an apodization_window. Kept separate from
+    Multiply a FID by an SIMPSONapodization_window. Kept separate from
     fft_simpson_fid so the apodized time-domain FID itself (not just
     the resulting spectrum) can be inspected/plotted.
 
@@ -272,7 +272,7 @@ def apply_apodization(real, imag, SW, kind='exponential', **kwargs):
     """
     npoints = len(real)
     dt = 1.0 / SW
-    t, window = apodization_window(npoints, dt, kind=kind, **kwargs)
+    t, window = SIMPSONapodization_window(npoints, dt, kind=kind, **kwargs)
     fid = (np.asarray(real) + 1j * np.asarray(imag)) * window
     return t, fid.real, fid.imag, window
 
@@ -282,7 +282,7 @@ def fft_simpson_fid(real, imag, SW, apodization='exponential', apod_params=None,
     """
     Fourier-transform a SIMPSON time-domain FID (TYPE=FID) into a
     frequency-domain spectrum, with an optional apodization window
-    (see apodization_window for the available kinds) and zero-filling.
+    (see SIMPSONapodization_window for the available kinds) and zero-filling.
     This gives the same processing control over a SIMPSON FID that
     TopSpin has already silently applied to Bruker processed data by
     the time NMR1dimport reads it -- useful if you want simulated and
@@ -296,10 +296,10 @@ def fft_simpson_fid(real, imag, SW, apodization='exponential', apod_params=None,
     SW : float
         Spectral width in Hz (dwell time = 1/SW).
     apodization : str, optional
-        Window kind, passed to apodization_window. Default
+        Window kind, passed to SIMPSONapodization_window. Default
         'exponential'. Pass 'none' to disable apodization entirely.
     apod_params : dict, optional
-        Extra kwargs for apodization_window (e.g. {'gb': 20} for a
+        Extra kwargs for SIMPSONapodization_window (e.g. {'gb': 20} for a
         Gaussian/Lorentz-to-Gauss window, or {'sine_offset': 0.5} for
         a shifted sine bell).
     line_broadening : float, optional
@@ -335,11 +335,11 @@ def fft_simpson_fid(real, imag, SW, apodization='exponential', apod_params=None,
     return x_Hz, spectrum.real, spectrum.imag
 
 
-def read_fid(path):
+def SIMPSONread_fid(path):
     """
     Read a SIMPSON time-domain FID file (TYPE=FID) without Fourier-
     transforming it -- for inspecting/apodizing/plotting the raw FID
-    (see plot_fid) ahead of deciding what processing to use, or for
+    (see SIMPSONplot_fid) ahead of deciding what processing to use, or for
     feeding real/imag/SW into fft_simpson_fid by hand.
 
     Parameters
@@ -355,7 +355,7 @@ def read_fid(path):
     if fmt == 'shape':
         raise ValueError(
             f"{path} looks like a SIMPSON pulse-shape file (2 columns, "
-            f"no header), not a FID. Use read_shape() instead."
+            f"no header), not a FID. Use SIMPSONread_shape() instead."
         )
 
     raw = _read_simp_text(path) if fmt == 'simp' else _read_dat_text(path)
@@ -461,14 +461,14 @@ def SIMPSONimport(path, nuclide=None, field=None, SFO1=None, mass=1,
     real_spectrum, normalised_real_spectrum, imag_spectrum,
     normalised_imag_spectrum, nuclide, BF1, SFO1, path), plus 'NP'
     and 'SW' for reference -- so it can be passed straight into
-    plot_1d_stack alongside NMR1dimport results.
+    SIMPSONplot_1d_stack alongside NMR1dimport results.
     """
     fmt = _sniff_format(path)
 
     if fmt == 'shape':
         raise ValueError(
             f"{path} looks like a SIMPSON pulse-shape file (2 columns, "
-            f"no header), not a spectrum. Use read_shape() instead."
+            f"no header), not a spectrum. Use SIMPSONread_shape() instead."
         )
 
     raw = _read_simp_text(path) if fmt == 'simp' else _read_dat_text(path)
@@ -603,7 +603,7 @@ def CSDMimport(path, nuclide=None, field=None, SFO1=None, mass=1,
 # Single-point FID series (e.g. pulse-sequence efficiency tests)
 # ============================================================
 
-def read_single_point_fid(path):
+def SIMPSONread_single_point_fid(path):
     """
     Read just the first data point of a SIMPSON FID file -- for
     single-point acquisitions used to evaluate pulse-sequence
@@ -634,12 +634,12 @@ def read_single_point_fid(path):
             'magnitude': float(np.hypot(real0, imag0)), 'path': path}
 
 
-def read_fid_series(paths, x=None, xlabel=None):
+def SIMPSONSIMPSONread_fid_series(paths, x=None, xlabel=None):
     """
     Read the first point of each FID file in `paths` -- e.g. a series
     of single-point pulse-sequence-efficiency acquisitions collected
     across a swept parameter (pulse length, RF power, offset, ...) --
-    and collect them into arrays ready for plot_fid_series.
+    and collect them into arrays ready for SIMPSONSIMPSONplot_fid_series.
 
     Parameters
     ----------
@@ -650,7 +650,7 @@ def read_fid_series(paths, x=None, xlabel=None):
         in \u00b5s, or RF amplitudes in kHz). If omitted, x is
         1..len(paths).
     xlabel : str, optional
-        Axis label carried through to plot_fid_series (e.g.
+        Axis label carried through to SIMPSONSIMPSONplot_fid_series (e.g.
         'Pulse length (\u00b5s)').
 
     Returns
@@ -668,7 +668,7 @@ def read_fid_series(paths, x=None, xlabel=None):
     imag = np.empty(len(paths))
     magnitude = np.empty(len(paths))
     for i, p in enumerate(paths):
-        point = read_single_point_fid(p)
+        point = SIMPSONread_single_point_fid(p)
         real[i], imag[i], magnitude[i] = point['real'], point['imag'], point['magnitude']
 
     x_arr = np.asarray(x, dtype=float) if x is not None else np.arange(1, len(paths) + 1, dtype=float)
@@ -681,7 +681,7 @@ def read_fid_series(paths, x=None, xlabel=None):
 # Plotting: stacked spectra from pre-imported result dicts
 # ============================================================
 
-def plot_1d_stack(spectra, labels=None, linestyles=None, colours=None,
+def SIMPSONplot_1d_stack(spectra, labels=None, linestyles=None, colours=None,
                    xlims='default', xlabel=None, pl_width=3.375, pl_height=3.375,
                    normalise=True, yoffset=0.2, font='Arial', fontsize=12,
                    x_unit='ppm', output_format='',
@@ -805,12 +805,12 @@ def plot_1d_stack(spectra, labels=None, linestyles=None, colours=None,
 # Plotting: pulse shape
 # ============================================================
 
-def plot_shape(path, duration_us=None, pl_width=3.375, pl_height=2.5,
+def SIMPSONplot_shape(path, duration_us=None, pl_width=3.375, pl_height=2.5,
                font='Arial', fontsize=12, save_fig=False,
                fig_name='pulse_shape', save_format='png'):
     """
     Plot amplitude and phase of a SIMPSON pulse-shape file as two
-    stacked panels. Deliberately separate from plot_1d_stack: a pulse
+    stacked panels. Deliberately separate from SIMPSONplot_1d_stack: a pulse
     shape isn't a spectrum (x-axis is point index/time, not
     frequency; data is amplitude/phase, not real/imaginary intensity)
     and overlaying it with spectra would misrepresent it.
@@ -826,7 +826,7 @@ def plot_shape(path, duration_us=None, pl_width=3.375, pl_height=2.5,
     -------
     fig, (ax_amplitude, ax_phase)
     """
-    shape = read_shape(path)
+    shape = SIMPSONread_shape(path)
     n = shape['npoints']
     x = np.linspace(0, duration_us, n) if duration_us else np.arange(n)
     xlabel = 'Time (\u00b5s)' if duration_us else 'Point index'
@@ -859,26 +859,26 @@ def plot_shape(path, duration_us=None, pl_width=3.375, pl_height=2.5,
 # Plotting: FID and its apodization window
 # ============================================================
 
-def plot_fid(fid, apodization=None, apod_params=None, show_imag=True,
+def SIMPSONplot_fid(fid, apodization=None, apod_params=None, show_imag=True,
              show_window=True, overlay_apodized=True,
              pl_width=3.375, pl_height=2.5, font='Arial', fontsize=12,
              tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
              save_fig=False, fig_name='fid_plot', save_format='png'):
     """
-    Plot a raw FID (as read by read_fid) against time, optionally with
-    an apodization window (see apodization_window) and the resulting
+    Plot a raw FID (as read by SIMPSONread_fid) against time, optionally with
+    an apodization window (see SIMPSONapodization_window) and the resulting
     apodized FID overlaid -- so the effect of a chosen window can be
     checked before it's baked into fft_simpson_fid.
 
     Parameters
     ----------
     fid : dict
-        Output of read_fid.
+        Output of SIMPSONread_fid.
     apodization : str, optional
-        Window kind (see apodization_window). If omitted/None, only
+        Window kind (see SIMPSONapodization_window). If omitted/None, only
         the raw FID is plotted.
     apod_params : dict, optional
-        Extra kwargs for apodization_window (lb, gb, sine_offset,
+        Extra kwargs for SIMPSONapodization_window (lb, gb, sine_offset,
         sine_end).
     show_imag : bool, optional
         Also plot the imaginary channel of the raw FID. Default True.
@@ -911,7 +911,7 @@ def plot_fid(fid, apodization=None, apod_params=None, show_imag=True,
 
     if apodization and apodization != 'none':
         apod_params = apod_params or {}
-        _, window = apodization_window(fid['NP'], fid['dt'], kind=apodization, **apod_params)
+        _, window = SIMPSONapodization_window(fid['NP'], fid['dt'], kind=apodization, **apod_params)
 
         if show_window:
             peak = np.max(np.abs(fid['real']))
@@ -946,20 +946,20 @@ def plot_fid(fid, apodization=None, apod_params=None, show_imag=True,
 # Plotting: single-point FID series (e.g. pulse-sequence efficiency)
 # ============================================================
 
-def plot_fid_series(series, y='magnitude', xlabel=None, ylabel=None,
+def SIMPSONSIMPSONplot_fid_series(series, y='magnitude', xlabel=None, ylabel=None,
                      normalise=False, marker='o', linestyle='-', color='black',
                      pl_width=3.375, pl_height=2.5, font='Arial', fontsize=12,
                      tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
                      save_fig=False, fig_name='fid_series', save_format='png'):
     """
     Plot the first-point intensity from a series of single-point FIDs
-    (see read_fid_series) against the swept quantity -- e.g. a
+    (see SIMPSONSIMPSONread_fid_series) against the swept quantity -- e.g. a
     nutation curve, an RF power-efficiency curve, an offset profile.
 
     Parameters
     ----------
     series : dict
-        Output of read_fid_series.
+        Output of SIMPSONSIMPSONread_fid_series.
     y : {'magnitude', 'real', 'imag'}, optional
         Which component of the first point to plot. Default
         'magnitude' (sign-insensitive, usually what you want for a

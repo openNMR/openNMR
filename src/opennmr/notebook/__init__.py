@@ -86,9 +86,9 @@ from .pnmr_fit import (
 )
 
 from .simpson import (
-    SIMPSONimport, CSDMimport, read_shape, apodization_window, read_fid
-    plot_fid, read_single_point_fid, read_fid_series, plot_1d_stack, plot_shape,
-    plot_fid_series
+    SIMPSONimport, CSDMimport, SIMPSONread_shape, SIMPSONapodization_window, SIMPSONread_fid
+    SIMPSONplot_fid, SIMPSONread_single_point_fid, SIMPSONread_fid_series, SIMPSONplot_1d_stack, SIMPSONplot_shape,
+    SIMPSONplot_fid_series
 )
 
 # NOTE: compute_BF1_SFO1, plot_spectrum_dict and plot_comparison used to be
@@ -157,7 +157,7 @@ __all__ = [
     "merge_groups_to_picks", "print_shift_drift_report", 
     "refit_merged_groups", "fit_cif_envelope",
     # simpson
-    "SIMPSONimport", "CSDMimport", "read_shape", "apodization_window", "read_fid"
-    "plot_fid", "read_single_point_fid", "read_fid_series", "plot_1d_stack", "plot_shape",
-    "plot_fid_series",
+    "SIMPSONimport", "CSDMimport", "SIMPSONread_shape", "SIMPSONapodization_window", "SIMPSONread_fid"
+    "SIMPSONplot_fid", "SIMPSONread_single_point_fid", "SIMPSONread_fid_series", "SIMPSONplot_1d_stack", "SIMPSONplot_shape",
+    "SIMPSONplot_fid_series",
 ]
