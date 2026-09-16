@@ -85,6 +85,12 @@ from .pnmr_fit import (
     refit_merged_groups, fit_cif_envelope,
 )
 
+from .simpson import (
+    SIMPSONimport, CSDMimport, read_shape, apodization_window, read_fid
+    plot_fid, read_single_point_fid, read_fid_series, plot_1d_stack, plot_shape,
+    plot_fid_series
+)
+
 # NOTE: compute_BF1_SFO1, plot_spectrum_dict and plot_comparison used to be
 # imported from here -- they now live in .utils / .plotting (single copy,
 # shared with the BMS pipeline below) and are imported from there, above.
@@ -150,4 +156,8 @@ __all__ = [
     "fit_predicted_spectrum", "merge_low_integral_peaks", 
     "merge_groups_to_picks", "print_shift_drift_report", 
     "refit_merged_groups", "fit_cif_envelope",
+    # simpson
+    "SIMPSONimport", "CSDMimport", "read_shape", "apodization_window", "read_fid"
+    "plot_fid", "read_single_point_fid", "read_fid_series", "plot_1d_stack", "plot_shape",
+    "plot_fid_series",
 ]
