@@ -217,8 +217,19 @@ def _p0_diffusion(b, y):
     return [I0, 1.0 / b_max]
 
 
+#: A PFG amplitude is a peak intensity, and an intensity cannot be
+#: negative. Leaving ``I0`` free below zero let a Stejskal-Tanner fit
+#: settle on a mirror-image decay -- a negative amplitude with a
+#: perfectly plausible D -- whenever the series was noisy, badly
+#: phased or over-attenuated at high b. That fit reports a diffusion
+#: coefficient that looks fine in isolation and is meaningless.
+#: Explicit user request: "for PFG there should be no possibility of
+#: negative intensities".
+_I0_MIN = 0.0
+
+
 def _bounds_diffusion(b, y):
-    return ([-np.inf, 1e-15], [np.inf, np.inf])
+    return ([_I0_MIN, 1e-15], [np.inf, np.inf])
 
 
 def _p0_diffusion_stretched(b, y):
@@ -254,7 +265,11 @@ def _p0_diffusion_biexp(b, y):
 
 
 def _bounds_diffusion_biexp(b, y):
-    return ([-np.inf, 1e-15, -np.inf, 1e-15], [np.inf, np.inf, np.inf, np.inf])
+    # Both component amplitudes, for the same reason as _I0_MIN: a
+    # two-component fit is *more* prone to this, not less -- it will
+    # happily describe a monoexponential decay as a large positive
+    # component plus a small negative one.
+    return ([_I0_MIN, 1e-15, _I0_MIN, 1e-15], [np.inf, np.inf, np.inf, np.inf])
 
 
 RELAXATION_MODELS = {

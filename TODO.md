@@ -44,6 +44,160 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
 
+## Baseline overlay, pseudo-2D check, sinusoidal controls, and measured warnings (2026-09-16, tenth round)
+
+Four asks, all following on from the Whittaker round:
+
+1. *"Can you add a processing overlay to the plot showing the baseline corrections before they are committed?"*
+2. *"Please check how the new baselining works across pseudo-2D data."*
+3. *"For all the different baseline corrections, maybe add some controllable options to adjust the polynomial and sinusoidal baselines."*
+4. *"Please also add appropriate warnings for any of the more automated steps that outline the potential issues or concerns."*
+
+### (2) The pseudo-2D check — and a 1.7x speedup it turned up
+
+Baseline correction was already per-row (`_baseline_correct_if_enabled_multi_row`), and that holds for Whittaker: **a row fitted inside the series is bit-identical to that row fitted alone**, on both the serial and the threaded branch. Tested.
+
+On a synthetic pseudo-2D whose rows roll *differently from each other* — the case a shared fit cannot serve — worst-row baseline RMS against truth:
+
+| method | worst-row RMS |
+|---|---|
+| linear | 0.334 |
+| polynomial (deg 3) | 0.074 |
+| sinusoidal | 0.056 |
+| spline | 0.074 |
+| **whittaker** | **0.005** |
+
+The cost is the catch. Measured per row: linear ~1 ms at 64k points, **Whittaker 176 ms** — ~50x. Profiling it showed `whittaker_smooth` rebuilding the `lam * D'D` penalty *inside every reweighting iteration* — ~30 times per row, ~15,000 times for a 512-row series — to arrive at the same array each time. It depends only on `(n, lam, d)`, all fixed for a whole fit and shared by every row. Now `lru_cache`d (`_whittaker_penalty_bands`, maxsize 8, callers copy before adding weights): **176 -> 102 ms at 64k, 29.6 -> 17.9 ms at 16k**, bit-identical output.
+
+Still slow enough on a big series to be worth saying so, hence the warning below.
+
+### (1) The overlay
+
+`compute_baseline()` split out of `baseline_correct()`, which is now literally `spectrum - compute_baseline(...)`. One code path, so the drawn curve and the subtracted one cannot drift apart — which would make the preview a lie in exactly the case it exists to catch. Tested for every method.
+
+`MplCanvas.set_baseline_preview()` draws it dashed over the trace (gid-tagged, like the region patches, so a figure rebuild cannot leave a stale Line2D). `MplCanvas.baseline_preview_source()` reports what that canvas is actually plotting, so the caller never guesses: a 2D contour has no trace and returns `None`, and the Processing preview plots a live-recomputed slice rather than anything in the session (it now keeps that in `_preview_1d_spectrum`). The overlay is scaled by the same `max(abs(data))` `NMRSpectrum.normalized` uses, or it would land beside the trace rather than on it.
+
+**On a pseudo-2D the Spectrum tab shows a contour, so the overlay correctly no-ops there — the Processing preview, which shows the selected slice, is the surface.**
+
+### (3) The options
+
+Sinusoidal's `n_harmonics` and `period` had been accepted by `baseline_correct` since it was written and had **no GUI at all**, so a rolling baseline could only ever be fitted with one harmonic over a data-derived period. Both exposed. Polynomial degree raised to 12. Method-specific spins are prefixed (`degree `, `harmonics `, `period `, `smoothing `, `λ 1e`) rather than labelled, since the row shows exactly one at a time.
+
+Also fixed: **`baseline_lam` was never restored per spectrum** when it was added last round, so it carried the previous spectrum's stiffness onto the next one. Harmonics and period are restored too.
+
+### (4) The warnings
+
+Deliberately *measured conditions*, not standing disclaimers — a warning that fires every time is one nobody reads. Each is a checkable property of the current selection and settings:
+
+- **A peak inside the edge region** every non-Whittaker method draws its baseline points from (>25% of the spectrum max within the outer 5%). Names the ppm, and says Whittaker does not use edge points.
+- **Polynomial degree >= 5 / sinusoidal harmonics >= 3** — oscillation between candidate points, worst at the edges.
+- **Whittaker on a series above ~8M cells** — states the ~50x per-row cost and the actual shape.
+- **Auto-pick below 3-sigma of the measured noise** (`estimate_noise_level` on the spectrum itself, against the peak-to-peak range prominence is a fraction of). Directly relevant now the floor is 0.001%: the low floor exists so a real peak beside a solvent peak can be found, and the same setting will happily pick noise.
+- **Linear prediction producing >= 25% of the measured FID** — it fabricates lineshape, and the result looks like real narrow signal either way.
+
+All non-blocking, into the processing/analysis status labels, for the same reason `_warn_if_slices_disagree_on_phase` is not a modal.
+
+**Still open**: nothing in the four. Note `baseline_correct` defaults to **on** for a loaded spectrum (`raw.setdefault("baseline_correct", True)`, line ~1922) — surprising, pre-existing, and not changed here.
+
+
+## Whittaker baselines, a processing report, and layout at the right size (2026-09-15, ninth round)
+
+Five items:
+
+1. *"minimum value for e.g. peak picking threshold, 0.1% is not small enough with dominant solvent peaks"*
+2. *"a nice Whittaker filter baseline correction (priority)"*
+3. *"Maybe a processing report for consistency and/or for publication comparison, like spectra are reported using a windowed EM function and 5 Hz of line broadening. 8 points of backwards linear prediction are used."*
+4. *"Saved png/pdf cuts off bottom of x-axis label below like 10x10 in"*
+5. *"DOSY axes are still reverting to the small fonts sometimes"*
+
+### (4) and (5) are the same bug, one level up from last round's
+
+Last round fixed *how* the layout was measured (`clipped_labels` read stale label positions). This round fixes *when* it is recomputed: **never, after the figure size changes.**
+
+- **Export**: `export_full_resolution` resizes the figure to the export size and then saves, without re-laying out. Subplot margins are stored as *fractions* of the figure, so margins computed against a large live widget leave too little absolute room for the same (absolutely-sized) text at a smaller export size — the label goes off the bottom edge. Now lays out at the export size, and again on restore.
+- **On screen**: nothing re-ran the layout on a widget resize at all, and `fit_labels_within_figure` **only ever shrinks** — it cannot know what size the text started at. So a figure laid out once while its tab was hidden kept shrunken text forever. Added `_restore_configured_text_sizes()` (put everything back to `_AXIS_LABELSIZE` first) plus a debounced re-layout on `resize_event`. A DOSY is computed and drawn *before* its tab is made visible, which is why it was the one that kept reverting.
+
+### (2) Whittaker baseline — the priority, and the only one needing real measurement
+
+`whittaker_smooth` + `estimate_baseline_whittaker` in `processing/fitting.py`, wired as `method="whittaker"` in `baseline_correct` and into the Baseline method dropdown with a λ box.
+
+**Why it earns its place**: every existing estimator starts from "the first and last `frac` of the spectrum are baseline" and sigma-clips from there. That is wrong for a crowded spectrum, one with signal at an edge, or one whose baseline rolls *in the middle* where there are no candidate points to see it. This fits a penalised smooth curve to the whole spectrum and iteratively down-weights whatever sits above it. arPLS by default (weights from a logistic in units of the below-fit scatter, so no asymmetry parameter to guess — the right choice with a dominant solvent peak, where a fixed `p` lets the peak drag the baseline up under its own feet); AsLS available.
+
+Solved with `scipy.linalg.solveh_banded`, not a general sparse solve: the system is symmetric positive-definite and banded with `d` superdiagonals, so banded Cholesky is O(n), which matters at one solve per reweighting iteration on a 64k-point spectrum. **Verified against a dense `np.linalg.solve` of the same system: max difference 4.2e-15.**
+
+**λ was measured, not guessed.** The first default (1e5 at 16384 points, scaled as `n**(2d)`) was wrong and three tests caught it. Swept 1e4..1e13 against a synthetic rolling baseline (0.35-amplitude sine + slope, span 0.67) carrying a solvent peak 100x the analyte peaks:
+
+| points | best λ | rms/span there |
+|---|---|---|
+| 4096 | 1e9 | 0.013 |
+| 8192 | 1e10 | 0.015 |
+| 16384 | 1e11–1e12 | 0.017–0.005 |
+| 32768 | 1e12–1e13 | 0.018–0.008 |
+
+The optimum moves ~x10 per doubling of n, which is what the theoretical exponent `2d - 1` predicts (the penalty sums `n-d` terms each scaling as `h**-2d`, and `h` goes as `1/n`) — not the `2d` I first wrote. Default is now **1e11 at 16384 points, scaled as `(n/16384)**(2d-1)`**; every size above recovers the baseline to under 3% of its own span while keeping ≥99% of the weakest analyte peak. The GUI λ box goes to 1e15, since 32k points already wants ~1e13.
+
+`baseline_regions` deliberately does **not** apply to this method — quietly restricting the fit to a candidate region would be a different method wearing this one's name. Tested.
+
+### (1) Thresholds
+
+Peak-pick prominence is now **in percent with a 0.001% floor** (was a 0-1 fraction with a 1% floor, which could not even express the number needed). Prominence is measured against the spectrum's own peak-to-peak range, so a solvent peak a thousand times taller than the analyte puts every real peak below 0.1% of that range. Same floor on the DOSY intensity threshold and level floor; SCORE threshold got 3 decimals.
+
+### (3) Processing report
+
+New `processing/report.py`: `processing_prose` (the sentences an experimental section uses), `processing_summary` (label/value pairs), `compare_processing` (side by side, marking every setting they disagree on — the "for consistency" half), `format_processing_report`. File ▸ Processing Report… shows it in a copyable dialog; a multi-selection gives the comparison instead.
+
+Reports **only what was actually applied** — a methods paragraph does not say "no linear prediction was used", and nothing applied gives an empty string rather than a confidently wrong sentence. SSB is spelled out as "shifted by pi/2" rather than quoted as a number meaningless outside TopSpin.
+
+### A note on the environment, not the code
+
+Most of this round could not be tested when written: `~/Documents/GitHub` is inside **iCloud Drive**, and with OneDrive simultaneously at ~183% CPU, file reads under the repo stalled hard — `pytest` died with `OSError: [Errno 89] Operation canceled` reading `pyproject.toml`, a fresh `import opennmr` blocked in `importlib`'s `get_data` on a 16 KB `.pyc`, and copying 97 source files to local disk managed 23 in two minutes. It cleared on its own. **If the suite starts timing out for no reason, check the sync daemons before suspecting the code.**
+
+
+## Nine GUI fixes: one Autophase, a stale-position layout bug, and the ILT panel (2026-09-15, eighth round)
+
+A nine-item list from the user, all GUI. Taken in order:
+
+1. *"Refresh the GUI after a dataset is loaded, i.e., the compare tab should be primed and ready to go and not need to be turned off and on again... a lot of specific buttons for example stay selected after switching experiment file"*
+2. *"There are two autophase buttons, there should just be one, and the difference should be whether or not the apply to each slice button is selected"*
+3. *"There are still instances where the view is being reset, probably when the fid is being recomputed after windowing etc., can the stored view just be applied to the new plot each time?"*
+4. *"A (sometimes tiny) blank popup box appears when the 'b from gradients' item is selected"*
+5. *"There should be some kind of warning if the values are not found from the file"*
+6. *"When fit points are excluded, the parameters set in starting values get ignored"*
+7. *"For PFG there should be no possibility of negative intensities"*
+8. *"ILT axes have tiny text and no way to update the contour levels etc. except for scrolling"*
+9. *"ILT also resets the D axis limits based on the data and ignores the values set by the user"*
+
+**The one worth reading about is (8).** "Tiny text" was not a DOSY problem at all -- it was `plotting.style.clipped_labels` measuring axis-label positions that matplotlib had not updated yet. Matplotlib positions an axis label during `Axis.draw`, not when the Axes moves, so between a `tight_layout` that repositioned the Axes and the next real draw, `label.get_window_extent()` reports where the label sat under the *previous* layout. `fit_labels_within_figure` read that as a clip and shrank every label and tick trying to fix it.
+
+Measured on a DOSY at 8 x 6 inches, with both axis labels comfortably inside the figure: x label reported at y0 = **-23 px** (outside), so the shrink loop ran ~9 steps and landed everything at **6 pt against a requested 16**. After a real `canvas.draw()`, at the same Axes positions, nothing was clipped. A 2D contour rebuilt by a level scroll had the same bug at labelsize 22 (shrank to 8.3).
+
+The DOSY is the worst case because it rebuilds its Axes from a fresh gridspec on every redraw, so its labels have no valid previous position to fall back on at all.
+
+Two fixes were tried:
+
+| approach | result |
+|---|---|
+| call `Axis._update_label_position(renderer)` directly | **rejected** -- it updates the label from tick boxes that are themselves stale; measured *still* 190 px off from a real draw on a shared-axis figure |
+| `fig.draw_without_rendering()` before measuring | **kept** -- agrees with a real draw exactly |
+
+The cost objection in `clipped_labels`' own docstring ("a full draw of a large 2D contour costs 0.3-1.3 s") turned out to be about `canvas.draw()`, not this. Measured `draw_without_rendering`: **16 ms for a 512 x 4096 contour**, 16 ms at 16x128 -- the expensive part of a contour is building its paths, which has already happened by the time the layout check runs. Five full contour rebuilds measured at 0.47 s total.
+
+This fix is app-wide, not DOSY-only: every canvas was being shrunk on false positives.
+
+### The rest
+
+- **(2) One Autophase.** `_on_autophase_slices_clicked` is gone as a button; `_on_autophase_clicked` routes to `_autophase_each_slice` when "Apply to every slice" is ticked on a pseudo-2D. Note the checkbox now means something different for Autophase than for a phase *drag* -- a drag broadcasts one shared value, Autophase fits each slice on its own. That is deliberate: broadcasting one *automatically found* phase to rows that disagree lands on a compromise that suits no row (measured previously on `test_data/xpulse_PFG/4`: apc0 on the whole block returned +111°, taking slice 1 from a real-part fraction of 0.99 to 0.73). The strongest-row compromise branch is deleted. `_pseudo2d_phase_spread` survives, repurposed: it now warns on the *single-slice* path, pointing at the checkbox.
+- **(4) The blank popup** was `self.pfg_widgets.append((QLabel(""), self.pfg_save_probe_button))` -- a label never added to any layout. `setVisible(True)` on a parentless widget makes Qt show it as its own top-level window. Both PFG buttons share one form row, so they now share that row's label.
+- **(5) The warning.** Two silent fallbacks: Auto returning `arange(1, n+1)` when no list is found, and b-from-gradients inventing an even 0→100% ramp. Both now set `_values_note`, shown with a ⚠ in the Values preview *and* prepended to the fit result -- by the time the number is being read the Values row is off screen.
+- **(6) Excluded points.** `_refit_relaxation_peak` deliberately refit "with plain defaults... Fit Curve itself doesn't currently expose fixed/bounds from the GUI either, so nothing is actually lost yet". That premise went stale when the Starting values table landed. `_relaxation_fit_context` now records the model + per-peak `(p0, bounds, fixed)` each Fit Curve ran with. This also fixed a second bug: a custom/`diffusion_n` fit could not be refitted at all, since `model="custom"` alone names no fittable spec.
+- **(1)** Two separate causes. The Compare tab: `_compare_shows_current_pseudo2d_stack` was evaluated while the list still held the *previous* spectrum's slices, so it always said no and force-switched to Spectrum -- leaving Compare unrendered, since its refresh defers the draw when it isn't visible. Only the tab *switch* is now suppressed; the silo still clears the outgoing stack. The buttons: Pick Peak / Select Region / Measure are gestures in progress, not settings, and now reset on a selection change. Per-spectrum settings (Align Echo, Baseline Correct, magnitude) deliberately do not -- those are restored from the incoming spectrum's own metadata.
+- **(3)** `update_data`'s rebuild path restored `xlim` only, so the same edit kept or discarded the intensity zoom depending purely on whether the point count changed. And `_on_fid_processing_control_changed` refreshed the Processing preview with `preserve_view=False`. None of those controls change what an axis *means*, so both now preserve.
+- **(7)** `_bounds_diffusion`/`_bounds_diffusion_biexp` had `I0` unbounded below. Now floored at 0 (`_I0_MIN`). `processing/diffusion.py`'s N-component model already did this.
+- **(8, 9) The ILT display panel.** A new "DOSY map display" group in the Curve Fitting sub-tab: contour levels, lowest level (%), and a "Fit D axis to the data" checkbox with explicit from/to boxes seeded from the grid the map was computed on. Display-only -- it redraws the stored map rather than re-running the inversion, which is why it is not in the settings dialog. The floor box and the scroll gesture reach the same quantity, so the canvas emits `dosyLevelFloorChanged` to keep them in step.
+
+**Still open here**: nothing in the nine. `_dosy_d_limits`' autoscale remains the default, which is right -- the grid spans several decades more than any sample occupies.
+
+
 ## Both eNMR pairings: unfolded ±V, the gradient-reversed repeat, and a voltage cutoff (2026-09-12, seventh round)
 
 User, in four parts over the round:

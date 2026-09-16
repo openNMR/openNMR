@@ -365,3 +365,40 @@ def test_pfg_params_are_empty_for_a_vendor_that_records_none():
     # Nothing invented: a caller can tell "the file says 4 ms" from
     # "the file does not say".
     assert dif.pfg_params_from_metadata(spectrum) == {}
+
+
+def test_stejskal_tanner_cannot_fit_a_negative_intensity():
+    """Explicit user request: "for PFG there should be no possibility
+    of negative intensities". A PFG amplitude is a peak intensity, and
+    an unbounded I0 let a noisy or over-attenuated series settle on a
+    mirror-image decay -- a negative amplitude with a perfectly
+    plausible-looking D."""
+    from opennmr.processing import relaxation as processing_relaxation
+
+    b = np.linspace(0.0, 4.0e9, 12)
+    # Deliberately upside down: the best unconstrained fit to this is a
+    # negative I0.
+    y = -1.0 * np.exp(-1.0e-9 * b)
+
+    result = processing_relaxation.fit_relaxation(b, y, model="stejskal_tanner")
+    assert result["params"]["I0"] >= 0.0
+    assert result["bounds"][0][0] == 0.0
+
+    biexp = processing_relaxation.fit_relaxation(
+        b, y, model="stejskal_tanner_biexponential")
+    assert biexp["params"]["I0a"] >= 0.0 and biexp["params"]["I0b"] >= 0.0
+
+    stretched = processing_relaxation.fit_relaxation(
+        b, y, model="stejskal_tanner_stretched")
+    assert stretched["params"]["I0"] >= 0.0
+
+
+def test_stejskal_tanner_still_fits_an_ordinary_decay():
+    """The bound must not cost anything for real data."""
+    from opennmr.processing import relaxation as processing_relaxation
+
+    b = np.linspace(0.0, 4.0e9, 16)
+    y = 3.0 * np.exp(-1.5e-9 * b)
+    result = processing_relaxation.fit_relaxation(b, y, model="stejskal_tanner")
+    assert result["params"]["I0"] == pytest.approx(3.0, rel=1e-4)
+    assert result["params"]["D"] == pytest.approx(1.5e-9, rel=1e-4)

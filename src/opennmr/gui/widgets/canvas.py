@@ -16,7 +16,7 @@ import os
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSpinBox,
@@ -357,6 +357,10 @@ class MplCanvas(QWidget):
     _DOSY_FACTOR_MIN = 1e-4
     _DOSY_FACTOR_MAX = 0.9
 
+    #: Contour levels drawn on a DOSY map. Matches ``plot_dosy``'s own
+    #: default, so the panel control starts showing what is on screen.
+    _DOSY_CLEVELS_DEFAULT = 8
+
     #: Emitted with a request to extract a trace from the DOSY map:
     #: ``(kind, value)`` where ``kind`` is ``"spectrum"`` (the map's
     #: row at one diffusion coefficient) or ``"profile"`` (its column
@@ -364,6 +368,14 @@ class MplCanvas(QWidget):
     #: right-clicked. The canvas knows where the click landed; only
     #: MainWindow can put the result into the session.
     dosyExtractRequested = Signal(str, float)
+
+    #: Emitted with the DOSY's contour floor (a fraction of the map's
+    #: own peak) whenever the *scroll* gesture changes it, so a panel
+    #: control showing the same number follows along instead of
+    #: drifting out of step with the plot. Not emitted when the panel
+    #: itself sets the floor -- that would be the control echoing back
+    #: to itself.
+    dosyLevelFloorChanged = Signal(float)
 
     #: Emitted with the finished measurement when the user completes one
     #: by clicking two points while measurement mode is active. Carries
@@ -384,6 +396,12 @@ class MplCanvas(QWidget):
     #: list that would go stale across a figure.clear() (a brand new
     #: Axes each time, invalidating any previously held patch objects).
     _REGION_PATCH_GID = "integration_region"
+
+    #: Tag on the not-yet-committed baseline overlay, so it can be
+    #: found and replaced without keeping a reference that a figure
+    #: rebuild would invalidate -- same approach as the region patches
+    #: above, and for the same reason.
+    _BASELINE_PREVIEW_GID = "baseline_preview"
 
     def __init__(self, parent=None, full_resolution: bool = False) -> None:
         super().__init__(parent)
@@ -599,6 +617,9 @@ class MplCanvas(QWidget):
         # None for any other view (contour, FID, compare, fit), where
         # unit-switching isn't offered.
         self._current_1d_spectrum: NMRSpectrum | None = None
+        #: The Processing preview's own bottom-panel spectrum -- see
+        #: :meth:`baseline_preview_source`. Only that layout sets it.
+        self._preview_1d_spectrum: NMRSpectrum | None = None
         self._axis_unit = "ppm"
         self._ppm_label = ""
         # Imaging Analysis sub-tab's gradient-to-mm conversion inputs
@@ -644,6 +665,13 @@ class MplCanvas(QWidget):
         self._dosy_result: dict | None = None
         self._dosy_factor = self._DOSY_FACTOR_DEFAULT
         self._dosy_title = ""
+        #: How many contour levels to draw, and the D axis range to
+        #: draw them in. ``None`` for the range means "fit the axis to
+        #: the populated part of the grid" (``plot_dosy``'s own
+        #: default); an explicit ``(low, high)`` is the user's own
+        #: choice and is used as given.
+        self._dosy_clevels = self._DOSY_CLEVELS_DEFAULT
+        self._dosy_d_lims: tuple[float, float] | None = None
         # Which row of a "Stacked" Compare view (an index into
         # _compare_axes) scroll-zoom targets on its own, decoupled from
         # the rest -- None (the default, and reset on every fresh
@@ -691,6 +719,13 @@ class MplCanvas(QWidget):
         self._processing_preview_spec_ax = None
         self._last_right_click_xy: tuple[float, float] | None = None
 
+        # Re-fit the labels whenever Qt resizes the canvas -- see
+        # _on_canvas_resized. The timer is what keeps a window drag
+        # from paying for a layout pass per pixel.
+        self._resize_layout_timer = QTimer(self)
+        self._resize_layout_timer.setSingleShot(True)
+        self._resize_layout_timer.timeout.connect(self._run_debounced_resize_layout)
+        self.canvas.mpl_connect("resize_event", self._on_canvas_resized)
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("button_press_event", self._on_press)
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
@@ -1172,6 +1207,53 @@ class MplCanvas(QWidget):
             self._nq_values = values
         if self._contour_spectrum is not None:
             self.show_spectrum(self._contour_spectrum)
+
+    def _restore_configured_text_sizes(self) -> None:
+        """Put every label, tick and title back to the size this canvas
+        is *configured* for, undoing any shrinking a previous layout
+        pass applied.
+
+        :func:`opennmr.plotting.fit_labels_within_figure` only ever
+        shrinks -- it has no way to know what size the text started at,
+        so it cannot grow it back. That is right for a single layout
+        pass, but it means a figure laid out once while its widget was
+        small keeps that shrunken text forever, however large the
+        widget later becomes. Re-laying out without this first would
+        measure the already-shrunk text, find it fits, and leave it.
+
+        Reported as "DOSY axes are still reverting to the small fonts
+        sometimes" -- a DOSY is computed and drawn before its tab is
+        made visible, so it is laid out at whatever size a
+        not-yet-shown widget happens to have."""
+        for ax in self.figure.get_axes():
+            ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+            ax.yaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+            if ax.get_title():
+                ax.title.set_fontsize(self._AXIS_LABELSIZE)
+            ax.tick_params(axis="both", which="both", labelsize=self._AXIS_LABELSIZE)
+            for label in (*ax.get_xticklabels(), *ax.get_yticklabels(),
+                          *ax.get_xticklabels(minor=True), *ax.get_yticklabels(minor=True)):
+                label.set_fontsize(self._AXIS_LABELSIZE)
+
+    def _on_canvas_resized(self, _event=None) -> None:
+        """Re-fit the labels after the widget's own size changes.
+
+        A layout is only as good as the size it was computed at, and a
+        GUI canvas is resized constantly -- by the window, by the
+        splitter, and by a tab becoming visible for the first time.
+        Nothing re-ran the layout on any of those, so a figure drawn
+        small stayed laid out (and shrunk) for small.
+
+        Debounced: a window drag fires a resize per pixel, and each
+        layout pass is a real cost on a large contour."""
+        self._resize_layout_timer.start(120)
+
+    def _run_debounced_resize_layout(self) -> None:
+        if not self.figure.get_axes():
+            return
+        self._restore_configured_text_sizes()
+        self._apply_layout()
+        self.canvas.draw_idle()
 
     def _apply_layout(self) -> None:
         """The layout pass every ``show_*``/rebuild ends with.
@@ -2437,6 +2519,67 @@ class MplCanvas(QWidget):
             self._pivot_line.set_xdata([ppm, ppm])
         self.canvas.draw_idle()
 
+    def baseline_preview_source(self):
+        """``(ppm, real data)`` of the 1D trace this canvas is
+        currently showing, or ``None`` when it is not showing one.
+
+        The scale a baseline overlay has to match is the *plotted*
+        one, and only the canvas knows which spectrum it actually
+        plotted -- a 2D contour has no trace to overlay at all, and the
+        Processing preview plots a live-recomputed slice rather than
+        anything in the session. Asking here keeps the caller from
+        guessing, and from drawing a baseline computed off one array
+        on top of another.
+        """
+        spectrum = self._preview_1d_spectrum or self._current_1d_spectrum
+        if spectrum is None or self._pivot_marker_ax is None or spectrum.ndim != 1:
+            return None
+        return spectrum.axis_values(0, "ppm"), np.real(spectrum.data)
+
+    def set_baseline_preview(self, x=None, baseline=None) -> None:
+        """Draw the baseline that *would* be subtracted over the trace
+        it would be subtracted from, or clear it with no arguments.
+
+        Explicit user request: "add a processing overlay to the plot
+        showing the baseline corrections before they are committed".
+        The point is to see whether the fit actually runs along the
+        baseline -- or through the feet of the peaks, which is what
+        every one of these estimators does when it goes wrong, and
+        which is invisible once the correction has been applied and
+        the evidence subtracted away.
+
+        Drawn on :attr:`_pivot_marker_ax` rather than ``self.ax``, the
+        same gate :meth:`set_peak_markers` uses: that is the spectrum
+        panel in the Processing preview's two-panel layout and
+        ``self.ax`` everywhere else, so one call does the right thing
+        on both without the caller knowing which is showing.
+
+        Found by gid rather than a stored reference, so a figure
+        rebuild between calls cannot leave a stale Line2D behind.
+        """
+        for ax in self.figure.get_axes():
+            for line in list(ax.lines):
+                if line.get_gid() == self._BASELINE_PREVIEW_GID:
+                    line.remove()
+        target = self._pivot_marker_ax
+        if x is None or baseline is None or target is None:
+            self.canvas.draw_idle()
+            return
+        x = np.asarray(x, dtype=float)
+        baseline = np.asarray(baseline, dtype=float)
+        if x.size != baseline.size or x.size == 0:
+            self.canvas.draw_idle()
+            return
+        # Dashed and coloured, over the trace rather than under it: the
+        # whole job of this line is to be compared against the data, so
+        # it has to stay visible where it crosses a peak.
+        line = target.plot(
+            x, baseline, linestyle="--", linewidth=1.4, color="tab:blue",
+            zorder=5, label="_baseline_preview",
+        )[0]
+        line.set_gid(self._BASELINE_PREVIEW_GID)
+        self.canvas.draw_idle()
+
     def set_peak_markers(self, shifts: list[float] | None) -> None:
         """Show or clear a small downward-pointing triangle just above
         the trace at each ppm in ``shifts`` -- visual confirmation of
@@ -2485,6 +2628,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
+        self._preview_1d_spectrum = None
         self._clear_figure()
         self.ax = self.figure.add_subplot(111)
         self.canvas.draw_idle()
@@ -2608,6 +2752,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
+        self._preview_1d_spectrum = None
         self._clear_figure()
         self.ax = self.figure.add_subplot(111)
         self._freeform_zoom_axes = {self.ax}
@@ -2694,10 +2839,15 @@ class MplCanvas(QWidget):
         ``preserve_view`` : keep whatever zoom/pan the two panels
         already have, instead of refitting to the new data. Right for a
         rebuild that changes *what is plotted* without changing what
-        the axes mean -- switching slice of a series, or a periodic
-        sidecar save's own refresh -- and wrong for one that genuinely
-        rescales the axes (a zero-fill or unit change), where the old
-        limits would frame a meaningless region."""
+        the axes *mean* -- switching slice of a series, a periodic
+        sidecar save's own refresh, or any FID-processing control
+        (window, zero-fill, shift, TDeff, LP): none of those change
+        what a ppm or a second on either axis is, so the region being
+        looked at is still the region worth looking at.
+
+        Wrong only where an axis genuinely changes meaning -- the FID
+        panel's time/points unit switch -- where the old limits would
+        frame a region that no longer exists."""
         previous_limits = self.processing_preview_limits() if preserve_view else None
         self._contour_spectrum = None
         self._contour_factor = None
@@ -2709,6 +2859,11 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
+        # The bottom panel's own spectrum, kept separately from
+        # _current_1d_spectrum (which every other view uses and which
+        # this layout deliberately leaves unset) so the baseline
+        # overlay can find the trace it has to line up with here too.
+        self._preview_1d_spectrum = spectrum
         self._clear_figure()
         fid_ax, spec_ax = self.figure.subplots(2, 1)
         self.ax = spec_ax
@@ -3084,6 +3239,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
+        self._preview_1d_spectrum = None
         self._clear_figure()
         self.ax = self.figure.add_subplot(111)
         self.ax.plot(x, y_data, color="black", linewidth=1.5, label="Data", zorder=0)
@@ -3132,7 +3288,8 @@ class MplCanvas(QWidget):
         self._apply_layout()
         self.canvas.draw_idle()
 
-    def show_dosy(self, dosy: dict, title: str = "") -> None:
+    def show_dosy(self, dosy: dict, title: str = "", factor: float | None = None,
+                   clevels: int | None = None, d_lims=None) -> None:
         """Draw a DOSY map (shift across, D down a log axis) from
         :func:`opennmr.processing.ilt.dosy_map`'s own output.
 
@@ -3150,9 +3307,44 @@ class MplCanvas(QWidget):
         ``plot_dosy`` rather than ``plot_2d_contour``, so sharing that
         state would send every contour path down the wrong branch."""
         self._dosy_result = dosy
-        self._dosy_factor = self._DOSY_FACTOR_DEFAULT
+        self._dosy_factor = self._DOSY_FACTOR_DEFAULT if factor is None else float(factor)
+        self._dosy_clevels = self._DOSY_CLEVELS_DEFAULT if clevels is None else int(clevels)
+        self._dosy_d_lims = None if d_lims is None else (float(d_lims[0]), float(d_lims[1]))
         self._dosy_title = title
         self._draw_dosy()
+
+    def set_dosy_display(self, factor=None, clevels=None, d_lims=...) -> None:
+        """Change how the stored DOSY map is *drawn* -- its contour
+        floor, how many levels, and the D axis range -- and redraw it,
+        without re-running the inverse Laplace transform.
+
+        The panel counterpart to the scroll gesture, which reaches the
+        same floor (see :meth:`_adjust_dosy_levels`). Everything here
+        is display-only: the map itself is whatever the last
+        :meth:`show_dosy` computed.
+
+        ``d_lims`` : ``(low, high)`` to pin the axis, or ``None`` to go
+        back to fitting it to the populated part of the grid. Its
+        default is the ``...`` sentinel rather than ``None`` precisely
+        because ``None`` is a meaningful value here -- omitting the
+        argument leaves the current range alone.
+
+        No-op when no DOSY is stored, so a control can be wired up
+        unconditionally.
+        """
+        if self._dosy_result is None:
+            return
+        if factor is not None:
+            self._dosy_factor = min(max(float(factor), self._DOSY_FACTOR_MIN),
+                                     self._DOSY_FACTOR_MAX)
+        if clevels is not None:
+            self._dosy_clevels = max(1, int(clevels))
+        if d_lims is not ...:
+            self._dosy_d_lims = None if d_lims is None else (float(d_lims[0]), float(d_lims[1]))
+        # The D range is part of what is being set here, so it must not
+        # be preserved from the view being replaced -- otherwise
+        # setting it would visibly do nothing.
+        self._draw_dosy(preserve_view=(d_lims is ...))
 
     def _draw_dosy(self, preserve_view: bool = False) -> None:
         """(Re)draw the stored DOSY map at its current level floor."""
@@ -3171,7 +3363,10 @@ class MplCanvas(QWidget):
         self.ax = self.figure.add_subplot(grid[1], sharex=projection_ax)
         plotting.plot_dosy(
             dosy, ax=self.ax, fig=self.figure, projection_ax=projection_ax,
-            factor=self._dosy_factor,
+            factor=self._dosy_factor, clevels=self._dosy_clevels,
+            # An explicit range from the panel, or None to let plot_dosy
+            # fit the axis to the populated part of the grid.
+            d_lims=self._dosy_d_lims,
             # This canvas's own style, not plot_dosy's standalone
             # defaults -- the DOSY is a contour panel like any other
             # here and has to answer to the Output tab's font/tick
@@ -3208,6 +3403,10 @@ class MplCanvas(QWidget):
             max(self._dosy_factor * step, self._DOSY_FACTOR_MIN), self._DOSY_FACTOR_MAX,
         )
         self._draw_dosy(preserve_view=True)
+        # So the panel's own floor control shows what the plot is
+        # actually drawn at, rather than the two disagreeing as soon as
+        # anyone scrolls.
+        self.dosyLevelFloorChanged.emit(self._dosy_factor)
 
     def show_relaxation_fit(self, result: dict, uncertainty: tuple | None = None,
                              xlabel: str = "Delay (s)", excluded_points: tuple | None = None,
@@ -3279,6 +3478,7 @@ class MplCanvas(QWidget):
         self._processing_preview_fid_ax = None
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
+        self._preview_1d_spectrum = None
         self._clear_figure()
         self.ax = self.figure.add_subplot(111)
 
@@ -3360,9 +3560,18 @@ class MplCanvas(QWidget):
         idx = plotting.downsample_indices(len(y))
         new_ydata = y if idx is None else y[idx]
         if len(new_ydata) != len(self.ax.lines[0].get_ydata()):
-            xlim = self.ax.get_xlim()
+            # Both limits, not just x. The in-place branch below leaves
+            # the y view exactly as it was (it only swaps ydata), so
+            # restoring x alone here made the same edit reset the
+            # intensity zoom or not depending purely on whether the
+            # point count happened to change -- a zero-fill threw it
+            # away, a window function did not. Reported as the view
+            # still being reset "when the fid is being recomputed after
+            # windowing etc.".
+            xlim, ylim = self.ax.get_xlim(), self.ax.get_ylim()
             self.show_spectrum(spectrum)
             self.ax.set_xlim(xlim)
+            self.ax.set_ylim(ylim)
             return
         self.ax.lines[0].set_ydata(new_ydata)
         self.canvas.draw_idle()
@@ -3516,6 +3725,17 @@ class MplCanvas(QWidget):
             self._export_fig_width if self._export_fig_width is not None else default_width,
             self._export_fig_height if self._export_fig_height is not None else default_height,
         )
+        # **Re-lay-out at the size actually being written.** Subplot
+        # margins are stored as *fractions* of the figure, and were
+        # computed by tight_layout against whatever size Qt gave the
+        # live widget -- but the text keeps its absolute point size. A
+        # figure laid out while the widget was large has a small
+        # fractional bottom margin, which at a smaller export size is
+        # no longer enough room for the same x label, so it is written
+        # off the bottom edge. Reported as "saved png/pdf cuts off
+        # bottom of x-axis label below like 10x10 in".
+        self._restore_configured_text_sizes()
+        self._apply_layout()
 
         try:
             save_fn()
@@ -3530,6 +3750,11 @@ class MplCanvas(QWidget):
                 self.ax.set_ylim(contour_ylim)
             self.figure.set_dpi(original_dpi)
             self.figure.set_size_inches(original_size)
+            # And back to a layout that suits the on-screen size, for
+            # the same reason -- otherwise the export's own margins
+            # stay behind on the live view.
+            self._restore_configured_text_sizes()
+            self._apply_layout()
             self.canvas.draw_idle()
 
     #: Order the units of a measured separation are reported in, and

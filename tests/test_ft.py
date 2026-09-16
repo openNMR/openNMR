@@ -859,3 +859,168 @@ def test_prepare_fid_echo_offset_defaults_to_no_change():
     fid = _echo()
     np.testing.assert_allclose(ft.prepare_fid(fid, align_echo_enabled=True),
                                ft.prepare_fid(fid, align_echo_enabled=True, echo_offset=0.0))
+
+
+# ============================================================
+# Whittaker (asymmetrically reweighted) baseline
+# ============================================================
+
+def _rolling_baseline_spectrum(n=8192, solvent=100.0, seed=0):
+    """A spectrum with a rolling baseline, a dominant solvent peak and
+    three weak analyte peaks -- the case the edge-based estimators
+    cannot see, because the roll is in the middle and the edges are
+    not representative of it."""
+    rng = np.random.default_rng(seed)
+    ppm = np.linspace(-2.0, 12.0, n)
+
+    def lor(centre, width, amp):
+        return amp / (1.0 + ((ppm - centre) / width) ** 2)
+
+    baseline = 0.35 * np.sin(2 * np.pi * (ppm + 2.0) / 22.0) + 0.05 * ppm
+    peaks = (lor(4.7, 0.02, solvent) + lor(1.2, 0.01, 1.0)
+             + lor(7.3, 0.01, 0.8) + lor(2.6, 0.015, 0.5))
+    noise = rng.normal(0.0, 0.004, n)
+    return ppm, peaks, baseline, peaks + baseline + noise
+
+
+def test_whittaker_smooth_matches_a_dense_solve():
+    """The banded solve is an optimisation, not a different answer."""
+    from opennmr.processing.fitting import whittaker_smooth
+
+    n = 150
+    rng = np.random.default_rng(1)
+    y = rng.normal(size=n)
+    w = rng.uniform(0.1, 1.0, size=n)
+    lam = 12.5
+
+    z = whittaker_smooth(y, w, lam, d=2)
+    D = np.diff(np.eye(n), 2, axis=0)
+    expected = np.linalg.solve(np.diag(w) + lam * D.T @ D, w * y)
+    np.testing.assert_allclose(z, expected, atol=1e-8)
+
+
+def test_whittaker_recovers_a_rolling_baseline_under_a_dominant_peak():
+    ppm, _peaks, true_baseline, spectrum = _rolling_baseline_spectrum()
+    from opennmr.processing.fitting import estimate_baseline_whittaker
+
+    fitted = estimate_baseline_whittaker(ppm, spectrum)
+    error = np.sqrt(np.mean((fitted - true_baseline) ** 2))
+    # The baseline itself spans ~0.9; recovering it to a few percent of
+    # that is the point of the method.
+    assert error < 0.05 * np.ptp(true_baseline)
+
+
+def test_whittaker_beats_the_edge_based_estimators_on_that_spectrum():
+    """The reason to add it: every other method assumes the first and
+    last few percent of the spectrum are representative baseline."""
+    ppm, _peaks, true_baseline, spectrum = _rolling_baseline_spectrum()
+
+    def rms(method, **kwargs):
+        corrected = ft.baseline_correct(ppm, spectrum, method=method, **kwargs)
+        return float(np.sqrt(np.mean(((spectrum - corrected) - true_baseline) ** 2)))
+
+    whittaker = rms("whittaker")
+    assert whittaker < rms("linear")
+    assert whittaker < rms("polynomial", degree=3)
+
+
+def test_whittaker_does_not_eat_the_peaks_it_runs_under():
+    """A baseline that follows the peaks is not a baseline."""
+    ppm, _peaks, _true, spectrum = _rolling_baseline_spectrum()
+    corrected = np.real(ft.baseline_correct(ppm, spectrum, method="whittaker"))
+
+    for centre, expected in ((4.7, 100.0), (1.2, 1.0), (7.3, 0.8), (2.6, 0.5)):
+        index = int(np.argmin(np.abs(ppm - centre)))
+        window = corrected[max(0, index - 30):index + 30]
+        # Every peak survives with most of its height -- including the
+        # weak ones, which a baseline dragged up by the solvent peak
+        # would have flattened.
+        assert window.max() > 0.8 * expected
+
+
+def test_whittaker_lam_controls_stiffness():
+    ppm, _peaks, _true, spectrum = _rolling_baseline_spectrum()
+    from opennmr.processing.fitting import estimate_baseline_whittaker
+
+    stiff = estimate_baseline_whittaker(ppm, spectrum, lam=1e14)
+    loose = estimate_baseline_whittaker(ppm, spectrum, lam=1e6)
+    # Stiffer means straighter: less curvature left in the result.
+    assert np.sum(np.abs(np.diff(stiff, 2))) < np.sum(np.abs(np.diff(loose, 2)))
+
+
+def test_whittaker_asls_is_available_and_also_finds_the_baseline():
+    ppm, _peaks, true_baseline, spectrum = _rolling_baseline_spectrum()
+    from opennmr.processing.fitting import estimate_baseline_whittaker
+
+    fitted = estimate_baseline_whittaker(ppm, spectrum, method="asls", p=0.001)
+    assert np.sqrt(np.mean((fitted - true_baseline) ** 2)) < 0.15 * np.ptp(true_baseline)
+
+    with pytest.raises(ValueError, match="arpls"):
+        estimate_baseline_whittaker(ppm, spectrum, method="nonsense")
+
+
+def test_whittaker_ignores_baseline_regions_rather_than_misusing_them():
+    """It finds the baseline itself; a candidate region is not part of
+    how it works, and quietly restricting the fit to one would be a
+    different method wearing this one's name."""
+    ppm, _peaks, _true, spectrum = _rolling_baseline_spectrum()
+    with_regions = ft.baseline_correct(
+        ppm, spectrum, method="whittaker", baseline_regions=[(0.0, 0.5)])
+    without = ft.baseline_correct(ppm, spectrum, method="whittaker")
+    np.testing.assert_allclose(np.real(with_regions), np.real(without))
+
+
+def test_whittaker_handles_an_all_zero_spectrum():
+    ppm = np.linspace(0.0, 10.0, 256)
+    from opennmr.processing.fitting import estimate_baseline_whittaker
+    np.testing.assert_allclose(estimate_baseline_whittaker(ppm, np.zeros(256)), 0.0)
+
+
+def test_baseline_correct_rejects_an_unknown_method_by_name():
+    ppm = np.linspace(0.0, 10.0, 256)
+    with pytest.raises(ValueError, match="whittaker"):
+        ft.baseline_correct(ppm, np.zeros(256), method="nope")
+
+
+def test_compute_baseline_and_baseline_correct_agree():
+    """The overlay draws compute_baseline's output and the correction
+    subtracts baseline_correct's -- if they ever disagreed, the preview
+    would be a lie in exactly the case it exists to catch."""
+    ppm, _peaks, _true, spectrum = _rolling_baseline_spectrum(n=2048)
+    for method, kwargs in (("linear", {}), ("polynomial", {"degree": 3}),
+                            ("sinusoidal", {"n_harmonics": 2}), ("spline", {}),
+                            ("whittaker", {})):
+        baseline = ft.compute_baseline(ppm, spectrum, method=method, **kwargs)
+        corrected = ft.baseline_correct(ppm, spectrum, method=method, **kwargs)
+        np.testing.assert_allclose(np.real(spectrum - baseline), np.real(corrected))
+
+
+def test_compute_baseline_rejects_an_unknown_method():
+    ppm = np.linspace(0.0, 10.0, 256)
+    with pytest.raises(ValueError, match="whittaker"):
+        ft.compute_baseline(ppm, np.zeros(256), method="nope")
+
+
+def test_sinusoidal_harmonics_and_period_change_the_fit():
+    """Both were accepted by baseline_correct all along and neither had
+    any way to be set."""
+    ppm, _peaks, _true, spectrum = _rolling_baseline_spectrum(n=2048)
+    one = ft.compute_baseline(ppm, spectrum, method="sinusoidal", n_harmonics=1)
+    three = ft.compute_baseline(ppm, spectrum, method="sinusoidal", n_harmonics=3)
+    assert not np.allclose(one, three)
+
+    auto = ft.compute_baseline(ppm, spectrum, method="sinusoidal")
+    pinned = ft.compute_baseline(ppm, spectrum, method="sinusoidal", period=4.0)
+    assert not np.allclose(auto, pinned)
+
+
+def test_whittaker_penalty_bands_are_cached_but_not_shared_mutably():
+    """The cache is what makes a pseudo-2D affordable; a caller adding
+    its weights to the shared array would corrupt every later row."""
+    from opennmr.processing.fitting import _whittaker_penalty_bands, whittaker_smooth
+
+    first = _whittaker_penalty_bands(64, 10.0, 2)
+    before = first.copy()
+    y = np.linspace(0.0, 1.0, 64)
+    whittaker_smooth(y, np.ones(64), 10.0, d=2)
+    np.testing.assert_array_equal(_whittaker_penalty_bands(64, 10.0, 2), before)

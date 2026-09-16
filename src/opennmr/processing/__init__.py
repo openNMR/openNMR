@@ -6,6 +6,7 @@ from .fitting import (
     gaussian, lorentzian, pseudo_voigt,
     estimate_baseline_from_edges, estimate_baseline_robust,
     estimate_baseline_polynomial, estimate_baseline_sinusoidal, evaluate_baseline_sinusoidal,
+    estimate_baseline_whittaker, whittaker_smooth,
     fit_spectrum, evaluate_fit, compute_integrals, compute_integral_errors, fit_quality,
     estimate_noise_level, select_2d_traces, NMR2D_fit_slices, NMR2D_print_fit_report,
     print_fit_report,
@@ -19,7 +20,10 @@ from .relaxation import (
     format_relaxation_report, format_global_report, print_relaxation_report,
     NMR2D_integrate_slices, NMR2D_fit_relaxation,
 )
-from . import diffusion, ilt, score, refdeconv, enmr
+from . import diffusion, ilt, score, refdeconv, enmr, report
+from .report import (
+    processing_summary, processing_prose, format_processing_report, compare_processing,
+)
 from .refdeconv import (
     reference_deconvolve, isolate_reference, ideal_reference, reference_position,
     REGULARISATIONS,
@@ -59,6 +63,7 @@ __all__ = [
     "gaussian", "lorentzian", "pseudo_voigt",
     "estimate_baseline_from_edges", "estimate_baseline_robust",
     "estimate_baseline_polynomial", "estimate_baseline_sinusoidal", "evaluate_baseline_sinusoidal",
+    "estimate_baseline_whittaker", "whittaker_smooth",
     "fit_spectrum", "evaluate_fit", "compute_integrals", "compute_integral_errors", "fit_quality",
     "estimate_noise_level", "select_2d_traces", "NMR2D_fit_slices", "NMR2D_print_fit_report",
     "print_fit_report",
@@ -77,4 +82,6 @@ __all__ = [
     "inverse_laplace", "dosy_map", "l_curve_alpha", "log_grid",
     "resolve_components", "estimate_components", "format_score_report",
     "components_to_csv", "crosstalk", "RESOLUTION_METHODS",
+    "report", "processing_summary", "processing_prose",
+    "format_processing_report", "compare_processing",
 ]
