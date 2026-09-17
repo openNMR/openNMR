@@ -480,11 +480,16 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
         Number of contour levels (log-spaced between ``factor`` and 1).
 
     projection_mode : {'auto', 'sum', 'max'}, optional
-        ``'sum'`` for conventional projections; ``'max'`` (of
-        ``abs()``) for pseudo-2D relaxation/diffusion series, where a
-        sum projection would wash out slice-to-slice changes.
-        ``'auto'`` picks ``'max'`` for pseudo-2D and ``'sum'``
-        otherwise.
+        Both modes match TopSpin's own row/column projections
+        (``rhpp``/``rvpp``) by using clipped-positive intensity only
+        (negative-going dispersive/antiphase/exchange contributions
+        are zeroed out first, so they can't cancel real peaks in a
+        sum or dominate as spurious maxima). ``'sum'`` for
+        conventional projections; ``'max'`` (skyline, of the
+        clipped-positive data) for pseudo-2D relaxation/diffusion
+        series, where a sum projection would wash out slice-to-slice
+        changes. ``'auto'`` picks ``'max'`` for pseudo-2D and
+        ``'sum'`` otherwise.
 
     show_projections : bool or {'f1', 'f2'}, optional
         ``True`` (default) shows both the F1 and F2 projection panels.
@@ -736,11 +741,23 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
             ax_f2.tick_params(axis='y', which='both', left=False, right=False,
                                labelleft=False, labelright=False)
 
-            # Maximum-magnitude projection ('max'): useful for pseudo-2D
-            # series (saturation/inversion recovery, T1, T2, diffusion),
-            # where a sum projection would wash out slice-to-slice changes.
-            f2_projection = (np.sum(spec_float, axis=0) if mode == "sum"
-                              else np.max(np.abs(spec_float), axis=0))
+            # TopSpin's own row/column projections ('rhpp'/'rvpp' --
+            # "positive projection") are built from clipped-positive
+            # intensity, not the raw signed (or abs()) data: negative-
+            # going dispersive tails, antiphase multiplets and (for
+            # EXSY/COSY-type, phase-sensitive echo-antiecho data
+            # especially) exchange/cross-peak lobes are zeroed out
+            # before summing or taking the skyline max. Using signed
+            # or abs() data instead lets those negative lobes cancel
+            # real peaks (sum) or dominate as spurious maxima (max),
+            # which is why the old code diverged from TopSpin.
+            spec_positive = np.clip(spec_float, 0, None)
+
+            # 'max' (skyline projection): useful for pseudo-2D series
+            # (saturation/inversion recovery, T1, T2, diffusion), where
+            # a sum projection would wash out slice-to-slice changes.
+            f2_projection = (np.sum(spec_positive, axis=0) if mode == "sum"
+                              else np.max(spec_positive, axis=0))
 
             ax_f2.plot(xAxppm, f2_projection + (0.02 * np.min(f2_projection)), 'k')
             ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
@@ -754,8 +771,8 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
             ax_f1.tick_params(axis='y', which='both', left=False, right=False,
                                labelleft=False, labelright=False)
 
-            f1_projection = (np.sum(spec_float, axis=1) if mode == "sum"
-                              else np.max(np.abs(spec_float), axis=1))
+            f1_projection = (np.sum(spec_positive, axis=1) if mode == "sum"
+                              else np.max(spec_positive, axis=1))
 
             ax_f1.plot(-f1_projection + (0.02 * np.min(-f1_projection)), y_axis, 'k')
             ax_f1.set_xlim([np.min(-f1_projection) * proj_scale, np.max(-f1_projection) * 0.99])
