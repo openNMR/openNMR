@@ -476,7 +476,8 @@ def plot_spectrum_dict(spectrum_dict, ax=None, axis="ppm", channel="real",
         if invert_x:
             ax.set_xlim(max(x), min(x))
     else:
-        ax.set_xlim(xlims[0], xlims[1])
+        ax.set_xlim(min(xlims), max(xlims))
+        ax.invert_xaxis()
 
     nuclide = spectrum_dict.get("nuclide", "")
     ax.set_xlabel(NUC_label(nuclide, x_unit=axis), fontsize=fontsize)
@@ -531,7 +532,7 @@ def plot_comparison(simulated_dict, experimental_dict, ax=None, axis="ppm",
             x_all = np.concatenate([simulated_dict[x_key], experimental_dict[x_key]])
             ax.set_xlim(x_all.max(), x_all.min())
     else:
-        ax.set_xlim(xlims[0], xlims[1])
+        ax.set_xlim(min(xlims), max(xlims))
 
     nuclide = simulated_dict.get("nuclide") or experimental_dict.get("nuclide") or ""
     safe_nuclide = re.sub(r"[^\w\-]", "", nuclide)

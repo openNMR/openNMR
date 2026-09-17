@@ -980,7 +980,7 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
     if xlims == 'default':
         ax.set_xlim(xmin, xmax)
     else:
-        xmin, xmax = xlims[0], xlims[1]
+        xmin, xmax = min(xlims), max(xlims)
         ax.set_xlim(xmin, xmax)
 
     ax.invert_xaxis()

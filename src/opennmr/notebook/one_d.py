@@ -555,7 +555,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], colour='black', f1p=0, f2p=0,
     if xlims == 'default':
         ax.set_xlim(xmin, xmax)
     else:
-        xmin, xmax = xlims[0], xlims[1]
+        xmin, xmax = min(xlims), max(xlims)
         ax.set_xlim(xmin, xmax)
 
     ax.set_xlabel(xlabel if xlabel is not None else labeltext)
@@ -833,7 +833,7 @@ def NMR1dheatmap(data_paths, mass=[1], procno=[1], f1p=0, f2p=0,
     if xlims == 'default':
         ax.set_xlim(x_common[0], x_common[-1])
     else:
-        ax.set_xlim(xlims[0], xlims[1])
+        ax.set_xlim(min(xlims), max(xlims))
 
     ax.set_xlabel(xlabel if xlabel is not None else labeltext)
     ax.invert_xaxis()

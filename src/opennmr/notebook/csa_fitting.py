@@ -930,7 +930,7 @@ def NMR1dplot_with_csa_fit(results, popt, fit_info, fit_regions=None,
     if xlims == 'default':
         ax.set_xlim(xmin, xmax)
     else:
-        ax.set_xlim(xlims[0], xlims[1])
+        ax.set_xlim(min(xlims), max(xlims))
 
     ax.invert_xaxis()
     ax.set_yticks([])
