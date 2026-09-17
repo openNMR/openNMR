@@ -921,7 +921,7 @@ def NMR2D_multi_plot(datasets, layout="row", panel_kwargs=None, titles=None,
                 f"panel_kwargs[{i}] contains figure-level keys not valid per panel: {sorted(bad)}"
             )
 
-    setup_plotting(font=font, fontsize=fontsize, output_format=output_format)
+    setup_plotting(output_format=output_format)
 
     if layout == "row":
         nrows, ncols = 1, n
