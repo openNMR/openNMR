@@ -32,26 +32,46 @@ shared function if that drift becomes a problem in practice.
 
 SIMPSON files carry no observe frequency, so ppm conversion is
 optional and only happens if you supply `nuclide` (+ `field`, or an
-explicit `SFO1`). ppm conversion is attempted via
-nmrtools.utils.find_gamma the way one_d.py calls it elsewhere, BUT:
-every usage of find_gamma visible in one_d.py already has SFO1 known
-in advance (read from a Bruker acqus file) before find_gamma is
-called -- its apparent role there is picking the canonical nuclide
-label given a known SFO1, not deriving SFO1 from a nuclide+field pair.
-I do not have utils.py, so I can't confirm find_gamma can do the
-latter at all. _hz_to_ppm() below calls it as asked, but checks for a
-usable SFO1 in the result and raises a clear error if one isn't there,
-rather than silently mis-scaling the ppm axis. If find_gamma doesn't
-support this, the fix is either to add a small
-nuclide+field->SFO1 helper (SFO1_MHz = field_T * gamma / (2*pi*1e6))
-somewhere in utils.py, or to just pass SFO1 explicitly here.
+explicit `SFO1`). Confirmed against the real nmrtools.utils: despite
+its name, find_gamma alone does NOT derive an SFO1 from a nuclide+field
+pair -- it only ever returns {'Nuclide', 'gamma'} (gamma in Hz/T); every
+usage of it in one_d.py already has SFO1 known in advance (read from a
+Bruker acqus file), and find_gamma's role there is picking the
+canonical nuclide label given a known SFO1, not the reverse. The actual
+nuclide+field->SFO1 conversion nmrtools already has is
+utils.compute_BF1_SFO1(nuclide, B0_tesla), which _resolve_SFO1_from_field()
+below wraps.
+
+`field` accepts two conventions, distinguished by type:
+
+    - a string, e.g. "500" or "800" -- the conversational field name,
+      i.e. the frequency (MHz) at which 1H resonates on that magnet
+      ("a 500", "an 800"). Converted to Tesla via 1H's own
+      gyromagnetic ratio before calling compute_BF1_SFO1.
+    - a plain number, e.g. 11.7 or 18.8 -- the field strength itself,
+      in Tesla, passed straight to compute_BF1_SFO1.
+
+field=500 (no quotes) is therefore read as 500 Tesla, not a "500 MHz"
+magnet -- use field="500" for that. This mirrors how spectroscopists
+actually say both of these out loud, but the string/number distinction
+is easy to trip over; if you'd rather not rely on it, pass SFO1
+explicitly (or B0_tesla-as-float unambiguously) instead.
+
+Design note: this conversational-field parsing only converts a string
+frequency to Tesla; the underlying nuclide+field(Tesla)->SFO1 step is
+utils.compute_BF1_SFO1, already shared by every *_spectrum_dict
+producer in nmrtools (see that function's own docstring). Consider
+moving _resolve_SFO1_from_field itself into utils.py (or teaching
+compute_BF1_SFO1 the same string convention directly) if another module
+ends up wanting the same "500"/"800" shorthand -- kept local to this
+module for now since only this ask covers simpson.py.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cmx
 
-from .utils import find_gamma, NUC_label
+from .utils import find_gamma, NUC_label, compute_BF1_SFO1
 from .plotting import (
     setup_plotting, get_stack_colormap, apply_tick_style, apply_spine_style, save_figure,
 )
@@ -379,13 +399,60 @@ def SIMPSONread_fid(path):
 # ppm conversion helper (shared by SIMPSONimport / CSDMimport)
 # ============================================================
 
+def _resolve_SFO1_from_field(nuclide, field):
+    """
+    Resolve an SFO1 (MHz) for `nuclide` at `field`, accepting either
+    convention -- see the module docstring:
+
+    - a string (e.g. "500", "800"): the conversational field name --
+      the frequency (MHz) at which 1H resonates on that magnet.
+      Converted to Tesla via 1H's own gyromagnetic ratio, then handed
+      to compute_BF1_SFO1.
+    - a plain number (e.g. 11.7, 18.8): the field strength itself, in
+      Tesla, passed straight to compute_BF1_SFO1.
+
+    Does no nuclide+field->frequency physics itself -- that's entirely
+    utils.compute_BF1_SFO1 (offset_ppm=0, so SFO1 == BF1: the
+    on-resonance carrier, no explicit offset); this function's only
+    job is normalising `field` to Tesla first when given as a
+    conversational 1H-frequency string.
+
+    Returns
+    -------
+    SFO1 : float (MHz)
+    B0_tesla : float
+    canonical_nuclide : str
+        As returned by compute_BF1_SFO1 -- identical to `nuclide` here
+        (see that function's docstring for when it can differ).
+    """
+    if isinstance(field, str):
+        try:
+            proton_freq_MHz = float(field)
+        except ValueError:
+            raise ValueError(
+                f'field={field!r} is a string but not a number -- pass e.g. '
+                f'field="500" for a conversational "500 MHz" magnet, or a '
+                f'plain number (field=11.7) for the field strength in Tesla.'
+            )
+        gamma_1H = find_gamma("1H")
+        if gamma_1H is None:
+            raise ValueError("Could not look up 1H in the gyromagnetic-ratio table.")
+        gamma_1H_MHz_per_T = gamma_1H["gamma"] / 1.0e6
+        B0_tesla = proton_freq_MHz / gamma_1H_MHz_per_T
+    else:
+        B0_tesla = float(field)
+
+    BF1, SFO1, canonical_nuclide = compute_BF1_SFO1(nuclide, B0_tesla)
+    return SFO1, B0_tesla, canonical_nuclide
+
+
 def _hz_to_ppm(x_Hz, nuclide, field, SFO1):
     """
-    Resolve an SFO1 (MHz) from an explicit SFO1, or via
-    nmrtools.utils.find_gamma given (nuclide, field) -- see the
-    caveat about find_gamma's actual capabilities in this module's
-    docstring. Returns (x_ppm or None, SFO1 or None): None if no ppm
-    axis could be resolved (caller decides whether that's fatal).
+    Resolve an SFO1 (MHz) from an explicit SFO1, or from (nuclide,
+    field) via _resolve_SFO1_from_field -- see the module docstring
+    for the two ways `field` can be given. Returns (x_ppm or None,
+    SFO1 or None): None if no ppm axis could be resolved (caller
+    decides whether that's fatal).
     """
     if SFO1 is not None:
         return x_Hz / SFO1, SFO1
@@ -393,17 +460,14 @@ def _hz_to_ppm(x_Hz, nuclide, field, SFO1):
     if nuclide is None:
         return None, None
 
-    nucgamma = find_gamma(nuclide, field=field, SFO1=SFO1)
-    resolved_SFO1 = nucgamma.get('SFO1') if isinstance(nucgamma, dict) else None
-
-    if resolved_SFO1 is None:
+    if field is None:
         raise ValueError(
-            f"find_gamma('{nuclide}', field={field}) did not return a "
-            f"usable SFO1 -- it may not support deriving SFO1 from "
-            f"nuclide+field alone (see this module's docstring). Pass "
-            f"SFO1 explicitly instead, or extend find_gamma/utils.py."
+            f"Converting {nuclide!r} to ppm needs a field (a Tesla float, "
+            f'or a conversational 1H-frequency string like "500") or an '
+            f"explicit SFO1 -- neither was given."
         )
 
+    resolved_SFO1, _, _ = _resolve_SFO1_from_field(nuclide, field)
     return x_Hz / resolved_SFO1, resolved_SFO1
 
 
@@ -436,13 +500,23 @@ def SIMPSONimport(path, nuclide=None, field=None, SFO1=None, mass=1,
         e.g. "31P". If given with `field` or `SFO1`, an x_ppm axis is
         computed (x_ppm = x_Hz / SFO1[MHz], same convention as
         NMR1dimport). If omitted, x_ppm is None and only x_Hz is set.
-    field : optional
-        Passed to find_gamma alongside `nuclide` -- see the caveat in
-        this module's docstring about whether this actually resolves
-        an SFO1.
+    field : str or float, optional
+        Required alongside `nuclide` if `SFO1` isn't given directly.
+        Two conventions, distinguished by type -- see the module
+        docstring:
+
+        - a string, e.g. "500" or "800" -- the conversational field
+          name, i.e. the frequency (MHz) 1H resonates at on that
+          magnet.
+        - a plain number, e.g. 11.7 or 18.8 -- the field strength
+          itself, in Tesla.
+
+        field=500 (no quotes) means 500 Tesla, not a "500 MHz" magnet
+        -- use field="500" for that.
     SFO1 : float, optional
         Explicit observe frequency in MHz. Takes precedence over
-        nuclide/field if given.
+        nuclide/field if given -- unambiguous, so prefer this over
+        `field` if you already know SFO1.
     mass : float, optional
         Scales real/imag spectra, mirroring NMR1dimport's convention
         (default 1 -- SIMPSON output isn't mass-normalised the way an
@@ -547,7 +621,9 @@ def CSDMimport(path, nuclide=None, field=None, SFO1=None, mass=1,
     path : str
     nuclide, field, SFO1 : optional
         Only used if the file's axis is in Hz rather than already in
-        ppm -- see _hz_to_ppm and its caveat about find_gamma.
+        ppm -- see _hz_to_ppm / _resolve_SFO1_from_field, and the
+        `field` convention described in the module docstring
+        (SIMPSONimport's docstring spells it out in full).
     mass : float, optional
     dependent_variable_index, component_index : int, optional
         Which dependent variable / component to read.
