@@ -8,7 +8,8 @@ from .style import (
 )
 from .oned import plot_1d, plot_1d_stack, plot_1d_heatmap
 from .twod import plot_2d_contour, multi_plot, overlay_plot
-from .fit import plot_1d_with_fit, plot_2d_integrals, plot_relaxation, plot_dosy, plot_score_components
+from .fit import (plot_1d_with_fit, plot_2d_integrals, plot_relaxation, plot_dosy,
+                  overlay_dosy, plot_score_components)
 
 __all__ = [
     "setup_plotting", "apply_tick_style", "apply_spine_style", "get_stack_colormap",
@@ -19,6 +20,6 @@ __all__ = [
     "CONTOUR_CMAP_NAMES", "VALID_SAVE_FORMATS",
     "plot_1d", "plot_1d_stack", "plot_1d_heatmap",
     "plot_2d_contour", "multi_plot", "overlay_plot",
-    "plot_1d_with_fit", "plot_2d_integrals", "plot_relaxation", "plot_dosy",
+    "plot_1d_with_fit", "plot_2d_integrals", "plot_relaxation", "plot_dosy", "overlay_dosy",
     "plot_score_components",
 ]

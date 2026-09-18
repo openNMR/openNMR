@@ -442,6 +442,8 @@ def test_peek_reports_shape_without_ever_reading_2rr(tmp_path):
     assert result == {
         "vendor": "bruker", "ndim": 2, "shape": (4, 8),
         "nucleus": "1H", "nucleus_indirect": "1H", "pseudo_2d": False,
+        # peek reports the pulse programme too; this fixture records none.
+        "pulse_program": None,
     }
     assert "block_shape" not in result  # XDIM=1 -- no real block structure
 
@@ -461,6 +463,8 @@ def test_peek_reports_1d_shape_when_there_is_no_proc2s(tmp_path):
     assert bruker.peek(str(expt)) == {
         "vendor": "bruker", "ndim": 1, "shape": (16,),
         "nucleus": "13C", "nucleus_indirect": None, "pseudo_2d": False,
+        # peek reports the pulse programme too; these fixtures record none.
+        "pulse_program": None,
     }
 
 
@@ -876,3 +880,72 @@ def test_acquisition_nc_makes_offsets_comparable_to_topspin():
     # Relative intensities across the series must track TopSpin's own.
     # Was [2.39, 1.00, 1.31, 1.17] against [0.28, 1.00, 0.17, 0.14].
     np.testing.assert_allclose(ours / ours[1], topspin / topspin[1], rtol=0.15)
+
+
+# ============================================================
+# peek(): F1 rows follow what the read does to F1
+# ============================================================
+
+def _write_2d_params(tmp_path, *, nuc2, td2, si2, vdlist=False, name="expt"):
+    """A 2D parameter set only -- no ser/2rr, proving peek never needs
+    them. ``nuc2`` of "off" is what the readers themselves test for to
+    decide pseudo-2D (see read_2d/read_2d_processed)."""
+    expt = tmp_path / name
+    pdata = expt / "pdata" / "1"
+    pdata.mkdir(parents=True)
+    with open(pdata / "procs", "w") as f:
+        f.write("##$SW_p= 8000.0\n##$SI= 64\n##$SF= 400.13\n##$XDIM= 1\n")
+    with open(pdata / "proc2s", "w") as f:
+        f.write(f"##$SW_p= 2000.0\n##$SI= {si2}\n##$SF= 100.6\n##$XDIM= 1\n")
+    with open(expt / "acqus", "w") as f:
+        f.write("##$NUC1= <1H>\n##$BF1= 400.0\n##$O1= 2000.0\n##$NS= 1\n")
+    with open(expt / "acqu2s", "w") as f:
+        f.write(f"##$NUC1= <{nuc2}>\n##$BF1= 100.6\n##$O1= 500.0\n##$NS= 1\n##$TD= {td2}\n")
+    if vdlist:
+        with open(expt / "vdlist", "w") as f:
+            f.write("\n".join(f"{i * 0.1:g}" for i in range(1, si2 + 1)) + "\n")
+    return expt
+
+
+def test_peek_reports_acquired_td_rows_for_a_pseudo_2d(tmp_path):
+    """A pseudo-2D has no F1 transform -- its rows are slices, so the
+    row count is exactly what was acquired. ``SI`` is TopSpin's
+    rounding of it: a real 15-slice saturation-recovery series with
+    ``SI=16`` was being labelled as 16 rows."""
+    expt = _write_2d_params(tmp_path, nuc2="off", td2=15, si2=16)
+    result = bruker.peek(str(expt))
+    assert result["shape"] == (15, 64)
+    assert result["pseudo_2d"] is True
+
+
+def test_peek_reports_si_rows_for_a_genuine_2d(tmp_path):
+    """A real indirect frequency dimension is zero-filled to ``SI`` by
+    the read, so ``SI`` is what a load produces whatever was acquired
+    (measured on real data: acqu2s TD=310 against 1024 rows loaded)."""
+    expt = _write_2d_params(tmp_path, nuc2="13C", td2=310, si2=1024)
+    result = bruker.peek(str(expt))
+    assert result["shape"] == (1024, 64)
+    assert result["pseudo_2d"] is False
+
+
+def test_peek_uses_the_readers_pseudo_test_not_its_own_reported_flag(tmp_path):
+    """**The regression this pins.** ``peek`` reports ``pseudo_2d`` as
+    ``nuc2 == "off" or has_variable_list(path)``, but ``read_2d`` and
+    ``read_2d_processed`` both decide it on ``nuc2 == "off"`` alone.
+    Several real datasets carry a vdlist *and* a real F1 nucleus (a 2D
+    run inside an arrayed experiment); gating the *shape* on the
+    reported flag takes their TD and gets them wrong.
+
+    So: reported pseudo_2d True (there is a vdlist), shape still
+    SI-based (F1 is a real nucleus and does get transformed).
+    """
+    expt = _write_2d_params(tmp_path, nuc2="13C", td2=7, si2=16, vdlist=True)
+    result = bruker.peek(str(expt))
+    assert result["pseudo_2d"] is True        # it is a series...
+    assert result["shape"] == (16, 64)        # ...but F1 is still transformed
+
+
+def test_peek_falls_back_to_si_when_acqu2s_has_no_td(tmp_path):
+    """A malformed/incomplete parameter set should degrade, not raise."""
+    expt = _write_2d_params(tmp_path, nuc2="off", td2=0, si2=8)
+    assert bruker.peek(str(expt))["shape"] == (8, 64)

@@ -726,7 +726,9 @@ def _read_xpulse_ntuples_2d(filepath: str, timegrid_warning: bool = False) -> di
     F2's own values. ``##FIRST=``/``##LAST=`` similarly appear both as
     a genuine global (pre-PAGE) declaration and, separately, as an
     always-``0,0,0,0`` per-PAGE placeholder in standard NTUPLES
-    layout -- only the first (global) occurrence is used here, since
+    layout (including one *before* the first ``##PAGE=``, so "before
+    any page" alone does not tell them apart) -- only the first
+    occurrence of each is used here, since
     per-row time reconstruction instead comes from each data line's
     own leading time checkpoint, exactly as the plain-1D reader
     already does.
@@ -734,9 +736,13 @@ def _read_xpulse_ntuples_2d(filepath: str, timegrid_warning: bool = False) -> di
     Returns a dict with keys ``"complex"`` (2D array, row-paired),
     ``"params"``, ``"exp_params"``, ``"t1_values"`` (the raw, not
     zero-based, per-page-pair T1 values recorded in the file, purely
-    for diagnostics -- not used for F1 axis construction, since the
-    increments are uniform and ``exp_params["SW1"]`` already gives the
-    true F1 dwell time directly).
+    for diagnostics), and ``"t1_first"``/``"t1_last"`` -- the global
+    ``##FIRST=``/``##LAST=`` declaration's own **T1** entries, in
+    seconds. Those two are what :func:`_f1_sweep_width` reconstructs
+    the F1 dwell time from when the sequence did not record an
+    ``SW1``; the per-page ``T1`` checkpoints are *not* usable for it,
+    being in the file's own undocumented page unit (2 us) rather than
+    seconds.
     """
     with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
@@ -792,10 +798,20 @@ def _read_xpulse_ntuples_2d(filepath: str, timegrid_warning: bool = False) -> di
         elif key in ("FIRST", "LAST") and current_page is None:
             # Global (pre-PAGE) declaration only -- see this function's
             # own docstring for why the per-PAGE occurrence is ignored.
+            #
+            # **First occurrence wins, not last.** The all-zero
+            # placeholder that precedes each PAGE block also precedes
+            # the *first* one, so it too arrives with `current_page is
+            # None` and a last-wins assignment would overwrite the
+            # real declaration with zeros. That was harmless while
+            # only T2 was read off this (its true FIRST is 0 anyway),
+            # and wrong the moment T1 was -- its FIRST is the initial
+            # evolution time, 6e-06 s, so the zeroed copy shifted the
+            # derived F1 dwell time by one part in 21000.
             values = [float(x.strip()) for x in val.split(",")]
-            if key == "FIRST":
+            if key == "FIRST" and global_first is None:
                 global_first = values
-            else:
+            elif key == "LAST" and global_last is None:
                 global_last = values
         elif "$$" in val:
             # Duplicate-named, dimension-tagged key (SF/SFO1) -- keep
@@ -846,10 +862,61 @@ def _read_xpulse_ntuples_2d(filepath: str, timegrid_warning: bool = False) -> di
         "params": params,
         "exp_params": exp_params,
         "t1_values": np.array(t1_values, dtype=np.float64),
+        # Index 0 is T1, index 1 is T2 -- ##SYMBOL= T1, T2, R, I.
+        "t1_first": global_first[0],
+        "t1_last": global_last[0],
     }
 
 
+def _f1_sweep_width(exp_params: dict, t1_first: float | None, t1_last: float | None,
+                    n1: int) -> float:
+    """F1's spectral width in Hz, for an NTUPLES 2D.
+
+    **``exp_params["SW1"]`` is not always there.** It is a sequence
+    parameter, so it exists only for sequences whose author put it in
+    their ParameterBlock -- ``HSQC_HX`` does, ``NOESY_HH`` does not
+    (its F1 window is not independently settable: a homonuclear
+    indirect dimension is swept at the direct dimension's own rate).
+    Reading such a file used to die on "Spectral width (F1) must be >
+    0 to compute dt" before producing anything, although the file
+    states its own F1 dwell time perfectly well.
+
+    It states it in the NTUPLES header: ``##FIRST=``/``##LAST=`` give
+    the T1 axis's first and last values in seconds, and the page pairs
+    are one per complex T1 increment, uniformly spaced (verified: the
+    per-page ``T1`` checkpoints step by a constant). So
+
+        dt1 = (t1_last - t1_first) / (n1 - 1)
+
+    **Checked against the one file that records both**, rather than
+    just asserted: Quinine ``HSQC_HX`` has ``SW1= 4000.0`` and a T1
+    axis of 6e-06 -> 0.031756 s over 128 pairs, which is
+    0.03175/127 = 2.5e-04 s, i.e. 4000.0000 Hz -- exact. On the
+    ``NOESY_HH`` that prompted this, 6e-06 -> 0.127506 s over 256
+    pairs gives 2000.0000 Hz, which is also its ``Filter`` (the F2
+    window) to the digit, exactly as a homonuclear F1 should be.
+
+    The recorded value still wins where there is one: it is the
+    sequence's own statement of intent, and deriving over the top of
+    it would silently paper over a real mismatch rather than show it.
+    """
+    recorded = exp_params.get("SW1")
+    try:
+        recorded = float(recorded)
+    except (TypeError, ValueError):
+        recorded = 0.0
+    if recorded > 0:
+        return recorded
+
+    if t1_first is not None and t1_last is not None and n1 > 1:
+        dt1 = (float(t1_last) - float(t1_first)) / (n1 - 1)
+        if dt1 > 0:
+            return 1.0 / dt1
+    return 0.0
+
+
 def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | None = None,
+            window_f1: str | None = None, window_kwargs_f1: dict | None = None,
             zero_fill: int | bool | None = None, zero_fill_f1: int | bool | None = None,
             truncate_f1: int | bool | None = None, pseudo_2d: bool | None = None,
             autophase: bool = True, phase_mode: str = "apc0",
@@ -902,9 +969,51 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     proof the referencing itself is wrong, but not proof it's right
     either. Treat this axis as unverified until checked against a
     known reference spectrum -- see TODO.md.
+
+    **A homonuclear dataset now says it is wrong, and by how much.**
+    A NOESY's diagonal is ground truth -- every real peak must sit at
+    F1 = F2 -- and on ``SRB_AKS_B014_4`` (``NOESY_HH``, 2000 Hz in
+    both dimensions) the F1 peaks land 8.4 ppm off it, mirrored about
+    the carrier, with the mirror pair equal in height. 8.4 ppm at
+    59.7 MHz is 500 Hz, which is ``SW1/4`` to within one F1 bin --
+    the exact displacement a 90-degree-per-increment phase ramp
+    produces, i.e. the ``##.ACQUISITION SCHEME= TPPI`` this file
+    declares. The equal-height mirror says F1 quadrature is being lost
+    as well, and the same ``SW1/4`` displacement survives all three
+    row-pairing interpretations tried (R/I as a States pair; R/I as
+    the real and imaginary halves of one t2 FID with a complex F1 FT;
+    the same with F1 taken from the real part alone), so it is the
+    *encoding* that is misread, not the pairing.
+
+    **Not corrected here**, deliberately. Subtracting ``SW1/4`` puts
+    this file's one resolved peak (the solvent, at the carrier) on the
+    diagonal, but that is a single peak in a single sample -- and the
+    same shift applied to the Quinine HSQC moves its 13C axis from one
+    impossible answer to another (a proton at 5.95 ppm correlating to
+    10.5 ppm without it, -56.1 ppm with it; quinine has no carbon at
+    either). One solvent peak cannot settle a convention, and a shift
+    that is right for the NOESY and wrong for the HSQC would be worse
+    than the present honest error. What this needs is a homonuclear
+    X-Pulse 2D with several *resolved* peaks away from the carrier --
+    see TODO.md.
     """
     fid_data = _read_xpulse_ntuples_2d(path, timegrid_warning=timegrid_warning)
-    raw_rows = np.asarray(fid_data["complex"], dtype=np.complex128)  # row-paired: 2k real, 2k+1 imag
+    page_rows = np.asarray(fid_data["complex"], dtype=np.float64)  # 2k = R page, 2k+1 = I page
+    # **``##SYMBOL= T1, T2, R, I`` means what it says.** R and I are
+    # the real and imaginary halves of *one* t2 FID -- the file
+    # declares ``##.ACQUISITION MODE= SIMULTANEOUS``, and both pages of
+    # a pair carry the *same* ``##PAGE= T1=`` value, which is why they
+    # cannot be a States cos/sin pair at two different t1 points.
+    # Reading them as one used to leave every row real-valued, so each
+    # row's F2 transform was the FFT of a real signal and **every peak
+    # came back with an equal-height reflection about the transmitter**
+    # -- user report: "the spectra are like duplicated. I see all the
+    # peaks but reflected about the centre". Measured on the NOESY:
+    # F2 peaks at 4.74 *and* 5.26 ppm about a 5.00 ppm carrier, which
+    # collapse to a single 4.74 ppm peak once the halves are combined
+    # here; on the Quinine HSQC the pair 4.05/5.95 collapses to 4.05
+    # (its OCH3). One complex FID per t1 value, as NTUPLES intends.
+    raw_rows = page_rows[0::2] + 1j * page_rows[1::2]
     params = fid_data["params"]
     exp_params = fid_data["exp_params"]
 
@@ -915,14 +1024,41 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     sfo1_hz = float(params.get("$SFO1_F2", params.get("$SFO1", 1.0))) * 1e6
     sfo1_hz_f1 = float(params.get("$SFO1_F1", 1.0)) * 1e6
     tx_ppm_f2 = float(exp_params.get("TxPPM", 0.0))
-    tx_ppm_f1 = float(exp_params.get("TxPPMX", 0.0))
 
-    sw1 = float(exp_params.get("SW1", 0.0))
+    nucleus_f2 = re.sub(r"\W+", "", params.get(".OBSERVENUCLEUS", "") or "") or None
+    nucleus_f1 = re.sub(r"\W+", "", params.get("$INDIRECTNUCLEUS", "") or "") or None
+
+    # **``TxPPMX`` is the X channel's offset, so a homonuclear sequence
+    # has none** -- there is no X channel in a NOESY_HH. Defaulting to
+    # 0.0 there would centre F1 at 0 ppm while F2 sat at ``TxPPM``
+    # (5.0 ppm for the NOESY that prompted this), putting the diagonal
+    # 5 ppm off the diagonal -- wrong in a way that is obvious on the
+    # plot but easy to mistake for a referencing convention. When both
+    # dimensions are the same nucleus they are the same channel, so F1
+    # takes F2's own offset. A *heteronuclear* file with no TxPPMX
+    # still falls back to 0.0: borrowing the 1H offset for a 13C axis
+    # would be a guess, not a deduction.
+    tx_ppm_f1 = exp_params.get("TxPPMX")
+    if tx_ppm_f1 is None and nucleus_f1 is not None and nucleus_f1 == nucleus_f2:
+        tx_ppm_f1 = exp_params.get("TxPPM")
+    tx_ppm_f1 = float(tx_ppm_f1 or 0.0)
+
+    # Before any truncate_f1 -- the T1 axis this is read off spans the
+    # whole file, so the dwell time must be derived from the whole of
+    # it too.
+    sw1 = _f1_sweep_width(exp_params, fid_data.get("t1_first"), fid_data.get("t1_last"),
+                          raw_rows.shape[0])
     if sw1 <= 0:
-        raise ValueError("Spectral width (F1) must be > 0 to compute dt")
+        raise ValueError(
+            "Spectral width (F1) must be > 0 to compute dt -- the sequence records no "
+            "SW1 and the file's ##FIRST=/##LAST= T1 axis gives no usable F1 increment"
+        )
     dt1 = 1.0 / sw1
 
-    # truncate_f1 -- applied to row *pairs*, before decode_hypercomplex_f1.
+    # truncate_f1 -- **two** of these complex FIDs per t1 increment,
+    # because F1's quadrature is States: a cos-modulated FID and a
+    # sin-modulated one at each t1. So this is a pair count, and
+    # truncating never separates a cos row from its sin partner.
     n1_native = raw_rows.shape[0] // 2
     if truncate_f1 is True:
         td1 = int(exp_params.get("NP1", n1_native))
@@ -985,7 +1121,50 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
         # phased above; only the F1 half is skipped.
         freq_ppm_f1 = None
     else:
+        # **States-TPPI quadrature: four pages per t1 increment.**
+        # The R/I pages combined above give one complex t2 FID each,
+        # and *consecutive* ones are the cos- and sin-modulated
+        # members of a States pair at the same t1 -- so 512 pages are
+        # 256 complex FIDs are 128 hypercomplex t1 points.
+        #
+        # Established against MestReNova processing the same file,
+        # after two rounds of getting it wrong from the data alone:
+        # its ``Processed_FID_1st_FT`` export carries exactly **128
+        # non-zero rows of 256**, i.e. it halves the FIDs the same way
+        # before zero-filling. Its finished F1 spans 1298.501 ->
+        # -693.686 Hz over 256 points -- the full 2000 Hz, the same
+        # window as F2 -- and its trace at the solvent column is a
+        # single peak at 4.74 ppm with the next feature at 0.06 of it.
+        # Genuine quadrature, so no reflection *and* no halved width;
+        # the two are not a trade.
+        #
+        # The ``##PAGE= T1=`` labels (3, 253, 503, ...) increment per
+        # page-pair, which is what made this look like one t1 point
+        # per pair. They are a per-page counter; the true t1 advances
+        # once per cos/sin pair.
+        #
+        # Measured against MNova's own F1 trace: this decode scores
+        # r=+0.42 against it, plain States (fn_mode 4) scores -0.04
+        # and throws every peak to the axis edges, and treating the
+        # rows as amplitude-modulated (no decode at all) scores
+        # +0.0006 and mirrors. No ``data[1::2] *= -1`` normalisation
+        # first -- that is Bruker's own convention and scores worse
+        # here (+0.28 against +0.42).
         spectrum = processing_ft.decode_hypercomplex_f1(spectrum, fn_mode=5)
+        # **F1 apodization, before zero-fill and the transform.**
+        # There was none at all, for any X-Pulse 2D. F1 is where an
+        # unwindowed truncation hurts most -- a couple of hundred
+        # increments against a couple of thousand F2 points, so the
+        # sinc ringing it leaves is the vertical streaking that makes
+        # a benchtop 2D hard to read. ``None`` keeps the old
+        # behaviour, so no existing dataset changes on load without
+        # the caller asking.
+        if window_f1:
+            spectrum = np.apply_along_axis(
+                lambda col: processing_ft.apodize(
+                    col, dt1, window=window_f1, **(window_kwargs_f1 or {})),
+                0, spectrum,
+            )
         if zero_fill_f1 is True:
             si1 = int(2 ** np.ceil(np.log2(max(spectrum.shape[0], 1))))
         elif isinstance(zero_fill_f1, int):
@@ -996,13 +1175,14 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
             spectrum = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, spectrum)
         freq_hz_f1, spectrum = processing_ft.fft_spectrum(spectrum.T, dt1)
         spectrum = spectrum.T
+        # **No F1 reversal.** A single noisy column suggested one; the
+        # F1 *projection*, which integrates every F2 point instead of
+        # trusting one of them, puts the peak at 4.74 ppm unreversed
+        # -- MNova's own F1 peak to the digit -- and at 5.39 reversed.
         freq_ppm_f1 = tx_ppm_f1 + freq_hz_f1 / (sfo1_hz_f1 / 1e6)
 
     ns = float(exp_params.get("NS", 1.0))
     spectrum = spectrum / ns  # match read_1d's own convention: data is always per-scan
-
-    nucleus_f2 = re.sub(r"\W+", "", params.get(".OBSERVENUCLEUS", "") or "") or None
-    nucleus_f1 = re.sub(r"\W+", "", params.get("$INDIRECTNUCLEUS", "") or "") or None
 
     metadata = NMRMetadata(
         vendor="xpulse",
@@ -1015,7 +1195,15 @@ def read_2d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
             # Recorded (autophase's own base) vs user phase -- see
             # _phase_metadata for why the split matters on reload.
             **_phase_metadata(phase0, phase1, autophased, pivot_frac),
+            # Bruker's own FnMODE numbering: 5 is States-TPPI, the
+            # row-pair decode this reader performs.
             "fn_mode": 5,
+            # No Bruker-style `data[1::2] *= -1` before the decode and
+            # no F1 reversal after it -- see the transform above for
+            # the measurements. Stated rather than left implicit, so
+            # the GUI's own F1 rebuild matches and the two pipelines
+            # cannot drift apart.
+            "f1_quadrature_sign_flip": False,
             "fid": f2_rows, "fid_dt": dt2, "fid_original_length": raw_rows.shape[1],
             "fid_dt_f1": dt1,
             "fid_raw": fid_raw,
@@ -1079,6 +1267,36 @@ def _find_array_step_jdx(array_dir: str) -> str | None:
         if e.is_file(follow_symlinks=False) and os.path.splitext(e.name)[1].lower() in (".jdx", ".dx")
     )
     return candidates[0] if candidates else None
+
+
+#: Gradient axes a probe can carry its own maximum for -- matches
+#: ``MainWindow._GRADIENT_AXES``, which is what consumes this.
+_GRADIENT_AXES = ("x", "y", "z")
+
+
+def _gradient_axis_from_params(exp_params: dict) -> str | None:
+    """Which gradient coil the experiment actually used, from the
+    ``$$GradAxis`` entry of the SPINFLOW parameter block.
+
+    **A triple-axis probe's three coils are not interchangeable** --
+    they routinely differ in maximum strength, which is why the GUI
+    stores a separate calibration per axis. Nothing was reading this,
+    so an X-Pulse PGSTE run on ``y`` fell back to the axis combo's own
+    default (``z``) and every diffusion coefficient came out scaled by
+    the ratio of the two coils' maxima -- wrong, and silently so.
+    Reported directly: "Make sure grad_axis is being read from the
+    parameters in the case of x-pulse for curve fitting."
+
+    Returns ``None`` for a missing or unrecognised value, which leaves
+    the GUI on whatever the user has selected -- the behaviour before
+    this existed, so a file that does not record an axis is no worse
+    off than it was.
+    """
+    value = (exp_params or {}).get("GradAxis")
+    if value is None:
+        return None
+    axis = str(value).strip().lower()
+    return axis if axis in _GRADIENT_AXES else None
 
 
 def _read_gradient_relative(path: str) -> np.ndarray | None:
@@ -1162,6 +1380,12 @@ def read_array(path: str, **kwargs) -> NMRSpectrum:
             "fid": fid_stack,
             "fid_raw": fid_raw_stack,
             "gradient_relative": _read_gradient_relative(path),
+            # The coil the series was actually run on -- see
+            # _gradient_axis_from_params for why it matters. Taken from
+            # the first step's own header: every step of one arrayed
+            # acquisition is the same experiment on the same axis.
+            **({"gradient_axis": axis}
+               if (axis := _gradient_axis_from_params(first.metadata.raw.get("exp_params"))) else {}),
         },
     )
 
@@ -1238,4 +1462,164 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     return read_1d(path, **kwargs)
 
 
-base.register("xpulse", _detect, _read_auto)
+def _peek_header(path: str) -> dict[str, list[str]]:
+    """Every ``##KEY=`` value in a JCAMP-DX file's header, in order,
+    stopping at the first data line.
+
+    **Stopping is the whole point.** X-Pulse is the one vendor here
+    whose full read is dominated by *parsing* rather than processing
+    -- measured at 1063 ms of an 1142 ms ``read_2d``, essentially all
+    of it ASDF-decoding data points the Data-tab browser never looks
+    at. Reading the header alone is ~1 ms.
+
+    End-of-header is tracked the way :func:`_read_xpulse_jcamp` tracks
+    it -- a non-``##`` line once a ``##DATATABLE=``/``##XYDATA=`` has
+    been seen -- not "the first line that isn't ``##``": a long
+    ``##TITLE=`` wraps onto a bare continuation line (real files here
+    do), which would end the scan on line two.
+
+    Values are lists because the per-dimension parameters repeat, once
+    per dimension, in F2-then-F1 order.
+    """
+    out: dict[str, list[str]] = {}
+    in_datatable = False
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("$$"):
+                continue
+            if stripped.upper().startswith("##"):
+                m = re.match(r"##([^=]+)=\s*(.*)", stripped)
+                if m:
+                    key = m.group(1).strip().upper()
+                    out.setdefault(key, []).append(m.group(2).split("$$")[0].strip())
+                    in_datatable = key in ("DATATABLE", "XYDATA")
+                continue
+            if in_datatable:
+                break
+    return out
+
+
+def _peek_td(header: dict[str, list[str]], index: int = 0) -> int:
+    """One dimension's acquired point count from ``##$TD``.
+
+    Fallback only -- :func:`_peek_vardim` is preferred, see there.
+    ``##$TD`` counts real+imaginary points, so the acquired count is
+    half of it."""
+    values = header.get("$TD") or []
+    try:
+        return int(float(values[index])) // 2
+    except (IndexError, TypeError, ValueError):
+        return 0
+
+
+def _peek_vardim(header: dict[str, list[str]]) -> dict[str, int]:
+    """``##VARDIM`` keyed by its matching ``##SYMBOL``.
+
+    **The file stating its own point counts, rather than us inferring
+    them.** ``##$TD`` counts real+imaginary points, so a shape derived
+    from it rests on an assumption about interleaving; ``##VARDIM`` is
+    the JCAMP-DX standard field and says the answer outright, aligned
+    positionally with ``##SYMBOL``:
+
+    * a genuine 2D -- ``SYMBOL= T1, T2, R, I`` with
+      ``VARDIM= 128, 2048, 2048, 2048``: ``T1`` is the indirect
+      dimension, ``T2`` the direct one.
+    * a 1D or a pseudo-2D page -- ``SYMBOL= X, R, I, N`` with
+      ``VARDIM= 32768, 32768, 32768, 2``: ``X`` is the direct
+      dimension.
+
+    **``N`` is not a row count.** It is the page count *within one
+    file* (2 on the real arrayed files here), where a pseudo-2D's rows
+    are its ``arrayN`` folders -- reading it as a shape would label
+    every arrayed experiment as two rows.
+
+    Returns ``{}`` when either field is missing, so the ``##$TD``
+    fallback still applies.
+    """
+    symbols = [v.strip().upper() for v in (header.get("SYMBOL") or [""])[0].split(",") if v.strip()]
+    dims = [v.strip() for v in (header.get("VARDIM") or [""])[0].split(",") if v.strip()]
+    out: dict[str, int] = {}
+    for symbol, dim in zip(symbols, dims):
+        try:
+            out[symbol] = int(float(dim))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _peek_pulse_program(header: dict[str, list[str]]) -> str | None:
+    """``##.PULSESEQUENCE`` -- the same field read_1d/read_2d name as
+    the pulse programme."""
+    value = (header.get(".PULSESEQUENCE") or [""])[0].strip()
+    return value or None
+
+
+def _peek_direct_points(header: dict[str, list[str]]) -> int:
+    """The direct (F2/acquisition) point count -- ``##VARDIM``'s own
+    ``T2``/``X`` where the file gives one, else ``##$TD // 2``."""
+    vardim = _peek_vardim(header)
+    for symbol in ("T2", "X"):
+        if vardim.get(symbol):
+            return vardim[symbol]
+    return _peek_td(header, 0)
+
+
+def peek(path: str) -> dict:
+    """Metadata-only probe: shape/nucleus/dimensionality from the
+    JCAMP-DX header alone, never decoding the data table.
+
+    Mirrors :func:`_read_auto`'s own three-way dispatch, so what this
+    reports is what a load of the same path would produce -- an
+    arrayed folder, a genuine NTUPLES 2D file, or a plain 1D FID.
+
+    Point counts come from ``##VARDIM``/``##SYMBOL`` -- the file
+    stating them outright -- falling back to ``##$TD // 2`` only where
+    those are missing; see :func:`_peek_vardim`. The indirect
+    dimension of an arrayed folder is its ``arrayN`` subfolder count,
+    never ``VARDIM``'s own ``N`` (a per-file page count). A test pins
+    the agreement with a real load.
+    """
+    if os.path.isdir(path):
+        array_dirs = _find_array_dirs(path)
+        step = _find_array_step_jdx(array_dirs[0][1]) if array_dirs else None
+        header = _peek_header(step) if step else {}
+        nucleus = re.sub(r"\W+", "", (header.get(".OBSERVENUCLEUS") or [""])[0]) or None
+        return {
+            "vendor": "xpulse", "ndim": 2,
+            # Rows are the arrayN folders, never VARDIM's own N -- see
+            # _peek_vardim.
+            "shape": (len(array_dirs), _peek_direct_points(header)),
+            "nucleus": nucleus, "nucleus_indirect": None,
+            # read_array builds an arrayed acquisition as one pseudo-2D.
+            "pseudo_2d": True,
+            "pulse_program": _peek_pulse_program(header),
+        }
+
+    header = _peek_header(path)
+    nucleus = re.sub(r"\W+", "", (header.get(".OBSERVENUCLEUS") or [""])[0]) or None
+    if _is_ntuples_2d_file(path):
+        vardim = _peek_vardim(header)
+        # ``##VARDIM``'s T1 counts acquired *FIDs*, and F1's States
+        # quadrature uses two of them (cos and sin) per t1 increment,
+        # so a load produces half as many F1 points. peek's contract
+        # is "the shape a load would produce", not "the shape on disk",
+        # so the halving belongs here -- a test pins the agreement.
+        t1_acquired = vardim.get("T1") or _peek_td(header, 1) * 2
+        return {
+            "vendor": "xpulse", "ndim": 2,
+            "shape": (t1_acquired // 2, _peek_direct_points(header)),
+            "nucleus": nucleus,
+            "nucleus_indirect": re.sub(
+                r"\W+", "", (header.get("$INDIRECTNUCLEUS") or [""])[0]) or None,
+            "pseudo_2d": False,
+            "pulse_program": _peek_pulse_program(header),
+        }
+    return {
+        "vendor": "xpulse", "ndim": 1, "shape": (_peek_direct_points(header),),
+        "nucleus": nucleus, "nucleus_indirect": None, "pseudo_2d": False,
+        "pulse_program": _peek_pulse_program(header),
+    }
+
+
+base.register("xpulse", _detect, _read_auto, peek=peek)

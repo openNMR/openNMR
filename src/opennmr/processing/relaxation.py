@@ -813,8 +813,39 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
         "t": t, "y": y, "y_err": y_err, "y_fit": y_fit,
         "uncertainty": describe_uncertainty(sigma is not None, dof),
         "fit_quality": {"rmse": rmse, "chi2": chi2, "reduced_chi2": red_chi2,
-                         "r_squared": r_squared, "dof": dof, "n_points": int(len(y))},
+                         "r_squared": r_squared, "dof": dof, "n_points": int(len(y)),
+                         "decay_fraction": decay_fraction(y)},
     }
+
+
+def decay_fraction(y) -> float:
+    """How much signal is left at the end of a series -- the last
+    measured point over the first, ``I_final / I_0``.
+
+    **A fit-quality number that R² cannot give you.** A diffusion or
+    relaxation series that only decayed to 80% of its starting
+    intensity constrains its rate poorly however tidily a curve passes
+    through the points -- the fit is extrapolating past the data. The
+    conventional target for a PFG series is to reach roughly 10-20% or
+    below, and this is the number that says whether it did.
+
+    **Measured, not fitted**: it states what the experiment actually
+    achieved. Taking it off the fitted curve would report what the
+    model claims the attenuation was, which is the thing being judged.
+
+    Assumes ``y`` is ordered by the independent variable, which
+    :func:`fit_relaxation` guarantees (it sorts by ``t``). Returns NaN
+    for an empty series or a zero first point -- an undefined ratio,
+    reported as such rather than as a misleading infinity.
+
+    Sign is kept. An inversion recovery starts negative and ends
+    positive, so a negative fraction there says the inversion worked;
+    forcing it positive would throw that away.
+    """
+    y = np.asarray(y, dtype=float)
+    if y.size < 2 or y[0] == 0 or not np.isfinite(y[0]):
+        return float("nan")
+    return float(y[-1] / y[0])
 
 
 def fit_relaxation_global(datasets, model: str = "exponential_decay", shared=(),
@@ -1044,6 +1075,7 @@ def fit_relaxation_global(datasets, model: str = "exponential_decay", shared=(),
                 "reduced_chi2": chi2 / dof,
                 "r_squared": 1.0 - float(np.sum(residual ** 2)) / ss_tot if ss_tot > 0 else np.nan,
                 "dof": dof, "n_points": int(length),
+                "decay_fraction": decay_fraction(data["y"]),
             },
         })
 
@@ -1158,6 +1190,19 @@ def format_global_report(result: dict, width: int = 66) -> str:
     lines.append(f"    RMSE           = {quality['rmse']:.4g}")
     lines.append(f"    reduced χ²     = {quality['reduced_chi2']:.4g}")
     lines.append(f"    points / d.o.f = {quality['n_points']} / {quality['dof']}")
+    # **Per curve, not over the joint series.** The joint fit's own
+    # y-vector is every dataset concatenated, so "last over first"
+    # across it would divide one curve's end by another curve's start
+    # -- a number with no meaning. Each curve's own attenuation is the
+    # thing worth reading, and a joint fit is exactly where one curve
+    # having barely decayed is easy to miss.
+    fractions = [(entry.get("label") or f"curve {i + 1}",
+                  entry.get("fit_quality", {}).get("decay_fraction", float("nan")))
+                 for i, entry in enumerate(result.get("per_dataset") or [])]
+    fractions = [(label, value) for label, value in fractions if np.isfinite(value)]
+    if fractions:
+        lines.append(f"    final I/I₀     = " + ", ".join(
+            f"{label} {value:.3g}" for label, value in fractions))
     lines.append(rule)
     return "\n".join(lines)
 
@@ -1213,8 +1258,105 @@ def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 
     return t_fine, y_fine, y_band
 
 
+def _csv_param_unit(name: str) -> str:
+    """The unit a fitted parameter's **raw** value is in, for a CSV
+    column header, or ``""`` where it has none.
+
+    Raw, not display-scaled: the panel shows a T2 in whatever unit
+    suits it, but a file that silently switched units with a combo box
+    would be unreadable a month later. Times stay in seconds and
+    diffusion coefficients in m^2/s, with the unit named in the header
+    so the file says what it holds."""
+    if name in _TIME_PARAMS:
+        return "s"
+    if name.startswith(_DIFFUSION_PARAM_PREFIX) and name[1:].isdigit() or name in ("D", "Da", "Db"):
+        return "m^2/s"
+    return ""
+
+
+def curve_fit_parameters_to_csv(results) -> str:
+    """Every fitted peak's parameters and fit quality as a CSV table --
+    one row per peak, one column per parameter with its error beside
+    it, then the quality metrics.
+
+    Explicit user request: "Export curve fit needs to include the fit
+    report parameters, like D/T1/T2 and the fit quality". The series
+    export alone gave the data behind the plot but not the numbers the
+    fit produced, which are the reason the fit was run.
+
+    **A table, not the formatted report.** ``format_relaxation_report``
+    already renders those numbers for reading; this is the same content
+    in a form a spreadsheet can sort and a script can parse. Values are
+    raw (see :func:`_csv_param_unit`) with the unit named in the
+    header.
+
+    Columns are the union of every peak's parameter names, so a
+    multi-component fit and a single-exponential one can sit in the
+    same file -- a peak with no such parameter gets an empty cell
+    rather than a zero.
+    """
+    import csv
+    from io import StringIO
+
+    results = list(results or [])
+    if not results:
+        raise ValueError("No curve fit to export -- run Fit Curve first.")
+
+    names: list[str] = []
+    for result in results:
+        for name in (result.get("params") or {}):
+            if name not in names:
+                names.append(name)
+
+    quality_columns = [
+        ("r_squared", "R^2"), ("reduced_chi2", "reduced chi^2"),
+        ("rmse", "RMSE"), ("dof", "dof"), ("n_points", "points"),
+        # How far the series actually decayed -- see decay_fraction.
+        # Alongside R² on purpose: the two answer different questions,
+        # and a tidy fit through a series that barely moved is exactly
+        # the case R² alone flatters.
+        ("decay_fraction", "final I/I0"),
+    ]
+
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    header = ["peak", "model"]
+    for name in names:
+        unit = _csv_param_unit(name)
+        header.append(f"{name} ({unit})" if unit else name)
+        header.append(f"{name} error ({unit})" if unit else f"{name} error")
+    header.extend(label for _key, label in quality_columns)
+    header.append("uncertainty")
+    writer.writerow(header)
+
+    for index, result in enumerate(results, start=1):
+        params = result.get("params") or {}
+        errors = result.get("errors") or {}
+        quality = result.get("fit_quality") or {}
+        row = [result.get("peak_label") or result.get("label") or f"peak {index}",
+               result.get("model", "")]
+        for name in names:
+            value = params.get(name)
+            error = errors.get(name)
+            row.append("" if value is None else f"{float(value):.10g}")
+            row.append("" if error is None else f"{float(error):.10g}")
+        for key, _label in quality_columns:
+            value = quality.get(key)
+            row.append("" if value is None else f"{float(value):.10g}")
+        # The one-line form, not the whole describe_uncertainty dict --
+        # its `description` is a paragraph meant for a report panel and
+        # would swamp the row. What the column has to say is *which
+        # kind* of error the ± is, which is exactly `short`.
+        uncertainty = result.get("uncertainty") or {}
+        row.append(str(uncertainty.get("short", "") if isinstance(uncertainty, dict)
+                        else uncertainty))
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
 def curve_fit_to_csv(results, x_label: str = "x", x_scale: float = 1.0,
-                      value_label: str = "value", include_fit: bool = True) -> str:
+                      value_label: str = "value", include_fit: bool = True,
+                      include_parameters: bool = True) -> str:
     """A curve fit as CSV: the x-axis, then each peak's **measured**
     value at every point, with the fitted curve alongside.
 
@@ -1243,6 +1385,14 @@ def curve_fit_to_csv(results, x_label: str = "x", x_scale: float = 1.0,
     ``value_label`` : what the measured column is -- "integral" or
     "amplitude", per the Value-source setting.
 
+    ``include_parameters`` : prepend the fitted parameters and fit
+    quality as their own table (see
+    :func:`curve_fit_parameters_to_csv`), separated from the series by
+    a blank line. On by default -- the numbers the fit produced are
+    the reason it was run, and a file holding only the points behind
+    the plot left them to be copied out of the GUI by hand. Pass
+    ``False`` for the bare series table.
+
     A pure string builder (no file I/O), so it can be tested against
     its own output rather than against "did a file appear".
     """
@@ -1252,6 +1402,18 @@ def curve_fit_to_csv(results, x_label: str = "x", x_scale: float = 1.0,
     results = list(results or [])
     if not results:
         raise ValueError("No curve fit to export -- run Fit Curve first.")
+
+    preamble = ""
+    if include_parameters:
+        # Two labelled sections rather than one wide table: the
+        # parameters are per *peak* and the series is per *point*, so
+        # they have genuinely different row meanings and forcing them
+        # into one grid would leave most of it empty. The section
+        # titles are what let a reader (or a script skipping to the
+        # blank line) tell which is which.
+        preamble = ("Curve fit parameters\n"
+                    + curve_fit_parameters_to_csv(results)
+                    + "\nCurve fit series\n")
 
     x_values = sorted({round(float(value), 12)
                        for result in results for value in np.asarray(result["t"], dtype=float)})
@@ -1290,7 +1452,7 @@ def curve_fit_to_csv(results, x_label: str = "x", x_scale: float = 1.0,
             if include_fit:
                 row.append("" if position is None else f"{y_fit[position]:.10g}")
         writer.writerow(row)
-    return buffer.getvalue()
+    return preamble + buffer.getvalue()
 
 
 def format_time_value(value, error=None, sig_figs=3):
@@ -1620,6 +1782,15 @@ def format_relaxation_report(fit, title: str | None = None, width: int = 66) -> 
     lines.append(f"    RMSE           = {quality.get('rmse', float('nan')):.4g}")
     lines.append(f"    reduced χ²     = {quality.get('reduced_chi2', float('nan')):.4g}")
     lines.append(f"    points / d.o.f = {quality.get('n_points', len(fit.get('t', [])))} / {quality.get('dof', '?')}")
+    # How far the series actually decayed -- the one quality number
+    # that says whether the *experiment* constrained the rate, as
+    # opposed to how well a curve fits whatever it produced. See
+    # decay_fraction.
+    fraction = quality.get("decay_fraction")
+    if fraction is None:
+        fraction = decay_fraction(fit.get("y", []))
+    if np.isfinite(fraction):
+        lines.append(f"    final I/I₀     = {fraction:.4g}  ({fraction * 100:.1f}%)")
     lines.append(rule)
     return "\n".join(lines)
 
@@ -1800,6 +1971,26 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
 # Convenience: fit directly from NMR2D_fit_slices/NMR2D_integrate_slices output
 # ============================================================
 
+#: What a slice's per-peak value can be, for a relaxation/diffusion
+#: curve fit.
+#:
+#: ``"area"`` and ``"region"`` are both integrals, and telling them
+#: apart is the point: ``NMR2D_fit_slices`` integrates each *fitted
+#: lineshape* (see :func:`opennmr.processing.fitting.compute_integrals`),
+#: while ``NMR2D_integrate_slices`` sums the raw data over a region
+#: nobody fitted anything to. Both used to be called ``"integral"``,
+#: which meant the same setting silently measured two different things
+#: depending on which function produced the slices. Reported directly:
+#: "the two options of peak height or integral don't make it clear if
+#: a fully fitted spectrum is being used, this should be a third,
+#: distinct option (where it should use the integrated peak area, not
+#: the integrated region)."
+#:
+#: ``"integral"`` survives as the historical name and resolves to
+#: whichever of the two the slices actually carry.
+_VALUE_SOURCES = ("integral", "region", "area", "amplitude")
+
+
 def _default_peak_label(fits, peak_index: int, value_source: str) -> str:
     """``"Peak 3 (4.213 ppm)"`` -- or ``"Region 2 (2.42-4.55 ppm)"``
     for an integrated series -- rather than a bare ``"Peak 3"``.
@@ -1823,7 +2014,9 @@ def _default_peak_label(fits, peak_index: int, value_source: str) -> str:
         return f"Peak {number}"
     first = fits[0]
 
-    if value_source == "integral" and "regions" in first:
+    # "region" is the new, explicit name; "integral" is the historical
+    # one that meant this whenever the slices carried regions.
+    if value_source in ("integral", "region") and "regions" in first:
         regions = first.get("regions") or []
         labels = first.get("region_labels") or []
         if peak_index < len(labels) and labels[peak_index]:
@@ -1995,22 +2188,36 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
         ``return_series``.
     """
 
-    if value_source not in ("integral", "amplitude"):
-        raise ValueError("value_source must be 'integral' or 'amplitude'")
+    if value_source not in _VALUE_SOURCES:
+        raise ValueError(f"value_source must be one of {sorted(_VALUE_SOURCES)}")
 
     if not fits:
         raise ValueError("No fitted slices available.")
+
+    fitted_slices = "popt" in fits[0]
+    if value_source in ("area", "amplitude") and not fitted_slices:
+        raise ValueError(
+            f"value_source={value_source!r} needs peaks fitted with NMR2D_fit_slices -- "
+            f"these slices came from NMR2D_integrate_slices, which measures a region "
+            f"without fitting a lineshape to it. Use value_source='region', or fit the "
+            f"peaks first."
+        )
+    if value_source == "region" and fitted_slices:
+        raise ValueError(
+            "value_source='region' means a raw integral over a region, but these slices "
+            "carry fitted peaks. Use value_source='area' for the area under the fitted "
+            "lineshape, or 'amplitude' for its height."
+        )
+    # "integral" is the historical name from before these were told
+    # apart, and meant whichever of the two the slices happened to
+    # carry. Kept working, resolved to whichever it would have been.
+    if value_source == "integral":
+        value_source = "area" if fitted_slices else "region"
 
     t = _get_delays(fits, vdlist)
     order = np.argsort(t)
 
     if value_source == "amplitude":
-        if not fits or "popt" not in fits[0]:
-            raise ValueError(
-                "value_source='amplitude' requires fitted peaks from NMR2D_fit_slices, "
-                "not integrated regions from NMR2D_integrate_slices. Use value_source='integral' "
-                "for integrated data, or fit peaks instead of integrating."
-            )
         per_fit_amplitudes = []
         per_fit_amplitude_errors = []
         for fit in fits:
@@ -2020,6 +2227,9 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
             per_fit_amplitude_errors.append([p["errors"][i] for p, i in zip(per_peak, amp_indices)])
         n_peaks = max(len(v) for v in per_fit_amplitudes)
     else:
+        # Both "area" and "region" read the same key; which one it holds
+        # is decided by the function that produced the slices, and the
+        # checks above have already established they agree.
         source = "integrals_norm" if normalised else "integrals"
         n_peaks = max(len(fit.get(source, [])) for fit in fits)
 

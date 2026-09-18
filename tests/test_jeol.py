@@ -298,3 +298,47 @@ def test_read_1d_accepts_align_echo_kwarg(tmp_path):
     path = _write_jdf(tmp_path, n_points=16)
     spectrum = jeol.read_1d(path, autophase=False, baseline_correct=False, align_echo=True)
     assert len(spectrum.data) == 16
+
+
+# ============================================================
+# peek(): header and parameters only, never the FT pipeline
+# ============================================================
+
+def test_peek_skips_the_processing_pipeline_entirely(monkeypatch):
+    """JEOL's full read is almost *all* pipeline -- measured at 1.4 ms
+    to parse the file against ~520 ms to read it, the difference being
+    apodisation, zero-fill, FFT, autophase and baseline correction.
+    None of that is needed to label an experiment in the browser, so
+    peek must not reach any of it."""
+    import os
+    from opennmr.processing import ft as processing_ft
+
+    path = "test_data/jeol_1d/carbon.jdf"
+    if not os.path.exists(path):
+        pytest.skip("test_data/jeol_1d not present")
+
+    def fail(*_a, **_k):
+        raise AssertionError("peek() must not run the FT pipeline")
+    for name in ("fft_spectrum", "apc0"):
+        if hasattr(processing_ft, name):
+            monkeypatch.setattr(processing_ft, name, fail)
+
+    info = jeol.peek(path)
+    assert info["ndim"] == 1
+    assert info["nucleus"] == "13C"
+
+
+@pytest.mark.parametrize("name", ["carbon", "fluorine", "phosphorus", "proton"])
+def test_peek_agrees_with_a_real_load(name):
+    """The final point count is whatever the digital-filter trim
+    leaves (32768 -> 32750 from a FILTER_FACTOR of 16 -- *not* a
+    subtraction of 16), which is why peek applies the same
+    ``rm_dig_filter`` call rather than re-deriving the arithmetic."""
+    import os
+    path = f"test_data/jeol_1d/{name}.jdf"
+    if not os.path.exists(path):
+        pytest.skip("test_data/jeol_1d not present")
+    info = jeol.peek(path)
+    spectrum = io.load(path, vendor="jeol")
+    assert tuple(info["shape"]) == tuple(spectrum.data.shape)
+    assert info["nucleus"] == spectrum.metadata.nucleus

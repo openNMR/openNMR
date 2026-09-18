@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import types
 
+import matplotlib.colors
 import numpy as np
 from PySide6.QtCore import QPoint
 import pytest
@@ -9,6 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QSpinBox
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from opennmr import plotting
 from opennmr.gui.widgets.canvas import MplCanvas
 
 
@@ -2706,12 +2708,14 @@ def test_measurement_restarts_when_the_second_click_is_in_another_axes(qapp):
     assert canvas._measurement_points[0][0] is canvas._proj_axes["f2"]
 
 
-def test_measurement_in_mm_when_imaging_gradient_params_are_set(qapp):
+def test_measurement_in_mm_when_the_axis_is_displayed_in_mm(qapp):
     canvas = MplCanvas()
     canvas.figure.set_size_inches(8, 6)
     canvas.show_spectrum(_make_1d())
     canvas.canvas.draw()
     canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
+    canvas.set_axis_unit("mm")
+    canvas.canvas.draw()
     canvas.set_measurement_mode(True)
     got = []
     canvas.measurementCompleted.connect(got.append)
@@ -2721,6 +2725,51 @@ def test_measurement_in_mm_when_imaging_gradient_params_are_set(qapp):
     result = got[0]
     assert result["dx"]["mm"] == pytest.approx(result["dx"]["hz"] / canvas._imaging_hz_per_mm())
     assert result["summary"].startswith("Δx = ") and "mm" in result["summary"]
+
+
+def test_measurement_omits_mm_while_the_axis_is_in_ppm(qapp):
+    """Imaging gradient parameters being set is not enough on its own.
+
+    They are a property of the acquisition, so once entered they stay
+    set for the whole session -- which had every ordinary chemical-shift
+    measurement quoting a distance beside the ppm value. Explicit user
+    request: "don't give a mm value unless the axis is set to mm"."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
+    assert canvas._axis_unit == "ppm"
+    canvas.set_measurement_mode(True)
+    got = []
+    canvas.measurementCompleted.connect(got.append)
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.5))
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.7, yfrac=0.5))
+
+    result = got[0]
+    assert "mm" not in result["dx"]
+    assert "mm" not in result["summary"]
+    # The pairing the measurement exists for is untouched.
+    assert "ppm" in result["summary"] and "Hz" in result["summary"]
+
+
+def test_measurement_omits_mm_in_hz_view_even_with_a_gradient(qapp):
+    """Hz is not mm either -- the gate is the displayed unit, not
+    "is this a frequency axis"."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
+    canvas.set_axis_unit("hz")
+    canvas.canvas.draw()
+    canvas.set_measurement_mode(True)
+    got = []
+    canvas.measurementCompleted.connect(got.append)
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.5))
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.7, yfrac=0.5))
+
+    assert "mm" not in got[0]["dx"]
 
 
 # ============================================================
@@ -2969,3 +3018,851 @@ def test_canvas_crosshair_toggle_still_governs_every_view(qapp):
 
     canvas.set_crosshair_enabled(True)
     assert _crosshair_after_move(canvas) is not None
+
+
+# ============================================================
+# Extracted slices: colour, and clearance from the y-axis label
+# ============================================================
+
+def test_slice_colours_are_stored_not_derived_at_draw_time(qapp):
+    # Reported directly: "when I changed the units, the colours reset".
+    # The colour used to be assigned by position inside the draw loop,
+    # so every rebuild re-derived it.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "a")
+    canvas._add_contour_slice("f1", 9, "b")
+
+    stored = [dict(s) for s in canvas._contour_slices]
+    assert all(s["color"] for s in stored)
+    assert stored[0]["color"] != stored[1]["color"]
+
+    canvas.set_axis_unit("hz")
+
+    assert [s["color"] for s in canvas._contour_slices] == [s["color"] for s in stored]
+
+
+def test_slice_colours_come_from_the_compare_colour_map(qapp):
+    # Explicit user request: they "should be able to either take a
+    # colour from the standard compare map, or be independently
+    # clickable".
+    import matplotlib.colors
+    from opennmr import plotting
+
+    canvas = MplCanvas()
+    canvas.set_style(compare_colormap="plasma")
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "a")
+
+    expected = matplotlib.colors.to_hex(
+        plotting.stack_colors(canvas._SLICE_PALETTE_SIZE, "plasma")[0])
+    assert canvas._contour_slices[0]["color"] == expected
+
+
+def test_a_slice_colour_can_be_set_on_its_own(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "a")
+    canvas._add_contour_slice("f1", 9, "b")
+    other = canvas._contour_slices[1]["color"]
+
+    canvas.set_slice_colour(0, "#123456")
+
+    assert canvas._contour_slices[0]["color"] == "#123456"
+    assert canvas._contour_slices[1]["color"] == other     # its neighbour is untouched
+
+
+def test_adding_a_slice_does_not_recolour_the_existing_ones(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "a")
+    first = canvas._contour_slices[0]["color"]
+    canvas._add_contour_slice("f1", 9, "b")
+    assert canvas._contour_slices[0]["color"] == first
+
+
+def test_slice_panel_clears_the_contour_y_axis_labels(qapp):
+    # Reported directly: "I still see the extracted slices overlapping
+    # with the y-axis label of the contour, probably because the data
+    # I'm looking at has units in the 1000s because if I change to kHz
+    # (100s scale) it is less cut off".
+    #
+    # The contour's y ticks and label are on the right and the panel is
+    # appended to that same side, so a fixed pad is eaten by whatever
+    # the tick labels take -- which grows with the digit count.
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 6)
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "a")
+    canvas.canvas.draw()
+    renderer = canvas.figure.canvas.get_renderer()
+
+    panel = canvas._proj_axes.get("slices")
+    assert panel is not None
+    right_edge = max(
+        [canvas.ax.yaxis.label.get_window_extent(renderer).x1]
+        + [t.get_window_extent(renderer).x1
+           for t in canvas.ax.get_yticklabels() if t.get_text()])
+    assert panel.get_window_extent(renderer).x0 > right_edge
+
+
+# ============================================================
+# One series interface across every multi-series plot
+# ============================================================
+
+def _two_1d():
+    return [_make_1d(), _make_1d()]
+
+
+def test_series_is_empty_where_there_is_no_notion_of_several(qapp):
+    """So a caller can offer per-series controls unconditionally."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    assert canvas.series() == []
+
+
+def test_every_multi_series_view_answers_the_same_interface(qapp):
+    # The point of the interface: one dialog section drives all of
+    # them, instead of one bespoke control per plot type.
+    canvas = MplCanvas()
+
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["a", "b"])
+    assert [e.key for e in canvas.series()] == ["0", "1"]
+
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "slice a")
+    assert [e.label for e in canvas.series()] == ["slice a"]
+
+    canvas.show_2d_overlay([_make_2d(n_f1=8), _make_2d(n_f1=8)], labels=["x", "y"])
+    assert [e.label for e in canvas.series()] == ["x", "y"]
+
+
+def test_every_series_gets_its_own_colour_from_the_shared_palette(qapp):
+    canvas = MplCanvas()
+    canvas.set_style(compare_colormap="plasma")
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["a", "b"])
+
+    colours = [e.colour for e in canvas.series()]
+    assert len(set(colours)) == 2
+    expected = matplotlib.colors.to_hex(plotting.stack_colors(2, "plasma")[0])
+    assert colours[0] == expected
+
+
+def test_a_series_colour_survives_a_redraw(qapp):
+    # The rule the interface exists to enforce: colours are stored when
+    # a series is created and only read at draw time.
+    canvas = MplCanvas()
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["a", "b"])
+    canvas.set_series_style("0", colour="#ff00ff")
+    assert canvas.series()[0].colour == "#ff00ff"
+
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["a", "b"])
+    assert canvas.series()[0].colour == "#ff00ff"
+
+
+def test_renaming_a_series_reaches_the_plot(qapp):
+    canvas = MplCanvas()
+    canvas.show_2d_overlay([_make_2d(n_f1=8), _make_2d(n_f1=8)], labels=["x", "y"])
+
+    canvas.set_series_style("1", label="my sample")
+
+    assert [e.label for e in canvas.series()] == ["x", "my sample"]
+    assert "my sample" in [t.get_text() for t in canvas.ax.get_legend().get_texts()]
+
+
+def test_a_compare_trace_is_named_by_its_spectrum_not_the_plot(qapp):
+    # Its name comes from the Data tab's Rename, which reaches every
+    # other view too -- so the plot does not offer a competing one.
+    canvas = MplCanvas()
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["a", "b"])
+    assert all(e.can_rename is False for e in canvas.series())
+
+    canvas.set_series_style("0", label="ignored")
+    assert canvas.series()[0].label == "a"
+
+
+def test_setting_a_slice_colour_through_the_interface_reaches_its_spec(qapp):
+    # Slices keep their own copy on the spec, which is what persists
+    # with the spectrum -- the two must not drift apart.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "a")
+
+    canvas.set_series_style("0", colour="#010203", label="renamed")
+
+    assert canvas._contour_slices[0]["color"] == "#010203"
+    assert canvas._contour_slices[0]["label"] == "renamed"
+    assert canvas.series()[0].colour == "#010203"
+
+
+def test_changing_the_palette_recolours_what_is_already_drawn(qapp):
+    # Reported directly: "when I change the colour map from a plot, it
+    # should update the existing colours from that new series rather
+    # than me having to redraw the plot in some way". The reuse that
+    # stops colours resetting on a redraw was also stopping this.
+    canvas = MplCanvas()
+    canvas.set_style(compare_colormap="viridis")
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["a", "b"])
+    before = [e.colour for e in canvas.series()]
+
+    canvas.set_style(compare_colormap="plasma")
+    canvas.restyle_series()
+
+    after = [e.colour for e in canvas.series()]
+    assert after != before
+    assert after[0] == matplotlib.colors.to_hex(plotting.stack_colors(2, "plasma")[0])
+
+
+def test_a_deliberate_colour_survives_a_palette_change(qapp):
+    canvas = MplCanvas()
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["a", "b"])
+    canvas.set_series_style("0", colour="#ff00ff")
+    untouched_before = canvas.series()[1].colour
+
+    canvas.set_style(compare_colormap="plasma")
+    canvas.restyle_series()
+
+    assert canvas.series()[0].colour == "#ff00ff"      # set on purpose, left alone
+    assert canvas.series()[1].colour != untouched_before  # derived, follows the map
+
+
+def test_resetting_colours_puts_everything_back_on_the_palette(qapp):
+    canvas = MplCanvas()
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["a", "b"])
+    canvas.set_series_style("0", colour="#ff00ff")
+
+    canvas.reset_series_colours()
+
+    entries = canvas.series()
+    assert entries[0].colour != "#ff00ff"
+    assert all(not e.colour_overridden for e in entries)
+    assert entries[0].colour == matplotlib.colors.to_hex(
+        plotting.stack_colors(2, canvas._series_colormap)[0])
+
+
+def test_a_compare_trace_takes_a_renamed_spectrum_name(qapp):
+    # can_rename=False must not mean "frozen at the first name" -- a
+    # rename made in the Data tab has to reach the plot.
+    canvas = MplCanvas()
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["a", "b"])
+    assert canvas.series()[0].label == "a"
+
+    canvas.show_compare(_two_1d(), mode="overlay", row_labels=["renamed", "b"])
+    assert canvas.series()[0].label == "renamed"
+
+
+def test_score_components_are_renameable_unlike_compare_traces(qapp):
+    # Resolved components are not session spectra; their labels are
+    # generated annotations and theirs to rename.
+    canvas = MplCanvas()
+    canvas.show_compare(_two_1d(), mode="stack", row_labels=["c1", "c2"],
+                        series_renameable=True)
+    assert all(e.can_rename for e in canvas.series())
+
+    canvas.set_series_style("0", label="free water")
+    assert canvas.series()[0].label == "free water"
+    # And it survives the redraw, unlike a Compare trace's name.
+    canvas.show_compare(_two_1d(), mode="stack", row_labels=["c1", "c2"],
+                        series_renameable=True)
+    assert canvas.series()[0].label == "free water"
+
+
+def test_a_slice_colour_override_is_marked_on_its_spec(qapp):
+    # The spec persists with the spectrum, so a palette change in a
+    # later session has to be able to tell deliberate from derived.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas._add_contour_slice("f1", 3, "a")
+    assert not canvas._contour_slices[0].get("color_override")
+
+    canvas.set_series_style("0", colour="#010203")
+    assert canvas._contour_slices[0]["color_override"] is True
+    assert canvas._contour_slices[0]["color"] == "#010203"
+
+    canvas.set_style(compare_colormap="plasma")
+    canvas.restyle_series()
+    assert canvas._contour_slices[0]["color"] == "#010203"
+
+
+def test_contour_line_width_is_editable_on_a_2d(qapp):
+    # Explicit user request: "DOSY (all 2D?) line width should be
+    # editable on contour". Deliberately separate from _AXIS_LINEWIDTH,
+    # which styles axis furniture -- at its default the rings merge.
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    assert canvas.style_settings()["contour_linewidth"] == pytest.approx(0.8)
+
+    canvas.set_style(contour_linewidth=2.5)
+
+    assert canvas.style_settings()["contour_linewidth"] == pytest.approx(2.5)
+    widths = [c.get_linewidth() for c in canvas.ax.collections]
+    assert widths and all(np.allclose(w, 2.5) for w in widths)
+
+
+def test_contour_line_width_is_independent_of_the_axis_line_width(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
+    canvas.set_style(contour_linewidth=2.5, linewidth=4.0)
+
+    assert canvas._contour_linewidth == pytest.approx(2.5)
+    assert canvas._AXIS_LINEWIDTH == pytest.approx(4.0)
+    assert all(np.allclose(c.get_linewidth(), 2.5) for c in canvas.ax.collections)
+
+
+# ============================================================
+# Context cursors: a double-headed arrow on the scrollable strips
+# ============================================================
+#
+# The rule being tested throughout: the crosshair stays the cursor over
+# anything you read values off -- spectra, projections, contours, DOSY
+# maps, all of which are scrollable -- and only the tick-label *strips*,
+# where a scroll zooms the axis itself, swap it for a double-headed
+# arrow. The scroll-event helpers above are reused verbatim: they carry
+# exactly the x/y/inaxes a motion event does, and _scroll_strip_at
+# deliberately never looks at `button`.
+
+def _shape(canvas):
+    return canvas.canvas.cursor().shape()
+
+
+def _hover(canvas, event):
+    canvas._on_motion(event)
+    return _shape(canvas)
+
+
+def test_x_strip_shows_a_horizontal_double_arrow(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    assert _hover(canvas, _x_strip_scroll_event(canvas.ax, xdata=3.0)) == Qt.CursorShape.SizeHorCursor
+
+
+def test_contour_y_strip_shows_a_vertical_double_arrow(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    assert _hover(canvas, _y_strip_scroll_event(canvas.ax, ydata=95.0)) == Qt.CursorShape.SizeVerCursor
+
+
+def test_a_1d_right_margin_gets_no_arrow(qapp):
+    """A plain 1D shows no y ticks and has no y-strip zoom -- so there
+    must be no arrow there promising one. The gate is the same
+    `has_levels` the scroll itself uses."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    assert _hover(canvas, _y_strip_scroll_event(canvas.ax, ydata=0.5)) == Qt.CursorShape.ArrowCursor
+
+
+def test_contour_body_keeps_the_crosshair_not_an_arrow(qapp):
+    """Scrolling a contour body adjusts the threshold, and the
+    crosshair is what belongs over it: "the projections, spectra, and
+    contours (inc DOSY contours) ... should stay as a (toggleable)
+    crosshair"."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    assert _hover(canvas, _body_scroll_event(canvas.ax, xdata=5.0, ydata=95.0)) == Qt.CursorShape.ArrowCursor
+    assert canvas._crosshair is not None      # the crosshair is the cursor here
+
+
+def test_projection_body_keeps_the_crosshair_not_an_arrow(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    f2 = canvas._proj_axes["f2"]
+    bbox = f2.get_window_extent()
+    event = SimpleNamespace(
+        inaxes=f2, x=bbox.x0 + 0.5 * bbox.width, y=bbox.y0 + 0.5 * bbox.height,
+        button="up",
+    )
+    event.xdata, event.ydata = f2.transData.inverted().transform((event.x, event.y))
+    assert _hover(canvas, event) == Qt.CursorShape.ArrowCursor
+
+
+def test_1d_body_keeps_the_crosshair_though_scrolling_zooms_intensity(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    assert _hover(canvas, _body_scroll_event(canvas.ax, xdata=5.0, ydata=0.5)) == Qt.CursorShape.ArrowCursor
+
+
+def test_each_panel_strip_gets_its_own_arrow(qapp):
+    """The arrow follows the same nearest-panel-above resolution the
+    zoom does, so it appears over a panel that is not self.ax."""
+    canvas, top, _bottom = _dual_panel_canvas(qapp)
+    assert _hover(canvas, _margin_scroll(canvas, top)) == Qt.CursorShape.SizeHorCursor
+
+
+def test_strip_arrows_survive_the_crosshair_being_switched_off(qapp):
+    """They answer different questions: the crosshair is a reading aid
+    on the data, the arrow is an affordance on the axis. Turning one
+    off must not remove the other."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas.set_crosshair_enabled(False)
+    assert _hover(canvas, _x_strip_scroll_event(canvas.ax, xdata=3.0)) == Qt.CursorShape.SizeHorCursor
+    assert canvas._crosshair is None
+
+
+def test_measurement_mode_wins_over_a_strip_arrow(qapp):
+    """A click mode arms a click, and the cross is what says so -- it
+    outranks an affordance for a gesture you are not making."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas.set_measurement_mode(True)
+    assert _hover(canvas, _x_strip_scroll_event(canvas.ax, xdata=3.0)) == Qt.CursorShape.CrossCursor
+    canvas.set_measurement_mode(False)
+    assert _hover(canvas, _x_strip_scroll_event(canvas.ax, xdata=3.0)) == Qt.CursorShape.SizeHorCursor
+
+
+def test_pick_mode_still_sets_the_cross_through_the_resolver(qapp):
+    """The three click-mode setters no longer call setCursor
+    themselves; they route through _refresh_cursor so the four writers
+    cannot disagree. Their visible behaviour must be unchanged."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_pick_mode(True)
+    assert _shape(canvas) == Qt.CursorShape.CrossCursor
+    canvas.set_pick_mode(False)
+    assert _shape(canvas) == Qt.CursorShape.ArrowCursor
+
+
+def test_region_select_mode_clears_its_drag_before_refreshing(qapp):
+    """_refresh_cursor leaves the shape alone mid-drag, so switching the
+    mode off has to drop the half-finished drag *first* or the cross
+    would stay behind."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_region_select_mode(True)
+    canvas._region_select_start = 5.0
+    canvas.set_region_select_mode(False)
+    assert _shape(canvas) == Qt.CursorShape.ArrowCursor
+
+
+def test_toolbar_pan_mode_keeps_matplotlibs_own_cursor(qapp):
+    """matplotlib sets MOVE/SELECT_REGION there and caches what it set.
+    Ours stands down, and forgets its own shape so the context cursor
+    is re-applied once the mode ends."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    _hover(canvas, _x_strip_scroll_event(canvas.ax, xdata=3.0))
+    canvas.toolbar.mode = "pan/zoom"
+    canvas._refresh_cursor(_body_scroll_event(canvas.ax, xdata=5.0, ydata=0.5))
+    assert canvas._last_cursor_shape is None
+
+    canvas.toolbar.mode = ""
+    assert _hover(canvas, _x_strip_scroll_event(canvas.ax, xdata=3.0)) == Qt.CursorShape.SizeHorCursor
+
+
+def test_the_cursor_is_left_alone_mid_drag(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    _hover(canvas, _x_strip_scroll_event(canvas.ax, xdata=3.0))
+    canvas._pan_start = (0, 0, canvas.ax.get_xlim(), canvas.ax.get_ylim(), canvas.ax)
+    canvas._refresh_cursor(_body_scroll_event(canvas.ax, xdata=5.0, ydata=0.5))
+    assert _shape(canvas) == Qt.CursorShape.SizeHorCursor
+
+
+def test_clear_figure_and_leaving_the_canvas_forget_the_shape(qapp):
+    """The cached shape was resolved against bboxes of Axes a rebuild
+    destroys, and against a position the cursor has left."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    _hover(canvas, _x_strip_scroll_event(canvas.ax, xdata=3.0))
+    assert canvas._last_cursor_shape == Qt.CursorShape.SizeHorCursor
+    canvas._clear_figure()
+    assert canvas._last_cursor_shape is None
+
+    canvas.ax = canvas.figure.add_subplot(111)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    _hover(canvas, _x_strip_scroll_event(canvas.ax, xdata=3.0))
+    canvas._on_figure_leave(None)
+    assert canvas._last_cursor_shape is None
+
+
+def test_the_strip_classifier_agrees_with_what_scrolling_does(qapp):
+    """The point of extracting _scroll_strip_at: one hit-test behind
+    both, so the cursor cannot promise a zoom that does not happen (or
+    stay silent about one that does)."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    ax = canvas.ax
+
+    x_event = _x_strip_scroll_event(ax, xdata=5.0, button="up")
+    assert canvas._scroll_strip_at(x_event) == ("x", ax)
+    before_x, before_y = ax.get_xlim(), ax.get_ylim()
+    canvas._on_scroll(x_event)
+    assert ax.get_xlim() != before_x and ax.get_ylim() == before_y
+
+    y_event = _y_strip_scroll_event(ax, ydata=95.0, button="up")
+    assert canvas._scroll_strip_at(y_event) == ("y", ax)
+    before_x, before_y = ax.get_xlim(), ax.get_ylim()
+    canvas._on_scroll(y_event)
+    assert ax.get_ylim() != before_y and ax.get_xlim() == before_x
+
+    # A body is not a strip -- the scroll there is a threshold change,
+    # which is exactly why it gets no arrow.
+    body = _body_scroll_event(ax, xdata=5.0, ydata=95.0, button="up")
+    assert canvas._scroll_strip_at(body) is None
+    before_factor = canvas._contour_factor
+    canvas._on_scroll(body)
+    assert canvas._contour_factor != before_factor
+
+
+def test_the_classifier_ignores_the_slice_and_projection_panels(qapp):
+    """Both are early returns in _on_scroll proper; the classifier
+    repeats those guards so it stays answerable in isolation from a
+    mouse move."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    f1 = canvas._proj_axes["f1"]
+    bbox = f1.get_window_extent()
+    event = SimpleNamespace(
+        inaxes=f1, x=bbox.x0 + 0.5 * bbox.width, y=bbox.y0 + 0.5 * bbox.height, button="up",
+    )
+    event.xdata, event.ydata = f1.transData.inverted().transform((event.x, event.y))
+    assert canvas._scroll_strip_at(event) is None
+
+
+def _processing_preview_canvas(qapp):
+    """The Processing tab's own dual view: FID on top, a preview
+    spectrum below, each with its own x axis."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    spectrum = _make_1d()
+    fid = np.exp(-np.linspace(0, 5, 128)) * np.exp(2j * np.pi * 10 * np.linspace(0, 1, 128))
+    canvas.show_processing_preview(fid, dt=1e-4, spectrum=spectrum)
+    canvas.canvas.draw()
+    return canvas
+
+
+def test_processing_preview_gives_both_panels_their_own_strip_arrow(qapp):
+    """Explicit user request: the scroll cursors have to be on the
+    Processing window's axes too, on the FID panel as well as the
+    spectrum one. The FID panel is not self.ax (the spectrum panel
+    below it is), so this is the nearest-panel-above resolution doing
+    its job for the cursor as well as for the zoom."""
+    canvas = _processing_preview_canvas(qapp)
+    fid_ax = canvas._processing_preview_fid_ax
+    spec_ax = canvas._processing_preview_spec_ax
+    assert fid_ax is not None and spec_ax is not None and fid_ax is not spec_ax
+
+    assert canvas._scroll_strip_at(_margin_scroll(canvas, fid_ax)) == ("x", fid_ax)
+    assert _hover(canvas, _margin_scroll(canvas, fid_ax)) == Qt.CursorShape.SizeHorCursor
+
+    canvas._on_figure_leave(None)
+    assert canvas._scroll_strip_at(_margin_scroll(canvas, spec_ax)) == ("x", spec_ax)
+    assert _hover(canvas, _margin_scroll(canvas, spec_ax)) == Qt.CursorShape.SizeHorCursor
+
+
+def test_processing_preview_panel_bodies_keep_the_plain_cursor(qapp):
+    """Their bodies scroll-zoom intensity (the FID freeform, the
+    spectrum pin-bottom), which is a body gesture, not an axis one."""
+    canvas = _processing_preview_canvas(qapp)
+    for ax in (canvas._processing_preview_fid_ax, canvas._processing_preview_spec_ax):
+        bbox = ax.get_window_extent()
+        event = SimpleNamespace(
+            inaxes=ax, x=bbox.x0 + 0.5 * bbox.width, y=bbox.y0 + 0.5 * bbox.height,
+            button="up",
+        )
+        event.xdata, event.ydata = ax.transData.inverted().transform((event.x, event.y))
+        canvas._on_figure_leave(None)
+        assert _hover(canvas, event) == Qt.CursorShape.ArrowCursor
+
+
+# ============================================================
+# Plot style: title, fonts, contour levels, legend appearance
+# ============================================================
+
+def _fitted_canvas(qapp):
+    """A view whose legend is built by opennmr.plotting.fit, not by the
+    canvas -- the case the legend sweep exists for."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    x = np.linspace(0, 10, 100)
+    y = np.exp(-((x - 5) ** 2))
+    canvas.show_slice_fit(x, y, y * 0.98, components=[y * 0.5, y * 0.48],
+                          peak_labels=["a", "b"], title="Fit")
+    canvas.canvas.draw()
+    return canvas
+
+
+def test_plot_title_is_hidden_by_default_and_toggles_back_on(qapp):
+    """Off by default on request. Hidden rather than blanked, so the
+    views that set a title keep setting it and turning the option on
+    needs no redraw."""
+    canvas = _fitted_canvas(qapp)
+    assert canvas.ax.get_title() == "Fit"       # still set...
+    assert canvas.ax.title.get_visible() is False   # ...just not shown
+
+    canvas.set_style(title_visible=True)
+    assert canvas.ax.title.get_visible() is True
+    canvas.set_style(title_visible=False)
+    assert canvas.ax.title.get_visible() is False
+
+
+def test_a_title_set_by_a_later_rebuild_is_still_hidden(qapp):
+    """The setting has to survive a redraw, or it reads as a toggle
+    that keeps coming undone."""
+    canvas = _fitted_canvas(qapp)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    canvas.ax.set_title("Slice 3")
+    canvas._apply_current_axis_style()
+    assert canvas.ax.title.get_visible() is False
+
+
+def test_legend_defaults_to_frameless_at_the_axis_font_size(qapp):
+    """Explicit user request. Checked on a legend the *plotting layer*
+    builds, since that is the one a per-call-site kwarg would have
+    missed."""
+    canvas = _fitted_canvas(qapp)
+    legend = canvas.ax.get_legend()
+    assert legend is not None
+    assert legend.get_frame_on() is False
+    assert legend.get_texts()[0].get_fontsize() == canvas._AXIS_LABELSIZE
+
+
+def test_legend_font_size_follows_the_axis_font_size_then_can_be_pinned(qapp):
+    canvas = _fitted_canvas(qapp)
+    canvas.set_style(labelsize=24)
+    assert canvas.ax.get_legend().get_texts()[0].get_fontsize() == 24
+
+    canvas.set_style(legend_fontsize=9)
+    assert canvas.ax.get_legend().get_texts()[0].get_fontsize() == 9
+    canvas.set_style(labelsize=14)
+    assert canvas.ax.get_legend().get_texts()[0].get_fontsize() == 9   # pinned, not following
+
+
+def test_legend_frame_alpha_and_colour_are_options_on_top_of_the_frame(qapp):
+    canvas = _fitted_canvas(qapp)
+    canvas.set_style(legend_frameon=True, legend_framealpha=0.5, legend_facecolor="#ff0000")
+    frame = canvas.ax.get_legend().get_frame()
+    assert canvas.ax.get_legend().get_frame_on() is True
+    assert frame.get_alpha() == pytest.approx(0.5)
+    assert matplotlib.colors.to_hex(frame.get_facecolor()) == "#ff0000"
+
+
+def test_legend_frame_colour_is_not_passed_while_the_frame_is_off(qapp):
+    """matplotlib treats any framealpha/facecolor as an implicit "there
+    is a frame", which would quietly undo the setting just turned off."""
+    canvas = _fitted_canvas(qapp)
+    canvas.set_style(legend_frameon=True, legend_facecolor="#ff0000")
+    canvas.set_style(legend_frameon=False)
+    assert canvas.ax.get_legend().get_frame_on() is False
+    assert "facecolor" not in canvas._legend_kwargs()
+    assert "framealpha" not in canvas._legend_kwargs()
+
+
+def test_font_family_reaches_every_piece_of_text(qapp):
+    canvas = _fitted_canvas(qapp)
+    canvas.set_style(font_family="monospace")
+    assert canvas.ax.xaxis.label.get_fontfamily() == ["monospace"]
+    assert canvas.ax.title.get_fontfamily() == ["monospace"]
+    assert canvas.ax.get_legend().get_texts()[0].get_fontfamily() == ["monospace"]
+
+    canvas.set_style(font_family="")     # the panel's "Default" entry
+    assert canvas._font_family is None
+
+
+def test_contour_levels_set_through_the_style_panel_drive_both_maps(qapp):
+    """One number behind the Plot Style box, the right-click dialog and
+    the Analysis tab's DOSY levels spin -- a canvas shows a 2D or a
+    DOSY, never both, so both are stored and neither is lost by a
+    switch between the two views."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    canvas.set_style(contour_clevels=15)
+    assert canvas._contour_clevels == 15
+    assert canvas._dosy_clevels == 15
+    assert canvas.style_settings()["contour_clevels"] == 15
+
+
+def test_contour_levels_rebuild_the_map_that_is_showing(qapp):
+    """Levels live on the QuadContourSet matplotlib builds, so unlike a
+    trace colour they cannot be set on what is already drawn."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    canvas.set_style(contour_clevels=20)
+    canvas.canvas.draw()
+    assert canvas._contour_clevels == 20
+    assert canvas._contour_spectrum is not None     # still a contour, not cleared
+
+
+def test_measurement_on_a_compare_row_reports_ppm_and_hz(qapp):
+    """A Compare row is a spectrum like any other, but its axis was not
+    consulted -- so a measurement there fell through to the "no spectral
+    axis" branch and came back as a bare difference. Reported directly:
+    "when measuring in compare, the value should show ppm / Hz like in
+    the spectrum view"."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_compare([_make_1d(), _make_1d()], mode="stack")
+    canvas.canvas.draw()
+    canvas.set_measurement_mode(True)
+    got = []
+    canvas.measurementCompleted.connect(got.append)
+    row = canvas._compare_axes[0]
+    canvas._on_press(_press_at(canvas, row, xfrac=0.3, yfrac=0.5))
+    canvas._on_press(_press_at(canvas, row, xfrac=0.7, yfrac=0.5))
+
+    summary = got[0]["summary"]
+    assert "ppm" in summary and "Hz" in summary
+    assert got[0]["dx"]["ppm"] == pytest.approx(4.0, rel=1e-3)
+
+
+def test_measurement_in_mm_reports_mm_and_hz_not_ppm(qapp):
+    """On an imaging axis the distance is the number wanted, and ppm
+    beside it is the one that stops meaning anything. Explicit user
+    request: "If the axis is mm, then show mm / Hz"."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
+    canvas.set_axis_unit("mm")
+    canvas.canvas.draw()
+    canvas.set_measurement_mode(True)
+    got = []
+    canvas.measurementCompleted.connect(got.append)
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.3, yfrac=0.5))
+    canvas._on_press(_press_at(canvas, canvas.ax, xfrac=0.7, yfrac=0.5))
+
+    summary = got[0]["summary"]
+    assert "mm" in summary and "Hz" in summary
+    assert "ppm" not in summary          # the whole point
+
+
+def test_measurement_is_always_a_pair_of_units(qapp):
+    """Two units, never one and never three -- the pairing is what lets
+    you read a position and a coupling off the same gesture."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    assert len(canvas._measurement_unit_order()) == 2
+    assert [u for u, _f in canvas._measurement_unit_order()] == ["ppm", "hz"]
+
+    canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
+    canvas.set_axis_unit("mm")
+    assert [u for u, _f in canvas._measurement_unit_order()] == ["mm", "hz"]
+
+
+def test_hiding_the_crosshair_blits_instead_of_redrawing(qapp):
+    """``draw_idle`` here was a full contour repaint on every exit --
+    295 ms for a real HSQC, 1.34 s for the EXSY -- which is exactly the
+    cost this class is blitted to avoid. It also ate the strip cursor:
+    the app is busy for that whole repaint, so the platform's own wait
+    cursor covers the canvas until it finishes."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    canvas._on_motion(_body_scroll_event(canvas.ax, xdata=5.0, ydata=95.0))
+    crosshair = canvas._crosshair
+    assert crosshair is not None
+    crosshair._background = canvas.canvas.copy_from_bbox(canvas.figure.bbox)
+    for line in (*crosshair._vlines, *crosshair._hlines):
+        line.set_visible(True)
+
+    draws = []
+    canvas.canvas.draw_idle = lambda *a, **k: draws.append(1)
+    crosshair._hide()
+
+    assert draws == []                                    # no repaint
+    assert not any(line.get_visible()
+                   for line in (*crosshair._vlines, *crosshair._hlines))
+
+
+def test_hiding_falls_back_to_a_redraw_with_no_cached_background(qapp):
+    """The one case blitting would leave whatever the buffer holds."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+    canvas._on_motion(_body_scroll_event(canvas.ax, xdata=5.0, ydata=95.0))
+    crosshair = canvas._crosshair
+    crosshair._background = None
+    for line in (*crosshair._vlines, *crosshair._hlines):
+        line.set_visible(True)
+
+    draws = []
+    canvas.canvas.draw_idle = lambda *a, **k: draws.append(1)
+    crosshair._hide()
+    assert draws == [1]
+
+
+def test_the_cursor_is_re_asserted_after_a_scroll(qapp):
+    """A contour-level scroll rebuilds the figure through
+    _clear_figure, which drops the cached shape -- and no mouse
+    movement follows a scroll, so nothing put one back. The canvas sat
+    on whatever the platform left until the pointer moved. Reported:
+    "the scroll cursor... only briefly appears again, and also it
+    should remain while scrolling too"."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+
+    body = _body_scroll_event(canvas.ax, xdata=5.0, ydata=95.0, button="up")
+    canvas._on_motion(body)
+    canvas._on_scroll(body)
+    # Not None: the cache is re-established by the scroll itself, so a
+    # later move into a strip is applied rather than skipped as "no
+    # change".
+    assert canvas._last_cursor_shape is not None
+    assert _shape(canvas) == Qt.CursorShape.ArrowCursor
+
+
+def test_a_strip_scroll_keeps_the_double_arrow(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    canvas.show_spectrum(_make_2d())
+    canvas.canvas.draw()
+
+    strip = _x_strip_scroll_event(canvas.ax, xdata=5.0, button="up")
+    canvas._on_motion(strip)
+    assert _shape(canvas) == Qt.CursorShape.SizeHorCursor
+    for _ in range(3):                       # a real scroll is many notches
+        canvas._on_scroll(strip)
+        assert _shape(canvas) == Qt.CursorShape.SizeHorCursor
+
+
+def test_the_scroll_refresh_survives_a_dispatch_that_raises(qapp):
+    """The refresh is in a `finally` so it covers every one of the
+    dispatch's eleven early returns -- and anything that goes wrong in
+    one of them."""
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(8, 6)
+    canvas.show_spectrum(_make_1d())
+    canvas.canvas.draw()
+    canvas._dispatch_scroll = lambda _event: (_ for _ in ()).throw(RuntimeError("boom"))
+
+    strip = _x_strip_scroll_event(canvas.ax, xdata=3.0, button="up")
+    with pytest.raises(RuntimeError):
+        canvas._on_scroll(strip)
+    assert _shape(canvas) == Qt.CursorShape.SizeHorCursor

@@ -1624,9 +1624,12 @@ def peek(path: str, procno: int = 1, homonuclear: bool = False) -> dict:
     a directory holds, without reading a potentially huge file just to
     find out).
 
-    Reports a genuine 2D's own processed shape ``(si2, si1)`` -- the
-    same (SI-based) shape :func:`read_2d_processed` would produce --
-    whenever ``pdata/<procno>`` has a ``proc2s`` file; every 1D
+    Reports the shape a load actually produces: F2 from ``procs``'s own
+    ``SI``, and F1 from ``proc2s``'s ``SI`` for a genuine 2D but
+    ``acqu2s``'s acquired ``TD`` for a pseudo-2D -- see the comment at
+    that branch for why, and for why "pseudo" there means
+    ``nuc2 == "off"`` alone rather than the ``pseudo_2d`` this reports.
+    A 2D is recognised by ``pdata/<procno>`` having a ``proc2s``; every 1D
     experiment's own ``pdata`` directory lacks one (there's no F1
     dimension to process), which is what actually distinguishes the
     two cases here, not merely whether it parses. 1D shape comes from
@@ -1642,14 +1645,63 @@ def peek(path: str, procno: int = 1, homonuclear: bool = False) -> dict:
             "vendor": "bruker", "ndim": 1, "shape": (si,),
             "nucleus": acqus.get("NUC1"), "nucleus_indirect": None,
             "pseudo_2d": False,
+            "pulse_program": acqus.get("PULPROG"),
         }
 
     info = _processed_2d_params(path, procno, homonuclear)
+    # **F1's row count is the acquired TD, not proc2s's SI.**
+    # :func:`_read_auto` *prefers the raw-FID path* and only falls back
+    # to already-processed data when there is no raw ``ser`` at all --
+    # so for almost every experiment the rows a load produces are the
+    # rows that were acquired, and this project does its own F1
+    # processing rather than inheriting TopSpin's. The two agree
+    # whenever SI == TD (both powers of two, the ordinary case), which
+    # is why reporting SI went unnoticed; they diverge on an aborted or
+    # odd-length series, where the browser then labelled a 15-row
+    # experiment as 16. Reported directly: "the shape should come from
+    # TD and procs, acqus is less relevant because we are doing the
+    # processing."
+    #
+    # F2 still comes from ``procs``'s own SI (via info["si1"]): the
+    # direct dimension *is* zero-filled/truncated to SI by the read,
+    # so acqus's own TD is the one that does not describe the result.
+    # **F1's row count: acqu2s TD for a pseudo-2D, proc2s SI for a
+    # genuine 2D** -- and the test for "pseudo" here is `nuc2 == "off"`
+    # *alone*, deliberately not the broader `pseudo_2d` reported below.
+    #
+    # A genuine 2D's indirect dimension is a real frequency axis that
+    # the read zero-fills to SI, so SI is what a load produces whatever
+    # was acquired (measured: acqu2s TD=310 against 1024 rows loaded).
+    # A pseudo-2D has no F1 transform -- its rows are slices -- so the
+    # rows are exactly what was acquired, and SI is TopSpin's rounding
+    # of it: a 15-slice series with SI=16 was labelled as 16 rows.
+    #
+    # The two criteria differ on purpose and the difference is the bug
+    # this fixes. `read_2d`/`read_2d_processed` both decide pseudo from
+    # `nuc2 == "off"` and nothing else; the `has_variable_list` clause
+    # below is peek's own, answering "is this a series?" for the
+    # browser label. Several real datasets carry a vdlist *and* a real
+    # F1 nucleus (a 2D run inside an arrayed experiment) -- gating the
+    # shape on the reported field instead of the reader's own criterion
+    # took TD for those and got four of them wrong.
+    rows = int(info["si2"])
+    if info["nuc2"] == "off":
+        try:
+            td = int(float(parse_jcampdx_params(os.path.join(path, "acqu2s")).get("TD")))
+        except (TypeError, ValueError, OSError):
+            td = 0
+        if td > 0:
+            rows = td
     result = {
         "vendor": "bruker", "ndim": 2,
-        "shape": (int(info["si2"]), int(info["si1"])),
+        "shape": (rows, int(info["si1"])),
         "nucleus": info["nuc1"], "nucleus_indirect": info["nuc2"],
         "pseudo_2d": (info["nuc2"] == "off") or has_variable_list(path),
+        # Named here as well as in the loaded metadata: the Data-tab
+        # browser lists what an experiment *is* before opening it, and
+        # the pulse programme is the most useful thing in that line --
+        # "hahn-echo" or "hsqcetgp" says more than any shape does.
+        "pulse_program": (info.get("acqus") or {}).get("PULPROG"),
     }
     if info["xdim_f1"] > 1:
         result["block_shape"] = (info["xdim_f1"], info["xdim_f2"])

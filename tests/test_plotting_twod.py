@@ -640,3 +640,59 @@ def test_plot_2d_contour_slice_panel_reaches_the_top_projection():
     assert panel_box.y0 == pytest.approx(contour_box.y0, abs=1.5)  # down to the contour's base
     assert panel_box.y1 > contour_box.y1 + 1.0                     # genuinely taller than before
     plt.close(fig)
+
+
+def test_both_frequency_axes_run_the_same_way():
+    """**Values increase in the negative screen direction, on both
+    axes.** F2 increases right-to-left, the universal NMR convention;
+    F1 increases top-to-bottom for the same reason, so high ppm sits
+    at the left *and* at the bottom.
+
+    Pinned because it was briefly changed to the opposite reading --
+    that both axes increase toward the top-left -- and nothing else in
+    the code distinguishes the two: the data lands at identical
+    coordinates either way, so only an explicit test holds the
+    convention. User's own statement of it: "the vertical axis the
+    wrong way round (low to high, bottom to top) compared to the
+    horizontal axis (NMR convention low to high, right to left)"."""
+    spec = _make_2d()
+    fig, ax = plt.subplots()
+    twod.plot_2d_contour(spec, ax=ax)
+
+    left, right = ax.get_xlim()
+    bottom, top = ax.get_ylim()
+    assert left > right, "F2 must increase right-to-left"
+    assert bottom > top, "F1 must increase top-to-bottom"
+    plt.close(fig)
+
+
+def test_the_nq_1_line_passes_through_the_self_correlations():
+    """The acceptance criterion the user gave for a homonuclear 2D:
+    "the nQ line = 1 should go through the self-correlations". The line
+    is drawn as ``y = n*x`` in data space, so this checks the axes put
+    a self-correlation exactly on it in *display* space, which is what
+    a wrong axis direction would break."""
+    spec = _make_2d(homonuclear=True, nucleus_indirect="1H")
+    fig, ax = plt.subplots()
+    twod.plot_2d_contour(spec, ax=ax, show_nQ_line=True, nQ=1)
+
+    line = next(l for l in ax.lines if l.get_linestyle() == '--')
+    xs, ys = line.get_data()
+    for shift in (2.0, 5.0, 8.0):
+        on_line = ax.transData.transform((shift, shift))
+        nearest = min(ax.transData.transform(np.column_stack([xs, ys])),
+                      key=lambda p: (p[0] - on_line[0]) ** 2 + (p[1] - on_line[1]) ** 2)
+        assert abs(nearest[0] - on_line[0]) < 1.0 and abs(nearest[1] - on_line[1]) < 1.0
+    plt.close(fig)
+
+
+def test_a_pseudo_2d_still_counts_slices_upward():
+    """Slice 1 at the bottom, increasing upward -- unchanged, and
+    deliberately: a slice index is not a shift and has no ppm
+    convention to follow."""
+    spec = _make_2d(pseudo=True)
+    fig, ax = plt.subplots()
+    twod.plot_2d_contour(spec, ax=ax)
+    bottom, top = ax.get_ylim()
+    assert top > bottom
+    plt.close(fig)

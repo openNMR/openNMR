@@ -14,6 +14,9 @@ import copy
 import os
 
 import numpy as np
+import dataclasses
+
+import matplotlib.colors
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -140,11 +143,42 @@ class _ContourCrosshair:
         self._background = self._canvas.copy_from_bbox(self._canvas.figure.bbox)
 
     def _hide(self) -> None:
+        """Take the crosshair off screen when the cursor leaves the
+        plot -- **by blitting the cached background back, not by
+        redrawing the figure.**
+
+        ``draw_idle`` here was a full contour repaint on every single
+        exit: measured at 295 ms for a real HSQC and 1.34 s for the
+        EXSY, which is exactly the cost this class was blitted to
+        avoid in the first place -- it was just being paid on the way
+        *out* instead of on the way in. Reported as "when I move the
+        mouse from the contour to the axis there is a very quick
+        loading wheel", and it also ate the scroll cursor: the app is
+        busy for that whole repaint, so the platform shows its own
+        wait cursor over the canvas and the strip arrow only becomes
+        visible once the redraw finishes -- by which time the pointer
+        has usually moved on. Hence "I saw one very briefly once".
+
+        The lines are ``animated=True``, so a normal draw never
+        includes them and the cached background is already the clean
+        frame -- restoring it *is* erasing them. ``set_visible(False)``
+        still matters for whatever full redraw comes next.
+
+        Falls back to ``draw_idle`` when there is no cached background
+        yet (nothing has forced a real draw since this instance was
+        created -- see the class docstring's second bug note), which is
+        the one case where blitting would leave whatever the buffer
+        happens to hold."""
         lines = (*self._vlines, *self._hlines)
-        if any(line.get_visible() for line in lines):
-            for line in lines:
-                line.set_visible(False)
+        if not any(line.get_visible() for line in lines):
+            return
+        for line in lines:
+            line.set_visible(False)
+        if self._background is None:
             self._canvas.draw_idle()
+            return
+        self._canvas.restore_region(self._background)
+        self._canvas.blit()
 
     def _onmove(self, event) -> None:
         if getattr(self._toolbar, "mode", "") or event.inaxes not in self.axes:
@@ -175,6 +209,54 @@ class _ContourCrosshair:
         for ax, line in zip(self._hline_axes, self._hlines):
             ax.draw_artist(line)
         self._canvas.blit()
+
+
+@dataclasses.dataclass
+class SeriesStyle:
+    """One addressable series on a plot: what it is called and what
+    colour it is drawn in.
+
+    **The single place a multi-series plot's per-series appearance
+    lives.** Before this there were four: Compare derived colours from
+    a colour map inside its draw loop, the DOSY overlay and the 2D
+    overlay each did the same with a different palette, and only
+    extracted slices stored anything. Four mechanisms meant four
+    places to wire every new control, and -- because three of them
+    re-derived the colour at draw time -- three places for it to reset
+    on a redraw, which is precisely what kept happening.
+
+    ``key`` addresses the series within its own view and is stable
+    across redraws; ``label`` and ``colour`` are what the Plot Style
+    dialog edits. ``can_rename`` is False where the name is not the
+    plot's to change (a Compare trace is named by its spectrum, which
+    has its own Rename action reaching every other view too).
+    """
+
+    key: str
+    label: str
+    colour: str
+    can_rename: bool = True
+    #: Whether ``colour`` was set deliberately rather than taken from
+    #: the series palette. The distinction is what lets a redraw keep
+    #: a colour *and* a palette change replace one: a derived colour is
+    #: re-derived from whatever palette is now in force, an overridden
+    #: one is left alone. Without it the reuse that stops colours
+    #: resetting on a redraw also stopped the colour map from doing
+    #: anything -- reported directly: "when I change the colour map
+    #: from a plot, it should update the existing colours from that new
+    #: series rather than me having to redraw the plot in some way".
+    colour_overridden: bool = False
+    #: Whether ``label`` was typed by the user rather than computed by
+    #: the view that drew the series. **Exactly the distinction
+    #: :attr:`colour_overridden` draws, and it was missing here.**
+    #: Reuse keyed on ``can_rename`` alone meant a renameable series
+    #: kept whatever label its key held last time -- so re-running
+    #: SCORE redrew component 1 with the *previous* resolution's
+    #: annotation (its D, its share, its ratio), stale but plausible,
+    #: while the sidebar showed the new one. Reported directly: "the
+    #: label on the first SCORE fit component plot doesn't match the
+    #: output in the side bar... consistently showing 1.60e-10 m^2/s".
+    label_overridden: bool = False
 
 
 class _Toolbar(NavigationToolbar2QT):
@@ -361,6 +443,14 @@ class MplCanvas(QWidget):
     #: default, so the panel control starts showing what is on screen.
     _DOSY_CLEVELS_DEFAULT = 8
 
+    #: Default contour ring weight. Matches plot_2d_contour's and
+    #: plot_dosy's own, so the control starts showing what is drawn.
+    _CONTOUR_LINEWIDTH_DEFAULT = 0.8
+
+    @classmethod
+    def _contour_linewidth_default(cls) -> float:
+        return cls._CONTOUR_LINEWIDTH_DEFAULT
+
     #: Emitted with a request to extract a trace from the DOSY map:
     #: ``(kind, value)`` where ``kind`` is ``"spectrum"`` (the map's
     #: row at one diffusion coefficient) or ``"profile"`` (its column
@@ -390,6 +480,13 @@ class MplCanvas(QWidget):
     measurementModeChanged = Signal(bool)
     crosshairEnabledChanged = Signal(bool)
 
+    #: The user picked a different result to show from this canvas's
+    #: own view switcher (see :meth:`set_view_switcher`), carrying that
+    #: entry's key. The canvas does not act on this itself: it holds no
+    #: record of how any of those results were produced, so redrawing
+    #: one is the owner's job.
+    viewSwitchRequested = Signal(str)
+
     #: Tag applied to every persistent integration-region axvspan (see
     #: :func:`set_regions`) so they can be found and cleared by gid on
     #: the next call, without needing to track a separate reference
@@ -402,6 +499,10 @@ class MplCanvas(QWidget):
     #: rebuild would invalidate -- same approach as the region patches
     #: above, and for the same reason.
     _BASELINE_PREVIEW_GID = "baseline_preview"
+
+    #: Tag on the faint "before correction" trace drawn beneath the
+    #: baseline overlay -- see :meth:`set_baseline_preview`.
+    _BASELINE_GHOST_GID = "baseline_preview_uncorrected"
 
     def __init__(self, parent=None, full_resolution: bool = False) -> None:
         super().__init__(parent)
@@ -437,11 +538,41 @@ class MplCanvas(QWidget):
             "Measure",
             "Measure a separation: click two points on the plot and the "
             "distance between them is labelled in ppm and Hz at once (and in "
-            "mm when imaging gradient parameters are set). Cmd/Ctrl+D toggles "
+            "mm while the axis is displayed in mm). Cmd/Ctrl+D toggles "
             "this from anywhere.",
             self.set_measurement_mode,
             checked=False,
         )
+
+        # "Showing:" -- which stored result this canvas is displaying,
+        # when its owner has several to choose between (a curve fit, a
+        # DOSY map, a SCORE fit, an eNMR fit all land on the same Fit
+        # canvas and used to overwrite one another). Reported directly:
+        # "I still don't have a clear button to alternate between e.g.
+        # a curve fit, a DOSY ILT plot, or a SCORE fit".
+        #
+        # **On the toolbar rather than in a bar above the canvas.**
+        # ``fit_canvas`` is referenced as a tab *widget* in sixteen
+        # places and ninety-eight test sites; wrapping it in a
+        # container to gain a header row would invalidate every
+        # ``canvas_tabs.indexOf(self.fit_canvas)`` among them. The
+        # toolbar is already this canvas's own place for controls that
+        # belong to the plot (Crosshair, Measure), and costs no
+        # re-parenting.
+        #
+        # Hidden until there is something to switch *between* -- a
+        # one-entry switcher is a label pretending to be a control.
+        self._view_switcher_label = QLabel(" Showing: ", self.toolbar)
+        self._view_switcher = QComboBox(self.toolbar)
+        self._view_switcher.setToolTip(
+            "Every result stored for this spectrum. Pick one to bring it back "
+            "without re-running it."
+        )
+        self._view_switcher.activated.connect(self._on_view_switcher_activated)
+        self._view_switcher_label_action = self.toolbar.addWidget(self._view_switcher_label)
+        self._view_switcher_action = self.toolbar.addWidget(self._view_switcher)
+        self._view_switcher_label_action.setVisible(False)
+        self._view_switcher_action.setVisible(False)
 
         # A visible bar for acting on an extracted slice, shown only
         # while one is being viewed. Real user report: "There is no way
@@ -481,6 +612,33 @@ class MplCanvas(QWidget):
         self._pan_start = None  # (x_pixel, y_pixel, xlim, ylim) while dragging
         self._legend_visible = False
         self._legend_loc = "best"
+        # --- Legend appearance ------------------------------------
+        # **frameon=False and the axis label size by default.** A
+        # framed legend at matplotlib's own default sits in an opaque
+        # white box, which on a dense contour hides the data it is
+        # labelling, and at its own default font size it disagrees
+        # with every other piece of text on the figure. Explicit user
+        # request: "default for legend should be the same font size as
+        # axes and frameon=False, with an option to set the background
+        # alpha/colour values or turn on the frame."
+        #
+        # ``_legend_fontsize`` of None means "follow _AXIS_LABELSIZE",
+        # so the legend keeps up with the font-size control instead of
+        # needing to be reset alongside it; a number pins it.
+        self._legend_frameon = False
+        self._legend_fontsize: float | None = None
+        self._legend_framealpha = 0.8
+        self._legend_facecolor: str | None = None
+        # --- Title -------------------------------------------------
+        # Off by default, on request. Several views set a title as
+        # they draw (a slice number, a DOSY's own caption); this hides
+        # the Artist rather than stopping them setting it, so turning
+        # it back on needs no redraw and no view has to learn about
+        # the setting.
+        self._title_visible = False
+        # Font family for every piece of text on the figure. None
+        # leaves matplotlib's own default alone.
+        self._font_family: str | None = None
         self._aspect_ratio: float | None = None  # None = unlocked
 
         # Per-instance style state (Output tab / MainWindow.set_style) --
@@ -493,7 +651,28 @@ class MplCanvas(QWidget):
         self._TICK_WIDTH = type(self)._TICK_WIDTH
         self._grid_visible = False
         self._minor_ticks_visible = True
-        self._compare_colormap = "viridis"
+        #: The palette every multi-series plot takes its default
+        #: colours from -- Compare, extracted slices, the DOSY overlay
+        #: and the 2D overlay. One setting rather than one per view, so
+        #: two plots of the same samples agree without being set up
+        #: twice. Individual series can override it; see SeriesStyle.
+        self._series_colormap = "viridis"
+        #: Per-view series styling, keyed by the view that owns it.
+        #: Written when a view is created and only ever *read* at draw
+        #: time -- the rule that stops a colour resetting on a redraw.
+        self._series: dict[str, list[SeriesStyle]] = {}
+        #: The 1D trace's own colour. plot_1d has always taken one; the
+        #: GUI simply never passed anything, so every Spectrum-tab
+        #: trace was black. Explicit user request: "the colours should
+        #: apply to the spectrum tab as well as the compare tab".
+        self._trace_color = "black"
+        #: Contour ring weight, for a 2D and a DOSY alike. Deliberately
+        #: separate from _AXIS_LINEWIDTH, which styles axis furniture:
+        #: at that setting's own 1.75 default the rings came out heavy
+        #: enough to merge into blobs, which is why it was never
+        #: forwarded. Explicit user request: "DOSY (all 2D?) line width
+        #: should be editable on contour".
+        self._contour_linewidth = self._CONTOUR_LINEWIDTH_DEFAULT
         # Export-only DPI/figure-size -- see set_export_settings's own
         # docstring for why these never touch the live figure directly.
         self._export_dpi: float | None = None
@@ -540,10 +719,24 @@ class MplCanvas(QWidget):
         # Owned by the spectrum, not the canvas -- MainWindow stores
         # and restores them via contourSlicesChanged.
         self._contour_slices: list[dict] = []
+        # The DOSY equivalent: rows of the map drawn beside it (dashed
+        # line across the map at each D + the spectrum at that D in a
+        # panel to the right), each ``{"D", "label", "color"}``. Rows
+        # only -- a DOSY's other extraction is a column over a log D
+        # axis, which shares neither the panel's x axis nor its linear
+        # stacking; see plot_dosy's own note.
+        self._dosy_slices: list[dict] = []
         self._nq_values: list[int] = [1]
         self._pick_mode = False
         self._region_select_mode = False
         self._measurement_mode = False
+        # The Qt cursor shape currently set on the canvas, so
+        # _refresh_cursor can skip a setCursor that would change
+        # nothing -- it runs on every mouse move, alongside a blitted
+        # crosshair. None means "unknown", which forces the next call
+        # to apply whatever it resolves; see _refresh_cursor for the
+        # three places that deliberately reset it to None.
+        self._last_cursor_shape = None
         # (axes, x_data, y_data) for each click of the current, not-yet-
         # complete measurement. The Axes is part of it so a second click
         # landing in a *different* Axes (a projection strip, another
@@ -657,12 +850,23 @@ class MplCanvas(QWidget):
         # The spectra a Compare/component stack is currently showing --
         # needed by set_axis_unit, which has to rewrite every row.
         self._compare_spectra: list = []
+        #: What show_compare was last called with, so a series restyle
+        #: can redraw the same view rather than guessing at it.
+        self._compare_kwargs: dict | None = None
+        #: The 2D overlay's own spectra and labels, kept for the same
+        #: reason.
+        self._overlay_spectra: list = []
+        self._overlay_labels: list | None = None
         # The DOSY map currently shown (processing.ilt.dosy_map's own
         # output) and its contour floor, mirroring _contour_spectrum/
         # _contour_factor. Set only while a DOSY is the current view,
         # so the scroll and right-click machinery can tell "this is a
         # DOSY" apart from every other view without inspecting Axes.
         self._dosy_result: dict | None = None
+        #: Every map when several are overlaid (``None`` for the
+        #: ordinary single-map view) -- see :meth:`show_dosy_overlay`.
+        self._dosy_overlay: list[dict] | None = None
+        self._dosy_overlay_labels: list[str] | None = None
         self._dosy_factor = self._DOSY_FACTOR_DEFAULT
         self._dosy_title = ""
         #: How many contour levels to draw, and the D axis range to
@@ -729,6 +933,7 @@ class MplCanvas(QWidget):
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("button_press_event", self._on_press)
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self.canvas.mpl_connect("figure_leave_event", self._on_figure_leave)
         self.canvas.mpl_connect("button_release_event", self._on_release)
         # Deliberately no matplotlib key_press_event binding for the
         # measurement toggle. It used to be a bare "d", which fired on
@@ -748,7 +953,7 @@ class MplCanvas(QWidget):
         :attr:`peakPicked` with the clicked x-data value instead of
         starting a pan drag."""
         self._pick_mode = enabled
-        self.canvas.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
+        self._refresh_cursor()
 
     def set_region_select_mode(self, enabled: bool) -> None:
         """Toggle drag-to-select-a-region: while on, a left-click-drag
@@ -756,11 +961,15 @@ class MplCanvas(QWidget):
         on release, instead of starting a pan drag -- the range
         equivalent of :func:`set_pick_mode`'s single click."""
         self._region_select_mode = enabled
-        self.canvas.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
         if not enabled:
             self._clear_region_select_patch()
             self._region_select_start = None
             self._region_select_ax = None
+        # *After* the half-finished drag is dropped, not before:
+        # _refresh_cursor deliberately leaves the shape alone while a
+        # drag is in flight, so refreshing first would be a no-op and
+        # the cross would stay behind after the mode was switched off.
+        self._refresh_cursor()
 
     def _add_toolbar_toggle(self, text: str, tooltip: str, slot, checked: bool) -> QToolButton:
         """A checkable text-only button on this canvas's own matplotlib
@@ -805,11 +1014,54 @@ class MplCanvas(QWidget):
         changed = enabled != self._measurement_mode
         self._measurement_mode = enabled
         self._sync_toggle(getattr(self, "_measure_button", None), enabled)
-        self.canvas.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
+        self._refresh_cursor()
         if not enabled:
             self.clear_measurements()
         if changed:
             self.measurementModeChanged.emit(enabled)
+
+    def set_view_switcher(self, entries: list[tuple[str, str]], current: str | None = None) -> None:
+        """Populate the "Showing:" switcher with ``(key, label)`` pairs
+        and select ``current``.
+
+        ``entries`` of fewer than two hides the control outright: with
+        one result there is nothing to switch between, and a combo box
+        holding a single fixed item reads as a control that has stopped
+        working. Passing ``[]`` (no results at all) hides it too.
+
+        The canvas stores the keys only to hand one back through
+        :attr:`viewSwitchRequested`; it never interprets them.
+        """
+        entries = list(entries or [])
+        self._view_switcher.blockSignals(True)
+        try:
+            self._view_switcher.clear()
+            for key, label in entries:
+                self._view_switcher.addItem(label, key)
+            if current is not None:
+                index = self._view_switcher.findData(current)
+                if index >= 0:
+                    self._view_switcher.setCurrentIndex(index)
+        finally:
+            self._view_switcher.blockSignals(False)
+        visible = len(entries) > 1
+        self._view_switcher_action.setVisible(visible)
+        self._view_switcher_label_action.setVisible(visible)
+
+    def current_view_key(self) -> str | None:
+        """The key of the entry the switcher is showing, or ``None``
+        when it holds nothing."""
+        data = self._view_switcher.currentData()
+        return str(data) if data is not None else None
+
+    def _on_view_switcher_activated(self, _index: int) -> None:
+        """``activated``, not ``currentIndexChanged``: the latter also
+        fires when :meth:`set_view_switcher` repopulates the list,
+        which would have every refresh ask the owner to redraw the
+        thing it had just finished drawing."""
+        key = self.current_view_key()
+        if key is not None:
+            self.viewSwitchRequested.emit(key)
 
     @staticmethod
     def _sync_toggle(button, checked: bool) -> None:
@@ -857,6 +1109,37 @@ class MplCanvas(QWidget):
             self.canvas.draw_idle()
 
     def _on_scroll(self, event) -> None:
+        """Handle a scroll, then re-assert the cursor shape.
+
+        **The cursor has to be re-applied after every scroll**, which
+        is what :meth:`_dispatch_scroll` on its own does not do:
+
+        * A contour- or DOSY-level scroll rebuilds the figure through
+          ``_clear_figure``, which deliberately drops the cached shape
+          (the bboxes it was resolved against are gone). Nothing then
+          puts one back -- the pointer has not moved, so no
+          ``motion_notify_event`` follows -- and the canvas sat on
+          whatever the platform left until the user moved the mouse.
+        * Every other scroll repaints too, and on a real contour that
+          repaint is long enough for the platform's own busy cursor to
+          cover ours. Re-asserting once the work is done is what brings
+          it back without waiting for a mouse move.
+
+        Reported directly: "the scroll cursor... only briefly appears
+        again, and also it should remain while scrolling too if
+        possible."
+
+        In a ``finally`` so it covers every one of the dispatch's own
+        early returns -- there are eleven, and one forgotten branch
+        would be a cursor that sticks only on certain regions, which is
+        exactly the symptom this is fixing.
+        """
+        try:
+            self._dispatch_scroll(event)
+        finally:
+            self._refresh_cursor(event)
+
+    def _dispatch_scroll(self, event) -> None:
         """Scroll hovering the x-axis (its tick-label strip, below the
         plotted data) zooms x only; scrolling over the plot body
         itself zooms y (intensity) only, pinning the bottom of the
@@ -897,45 +1180,13 @@ class MplCanvas(QWidget):
                 self._zoom_projection_intensity(proj_ax, kind, event)
                 return
 
-        # Whose x-tick strip is under the cursor, not just self.ax's.
-        #
-        # self.ax is the *last* Axes a multi-panel view created -- the
-        # spectrum panel of the Processing tab's dual preview, the
-        # bottom row of a stack. Checking only it meant the FID panel
-        # on top could never have its own strip hovered, so its x axis
-        # (time) could not be scroll-zoomed at all, however precisely
-        # you aimed at its "Time (s)" labels. The panel does have a
-        # real strip -- the dual preview is a plain subplots(2, 1) with
-        # its own labels on both panels -- it was simply never
-        # consulted.
-        #
-        # Only searched when the cursor is in a margin (`inaxes is
-        # None`): inside a data rectangle the intensity zoom owns the
-        # gesture, and one panel's strip region can overlap another
-        # panel's plot area in a tight layout.
-        # The *nearest* panel above the cursor, not the first match: in
-        # a stack, a point below the bottom panel is also below every
-        # panel over it, so taking the first hit zoomed the top panel
-        # whenever the bottom one's own strip was aimed at.
-        strip_ax = self.ax
-        if event.inaxes is None:
-            candidates = [ax for ax in self.figure.axes if self._hovering_x_axis(ax, event)]
-            if candidates:
-                # Ties broken toward self.ax -- two panels can share a
-                # bottom edge (a full-figure Axes left under a stacked
-                # layout, a twin), and picking whichever happened to be
-                # created first would zoom an arbitrary one of them.
-                strip_ax = min(
-                    candidates,
-                    key=lambda ax: (ax.get_window_extent().y0 - event.y, ax is not self.ax),
-                )
-
-        on_x_strip = self._hovering_x_axis(strip_ax, event)
-        # A DOSY's y axis (D) is a *position* axis like a contour's F1,
-        # not an intensity one, so it gets the same right-hand strip
-        # zoom rather than the 1D pin-bottom intensity behaviour.
-        has_levels = self._contour_factor is not None or self._dosy_result is not None
-        on_y_strip = has_levels and self._hovering_y_axis(self.ax, event)
+        # Which tick strip -- if any -- is under the cursor. Shared
+        # with the cursor-shape resolver rather than hit-tested twice;
+        # see :meth:`_scroll_strip_at`.
+        strip = self._scroll_strip_at(event)
+        on_x_strip = strip is not None and strip[0] == "x"
+        on_y_strip = strip is not None and strip[0] == "y"
+        strip_ax = strip[1] if strip is not None else self.ax
         if on_x_strip:
             ax = strip_ax
         else:
@@ -1023,6 +1274,169 @@ class MplCanvas(QWidget):
         ymin, ymax = ax.get_ylim()
         ax.set_ylim(ymin, ymin + (ymax - ymin) * factor)
         self.canvas.draw_idle()
+
+    #: Cursor shown over each kind of scroll-zoomable tick strip -- a
+    #: double-headed arrow along the axis the scroll would move.
+    #: Explicit user request: "context cursors like some double-headed
+    #: arrow where it is possible to scroll to zoom axes".
+    #:
+    #: **Strips only, never a plot body.** Scrolling a body does
+    #: something too (intensity on a 1D/projection/Compare row, the
+    #: contour or DOSY threshold on a map), but the crosshair is what
+    #: belongs over data you are reading values off: "I would keep the
+    #: crosshair as the main cursor on the canvas except for on the
+    #: scrollable axes... While the projections, spectra, and contours
+    #: (inc DOSY contours) are scrollable, these should stay as a
+    #: (toggleable) crosshair."
+    _STRIP_CURSORS = {
+        "x": Qt.CursorShape.SizeHorCursor,
+        "y": Qt.CursorShape.SizeVerCursor,
+    }
+
+    def _scroll_strip_at(self, event):
+        """Which tick-label *strip* the cursor is over, as ``("x", ax)``
+        or ``("y", ax)`` -- or ``None`` for anywhere else (a plot body,
+        a dead margin).
+
+        **The single hit-test behind both the scroll zoom and the
+        cursor shape.** :meth:`_on_scroll` uses it to decide what a
+        scroll does; :meth:`_refresh_cursor` uses it to decide what the
+        cursor looks like. Written once because two copies of an
+        eleven-branch region test would drift apart the first time a
+        view was added -- the cursor would then promise a zoom that
+        does not happen, or hide one that does.
+
+        Reads only ``x``/``y``/``inaxes`` -- **never ``event.button``**,
+        which means ``"up"``/``"down"`` on a scroll event but ``None``
+        or an int on the motion event this also serves.
+
+        The first two guards mirror early returns :meth:`_on_scroll`
+        makes before it ever asks: the extracted-slice panel (a
+        deliberate no-op) and the F1/F2 projection strips (which zoom
+        their own intensity). ``_on_scroll`` still has to act on those
+        itself, so those two ``if``s exist in both places -- but this
+        one is what keeps a *cursor* off them, and keeping the
+        precedence self-contained is what lets it be asked in isolation
+        from a mouse move.
+        """
+        if event is None or event.x is None or event.y is None:
+            return None
+        if self._proj_axes.get("slices") is not None and event.inaxes is self._proj_axes["slices"]:
+            return None
+        for kind in ("f1", "f2"):
+            proj_ax = self._proj_axes.get(kind)
+            if proj_ax is not None and event.inaxes is proj_ax:
+                return None
+
+        # Whose x-tick strip is under the cursor, not just self.ax's.
+        #
+        # self.ax is the *last* Axes a multi-panel view created -- the
+        # spectrum panel of the Processing tab's dual preview, the
+        # bottom row of a stack. Checking only it meant the FID panel
+        # on top could never have its own strip hovered, so its x axis
+        # (time) could not be scroll-zoomed at all, however precisely
+        # you aimed at its "Time (s)" labels. The panel does have a
+        # real strip -- the dual preview is a plain subplots(2, 1) with
+        # its own labels on both panels -- it was simply never
+        # consulted.
+        #
+        # Only searched when the cursor is in a margin (`inaxes is
+        # None`): inside a data rectangle the intensity zoom owns the
+        # gesture, and one panel's strip region can overlap another
+        # panel's plot area in a tight layout.
+        # The *nearest* panel above the cursor, not the first match: in
+        # a stack, a point below the bottom panel is also below every
+        # panel over it, so taking the first hit zoomed the top panel
+        # whenever the bottom one's own strip was aimed at.
+        strip_ax = self.ax
+        if event.inaxes is None:
+            candidates = [ax for ax in self.figure.axes if self._hovering_x_axis(ax, event)]
+            if candidates:
+                # Ties broken toward self.ax -- two panels can share a
+                # bottom edge (a full-figure Axes left under a stacked
+                # layout, a twin), and picking whichever happened to be
+                # created first would zoom an arbitrary one of them.
+                strip_ax = min(
+                    candidates,
+                    key=lambda ax: (ax.get_window_extent().y0 - event.y, ax is not self.ax),
+                )
+        if strip_ax is not None and self._hovering_x_axis(strip_ax, event):
+            return ("x", strip_ax)
+
+        # A DOSY's y axis (D) is a *position* axis like a contour's F1,
+        # not an intensity one, so it gets the same right-hand strip
+        # zoom rather than the 1D pin-bottom intensity behaviour. A
+        # plain 1D shows no y ticks at all, so it has no y strip and
+        # falls through here to None -- which is correct both ways:
+        # nothing to zoom, and so no arrow promising one.
+        has_levels = self._contour_factor is not None or self._dosy_result is not None
+        if has_levels and self.ax is not None and self._hovering_y_axis(self.ax, event):
+            return ("y", self.ax)
+        return None
+
+    def _refresh_cursor(self, event=None) -> None:
+        """The one place this canvas's cursor shape is decided.
+
+        Four writers used to set it independently (pick, region-select
+        and measurement mode, plus matplotlib's own toolbar), which is
+        survivable while each is a simple on/off -- but a shape that
+        also depends on *where the cursor is* has to be resolved
+        against the others, or arming Pick Peak while hovering an axis
+        strip would have the next mouse move quietly undo it.
+
+        Precedence, highest first:
+
+        1. **The toolbar's pan/zoom mode.** matplotlib sets its own
+           MOVE/SELECT_REGION cursor there and caches what it set, so
+           we leave it alone -- and forget our own shape, so that when
+           the mode ends (the toolbar resetting to POINTER on its next
+           mouse move) the call after that re-applies the context
+           cursor instead of finding it unchanged and skipping.
+           Ordering note: the toolbar is constructed before
+           ``_on_motion`` is connected, so its ``mouse_move`` callback
+           runs first and ours has the last word each move. Swapping
+           those two lines in ``__init__`` would silently break this.
+        2. **A drag in flight.** Changing shape mid-gesture reads as
+           the gesture having ended.
+        3. **A click mode** -- Pick Peak, Select Region, Measure. Each
+           arms a click, and the cross is what says so.
+        4. **A scroll-zoomable tick strip**, per :attr:`_STRIP_CURSORS`.
+        5. Otherwise the plain arrow. Plot bodies land here: the
+           crosshair is the cursor over data (see
+           :attr:`_STRIP_CURSORS`), and the arrow on top of it stays
+           out of the way of the cross the click modes use.
+
+        ``event`` of ``None`` (every call from a mode setter) resolves
+        as "no strip" rather than reusing the last known position:
+        a stored event's Axes go stale on any rebuild, and this canvas
+        has been bitten repeatedly by exactly that. The cost is that
+        toggling a mode off while parked on a strip shows the arrow
+        until the next mouse move, which is one frame nobody sees.
+        """
+        if self.toolbar.mode:
+            self._last_cursor_shape = None
+            return
+        if self._pan_start is not None or self._region_select_start is not None:
+            return
+        if self._pick_mode or self._region_select_mode or self._measurement_mode:
+            shape = Qt.CursorShape.CrossCursor
+        else:
+            strip = self._scroll_strip_at(event)
+            shape = (self._STRIP_CURSORS[strip[0]] if strip is not None
+                     else Qt.CursorShape.ArrowCursor)
+        if shape == self._last_cursor_shape:
+            return
+        self._last_cursor_shape = shape
+        self.canvas.setCursor(shape)
+
+    def _on_figure_leave(self, _event) -> None:
+        """Forget the applied shape when the cursor leaves the canvas.
+
+        Qt shows whichever widget the cursor is now over, so nothing is
+        visibly stuck -- but the *cache* would still claim the strip
+        arrow, and re-entering at the same pixel would find "no change
+        needed" and leave whatever shape the canvas had drifted to."""
+        self._last_cursor_shape = None
 
     def _zoom_projection_intensity(self, proj_ax, kind: str, event) -> None:
         """Zoom one F1/F2 projection panel's own intensity axis,
@@ -1167,6 +1581,19 @@ class MplCanvas(QWidget):
         see :meth:`set_contour_slices`."""
         return {"slices": self._contour_slices or None}
 
+    def set_slice_colour(self, position: int, colour: str) -> None:
+        """Recolour one extracted slice, by its position in the list.
+
+        The trace and its dashed marker on the contour share the
+        colour, so they stay paired -- that pairing is the only thing
+        connecting them since the connector lines were dropped."""
+        if not (0 <= position < len(self._contour_slices)):
+            return
+        # Delegated, not reimplemented: a slice is a series like any
+        # other, and the shared setter is what records the colour as
+        # deliberate so a palette change leaves it alone.
+        self.set_series_style(str(position), colour=colour)
+
     def set_contour_slices(self, slices: list[dict] | None) -> None:
         """Replace the set of extracted slices drawn beside the contour
         -- each a ``{"axis", "index", "label"}`` dict, see
@@ -1180,8 +1607,54 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None:
             self.show_spectrum(self._contour_spectrum)
 
+    #: How many distinct colours a slice's own colour is drawn from.
+    #: Fixed rather than "one per slice so far", so adding a fourth
+    #: slice does not recolour the first three.
+    _SLICE_PALETTE_SIZE = 8
+
+    def _sync_slice_series(self) -> None:
+        """Register the extracted slices as series and write the
+        resulting colours back onto their specs.
+
+        The specs are the store that persists with the spectrum, and
+        they are what ``_draw_slice_panel`` reads -- so the series
+        layer decides and the specs follow. A colour set deliberately
+        is marked on the spec too, so a palette change in a later
+        session respects it."""
+        entries = self._assign_series("slices", [
+            (str(i), spec.get("label") or f"Slice {i + 1}", True)
+            for i, spec in enumerate(self._contour_slices)
+        ])
+        for spec, entry in zip(self._contour_slices, entries):
+            if spec.get("color_override") and spec.get("color"):
+                entry.colour = spec["color"]
+                entry.colour_overridden = True
+            spec["color"] = entry.colour
+
+    def _next_slice_colour(self) -> str:
+        """The next extracted slice's colour, from this canvas's own
+        Compare colour map.
+
+        Explicit user request: extracted slices "should be able to
+        either take a colour from the standard compare map, or be
+        independently clickable". Taking it from the same map the
+        Compare tab uses means the two views of the same data agree,
+        and changing that map in the Plot Style dialog moves both."""
+        palette = plotting.stack_colors(self._SLICE_PALETTE_SIZE, self._compare_colormap)
+        return matplotlib.colors.to_hex(palette[len(self._contour_slices) % len(palette)])
+
     def _add_contour_slice(self, axis: str, index: int, label: str) -> None:
-        self._contour_slices.append({"axis": axis, "index": int(index), "label": label})
+        # **The colour is stored on the slice, not chosen at draw time.**
+        # It used to be assigned by position in the draw loop, so every
+        # redraw re-derived it -- and a redraw that reordered or
+        # rebuilt anything (a unit change, most visibly) handed the
+        # slices different colours. Reported directly: "when I changed
+        # the units, the colours reset". Stored here, it survives every
+        # redraw and is what a per-slice colour picker edits.
+        self._contour_slices.append({
+            "axis": axis, "index": int(index), "label": label,
+            "color": self._next_slice_colour(),
+        })
         self.contourSlicesChanged.emit(list(self._contour_slices))
         # preserve_view: adding a slice is an annotation, not a change
         # of subject -- explicit user request, "the scale/view shouldn't
@@ -1234,6 +1707,7 @@ class MplCanvas(QWidget):
             for label in (*ax.get_xticklabels(), *ax.get_yticklabels(),
                           *ax.get_xticklabels(minor=True), *ax.get_yticklabels(minor=True)):
                 label.set_fontsize(self._AXIS_LABELSIZE)
+            self._apply_title_and_font(ax)
 
     def _on_canvas_resized(self, _event=None) -> None:
         """Re-fit the labels after the widget's own size changes.
@@ -1341,12 +1815,26 @@ class MplCanvas(QWidget):
         # path already goes through, rather than at each of the eight
         # places _compare_axes is reset.
         self._compare_spectra = []
+        self._compare_kwargs = None
+        self._overlay_spectra = []
+        self._overlay_labels = None
         # A DOSY's own state describes Axes about to be destroyed. The
         # redraw path re-sets it immediately afterwards; every other
         # view leaves it cleared, which is what makes "is this a DOSY?"
         # a reliable question for the scroll/right-click handlers.
         self._dosy_result = None
+        self._dosy_overlay = None
+        self._dosy_overlay_labels = None
         self._dosy_projection_ax = None
+        # Rows drawn beside the map go with the map, for the same
+        # reason: they describe Axes about to be destroyed, and a
+        # canvas showing nothing has no rows. _draw_dosy carries them
+        # across its own rebuild explicitly, alongside the result.
+        self._dosy_slices = []
+        # The shape was resolved against bboxes of Axes about to be
+        # destroyed. Same choke point, same reasoning as the crosshair
+        # teardown above.
+        self._last_cursor_shape = None
         self._cancel_navigation_drag()
         self.figure.clear()
 
@@ -1449,6 +1937,11 @@ class MplCanvas(QWidget):
         # for a show_spectrum that will not come.
         self._crosshair_ready = True
         self.ax = self.figure.add_subplot(111)
+        # Before the draw: _draw_slice_panel reads each spec's own
+        # "color", so the series layer has to have decided it first --
+        # otherwise a palette change would update the series list and
+        # leave the panel drawing last time's colours.
+        self._sync_slice_series()
         display_spectrum, unit_xlabel, unit_ylabel = self._contour_for_display()
         xlims, ylims = self._contour_display_limits(display_spectrum)
         _, _, self._proj_axes = plotting.plot_2d_contour(
@@ -1553,6 +2046,10 @@ class MplCanvas(QWidget):
 
     def _on_motion(self, event) -> None:
         self._ensure_crosshair()
+        # Before the drag branches below, not after: they return early,
+        # and the cursor has to be resolved on every move, not only on
+        # the ones that fall through to the end.
+        self._refresh_cursor(event)
         if self._region_select_start is not None and event.x is not None and self._region_select_ax is not None:
             # Pixel coordinates, not event.xdata directly -- like the
             # pan drag below, this needs to keep tracking smoothly even
@@ -1704,8 +2201,18 @@ class MplCanvas(QWidget):
         """
         return menu.exec(self.canvas.mapToGlobal(pos))
 
+    #: Emitted when the right-click menu's "Plot Style…" entry is
+    #: chosen. The canvas knows the gesture happened; only MainWindow
+    #: owns the dialog and the controls in it.
+    plotStyleRequested = Signal()
+
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
+
+        style_action = menu.addAction("Plot Style…")
+        style_action.setToolTip("Line width, fonts, ticks, colours and export settings for this plot.")
+        style_action.triggered.connect(self.plotStyleRequested.emit)
+        menu.addSeparator()
 
         legend_action = menu.addAction("Show Legend")
         legend_action.setCheckable(True)
@@ -1757,6 +2264,7 @@ class MplCanvas(QWidget):
             unit_actions[mm_action] = "mm"
 
         dosy_spectrum_action = dosy_profile_action = dosy_levels_action = None
+        dosy_panel_action = dosy_clear_slices_action = None
         if self._dosy_result is not None and self._last_right_click_xy is not None:
             shift, diffusion = self._last_right_click_xy
             dosy_spectrum_action = menu.addAction(
@@ -1765,6 +2273,23 @@ class MplCanvas(QWidget):
                 "The row of the map at this diffusion coefficient -- the spectrum "
                 "of whatever is diffusing at that rate, as its own 1D spectrum."
             )
+            # The other of the two things worth doing with a row, and a
+            # separate entry rather than a mode dialog: a 2D contour's
+            # own Extract Slice… needs a dialog anyway (it has an axis
+            # and an index to choose), where a DOSY row is fully
+            # specified by the click that opened this menu. Explicit
+            # user request: "when I extract a line from the DOSY, I
+            # would also like the option to plot alongside with the
+            # dashed line like in normal 2D contours".
+            dosy_panel_action = menu.addAction(
+                f"Show Spectrum at D = {diffusion:.3g} m²/s Beside the Map")
+            dosy_panel_action.setToolTip(
+                "Keeps the map, draws a dashed line across it at this diffusion "
+                "coefficient, and stacks the spectrum there in a panel to the "
+                "right -- the same as a 2D contour's own extracted slices."
+            )
+            if self._dosy_slices:
+                dosy_clear_slices_action = menu.addAction("Clear Rows Beside the Map")
             dosy_profile_action = menu.addAction(f"Extract Diffusion Profile at {shift:.4g} ppm")
             dosy_profile_action.setToolTip(
                 "The column of the map at this shift -- how this peak's intensity is "
@@ -1823,6 +2348,12 @@ class MplCanvas(QWidget):
         # it. Harmless for the always-created actions this file had
         # before; an immediate crash for the DOSY ones, which then
         # subscripted a `_last_right_click_xy` that was also None.
+        if chosen is dosy_panel_action:
+            self.dosyExtractRequested.emit("spectrum_panel", float(self._last_right_click_xy[1]))
+            return
+        if chosen is dosy_clear_slices_action:
+            self.set_dosy_slices([])
+            return
         if chosen is dosy_spectrum_action:
             self.dosyExtractRequested.emit("spectrum", float(self._last_right_click_xy[1]))
             return
@@ -1910,6 +2441,7 @@ class MplCanvas(QWidget):
             "fontsize": self._AXIS_LABELSIZE,
             "tick_length": self._TICK_LENGTH,
             "tick_width": self._TICK_WIDTH,
+            "contour_linewidth": self._contour_linewidth,
         }
 
     def _apply_current_axis_style(self) -> None:
@@ -1934,9 +2466,270 @@ class MplCanvas(QWidget):
             ax.yaxis.label.set_fontsize(self._AXIS_LABELSIZE)
             if ax.get_title():
                 ax.title.set_fontsize(self._AXIS_LABELSIZE)
+            self._apply_title_and_font(ax)
+        self._restyle_existing_legends()
+
+    def _legend_kwargs(self) -> dict:
+        """The keyword arguments every ``ax.legend()`` on this canvas is
+        built with.
+
+        **One builder, not a kwarg repeated at each call site.** There
+        are legends on the Spectrum view, the Compare stack, the
+        spectral fit and the DOSY overlay; before this each called
+        ``ax.legend()`` bare, so matplotlib's own rcParams decided how
+        they looked and none of them could be changed without finding
+        all four.
+
+        ``frameon`` off is the default (see ``__init__``), in which
+        case the frame's own colour and alpha are not passed at all:
+        matplotlib treats any ``framealpha``/``facecolor`` as an
+        implicit "there is a frame", which would quietly undo the
+        setting the user just turned off."""
+        kwargs = {
+            "loc": self._legend_loc,
+            "fontsize": self._legend_fontsize or self._AXIS_LABELSIZE,
+            "frameon": self._legend_frameon,
+        }
+        if self._legend_frameon:
+            kwargs["framealpha"] = self._legend_framealpha
+            if self._legend_facecolor:
+                kwargs["facecolor"] = self._legend_facecolor
+        return kwargs
+
+    def _restyle_existing_legends(self) -> None:
+        """Re-issue every legend already on the figure with this
+        canvas's own :meth:`_legend_kwargs`.
+
+        **Why a sweep rather than a kwarg at each call site.** Three of
+        the legends on this canvas are not built here at all -- the
+        curve fit, the spectral fit and the relaxation plot are drawn
+        by :mod:`opennmr.plotting.fit`, which calls a bare
+        ``ax.legend()`` of its own. Plumbing a new parameter through
+        those signatures would reach exactly today's three and miss the
+        fourth the next time one is added; sweeping the figure after
+        each rebuild reaches whatever is actually there.
+
+        Rebuilt, not nudged: font size, frame, alpha and face colour
+        are all fixed when a Legend is constructed."""
+        kwargs = self._legend_kwargs()
+        for ax in self.figure.get_axes():
+            if ax.get_legend() is None:
+                continue
+            legend = ax.legend(**kwargs)
+            # **After the rebuild, not before.** The font family is a
+            # property of the Text artists inside the Legend, and
+            # re-issuing the legend builds new ones -- applying it in
+            # _apply_title_and_font first (which runs before this) set
+            # it on artists that were then thrown away.
+            if self._font_family:
+                for text in legend.get_texts():
+                    text.set_fontfamily(self._font_family)
+
+    def _apply_title_and_font(self, ax) -> None:
+        """One axes' title visibility and font family.
+
+        Shared by the two style passes (:meth:`_apply_current_axis_style`
+        and the resize-driven text refit) rather than written into
+        each: they already both exist for the same reason, and a
+        setting applied by only one of them comes back on the next
+        window resize."""
+        # Hidden, not blanked: the views that set a title keep setting
+        # it, so turning the option back on shows it again with no
+        # redraw and no view needing to know the setting exists.
+        ax.title.set_visible(self._title_visible)
+        if not self._font_family:
+            return
+        for text in (ax.title, ax.xaxis.label, ax.yaxis.label,
+                     *ax.get_xticklabels(), *ax.get_yticklabels(),
+                     *ax.get_xticklabels(minor=True), *ax.get_yticklabels(minor=True)):
+            text.set_fontfamily(self._font_family)
+        # The legend's own texts are handled by
+        # _restyle_existing_legends, which runs after this and rebuilds
+        # them -- see there.
+
+    @property
+    def _compare_colormap(self) -> str:
+        """The old name for :attr:`_series_colormap`, from when this
+        palette only served the Compare tab."""
+        return self._series_colormap
+
+    @_compare_colormap.setter
+    def _compare_colormap(self, value: str) -> None:
+        self._series_colormap = value
+
+    #: Which view's series list is live, by what the canvas is showing.
+    #: One place deciding this, so `series()` and every draw path agree
+    #: about what is on screen.
+    def _active_series_view(self) -> str | None:
+        if self._dosy_overlay:
+            return "dosy_overlay"
+        if self._overlay_spectra:
+            return "overlay_2d"
+        if self._contour_spectrum is not None and self._contour_slices:
+            return "slices"
+        if self._compare_spectra:
+            return "compare"
+        return None
+
+    def series(self) -> list[SeriesStyle]:
+        """Every addressable series on the current plot.
+
+        Empty for a view that has no notion of several series (a lone
+        1D trace has its own trace-colour control, and a bare contour
+        has none) -- a caller can offer per-series controls
+        unconditionally and get nothing where there is nothing."""
+        view = self._active_series_view()
+        return list(self._series.get(view, [])) if view else []
+
+    def set_series_style(self, key: str, *, label=None, colour=None) -> None:
+        """Rename or recolour one series on the current plot, and
+        redraw.
+
+        The one entry point behind every per-series control, whatever
+        kind of plot is showing -- the alternative was a separate
+        setter and a separate dialog section per view, which is how the
+        extracted-slice colour picker ended up not helping the DOSY
+        overlay at all."""
+        view = self._active_series_view()
+        if view is None:
+            return
+        for entry in self._series.get(view, []):
+            if entry.key != key:
+                continue
+            if label is not None and entry.can_rename:
+                entry.label = label
+                entry.label_overridden = True
+            if colour is not None:
+                entry.colour = colour
+                entry.colour_overridden = True
+            # Slices keep their own copy on the slice spec, which is
+            # what persists with the spectrum; keep the two in step.
+            if view == "slices":
+                position = int(key)
+                if 0 <= position < len(self._contour_slices):
+                    self._contour_slices[position]["color"] = entry.colour
+                    self._contour_slices[position]["label"] = entry.label
+                    # Recorded on the spec too, since that is what
+                    # persists with the spectrum -- a palette change in
+                    # a later session must respect it the same way.
+                    self._contour_slices[position]["color_override"] = entry.colour_overridden
+                    self.contourSlicesChanged.emit(list(self._contour_slices))
+            self._redraw_active_series_view()
+            return
+
+    def _redraw_active_series_view(self) -> None:
+        """Redraw whichever multi-series view is showing, preserving
+        the view where that makes sense."""
+        view = self._active_series_view()
+        if view == "dosy_overlay":
+            self._draw_dosy(preserve_view=True)
+        elif view == "overlay_2d":
+            self.show_2d_overlay(self._overlay_spectra, self._overlay_labels)
+        elif view == "slices":
+            self._redraw_contour(preserve_view=True)
+        elif view == "compare":
+            self.show_compare(self._compare_spectra, **(self._compare_kwargs or {}))
+
+    def _assign_series(self, view: str, entries) -> list[SeriesStyle]:
+        """Build (or reuse) the series list for ``view``.
+
+        Reuses a previous entry's label and colour where the key is the
+        same, so a redraw -- a unit change, a level scroll, a restyle --
+        keeps whatever was set rather than re-deriving it. That reuse
+        *is* the fix for the resetting-colour bug, applied once here
+        instead of per view."""
+        previous = {entry.key: entry for entry in self._series.get(view, [])}
+        palette = plotting.stack_colors(max(len(entries), 1), self._series_colormap)
+        built = []
+        for index, (key, label, can_rename) in enumerate(entries):
+            was = previous.get(key)
+            overridden = was.colour_overridden if was is not None else False
+            built.append(SeriesStyle(
+                key=key,
+                # A name the user *typed* survives a redraw; a computed
+                # one is recomputed. Same rule, and the same reasoning,
+                # as the colour below: reusing on `can_rename` alone
+                # could not tell "the user renamed this" from "a label
+                # existed for this key last time", so a fresh SCORE run
+                # kept the old run's numbers.
+                label=(was.label if (was is not None and can_rename
+                                     and was.label_overridden) else label),
+                # Derived unless deliberately set: same palette gives
+                # the same colour back on a redraw, a new palette gives
+                # a new one, and an override survives both.
+                colour=(was.colour if overridden
+                        else matplotlib.colors.to_hex(palette[index % len(palette)])),
+                can_rename=can_rename,
+                colour_overridden=overridden,
+                label_overridden=(was.label_overridden if was is not None else False),
+            ))
+        self._series[view] = built
+        return built
+
+    def reset_series_colours(self) -> None:
+        """Drop every deliberate colour on the current plot, putting it
+        back on the palette."""
+        view = self._active_series_view()
+        if view is None:
+            return
+        for entry in self._series.get(view, []):
+            entry.colour_overridden = False
+        if view == "slices":
+            for spec in self._contour_slices:
+                spec.pop("color", None)
+                spec.pop("color_override", None)
+            self.contourSlicesChanged.emit(list(self._contour_slices))
+        self._redraw_active_series_view()
+
+    def restyle_series(self) -> None:
+        """Re-derive every non-overridden colour from the palette now in
+        force, and redraw.
+
+        What a colour-map change calls: the palette supplies defaults,
+        so changing it has to actually reach the plot rather than
+        waiting for the next redraw to happen for some other reason."""
+        if self._active_series_view() is not None:
+            self._redraw_active_series_view()
+
+    def style_settings(self) -> dict:
+        """This canvas's own current style, in the form
+        :meth:`set_style` takes it back.
+
+        Style is per-canvas state (it always was -- ``__init__`` copies
+        the class defaults onto instance attributes); what changed is
+        that it is now *edited* per canvas rather than only ever being
+        fanned out to all of them at once. A dialog editing one plot
+        needs to show what that plot is currently set to, which is what
+        this is for."""
+        return {
+            "linewidth": self._AXIS_LINEWIDTH,
+            "labelsize": self._AXIS_LABELSIZE,
+            "tick_length": self._TICK_LENGTH,
+            "tick_width": self._TICK_WIDTH,
+            "minor_ticks": self._minor_ticks_visible,
+            "grid": self._grid_visible,
+            "legend_loc": self._legend_loc,
+            "compare_colormap": self._compare_colormap,
+            "trace_color": self._trace_color,
+            "contour_linewidth": self._contour_linewidth,
+            "contour_clevels": self._contour_clevels,
+            "contour_level_mode": self._contour_level_mode,
+            "contour_power": self._contour_power,
+            "dosy_clevels": self._dosy_clevels,
+            "title_visible": self._title_visible,
+            "font_family": self._font_family,
+            "legend_frameon": self._legend_frameon,
+            "legend_fontsize": self._legend_fontsize,
+            "legend_framealpha": self._legend_framealpha,
+            "legend_facecolor": self._legend_facecolor,
+        }
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
-                  minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None) -> None:
+                  minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
+                  trace_color=None, contour_linewidth=None, contour_clevels=None,
+                  contour_level_mode=None, contour_power=None,
+                  title_visible=None, font_family=None, legend_frameon=None,
+                  legend_fontsize=None, legend_framealpha=None, legend_facecolor=None) -> None:
         """The Output tab's live style panel -- updates whichever of
         these aren't ``None``, both as the new per-instance default
         (every ``show_*`` method reads ``self._AXIS_LINEWIDTH`` etc.,
@@ -1969,6 +2762,66 @@ class MplCanvas(QWidget):
             self._legend_loc = legend_loc
         if compare_colormap is not None:
             self._compare_colormap = compare_colormap
+        if title_visible is not None:
+            self._title_visible = bool(title_visible)
+        if font_family is not None:
+            # "" from a combo meaning "matplotlib's own default" is
+            # stored as None, so _apply_title_and_font's own truthiness
+            # check is the only place that decision is made.
+            self._font_family = font_family or None
+        if legend_frameon is not None:
+            self._legend_frameon = bool(legend_frameon)
+        if legend_fontsize is not None:
+            # 0 is the panel's "follow the axis label size" sentinel --
+            # see _legend_kwargs.
+            self._legend_fontsize = legend_fontsize or None
+        if legend_framealpha is not None:
+            self._legend_framealpha = float(legend_framealpha)
+        if legend_facecolor is not None:
+            self._legend_facecolor = legend_facecolor or None
+        if contour_clevels is not None:
+            # **The same number the right-click "Set Contour Levels…"
+            # dialog and the DOSY display panel set**, not a parallel
+            # one: a canvas shows a 2D contour or a DOSY map, never
+            # both, so one control driving whichever is live is what
+            # "linked to the other boxes where it might be used"
+            # means. Both are stored so neither is lost by a switch
+            # between the two views.
+            clevels = max(2, int(contour_clevels))
+            self._contour_clevels = clevels
+            self._dosy_clevels = clevels
+        # How those levels are spaced, alongside how many there are:
+        # the count alone decides nothing about whether the weak peaks
+        # beside a strong one are visible, which is what the spacing
+        # is for. Same values the right-click "Set Contour Levels…"
+        # dialog sets, so the two cannot disagree.
+        if contour_level_mode is not None:
+            self._contour_level_mode = "power" if contour_level_mode == "power" else "linear"
+        if contour_power is not None:
+            self._contour_power = float(contour_power)
+        if contour_linewidth is not None:
+            self._contour_linewidth = contour_linewidth
+        if (contour_linewidth is not None or contour_clevels is not None
+                or contour_level_mode is not None or contour_power is not None):
+            # Rebuild: a contour's line width and its levels both live
+            # on the QuadContourSet matplotlib builds, so neither can
+            # be set on what is already drawn the way a trace colour
+            # can. One rebuild covers both, however many changed.
+            if self._dosy_result is not None:
+                self._draw_dosy(preserve_view=True)
+            elif self._contour_spectrum is not None:
+                self._redraw_contour(preserve_view=True)
+        if trace_color is not None:
+            self._trace_color = trace_color
+            # Unlike the axis furniture below, a trace colour lives on
+            # the Line2D itself -- applied to what is already drawn so
+            # the change shows without waiting for a reselect, the same
+            # way every other setting here does.
+            for ax in self.figure.get_axes():
+                for line in ax.lines:
+                    if line.get_gid() not in (self._BASELINE_PREVIEW_GID,
+                                               self._BASELINE_GHOST_GID):
+                        line.set_color(trace_color)
 
         # Everything except grid/legend is the same "apply the current
         # style to every axes" the contour rebuild needs, so it lives in
@@ -1976,12 +2829,16 @@ class MplCanvas(QWidget):
         # unconditionally is equivalent to the old per-argument guards,
         # since anything not passed in is re-applied at its existing
         # value.
+        # Ends with _restyle_existing_legends, which is what re-issues
+        # every legend with the current kwargs -- deliberately *not*
+        # repeated in the grid loop below. Doing it in both places
+        # rebuilt each legend twice, and the second rebuild (with no
+        # font pass after it) threw away the font family the first had
+        # just applied to its Text artists.
         self._apply_current_axis_style()
         for ax in self.figure.get_axes():
             if grid is not None:
                 ax.grid(grid, **({"alpha": 0.3} if grid else {}))
-            if legend_loc is not None and ax.get_legend() is not None:
-                ax.legend(loc=legend_loc)
 
         # compare_colormap only takes effect on the next full
         # show_compare redraw (it re-derives every trace's colour from
@@ -2474,7 +3331,7 @@ class MplCanvas(QWidget):
         self._pivot_marker_ax = None
         self._peak_marker_lines = []
         if self._legend_visible and self.ax.get_legend_handles_labels()[0]:
-            self.ax.legend(loc=self._legend_loc)
+            self.ax.legend(**self._legend_kwargs())
         else:
             existing = self.ax.get_legend()
             if existing is not None:
@@ -2495,6 +3352,15 @@ class MplCanvas(QWidget):
         # an implicit "turn it on" and warns -- only pass alpha when
         # actually enabling it.
         self.ax.grid(self._grid_visible, **({"alpha": 0.3} if self._grid_visible else {}))
+        # Every rebuild, so a legend drawn by the plotting layer (which
+        # knows nothing about these settings) still comes out matching
+        # the ones drawn here -- see _restyle_existing_legends.
+        self._restyle_existing_legends()
+        # The title/font pass is in _apply_current_axis_style, which not
+        # every rebuild reaches; a title set by a show_* that skips it
+        # would otherwise appear despite the option being off.
+        for ax in self.figure.get_axes():
+            self._apply_title_and_font(ax)
 
     def set_pivot_marker(self, ppm: float | None) -> None:
         """Show, move, or hide a dashed vertical line at ``ppm`` -- the
@@ -2536,7 +3402,7 @@ class MplCanvas(QWidget):
             return None
         return spectrum.axis_values(0, "ppm"), np.real(spectrum.data)
 
-    def set_baseline_preview(self, x=None, baseline=None) -> None:
+    def set_baseline_preview(self, x=None, baseline=None, uncorrected=None) -> None:
         """Draw the baseline that *would* be subtracted over the trace
         it would be subtracted from, or clear it with no arguments.
 
@@ -2557,9 +3423,10 @@ class MplCanvas(QWidget):
         Found by gid rather than a stored reference, so a figure
         rebuild between calls cannot leave a stale Line2D behind.
         """
+        stale = {self._BASELINE_PREVIEW_GID, self._BASELINE_GHOST_GID}
         for ax in self.figure.get_axes():
             for line in list(ax.lines):
-                if line.get_gid() == self._BASELINE_PREVIEW_GID:
+                if line.get_gid() in stale:
                     line.remove()
         target = self._pivot_marker_ax
         if x is None or baseline is None or target is None:
@@ -2570,6 +3437,24 @@ class MplCanvas(QWidget):
         if x.size != baseline.size or x.size == 0:
             self.canvas.draw_idle()
             return
+        if uncorrected is not None:
+            # The trace the baseline was actually fitted to, faint and
+            # behind everything. Without it, a correction that is
+            # already applied leaves the overlay sitting on a flat line
+            # with nothing to judge it against -- reported directly:
+            # "seeing the baseline plotted against the already
+            # corrected spectrum isn't so useful".
+            ghost = np.asarray(uncorrected, dtype=float)
+            if ghost.size == x.size:
+                # Dashed, so it cannot be mistaken for a second
+                # spectrum: it is the same data as the solid trace,
+                # before a correction that has not been committed.
+                # Explicit user request: "should use dashed lines".
+                line = target.plot(
+                    x, ghost, linewidth=1.0, color="0.55", linestyle=(0, (4, 2)),
+                    zorder=1, label="_baseline_uncorrected",
+                )[0]
+                line.set_gid(self._BASELINE_GHOST_GID)
         # Dashed and coloured, over the trace rather than under it: the
         # whole job of this line is to be compared against the data, so
         # it has to stay visible where it crosses a peak.
@@ -2629,6 +3514,12 @@ class MplCanvas(QWidget):
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self._preview_1d_spectrum = None
+        # Nothing on the canvas means nothing to switch between. Done
+        # here rather than left to each caller: `clear` is already the
+        # one thing every "this canvas now shows nothing" path goes
+        # through, the same reasoning `_clear_figure` is the single
+        # teardown point for the crosshair.
+        self.set_view_switcher([])
         self._clear_figure()
         self.ax = self.figure.add_subplot(111)
         self.canvas.draw_idle()
@@ -2660,7 +3551,9 @@ class MplCanvas(QWidget):
             self._current_1d_spectrum = spectrum
             self._axis_unit = "ppm"  # a fresh spectrum always starts in ppm
             self.ax = self.figure.add_subplot(111)
-            xmin, xmax, labeltext = plotting.plot_1d(self.ax, spectrum, full_resolution=self._full_resolution)
+            xmin, xmax, labeltext = plotting.plot_1d(
+                self.ax, spectrum, full_resolution=self._full_resolution,
+                color=self._trace_color)
             self._ppm_label = labeltext
             self.ax.lines[0].set_label(_spectrum_label(spectrum))
             self.ax.set_xlim(xmin, xmax)
@@ -2673,11 +3566,23 @@ class MplCanvas(QWidget):
                                        labelsize=self._AXIS_LABELSIZE)
         elif spectrum.ndim == 2:
             self._current_1d_spectrum = None
+            # **Only reset the contour settings for a *different*
+            # spectrum.** A live reprocess writes into the same
+            # NMRSpectrum object and redraws it, so resetting here
+            # unconditionally threw away the noise floor, level count,
+            # scaling and exponent on every settle -- while
+            # MainWindow._redraw_2d_preserving_view was carefully
+            # preserving the zoom right beside it. User report: "the
+            # contour levels and view shouldn't reset when processing".
+            # Identity is the right test: a reprocess mutates in
+            # place, a selection change hands over a new object.
+            same_spectrum = self._contour_spectrum is spectrum
             self._contour_spectrum = spectrum
-            self._contour_factor = self._CONTOUR_FACTOR_DEFAULT
-            self._contour_clevels = self._CONTOUR_CLEVELS_DEFAULT
-            self._contour_level_mode = self._CONTOUR_LEVEL_MODE_DEFAULT
-            self._contour_power = self._CONTOUR_POWER_DEFAULT
+            if not same_spectrum or self._contour_factor is None:
+                self._contour_factor = self._CONTOUR_FACTOR_DEFAULT
+                self._contour_clevels = self._CONTOUR_CLEVELS_DEFAULT
+                self._contour_level_mode = self._CONTOUR_LEVEL_MODE_DEFAULT
+                self._contour_power = self._CONTOUR_POWER_DEFAULT
             self.ax = self.figure.add_subplot(111)
             display_spectrum, unit_xlabel, unit_ylabel = self._contour_for_display()
             xlims, ylims = self._contour_display_limits(display_spectrum)
@@ -2949,7 +3854,8 @@ class MplCanvas(QWidget):
         return True
 
     def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack", normalize: bool = False,
-                      row_labels: list[str] | None = None, shared_scale: bool = False) -> None:
+                      row_labels: list[str] | None = None, shared_scale: bool = False,
+                      series_renameable: bool = False) -> None:
         """Plot several 1D spectra together for comparison.
 
         ``mode="overlay"`` : every spectrum on one shared axes at y=0
@@ -3012,9 +3918,32 @@ class MplCanvas(QWidget):
         self._current_1d_spectrum = None
         self._clear_figure()
 
+        self._compare_kwargs = {"mode": mode, "normalize": normalize,
+                                 "row_labels": row_labels, "shared_scale": shared_scale,
+                                 "series_renameable": series_renameable}
+        # Both modes, not just "stack" -- the stack branch below set
+        # this for its own unit-conversion needs, which left an overlay
+        # Compare invisible to _active_series_view and so unstyleable.
+        self._compare_spectra = list(spectra)
+        # ``series_renameable`` because this renderer serves two quite
+        # different things. The Compare tab plots session spectra, whose
+        # names come from the spectrum and are changed by the Data tab's
+        # Rename… (which reaches every other view too), so the plot must
+        # not offer a competing local name. Resolved SCORE/OUTSCORE
+        # components are drawn through the same renderer but are not
+        # session spectra at all -- their labels are generated
+        # annotations, plot-local, and theirs to rename.
+        entries = self._assign_series("compare", [
+            (str(i), (row_labels[i] if row_labels and i < len(row_labels) else f"Trace {i + 1}"),
+             series_renameable)
+            for i in range(len(spectra))
+        ])
+        colors = [entry.colour for entry in entries]
+        if row_labels is not None:
+            row_labels = [entry.label for entry in entries]
+
         if mode == "stack" and len(spectra) > 1:
             axes = list(np.atleast_1d(self.figure.subplots(len(spectra), 1, sharex=True)))
-            colors = plotting.stack_colors(len(spectra), self._compare_colormap)
             xmin = xmax = labeltext = None
             for i, (row_ax, spectrum) in enumerate(zip(axes, spectra)):
                 this_xmin, this_xmax, labeltext = plotting.plot_1d(
@@ -3169,9 +4098,19 @@ class MplCanvas(QWidget):
         one specific spectrum's own data, which an overlay of several
         doesn't have."""
         self.clear()  # already leaves self.ax as a fresh, single subplot
-        plotting.overlay_plot(spectra, ax=self.ax, fig=self.figure, labels=labels, **self._contour_fraction_kwargs())
+        self._overlay_spectra = list(spectra)
+        self._overlay_labels = list(labels) if labels is not None else None
+        entries = self._assign_series("overlay_2d", [
+            (str(i), (labels[i] if labels and i < len(labels) else f"Spectrum {i + 1}"), True)
+            for i in range(len(spectra))
+        ])
+        plotting.overlay_plot(
+            spectra, ax=self.ax, fig=self.figure,
+            labels=[entry.label for entry in entries] if labels is not None else None,
+            colours=[entry.colour for entry in entries],
+            **self._contour_fraction_kwargs())
         if labels is not None:
-            self.ax.legend()
+            self.ax.legend(**self._legend_kwargs())
             self._legend_visible = True
         self._apply_view_options()
         # Crosshairs here too: reading a value off this plot is
@@ -3307,6 +4246,44 @@ class MplCanvas(QWidget):
         ``plot_dosy`` rather than ``plot_2d_contour``, so sharing that
         state would send every contour path down the wrong branch."""
         self._dosy_result = dosy
+        self._dosy_overlay = None
+        self._dosy_overlay_labels = None
+        self._dosy_factor = self._DOSY_FACTOR_DEFAULT if factor is None else float(factor)
+        self._dosy_clevels = self._DOSY_CLEVELS_DEFAULT if clevels is None else int(clevels)
+        self._dosy_d_lims = None if d_lims is None else (float(d_lims[0]), float(d_lims[1]))
+        self._dosy_title = title
+        self._draw_dosy()
+
+    def show_dosy_overlay(self, maps, labels=None, title: str = "", factor: float | None = None,
+                           clevels: int | None = None, d_lims=None) -> None:
+        """Draw several DOSY maps on one set of axes, each in its own
+        colour, via :func:`opennmr.plotting.overlay_dosy`.
+
+        Explicit user request: "I'd also like to be able to overlay
+        DOSY plot ILT results". Reading whether a shift has moved up or
+        down the diffusion axis between two samples off two separate
+        figures -- each with its own independently fitted D axis -- is
+        how that comparison goes wrong.
+
+        Everything the single-map view supports still applies: the
+        level floor and count come from the same panel controls, the
+        scroll gesture still scales the levels, and the D axis can
+        still be pinned. ``_dosy_result`` is left pointing at the first
+        map so the right-click trace extraction still has one
+        unambiguous map to extract from."""
+        maps = list(maps)
+        if len(maps) < 2:
+            raise ValueError(f"show_dosy_overlay needs at least 2 maps, got {len(maps)}.")
+        self._dosy_result = maps[0]
+        self._dosy_overlay = maps
+        self._dosy_overlay_labels = list(labels) if labels is not None else None
+        if labels is not None:
+            # On, not left to the canvas-wide toggle's default: the
+            # legend is the only thing distinguishing one map from
+            # another here, so an overlay without it is unreadable.
+            # It is still the user's own toggle, so it can be switched
+            # back off from the right-click menu afterwards.
+            self._legend_visible = True
         self._dosy_factor = self._DOSY_FACTOR_DEFAULT if factor is None else float(factor)
         self._dosy_clevels = self._DOSY_CLEVELS_DEFAULT if clevels is None else int(clevels)
         self._dosy_d_lims = None if d_lims is None else (float(d_lims[0]), float(d_lims[1]))
@@ -3352,18 +4329,43 @@ class MplCanvas(QWidget):
             return
         limits = (self.ax.get_xlim(), self.ax.get_ylim()) if (preserve_view and self.ax) else None
         dosy = self._dosy_result
+        overlay = self._dosy_overlay
+        overlay_labels = self._dosy_overlay_labels
+        slices = list(self._dosy_slices)
         self._clear_figure()
         self._dosy_result = dosy      # _clear_figure resets view state
+        self._dosy_overlay = overlay
+        self._dosy_overlay_labels = overlay_labels
+        self._dosy_slices = slices
         self._contour_spectrum = None
         self._current_1d_spectrum = None
         self._compare_axes = None
         self._proj_axes = {"f1": None, "f2": None}
-        grid = self.figure.add_gridspec(2, 1, height_ratios=[0.22, 1.0], hspace=0.04)
-        projection_ax = self.figure.add_subplot(grid[0])
-        self.ax = self.figure.add_subplot(grid[1], sharex=projection_ax)
-        plotting.plot_dosy(
-            dosy, ax=self.ax, fig=self.figure, projection_ax=projection_ax,
+        # A plain 111 subplot, exactly as _redraw_contour does for a 2D
+        # -- plot_dosy now builds its own projection strip off the same
+        # AxesDivider plot_2d_contour uses, so the panel proportions,
+        # strip height and spacing match every other contour in the app
+        # instead of being this one view's own gridspec. Explicit user
+        # request: "the shape of the contour plot can just follow that
+        # used for every other contour".
+        self.ax = self.figure.add_subplot(111)
+        draw = plotting.plot_dosy if overlay is None else plotting.overlay_dosy
+        subject = dosy if overlay is None else overlay
+        extra = {}
+        if overlay is not None:
+            labels = self._dosy_overlay_labels or []
+            entries = self._assign_series("dosy_overlay", [
+                (str(i), (labels[i] if i < len(labels) else f"Map {i + 1}"), True)
+                for i in range(len(overlay))
+            ])
+            extra = {"labels": [e.label for e in entries],
+                     "colours": [e.colour for e in entries]}
+        _fig, (_contour_ax, projection_ax) = draw(
+            subject, ax=self.ax, fig=self.figure, **extra,
             factor=self._dosy_factor, clevels=self._dosy_clevels,
+            # Square panel, same as a 2D contour, unless the user has
+            # locked their own aspect ratio on this canvas.
+            square_aspect=self._aspect_ratio is None,
             # An explicit range from the panel, or None to let plot_dosy
             # fit the axis to the populated part of the grid.
             d_lims=self._dosy_d_lims,
@@ -3378,10 +4380,25 @@ class MplCanvas(QWidget):
             # and at its 1.75 default the contour rings came out
             # heavy enough to merge into blobs. Spine widths are set
             # from it separately, by _apply_current_axis_style below.
+            # Rows extracted from this map, drawn beside it. Only for
+            # the single-map view: an overlay of several inversions has
+            # no single map for a row to come from, and overlay_dosy
+            # takes no slices.
+            **({"slices": self._dosy_slices} if (overlay is None and self._dosy_slices) else {}),
             **self._contour_style_kwargs(),
         )
         self._dosy_projection_ax = projection_ax
-        if self._dosy_title:
+        # plot_dosy cannot return the panel (it shares a fixed-arity
+        # unpack with overlay_dosy), so it tags it -- see
+        # plotting.twod._draw_traces_panel. Recorded in _proj_axes
+        # under the same "slices" key a 2D contour's own panel uses, so
+        # the scroll and cursor handlers that already special-case that
+        # panel cover the DOSY's for free rather than learning a second
+        # attribute.
+        self._proj_axes["slices"] = next(
+            (a for a in self.figure.get_axes()
+             if a.get_gid() == plotting.twod.SLICE_PANEL_GID), None)
+        if self._dosy_title and projection_ax is not None:
             projection_ax.set_title(self._dosy_title, fontsize=self._AXIS_LABELSIZE)
         self._apply_current_axis_style()
         self._apply_view_options()
@@ -3392,6 +4409,21 @@ class MplCanvas(QWidget):
         # Crosshairs here too: a DOSY map is read off the plot.
         self._crosshair_ready = True
         self.canvas.draw_idle()
+
+    def set_dosy_slices(self, slices: list[dict] | None) -> None:
+        """Replace the set of rows drawn beside the DOSY map -- each a
+        ``{"D", "label", "color"}`` dict. Redraws straight away if a
+        map is currently shown, the same way :meth:`set_contour_slices`
+        does for a 2D.
+
+        The D values are kept as given rather than snapped to the
+        grid: ``plot_dosy`` resolves each to its nearest row at draw
+        time, so a map later re-inverted onto a finer grid still shows
+        the row the user asked for rather than one frozen against the
+        old grid."""
+        self._dosy_slices = list(slices or [])
+        if self._dosy_result is not None:
+            self._draw_dosy(preserve_view=True)
 
     def _adjust_dosy_levels(self, event) -> None:
         """Scroll-up raises the DOSY's contour floor (fewer, stronger
@@ -3757,15 +4789,33 @@ class MplCanvas(QWidget):
             self._apply_layout()
             self.canvas.draw_idle()
 
-    #: Order the units of a measured separation are reported in, and
-    #: how each is formatted. mm leads where it exists (an imaging
-    #: measurement is a distance, and that is the number wanted);
-    #: otherwise ppm leads, with Hz beside it -- never instead of it.
+    #: How each reportable unit is formatted. Which of them a given
+    #: measurement actually shows is :meth:`_measurement_unit_order`'s
+    #: decision, not a fixed list -- see there.
     #: Explicit requirement from the plan: a separation is quoted in
     #: **both** ppm and Hz at once, because a position is ppm and a
     #: coupling is Hz, and switching the display unit to read one
     #: should not cost you the other.
-    _MEASUREMENT_UNIT_ORDER = (("mm", "{:.4f} mm"), ("ppm", "{:.4f} ppm"), ("hz", "{:.2f} Hz"))
+    _MEASUREMENT_UNIT_FORMATS = {
+        "mm": "{:.4f} mm", "ppm": "{:.4f} ppm", "hz": "{:.2f} Hz",
+    }
+
+    def _measurement_unit_order(self) -> tuple:
+        """Which units a separation is quoted in, in order -- **a pair,
+        always, and which pair depends on the axis**.
+
+        ``ppm / Hz`` normally: a position is ppm and a coupling is Hz,
+        so switching the display unit to read one should not cost you
+        the other.
+
+        ``mm / Hz`` on an imaging axis. The distance is the number
+        wanted there, and ppm alongside it is the one that stops
+        meaning anything -- a chemical shift is not what an mm axis
+        measures. Explicit user request: "If the axis is mm, then show
+        mm / Hz". It used to append mm to the front of the pair and
+        report all three."""
+        leading = "mm" if self._axis_unit == "mm" else "ppm"
+        return tuple((unit, self._MEASUREMENT_UNIT_FORMATS[unit]) for unit in (leading, "hz"))
 
     #: Colour of every measurement annotation, and the gid marking the
     #: first-click marker so it can be cleared once the pair completes.
@@ -3780,6 +4830,19 @@ class MplCanvas(QWidget):
         spectrum). Only these get converted to real units; anything
         else is reported as a plain difference in whatever is plotted.
         """
+        # **A Compare row is a spectrum like any other.** Its axis was
+        # not consulted here, so a measurement taken on the Compare tab
+        # fell through to the "no spectral axis" branch and came back
+        # as a bare difference in whatever the row happened to be
+        # plotted in -- no ppm, no Hz. Reported directly: "when
+        # measuring in compare, the value should show ppm / Hz like in
+        # the spectrum view". Checked first, because a Compare stack
+        # can be shown while _contour_spectrum/_current_1d_spectrum
+        # still hold something from a previous view.
+        if self._compare_axes and self._compare_spectra and ax in self._compare_axes:
+            position = self._compare_axes.index(ax)
+            if position < len(self._compare_spectra):
+                return self._compare_spectra[position].axes[0], None
         spectrum = self._contour_spectrum
         if spectrum is not None:
             if ax is self._proj_axes.get("f2"):
@@ -3827,15 +4890,27 @@ class MplCanvas(QWidget):
         out["hz"] = delta_hz
         out["khz"] = delta_hz / 1000.0
         out["ppm"] = delta_hz / hz_per_ppm
-        if hz_per_mm:
+        # **Only when the view is actually in mm.** Having imaging
+        # gradient parameters set is not enough: they are a property of
+        # the acquisition, so once entered they stay set for every
+        # spectrum in the session, and a chemical-shift measurement on
+        # a ppm axis was being quoted with a distance beside it -- a
+        # number with no meaning on that axis, inviting a position to
+        # be read off an axis that is not one. Explicit user request:
+        # "don't give a mm value unless the axis is set to mm".
+        # ppm/Hz are still reported alongside it in the mm case: those
+        # remain true of an imaging axis, and dropping them would cost
+        # the coupling reading the pairing exists to preserve.
+        if self._axis_unit == "mm":
             out["mm"] = delta_hz / hz_per_mm
         return out
 
     def _format_delta(self, label: str, deltas: dict, raw: float) -> str:
         """One axis's separation, every applicable unit in one string --
         never a bare number, and never a number carrying a unit it was
-        not converted into (see :attr:`_MEASUREMENT_UNIT_ORDER`)."""
-        parts = [fmt.format(deltas[unit]) for unit, fmt in self._MEASUREMENT_UNIT_ORDER if unit in deltas]
+        not converted into (see :meth:`_measurement_unit_order`)."""
+        parts = [fmt.format(deltas[unit])
+                 for unit, fmt in self._measurement_unit_order() if unit in deltas]
         if not parts:
             # No spectral axis behind this direction -- an intensity, or
             # a slice index. Report the plain difference, said plainly.

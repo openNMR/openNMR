@@ -100,17 +100,56 @@ def _layout_quietly(fig) -> bool:
 _LABEL_FIT_TOLERANCE_PX = 2.0
 
 
-def _shrinkable_text_artists(fig):
-    """Every text artist worth shrinking to win back space -- tick
-    labels included, since their height is usually what pushes an axis
-    label off the figure in the first place."""
+def _axis_label_artists(fig):
+    """The persistent text artists: axis labels and titles. These are
+    single objects that live as long as the Axes, so setting a font
+    size on one sticks."""
     for ax in fig.axes:
         for artist in (ax.xaxis.label, ax.yaxis.label, ax.title):
             if artist.get_text():
                 yield artist
-        for artist in (*ax.get_xticklabels(), *ax.get_yticklabels()):
-            if artist.get_text() and artist.get_visible():
-                yield artist
+
+
+def _tick_labelsize(axis) -> float:
+    """The font size ``axis``'s tick labels are currently drawn at."""
+    for label in axis.get_ticklabels():
+        if label.get_text():
+            return float(label.get_fontsize())
+    return float(plt.rcParams.get("font.size", 10.0))
+
+
+def _shrink_text_once(fig, factor: float, min_fontsize: float) -> bool:
+    """Shrink every label, title and tick on ``fig`` by ``factor``,
+    down to ``min_fontsize``. Returns whether anything actually moved.
+
+    **Tick labels are shrunk through ``set_tick_params``, not by
+    setting a size on the individual tick artists.** A Tick's label is
+    not a persistent object the way an axis label is: matplotlib keeps
+    a pool of them and creates more from the axis's *stored* tick
+    parameters whenever a view needs more ticks than the pool holds.
+    Writing a size onto the artists therefore shrank the ticks that
+    happened to exist and left the stored size untouched, so the next
+    pan, zoom or level scroll brought some ticks back at full size
+    while the axis labels stayed small -- reported as the DOSY still
+    having "tiny labels" while "the tickmarks now seem to be better
+    matched". Going through the axis makes the change durable and
+    keeps labels and ticks in step.
+    """
+    changed = False
+    for artist in _axis_label_artists(fig):
+        current = artist.get_fontsize()
+        new = max(min_fontsize, current * factor)
+        if new < current:
+            artist.set_fontsize(new)
+            changed = True
+    for ax in fig.axes:
+        for axis in (ax.xaxis, ax.yaxis):
+            current = _tick_labelsize(axis)
+            new = max(min_fontsize, current * factor)
+            if new < current:
+                axis.set_tick_params(which="both", labelsize=new)
+                changed = True
+    return changed
 
 
 def _settle_label_positions(fig) -> None:
@@ -218,11 +257,8 @@ def fit_labels_within_figure(fig, *, min_fontsize: float = LABEL_FIT_MIN_FONTSIZ
     clipped = clipped_labels(fig)
     steps = 0
     while clipped and steps < _LABEL_FIT_MAX_STEPS:
-        artists = list(_shrinkable_text_artists(fig))
-        if all(a.get_fontsize() <= min_fontsize for a in artists):
-            break
-        for artist in artists:
-            artist.set_fontsize(max(min_fontsize, artist.get_fontsize() * _LABEL_FIT_FACTOR))
+        if not _shrink_text_once(fig, _LABEL_FIT_FACTOR, min_fontsize):
+            break          # everything is already at the floor
         _layout_quietly(fig)
         clipped = clipped_labels(fig)
         steps += 1

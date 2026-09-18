@@ -129,7 +129,14 @@ def _labelled_figure(width, height):
 
 
 def _font_sizes(fig):
-    return {round(a.get_fontsize(), 2) for a in style._shrinkable_text_artists(fig)}
+    """Every text size the label fitter controls: the persistent axis
+    labels and titles, and the tick labels it now resizes through the
+    axis rather than per artist (see style._shrink_text_once)."""
+    sizes = {round(a.get_fontsize(), 2) for a in style._axis_label_artists(fig)}
+    for ax in fig.axes:
+        for axis in (ax.xaxis, ax.yaxis):
+            sizes.add(round(style._tick_labelsize(axis), 2))
+    return sizes
 
 
 def test_fit_labels_leaves_a_roomy_figure_untouched():
@@ -379,3 +386,41 @@ def test_the_legacy_notebook_api_uses_the_same_filter():
     # And its two special cases are untouched.
     assert style.relative_luminance(legacy_stack("black")(0.5)[:3]) == pytest.approx(0.0)
     assert legacy_stack("diverging") is not None
+
+
+def test_shrinking_ticks_goes_through_the_axis_not_the_artists():
+    """A Tick's label is not a persistent artist: matplotlib keeps a
+    pool and creates more from the axis's *stored* tick parameters when
+    a view needs more ticks than the pool holds. Writing a size onto
+    the artists left that stored size at full size, so a later pan or
+    zoom brought some ticks back big while the axis labels stayed
+    small -- reported as a DOSY with tiny labels but correct ticks."""
+    fig, ax = _labelled_figure(1.4, 1.0)
+    ax.set_xlabel("delta / ppm", fontsize=16)
+    ax.set_ylabel("D", fontsize=16)
+    ax.tick_params(axis="both", which="both", labelsize=16)
+
+    result = style.fit_labels_within_figure(fig)
+    assert result["steps"] > 0, "this figure should have been too small to fit"
+
+    shrunk = ax.xaxis.label.get_fontsize()
+    assert shrunk < 16
+    # The axis itself now carries the smaller size, so any tick created
+    # later comes out at it too -- labels and ticks stay in step.
+    assert style._tick_labelsize(ax.xaxis) == pytest.approx(shrunk)
+    assert style._tick_labelsize(ax.yaxis) == pytest.approx(shrunk)
+
+
+def test_tick_and_label_sizes_stay_together_across_a_view_change():
+    fig, ax = _labelled_figure(1.4, 1.0)
+    ax.set_xlabel("delta / ppm", fontsize=16)
+    ax.set_ylabel("D", fontsize=16)
+    ax.tick_params(axis="both", which="both", labelsize=16)
+    style.fit_labels_within_figure(fig)
+
+    label_size = ax.xaxis.label.get_fontsize()
+    ax.set_xlim(0.2, 0.4)          # regenerates ticks
+    fig.canvas.draw()
+
+    drawn = {round(t.get_fontsize(), 2) for t in ax.get_xticklabels() if t.get_text()}
+    assert drawn == {round(label_size, 2)}

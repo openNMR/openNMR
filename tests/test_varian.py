@@ -276,3 +276,48 @@ def test_io_load_autodetects_varian(tmp_path):
     assert io.detect_vendor(path) == "varian"
     spectrum = io.load(path, autophase=False)
     assert spectrum.metadata.vendor == "varian"
+
+
+# ============================================================
+# peek(): procpar only, never the binary fid
+# ============================================================
+
+def test_peek_reports_shape_without_ever_reading_the_fid(tmp_path):
+    """The reason this exists: without a registered ``peek``,
+    :func:`opennmr.io.base.peek` falls back to a full ``load()`` --
+    so the Data-tab browser was reading *and processing* every
+    experiment in a folder just to label it. Proven the same way the
+    Bruker one is: with the big data file deleted, peek still works.
+    """
+    import os
+    path = _write_varian_1d(tmp_path, n=8, tn="Li7")
+    os.remove(os.path.join(path, "fid"))
+
+    assert varian.peek(path) == {
+        "vendor": "varian", "ndim": 1, "shape": (8,),
+        "nucleus": "7Li", "nucleus_indirect": None, "pseudo_2d": False,
+        # peek reports the pulse programme too; these fixtures record none.
+        "pulse_program": None,
+    }
+    # And the fallback would have needed it.
+    with pytest.raises(Exception):
+        varian.read_1d(path)
+
+
+@pytest.mark.parametrize("path", [
+    "test_data/varian_1d/Li7_8000ns_12s_june.fid",
+    "test_data/varian_2d/HLi_CP_2D_8p5kHz_june2024.fid",
+])
+def test_peek_agrees_with_a_real_load(path):
+    """``np`` counts real+imaginary points and ``ni`` is the indirect
+    increment count -- this pins that derivation against what the
+    readers actually produce, so a browser label cannot drift from the
+    spectrum it describes."""
+    import os
+    if not os.path.isdir(path):
+        pytest.skip(f"{path} not present")
+    info = varian.peek(path)
+    spectrum = io.load(path, vendor="varian")
+    assert tuple(info["shape"]) == tuple(spectrum.data.shape)
+    assert info["nucleus"] == spectrum.metadata.nucleus
+    assert info["ndim"] == spectrum.data.ndim
