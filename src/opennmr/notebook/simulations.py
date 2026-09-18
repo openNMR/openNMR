@@ -30,6 +30,7 @@ plotted directly, e.g.::
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
+from scipy.signal import fftconvolve
 
 
 # ============================================================
@@ -365,13 +366,82 @@ def gaussian_broadening(spectrum, ppm_axis, fwhm=2.0):
     return gaussian_filter1d(spectrum, sigma_pts)
 
 
+def lorentzian_broadening(spectrum, ppm_axis, fwhm=2.0):
+    """
+    Convolve `spectrum` with a Lorentzian kernel of the given FWHM (in
+    ppm). There is no closed-form recursive filter for a Lorentzian the
+    way `scipy.ndimage.gaussian_filter1d` gives one for a Gaussian, so
+    this builds an explicit kernel on the same grid as `ppm_axis` (as
+    wide as the data itself, to avoid truncating a Lorentzian's slowly-
+    decaying tails at realistic fwhm) and convolves via FFT.
+    """
+    if fwhm <= 0:
+        print("fwhm set to 0 or less; proceeding without broadening...")
+        return spectrum
+    dx = abs(ppm_axis[1] - ppm_axis[0])
+    gamma = fwhm / 2.0  # HWHM
+    n_kernel = len(ppm_axis)
+    x_kernel = (np.arange(n_kernel) - n_kernel // 2) * dx
+    kernel = gamma / (np.pi * (x_kernel ** 2 + gamma ** 2))
+    kernel = kernel / kernel.sum()
+    return fftconvolve(spectrum, kernel, mode="same")
+
+
+def pseudo_voigt_broadening(spectrum, ppm_axis, fwhm=2.0, eta=0.5):
+    """
+    Broaden `spectrum` with a pseudo-Voigt kernel of the given FWHM
+    (shared between the Gaussian and Lorentzian components -- the same
+    convention already used for closed-form peaks in
+    `nmrtools.fitting.pseudo_voigt`): ``eta * Lorentzian + (1 - eta) *
+    Gaussian``, ``eta`` in [0, 1] (0 = pure Gaussian, 1 = pure
+    Lorentzian). NOTE: this `eta` is the lineshape-mixing fraction, an
+    entirely different quantity from a CSA tensor's Haeberlen
+    asymmetry (also conventionally called eta) -- see
+    `nmrtools.csa_fitting`'s module docstring.
+    """
+    eta = float(np.clip(eta, 0.0, 1.0))
+    if eta == 0.0:
+        return gaussian_broadening(spectrum, ppm_axis, fwhm=fwhm)
+    if eta == 1.0:
+        return lorentzian_broadening(spectrum, ppm_axis, fwhm=fwhm)
+    return (eta * lorentzian_broadening(spectrum, ppm_axis, fwhm=fwhm)
+            + (1.0 - eta) * gaussian_broadening(spectrum, ppm_axis, fwhm=fwhm))
+
+
+def _apply_broadening(spectrum, ppm_axis, fwhm=2.0, lineshape="gaussian", eta=0.0):
+    """Dispatch to gaussian_broadening / lorentzian_broadening /
+    pseudo_voigt_broadening by name -- shared by
+    `make_static_csa_spectrum` and `finite_mas_csa_spectrum`."""
+    key = str(lineshape).lower().replace("-", "_")
+    if key == "gaussian":
+        return gaussian_broadening(spectrum, ppm_axis, fwhm=fwhm)
+    if key == "lorentzian":
+        return lorentzian_broadening(spectrum, ppm_axis, fwhm=fwhm)
+    if key in ("pseudo_voigt", "pv"):
+        return pseudo_voigt_broadening(spectrum, ppm_axis, fwhm=fwhm, eta=eta)
+    raise ValueError(
+        f"Unknown lineshape {lineshape!r}; use 'gaussian', 'lorentzian', "
+        f"or 'pseudo_voigt'."
+    )
+
+
 def make_static_csa_spectrum(csa, ppm_axis, fwhm=2.0, n_theta=1500, n_phi=3000,
                               use_octant_symmetry=True, powder_scheme='rectangular',
-                              n_zcw=None):
+                              n_zcw=None, lineshape="gaussian", eta=0.0):
+    """
+    lineshape : {'gaussian', 'lorentzian', 'pseudo_voigt'}, optional
+        Broadening kernel convolved onto the simulated powder pattern.
+        Default 'gaussian' (unchanged behaviour). 'pseudo_voigt' uses
+        `eta` as the Gaussian/Lorentzian mixing fraction -- see
+        `pseudo_voigt_broadening`.
+    eta : float, optional
+        Only used when ``lineshape='pseudo_voigt'``.
+    """
     spec_before_broad = static_csa(csa, ppm_axis, n_theta=n_theta, n_phi=n_phi,
                                     use_octant_symmetry=use_octant_symmetry,
                                     powder_scheme=powder_scheme, n_zcw=n_zcw)
-    spec_after_broad = gaussian_broadening(spec_before_broad, ppm_axis, fwhm=fwhm)
+    spec_after_broad = _apply_broadening(spec_before_broad, ppm_axis, fwhm=fwhm,
+                                          lineshape=lineshape, eta=eta)
     maximum = np.max(spec_after_broad)
     normalised = spec_after_broad / maximum if maximum > 0 else spec_after_broad
     return {
@@ -387,8 +457,12 @@ def finite_mas_csa_spectrum(csa, ppm_axis, larmor_Hz, mas_Hz,
                              rotor_angle='magic', n_theta=60, n_phi=120,
                              n_time=4096, n_sidebands=30, fwhm=2.0,
                              subtract_residual_mean=True, orientation_chunk_size=None,
-                             powder_scheme='rectangular', n_zcw=None):
+                             powder_scheme='rectangular', n_zcw=None,
+                             lineshape="gaussian", eta=0.0):
     """
+    lineshape, eta : see `make_static_csa_spectrum` -- same broadening
+        options, applied to the simulated sideband pattern below.
+
     NOTE ON GRID SIZE: each crystallite orientation needs its own
     length-n_time trajectory/FFT, so this cannot use the same
     rectangular-grid point counts as the static CSA case (the original
