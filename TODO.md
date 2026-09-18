@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-18)
 
-**2132 tests passing, none failing** (full suite, 8m45s). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
+**2151 tests passing, none failing** (full suite, 8m46s). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -45,66 +45,51 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
 
-## Planned, not built: CSA and quadrupolar lineshape fitting in the GUI (2026-09-19)
+## CSA lineshape fitting in the GUI, and Euan's simple requests (2026-09-19)
 
-User: *"There should be some new files added by Euan to the notebook, maybe as a pull request. Have a look over these and plan out the integration of any new functionality like the CSA and other fitting scripts there should be."*
+**Supersedes the plan written earlier the same day**, which was drafted without knowing PR #1 existed. That plan proposed building multi-model fitting support and per-parameter bounds from scratch; Euan has already written both, so stages 1-3 of it are moot. What follows replaces it.
 
-### First, what is *not* the gap
+### What arrived, and what it changes
 
-`nmrtools2` has four commits since this checkout was taken (2026-09-02), and **all four are already in `opennmr/notebook/`**: the `xlims='default'` union across spectra in `NMR1dplot`, the `setup_plotting` font/mathtext fix, and `x_offsets`/`y_offsets` on `NMR2D_overlay_plot`. Nothing to port. (The *local* `nmrtools2` checkout is 4 commits behind its own origin, and its tutorial notebook has uncommitted edits -- housekeeping in that repo, not here.)
+PR #1's `src/opennmr/notebook/` is now on main (commit "Take Euan's notebook package from PR #1, without its reverts" -- the PR itself must **not** be merged, see that commit message). For CSA specifically:
 
-**The gap is that `notebook/csa_fitting.py` (773 lines) and `notebook/simulations.py` (888 lines) exist only in openNMR and are wired into nothing.** `grep` for either across `src/opennmr/gui/` returns nothing. They are a complete, working notebook workflow that the application cannot reach.
+* `csa_fitting.fit_csa_spectrum` is a complete **multi-site** fitter: labels, per-site bounds, per-site fixed matrices, a robust fixed baseline, bound-hit detection, a report and a plotting routine. Parameter layout is five per site -- `d_iso, span_or_Delta, skew_or_eta, fwhm, A` -- followed by `b0, b1`.
+* `simulations` gains **ZCW powder averaging**. This is what makes the whole thing practical: a ZCW grid reaches a given accuracy from far fewer orientations than a rectangular theta/phi one, and the powder loop is what dominates the cost of every fit iteration.
 
-### The architectural crux
+### The architecture decision: a dedicated path, not a refactor
 
-The GUI's spectral fitting (`processing/fitting.py`) sums **closed-form, pointwise** models -- Gaussian, Lorentzian, pseudo-Voigt -- evaluated at whatever x-points the region mask selects. A CSA powder lineshape is not that: it is a powder average histogrammed onto a uniform ppm axis, so **every fit iteration has to simulate the whole spectrum and then select the region**, which is exactly what `csa_fitting.csa_model_full` already does. The pattern exists; it has never been taught to the multi-peak machinery.
+The earlier plan's stage 2 was to teach `processing/fitting.py` about simulated models so a CSA line could sit in the peak table beside Gaussians. **Rejected.** The peak table is pseudo-Voigt-shaped -- shift, FWHM, eta -- and a CSA site is delta_iso, span/Delta, skew/eta, FWHM plus a convention; forcing them into one table distorts both, and `fit_csa_spectrum` already *is* the fitter, with its own parameter layout and bounds machinery.
 
-Cost follows the powder-average loop (`n_theta * n_phi`, times `n_time` for finite MAS), not the ppm grid -- so coarse while fitting, refined for the final render, and those have to be controls rather than constants.
+Instead CSA gets its own path, exactly the shape DOSY, SCORE and eNMR already have in this GUI: a dialog, an Analysis action, its own results label, and a view on the shared Fit canvas. That is the house pattern, and it reuses Euan's code whole rather than reimplementing it -- the standing rule.
 
-### Staged plan
+### Work items
 
-1. **Move the physics under `processing/`.** `simulations.py` and `csa_fitting.py` are openNMR's own, not part of Euan's vendored mirror, and the GUI should not import from `notebook/`. Proposal: `processing/lineshapes.py` holds them, and `notebook/simulations.py`/`notebook/csa_fitting.py` become thin re-export shims so the notebook API is unchanged. Keeps `notebook/` a faithful mirror of `bignmrtools` plus shims, which is what makes future syncs with Euan cheap.
+1. ~~**A bridge from `NMRSpectrum` to the notebook's results dict.**~~ **Built.** `notebook/bridge.py`, `results_from_spectrum(spectrum, row=None)`. Every notebook entry point -- `fit_csa_spectrum`, and later pNMR, BMS and SIMPSON -- takes the ten-key dict `NMR1dimport` returns (`x_ppm`, `real_spectrum`, `normalised_real_spectrum`, `SFO1`, `nuclide`, ...), and nothing in `src/` outside `notebook/` produces one. This is the seam between the live application and the notebook API, so it belongs in its own module rather than buried in a GUI handler: `notebook/bridge.py`, `results_from_spectrum(spectrum)`.
 
-2. **Teach the fit engine simulated models.** Add a peak `type` whose evaluation runs the simulator on the full sorted ppm axis and indexes the mask, alongside the existing closed-form types -- so a CSA line can sit in the same fit as Gaussian/Lorentzian lines. That combination is the normal case, not an exotic one: the DMFit reference fits already in `test_data` are things like *6 lines, 1 CSA, 2 Quad1st, 3 GaussLor*.
+2. ~~**Read the MAS rate.**~~ **Built, and it needed no new plumbing at all** -- Bruker writes `MASR` into `acqus` and the reader already carries that to `metadata.raw`, so the control just needed somewhere to read it. Seeded on selection, never forced: a rate recorded at setup and not used is common. Original note follows. The finite-MAS model needs it and **nothing outside `notebook/` reads `MASR`** -- `acquisition_constants` does not expose it, and `io/bruker.py` never parses it. Read it per vendor into metadata, and default the dialog's control from it.
 
-3. **GUI surface.** "CSA (static)" and "CSA (MAS)" peak types; parameter rows for δ_iso, span/Δ, skew/η, FWHM; a Haeberlen <-> Herzfeld-Berger toggle (`csa_definition` already handles both conventions). Three things fall out nearly free because the notebook module already has them: `build_csa_bounds` gives **user-supplied min/max**, which is one of Euan's own written requests (`notes_from_Euan.txt`); `check_csa_bound_hits` gives a **bound-hit warning** in the fit report, matching how the uncertainty kind is already reported; `print_csa_fit_report` gives the report text.
-   **Blocker to resolve first:** the MAS model needs the spinning rate, and **nothing in `src/` outside `notebook/` reads `MASR`** -- `acquisition_constants` does not expose it. Either read it per vendor or make it a control with the recorded value as default.
+3. ~~**The CSA fit dialog.**~~ **Built as a sub-tab, not a dialog** -- Analysis > CSA, beside Curve Fitting/eNMR/VOCS/Imaging, which is where the other analyses live. Sites table, convention, static/finite-MAS, powder scheme and *two* orientation counts. A sites table (label, delta_iso, span/Delta, skew/eta, FWHM, fixed), a Haeberlen <-> Herzfeld-Berger toggle, static vs finite-MAS with the rate, and the powder controls. Powder resolution matters enough to be visible rather than hidden: coarse while fitting, refined for the final render, which is what `csa_fitting`'s own docstring advises.
 
-4. **Validate against DMFit, not against a fixture.** `test_data/2p5mm_.../2012/pdata/1/` already holds real DMFit fits of the ²³Na/¹¹³Cd Na₂CdFeCN₆ data, including `FIT_6lines_1CSA_2Quad1st_3GaussLor_Best_Yet_20260506`. Port the `dmfit` reader from `leonmr.py:373` (already on the survey backlog as "not covered by any current opennmr reader"), read the `.asc`, and pin openNMR's CSA fit against DMFit's own parameters on real data.
-   **This is the MNova lesson, applied before the fact.** The X-Pulse F1 encoding took four attempts because a self-built fixture agreed with a wrong reader; it was settled in one pass by an external reference. A CSA fit has exactly the same shape of risk -- a powder lineshape that looks plausible and is wrong -- and the reference is already sitting in the repo.
+4. ~~**Handler, render, report.**~~ **Built.** The curve draws through the existing `show_slice_fit` rather than a CSA-specific twin of it -- it already draws "measured plus fitted, optionally with per-component shading", and a CSA fit is exactly that with one component per site. The report is Euan's own `print_csa_fit_report`, captured from stdout rather than reimplemented. Run the fit, keep the result beside the other analysis results, draw it on the Fit canvas through the existing "Showing:" switcher, and print `print_csa_fit_report` into a `csa_results_label` of its own -- per-sub-tab labels being the convention since the reports moved out of `analysis_results_label`.
 
-5. **Quadrupolar fitting, deferred and scoped.** `simulations.py` already simulates static quadrupolar lineshapes three ways (first-order, exact, and decomposed into central/satellite and first/second order) plus a MAS quadrupolar FID, but only `static_quadrupolar_spectrum_exact` is exported and **there is no quadrupolar fitting module at all** -- `csa_fitting.py` has no counterpart. Most of the DMFit reference fits are quadrupolar, so this is the larger prize, and it should follow CSA rather than lead it: CSA proves the simulated-model path through the fit engine on the simpler interaction.
+5. **Validate against DMFit, not a fixture.** `test_data/2p5mm_.../2012/pdata/1/` holds real DMFit fits of the 23Na/113Cd data, including `FIT_6lines_1CSA_2Quad1st_3GaussLor_Best_Yet_20260506`. The `dmfit` reader exists in `leonmr.py:373` and is on the survey backlog. **This is the X-Pulse F1 lesson applied before the fact**: a self-built fixture agreed with a wrong reader for four rounds there, and an external reference settled it in one pass. A powder lineshape that looks plausible and is wrong is the same trap.
 
-### Decisions needed before any of this starts
+### Found while building it
 
-* Is **CSA fitting in the GUI** actually the goal, or is the notebook workflow sufficient and the real target quadrupolar fitting (stage 5)?
-* Does the physics move to `processing/` with notebook shims (stage 1), or stay put with the GUI importing from `notebook/`?
-* Where does this sit against the other open items -- F1 phasing and linear prediction to close the remaining MNova gap, and the load-speed work?
+* **A clipped powder pattern fits back with a badly shrunken span, and nothing else says so.** Measured directly: the same tensor fitted over a window that cuts its high-frequency shoulder returns Δ = 126 ppm against a true 200, because the residual *inside* the window stays small. The fitted span is the number people take away from a CSA fit, so the CSA tab now warns when the fitted lineshape still has more than 5% of its height at the edge of the fitted range. There is a test for it.
+* **Euan's fitter is exact.** `csa_model_full` reproduces `make_static_csa_spectrum` to 0.0 difference, and a fit started away from the answer recovers a known tensor exactly (δiso 100.0, Δ 200.0, η 0.30 from a start of 85/170/0.45). An earlier apparent failure was the clipping above, in the test's own window -- not the code.
+* **FWHM absorbs the powder grid's graininess.** Fitting on a coarse grid inflates the fitted linewidth (10.7 ppm against a true 5.0 at 800 orientations) while leaving the tensor parameters exact. That is the trade the two orientation counts exist to manage, and it is why the tests assert the tensor tightly and the linewidth not at all.
 
+### Deferred: quadrupolar fitting
 
-## Pivot line, contour settings that would not stay put, and contour spacing in Plot Style (2026-09-18, nineteenth round)
+`simulations` models static quadrupolar lineshapes three ways plus a MAS FID, but there is still **no quadrupolar fitting module** -- `csa_fitting.py` has no counterpart, and Euan's PR did not add one. Most of the DMFit reference fits are quadrupolar, so this is the larger prize; it should follow CSA, which proves the path on the simpler interaction.
 
-User, once F1 was finally right: *"The pivot line and some things are still off for processing F1, the contour levels and view shouldn't reset when processing whether the view is processing or spectrum. The plot style for a 2D contour should include number of contours and the power scaling (didn't we already do this one??)."*
+### Euan's written requests: the two simple ones
 
-### The F1 pivot line -- a regression from the round before
+From `notes_from_Euan.txt`. The rest of that list is mostly addressed already; these two are not, and both are small.
 
-The single-panel F1 processing preview always ended with `canvas.set_pivot_marker(...)`. The dual-panel branch added when F1 gained its interferogram returns early, and returned without one -- so the Phase 1 pivot vanished from the F1 view the moment that panel appeared. It also hardcoded `preserve_view=False` while the caller had a `preserve_view` argument to pass; both fixed, and the argument is now plumbed through.
-
-### Contour settings reset on every reprocess
-
-`MplCanvas.show_spectrum` reset `_contour_factor`, `_contour_clevels`, `_contour_level_mode` and `_contour_power` to their defaults for **any** 2D it was handed. A live reprocess writes into the same `NMRSpectrum` object and redraws it, so every settle threw the user's noise floor and level spacing away -- while `_redraw_2d_preserving_view`, three lines further out, was carefully preserving the zoom.
-
-Reset now happens only for a *different* spectrum, tested by object identity: a reprocess mutates in place, a selection change hands over a new object. The zoom was already preserved on both debounced 2D paths, so with this the whole of "shouldn't reset when processing" holds on the Spectrum tab, and the Processing tab honours `preserve_view` for F1 as well as F2.
-
-### "Didn't we already do this one??" -- half of it
-
-The **count** was already in Plot Style, and has been since it was asked for. The **spacing** was not: Power/Linear and the power exponent lived only behind the right-click "Set Contour Levels..." dialog. That split one decision across two places, and it is the spacing that decides whether a weak peak beside a strong one is visible at all -- the count alone decides nothing about it.
-
-`set_style` now takes `contour_level_mode` and `contour_power` alongside `contour_clevels`, `style_settings` reports them back so reopening the dialog reads the live canvas, and the exponent greys out under Linear where it means nothing. Same values the right-click dialog sets, so the two cannot disagree.
-
-### Tests
-
-`tests/test_gui.py` +4: contour settings surviving a redraw of the same spectrum and resetting for a different one, the Plot Style scaling/exponent round-tripping through the canvas and back, and the F1 preview drawing its pivot line.
+* **Signal-to-noise threshold for peak picking.** Currently the only sensitivity control is Min. prominence (`auto_pick_prominence_spin`). His point is that prominence alone fails exactly where it matters: *"prominence can become v small when you have strong and weak peaks (e.g., decomposition products in the baseline of electrolytic solutions)"* -- a percentage-of-maximum threshold cannot express "above the noise" when one peak dwarfs the rest. Plan: an optional **Min. S/N** spin beside prominence, with the noise estimated the way the baseline fitter already estimates it (`estimate_baseline_robust`'s sigma-clipped residual), so the two agree about what "noise" means. Both filters apply, so it narrows rather than replaces.
+* **Mass in mg by default.** Mass is stored in **grams** (`NMRMetadata.mass`, documented as g) and `_refresh_selection_display` already renders it as mg (`meta.mass * 1000.0`), so only the *input* is left in grams. Plan: the mass field takes mg and divides by 1000 on the way in, so the unit reads the same in both directions. Small, but it is a units bug waiting to happen -- someone types 50 meaning 50 mg and gets 50 g, and mass-normalised comparison then scales that spectrum by a factor of 1000.
 
 ## The indirect dimension: axis direction, and a window it never had (2026-09-18, eighteenth round)
 

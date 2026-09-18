@@ -7169,7 +7169,7 @@ def test_main_window_peak_picking_and_integration_are_separate_subtabs(qapp):
     # test_main_window_spectral_fitting_is_its_own_top_level_tab. They
     # are still two separate sub-tabs, which is what this test is
     # actually about; only their parent changed.
-    assert labels == ["Curve Fitting", "eNMR", "VOCS", "Imaging"]
+    assert labels == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]
     spectral = [window.spectral_fitting_sub_tabs.tabText(i)
                 for i in range(window.spectral_fitting_sub_tabs.count())]
     assert spectral == ["Peak Picking", "Integration"]
@@ -10927,7 +10927,7 @@ def test_main_window_spectral_fitting_is_its_own_top_level_tab(qapp):
     assert spectral == ["Peak Picking", "Integration"]
     analysis = [window.analysis_sub_tabs.tabText(i)
                 for i in range(window.analysis_sub_tabs.count())]
-    assert analysis == ["Curve Fitting", "eNMR", "VOCS", "Imaging"]
+    assert analysis == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]
 
 
 def test_main_window_curve_fit_names_what_it_will_fit(qapp, tmp_path):
@@ -14772,3 +14772,129 @@ def test_the_f1_processing_preview_draws_the_pivot_line(qapp, tmp_path, monkeypa
     canvas = window.processing_preview_canvas
     assert canvas._processing_preview_fid_ax is not None     # the dual panel is up
     assert canvas._pivot_line is not None, "no pivot line on the F1 preview"
+
+
+def _csa_spectrum(d_iso=100.0, aniso=200.0, asym=0.3, fwhm=5.0, lo=-200.0, hi=500.0, n=512):
+    """A synthetic CSA powder pattern as an NMRSpectrum, ppm descending."""
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    from opennmr.notebook.simulations import csa_definition, make_static_csa_spectrum
+
+    ascending = np.linspace(lo, hi, n)
+    simulated = make_static_csa_spectrum(csa_definition(d_iso, aniso, asym),
+                                         ascending, fwhm=fwhm, n_theta=120, n_phi=240)
+    ppm = ascending[::-1]
+    return NMRSpectrum(
+        data=simulated["real_spec"][::-1],
+        axes=[NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 100.0)],
+        metadata=NMRMetadata(vendor="test", nucleus="13C", sfo1=100.0),
+    )
+
+
+def _window_with_csa(spectrum):
+    window = MainWindow()
+    window.session.add_derived(spectrum, "csa")
+    window.spectrum_list.addItem("csa")
+    window.spectrum_list.setCurrentRow(0)
+    window.csa_orientations_spin.setValue(800)
+    window.csa_render_orientations_spin.setValue(2000)
+    return window
+
+
+def test_the_csa_fit_recovers_a_known_powder_lineshape(qapp):
+    """The CSA sub-tab, end to end: table -> bridge -> Euan's
+    multi-site fitter -> curve on the Fit canvas -> report.
+
+    FWHM is deliberately not asserted tightly: the fit runs on a
+    coarse powder grid on purpose (the loop is what every Jacobian
+    evaluation costs), so it absorbs the grid's graininess as extra
+    broadening. The tensor parameters are what a CSA fit is for."""
+    window = _window_with_csa(_csa_spectrum())
+    window._add_csa_site(("A", "85", "170", "0.45", "7"))
+    window._on_csa_fit_clicked()
+
+    result = window._csa_fit_result
+    assert result is not None
+    assert result["popt"][0] == pytest.approx(100.0, abs=3.0)   # d_iso
+    assert result["popt"][1] == pytest.approx(200.0, abs=8.0)   # Delta
+    assert result["popt"][2] == pytest.approx(0.30, abs=0.08)   # eta
+    assert window.canvas_tabs.currentWidget() is window.fit_canvas
+    assert "CSA FIT REPORT" in window.csa_results_label.text().upper()
+
+
+def test_a_clipped_powder_pattern_is_warned_about(qapp):
+    """**Measured, not hypothetical.** A powder pattern that runs off
+    the edge of the fitted range fits back with a badly shrunken span
+    -- 126 ppm against a true 200 -- and nothing else says so, because
+    the residual *inside* the window stays small. The fitted span is
+    the number people take away from a CSA fit."""
+    # Same tensor, but a window that cuts the high-frequency shoulder.
+    window = _window_with_csa(_csa_spectrum(lo=-100.0, hi=300.0))
+    window._add_csa_site(("A", "85", "170", "0.45", "7"))
+    window._on_csa_fit_clicked()
+
+    assert window._csa_fit_result is not None
+    assert "clipped" in window.csa_results_label.text().lower()
+
+
+def test_the_csa_site_table_reports_bad_input_by_row(qapp):
+    window = _window_with_csa(_csa_spectrum())
+    with pytest.raises(ValueError, match="at least one CSA site"):
+        window._read_csa_sites()
+
+    window._add_csa_site(("A", "not a number", "170", "0.45", "7"))
+    with pytest.raises(ValueError, match="Site row 1"):
+        window._read_csa_sites()
+
+
+def test_the_csa_site_table_defaults_its_label(qapp):
+    window = _window_with_csa(_csa_spectrum())
+    window._add_csa_site(("", "0", "100", "0", "5"))
+    assert window._read_csa_sites()[0]["label"] == "Site 1"
+
+
+def test_the_mas_rate_is_seeded_from_the_file(qapp, tmp_path, monkeypatch):
+    """Bruker records the spinning rate as MASR in acqus and the
+    reader already carries it to metadata.raw, so the finite-MAS
+    control needs somewhere to read it rather than new plumbing.
+    Seeded, never forced -- a rate recorded at setup and not used is
+    common enough that the box stays editable."""
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw.setdefault("acqus", {})["MASR"] = 25000
+
+    window.csa_mas_spin.setValue(0.0)
+    window._refresh_csa_controls(spectrum)
+    assert window.csa_mas_spin.value() == pytest.approx(25000.0)
+
+    # Already set by hand: left alone.
+    window.csa_mas_spin.setValue(12000.0)
+    window._refresh_csa_controls(spectrum)
+    assert window.csa_mas_spin.value() == pytest.approx(12000.0)
+
+
+def test_the_finite_mas_lineshape_refuses_a_zero_rate(qapp, monkeypatch):
+    """Better than simulating a nonsense sideband pattern at 0 Hz."""
+    from PySide6.QtWidgets import QMessageBox
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+    window = _window_with_csa(_csa_spectrum())
+    window._add_csa_site(("A", "85", "170", "0.45", "7"))
+    window.csa_static_combo.setCurrentIndex(
+        window.csa_static_combo.findData(False))
+    window.csa_mas_spin.setValue(0.0)
+    window._on_csa_fit_clicked()
+
+    assert warned, "no warning for a finite-MAS fit with no spinning rate"
+    assert "spinning rate" in warned[-1][2]
+
+
+def test_the_powder_grid_is_expressed_the_way_each_scheme_wants(qapp):
+    """ZCW takes one orientation count; the rectangular grid takes a
+    theta/phi pair, split in the 1:2 ratio the simulator's own
+    defaults use."""
+    assert MainWindow._csa_grid_kwargs("zcw", 5000) == {"n_zcw": 5000}
+    rectangular = MainWindow._csa_grid_kwargs("rectangular", 5000)
+    assert rectangular["n_phi"] == 2 * rectangular["n_theta"]
+    assert rectangular["n_theta"] * rectangular["n_phi"] == pytest.approx(5000, rel=0.1)

@@ -10,6 +10,7 @@ updates the canvas live.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import dataclasses
 import json
@@ -43,6 +44,11 @@ def _is_dark_colour(colour) -> bool:
 
 from .. import io
 from .. import plotting
+# The notebook package's CSA fitter, reached through its own bridge --
+# see opennmr.notebook.bridge for why a conversion rather than a
+# re-read from disk.
+from ..notebook import bridge as notebook_bridge
+from ..notebook import csa_fitting as notebook_csa
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRSpectrum
 from ..io import bruker as io_bruker
@@ -382,6 +388,10 @@ class MainWindow(QMainWindow):
         # The last SCORE resolution (processing.score.score's own
         # output) -- component spectra plus their decay constants.
         self._score_result: dict | None = None
+        # The last CSA lineshape fit (see _on_csa_fit_clicked), kept
+        # so its curve and report survive a tab switch the way every
+        # other analysis result does.
+        self._csa_fit_result: dict | None = None
         # The legend box's fill colour, or None for matplotlib's own.
         # On the window rather than read back off a canvas: it is only
         # meaningful alongside the frame checkbox beside it, and the
@@ -8908,9 +8918,215 @@ class MainWindow(QMainWindow):
         self.analysis_sub_tabs.addTab(self._build_enmr_subtab(), "eNMR")
         self.analysis_sub_tabs.addTab(self._build_vocs_subtab(), "VOCS")
         self.analysis_sub_tabs.addTab(self._build_imaging_subtab(), "Imaging")
+        self.analysis_sub_tabs.addTab(self._build_csa_subtab(), "CSA")
         layout.addWidget(self.analysis_sub_tabs)
 
         return tab
+
+    #: Columns of the CSA sites table.
+    _CSA_COLUMNS = ("Label", "δiso / ppm", "Span or Δ / ppm", "Skew or η", "FWHM / ppm")
+
+    def _build_csa_subtab(self) -> QWidget:
+        """Fit a static or finite-MAS CSA powder lineshape to the
+        selected 1D spectrum.
+
+        **A dedicated path, not a row in the peak table.** The peak
+        table is pseudo-Voigt-shaped -- shift, FWHM, eta -- and a CSA
+        site is δiso, span/Δ, skew/η plus a convention; putting them
+        in one table distorts both. More to the point,
+        :func:`opennmr.notebook.csa_fitting.fit_csa_spectrum` already
+        *is* the fitter, with its own five-parameters-per-site layout,
+        bounds, fixed-parameter matrices, bound-hit detection and
+        report. This wraps it the way DOSY, SCORE and eNMR are
+        wrapped: controls, an action, its own results label, and a
+        view on the shared Fit canvas.
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        blurb = QLabel(
+            "Fit a chemical-shift-anisotropy powder lineshape to the selected "
+            "1D spectrum (or the displayed slice of a 2D). Add one row per "
+            "site; every site is simulated independently and summed."
+        )
+        blurb.setWordWrap(True)
+        layout.addWidget(blurb)
+
+        self.csa_sites_table = QTableWidget(0, len(self._CSA_COLUMNS))
+        self.csa_sites_table.setHorizontalHeaderLabels(list(self._CSA_COLUMNS))
+        self.csa_sites_table.horizontalHeader().setStretchLastSection(True)
+        self.csa_sites_table.setToolTip(
+            "Starting values, one row per site. δiso is the isotropic shift; "
+            "the second and third columns are read as span/skew or Δ/η "
+            "depending on the convention below."
+        )
+        layout.addWidget(self.csa_sites_table)
+
+        row_buttons = QHBoxLayout()
+        add_site = QPushButton("Add site")
+        add_site.clicked.connect(lambda: self._add_csa_site())
+        remove_site = QPushButton("Remove site")
+        remove_site.clicked.connect(self._remove_csa_site)
+        row_buttons.addWidget(add_site)
+        row_buttons.addWidget(remove_site)
+        row_buttons.addStretch(1)
+        layout.addLayout(row_buttons)
+
+        form = QFormLayout()
+
+        self.csa_convention_combo = QComboBox()
+        self.csa_convention_combo.addItem("Haeberlen (Δ, η)", "Haeberlen")
+        self.csa_convention_combo.addItem("Herzfeld-Berger (span, skew)", "Herzfeld-Berger")
+        self.csa_convention_combo.setToolTip(
+            "Which pair of anisotropy parameters the table's two middle "
+            "columns mean. Both describe the same tensor; the fitted values "
+            "and the report follow whichever is chosen here."
+        )
+        form.addRow("Convention:", self.csa_convention_combo)
+
+        self.csa_static_combo = QComboBox()
+        self.csa_static_combo.addItem("Static powder", True)
+        self.csa_static_combo.addItem("Finite MAS (sidebands)", False)
+        self.csa_static_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_csa_controls())
+        form.addRow("Lineshape:", self.csa_static_combo)
+
+        self.csa_mas_spin = QDoubleSpinBox()
+        self.csa_mas_spin.setRange(0.0, 200000.0)
+        self.csa_mas_spin.setDecimals(0)
+        self.csa_mas_spin.setSuffix(" Hz")
+        self.csa_mas_spin.setToolTip(
+            "Sample spinning rate, for the finite-MAS lineshape. Read from "
+            "the file where the vendor records it, and editable where it is "
+            "wrong or absent."
+        )
+        form.addRow("MAS rate:", self.csa_mas_spin)
+
+        self.csa_powder_combo = QComboBox()
+        self.csa_powder_combo.addItem("ZCW", "zcw")
+        self.csa_powder_combo.addItem("Rectangular (θ/φ)", "rectangular")
+        self.csa_powder_combo.setToolTip(
+            "How crystallite orientations are sampled for the powder "
+            "average.\n\n"
+            "ZCW reaches a given accuracy from far fewer orientations, which "
+            "matters because this loop — not the number of ppm points — is "
+            "what every fit iteration costs."
+        )
+        form.addRow("Powder averaging:", self.csa_powder_combo)
+
+        self.csa_orientations_spin = QSpinBox()
+        self.csa_orientations_spin.setRange(50, 200000)
+        self.csa_orientations_spin.setSingleStep(500)
+        self.csa_orientations_spin.setValue(2000)
+        self.csa_orientations_spin.setToolTip(
+            "Orientations in the powder average while fitting.\n\n"
+            "Keep this coarse: the fit calls the simulator once per site per "
+            "Jacobian evaluation, so cost scales with it directly. The final "
+            "render uses the refined count below."
+        )
+        form.addRow("Orientations (fitting):", self.csa_orientations_spin)
+
+        self.csa_render_orientations_spin = QSpinBox()
+        self.csa_render_orientations_spin.setRange(50, 500000)
+        self.csa_render_orientations_spin.setSingleStep(2000)
+        self.csa_render_orientations_spin.setValue(20000)
+        self.csa_render_orientations_spin.setToolTip(
+            "Orientations for the final curve, once the fit has converged. "
+            "Paid once, so it can afford to be much finer than the fitting "
+            "count."
+        )
+        form.addRow("Orientations (final):", self.csa_render_orientations_spin)
+        layout.addLayout(form)
+
+        self.csa_fit_button = QPushButton("Fit CSA Lineshape")
+        self.csa_fit_button.setToolTip(
+            "Fit every site in the table at once, against the selected "
+            "spectrum's own region selection if one is set."
+        )
+        self.csa_fit_button.clicked.connect(self._on_csa_fit_clicked)
+        layout.addWidget(self.csa_fit_button)
+
+        self.csa_results_label = QLabel("")
+        self.csa_results_label.setWordWrap(True)
+        self.csa_results_label.setFont(QFontDatabase.systemFont(
+            QFontDatabase.SystemFont.FixedFont))
+        self.csa_results_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.csa_results_label)
+        layout.addStretch(1)
+
+        self._refresh_csa_controls()
+        return tab
+
+    def _add_csa_site(self, values=None) -> None:
+        """Append a site row, seeded from ``values`` or from a plain
+        default. The default deliberately is not zero: a CSA fit
+        started from a zero span has no lineshape to work with and
+        goes nowhere, so a visible, obviously-a-placeholder set of
+        numbers is more useful than an empty row."""
+        defaults = values or ("Site %d" % (self.csa_sites_table.rowCount() + 1),
+                              "0", "100", "0", "5")
+        row = self.csa_sites_table.rowCount()
+        self.csa_sites_table.insertRow(row)
+        for column, value in enumerate(defaults):
+            self.csa_sites_table.setItem(row, column, QTableWidgetItem(str(value)))
+
+    def _remove_csa_site(self) -> None:
+        row = self.csa_sites_table.currentRow()
+        if row < 0:
+            row = self.csa_sites_table.rowCount() - 1
+        if row >= 0:
+            self.csa_sites_table.removeRow(row)
+
+    def _refresh_csa_controls(self, spectrum=None) -> None:
+        """The MAS rate only means anything for the finite-MAS
+        lineshape, and where the file records one it is the right
+        default.
+
+        **Bruker writes it as ``MASR`` in ``acqus``** and the reader
+        already carries that through to ``metadata.raw``, so this
+        needs no new plumbing -- just somewhere to read it. Only
+        seeded, never forced: a rate recorded at setup and not
+        actually used is common enough that the box has to stay
+        editable."""
+        is_static = bool(self.csa_static_combo.currentData())
+        self.csa_mas_spin.setEnabled(not is_static)
+        if spectrum is None or self.csa_mas_spin.value():
+            return
+        try:
+            recorded = float(spectrum.metadata.raw.get("acqus", {}).get("MASR", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if recorded > 0:
+            self.csa_mas_spin.setValue(recorded)
+
+    def _read_csa_sites(self) -> list[dict]:
+        """The table as ``fit_csa_spectrum``'s own ``p0`` -- one dict
+        per site, with the keys it requires."""
+        sites = []
+        for row in range(self.csa_sites_table.rowCount()):
+            def cell(column, name):
+                item = self.csa_sites_table.item(row, column)
+                text = item.text().strip() if item is not None else ""
+                try:
+                    return float(text)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Site row {row + 1}: {name} must be a number, got {text!r}."
+                    ) from exc
+
+            label_item = self.csa_sites_table.item(row, 0)
+            label = (label_item.text().strip() if label_item is not None else "") or f"Site {row + 1}"
+            sites.append({
+                "label": label,
+                "d_iso": cell(1, "δiso"),
+                "span_or_Delta": cell(2, "span/Δ"),
+                "skew_or_eta": cell(3, "skew/η"),
+                "fwhm": cell(4, "FWHM"),
+            })
+        if not sites:
+            raise ValueError("Add at least one CSA site before fitting.")
+        return sites
 
     def _build_peak_picking_subtab(self) -> QWidget:
         tab = QWidget()
@@ -13937,6 +14153,214 @@ class MainWindow(QMainWindow):
 
     # ---- DOSY -----------------------------------------------------
 
+    def _on_csa_fit_clicked(self) -> None:
+        """Fit the CSA sites in the table to the selected spectrum.
+
+        The spectrum is handed over through
+        :func:`opennmr.notebook.bridge.results_from_spectrum` rather
+        than re-read from disk: the notebook fitters all take the dict
+        ``NMR1dimport`` returns, and converting is the whole point of
+        that bridge.
+
+        Powder resolution is set twice on purpose -- coarse for the
+        fit, fine for the curve that gets drawn. The powder loop is
+        what every Jacobian evaluation costs, and the final render is
+        paid once.
+        """
+        index = self._selected_index()
+        if index is None:
+            QMessageBox.information(self, "CSA fit", "Select a spectrum first.")
+            return
+        spectrum = self.session.spectra[index]
+        try:
+            sites = self._read_csa_sites()
+        except ValueError as exc:
+            QMessageBox.warning(self, "CSA fit", str(exc))
+            return
+
+        row = None
+        if spectrum.ndim == 2:
+            row = max(self.slice_spin.value() - 1, 0) if spectrum.is_pseudo_2d else 0
+        try:
+            results = notebook_bridge.results_from_spectrum(spectrum, row=row)
+        except (ValueError, IndexError) as exc:
+            QMessageBox.warning(self, "CSA fit", str(exc))
+            return
+
+        static = bool(self.csa_static_combo.currentData())
+        scheme = self.csa_powder_combo.currentData()
+        fitting_n = self.csa_orientations_spin.value()
+        common = dict(convention=self.csa_convention_combo.currentData(),
+                      static=static, powder_scheme=scheme)
+        if not static:
+            mas = self.csa_mas_spin.value()
+            if mas <= 0:
+                QMessageBox.warning(
+                    self, "CSA fit",
+                    "The finite-MAS lineshape needs a spinning rate. Set MAS "
+                    "rate, or switch to the static powder lineshape.")
+                return
+            common["mas_Hz"] = mas
+
+        fit_regions = self._csa_fit_regions()
+        self.statusBar().showMessage("Fitting CSA lineshape…")
+        try:
+            popt, pcov, is_free, scale, info = notebook_csa.fit_csa_spectrum(
+                results, sites, fit_regions=fit_regions,
+                **self._csa_grid_kwargs(scheme, fitting_n), **common)
+        except Exception as exc:  # noqa: BLE001 -- a fit that will not converge
+            # is a normal outcome here, not a bug to crash on.
+            self.statusBar().clearMessage()
+            QMessageBox.warning(self, "CSA fit", f"The CSA fit did not succeed:\n\n{exc}")
+            return
+        self.statusBar().clearMessage()
+
+        # Re-simulate the drawn curve at the finer grid. Rebuilding
+        # `sim_kwargs` rather than reusing the fit's own is what makes
+        # "coarse to fit, fine to show" actually happen.
+        info = dict(info)
+        info["sim_kwargs"] = {
+            **info["sim_kwargs"],
+            **self._csa_grid_kwargs(scheme, self.csa_render_orientations_spin.value()),
+        }
+        x_sorted = np.sort(results["x_ppm"])
+        fitted = notebook_csa.evaluate_csa_fit(x_sorted, popt, info)
+        # Per-site curves as well as the total, when there is more
+        # than one site -- the same "judge it peak by peak, not only
+        # as a summed curve" the slice-fit view already offers.
+        components = None
+        if info["n_sites"] > 1:
+            try:
+                components = list(notebook_csa.evaluate_csa_fit(
+                    x_sorted, popt, info, return_components=True)[1])
+            except Exception:  # noqa: BLE001 -- the total curve is the point
+                components = None
+
+        self._csa_fit_result = {
+            "popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
+            "x": x_sorted, "y_fit": fitted, "components": components, "results": results,
+            "convention": common["convention"], "spectrum_index": index,
+        }
+        self._draw_csa_fit()
+        self._report_csa_fit()
+
+    @staticmethod
+    def _csa_grid_kwargs(scheme: str, orientations: int) -> dict:
+        """Powder-grid size expressed the way each scheme wants it.
+
+        ZCW takes a single orientation count; the rectangular grid
+        takes a θ/φ pair, so the count is split into roughly the 1:2
+        ratio the simulator's own defaults use (θ over a hemisphere,
+        φ over a full turn)."""
+        if scheme == "zcw":
+            return {"n_zcw": int(orientations)}
+        n_theta = max(int(round((orientations / 2.0) ** 0.5)), 8)
+        return {"n_theta": n_theta, "n_phi": 2 * n_theta}
+
+    def _csa_fit_regions(self):
+        """The selected region, as ``fit_csa_spectrum`` wants it, or
+        ``None`` for the whole spectrum.
+
+        Worth setting: a CSA powder pattern that runs off the edge of
+        the fitted region is silently compensated for by shrinking the
+        span -- measured directly, a pattern clipped at its shoulder
+        fitted back as Δ = 126 ppm against a true 200 ppm. See
+        :meth:`_report_csa_fit`, which warns when the fitted pattern
+        reaches the edge."""
+        regions = []
+        for row in range(self.region_table.rowCount()):
+            try:
+                lo = float(self.region_table.item(row, 0).text())
+                hi = float(self.region_table.item(row, 1).text())
+            except (AttributeError, ValueError):
+                continue
+            regions.append((min(lo, hi), max(lo, hi)))
+        return regions or None
+
+    def _draw_csa_fit(self) -> None:
+        """Data and fitted lineshape on the Fit canvas."""
+        result = self._csa_fit_result
+        if not result:
+            return
+        results = result["results"]
+        order = np.argsort(results["x_ppm"])
+        # show_slice_fit, not a CSA-specific twin of it: it already
+        # draws "measured spectrum plus fitted curve, optionally with
+        # per-component shading" and a CSA fit is exactly that, with
+        # one component per site.
+        components = result.get("components")
+        labels = result["info"]["labels"] if components else None
+        self.fit_canvas.show_slice_fit(
+            result["x"], np.asarray(results["real_spectrum"])[order], result["y_fit"],
+            components=components, peak_labels=labels,
+            title=f"CSA fit ({result['convention']})",
+        )
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _report_csa_fit(self) -> None:
+        """The fit report, plus the two warnings that matter."""
+        result = self._csa_fit_result
+        if not result:
+            return
+        info = result["info"]
+        order = np.argsort(result["results"]["x_ppm"])
+        measured = np.asarray(result["results"]["real_spectrum"])[order]
+        # `print_csa_fit_report` writes its report to stdout rather
+        # than returning it, so capture that instead of reimplementing
+        # it here -- it carries the per-site uncertainties and the fit
+        # quality, and a second implementation of a report is exactly
+        # the kind of copy that drifts.
+        buffer = StringIO()
+        try:
+            with contextlib.redirect_stdout(buffer):
+                notebook_csa.print_csa_fit_report(
+                    result["x"], measured, result["y_fit"],
+                    result["popt"], result["pcov"], result["is_free"],
+                    info["labels"], convention=result["convention"],
+                )
+            report = buffer.getvalue().strip()
+        except Exception:  # noqa: BLE001 -- a report must never sink a good fit
+            report = ""
+        if not report:
+            report = self._csa_summary(result)
+        edge = self._csa_edge_warning(result)
+        self.csa_results_label.setText(f"{edge}\n\n{report}" if edge else report)
+
+    def _csa_summary(self, result) -> str:
+        """A compact per-site summary, used when the notebook's own
+        report writes to stdout rather than returning text."""
+        labels = result["info"]["labels"]
+        popt, convention = result["popt"], result["convention"]
+        second, third = (("Δ", "η") if convention == "Haeberlen" else ("span", "skew"))
+        lines = [f"CSA fit ({convention})"]
+        for site, label in enumerate(labels):
+            d_iso, aniso, asym, fwhm, amplitude = popt[site * 5: site * 5 + 5]
+            lines.append(
+                f"  {label}: δiso {d_iso:8.2f} ppm   {second} {aniso:8.2f} ppm   "
+                f"{third} {asym:6.3f}   FWHM {fwhm:6.2f} ppm   amp {amplitude:.3g}")
+        return "\n".join(lines)
+
+    def _csa_edge_warning(self, result) -> str:
+        """Warn when the fitted lineshape still has intensity at the
+        edge of the fitted range.
+
+        **Measured, not hypothetical**: a powder pattern clipped at
+        its shoulder fits back with a badly shrunken span (Δ = 126 ppm
+        against a true 200) and no other sign that anything is wrong,
+        because the residual inside the window is small. The fitted
+        span is the number people take away from a CSA fit, so this
+        has to be said out loud rather than left to be noticed."""
+        y = np.abs(np.asarray(result["y_fit"], dtype=float))
+        if not y.size or not np.max(y):
+            return ""
+        edge = max(y[0], y[-1]) / np.max(y)
+        if edge < 0.05:
+            return ""
+        return (f"⚠ The fitted lineshape still has {edge:.0%} of its height at the edge "
+                f"of the fitted range — the pattern is being clipped, and a clipped "
+                f"powder pattern fits back with too small a span. Widen the region, "
+                f"or fit the whole spectrum.")
+
     def _on_dosy_clicked(self) -> None:
         """Build and show a DOSY map from the selected PFG series.
 
@@ -16212,6 +16636,8 @@ class MainWindow(QMainWindow):
         if processed_reason:
             bits.append(f"Loaded from processed data, not the raw FID: {processed_reason}")
         self.info_label.setText("\n".join(bits))
+
+        self._refresh_csa_controls(spectrum)
 
         # Both tabs' gradient controls, in one place -- see
         # _refresh_max_gradient_controls.
