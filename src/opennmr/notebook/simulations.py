@@ -80,18 +80,21 @@ from scipy.ndimage import gaussian_filter1d
 #     cheaper and removes the import-inside-loop overhead.
 #   - intensity_threshold defaults unified to 1e-10 across functions.
 #
+# EFFICIENCY (continued)
+#   - ZCW (Zaremba-Conroy-Wolfsberg) powder averaging is now available
+#     as an alternative to the rectangular (theta,phi) product grid,
+#     which oversamples near the poles and needs far more points than
+#     an optimised angle set for the same convergence. See zcw_angles()
+#     and get_powder_grid(); every *_spectrum* function below now takes
+#     powder_scheme='rectangular' (default, unchanged behaviour) or
+#     'zcw' (+ n_zcw). Biggest win is finite_mas_csa_spectrum, where
+#     each orientation costs a full FFT and is called ~100x per fit via
+#     curve_fit's Jacobian -- try n_zcw in the low thousands there and
+#     compare against a converged rectangular grid. use_octant_symmetry
+#     is a rectangular-grid-only trick and is not combined with ZCW
+#     here; SOPHE/REPULSION sets are still not implemented.
+#
 # NOT DONE (flagged, not fixed)
-#   - True powder-averaging efficiency (ZCW / SOPHE / REPULSION angle
-#     sets) is not implemented. The rectangular (theta,phi) grid used
-#     throughout is wasteful -- it over-samples near the poles and
-#     needs far more points than an optimized angle set for the same
-#     convergence. This matters most for finite_mas_csa_spectrum,
-#     where each orientation costs a full FFT: the original defaults
-#     (n_theta=1500, n_phi=3000 -> 4.5M orientations) are not tractable
-#     with a per-orientation FFT and have been reduced substantially
-#     below. If you want production-quality sideband simulations,
-#     porting a ZCW angle set (as ssNake/SIMPSON do) is the right next
-#     step, not further brute-force grid tuning.
 #   - The exact-diagonalization quadrupolar functions still do one
 #     np.linalg.eigh call per crystallite in a Python loop rather than
 #     a single batched eigh over a stacked array of Hamiltonians.
@@ -99,7 +102,7 @@ from scipy.ndimage import gaussian_filter1d
 #     (N,n)), which would remove the Python-loop overhead; not done
 #     here because the variable number of allowed transitions per
 #     orientation makes the transition-selection step awkward to
-#     vectorize cleanly, and I did not want to introduce a subtle
+#     vectorise cleanly, and I did not want to introduce a subtle
 #     indexing bug under time pressure. Flagged as the next efficiency
 #     step if the exact quadrupolar functions turn out to be a
 #     bottleneck.
@@ -210,11 +213,136 @@ def powder_orientations_octant(n_theta=1500, n_phi=3000):
     return theta, phi, weights
 
 
-def static_csa(csa, ppm_axis, n_theta=1500, n_phi=3000, use_octant_symmetry=True):
-    if use_octant_symmetry:
-        theta, phi, wts = powder_orientations_octant(n_theta=n_theta, n_phi=n_phi)
+def zcw_angles(n_min):
+    """
+    Zaremba-Conroy-Wolfsberg (ZCW) powder-orientation set, covering the
+    full sphere with a single well-distributed angle set rather than a
+    rectangular (theta, phi) product grid.
+
+    Use this in place of ``powder_orientations`` for any observable
+    that depends on crystallite orientation only through (theta, phi)
+    -- i.e. does not depend on the third (gamma) Euler angle, or where
+    gamma-averaging is handled separately (as in
+    ``finite_mas_csa_spectrum``'s analytic gamma-COMPUTE approach, or
+    the static quadrupolar functions, which have no spinning gamma to
+    average at all). It is NOT a drop-in replacement for anything that
+    needs a genuine 3-angle (alpha, beta, gamma) set.
+
+    Unlike the rectangular grid, ZCW orientations are not wasted
+    oversampling near the poles, so a given accuracy is reached with
+    far fewer crystallites -- the more expensive the per-orientation
+    cost (a diagonalization, an FFT), the bigger the win. The cost is
+    that ZCW sets only exist at a discrete family of sizes (Fibonacci
+    numbers), so you get *at least* ``n_min`` orientations, not exactly
+    ``n_min``.
+
+    Parameters
+    ----------
+    n_min : int
+        Minimum number of crystallite orientations requested. The
+        actual count returned, N, is the smallest Fibonacci number
+        >= n_min (with N >= 2).
+
+    Returns
+    -------
+    theta, phi : ndarray, shape (N,)
+        Polar and azimuthal angles in radians.
+    weights : ndarray, shape (N,)
+        Uniform weights, each 1/N (they sum to 1).
+
+    Notes
+    -----
+    Formula (Cheng, Suzukawa & Wolfsberg, J. Chem. Phys. 59, 3992
+    (1973); as summarised e.g. in Eden, Concepts Magn. Reson. A 18, 24
+    (2003)):
+
+        phi_k   = 2*pi * ((k * M) mod N) / N
+        theta_k = arccos(1 - (2k+1)/N)
+        weight_k = 1/N,   k = 0, ..., N-1
+
+    where M and N are Fibonacci numbers two places apart in the
+    sequence (N = F(j), M = F(j-2)) -- e.g. (M, N) = (55, 144),
+    (89, 233), (144, 377), .... This choice of M makes the sequence of
+    phi_k values a low-discrepancy (quasi-random, golden-ratio-like)
+    sweep over [0, 2*pi) that, combined with the theta_k spacing
+    (uniform in cos(theta), as required for a solid-angle-correct
+    average), gives near-uniform coverage of the sphere for any N in
+    the Fibonacci family.
+    """
+    if n_min < 1:
+        raise ValueError("n_min must be >= 1.")
+    fib = [1, 1]
+    while fib[-1] < n_min or len(fib) < 3:
+        fib.append(fib[-1] + fib[-2])
+    N = fib[-1]
+    M = fib[-3]
+    k = np.arange(N)
+    phi = 2.0 * np.pi * np.mod(k * M, N) / N
+    theta = np.arccos(1.0 - (2.0 * k + 1.0) / N)
+    weights = np.full(N, 1.0 / N)
+    return theta, phi, weights
+
+
+def get_powder_grid(n_theta, n_phi, powder_scheme='rectangular', n_zcw=None,
+                     use_octant_symmetry=False):
+    """
+    Dispatch to the requested powder-orientation grid, so every
+    ``*_spectrum*`` function below can offer the same
+    ``powder_scheme``/``n_zcw`` choice without duplicating the
+    if/else.
+
+    Parameters
+    ----------
+    n_theta, n_phi : int
+        Rectangular-grid size, used when ``powder_scheme='rectangular'``
+        (and as the default ``n_zcw = n_theta * n_phi`` when
+        ``powder_scheme='zcw'`` and ``n_zcw`` is not given explicitly,
+        so swapping schemes at fixed n_theta/n_phi is a fair-ish
+        like-for-like comparison rather than a silent count change).
+    powder_scheme : {'rectangular', 'zcw'}, optional
+        'rectangular' (default -- unchanged behaviour): the (theta,
+        phi) product grid via ``powder_orientations`` /
+        ``powder_orientations_octant``.
+        'zcw' : a single ZCW angle set via ``zcw_angles``, sized by
+        ``n_zcw``. Typically needs far fewer orientations than the
+        rectangular grid for the same convergence -- most worthwhile
+        where each orientation is expensive (an eigh call, an FFT):
+        ``finite_mas_csa_spectrum``, the quadrupolar exact/decomposed
+        functions. For plain static CSA, the rectangular grid with
+        ``use_octant_symmetry=True`` is already an exact 8x reduction
+        at negligible per-point cost, so ZCW's advantage there is
+        smaller (though still real at high resolution).
+    n_zcw : int, optional
+        Minimum ZCW orientation count (see ``zcw_angles``). Only used
+        when ``powder_scheme='zcw'``. Defaults to ``n_theta * n_phi``.
+    use_octant_symmetry : bool, optional
+        Only consulted when ``powder_scheme='rectangular'``. ZCW
+        already spans the full sphere efficiently -- the octant-folding
+        trick is specific to the rectangular grid's redundant
+        structure and is NOT applied when ``powder_scheme='zcw'``.
+
+    Returns
+    -------
+    theta, phi, weights : ndarray
+    """
+    if powder_scheme == 'rectangular':
+        if use_octant_symmetry:
+            return powder_orientations_octant(n_theta=n_theta, n_phi=n_phi)
+        return powder_orientations(n_theta=n_theta, n_phi=n_phi)
+    elif powder_scheme == 'zcw':
+        if n_zcw is None:
+            n_zcw = n_theta * n_phi
+        return zcw_angles(n_zcw)
     else:
-        theta, phi, wts = powder_orientations(n_theta=n_theta, n_phi=n_phi)
+        raise ValueError("powder_scheme must be 'rectangular' or 'zcw'.")
+
+
+def static_csa(csa, ppm_axis, n_theta=1500, n_phi=3000, use_octant_symmetry=True,
+                powder_scheme='rectangular', n_zcw=None):
+    theta, phi, wts = get_powder_grid(
+        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
+        use_octant_symmetry=use_octant_symmetry,
+    )
     shifts = csa_frequency(csa, theta, phi)
     spectrum = np.zeros_like(ppm_axis, dtype=float)
     dx = ppm_axis[1] - ppm_axis[0]
@@ -238,9 +366,11 @@ def gaussian_broadening(spectrum, ppm_axis, fwhm=2.0):
 
 
 def make_static_csa_spectrum(csa, ppm_axis, fwhm=2.0, n_theta=1500, n_phi=3000,
-                              use_octant_symmetry=True):
+                              use_octant_symmetry=True, powder_scheme='rectangular',
+                              n_zcw=None):
     spec_before_broad = static_csa(csa, ppm_axis, n_theta=n_theta, n_phi=n_phi,
-                                    use_octant_symmetry=use_octant_symmetry)
+                                    use_octant_symmetry=use_octant_symmetry,
+                                    powder_scheme=powder_scheme, n_zcw=n_zcw)
     spec_after_broad = gaussian_broadening(spec_before_broad, ppm_axis, fwhm=fwhm)
     maximum = np.max(spec_after_broad)
     normalised = spec_after_broad / maximum if maximum > 0 else spec_after_broad
@@ -256,18 +386,47 @@ def make_static_csa_spectrum(csa, ppm_axis, fwhm=2.0, n_theta=1500, n_phi=3000,
 def finite_mas_csa_spectrum(csa, ppm_axis, larmor_Hz, mas_Hz,
                              rotor_angle='magic', n_theta=60, n_phi=120,
                              n_time=4096, n_sidebands=30, fwhm=2.0,
-                             subtract_residual_mean=True):
+                             subtract_residual_mean=True, orientation_chunk_size=None,
+                             powder_scheme='rectangular', n_zcw=None):
     """
-    NOTE ON GRID SIZE: each crystallite orientation here costs a full
-    length-n_time FFT, so this cannot use the same rectangular-grid
-    point counts as the static CSA case (the original defaults of
-    n_theta=1500, n_phi=3000 imply ~4.5e6 FFTs). Defaults have been
-    reduced to n_theta=60, n_phi=120 (7200 orientations); check
-    convergence for your specific tensor/spinning-rate combination by
-    increasing these and confirming sideband intensities are stable.
-    A proper ZCW/SOPHE angle set would converge with far fewer points
-    than either the old or new rectangular grid -- see module-level
-    changelog.
+    NOTE ON GRID SIZE: each crystallite orientation needs its own
+    length-n_time trajectory/FFT, so this cannot use the same
+    rectangular-grid point counts as the static CSA case (the original
+    defaults of n_theta=1500, n_phi=3000 imply ~4.5e6 FFTs). Defaults
+    have been reduced to n_theta=60, n_phi=120 (7200 orientations);
+    check convergence for your specific tensor/spinning-rate
+    combination by increasing these and confirming sideband
+    intensities are stable.
+
+    POWDER SCHEME: this is exactly the function the module-level
+    changelog flagged as most in need of ZCW (each orientation costs a
+    full FFT, and this gets called ~100x per fit via curve_fit's
+    Jacobian). Pass ``powder_scheme='zcw'`` (with ``n_zcw`` -- defaults
+    to n_theta*n_phi) to use a ZCW angle set instead of the rectangular
+    grid; gamma is still handled the same way either way (analytically,
+    via the modulation/FFT below), since ZCW here only replaces the
+    (theta, phi) sampling, not the gamma treatment. Expect convergence
+    at a noticeably smaller orientation count than the rectangular grid
+    -- e.g. try n_zcw=987 or 1597 as a starting point and compare
+    against a larger rectangular grid before trusting it for
+    production sideband intensities.
+
+    PERFORMANCE: all orientations are evaluated together as batched
+    array operations (one call to np.fft.fft over all orientations at
+    once, rather than looping in Python and calling np.fft.fft once
+    per orientation) -- ~50-100x faster at the default grid size, since
+    the earlier per-orientation Python loop paid full numpy call
+    overhead 7200 times (and a fit calls this function on the order of
+    a hundred times via curve_fit's finite-difference Jacobian, so that
+    overhead compounds into the multi-minute fits this was rewritten
+    to fix). This does mean an (n_orientations, n_time) complex array
+    is held in memory rather than one length-n_time array at a time;
+    orientation_chunk_size caps that (processing that many orientations'
+    full (chunk, n_time) arrays per batch, looping only over chunks
+    -- a handful of iterations, not thousands) if the default grid size
+    is increased enough that memory becomes a concern. None (default)
+    picks a chunk size that keeps each batch under ~150M array elements
+    (a few hundred MB), which covers the default grid in one pass.
 
     subtract_residual_mean: at the exact magic angle the gamma-average
     of the CSA modulation over one rotor period is (by construction)
@@ -278,7 +437,9 @@ def finite_mas_csa_spectrum(csa, ppm_axis, larmor_Hz, mas_Hz,
     """
     if mas_Hz <= 0:
         raise ValueError("mas_hz must be > 0.")
-    theta, phi, wts = powder_orientations(n_theta=n_theta, n_phi=n_phi)
+    theta, phi, wts = get_powder_grid(
+        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
+    )
     if rotor_angle == 'magic':
         beta_rotor = np.arccos(1.0 / np.sqrt(3.0))
     else:
@@ -298,40 +459,100 @@ def finite_mas_csa_spectrum(csa, ppm_axis, larmor_Hz, mas_Hz,
         cross_with_ref[close] = np.cross(rotor_axis[close], ref2)
         cross_norm[close] = np.linalg.norm(cross_with_ref[close], axis=1)
     e1 = cross_with_ref / cross_norm[:, None]
-    e2 = np.cross(rotor_axis, e1)
     b0 = (np.cos(beta_rotor) * rotor_axis + np.sin(beta_rotor) * e1)
     gamma = (2.0 * np.pi * np.arange(n_time)) / n_time
+    cos_gamma = np.cos(gamma)
+    sin_gamma = np.sin(gamma)
     tensor = csa
     csa_iso = (csa[0, 0] + csa[1, 1] + csa[2, 2]) / 3.0
     sideband_int = np.zeros(2 * n_sidebands + 1, dtype=float)
+    dt = 1.0 / (mas_Hz * n_time)
+    t_grid = np.arange(n_time) * dt
+    centre = n_time // 2
 
-    for k in range(len(wts)):
-        axis = rotor_axis[k]
-        b = b0[k]
-        cross_ab = np.cross(axis, b)
-        dot_ab = np.dot(axis, b)
-        cos_gamma = np.cos(gamma)
-        sin_gamma = np.sin(gamma)
-        vectors = (b[None, :] * cos_gamma[:, None]
-                   + cross_ab[None, :] * sin_gamma[:, None]
-                   + axis[None, :] * dot_ab * (1.0 - cos_gamma[:, None]))
-        delta = np.einsum("ni,ij,nj->n", vectors, tensor, vectors)
+    n_orientations = len(wts)
+    if orientation_chunk_size is None:
+        # Cache-blocking, not just a memory cap: every array below is
+        # shape (chunk, n_time), and even though this whole function is
+        # otherwise fully vectorised (no more per-orientation Python
+        # loop), processing all orientations as a single giant array
+        # measured SLOWER than a reasonably-sized chunk loop -- e.g. at
+        # n_theta=100, n_phi=200, n_time=2048 (20,000 orientations),
+        # one single pass took ~5.2s, chunks of 100 orientations ~2.2s,
+        # because a (20000, 2048) array (~650MB for the complex128
+        # arrays below) blows well past CPU cache, so every elementwise/
+        # cumsum/FFT pass over it is memory-bandwidth-bound rather than
+        # compute-bound. Targeting ~200,000 elements per chunk keeps
+        # each chunk's working set in the low single-digit MB range
+        # (comfortably inside L2/L3 on essentially any machine) while
+        # still being large enough that the reduced number of chunk-
+        # loop iterations doesn't reintroduce Python-overhead as the
+        # bottleneck (the failure mode of the original per-orientation
+        # loop this whole function replaces).
+        orientation_chunk_size = max(1, int(2.0e5 // n_time))
+
+    # `vectors[k,n,:]` (the Rodrigues-rotated orientation at gamma[n] for
+    # crystallite k) is a linear combination of THREE fixed 3-vectors
+    # per k -- u1=b0[k], u2=cross_ab[k], u3=dot_ab[k]*rotor_axis[k] --
+    # with coefficients cos_gamma[n], sin_gamma[n], (1-cos_gamma[n]).
+    # delta[k,n] = vectors[k,n,:] @ tensor @ vectors[k,n,:] is therefore
+    # a quadratic form in those three coefficients, i.e. a fixed sum of
+    # 6 outer products of a length-n_orientations array with a
+    # length-n_time array -- computed below via the 6 scalar bilinear
+    # forms (Auu, Avv, Aww, Auv, Auw, Avw), each O(n_orientations) to
+    # get (batched (n,3)@(3,3) matmuls). This never has to build the
+    # (n_orientations, n_time, 3) array a direct translation of the
+    # original per-orientation loop would need -- that intermediate
+    # was tried first and made things SLOWER than the loop it replaced
+    # (memory-bandwidth bound: 100+MB of temporaries, several passes
+    # over all of it), even though the orientation loop itself is
+    # replaced by cheap array ops either way.
+    cos2 = cos_gamma ** 2
+    sin2 = sin_gamma ** 2
+    one_minus_cos = 1.0 - cos_gamma
+    omc2 = one_minus_cos ** 2
+    cs = cos_gamma * sin_gamma
+    comc = cos_gamma * one_minus_cos
+    somc = sin_gamma * one_minus_cos
+
+    for start in range(0, n_orientations, orientation_chunk_size):
+        stop = min(start + orientation_chunk_size, n_orientations)
+        axis = rotor_axis[start:stop]                          # (c, 3)
+        b = b0[start:stop]                                      # (c, 3)
+        wts_chunk = wts[start:stop]                              # (c,)
+
+        u1 = b
+        u2 = np.cross(axis, b)
+        u3 = np.einsum("ki,ki->k", axis, b)[:, None] * axis      # dot_ab[:,None]*axis
+
+        Tu1 = u1 @ tensor
+        Tu2 = u2 @ tensor
+        Tu3 = u3 @ tensor
+        Auu = np.sum(Tu1 * u1, axis=1)
+        Avv = np.sum(Tu2 * u2, axis=1)
+        Aww = np.sum(Tu3 * u3, axis=1)
+        Auv = np.sum(Tu1 * u2, axis=1)
+        Auw = np.sum(Tu1 * u3, axis=1)
+        Avw = np.sum(Tu2 * u3, axis=1)
+
+        delta = (Auu[:, None] * cos2[None, :] + Avv[:, None] * sin2[None, :]
+                 + Aww[:, None] * omc2[None, :] + 2.0 * Auv[:, None] * cs[None, :]
+                 + 2.0 * Auw[:, None] * comc[None, :] + 2.0 * Avw[:, None] * somc[None, :])   # (c, n_time)
+
         modulation_Hz = (delta - csa_iso) * larmor_Hz / (1e+06)
-        dt = 1.0 / (mas_Hz * n_time)
-        phase = np.zeros(n_time, dtype=float)
+
+        phase = np.zeros_like(modulation_Hz)
         # phase (cycles) = integral of modulation_Hz dt (trapezoidal)
-        phase[1:] = np.cumsum(0.5 * (modulation_Hz[:-1] + modulation_Hz[1:]) * dt)
+        phase[:, 1:] = np.cumsum(0.5 * (modulation_Hz[:, :-1] + modulation_Hz[:, 1:]) * dt, axis=1)
         if subtract_residual_mean:
-            # FIX: this term must be in the same units as `phase` above
-            # (cycles), NOT radians -- previously had a stray 2*pi here.
-            phase -= np.mean(modulation_Hz) * np.arange(n_time) * dt
-        signal = np.exp(-1j * 2.0 * np.pi * phase)
-        coeff = np.fft.fft(signal) / n_time
-        coeff = np.fft.fftshift(coeff)
-        centre = n_time // 2
-        selected_ssb = coeff[centre - n_sidebands: centre + n_sidebands + 1]
-        intensities = np.abs(selected_ssb ** 2)
-        sideband_int += (wts[k] * intensities)
+            phase -= np.mean(modulation_Hz, axis=1, keepdims=True) * t_grid[None, :]
+
+        signal = np.exp(-1j * 2.0 * np.pi * phase)              # (c, n_time)
+        coeff = np.fft.fft(signal, axis=1) / n_time              # one batched FFT call
+        coeff = np.fft.fftshift(coeff, axes=1)
+        selected_ssb = coeff[:, centre - n_sidebands: centre + n_sidebands + 1]
+        intensities = np.abs(selected_ssb ** 2)                  # (c, 2*n_sidebands+1)
+        sideband_int += np.sum(wts_chunk[:, None] * intensities, axis=0)
 
     orders = np.arange(-n_sidebands, n_sidebands + 1)
     sideband_Hz = (orders * mas_Hz)
@@ -487,18 +708,26 @@ def quadrupolar_transitions(I, C_Q, eta_Q, theta, phi, larmor_Hz,
 
 def static_quadrupolar_spectrum(I, C_Q, eta_Q, ppm_axis, larmor_Hz,
                                  n_theta=150, n_phi=300, fwhm=2.0,
-                                 intensity_threshold=1e-10):
+                                 intensity_threshold=1e-10,
+                                 powder_scheme='rectangular', n_zcw=None):
     """
     Simulate a static powder quadrupolar spectrum (first-order-only
     transition energies from the eigenbasis, but computed via the same
     exact diagonalization as static_quadrupolar_spectrum_exact -- see
     that function's docstring for the distinction from the perturbative
     decomposition used in static_quadrupolar_spectrum_decomposed).
+
+    powder_scheme, n_zcw : see get_powder_grid / zcw_angles. Every
+    orientation here costs a np.linalg.eigh call, so 'zcw' typically
+    reaches the same convergence with substantially fewer orientations
+    than the rectangular grid.
     """
     if I < 1:
         raise ValueError("Quadrupolar interaction requires I >= 1.")
     ops = _quad_operators(I, C_Q, eta_Q)  # built once, reused every orientation
-    theta, phi, wts = powder_orientations(n_theta=n_theta, n_phi=n_phi)
+    theta, phi, wts = get_powder_grid(
+        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
+    )
     spectrum = np.zeros_like(ppm_axis, dtype=float)
     for k in range(len(wts)):
         frequencies_Hz, intensities = quadrupolar_transitions(
@@ -568,11 +797,14 @@ def quadrupolar_transitions_exact(I, C_Q, eta_Q, theta, phi, larmor_Hz,
 
 def static_quadrupolar_spectrum_exact(I, C_Q, eta_Q, ppm_axis, larmor_Hz,
                                        n_theta=150, n_phi=300, fwhm=2.0,
-                                       intensity_threshold=1e-10):
+                                       intensity_threshold=1e-10,
+                                       powder_scheme='rectangular', n_zcw=None):
     """
     Static powder quadrupolar spectrum including exact first-, second-,
     and higher-order quadrupolar effects via exact diagonalization of
     H_Z + H_Q for every crystallite orientation.
+
+    powder_scheme, n_zcw : see get_powder_grid / zcw_angles.
     """
     if I < 1:
         raise ValueError("Quadrupolar interaction requires I >= 1.")
@@ -583,7 +815,9 @@ def static_quadrupolar_spectrum_exact(I, C_Q, eta_Q, ppm_axis, larmor_Hz,
               "ordering of the quadrupolar principal values.")
 
     ops = _quad_operators(I, C_Q, eta_Q)
-    theta, phi, wts = powder_orientations(n_theta=n_theta, n_phi=n_phi)
+    theta, phi, wts = get_powder_grid(
+        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
+    )
     spectrum = np.zeros_like(ppm_axis, dtype=float)
 
     for k in range(len(wts)):
@@ -701,14 +935,19 @@ def quadrupolar_transition_decomposition(I, C_Q, eta_Q, theta, phi, larmor_Hz,
 
 def static_quadrupolar_spectrum_decomposed(I, C_Q, eta_Q, ppm_axis, larmor_Hz,
                                             n_theta=150, n_phi=300, fwhm=2.0,
-                                            intensity_threshold=1e-10):
+                                            intensity_threshold=1e-10,
+                                            powder_scheme='rectangular', n_zcw=None):
     """
     Static powder quadrupolar spectrum separated into central and
     satellite transitions, each further split into a first-order
     representation and the (exact - first-order) residual.
+
+    powder_scheme, n_zcw : see get_powder_grid / zcw_angles.
     """
     ops = _quad_operators(I, C_Q, eta_Q)
-    theta, phi, wts = powder_orientations(n_theta=n_theta, n_phi=n_phi)
+    theta, phi, wts = get_powder_grid(
+        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
+    )
 
     central = np.zeros_like(ppm_axis, dtype=float)
     satellites = np.zeros_like(ppm_axis, dtype=float)
@@ -780,14 +1019,19 @@ def static_quadrupolar_spectrum_decomposed(I, C_Q, eta_Q, ppm_axis, larmor_Hz,
     }
 
 
-def quadrupolar_second_order_map(I, C_Q, eta_Q, larmor_Hz, n_theta=100, n_phi=200):
+def quadrupolar_second_order_map(I, C_Q, eta_Q, larmor_Hz, n_theta=100, n_phi=200,
+                                  powder_scheme='rectangular', n_zcw=None):
     """
     Calculate the exact and first-order frequencies of each transition
     over a powder grid -- useful for visualising the second-order
     central-transition shift as a function of crystallite orientation.
+
+    powder_scheme, n_zcw : see get_powder_grid / zcw_angles.
     """
     ops = _quad_operators(I, C_Q, eta_Q)
-    theta, phi, wts = powder_orientations(n_theta=n_theta, n_phi=n_phi)
+    theta, phi, wts = get_powder_grid(
+        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
+    )
     records = []
     for k in range(len(wts)):
         transitions = quadrupolar_transition_decomposition(

@@ -14,11 +14,14 @@ Tools for importing, plotting, and fitting Bruker NMR data (1D and 2D).
     )
 """
 
-from .utils import find_gamma, NUC_label, read_bruker_metadata, read_vdlist
+from .utils import (
+    find_gamma, NUC_label, read_bruker_metadata, read_vdlist, compute_BF1_SFO1,
+)
 
 from .plotting import (
     setup_plotting, get_stack_colormap, get_contour_cmap, downsample_2d,
     apply_tick_style, apply_spine_style, save_figure,
+    plot_spectrum_dict, plot_comparison, plot_stacked_spectra,
 )
 
 from .one_d import (
@@ -67,18 +70,45 @@ from .csa_fitting import (
 )
 
 from .pnmr_simulator import (
-    read_cif_with_occupancies, get_neighbors_by_shell, 
-    local_environment_distribution, combine_labeled_shells, enumerate_local_environments, 
-    build_shift_table, compute_BF1_SFO1, _broadened_spectrum, generate_spectrum_dict, 
-    plot_spectrum_dict, plot_comparison, shell_distance_histogram
+    read_cif_with_occupancies, get_neighbors_by_shell,
+    local_environment_distribution, combine_labeled_shells, enumerate_local_environments,
+    build_shift_table, _broadened_spectrum, generate_spectrum_dict,
+    shell_distance_histogram,
 )
+
+from .pnmr_fit import (
+    predict_environments, default_tolerance, group_environments, 
+    select_groups, groups_to_peak_defs, split_integrals_by_environment, 
+    print_environment_report, dominant_environment, format_environment_label, 
+    add_dominant_environment_labels, fit_predicted_spectrum, 
+    merge_low_integral_peaks, merge_groups_to_picks, print_shift_drift_report, 
+    refit_merged_groups, fit_cif_envelope,
+)
+
+from .simpson import (
+    SIMPSONimport, CSDMimport, SIMPSONread_shape, SIMPSONapodization_window, SIMPSONread_fid,
+    SIMPSONplot_fid, SIMPSONread_single_point_fid, SIMPSONread_fid_series, SIMPSONplot_1d_stack, SIMPSONplot_shape,
+    SIMPSONplot_fid_series,
+)
+
+# NOTE: compute_BF1_SFO1, plot_spectrum_dict and plot_comparison used to be
+# imported from here -- they now live in .utils / .plotting (single copy,
+# shared with the BMS pipeline below) and are imported from there, above.
+# pnmr_simulator.py still re-exports them itself for anyone importing
+# `from nmrtools.pnmr_simulator import ...` directly, but nmr.compute_BF1_SFO1
+# etc. below now resolve to the .utils/.plotting names, not pnmr_simulator's
+# re-export -- same object either way, just naming the canonical source here.
+
+from .bms_spectrum import generate_bms_spectrum_dict
+from .bms.io_utils import make_particle
 
 __all__ = [
     # utils
-    "find_gamma", "NUC_label", "read_bruker_metadata", "read_vdlist",
+    "find_gamma", "NUC_label", "read_bruker_metadata", "read_vdlist", "compute_BF1_SFO1",
     # plotting
     "setup_plotting", "get_stack_colormap", "get_contour_cmap", "downsample_2d",
     "apply_tick_style", "apply_spine_style", "save_figure",
+    "plot_spectrum_dict", "plot_comparison", "plot_stacked_spectra",
     # one_d
     "NMR1dimport", "NMR1dplot", "NMR1dheatmap",
     "vocs_f1", "vocs_f2", "vocs_power", "pulse_to_w1", "apply_VOCS", "VOCSSum",
@@ -112,8 +142,22 @@ __all__ = [
     "csa_model_full", "build_csa_model", "fit_csa_spectrum", "evaluate_csa_fit",
     "print_csa_fit_report", "NMR1dplot_with_csa_fit", "NMRCSAFitWorkflow",
     # pnmr_simulator
-    "read_cif_with_occupancies", "get_neighbors_by_shell", 
-    "local_environment_distribution", "combine_labeled_shells", "enumerate_local_environments", 
-    "build_shift_table", "compute_BF1_SFO1", "_broadened_spectrum", "generate_spectrum_dict", 
-    "plot_spectrum_dict", "plot_comparison", "shell_distance_histogram"
+    "read_cif_with_occupancies", "get_neighbors_by_shell",
+    "local_environment_distribution", "combine_labeled_shells", "enumerate_local_environments",
+    "build_shift_table", "_broadened_spectrum", "generate_spectrum_dict",
+    "shell_distance_histogram",
+    # bms
+    "generate_bms_spectrum_dict", "make_particle",
+    # pnmr_fit
+    "predict_environments", "default_tolerance", "group_environments", 
+    "select_groups", "groups_to_peak_defs", "split_integrals_by_environment", 
+    "print_environment_report", "dominant_environment", 
+    "format_environment_label", "add_dominant_environment_labels", 
+    "fit_predicted_spectrum", "merge_low_integral_peaks", 
+    "merge_groups_to_picks", "print_shift_drift_report", 
+    "refit_merged_groups", "fit_cif_envelope",
+    # simpson
+    "SIMPSONimport", "CSDMimport", "SIMPSONread_shape", "SIMPSONapodization_window", "SIMPSONread_fid"
+    "SIMPSONplot_fid", "SIMPSONread_single_point_fid", "SIMPSONread_fid_series", "SIMPSONplot_1d_stack", "SIMPSONplot_shape",
+    "SIMPSONplot_fid_series",
 ]

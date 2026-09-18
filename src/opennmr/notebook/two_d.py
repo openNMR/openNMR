@@ -445,10 +445,10 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
                   proj_scale=1.0, projection_mode="auto", show_projections=True,
                   projection_size=2.0, projection_pad=0.1,
                   field='400', xlabel=None, ylabel=None, xlims=None, ylims=None,
-                  font='Arial', fontsize=12, output_format='',
+                  font='Arial', fontsize=None, output_format='',
                   colour_spectra=None, equal_tickspacing=False, tick_number=None,
                   tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
-                  show_nQ_line=False, nQ=1, nQ_colors=None,
+                  show_nQ_line=False, nQ=1, nQ_colours=None,
                   ax=None, fig=None, save_fig=False, fig_name='nmr_2d_spectrum',
                   save_format='png'):
     """
@@ -480,11 +480,16 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
         Number of contour levels (log-spaced between ``factor`` and 1).
 
     projection_mode : {'auto', 'sum', 'max'}, optional
-        ``'sum'`` for conventional projections; ``'max'`` (of
-        ``abs()``) for pseudo-2D relaxation/diffusion series, where a
-        sum projection would wash out slice-to-slice changes.
-        ``'auto'`` picks ``'max'`` for pseudo-2D and ``'sum'``
-        otherwise.
+        Both modes match TopSpin's own row/column projections
+        (``rhpp``/``rvpp``) by using clipped-positive intensity only
+        (negative-going dispersive/antiphase/exchange contributions
+        are zeroed out first, so they can't cancel real peaks in a
+        sum or dominate as spurious maxima). ``'sum'`` for
+        conventional projections; ``'max'`` (skyline, of the
+        clipped-positive data) for pseudo-2D relaxation/diffusion
+        series, where a sum projection would wash out slice-to-slice
+        changes. ``'auto'`` picks ``'max'`` for pseudo-2D and
+        ``'sum'`` otherwise.
 
     show_projections : bool or {'f1', 'f2'}, optional
         ``True`` (default) shows both the F1 and F2 projection panels.
@@ -511,7 +516,7 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
         quantum diagonal, ``nQ=[1, 2]`` to also show a double-quantum
         diagonal on a DQ-SQ correlation spectrum.
 
-    nQ_colors : list of str, optional
+    nQ_colours : list of str, optional
         Colours for each diagonal in ``nQ``. Defaults to grey for all.
 
     tick_dir : {'in', 'out', 'inout'}, optional
@@ -696,15 +701,15 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
         nQ_list = nQ if isinstance(nQ, (list, tuple, np.ndarray)) else [nQ]
         nQ_list = [n for n in nQ_list if n != 0]
 
-        if nQ_colors is None:
-            nQ_colors = ['gray'] * len(nQ_list)
-        elif len(nQ_colors) != len(nQ_list):
-            raise ValueError("nQ_colors must have the same length as nQ.")
+        if nQ_colours is None:
+            nQ_colours = ['gray'] * len(nQ_list)
+        elif len(nQ_colours) != len(nQ_list):
+            raise ValueError("nQ_colours must have the same length as nQ.")
 
         xmin, xmax = ax.get_xlim()
         x_line = np.linspace(xmin, xmax, 500)
 
-        for n, colour in zip(nQ_list, nQ_colors):
+        for n, colour in zip(nQ_list, nQ_colours):
             ax.plot(x_line, n * x_line, linestyle='--', linewidth=1.5,
                      color=colour, alpha=0.8, zorder=10)
 
@@ -736,11 +741,23 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
             ax_f2.tick_params(axis='y', which='both', left=False, right=False,
                                labelleft=False, labelright=False)
 
-            # Maximum-magnitude projection ('max'): useful for pseudo-2D
-            # series (saturation/inversion recovery, T1, T2, diffusion),
-            # where a sum projection would wash out slice-to-slice changes.
-            f2_projection = (np.sum(spec_float, axis=0) if mode == "sum"
-                              else np.max(np.abs(spec_float), axis=0))
+            # TopSpin's own row/column projections ('rhpp'/'rvpp' --
+            # "positive projection") are built from clipped-positive
+            # intensity, not the raw signed (or abs()) data: negative-
+            # going dispersive tails, antiphase multiplets and (for
+            # EXSY/COSY-type, phase-sensitive echo-antiecho data
+            # especially) exchange/cross-peak lobes are zeroed out
+            # before summing or taking the skyline max. Using signed
+            # or abs() data instead lets those negative lobes cancel
+            # real peaks (sum) or dominate as spurious maxima (max),
+            # which is why the old code diverged from TopSpin.
+            spec_positive = np.clip(spec_float, 0, None)
+
+            # 'max' (skyline projection): useful for pseudo-2D series
+            # (saturation/inversion recovery, T1, T2, diffusion), where
+            # a sum projection would wash out slice-to-slice changes.
+            f2_projection = (np.sum(spec_positive, axis=0) if mode == "sum"
+                              else np.max(spec_positive, axis=0))
 
             ax_f2.plot(xAxppm, f2_projection + (0.02 * np.min(f2_projection)), 'k')
             ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
@@ -754,8 +771,8 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
             ax_f1.tick_params(axis='y', which='both', left=False, right=False,
                                labelleft=False, labelright=False)
 
-            f1_projection = (np.sum(spec_float, axis=1) if mode == "sum"
-                              else np.max(np.abs(spec_float), axis=1))
+            f1_projection = (np.sum(spec_positive, axis=1) if mode == "sum"
+                              else np.max(spec_positive, axis=1))
 
             ax_f1.plot(-f1_projection + (0.02 * np.min(-f1_projection)), y_axis, 'k')
             ax_f1.set_xlim([np.min(-f1_projection) * proj_scale, np.max(-f1_projection) * 0.99])
@@ -928,7 +945,7 @@ def NMR2D_multi_plot(datasets, layout="row", panel_kwargs=None, titles=None,
         ax = fig.add_subplot(gs[r, c])
         kw = dict(shared_kwargs)
         kw.update(panel_kwargs[i])
-        NMR2Dplotter(dataset, ax=ax, fig=fig, **kw)
+        NMR2Dplotter(dataset, ax=ax, fig=fig, fontsize=fontsize, **kw)
         if titles is not None:
             ax.set_title(titles[i])
         axes.append(ax)
@@ -987,7 +1004,7 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
                         font='Arial', fontsize=12, output_format='',
                         equal_tickspacing=False, tick_number=None,
                         tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
-                        show_nQ_line=False, nQ=1, nQ_colors=None,
+                        show_nQ_line=False, nQ=1, nQ_colours=None,
                         ax=None, fig=None, save_fig=False, fig_name='nmr_2d_overlay',
                         save_format='png'):
     """
@@ -1058,7 +1075,7 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
 
     field, xlabel, ylabel, xlims, ylims, equal_tickspacing, tick_number,
     tick_dir, tick_length, tick_width, tick_pad, show_nQ_line, nQ,
-    nQ_colors : optional
+    nQ_colours : optional
         Same meaning as the corresponding :func:`NMR2Dplotter`
         arguments -- axis labels are generated from the (shared)
         nuclides of ``datasets[0]``.
@@ -1239,15 +1256,15 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
         nQ_list = nQ if isinstance(nQ, (list, tuple, np.ndarray)) else [nQ]
         nQ_list = [n_ for n_ in nQ_list if n_ != 0]
 
-        if nQ_colors is None:
-            nQ_colors = ['gray'] * len(nQ_list)
-        elif len(nQ_colors) != len(nQ_list):
-            raise ValueError("nQ_colors must have the same length as nQ.")
+        if nQ_colours is None:
+            nQ_colours = ['gray'] * len(nQ_list)
+        elif len(nQ_colours) != len(nQ_list):
+            raise ValueError("nQ_colours must have the same length as nQ.")
 
         xmin, xmax = ax.get_xlim()
         x_line = np.linspace(xmin, xmax, 500)
 
-        for nq, colour in zip(nQ_list, nQ_colors):
+        for nq, colour in zip(nQ_list, nQ_colours):
             ax.plot(x_line, nq * x_line, linestyle='--', linewidth=1.5,
                      color=colour, alpha=0.8, zorder=10)
 
@@ -1523,7 +1540,7 @@ def NMR2D_get_slices(dataset, rows=None, row_shifts=None, row_width=1,
     return slices
 
 
-def prepare_trace_for_fit(trace, normalize=True):
+def prepare_trace_for_fit(trace, normalise=True):
     """
     Convert an extracted 2D trace (see :func:`NMR2d_get_trace`) into
     the dictionary format expected by ``nmrtools.fitting``'s 1D
@@ -1534,7 +1551,7 @@ def prepare_trace_for_fit(trace, normalize=True):
     trace : dict
         Output of :func:`NMR2d_get_trace`.
 
-    normalize : bool, optional
+    normalise : bool, optional
         If True, normalise the spectrum to its maximum absolute
         intensity.
 
@@ -1553,7 +1570,7 @@ def prepare_trace_for_fit(trace, normalize=True):
         "SFO1": trace.get("SFO1", 0),
     }
 
-    if normalize:
+    if normalise:
         scale = np.max(np.abs(trace["y"]))
         results["normalised_real_spectrum"] = trace["y"] / scale if scale != 0 else trace["y"]
     else:
@@ -1566,6 +1583,17 @@ def prepare_trace_for_fit(trace, normalize=True):
 # Slice plotting
 # ============================================================
 
+def _hyphen_to_minus(text):
+    """
+    Replace a leading ASCII hyphen-minus with a proper Unicode minus
+    sign (U+2212), so negative shift values in labels render with a
+    typographic minus rather than a hyphen.
+    """
+    if text.startswith("-"):
+        return "\u2212" + text[1:]
+    return text
+
+
 def _default_slice_label(tr):
     """
     Default per-slice label: ``"F1 = <shift> ppm"`` / ``"F2 = <shift>
@@ -1577,15 +1605,17 @@ def _default_slice_label(tr):
     axis_name = tr.get("axis", "f1").upper()
     shift = tr.get("shift", 0.0)
     if tr.get("shift_unit") == "index":
-        return f"{axis_name} = {shift:.0f}"
-    return f"{axis_name} = {shift:.2f} ppm"
+        value = f"{shift:.0f}"
+        return f"{axis_name} = {_hyphen_to_minus(value)}"
+    value = f"{shift:.2f}"
+    return f"{axis_name} = {_hyphen_to_minus(value)} ppm"
 
 
 def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
                        show_fit_components=False, colour_spectra='black',
-                       offset_scale=0.1, normalize=False, xlims=None, xlabel=None,
-                       fit_color='red', component_color='gray',
-                       show_nQ_markers=False, nQ=1, nQ_colors=None,
+                       offset_scale=0.1, normalise=False, xlims=None, xlabel=None,
+                       fit_colour='red', component_colour='gray',
+                       show_nQ_markers=False, nQ=1, nQ_colours=None,
                        nQ_marker='*', nQ_markersize=10, nQ_marker_offset=0.05,
                        show_labels=False, labels=None, label_style='legend',
                        label_side='right', label_pad=0.05, label_fontsize=None,
@@ -1647,8 +1677,8 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
         Vertical spacing between traces, as a fraction of each trace's
         own peak-to-peak range.
 
-    normalize : bool, optional
-        If True, normalize each trace to its own maximum absolute
+    normalise : bool, optional
+        If True, normalise each trace to its own maximum absolute
         intensity before plotting (independent of any normalisation
         already applied in ``slices``).
 
@@ -1667,7 +1697,7 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
         ``mode='both'``, applied independently to both the rows and
         columns plots (each against its own fixed shift).
 
-    nQ_colors : list of str, optional
+    nQ_colours : list of str, optional
         Colours for each diagonal in ``nQ``, in the same order.
         Defaults to black for all.
 
@@ -1828,9 +1858,9 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
 
         common_kwargs = dict(
             fits=fits, show_fits=show_fits, show_fit_components=show_fit_components,
-            colour_spectra=colour_spectra, offset_scale=offset_scale, normalize=normalize,
-            xlims=xlims, xlabel=xlabel, fit_color=fit_color, component_color=component_color,
-            show_nQ_markers=show_nQ_markers, nQ=nQ, nQ_colors=nQ_colors,
+            colour_spectra=colour_spectra, offset_scale=offset_scale, normalise=normalise,
+            xlims=xlims, xlabel=xlabel, fit_colour=fit_colour, component_colour=component_colour,
+            show_nQ_markers=show_nQ_markers, nQ=nQ, nQ_colours=nQ_colours,
             nQ_marker=nQ_marker, nQ_markersize=nQ_markersize, nQ_marker_offset=nQ_marker_offset,
             show_labels=show_labels, label_style=label_style, label_side=label_side,
             label_pad=label_pad, label_fontsize=label_fontsize, legend_kwargs=legend_kwargs,
@@ -1923,12 +1953,12 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
     if show_nQ_markers:
         nQ_list = nQ if isinstance(nQ, (list, tuple, np.ndarray)) else [nQ]
         nQ_list = [nq for nq in nQ_list if nq != 0]
-        if nQ_colors is None:
-            nQ_marker_colors = ['black'] * len(nQ_list)
-        elif len(nQ_colors) != len(nQ_list):
-            raise ValueError("nQ_colors must have the same length as nQ.")
+        if nQ_colours is None:
+            nQ_marker_colours = ['black'] * len(nQ_list)
+        elif len(nQ_colours) != len(nQ_list):
+            raise ValueError("nQ_colours must have the same length as nQ.")
         else:
-            nQ_marker_colors = nQ_colors
+            nQ_marker_colours = nQ_colours
 
     yBase = 0.0
     xmin = xmax = None
@@ -1940,7 +1970,7 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
         y = np.asarray(tr["y"])
         x_is_ppm = tr.get("x_is_ppm", True)
 
-        if normalize:
+        if normalise:
             m = np.max(np.abs(y))
             y = y / m if m != 0 else y
 
@@ -1956,13 +1986,13 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
 
             if show_fits and "y_fit" in fit:
                 fx = np.asarray(fit.get("x", x))
-                ax.plot(fx, np.asarray(fit["y_fit"]) + yBase, color=fit_color,
+                ax.plot(fx, np.asarray(fit["y_fit"]) + yBase, color=fit_colour,
                         linewidth=1.0, linestyle='--')
 
             if show_fit_components and fit.get("components") is not None:
                 fx = np.asarray(fit.get("x", x))
                 for comp in fit["components"]:
-                    ax.plot(fx, np.asarray(comp) + yBase, color=component_color,
+                    ax.plot(fx, np.asarray(comp) + yBase, color=component_colour,
                             linewidth=0.7, alpha=0.7)
 
         span = (np.max(y) - np.min(y)) if len(y) else 1.0
@@ -1979,7 +2009,7 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
         if show_nQ_markers and len(x):
             order = np.argsort(x)
             x_sorted, y_sorted = x[order], y[order]
-            for nq, mcolour in zip(nQ_list, nQ_marker_colors):
+            for nq, mcolour in zip(nQ_list, nQ_marker_colours):
                 x_cross = _nQ_crossing_x(tr, nq)
                 if x_cross is None:
                     continue
@@ -1998,7 +2028,9 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
             xmax = hi if xmax is None else max(xmax, hi)
 
     if xlims is not None:
-        ax.set_xlim(xlims)
+        ax.set_xlim(min(xlims), max(xlims))
+        if x_is_ppm:
+            ax.invert_xaxis()
     elif xmin is not None:
         ax.set_xlim(xmin, xmax)
         if x_is_ppm:
@@ -2008,18 +2040,19 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
     apply_spine_style(ax, top=False, right=False, bottom=True, left=False)
     apply_tick_style(ax, direction=tick_dir, length=tick_length, width=tick_width,
                       pad=tick_pad, num_ticks=tick_number, axis='x')
+    ax.tick_params(axis='x', labelsize=fontsize)
 
     if show_labels and label_style == 'legend':
         ax.legend(**(legend_kwargs or {}))
 
     label_nuclide = traces[0].get("nuclide")
     if xlabel is not None:
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel(xlabel, fontsize=fontsize)
     elif x_is_ppm and label_nuclide:
         nucgamma = find_gamma(label_nuclide, field=field, SFO1=traces[0].get("SFO1", 0))
-        ax.set_xlabel(NUC_label(nucgamma['Nuclide'], x_unit='ppm'))
+        ax.set_xlabel(NUC_label(nucgamma['Nuclide'], x_unit='ppm'), fontsize=fontsize)
     elif not x_is_ppm:
-        ax.set_xlabel("Slice number")
+        ax.set_xlabel("Slice number", fontsize=fontsize)
 
     ax.set_title(f"Extracted {mode}")
 
@@ -2045,7 +2078,7 @@ def NMR2D_summary_plot(dataset, slices=None, fits=None, integrals=None,
                         factor=None, clevels=None,
                         projection_size=None, projection_pad=None,
                         xlims=None, ylims=None, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0,
-                        show_nQ_line=False, nQ=1, nQ_colors=None, show_nQ_markers=False,
+                        show_nQ_line=False, nQ=1, nQ_colours=None, show_nQ_markers=False,
                         nQ_marker='*', nQ_markersize=10, nQ_marker_offset=0.05,
                         slices_on_contour_mode=None, slices_on_contour_linestyle='--',
                         slices_on_contour_alpha=0.6,
@@ -2183,7 +2216,7 @@ def NMR2D_summary_plot(dataset, slices=None, fits=None, integrals=None,
         Only applied to a panel if that panel's own kwargs dict
         (``contour_kwargs``/``slices_kwargs``) doesn't already set it.
 
-    nQ_colors : list of str, optional
+    nQ_colours : list of str, optional
         Colours for each diagonal in ``nQ``, forwarded to every panel
         the same way. Defaults to grey on the contour and black for
         the slice-panel crossing markers (each function's own
@@ -2213,7 +2246,7 @@ def NMR2D_summary_plot(dataset, slices=None, fits=None, integrals=None,
         ``projection_mode``, ``colour_spectra``, ``factor``,
         ``clevels``, ``projection_size``, ``projection_pad``,
         ``xlims``/``ylims``/``f1l``/``f1r``/``f2l``/``f2r``,
-        ``show_nQ_line``, ``nQ``, and ``nQ_colors`` above if both are
+        ``show_nQ_line``, ``nQ``, and ``nQ_colours`` above if both are
         given. For ``slices_mode='both'``, the same ``slices_kwargs``
         dict is used as the base for both the rows and columns calls
         (their ``xlims`` are then set independently as described
@@ -2225,9 +2258,13 @@ def NMR2D_summary_plot(dataset, slices=None, fits=None, integrals=None,
 
     font, fontsize : optional
         Typeface settings, see :func:`nmrtools.plotting.setup_plotting`.
-        Applied to the whole (shared) figure -- individual panels'
-        ``font``/``fontsize`` in ``contour_kwargs`` etc. are ignored,
-        since matplotlib's font rcParams are figure-wide.
+        Applied to the whole (shared) figure via ``setup_plotting``,
+        and also forwarded as the default ``font``/``fontsize`` for
+        the contour and slices panels (an explicit ``font``/
+        ``fontsize`` already present in ``contour_kwargs``/
+        ``slices_kwargs`` takes precedence). The integrals panel has
+        no ``font``/``fontsize`` of its own and always follows the
+        shared rcParams.
 
     output_format : {'', 'manuscript', 'presentation'}, optional
         Predefined figure formatting, see
@@ -2261,6 +2298,19 @@ def NMR2D_summary_plot(dataset, slices=None, fits=None, integrals=None,
     contour_kwargs = dict(contour_kwargs or {})
     slices_kwargs = dict(slices_kwargs or {})
     integrals_kwargs = dict(integrals_kwargs or {})
+
+    # Explicitly forward the resolved typeface settings to each panel
+    # rather than relying solely on the (figure-wide) rcParams that
+    # setup_plotting() configures above -- individual panel kwargs
+    # can still override these via contour_kwargs/slices_kwargs.
+    # (_plot_integral_curves has no font/fontsize parameters of its
+    # own -- it always follows the shared rcParams.)
+    if fontsize is not None:
+        contour_kwargs.setdefault("fontsize", fontsize)
+        slices_kwargs.setdefault("fontsize", fontsize)
+    if font is not None:
+        contour_kwargs.setdefault("font", font)
+        slices_kwargs.setdefault("font", font)
 
     if show_slices is None:
         show_slices = slices is not None
@@ -2325,8 +2375,8 @@ def NMR2D_summary_plot(dataset, slices=None, fits=None, integrals=None,
             contour_kwargs.setdefault("projection_pad", projection_pad)
         contour_kwargs.setdefault("show_nQ_line", show_nQ_line)
         contour_kwargs.setdefault("nQ", nQ)
-        if nQ_colors is not None:
-            contour_kwargs.setdefault("nQ_colors", nQ_colors)
+        if nQ_colours is not None:
+            contour_kwargs.setdefault("nQ_colours", nQ_colours)
         if xlims is not None:
             contour_kwargs.setdefault("xlims", [min(xlims), max(xlims)])
         elif f2l + f2r != 0:
@@ -2343,8 +2393,8 @@ def NMR2D_summary_plot(dataset, slices=None, fits=None, integrals=None,
             kw.setdefault("colour_spectra", colour_spectra)
         kw.setdefault("show_nQ_markers", show_nQ_markers)
         kw.setdefault("nQ", nQ)
-        if nQ_colors is not None:
-            kw.setdefault("nQ_colors", nQ_colors)
+        if nQ_colours is not None:
+            kw.setdefault("nQ_colours", nQ_colours)
         #show_nQ_markers=False, nQ_marker='*', nQ_markersize=10, nQ_marker_offset=0.05,
         kw.setdefault("nQ_marker", nQ_marker)
         kw.setdefault("nQ_markersize", nQ_markersize)

@@ -15,14 +15,39 @@ plotting functions. This module is the single source of truth for:
 - ``save_figure``      : shared ``fig_name``/``save_format`` saving
                           convention used by every plotting function
                           that generates its own figure.
+- ``plot_spectrum_dict``, ``plot_comparison``, ``plot_stacked_spectra``
+                        : plot any dict of the shared 10-key spectrum
+                          shape (x_ppm, x_Hz, real_spectrum,
+                          normalised_real_spectrum, imag_spectrum,
+                          normalised_imag_spectrum, nuclide, BF1, SFO1,
+                          path) -- the shape returned by NMR1dimport
+                          (one_d.py, experimental), generate_spectrum_dict
+                          (pnmr_simulator.py, CIF-predicted) and
+                          generate_bms_spectrum_dict (bms_spectrum.py,
+                          BMS-predicted). Moved here (previously defined
+                          only inside pnmr_simulator.py) since none of
+                          the three functions below have anything
+                          CIF-specific in them -- keeping them in a
+                          module about CIF parsing was just an accident
+                          of which pipeline was written first, and meant
+                          bms_spectrum.py would otherwise have had to
+                          import plotting code from a CIF module to plot
+                          a result that has nothing to do with CIFs.
 """
 
 import os
+import re
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as cl
 from matplotlib import cm
 from matplotlib.ticker import MaxNLocator
+
+from .utils import NUC_label
+
+# One implementation of the too-light-colour rule, in the live
+# plotting package; this legacy copy delegates rather than repeating it.
+from ..plotting.style import readable_cmap
 
 # Output formats every save-capable plotting function in nmrtools
 # accepts for its ``save_format`` argument.
@@ -191,14 +216,14 @@ def setup_plotting(font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
 # Colour mapping
 # ============================================================
 
-def get_stack_colormap(color='black'):
+def get_stack_colormap(colour='black'):
     """
     Return a matplotlib colormap used to colour a stack of traces
     (multiple 1D spectra, or extracted 2D row/column slices).
 
     Parameters
     ----------
-    color : str
+    colour : str
         ``'black'``     : every trace plotted in black.
         ``'diverging'``  : a four-stop brown/teal diverging colormap.
         any other string : looked up as a standard matplotlib colormap
@@ -210,20 +235,26 @@ def get_stack_colormap(color='black'):
     matplotlib.colors.Colormap
     """
 
-    if color == 'diverging':
+    if colour == 'diverging':
         return cl.LinearSegmentedColormap.from_list(
             "", ["#a6611a", "#dfc27d", "#80cdc1", "#018571"]
         )
 
-    if color == 'black':
+    if colour == 'black':
         return cl.LinearSegmentedColormap.from_list(
             "", ["#000000", "#000000", "#000000", "#000000"]
         )
 
     try:
-        return plt.get_cmap(color)
+        # Through the shared luminance filter, so this legacy notebook
+        # API draws with the same readable colours the live plotting
+        # package does rather than quietly keeping the near-white ends
+        # -- see opennmr.plotting.style.MAX_LINE_LUMINANCE. Delegated
+        # rather than reimplemented: two copies of a rule like this
+        # drift.
+        return readable_cmap(plt.get_cmap(colour))
     except (ValueError, KeyError):
-        print(f"Colour scheme '{color}' not recognised; defaulting to black.")
+        print(f"Colour scheme '{colour}' not recognised; defaulting to black.")
         return cl.LinearSegmentedColormap.from_list(
             "", ["#000000", "#000000", "#000000", "#000000"]
         )
@@ -252,9 +283,10 @@ def get_contour_cmap(name):
             f"Available options: {sorted(CONTOUR_CMAP_NAMES)}"
         )
     try:
-        return plt.get_cmap(name)  # modern matplotlib
+        base = plt.get_cmap(name)  # modern matplotlib
     except AttributeError:  # pragma: no cover - very old matplotlib
-        return cm.get_cmap(name)
+        base = cm.get_cmap(name)
+    return readable_cmap(base)
 
 
 # ============================================================
@@ -354,3 +386,206 @@ def downsample_2d(data, x, y, max_points_x=2000, max_points_y=500):
     y_ds = y[y_idx]
 
     return data_ds, x_ds, y_ds
+
+
+# ============================================================
+# Generic spectrum_dict plotting
+# ============================================================
+#
+# All three functions below share the same "usual plot modifiers":
+#
+#   tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
+#   tick_number=None, xlims='default', pl_width=3.375, pl_height=3.375,
+#   font='Arial', fontsize=12, fname=True
+#
+# xlims : 'default' auto-ranges from the plotted data (inverted per NMR
+#         convention when invert_x=True); pass an explicit (xmin, xmax) to
+#         override (used exactly as given, via ax.set_xlim(*xlims)).
+# pl_width / pl_height : figure size in inches, only used when `ax=None`
+#         (i.e. this call creates its own figure).
+# fname : True  -> auto-name and save next to the spectrum's own 'path'
+#                   (falls back to the current directory if unavailable);
+#         str   -> save to that exact path;
+#         False/None -> don't save.
+
+def _apply_axis_style(ax, tick_dir, tick_length, tick_width, tick_pad,
+                       tick_number, fontsize, show_yaxis):
+    ax.tick_params(axis='x', direction=tick_dir, length=tick_length,
+                    width=tick_width, pad=tick_pad, labelsize=fontsize)
+    if tick_number is not None:
+        ax.xaxis.set_major_locator(MaxNLocator(tick_number))
+
+    if show_yaxis:
+        ax.tick_params(axis='y', direction=tick_dir, length=tick_length,
+                        width=tick_width, pad=tick_pad, labelsize=fontsize)
+    else:
+        ax.yaxis.set_visible(False)
+        for spine in ("left", "right", "top"):
+            ax.spines[spine].set_visible(False)
+
+
+def _save_spectrum_figure(fig, fname, default_dir, default_name):
+    """Save-convention for the spectrum_dict plotters below. Distinct from
+    save_figure() above (which is fig_name/save_format-driven and used by
+    one_d.py/two_d.py's own figures): this one derives its default
+    filename/location from the spectrum_dict itself ('path' + nuclide),
+    since a simulated spectrum_dict generally has no user-chosen fig_name
+    the way a NMR1dplot() call does."""
+    if not fname:
+        return
+    out_path = os.path.join(default_dir or ".", default_name) if fname is True else fname
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+
+
+def plot_spectrum_dict(spectrum_dict, ax=None, axis="ppm", channel="real",
+                        normalised=True, invert_x=True, offset=0.0, label=None,
+                        show_yaxis=False,
+                        tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
+                        tick_number=None, xlims='default', pl_width=3.375, pl_height=3.375,
+                        font='Arial', fontsize=12, fname=True, **plot_kwargs):
+    """
+    Plot a spectrum dict (experimental, CIF-simulated, or BMS-simulated -
+    same shape) on a Matplotlib Axes.
+
+    axis     : "ppm" or "Hz"
+    channel  : "real" or "imag"
+    normalised : use the normalised_* arrays
+    offset   : constant added to y after selecting the channel/normalisation
+               (e.g. to stack several plot_spectrum_dict calls on one Axes)
+    """
+    plt.rcParams['font.family'] = font
+
+    x_key = "x_ppm" if axis == "ppm" else "x_Hz"
+    prefix = "normalised_" if normalised else ""
+    y_key = f"{prefix}{channel}_spectrum"
+
+    x = spectrum_dict[x_key]
+    y = spectrum_dict[y_key] + offset
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(pl_width, pl_height))
+    else:
+        fig = ax.figure
+
+    ax.plot(x, y, label=label, **plot_kwargs)
+
+    _apply_axis_style(ax, tick_dir, tick_length, tick_width, tick_pad,
+                       tick_number, fontsize, show_yaxis)
+
+    if xlims == 'default':
+        if invert_x:
+            ax.set_xlim(max(x), min(x))
+    else:
+        ax.set_xlim(min(xlims), max(xlims))
+        ax.invert_xaxis()
+
+    nuclide = spectrum_dict.get("nuclide", "")
+    ax.set_xlabel(NUC_label(nuclide, x_unit=axis), fontsize=fontsize)
+
+    if label is not None:
+        ax.legend(fontsize=fontsize * 0.85)
+
+    safe_nuclide = re.sub(r"[^\w\-]", "", nuclide)
+    _save_spectrum_figure(fig, fname, spectrum_dict.get("path"),
+                           f"{safe_nuclide}_{channel}_{axis}_spectrum.png")
+
+    return ax
+
+
+def plot_comparison(simulated_dict, experimental_dict, ax=None, axis="ppm",
+                     channel="real", normalised=True, invert_x=True,
+                     sim_label="Simulated", exp_label="Experimental", offset=0.0,
+                     show_yaxis=False,
+                     tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
+                     tick_number=None, xlims='default', pl_width=3.375, pl_height=3.375,
+                     font='Arial', fontsize=12, fname=True):
+    """
+    Overlay a simulated spectrum dict (CIF-predicted or BMS-predicted) and
+    an experimental spectrum dict.
+
+    offset : added to the simulated spectrum's y-values only, so the two
+             traces can be separated vertically (e.g. offset=0.2 with
+             normalised=True plots the simulated trace 0.2 above the
+             experimental one).
+    """
+    plt.rcParams['font.family'] = font
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(pl_width, pl_height))
+    else:
+        fig = ax.figure
+
+    common = dict(axis=axis, channel=channel, normalised=normalised, invert_x=False,
+                   show_yaxis=show_yaxis, tick_dir=tick_dir, tick_length=tick_length,
+                   tick_width=tick_width, tick_pad=tick_pad, tick_number=tick_number,
+                   xlims='default', pl_width=pl_width, pl_height=pl_height,
+                   font=font, fontsize=fontsize, fname=False)
+
+    plot_spectrum_dict(experimental_dict, ax=ax, offset=0.0, label=exp_label,
+                        color="tab:gray", **common)
+    plot_spectrum_dict(simulated_dict, ax=ax, offset=offset, label=sim_label,
+                        color="tab:red", **common)
+
+    x_key = "x_ppm" if axis == "ppm" else "x_Hz"
+    if xlims == 'default':
+        if invert_x:
+            x_all = np.concatenate([simulated_dict[x_key], experimental_dict[x_key]])
+            ax.set_xlim(x_all.max(), x_all.min())
+    else:
+        ax.set_xlim(min(xlims), max(xlims))
+
+    nuclide = simulated_dict.get("nuclide") or experimental_dict.get("nuclide") or ""
+    safe_nuclide = re.sub(r"[^\w\-]", "", nuclide)
+    path = simulated_dict.get("path") or experimental_dict.get("path")
+    _save_spectrum_figure(fig, fname, path, f"{safe_nuclide}_comparison_{channel}_{axis}.png")
+
+    return ax
+
+
+def plot_stacked_spectra(spectra, labels=None, offset_step=0.2, colours=None,
+                          axis="ppm", channel="real", normalised=True, invert_x=True,
+                          ax=None, show_yaxis=False,
+                          tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
+                          tick_number=None, xlims='default', pl_width=3.375, pl_height=3.375,
+                          font='Arial', fontsize=12, fname=True):
+    """
+    Stack any number of spectrum dicts (experimental, CIF-simulated,
+    and/or BMS-simulated, freely mixed) vertically, offsetting spectrum i
+    by i * offset_step. Handy for comparing a simulated spectrum against
+    several experimental ones (or several simulated candidate models) at
+    once.
+    """
+    plt.rcParams['font.family'] = font
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(pl_width, pl_height))
+    else:
+        fig = ax.figure
+
+    labels = labels or [None] * len(spectra)
+    colours = colours or [None] * len(spectra)
+
+    common = dict(axis=axis, channel=channel, normalised=normalised, invert_x=False,
+                   show_yaxis=show_yaxis, tick_dir=tick_dir, tick_length=tick_length,
+                   tick_width=tick_width, tick_pad=tick_pad, tick_number=tick_number,
+                   xlims='default', pl_width=pl_width, pl_height=pl_height,
+                   font=font, fontsize=fontsize, fname=False)
+
+    for i, (spec, lab, colour) in enumerate(zip(spectra, labels, colours)):
+        plot_spectrum_dict(spec, ax=ax, offset=i * offset_step, label=lab,
+                            color=colour, **common)
+
+    x_key = "x_ppm" if axis == "ppm" else "x_Hz"
+    if xlims == 'default':
+        if invert_x and spectra:
+            x_all = np.concatenate([s[x_key] for s in spectra])
+            ax.set_xlim(x_all.max(), x_all.min())
+    else:
+        ax.set_xlim(xlims[0], xlims[1])
+
+    nuclide = spectra[0].get("nuclide", "") if spectra else ""
+    safe_nuclide = re.sub(r"[^\w\-]", "", nuclide)
+    path = spectra[0].get("path") if spectra else None
+    _save_spectrum_figure(fig, fname, path, f"{safe_nuclide}_stack_{channel}_{axis}.png")
+
+    return ax
