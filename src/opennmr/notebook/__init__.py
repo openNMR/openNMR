@@ -69,6 +69,11 @@ from .csa_fitting import (
     print_csa_fit_report, NMR1dplot_with_csa_fit, NMRCSAFitWorkflow
 )
 
+from .csa_relaxation import (
+    compute_csa_integrals, compute_csa_integral_errors,
+    NMR2D_fit_csa_slices, NMR2D_csa_relaxation_workflow,
+)
+
 from .pnmr_simulator import (
     read_cif_with_occupancies, get_neighbors_by_shell,
     local_environment_distribution, combine_labeled_shells, enumerate_local_environments,
@@ -141,6 +146,9 @@ __all__ = [
     # csa_fitting
     "csa_model_full", "build_csa_model", "fit_csa_spectrum", "evaluate_csa_fit",
     "print_csa_fit_report", "NMR1dplot_with_csa_fit", "NMRCSAFitWorkflow",
+    # csa_relaxation
+    "compute_csa_integrals", "compute_csa_integral_errors",
+    "NMR2D_fit_csa_slices", "NMR2D_csa_relaxation_workflow",
     # pnmr_simulator
     "read_cif_with_occupancies", "get_neighbors_by_shell",
     "local_environment_distribution", "combine_labeled_shells", "enumerate_local_environments",
