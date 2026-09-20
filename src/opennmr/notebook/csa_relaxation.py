@@ -145,12 +145,12 @@ def compute_csa_integral_errors(popt, pcov, fit_info, integrals):
     strictly linear in its own amplitude.
     """
     n_sites = fit_info["n_sites"]
-    csa_params = np.asarray(popt[: 5 * n_sites]).reshape(n_sites, 5)
+    csa_params = np.asarray(popt[: 6 * n_sites]).reshape(n_sites, 6)
 
     errors = []
     for i, row in enumerate(csa_params):
         amplitude = row[4]
-        amp_idx = i * 5 + 4
+        amp_idx = i * 6 + 4
         sigma_A = np.sqrt(max(pcov[amp_idx, amp_idx], 0.0))
         errors.append(np.nan if amplitude == 0 else abs(integrals[i]) * sigma_A / abs(amplitude))
 
@@ -230,7 +230,7 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
                           larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                           n_theta=60, n_phi=120, use_octant_symmetry=True,
                           n_time=1024, n_sidebands=15, subtract_residual_mean=True,
-                          powder_scheme='rectangular', n_zcw=None,
+                          powder_scheme='rectangular', n_zcw=None, lineshape="gaussian",
                           fit_regions=None, normalise=True,
                           baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
                           bounds=None, fixed=None,
@@ -269,7 +269,7 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
     mode : {'rows', 'columns', 'both'}, optional
     convention, static, larmor_Hz, mas_Hz, rotor_angle, n_theta, n_phi,
     use_octant_symmetry, n_time, n_sidebands, subtract_residual_mean,
-    powder_scheme, n_zcw, fit_regions, baseline_regions, baseline_sigma,
+    powder_scheme, n_zcw, lineshape, fit_regions, baseline_regions, baseline_sigma,
     baseline_max_iter, bounds, fixed :
         See :func:`nmrtools.csa_fitting.fit_csa_spectrum` -- used for
         the reference-slice fit (and, when ``freeze_shape=False``, for
@@ -359,7 +359,7 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
                 n_theta=n_theta, n_phi=n_phi, use_octant_symmetry=use_octant_symmetry,
                 n_time=n_time, n_sidebands=n_sidebands,
                 subtract_residual_mean=subtract_residual_mean,
-                powder_scheme=powder_scheme, n_zcw=n_zcw,
+                powder_scheme=powder_scheme, n_zcw=n_zcw, lineshape=lineshape,
                 fit_regions=fit_regions, use_normalised=normalise,
                 baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
                 baseline_max_iter=baseline_max_iter, bounds=bounds, fixed=fixed,
@@ -374,10 +374,11 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
 
             n_sites = ref_fit_info["n_sites"]
             sim_kwargs = ref_fit_info["sim_kwargs"]
-            ref_csa_params = np.asarray(ref_popt[: 5 * n_sites]).reshape(n_sites, 5)
+            ref_csa_params = np.asarray(ref_popt[: 6 * n_sites]).reshape(n_sites, 6)
             ref_shapes_full = [
-                csa_model_full(ref_x_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm, **sim_kwargs)
-                for d_iso, span_or_Delta, skew_or_eta, fwhm, _ in ref_csa_params
+                csa_model_full(ref_x_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
+                                eta=eta, **sim_kwargs)
+                for d_iso, span_or_Delta, skew_or_eta, fwhm, _, eta in ref_csa_params
             ]
 
             if show_warnings:
@@ -427,9 +428,10 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
                 else:
                     sim_kwargs = ref_fit_info["sim_kwargs"]
                     shapes_full = [
-                        csa_model_full(x_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm, **sim_kwargs)
-                        for d_iso, span_or_Delta, skew_or_eta, fwhm, _ in
-                        np.asarray(ref_popt[: 5 * ref_fit_info["n_sites"]]).reshape(-1, 5)
+                        csa_model_full(x_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
+                                       eta=eta, **sim_kwargs)
+                        for d_iso, span_or_Delta, skew_or_eta, fwhm, _, eta in
+                        np.asarray(ref_popt[: 6 * ref_fit_info["n_sites"]]).reshape(-1, 6)
                     ]
 
                 mask = build_region_mask(x_sorted, fit_regions) if fit_regions is not None \
@@ -446,17 +448,17 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
 
                 n_sites = ref_fit_info["n_sites"]
                 popt = ref_popt.copy()
-                popt[np.arange(n_sites) * 5 + 4] = coeffs[:n_sites]      # amplitudes
-                popt[5 * n_sites: 5 * n_sites + 2] = coeffs[n_sites:]    # b0, b1
+                popt[np.arange(n_sites) * 6 + 4] = coeffs[:n_sites]      # amplitudes
+                popt[6 * n_sites: 6 * n_sites + 2] = coeffs[n_sites:]    # b0, b1
 
                 # Full-size pcov with only the (amplitude, b0, b1) block
                 # populated from the linear fit -- shape-parameter rows/
-                # columns are exactly zero, correctly reflecting that
-                # they were held fixed (not "unknown"), matching
-                # nmrtools.fitting.expand_pcov's convention for fixed
-                # parameters elsewhere in this package.
+                # columns (including eta) are exactly zero, correctly
+                # reflecting that they were held fixed (not "unknown"),
+                # matching nmrtools.fitting.expand_pcov's convention for
+                # fixed parameters elsewhere in this package.
                 pcov = np.zeros_like(ref_pcov)
-                lin_idx = list(np.arange(n_sites) * 5 + 4) + [5 * n_sites, 5 * n_sites + 1]
+                lin_idx = list(np.arange(n_sites) * 6 + 4) + [6 * n_sites, 6 * n_sites + 1]
                 for a, ia in enumerate(lin_idx):
                     for b, ib in enumerate(lin_idx):
                         pcov[ia, ib] = pcov_lin[a, b]
@@ -470,7 +472,7 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
                     n_theta=n_theta, n_phi=n_phi, use_octant_symmetry=use_octant_symmetry,
                     n_time=n_time, n_sidebands=n_sidebands,
                     subtract_residual_mean=subtract_residual_mean,
-                    powder_scheme=powder_scheme, n_zcw=n_zcw,
+                    powder_scheme=powder_scheme, n_zcw=n_zcw, lineshape=lineshape,
                     fit_regions=fit_regions, use_normalised=normalise,
                     baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
                     baseline_max_iter=baseline_max_iter, bounds=bounds, fixed=fixed,
@@ -524,7 +526,7 @@ def NMR2D_csa_relaxation_workflow(datapath, p0, procno=1,
                                    larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                                    n_theta=60, n_phi=120, use_octant_symmetry=True,
                                    n_time=1024, n_sidebands=15, subtract_residual_mean=True,
-                                   powder_scheme='rectangular', n_zcw=None,
+                                   powder_scheme='rectangular', n_zcw=None, lineshape="gaussian",
                                    fit_regions=None, baseline_regions=None, baseline_sigma=2.5,
                                    baseline_max_iter=10, normalise=True,
                                    bounds=None, fixed=None,
@@ -574,7 +576,7 @@ def NMR2D_csa_relaxation_workflow(datapath, p0, procno=1,
         Slice selection -- see :func:`nmrtools.two_d.NMR2D_get_slices`.
     convention, static, larmor_Hz, mas_Hz, rotor_angle, n_theta, n_phi,
     use_octant_symmetry, n_time, n_sidebands, subtract_residual_mean,
-    powder_scheme, n_zcw, fit_regions, baseline_regions, baseline_sigma,
+    powder_scheme, n_zcw, lineshape, fit_regions, baseline_regions, baseline_sigma,
     baseline_max_iter, normalise, bounds, fixed, positive_intensity,
     allow_negative_intensity, freeze_shape, reference :
         See :func:`NMR2D_fit_csa_slices`.
@@ -621,7 +623,7 @@ def NMR2D_csa_relaxation_workflow(datapath, p0, procno=1,
         larmor_Hz=larmor_Hz, mas_Hz=mas_Hz, rotor_angle=rotor_angle,
         n_theta=n_theta, n_phi=n_phi, use_octant_symmetry=use_octant_symmetry,
         n_time=n_time, n_sidebands=n_sidebands, subtract_residual_mean=subtract_residual_mean,
-        powder_scheme=powder_scheme, n_zcw=n_zcw,
+        powder_scheme=powder_scheme, n_zcw=n_zcw, lineshape=lineshape,
         fit_regions=fit_regions, normalise=normalise,
         baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
         baseline_max_iter=baseline_max_iter, bounds=bounds, fixed=fixed,

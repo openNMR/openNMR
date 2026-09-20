@@ -641,7 +641,7 @@ def finite_mas_csa_spectrum(csa, ppm_axis, larmor_Hz, mas_Hz,
         frac = (shift - x1) / (x2 - x1)
         spectrum[i - 1] += (ints * (1.0 - frac))
         spectrum[i] += (ints * frac)
-    spectrum = gaussian_broadening(spectrum, ppm_axis, fwhm=fwhm)
+    spectrum = _apply_broadening(spectrum, ppm_axis, fwhm=fwhm, lineshape=lineshape, eta=eta)
     maximum = np.max(spectrum)
     normalised = spectrum / maximum if maximum > 0 else spectrum
     return {

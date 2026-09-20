@@ -69,25 +69,40 @@ from .one_d import NMR1dimport
 from .fitting import build_region_mask, estimate_baseline_robust, fit_quality, expand_pcov
 from .simulations import csa_definition, make_static_csa_spectrum, finite_mas_csa_spectrum
 
-_CSA_PARAM_NAMES = ["d_iso", "span_or_Delta", "skew_or_eta", "fwhm", "amplitude"]
+_CSA_PARAM_NAMES = ["d_iso", "span_or_Delta", "skew_or_eta", "fwhm", "amplitude", "eta"]
+
+# NOTE ON NAMING: `skew_or_eta` is the CSA tensor's own asymmetry
+# parameter (Haeberlen eta_CS, or Herzfeld-Berger skew) -- an
+# intrinsic, physical property of the tensor. `eta` (the 6th, newer
+# per-site parameter below) is an unrelated quantity: the Gaussian/
+# Lorentzian mixing fraction of the broadening kernel convolved onto
+# the simulated powder pattern (see `nmrtools.simulations.
+# pseudo_voigt_broadening`), only meaningful when `lineshape=
+# 'pseudo_voigt'`. Both are conventionally called "eta" in the NMR
+# literature; this package keeps them as two distinct fields
+# (`skew_or_eta` vs `eta`) specifically to avoid conflating them, and
+# `print_csa_fit_report` labels them differently for the same reason.
+# Double-check which one you mean when reading or writing a p0/bounds/
+# fixed dict.
 
 
 # ============================================================
 # Model
 # ============================================================
 
-def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
+def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm, eta=0.0,
                     convention="Haeberlen", static=True,
                     larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                     n_theta=60, n_phi=120, use_octant_symmetry=True,
                     n_time=1024, n_sidebands=15, subtract_residual_mean=True,
-                    powder_scheme='rectangular', n_zcw=None):
+                    powder_scheme='rectangular', n_zcw=None,
+                    lineshape="gaussian"):
     """
     Simulate a unit-amplitude, normalised CSA lineshape for a SINGLE
     site on ``x_ppm_sorted`` (must be ascending and evenly spaced --
     the axis convention used by
-    :func:`nmrtools.csa_quad_simulator.make_static_csa_spectrum` and
-    :func:`nmrtools.csa_quad_simulator.finite_mas_csa_spectrum`).
+    :func:`nmrtools.simulations.make_static_csa_spectrum` and
+    :func:`nmrtools.simulations.finite_mas_csa_spectrum`).
 
     For multi-site spectra this is called once per site and the
     results are summed with per-site amplitudes -- see
@@ -97,10 +112,21 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
     ----------
     static : bool, optional
         If True (default), simulate a static powder pattern via
-        :func:`nmrtools.csa_quad_simulator.make_static_csa_spectrum`.
+        :func:`nmrtools.simulations.make_static_csa_spectrum`.
         If False, simulate a finite-speed-MAS sideband pattern via
-        :func:`nmrtools.csa_quad_simulator.finite_mas_csa_spectrum`,
+        :func:`nmrtools.simulations.finite_mas_csa_spectrum`,
         which requires ``larmor_Hz`` and ``mas_Hz``.
+    lineshape : {'gaussian', 'lorentzian', 'pseudo_voigt'}, optional
+        Broadening kernel convolved onto the simulated powder pattern
+        (applies to every site sharing this ``sim_kwargs``/fit -- see
+        :func:`fit_csa_spectrum`). Default 'gaussian' (unchanged
+        behaviour from earlier versions).
+    eta : float, optional
+        Gaussian/Lorentzian mixing fraction, 0 (pure Gaussian) to 1
+        (pure Lorentzian). Only meaningful (and only fitted --
+        see :func:`fit_csa_spectrum`) when ``lineshape='pseudo_voigt'``;
+        ignored otherwise. NOT the CSA tensor's own asymmetry parameter
+        -- see the note by ``_CSA_PARAM_NAMES`` above.
     n_theta, n_phi, use_octant_symmetry : optional
         Powder-grid size for the static case. Only used when
         ``powder_scheme='rectangular'``.
@@ -108,10 +134,10 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
     subtract_residual_mean : optional
         Powder-grid/FFT size and gamma-averaging options for the
         finite-MAS case. See
-        :func:`nmrtools.csa_quad_simulator.finite_mas_csa_spectrum`.
+        :func:`nmrtools.simulations.finite_mas_csa_spectrum`.
     powder_scheme : {'rectangular', 'zcw'}, optional
         Powder-averaging scheme, forwarded to the simulator (see
-        :func:`nmrtools.csa_quad_simulator.get_powder_grid`). 'zcw'
+        :func:`nmrtools.simulations.get_powder_grid`). 'zcw'
         typically converges with far fewer orientations for the
         finite-MAS case (each orientation costs an FFT, and this
         function is called ~100x per fit via curve_fit's Jacobian,
@@ -135,6 +161,7 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
             csa, x_ppm_sorted, fwhm=fwhm, n_theta=n_theta, n_phi=n_phi,
             use_octant_symmetry=use_octant_symmetry,
             powder_scheme=powder_scheme, n_zcw=n_zcw,
+            lineshape=lineshape, eta=eta,
         )
     else:
         if larmor_Hz is None or mas_Hz is None:
@@ -145,6 +172,7 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
             n_time=n_time, n_sidebands=n_sidebands, fwhm=fwhm,
             subtract_residual_mean=subtract_residual_mean,
             powder_scheme=powder_scheme, n_zcw=n_zcw,
+            lineshape=lineshape, eta=eta,
         )
 
     return spec["normalised_real_spec"]
@@ -159,34 +187,37 @@ def build_csa_model(x_ppm_sorted, params, n_sites, x_ref=None, **sim_kwargs):
     ----------
     params : ndarray
         Flat parameter vector: for each of the ``n_sites`` sites (in
-        order) ``(d_iso, span_or_Delta, skew_or_eta, fwhm,
-        amplitude)``, i.e. ``5 * n_sites`` values, followed by the
-        shared baseline ``(b0, b1)``. Total length ``5 * n_sites + 2``.
+        order) ``(d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude,
+        eta)``, i.e. ``6 * n_sites`` values, followed by the shared
+        baseline ``(b0, b1)``. Total length ``6 * n_sites + 2``.
     n_sites : int
         Number of CSA sites encoded in ``params``.
     sim_kwargs :
         Forwarded to :func:`csa_model_full` for every site
-        (``convention``, ``static``, ``larmor_Hz``, ``mas_Hz``, grid
-        sizes, etc). All sites share the same simulation settings.
+        (``convention``, ``static``, ``larmor_Hz``, ``mas_Hz``,
+        ``lineshape``, grid sizes, etc). All sites share the same
+        simulation settings (including ``lineshape``, the broadening
+        kernel choice -- only each site's own ``eta`` mixing fraction,
+        carried in ``params``, differs between sites).
     """
     params = np.asarray(params, dtype=float)
     x_ppm_sorted = np.asarray(x_ppm_sorted)
 
-    expected_len = 5 * n_sites + 2
+    expected_len = 6 * n_sites + 2
     if params.shape[0] != expected_len:
         raise ValueError(
             f"params has length {params.shape[0]}, expected {expected_len} "
-            f"for n_sites={n_sites} (5 per site + 2 baseline)."
+            f"for n_sites={n_sites} (6 per site + 2 baseline)."
         )
 
-    csa_params = params[: 5 * n_sites].reshape(n_sites, 5)
-    b0, b1 = params[5 * n_sites], params[5 * n_sites + 1]
+    csa_params = params[: 6 * n_sites].reshape(n_sites, 6)
+    b0, b1 = params[6 * n_sites], params[6 * n_sites + 1]
     x_ref = np.mean(x_ppm_sorted) if x_ref is None else x_ref
 
     total = np.zeros_like(x_ppm_sorted, dtype=float)
-    for d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude in csa_params:
+    for d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude, eta in csa_params:
         shape = csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta,
-                                fwhm, **sim_kwargs)
+                                fwhm, eta=eta, **sim_kwargs)
         total += amplitude * shape
 
     return total + b0 + b1 * (x_ppm_sorted - x_ref)
@@ -323,15 +354,20 @@ def initialise_csa_params(p0, b0_init, b1_init, x=None, y=None, fixed=None):
         A single site's initial guess, or a list of them (one per
         site) -- see the module docstring. Each site dict is
         ``{"d_iso": ..., "span_or_Delta": ..., "skew_or_eta": ...,
-        "fwhm": ..., ["amplitude": ...], ["label": ...]}``. If
-        ``"amplitude"`` is omitted for a site, it is estimated as
+        "fwhm": ..., ["amplitude": ...], ["eta": ...], ["label": ...]}``.
+        If ``"amplitude"`` is omitted for a site, it is estimated as
         ``max(abs(y)) / n_sites`` (an equal-height guess -- ``x``/``y``
         must then be supplied, and you should supply ``"amplitude"``
         explicitly instead if sites differ substantially in
-        intensity).
+        intensity). If ``"eta"`` (the broadening-kernel Gaussian/
+        Lorentzian mixing fraction, NOT the CSA asymmetry -- see the
+        note by ``_CSA_PARAM_NAMES``) is omitted, it defaults to 0.0;
+        only meaningful (and only actually fitted) when
+        ``lineshape='pseudo_voigt'`` is passed to :func:`fit_csa_spectrum`
+        -- see there for the automatic fixing that happens otherwise.
     fixed : list or dict, optional
         Names from
-        ``["d_iso","span_or_Delta","skew_or_eta","fwhm","amplitude"]``
+        ``["d_iso","span_or_Delta","skew_or_eta","fwhm","amplitude","eta"]``
         to hold fixed at their ``p0`` value, applied to every site; or
         a dict mixing such global names with per-site overrides keyed
         by site index or label -- see :func:`_resolve_fixed_matrix`.
@@ -339,7 +375,7 @@ def initialise_csa_params(p0, b0_init, b1_init, x=None, y=None, fixed=None):
     Returns
     -------
     params0 : ndarray
-        Length ``5 * n_sites + 2`` (per-site CSA params, then
+        Length ``6 * n_sites + 2`` (per-site CSA params, then
         ``b0, b1``).
     is_free : ndarray(bool)
         Same length as ``params0``.
@@ -364,7 +400,7 @@ def initialise_csa_params(p0, b0_init, b1_init, x=None, y=None, fixed=None):
             amplitude = np.max(np.abs(y)) / n_sites
         values.extend([
             site["d_iso"], site["span_or_Delta"], site["skew_or_eta"],
-            site["fwhm"], amplitude,
+            site["fwhm"], amplitude, site.get("eta", 0.0),
         ])
 
     fixed_matrix = _resolve_fixed_matrix(fixed, n_sites, labels)
@@ -424,6 +460,7 @@ def build_csa_bounds(n_sites, labels=None, convention="Haeberlen", bounds=None,
         "skew_or_eta": default_skew_or_eta,
         "fwhm": (1e-6, np.inf),
         "amplitude": (amp_lower, np.inf),
+        "eta": (0.0, 1.0),
     }
 
     per_site = [dict(base_defaults) for _ in range(n_sites)]
@@ -469,6 +506,7 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
                       n_theta=60, n_phi=120, use_octant_symmetry=True,
                       n_time=1024, n_sidebands=15, subtract_residual_mean=True,
                       powder_scheme='rectangular', n_zcw=None,
+                      lineshape="gaussian",
                       fit_regions=None, use_normalised=True,
                       baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
                       bounds=None, fixed=None,
@@ -521,6 +559,20 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
         False``) since that's where each ``curve_fit`` iteration is
         most expensive; check the fit result is unchanged when you
         raise ``n_zcw`` before trusting a low value.
+    lineshape : {'gaussian', 'lorentzian', 'pseudo_voigt'}, optional
+        Broadening kernel convolved onto every site's simulated
+        powder pattern (shared by all sites in this fit). Default
+        'gaussian' (unchanged behaviour from earlier versions). With
+        ``lineshape='pseudo_voigt'``, each site's own ``eta`` (its
+        Gaussian/Lorentzian mixing fraction, 0-1 -- see the note by
+        ``_CSA_PARAM_NAMES``, NOT the CSA asymmetry ``skew_or_eta``)
+        becomes a genuinely fittable per-site parameter, initialised
+        from ``p0[i].get("eta", 0.0)`` and controllable via the usual
+        per-site ``fixed``/``bounds`` machinery. With ``lineshape=
+        'gaussian'`` or ``'lorentzian'``, ``eta`` has no broadening
+        effect (those kernels don't mix), so it is forced fixed here
+        (at 0.0 or 1.0 respectively) regardless of any ``fixed``
+        setting -- a warning is printed if you had asked for it free.
     fit_regions : list of tuple, optional
         ``[(xmin, xmax), ...]`` in ppm. If None, the complete spectrum
         is fitted.
@@ -547,8 +599,8 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
     -------
     popt : ndarray
         Per-site ``(d_iso, span_or_Delta, skew_or_eta, fwhm,
-        amplitude)`` blocks in site order, followed by ``(b0, b1)``.
-        Length ``5 * n_sites + 2``.
+        amplitude, eta)`` blocks in site order, followed by ``(b0, b1)``.
+        Length ``6 * n_sites + 2``.
     pcov_free : ndarray
         Covariance of the free parameters only -- expand with
         :func:`nmrtools.fitting.expand_pcov`.
@@ -609,12 +661,36 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
     if not static and larmor_Hz is None:
         larmor_Hz = results["SFO1"] * 1.0e6
 
+    # `eta` (per-site broadening-kernel mixing fraction) only has any
+    # effect on the model when lineshape='pseudo_voigt' (see
+    # csa_model_full/pseudo_voigt_broadening) -- for 'gaussian' or
+    # 'lorentzian' it is degenerate (the model's derivative w.r.t. eta
+    # is exactly zero), so leaving it free would waste curve_fit
+    # iterations on an unidentifiable parameter. Force it fixed at the
+    # value that matches the chosen kernel, regardless of `fixed`.
+    lineshape_key = str(lineshape).lower().replace("-", "_")
+    eta_idx = np.arange(n_sites) * 6 + 5
+    if lineshape_key in ("gaussian", "lorentzian"):
+        if np.any(is_free[eta_idx]):
+            print(
+                f"Note: lineshape={lineshape!r} has no Gaussian/Lorentzian "
+                f"mixing to fit -- forcing every site's eta fixed "
+                f"({'0.0' if lineshape_key == 'gaussian' else '1.0'})."
+            )
+        p0_arr[eta_idx] = 0.0 if lineshape_key == "gaussian" else 1.0
+        is_free[eta_idx] = False
+    elif lineshape_key not in ("pseudo_voigt", "pv"):
+        raise ValueError(
+            f"Unknown lineshape {lineshape!r}; use 'gaussian', 'lorentzian', "
+            f"or 'pseudo_voigt'."
+        )
+
     sim_kwargs = dict(
         convention=convention, static=static, larmor_Hz=larmor_Hz, mas_Hz=mas_Hz,
         rotor_angle=rotor_angle, n_theta=n_theta, n_phi=n_phi,
         use_octant_symmetry=use_octant_symmetry, n_time=n_time,
         n_sidebands=n_sidebands, subtract_residual_mean=subtract_residual_mean,
-        powder_scheme=powder_scheme, n_zcw=n_zcw,
+        powder_scheme=powder_scheme, n_zcw=n_zcw, lineshape=lineshape,
     )
 
     lower, upper = build_csa_bounds(
@@ -658,7 +734,7 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
         # leaving any of them in curve_fit's internal normalised scale
         # silently mixes units within a single popt vector. Same bug,
         # same fix, as nmrtools.fitting.fit_spectrum's rescale_params.
-        amp_idx = np.arange(n_sites) * 5 + 4
+        amp_idx = np.arange(n_sites) * 6 + 4
         popt[amp_idx] *= scale   # amplitude, every site
         popt[-2:] *= scale       # baseline b0, b1
 
@@ -697,12 +773,13 @@ def evaluate_csa_fit(x_ppm, popt, fit_info, return_components=False):
     order = np.argsort(x_ppm)
     x_sorted = x_ppm[order]
 
-    csa_params = np.asarray(popt[: 5 * n_sites]).reshape(n_sites, 5)
-    b0, b1 = popt[5 * n_sites], popt[5 * n_sites + 1]
+    csa_params = np.asarray(popt[: 6 * n_sites]).reshape(n_sites, 6)
+    b0, b1 = popt[6 * n_sites], popt[6 * n_sites + 1]
 
     site_components_sorted = []
-    for d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude in csa_params:
-        shape = csa_model_full(x_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm, **sim_kwargs)
+    for d_iso, span_or_Delta, skew_or_eta, fwhm, amplitude, eta in csa_params:
+        shape = csa_model_full(x_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm,
+                                eta=eta, **sim_kwargs)
         site_components_sorted.append(amplitude * shape)
 
     baseline_sorted = b0 + b1 * (x_sorted - x_ref)
@@ -735,7 +812,7 @@ def check_csa_bound_hits(popt, pcov, is_free, lower, upper, labels):
     warnings = []
     for site_idx, label in enumerate(labels):
         for j, name in enumerate(_CSA_PARAM_NAMES):
-            i = site_idx * 5 + j
+            i = site_idx * 6 + j
             if not is_free[i]:
                 continue
             val, lo, hi = popt[i], lower[i], upper[i]
@@ -769,7 +846,14 @@ def print_csa_fit_report(x, y, y_fit, popt, pcov, is_free, labels, convention="H
 
     span_or_delta_label = "Delta" if convention == "Haeberlen" else "span"
     skew_or_eta_label = "eta" if convention == "Haeberlen" else "skew"
-    per_site_names = ["d_iso", span_or_delta_label, skew_or_eta_label, "fwhm", "amplitude"]
+    # Deliberately NOT called "eta" -- under Haeberlen convention
+    # `skew_or_eta_label` above is already "eta" (the CSA tensor's own
+    # asymmetry parameter); this is the unrelated broadening-kernel
+    # Gaussian/Lorentzian mixing fraction (see the note by
+    # `_CSA_PARAM_NAMES`), and needs a visibly different label here or
+    # the two are impossible to tell apart in the printed report.
+    per_site_names = ["d_iso", span_or_delta_label, skew_or_eta_label, "fwhm",
+                       "amplitude", "pv_mix_eta"]
 
     names = []
     for label in labels:
@@ -965,7 +1049,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
                        larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                        n_theta=60, n_phi=120, use_octant_symmetry=True,
                        n_time=1024, n_sidebands=15, subtract_residual_mean=True,
-                       powder_scheme='rectangular', n_zcw=None,
+                       powder_scheme='rectangular', n_zcw=None, lineshape="gaussian",
                        fit_regions=None, baseline_regions=None,
                        baseline_sigma=2.5, baseline_max_iter=10, normalise=True,
                        bounds=None, fixed=None,
@@ -1000,13 +1084,16 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
         "span_or_Delta", "skew_or_eta", "fwhm"; optional: "amplitude"
         (estimated as ``max(abs(y)) / n_sites`` if omitted -- a rough
         equal-height guess; supply it explicitly if sites differ a lot
-        in intensity) and "label" (defaults to "Site 1", "Site 2",
-        ... -- used in the legend, CSV columns, and fit report). See
-        :func:`initialise_csa_params`.
+        in intensity), "eta" (broadening-kernel Gaussian/Lorentzian
+        mixing fraction, 0-1, only meaningful with ``lineshape=
+        'pseudo_voigt'`` below -- defaults to 0.0; NOT the CSA
+        asymmetry, which is "skew_or_eta"), and "label" (defaults to
+        "Site 1", "Site 2", ... -- used in the legend, CSV columns,
+        and fit report). See :func:`initialise_csa_params`.
     procno : int, optional
     convention, static, larmor_Hz, mas_Hz, rotor_angle, n_theta, n_phi,
     use_octant_symmetry, n_time, n_sidebands, subtract_residual_mean,
-    powder_scheme, n_zcw,
+    powder_scheme, n_zcw, lineshape,
     fit_regions, baseline_regions, baseline_sigma, baseline_max_iter,
     bounds, fixed, positive_intensity, allow_negative_intensity :
         See :func:`fit_csa_spectrum`. ``bounds``/``fixed`` accept
@@ -1030,7 +1117,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
     Notes
     -----
     For each site, parameters are ordered ``d_iso, span_or_Delta,
-    skew_or_eta, fwhm, amplitude``; sites are concatenated in the
+    skew_or_eta, fwhm, amplitude, eta``; sites are concatenated in the
     order given in ``p0``, followed by the shared baseline ``b0, b1``.
     The fitted model is ``sum_i(amplitude_i * csa_lineshape_i) + b0 +
     b1 * (x - x_ref)``.
@@ -1046,7 +1133,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
         n_theta=n_theta, n_phi=n_phi, use_octant_symmetry=use_octant_symmetry,
         n_time=n_time, n_sidebands=n_sidebands,
         subtract_residual_mean=subtract_residual_mean,
-        powder_scheme=powder_scheme, n_zcw=n_zcw,
+        powder_scheme=powder_scheme, n_zcw=n_zcw, lineshape=lineshape,
         fit_regions=fit_regions, use_normalised=normalise,
         baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
         baseline_max_iter=baseline_max_iter, bounds=bounds, fixed=fixed,
