@@ -47,6 +47,7 @@ from .plotting import (
     setup_plotting, get_stack_colormap, get_contour_cmap, downsample_2d,
     apply_tick_style, apply_spine_style, save_figure,
 )
+from .one_d import NMR1dimport
 
 
 # ============================================================
@@ -438,12 +439,75 @@ def _prepare_2d_contour(dataset, contour_fraction_x=0.25, contour_fraction_y=0.2
     return contour_x, contour_y, contour_spectrum, thresvec, y_axis
 
 
+def _resolve_external_projection(source, lo, hi, import_kwargs=None):
+    """
+    Resolve an "external" 1D projection trace -- the output of
+    :func:`nmrtools.one_d.NMR1dimport`, or a Bruker experiment path
+    that is imported internally -- to plain ``(x_ppm, intensity)``
+    arrays, cropped to ``[lo, hi]`` ppm. Internal helper for
+    :func:`NMR2Dplotter`'s ``f1_external_projection``/
+    ``f2_external_projection``.
+
+    ``lo``/``hi`` are always the *displayed* F1/F2 limits of the
+    contour plot (i.e. the same range the corresponding projection
+    axis is drawn over), so the external trace lines up with the
+    contour regardless of whether it was imported over a wider (or
+    narrower) range, or with no crop at all.
+
+    Parameters
+    ----------
+    source : dict or str
+        Either an already-imported 1D dataset (the dict returned by
+        :func:`NMR1dimport`), or a Bruker experiment path, in which
+        case it is imported internally with ``f1p``/``f2p`` set to
+        ``lo``/``hi`` directly (so only the needed region is read).
+
+    lo, hi : float
+        Display limits (ppm) to crop the trace to, in either order.
+
+    import_kwargs : dict, optional
+        Extra keyword arguments forwarded to :func:`NMR1dimport` when
+        ``source`` is a path (e.g. ``procno``, ``mass``, ``VOCS``,
+        ``pulse``). Ignored when ``source`` is already an imported
+        dict.
+
+    Returns
+    -------
+    x_ppm, intensity : ndarray
+    """
+
+    import_kwargs = dict(import_kwargs) if import_kwargs else {}
+
+    if isinstance(source, str):
+        spec1d = NMR1dimport(source, f1p=lo, f2p=hi, **import_kwargs)
+        x_ppm = np.asarray(spec1d["x_ppm"])
+        intensity = np.asarray(spec1d["real_spectrum"], dtype=np.float64)
+        return x_ppm, intensity
+
+    if isinstance(source, dict):
+        x_ppm = np.asarray(source["x_ppm"])
+        intensity = np.asarray(source["real_spectrum"], dtype=np.float64)
+        mask = (x_ppm >= min(lo, hi)) & (x_ppm <= max(lo, hi))
+        if np.any(mask):
+            x_ppm, intensity = x_ppm[mask], intensity[mask]
+        return x_ppm, intensity
+
+    raise TypeError(
+        "f1_external_projection/f2_external_projection must be a dict "
+        "(the output of NMR1dimport) or a Bruker experiment path (str), "
+        f"got {type(source)!r}."
+    )
+
+
 def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonuclear=False,
                   contour_fraction_x=0.25, contour_fraction_y=0.25,
                   ncontourpts_x=16384, ncontourpts_y=1024,
                   pl_height=7.0, pl_width=7.0, factor=1e-03, clevels=20,
                   proj_scale=1.0, projection_mode="auto", show_projections=True,
                   projection_size=2.0, projection_pad=0.1,
+                  f1_external_projection=None, f2_external_projection=None,
+                  f1_external_kwargs=None, f2_external_kwargs=None,
+                  external_projection_color='crimson',
                   field='400', xlabel=None, ylabel=None, xlims=None, ylims=None,
                   font='Arial', fontsize=None, output_format='',
                   colour_spectra=None, equal_tickspacing=False, tick_number=None,
@@ -509,6 +573,37 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
     projection_pad : float, optional
         Padding (in inches) between the contour axes and each
         projection panel.
+
+    f1_external_projection, f2_external_projection : dict or str, optional
+        Use an independently-acquired 1D NMR spectrum as the F1 and/or
+        F2 projection trace, instead of computing it from ``dataset``
+        itself (e.g. a separately-acquired reference 1D, or a 1D with
+        better resolution/sensitivity than the 2D's own projection).
+        Each is either the dict returned by :func:`NMR1dimport`, or a
+        Bruker experiment path (imported internally). Only affects the
+        panel(s) actually shown, per ``show_projections``.
+
+        The external trace is always cropped to the *same displayed
+        limits* as the corresponding 2D dimension -- i.e. ``xlims``
+        (or ``f2l``/``f2r``) for ``f2_external_projection``, and
+        ``ylims`` (or ``f1l``/``f1r``) for ``f1_external_projection``
+        -- so it lines up with the contour regardless of the range it
+        was originally imported/cropped over. ``f1_external_projection``
+        is not supported for pseudo-2D data, since its F1 axis is a
+        slice/experiment number rather than a chemical shift.
+
+    f1_external_kwargs, f2_external_kwargs : dict, optional
+        Extra keyword arguments forwarded to :func:`NMR1dimport` when
+        the corresponding ``f1_external_projection``/
+        ``f2_external_projection`` is given as a path rather than an
+        already-imported dict, e.g. ``{'procno': 2, 'mass': 12.3}``.
+        Ignored otherwise.
+
+    external_projection_color : str, optional
+        Line colour used for an external projection trace, so it
+        remains visually distinct from a projection computed from
+        ``dataset`` (which is always plotted in black). Default
+        ``'crimson'``.
 
     show_nQ_line, nQ : bool, float or list of float, optional
         If True, overlay one or more diagonal lines through the
@@ -721,9 +816,13 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
     if show_projections not in (True, False, 'f1', 'f2'):
         raise ValueError("show_projections must be True, False, 'f1', or 'f2'")
 
-    if show_f2_projection or show_f1_projection:
+    if f1_external_projection is not None and pseudo2d:
+        raise ValueError(
+            "f1_external_projection is not supported for pseudo-2D data "
+            "(the F1 axis is a slice/experiment number, not a chemical shift)."
+        )
 
-        spec_float = np.asarray(real_spectrum_2d, dtype=np.float64)
+    if show_f2_projection or show_f1_projection:
 
         mode = projection_mode
         if mode == "auto":
@@ -731,15 +830,14 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
         elif mode not in ("sum", "max"):
             raise ValueError("projection_mode must be 'auto', 'sum', or 'max'")
 
-        proj_axes = []
-
-        if show_f2_projection:
-
-            ax_f2 = divider.append_axes("top", projection_size, pad=projection_pad, sharex=ax)
-            ax_f2.tick_params(axis='x', which='both', bottom=False, top=False,
-                               labelbottom=False, labeltop=False)
-            ax_f2.tick_params(axis='y', which='both', left=False, right=False,
-                               labelleft=False, labelright=False)
+        # Only needed for a panel actually computed from `dataset`
+        # itself -- skip it entirely if every shown panel is external.
+        need_internal = (
+            (show_f2_projection and f2_external_projection is None)
+            or (show_f1_projection and f1_external_projection is None)
+        )
+        if need_internal:
+            spec_float = np.asarray(real_spectrum_2d, dtype=np.float64)
 
             # TopSpin's own row/column projections ('rhpp'/'rvpp' --
             # "positive projection") are built from clipped-positive
@@ -753,13 +851,35 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
             # which is why the old code diverged from TopSpin.
             spec_positive = np.clip(spec_float, 0, None)
 
-            # 'max' (skyline projection): useful for pseudo-2D series
-            # (saturation/inversion recovery, T1, T2, diffusion), where
-            # a sum projection would wash out slice-to-slice changes.
-            f2_projection = (np.sum(spec_positive, axis=0) if mode == "sum"
-                              else np.max(spec_positive, axis=0))
+        proj_axes = []
 
-            ax_f2.plot(xAxppm, f2_projection + (0.02 * np.min(f2_projection)), 'k')
+        if show_f2_projection:
+
+            ax_f2 = divider.append_axes("top", projection_size, pad=projection_pad, sharex=ax)
+            ax_f2.tick_params(axis='x', which='both', bottom=False, top=False,
+                               labelbottom=False, labeltop=False)
+            ax_f2.tick_params(axis='y', which='both', left=False, right=False,
+                               labelleft=False, labelright=False)
+
+            if f2_external_projection is not None:
+                # Same displayed range as the contour's own F2 axis,
+                # whatever it was cropped to above (xlims, f2l/f2r, or
+                # the dataset's full range).
+                f2_lo, f2_hi = sorted(ax.get_xlim())
+                f2_x, f2_projection = _resolve_external_projection(
+                    f2_external_projection, f2_lo, f2_hi, f2_external_kwargs,
+                )
+                f2_colour = external_projection_color
+            else:
+                f2_x = xAxppm
+                # 'max' (skyline projection): useful for pseudo-2D series
+                # (saturation/inversion recovery, T1, T2, diffusion), where
+                # a sum projection would wash out slice-to-slice changes.
+                f2_projection = (np.sum(spec_positive, axis=0) if mode == "sum"
+                                  else np.max(spec_positive, axis=0))
+                f2_colour = 'k'
+
+            ax_f2.plot(f2_x, f2_projection + (0.02 * np.min(f2_projection)), f2_colour)
             ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
             proj_axes.append(ax_f2)
 
@@ -771,10 +891,20 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
             ax_f1.tick_params(axis='y', which='both', left=False, right=False,
                                labelleft=False, labelright=False)
 
-            f1_projection = (np.sum(spec_positive, axis=1) if mode == "sum"
-                              else np.max(spec_positive, axis=1))
+            if f1_external_projection is not None:
+                # Same displayed range as the contour's own F1 axis.
+                f1_lo, f1_hi = sorted(ax.get_ylim())
+                f1_x, f1_projection = _resolve_external_projection(
+                    f1_external_projection, f1_lo, f1_hi, f1_external_kwargs,
+                )
+                f1_colour = external_projection_color
+            else:
+                f1_x = y_axis
+                f1_projection = (np.sum(spec_positive, axis=1) if mode == "sum"
+                                  else np.max(spec_positive, axis=1))
+                f1_colour = 'k'
 
-            ax_f1.plot(-f1_projection + (0.02 * np.min(-f1_projection)), y_axis, 'k')
+            ax_f1.plot(-f1_projection + (0.02 * np.min(-f1_projection)), f1_x, f1_colour)
             ax_f1.set_xlim([np.min(-f1_projection) * proj_scale, np.max(-f1_projection) * 0.99])
             proj_axes.append(ax_f1)
 
