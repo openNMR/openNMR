@@ -35,6 +35,31 @@ pip install -e ".[test]"
 opennmr-gui
 ```
 
+## Add an OpenNMR button to TopSpin
+
+```
+opennmr-topspin-install
+```
+
+Finds the TopSpin installations on the local machine, offers to copy the
+OpenNMR plugin into each installation's `exp/stan/nmr/py/user/` folder,
+and to add the `opennmr` launch command to TopSpin's `autostart.mac`.
+At the TopSpin command line, `opennmr` puts the button on the main
+toolbar and `opennmr -kill` takes it off again.
+
+**The plugin records the absolute path of the environment you run the
+installer from**, rather than looking for `opennmr-gui` on PATH when the
+button is clicked. Depending on how TopSpin is launched, shell startup
+files may not be read, so a conda install is invisible to it, and on
+Windows neither conda nor python.org's installer puts itself on PATH by
+default. The cost is that moving or recreating the environment can break
+the button; re-run the installer if it does.
+
+`--topspin FOLDER` defines a TopSpin installation directory the search
+missed; `--uninstall` removes the plugin and its autostart entry;
+`--list` shows what was found. Writing into TopSpin's own folder may
+need administrator rights.
+
 ## Run tests
 
 ```
