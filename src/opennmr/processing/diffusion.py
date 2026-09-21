@@ -146,6 +146,20 @@ PROBE_MAX_GRADIENT_G_PER_CM = {
 CALIBRATION_LIQUIDS = {
     "H2O_25C": {"D": 2.299e-9, "label": "H2O, 25 °C", "nucleus": "1H"},
     "H2O_20C": {"D": 2.025e-9, "label": "H2O, 20 °C", "nucleus": "1H"},
+    # 40 °C, on request. The temperature matters more than it looks:
+    # water's D rises ~2.4% per degree, so calibrating a 40 °C sample
+    # against the 25 °C value would be ~40% out.
+    "H2O_40C": {"D": 3.222e-9, "label": "H2O, 40 °C", "nucleus": "1H"},
+    # **Doped water is water, as far as diffusion is concerned.** A
+    # relaxation dopant (GdCl3, CuSO4, NiSO4 -- the usual few-mM
+    # additions in a sensitivity/gradient standard) shortens T1 and T2
+    # by orders of magnitude while changing the solvent's own
+    # self-diffusion by well under the ~1% a gradient calibration can
+    # resolve. It is listed separately only so the sample on the bench
+    # can be picked by name; the number is deliberately the same as
+    # H2O_40C rather than a different one invented to look specific.
+    "H2O_doped_40C": {"D": 3.222e-9, "label": "Doped H2O (relaxation agent), 40 °C",
+                       "nucleus": "1H"},
     "D2O_25C": {"D": 1.872e-9, "label": "D2O (residual HDO), 25 °C", "nucleus": "1H"},
     "C6D6_25C": {"D": 2.207e-9, "label": "C6D6, 25 °C", "nucleus": "1H"},
 }

@@ -1,8 +1,10 @@
+import glob
 import os
 
 import numpy as np
 import pytest
 
+from opennmr import io
 from opennmr.io import xpulse
 
 FIXTURE = """\
@@ -372,37 +374,82 @@ def test_read_auto_dispatches_single_file_to_read_1d(tmp_path):
 # Genuine 2D (NTUPLES-format JCAMP-DX, e.g. HSQC)
 # ============================================================
 
-def _make_ntuples_fixture(tmp_path, n1=8, n2=8, sw1=100.0, sw2=800.0, f1_hz=None, name="hsqc.jdx"):
+#: The initial F1 evolution time every real X-Pulse NTUPLES export
+#: records as T1's own ``##FIRST=``, in seconds.
+_T1_FIRST = 6e-06
+
+
+def _make_ntuples_fixture(tmp_path, n1=8, n2=8, sw1=100.0, sw2=800.0, f1_hz=None, name="hsqc.jdx",
+                          record_sw1=True, homonuclear=False, f2_hz=None):
     """A synthetic NTUPLES 2D fixture matching the real format
-    confirmed by direct inspection of a real HSQC export: one
-    (T2++(R..R)), (T2++(I..I)) PAGE pair per T1 increment, States-TPPI
-    row-pairing (see processing.ft.decode_hypercomplex_f1's own
-    docstring for the forward model this mirrors). Plain AFFN decimal
-    text, not ASDF pseudo-digit -- deliberately paired with a
-    ``##VARFORM= AFFN, AFFN, AFFN, AFFN`` header claim that's
-    technically *correct* here (unlike the real file, which lies about
-    this) precisely so the auto-detection path is exercised on both
-    "really is AFFN" and (the real file's own) "claims AFFN but is
-    ASDF" without needing two separate fixtures."""
+    confirmed by direct inspection of a real X-Pulse export.
+
+    **The forward model is TPPI, and R/I are one FID.** Each ``##PAGE=
+    T1=`` value carries *two* pages -- ``(T2++(R..R))`` and
+    ``(T2++(I..I))`` -- and they are the real and imaginary halves of
+    the same complex t2 FID, not a States cos/sin pair: both pages of
+    a pair record the *same* T1, and the file declares
+    ``##.ACQUISITION MODE= SIMULTANEOUS``. F1 sign discrimination
+    comes instead from the ``##.ACQUISITION SCHEME= TPPI``
+    90-degree-per-increment phase ramp, built in below.
+
+    This fixture used to build States cos/sin pairs, which matched
+    what the reader then did rather than what the files contain -- so
+    it agreed with the reader while both were wrong, and the mirrored
+    spectra a user reported went unnoticed. It now carries a known F2
+    frequency as well as a known F1 one, precisely so a reflection in
+    either dimension fails a test.
+
+    Plain AFFN decimal text, not ASDF pseudo-digit -- deliberately
+    paired with a ``##VARFORM= AFFN, AFFN, AFFN, AFFN`` header claim
+    that's technically *correct* here (unlike the real file, which
+    lies about this) precisely so the auto-detection path is exercised
+    on both "really is AFFN" and (the real file's own) "claims AFFN
+    but is ASDF" without needing two separate fixtures."""
+    # ``n1`` counts acquired *FIDs*, matching ##VARDIM's own T1 entry
+    # in the real files. F1's States quadrature uses two of them per
+    # t1 increment, so there are n1 // 2 increments and 2 * n1 pages.
+    n_t1 = max(n1 // 2, 1)
     if f1_hz is None:
-        f1_hz = 2 * (sw1 / n1)  # an exact FFT bin
+        f1_hz = sw1 / n_t1        # exactly one F1 bin
+    if f2_hz is None:
+        f2_hz = 2 * (sw2 / n2)    # likewise an exact bin, well off centre
     t2 = np.arange(n2) / sw2
-    # Each NTUPLES page holds one *real*-valued float per T2 point --
-    # confirmed directly against the real file (both its R and I pages
-    # decode to plain float64, never complex) -- so the synthetic F2
-    # content here must be real too, not the complex quadrature signal
-    # test_ft.py's own States-TPPI fixture uses for a genuinely
-    # complex-per-row Bruker row.
-    f2signal = np.exp(-t2 * 50.0)
+    decay = np.exp(-t2 * 5.0)
     pages = []
-    for k in range(n1):
+    for k in range(n_t1):
         t1 = k / sw1
-        phase = 2 * np.pi * f1_hz * t1
+        # **States quadrature: a cos- and a sin-modulated FID per t1
+        # increment**, so four pages per increment once each is split
+        # into its R and I halves. That is what MestReNova does with
+        # the real files (its first-FT export halves 256 FIDs to 128
+        # t1 points), and it is what gives F1 a single peak at the
+        # full sweep width rather than a reflection or a halved
+        # window.
+        #
+        # Earlier versions of this fixture built amplitude modulation
+        # with a TPPI phase ramp. That was wrong about the format, and
+        # because the reader was wrong the same way, the pair agreed
+        # and the tests passed. A fixture cannot be what decides a
+        # format question -- this one follows the reference data.
+        # States-**TPPI**: successive t1 increments alternate sign (a
+        # 180-degree phase alternation, which puts axial peaks at the
+        # edge of F1 rather than through the middle of the spectrum).
+        # That is the convention the real files use -- decoding them
+        # as plain States (fn_mode 4) throws every peak to the axis
+        # edges and scores r=-0.04 against MestReNova, against +0.85
+        # for this one.
         sign = -1.0 if k % 2 else 1.0
-        real_row = sign * np.cos(phase) * f2signal
-        imag_row = sign * np.sin(phase) * f2signal
-        pages.append(("R", real_row, k))
-        pages.append(("I", imag_row, k))
+        # (cos, -sin), not (cos, sin): F2 below is built as
+        # exp(-2j*pi*f2*t2), so the same coherence evolves at -2*pi*f
+        # and its t1 pair must follow. Getting this wrong puts the
+        # fixture's own "diagonal" peak at +f in F2 and -f in F1 --
+        # off its own diagonal, which no homonuclear dataset can be.
+        for quadrature, sense in ((np.cos, 1.0), (np.sin, -1.0)):
+            amplitude = sign * sense * quadrature(2 * np.pi * f1_hz * t1)
+            complex_row = amplitude * decay * np.exp(-2j * np.pi * f2_hz * t2)
+            pages.append(("R", np.real(complex_row), k))
+            pages.append(("I", np.imag(complex_row), k))
 
     t2_last = (n2 - 1) / sw2
     lines = [
@@ -413,20 +460,25 @@ def _make_ntuples_fixture(tmp_path, n1=8, n2=8, sw1=100.0, sw2=800.0, f1_hz=None
         "$$SpinFlow Sequence Parameters Start",
         f"$$NP1= {n1}",
         f"$$NP2= {n2}",
-        f"$$SW1= {sw1}",
+        # ``record_sw1=False`` mirrors a homonuclear sequence such as
+        # NOESY_HH, whose ParameterBlock has no SW1 at all -- its F1
+        # window is not independently settable. See _f1_sweep_width.
+        *([f"$$SW1= {sw1}"] if record_sw1 else []),
         f"$$Filter= {sw2}",
         "$$O1= 0.0",
         "$$NS= 1",
         "$$TxPPM= 5.0",
-        "$$TxPPMX= 100.0",
+        # Likewise TxPPMX: it is the X channel's offset, and a
+        # homonuclear sequence has no X channel.
+        *([] if homonuclear else ["$$TxPPMX= 100.0"]),
         "$$SpinFlow Sequence Parameters End",
         "##.OBSERVENUCLEUS= ^1H",
-        "##$INDIRECTNUCLEUS= ^13C",
+        "##$INDIRECTNUCLEUS= ^1H" if homonuclear else "##$INDIRECTNUCLEUS= ^13C",
         "##.ACQUISITION SCHEME= TPPI",
         "##$SF= 500.000000 $$ f2",
-        "##$SF= 125.000000 $$ f1",
+        f"##$SF= {'500.000000' if homonuclear else '125.000000'} $$ f1",
         "##$SFO1= 500.000000 $$ f2",
-        "##$SFO1= 125.000000 $$ f1",
+        f"##$SFO1= {'500.000000' if homonuclear else '125.000000'} $$ f1",
         "##NTUPLES= nD NMR FID",
         "##VARNAME= TIME1, TIME2, FID/REAL, FID/IMAG",
         "##SYMBOL= T1, T2, R, I",
@@ -435,8 +487,15 @@ def _make_ntuples_fixture(tmp_path, n1=8, n2=8, sw1=100.0, sw2=800.0, f1_hz=None
         "##VARFORM= AFFN, AFFN, AFFN, AFFN",
         f"##VARDIM= {n1}, {n2}, {n2}, {n2}",
         "##UNITS= SECONDS, SECONDS, ARBITRARY UNITS, ARBITRARY UNITS",
-        f"##FIRST= 0, 0, 0, 0",
-        f"##LAST= {(n1 - 1) / sw1}, {t2_last}, 0, 0",
+        # T1's own FIRST is the initial evolution time, **not** zero --
+        # 6e-06 s in every real X-Pulse export seen. Pinned here as a
+        # non-zero value on purpose: the zeroed ##FIRST= placeholder on
+        # the next line also precedes the first ##PAGE=, so a reader
+        # that takes the *last* pre-PAGE declaration silently reads
+        # T1's first value as 0 and derives a slightly wrong F1 dwell
+        # time. That was a real bug; a zero here would not have caught it.
+        f"##FIRST= {_T1_FIRST}, 0, 0, 0",
+        f"##LAST= {_T1_FIRST + (n1 - 1) / sw1}, {t2_last}, 0, 0",
         "##FIRST= 0,0,0,0",
     ]
     for kind, row, t1_index in pages:
@@ -449,42 +508,86 @@ def _make_ntuples_fixture(tmp_path, n1=8, n2=8, sw1=100.0, sw2=800.0, f1_hz=None
 
     path = tmp_path / name
     path.write_text("\n".join(lines) + "\n")
-    return str(path), f1_hz
+    return str(path), f1_hz, f2_hz
 
 
-def test_read_xpulse_ntuples_2d_recovers_known_f1_frequency(tmp_path):
-    n1, sw1 = 8, 100.0
-    path, f1_hz = _make_ntuples_fixture(tmp_path, n1=n1, sw1=sw1)
+def test_read_xpulse_ntuples_2d_pairs_the_pages_into_one_complex_fid(tmp_path):
+    """``##SYMBOL= T1, T2, R, I``: R and I are the real and imaginary
+    halves of **one** t2 FID, not a States cos/sin pair -- both pages
+    of a pair carry the same ``##PAGE= T1=``. The reader still hands
+    back the pages row-paired; read_2d is what combines them."""
+    n1 = 8
+    path, *_ = _make_ntuples_fixture(tmp_path, n1=n1)
     fid_data = xpulse._read_xpulse_ntuples_2d(path)
-    raw_rows = fid_data["complex"]
-    assert raw_rows.shape[0] == 2 * n1  # row-paired, not yet decoded
-
-    from opennmr.processing import ft as processing_ft
-    decoded = processing_ft.decode_hypercomplex_f1(raw_rows, fn_mode=5)
-    assert decoded.shape[0] == n1
-    spectrum = np.fft.fftshift(np.fft.fft(decoded, axis=0), axes=0)
-    power = np.abs(spectrum).sum(axis=1)
-    freqs = np.fft.fftshift(np.fft.fftfreq(n1, d=1.0 / sw1))
-    assert abs(freqs[np.argmax(power)] - f1_hz) < (sw1 / n1) / 2
-
-
-def test_read_xpulse_2d_end_to_end_shape_and_metadata(tmp_path):
-    path, _ = _make_ntuples_fixture(tmp_path, n1=8, n2=16)
+    assert fid_data["complex"].shape[0] == 2 * n1   # still one row per page
     spectrum = xpulse.read_2d(path, autophase=False)
-    assert spectrum.ndim == 2
-    assert spectrum.data.shape[0] == 8  # F1: row-paired 16 -> decoded 8
-    assert spectrum.metadata.nucleus == "1H"
-    assert spectrum.metadata.nucleus_indirect == "13C"
-    assert spectrum.metadata.raw["fn_mode"] == 5
-    assert spectrum.axes[0].kind == "frequency"
-    assert spectrum.axes[1].kind == "frequency"
+    assert spectrum.metadata.raw["fid_raw"].shape[0] == n1   # one FID per page-pair
+    assert np.iscomplexobj(spectrum.metadata.raw["fid_raw"])
 
 
-def test_read_xpulse_2d_zero_fill_and_truncate_f1(tmp_path):
-    path, _ = _make_ntuples_fixture(tmp_path, n1=8, n2=8)
-    spectrum = xpulse.read_2d(path, autophase=False, truncate_f1=4, zero_fill_f1=16)
-    assert spectrum.metadata.raw["fid_raw"].shape[0] == 8  # 4 pairs, row-paired
-    assert spectrum.data.shape[0] == 16
+def test_read_xpulse_2d_recovers_both_known_frequencies(tmp_path):
+    """**The regression for "the spectra are like duplicated."**
+
+    F2 mirrored because each page was transformed as a real FID
+    instead of R and I being combined into one complex one. F1
+    mirrored because the States pairing of *consecutive* FIDs was
+    dropped, leaving its t1 series amplitude-modulated. Both are
+    fixed, and neither reflection may come back."""
+    path, f1_hz, f2_hz = _make_ntuples_fixture(tmp_path, n1=16, n2=32)
+    spectrum = xpulse.read_2d(path, autophase=False)
+    magnitude = np.abs(spectrum.data + 1j * spectrum.data_imag)
+
+    f2_trace, f1_trace = magnitude.sum(axis=0), magnitude.sum(axis=1)
+    f2_axis, f1_axis = spectrum.axes[1].hz, spectrum.axes[0].hz
+    assert f2_axis[np.argmax(f2_trace)] == pytest.approx(f2_hz, abs=1.0)
+    assert abs(f1_axis[np.argmax(f1_trace)]) == pytest.approx(abs(f1_hz), abs=1.0)
+
+    def height_at(axis, trace, target):
+        return trace[int(np.argmin(np.abs(axis - target)))] / trace.max()
+
+    # F2: no reflection. That is the bug this pins.
+    assert height_at(f2_axis, f2_trace, -f2_hz) < 0.05
+    # F1: no reflection either. States quadrature gives genuine sign
+    # discrimination, so a single peak at the full sweep width -- the
+    # two are not a trade, which is what several earlier attempts got
+    # wrong in both directions.
+    assert height_at(f1_axis, f1_trace, -f1_hz) < 0.2
+
+
+def test_the_f1_axis_spans_the_full_sweep_width(tmp_path):
+    """**No half-window crop.** F1's width is what its own dwell time
+    defines, and every transformed point is kept.
+
+    User report: "the F1 dimension isn't matching ... you're ditching
+    half of the data and so the spectral length is halved." Halving
+    also contradicts the recorded parameters -- ``HSQC_HX`` records
+    ``SW1= 4000`` with a measured dwell of exactly 1/4000 s, the
+    States convention in which SW *is* the usable width."""
+    n1, sw1 = 16, 100.0
+    path, *_ = _make_ntuples_fixture(tmp_path, n1=n1, sw1=sw1)
+    spectrum = xpulse.read_2d(path, autophase=False)
+    # n1 acquired FIDs are n1 // 2 States t1 increments.
+    assert spectrum.data.shape[0] == n1 // 2
+    span_hz = spectrum.axes[0].hz.max() - spectrum.axes[0].hz.min()
+    assert span_hz == pytest.approx(sw1, rel=0.15)
+
+
+def test_a_homonuclear_f1_spans_the_same_window_as_f2(tmp_path):
+    """The directly checkable consequence, and what the user reported
+    against: both dimensions are the same nuclei on the same
+    transmitter, so their sweep widths must agree. On the real
+    ``NOESY_HH`` that is F1 -11.62..21.75 ppm against F2
+    -11.73..21.75; cropped to half it was -3.24..13.37."""
+    path, *_ = _make_ntuples_fixture(tmp_path, n1=16, n2=32, sw1=800.0, sw2=800.0,
+                                     homonuclear=True, record_sw1=False)
+    spectrum = xpulse.read_2d(path, autophase=False)
+    f1, f2 = spectrum.axes[0].ppm, spectrum.axes[1].ppm
+    # The *sweep width*, not the first-to-last span: those differ by
+    # one bin, and F1 has far fewer bins than F2, so comparing spans
+    # directly fails on the point count rather than on the width.
+    def sweep(axis):
+        return (axis.max() - axis.min()) * len(axis) / (len(axis) - 1)
+    assert sweep(f1) == pytest.approx(sweep(f2), rel=0.02)
 
 
 def test_detect_varform_ignores_unreliable_header_claim():
@@ -495,7 +598,7 @@ def test_detect_varform_ignores_unreliable_header_claim():
 
 
 def test_is_ntuples_2d_file_true_for_ntuples_false_for_plain_1d(tmp_path):
-    ntuples_path, _ = _make_ntuples_fixture(tmp_path)
+    ntuples_path, *_ = _make_ntuples_fixture(tmp_path)
     plain_path = _write_fixture(tmp_path)
     assert xpulse._is_ntuples_2d_file(ntuples_path) is True
     assert xpulse._is_ntuples_2d_file(plain_path) is False
@@ -525,7 +628,7 @@ def test_is_ntuples_2d_file_false_for_a_1d_file_that_still_declares_ntuples(tmp_
 
 
 def test_read_auto_dispatches_ntuples_file_to_read_2d(tmp_path):
-    path, _ = _make_ntuples_fixture(tmp_path)
+    path, *_ = _make_ntuples_fixture(tmp_path)
     spectrum = xpulse._read_auto(path, autophase=False)
     assert spectrum.ndim == 2
     assert spectrum.metadata.nucleus_indirect == "13C"
@@ -651,3 +754,362 @@ def test_acquisition_constants_on_a_real_xpulse_pfg_dataset():
     assert constants["delta"] == pytest.approx(4000.0)
     assert constants["DELTA"] == pytest.approx(50000.0)
     assert constants["P90"] == pytest.approx(8.78)
+
+
+# ============================================================
+# peek(): the JCAMP header only, never the data table
+# ============================================================
+
+def test_peek_stops_at_the_data_table():
+    """X-Pulse is the one vendor here whose full read is dominated by
+    *parsing* rather than processing -- 1063 ms of an 1142 ms read_2d,
+    essentially all of it ASDF-decoding points the browser never looks
+    at. The header scan must therefore stop, and stop in the right
+    place: a long ``##TITLE=`` wraps onto a bare continuation line, so
+    "the first line that isn't ##" would end the scan on line two."""
+    path = "test_data/xpulse_HSQC_NUS/2/Quinine_HSQC_HX_avg.jdx"
+    if not os.path.exists(path):
+        pytest.skip("test_data/xpulse_HSQC_NUS not present")
+
+    header = xpulse._peek_header(path)
+    # Read past the wrapped title, all the way to the per-dimension
+    # parameters near the end of the header...
+    assert header["NUMDIM"] == ["2"]
+    assert len(header["$TD"]) == 2
+    # ...and stopped: a decoded data table would have been thousands
+    # of lines more, and the datatable key is the last thing seen.
+    assert "DATATABLE" in header
+
+
+def test_peek_header_tolerates_a_file_that_is_all_header(tmp_path):
+    """No data table at all must not run off the end or raise."""
+    path = tmp_path / "header_only.jdx"
+    path.write_text("##TITLE= x\nwrapped continuation\n##NUMDIM= 1\n##$TD= 64\n##END=\n")
+    header = xpulse._peek_header(str(path))
+    assert header["$TD"] == ["64"]
+    # _peek_td halves: ##$TD counts real+imaginary points, so a TD of
+    # 64 is 32 acquired points. (The preferred source is ##VARDIM,
+    # which states the 32 outright -- absent here on purpose, so this
+    # exercises the fallback.)
+    assert xpulse._peek_td(header) == 32
+    assert xpulse._peek_direct_points(header) == 32
+
+
+def test_peek_td_is_zero_when_the_header_does_not_say():
+    assert xpulse._peek_td({}) == 0
+    assert xpulse._peek_td({"$TD": ["not a number"]}) == 0
+    assert xpulse._peek_td({"$TD": ["64"]}, index=1) == 0
+
+
+@pytest.mark.parametrize("path", [
+    "test_data/xpulse_HSQC_NUS/2/Quinine_HSQC_HX_avg.jdx",   # NTUPLES 2D
+    "test_data/xpulse_PFG/4",                                 # arrayed folder
+])
+def test_peek_agrees_with_a_real_load(path):
+    """``##$TD`` counts real+imaginary points, so an acquired dimension
+    is ``TD // 2``; the indirect dimension is F1's own ``TD`` for a 2D
+    and the ``arrayN`` count for an arrayed folder. This pins that
+    derivation against what a real load produces."""
+    if not os.path.exists(path):
+        pytest.skip(f"{path} not present")
+    info = xpulse.peek(path)
+    spectrum = io.load(path, vendor="xpulse")
+    assert tuple(info["shape"]) == tuple(spectrum.data.shape)
+    assert info["ndim"] == spectrum.data.ndim
+    assert info["nucleus"] == spectrum.metadata.nucleus
+
+
+def test_peek_mirrors_read_auto_three_way_dispatch():
+    """An arrayed folder is a pseudo-2D, a NUMDIM=2 file is a genuine
+    2D, anything else is 1D -- the same three cases _read_auto splits
+    on, so what the browser says matches what opening it gives."""
+    cases = [
+        ("test_data/xpulse_PFG/4", 2, True),
+        ("test_data/xpulse_HSQC_NUS/2/Quinine_HSQC_HX_avg.jdx", 2, False),
+        ("test_data/xpulse_MRI/14", 1, False),
+    ]
+    for path, ndim, pseudo in cases:
+        target = path
+        if os.path.isdir(path) and not xpulse._find_array_dirs(path):
+            found = glob.glob(os.path.join(path, "*.jdx"))
+            if not found:
+                continue
+            target = found[0]
+        if not os.path.exists(target):
+            continue
+        info = xpulse.peek(target)
+        assert info["ndim"] == ndim, target
+        assert info["pseudo_2d"] is pseudo, target
+
+
+# ============================================================
+# Which gradient coil the experiment used
+# ============================================================
+
+def test_gradient_axis_is_read_from_the_spinflow_parameters():
+    """**A triple-axis probe's three coils are not interchangeable.**
+    Nothing read ``$$GradAxis``, so a PGSTE run on y fell back to the
+    axis combo's default (z) and every D came out scaled by the ratio
+    of the two coils' maxima. Reported directly: "Make sure grad_axis
+    is being read from the parameters in the case of x-pulse for curve
+    fitting"."""
+    path = "test_data/xpulse_PFG/4"
+    if not os.path.isdir(path):
+        pytest.skip("test_data/xpulse_PFG not present")
+    spectrum = xpulse.read_array(path)
+    # The file's own header says "PGSTE 1H y gradient".
+    assert spectrum.metadata.raw["gradient_axis"] == "y"
+
+
+def test_gradient_axis_normalises_and_rejects_what_it_does_not_know():
+    assert xpulse._gradient_axis_from_params({"GradAxis": "Y"}) == "y"
+    assert xpulse._gradient_axis_from_params({"GradAxis": " z "}) == "z"
+    # An unrecognised or missing value leaves the GUI on the user's own
+    # selection -- the behaviour before this existed.
+    assert xpulse._gradient_axis_from_params({"GradAxis": "diagonal"}) is None
+    assert xpulse._gradient_axis_from_params({}) is None
+    assert xpulse._gradient_axis_from_params(None) is None
+
+
+# ============================================================
+# F1 spectral width: recorded where a sequence records one,
+# derived from the file's own T1 axis where none does
+# ============================================================
+
+def test_f1_sweep_width_prefers_the_recorded_sw1():
+    """A sequence that states its own F1 window is believed. Deriving
+    over the top of it would paper over a real mismatch rather than
+    show it -- the derivation exists for the files that have no SW1,
+    not to second-guess the ones that do."""
+    # A T1 axis that would derive 1000 Hz, and a recorded 4000.
+    assert xpulse._f1_sweep_width({"SW1": 4000.0}, 0.0, 0.127, 128) == 4000.0
+
+
+def test_f1_sweep_width_derives_from_the_t1_axis_when_sw1_is_absent():
+    """``NOESY_HH`` records no SW1 -- a homonuclear F1 window is not
+    independently settable -- and reading one used to die on "Spectral
+    width (F1) must be > 0 to compute dt" before producing anything,
+    although the file states its F1 dwell time perfectly well in its
+    own ##FIRST=/##LAST= T1 axis."""
+    # 128 pairs from 6e-06 to 0.031756 s -> 2.5e-04 s -> 4000 Hz.
+    assert xpulse._f1_sweep_width({}, 6e-06, 0.031756, 128) == pytest.approx(4000.0)
+    # The initial evolution time is not ignorable: dropping it shifts
+    # the answer, which is why ##FIRST= has to be the real declaration
+    # and not the zeroed placeholder beside it.
+    assert xpulse._f1_sweep_width({}, 0.0, 0.031756, 128) != pytest.approx(4000.0)
+
+
+def test_f1_sweep_width_reports_nothing_rather_than_guessing():
+    """No SW1 and no usable T1 axis is a genuine "can't tell" -- the
+    caller raises with a message naming both, instead of a plausible
+    number nobody can trace."""
+    assert xpulse._f1_sweep_width({}, None, None, 128) == 0.0
+    assert xpulse._f1_sweep_width({}, 0.0, 0.0, 128) == 0.0
+    assert xpulse._f1_sweep_width({}, 0.0, 0.1, 1) == 0.0       # a single increment
+    assert xpulse._f1_sweep_width({"SW1": "n/a"}, None, None, 8) == 0.0
+
+
+@pytest.mark.skipif(not os.path.isfile("test_data/xpulse_HSQC_NUS/2/Quinine_HSQC_HX_avg.jdx"),
+                    reason="test_data/xpulse_HSQC_NUS not present")
+def test_the_derived_f1_width_matches_the_recorded_one_on_real_data():
+    """**The check that makes the derivation trustworthy.** Quinine
+    ``HSQC_HX`` records ``SW1= 4000.0`` *and* a T1 axis, so the two can
+    be compared on a real file rather than a fixture built to agree.
+    6e-06 -> 0.031756 s over 128 pairs is 2.5e-04 s exactly, i.e.
+    4000.0000 Hz -- so the rule used on files with no SW1 reproduces
+    the recorded value on the one file that has both."""
+    path = "test_data/xpulse_HSQC_NUS/2/Quinine_HSQC_HX_avg.jdx"
+    fid_data = xpulse._read_xpulse_ntuples_2d(path)
+    n1 = fid_data["complex"].shape[0] // 2
+    derived = xpulse._f1_sweep_width({}, fid_data["t1_first"], fid_data["t1_last"], n1)
+    assert derived == pytest.approx(float(fid_data["exp_params"]["SW1"]))
+
+
+@pytest.mark.skipif(not os.path.isfile("test_data/xpulse_HSQC_NUS/2/Quinine_HSQC_HX_avg.jdx"),
+                    reason="test_data/xpulse_HSQC_NUS not present")
+def test_global_first_is_the_declaration_not_the_zeroed_placeholder():
+    """``##FIRST=`` appears twice before the first ``##PAGE=``: the real
+    declaration, then the all-zero per-page placeholder. First wins."""
+    fid_data = xpulse._read_xpulse_ntuples_2d(
+        "test_data/xpulse_HSQC_NUS/2/Quinine_HSQC_HX_avg.jdx")
+    assert fid_data["t1_first"] == pytest.approx(6e-06)
+    assert fid_data["t1_last"] == pytest.approx(0.031756)
+
+
+def test_ntuples_2d_reads_a_sequence_that_records_no_sw1(tmp_path):
+    """End to end: the same fixture, minus its ``$$SW1=`` line, still
+    loads and still gets the same F1 dwell time."""
+    n1, sw1 = 8, 100.0
+    with_sw1, *_ = _make_ntuples_fixture(tmp_path, n1=n1, sw1=sw1, name="with_sw1.jdx")
+    without, *_ = _make_ntuples_fixture(tmp_path, n1=n1, sw1=sw1, name="no_sw1.jdx",
+                                       record_sw1=False)
+
+    recorded = xpulse.read_2d(with_sw1, autophase=False)
+    derived = xpulse.read_2d(without, autophase=False)
+    assert "SW1" not in derived.metadata.raw["exp_params"]
+    assert derived.metadata.raw["fid_dt_f1"] == pytest.approx(1.0 / sw1)
+    assert derived.metadata.raw["fid_dt_f1"] == pytest.approx(recorded.metadata.raw["fid_dt_f1"])
+    np.testing.assert_allclose(derived.axes[0].ppm, recorded.axes[0].ppm)
+
+
+def test_a_homonuclear_f1_takes_the_observe_channels_offset(tmp_path):
+    """``TxPPMX`` is the *X channel's* offset, so a homonuclear
+    sequence has none. Defaulting to 0.0 there would centre F1 at
+    0 ppm while F2 sat at ``TxPPM`` (5.0), putting a NOESY's diagonal
+    5 ppm off the diagonal."""
+    path, *_ = _make_ntuples_fixture(tmp_path, homonuclear=True, record_sw1=False)
+    spectrum = xpulse.read_2d(path, autophase=False)
+    assert spectrum.metadata.nucleus == spectrum.metadata.nucleus_indirect == "1H"
+    centre_f1 = 0.5 * (spectrum.axes[0].ppm.min() + spectrum.axes[0].ppm.max())
+    centre_f2 = 0.5 * (spectrum.axes[1].ppm.min() + spectrum.axes[1].ppm.max())
+    assert centre_f1 == pytest.approx(5.0, abs=1.0)
+    assert centre_f1 == pytest.approx(centre_f2, abs=1.0)
+
+
+def test_a_heteronuclear_f1_does_not_borrow_the_proton_offset(tmp_path):
+    """The fallback is a deduction about one channel being two
+    dimensions, not a general "use TxPPM if TxPPMX is missing" -- that
+    would silently put a 13C axis on the 1H carrier."""
+    path, *_ = _make_ntuples_fixture(tmp_path, homonuclear=False)
+    spectrum = xpulse.read_2d(path, autophase=False)
+    assert spectrum.metadata.nucleus_indirect == "13C"
+    centre_f1 = 0.5 * (spectrum.axes[0].ppm.min() + spectrum.axes[0].ppm.max())
+    assert centre_f1 == pytest.approx(100.0, abs=1.0)   # TxPPMX, not TxPPM
+
+
+def test_no_f1_width_anywhere_raises_and_says_where_it_looked(tmp_path):
+    """The error a user actually sees should name both places a width
+    could have come from, not just the parameter that was missing."""
+    import re
+    path, *_ = _make_ntuples_fixture(tmp_path, record_sw1=False)
+    # Collapse the T1 axis so nothing can be derived from it either.
+    text = re.sub(r"##LAST= [^,]+,", "##LAST= 6e-06,", open(path).read(), count=1)
+    assert "##LAST= 6e-06," in text
+    (tmp_path / "flat.jdx").write_text(text)
+    with pytest.raises(ValueError, match=r"(?s)F1.*SW1.*FIRST"):
+        xpulse.read_2d(str(tmp_path / "flat.jdx"), autophase=False)
+
+
+@pytest.mark.skipif(not os.path.isfile("test_data/xpulse_HSQC_NUS/2/Quinine_HSQC_HX_avg.jdx"),
+                    reason="test_data/xpulse_HSQC_NUS not present")
+def test_a_real_2d_has_no_reflection_about_the_transmitter():
+    """The same regression on real data. Before the R/I pages were
+    combined, Quinine's F2 projection carried an equal-height pair at
+    4.05 and 5.95 ppm about its 5.0 ppm transmitter; 4.05 is its OCH3
+    (3.95 ppm in the literature) and 5.95 was the reflection."""
+    spectrum = xpulse.read_2d("test_data/xpulse_HSQC_NUS/2/Quinine_HSQC_HX_avg.jdx")
+    ppm = spectrum.axes[1].ppm
+    projection = np.abs(spectrum.data).sum(axis=0)
+    carrier = float(spectrum.metadata.raw["exp_params"]["TxPPM"])
+
+    peak_ppm = ppm[int(np.argmax(projection))]
+    assert peak_ppm == pytest.approx(4.05, abs=0.3)
+    # Its reflection about the transmitter must not also be a peak.
+    mirror = carrier + (carrier - peak_ppm)
+    height = projection[int(np.argmin(np.abs(ppm - mirror)))] / projection.max()
+    assert height < 0.5, f"a reflection survives at {mirror:.2f} ppm"
+
+
+def test_an_f1_window_is_applied_and_suppresses_truncation_ringing(tmp_path):
+    """**F1 had no apodization at all.** An interferogram cut off at
+    its last increment rings as sinc wiggles down F1, and F1 is where
+    that hurts most -- a couple of hundred increments against a couple
+    of thousand F2 points. User report: "I don't think the windowing is
+    being applied to the indirect dimension"."""
+    # **Half-way between two F1 bins on purpose.** The default fixture
+    # frequency is an exact bin, where a truncated transform leaks
+    # essentially nothing (measured: 3e-07) and there is no ringing for
+    # a window to suppress -- the degenerate case, not the real one. A
+    # half-bin offset is where truncation leakage is largest.
+    # Enough F1 increments that the measurement means something: a
+    # sine-bell over a handful of points broadens more than it
+    # suppresses, and the off-peak window below would have almost
+    # nothing left in it.
+    n1, sw1 = 64, 100.0
+    path, *_ = _make_ntuples_fixture(tmp_path, n1=n1, n2=32, sw1=sw1,
+                                     f1_hz=1.5 * (sw1 / (n1 // 2)))
+    plain = xpulse.read_2d(path, autophase=False)
+    windowed = xpulse.read_2d(path, autophase=False,
+                              window_f1="sine", window_kwargs_f1={"ssb": 2.0})
+
+    assert plain.data.shape == windowed.data.shape
+    assert not np.allclose(plain.data, windowed.data)  # it actually did something
+
+    def ringing(spectrum):
+        trace = np.abs(spectrum.data).sum(axis=1)
+        peak = int(np.argmax(trace))
+        # Well clear of the line itself: a window broadens the peak, so
+        # the neighbouring bins legitimately gain intensity. What must
+        # fall is the leakage further out.
+        off = np.concatenate([trace[:max(peak - 5, 0)], trace[peak + 6:]])
+        return off.mean() / trace[peak]
+
+    assert ringing(windowed) < ringing(plain)
+
+
+def test_no_f1_window_by_default_so_an_existing_load_is_unchanged(tmp_path):
+    """Opting in is deliberate: the default stays "no F1 window", so
+    adding the control cannot silently change what any dataset already
+    on disk looks like when it is reopened."""
+    path, *_ = _make_ntuples_fixture(tmp_path)
+    default = xpulse.read_2d(path, autophase=False)
+    explicit_none = xpulse.read_2d(path, autophase=False, window_f1=None)
+    np.testing.assert_array_equal(default.data, explicit_none.data)
+
+
+#: The NOESY that settled F1's encoding, together with MestReNova's
+#: own export of it at four stages. In the repository rather than
+#: referenced on a personal drive: this is the only thing pinning the
+#: States-TPPI decode, and it took a reference dataset to establish
+#: after three rounds of inferring it wrongly from the raw file alone.
+_MNOVA_NOESY = os.path.join("test_data", "xpulse_NOESY", "4")
+
+
+def _read_mnova_matrix(path):
+    """A MestReNova CSV export: an F2 ppm header row, then one row per
+    F1 point prefixed by its own ppm."""
+    with open(path) as handle:
+        lines = [line.rstrip("\n") for line in handle if line.strip()]
+    f2 = np.array([float(v) for v in lines[0].split("\t") if v.strip()])
+    f1, rows = [], []
+    for line in lines[1:]:
+        parts = [p for p in line.split("\t") if p.strip()]
+        f1.append(float(parts[0]))
+        rows.append([float(p) for p in parts[1:]])
+    return np.array(f1), f2, np.array(rows)
+
+
+@pytest.mark.skipif(not os.path.isfile(os.path.join(_MNOVA_NOESY, "Mnova_exp.csv")),
+                    reason="test_data/xpulse_NOESY not present")
+def test_the_noesy_matches_mestrenovas_own_processing():
+    """**The reference that settled F1**, after three rounds of
+    getting it wrong from the data alone.
+
+    MestReNova's export of this same file is the ground truth: its
+    ``Processed_FID_1st_FT`` carries 128 non-zero rows of 256, i.e. it
+    halves the acquired FIDs into States pairs exactly as this reader
+    now does, and its finished F1 spans the full 2000 Hz with a single
+    peak at 4.74 ppm rather than a reflected pair or a halved window.
+    """
+    m_f1, m_f2, reference = _read_mnova_matrix(f"{_MNOVA_NOESY}/Mnova_exp.csv")
+    spectrum = xpulse.read_2d(f"{_MNOVA_NOESY}/SRB_AKS_B014_4_NOESY_HH_avg.jdx",
+                              zero_fill_f1=len(m_f1))
+    f1, f2 = spectrum.axes[0].ppm, spectrum.axes[1].ppm
+    magnitude = np.abs(spectrum.data + 1j * spectrum.data_imag)
+
+    # Same window, to within a bin.
+    assert f1.min() == pytest.approx(m_f1.min(), abs=0.2)
+    assert f1.max() == pytest.approx(m_f1.max(), abs=0.2)
+
+    mine = magnitude.sum(axis=1)
+    theirs = np.abs(reference).sum(axis=1)
+    assert f1[int(np.argmax(mine))] == pytest.approx(m_f1[int(np.argmax(theirs))], abs=0.2)
+
+    # And the whole F1 profile, not just its maximum -- a reflection
+    # or a half-window would still put *a* peak near the right place.
+    resampled = np.interp(m_f1, f1[::-1], (mine / mine.max())[::-1])
+    assert np.corrcoef(resampled, theirs / theirs.max())[0, 1] > 0.7
+
+    # The solvent self-correlation lands on the diagonal.
+    i1, i2 = np.unravel_index(np.argmax(magnitude), magnitude.shape)
+    assert f1[i1] == pytest.approx(f2[i2], abs=0.3)

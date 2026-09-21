@@ -494,7 +494,8 @@ def _two_peak_curve_fit():
 def test_curve_fit_to_csv_writes_each_peaks_measured_values_against_x():
     t, results = _two_peak_curve_fit()
     rows = [row.split(",") for row in
-            relaxation.curve_fit_to_csv(results, x_label="delay (s)").splitlines()]
+            relaxation.curve_fit_to_csv(results, x_label="delay (s)",
+                                        include_parameters=False).splitlines()]
     header, body = rows[0], rows[1:]
     assert header == ["delay (s)", "A value", "A fit", "B value", "B fit"]
     assert len(body) == len(t)
@@ -506,14 +507,16 @@ def test_curve_fit_to_csv_writes_each_peaks_measured_values_against_x():
 def test_curve_fit_to_csv_scales_x_to_the_requested_unit():
     t, results = _two_peak_curve_fit()
     rows = relaxation.curve_fit_to_csv(
-        results, x_label="delay (ms)", x_scale=1e-3).splitlines()
+        results, x_label="delay (ms)", x_scale=1e-3,
+        include_parameters=False).splitlines()
     np.testing.assert_allclose(
         [float(row.split(",")[0]) for row in rows[1:]], t * 1e3, rtol=1e-9)
 
 
 def test_curve_fit_to_csv_names_the_value_source():
     _t, results = _two_peak_curve_fit()
-    header = relaxation.curve_fit_to_csv(results, value_label="amplitude").splitlines()[0]
+    header = relaxation.curve_fit_to_csv(results, value_label="amplitude",
+                                         include_parameters=False).splitlines()[0]
     assert "A amplitude" in header and "B amplitude" in header
 
 
@@ -526,7 +529,7 @@ def test_curve_fit_to_csv_leaves_a_gap_where_a_peak_has_no_point():
     for key in ("t", "y", "y_fit"):
         results[1][key] = np.asarray(results[1][key])[1:]
     rows = [row.split(",") for row in
-            relaxation.curve_fit_to_csv(results).splitlines()[1:]]
+            relaxation.curve_fit_to_csv(results, include_parameters=False).splitlines()[1:]]
     assert rows[0][3] == "" and rows[0][4] == ""
     assert rows[1][3] != ""
     assert len(rows) == 6  # every x still present
@@ -536,7 +539,7 @@ def test_curve_fit_to_csv_includes_errors_when_the_fit_had_them():
     _t, results = _two_peak_curve_fit()
     for result in results:
         result["y_err"] = np.full(len(result["y"]), 0.1)
-    header = relaxation.curve_fit_to_csv(results).splitlines()[0]
+    header = relaxation.curve_fit_to_csv(results, include_parameters=False).splitlines()[0]
     assert "A value error" in header
 
 
@@ -692,3 +695,232 @@ def test_get_delays_follows_the_slice_indices_not_their_order():
     fits = [{"index": 3}, {"index": 1}]
     np.testing.assert_allclose(
         relaxation._get_delays(fits, np.array([10.0, 20.0, 30.0, 40.0])), [30.0, 10.0])
+
+
+# ============================================================
+# Telling a fitted peak area apart from an integrated region
+# ============================================================
+
+def _fitted_slices():
+    """Slices from NMR2D_fit_slices -- carrying popt, and integrals
+    that are the area under each *fitted lineshape*, rather than a raw
+    sum over a region nobody fitted anything to."""
+    delays = np.linspace(0.01, 0.3, 6)
+    spec = _make_pseudo2d_relaxation(delays, M0=1.0, T1=0.1, C=0.0)
+    slices = slicing.get_slices(spec, rows=list(range(1, len(delays) + 1)))
+    fitted = fitting.NMR2D_fit_slices(
+        slices, [{"type": "gaussian", "shift": 5.0, "fwhm": 0.05}],
+        mode="rows", show_report=False, show_warnings=False)
+    return fitted["rows"], delays
+
+
+def test_value_source_area_needs_a_lineshape_fit():
+    """Explicit user request: the two old options "don't make it clear
+    if a fully fitted spectrum is being used"."""
+    fits, delays = _fitted_slices()
+    # Fitted slices: area and amplitude both work.
+    for source in ("area", "amplitude"):
+        results = relaxation.NMR2D_fit_relaxation(fits, model="exponential_decay", vdlist=delays,
+                                        value_source=source, show_report=False)
+        assert results and np.isfinite(results[0]["params"]["T2"])
+
+    # ...and asking for a raw region integral is refused, not quietly
+    # answered with the fitted area.
+    with pytest.raises(ValueError, match="raw integral over a region"):
+        relaxation.NMR2D_fit_relaxation(fits, model="exponential_decay", vdlist=delays,
+                             value_source="region", show_report=False)
+
+
+def test_value_source_region_needs_integrated_slices():
+    integrated = [{"integrals": [1.0], "regions": [(4.5, 5.5)], "slice": {"index": i}}
+                  for i in range(4)]
+    delays = np.linspace(0.01, 0.2, 4)
+
+    for source in ("area", "amplitude"):
+        with pytest.raises(ValueError, match="NMR2D_fit_slices"):
+            relaxation.NMR2D_fit_relaxation(integrated, model="exponential_decay", vdlist=delays,
+                                 value_source=source, show_report=False)
+
+
+def test_value_source_integral_still_resolves_the_old_way():
+    """The historical name meant whichever of the two the slices
+    carried; it keeps doing that so existing callers are unaffected."""
+    fits, delays = _fitted_slices()
+    old = relaxation.NMR2D_fit_relaxation(fits, model="exponential_decay", vdlist=delays,
+                                value_source="integral", show_report=False)
+    new = relaxation.NMR2D_fit_relaxation(fits, model="exponential_decay", vdlist=delays,
+                                value_source="area", show_report=False)
+    assert old[0]["params"]["T2"] == pytest.approx(new[0]["params"]["T2"])
+
+
+def test_value_source_rejects_an_unknown_name():
+    fits, delays = _fitted_slices()
+    with pytest.raises(ValueError, match="value_source must be one of"):
+        relaxation.NMR2D_fit_relaxation(fits, model="exponential_decay", vdlist=delays,
+                             value_source="nonsense", show_report=False)
+
+
+# ============================================================
+# Curve fit export: the fitted parameters, not just the series
+# ============================================================
+
+def test_curve_fit_parameters_to_csv_reports_the_fitted_values_and_quality():
+    """Explicit user request: "Export curve fit needs to include the
+    fit report parameters, like D/T1/T2 and the fit quality"."""
+    _t, results = _two_peak_curve_fit()
+    rows = [row.split(",") for row in
+            relaxation.curve_fit_parameters_to_csv(results).splitlines()]
+    header, body = rows[0], rows[1:]
+
+    assert header[:2] == ["peak", "model"]
+    assert "T2 (s)" in header and "T2 error (s)" in header
+    assert "R^2" in header and "reduced chi^2" in header and "points" in header
+    assert [row[0] for row in body] == ["A", "B"]
+
+    # The values are the fit's own, not a re-derivation.
+    t2 = float(body[0][header.index("T2 (s)")])
+    assert t2 == pytest.approx(results[0]["params"]["T2"])
+    assert float(body[0][header.index("points")]) == len(results[0]["t"])
+
+
+def test_curve_fit_parameters_name_the_unit_of_a_diffusion_coefficient():
+    """Raw values with the unit in the header -- a file that silently
+    changed unit with a display combo would be unreadable later."""
+    t = np.linspace(0, 4e9, 8)
+    fits = [{"index": i + 1, "integrals": [float(10.0 * np.exp(-2.0e-9 * bi))]}
+            for i, bi in enumerate(t)]
+    results = relaxation.NMR2D_fit_relaxation(
+        fits, model="stejskal_tanner", vdlist=t, show_report=False, peak_labels=["A"])
+    header = relaxation.curve_fit_parameters_to_csv(results).splitlines()[0].split(",")
+    assert "D (m^2/s)" in header
+    assert "D error (m^2/s)" in header
+
+
+def test_curve_fit_parameters_use_the_short_uncertainty_label():
+    """The full describe_uncertainty dict is a paragraph for a report
+    panel; the column only has to say which kind of error the +- is."""
+    _t, results = _two_peak_curve_fit()
+    rows = relaxation.curve_fit_parameters_to_csv(results).splitlines()
+    header, first = rows[0].split(","), rows[1]
+    assert header[-1] == "uncertainty"
+    assert "description" not in first        # not the whole dict
+    assert "σ" in first or "sigma" in first
+
+
+def test_curve_fit_parameters_leave_a_gap_where_a_peak_lacks_one():
+    """Columns are the union over peaks, so a multi-component fit and a
+    single-exponential one can share a file -- an absent parameter is
+    an empty cell, not a zero."""
+    _t, results = _two_peak_curve_fit()
+    results[1]["params"] = {k: v for k, v in results[1]["params"].items() if k != "T2"}
+    results[1]["errors"] = {k: v for k, v in results[1].get("errors", {}).items() if k != "T2"}
+    rows = [row.split(",") for row in
+            relaxation.curve_fit_parameters_to_csv(results).splitlines()]
+    column = rows[0].index("T2 (s)")
+    assert rows[1][column] != ""
+    assert rows[2][column] == ""
+
+
+def test_curve_fit_to_csv_puts_the_parameters_before_the_series():
+    """Two labelled sections: the parameters are per peak and the
+    series is per point, so they have different row meanings. The
+    titles are what let a reader tell which is which."""
+    _t, results = _two_peak_curve_fit()
+    text = relaxation.curve_fit_to_csv(results, x_label="delay (s)")
+    lines = text.splitlines()
+
+    assert lines[0] == "Curve fit parameters"
+    series_at = lines.index("Curve fit series")
+    assert lines[series_at - 1] == ""                 # blank line between them
+    assert lines[series_at + 1].startswith("delay (s),")
+    # Both sections really carry their own content.
+    assert any("T2 (s)" in line for line in lines[:series_at])
+    assert len(lines) - series_at - 2 == len(results[0]["t"])
+
+
+def test_curve_fit_to_csv_can_still_produce_the_bare_series():
+    _t, results = _two_peak_curve_fit()
+    text = relaxation.curve_fit_to_csv(results, include_parameters=False)
+    assert not text.startswith("Curve fit parameters")
+    assert text.splitlines()[0].startswith("x,")
+
+
+# ============================================================
+# Decay fraction: the quality number R² cannot give you
+# ============================================================
+
+def test_decay_fraction_is_last_over_first():
+    assert relaxation.decay_fraction([10.0, 5.0, 2.0]) == pytest.approx(0.2)
+    assert relaxation.decay_fraction(np.array([4.0, 1.0])) == pytest.approx(0.25)
+
+
+def test_decay_fraction_keeps_the_sign_of_an_inversion():
+    """An inversion recovery starts negative and ends positive, so a
+    negative fraction says the inversion worked. Forcing it positive
+    would throw that away."""
+    assert relaxation.decay_fraction([-10.0, 0.0, 9.0]) == pytest.approx(-0.9)
+
+
+def test_decay_fraction_is_nan_where_it_is_undefined():
+    """An undefined ratio reported as such, not as a misleading
+    infinity."""
+    assert np.isnan(relaxation.decay_fraction([0.0, 5.0]))
+    assert np.isnan(relaxation.decay_fraction([5.0]))
+    assert np.isnan(relaxation.decay_fraction([]))
+
+
+def test_decay_fraction_catches_a_series_that_barely_decayed():
+    """**The reason it exists.** Both of these fit perfectly -- R² is
+    1.000000 for each -- but one decayed to 9% and the other only to
+    98%, and the second constrains its D hardly at all. R² cannot tell
+    them apart; this does."""
+    b = np.linspace(0, 4e8, 8)
+
+    def fit(rate, label):
+        fits = [{"index": i + 1, "integrals": [float(10.0 * np.exp(-rate * bi))]}
+                for i, bi in enumerate(b)]
+        return relaxation.NMR2D_fit_relaxation(
+            fits, model="stejskal_tanner", vdlist=b,
+            show_report=False, peak_labels=[label])[0]
+
+    strong, weak = fit(6e-9, "strong"), fit(5e-11, "weak")
+    assert strong["fit_quality"]["r_squared"] == pytest.approx(1.0, abs=1e-6)
+    assert weak["fit_quality"]["r_squared"] == pytest.approx(1.0, abs=1e-6)
+
+    assert strong["fit_quality"]["decay_fraction"] < 0.15
+    assert weak["fit_quality"]["decay_fraction"] > 0.95
+
+
+def test_fit_report_states_the_decay_fraction():
+    _t, results = _two_peak_curve_fit()
+    report = relaxation.format_relaxation_report(results[0], width=60)
+    assert "final I/I" in report
+    fraction = results[0]["fit_quality"]["decay_fraction"]
+    assert f"{fraction:.4g}" in report
+
+
+def test_curve_fit_export_carries_the_decay_fraction():
+    _t, results = _two_peak_curve_fit()
+    rows = [row.split(",") for row in
+            relaxation.curve_fit_parameters_to_csv(results).splitlines()]
+    column = rows[0].index("final I/I0")
+    assert float(rows[1][column]) == pytest.approx(
+        results[0]["fit_quality"]["decay_fraction"])
+
+
+def test_joint_report_gives_the_decay_fraction_per_curve():
+    """**Per curve, not over the joint series.** A joint fit's own
+    y-vector is every dataset concatenated, so "last over first" across
+    it would divide one curve's end by another curve's start."""
+    b = np.linspace(0, 4e8, 8)
+    result = relaxation.fit_relaxation_global(
+        [{"t": b, "y": 10.0 * np.exp(-6e-9 * b), "label": "fast"},
+         {"t": b, "y": 5.0 * np.exp(-5e-11 * b), "label": "slow"}],
+        model="stejskal_tanner", shared=["D"])
+    report = relaxation.format_global_report(result, width=64)
+
+    line = next(ln for ln in report.splitlines() if "I/I" in ln)
+    assert "fast" in line and "slow" in line
+    # Each curve's own attenuation, not one number over the pair.
+    assert result["per_dataset"][0]["fit_quality"]["decay_fraction"] < 0.15
+    assert result["per_dataset"][1]["fit_quality"]["decay_fraction"] > 0.95

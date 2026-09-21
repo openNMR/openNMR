@@ -27,6 +27,7 @@ build = ["pyinstaller"]
 
 [project.scripts]
 opennmr-gui = "opennmr.gui.app:main"
+opennmr-topspin-install = "opennmr.topspin.install:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -36,3 +37,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "opennmr.gui" = ["resources/*.png"]
+"opennmr.topspin" = ["resources/*.py"]

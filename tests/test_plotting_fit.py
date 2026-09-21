@@ -334,3 +334,164 @@ def test_plot_dosy_d_limits_fall_back_to_the_whole_grid_when_empty():
     assert fitplot._dosy_d_limits(np.zeros((32, 8)), d_grid, factor=0.02) == (
         pytest.approx(float(d_grid.min())), pytest.approx(float(d_grid.max())),
     )
+
+
+# ============================================================
+# Overlaying several DOSY maps
+# ============================================================
+
+def _dosy_pair():
+    a = _dosy_fixture()
+    b = _dosy_fixture()
+    # A different grid on the second map, deliberately: maps computed
+    # with a different n_grid/d_range must still overlay.
+    b = dict(b, D=np.asarray(b["D"]) * 1.3)
+    return [a, b]
+
+
+def test_overlay_dosy_draws_one_contour_set_per_map():
+    maps = _dosy_pair()
+    fig, (contour_ax, _projection_ax) = fitplot.overlay_dosy(maps, labels=["A", "B"])
+    assert len(contour_ax.collections) == len(maps)
+    assert contour_ax.get_yscale() == "log"
+
+
+def test_overlay_dosy_labels_each_map_in_the_legend():
+    fig, (contour_ax, _proj) = fitplot.overlay_dosy(_dosy_pair(), labels=["sample A", "sample B"])
+    assert [t.get_text() for t in contour_ax.get_legend().get_texts()] == ["sample A", "sample B"]
+
+
+def test_overlay_dosy_gives_each_map_its_own_colour():
+    fig, (contour_ax, _proj) = fitplot.overlay_dosy(_dosy_pair(), labels=["A", "B"])
+    colours = [tuple(np.ravel(c.get_edgecolor())[:3]) for c in contour_ax.collections]
+    assert colours[0] != colours[1]
+
+
+def test_overlay_dosy_spans_every_map_on_the_d_axis():
+    """A range that fits one map and clips the other is worse than a
+    slightly roomy one."""
+    maps = _dosy_pair()
+    fig, (contour_ax, _proj) = fitplot.overlay_dosy(maps)
+    low, high = contour_ax.get_ylim()
+    for dosy in maps:
+        alone = fitplot._dosy_d_limits(np.asarray(dosy["Z"]), np.asarray(dosy["D"]), 0.02)
+        assert low <= alone[0] * (1 + 1e-9) and high >= alone[1] * (1 - 1e-9)
+
+
+def test_overlay_dosy_honours_an_explicit_d_range():
+    fig, (contour_ax, _proj) = fitplot.overlay_dosy(_dosy_pair(), d_lims=(1e-11, 1e-9))
+    assert contour_ax.get_ylim() == pytest.approx((1e-11, 1e-9))
+
+
+def test_overlay_dosy_needs_at_least_two_maps():
+    with pytest.raises(ValueError, match="at least 2"):
+        fitplot.overlay_dosy([_dosy_fixture()])
+
+
+def test_overlay_dosy_rejects_mismatched_labels():
+    with pytest.raises(ValueError, match="labels"):
+        fitplot.overlay_dosy(_dosy_pair(), labels=["only one"])
+
+
+def test_overlay_dosy_scales_each_projection_to_its_own_peak():
+    """The strip says which shift is which; raw intensities from
+    differently-concentrated samples bury the weaker map."""
+    a, b = _dosy_pair()
+    b = dict(b, projection=np.asarray(b["projection"]) * 50.0)
+    fig, (_contour_ax, projection_ax) = fitplot.overlay_dosy([a, b])
+    peaks = [float(np.nanmax(np.abs(line.get_ydata()))) for line in projection_ax.lines]
+    assert peaks[0] == pytest.approx(peaks[1], rel=1e-6)
+
+
+def test_plot_dosy_panel_is_square_like_every_other_contour():
+    # Explicit user request: "the shape of the contour plot can just
+    # follow that used for every other contour."
+    fig, (contour_ax, projection_ax) = fitplot.plot_dosy(_dosy_fixture(),
+                                                          pl_width=8.0, pl_height=6.0)
+    fig.canvas.draw()
+    box = contour_ax.get_position()
+    width_in, height_in = box.width * 8.0, box.height * 6.0
+    assert width_in == pytest.approx(height_in, rel=0.05)
+
+    # And the strip sits directly above it, sharing its width.
+    strip = projection_ax.get_position()
+    assert strip.x0 == pytest.approx(box.x0, abs=1e-6)
+    assert strip.width == pytest.approx(box.width, abs=1e-6)
+    assert strip.y0 > box.y1
+
+
+# ============================================================
+# DOSY rows drawn beside the map
+# ============================================================
+
+def test_plot_dosy_draws_a_slice_panel_and_a_dashed_marker():
+    """Explicit user request: extracting a line from a DOSY should
+    offer "the option to plot alongside with the dashed line like in
+    normal 2D contours". Same drawing code as a 2D contour's own
+    extracted slices -- see plotting.twod._draw_traces_panel."""
+    from opennmr.plotting.twod import SLICE_PANEL_GID
+
+    dosy = _dosy_fixture()
+    # A row the ILT actually populated: most of the D grid is empty by
+    # construction (an inversion puts signal only where there is any),
+    # and an empty row is deliberately skipped -- see the test below.
+    z = np.asarray(dosy["Z"], dtype=float)
+    populated = [i for i in range(z.shape[0]) if np.any(z[i, :])]
+    d_value = float(np.asarray(dosy["D"])[populated[0]])
+    fig, (contour_ax, _projection_ax) = fitplot.plot_dosy(
+        dosy, slices=[{"D": d_value, "label": "fast"}])
+
+    panel = [a for a in fig.axes if a.get_gid() == SLICE_PANEL_GID]
+    assert len(panel) == 1
+    assert panel[0].lines                      # the extracted row is drawn
+    # A dashed horizontal line across the map at that D -- a row is
+    # fixed in D, so the marker runs along the shift axis.
+    dashed = [ln for ln in contour_ax.lines if ln.get_linestyle() not in ("-", "None")]
+    assert dashed
+    plt.close(fig)
+
+
+def test_plot_dosy_without_slices_builds_no_panel():
+    from opennmr.plotting.twod import SLICE_PANEL_GID
+
+    fig, _axes = fitplot.plot_dosy(_dosy_fixture())
+    assert not [a for a in fig.axes if a.get_gid() == SLICE_PANEL_GID]
+    plt.close(fig)
+
+
+def test_plot_dosy_skips_a_row_the_ilt_left_empty():
+    """A flat line labelled as a spectrum would be a claim the map does
+    not make."""
+    from opennmr.plotting.twod import SLICE_PANEL_GID
+
+    dosy = _dosy_fixture()
+    z = np.asarray(dosy["Z"], dtype=float)
+    empty_row = int(np.argmin(np.abs(z).sum(axis=1)))
+    assert not np.any(z[empty_row, :])         # the fixture really has one
+    d_value = float(np.asarray(dosy["D"])[empty_row])
+
+    fig, _axes = fitplot.plot_dosy(dosy, slices=[{"D": d_value}])
+    assert not [a for a in fig.axes if a.get_gid() == SLICE_PANEL_GID]
+    plt.close(fig)
+
+
+def test_plot_dosy_resolves_each_slice_to_its_nearest_grid_row():
+    """D values are kept as the user gave them and resolved at draw
+    time, so a map re-inverted onto a finer grid still shows the row
+    that was asked for."""
+    from opennmr.plotting.twod import SLICE_PANEL_GID
+
+    dosy = _dosy_fixture()
+    grid = np.asarray(dosy["D"], dtype=float)
+    populated = [i for i in range(grid.size) if np.any(np.asarray(dosy["Z"])[i, :])]
+    target = populated[len(populated) // 2]
+    # Deliberately off-grid, between two rows.
+    off_grid = float(np.sqrt(grid[target] * grid[target + 1]))
+
+    fig, (contour_ax, _projection_ax) = fitplot.plot_dosy(dosy, slices=[{"D": off_grid}])
+    assert [a for a in fig.axes if a.get_gid() == SLICE_PANEL_GID]
+    dashed = [ln for ln in contour_ax.lines if ln.get_linestyle() not in ("-", "None")]
+    assert len(dashed) == 1
+    drawn = dashed[0].get_ydata()[0]
+    assert drawn in (grid[target], grid[target + 1])
+    plt.close(fig)

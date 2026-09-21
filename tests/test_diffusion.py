@@ -402,3 +402,27 @@ def test_stejskal_tanner_still_fits_an_ordinary_decay():
     result = processing_relaxation.fit_relaxation(b, y, model="stejskal_tanner")
     assert result["params"]["I0"] == pytest.approx(3.0, rel=1e-4)
     assert result["params"]["D"] == pytest.approx(1.5e-9, rel=1e-4)
+
+
+def test_calibration_liquids_cover_40c_water():
+    """On request. The temperature matters: water's D rises ~2.4% per
+    degree, so calibrating a 40 °C sample against the 25 °C value would
+    be about 40% out."""
+    entry = dif.CALIBRATION_LIQUIDS["H2O_40C"]
+    assert entry["D"] == pytest.approx(3.222e-9)
+    assert "40" in entry["label"]
+
+    # Warmer than 25 °C means faster, by roughly the expected amount.
+    ratio = entry["D"] / dif.CALIBRATION_LIQUIDS["H2O_25C"]["D"]
+    assert 1.3 < ratio < 1.5
+
+
+def test_doped_water_shares_pure_waters_diffusion_coefficient():
+    """**Doped water is water, as far as diffusion is concerned.** A
+    relaxation dopant shortens T1/T2 by orders of magnitude while
+    changing the solvent's own self-diffusion by well under the ~1% a
+    gradient calibration can resolve. Listed separately so the sample
+    on the bench can be picked by name -- not given a different number
+    invented to look specific."""
+    assert (dif.CALIBRATION_LIQUIDS["H2O_doped_40C"]["D"]
+            == dif.CALIBRATION_LIQUIDS["H2O_40C"]["D"])

@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 
+import matplotlib.colors
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
@@ -21,6 +22,7 @@ from opennmr.gui.main_window import (
     _ProcessingReportDialog, _ScoreSettingsDialog,
 )
 from opennmr.gui.session import Session
+from opennmr.gui.widgets.canvas import MplCanvas
 import opennmr.gui.main_window as main_window_module
 from opennmr import io as opennmr_io
 from opennmr.io import bruker as io_bruker
@@ -28,6 +30,8 @@ from opennmr.io import persistence as io_persistence
 from opennmr.processing import diffusion as processing_diffusion
 from opennmr.processing import fitting as processing_fitting
 from opennmr.processing import ilt as processing_ilt
+from opennmr.processing import score as processing_score
+from opennmr.processing import relaxation as processing_relaxation
 from opennmr.processing import slicing as processing_slicing
 from opennmr.processing import ft as processing_ft
 from opennmr.processing.slicing import get_trace
@@ -1467,14 +1471,64 @@ def test_main_window_revert_autophase_noop_with_nothing_to_revert(qapp, tmp_path
     window._on_revert_autophase_clicked()  # must not raise
 
 
-def test_main_window_baseline_correct_is_now_on_by_default(qapp, tmp_path):
-    # Explicit user feedback: a well-phased spectrum should generally
-    # land close to zero, which wasn't reliably happening while this
-    # was off by default for every vendor but X-Pulse.
+def test_main_window_per_slice_phases_survive_a_reload(qapp, tmp_path, monkeypatch):
+    # Reported directly: "need to make sure that per-slice phasing/
+    # processing is being maintained across loads". They were saved and
+    # restored into metadata.raw correctly -- and never *applied*,
+    # because the reader has no parameter for them and the load took
+    # the already-applied fast path anyway.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=6, n_f2=64)
+    window._load(path, vendor="bruker")
+    spectrum = window.session.spectra[0]
+
+    for row in range(spectrum.data.shape[0]):
+        window._add_slice_phase(spectrum, row, 10.0 * (row + 1), 0.0)
+    window._recompute_multi_row_data(spectrum)
+    phased = spectrum.complex_data.copy()
+    window._schedule_sidecar_save(0)
+    window._sidecar_save_timer.stop()
+    window._run_debounced_sidecar_save()
+
+    reloaded_window = MainWindow()
+    reloaded_window._load(path, vendor="bruker")
+    reloaded = reloaded_window.session.spectra[0]
+
+    assert reloaded.metadata.raw["slice_phase0"] == [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+    # Recorded *and* applied -- the data itself comes back phased.
+    np.testing.assert_allclose(reloaded.complex_data, phased)
+
+
+def test_main_window_a_series_with_no_slice_phases_keeps_the_fast_load(qapp, tmp_path, monkeypatch):
+    # The exclusion must be conditional: falling back to the full
+    # recompute for every 2D would undo the load-speed work.
+    _isolate_sidecars(monkeypatch, tmp_path)
+    window = MainWindow()
+    path = _make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=6, n_f2=64)
+    window._load(path, vendor="bruker")
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw["_read_used_saved_processing"] = True
+    spectrum.metadata.raw["slice_phase0"] = [0.0] * spectrum.data.shape[0]
+
+    assert window._read_already_applied_saved_processing(spectrum) is True
+
+    spectrum.metadata.raw["slice_phase0"][2] = 15.0
+    assert window._read_already_applied_saved_processing(spectrum) is False
+
+
+def test_main_window_baseline_correct_is_off_by_default(qapp, tmp_path):
+    # **This default has been both ways.** It was turned *on* for
+    # earlier feedback that "a well-phased spectrum should generally
+    # land close to zero"; it is now off again, chosen deliberately
+    # when the baseline overlay landed -- a spectrum that arrives
+    # already corrected leaves the overlay nothing meaningful to draw,
+    # since the trace it would fit is the one the correction has
+    # already flattened.
     window = MainWindow()
     window._load(_make_1d_dataset(tmp_path, n=64), vendor="bruker")
-    assert window.baseline_correct_button.isChecked() is True
-    assert window.session.spectra[0].metadata.raw.get("baseline_correct") is True
+    assert window.baseline_correct_button.isChecked() is False
+    assert window.session.spectra[0].metadata.raw.get("baseline_correct") is False
 
 
 def test_main_window_baseline_correct_changes_1d_data(qapp, tmp_path):
@@ -1583,7 +1637,7 @@ def test_main_window_baseline_correct_spline_method_persists_across_reselection(
     window.baseline_correct_button.setChecked(True)
 
     window._select_single_row(index_b)
-    assert window.baseline_correct_button.isChecked() is True  # untouched spectrum, own (now-on) default
+    assert window.baseline_correct_button.isChecked() is False  # untouched spectrum, own (off) default
     assert window.baseline_method_combo.currentData() == "linear"  # its own default method, not expt_a's spline
 
     window._select_single_row(index_a)
@@ -2029,7 +2083,13 @@ def test_main_window_2d_phase_slice_follows_dimension_switch(qapp, tmp_path, mon
     window.dim_combo.setCurrentIndex(1)  # switch to F1 (indirect)
 
     assert window._phase_2d_slice_index == 1  # F1 default: column 1
-    assert "F2 column 1" in window.processing_preview_canvas.ax.get_title()
+    # The F1 view is a dual panel now (interferogram above spectrum),
+    # so the title that proves the switch re-anchored the display is
+    # the FID panel's. The interferogram deliberately shows the
+    # *strongest* F2 column rather than column 1 -- the panel exists to
+    # judge F1 truncation against a real decay, and column 1 is the
+    # edge of the spectrum, which is noise.
+    assert "F1 interferogram" in window.processing_preview_canvas._processing_preview_fid_ax.get_title()
 
 
 def test_main_window_processing_preview_slice_matches_spectrum_tab_across_zero_fill_mismatch(
@@ -2116,7 +2176,11 @@ def test_main_window_2d_genuine_processing_preview_supports_f1_dimension(qapp, t
     canvas = window.processing_preview_canvas
     assert canvas._contour_spectrum is None
     assert len(canvas.ax.lines) >= 1
-    assert "F2 column" in canvas.ax.get_title()
+    # Two panels now, not one: F1's interferogram above its spectrum,
+    # so Truncate (F1) and Zero-fill (F1) can be judged against the
+    # decay they are decisions about. The title names the FID panel.
+    assert canvas._processing_preview_fid_ax is not None
+    assert "F1 interferogram" in canvas._processing_preview_fid_ax.get_title()
 
 
 def test_main_window_2d_indirect_processing_preview_does_not_double_apply_phase(qapp, tmp_path, monkeypatch):
@@ -2508,6 +2572,24 @@ def test_main_window_change_procno_cancelled_is_noop(qapp, tmp_path, monkeypatch
     np.testing.assert_allclose(window.session.spectra[index].data, original)
 
 
+class _FakeAction(str):
+    """Stands in for a QAction where a fake menu is used.
+
+    Compares equal to its own label, so every ``"Some label" in
+    added_labels`` assertion keeps working, while tolerating the
+    QAction API the real menu code calls on what ``addAction``
+    returns."""
+
+    def setToolTip(self, _text) -> None:
+        pass
+
+    def setCheckable(self, _value) -> None:
+        pass
+
+    def setChecked(self, _value) -> None:
+        pass
+
+
 def test_main_window_change_procno_not_offered_for_xpulse(qapp, tmp_path, monkeypatch):
     # QMenu.exec() is modal and not interceptable headlessly by
     # monkeypatching the real PySide6 class (see
@@ -2526,7 +2608,7 @@ def test_main_window_change_procno_not_offered_for_xpulse(qapp, tmp_path, monkey
 
         def addAction(self, label):
             added_labels.append(label)
-            return label
+            return _FakeAction(label)
 
         def addSeparator(self):
             pass
@@ -2993,7 +3075,16 @@ def _make_xpulse_ntuples_2d_dataset(tmp_path, n1=4, n2=32, name="hsqc.jdx"):
     axis for a 2D array) as a loud crash rather than a silent
     wrong-value bug a square array wouldn't have caught."""
     t2 = np.arange(n2) / 800.0
-    f2signal = np.exp(-t2 * 50.0)
+    # TPPI, and R/I are the real and imaginary halves of ONE complex t2
+    # FID -- see tests/test_xpulse.py::_make_ntuples_fixture for the
+    # full reasoning. The old model here built States cos/sin pairs of
+    # a real signal, which agreed with what the reader then did rather
+    # than with what the files contain.
+    decay = np.exp(-t2 * 5.0)
+    # n1 counts acquired FIDs; F1's States quadrature uses two per t1
+    # increment, so there are n1 // 2 increments and 2 * n1 pages.
+    n_t1 = max(n1 // 2, 1)
+    f1_hz, f2_hz = 100.0 / n_t1, 2 * (800.0 / n2)
     lines = [
         "##TITLE= synthetic NTUPLES 2D fixture", "##DATACLASS= NTUPLES", "##NUMDIM= 2",
         "$$SpinFlow Sequence Parameters Start",
@@ -3008,14 +3099,17 @@ def _make_xpulse_ntuples_2d_dataset(tmp_path, n1=4, n2=32, name="hsqc.jdx"):
         "##FIRST= 0, 0, 0, 0", f"##LAST= {(n1 - 1) / 100.0}, {(n2 - 1) / 800.0}, 0, 0",
         "##FIRST= 0,0,0,0",
     ]
-    for k in range(n1):
-        sign = -1.0 if k % 2 else 1.0
-        for kind, row in (("R", sign * f2signal), ("I", sign * f2signal * 0.5)):
-            lines.append(f"##PAGE=\tT1= {k}")
-            lines.append("##FIRST= 0,0,0,0")
-            lines.append(f"##DATATABLE= (T2++({kind}..{kind})), PROFILE")
-            for t2_val, value in zip(t2, row):
-                lines.append(f"{t2_val:.6f} {value:.6f}")
+    for k in range(n_t1):
+        sign = -1.0 if k % 2 else 1.0          # States-TPPI alternation
+        for quadrature, sense in ((np.cos, 1.0), (np.sin, -1.0)):
+            amplitude = sign * sense * quadrature(2 * np.pi * f1_hz * (k / 100.0))
+            complex_row = amplitude * decay * np.exp(-2j * np.pi * f2_hz * t2)
+            for kind, row in (("R", np.real(complex_row)), ("I", np.imag(complex_row))):
+                lines.append(f"##PAGE=\tT1= {k}")
+                lines.append("##FIRST= 0,0,0,0")
+                lines.append(f"##DATATABLE= (T2++({kind}..{kind})), PROFILE")
+                for t2_val, value in zip(t2, row):
+                    lines.append(f"{t2_val:.6f} {value:.6f}")
     lines.append("##END=")
     path = tmp_path / name
     path.write_text("\n".join(lines) + "\n")
@@ -3045,7 +3139,8 @@ def test_main_window_xpulse_2d_loads_and_renders_without_crashing(qapp, tmp_path
     assert critical_calls == []
     index = window._selected_index()
     spectrum = window.session.spectra[index]
-    assert spectrum.data.shape[0] == 4  # F1: row-paired 8 -> decoded 4
+    # 4 acquired FIDs are 2 States (cos, sin) t1 increments.
+    assert spectrum.data.shape[0] == 2
     assert len(spectrum.axes[0].ppm) == spectrum.data.shape[0]
     assert len(spectrum.axes[1].ppm) == spectrum.data.shape[1]
 
@@ -3072,7 +3167,7 @@ def test_main_window_xpulse_2d_phase_drag_does_not_crash(qapp, tmp_path, monkeyp
 
     assert critical_calls == []
     index = window._selected_index()
-    assert window.session.spectra[index].data.shape[0] == 4
+    assert window.session.spectra[index].data.shape[0] == 2  # 4 FIDs -> 2 t1 points
 
 
 def test_main_window_process_indirect_button_works_for_xpulse_2d(qapp, tmp_path, monkeypatch):
@@ -3888,16 +3983,18 @@ def test_main_window_f1_truncate_and_zero_fill_change_row_count_live_xpulse(qapp
     path = _make_xpulse_ntuples_2d_dataset(tmp_path, n1=8, n2=16, name="f1livexpulse.jdx")
     window._load(path, vendor="xpulse")
     index = window._selected_index()
-    assert window.session.spectra[index].data.shape[0] == 8
+    assert window.session.spectra[index].data.shape[0] == 8 // 2
 
-    window.tdeff_f1_spin.setValue(3)
-    window.zero_fill_f1_spin.setValue(3)
+    window.tdeff_f1_spin.setValue(6)
+    window.zero_fill_f1_spin.setValue(16)
     window._on_fid_processing_control_changed()
     _settle_live_reprocess(window)  # conventional 2D always debounces the actual recompute
 
+    # The live rebuild must size F1 the same way the reader does, or
+    # the two pipelines disagree the moment an F1 control is touched.
     spectrum = window.session.spectra[index]
-    assert spectrum.data.shape[0] == 3
-    assert len(spectrum.axes[0].ppm) == 3
+    assert spectrum.data.shape[0] == 16
+    assert len(spectrum.axes[0].ppm) == 16
 
 
 def test_main_window_f1_truncate_and_zero_fill_persist_across_reselection(qapp, tmp_path, monkeypatch):
@@ -4781,7 +4878,7 @@ def test_main_window_fit_curve_compare_stack_recovers_known_t2(qapp):
 
     window._on_fit_curve_compare_stack_action()
 
-    assert "T2" in window.analysis_results_label.text()
+    assert "T2" in window.curve_fit_summary_label.text()
     assert len(window.fit_canvas.ax.lines) == 2
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
 
@@ -4813,7 +4910,7 @@ def test_main_window_fit_curve_custom_equation_recovers_known_t2(qapp):
     assert result["params"]["T2"] == pytest.approx(true_t2, rel=0.1)
     # The report names every parameter and says what its ± means -- see
     # processing.relaxation.format_relaxation_report.
-    report = window.analysis_results_label.text()
+    report = window.curve_fit_summary_label.text()
     assert "A" in report and "T2" in report
     assert "Uncertainty" in report and "1σ" in report
     assert "R²" in report
@@ -5272,6 +5369,8 @@ def test_main_window_auto_pick_peaks_shows_markers_on_spectrum(qapp):
     # indication on the spectrum" -- previously only the peak table
     # was populated, nothing was drawn on the canvas itself.
     window = MainWindow()
+    # Peak markers only draw while the Spectral Fitting tab is up.
+    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     window._on_auto_pick_peaks_clicked()
     assert len(window.canvas._peak_marker_lines) == 1
@@ -5292,6 +5391,8 @@ def test_main_window_manually_added_peak_shows_a_marker(qapp):
     # nothing appeared on the canvas until Auto-Pick happened to be
     # used instead.
     window = MainWindow()
+    # Peak markers only draw while the Spectral Fitting tab is up.
+    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     assert window.canvas._peak_marker_lines == []
 
@@ -5308,6 +5409,8 @@ def test_main_window_peak_picked_via_click_shows_a_marker(qapp):
     # actual click-to-pick path (_on_pick_peak_toggled -> canvas click
     # -> _on_peak_picked) rather than calling _add_peak_row directly.
     window = MainWindow()
+    # Peak markers only draw while the Spectral Fitting tab is up.
+    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     window.pick_peak_button.setChecked(True)
     window._on_peak_picked(5.0)
@@ -5316,6 +5419,8 @@ def test_main_window_peak_picked_via_click_shows_a_marker(qapp):
 
 def test_main_window_removing_a_peak_removes_its_marker(qapp):
     window = MainWindow()
+    # Peak markers only draw while the Spectral Fitting tab is up.
+    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
     window._add_peak_row(shift=6.0, fwhm=0.05, eta=0.5)
@@ -5333,12 +5438,68 @@ def test_main_window_editing_a_peak_shift_moves_its_marker(qapp):
     # typing a new shift directly into the table (not just add/
     # remove/auto-pick) should move the marker too.
     window = MainWindow()
+    # Peak markers only draw while the Spectral Fitting tab is up.
+    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
     assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([5.0])
 
     window.peak_table.item(0, 0).setText("6.5")
     assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([6.5])
+
+
+def test_main_window_markers_only_show_on_the_spectral_fitting_tab(qapp):
+    # Reported directly: "the peak picking triangles/integrated regions
+    # should only be visible while in the spectral fitting tab". Left
+    # on the Spectrum view after moving on, they read as leftover state
+    # -- the same reasoning that already hides the phase pivot marker.
+    window = MainWindow()
+    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, n_pts=200))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    window._add_region_row(4.5, 5.5)
+
+    def markers():
+        return len(window.canvas._peak_marker_lines)
+
+    def shading():
+        return sum(1 for p in window.canvas.ax.patches
+                   if p.get_gid() == window.canvas._REGION_PATCH_GID)
+
+    assert markers() == 1 and shading() == 1
+
+    # Move to another tab -- both go.
+    for index in range(window.side_tabs.count()):
+        if index != window._spectral_fitting_tab_index:
+            window.side_tabs.setCurrentIndex(index)
+            break
+    assert markers() == 0 and shading() == 0
+
+    # And come back when it does.
+    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    assert markers() == 1 and shading() == 1
+    # The definitions themselves are untouched -- only the drawing.
+    assert window.peak_table.rowCount() == 1
+    assert window.region_table.rowCount() == 1
+
+
+def test_main_window_align_echo_is_not_offered_on_the_indirect_dimension(qapp, tmp_path, monkeypatch):
+    # Reported directly: "align echo should generally only apply to the
+    # F2 dimension in a 2D". The reader already only applies it in its
+    # own F2 block; offering the control on F1 implied otherwise.
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=8, n_f2=64), vendor="bruker")
+    window.process_indirect_button.setChecked(True)      # a genuine 2D
+    assert window._phase_mode == "2d"
+
+    window.dim_combo.setCurrentIndex(0)                  # Direct (F2)
+    assert window.align_echo_button.isHidden() is False
+
+    window.dim_combo.setCurrentIndex(1)                  # Indirect (F1)
+    assert window.align_echo_button.isHidden() is True
+
+    window.dim_combo.setCurrentIndex(0)
+    assert window.align_echo_button.isHidden() is False
 
 
 def test_main_window_peak_markers_survive_reselection(qapp):
@@ -5351,6 +5512,8 @@ def test_main_window_peak_markers_survive_reselection(qapp):
     # very next line. Fixed by re-syncing again after
     # _draw_selected_spectrum, not just from _restore_analysis_state.
     window = MainWindow()
+    # These markers only show while the Spectral Fitting tab is up.
+    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, n_pts=200))
     index_a = window._selected_index()
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
@@ -5373,6 +5536,8 @@ def test_main_window_region_shading_survives_reselection(qapp):
     # saved region, even though the region_table itself still had the
     # row).
     window = MainWindow()
+    # Region shading only shows while the Spectral Fitting tab is up.
+    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, n_pts=200))
     index_a = window._selected_index()
     window._add_region_row(4.5, 5.5)
@@ -5558,9 +5723,18 @@ def test_main_window_baseline_overlay_matches_what_would_be_subtracted(qapp, tmp
         window.baseline_method_combo.findData("polynomial"))
     assert window.session.spectra[0].metadata.raw["baseline_correct"] is False
 
-    lines = [ln for ln in window.canvas.ax.lines
-             if ln.get_gid() == window.canvas._BASELINE_PREVIEW_GID]
+    # The Processing preview, not the Spectrum tab: an uncommitted
+    # correction belongs in the speculative view, the same reasoning as
+    # the ghost trace. Reported directly: "I still see the baseline
+    # dashed blue line on the spectrum tab".
+    window.canvas_tabs.setCurrentWidget(window.processing_preview_canvas)
+    preview = window.processing_preview_canvas
+    lines = [ln for ln in preview._pivot_marker_ax.lines
+             if ln.get_gid() == preview._BASELINE_PREVIEW_GID]
     assert len(lines) == 1, "the baseline should be drawn without committing to it"
+    # And never on the Spectrum tab.
+    assert [ln for ln in window.canvas.ax.lines
+            if ln.get_gid() == window.canvas._BASELINE_PREVIEW_GID] == []
 
     # It is the real thing, on the trace's own scale -- not a sketch.
     spectrum = window.session.spectra[0]
@@ -5571,13 +5745,67 @@ def test_main_window_baseline_overlay_matches_what_would_be_subtracted(qapp, tmp
     np.testing.assert_allclose(lines[0].get_ydata(), expected / scale)
 
 
+def test_main_window_baseline_overlay_shows_what_was_removed(qapp, tmp_path, monkeypatch):
+    # Reported directly: "seeing the baseline plotted against the
+    # already corrected spectrum isn't so useful". Estimating a
+    # baseline from an already-corrected trace produces a flat line at
+    # zero; the overlay now shows the baseline that was *subtracted*,
+    # over a faint reconstruction of the trace it was fitted to.
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
+    # The ghost belongs to the *speculative* view, so that is where it
+    # is drawn -- explicit user request, "the ghost spectrum should
+    # only appear in the processing preview".
+    window.canvas_tabs.setCurrentWidget(window.processing_preview_canvas)
+    canvas = window.processing_preview_canvas
+
+    def lines(gid, target=None):
+        ax = (target or canvas)._pivot_marker_ax
+        return [ln for ln in ax.lines if ln.get_gid() == gid]
+
+    # Uncorrected: baseline drawn, no ghost needed (it would duplicate
+    # the main trace).
+    assert lines(canvas._BASELINE_PREVIEW_GID)
+    assert not lines(canvas._BASELINE_GHOST_GID)
+
+    window.baseline_correct_button.setChecked(True)
+
+    baseline = np.array(lines(canvas._BASELINE_PREVIEW_GID)[0].get_ydata())
+    ghost = lines(canvas._BASELINE_GHOST_GID)
+    assert ghost, "the trace the baseline was fitted to should be shown"
+    ghost_y = np.array(ghost[0].get_ydata())
+    # Dashed, so it cannot be read as a second spectrum.
+    assert ghost[0].get_linestyle() not in ("-", "solid")
+
+    # The ghost is the trace the baseline was actually fitted to --
+    # stored as it was used, not reconstructed as "displayed +
+    # baseline", which assumed the displayed trace was the corrected
+    # one and produced corrected + 2x baseline where it was not.
+    corrected = np.array(canvas._pivot_marker_ax.lines[0].get_ydata())
+    assert len(corrected) == len(ghost_y)
+    assert not np.allclose(ghost_y, corrected)      # genuinely a different trace
+    # Taking the baseline off the ghost lands on what is displayed.
+    np.testing.assert_allclose(ghost_y - baseline, corrected, rtol=0.05, atol=1e-3)
+
+    # And it is a real baseline, not the flat line a second pass gives.
+    assert np.ptp(baseline) > 0
+
+    # The Spectrum tab gets neither: it shows the spectrum as it *is*.
+    assert [ln for ln in window.canvas.ax.lines
+            if ln.get_gid() in (window.canvas._BASELINE_GHOST_GID,
+                                window.canvas._BASELINE_PREVIEW_GID)] == []
+
+
 def test_main_window_baseline_overlay_can_be_turned_off(qapp, tmp_path, monkeypatch):
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
 
+    window.canvas_tabs.setCurrentWidget(window.processing_preview_canvas)
+    preview = window.processing_preview_canvas
+
     def overlay_count():
-        return len([ln for ln in window.canvas.ax.lines
-                    if ln.get_gid() == window.canvas._BASELINE_PREVIEW_GID])
+        return len([ln for ln in preview._pivot_marker_ax.lines
+                    if ln.get_gid() == preview._BASELINE_PREVIEW_GID])
 
     assert overlay_count() == 1
     window.baseline_preview_checkbox.setChecked(False)
@@ -5590,9 +5818,12 @@ def test_main_window_baseline_overlay_follows_the_method(qapp, tmp_path, monkeyp
     window = MainWindow()
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
 
+    window.canvas_tabs.setCurrentWidget(window.processing_preview_canvas)
+    preview = window.processing_preview_canvas
+
     def overlay_y():
-        line = next(ln for ln in window.canvas.ax.lines
-                    if ln.get_gid() == window.canvas._BASELINE_PREVIEW_GID)
+        line = next(ln for ln in preview._pivot_marker_ax.lines
+                    if ln.get_gid() == preview._BASELINE_PREVIEW_GID)
         return np.array(line.get_ydata())
 
     window.baseline_method_combo.setCurrentIndex(
@@ -5891,7 +6122,9 @@ def test_main_window_integrate_regions_feeds_fit_curve_recovers_known_t2(qapp):
 
     assert "Integrated" in window.integration_results_label.text()
     assert window.view_slice_fit_spin.isEnabled() is False  # no peak-fit-shaped viewer for this
-    assert window.value_source_combo.currentData() == "integral"
+    # "region", not the old ambiguous "integral": these results are a
+    # raw sum over a region with no lineshape fitted to it.
+    assert window.value_source_combo.currentData() == "region"
 
     window.delay_source_combo.setCurrentIndex(1)
     _set_delay_unit(window, "s")
@@ -6762,7 +6995,7 @@ class _FakeMenu:
 
     def addAction(self, label):
         self.added_labels.append(label)
-        return label
+        return _FakeAction(label)
 
     def addSeparator(self):
         pass
@@ -6819,7 +7052,7 @@ def test_main_window_fit_spectrum_then_curve_recovers_known_t2(qapp):
 
     _fit_spectrum_then_curve(window)
 
-    assert "T2" in window.analysis_results_label.text()
+    assert "T2" in window.curve_fit_summary_label.text()
     assert len(window.fit_canvas.ax.lines) == 2  # data points + fit curve
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
 
@@ -6936,7 +7169,7 @@ def test_main_window_peak_picking_and_integration_are_separate_subtabs(qapp):
     # test_main_window_spectral_fitting_is_its_own_top_level_tab. They
     # are still two separate sub-tabs, which is what this test is
     # actually about; only their parent changed.
-    assert labels == ["Curve Fitting", "eNMR", "VOCS", "Imaging"]
+    assert labels == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]
     spectral = [window.spectral_fitting_sub_tabs.tabText(i)
                 for i in range(window.spectral_fitting_sub_tabs.count())]
     assert spectral == ["Peak Picking", "Integration"]
@@ -7451,8 +7684,8 @@ def test_main_window_diffusion_fit_recovers_known_d(qapp):
 
     _fit_spectrum_then_curve(window)
 
-    assert "D" in window.analysis_results_label.text()
-    assert "m^2/s" in window.analysis_results_label.text() or "e-" in window.analysis_results_label.text()
+    assert "D" in window.curve_fit_summary_label.text()
+    assert "m^2/s" in window.curve_fit_summary_label.text() or "e-" in window.curve_fit_summary_label.text()
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
     assert window.fit_canvas.ax.get_xlabel() == "b-value (s/m²)"
 
@@ -7493,7 +7726,7 @@ def test_main_window_biexponential_diffusion_fit_recovers_known_ds(qapp):
 
     _fit_spectrum_then_curve(window)
 
-    results_text = window.analysis_results_label.text()
+    results_text = window.curve_fit_summary_label.text()
     assert "Da" in results_text and "Db" in results_text
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
 
@@ -7554,14 +7787,14 @@ def test_main_window_analysis_results_siloed_per_spectrum(qapp):
     window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in delays))
     window.relaxation_model_combo.setCurrentIndex(2)
     _fit_spectrum_then_curve(window)
-    assert window.analysis_results_label.text() != ""
+    assert window.curve_fit_summary_label.text() != ""
 
     window._select_single_row(1)
-    assert window.analysis_results_label.text() == ""  # never fitted -- not spectrum a's result
+    assert window.curve_fit_summary_label.text() == ""  # never fitted -- not spectrum a's result
     assert window.view_slice_fit_spin.isEnabled() is False
 
     window._select_single_row(0)
-    assert window.analysis_results_label.text() != ""
+    assert window.curve_fit_summary_label.text() != ""
     assert window.view_slice_fit_spin.isEnabled() is True
 
 
@@ -8033,11 +8266,149 @@ def test_main_window_combine_spectra_requires_two(qapp, monkeypatch):
 # Output tab (Phase 4: live style panel, export settings, per-type templates)
 # ============================================================
 
-def test_main_window_output_style_change_applies_to_every_canvas(qapp):
+def test_main_window_has_no_output_tab_any_more(qapp):
+    # Explicit user request: the Plot Style dialog "supplants the need
+    # for an output tab". The controls survive as the dialog's body --
+    # same widget objects, so every handler still reads self.output_*.
     window = MainWindow()
+    names = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    assert "Output" not in names
+    assert window.output_linewidth_spin is not None
+    assert window._style_panel is not None
+
+
+def test_main_window_plot_style_dialog_opens_on_the_current_plot(qapp):
+    window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
+    window.compare_canvas.set_style(linewidth=4.25)
+
+    window._on_plot_style_clicked()
+
+    assert window._style_dialog is not None
+    assert window.output_linewidth_spin.value() == pytest.approx(4.25)
+    assert "Compare" in window.style_scope_label.text()
+    window._style_dialog.close()
+
+
+def test_main_window_plot_style_is_reachable_from_the_canvas(qapp):
+    # Asked for as "a plot view popup (from right click menu or top
+    # menu)" -- both routes reach the same dialog.
+    window = MainWindow()
+    window.canvas.plotStyleRequested.emit()
+    assert window._style_dialog is not None
+    window._style_dialog.close()
+
+
+def test_main_window_trace_colour_applies_to_the_spectrum_tab(qapp, tmp_path):
+    # Explicit user request: "the colours should apply to the spectrum
+    # tab as well as the compare tab". plot_1d always took a colour;
+    # nothing ever passed one.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+
+    window.canvas.set_style(trace_color="#cc3311")
+
+    assert window.canvas.style_settings()["trace_color"] == "#cc3311"
+    trace = _trace_lines(window.canvas.ax)[0]
+    assert matplotlib.colors.to_hex(trace.get_color()) == "#cc3311"
+    # And it survives a redraw, not just the in-place recolour.
+    window.canvas.show_spectrum(window.session.spectra[0])
+    assert matplotlib.colors.to_hex(
+        _trace_lines(window.canvas.ax)[0].get_color()) == "#cc3311"
+
+
+def test_main_window_rename_reaches_every_place_a_spectrum_is_named(qapp, tmp_path, monkeypatch):
+    # One override, honoured by Session.label, rather than a separate
+    # editable field per view.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("My sample", True))
+
+    window._on_rename_spectrum_action(0)
+
+    assert window.session.label(0) == "My sample"
+    assert window.spectrum_list.item(0).text() == "My sample"
+
+    # Blank restores the derived name.
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("   ", True))
+    window._on_rename_spectrum_action(0)
+    assert window.session.label(0) != "My sample"
+
+
+def test_main_window_saved_style_defaults_are_applied_at_startup(qapp, tmp_path, monkeypatch):
+    config = tmp_path / "plot_style.json"
+    config.write_text(json.dumps({"linewidth": 2.75, "labelsize": 19, "grid": True}))
+    monkeypatch.setattr(MainWindow, "_PLOT_STYLE_CONFIG_PATH", str(config))
+
+    window = MainWindow()
+
+    for canvas in window._all_canvases():
+        assert canvas._AXIS_LINEWIDTH == pytest.approx(2.75)
+        assert canvas._AXIS_LABELSIZE == 19
+        assert canvas._grid_visible is True
+
+
+def test_main_window_missing_style_defaults_are_not_an_error(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_PLOT_STYLE_CONFIG_PATH", str(tmp_path / "nope.json"))
+    window = MainWindow()          # must not raise
+    assert window.canvas._AXIS_LINEWIDTH == pytest.approx(MplCanvas._AXIS_LINEWIDTH)
+
+
+def test_main_window_save_style_default_writes_and_applies(qapp, tmp_path, monkeypatch):
+    config = tmp_path / "plot_style.json"
+    monkeypatch.setattr(MainWindow, "_PLOT_STYLE_CONFIG_PATH", str(config))
+    window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+    window.output_linewidth_spin.setValue(3.5)
+
+    window._on_save_style_default_clicked()
+
+    assert json.loads(config.read_text())["linewidth"] == pytest.approx(3.5)
+    # Saving a default also puts it everywhere now, not just on disk.
+    for canvas in window._all_canvases():
+        assert canvas._AXIS_LINEWIDTH == pytest.approx(3.5)
+
+
+def test_main_window_style_change_applies_to_the_plot_you_are_on(qapp):
+    # Style used to be fanned out to every canvas on every change.
+    # It is now per plot -- which is what makes "Apply to all" a real
+    # action, and what lets a Compare stack be styled differently from
+    # the Spectrum tab. Explicit user request.
+    window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.canvas)
     window.output_linewidth_spin.setValue(3.0)
+
+    assert window.canvas._AXIS_LINEWIDTH == pytest.approx(3.0)
+    assert window.compare_canvas._AXIS_LINEWIDTH != pytest.approx(3.0)
+
+
+def test_main_window_apply_style_to_all_pushes_it_everywhere(qapp):
+    window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+    window.output_linewidth_spin.setValue(3.0)
+
+    window._on_apply_style_to_all_clicked()
+
     for canvas in window._all_canvases():
         assert canvas._AXIS_LINEWIDTH == pytest.approx(3.0)
+
+
+def test_main_window_style_controls_reload_from_the_plot_being_edited(qapp):
+    # Opening the dialog on another plot has to show *that* plot's
+    # settings, or the first edit silently overwrites them.
+    window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+    window.output_linewidth_spin.setValue(3.0)
+
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
+    window._load_style_controls_from(window.compare_canvas)
+    assert window.output_linewidth_spin.value() == pytest.approx(
+        window.compare_canvas._AXIS_LINEWIDTH)
+
+    window._load_style_controls_from(window.canvas)
+    assert window.output_linewidth_spin.value() == pytest.approx(3.0)
 
 
 def test_main_window_contour_fraction_spin_defaults_to_25_percent(qapp):
@@ -8119,9 +8490,13 @@ def test_main_window_output_legend_position_applies_to_spectrum_canvas(qapp):
     assert window.canvas._legend_loc == "lower left"
 
 
-def test_main_window_output_compare_colormap_applies_to_all_canvases(qapp):
+def test_main_window_compare_colormap_applies_to_the_current_plot(qapp):
     window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
     window.output_colormap_combo.setCurrentText("plasma")
+    assert window.compare_canvas._compare_colormap == "plasma"
+
+    window._on_apply_style_to_all_clicked()
     for canvas in window._all_canvases():
         assert canvas._compare_colormap == "plasma"
 
@@ -8134,12 +8509,20 @@ def test_main_window_output_export_settings_stored_not_applied_live(qapp):
     original_dpi = window.canvas.figure.get_dpi()
     original_size = window.canvas.figure.get_size_inches()
 
+    window.canvas_tabs.setCurrentWidget(window.canvas)
     window.output_dpi_spin.setValue(600)
     window.output_fig_width_spin.setValue(10.0)
     window.output_fig_height_spin.setValue(7.0)
 
     assert window.canvas.figure.get_dpi() == pytest.approx(original_dpi)
     assert window.canvas.figure.get_size_inches() == pytest.approx(original_size)
+    # Per plot now, like every other style setting -- Apply to all is
+    # what puts them everywhere.
+    assert window.canvas._export_dpi == pytest.approx(600)
+    assert window.canvas._export_fig_width == pytest.approx(10.0)
+    assert window.canvas._export_fig_height == pytest.approx(7.0)
+
+    window._on_apply_style_to_all_clicked()
     for canvas in window._all_canvases():
         assert canvas._export_dpi == pytest.approx(600)
         assert canvas._export_fig_width == pytest.approx(10.0)
@@ -9220,10 +9603,14 @@ def test_main_window_contour_slices_are_stored_against_the_spectrum(qapp, tmp_pa
     window._select_single_row(0)
     window.canvas._add_contour_slice("f1", 2, "Impurity")
     window.canvas._add_contour_slice("f1", 5, "Shift")
-    assert window.session.spectra[0].metadata.raw["contour_slices"] == [
-        {"axis": "f1", "index": 2, "label": "Impurity"},
-        {"axis": "f1", "index": 5, "label": "Shift"},
+    stored = window.session.spectra[0].metadata.raw["contour_slices"]
+    assert [(s["axis"], s["index"], s["label"]) for s in stored] == [
+        ("f1", 2, "Impurity"), ("f1", 5, "Shift"),
     ]
+    # Each carries its own colour, stored rather than re-derived at
+    # draw time -- that is what keeps it across a unit change.
+    assert all(s["color"] for s in stored)
+    assert stored[0]["color"] != stored[1]["color"]
 
     window._select_single_row(1)
     assert window.canvas._contour_slices == []
@@ -10155,7 +10542,7 @@ def test_main_window_generalised_diffusion_model_recovers_two_components(qapp):
     assert recovered[1] == pytest.approx(2e-10, rel=0.05)
     # Each component's share of the total, paired with its own D --
     # the form a multi-component result is quoted in.
-    report = window.analysis_results_label.text()
+    report = window.curve_fit_summary_label.text()
     assert "population weights" in report
     assert "%" in report.split("Relative amplitudes")[1]
 
@@ -10307,7 +10694,7 @@ def test_main_window_curve_fit_report_states_the_uncertainty_kind(qapp):
 
     # A single peak gets the full report -- units, uncertainty kind and
     # quality, not a bare "D = 2e-09 ± 5e-11".
-    report = window.analysis_results_label.text()
+    report = window.curve_fit_summary_label.text()
     assert "Uncertainty" in report and "1σ" in report
     assert "R²" in report
     # And the Fit tab's own panel, sitting right under the curve.
@@ -10322,7 +10709,7 @@ def test_main_window_multi_peak_summary_names_the_uncertainty_once(qapp):
     window.relaxation_model_combo.setCurrentIndex(0)
     _fit_spectrum_then_curve(window)
 
-    summary = window.analysis_results_label.text()
+    summary = window.curve_fit_summary_label.text()
     assert "2 peaks" in summary
     assert summary.count("± is") == 1
     assert "m^2/s" in summary and "R²=" in summary
@@ -10358,7 +10745,7 @@ def test_main_window_global_fit_ties_one_d_across_every_peak(qapp):
     assert window._global_fit_result["shared"]["D"] == pytest.approx(1.2e-9, rel=0.05)
     values = {r["params"]["D"] for r in window._relaxation_fit_results}
     assert len(values) == 1
-    assert "Shared across every curve" in window.analysis_results_label.text()
+    assert "Shared across every curve" in window.curve_fit_summary_label.text()
 
 
 def test_main_window_global_fit_needs_a_shared_parameter_named(qapp):
@@ -10416,7 +10803,7 @@ def test_main_window_dosy_map_places_peaks_at_their_own_d(qapp, monkeypatch):
     # The regularisation weight is stated: an ILT's peak width is set by
     # it, so a summary quoting a spread without it reports a setting as
     # a measurement.
-    assert "regularisation α" in window.analysis_results_label.text()
+    assert "regularisation α" in window.dosy_results_label.text()
 
 
 def test_main_window_dosy_refuses_a_slice_index_axis(qapp, monkeypatch):
@@ -10491,7 +10878,7 @@ def test_main_window_gradient_calibration_recovers_a_known_maximum(qapp, monkeyp
     window._on_calibrate_gradient_clicked()
 
     assert window.pfg_max_gradient_spin.value() == pytest.approx(true_g_max_g_per_cm, rel=0.02)
-    assert "Maximum gradient" in window.analysis_results_label.text()
+    assert "Maximum gradient" in window.gradient_calibration_label.text()
 
 
 def test_main_window_gradient_calibration_needs_a_spectral_fit_first(qapp, monkeypatch):
@@ -10540,7 +10927,7 @@ def test_main_window_spectral_fitting_is_its_own_top_level_tab(qapp):
     assert spectral == ["Peak Picking", "Integration"]
     analysis = [window.analysis_sub_tabs.tabText(i)
                 for i in range(window.analysis_sub_tabs.count())]
-    assert analysis == ["Curve Fitting", "eNMR", "VOCS", "Imaging"]
+    assert analysis == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]
 
 
 def test_main_window_curve_fit_names_what_it_will_fit(qapp, tmp_path):
@@ -10771,8 +11158,8 @@ def test_main_window_score_resolves_overlapping_species(qapp, monkeypatch):
     # The peak table was never touched -- SCORE does not use it, which
     # is the point, and the results text says so.
     assert window.peak_table.rowCount() == 0
-    assert "peak table" in window.analysis_results_label.text()
-    assert "SCORE" in window.analysis_results_label.text()
+    assert "peak table" in window.score_results_label.text()
+    assert "SCORE" in window.score_results_label.text()
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
 
 
@@ -10794,7 +11181,7 @@ def test_main_window_score_uses_the_curve_fit_panels_model(qapp, monkeypatch):
     assert result["model"] == "stejskal_tanner_stretched"
     # Each component carries the model's own extra parameter.
     assert all("beta" in entry for entry in result["component_params"])
-    assert "stejskal_tanner_stretched" in window.analysis_results_label.text()
+    assert "stejskal_tanner_stretched" in window.score_results_label.text()
 
 
 def test_main_window_score_default_model_is_the_plain_stejskal_tanner(qapp, monkeypatch):
@@ -11003,7 +11390,7 @@ def test_main_window_outscore_separates_similar_sized_species(qapp, monkeypatch)
     assert result["method"] == "outscore"
     assert result["constants"][0] == pytest.approx(slow, rel=0.03)
     assert result["constants"][1] == pytest.approx(fast, rel=0.03)
-    assert "OUTSCORE" in window.analysis_results_label.text()
+    assert "OUTSCORE" in window.score_results_label.text()
 
 
 def test_main_window_score_dialog_offers_both_methods(qapp):
@@ -11636,7 +12023,7 @@ def test_main_window_warns_when_no_value_list_was_found(qapp):
     # And it travels with the result, which is where the number that
     # gets written down is read from.
     window._on_fit_curve_button_clicked()
-    assert "no value list found" in window.analysis_results_label.text()
+    assert "no value list found" in window.curve_fit_summary_label.text()
 
 
 def test_main_window_does_not_warn_when_the_values_are_real(qapp):
@@ -12037,6 +12424,245 @@ def test_dosy_scroll_scales_the_contour_levels(qapp, monkeypatch):
     body_scroll("down")
     body_scroll("down")
     assert canvas._dosy_factor < before          # and down lowers it
+
+
+def test_main_window_can_get_back_to_a_single_dosy_map(qapp, monkeypatch):
+    # Reported directly: "still no way to get back to the previous DOSY
+    # ILT, only the controls to change the plot." The list of
+    # inversions was hidden below two entries, and the Fit canvas is
+    # shared -- so running a curve fit left the one DOSY unreachable.
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    assert len(spectrum.metadata.raw["dosy_variants"]) == 1
+    assert window.dosy_variant_group.isVisible() or not window.isVisible()
+
+    # Something else takes over the Fit canvas.
+    window.fit_canvas.clear()
+    assert window.fit_canvas._dosy_result is None
+
+    # Ticking the inversion brings it back, without re-inverting.
+    called = []
+    monkeypatch.setattr(processing_ilt, "dosy_map", lambda *a, **k: called.append(1))
+    window.dosy_variant_list.item(0).setCheckState(Qt.CheckState.Unchecked)
+    window.dosy_variant_list.item(0).setCheckState(Qt.CheckState.Checked)
+
+    assert called == []
+    assert window.fit_canvas._dosy_result is spectrum.metadata.raw["dosy_variants"][0]["result"]
+    assert window.fit_canvas.ax.collections
+
+
+def test_main_window_keeps_every_dosy_inversion_of_a_spectrum(qapp, monkeypatch):
+    # Explicit user request: "so multiple fitting modes can be trialled
+    # against one another". A second run with different settings adds
+    # an attempt rather than replacing the first.
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    assert len(spectrum.metadata.raw["dosy_variants"]) == 1
+
+    window.dosy_settings_for_test = None
+    monkeypatch.setattr(_DosySettingsDialog, "values", lambda self: {
+        "auto_alpha": False, "alpha": 5e-2, "d_min": 1e-13, "d_max": 1e-8,
+        "n_grid": 64, "threshold": 0.05,
+    })
+    window._on_dosy_clicked()
+
+    variants = spectrum.metadata.raw["dosy_variants"]
+    assert len(variants) == 2
+    # Each is named by what makes it different, not "DOSY 1/2".
+    assert all("α=" in v["label"] and "thr" in v["label"] for v in variants)
+    assert variants[0]["label"] != variants[1]["label"]
+    assert window.dosy_variant_group.isVisible() or not window.isVisible()
+
+
+def test_main_window_repeating_dosy_settings_replaces_that_attempt(qapp, monkeypatch):
+    # Re-running the same thing is a retry, not a second opinion.
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    window._on_dosy_clicked()
+    assert len(spectrum.metadata.raw["dosy_variants"]) == 1
+
+
+def test_main_window_ticking_two_inversions_overlays_them(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    monkeypatch.setattr(_DosySettingsDialog, "values", lambda self: {
+        "auto_alpha": False, "alpha": 5e-2, "d_min": 1e-13, "d_max": 1e-8,
+        "n_grid": 64, "threshold": 0.05,
+    })
+    window._on_dosy_clicked()
+    assert len(spectrum.metadata.raw["dosy_variants"]) == 2
+
+    for row in range(window.dosy_variant_list.count()):
+        window.dosy_variant_list.item(row).setCheckState(Qt.CheckState.Checked)
+
+    canvas = window.fit_canvas
+    assert canvas._dosy_overlay is not None and len(canvas._dosy_overlay) == 2
+    assert len(canvas.ax.collections) == 2
+    # Labelled by settings, so the legend says which is which.
+    assert len(canvas.ax.get_legend().get_texts()) == 2
+
+
+def test_main_window_keep_only_the_latest_dosy_inversion(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    monkeypatch.setattr(_DosySettingsDialog, "values", lambda self: {
+        "auto_alpha": False, "alpha": 5e-2, "d_min": 1e-13, "d_max": 1e-8,
+        "n_grid": 64, "threshold": 0.05,
+    })
+    window._on_dosy_clicked()
+    assert len(spectrum.metadata.raw["dosy_variants"]) == 2
+
+    window._on_clear_dosy_variants_clicked()
+
+    remaining = spectrum.metadata.raw["dosy_variants"]
+    assert len(remaining) == 1
+    assert remaining[0]["result"] is spectrum.metadata.raw["dosy_result"]
+
+
+def test_main_window_keeps_the_dosy_map_across_a_reselection(qapp, monkeypatch, tmp_path):
+    # Reported directly: "DOSY plots are not being kept anywhere
+    # visible and it seems like the only way to get them back is to
+    # recompute them."
+    window = _dosy_window(qapp, monkeypatch)
+    computed = window.fit_canvas._dosy_result
+    assert computed is not None
+
+    window._load(_make_1d_dataset(tmp_path, name="elsewhere"), vendor="bruker")
+    assert window.fit_canvas._dosy_result is None      # correctly cleared for the new spectrum
+
+    window._select_single_row(0)
+
+    # Back, and the *same* map object -- reused, not re-inverted.
+    assert window.fit_canvas._dosy_result is computed
+    assert window.fit_canvas.ax.collections, "the map should be drawn again"
+    assert window.dosy_display_box.isVisible() or not window.isVisible()
+
+
+def test_main_window_restoring_a_dosy_does_not_recompute_it(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+
+    called = []
+    monkeypatch.setattr(processing_ilt, "dosy_map",
+                        lambda *a, **k: called.append(1))
+    window._restore_dosy_for(spectrum)
+
+    assert called == []
+    assert window.fit_canvas._dosy_result is spectrum.metadata.raw["dosy_result"]
+
+
+def test_main_window_overlays_several_dosy_maps(qapp, monkeypatch):
+    # Explicit user request: "I'd also like to be able to overlay DOSY
+    # plot ILT results".
+    window = _dosy_window(qapp, monkeypatch)
+    first = window.session.spectra[0]
+    assert first.metadata.raw.get("dosy_result") is not None
+
+    # A second spectrum carrying its own already-computed map.
+    second = dataclasses.replace(
+        first, metadata=dataclasses.replace(first.metadata, raw=dict(first.metadata.raw)))
+    _load_spectrum_directly(window, second)
+    _select_rows(window, [0, 1])
+
+    window._on_overlay_dosy_clicked()
+
+    canvas = window.fit_canvas
+    assert canvas._dosy_overlay is not None and len(canvas._dosy_overlay) == 2
+    assert len(canvas.ax.collections) == 2          # one contour set per map
+    assert len(canvas.ax.get_legend().get_texts()) == 2
+    # Extraction still has one unambiguous map to work from.
+    assert canvas._dosy_result is canvas._dosy_overlay[0]
+
+
+def test_main_window_overlay_dosy_needs_two_maps(qapp, monkeypatch, tmp_path):
+    window = _dosy_window(qapp, monkeypatch)
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information",
+                        lambda *a, **k: shown.setdefault("msg", a[2]))
+    _select_rows(window, [0])
+    window._on_overlay_dosy_clicked()
+    assert "two or more" in shown["msg"]
+    assert window.fit_canvas._dosy_overlay is None
+
+
+def test_main_window_dosy_overlay_colours_and_names_are_editable(qapp, monkeypatch):
+    # Explicit user request: "I need to be able to also adjust the DOSY
+    # overlay colours and legend names." Reached through the same
+    # series interface every other multi-series plot answers, so this
+    # needed no DOSY-specific control of its own.
+    window = _dosy_window(qapp, monkeypatch)
+    first = window.session.spectra[0]
+    second = dataclasses.replace(
+        first, metadata=dataclasses.replace(first.metadata, raw=dict(first.metadata.raw)))
+    _load_spectrum_directly(window, second)
+    _select_rows(window, [0, 1])
+    window._on_overlay_dosy_clicked()
+
+    canvas = window.fit_canvas
+    entries = canvas.series()
+    assert len(entries) == 2
+    assert all(e.can_rename for e in entries)
+    assert entries[0].colour != entries[1].colour
+
+    canvas.set_series_style(entries[0].key, colour="#aa3377", label="sample A")
+
+    assert canvas.series()[0].colour == "#aa3377"
+    assert "sample A" in [t.get_text() for t in canvas.ax.get_legend().get_texts()]
+    # And it survives the redraw a level change causes.
+    window.dosy_levels_spin.setValue(11)
+    assert canvas.series()[0].colour == "#aa3377"
+    assert canvas.series()[0].label == "sample A"
+
+
+def test_main_window_series_section_serves_every_plot_type(qapp, monkeypatch, tmp_path):
+    # One dialog section, driven by MplCanvas.series() -- it used to be
+    # an extracted-slices-only section, which is why the DOSY overlay
+    # had no control at all.
+    window = _dosy_window(qapp, monkeypatch)
+    window.canvas_tabs.setCurrentWidget(window.fit_canvas)
+    window._load_style_controls_from(window.fit_canvas)
+    # A single DOSY map is one plot, not several series.
+    assert window.slice_colour_group.isVisible() is False
+
+    first = window.session.spectra[0]
+    second = dataclasses.replace(
+        first, metadata=dataclasses.replace(first.metadata, raw=dict(first.metadata.raw)))
+    _load_spectrum_directly(window, second)
+    _select_rows(window, [0, 1])
+    window._on_overlay_dosy_clicked()
+    window._load_style_controls_from(window.fit_canvas)
+
+    assert window.slice_colour_group.isVisible() or not window.isVisible()
+    assert len(window._slice_colour_buttons) == 2
+
+
+def test_main_window_series_colour_map_is_app_wide(qapp):
+    # Unlike the rest of the style panel, which is per plot: this one
+    # supplies defaults to several views, and two plots of the same
+    # samples should agree without being set up twice.
+    window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+    window.output_colormap_combo.setCurrentText("plasma")
+
+    for canvas in window._all_canvases():
+        assert canvas._series_colormap == "plasma"
+
+
+def test_main_window_overlay_dosy_follows_the_display_panel(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    first = window.session.spectra[0]
+    second = dataclasses.replace(
+        first, metadata=dataclasses.replace(first.metadata, raw=dict(first.metadata.raw)))
+    _load_spectrum_directly(window, second)
+    _select_rows(window, [0, 1])
+    window._on_overlay_dosy_clicked()
+
+    canvas = window.fit_canvas
+    window.dosy_levels_spin.setValue(15)
+    assert canvas._dosy_clevels == 15
+    # Still an overlay after the redraw, not collapsed back to one map.
+    assert len(canvas._dosy_overlay) == 2
+    assert len(canvas.ax.collections) == 2
 
 
 def test_dosy_display_panel_sets_levels_without_re_inverting(qapp, monkeypatch):
@@ -12603,7 +13229,18 @@ def test_main_window_exports_the_curve_fit_as_values_vs_x(qapp, tmp_path, monkey
                         lambda *args, **kwargs: (str(target), "CSV files (*.csv)"))
     window._on_export_curve_fit_clicked()
 
-    rows = list(csv.reader(target.read_text().splitlines()))
+    lines = target.read_text().splitlines()
+    # **The parameters come first**, on request: "Export curve fit needs
+    # to include the fit report parameters, like D/T1/T2 and the fit
+    # quality". The series follows its own section header.
+    assert lines[0] == "Curve fit parameters"
+    param_header = lines[1].split(",")
+    assert "T2 (s)" in param_header and "R^2" in param_header
+    fitted_t2 = float(lines[2].split(",")[param_header.index("T2 (s)")])
+    assert fitted_t2 == pytest.approx(true_t2, rel=0.05)
+
+    series_at = lines.index("Curve fit series")
+    rows = list(csv.reader(lines[series_at + 1:]))
     header, body = rows[0], rows[1:]
     # The x column names the unit the panel is showing, and the measured
     # column names which Value source produced it.
@@ -12817,7 +13454,11 @@ def test_main_window_curve_fit_export_x_matches_the_plot(qapp, tmp_path, monkeyp
                         lambda *args, **kwargs: (str(target), "CSV files (*.csv)"))
     window._on_export_curve_fit_clicked()
 
-    rows = list(csv.reader(target.read_text().splitlines()))
+    # The file now opens with the fitted parameters; the series
+    # follows its own section header -- see curve_fit_to_csv.
+    lines = target.read_text().splitlines()
+    series_at = lines.index("Curve fit series")
+    rows = list(csv.reader(lines[series_at + 1:]))
     assert rows[0][0] == "delay (ms)"
     np.testing.assert_allclose(
         [float(r[0]) for r in rows[1:]],
@@ -12930,7 +13571,7 @@ def test_main_window_multi_peak_summary_quotes_amplitudes_as_shares(qapp):
     window._on_fit_spectrum_clicked()
     window._on_fit_curve_button_clicked()
 
-    summary = window.analysis_results_label.text()
+    summary = window.curve_fit_summary_label.text()
     assert "A1=" in summary and "%" in summary
     # The two peaks have opposite dominant components, which is exactly
     # the comparison the shares make readable.
@@ -13367,3 +14008,893 @@ def test_main_window_enmr_needs_a_pseudo_2d(qapp, tmp_path, monkeypatch):
     window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=64), vendor="bruker")
     window._on_fit_enmr_clicked()
     assert "pseudo-2D" in shown["text"]
+
+
+# ============================================================
+# DOSY rows beside the map; no baseline overlay on a derived trace
+# ============================================================
+
+def _populated_dosy_d(window):
+    """A diffusion coefficient the inversion actually put signal at --
+    most of the D grid is empty by construction."""
+    result = window.fit_canvas._dosy_result
+    z = np.asarray(result["Z"], dtype=float)
+    grid = np.asarray(result["D"], dtype=float)
+    populated = [i for i in range(z.shape[0]) if np.any(z[i, :])]
+    return float(grid[populated[len(populated) // 2]])
+
+
+def test_dosy_row_can_be_drawn_beside_the_map(qapp, monkeypatch):
+    """Explicit user request: "when I extract a line from the DOSY, I
+    would also like the option to plot alongside with the dashed line
+    like in normal 2D contours"."""
+    from opennmr.plotting.twod import SLICE_PANEL_GID
+
+    window = _dosy_window(qapp, monkeypatch)
+    d_value = _populated_dosy_d(window)
+    before = len(window.session.spectra)
+
+    window._on_dosy_extract_requested("spectrum_panel", d_value)
+    window.fit_canvas.canvas.draw()
+
+    # Drawn beside the map, not added to the spectrum list -- that is
+    # what distinguishes it from the plain "Extract Spectrum" action.
+    assert len(window.session.spectra) == before
+    assert len(window.fit_canvas._dosy_slices) == 1
+    panel = [a for a in window.fit_canvas.figure.axes if a.get_gid() == SLICE_PANEL_GID]
+    assert len(panel) == 1
+    # And the canvas knows it as a slice panel, so the scroll/cursor
+    # handlers treat it the way a 2D contour's own panel is treated.
+    assert window.fit_canvas._proj_axes["slices"] is panel[0]
+
+
+def test_dosy_rows_are_siloed_on_the_spectrum_and_restored_with_the_map(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    window._on_dosy_extract_requested("spectrum_panel", _populated_dosy_d(window))
+    assert len(spectrum.metadata.raw["dosy_slices"]) == 1
+
+    window.fit_canvas.clear()
+    assert window.fit_canvas._dosy_slices == []
+
+    window._restore_dosy_for(spectrum)
+    window.fit_canvas.canvas.draw()
+    assert len(window.fit_canvas._dosy_slices) == 1
+
+
+def test_the_same_dosy_row_twice_is_not_drawn_twice(qapp, monkeypatch):
+    """A repeat is a mis-click, not a request for two identical dashed
+    lines on top of each other."""
+    window = _dosy_window(qapp, monkeypatch)
+    d_value = _populated_dosy_d(window)
+    window._on_dosy_extract_requested("spectrum_panel", d_value)
+    window._on_dosy_extract_requested("spectrum_panel", d_value)
+    assert len(window.fit_canvas._dosy_slices) == 1
+
+
+def test_plain_dosy_extraction_still_adds_a_spectrum(qapp, monkeypatch):
+    """The panel mode is an addition, not a replacement."""
+    window = _dosy_window(qapp, monkeypatch)
+    before = len(window.session.spectra)
+    window._on_dosy_extract_requested("spectrum", _populated_dosy_d(window))
+    assert len(window.session.spectra) == before + 1
+    assert window.fit_canvas._dosy_slices == []
+
+
+def test_no_baseline_overlay_on_an_extracted_trace(qapp, monkeypatch):
+    """Reported directly: "when the 1D is extracted, I shouldn't see the
+    baseline dashed line on the plot." A derived trace is computed from
+    already-processed data -- there is no correction in the pipeline for
+    the overlay to be previewing."""
+    window = _dosy_window(qapp, monkeypatch)
+    window.baseline_preview_checkbox.setChecked(True)
+
+    window._on_dosy_extract_requested("spectrum", _populated_dosy_d(window))
+    derived = len(window.session.spectra) - 1
+    assert window.session.spectra[derived].metadata.vendor == "derived"
+
+    window.spectrum_list.setCurrentRow(derived)
+    window._refresh_baseline_preview()
+    window.canvas.canvas.draw()
+
+    overlay = [ln for ln in window.canvas.ax.lines
+               if ln.get_gid() in (window.canvas._BASELINE_PREVIEW_GID,
+                                   window.canvas._BASELINE_GHOST_GID)]
+    assert overlay == []
+
+
+# ============================================================
+# Excluded slices: one set, every fitting method
+# ============================================================
+
+def test_excluded_slices_are_siloed_on_the_spectrum(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    assert MainWindow.excluded_slices(spectrum) == set()
+
+    window.set_excluded_slices(spectrum, {2, 5})
+    assert MainWindow.excluded_slices(spectrum) == {2, 5}
+    assert spectrum.metadata.raw["excluded_slices"] == [2, 5]
+
+
+def test_included_rows_drops_the_excluded_ones(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    n = window._fit_slice_count(spectrum)
+    window.set_excluded_slices(spectrum, {1, 3})
+    rows = window._included_rows(spectrum, n)
+    assert 1 not in rows and 3 not in rows
+    assert len(rows) == n - 2
+    assert rows == sorted(rows)          # order preserved, not just a set
+
+
+def test_the_slice_list_shows_one_row_per_slice_and_ticks_the_included(qapp, monkeypatch):
+    """A checkable list, not a text field of indices: the question is
+    "which of these is bad", which you answer by looking at them."""
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    window._refresh_excluded_slice_list(spectrum)
+
+    assert window.excluded_slice_group.isVisible() or not window.isVisible()
+    assert window.excluded_slice_list.count() == window._fit_slice_count(spectrum)
+    assert all(window.excluded_slice_list.item(i).checkState() == Qt.CheckState.Checked
+               for i in range(window.excluded_slice_list.count()))
+
+    window.set_excluded_slices(spectrum, {0})
+    assert window.excluded_slice_list.item(0).checkState() == Qt.CheckState.Unchecked
+    assert window.excluded_slice_list.item(1).checkState() == Qt.CheckState.Checked
+
+
+def test_unticking_a_slice_writes_it_onto_the_spectrum(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    window.spectrum_list.setCurrentRow(0)
+    window._refresh_excluded_slice_list(spectrum)
+
+    window.excluded_slice_list.item(2).setCheckState(Qt.CheckState.Unchecked)
+    assert MainWindow.excluded_slices(spectrum) == {2}
+
+    window._on_include_all_slices_clicked()
+    assert MainWindow.excluded_slices(spectrum) == set()
+
+
+def test_the_slice_list_is_hidden_for_anything_without_slices(qapp, tmp_path):
+    """A group of dead controls beside a 1D spectrum reads as broken
+    rather than as not-yet-applicable."""
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window._refresh_excluded_slice_list(window.session.spectra[0])
+    assert not window.excluded_slice_group.isVisible()
+
+
+def test_dosy_inverts_only_the_included_slices(qapp, monkeypatch):
+    """An ILT fits the whole matrix, so a spoiled gradient step has no
+    per-peak exclusion to hide behind -- this is the only way to drop
+    one. Explicit user request that it reach SCORE and the ILT."""
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    n = window._fit_slice_count(spectrum)
+
+    seen = {}
+    real_dosy_map = processing_ilt.dosy_map
+
+    def capture(b_values, data, ppm, **kwargs):
+        seen["rows"] = len(b_values)
+        seen["data_rows"] = data.shape[0]
+        return real_dosy_map(b_values, data, ppm, **kwargs)
+
+    monkeypatch.setattr(processing_ilt, "dosy_map", capture)
+    window.set_excluded_slices(spectrum, {0, 1})
+    window._on_dosy_clicked()
+
+    # Both the b-values and the data matrix lost the same two rows --
+    # dropping one without the other is the misalignment this is
+    # written to avoid.
+    assert seen["rows"] == n - 2
+    assert seen["data_rows"] == n - 2
+
+
+def test_dosy_refuses_when_almost_everything_is_excluded(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    n = window._fit_slice_count(spectrum)
+    window.set_excluded_slices(spectrum, set(range(n - 1)))
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+    called = []
+    monkeypatch.setattr(processing_ilt, "dosy_map", lambda *a, **k: called.append(1))
+    window._on_dosy_clicked()
+
+    assert warned and not called
+
+
+def test_curve_fit_filtering_drops_series_entries_but_keeps_the_value_list_whole(qapp, monkeypatch):
+    """**The values are looked up by slice number, not by position.**
+    ``NMR2D_fit_relaxation`` reads ``vdlist[fit["index"] - 1]``, and a
+    kept slice keeps its original index -- so re-packing the values to
+    positions 0..n would leave the last slice pointing past the end.
+    Reported as "a mismatch between the number of integrals and number
+    of points to fit"."""
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    window.set_excluded_slices(spectrum, {2, 6})
+
+    results = [{"index": i + 1} for i in range(10)]
+    values = np.arange(10, dtype=float) * 0.5
+    kept_results, kept_values = window._drop_excluded_from_series(
+        spectrum, results, values, 10)
+
+    # The series loses the excluded slices...
+    assert [r["index"] for r in kept_results] == [1, 2, 4, 5, 6, 8, 9, 10]
+    # ...and the value list stays whole, so slice 10 still finds its
+    # own value. A longer list than the fit needs is explicitly fine.
+    assert list(kept_values) == list(values)
+
+
+def test_curve_fit_with_excluded_slices_actually_fits(qapp, monkeypatch):
+    """The end-to-end shape of the bug: excluding a slice and refitting
+    raised rather than fitting."""
+    t = np.geomspace(0.01, 0.5, 10)
+    fits = [{"index": i + 1, "integrals": [float(10.0 * np.exp(-ti / 0.1))]}
+            for i, ti in enumerate(t)]
+    keep = [i for i in range(10) if i not in (0, 2)]
+
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    window.set_excluded_slices(spectrum, {0, 2})
+    kept_results, kept_values = window._drop_excluded_from_series(
+        spectrum, fits, t, 10)
+
+    # No ValueError about slices without a value.
+    results = processing_relaxation.NMR2D_fit_relaxation(
+        kept_results, model="exponential_decay", vdlist=kept_values,
+        show_report=False)
+    assert len(results[0]["t"]) == len(keep)
+    assert results[0]["params"]["T2"] == pytest.approx(0.1, rel=0.01)
+
+
+def test_curve_fit_filtering_leaves_a_values_dict_untouched(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    spectrum = window.session.spectra[0]
+    window.set_excluded_slices(spectrum, {1})
+    results = [{"index": i + 1} for i in range(4)]
+    values = {"seconds": np.array([0.0, 1.0, 2.0, 3.0]), "unit": "s"}
+
+    kept_results, kept_values = window._drop_excluded_from_series(
+        spectrum, results, values, 4)
+    assert [r["index"] for r in kept_results] == [1, 3, 4]
+    assert kept_values is values
+
+
+def test_curve_fit_series_filtering_is_a_no_op_for_a_compare_stack(qapp, monkeypatch):
+    """A Compare-tab stack has no single owning spectrum, so positions
+    in it mean nothing to any one spectrum's exclusion set."""
+    window = _dosy_window(qapp, monkeypatch)
+    results = [{"slice": i} for i in range(4)]
+    values = np.arange(4, dtype=float)
+    kept_results, kept_values = window._drop_excluded_from_series(None, results, values, 4)
+    assert kept_results is results and kept_values is values
+
+
+def test_score_resolves_only_the_included_slices(qapp, monkeypatch):
+    """SCORE fits the whole data matrix, so a spoiled slice pulls on
+    every resolved component at once -- and a per-peak right-click
+    exclusion has nothing to act on for it."""
+    window, _b, _ppm = _overlapping_pfg_window(qapp)
+    monkeypatch.setattr(_ScoreSettingsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    spectrum = window.session.spectra[0]
+    n = window._fit_slice_count(spectrum)
+
+    seen = {}
+    real_score = processing_score.score
+
+    def capture(x_values, data, **kwargs):
+        seen["x"] = len(x_values)
+        seen["rows"] = data.shape[0]
+        return real_score(x_values, data, **kwargs)
+
+    monkeypatch.setattr(processing_score, "score", capture)
+    window.set_excluded_slices(spectrum, {0, 2})
+    window._on_score_clicked()
+
+    assert seen["x"] == n - 2
+    assert seen["rows"] == n - 2
+
+
+def test_score_refuses_when_almost_everything_is_excluded(qapp, monkeypatch):
+    window, _b, _ppm = _overlapping_pfg_window(qapp)
+    monkeypatch.setattr(_ScoreSettingsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    spectrum = window.session.spectra[0]
+    n = window._fit_slice_count(spectrum)
+    window.set_excluded_slices(spectrum, set(range(n - 1)))
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+    called = []
+    monkeypatch.setattr(processing_score, "score", lambda *a, **k: called.append(1))
+    window._on_score_clicked()
+
+    assert warned and not called
+
+
+def test_no_baseline_overlay_on_the_spectrum_tab_for_plain_1d_data(qapp, tmp_path, monkeypatch):
+    """The checkbox defaults to on, and the Spectrum canvas used to be
+    in the preview list -- so every ordinary 1D got a dashed blue curve
+    over it by default. Reported twice: "in 1D data, I still see the
+    baseline dashed blue line on the spectrum tab".
+
+    The earlier derived-spectrum gate did not cover this: an ordinary
+    loaded spectrum is not derived."""
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
+    assert window.baseline_preview_checkbox.isChecked()      # still on by default
+
+    overlay = [ln for ln in window.canvas.ax.lines
+               if ln.get_gid() in (window.canvas._BASELINE_PREVIEW_GID,
+                                   window.canvas._BASELINE_GHOST_GID)]
+    assert overlay == []
+
+
+def test_the_baseline_overlay_still_reaches_the_processing_preview(qapp, tmp_path, monkeypatch):
+    """Moved, not removed -- the speculative view is where an
+    uncommitted correction belongs."""
+    window = MainWindow()
+    window._load(_make_raw_1d_dataset(tmp_path, monkeypatch, n=512), vendor="bruker")
+    window.canvas_tabs.setCurrentWidget(window.processing_preview_canvas)
+    preview = window.processing_preview_canvas
+
+    assert [ln for ln in preview._pivot_marker_ax.lines
+            if ln.get_gid() == preview._BASELINE_PREVIEW_GID]
+
+
+def test_gradient_axis_from_the_file_drives_the_probe_calibration(qapp):
+    """The per-axis probe store exists because the coils differ; it is
+    only any use if the axis the experiment actually used is known."""
+    path = "test_data/xpulse_PFG/4"
+    if not os.path.isdir(path):
+        pytest.skip("test_data/xpulse_PFG not present")
+    window = MainWindow()
+    window._load(path, vendor="xpulse")
+    spectrum = window.session.spectra[window._selected_index()]
+
+    assert spectrum.metadata.raw["gradient_axis"] == "y"
+    assert window._gradient_axis(spectrum) == "y"
+    # And the combo the user sees agrees with the file.
+    assert window.pfg_gradient_axis_combo.currentData() == "y"
+    assert window.imaging_gradient_axis_combo.currentData() == "y"
+
+
+def _calibration_window(qapp, known_d=2.299e-9, true_g_max=55.0, n=16, corrupt=None):
+    """A PFG series on a standard of known D, spectrally fitted and
+    ready to calibrate. ``corrupt`` : row index to spoil, so a test can
+    check that excluding it recovers the right answer."""
+    relative = np.linspace(0.02, 0.95, n)
+    b = processing_diffusion.b_values_from_relative(
+        relative, true_g_max, 2e-3, 100e-3, nucleus="1H", shape="smsq10",
+        max_gradient_unit="G/cm")
+    from opennmr.processing.fitting import gaussian
+    ppm = np.linspace(0.0, 10.0, 700)
+    amplitudes = np.exp(-known_d * b)
+    if corrupt is not None:
+        amplitudes[corrupt] *= 3.0          # a spoiled scan
+    data = np.array([gaussian(ppm, 5.0, 0.05, a) for a in amplitudes])
+    spectrum = NMRSpectrum(
+        data=data,
+        axes=[NMRAxis(kind="index", index=np.arange(1, len(b) + 1)),
+              NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0, pseudo_2d=True,
+                              raw={"gradient_relative": relative}),
+    )
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window._on_fit_spectrum_clicked()
+    return window, true_g_max
+
+
+def test_gradient_calibration_honours_the_excluded_slices(qapp, monkeypatch):
+    """Asked directly: "Is the calibrate gradient function also able to
+    use the selection of slices used in the curve fit?" It is a fit
+    like any other, and a spoiled gradient step damages it the same way
+    -- arguably more, since the whole probe's G_max comes off it."""
+    window, true_g_max = _calibration_window(qapp, corrupt=5)
+    monkeypatch.setattr(_GradientCalibrationDialog, "exec",
+                        lambda self: QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    spectrum = window.session.spectra[0]
+
+    # With the bad point in, the answer is off.
+    window._on_calibrate_gradient_clicked()
+    spoiled = window.pfg_max_gradient_spin.value()
+    assert abs(spoiled - true_g_max) / true_g_max > 0.02
+
+    # Excluding it recovers the true maximum.
+    window.set_excluded_slices(spectrum, {5})
+    window._on_calibrate_gradient_clicked()
+    assert window.pfg_max_gradient_spin.value() == pytest.approx(true_g_max, rel=0.02)
+
+
+def test_gradient_calibration_says_how_many_slices_it_used(qapp, monkeypatch):
+    """A calibration quietly computed from fewer points than the series
+    holds is worth seeing next to the number it produced."""
+    window, _g = _calibration_window(qapp)
+    monkeypatch.setattr(_GradientCalibrationDialog, "exec",
+                        lambda self: QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+
+    window._on_calibrate_gradient_clicked()
+    assert "excluded" not in window.gradient_calibration_label.text()
+
+    window.set_excluded_slices(window.session.spectra[0], {2, 9})
+    window._on_calibrate_gradient_clicked()
+    text = window.gradient_calibration_label.text()
+    assert "From 14 of 16 slices" in text and "2 excluded" in text
+
+
+def test_gradient_calibration_refuses_when_almost_everything_is_excluded(qapp, monkeypatch):
+    window, _g = _calibration_window(qapp)
+    window.set_excluded_slices(window.session.spectra[0], set(range(15)))
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+    opened = []
+    monkeypatch.setattr(_GradientCalibrationDialog, "exec",
+                        lambda self: opened.append(1) or QDialog.DialogCode.Accepted)
+
+    window._on_calibrate_gradient_clicked()
+    # Refused before the settings dialog, not after filling it in.
+    assert warned and not opened
+
+
+def test_the_score_report_lands_with_score_not_in_peak_picking(qapp, monkeypatch):
+    """``analysis_results_label`` is built by
+    ``_build_peak_picking_subtab`` and is that sub-tab's own results
+    display, so a resolution used to print its report on a different
+    tab -- beside a peak table it explicitly does not use. Reported
+    directly: "why is the SCORE report in the peak picking tab? it
+    should be with the SCORE in analysis"."""
+    window, _b, _ppm = _overlapping_pfg_window(qapp)
+    monkeypatch.setattr(_ScoreSettingsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    before = window.analysis_results_label.text()
+
+    window._on_score_clicked()
+
+    assert "SCORE" in window.score_results_label.text()
+    # Peak Picking's own label is left exactly as it was.
+    assert window.analysis_results_label.text() == before
+
+
+def test_the_score_report_is_siloed_and_hidden_with_its_panel(qapp, monkeypatch):
+    window, _b, _ppm = _overlapping_pfg_window(qapp)
+    monkeypatch.setattr(_ScoreSettingsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+    window._on_score_clicked()
+    spectrum = window.session.spectra[0]
+    report = window.score_results_label.text()
+    assert report
+
+    # Siloed with the spectrum, like every other per-spectrum panel --
+    # it left analysis_results_label, so it needs its own slot or a
+    # reselection loses it.
+    state = window._capture_analysis_state()
+    assert state["score_results_text"] == report
+    spectrum.metadata.raw["analysis_state"] = state
+
+    window.score_results_label.setText("")
+    window._restore_analysis_state(spectrum)
+    assert window.score_results_label.text() == report
+
+
+# ============================================================
+# Results land with the analysis that produced them
+# ============================================================
+
+def test_every_analysis_report_has_its_own_home(qapp):
+    """``analysis_results_label`` is built by
+    ``_build_peak_picking_subtab`` and is that sub-tab's own display,
+    but four analyses used to write to it -- so a DOSY, a SCORE, a
+    curve fit and a gradient calibration all printed their results on
+    the Peak Picking tab. Each now has its own label."""
+    window = MainWindow()
+    for name in ("score_results_label", "dosy_results_label",
+                 "curve_fit_summary_label", "gradient_calibration_label"):
+        assert hasattr(window, name), name
+
+
+def test_the_dosy_summary_lands_with_dosy(qapp, monkeypatch):
+    window = _dosy_window(qapp, monkeypatch)
+    before = window.analysis_results_label.text()
+    assert window.dosy_results_label.text()
+    assert window.analysis_results_label.text() == before
+
+
+def test_the_calibration_result_lands_with_the_gradient_controls(qapp, monkeypatch):
+    window, _g = _calibration_window(qapp)
+    monkeypatch.setattr(_GradientCalibrationDialog, "exec",
+                        lambda self: QDialog.DialogCode.Accepted)
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    before = window.analysis_results_label.text()
+
+    window._on_calibrate_gradient_clicked()
+    assert "Maximum gradient" in window.gradient_calibration_label.text()
+    assert window.analysis_results_label.text() == before
+
+
+def test_all_four_reports_survive_a_reselection(qapp, monkeypatch):
+    """They left analysis_results_label, which was the only one the
+    analysis state captured -- each needs its own slot or a reselection
+    loses it."""
+    window = _dosy_window(qapp, monkeypatch)
+    window.score_results_label.setText("score text")
+    window.curve_fit_summary_label.setText("curve text")
+    window.gradient_calibration_label.setText("calibration text")
+
+    state = window._capture_analysis_state()
+    for key, expected in (("score_results_text", "score text"),
+                          ("curve_fit_summary_text", "curve text"),
+                          ("gradient_calibration_text", "calibration text")):
+        assert state[key] == expected
+    assert state["dosy_results_text"] == window.dosy_results_label.text()
+
+
+# ============================================================
+# The status bar says what is open, not just what just happened
+# ============================================================
+
+def test_status_bar_states_the_selected_experiment(qapp, monkeypatch):
+    """It was transient-only -- 32 showMessage calls and nothing else --
+    so between operations the space said nothing. Explicit user
+    request: "make better use of the status bar at the bottom beyond
+    just loading"."""
+    window = _dosy_window(qapp, monkeypatch)
+    text = window._status_experiment.text()
+    assert "1H" in text
+    assert "pseudo-2D" in text
+    assert window._status_session.text() == "1 spectrum"
+
+
+def test_status_bar_is_empty_with_nothing_open(qapp):
+    window = MainWindow()
+    assert window._status_experiment.text() == ""
+    assert window._status_session.text() == ""
+
+
+def test_status_bar_context_is_permanent_not_transient(qapp, monkeypatch):
+    """Permanent widgets, so a load/export/fit message takes the
+    left-hand space and this stays put beside it rather than being
+    wiped by it."""
+    window = _dosy_window(qapp, monkeypatch)
+    before = window._status_experiment.text()
+    window.statusBar().showMessage("Loading something…")
+    assert window._status_experiment.text() == before
+    window.statusBar().clearMessage()
+    assert window._status_experiment.text() == before
+
+
+def test_f1_processing_preview_shows_an_interferogram_and_a_spectrum(qapp, tmp_path):
+    """"F1 processing doesn't show fid and spectrum, can this be done?"
+
+    It can: the readers already stash every row's F2-processed data as
+    ``raw["fid"]`` for a genuine 2D, and a column of that *is* F1's
+    time-domain series -- the one the F1 transform runs across, and
+    the one Truncate (F1) and Zero-fill (F1) are decisions about."""
+    window = MainWindow()
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=8, n2=32), vendor="xpulse")
+    spectrum = window.session.spectra[window._selected_index()]
+
+    interferogram, dt_f1 = window._f1_interferogram(spectrum)
+    assert interferogram is not None
+    # One point per F1 increment of the *time* domain, so it matches
+    # the row count of the stashed F2-processed rows -- not the
+    # (TPPI-halved) row count of the transformed spectrum.
+    assert len(interferogram) == np.asarray(spectrum.metadata.raw["fid"]).shape[0]
+    assert dt_f1 == pytest.approx(spectrum.metadata.raw["fid_dt_f1"])
+    # Real-valued: an amplitude-modulated F1 carries its t1 information
+    # in the real part, the imaginary part being F2's quadrature.
+    assert np.allclose(np.imag(interferogram), 0.0)
+
+
+def test_f1_interferogram_is_absent_rather_than_wrong_without_cached_rows(qapp):
+    """A 1D, or a 2D loaded from processed data with no F1 time domain
+    cached, has no interferogram -- the panel is skipped, not faked."""
+    window = MainWindow()
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    bare = NMRSpectrum(
+        data=np.zeros((4, 8)), axes=[NMRAxis(kind="index", index=np.arange(4)),
+                                      NMRAxis(kind="frequency", ppm=np.arange(8.0))],
+        metadata=NMRMetadata(vendor="xpulse", raw={}),
+    )
+    assert window._f1_interferogram(bare) == (None, None)
+
+
+def test_f1_window_controls_drive_the_live_rebuild(qapp, tmp_path):
+    """"I don't think the windowing is being applied to the indirect
+    dimension." It wasn't -- F1 had no window at all for X-Pulse, and
+    for Bruker only its own recorded `proc2s` WDW, with nothing the
+    user could choose. Its own controls, not F2's re-targeted through
+    dim_combo: F1 truncate and zero-fill are already separate widgets,
+    and a heavy sine-bell on 200 increments beside a light exponential
+    on 2048 points is the normal case."""
+    window = MainWindow()
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=16, n2=32), vendor="xpulse")
+    index = window._selected_index()
+    spectrum = window.session.spectra[index]
+
+    assert window.window_f1_combo.isEnabled()
+    assert window._resolve_f1_window() is None          # "None" by default
+    before = np.array(spectrum.data, copy=True)
+
+    window.window_f1_combo.setCurrentIndex(window.window_f1_combo.findData("sine"))
+    window.ssb_f1_spin.setValue(2.0)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)
+
+    assert window._resolve_f1_window() == ("sine", {"ssb": 2.0})
+    assert not np.allclose(before, window.session.spectra[index].data)
+
+
+def test_f1_window_choice_survives_reselection(qapp, tmp_path):
+    """Persisted and restored like every other live control, so
+    switching experiments doesn't quietly drop it."""
+    window = MainWindow()
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=16, n2=32, name="a.jdx"),
+                 vendor="xpulse")
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=16, n2=32, name="b.jdx"),
+                 vendor="xpulse")
+
+    window.spectrum_list.setCurrentRow(0)
+    window.window_f1_combo.setCurrentIndex(window.window_f1_combo.findData("qsine"))
+    window.ssb_f1_spin.setValue(2.0)
+    window._on_fid_processing_control_changed()
+    _settle_live_reprocess(window)
+
+    window.spectrum_list.setCurrentRow(1)
+    assert window.window_f1_combo.currentData() == "none"   # B never chose one
+    window.spectrum_list.setCurrentRow(0)
+    assert window.window_f1_combo.currentData() == "qsine"
+    assert window.ssb_f1_spin.value() == pytest.approx(2.0)
+
+
+def test_the_f1_preview_draws_the_f1_window_envelope(qapp, tmp_path):
+    """"Certainly I don't see the windowing in the processing view."
+    The envelope is F2's own overlay, applied to F1's panel -- without
+    it there is no way to see what Window F1 is doing, or that it is
+    doing nothing."""
+    window = MainWindow()
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=16, n2=32), vendor="xpulse")
+
+    assert window._compute_f1_window_envelope(1e-3, 16) is None   # nothing chosen
+    window.window_f1_combo.setCurrentIndex(window.window_f1_combo.findData("sine"))
+    window.ssb_f1_spin.setValue(2.0)
+
+    envelope = window._compute_f1_window_envelope(1e-3, 16)
+    assert envelope is not None and len(envelope) == 16
+    assert envelope.max() == pytest.approx(1.0)
+    # A cosine-bell (ssb=2) starts at its maximum and decays.
+    assert envelope[0] > envelope[-1]
+
+
+def test_saved_f1_window_is_folded_into_the_reader_kwargs():
+    """A reopened spectrum must read with the same F1 window it was
+    left with, or it comes back looking different until a control is
+    touched -- the "two pipelines quietly diverge" failure again."""
+    kwargs = MainWindow._saved_processing_read_kwargs(
+        {"live_window_f1": "sine", "live_ssb_f1": 2.0})
+    assert kwargs["window_f1"] == "sine"
+    assert kwargs["window_kwargs_f1"] == {"ssb": 2.0}
+
+    # "none" maps to nothing at all, not to a zero-width exponential
+    # the way F2's does: F1's default really is no window.
+    assert "window_f1" not in MainWindow._saved_processing_read_kwargs(
+        {"live_window_f1": "none"})
+    assert "window_f1" not in MainWindow._saved_processing_read_kwargs({})
+
+
+def test_contour_settings_survive_a_reprocess_of_the_same_spectrum(qapp, tmp_path):
+    """"The contour levels and view shouldn't reset when processing."
+    A live reprocess writes into the same NMRSpectrum object and
+    redraws it; resetting the noise floor, level count, scaling and
+    exponent there threw away deliberate choices on every settle --
+    while _redraw_2d_preserving_view was carefully preserving the zoom
+    right beside it."""
+    window = MainWindow()
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=8, n2=32), vendor="xpulse")
+    spectrum = window.session.spectra[window._selected_index()]
+    canvas = window.canvas
+
+    canvas.set_contour_levels(23, "linear", 3.5, 0.02)
+    canvas.show_spectrum(spectrum)          # the redraw a reprocess performs
+
+    assert canvas._contour_clevels == 23
+    assert canvas._contour_level_mode == "linear"
+    assert canvas._contour_power == pytest.approx(3.5)
+    assert canvas._contour_factor == pytest.approx(0.02)
+
+
+def test_a_different_spectrum_does_reset_the_contour_settings(qapp, tmp_path):
+    """The other half of the rule: settings follow the spectrum they
+    were chosen for, so selecting a different one starts clean."""
+    window = MainWindow()
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=8, n2=32, name="a.jdx"),
+                 vendor="xpulse")
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=8, n2=32, name="b.jdx"),
+                 vendor="xpulse")
+    canvas = window.canvas
+    canvas.set_contour_levels(23, "linear", 3.5, 0.02)
+
+    canvas.show_spectrum(window.session.spectra[0])
+    assert canvas._contour_clevels == MplCanvas._CONTOUR_CLEVELS_DEFAULT
+    assert canvas._contour_level_mode == MplCanvas._CONTOUR_LEVEL_MODE_DEFAULT
+
+
+def test_plot_style_carries_contour_scaling_and_power(qapp, tmp_path):
+    """"The plot style for a 2D contour should include number of
+    contours and the power scaling." The count was already there; the
+    spacing was only behind the right-click dialog, which split one
+    decision across two places -- the count alone decides nothing
+    about whether a weak peak beside a strong one is visible."""
+    window = MainWindow()
+    window._load(_make_xpulse_ntuples_2d_dataset(tmp_path, n1=8, n2=32), vendor="xpulse")
+
+    window.output_contour_mode_combo.setCurrentIndex(
+        window.output_contour_mode_combo.findData("linear"))
+    assert window.canvas._contour_level_mode == "linear"
+    # The exponent is meaningless for linear spacing, so it greys out.
+    assert window.output_contour_power_spin.isEnabled() is False
+
+    window.output_contour_mode_combo.setCurrentIndex(
+        window.output_contour_mode_combo.findData("power"))
+    window.output_contour_power_spin.setValue(2.5)
+    assert window.canvas._contour_level_mode == "power"
+    assert window.canvas._contour_power == pytest.approx(2.5)
+
+    # And reopening the dialog reads them back off the live canvas.
+    window.canvas.set_contour_levels(9, "linear", 4.0, 0.05)
+    window._load_style_controls_from(window.canvas)
+    assert window.output_contour_levels_spin.value() == 9
+    assert window.output_contour_mode_combo.currentData() == "linear"
+    assert window.output_contour_power_spin.value() == pytest.approx(4.0)
+
+
+def test_the_f1_processing_preview_draws_the_pivot_line(qapp, tmp_path, monkeypatch):
+    """The single-panel F1 view always drew the Phase 1 pivot; the
+    dual-panel one added with the interferogram returned without it,
+    so the pivot vanished from F1 the moment that panel appeared."""
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8, f1_nuc="13C"),
+                 vendor="bruker")
+    window.process_indirect_button.setChecked(True)
+    window.side_tabs.setCurrentIndex(window._processing_tab_index)
+    window.dim_combo.setCurrentIndex(1)                      # F1 (indirect)
+
+    canvas = window.processing_preview_canvas
+    assert canvas._processing_preview_fid_ax is not None     # the dual panel is up
+    assert canvas._pivot_line is not None, "no pivot line on the F1 preview"
+
+
+def _csa_spectrum(d_iso=100.0, aniso=200.0, asym=0.3, fwhm=5.0, lo=-200.0, hi=500.0, n=512):
+    """A synthetic CSA powder pattern as an NMRSpectrum, ppm descending."""
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    from opennmr.notebook.simulations import csa_definition, make_static_csa_spectrum
+
+    ascending = np.linspace(lo, hi, n)
+    simulated = make_static_csa_spectrum(csa_definition(d_iso, aniso, asym),
+                                         ascending, fwhm=fwhm, n_theta=120, n_phi=240)
+    ppm = ascending[::-1]
+    return NMRSpectrum(
+        data=simulated["real_spec"][::-1],
+        axes=[NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 100.0)],
+        metadata=NMRMetadata(vendor="test", nucleus="13C", sfo1=100.0),
+    )
+
+
+def _window_with_csa(spectrum):
+    window = MainWindow()
+    window.session.add_derived(spectrum, "csa")
+    window.spectrum_list.addItem("csa")
+    window.spectrum_list.setCurrentRow(0)
+    window.csa_orientations_spin.setValue(800)
+    window.csa_render_orientations_spin.setValue(2000)
+    return window
+
+
+def test_the_csa_fit_recovers_a_known_powder_lineshape(qapp):
+    """The CSA sub-tab, end to end: table -> bridge -> Euan's
+    multi-site fitter -> curve on the Fit canvas -> report.
+
+    FWHM is deliberately not asserted tightly: the fit runs on a
+    coarse powder grid on purpose (the loop is what every Jacobian
+    evaluation costs), so it absorbs the grid's graininess as extra
+    broadening. The tensor parameters are what a CSA fit is for."""
+    window = _window_with_csa(_csa_spectrum())
+    window._add_csa_site(("A", "85", "170", "0.45", "7"))
+    window._on_csa_fit_clicked()
+
+    result = window._csa_fit_result
+    assert result is not None
+    assert result["popt"][0] == pytest.approx(100.0, abs=3.0)   # d_iso
+    assert result["popt"][1] == pytest.approx(200.0, abs=8.0)   # Delta
+    assert result["popt"][2] == pytest.approx(0.30, abs=0.08)   # eta
+    assert window.canvas_tabs.currentWidget() is window.fit_canvas
+    assert "CSA FIT REPORT" in window.csa_results_label.text().upper()
+
+
+def test_a_clipped_powder_pattern_is_warned_about(qapp):
+    """**Measured, not hypothetical.** A powder pattern that runs off
+    the edge of the fitted range fits back with a badly shrunken span
+    -- 126 ppm against a true 200 -- and nothing else says so, because
+    the residual *inside* the window stays small. The fitted span is
+    the number people take away from a CSA fit."""
+    # Same tensor, but a window that cuts the high-frequency shoulder.
+    window = _window_with_csa(_csa_spectrum(lo=-100.0, hi=300.0))
+    window._add_csa_site(("A", "85", "170", "0.45", "7"))
+    window._on_csa_fit_clicked()
+
+    assert window._csa_fit_result is not None
+    assert "clipped" in window.csa_results_label.text().lower()
+
+
+def test_the_csa_site_table_reports_bad_input_by_row(qapp):
+    window = _window_with_csa(_csa_spectrum())
+    with pytest.raises(ValueError, match="at least one CSA site"):
+        window._read_csa_sites()
+
+    window._add_csa_site(("A", "not a number", "170", "0.45", "7"))
+    with pytest.raises(ValueError, match="Site row 1"):
+        window._read_csa_sites()
+
+
+def test_the_csa_site_table_defaults_its_label(qapp):
+    window = _window_with_csa(_csa_spectrum())
+    window._add_csa_site(("", "0", "100", "0", "5"))
+    assert window._read_csa_sites()[0]["label"] == "Site 1"
+
+
+def test_the_mas_rate_is_seeded_from_the_file(qapp, tmp_path, monkeypatch):
+    """Bruker records the spinning rate as MASR in acqus and the
+    reader already carries it to metadata.raw, so the finite-MAS
+    control needs somewhere to read it rather than new plumbing.
+    Seeded, never forced -- a rate recorded at setup and not used is
+    common enough that the box stays editable."""
+    window = MainWindow()
+    window._load(_make_raw_2d_dataset(tmp_path, monkeypatch, n_f1=4, n_f2=8), vendor="bruker")
+    spectrum = window.session.spectra[0]
+    spectrum.metadata.raw.setdefault("acqus", {})["MASR"] = 25000
+
+    window.csa_mas_spin.setValue(0.0)
+    window._refresh_csa_controls(spectrum)
+    assert window.csa_mas_spin.value() == pytest.approx(25000.0)
+
+    # Already set by hand: left alone.
+    window.csa_mas_spin.setValue(12000.0)
+    window._refresh_csa_controls(spectrum)
+    assert window.csa_mas_spin.value() == pytest.approx(12000.0)
+
+
+def test_the_finite_mas_lineshape_refuses_a_zero_rate(qapp, monkeypatch):
+    """Better than simulating a nonsense sideband pattern at 0 Hz."""
+    from PySide6.QtWidgets import QMessageBox
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+    window = _window_with_csa(_csa_spectrum())
+    window._add_csa_site(("A", "85", "170", "0.45", "7"))
+    window.csa_static_combo.setCurrentIndex(
+        window.csa_static_combo.findData(False))
+    window.csa_mas_spin.setValue(0.0)
+    window._on_csa_fit_clicked()
+
+    assert warned, "no warning for a finite-MAS fit with no spinning rate"
+    assert "spinning rate" in warned[-1][2]
+
+
+def test_the_powder_grid_is_expressed_the_way_each_scheme_wants(qapp):
+    """ZCW takes one orientation count; the rectangular grid takes a
+    theta/phi pair, split in the 1:2 ratio the simulator's own
+    defaults use."""
+    assert MainWindow._csa_grid_kwargs("zcw", 5000) == {"n_zcw": 5000}
+    rectangular = MainWindow._csa_grid_kwargs("rectangular", 5000)
+    assert rectangular["n_phi"] == 2 * rectangular["n_theta"]
+    assert rectangular["n_theta"] * rectangular["n_phi"] == pytest.approx(5000, rel=0.1)

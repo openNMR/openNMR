@@ -26,6 +26,17 @@ reads only the small parameter files -- about a millisecond, against
 seconds for a real load -- so the tree can say "1H, 2D, 1024x4096"
 without opening anything large. Peeking is deferred until a folder is
 expanded, so pointing this at a big archive costs nothing up front.
+
+**That was only ever true of Bruker.** ``io.peek`` falls back to a
+full ``load()`` for any vendor that has not registered its own, and
+until every vendor did, expanding a folder here read *and processed*
+every experiment in it -- measured at 1.8 s per X-Pulse arrayed
+experiment and 0.7 s per JEOL file, so a five-experiment PFG folder
+blocked the GUI for about nine seconds to print five labels. All four
+vendors now have a real ``peek``, and each is pinned by a test
+asserting it reports the same shape a real load produces; describing
+the whole of ``test_data`` (238 experiments, all four vendors) takes
+about 250 ms.
 """
 
 from __future__ import annotations
@@ -79,6 +90,15 @@ class DataBrowser(QWidget):
         self._root_label.setWordWrap(True)
         layout.addWidget(self._root_label)
 
+        # **No per-selection details panel here**, deliberately. One
+        # briefly sat between this label and the tree, restating the
+        # selected experiment's nucleus, size and pulse programme. But
+        # the Data tab's own "Selected spectrum" box already says all
+        # of that (see MainWindow._refresh_selection_display), and each
+        # tree row already carries its own one-line summary from
+        # `_describe` -- so the panel made it the third statement of
+        # the same facts on one tab. User report: it was "double
+        # noting" what the selected-spectrum panel notes already.
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -173,7 +193,13 @@ class DataBrowser(QWidget):
         Deferred to expansion, and done once: :func:`opennmr.io.peek` is
         cheap (~1 ms, parameter files only) but a large archive holds
         hundreds of experiments, and there is no reason to describe a
-        folder nobody has opened."""
+        folder nobody has opened.
+
+        Still synchronous, and that is now fine: at ~1 ms per
+        experiment a folder would have to hold thousands before this
+        is noticeable. It was *not* fine while three of the four
+        vendors fell back to a full load -- see this module's own
+        docstring."""
         if parent is None:
             return
         if parent is not self._tree.invisibleRootItem():
@@ -221,6 +247,16 @@ class DataBrowser(QWidget):
         shape = info.get("shape")
         if shape:
             bits.append("x".join(str(int(n)) for n in shape))
+        # **Last, and it is the most useful thing here.** "PGSTE" or
+        # "hsqcetgp" identifies an experiment in a way no shape can --
+        # a folder of 1H 1D 65536s is indistinguishable without it.
+        # All four vendors record one and all four peeks now report it
+        # (Bruker PULPROG, Varian seqfil, JEOL `experiment`, X-Pulse
+        # .PULSESEQUENCE), so this costs nothing beyond the peek that
+        # already ran. Explicit user request.
+        pulse_program = info.get("pulse_program")
+        if pulse_program:
+            bits.append(str(pulse_program))
         return "· " + ", ".join(bits) if bits else ""
 
     # -- interaction ---------------------------------------------------

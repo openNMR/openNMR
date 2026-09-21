@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import axes_size
+from mpl_toolkits.axes_grid1.axes_divider import AxesDivider
 
 from ..core.registry import find_gamma, NUC_label
 from ..processing.relaxation import RELAXATION_MODELS, format_time_value
@@ -34,7 +36,7 @@ from .style import (
 # bunch differently from every other contour in the app is exactly the
 # kind of quiet divergence that makes two plots of the same data look
 # like different measurements.
-from .twod import _contour_levels
+from .twod import _contour_levels, _draw_traces_panel, SLICE_COLOURS
 
 
 def plot_1d_with_fit(fit_result: dict, x_unit: str = "ppm", show_components: bool = True,
@@ -488,6 +490,11 @@ def _dosy_d_limits(z, d_grid, factor: float, pad_decades: float = 0.5):
     return max(low, full[0]), min(high, full[1])
 
 
+def sharing_x(a, b) -> bool:
+    """Whether two Axes are on the same shared-x group."""
+    return a in b.get_shared_x_axes().get_siblings(b)
+
+
 def plot_dosy(dosy: dict, ax=None, fig=None, contour_ax=None, projection_ax=None,
               clevels: int = 8, factor: float = 0.02, cmap: str | None = None,
               level_mode: str = "power", power: float = 1.25,
@@ -497,8 +504,13 @@ def plot_dosy(dosy: dict, ax=None, fig=None, contour_ax=None, projection_ax=None
               # so "m²s⁻¹" renders with a missing-glyph box and emits a
               # warning on every draw.
               xlabel: str = "δ / ppm", ylabel: str = r"D / $\mathregular{m^{2}\,s^{-1}}$",
-              show_projection: bool = True, projection_height: float = 0.22,
+              contour_linewidth: float | None = None,
+              show_projection: bool = True, projection_size: float = 1.0,
+              projection_pad: float = 0.1, square_aspect: bool = True,
               projection_color: str = "black", linewidths: float = 0.8,
+              slices=None, slice_size: float = 1.0, slice_pad: float = 0.1,
+              slice_offset_fraction: float = 0.9, slice_colours=None,
+              slice_linewidth: float = 2.0,
               pl_width: float = 5.0, pl_height: float = 5.0,
               font: str = "Arial", fontsize: float = 12,
               tick_dir: str = "in", tick_length: float = 4.0, tick_width: float = 1.0,
@@ -539,6 +551,11 @@ def plot_dosy(dosy: dict, ax=None, fig=None, contour_ax=None, projection_ax=None
     Returns ``fig, (contour_ax, projection_ax)`` -- the second is
     ``None`` when no strip was drawn.
     """
+    # The rings and the projection trace are separately weighted: the
+    # rings are the one a caller wants to thin or thicken (a dense map
+    # merges into blobs), while the strip above reads best at the
+    # figure's own line weight.
+    rings = linewidths if contour_linewidth is None else contour_linewidth
     z = np.asarray(dosy["Z"], dtype=float)
     d_grid = np.asarray(dosy["D"], dtype=float)
     ppm = np.asarray(dosy["ppm"], dtype=float)
@@ -550,15 +567,31 @@ def plot_dosy(dosy: dict, ax=None, fig=None, contour_ax=None, projection_ax=None
     else:
         setup_plotting(font=font, fontsize=fontsize)
         fig = plt.figure(figsize=(pl_width, pl_height))
-        if show_projection:
-            # A shared x so panning/zooming the map keeps the spectrum
-            # above it lined up -- the whole point of the strip.
-            grid = fig.add_gridspec(2, 1, height_ratios=[projection_height, 1.0], hspace=0.04)
-            projection_ax = fig.add_subplot(grid[0])
-            contour_ax = fig.add_subplot(grid[1], sharex=projection_ax)
-        else:
-            contour_ax = fig.add_subplot(111)
-            projection_ax = None
+        contour_ax = fig.add_subplot(111)
+
+    # **The same panel geometry as every other contour in this package.**
+    # Explicit user request: "the shape of the contour plot can just
+    # follow that used for every other contour". This used to build its
+    # own 2x1 gridspec, which made a DOSY the one contour panel whose
+    # proportions, projection height and spacing were unrelated to the
+    # 2D views beside it in the same app.
+    #
+    # Same AxesDivider as plot_2d_contour, for the same reason it gives
+    # there: it coordinates the main panel and the appended strip
+    # together when resizing for the aspect constraint, where
+    # set_box_aspect would shrink the panel alone and strand the strip.
+    # Size.Scaled(1) on both references makes set_aspect(True) equalise
+    # physical box dimensions rather than data ranges -- see that
+    # function's own note on why the default reference sizes are wrong
+    # for this.
+    divider = AxesDivider(contour_ax, xref=axes_size.Scaled(1), yref=axes_size.Scaled(1))
+    contour_ax.set_axes_locator(divider.new_locator(nx=0, ny=0))
+    divider.set_aspect(square_aspect)
+    if show_projection and projection_ax is None:
+        # sharex so panning or zooming the map keeps the spectrum above
+        # it lined up -- the whole point of the strip.
+        projection_ax = divider.append_axes(
+            "top", projection_size, pad=projection_pad, sharex=contour_ax)
 
     peak = float(np.nanmax(z)) if z.size else 0.0
     if peak > 0:
@@ -574,9 +607,11 @@ def plot_dosy(dosy: dict, ax=None, fig=None, contour_ax=None, projection_ax=None
         # two kinds of plot read alike.
         levels = _contour_levels(peak * max(float(factor), 1e-6), peak, clevels, level_mode, power)
         if cmap:
-            contour_ax.contour(ppm, d_grid, z, levels=levels, cmap=cmap, linewidths=linewidths)
+            contour_ax.contour(ppm, d_grid, z, levels=levels, cmap=cmap,
+                               linewidths=rings)
         else:
-            contour_ax.contour(ppm, d_grid, z, levels=levels, colors="black", linewidths=linewidths)
+            contour_ax.contour(ppm, d_grid, z, levels=levels, colors="black",
+                               linewidths=rings)
 
     contour_ax.set_yscale("log")
     contour_ax.set_xlabel(xlabel, fontsize=fontsize)
@@ -595,15 +630,214 @@ def plot_dosy(dosy: dict, ax=None, fig=None, contour_ax=None, projection_ax=None
     apply_spine_style(contour_ax, top=True, right=True, bottom=True, left=True,
                       linewidth=tick_width)
 
+    # --- Extracted rows, drawn beside the map ----------------------
+    # A dashed horizontal line across the map at each chosen D, plus
+    # the spectrum at that D in a panel to the right -- the same thing
+    # a 2D contour's own extracted slices do, through the same drawing
+    # code (see twod._draw_traces_panel). Explicit user request: "when
+    # I extract a line from the DOSY, I would also like the option to
+    # plot alongside with the dashed line like in normal 2D contours".
+    #
+    # Rows only. A DOSY's other extraction is a *column* -- how one
+    # peak's intensity is spread over D -- whose x axis is a diffusion
+    # coefficient on a log scale, not a shift, so it shares neither the
+    # panel's x axis nor its linear stacking. It stays extract-to-the-
+    # spectrum-list only.
+    if slices:
+        entries = []
+        for spec in slices:
+            d_value = spec.get("D")
+            if d_value is None:
+                continue
+            row = int(np.argmin(np.abs(d_grid - float(d_value))))
+            data = z[row, :]
+            if not np.any(data):
+                # An empty row is a D the ILT never put anything at --
+                # a flat line labelled as a spectrum would be a claim
+                # the map does not make.
+                continue
+            entries.append({"spec": spec, "x": ppm,
+                            "y": np.asarray(data, dtype=float),
+                            "position": float(d_grid[row])})
+        # Not returned: plot_dosy and overlay_dosy share a two-element
+        # unpack at every call site (the GUI picks between them into
+        # the same tuple), so widening it here alone would break that.
+        # The panel is tagged instead and found by gid -- the same way
+        # this app already finds its region patches and baseline
+        # overlay, and for the same reason: a stored reference goes
+        # stale the moment a rebuild replaces the Axes.
+        _draw_traces_panel(
+            contour_ax, divider, entries, axis_kind="f1",
+            size=slice_size, pad=slice_pad,
+            offset_fraction=slice_offset_fraction,
+            colours=slice_colours or SLICE_COLOURS,
+            font=font, fontsize=fontsize, axis_label=xlabel,
+            linewidth=slice_linewidth,
+        )
+
     if projection_ax is not None:
         projection = np.asarray(dosy["projection"], dtype=float)
         projection_ax.plot(ppm, projection, color=projection_color, linewidth=linewidths)
-        projection_ax.set_xlim(contour_ax.get_xlim())
+        if not sharing_x(projection_ax, contour_ax):
+            # Only when the caller supplied its own unshared strip --
+            # a divider-appended one shares x already, and forcing the
+            # limits here would fight the shared axis.
+            projection_ax.set_xlim(contour_ax.get_xlim())
         # No ticks at all, on either axis, and no frame -- exactly what
         # plot_2d_contour does with its own projection strips. Leaving
         # the x ticks on drew a row of marks floating above the contour
         # with no spine to belong to, and the strip's own intensity
         # scale is arbitrary, so its y ticks say nothing either.
+        projection_ax.tick_params(axis="x", which="both", bottom=False, top=False,
+                                   labelbottom=False, labeltop=False)
+        projection_ax.tick_params(axis="y", which="both", left=False, right=False,
+                                   labelleft=False, labelright=False)
+        apply_spine_style(projection_ax, top=False, right=False, left=False, bottom=False)
+
+    if not external_axis and save_fig:
+        save_figure(fig, fig_name=fig_name, save_format=save_format)
+
+    return fig, (contour_ax, projection_ax)
+
+
+def overlay_dosy(dosy_maps, labels=None, colours=None, ax=None, fig=None,
+                  projection_ax=None, clevels: int = 8, factor: float = 0.02,
+                  level_mode: str = "power", power: float = 1.25,
+                  d_lims=None, ppm_lims=None,
+                  xlabel: str = "δ / ppm", ylabel: str = r"D / $\mathregular{m^{2}\,s^{-1}}$",
+                  contour_linewidth: float | None = None,
+              show_projection: bool = True, projection_size: float = 1.0,
+                  projection_pad: float = 0.1, square_aspect: bool = True,
+                  linewidths: float = 0.8, legend_kwargs=None,
+                  pl_width: float = 5.0, pl_height: float = 5.0,
+                  font: str = "Arial", fontsize: float = 12,
+                  tick_dir: str = "in", tick_length: float = 4.0, tick_width: float = 1.0,
+                  save_fig: bool = False, fig_name: str = "nmr_dosy_overlay",
+                  save_format: str = "png"):
+    """Overlay several DOSY maps on one set of axes, each in its own
+    flat colour -- the diffusion counterpart of
+    :func:`opennmr.plotting.twod.overlay_plot`, and built to match it:
+    line contours in one colour per map, a legend built from empty
+    proxy artists, and the same panel geometry as every other contour
+    in this package.
+
+    The comparison this exists for is *the same peak in two samples*:
+    whether a shift has moved up or down the diffusion axis between
+    them is the entire question a pair of DOSY maps is usually run to
+    answer, and reading it off two separate figures with independently
+    fitted D axes is exactly how that goes wrong.
+
+    Each map keeps **its own** ``D`` and ``ppm`` grids -- they are
+    contoured separately, so maps computed over different grids (a
+    different ``n_grid``, a different ``d_range``) overlay correctly
+    rather than needing to be recomputed to match. The axes are set to
+    span all of them.
+
+    ``dosy_maps`` : an iterable of :func:`opennmr.processing.ilt.
+    dosy_map` output dicts. Two or more.
+
+    ``labels`` : one per map, for the legend. ``None`` draws no legend
+    -- which is almost never what you want here, since the whole point
+    is telling the maps apart.
+
+    ``colours`` : one matplotlib colour per map. ``None`` (default)
+    takes them from :func:`opennmr.plotting.style.qualitative_colors`,
+    the same palette the rest of this package uses for "these are
+    different things", not different levels of one thing.
+
+    ``factor`` is applied to **each map's own peak**, not to a shared
+    one: the maps being compared routinely differ in absolute
+    intensity (different sample concentrations, different receiver
+    gain), and a shared floor would then draw one of them as a dense
+    mass of rings and the other as nothing at all.
+
+    Returns ``fig, (contour_ax, projection_ax)``.
+    """
+    dosy_maps = list(dosy_maps)
+    if len(dosy_maps) < 2:
+        raise ValueError(f"overlay_dosy needs at least 2 maps, got {len(dosy_maps)}.")
+    if labels is not None and len(labels) != len(dosy_maps):
+        raise ValueError("labels must have the same length as dosy_maps.")
+    if colours is None:
+        colours = qualitative_colors(len(dosy_maps))
+    elif len(colours) != len(dosy_maps):
+        raise ValueError("colours must have the same length as dosy_maps.")
+
+    external_axis = ax is not None
+    if external_axis:
+        contour_ax = ax
+        fig = fig if fig is not None else contour_ax.get_figure()
+    else:
+        setup_plotting(font=font, fontsize=fontsize)
+        fig = plt.figure(figsize=(pl_width, pl_height))
+        contour_ax = fig.add_subplot(111)
+
+    # Same divider geometry as plot_dosy and plot_2d_contour -- see
+    # plot_dosy's own note.
+    divider = AxesDivider(contour_ax, xref=axes_size.Scaled(1), yref=axes_size.Scaled(1))
+    contour_ax.set_axes_locator(divider.new_locator(nx=0, ny=0))
+    divider.set_aspect(square_aspect)
+    if show_projection and projection_ax is None:
+        projection_ax = divider.append_axes(
+            "top", projection_size, pad=projection_pad, sharex=contour_ax)
+
+    all_ppm, fitted_d_lims = [], []
+    for index, dosy in enumerate(dosy_maps):
+        z = np.asarray(dosy["Z"], dtype=float)
+        d_grid = np.asarray(dosy["D"], dtype=float)
+        ppm = np.asarray(dosy["ppm"], dtype=float)
+        all_ppm.append(ppm)
+        colour = colours[index]
+
+        peak = float(np.nanmax(z)) if z.size else 0.0
+        if peak > 0:
+            levels = _contour_levels(peak * max(float(factor), 1e-6), peak,
+                                     clevels, level_mode, power)
+            contour_ax.contour(ppm, d_grid, z, levels=levels, colors=[colour],
+                               linewidths=(linewidths if contour_linewidth is None
+                                            else contour_linewidth))
+            fitted_d_lims.append(_dosy_d_limits(z, d_grid, factor))
+        if projection_ax is not None:
+            projection = np.asarray(dosy["projection"], dtype=float)
+            # Each normalised to its own maximum: the strip is here to
+            # say which shift is which, and an overlay of raw
+            # intensities from differently-concentrated samples buries
+            # the weaker one.
+            scale = float(np.nanmax(np.abs(projection))) or 1.0
+            projection_ax.plot(ppm, projection / scale, color=colour, linewidth=linewidths)
+        if labels is not None:
+            # An empty proxy artist per map, exactly as overlay_plot
+            # builds its own legend -- a contour set has no single
+            # handle to label.
+            contour_ax.plot([], [], color=colour, label=labels[index])
+
+    contour_ax.set_yscale("log")
+    contour_ax.set_xlabel(xlabel, fontsize=fontsize)
+    contour_ax.set_ylabel(ylabel, fontsize=fontsize)
+
+    joined_ppm = np.concatenate(all_ppm)
+    contour_ax.set_xlim(*(ppm_lims if ppm_lims
+                          else (float(np.max(joined_ppm)), float(np.min(joined_ppm)))))
+    if d_lims:
+        contour_ax.set_ylim(*d_lims)
+    elif fitted_d_lims:
+        # The union of what each map alone would have shown: a range
+        # that fits one of them and clips the other is worse than a
+        # slightly roomy one.
+        contour_ax.set_ylim(min(low for low, _ in fitted_d_lims),
+                            max(high for _, high in fitted_d_lims))
+
+    contour_ax.tick_params(
+        axis="both", which="both", direction=tick_dir, labelsize=fontsize,
+        length=tick_length, width=tick_width, bottom=True, left=True, top=True, right=True,
+    )
+    apply_spine_style(contour_ax, top=True, right=True, bottom=True, left=True,
+                      linewidth=tick_width)
+    if labels is not None:
+        contour_ax.legend(**(legend_kwargs or {"loc": "best", "fontsize": fontsize * 0.8,
+                                                "frameon": False}))
+
+    if projection_ax is not None:
         projection_ax.tick_params(axis="x", which="both", bottom=False, top=False,
                                    labelbottom=False, labeltop=False)
         projection_ax.tick_params(axis="y", which="both", left=False, right=False,

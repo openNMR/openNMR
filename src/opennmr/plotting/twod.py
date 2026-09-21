@@ -213,12 +213,54 @@ def _contour_levels(thresh_min, thresh_max, clevels, level_mode, power):
 #: chosen to stay distinguishable both from the black positive contours
 #: and from each other, including for the common red-green colour-vision
 #: deficiencies.
+#: gid on a slice/trace panel's own Axes, so a caller that cannot
+#: receive it as a return value can find it on the figure -- see
+#: :func:`_draw_traces_panel`.
+SLICE_PANEL_GID = "slice_panel"
+
 SLICE_COLOURS = ("#3b4cc0", "#b02ba0", "#e8703a", "#2a9d8f", "#7a4fbf", "#c0392b")
 
 #: Dash pattern for the slice lines: a long-dash/dot alternation, so
 #: they read as annotation rather than as another contour level, and
 #: stay legible where they cross dense contours.
 _SLICE_DASHES = (0, (7, 3, 1, 3))
+
+
+def _right_label_clearance(ax, fontsize: float) -> float:
+    """Inches of room the contour's **right-hand** y tick labels and
+    axis label need, so a panel appended to the right can be padded
+    clear of them.
+
+    ``plot_2d_contour`` puts the y ticks and label on the right (the F1
+    projection occupies the left), and the extracted-slice panel is
+    appended to that same side -- so the gap between contour and panel
+    is the pad *minus* whatever the tick labels take. With a fixed pad
+    that gap shrinks as the numbers get wider, which is exactly what
+    was reported: "I still see the extracted slices overlapping with
+    the y-axis label of the contour, probably because the data I'm
+    looking at has units in the 1000s because if I change to kHz (100s
+    scale) it is less cut off."
+
+    Measured on a 8 x 6 in figure: a +/-12.5 ppm axis left a 28 px gap,
+    the same axis in Hz (+/-5000) left 10 px. Same pad, same figure --
+    only the digit count changed.
+
+    Estimated from the tick values and the font rather than measured
+    off a renderer: this runs while the layout is being built, before
+    anything has been drawn, and the estimate only has to be good
+    enough to reserve space.
+    """
+    try:
+        ticks = list(ax.get_yticks())
+        formatter = ax.yaxis.get_major_formatter()
+        widest = max((len(str(formatter.format_data_short(t)).strip()) for t in ticks),
+                     default=4)
+    except Exception:  # noqa: BLE001 -- an estimate that fails falls back to a plain one
+        widest = 6
+    # ~0.6 em per character for a proportional face, plus the rotated
+    # axis label lying on its side (about one line's height) and the
+    # tick marks themselves.
+    return (0.6 * fontsize * widest + 1.8 * fontsize) / 72.0
 
 
 def _draw_slice_panel(ax, divider, spectrum, slices, *,
@@ -266,8 +308,10 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
     if not slices:
         return None
     axis_kind = slices[0].get("axis", "f1")
+    fixed_axis = spectrum.axes[0] if axis_kind == "f1" else spectrum.axes[1]
+    fixed_positions = fixed_axis.ppm if fixed_axis.ppm is not None else fixed_axis.index
 
-    traces = []
+    entries = []
     for spec in slices:
         if spec.get("axis", "f1") != axis_kind:
             continue
@@ -278,9 +322,45 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
             # reprocessed to a different size shouldn't take the whole
             # figure down with it -- skip it and draw the rest.
             continue
-        traces.append((spec, trace))
-    if not traces:
+        trace_axis = trace.axes[0]
+        trace_x = trace_axis.ppm if trace_axis.ppm is not None else trace_axis.index
+        entries.append({
+            "spec": spec,
+            "x": trace_x,
+            "y": np.asarray(trace.data, dtype=float),
+            "position": float(fixed_positions[int(spec["index"]) - 1]),
+        })
+    return _draw_traces_panel(
+        ax, divider, entries, axis_kind=axis_kind, size=size, pad=pad,
+        offset_fraction=offset_fraction, colours=colours, font=font,
+        fontsize=fontsize, axis_label=axis_label, linewidth=linewidth,
+    )
+
+
+def _draw_traces_panel(ax, divider, entries, *, axis_kind,
+                       size, pad, offset_fraction, colours,
+                       font, fontsize, axis_label, linewidth):
+    """The panel half of :func:`_draw_slice_panel`, over already-extracted
+    traces rather than over an :class:`NMRSpectrum`.
+
+    Split out so a **DOSY** can have the same thing. Its map is a plain
+    ``{"Z", "D", "ppm"}`` dict from the inverse Laplace transform, not a
+    spectrum with axes to slice, so it could not call the function
+    above -- and copying the stacking, per-trace normalisation, label
+    placement and dashed-marker code into :mod:`opennmr.plotting.fit`
+    would have been the second place for all of it to drift. Explicit
+    user request: extracting a line from a DOSY should offer "the
+    option to plot alongside with the dashed line like in normal 2D
+    contours".
+
+    ``entries`` : one dict per trace, ``{"spec", "x", "y", "position"}``
+    -- ``spec`` carrying the ``label``/``color`` the caller chose,
+    ``position`` the coordinate on the *fixed* axis where the dashed
+    marker goes.
+    """
+    if not entries:
         return None
+    traces = [(e["spec"], e) for e in entries]
 
     # sharex for a row panel, so the traces stay aligned under the
     # contour through every later zoom/pan rather than only at draw
@@ -290,8 +370,11 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
     # got a full-range panel beside it. A column panel's x axis is the
     # contour's *y*, which matplotlib cannot share across orientations,
     # so that case still takes a one-time copy below.
+    # Pad past whatever the contour's own right-hand labels occupy, not
+    # a fixed distance that they eat into -- see _right_label_clearance.
     panel = divider.append_axes(
-        "right", axes_size.Scaled(size), pad=pad,
+        "right", axes_size.Scaled(size),
+        pad=max(pad, _right_label_clearance(ax, fontsize) + 0.15),
         **({"sharex": ax} if axis_kind == "f1" else {}),
     )
     # Span every row of the divider, not just the contour's own, so the
@@ -305,30 +388,26 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
     panel.set_axes_locator(divider.new_locator(
         nx=len(divider.get_horizontal()) - 1, ny=0, ny1=len(divider.get_vertical()),
     ))
-    fixed_axis = spectrum.axes[0] if axis_kind == "f1" else spectrum.axes[1]
-    fixed_positions = fixed_axis.ppm if fixed_axis.ppm is not None else fixed_axis.index
-
     # Evenly spread: one slot per trace across a normalised 0..1 panel,
     # each trace scaled to fill its own slot.
     n = len(traces)
     slot = 1.0 / n
-    heights = [float(np.max(t.data) - np.min(t.data)) or 1.0 for _, t in traces]
+    heights = [float(np.max(e["y"]) - np.min(e["y"])) or 1.0 for _, e in traces]
 
     # Stack so the panel's vertical order matches the contour's: the
     # slice whose dashed line sits highest gets the highest trace.
     lo, hi = ax.get_ylim() if axis_kind == "f1" else ax.get_xlim()
     span = (hi - lo) or 1.0
     palette = tuple(colours) if colours else SLICE_COLOURS
-    positions = [float(fixed_positions[int(spec["index"]) - 1]) for spec, _ in traces]
+    positions = [float(e["position"]) for _, e in traces]
     order = sorted(range(n), key=lambda i: (positions[i] - lo) / span)
     baselines = {slot_index: rank * slot for rank, slot_index in enumerate(order)}
 
-    for i, (spec, trace) in enumerate(traces):
+    for i, (spec, entry) in enumerate(traces):
         colour = spec.get("color") or palette[i % len(palette)]
-        trace_axis = trace.axes[0]
-        trace_x = trace_axis.ppm if trace_axis.ppm is not None else trace_axis.index
+        trace_x = entry["x"]
         baseline = baselines[i]
-        y = np.asarray(trace.data, dtype=float)
+        y = np.asarray(entry["y"], dtype=float)
         # Normalised per trace, not on one shared scale.
         scale = (slot * offset_fraction) / heights[i]
         panel.plot(trace_x, (y - float(np.min(y))) * scale + baseline,
@@ -366,6 +445,10 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
     panel.tick_params(axis="x", which="both", labelsize=fontsize)
     for spine in ("top", "right", "left"):
         panel.spines[spine].set_visible(False)
+    # Tagged so a caller that cannot take it as a return value can
+    # still find it -- see plot_dosy, which shares a fixed-arity
+    # unpack with overlay_dosy at every call site.
+    panel.set_gid(SLICE_PANEL_GID)
     return panel
 
 
@@ -382,6 +465,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                      show_nQ_line=False, nQ=1, nQ_colors=None,
                      slices=None, slice_panel_size=1.0, slice_panel_pad=0.95,
                      slice_offset_fraction=0.85, slice_colors=None, slice_linewidth=2.0,
+                     contour_linewidth: float = 0.8,
                      ax=None, fig=None, save_fig=False, fig_name='nmr_2d_spectrum',
                      save_format='png'):
     """Plot a 2D NMR spectrum as a contour plot with F1/F2 projections.
@@ -474,9 +558,11 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     if colour_spectra:
         masked = np.ma.masked_where(contour_data <= 0, contour_data)
         ax.contour(contour_x, contour_y, masked, levels=thresvec,
-                   cmap=get_contour_cmap(colour_spectra), norm=LogNorm())
+                   cmap=get_contour_cmap(colour_spectra), norm=LogNorm(),
+                   linewidths=contour_linewidth)
     else:
-        ax.contour(contour_x, contour_y, contour_data, colors='black', levels=thresvec)
+        ax.contour(contour_x, contour_y, contour_data, colors='black', levels=thresvec,
+                   linewidths=contour_linewidth)
 
     if neg_thresvec is not None:
         # Negative-going signal (dispersive phase error, an artifact,
@@ -494,7 +580,8 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
         # shouting. Real user request: "maybe also the colour needs to
         # be softened to something less stark like a teal".
         ax.contour(contour_x, contour_y, contour_data,
-                   colors=NEGATIVE_CONTOUR_COLOUR, levels=sorted(neg_thresvec))
+                   colors=NEGATIVE_CONTOUR_COLOUR, levels=sorted(neg_thresvec),
+                   linewidths=contour_linewidth)
 
     # A plain make_axes_locatable(ax) divider's default reference sizes
     # (Size.AxesX/AxesY) are the axes' own *data-coordinate range*, not
@@ -540,6 +627,25 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
         if ylims is None:
             ax.set_ylim(y_axis.min() - 0.5, y_axis.max() + 0.5)
     else:
+        # **Both frequency axes run the same way: values increase in
+        # the negative screen direction.** F2 increases right-to-left
+        # (`invert_xaxis` above, the universal NMR convention), and F1
+        # increases top-to-bottom for exactly the same reason -- so
+        # high ppm sits at the left *and* at the bottom, and the
+        # nQ = 1 line through a homonuclear spectrum's
+        # self-correlations runs bottom-left to top-right.
+        #
+        # This was briefly removed, on the mistaken reading that the
+        # two axes should both increase toward the top-left. Restored
+        # on the user's own statement of the convention: "the vertical
+        # axis the wrong way round (low to high, bottom to top)
+        # compared to the horizontal axis (NMR convention low to high,
+        # right to left)". Either orientation puts the data at the same
+        # *coordinates* -- the nQ line is drawn in data space and
+        # passes through the self-correlations either way -- so nothing
+        # but the axis direction itself distinguishes them, which is
+        # why this has to follow the convention rather than an argument
+        # about geometry.
         ax.invert_yaxis()
 
     if equal_tickspacing:
@@ -785,6 +891,7 @@ def _check_overlay_compatible(spectra: list[NMRSpectrum]):
 def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fraction_y=0.25,
                   ncontourpts_x=16384, ncontourpts_y=1024,
                   pl_height=7.0, pl_width=7.0, factor=0.07, clevels=7,
+                  contour_linewidth: float = 0.8,
                   colours='diverging', labels=None, legend_kwargs=None,
                   field='', xlabel=None, ylabel=None, xlims=None, ylims=None,
                   font='Arial', fontsize=12, output_format='',
@@ -857,7 +964,8 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
             spectrum, contour_fraction_x=contour_fraction_x, contour_fraction_y=contour_fraction_y,
             ncontourpts_x=ncontourpts_x, ncontourpts_y=ncontourpts_y, factor=factor, clevels=clevels,
         )
-        ax.contour(contour_x, contour_y, contour_data, colors=[colour], levels=thresvec)
+        ax.contour(contour_x, contour_y, contour_data, colors=[colour], levels=thresvec,
+                   linewidths=contour_linewidth)
         if label is not None:
             ax.plot([], [], color=colour, label=label)
 
@@ -887,6 +995,25 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
             y_axis = ref.axes[0].index
             ax.set_ylim(y_axis.min() - 0.5, y_axis.max() + 0.5)
     else:
+        # **Both frequency axes run the same way: values increase in
+        # the negative screen direction.** F2 increases right-to-left
+        # (`invert_xaxis` above, the universal NMR convention), and F1
+        # increases top-to-bottom for exactly the same reason -- so
+        # high ppm sits at the left *and* at the bottom, and the
+        # nQ = 1 line through a homonuclear spectrum's
+        # self-correlations runs bottom-left to top-right.
+        #
+        # This was briefly removed, on the mistaken reading that the
+        # two axes should both increase toward the top-left. Restored
+        # on the user's own statement of the convention: "the vertical
+        # axis the wrong way round (low to high, bottom to top)
+        # compared to the horizontal axis (NMR convention low to high,
+        # right to left)". Either orientation puts the data at the same
+        # *coordinates* -- the nQ line is drawn in data space and
+        # passes through the self-correlations either way -- so nothing
+        # but the axis direction itself distinguishes them, which is
+        # why this has to follow the convention rather than an argument
+        # about geometry.
         ax.invert_yaxis()
 
     if equal_tickspacing:

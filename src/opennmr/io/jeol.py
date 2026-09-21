@@ -520,4 +520,43 @@ def _detect(path: str) -> bool:
     return head == b"JEOL.NMR"
 
 
-base.register("jeol", _detect, read_1d)
+def peek(path: str) -> dict:
+    """Metadata-only probe: shape/nucleus from the ``.jdf`` header and
+    parameter block, skipping the FT pipeline entirely.
+
+    Without this, :func:`opennmr.io.base.peek` fell back to a full
+    ``load()``, and for JEOL that is almost *all* pipeline: measured at
+    1.4 ms to parse the file against 522 ms to read it, the difference
+    being apodisation, zero-fill, FFT, autophase and baseline
+    correction -- none of which the Data-tab browser needs to print
+    "13C, 1D, 32750".
+
+    **The digital-filter trim is applied, not re-derived.** The final
+    point count is whatever ``rm_dig_filter`` leaves (32768 -> 32750 on
+    the real files here, from a ``FILTER_FACTOR`` of 16 -- not a
+    subtraction of 16), so this calls the same function
+    :func:`read_1d` does on the same array rather than reimplementing
+    its arithmetic, which would be a second place for the two to
+    disagree. It costs a single array slice on data already in memory.
+    """
+    parsed = _read_jeol_jdf(path)
+    header, params = parsed["header"], parsed["params"]
+    fid = parsed["data"]
+    filter_factor_param = _get_param(params, "FILTER_FACTOR")
+    if filter_factor_param is not None and filter_factor_param["value"]:
+        fid = digital_filter.rm_dig_filter(
+            fid, decim=0, dspfvs=0, grpdly=float(filter_factor_param["value"]))
+    x_domain = _get_param(params, "X_DOMAIN")
+    experiment = _get_param(params, "experiment")
+    return {
+        "vendor": "jeol",
+        "pulse_program": experiment["value"] if experiment else None,
+        "ndim": int(header.get("dataDimensionNumber", 1)),
+        "shape": (int(fid.shape[0]),),
+        "nucleus": _normalize_nucleus(x_domain["value"] if x_domain else None),
+        "nucleus_indirect": None,
+        "pseudo_2d": False,
+    }
+
+
+base.register("jeol", _detect, read_1d, peek=peek)

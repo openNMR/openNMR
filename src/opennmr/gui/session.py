@@ -258,6 +258,14 @@ class Session:
         folder name, nucleus, vendor, and procno."""
         spectrum = self.spectra[index]
         meta = spectrum.metadata
+        # A name the user typed wins outright. One override, honoured
+        # here, reaches everything that names a spectrum: the Data-tab
+        # list, the Compare legend, a DOSY overlay's own legend, the
+        # processing report. Explicit user request: "I would like the
+        # ability to manipulate things like the legend name".
+        override = (meta.raw or {}).get("display_label")
+        if isinstance(override, str) and override.strip():
+            return override.strip()
         if meta.vendor == "derived" and meta.source_path:
             # A derived spectrum's source_path is a *label* that
             # add_derived put there, not a path -- basename()ing it

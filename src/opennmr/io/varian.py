@@ -359,4 +359,47 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     return read_1d(path, **kwargs)
 
 
-base.register("varian", _detect, _read_auto)
+def peek(path: str) -> dict:
+    """Metadata-only probe: shape/nucleus/dimensionality from
+    ``procpar`` alone, never touching the binary ``fid``.
+
+    Without this, :func:`opennmr.io.base.peek` falls back to a full
+    ``load()`` -- which for the Data-tab folder browser meant reading
+    and *processing* (apodize, FFT, autophase, baseline) every
+    experiment in a folder just to print "7Li, 1D, 1000". Measured at
+    ~28 ms per experiment against ~1 ms here.
+
+    Shape is derived the way the readers derive it, and a test pins
+    that agreement (``test_peek_agrees_with_load_on_every_dataset``):
+    ``np`` counts real+imaginary points, so the acquired dimension is
+    ``np // 2``, and ``ni`` is the indirect increment count -- the
+    same parameter :func:`_read_auto` already uses to choose between
+    :func:`read_1d` and :func:`read_2d` without reading the FID.
+    """
+    procpar = varian_binary.read_procpar(os.path.join(path, "procpar"))
+    np_points = _procpar_value(procpar, "np", default=0, cast=int) or 0
+    ni = _procpar_value(procpar, "ni", default=1, cast=int) or 1
+    nucleus = _normalize_nucleus(_procpar_value(procpar, "tn", default=None, cast=str))
+    # Same source read_1d/read_2d name as the pulse programme.
+    pulse_program = _procpar_value(procpar, "seqfil", default=None, cast=str)
+    fast = int(np_points) // 2
+    if ni > 1:
+        # read_2d always builds an index (not frequency) indirect axis
+        # -- an arrayed Varian 2D is treated as a pseudo-2D, see its
+        # own `pseudo_2d=True`. Reported here to match.
+        return {
+            "vendor": "varian", "ndim": 2, "shape": (int(ni), fast),
+            "nucleus": nucleus,
+            "nucleus_indirect": _normalize_nucleus(
+                _procpar_value(procpar, "dn", default=None, cast=str)),
+            "pseudo_2d": True,
+            "pulse_program": pulse_program,
+        }
+    return {
+        "vendor": "varian", "ndim": 1, "shape": (fast,),
+        "nucleus": nucleus, "nucleus_indirect": None, "pseudo_2d": False,
+        "pulse_program": pulse_program,
+    }
+
+
+base.register("varian", _detect, _read_auto, peek=peek)

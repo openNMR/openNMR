@@ -9,6 +9,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from opennmr import io
 from opennmr.gui.widgets import data_browser as browser_module
 from opennmr.gui.widgets.data_browser import _PATH_ROLE, _VENDOR_ROLE, DataBrowser
 
@@ -236,3 +237,28 @@ def test_return_key_also_activates(qapp, tmp_path):
     browser._tree.itemActivated.emit(browser._tree.topLevelItem(0), 0)
 
     assert activated == [str(expt)]
+
+
+def test_leaf_summary_names_the_pulse_programme(qapp):
+    """"PGSTE" or "hsqcetgp" identifies an experiment in a way no shape
+    can -- a folder of 1H 1D 65536s is indistinguishable without it.
+    Explicit user request, and all four vendors record one."""
+    import os
+    path = "test_data/bruker_T2/11"
+    if not os.path.isdir(path):
+        pytest.skip("test_data/bruker_T2 not present")
+    summary = browser_module.DataBrowser._describe(path, "bruker")
+    assert "hahn-echo" in summary
+
+
+@pytest.mark.parametrize("vendor,path,expected", [
+    ("bruker", "test_data/bruker_PFG/150", "diffSte"),
+    ("varian", "test_data/varian_1d/Li7_8000ns_12s_june.fid", "onepul"),
+    ("jeol", "test_data/jeol_1d/carbon.jdf", "carbon"),
+    ("xpulse", "test_data/xpulse_PFG/4", "PGSTE"),
+])
+def test_every_vendors_peek_reports_a_pulse_programme(vendor, path, expected):
+    import os
+    if not os.path.exists(path):
+        pytest.skip(f"{path} not present")
+    assert expected in str(io.peek(path, vendor=vendor).get("pulse_program"))

@@ -10,6 +10,7 @@ updates the canvas live.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import dataclasses
 import json
@@ -29,9 +30,25 @@ from PySide6.QtWidgets import (
     QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
     QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
+from PySide6.QtWidgets import QColorDialog
+from PySide6.QtGui import QColor
+
+
+def _is_dark_colour(colour) -> bool:
+    """Whether white text reads better than black on ``colour`` --
+    relative luminance, so a colour swatch button stays legible."""
+    rgb = QColor(colour)
+    if not rgb.isValid():
+        return False
+    return (0.299 * rgb.red() + 0.587 * rgb.green() + 0.114 * rgb.blue()) < 140
 
 from .. import io
 from .. import plotting
+# The notebook package's CSA fitter, reached through its own bridge --
+# see opennmr.notebook.bridge for why a conversion rather than a
+# re-read from disk.
+from ..notebook import bridge as notebook_bridge
+from ..notebook import csa_fitting as notebook_csa
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRSpectrum
 from ..io import bruker as io_bruker
@@ -371,6 +388,15 @@ class MainWindow(QMainWindow):
         # The last SCORE resolution (processing.score.score's own
         # output) -- component spectra plus their decay constants.
         self._score_result: dict | None = None
+        # The last CSA lineshape fit (see _on_csa_fit_clicked), kept
+        # so its curve and report survive a tab switch the way every
+        # other analysis result does.
+        self._csa_fit_result: dict | None = None
+        # The legend box's fill colour, or None for matplotlib's own.
+        # On the window rather than read back off a canvas: it is only
+        # meaningful alongside the frame checkbox beside it, and the
+        # panel is what owns that pairing.
+        self._legend_facecolor: str | None = None
         # The shift axis the components were resolved on, kept beside
         # them because the export needs both and they must match.
         self._score_ppm = None
@@ -403,6 +429,12 @@ class MainWindow(QMainWindow):
         self.fit_canvas.fitPointsResetRequested.connect(self._on_fit_points_reset_requested)
         self.fit_canvas.measurementCompleted.connect(self._on_measurement_completed)
         self.fit_canvas.dosyExtractRequested.connect(self._on_dosy_extract_requested)
+        # The Fit canvas is shared by four different kinds of result
+        # (curve fit, DOSY map, SCORE components, eNMR fit), each of
+        # which used to overwrite whichever was there before with no
+        # way back short of re-running it. Its own "Showing:" switcher
+        # asks here for the one the user picked.
+        self.fit_canvas.viewSwitchRequested.connect(self._on_fit_view_requested)
         # A single-slice pseudo-Voigt spectral fit (data + fit curve,
         # from "Spectrum fit (slice #)") gets its own tab rather than sharing
         # the Spectrum canvas -- it used to temporarily overwrite the
@@ -482,7 +514,18 @@ class MainWindow(QMainWindow):
             self._scrollable(self._build_spectral_fitting_tab()), "Spectral Fitting")
         tabs.addTab(self._scrollable(self._build_analysis_tab()), "Analysis")
         tabs.addTab(self._scrollable(self._build_compare_tab()), "Compare")
-        tabs.addTab(self._scrollable(self._build_output_tab()), "Output")
+        # No Output tab any more -- its controls live in the Plot Style
+        # dialog (View ▸ Plot Style…, or right-click any plot). Built
+        # here all the same, once, so every handler that reads
+        # self.output_* has its widget from startup whether or not the
+        # dialog has ever been opened.
+        self._style_panel = self._build_style_panel()
+        self._style_dialog = None
+        for canvas in self._all_canvases():
+            canvas.plotStyleRequested.connect(self._on_plot_style_clicked)
+        # Before any tab is current, so _style_target_canvases falls
+        # back to every canvas and the saved defaults land everywhere.
+        self._apply_saved_style_defaults()
         # Entering the Processing tab switches the canvas to its own
         # live dual preview automatically (see _show_processing_preview);
         # leaving it switches back, so that speculative preview state
@@ -520,6 +563,61 @@ class MainWindow(QMainWindow):
         self.dimension_box.setVisible(False)
 
         self._build_menu_bar()
+        self._build_status_bar()
+
+    def _build_status_bar(self) -> None:
+        """Permanent context on the right of the status bar.
+
+        **The bar was transient-only** -- 32 ``showMessage`` calls and
+        nothing else, so between operations it sat empty and the space
+        said nothing. Explicit user request: "maybe make better use of
+        the status bar at the bottom beyond just loading."
+
+        Permanent widgets, so a transient message (a load, an export,
+        a fit) still takes the left-hand space and this stays put
+        beside it rather than being wiped by it. What goes here is the
+        context that is true regardless of which tab is showing: what
+        is selected and how much is open. Anything that changes with
+        the cursor belongs on the plot, not here -- the crosshair and
+        the measurement readout already own that.
+        """
+        self._status_experiment = QLabel("")
+        self._status_experiment.setToolTip(
+            "The selected experiment: nucleus, size and pulse programme."
+        )
+        self._status_session = QLabel("")
+        self._status_session.setToolTip("How many spectra are open in this session.")
+        bar = self.statusBar()
+        bar.addPermanentWidget(self._status_experiment)
+        bar.addPermanentWidget(self._status_session)
+        self._refresh_status_bar()
+
+    def _refresh_status_bar(self) -> None:
+        """Re-state the permanent status context for the current
+        selection. Safe to call before the bar exists (startup order)."""
+        if not hasattr(self, "_status_experiment"):
+            return
+        count = len(self.session.spectra)
+        self._status_session.setText(
+            "" if not count else f"{count} spectrum" if count == 1 else f"{count} spectra")
+
+        index = self._selected_index()
+        if index is None:
+            self._status_experiment.setText("")
+            return
+        spectrum = self.session.spectra[index]
+        bits = []
+        if spectrum.metadata.nucleus:
+            bits.append(str(spectrum.metadata.nucleus))
+        if spectrum.metadata.nucleus_indirect:
+            bits.append(f"/{spectrum.metadata.nucleus_indirect}")
+        shape = tuple(spectrum.data.shape)
+        kind = ("pseudo-2D" if (spectrum.ndim == 2 and spectrum.is_pseudo_2d)
+                else f"{spectrum.ndim}D")
+        bits.append(f"{kind} {'x'.join(str(int(n)) for n in shape)}")
+        if spectrum.metadata.pulse_program:
+            bits.append(str(spectrum.metadata.pulse_program))
+        self._status_experiment.setText("  ·  ".join(bits))
 
     def _build_menu_bar(self) -> None:
         """A real top-level menu bar -- native on macOS (the app's own
@@ -624,6 +722,19 @@ class MainWindow(QMainWindow):
         toggle_nav_action.setToolTip("Switch between pan and zoom.")
         toggle_nav_action.triggered.connect(self._toggle_navigation_mode)
         view_menu.addAction(toggle_nav_action)
+
+        view_menu.addSeparator()
+        plot_style_action = QAction("&Plot Style…", self)
+        plot_style_action.setToolTip(
+            "Line width, font size, ticks, grid, legend, colours and export "
+            "settings for the plot you are looking at.\n\n"
+            "Applies to that plot on its own, so a Compare stack can be styled "
+            "differently from the Spectrum tab; “Apply to all plots” pushes the "
+            "settings everywhere, and “Save as default” makes them what every "
+            "new session starts from."
+        )
+        plot_style_action.triggered.connect(self._on_plot_style_clicked)
+        view_menu.addAction(plot_style_action)
 
         view_menu.addSeparator()
         self.crosshair_menu_action = QAction("&Crosshair", self)
@@ -740,6 +851,19 @@ class MainWindow(QMainWindow):
         )
         dosy_menu_action.triggered.connect(self._on_dosy_clicked)
         analysis_menu.addAction(dosy_menu_action)
+
+        overlay_dosy_action = QAction("Overlay DOSY &Maps…", self)
+        overlay_dosy_action.setToolTip(
+            "Draw the DOSY maps of every selected spectrum on one set of axes, "
+            "each in its own colour.\n\n"
+            "Select two or more spectra that already have a DOSY map (build each "
+            "one with DOSY Map (ILT)… first). Whether a shift has moved up or "
+            "down the diffusion axis between two samples is the question a pair "
+            "of DOSY maps is usually run to answer, and two separate figures "
+            "with independently fitted D axes is how that comparison goes wrong."
+        )
+        overlay_dosy_action.triggered.connect(self._on_overlay_dosy_clicked)
+        analysis_menu.addAction(overlay_dosy_action)
 
         score_action = QAction("&Resolve Components (SCORE)…", self)
         score_action.setToolTip(
@@ -1059,6 +1183,29 @@ class MainWindow(QMainWindow):
             current.reset_view()
         elif hasattr(current, "toolbar"):
             current.toolbar.home()
+
+    def _on_plot_style_clicked(self) -> None:
+        """View ▸ Plot Style… (and the right-click menu's own entry) --
+        the style and export controls for whichever plot is showing.
+
+        Non-modal, and the controls apply live as they always did: the
+        panel is the same one the Output tab used to hold, so nothing
+        here waits for an OK. Reopening re-reads the current plot's own
+        settings, which is what makes it per-plot rather than one
+        global style wearing a dialog."""
+        if getattr(self, "_style_dialog", None) is None:
+            self._style_dialog = _PlotStyleDialog(self, self._style_panel)
+            self._style_dialog.apply_to_all_button.clicked.connect(
+                self._on_apply_style_to_all_clicked)
+            self._style_dialog.save_default_button.clicked.connect(
+                self._on_save_style_default_clicked)
+        current = self.canvas_tabs.currentWidget()
+        if isinstance(current, MplCanvas):
+            self._load_style_controls_from(current)
+        self._refresh_style_scope_label()
+        self._style_dialog.show()
+        self._style_dialog.raise_()
+        self._style_dialog.activateWindow()
 
     def _on_processing_report_clicked(self) -> None:
         """File ▸ Processing Report… -- what was actually done to the
@@ -1753,6 +1900,24 @@ class MainWindow(QMainWindow):
             kwargs["window"], kwargs["window_kwargs"] = key, {"ssb": saved.get("live_ssb", 0.0)}
         elif key not in (None, "__recorded__"):
             kwargs["window"], kwargs["window_kwargs"] = key, {}
+        # F1's own window pair, the same translation. "none" maps to
+        # *nothing* rather than to a zero-width exponential the way F2's
+        # does: F1's default really is no window at all, and passing
+        # window_f1="exponential" with lb=0 would make every reopened
+        # 2D take the apodization path for no effect.
+        key_f1 = saved.get("live_window_f1")
+        if key_f1 == "exponential":
+            kwargs["window_f1"] = "exponential"
+            kwargs["window_kwargs_f1"] = {"lb": saved.get("live_lb_f1", 0.0)}
+        elif key_f1 == "gaussian":
+            kwargs["window_f1"] = "gaussian"
+            kwargs["window_kwargs_f1"] = {"lb": saved.get("live_lb_f1", 0.0), "gb": 0.0}
+        elif key_f1 in ("sine", "qsine"):
+            kwargs["window_f1"] = key_f1
+            kwargs["window_kwargs_f1"] = {"ssb": saved.get("live_ssb_f1", 0.0)}
+        elif key_f1 not in (None, "none", "__recorded__"):
+            kwargs["window_f1"], kwargs["window_kwargs_f1"] = key_f1, {}
+
         # phase0/phase1 are only meaningful with autophase off -- with
         # it on the reader recomputes its own and ignores them.
         if "phase0" in kwargs or "phase1" in kwargs:
@@ -1919,7 +2084,16 @@ class MainWindow(QMainWindow):
         # recording an already-applied effect -- a real, visible
         # change (a freshly-loaded spectrum now gets linear baseline
         # correction where it previously didn't), not just bookkeeping.
-        spectrum.metadata.raw.setdefault("baseline_correct", True)
+        # **Off.** It used to default on, which meant a spectrum
+        # arrived already corrected -- so the baseline overlay had
+        # nothing meaningful to draw (the trace it would fit is the one
+        # the correction had already flattened), and the first thing
+        # anyone saw was a correction they had not asked for. Reported
+        # directly: "seeing the baseline plotted against the already
+        # corrected spectrum isn't so useful". Loading now shows the
+        # spectrum as read, with the baseline the correction *would*
+        # remove drawn over it; ticking Baseline Correct applies it.
+        spectrum.metadata.raw.setdefault("baseline_correct", False)
         spectrum.metadata.raw.setdefault("baseline_method", "linear")
 
         # Restore this experiment's own saved sidecar state (see
@@ -2049,6 +2223,23 @@ class MainWindow(QMainWindow):
         if not raw.get("_read_used_saved_processing"):
             return False
         if any(float(raw.get(key, 0.0) or 0.0) for key in ("phase0_f1", "phase1_f1")):
+            return False
+        # **Per-slice phases, for exactly the same reason as the F1
+        # phase above: the reader has no parameter for them.** They are
+        # a GUI concept (Autophase with "Apply to every slice", or a
+        # phase dragged on one slice), recorded per row in
+        # ``slice_phase0``/``slice_phase1`` and applied by
+        # _recompute_multi_row_data. Saved and restored into
+        # metadata.raw correctly, but on the fast path nothing ever
+        # applied them -- so a reloaded series came back with its
+        # per-slice phasing recorded and absent. Measured on a 6-row
+        # raw 2D with phases of 10..60 degrees: the reloaded data
+        # differed from what had been saved by 24.7 of full scale.
+        # Reported directly: "need to make sure that per-slice
+        # phasing/processing is being maintained across loads".
+        if any(float(value or 0.0)
+               for key in self._SLICE_PHASE_KEYS
+               for value in (raw.get(key) or ())):
             return False
         # See the docstring: the two pipelines genuinely disagree here,
         # so this takes the slow path that keeps today's output rather
@@ -2255,6 +2446,10 @@ class MainWindow(QMainWindow):
         self.peak_table.setRowCount(0)
         self.analysis_results_label.setText("")
         self.integration_results_label.setText("")
+        self.score_results_label.setText("")
+        self.curve_fit_summary_label.setText("")
+        self.dosy_results_label.setText("")
+        self.gradient_calibration_label.setText("")
         self.spectral_fit_params_label.setText("")
         self.analysis_status_label.setText("Select a pseudo-2D spectrum (e.g. a T1/T2 relaxation series) to fit.")
         self._current_analysis_index = None
@@ -2319,6 +2514,11 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
 
         menu = QMenu(self)
+        rename_action = menu.addAction("Rename…")
+        rename_action.setToolTip(
+            "The name this spectrum goes by everywhere -- this list, the Compare "
+            "legend, a DOSY overlay's legend, the processing report.")
+        menu.addSeparator()
         override_action = menu.addAction("Override nucleus…")
         suggest_action = menu.addAction("Suggest nucleus (500 MHz console / 100 MHz magnet)…")
         mass_action = menu.addAction("Set sample mass…")
@@ -2353,7 +2553,9 @@ class MainWindow(QMainWindow):
         remove_action = menu.addAction("Remove")
 
         chosen = menu.exec(self.spectrum_list.viewport().mapToGlobal(pos))
-        if chosen is override_action:
+        if chosen is rename_action:
+            self._on_rename_spectrum_action(index)
+        elif chosen is override_action:
             self._on_override_nucleus_action(index)
         elif chosen is suggest_action:
             self._on_suggest_nucleus_action(index)
@@ -2380,6 +2582,40 @@ class MainWindow(QMainWindow):
         self.spectrum_list.item(index).setText(self.session.label(index))
         if index == self._selected_index():
             self._refresh_selection_display(index)
+        self._schedule_sidecar_save(index)
+
+    def _on_rename_spectrum_action(self, index: int) -> None:
+        """Rename a spectrum for display -- the name it goes by in the
+        list, in a Compare legend, in a DOSY overlay's legend and in
+        the processing report.
+
+        Stored as ``display_label`` and honoured by
+        :meth:`Session.label`, so one override reaches every place a
+        spectrum is named rather than each of them needing its own
+        editable field. Explicit user request: "I would like the
+        ability to manipulate things like the legend name".
+
+        An empty string clears it, going back to the derived name."""
+        spectrum = self.session.spectra[index]
+        current = spectrum.metadata.raw.get("display_label", "")
+        text, ok = QInputDialog.getText(
+            self, "Rename spectrum",
+            "Name for lists, legends and reports (blank to restore the default):",
+            text=current or self.session.label(index),
+        )
+        if not ok:
+            return
+        text = text.strip()
+        if text:
+            spectrum.metadata.raw["display_label"] = text
+        else:
+            spectrum.metadata.raw.pop("display_label", None)
+        self.spectrum_list.item(index).setText(self.session.label(index))
+        self._rebuild_compare_list([
+            self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self.compare_list.count())
+        ])
+        self._refresh_compare_view_if_active(switch_tab=False)
         self._schedule_sidecar_save(index)
 
     def _on_override_nucleus_action(self, index: int) -> None:
@@ -2808,16 +3044,26 @@ class MainWindow(QMainWindow):
             self.spectral_fit_canvas, self.fit_canvas, self.compare_canvas,
         ]
 
-    def _build_output_tab(self) -> QWidget:
+    def _build_style_panel(self) -> QWidget:
+        """Every plot-style and export control, as a plain widget.
+
+        Was the Output *tab*; it is now the body of the Plot Style
+        dialog (see :meth:`_on_plot_style_clicked`). The widgets
+        themselves are unchanged and still live on ``self`` -- moving
+        the panel rather than rebuilding it means every handler that
+        reads ``self.output_*`` keeps working, and the change is where
+        the controls live and what they act on, not what they are.
+
+        Explicit user request: "maybe what we need is a plot view
+        popup (from right click menu or top menu) that controls these
+        things, rather than just the output tab... this supplants the
+        need for an output tab"."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        intro = QLabel(
-            "Live style controls -- changes apply immediately to every "
-            "plot in the app, not just a separate export preview."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
+        self.style_scope_label = QLabel("")
+        self.style_scope_label.setWordWrap(True)
+        layout.addWidget(self.style_scope_label)
 
         style_box = QGroupBox("Core styling")
         style_form = QFormLayout(style_box)
@@ -2834,6 +3080,92 @@ class MainWindow(QMainWindow):
         self.output_fontsize_spin.setValue(MplCanvas._AXIS_LABELSIZE)
         self.output_fontsize_spin.valueChanged.connect(self._on_output_style_changed)
         style_form.addRow("Font size:", self.output_fontsize_spin)
+
+        # --- Font family ------------------------------------------
+        # Offered as matplotlib's own generic families rather than a
+        # list of installed faces: a generic name resolves to something
+        # real on every machine, where a specific one silently falls
+        # back (with a warning nobody sees) on a machine that lacks it
+        # -- and a figure exported from one laptop should not come out
+        # in a different face on another.
+        self.output_font_family_combo = QComboBox()
+        self.output_font_family_combo.addItem("Default", "")
+        for family in ("sans-serif", "serif", "monospace", "cursive", "fantasy"):
+            self.output_font_family_combo.addItem(family, family)
+        self._narrow_combo(self.output_font_family_combo)
+        self.output_font_family_combo.setToolTip(
+            "Font family for every piece of text on the plot — title, axis "
+            "labels, tick labels and the legend.\n\n"
+            "Generic families only, so a figure looks the same wherever it is "
+            "opened; “Default” leaves matplotlib's own choice alone."
+        )
+        self.output_font_family_combo.currentIndexChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Font family:", self.output_font_family_combo)
+
+        # --- Title ------------------------------------------------
+        # Off by default, on request. Several views set a title as they
+        # draw (a slice number, a DOSY caption, the fitted peak); this
+        # decides whether it is shown, not whether it is set.
+        self.output_title_checkbox = QCheckBox("Show plot title")
+        self.output_title_checkbox.setChecked(False)
+        self.output_title_checkbox.setToolTip(
+            "Show the title each view sets for itself — a slice number, a "
+            "DOSY caption, the fitted peak's name.\n\n"
+            "Off by default: a figure going into a manuscript is captioned "
+            "there, and the on-plot title duplicates it."
+        )
+        self.output_title_checkbox.toggled.connect(self._on_output_style_changed)
+        style_form.addRow(self.output_title_checkbox)
+
+        # --- Contour levels ---------------------------------------
+        # The same number the right-click "Set Contour Levels..." dialog
+        # and the Analysis tab's DOSY levels box set. Explicit user
+        # request: "change number of contour levels directly (linked to
+        # the other boxes where it might be used)".
+        self.output_contour_levels_spin = QSpinBox()
+        self.output_contour_levels_spin.setRange(2, 200)
+        self.output_contour_levels_spin.setValue(MplCanvas._CONTOUR_CLEVELS_DEFAULT)
+        self.output_contour_levels_spin.setToolTip(
+            "How many contour rings are drawn, on a 2D map and a DOSY alike.\n\n"
+            "The same setting as the right-click “Set Contour Levels…” dialog "
+            "and the Analysis tab's own DOSY levels box — changing it in any "
+            "of them moves the others."
+        )
+        self.output_contour_levels_spin.valueChanged.connect(self._on_contour_levels_changed)
+        style_form.addRow("Contour levels:", self.output_contour_levels_spin)
+
+        # **How the levels are spaced, beside how many there are.**
+        # The count alone decides nothing about whether a weak peak
+        # next to a strong one is visible -- that is what the spacing
+        # does -- so having one here and the other only behind a
+        # right-click dialog split a single decision across two
+        # places. User report: "the plot style for a 2D contour should
+        # include number of contours and the power scaling".
+        self.output_contour_mode_combo = QComboBox()
+        self.output_contour_mode_combo.addItem("Power", "power")
+        self.output_contour_mode_combo.addItem("Linear", "linear")
+        self.output_contour_mode_combo.setToolTip(
+            "How the contour levels are spaced between the noise floor and "
+            "the tallest peak.\n\n"
+            "Power bunches them towards the floor, which is what makes weak "
+            "peaks beside a strong one visible; Linear spaces them evenly."
+        )
+        self.output_contour_mode_combo.currentIndexChanged.connect(
+            lambda _i: self._on_contour_scaling_changed())
+        style_form.addRow("Contour scaling:", self.output_contour_mode_combo)
+
+        self.output_contour_power_spin = QDoubleSpinBox()
+        self.output_contour_power_spin.setRange(0.1, 10.0)
+        self.output_contour_power_spin.setSingleStep(0.05)
+        self.output_contour_power_spin.setValue(MplCanvas._CONTOUR_POWER_DEFAULT)
+        self.output_contour_power_spin.setToolTip(
+            "Higher values bunch more levels near the noise floor — good for "
+            "finding weak peaks near a strong one without saturating the "
+            "display. Only used for Power scaling."
+        )
+        self.output_contour_power_spin.valueChanged.connect(
+            lambda _v: self._on_contour_scaling_changed())
+        style_form.addRow("Contour power:", self.output_contour_power_spin)
 
         self.output_tick_length_spin = QDoubleSpinBox()
         self.output_tick_length_spin.setRange(0.0, 20.0)
@@ -2907,13 +3239,123 @@ class MainWindow(QMainWindow):
         self.output_legend_loc_combo.currentIndexChanged.connect(self._on_output_legend_changed)
         style_form.addRow("Legend position:", self.output_legend_loc_combo)
 
+        # --- Legend appearance ------------------------------------
+        # Defaults: frameless, at the axis label size. Explicit user
+        # request -- "default for legend should be the same font size
+        # as axes and frameon=False, with an option to set the
+        # background alpha/colour values or turn on the frame". The
+        # frame's own colour and alpha are therefore *options on top*,
+        # and stay disabled until the frame is turned on: they do
+        # nothing without one, and a live-looking control that does
+        # nothing reads as broken.
+        self.output_legend_frame_checkbox = QCheckBox("Legend frame")
+        self.output_legend_frame_checkbox.setChecked(False)
+        self.output_legend_frame_checkbox.setToolTip(
+            "Draw the legend in a box. Off by default: at matplotlib's own "
+            "default the box is opaque, which on a dense contour hides the "
+            "data the legend is labelling."
+        )
+        self.output_legend_frame_checkbox.toggled.connect(self._on_legend_appearance_changed)
+        style_form.addRow(self.output_legend_frame_checkbox)
+
+        self.output_legend_fontsize_spin = QSpinBox()
+        self.output_legend_fontsize_spin.setRange(0, 40)
+        self.output_legend_fontsize_spin.setValue(0)
+        self.output_legend_fontsize_spin.setSpecialValueText("Match axes")
+        self.output_legend_fontsize_spin.setToolTip(
+            "Legend text size. “Match axes” (the default) keeps it on the "
+            "font size above, so the two cannot drift apart."
+        )
+        self.output_legend_fontsize_spin.valueChanged.connect(self._on_legend_appearance_changed)
+        style_form.addRow("Legend font size:", self.output_legend_fontsize_spin)
+
+        self.output_legend_alpha_spin = QDoubleSpinBox()
+        self.output_legend_alpha_spin.setRange(0.0, 1.0)
+        self.output_legend_alpha_spin.setSingleStep(0.05)
+        self.output_legend_alpha_spin.setDecimals(2)
+        self.output_legend_alpha_spin.setValue(0.8)
+        self.output_legend_alpha_spin.setToolTip(
+            "How opaque the legend's background box is. Needs the frame on."
+        )
+        self.output_legend_alpha_spin.valueChanged.connect(self._on_legend_appearance_changed)
+        style_form.addRow("Legend background alpha:", self.output_legend_alpha_spin)
+
+        self.legend_color_button = QPushButton("Legend background…")
+        self.legend_color_button.setToolTip(
+            "The legend box's own fill colour. Needs the frame on."
+        )
+        self.legend_color_button.clicked.connect(self._on_legend_color_clicked)
+        style_form.addRow("Legend background:", self.legend_color_button)
+        self._sync_legend_frame_controls()
+
         self.output_colormap_combo = QComboBox()
         self.output_colormap_combo.addItems(plotting.CONTOUR_CMAP_NAMES)
         self.output_colormap_combo.setCurrentText("viridis")
         self._narrow_combo(self.output_colormap_combo)
-        self.output_colormap_combo.setToolTip("Colour scheme for the Compare tab's stacked/overlaid traces.")
-        self.output_colormap_combo.currentIndexChanged.connect(self._on_output_style_changed)
-        style_form.addRow("Compare colour map:", self.output_colormap_combo)
+        self.output_colormap_combo.setToolTip(
+            "Default colours for every plot that draws several series at once — "
+            "Compare traces, extracted slices beside a 2D, DOSY overlay maps and "
+            "2D contour overlays.\n\n"
+            "**App-wide**, unlike the settings above it: two plots of the same "
+            "samples should agree without being set up twice. A series whose "
+            "colour has been set individually below keeps it."
+        )
+        self.output_colormap_combo.currentIndexChanged.connect(self._on_series_colormap_changed)
+        style_form.addRow("Series colour map:", self.output_colormap_combo)
+
+        # --- The single trace's own colour --------------------------
+        # plot_1d has always taken a colour; nothing ever passed one,
+        # so every Spectrum-tab trace was black while Compare had a
+        # whole colour map. Explicit user request: "the colours should
+        # apply to the spectrum tab as well as the compare tab".
+        self.trace_color_button = QPushButton("Trace colour…")
+        self.trace_color_button.setToolTip(
+            "The colour of this plot's own 1D trace — the Spectrum, FID and "
+            "Processing preview lines.\n\n"
+            "The Compare tab draws several traces at once and takes its colours "
+            "from the colour map above instead."
+        )
+        self.trace_color_button.clicked.connect(self._on_trace_color_clicked)
+        style_form.addRow("Trace colour:", self.trace_color_button)
+        self._refresh_trace_color_button()
+
+        self.output_contour_linewidth_spin = QDoubleSpinBox()
+        self.output_contour_linewidth_spin.setRange(0.1, 5.0)
+        self.output_contour_linewidth_spin.setSingleStep(0.1)
+        self.output_contour_linewidth_spin.setDecimals(2)
+        self.output_contour_linewidth_spin.setValue(MplCanvas._contour_linewidth_default())
+        self.output_contour_linewidth_spin.setToolTip(
+            "Weight of the contour rings, on a 2D and a DOSY alike.\n\n"
+            "Separate from the line width above, which styles the axis "
+            "furniture: at that setting's own default the rings come out heavy "
+            "enough to merge into blobs on a dense map, which is why the two "
+            "were never one control."
+        )
+        self.output_contour_linewidth_spin.valueChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Contour line width:", self.output_contour_linewidth_spin)
+
+        # --- Extracted slices, one row each ------------------------
+        # Explicit user request: extracted slices beside a 2D "should
+        # be able to either take a colour from the standard compare
+        # map, or be independently clickable". They take the compare
+        # map by default (see MplCanvas._next_slice_colour); this is
+        # the second half.
+        self.slice_colour_group = QGroupBox("Series on this plot")
+        self.slice_colour_layout = QVBoxLayout(self.slice_colour_group)
+        self.slice_colour_hint = QLabel(
+            "Each series takes its colour from the series colour map above. "
+            "Click one to set it individually, or edit its name.")
+        self.slice_colour_hint.setWordWrap(True)
+        self.slice_colour_layout.addWidget(self.slice_colour_hint)
+        self.reset_series_colours_button = QPushButton("Reset colours to the map")
+        self.reset_series_colours_button.setToolTip(
+            "Drop every individually set colour on this plot, putting all of its "
+            "series back on the series colour map.")
+        self.reset_series_colours_button.clicked.connect(self._on_reset_series_colours_clicked)
+        self.slice_colour_layout.addWidget(self.reset_series_colours_button)
+        self.slice_colour_group.setVisible(False)
+        layout.addWidget(self.slice_colour_group)
+        self._slice_colour_buttons = []
 
         layout.addWidget(style_box)
 
@@ -2989,7 +3431,16 @@ class MainWindow(QMainWindow):
             "tick_width": self.output_tick_width_spin.value(),
             "minor_ticks": self.output_minor_ticks_checkbox.isChecked(),
             "grid": self.output_grid_checkbox.isChecked(),
-            "compare_colormap": self.output_colormap_combo.currentText(),
+            "contour_linewidth": self.output_contour_linewidth_spin.value(),
+            "title_visible": self.output_title_checkbox.isChecked(),
+            "font_family": self.output_font_family_combo.currentData(),
+            "legend_frameon": self.output_legend_frame_checkbox.isChecked(),
+            "legend_fontsize": self.output_legend_fontsize_spin.value(),
+            "legend_framealpha": self.output_legend_alpha_spin.value(),
+            "legend_facecolor": self._legend_facecolor,
+            # Not here: the series palette is app-wide and has its own
+            # handler (_on_series_colormap_changed), so a per-plot style
+            # edit must not quietly push it onto one canvas alone.
         }
 
     def _current_output_export_kwargs(self) -> dict:
@@ -2999,19 +3450,375 @@ class MainWindow(QMainWindow):
             "fig_height": self.output_fig_height_spin.value(),
         }
 
+    def _on_series_colormap_changed(self, *_args) -> None:
+        """The series palette is one setting for the whole app.
+
+        Deliberately not per-plot like the rest of the style panel:
+        it supplies the *defaults* several views draw from, and the
+        point of it is that a Compare stack and a DOSY overlay of the
+        same samples come out consistent. An individually set series
+        colour survives, because `_assign_series` reuses what is
+        already there."""
+        colormap = self.output_colormap_combo.currentText()
+        for canvas in self._all_canvases():
+            canvas.set_style(compare_colormap=colormap)
+            # Redraw, not just record: the palette supplies the colours
+            # already on screen, so changing it has to reach them.
+            # Reported directly: "when I change the colour map from a
+            # plot, it should update the existing colours from that new
+            # series rather than me having to redraw the plot in some
+            # way". Colours set deliberately are left alone.
+            canvas.restyle_series()
+        self._refresh_slice_colour_rows()
+
+    def _refresh_slice_colour_rows(self) -> None:
+        """One row per series on the current plot: a colour swatch and
+        a name box.
+
+        **One section for every kind of multi-series plot** -- Compare
+        traces, extracted slices, DOSY overlay maps, a 2D contour
+        overlay -- because they all answer ``MplCanvas.series()`` the
+        same way. It used to be an extracted-slices-only section, which
+        is exactly why the DOSY overlay had no colour or name control
+        at all and would have needed its own copy of this.
+
+        Rebuilt rather than kept in step: series come and go from
+        elsewhere entirely (the canvas right-click menu, a fresh
+        overlay), so the list this mirrors changes underneath it."""
+        if not hasattr(self, "slice_colour_group"):
+            return
+        for widget in self._slice_colour_buttons:
+            self.slice_colour_layout.removeWidget(widget)
+            widget.deleteLater()
+        self._slice_colour_buttons = []
+
+        targets = self._style_target_canvases()
+        canvas = targets[0] if len(targets) == 1 else None
+        entries = canvas.series() if canvas is not None else []
+        for entry in entries:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+
+            swatch = QPushButton(entry.colour)
+            swatch.setFixedWidth(90)
+            swatch.setStyleSheet(
+                f"QPushButton {{ background-color: {entry.colour}; color: "
+                f"{'white' if _is_dark_colour(entry.colour) else 'black'}; }}")
+            swatch.clicked.connect(
+                lambda _checked=False, key=entry.key: self._on_series_colour_clicked(key))
+            row_layout.addWidget(swatch)
+
+            name = QLineEdit(entry.label)
+            name.setEnabled(entry.can_rename)
+            name.setToolTip(
+                "The name this series goes by in this plot's legend."
+                if entry.can_rename else
+                "Named by its spectrum -- use the Data tab's right-click "
+                "Rename… to change it everywhere at once.")
+            name.editingFinished.connect(
+                lambda key=entry.key, box=name: self._on_series_renamed(key, box.text()))
+            row_layout.addWidget(name)
+
+            self.slice_colour_layout.addWidget(row)
+            self._slice_colour_buttons.append(row)
+        # Back to the bottom: the rows above it were just re-added, so
+        # without this the reset button floats among them.
+        self.slice_colour_layout.removeWidget(self.reset_series_colours_button)
+        self.slice_colour_layout.addWidget(self.reset_series_colours_button)
+        self.slice_colour_group.setVisible(bool(entries))
+
+    def _on_series_colour_clicked(self, key: str) -> None:
+        canvas = self._series_target_canvas()
+        if canvas is None:
+            return
+        current = next((e.colour for e in canvas.series() if e.key == key), "black")
+        chosen = QColorDialog.getColor(QColor(current), self, "Series colour")
+        if not chosen.isValid():
+            return
+        canvas.set_series_style(key, colour=chosen.name())
+        self._refresh_slice_colour_rows()
+
+    def _on_series_renamed(self, key: str, label: str) -> None:
+        canvas = self._series_target_canvas()
+        if canvas is None or not label.strip():
+            return
+        if any(e.key == key and e.label == label.strip() for e in canvas.series()):
+            return          # editingFinished fires on focus-out too
+        canvas.set_series_style(key, label=label.strip())
+        self._refresh_slice_colour_rows()
+
+    def _on_reset_series_colours_clicked(self) -> None:
+        canvas = self._series_target_canvas()
+        if canvas is None:
+            return
+        canvas.reset_series_colours()
+        self._refresh_slice_colour_rows()
+
+    def _series_target_canvas(self):
+        targets = self._style_target_canvases()
+        return targets[0] if len(targets) == 1 else None
+
+    def _refresh_trace_color_button(self) -> None:
+        """Show the current trace colour on the button itself -- a
+        colour picker whose button does not show the colour makes you
+        open it to find out what is set."""
+        if not hasattr(self, "trace_color_button"):
+            return
+        targets = self._style_target_canvases()
+        colour = targets[0].style_settings()["trace_color"] if targets else "black"
+        self.trace_color_button.setText(str(colour))
+        self.trace_color_button.setStyleSheet(
+            f"QPushButton {{ background-color: {colour}; color: "
+            f"{'white' if _is_dark_colour(colour) else 'black'}; }}")
+
+    def _on_trace_color_clicked(self) -> None:
+        targets = self._style_target_canvases()
+        current = targets[0].style_settings()["trace_color"] if targets else "black"
+        chosen = QColorDialog.getColor(QColor(current), self, "Trace colour")
+        if not chosen.isValid():
+            return
+        for canvas in targets:
+            canvas.set_style(trace_color=chosen.name())
+        self._refresh_trace_color_button()
+
+    def _style_target_canvases(self) -> list:
+        """The canvas a style edit acts on: the one being looked at.
+
+        Style used to be fanned out to every canvas on every change,
+        deliberately ("so the app has one consistent look"). It is now
+        per plot, which is what makes "Apply to all" a real action
+        rather than a description of what already happened -- and what
+        lets a Compare stack be coloured differently from the Spectrum
+        tab, as asked.
+
+        Falls back to every canvas before any tab exists (startup,
+        restoring saved defaults), so nothing is left unstyled."""
+        current = self.canvas_tabs.currentWidget() if hasattr(self, "canvas_tabs") else None
+        return [current] if isinstance(current, MplCanvas) else self._all_canvases()
+
     def _on_output_style_changed(self, *_args) -> None:
         kwargs = self._current_output_style_kwargs()
-        for canvas in self._all_canvases():
+        for canvas in self._style_target_canvases():
             canvas.set_style(**kwargs)
+        self._refresh_style_scope_label()
 
     def _on_output_export_settings_changed(self, *_args) -> None:
         kwargs = self._current_output_export_kwargs()
-        for canvas in self._all_canvases():
+        for canvas in self._style_target_canvases():
             canvas.set_export_settings(**kwargs)
 
+    def _on_contour_scaling_changed(self) -> None:
+        """Contour spacing (Power/Linear) and its exponent, applied to
+        the same canvases the level count goes to -- see
+        :meth:`_on_contour_levels_changed`, whose scope this shares so
+        the three controls always describe one contour together."""
+        mode = self.output_contour_mode_combo.currentData()
+        self.output_contour_power_spin.setEnabled(mode == "power")
+        for canvas in self._style_target_canvases():
+            canvas.set_style(contour_level_mode=mode,
+                             contour_power=self.output_contour_power_spin.value())
+
+    def _on_contour_levels_changed(self, value: int) -> None:
+        """One number, three controls. The Plot Style box, the
+        right-click "Set Contour Levels…" dialog and the Analysis tab's
+        DOSY levels spin all set the same thing, so this pushes the new
+        value at the canvases *and* at the DOSY box, blocking that
+        box's own signal so it does not immediately echo back."""
+        for canvas in self._style_target_canvases():
+            canvas.set_style(contour_clevels=value)
+        spin = getattr(self, "dosy_levels_spin", None)
+        if spin is not None and spin.value() != value:
+            blocked = spin.blockSignals(True)
+            try:
+                spin.setValue(value)
+            finally:
+                spin.blockSignals(blocked)
+
+    def _sync_legend_frame_controls(self) -> None:
+        """The frame's colour and alpha do nothing without a frame, so
+        they follow its checkbox rather than sitting there live-looking
+        and inert."""
+        on = self.output_legend_frame_checkbox.isChecked()
+        self.output_legend_alpha_spin.setEnabled(on)
+        self.legend_color_button.setEnabled(on)
+
+    def _on_legend_appearance_changed(self, *_args) -> None:
+        self._sync_legend_frame_controls()
+        for canvas in self._style_target_canvases():
+            canvas.set_style(
+                legend_frameon=self.output_legend_frame_checkbox.isChecked(),
+                legend_fontsize=self.output_legend_fontsize_spin.value(),
+                legend_framealpha=self.output_legend_alpha_spin.value(),
+                legend_facecolor=self._legend_facecolor or "",
+            )
+
+    def _on_legend_color_clicked(self) -> None:
+        initial = QColor(self._legend_facecolor) if self._legend_facecolor else QColor("white")
+        colour = QColorDialog.getColor(initial, self, "Legend background colour")
+        if not colour.isValid():
+            return
+        self._legend_facecolor = colour.name()
+        self._refresh_legend_color_button()
+        self._on_legend_appearance_changed()
+
+    def _refresh_legend_color_button(self) -> None:
+        colour = self._legend_facecolor
+        self.legend_color_button.setText(colour if colour else "Legend background…")
+
     def _on_output_legend_changed(self, *_args) -> None:
-        self.canvas.set_legend_visible(self.output_legend_checkbox.isChecked())
-        self.canvas.set_style(legend_loc=self.output_legend_loc_combo.currentText())
+        for canvas in self._style_target_canvases():
+            canvas.set_legend_visible(self.output_legend_checkbox.isChecked())
+            canvas.set_style(legend_loc=self.output_legend_loc_combo.currentText())
+
+    def _refresh_style_scope_label(self) -> None:
+        """Name the plot the controls are currently acting on -- "these
+        settings apply to X" is the one thing a per-plot style panel
+        has to say out loud, or every change looks like it went
+        somewhere unexpected."""
+        if not hasattr(self, "style_scope_label"):
+            return
+        targets = self._style_target_canvases()
+        if len(targets) == 1 and hasattr(self, "canvas_tabs"):
+            index = self.canvas_tabs.indexOf(targets[0])
+            name = self.canvas_tabs.tabText(index) if index >= 0 else "this plot"
+            self.style_scope_label.setText(
+                f"These settings apply to the <b>{name}</b> plot. "
+                f"Use “Apply to all plots” to push them everywhere.")
+        else:
+            self.style_scope_label.setText("These settings apply to every plot.")
+
+    def _load_style_controls_from(self, canvas) -> None:
+        """Point the style controls at ``canvas``'s own current
+        settings, without firing their handlers back at it."""
+        settings = canvas.style_settings()
+        for widget, value in (
+            (self.output_linewidth_spin, settings["linewidth"]),
+            (self.output_fontsize_spin, settings["labelsize"]),
+            (self.output_tick_length_spin, settings["tick_length"]),
+            (self.output_tick_width_spin, settings["tick_width"]),
+            (self.output_contour_linewidth_spin, settings["contour_linewidth"]),
+            (self.output_contour_levels_spin, settings["contour_clevels"]),
+            (self.output_contour_power_spin, settings["contour_power"]),
+            (self.output_legend_fontsize_spin, settings["legend_fontsize"] or 0),
+            (self.output_legend_alpha_spin, settings["legend_framealpha"]),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+        mode_index = self.output_contour_mode_combo.findData(settings["contour_level_mode"])
+        if mode_index >= 0:
+            self.output_contour_mode_combo.blockSignals(True)
+            self.output_contour_mode_combo.setCurrentIndex(mode_index)
+            self.output_contour_mode_combo.blockSignals(False)
+        self.output_contour_power_spin.setEnabled(settings["contour_level_mode"] == "power")
+        for check, value in ((self.output_minor_ticks_checkbox, settings["minor_ticks"]),
+                              (self.output_grid_checkbox, settings["grid"]),
+                              (self.output_title_checkbox, settings["title_visible"]),
+                              (self.output_legend_frame_checkbox, settings["legend_frameon"])):
+            check.blockSignals(True)
+            check.setChecked(bool(value))
+            check.blockSignals(False)
+        self.output_colormap_combo.blockSignals(True)
+        index = self.output_colormap_combo.findText(settings["compare_colormap"])
+        if index >= 0:
+            self.output_colormap_combo.setCurrentIndex(index)
+        self.output_colormap_combo.blockSignals(False)
+        self.output_legend_loc_combo.blockSignals(True)
+        loc = self.output_legend_loc_combo.findText(settings["legend_loc"])
+        if loc >= 0:
+            self.output_legend_loc_combo.setCurrentIndex(loc)
+        self.output_legend_loc_combo.blockSignals(False)
+        self.output_legend_checkbox.blockSignals(True)
+        self.output_legend_checkbox.setChecked(bool(canvas._legend_visible))
+        self.output_legend_checkbox.blockSignals(False)
+        self.output_font_family_combo.blockSignals(True)
+        family = self.output_font_family_combo.findData(settings["font_family"] or "")
+        if family >= 0:
+            self.output_font_family_combo.setCurrentIndex(family)
+        self.output_font_family_combo.blockSignals(False)
+        self._legend_facecolor = settings["legend_facecolor"]
+        self._refresh_legend_color_button()
+        self._sync_legend_frame_controls()
+        self._refresh_trace_color_button()
+        self._refresh_slice_colour_rows()
+        self._refresh_style_scope_label()
+
+    def _on_apply_style_to_all_clicked(self) -> None:
+        """Push the panel's current settings to every canvas."""
+        kwargs = self._current_output_style_kwargs()
+        export = self._current_output_export_kwargs()
+        for canvas in self._all_canvases():
+            canvas.set_style(**kwargs)
+            canvas.set_export_settings(**export)
+            canvas.set_legend_visible(self.output_legend_checkbox.isChecked())
+            canvas.set_style(legend_loc=self.output_legend_loc_combo.currentText())
+        self.statusBar().showMessage("Plot style applied to every plot.", 5000)
+
+    #: Where "Save as default" writes. Beside the probe gradient store,
+    #: which established both the directory and the "one small JSON of
+    #: app-wide defaults" pattern.
+    _PLOT_STYLE_CONFIG_PATH = os.path.expanduser("~/.opennmr/plot_style.json")
+
+    def _on_save_style_default_clicked(self) -> None:
+        """Remember the panel's current settings as what a new session
+        starts from, for every plot."""
+        payload = dict(self._current_output_style_kwargs())
+        payload.update(self._current_output_export_kwargs())
+        payload["legend_loc"] = self.output_legend_loc_combo.currentText()
+        try:
+            os.makedirs(os.path.dirname(self._PLOT_STYLE_CONFIG_PATH), exist_ok=True)
+            with open(self._PLOT_STYLE_CONFIG_PATH, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save defaults", str(exc))
+            return
+        self._on_apply_style_to_all_clicked()
+        self.statusBar().showMessage(
+            f"Saved as the default plot style ({self._PLOT_STYLE_CONFIG_PATH}).", 8000)
+
+    def _apply_saved_style_defaults(self) -> None:
+        """Apply ``~/.opennmr/plot_style.json`` at startup, if there is
+        one. Silent when absent or unreadable -- a missing or corrupt
+        preferences file should start the app at its built-in defaults,
+        not stop it."""
+        try:
+            with open(self._PLOT_STYLE_CONFIG_PATH, encoding="utf-8") as handle:
+                saved = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(saved, dict):
+            return
+        for widget, key in ((self.output_linewidth_spin, "linewidth"),
+                             (self.output_fontsize_spin, "labelsize"),
+                             (self.output_tick_length_spin, "tick_length"),
+                             (self.output_tick_width_spin, "tick_width"),
+                             (self.output_contour_linewidth_spin, "contour_linewidth"),
+                             (self.output_dpi_spin, "dpi"),
+                             (self.output_fig_width_spin, "fig_width"),
+                             (self.output_fig_height_spin, "fig_height")):
+            if isinstance(saved.get(key), (int, float)):
+                widget.blockSignals(True)
+                widget.setValue(saved[key])
+                widget.blockSignals(False)
+        for check, key in ((self.output_minor_ticks_checkbox, "minor_ticks"),
+                            (self.output_grid_checkbox, "grid")):
+            if isinstance(saved.get(key), bool):
+                check.blockSignals(True)
+                check.setChecked(saved[key])
+                check.blockSignals(False)
+        for combo, key in ((self.output_colormap_combo, "compare_colormap"),
+                            (self.output_legend_loc_combo, "legend_loc")):
+            index = combo.findText(str(saved.get(key, "")))
+            if index >= 0:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+        kwargs = self._current_output_style_kwargs()
+        export = self._current_output_export_kwargs()
+        for canvas in self._all_canvases():
+            canvas.set_style(**kwargs)
+            canvas.set_export_settings(**export)
 
     def _on_contour_fraction_changed(self, value: int) -> None:
         fraction = value / 100.0
@@ -3789,10 +4596,64 @@ class MainWindow(QMainWindow):
             "(or truncates) F1 to this many points. Defaults to F1's "
             "own current length (no-op) -- unlike F2's own Zero-fill "
             "to above, there's no '2x acquired' convention for F1 "
-            "here; opt in explicitly to a larger value."
+            "here; opt in explicitly to a larger value.\n\n"
+            "This is the length of the interferogram going *into* F1's "
+            "transform. For TPPI data (X-Pulse) the transform then "
+            "discards its mirror half, so the spectrum ends up with "
+            "about half this many points."
         )
         self.zero_fill_f1_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Zero-fill F1 to:", self.zero_fill_f1_spin)
+
+        # **F1 had no window at all** -- not in either reader for
+        # X-Pulse, and in the GUI's live rebuild only as Bruker's own
+        # recorded `proc2s` WDW, with nothing the user could choose.
+        # An unwindowed interferogram is truncated hard at its last
+        # increment, and F1 is where truncation hurts most: a 2D is
+        # typically 128-256 increments against thousands of F2 points,
+        # so the sinc wiggles that produces are exactly the vertical
+        # streaking ("t1 noise") that makes a benchtop 2D unreadable.
+        # User report: "I don't think the windowing is being applied to
+        # the indirect dimension, and certainly I don't see the
+        # windowing in the processing view."
+        #
+        # Its own controls rather than re-targeting F2's through
+        # dim_combo: F1's truncate and zero-fill are already separate
+        # widgets rather than mode-switched ones, and an F1 window is
+        # a genuinely independent choice from F2's (a heavy sine-bell
+        # on 128 increments alongside a light exponential on 2048
+        # points is the normal case, not an exception).
+        self.window_f1_combo = QComboBox()
+        self.window_f1_combo.setToolTip(
+            "The apodisation applied down F1 (the indirect dimension) "
+            "before its own FFT.\n\n"
+            "“None” leaves the interferogram truncated at its last "
+            "increment, which rings as vertical streaking through every "
+            "peak. A sine-bell (or QSine) is the usual choice for a 2D: "
+            "F1 is short enough that the resolution cost is small "
+            "against the artefact it removes."
+        )
+        self.window_f1_combo.currentIndexChanged.connect(
+            lambda _i: self._on_f1_window_changed())
+        form.addRow("Window F1:", self.window_f1_combo)
+
+        self.lb_f1_spin = QDoubleSpinBox()
+        self.lb_f1_spin.setRange(0.0, 1000.0)
+        self.lb_f1_spin.setSuffix(" Hz")
+        self.lb_f1_spin.setToolTip("Line broadening for F1's exponential/Gaussian window.")
+        self.lb_f1_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
+        form.addRow("F1 LB:", self.lb_f1_spin)
+
+        self.ssb_f1_spin = QDoubleSpinBox()
+        self.ssb_f1_spin.setRange(0.0, 10.0)
+        self.ssb_f1_spin.setDecimals(1)
+        self.ssb_f1_spin.setToolTip(
+            "Sine-bell shift for F1's Sine/QSine window: 0 (or 1) is a "
+            "pure sine starting at zero, 2 a cosine-bell starting at "
+            "its maximum."
+        )
+        self.ssb_f1_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
+        form.addRow("F1 SSB:", self.ssb_f1_spin)
 
         reset_processing_button = QPushButton("Reset")
         reset_processing_button.setToolTip(
@@ -3809,6 +4670,55 @@ class MainWindow(QMainWindow):
         form.addRow(reset_processing_button)
 
         return box
+
+    #: F1's own window menu -- the same shapes F2 offers, whose first
+    #: entry is already "None (no apodization)". None stays the default
+    #: so this cannot silently change what any existing dataset looks
+    #: like on load; opting in is deliberate, the same way F1 zero-fill
+    #: is. "Recorded" is offered for Bruker only, where `proc2s` really
+    #: does record an F1 WDW, and is that vendor's default because it
+    #: is what the reader has always applied there.
+    _WINDOW_F1_ITEMS = tuple(_WINDOW_ITEMS)
+
+    def _on_f1_window_changed(self) -> None:
+        self._update_f1_window_param_spin_enabled()
+        self._on_fid_processing_control_changed()
+
+    def _update_f1_window_param_spin_enabled(self) -> None:
+        """Only the parameters the chosen F1 window actually uses stay
+        enabled -- same convention as F2's own
+        :meth:`_update_window_param_spin_enabled`."""
+        key = self.window_f1_combo.currentData()
+        self.lb_f1_spin.setEnabled(key in ("exponential", "gaussian"))
+        self.ssb_f1_spin.setEnabled(key in ("sine", "qsine"))
+
+    def _populate_window_f1_combo(self, vendor: str) -> None:
+        self.window_f1_combo.blockSignals(True)
+        self.window_f1_combo.clear()
+        for label, key in self._WINDOW_F1_ITEMS:
+            self.window_f1_combo.addItem(label, key)
+        if vendor == "bruker":
+            self.window_f1_combo.insertItem(0, "Recorded (TopSpin's own WDW)", "__recorded__")
+        self.window_f1_combo.setCurrentIndex(0)
+        self.window_f1_combo.blockSignals(False)
+        self._update_f1_window_param_spin_enabled()
+
+    def _resolve_f1_window(self):
+        """``(window_key, kwargs)`` for F1, or ``None`` for "leave it
+        to the vendor's own recorded window (Bruker) or to nothing
+        (everyone else)" -- F2's :meth:`_resolve_window_kwargs` in
+        miniature, minus the "Recorded" case, which the caller handles
+        because only Bruker has one."""
+        key = self.window_f1_combo.currentData()
+        if key in (None, "none", "__recorded__"):
+            return None
+        if key == "exponential":
+            return key, {"lb": self.lb_f1_spin.value()}
+        if key == "gaussian":
+            return key, {"lb": self.lb_f1_spin.value(), "gb": 0.0}
+        if key in ("sine", "qsine"):
+            return key, {"ssb": self.ssb_f1_spin.value()}
+        return key, {}
 
     def _populate_window_combo(self, vendor: str) -> None:
         self.window_combo.blockSignals(True)
@@ -4260,7 +5170,59 @@ class MainWindow(QMainWindow):
         )
         return filled, dt, preview_spectrum, title
 
-    def _show_2d_indirect_processing_preview(self, spectrum) -> None:
+    def _compute_f1_window_envelope(self, dt_f1, n):
+        """F1's currently-selected window as a 0..1 envelope over ``n``
+        increments, or ``None`` when there is nothing to draw (no
+        window chosen, or Bruker's own recorded one, which has no
+        user-facing parameters here -- the same exemption F2's
+        :meth:`_compute_window_envelope` makes for "Recorded")."""
+        chosen = self._resolve_f1_window()
+        if chosen is None or not dt_f1 or not n:
+            return None
+        key, kwargs = chosen
+        try:
+            envelope = np.abs(processing_ft.apodize(
+                np.ones(n, dtype=complex), dt_f1, window=key, **kwargs))
+        except Exception:  # noqa: BLE001 -- a preview overlay never fails a redraw
+            return None
+        peak = envelope.max()
+        return envelope / peak if peak else None
+
+    @staticmethod
+    def _f1_interferogram(spectrum, column: int | None = None):
+        """F1's own time-domain series for one F2 column, plus its
+        dwell time -- ``(interferogram, dt_f1)``, or ``(None, None)``
+        if this spectrum has no F1 time-domain data cached.
+
+        ``metadata.raw["fid"]`` holds the F2-processed rows for a
+        genuine 2D (every vendor that reads one: Bruker ``fid_f2``,
+        X-Pulse ``f2_rows``), which is precisely the array F1's
+        transform runs down. A column of it is therefore F1's FID in
+        the only sense F1 has one.
+
+        The real part only, and that is not a display choice: an
+        amplitude-modulated F1 (TPPI, and States/States-TPPI after
+        their own decode) carries its t1 information in the real part,
+        with the imaginary part belonging to F2's quadrature. Drawing
+        the complex column would show an F2 artefact as if it were F1
+        signal."""
+        rows = spectrum.metadata.raw.get("fid")
+        dt_f1 = spectrum.metadata.raw.get("fid_dt_f1")
+        if rows is None or dt_f1 is None:
+            return None, None
+        rows = np.asarray(rows)
+        if rows.ndim != 2 or rows.shape[0] < 2:
+            return None, None
+        if column is None:
+            # The column with the most signal in it, so the panel shows
+            # a decay worth judging a truncation point against rather
+            # than a noise trace -- the same "pick something
+            # representative" principle _phase_2d_slice_index uses.
+            column = int(np.argmax(np.abs(rows).sum(axis=0)))
+        column = min(max(column, 0), rows.shape[1] - 1)
+        return np.real(rows[:, column]).astype(complex), float(dt_f1)
+
+    def _show_2d_indirect_processing_preview(self, spectrum, preserve_view: bool = False) -> None:
         """The Processing tab's own preview for a genuine 2D while the
         Dimension box is on F1 (indirect) -- :meth:`_compute_processing_preview`'s
         sibling for the other dimension, but structurally different:
@@ -4294,10 +5256,22 @@ class MainWindow(QMainWindow):
         -- differed by a magnitude comparable to the data itself, not a
         rounding-sized gap.
 
-        No FID-domain top panel either, for the same reason
-        :meth:`_show_processing_preview`'s own docstring gives for
-        skipping it elsewhere: F1 has no window/shift/echo/LP controls
-        of its own to judge against a raw trace.
+        **There is now an FID-domain top panel**, showing F1's own
+        interferogram -- the selected F2 column of every row's
+        F2-processed data, which is exactly the series F1's transform
+        runs across. It was skipped on the grounds that "F1 has no
+        window/shift/echo/LP controls of its own to judge against a
+        raw trace", but that overlooked the two F1 controls that do
+        exist: Truncate (F1) and Zero-fill (F1). Both are decisions
+        about where an interferogram has decayed to nothing, and both
+        were being made blind. User request: "F1 processing doesn't
+        show fid and spectrum, can this be done?"
+
+        The interferogram comes from ``metadata.raw["fid"]`` -- the
+        readers stash the F2-processed rows there for a genuine 2D,
+        and :meth:`_recompute_multi_row_data` refreshes it on every
+        live rebuild, so it cannot describe a spectrum that has since
+        been reprocessed.
 
         Falls back to the plain :meth:`MplCanvas.show_spectrum` full-
         contour view when there's no slice index to show yet
@@ -4307,6 +5281,38 @@ class MainWindow(QMainWindow):
             self.processing_preview_canvas.show_spectrum(spectrum)
             return
         trace = get_trace(spectrum, axis="f2", index=self._phase_2d_slice_index)
+
+        interferogram, dt_f1 = self._f1_interferogram(spectrum)
+        if interferogram is not None:
+            # The dual panel, same widget the F2 side uses. No echo
+            # marker -- that is an F2-only control, and drawing it here
+            # would suggest F1 has one. The truncate marker and the
+            # window envelope *are* meaningful: they are the F1
+            # controls this panel exists to make visible.
+            truncate_f1 = (self.tdeff_f1_spin.value()
+                           if getattr(self, "tdeff_f1_spin", None) is not None
+                           and self.tdeff_f1_spin.isEnabled() else 0)
+            self.processing_preview_canvas.show_processing_preview(
+                interferogram, dt_f1, trace,
+                # Not _phase_2d_slice_index: _f1_interferogram picks the
+                # strongest F2 column on its own, so naming that index
+                # here would label the panel with a column it isn't.
+                title="F1 interferogram (strongest F2 column)",
+                window_envelope=self._compute_f1_window_envelope(dt_f1, len(interferogram)),
+                tdeff_index=truncate_f1 or None,
+                echo_top_index=None,
+                fid_mode=self.fid_display_combo.currentData(),
+                fid_x_unit=self.fid_x_unit_combo.currentData(),
+                preserve_view=preserve_view,
+            )
+            # **The pivot line belongs here too.** The single-panel
+            # path below has always drawn it, and this branch -- added
+            # when F1 gained its interferogram panel -- returned
+            # without one, so the Phase 1 pivot vanished from the F1
+            # view the moment that panel appeared.
+            self.processing_preview_canvas.set_pivot_marker(self.pivot_spin.value())
+            self.processing_preview_canvas.canvas.draw_idle()
+            return
 
         canvas = self.processing_preview_canvas
         # Prefer an in-place update, only rebuild when there's no
@@ -4571,7 +5577,14 @@ class MainWindow(QMainWindow):
             # Same F1-quadrature normalisation io.bruker.read_2d does
             # before decoding -- this path rebuilds the same Bruker data,
             # so it must normalise it the same way.
-            if fn_mode in (4, 5):
+            # Bruker's own F1-quadrature normalisation, and *only*
+            # Bruker's: io.xpulse.read_2d does not apply it, and
+            # measured against MestReNova's processing of the same
+            # file it scores worse there. The reader states which
+            # convention it used rather than this re-deriving it, so
+            # the two pipelines cannot drift apart.
+            if fn_mode in (4, 5) and spectrum.metadata.raw.get(
+                    "f1_quadrature_sign_flip", True):
                 data = data.copy()
                 data[1::2] *= -1
             data = processing_ft.decode_hypercomplex_f1(data, fn_mode)
@@ -4585,7 +5598,18 @@ class MainWindow(QMainWindow):
             proc2s_lp = spectrum.metadata.raw.get("proc2s")
             if proc2s_lp:
                 data = io_bruker.apply_recorded_f1_linear_prediction(data, proc2s_lp)
-            if spectrum.metadata.vendor == "bruker":
+            chosen_f1_window = self._resolve_f1_window()
+            if chosen_f1_window is not None:
+                # An explicit F1 window wins over the vendor's recorded
+                # one, exactly as F2's combo already overrides
+                # "Recorded (TopSpin's own WDW)" the moment anything
+                # else is picked.
+                f1_key, f1_kwargs = chosen_f1_window
+                data = np.apply_along_axis(
+                    lambda col: processing_ft.apodize(col, dt_f1, window=f1_key, **f1_kwargs),
+                    0, data,
+                )
+            elif spectrum.metadata.vendor == "bruker":
                 # Real bug, found and fixed: this method never applied
                 # any window to F1 at all -- read_2d always does
                 # (defaulting to proc2s's own recorded WDW, the same
@@ -4601,9 +5625,10 @@ class MainWindow(QMainWindow):
                 # explained by anything phase-related; isolated to this
                 # exact missing step by confirming F2's own per-row
                 # processing already matched read_2d's own primitives
-                # exactly (0.0 diff) before looking at F1. X-Pulse's own
-                # read_2d applies no F1 window either (confirmed by
-                # reading it directly), so this stays Bruker-only.
+                # exactly (0.0 diff) before looking at F1. This branch
+                # stays Bruker-only because only Bruker *records* an F1
+                # window; every vendor can now be given one explicitly
+                # through the Window F1 control, handled just above.
                 proc2s = spectrum.metadata.raw.get("proc2s")
                 sw_1_for_window = spectrum.metadata.raw.get("proc2s", {}).get("SW_p") if proc2s else None
                 if proc2s and sw_1_for_window:
@@ -4621,8 +5646,17 @@ class MainWindow(QMainWindow):
                 # F1's own current (already-decoded) length -- unaffected
                 # by F2-only controls, absent an explicit live F1 choice.
                 si1 = spectrum.data.shape[0]
+            # `data` at this exact point is the F1 *interferogram*:
+            # every row through its own F2 processing, nothing done
+            # along F1 yet. That is what the readers stash as
+            # raw["fid"] at load time, and what the Processing tab's
+            # F1 preview draws in its top panel -- so refresh it here,
+            # or an F2-side change would leave that panel showing the
+            # interferogram of a spectrum that no longer exists.
+            spectrum.metadata.raw["fid"] = data
             f1_filled = np.apply_along_axis(lambda col: processing_ft.zero_fill(col, si1), 0, data)
-            data = np.apply_along_axis(lambda col: processing_ft.fft_spectrum(col, dt_f1)[1], 0, f1_filled)
+            data = np.apply_along_axis(
+                lambda col: processing_ft.fft_spectrum(col, dt_f1)[1], 0, f1_filled)
             if fn_mode not in (4, 5, 6):
                 # Mirrors io.bruker.read_2d's own matching fix -- same
                 # "two pipelines quietly diverge" class this project has
@@ -4645,7 +5679,10 @@ class MainWindow(QMainWindow):
             # raw params) keeps this vendor-agnostic, matching how this
             # whole method already avoids vendor-specific formulas.
             old_ppm1 = f1_axis.ppm
-            ppm1 = np.linspace(old_ppm1[0], old_ppm1[-1], si1) if si1 != len(old_ppm1) else old_ppm1
+            # The data's own row count, not si1: a TPPI transform drops
+            # its mirror half, so the two differ for fn_mode 3.
+            n_f1 = data.shape[0]
+            ppm1 = np.linspace(old_ppm1[0], old_ppm1[-1], n_f1) if n_f1 != len(old_ppm1) else old_ppm1
             hz1 = ppm1 * (spectrum.metadata.sfo1_indirect or spectrum.metadata.sfo1 or 1.0)
             f1_axis = NMRAxis(kind="frequency", ppm=ppm1, hz=hz1)
             phase0_f1 = float(spectrum.metadata.raw.get("phase0_f1", 0.0))
@@ -4707,7 +5744,8 @@ class MainWindow(QMainWindow):
         workers = min(processing_ft.fft_workers(), rows)
         if workers <= 1 or rows < 32:
             return np.apply_along_axis(
-                lambda row: MainWindow._baseline_correct_if_enabled(row, freq_ppm, spectrum), 1, data,
+                lambda row: MainWindow._baseline_correct_if_enabled(
+                    row, freq_ppm, spectrum, stash=False), 1, data,
             )
         # Threaded, not vectorised. Both batched formulations were
         # written and measured, and **both were slower than the plain
@@ -4728,7 +5766,8 @@ class MainWindow(QMainWindow):
 
         def fill(rows_slice):
             for row in rows_slice:
-                out[row] = MainWindow._baseline_correct_if_enabled(data[row], freq_ppm, spectrum)
+                out[row] = MainWindow._baseline_correct_if_enabled(
+                    data[row], freq_ppm, spectrum, stash=False)
 
         chunks = [c for c in np.array_split(np.arange(rows), workers * 4) if c.size]
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -4792,7 +5831,7 @@ class MainWindow(QMainWindow):
         if not self._fid_reprocessable(spectrum):
             self.processing_preview_canvas.show_spectrum(spectrum)
         elif spectrum.ndim == 2 and not spectrum.is_pseudo_2d and self.dim_combo.currentIndex() != 0:
-            self._show_2d_indirect_processing_preview(spectrum)
+            self._show_2d_indirect_processing_preview(spectrum, preserve_view=preserve_view)
         else:
             try:
                 computed = self._compute_processing_preview(spectrum)
@@ -4909,6 +5948,11 @@ class MainWindow(QMainWindow):
         stray dashed line once the user has moved on to Data/Analysis/
         Compare, it reads as leftover state rather than the live pivot
         point it was showing."""
+        # Peak triangles and region shading follow the Spectral
+        # Fitting tab in and out -- both refreshers gate on it, so one
+        # call each way is enough.
+        self._sync_region_shading()
+        self._refresh_peak_markers()
         if index != self._processing_tab_index:
             self.canvas.set_pivot_marker(None)
             self.processing_preview_canvas.set_pivot_marker(None)
@@ -5035,16 +6079,52 @@ class MainWindow(QMainWindow):
 
         self.zero_fill_f1_spin.setEnabled(is_genuine_2d)
         self.zero_fill_f1_spin.blockSignals(True)
-        # F1's own current (already-decoded) length is the no-op
-        # default -- matching _recompute_multi_row_data's own fallback
-        # when no live choice has been made yet.
-        default_si1 = spectrum.data.shape[0] if is_genuine_2d else 1
+        # The no-op default: the length of the interferogram going
+        # *into* F1's transform, matching _recompute_multi_row_data's
+        # own fallback when no live choice has been made yet.
+        #
+        # For TPPI that is **not** the spectrum's row count -- the
+        # transform drops the mirror half, so n in gives n//2 + 1 out.
+        # Seeding the box with the row count instead made the box's own
+        # default a lossy setting: persisting it halved F1 again on the
+        # next live rebuild.
+        if not is_genuine_2d:
+            default_si1 = 1
+        else:
+            default_si1 = spectrum.data.shape[0]
         saved_zero_fill_f1 = raw.get("live_zero_fill_f1")
         if isinstance(saved_zero_fill_f1, int) and not isinstance(saved_zero_fill_f1, bool):
             default_si1 = saved_zero_fill_f1
         self.zero_fill_f1_spin.setMaximum(max(default_si1, n1_native, 1) * 4)
         self.zero_fill_f1_spin.setValue(max(1, default_si1))
         self.zero_fill_f1_spin.blockSignals(False)
+
+        # F1's own window, restored the same way and gated the same way
+        # -- it is meaningless without a real F1 FFT to apply it before.
+        #
+        # Populated here rather than beside F2's own
+        # `_populate_window_combo` call, which happens *later* in this
+        # method: populating resets the combo to its first entry, so
+        # doing it afterwards silently discarded the restore below and
+        # every reselection came back on "None".
+        self._populate_window_f1_combo(spectrum.metadata.vendor)
+        for widget in (self.window_f1_combo, self.lb_f1_spin, self.ssb_f1_spin):
+            widget.setEnabled(is_genuine_2d)
+            widget.blockSignals(True)
+        saved_window_f1 = raw.get("live_window_f1")
+        if saved_window_f1 is not None:
+            position = self.window_f1_combo.findData(saved_window_f1)
+            if position >= 0:
+                self.window_f1_combo.setCurrentIndex(position)
+        saved_lb_f1 = raw.get("live_lb_f1")
+        if saved_lb_f1 is not None:
+            self.lb_f1_spin.setValue(float(saved_lb_f1))
+        saved_ssb_f1 = raw.get("live_ssb_f1")
+        if saved_ssb_f1 is not None:
+            self.ssb_f1_spin.setValue(float(saved_ssb_f1))
+        for widget in (self.window_f1_combo, self.lb_f1_spin, self.ssb_f1_spin):
+            widget.blockSignals(False)
+        self._update_f1_window_param_spin_enabled()
 
         if not reprocessable:
             return
@@ -5148,6 +6228,10 @@ class MainWindow(QMainWindow):
             raw["live_truncate_f1"] = self.tdeff_f1_spin.value()
         if self.zero_fill_f1_spin.isEnabled():
             raw["live_zero_fill_f1"] = self.zero_fill_f1_spin.value()
+        if self.window_f1_combo.isEnabled():
+            raw["live_window_f1"] = self.window_f1_combo.currentData()
+            raw["live_lb_f1"] = self.lb_f1_spin.value()
+            raw["live_ssb_f1"] = self.ssb_f1_spin.value()
         self._schedule_sidecar_save()
 
     def _on_fid_processing_control_changed(self) -> None:
@@ -5652,7 +6736,19 @@ class MainWindow(QMainWindow):
         """The echo-position nudge only exists while echo alignment is
         on -- it corrects the detected top, and nothing is detecting a
         top otherwise."""
-        on = self.align_echo_button.isChecked()
+        # **Not offered while the Dimension box is on F1.** Echo
+        # alignment finds the top of an echo in the *acquired* FID and
+        # shifts it, which is a direct-dimension operation -- the
+        # reader only ever applies it in its own F2 block, and an
+        # indirect-dimension interferogram has no acquired echo to
+        # align. Offering the control there implied otherwise.
+        # Explicit user request: "align echo should generally only
+        # apply to the F2 dimension in a 2D".
+        indirect = (self._phase_mode == "2d"
+                    and getattr(self, "dim_combo", None) is not None
+                    and self.dim_combo.currentIndex() == 1)
+        self.align_echo_button.setVisible(not indirect)
+        on = self.align_echo_button.isChecked() and not indirect
         self.echo_offset_row_label.setVisible(on)
         self.echo_offset_spin.setVisible(on)
 
@@ -6572,8 +7668,15 @@ class MainWindow(QMainWindow):
         self._last_autophase_revert = None
         self.revert_autophase_button.setEnabled(False)
 
+    #: Where the baseline actually subtracted from the displayed trace
+    #: is kept, so the overlay can show *what was removed* rather than
+    #: re-estimating a baseline from data it has already been removed
+    #: from. Not persisted: io.persistence skips what will not
+    #: json.dumps, and this is derived data with a one-call lifetime.
+    _BASELINE_APPLIED_KEY = "_baseline_last_applied"
+
     @staticmethod
-    def _baseline_correct_if_enabled(data, freq_ppm, spectrum):
+    def _baseline_correct_if_enabled(data, freq_ppm, spectrum, stash: bool = True):
         """``data`` unchanged if ``spectrum.metadata.raw["baseline_
         correct"]`` isn't set, else baseline-corrected per its own
         recorded method/smoothing (see :meth:`_on_baseline_correct_
@@ -6591,13 +7694,38 @@ class MainWindow(QMainWindow):
         preview step in this class; the user sees the uncorrected
         result rather than the whole live-update pipeline raising out
         of a signal handler over one edge case."""
-        if not spectrum.metadata.raw.get("baseline_correct"):
+        raw = spectrum.metadata.raw
+        if not raw.get("baseline_correct"):
+            if stash:
+                raw.pop(MainWindow._BASELINE_APPLIED_KEY, None)
             return data
         try:
-            return processing_ft.baseline_correct(
+            baseline = processing_ft.compute_baseline(
                 freq_ppm, data, **MainWindow._baseline_kwargs(spectrum))
         except Exception:  # noqa: BLE001 -- best-effort live correction, see docstring above
+            if stash:
+                raw.pop(MainWindow._BASELINE_APPLIED_KEY, None)
             return data
+        if stash:
+            # **Both halves.** The baseline *and* the trace it was
+            # fitted to. Reconstructing the latter as
+            # ``displayed + baseline`` assumed the displayed trace was
+            # the corrected one, which is not reliably true -- measured
+            # on the Processing preview, where it produced a ghost at
+            # corrected + 2x baseline. Storing what was actually used
+            # removes the assumption.
+            #
+            # Only for a single trace. The multi-row path calls this
+            # once per row (see _baseline_correct_if_enabled_multi_row,
+            # which passes stash=False): keeping every row's baseline
+            # would double a large 2D's memory -- 268 MB for a
+            # 512 x 65536 -- to serve an overlay that only ever draws
+            # one trace.
+            raw[MainWindow._BASELINE_APPLIED_KEY] = {
+                "baseline": np.real(baseline),
+                "uncorrected": np.real(data),
+            }
+        return data - baseline
 
     @staticmethod
     def _baseline_kwargs(spectrum) -> dict:
@@ -6624,8 +7752,31 @@ class MainWindow(QMainWindow):
     #: preview is where a pseudo-2D's selected slice is -- and a 2D
     #: contour has no trace to overlay, which each canvas decides for
     #: itself (see ``MplCanvas.baseline_preview_source``).
+    #: Where the not-yet-committed baseline overlay is drawn. **The
+    #: Processing preview only** -- the same reasoning, and the same
+    #: request, as the ghost trace below it: that is the speculative
+    #: view, where an uncommitted correction belongs, while the
+    #: Spectrum tab shows the spectrum as it *is*. A dashed blue curve
+    #: over a committed spectrum reads as data, not as a preview, and
+    #: the checkbox that drives it lives in the Processing tab beside
+    #: the correction it previews. Reported directly, twice: "I still
+    #: see the baseline dashed blue line on the spectrum tab".
+    #:
+    #: This supersedes the narrower derived-spectrum gate in
+    #: :meth:`_refresh_baseline_preview` for the Spectrum tab, but that
+    #: gate is still doing work: a derived trace has no baseline
+    #: correction in the pipeline to preview on *any* canvas.
     def _baseline_preview_canvases(self) -> list:
-        return [self.canvas, self.processing_preview_canvas]
+        return [self.processing_preview_canvas]
+
+    #: Where the faint "before correction" trace is drawn. The
+    #: Processing preview only -- that is the speculative view, where
+    #: an uncommitted correction belongs. The Spectrum tab shows the
+    #: spectrum as it *is*, and a second ghost trace over it reads as
+    #: data rather than as a preview. Explicit user request: "the ghost
+    #: spectrum should only appear in the processing preview".
+    def _baseline_ghost_canvases(self) -> list:
+        return [self.processing_preview_canvas]
 
     def _refresh_baseline_preview(self) -> None:
         """Draw (or clear) the not-yet-committed baseline on every
@@ -6648,23 +7799,66 @@ class MainWindow(QMainWindow):
             return
         show = self.baseline_preview_checkbox.isChecked()
         index = self._selected_index()
+        # **Never on a derived trace.** An extracted slice, a DOSY row,
+        # a SCORE component and a spectrum-arithmetic result are all
+        # computed from already-processed data: there is no raw FID
+        # behind them and no baseline correction in the pipeline to
+        # preview, so the dashed overlay was drawing an estimate of a
+        # correction that will never be applied to them. Reported
+        # directly: "when the 1D is extracted, I shouldn't see the
+        # baseline dashed line on the plot."
+        #
+        # Keyed on the same ``vendor == "derived"`` marker
+        # Session.add_derived sets and _fid_reprocessable already
+        # reads, rather than on a new per-view flag -- it is exactly
+        # the "this was computed, not loaded" question, already
+        # answered in one place.
+        if index is not None and self.session.spectra[index].metadata.vendor == "derived":
+            show = False
         for canvas in self._baseline_preview_canvases():
             source = canvas.baseline_preview_source() if show else None
             if source is None or index is None:
                 canvas.set_baseline_preview()
                 continue
             ppm, data = source
-            try:
-                baseline = processing_ft.compute_baseline(
-                    ppm, data, **self._baseline_kwargs(self.session.spectra[index]))
-            except Exception:  # noqa: BLE001 -- best-effort overlay, see docstring
-                canvas.set_baseline_preview()
-                continue
+            spectrum = self.session.spectra[index]
+            # **What was actually removed, where there is one.** Once
+            # the correction is applied, `data` is the *corrected*
+            # trace, and estimating a baseline from it just produces a
+            # flat line at zero -- measured at a span of 2.4e-5 in
+            # normalised units on a real load. The baseline the
+            # pipeline subtracted is stashed as it goes (see
+            # _baseline_correct_if_enabled), so the overlay can show
+            # that instead, and reconstruct the trace it was fitted to
+            # by adding it back.
+            applied = spectrum.metadata.raw.get(self._BASELINE_APPLIED_KEY)
+            uncorrected = None
+            if (isinstance(applied, dict)
+                    and np.size(applied.get("baseline")) == np.size(data)):
+                baseline = np.asarray(applied["baseline"], dtype=float)
+                uncorrected = np.asarray(applied["uncorrected"], dtype=float)
+            else:
+                try:
+                    baseline = np.asarray(processing_ft.compute_baseline(
+                        ppm, data, **self._baseline_kwargs(spectrum)), dtype=float)
+                except Exception:  # noqa: BLE001 -- best-effort overlay, see docstring
+                    canvas.set_baseline_preview()
+                    continue
             # plot_1d draws spectrum.normalized(), i.e. divided by the
-            # trace's own peak absolute value; the overlay has to be
-            # divided by the same number to share its axes.
+            # trace's own peak absolute value; everything drawn beside
+            # it has to be divided by the same number to share its axes.
+            # Deliberately the *displayed* trace's peak, not the
+            # reconstructed one's -- the ghost is then correctly taller
+            # than the corrected line rather than squashed to match it.
+            # The *displayed* trace's own peak, since that is what
+            # plot_1d normalised by -- everything drawn beside it has
+            # to share that divisor to land on it.
             scale = float(np.max(np.abs(data))) or 1.0
-            canvas.set_baseline_preview(ppm, np.asarray(baseline, dtype=float) / scale)
+            show_ghost = canvas in self._baseline_ghost_canvases()
+            canvas.set_baseline_preview(
+                ppm, baseline / scale,
+                uncorrected=(None if uncorrected is None or not show_ghost
+                             else uncorrected / scale))
 
     #: Polynomial degree above which a fit starts oscillating between
     #: its own candidate points rather than following the baseline --
@@ -6843,6 +8037,7 @@ class MainWindow(QMainWindow):
         ``_capture_phase_reference``) and redraw to show that view at
         its own current (un-previewed) phase."""
         self._capture_phase_reference()
+        self._refresh_echo_offset_visibility()   # Align Echo is F2-only
         self._apply_phase_preview()
 
     def _on_slice_spin_changed(self, _value: int) -> None:
@@ -7001,6 +8196,7 @@ class MainWindow(QMainWindow):
         answer and it is rejected on memory -- the EXSY benchmark's
         decoded array is already ~1 GB, and this project caps contour
         points at a quarter of that same dataset for the same reason.
+
         """
         return (
             not spectrum.metadata.pseudo_2d
@@ -7722,9 +8918,215 @@ class MainWindow(QMainWindow):
         self.analysis_sub_tabs.addTab(self._build_enmr_subtab(), "eNMR")
         self.analysis_sub_tabs.addTab(self._build_vocs_subtab(), "VOCS")
         self.analysis_sub_tabs.addTab(self._build_imaging_subtab(), "Imaging")
+        self.analysis_sub_tabs.addTab(self._build_csa_subtab(), "CSA")
         layout.addWidget(self.analysis_sub_tabs)
 
         return tab
+
+    #: Columns of the CSA sites table.
+    _CSA_COLUMNS = ("Label", "δiso / ppm", "Span or Δ / ppm", "Skew or η", "FWHM / ppm")
+
+    def _build_csa_subtab(self) -> QWidget:
+        """Fit a static or finite-MAS CSA powder lineshape to the
+        selected 1D spectrum.
+
+        **A dedicated path, not a row in the peak table.** The peak
+        table is pseudo-Voigt-shaped -- shift, FWHM, eta -- and a CSA
+        site is δiso, span/Δ, skew/η plus a convention; putting them
+        in one table distorts both. More to the point,
+        :func:`opennmr.notebook.csa_fitting.fit_csa_spectrum` already
+        *is* the fitter, with its own five-parameters-per-site layout,
+        bounds, fixed-parameter matrices, bound-hit detection and
+        report. This wraps it the way DOSY, SCORE and eNMR are
+        wrapped: controls, an action, its own results label, and a
+        view on the shared Fit canvas.
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        blurb = QLabel(
+            "Fit a chemical-shift-anisotropy powder lineshape to the selected "
+            "1D spectrum (or the displayed slice of a 2D). Add one row per "
+            "site; every site is simulated independently and summed."
+        )
+        blurb.setWordWrap(True)
+        layout.addWidget(blurb)
+
+        self.csa_sites_table = QTableWidget(0, len(self._CSA_COLUMNS))
+        self.csa_sites_table.setHorizontalHeaderLabels(list(self._CSA_COLUMNS))
+        self.csa_sites_table.horizontalHeader().setStretchLastSection(True)
+        self.csa_sites_table.setToolTip(
+            "Starting values, one row per site. δiso is the isotropic shift; "
+            "the second and third columns are read as span/skew or Δ/η "
+            "depending on the convention below."
+        )
+        layout.addWidget(self.csa_sites_table)
+
+        row_buttons = QHBoxLayout()
+        add_site = QPushButton("Add site")
+        add_site.clicked.connect(lambda: self._add_csa_site())
+        remove_site = QPushButton("Remove site")
+        remove_site.clicked.connect(self._remove_csa_site)
+        row_buttons.addWidget(add_site)
+        row_buttons.addWidget(remove_site)
+        row_buttons.addStretch(1)
+        layout.addLayout(row_buttons)
+
+        form = QFormLayout()
+
+        self.csa_convention_combo = QComboBox()
+        self.csa_convention_combo.addItem("Haeberlen (Δ, η)", "Haeberlen")
+        self.csa_convention_combo.addItem("Herzfeld-Berger (span, skew)", "Herzfeld-Berger")
+        self.csa_convention_combo.setToolTip(
+            "Which pair of anisotropy parameters the table's two middle "
+            "columns mean. Both describe the same tensor; the fitted values "
+            "and the report follow whichever is chosen here."
+        )
+        form.addRow("Convention:", self.csa_convention_combo)
+
+        self.csa_static_combo = QComboBox()
+        self.csa_static_combo.addItem("Static powder", True)
+        self.csa_static_combo.addItem("Finite MAS (sidebands)", False)
+        self.csa_static_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_csa_controls())
+        form.addRow("Lineshape:", self.csa_static_combo)
+
+        self.csa_mas_spin = QDoubleSpinBox()
+        self.csa_mas_spin.setRange(0.0, 200000.0)
+        self.csa_mas_spin.setDecimals(0)
+        self.csa_mas_spin.setSuffix(" Hz")
+        self.csa_mas_spin.setToolTip(
+            "Sample spinning rate, for the finite-MAS lineshape. Read from "
+            "the file where the vendor records it, and editable where it is "
+            "wrong or absent."
+        )
+        form.addRow("MAS rate:", self.csa_mas_spin)
+
+        self.csa_powder_combo = QComboBox()
+        self.csa_powder_combo.addItem("ZCW", "zcw")
+        self.csa_powder_combo.addItem("Rectangular (θ/φ)", "rectangular")
+        self.csa_powder_combo.setToolTip(
+            "How crystallite orientations are sampled for the powder "
+            "average.\n\n"
+            "ZCW reaches a given accuracy from far fewer orientations, which "
+            "matters because this loop — not the number of ppm points — is "
+            "what every fit iteration costs."
+        )
+        form.addRow("Powder averaging:", self.csa_powder_combo)
+
+        self.csa_orientations_spin = QSpinBox()
+        self.csa_orientations_spin.setRange(50, 200000)
+        self.csa_orientations_spin.setSingleStep(500)
+        self.csa_orientations_spin.setValue(2000)
+        self.csa_orientations_spin.setToolTip(
+            "Orientations in the powder average while fitting.\n\n"
+            "Keep this coarse: the fit calls the simulator once per site per "
+            "Jacobian evaluation, so cost scales with it directly. The final "
+            "render uses the refined count below."
+        )
+        form.addRow("Orientations (fitting):", self.csa_orientations_spin)
+
+        self.csa_render_orientations_spin = QSpinBox()
+        self.csa_render_orientations_spin.setRange(50, 500000)
+        self.csa_render_orientations_spin.setSingleStep(2000)
+        self.csa_render_orientations_spin.setValue(20000)
+        self.csa_render_orientations_spin.setToolTip(
+            "Orientations for the final curve, once the fit has converged. "
+            "Paid once, so it can afford to be much finer than the fitting "
+            "count."
+        )
+        form.addRow("Orientations (final):", self.csa_render_orientations_spin)
+        layout.addLayout(form)
+
+        self.csa_fit_button = QPushButton("Fit CSA Lineshape")
+        self.csa_fit_button.setToolTip(
+            "Fit every site in the table at once, against the selected "
+            "spectrum's own region selection if one is set."
+        )
+        self.csa_fit_button.clicked.connect(self._on_csa_fit_clicked)
+        layout.addWidget(self.csa_fit_button)
+
+        self.csa_results_label = QLabel("")
+        self.csa_results_label.setWordWrap(True)
+        self.csa_results_label.setFont(QFontDatabase.systemFont(
+            QFontDatabase.SystemFont.FixedFont))
+        self.csa_results_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.csa_results_label)
+        layout.addStretch(1)
+
+        self._refresh_csa_controls()
+        return tab
+
+    def _add_csa_site(self, values=None) -> None:
+        """Append a site row, seeded from ``values`` or from a plain
+        default. The default deliberately is not zero: a CSA fit
+        started from a zero span has no lineshape to work with and
+        goes nowhere, so a visible, obviously-a-placeholder set of
+        numbers is more useful than an empty row."""
+        defaults = values or ("Site %d" % (self.csa_sites_table.rowCount() + 1),
+                              "0", "100", "0", "5")
+        row = self.csa_sites_table.rowCount()
+        self.csa_sites_table.insertRow(row)
+        for column, value in enumerate(defaults):
+            self.csa_sites_table.setItem(row, column, QTableWidgetItem(str(value)))
+
+    def _remove_csa_site(self) -> None:
+        row = self.csa_sites_table.currentRow()
+        if row < 0:
+            row = self.csa_sites_table.rowCount() - 1
+        if row >= 0:
+            self.csa_sites_table.removeRow(row)
+
+    def _refresh_csa_controls(self, spectrum=None) -> None:
+        """The MAS rate only means anything for the finite-MAS
+        lineshape, and where the file records one it is the right
+        default.
+
+        **Bruker writes it as ``MASR`` in ``acqus``** and the reader
+        already carries that through to ``metadata.raw``, so this
+        needs no new plumbing -- just somewhere to read it. Only
+        seeded, never forced: a rate recorded at setup and not
+        actually used is common enough that the box has to stay
+        editable."""
+        is_static = bool(self.csa_static_combo.currentData())
+        self.csa_mas_spin.setEnabled(not is_static)
+        if spectrum is None or self.csa_mas_spin.value():
+            return
+        try:
+            recorded = float(spectrum.metadata.raw.get("acqus", {}).get("MASR", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if recorded > 0:
+            self.csa_mas_spin.setValue(recorded)
+
+    def _read_csa_sites(self) -> list[dict]:
+        """The table as ``fit_csa_spectrum``'s own ``p0`` -- one dict
+        per site, with the keys it requires."""
+        sites = []
+        for row in range(self.csa_sites_table.rowCount()):
+            def cell(column, name):
+                item = self.csa_sites_table.item(row, column)
+                text = item.text().strip() if item is not None else ""
+                try:
+                    return float(text)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Site row {row + 1}: {name} must be a number, got {text!r}."
+                    ) from exc
+
+            label_item = self.csa_sites_table.item(row, 0)
+            label = (label_item.text().strip() if label_item is not None else "") or f"Site {row + 1}"
+            sites.append({
+                "label": label,
+                "d_iso": cell(1, "δiso"),
+                "span_or_Delta": cell(2, "span/Δ"),
+                "skew_or_eta": cell(3, "skew/η"),
+                "fwhm": cell(4, "FWHM"),
+            })
+        if not sites:
+            raise ValueError("Add at least one CSA site before fitting.")
+        return sites
 
     def _build_peak_picking_subtab(self) -> QWidget:
         tab = QWidget()
@@ -8205,16 +9607,34 @@ class MainWindow(QMainWindow):
         relax_form.addRow(self.custom_p0_row_label, self.custom_p0_edit)
 
         self.value_source_combo = QComboBox()
-        self.value_source_combo.addItem("Integrated area", "integral")
-        self.value_source_combo.addItem("Peak amplitude", "amplitude")
+        # **Three, not two.** "Integrated area" used to mean whichever
+        # of two quite different measurements the slices happened to
+        # carry: the area under a *fitted lineshape* (Fit Spectrum) or
+        # a raw sum over a region nobody fitted anything to (Integrate
+        # Regions). Reported directly: "the two options of peak height
+        # or integral don't make it clear if a fully fitted spectrum is
+        # being used, this should be a third, distinct option (where it
+        # should use the integrated peak area, not the integrated
+        # region)."
+        self.value_source_combo.addItem("Fitted peak area", "area")
+        self.value_source_combo.addItem("Fitted peak amplitude", "amplitude")
+        self.value_source_combo.addItem("Integrated region (no fit)", "region")
         self._narrow_combo(self.value_source_combo)
         self.value_source_combo.setToolTip(
-            "What each slice's per-peak value is, for the curve fit: "
-            "Integrated area (default -- sums over the whole fitted "
-            "peak, more robust to a linewidth change across slices) or "
-            "Peak amplitude (the fitted peak height alone -- simpler, "
-            "but more sensitive to linewidth changes mimicking an "
-            "intensity change)."
+            "What each slice's per-peak value is, for the curve fit.\n\n"
+            "Fitted peak area — the area under the fitted lineshape. The "
+            "default, and the most robust to a linewidth that changes across "
+            "the series. Needs Fit Spectrum to have been run.\n\n"
+            "Fitted peak amplitude — the fitted peak's height alone. Simpler, "
+            "but a linewidth change then mimics an intensity change. Also "
+            "needs Fit Spectrum.\n\n"
+            "Integrated region (no fit) — the raw sum over each region from "
+            "Integrate Regions, with no lineshape fitted to it at all. Use "
+            "this when the peaks are too overlapped or too odd-shaped to fit, "
+            "and accept that anything else in the region is included.\n\n"
+            "The first two are measurements of a fit; the third is not. "
+            "Choosing one that does not match what you ran is reported rather "
+            "than quietly measuring the other thing."
         )
         relax_form.addRow("Value source:", self.value_source_combo)
 
@@ -8551,6 +9971,20 @@ class MainWindow(QMainWindow):
         # popup that appeared whenever "b from gradients" was selected.
         self.pfg_widgets.append((pfg_row_label, self.pfg_save_probe_button))
 
+        # The calibration result belongs beside the gradient controls it
+        # sets, not on the Peak Picking sub-tab -- see the comment on
+        # score_results_label for the shared cause. Shown only with the
+        # rest of the PFG row, since it is meaningless without them.
+        self.gradient_calibration_label = QLabel("")
+        self.gradient_calibration_label.setWordWrap(True)
+        self.gradient_calibration_label.setFont(QFontDatabase.systemFont(
+            QFontDatabase.SystemFont.FixedFont))
+        self.gradient_calibration_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        calibration_row_label = QLabel("")
+        relax_form.addRow(calibration_row_label, self.gradient_calibration_label)
+        self.pfg_widgets.append((calibration_row_label, self.gradient_calibration_label))
+
         # --- Starting guesses / bounds / fixed ----------------------
         # Explicit user request: "offer somewhere for guess values".
         # fit_relaxation has always accepted p0/bounds/fixed; nothing in
@@ -8736,6 +10170,24 @@ class MainWindow(QMainWindow):
         self.resolve_components_button.clicked.connect(self._on_score_clicked)
         relax_form.addRow(self.resolve_components_button)
 
+        # **SCORE's report belongs with SCORE.** It used to be written
+        # into `analysis_results_label`, which is built by
+        # `_build_peak_picking_subtab` and is that sub-tab's own results
+        # display -- so running a resolution here printed its report on
+        # a different tab, beside a peak table it explicitly does not
+        # use. Reported directly: "why is the SCORE report in the peak
+        # picking tab? it should be with the SCORE in analysis".
+        #
+        # Monospaced for the same reason the other report labels are:
+        # format_score_report aligns its columns with spaces.
+        self.score_results_label = QLabel("")
+        self.score_results_label.setWordWrap(True)
+        self.score_results_label.setFont(QFontDatabase.systemFont(
+            QFontDatabase.SystemFont.FixedFont))
+        self.score_results_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        relax_form.addRow(self.score_results_label)
+
         score_display_row = QHBoxLayout()
         self.score_annotate_check = QCheckBox("Label components on the plot")
         self.score_annotate_check.setChecked(True)
@@ -8820,6 +10272,50 @@ class MainWindow(QMainWindow):
         relax_fit_row.addLayout(peak_spin_row)
         layout.addLayout(relax_fit_row)
 
+        # --- Slices used in fits ----------------------------------
+        # The direct, non-right-click way to drop a bad point, and the
+        # only one SCORE and the DOSY ILT can have: both fit the whole
+        # data matrix rather than a per-peak series, so the Fit
+        # canvas's own "Exclude Nearest Point" has nothing to act on
+        # for them. Explicit user request: "I also need a good way to
+        # exclude points for the fits directly in the fitting tab (not
+        # just right clicking) and this should apply to the SCORE and
+        # DOSY ILT methods too."
+        #
+        # A checkable list rather than a text field of indices: the
+        # question being answered is "which of these points is bad",
+        # which you answer by looking at them, and a list can show each
+        # slice's own delay/b-value beside its number. Ticked = used,
+        # so the default state reads as "everything is in".
+        self.excluded_slice_group = QGroupBox("Slices used in fits")
+        excluded_layout = QVBoxLayout(self.excluded_slice_group)
+        excluded_hint = QLabel(
+            "Untick a slice to drop it from every fit on this spectrum — the "
+            "curve fit, SCORE and the DOSY ILT alike. For a single bad point "
+            "on one peak only, right-click that point on the Fit plot instead."
+        )
+        excluded_hint.setWordWrap(True)
+        excluded_layout.addWidget(excluded_hint)
+        self.excluded_slice_list = QListWidget()
+        self.excluded_slice_list.setMaximumHeight(140)
+        self.excluded_slice_list.setToolTip(
+            "Every slice of the selected series, with the value it is fitted "
+            "against. Unticking one excludes it from the curve fit, SCORE and "
+            "the DOSY ILT.\n\n"
+            "Kept with the spectrum, so it survives reselecting it."
+        )
+        self.excluded_slice_list.itemChanged.connect(self._on_excluded_slice_toggled)
+        excluded_layout.addWidget(self.excluded_slice_list)
+        slice_button_row = QHBoxLayout()
+        self.include_all_slices_button = QPushButton("Use all")
+        self.include_all_slices_button.setToolTip("Put every slice back into the fits.")
+        self.include_all_slices_button.clicked.connect(self._on_include_all_slices_clicked)
+        slice_button_row.addWidget(self.include_all_slices_button)
+        slice_button_row.addStretch(1)
+        excluded_layout.addLayout(slice_button_row)
+        self.excluded_slice_group.setVisible(False)
+        layout.addWidget(self.excluded_slice_group)
+
         self.relaxation_uncertainty_checkbox = QCheckBox("Show uncertainty band")
         self.relaxation_uncertainty_checkbox.setToolTip(
             "Shade a +/-3-sigma uncertainty envelope around the fit "
@@ -8840,13 +10336,18 @@ class MainWindow(QMainWindow):
         self.export_curve_fit_button = QPushButton("Export curve fit (CSV)…")
         self.export_curve_fit_button.setEnabled(False)
         self.export_curve_fit_button.setToolTip(
-            "Write the fitted series to a CSV: the x-axis (delay or b-value), "
-            "then every peak's measured integral or amplitude at each point, "
-            "with the fitted curve beside it.\n\n"
-            "The x column is in the unit this panel is showing, and the "
-            "measured column is whichever Value source the fit used — both "
-            "named in the header, so the file says what it holds without "
-            "needing this window open."
+            "Write the curve fit to a CSV, in two sections.\n\n"
+            "**Parameters** — one row per peak: the fitted D / T1 / T2 and "
+            "every other parameter with its error, then R², reduced χ², RMSE "
+            "and the point count, and which kind of error the ± is.\n\n"
+            "**Series** — the data behind the plot: the x-axis (delay or "
+            "b-value), each peak's measured integral or amplitude at every "
+            "point, and the fitted curve beside it.\n\n"
+            "The x column is in the unit this panel is showing and the "
+            "measured column is whichever Value source the fit used, both "
+            "named in the header. Parameters are written raw — times in "
+            "seconds, diffusion in m²/s — with the unit in the column name, "
+            "so the file cannot silently change unit with a combo box."
         )
         self.export_curve_fit_button.clicked.connect(self._on_export_curve_fit_clicked)
         layout.addWidget(self.export_curve_fit_button)
@@ -8924,6 +10425,40 @@ class MainWindow(QMainWindow):
         self.dosy_d_axis_row_label = QLabel("D axis:")
         dosy_form.addRow(self.dosy_d_axis_row_label, d_axis_row)
 
+        # --- Several inversions of the same data, side by side ------
+        # Explicit user request: "maybe there can be a context tab
+        # under fit or something so multiple fitting modes can be
+        # trialled against one another". A checkable list rather than
+        # nested canvas tabs: ticking two overlays them, which is the
+        # comparison actually being asked for -- two maps in separate
+        # tabs still have to be flipped between, and the whole
+        # difficulty with a DOSY is that a peak's position on the D
+        # axis moves with alpha.
+        self.dosy_variant_group = QGroupBox("Inversions of this spectrum")
+        variant_layout = QVBoxLayout(self.dosy_variant_group)
+        self.dosy_variant_list = QListWidget()
+        self.dosy_variant_list.setMaximumHeight(110)
+        self.dosy_variant_list.setToolTip(
+            "Every DOSY map built from this spectrum, labelled by the settings "
+            "that produced it.\n\n"
+            "Tick one to show it — including after a curve fit, SCORE or eNMR "
+            "has taken over the Fit tab, which is how you get a map back "
+            "without re-running the inversion. Tick several to overlay them, "
+            "each in its own colour.\n\n"
+            "Run DOSY Map (ILT)… again with different settings to add another; "
+            "repeating settings you have already tried replaces that entry "
+            "rather than adding a duplicate."
+        )
+        self.dosy_variant_list.itemChanged.connect(self._on_dosy_variant_selection_changed)
+        variant_layout.addWidget(self.dosy_variant_list)
+        self.clear_dosy_variants_button = QPushButton("Keep only the latest")
+        self.clear_dosy_variants_button.setToolTip(
+            "Drop every stored inversion except the most recent one.")
+        self.clear_dosy_variants_button.clicked.connect(self._on_clear_dosy_variants_clicked)
+        variant_layout.addWidget(self.clear_dosy_variants_button)
+        self.dosy_variant_group.setVisible(False)
+        layout.addWidget(self.dosy_variant_group)
+
         # Hidden until there is a map for it to act on: every control
         # in here is a no-op without one, and an always-visible panel
         # of dead controls in the middle of the Analysis tab reads as
@@ -8931,6 +10466,28 @@ class MainWindow(QMainWindow):
         self.dosy_display_box.setVisible(False)
         self.fit_canvas.dosyLevelFloorChanged.connect(self._on_dosy_scroll_floor_changed)
         layout.addWidget(self.dosy_display_box)
+
+        # The DOSY summary, with the DOSY controls -- same move, same
+        # reason as score_results_label.
+        self.dosy_results_label = QLabel("")
+        self.dosy_results_label.setWordWrap(True)
+        self.dosy_results_label.setFont(QFontDatabase.systemFont(
+            QFontDatabase.SystemFont.FixedFont))
+        self.dosy_results_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.dosy_results_label)
+
+
+        # The across-peaks summary, above the per-peak report it
+        # summarises. It used to print on the Peak Picking sub-tab --
+        # see score_results_label for the cause the four shared.
+        self.curve_fit_summary_label = QLabel("")
+        self.curve_fit_summary_label.setWordWrap(True)
+        self.curve_fit_summary_label.setFont(QFontDatabase.systemFont(
+            QFontDatabase.SystemFont.FixedFont))
+        self.curve_fit_summary_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.curve_fit_summary_label)
 
         self.relaxation_fit_params_label = QLabel("")
         self.relaxation_fit_params_label.setWordWrap(True)
@@ -9266,6 +10823,14 @@ class MainWindow(QMainWindow):
         label = f"{self.session.label(index)}  —  {region[0]:g} to {region[1]:g} ppm"
         self._enmr_result = result
         self._enmr_result_label = label
+        # **Siloed on the spectrum, not only on self.** Every other
+        # thing that draws into the Fit canvas keeps its result in
+        # metadata.raw, which is what lets it be brought back after
+        # something else has taken the canvas over; the eNMR fit lived
+        # on instance state alone, so selecting another spectrum lost
+        # it outright. Needed for it to appear in the "Showing:"
+        # switcher at all (see _available_fit_views).
+        spectrum.metadata.raw["enmr_result"] = {"result": result, "label": label}
         # Kept so a gradient-reversed partner can be averaged against
         # this one *ramp by ramp* rather than only slope by slope.
         self._enmr_series = {"voltages": volts, "phases": phases,
@@ -9281,8 +10846,9 @@ class MainWindow(QMainWindow):
         self.enmr_results_label.setText(report)
         self.enmr_keep_repeat_button.setEnabled(True)
         self._show_enmr_fit(result, label)
+        self._claim_fit_view(spectrum, "enmr")
 
-    def _show_enmr_fit(self, result: dict, label: str) -> None:
+    def _show_enmr_fit(self, result: dict, label: str, switch_tab: bool = True) -> None:
         """Plot phase against voltage in the Fit tab.
 
         Shaped as a relaxation-fit result so it goes through the same
@@ -9339,7 +10905,12 @@ class MainWindow(QMainWindow):
         )
         self._fit_canvas_owner = "enmr" if unfolded else "enmr-folded"
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
-        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+        # ``switch_tab=False`` for the restore path: putting a stored
+        # result back when another spectrum is selected is a background
+        # repair of a stale tab, not a request to go and look at it.
+        # Running a fit *is*, which is why this defaults to True.
+        if switch_tab:
+            self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
     def _on_enmr_unfold_toggled(self, _checked: bool) -> None:
         """Redraw the last fit in the other view. Switching between the
@@ -9934,6 +11505,20 @@ class MainWindow(QMainWindow):
             regions.append((min(lo, hi), max(lo, hi)))
         return regions
 
+    def _spectral_fitting_tab_active(self) -> bool:
+        """Whether the Spectral Fitting side tab is the one showing.
+
+        Peak triangles and shaded integration regions are annotations
+        belonging to *that* tab's controls. Left on the Spectrum view
+        after moving to Analysis or Compare they read as leftover
+        state rather than as live markers -- the same reasoning that
+        already hides the phase pivot marker on leaving the Processing
+        tab. Explicit user request: "the peak picking triangles/
+        integrated regions should only be visible while in the
+        spectral fitting tab"."""
+        return (getattr(self, "side_tabs", None) is not None
+                and self.side_tabs.currentIndex() == self._spectral_fitting_tab_index)
+
     def _sync_region_shading(self) -> None:
         """Reflect the region table's current contents as shaded spans
         on the Spectrum canvas -- called whenever the table itself
@@ -9950,7 +11535,8 @@ class MainWindow(QMainWindow):
         -- an acceptable, purely cosmetic gap given how many places
         redraw that canvas; the region *definitions* themselves are
         unaffected and stay correct for fitting/integration regardless."""
-        self.canvas.set_regions(self._read_region_defs())
+        self.canvas.set_regions(
+            self._read_region_defs() if self._spectral_fitting_tab_active() else [])
 
     def _refresh_peak_markers(self) -> None:
         """Reflect the peak table's current contents as triangle
@@ -9975,7 +11561,8 @@ class MainWindow(QMainWindow):
                 shifts.append(float(item.text()))
             except ValueError:
                 continue
-        self.canvas.set_peak_markers(shifts or None)
+        self.canvas.set_peak_markers(
+            (shifts or None) if self._spectral_fitting_tab_active() else None)
 
     def _on_select_region_toggled(self, checked: bool) -> None:
         # Mirrors _on_pick_peak_toggled: region-select only ever
@@ -10941,12 +12528,79 @@ class MainWindow(QMainWindow):
     def _fit_slice_rows(self, spectrum) -> list[int]:
         """The 1-based slice indices the analysis should fit -- the one
         place that decides, so Fit Spectrum, Fit Curve, DOSY and SCORE
-        cannot disagree about how much of a series is being used."""
+        cannot disagree about how much of a series is being used.
+
+        **Deliberately not filtered by the excluded-slice set.** Fit
+        Spectrum's per-slice results are worth having for every slice
+        (they are what the spectral-fit viewer browses, and a slice
+        excluded from a *curve* fit is not a slice you stop wanting to
+        look at). More importantly, dropping rows here would leave
+        ``_run_curve_fit`` resolving its x-values by *count*, which
+        truncates rather than index-filters: exclude slices 3 and 7 of
+        10 and the fit would pair the remaining eight points with the
+        first eight delays. Exclusions are applied where the series and
+        its own x-values are filtered together -- see
+        :meth:`_included_rows` and its three call sites."""
         return list(range(1, self._fit_slice_count(spectrum) + 1))
+
+    # ============================================================
+    # Excluded slices: one set, every fitting method
+    # ============================================================
+    #
+    # **Dataset-level, distinct from the per-peak right-click.** The
+    # Fit canvas's own "Exclude Nearest Point" removes one point from
+    # one *peak's* curve -- the right tool when a single peak's
+    # intensity is bad in one slice. This is the other case, and the
+    # one SCORE and the DOSY ILT need: a whole slice is bad (a spoiled
+    # scan, a gradient step that misfired), so no fit should use it.
+    # SCORE and the ILT fit the entire data matrix rather than a
+    # per-peak series, so a per-peak exclusion has nowhere to apply to
+    # them at all -- which is why they had no way to drop a point
+    # before this. Reported directly: "I also need a good way to
+    # exclude points for the fits directly in the fitting tab (not just
+    # right clicking) and this should apply to the SCORE and DOSY ILT
+    # methods too."
+    #
+    # Stored 0-based on the spectrum, so it survives a reselection the
+    # way every other per-spectrum analysis state here does.
+
+    @staticmethod
+    def excluded_slices(spectrum) -> set[int]:
+        """The 0-based slice indices excluded from every fit on
+        ``spectrum``, or an empty set."""
+        if spectrum is None:
+            return set()
+        raw = getattr(spectrum.metadata, "raw", None) or {}
+        return {int(i) for i in (raw.get("excluded_slices") or [])}
+
+    def set_excluded_slices(self, spectrum, excluded) -> None:
+        """Replace the excluded-slice set and re-offer the controls
+        that display it."""
+        if spectrum is None:
+            return
+        spectrum.metadata.raw["excluded_slices"] = sorted({int(i) for i in excluded})
+        self._refresh_excluded_slice_list(spectrum)
+
+    def _included_rows(self, spectrum, n_slices: int | None = None):
+        """0-based row indices a fit should actually use -- the Slices
+        limit minus the excluded set.
+
+        The one place the *data matrix* is filtered, so the DOSY ILT,
+        SCORE and the curve fit cannot disagree about which rows they
+        dropped. Returns a list, usable directly as a numpy fancy
+        index on both the data and its own x-values.
+        """
+        if n_slices is None:
+            n_slices = self._fit_slice_count(spectrum)
+        excluded = self.excluded_slices(spectrum)
+        return [i for i in range(int(n_slices)) if i not in excluded]
 
     def _on_slice_limit_changed(self, _value: int) -> None:
         self._refresh_values_preview()
         self._refresh_staged_measurement_label()
+        # The list shows one row per slice *in the limit*, so it has to
+        # follow when the limit moves.
+        self._refresh_excluded_slice_list()
 
     def _param_display_scale(self, name: str) -> float:
         """Seconds per displayed unit for parameter ``name`` -- the Unit
@@ -12072,6 +13726,14 @@ class MainWindow(QMainWindow):
         self.view_slice_fit_spin.setMaximum(max(1, len(results)))
         self.view_slice_fit_spin.setValue(1)
         self.view_slice_fit_spin.blockSignals(False)
+        # The mirror of _show_integration_results' own steer: fitting
+        # peaks produces fitted areas and amplitudes, so leave the
+        # Value source on one of those rather than on the region
+        # integral these results do not carry.
+        if self.value_source_combo.currentData() == "region":
+            area_index = self.value_source_combo.findData("area")
+            if area_index >= 0:
+                self.value_source_combo.setCurrentIndex(area_index)
         self._on_view_slice_fit_changed(1)  # show immediately, not just once the spinner is touched
 
     def _show_integration_results(self, spectrum, results: list[dict], n_regions: int) -> None:
@@ -12098,11 +13760,14 @@ class MainWindow(QMainWindow):
         self.spectral_fit_params_label.setText("")
         self.integration_results_label.setText(
             f"Integrated {len(results)} slice(s) across {n_regions} region(s) -- "
-            f"ready for Fit Curve (Value source: Integrated area)."
+            f"ready for Fit Curve (Value source: Integrated region)."
         )
-        integral_index = self.value_source_combo.findData("integral")
-        if integral_index >= 0:
-            self.value_source_combo.setCurrentIndex(integral_index)
+        # Integrating regions produces region integrals, so point the
+        # Value source at the one that means that -- the others need a
+        # lineshape fit these results do not have.
+        region_index = self.value_source_combo.findData("region")
+        if region_index >= 0:
+            self.value_source_combo.setCurrentIndex(region_index)
 
     def _on_seed_mode_changed(self, _index: int) -> None:
         """The anchor only exists for the mode that pins a lineshape."""
@@ -12184,6 +13849,17 @@ class MainWindow(QMainWindow):
         is_diffusion = self._is_diffusion_fit()
         try:
             independent_values = self._resolve_independent_values(reference_spectrum, is_diffusion, n_slices=n_slices)
+            # **Excluded slices, filtered by index, after the values
+            # have been resolved for the full series.** Resolving for
+            # the reduced count instead would *truncate*: exclude
+            # slices 3 and 7 of 10 and the remaining eight points would
+            # be paired with the first eight delays. Only applied when
+            # the series really is this spectrum's own slices --
+            # a Compare-tab stack (persist_to=None) is a set of
+            # independently-loaded files whose positions mean nothing
+            # to any one spectrum's exclusion set.
+            slice_results, independent_values = self._drop_excluded_from_series(
+                persist_to, slice_results, independent_values, n_slices)
             model_key = self.relaxation_model_combo.currentData()
             # A named registry model stays a plain name (so the result
             # says "stejskal_tanner", not "custom"); a generalised or
@@ -12239,7 +13915,7 @@ class MainWindow(QMainWindow):
         note = getattr(self, "_values_note", None)
         if note:
             summary = f"⚠ {note}\n\n{summary}"
-        self.analysis_results_label.setText(summary)
+        self.curve_fit_summary_label.setText(summary)
         self._global_fit_result = global_result
 
         self._relaxation_fit_results = results
@@ -12274,6 +13950,130 @@ class MainWindow(QMainWindow):
             # callable, and io.persistence already skips anything that
             # won't json.dumps.
             persist_to.metadata.raw["relaxation_fit_context"] = fit_context
+            self._claim_fit_view(persist_to, "relaxation")
+
+    def _refresh_excluded_slice_list(self, spectrum=None) -> None:
+        """Rebuild the "Slices used in fits" list for ``spectrum``.
+
+        Shown only for a pseudo-2D series, which is the only thing that
+        *has* slices to exclude -- a group of dead controls beside a 1D
+        spectrum reads as broken rather than as not-yet-applicable, the
+        same reasoning the DOSY display panel's own visibility follows.
+
+        Each row is labelled with the value it will be fitted against
+        where one can be resolved, because "slice 7" is not what anyone
+        is looking at when they decide a point is bad -- the b-value or
+        delay is. Resolution is best-effort: a half-configured Values
+        source should leave the numbers off, not refuse the list."""
+        if not hasattr(self, "excluded_slice_list"):
+            return
+        if spectrum is None:
+            index = self._selected_index()
+            spectrum = self.session.spectra[index] if index is not None else None
+        usable = spectrum is not None and spectrum.ndim == 2 and spectrum.is_pseudo_2d
+        self.excluded_slice_group.setVisible(bool(usable))
+        if not usable:
+            return
+
+        n_slices = self._fit_slice_count(spectrum)
+        values = None
+        try:
+            resolved = self._resolve_independent_values(
+                spectrum, self._is_diffusion_fit(), n_slices=n_slices)
+            resolved = resolved["seconds"] if isinstance(resolved, dict) else resolved
+            resolved = np.asarray(resolved, dtype=float)
+            if resolved.size == n_slices:
+                values = resolved
+        except Exception:  # noqa: BLE001 -- a label is not worth refusing the list over
+            values = None
+
+        excluded = self.excluded_slices(spectrum)
+        self.excluded_slice_list.blockSignals(True)
+        try:
+            self.excluded_slice_list.clear()
+            for row in range(n_slices):
+                label = f"Slice {row + 1}"
+                if values is not None:
+                    label += f"   ({values[row]:.4g})"
+                item = QListWidgetItem(label)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Unchecked if row in excluded
+                                    else Qt.CheckState.Checked)
+                item.setData(Qt.ItemDataRole.UserRole, row)
+                self.excluded_slice_list.addItem(item)
+        finally:
+            self.excluded_slice_list.blockSignals(False)
+
+    def _on_excluded_slice_toggled(self, item) -> None:
+        """One slice ticked or unticked. Rebuilds the set from the list
+        rather than toggling one entry, so the widget is the single
+        source of truth and the two cannot drift apart."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        excluded = {
+            self.excluded_slice_list.item(row).data(Qt.ItemDataRole.UserRole)
+            for row in range(self.excluded_slice_list.count())
+            if self.excluded_slice_list.item(row).checkState() == Qt.CheckState.Unchecked
+        }
+        # Stored without refreshing the list from here: this *is* the
+        # list's own signal, and rebuilding it mid-signal would drop the
+        # item that is still being delivered.
+        spectrum.metadata.raw["excluded_slices"] = sorted(excluded)
+        kept = self.excluded_slice_list.count() - len(excluded)
+        self.statusBar().showMessage(
+            f"{kept} of {self.excluded_slice_list.count()} slices used in fits"
+            + (f" ({len(excluded)} excluded)." if excluded else "."), 5000)
+
+    def _on_include_all_slices_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        self.set_excluded_slices(spectrum, set())
+
+    def _drop_excluded_from_series(self, spectrum, slice_results, independent_values, n_slices):
+        """Take the excluded slices out of a curve fit's series and its
+        own x-values together, by index.
+
+        Returns the pair unchanged when there is nothing to exclude,
+        when ``spectrum`` is ``None`` (a Compare-tab stack -- see the
+        call site), when the series is not this spectrum's own slices,
+        or when excluding would leave fewer than two points to fit.
+        ``independent_values`` may be a plain array or the
+        ``{"seconds": ...}`` dict :meth:`_resolve_independent_values`
+        returns for a delay source; both are filtered the same way.
+        """
+        excluded = self.excluded_slices(spectrum)
+        if not excluded or len(slice_results) != int(n_slices):
+            return slice_results, independent_values
+        keep = [i for i in range(int(n_slices)) if i not in excluded]
+        if len(keep) < 2:
+            return slice_results, independent_values
+        # **Only the series is filtered; the values are left whole.**
+        #
+        # ``NMR2D_fit_relaxation`` looks each slice's value up *by its
+        # own slice number* -- ``vdlist[fit["index"] - 1]`` -- not
+        # positionally. A kept slice carries its original index (drop
+        # slices 1 and 3 of 10 and the survivors are still numbered
+        # 2, 4, 5 ... 10), so re-packing the values to positions 0..7
+        # left slice 10 pointing past the end of an 8-entry list:
+        # "The value list has 8 entries but this fit covers slice 10".
+        # Reported directly: "I just removed one and tried again and it
+        # tells me there is a mismatch between the number of integrals
+        # and number of points to fit".
+        #
+        # A list *longer* than the fit needs is explicitly fine there
+        # ("the surplus is simply never read" -- Bruker's own vdlist
+        # convention), so leaving it whole is not a workaround but the
+        # shape that function is written for.
+        #
+        # The DOSY ILT and SCORE are the opposite case and stay
+        # filtered: both pair their x-values with data *rows*
+        # positionally, so there the two must be cut together. Two
+        # contracts, which is why this is not one shared helper.
+        return [slice_results[i] for i in keep], independent_values
 
     def _run_global_curve_fit(self, slice_results, independent_values, model_key, custom_model,
                                p0, bounds, fixed):
@@ -12353,6 +14153,214 @@ class MainWindow(QMainWindow):
 
     # ---- DOSY -----------------------------------------------------
 
+    def _on_csa_fit_clicked(self) -> None:
+        """Fit the CSA sites in the table to the selected spectrum.
+
+        The spectrum is handed over through
+        :func:`opennmr.notebook.bridge.results_from_spectrum` rather
+        than re-read from disk: the notebook fitters all take the dict
+        ``NMR1dimport`` returns, and converting is the whole point of
+        that bridge.
+
+        Powder resolution is set twice on purpose -- coarse for the
+        fit, fine for the curve that gets drawn. The powder loop is
+        what every Jacobian evaluation costs, and the final render is
+        paid once.
+        """
+        index = self._selected_index()
+        if index is None:
+            QMessageBox.information(self, "CSA fit", "Select a spectrum first.")
+            return
+        spectrum = self.session.spectra[index]
+        try:
+            sites = self._read_csa_sites()
+        except ValueError as exc:
+            QMessageBox.warning(self, "CSA fit", str(exc))
+            return
+
+        row = None
+        if spectrum.ndim == 2:
+            row = max(self.slice_spin.value() - 1, 0) if spectrum.is_pseudo_2d else 0
+        try:
+            results = notebook_bridge.results_from_spectrum(spectrum, row=row)
+        except (ValueError, IndexError) as exc:
+            QMessageBox.warning(self, "CSA fit", str(exc))
+            return
+
+        static = bool(self.csa_static_combo.currentData())
+        scheme = self.csa_powder_combo.currentData()
+        fitting_n = self.csa_orientations_spin.value()
+        common = dict(convention=self.csa_convention_combo.currentData(),
+                      static=static, powder_scheme=scheme)
+        if not static:
+            mas = self.csa_mas_spin.value()
+            if mas <= 0:
+                QMessageBox.warning(
+                    self, "CSA fit",
+                    "The finite-MAS lineshape needs a spinning rate. Set MAS "
+                    "rate, or switch to the static powder lineshape.")
+                return
+            common["mas_Hz"] = mas
+
+        fit_regions = self._csa_fit_regions()
+        self.statusBar().showMessage("Fitting CSA lineshape…")
+        try:
+            popt, pcov, is_free, scale, info = notebook_csa.fit_csa_spectrum(
+                results, sites, fit_regions=fit_regions,
+                **self._csa_grid_kwargs(scheme, fitting_n), **common)
+        except Exception as exc:  # noqa: BLE001 -- a fit that will not converge
+            # is a normal outcome here, not a bug to crash on.
+            self.statusBar().clearMessage()
+            QMessageBox.warning(self, "CSA fit", f"The CSA fit did not succeed:\n\n{exc}")
+            return
+        self.statusBar().clearMessage()
+
+        # Re-simulate the drawn curve at the finer grid. Rebuilding
+        # `sim_kwargs` rather than reusing the fit's own is what makes
+        # "coarse to fit, fine to show" actually happen.
+        info = dict(info)
+        info["sim_kwargs"] = {
+            **info["sim_kwargs"],
+            **self._csa_grid_kwargs(scheme, self.csa_render_orientations_spin.value()),
+        }
+        x_sorted = np.sort(results["x_ppm"])
+        fitted = notebook_csa.evaluate_csa_fit(x_sorted, popt, info)
+        # Per-site curves as well as the total, when there is more
+        # than one site -- the same "judge it peak by peak, not only
+        # as a summed curve" the slice-fit view already offers.
+        components = None
+        if info["n_sites"] > 1:
+            try:
+                components = list(notebook_csa.evaluate_csa_fit(
+                    x_sorted, popt, info, return_components=True)[1])
+            except Exception:  # noqa: BLE001 -- the total curve is the point
+                components = None
+
+        self._csa_fit_result = {
+            "popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
+            "x": x_sorted, "y_fit": fitted, "components": components, "results": results,
+            "convention": common["convention"], "spectrum_index": index,
+        }
+        self._draw_csa_fit()
+        self._report_csa_fit()
+
+    @staticmethod
+    def _csa_grid_kwargs(scheme: str, orientations: int) -> dict:
+        """Powder-grid size expressed the way each scheme wants it.
+
+        ZCW takes a single orientation count; the rectangular grid
+        takes a θ/φ pair, so the count is split into roughly the 1:2
+        ratio the simulator's own defaults use (θ over a hemisphere,
+        φ over a full turn)."""
+        if scheme == "zcw":
+            return {"n_zcw": int(orientations)}
+        n_theta = max(int(round((orientations / 2.0) ** 0.5)), 8)
+        return {"n_theta": n_theta, "n_phi": 2 * n_theta}
+
+    def _csa_fit_regions(self):
+        """The selected region, as ``fit_csa_spectrum`` wants it, or
+        ``None`` for the whole spectrum.
+
+        Worth setting: a CSA powder pattern that runs off the edge of
+        the fitted region is silently compensated for by shrinking the
+        span -- measured directly, a pattern clipped at its shoulder
+        fitted back as Δ = 126 ppm against a true 200 ppm. See
+        :meth:`_report_csa_fit`, which warns when the fitted pattern
+        reaches the edge."""
+        regions = []
+        for row in range(self.region_table.rowCount()):
+            try:
+                lo = float(self.region_table.item(row, 0).text())
+                hi = float(self.region_table.item(row, 1).text())
+            except (AttributeError, ValueError):
+                continue
+            regions.append((min(lo, hi), max(lo, hi)))
+        return regions or None
+
+    def _draw_csa_fit(self) -> None:
+        """Data and fitted lineshape on the Fit canvas."""
+        result = self._csa_fit_result
+        if not result:
+            return
+        results = result["results"]
+        order = np.argsort(results["x_ppm"])
+        # show_slice_fit, not a CSA-specific twin of it: it already
+        # draws "measured spectrum plus fitted curve, optionally with
+        # per-component shading" and a CSA fit is exactly that, with
+        # one component per site.
+        components = result.get("components")
+        labels = result["info"]["labels"] if components else None
+        self.fit_canvas.show_slice_fit(
+            result["x"], np.asarray(results["real_spectrum"])[order], result["y_fit"],
+            components=components, peak_labels=labels,
+            title=f"CSA fit ({result['convention']})",
+        )
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _report_csa_fit(self) -> None:
+        """The fit report, plus the two warnings that matter."""
+        result = self._csa_fit_result
+        if not result:
+            return
+        info = result["info"]
+        order = np.argsort(result["results"]["x_ppm"])
+        measured = np.asarray(result["results"]["real_spectrum"])[order]
+        # `print_csa_fit_report` writes its report to stdout rather
+        # than returning it, so capture that instead of reimplementing
+        # it here -- it carries the per-site uncertainties and the fit
+        # quality, and a second implementation of a report is exactly
+        # the kind of copy that drifts.
+        buffer = StringIO()
+        try:
+            with contextlib.redirect_stdout(buffer):
+                notebook_csa.print_csa_fit_report(
+                    result["x"], measured, result["y_fit"],
+                    result["popt"], result["pcov"], result["is_free"],
+                    info["labels"], convention=result["convention"],
+                )
+            report = buffer.getvalue().strip()
+        except Exception:  # noqa: BLE001 -- a report must never sink a good fit
+            report = ""
+        if not report:
+            report = self._csa_summary(result)
+        edge = self._csa_edge_warning(result)
+        self.csa_results_label.setText(f"{edge}\n\n{report}" if edge else report)
+
+    def _csa_summary(self, result) -> str:
+        """A compact per-site summary, used when the notebook's own
+        report writes to stdout rather than returning text."""
+        labels = result["info"]["labels"]
+        popt, convention = result["popt"], result["convention"]
+        second, third = (("Δ", "η") if convention == "Haeberlen" else ("span", "skew"))
+        lines = [f"CSA fit ({convention})"]
+        for site, label in enumerate(labels):
+            d_iso, aniso, asym, fwhm, amplitude = popt[site * 5: site * 5 + 5]
+            lines.append(
+                f"  {label}: δiso {d_iso:8.2f} ppm   {second} {aniso:8.2f} ppm   "
+                f"{third} {asym:6.3f}   FWHM {fwhm:6.2f} ppm   amp {amplitude:.3g}")
+        return "\n".join(lines)
+
+    def _csa_edge_warning(self, result) -> str:
+        """Warn when the fitted lineshape still has intensity at the
+        edge of the fitted range.
+
+        **Measured, not hypothetical**: a powder pattern clipped at
+        its shoulder fits back with a badly shrunken span (Δ = 126 ppm
+        against a true 200) and no other sign that anything is wrong,
+        because the residual inside the window is small. The fitted
+        span is the number people take away from a CSA fit, so this
+        has to be said out loud rather than left to be noticed."""
+        y = np.abs(np.asarray(result["y_fit"], dtype=float))
+        if not y.size or not np.max(y):
+            return ""
+        edge = max(y[0], y[-1]) / np.max(y)
+        if edge < 0.05:
+            return ""
+        return (f"⚠ The fitted lineshape still has {edge:.0%} of its height at the edge "
+                f"of the fitted range — the pattern is being clipped, and a clipped "
+                f"powder pattern fits back with too small a span. Widen the region, "
+                f"or fit the whole spectrum.")
+
     def _on_dosy_clicked(self) -> None:
         """Build and show a DOSY map from the selected PFG series.
 
@@ -12403,8 +14411,20 @@ class MainWindow(QMainWindow):
 
         # The same rows the b-values were resolved for: a slice limit
         # has to cut the data matrix too, or the map would be built
-        # from more rows than there are b-values.
-        data = np.real(spectrum.data)[:n_slices]
+        # from more rows than there are b-values. Excluded slices come
+        # out of *both* here -- an ILT fits the whole matrix, so a bad
+        # gradient step has no per-peak exclusion to hide behind and
+        # would otherwise distort every column of the map.
+        rows = self._included_rows(spectrum, n_slices)
+        if len(rows) < 2:
+            QMessageBox.warning(
+                self, "Too few slices",
+                "Every slice but one is excluded, so there is nothing to invert. "
+                "Re-include some in the Curve Fitting sub-tab's 'Slices used in fits' list.",
+            )
+            return
+        data = np.real(spectrum.data)[:n_slices][rows]
+        b_values = b_values[rows]
         ppm = spectrum.axes[1].values("ppm")
         self.statusBar().showMessage("Building DOSY map (inverse Laplace transform)…")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -12423,7 +14443,21 @@ class MainWindow(QMainWindow):
 
         self._dosy_result = dosy
         spectrum.metadata.raw["dosy_result"] = dosy
+        spectrum.metadata.raw["dosy_title"] = f"DOSY — {self.session.label(index)}"
+        # **Kept, not replaced.** Every run is added to this spectrum's
+        # own list of attempts, labelled with the settings that produced
+        # it, so several inversions of the same data can be held at once
+        # and compared. Explicit user request: "so multiple fitting
+        # modes can be trialled against one another".
+        self._record_dosy_variant(spectrum, dosy, settings)
         self._prime_dosy_display_controls(dosy)
+        # Rows drawn beside the map survive a re-inversion. They are
+        # stored as D *values*, not grid indices, and plot_dosy resolves
+        # each to its nearest row at draw time -- so a map re-run onto a
+        # finer grid still shows the rows that were asked for, rather
+        # than silently dropping them (they would come back on the next
+        # reselect anyway, which is worse: gone, then back).
+        self.fit_canvas._dosy_slices = list(spectrum.metadata.raw.get("dosy_slices") or [])
         pinned = not self.dosy_fit_d_axis_check.isChecked()
         self.fit_canvas.show_dosy(
             dosy, title=f"DOSY — {self.session.label(index)}",
@@ -12434,7 +14468,176 @@ class MainWindow(QMainWindow):
         )
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
-        self.analysis_results_label.setText(self._format_dosy_summary(dosy))
+        self.dosy_results_label.setText(self._format_dosy_summary(dosy))
+        self._claim_fit_view(spectrum, "dosy")
+
+    @staticmethod
+    def _dosy_variant_label(settings: dict, dosy: dict) -> str:
+        """Name a stored inversion by *what makes it different* -- the
+        settings that produced it. "DOSY 1", "DOSY 2" would say nothing
+        about which one to believe."""
+        alpha = dosy.get("alpha")
+        bits = [f"α={alpha:.3g}" if isinstance(alpha, (int, float)) else "α=?"]
+        if settings.get("auto_alpha"):
+            bits[0] += " (auto)"
+        bits.append(f"thr {settings.get('threshold', 0.0) * 100:g}%")
+        bits.append(f"{settings.get('n_grid', '?')} pts")
+        return ", ".join(bits)
+
+    def _record_dosy_variant(self, spectrum, dosy: dict, settings: dict) -> None:
+        """Add this inversion to ``spectrum``'s own list of attempts.
+
+        A repeat of settings already tried replaces that entry rather
+        than growing a list of duplicates -- re-running the same thing
+        is usually a retry, not a second opinion."""
+        label = self._dosy_variant_label(settings, dosy)
+        variants = spectrum.metadata.raw.setdefault("dosy_variants", [])
+        for existing in variants:
+            if existing.get("label") == label:
+                existing["result"] = dosy
+                break
+        else:
+            variants.append({"label": label, "result": dosy})
+        self._refresh_dosy_variant_list(spectrum, select=label)
+
+    def _refresh_dosy_variant_list(self, spectrum, select: str | None = None) -> None:
+        """Rebuild the variants list for ``spectrum``, checking
+        ``select`` alone if given."""
+        if not hasattr(self, "dosy_variant_list"):
+            return
+        variants = (spectrum.metadata.raw.get("dosy_variants") or []) if spectrum else []
+        self.dosy_variant_list.blockSignals(True)
+        self.dosy_variant_list.clear()
+        for variant in variants:
+            item = QListWidgetItem(variant["label"])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if variant["label"] == select
+                               else Qt.CheckState.Unchecked)
+            self.dosy_variant_list.addItem(item)
+        self.dosy_variant_list.blockSignals(False)
+        # **One is enough to need the list.** It used to appear only at
+        # two or more, on the reasoning that a single inversion is
+        # already on screen -- but the Fit canvas is shared with the
+        # curve fit, SCORE and eNMR, so running any of those left the
+        # one DOSY with nothing to bring it back. Reported directly:
+        # "still no way to get back to the previous DOSY ILT, only the
+        # controls to change the plot."
+        self.dosy_variant_group.setVisible(bool(variants))
+
+    def _checked_dosy_variants(self, spectrum) -> list[dict]:
+        variants = spectrum.metadata.raw.get("dosy_variants") or []
+        by_label = {v["label"]: v for v in variants}
+        chosen = []
+        for row in range(self.dosy_variant_list.count()):
+            item = self.dosy_variant_list.item(row)
+            if item.checkState() == Qt.CheckState.Checked and item.text() in by_label:
+                chosen.append(by_label[item.text()])
+        return chosen
+
+    def _on_dosy_variant_selection_changed(self, *_args) -> None:
+        """Show whichever inversions are ticked -- one on its own, or
+        several overlaid, which is how they get compared."""
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        chosen = self._checked_dosy_variants(spectrum)
+        if not chosen:
+            return
+        pinned = not self.dosy_fit_d_axis_check.isChecked()
+        d_lims = ((10.0 ** self.dosy_d_min_spin.value(),
+                   10.0 ** self.dosy_d_max_spin.value()) if pinned else None)
+        common = {"factor": self.dosy_floor_spin.value() / 100.0,
+                  "clevels": self.dosy_levels_spin.value(), "d_lims": d_lims}
+        if len(chosen) == 1:
+            self._dosy_result = chosen[0]["result"]
+            self.fit_canvas.show_dosy(
+                chosen[0]["result"], title=f"DOSY — {chosen[0]['label']}", **common)
+        else:
+            self._dosy_result = chosen[0]["result"]
+            self.fit_canvas.show_dosy_overlay(
+                [v["result"] for v in chosen], labels=[v["label"] for v in chosen],
+                title=f"DOSY — {len(chosen)} inversions of {self.session.label(index)}",
+                **common)
+        self._claim_fit_view(spectrum, "dosy")
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _on_clear_dosy_variants_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        spectrum = self.session.spectra[index]
+        keep = spectrum.metadata.raw.get("dosy_result")
+        spectrum.metadata.raw["dosy_variants"] = (
+            [v for v in (spectrum.metadata.raw.get("dosy_variants") or [])
+             if v["result"] is keep])
+        self._refresh_dosy_variant_list(spectrum)
+
+    def _restore_dosy_for(self, spectrum) -> None:
+        """Redraw the DOSY map already stored on ``spectrum``, at the
+        display panel's current settings.
+
+        The map itself is reused, never recomputed: an inverse Laplace
+        transform per column is the slowest thing in the Analysis tab,
+        and reselecting a spectrum is not a request to re-run it."""
+        dosy = spectrum.metadata.raw.get("dosy_result")
+        if not dosy:
+            return
+        self._dosy_result = dosy
+        self._prime_dosy_display_controls(dosy)
+        # Put back any rows the user had drawn beside this map -- they
+        # are siloed on the spectrum exactly as a 2D contour's own
+        # extracted slices are, and restoring the map without them
+        # would look like they had been discarded.
+        self.fit_canvas._dosy_slices = list(spectrum.metadata.raw.get("dosy_slices") or [])
+        latest = (spectrum.metadata.raw.get("dosy_variants") or [{}])[-1].get("label")
+        self._refresh_dosy_variant_list(spectrum, select=latest)
+        pinned = not self.dosy_fit_d_axis_check.isChecked()
+        self.fit_canvas.show_dosy(
+            dosy, title=spectrum.metadata.raw.get("dosy_title", "DOSY"),
+            factor=self.dosy_floor_spin.value() / 100.0,
+            clevels=self.dosy_levels_spin.value(),
+            d_lims=((10.0 ** self.dosy_d_min_spin.value(),
+                     10.0 ** self.dosy_d_max_spin.value()) if pinned else None),
+        )
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+
+    def _on_overlay_dosy_clicked(self) -> None:
+        """Analysis ▸ Overlay DOSY Maps… -- every selected spectrum's
+        stored DOSY map, on one set of axes.
+
+        Uses the maps already computed and siloed on each spectrum
+        rather than recomputing: an inverse Laplace transform per
+        column is not something to re-run silently, and reusing them
+        means the overlay shows exactly the maps that were inspected
+        individually."""
+        rows = [row for row in self._selected_rows()
+                if self.session.spectra[row].metadata.raw.get("dosy_result")]
+        if len(rows) < 2:
+            QMessageBox.information(
+                self, "Need two DOSY maps",
+                "Select two or more spectra that each already have a DOSY map.\n\n"
+                "Build one per spectrum with Analysis ▸ DOSY Map (ILT)… first — this "
+                "overlays the maps that already exist rather than recomputing them.",
+            )
+            return
+        maps = [self.session.spectra[row].metadata.raw["dosy_result"] for row in rows]
+        labels = [self.session.label(row) for row in rows]
+        self._dosy_result = maps[0]
+        self._prime_dosy_display_controls(maps[0])
+        pinned = not self.dosy_fit_d_axis_check.isChecked()
+        self.fit_canvas.show_dosy_overlay(
+            maps, labels=labels, title=f"DOSY overlay — {len(maps)} maps",
+            factor=self.dosy_floor_spin.value() / 100.0,
+            clevels=self.dosy_levels_spin.value(),
+            d_lims=((10.0 ** self.dosy_d_min_spin.value(),
+                     10.0 ** self.dosy_d_max_spin.value()) if pinned else None),
+        )
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+        self.dosy_results_label.setText(
+            "\n\n".join(f"{label}:\n{self._format_dosy_summary(dosy)}"
+                        for label, dosy in zip(labels, maps)))
 
     def _on_dosy_display_changed(self, *_args) -> None:
         """Redraw the DOSY at the panel's own level/D-axis settings.
@@ -12461,6 +14664,17 @@ class MainWindow(QMainWindow):
             clevels=self.dosy_levels_spin.value(),
             d_lims=d_lims,
         )
+        # The other half of "linked to the other boxes where it might
+        # be used": the Plot Style panel's own contour-levels spin sets
+        # this same number, so it has to follow when this one moves.
+        # Signals blocked, or it would push straight back here.
+        spin = getattr(self, "output_contour_levels_spin", None)
+        if spin is not None and spin.value() != self.dosy_levels_spin.value():
+            blocked = spin.blockSignals(True)
+            try:
+                spin.setValue(self.dosy_levels_spin.value())
+            finally:
+                spin.blockSignals(blocked)
 
     def _on_dosy_scroll_floor_changed(self, factor: float) -> None:
         """Follow the scroll gesture with the panel's own floor box.
@@ -12611,7 +14825,19 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "SCORE failed", str(exc))
             return
 
-        data = np.real(spectrum.data)[:n_slices]
+        # Excluded slices, same as the DOSY ILT above and for the same
+        # reason: SCORE fits the whole data matrix, so a spoiled slice
+        # pulls on every resolved component at once.
+        rows = self._included_rows(spectrum, n_slices)
+        if len(rows) < 2:
+            QMessageBox.warning(
+                self, "Too few slices",
+                "Every slice but one is excluded, so there is nothing to resolve. "
+                "Re-include some in the Curve Fitting sub-tab's 'Slices used in fits' list.",
+            )
+            return
+        data = np.real(spectrum.data)[:n_slices][rows]
+        x_values = x_values[rows]
         suggestion = processing_score.estimate_components(data)
         dialog = _ScoreSettingsDialog(self, suggested=suggestion["n_components"],
                                        is_diffusion=is_diffusion,
@@ -12643,12 +14869,13 @@ class MainWindow(QMainWindow):
         self._score_ppm = ppm
         self._populate_score_component_list()
         report = processing_score.format_score_report(result, width=58)
-        self.analysis_results_label.setText(
+        self.score_results_label.setText(
             report + "\n\nFits the whole data matrix — the peak table and integration\n"
                      "regions are not used, and do not need to be set."
         )
         self._refresh_score_export_buttons()
         self._redraw_score_components()
+        self._claim_fit_view(spectrum, "score")
         # A warning here is not cosmetic: measured on synthetic data, an
         # OUTSCORE run whose diffusion coefficients were 69% wrong
         # reported a *better* R² than the SCORE run that got them right.
@@ -12669,7 +14896,7 @@ class MainWindow(QMainWindow):
         available = self._score_result is not None
         for widget in (self.keep_components_button, self.export_components_button,
                         self.score_component_list, self.score_annotate_check,
-                        self.score_shared_scale_check):
+                        self.score_shared_scale_check, self.score_results_label):
             widget.setVisible(available)
 
     def _populate_score_component_list(self) -> None:
@@ -12742,6 +14969,11 @@ class MainWindow(QMainWindow):
             spectra, mode="stack",
             row_labels=labels if self.score_annotate_check.isChecked() else None,
             shared_scale=self.score_shared_scale_check.isChecked(),
+            # A resolved component is not a session spectrum -- its
+            # label is a generated annotation, so it is the plot's to
+            # rename. Explicit user request: "SCORE/OUTSCORE spectra
+            # should follow the same logic with colour series".
+            series_renameable=True,
         )
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
@@ -12865,8 +15097,14 @@ class MainWindow(QMainWindow):
             self.export_curve_fit_button.setEnabled(bool(self._relaxation_fit_results))
 
     def _on_export_curve_fit_clicked(self) -> None:
-        """Write the last Fit Curve's measured series and fitted curve
-        to a CSV."""
+        """Write the last Fit Curve's fitted parameters, measured series
+        and fitted curve to a CSV.
+
+        The parameters are included because they are the reason the fit
+        was run -- reported directly: "Export curve fit needs to include
+        the fit report parameters, like D/T1/T2 and the fit quality".
+        Before this the file held only the points behind the plot, and
+        the numbers had to be copied out of the report panel by hand."""
         if not self._relaxation_fit_results:
             QMessageBox.information(self, "Nothing to export", "Run Fit Curve first.")
             return
@@ -12939,6 +15177,36 @@ class MainWindow(QMainWindow):
         grid, ppm = np.asarray(result["D"]), np.asarray(result["ppm"])
         z = np.asarray(result["Z"])
 
+        if kind == "spectrum_panel":
+            # Beside the map, not into the spectrum list: the row stays
+            # part of the figure it came from, the way a 2D contour's
+            # own extracted slices do. Siloed on the spectrum for the
+            # same reason those are -- so reselecting the dataset shows
+            # the map with its rows still on it.
+            row = int(np.argmin(np.abs(grid - value)))
+            if not np.any(z[row, :]):
+                QMessageBox.information(
+                    self, "Nothing there",
+                    f"The map is empty at D = {grid[row]:.3g} m²/s -- no column was inverted "
+                    f"to a component at that rate. Try a D where the map actually has signal.",
+                )
+                return
+            index = self._selected_index()
+            spectrum = self.session.spectra[index] if index is not None else None
+            slices = list(self.fit_canvas._dosy_slices)
+            d_value = float(grid[row])
+            if any(abs(existing.get("D", 0.0) - d_value) < 1e-30 for existing in slices):
+                # The same row twice is a mis-click, not a request for
+                # two identical dashed lines on top of each other.
+                return
+            slices.append({"D": d_value, "label": f"D = {d_value:.3g}"})
+            self.fit_canvas.set_dosy_slices(slices)
+            if spectrum is not None:
+                spectrum.metadata.raw["dosy_slices"] = slices
+            self.statusBar().showMessage(
+                f"Drawing the spectrum at D = {d_value:.3g} m² s⁻¹ beside the map.", 8000)
+            return
+
         if kind == "spectrum":
             row = int(np.argmin(np.abs(grid - value)))
             data = z[row, :]
@@ -12992,7 +15260,14 @@ class MainWindow(QMainWindow):
         The missing piece for any spectrometer that records gradients
         only as relative fractions -- X-Pulse above all. Needs Fit
         Spectrum (or Integrate Regions) to have been run first, so
-        there is a per-slice intensity series to fit."""
+        there is a per-slice intensity series to fit.
+
+        **Honours the Slices-used-in-fits selection**, like every other
+        analysis here. A calibration is a fit like any other and a
+        spoiled gradient step damages it the same way -- arguably more,
+        since the whole probe's G_max comes off this one number.
+        Asked directly: "Is the calibrate gradient function also able
+        to use the selection of slices used in the curve fit?"."""
         index = self._selected_index()
         if index is None:
             return
@@ -13006,6 +15281,17 @@ class MainWindow(QMainWindow):
             )
             return
 
+        n_slices = len(slice_results)
+        rows = self._included_rows(spectrum, n_slices)
+        if len(rows) < 2:
+            QMessageBox.warning(
+                self, "Too few slices",
+                "Every slice but one is excluded, so there is nothing to calibrate "
+                "against. Re-include some in the Curve Fitting sub-tab's "
+                "'Slices used in fits' list.",
+            )
+            return
+
         dialog = _GradientCalibrationDialog(self, self._pfg_settings())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -13013,15 +15299,32 @@ class MainWindow(QMainWindow):
 
         try:
             _results, series = processing_relaxation.NMR2D_fit_relaxation(
-                slice_results, model="stejskal_tanner",
-                vdlist=np.arange(1, len(slice_results) + 1, dtype=float),
+                [slice_results[i] for i in rows], model="stejskal_tanner",
+                # **The full-length dummy list, not one per kept slice.**
+                # This is only here to give each slice a distinct x so
+                # the per-slice intensities can be extracted; the fit
+                # that matters is calibrate_max_gradient below. But
+                # NMR2D_fit_relaxation looks it up by *slice number*,
+                # and a kept slice keeps its original index -- so a
+                # list sized to the kept count would leave the last
+                # slice pointing past its end. Same trap as
+                # _drop_excluded_from_series; the surplus is ignored.
+                vdlist=np.arange(1, n_slices + 1, dtype=float),
                 show_report=False, value_source=self.value_source_combo.currentData(),
                 return_series=True,
             )
             intensities = series[0]["y"]
             relative = spectrum.metadata.raw.get("gradient_relative")
             if relative is None:
-                relative = np.linspace(0.0, 1.0, len(intensities))
+                relative = np.linspace(0.0, 1.0, n_slices)
+            # Paired with `intensities` **positionally** (element i of
+            # each is one gradient step, see calibrate_max_gradient),
+            # so this is the opposite of the vdlist above: it has to be
+            # cut to exactly the kept rows. Trimmed to the slice count
+            # first, since the recorded gradient list covers every row
+            # of the data while slice_results may stop at the Slices
+            # limit.
+            relative = np.asarray(relative, dtype=float)[:n_slices][rows]
             calibration = processing_diffusion.calibrate_max_gradient(
                 relative, intensities, settings["known_D"], settings["delta"], settings["DELTA"],
                 nucleus=spectrum.metadata.nucleus or "1H", shape=settings["shape"],
@@ -13034,16 +15337,24 @@ class MainWindow(QMainWindow):
 
         g_per_cm = calibration["max_gradient_g_per_cm"]
         error = calibration["max_gradient_g_per_cm_error"]
+        # Say how many points it was actually solved from where that
+        # is not every slice -- a calibration quietly computed from
+        # fewer points than the series holds is exactly the kind of
+        # thing worth seeing next to the number it produced.
+        used_note = ("" if len(rows) == n_slices
+                     else f"\nFrom {len(rows)} of {n_slices} slices "
+                          f"({n_slices - len(rows)} excluded).")
         message = (
             f"Maximum gradient = {g_per_cm:.3f} ± {error:.3f} G/cm\n"
             f"                 = {calibration['max_gradient_t_per_m']:.5f} T/m\n\n"
             f"R² = {calibration['r_squared']:.5f}, against D = "
-            f"{processing_relaxation.format_diffusion_value(settings['known_D'])} held fixed.\n\n"
+            f"{processing_relaxation.format_diffusion_value(settings['known_D'])} held fixed."
+            f"{used_note}\n\n"
             f"Apply this as the Max gradient for b-value calculation?"
         )
         if QMessageBox.question(self, "Gradient calibration", message) == QMessageBox.StandardButton.Yes:
             self.pfg_max_gradient_spin.setValue(g_per_cm)
-        self.analysis_results_label.setText(message)
+        self.gradient_calibration_label.setText(message)
 
     @staticmethod
     def _peak_count_in(slice_results: list[dict]) -> int:
@@ -13644,6 +15955,13 @@ class MainWindow(QMainWindow):
             "sn_threshold": self.sn_threshold_spin.value(),
             "results_text": self.analysis_results_label.text(),
             "integration_results_text": self.integration_results_label.text(),
+            # SCORE's own report, siloed like every other panel's -- it
+            # moved out of analysis_results_label and would otherwise
+            # be lost on a reselection.
+            "score_results_text": self.score_results_label.text(),
+            "curve_fit_summary_text": self.curve_fit_summary_label.text(),
+            "dosy_results_text": self.dosy_results_label.text(),
+            "gradient_calibration_text": self.gradient_calibration_label.text(),
             # The rest of the Curve Fitting panel. Everything in it is
             # siloed per spectrum, so anything added there has to be
             # captured here too -- otherwise selecting the very row you
@@ -13710,6 +16028,10 @@ class MainWindow(QMainWindow):
         self.region_table.setRowCount(0)
         self.analysis_results_label.setText("")
         self.integration_results_label.setText("")
+        self.score_results_label.setText("")
+        self.curve_fit_summary_label.setText("")
+        self.dosy_results_label.setText("")
+        self.gradient_calibration_label.setText("")
         self.spectral_fit_params_label.setText("")
 
         state = spectrum.metadata.raw.get("analysis_state")
@@ -13795,6 +16117,10 @@ class MainWindow(QMainWindow):
             self.sn_threshold_spin.setValue(state.get("sn_threshold", 3.0))
             self.analysis_results_label.setText(state["results_text"])
             self.integration_results_label.setText(state.get("integration_results_text", ""))
+            self.score_results_label.setText(state.get("score_results_text", ""))
+            self.curve_fit_summary_label.setText(state.get("curve_fit_summary_text", ""))
+            self.dosy_results_label.setText(state.get("dosy_results_text", ""))
+            self.gradient_calibration_label.setText(state.get("gradient_calibration_text", ""))
             # After the model combo above, since these are the shape of
             # the model the guesses belong to -- restored the other way
             # round, setting the component count would rebuild the
@@ -14037,6 +16363,159 @@ class MainWindow(QMainWindow):
 
         self._silo_other_canvas_tabs(spectrum, skip_compare=compare_matches_list)
 
+    #: Every kind of result that can land on the shared Fit canvas, in
+    #: the order they are offered in its "Showing:" switcher, as
+    #: ``(key, metadata.raw slot)``.
+    #:
+    #: **The list is the switcher and the restore order at once.** The
+    #: Fit tab used to pick what to show with a fixed
+    #: ``if relaxation_fit_results: ... elif dosy_result: ...`` chain,
+    #: so a spectrum carrying both could only ever show the curve fit
+    #: -- and SCORE and eNMR were not in the chain at all. Adding a
+    #: fifth kind of result now means adding a row here and a branch in
+    #: :meth:`_show_fit_view`, not editing a priority chain that
+    #: silently decides on the user's behalf.
+    _FIT_VIEWS = (
+        ("relaxation", "relaxation_fit_results"),
+        ("dosy", "dosy_result"),
+        ("score", "score_result"),
+        ("enmr", "enmr_result"),
+    )
+
+    def _available_fit_views(self, spectrum) -> list[tuple[str, str]]:
+        """``(key, label)`` for every result stored on ``spectrum`` that
+        the Fit canvas can bring back, in :attr:`_FIT_VIEWS` order."""
+        if spectrum is None:
+            return []
+        raw = getattr(spectrum.metadata, "raw", None) or {}
+        entries = []
+        for key, slot in self._FIT_VIEWS:
+            stored = raw.get(slot)
+            if not stored:
+                continue
+            entries.append((key, self._fit_view_label(key, stored, raw)))
+        return entries
+
+    @staticmethod
+    def _fit_view_label(key: str, stored, raw: dict) -> str:
+        """Name one switcher entry by *what it is*, with the one detail
+        that distinguishes it from a repeat of itself where there is
+        one -- the same reasoning as :meth:`_dosy_variant_label`, at one
+        level up. Which of several DOSY inversions is shown stays the
+        variants list's job; this only gets you back to "a DOSY"."""
+        if key == "relaxation":
+            n = len(stored) if isinstance(stored, (list, tuple)) else 0
+            return f"Curve fit ({n} peaks)" if n > 1 else "Curve fit"
+        if key == "dosy":
+            n = len(raw.get("dosy_variants") or [])
+            return f"DOSY map ({n} inversions)" if n > 1 else "DOSY map"
+        if key == "score":
+            method = str((stored or {}).get("method", "score")).upper()
+            return f"{method} components"
+        if key == "enmr":
+            return "eNMR fit"
+        return key
+
+    def _claim_fit_view(self, spectrum, key: str) -> None:
+        """Record that ``key`` is what the Fit canvas is now showing for
+        ``spectrum``, and re-offer the switcher around it.
+
+        Called by every path that *draws* into the Fit canvas, not only
+        by the switcher itself -- the remembered choice is what
+        :meth:`_silo_other_canvas_tabs` puts back when this spectrum is
+        selected again, so a fit you just ran must claim the slot or
+        reselecting would silently hand the canvas to whichever kind of
+        result happens to come first in :attr:`_FIT_VIEWS`."""
+        if spectrum is not None:
+            spectrum.metadata.raw["fit_view"] = key
+        self._refresh_fit_view_switcher(spectrum, current=key)
+
+    def _refresh_fit_view_switcher(self, spectrum=None, current: str | None = None) -> None:
+        """Re-offer the Fit canvas's "Showing:" switcher for
+        ``spectrum`` (default: whichever is selected)."""
+        if not hasattr(self, "fit_canvas"):
+            return
+        if spectrum is None:
+            index = self._selected_index()
+            spectrum = self.session.spectra[index] if index is not None else None
+        entries = self._available_fit_views(spectrum)
+        if current is None and spectrum is not None:
+            current = spectrum.metadata.raw.get("fit_view")
+        self.fit_canvas.set_view_switcher(entries, current)
+
+    def _on_fit_view_requested(self, key: str) -> None:
+        """The switcher was used. Bring that result back *and* make the
+        Fit tab current: this one came from a deliberate click on the
+        Fit canvas's own toolbar, so it is a request to look."""
+        self._show_fit_view(key)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _show_fit_view(self, key: str, spectrum=None, switch_tab: bool = False) -> bool:
+        """Redraw the Fit canvas from ``spectrum``'s stored ``key``
+        result. Returns whether there was one to draw.
+
+        Nothing here recomputes: a curve fit, an inverse Laplace
+        transform, a SCORE resolution and an eNMR fit are all stored
+        the moment they are produced, and switching between them is a
+        display choice, not a reason to re-run the slowest thing in the
+        Analysis tab."""
+        if spectrum is None:
+            index = self._selected_index()
+            if index is None:
+                return False
+            spectrum = self.session.spectra[index]
+        raw = spectrum.metadata.raw
+        if key == "relaxation":
+            results = raw.get("relaxation_fit_results")
+            if not results:
+                return False
+            # matches view_relaxation_peak_spin resetting to 1 on reselect
+            self._relaxation_fit_results = results
+            self._relaxation_fit_xlabel = raw.get("relaxation_fit_xlabel", "Delay (s)")
+            self._adopt_relaxation_fit_state(spectrum)
+            self._display_relaxation_peak(0)
+        elif key == "dosy":
+            if not raw.get("dosy_result"):
+                return False
+            self._restore_dosy_for(spectrum)
+        elif key == "score":
+            if not self._restore_score_for(spectrum):
+                return False
+        elif key == "enmr":
+            stored = raw.get("enmr_result")
+            if not stored:
+                return False
+            self._enmr_result = stored["result"]
+            self._enmr_result_label = stored.get("label", "")
+            self._show_enmr_fit(stored["result"], self._enmr_result_label,
+                                switch_tab=switch_tab)
+        else:
+            return False
+        raw["fit_view"] = key
+        self._refresh_fit_view_switcher(spectrum, current=key)
+        return True
+
+    def _restore_score_for(self, spectrum) -> bool:
+        """Put a stored SCORE/OUTSCORE resolution back on the Fit
+        canvas, component list and all.
+
+        The components themselves are rebuilt from the stored result
+        rather than kept as spectra (see :meth:`_component_spectrum`),
+        so this needs the parent's own frequency axis -- which makes it
+        meaningful only for the spectrum the resolution was run on."""
+        result = spectrum.metadata.raw.get("score_result")
+        if not result or len(spectrum.axes) < 2:
+            return False
+        self._score_result = result
+        self._score_ppm = spectrum.axes[1].values("ppm")
+        self._populate_score_component_list()
+        self._refresh_score_export_buttons()
+        self._redraw_score_components()
+        self._fit_canvas_owner = "score"
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        return True
+
     def _silo_other_canvas_tabs(self, spectrum, skip_compare: bool = False) -> None:
         """Keep the Fit/Spectral Fit/Compare canvas tabs from showing a
         previously-selected spectrum's stale plot -- they aren't
@@ -14047,15 +16526,34 @@ class MainWindow(QMainWindow):
         alone when it's already correctly showing the just-selected
         pseudo-2D's own slice stack, instead of clearing it out from
         under itself."""
-        fit_results = spectrum.metadata.raw.get("relaxation_fit_results")
-        if fit_results:
-            # matches view_relaxation_peak_spin resetting to 1 on reselect
-            self._relaxation_fit_results = fit_results
-            self._relaxation_fit_xlabel = spectrum.metadata.raw.get("relaxation_fit_xlabel", "Delay (s)")
-            self._adopt_relaxation_fit_state(spectrum)
-            self._display_relaxation_peak(0)
+        # **Put back whichever result was last being looked at**, out of
+        # however many this spectrum carries -- see _FIT_VIEWS. This
+        # used to be a fixed `if relaxation: ... elif dosy: ...` chain,
+        # which meant a spectrum with both could only ever come back to
+        # the curve fit, and that SCORE and eNMR results (siloed the
+        # same way) came back to nothing at all. Reported directly: "I
+        # still don't have a clear button to alternate between e.g. a
+        # curve fit, a DOSY ILT plot, or a SCORE fit."
+        #
+        # Deliberately no tab switch: this runs on every selection
+        # change, to stop the Fit tab showing the *previous*
+        # spectrum's plot. Yanking the user onto it would make merely
+        # clicking through the spectra list jump tabs.
+        views = self._available_fit_views(spectrum)
+        if views:
+            keys = [key for key, _label in views]
+            remembered = spectrum.metadata.raw.get("fit_view")
+            chosen = remembered if remembered in keys else keys[0]
+            if not self._show_fit_view(chosen, spectrum=spectrum):
+                # A stored result its restore path could not use (e.g. a
+                # SCORE result on a spectrum that is no longer 2D).
+                # Falling back rather than leaving the previous
+                # spectrum's plot in place, which is the whole point of
+                # this method.
+                self.fit_canvas.clear()
         else:
             self.fit_canvas.clear()
+            self._refresh_fit_view_switcher(spectrum)
         # ``clear`` drops the canvas's stored DOSY map, so the display
         # panel's controls now have nothing to act on -- hide it rather
         # than leave a live-looking group of dead boxes behind, the
@@ -14063,6 +16561,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "dosy_display_box") and self.fit_canvas._dosy_result is None:
             self._dosy_result = None
             self.dosy_display_box.setVisible(False)
+            self.dosy_variant_group.setVisible(False)
 
         slice_fit_results = spectrum.metadata.raw.get("slice_fit_results")
         if slice_fit_results and "popt" in slice_fit_results[0]:
@@ -14138,6 +16637,8 @@ class MainWindow(QMainWindow):
             bits.append(f"Loaded from processed data, not the raw FID: {processed_reason}")
         self.info_label.setText("\n".join(bits))
 
+        self._refresh_csa_controls(spectrum)
+
         # Both tabs' gradient controls, in one place -- see
         # _refresh_max_gradient_controls.
         self._refresh_max_gradient_controls(spectrum)
@@ -14204,6 +16705,12 @@ class MainWindow(QMainWindow):
         self._refresh_series_fit_controls(spectrum)
         self._refresh_analysis_tab(spectrum)
         self._refresh_staged_measurement_label()
+        # The excluded set is siloed on the spectrum, so the list has to
+        # be rebuilt against whichever one is now selected -- otherwise
+        # it would keep showing the previous series' slices, and ticking
+        # one would write that choice onto the wrong spectrum.
+        self._refresh_excluded_slice_list(spectrum)
+        self._refresh_status_bar()
         self._refresh_guess_peak_combo()
 
         # Which Dimension controls apply depends on the spectrum type --
@@ -14241,6 +16748,45 @@ class MainWindow(QMainWindow):
             self.dim_combo.blockSignals(False)
 
         self._capture_phase_reference()
+
+
+class _PlotStyleDialog(QDialog):
+    """A window around the plot-style panel.
+
+    Hosts the panel widget rather than building its own copy of the
+    controls: they are the same objects the Output tab used to show,
+    still owned by :class:`MainWindow`, so every handler and every
+    saved reference to them keeps working across the move.
+
+    Non-modal (``show``, not ``exec``) -- the whole point is adjusting
+    a plot while looking at it.
+    """
+
+    def __init__(self, parent, panel: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Plot style")
+        self.resize(420, 640)
+        layout = QVBoxLayout(self)
+
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(scroll)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self.apply_to_all_button = buttons.addButton(
+            "Apply to all plots", QDialogButtonBox.ButtonRole.ActionRole)
+        self.apply_to_all_button.setToolTip(
+            "Push these settings to every plot in the app, not just this one.")
+        self.save_default_button = buttons.addButton(
+            "Save as default", QDialogButtonBox.ButtonRole.ActionRole)
+        self.save_default_button.setToolTip(
+            "Remember these settings as what every new session starts from, "
+            "and apply them everywhere now.")
+        buttons.rejected.connect(self.close)
+        layout.addWidget(buttons)
 
 
 class _ProcessingReportDialog(QDialog):
