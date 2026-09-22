@@ -43,8 +43,10 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   Tests that need it skip when it is absent, so a fresh clone runs the
   suite with those skipped. A new real-data test must do the same
   (`pytest.mark.skipif(not os.path.isdir(...))`).
-- No CI runs the tests; `.github/workflows/build.yml` only builds the
-  app. Running them locally is the only check.
+- `.github/workflows/tests.yml` runs the suite on every push and pull
+  request to `main`, without `test_data/`. Check the Actions tab after
+  pushing; still run the tests locally first, since CI cannot run the
+  real-data ones.
 
 ## GUI layout (`src/opennmr/gui/main_window.py`)
 
