@@ -146,3 +146,24 @@ def test_wrapping_tabs_strip_reports_height_for_width(qapp):
 
     assert widget._bar.sizePolicy().hasHeightForWidth()
     assert widget._bar.heightForWidth(200) > widget._bar.heightForWidth(2000)
+
+
+def test_hidden_strip_can_show_the_current_tab_as_a_heading(qapp):
+    # The main toolbar switches pages once the strips are hidden, so a
+    # nested strip shows the page's name instead -- otherwise nothing
+    # on screen says which sub-panel is open.
+    widget, pages = _tabs(qapp)
+    assert widget.isTabBarVisible()
+    assert widget.headingText() == ""
+
+    widget.setTabBarVisible(False, show_heading=True)
+    assert not widget.isTabBarVisible()
+    assert widget.headingText() == "One"
+    widget.setCurrentWidget(pages[2])
+    assert widget.headingText() == "Three"
+
+    widget.setTabBarVisible(False)
+    assert widget.headingText() == ""
+    widget.setTabBarVisible(True)
+    assert widget.isTabBarVisible()
+    assert widget.headingText() == ""

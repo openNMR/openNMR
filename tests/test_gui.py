@@ -13,7 +13,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QSplitter, QTableWidgetItem,
+    QSplitter, QTableWidgetItem, QToolButton,
 )
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
@@ -7476,6 +7476,103 @@ def test_main_window_unmodified_spectrum_still_gets_fresh_defaults(qapp, tmp_pat
     # spectrum 0's settings.
     window._select_single_row(1)
     assert window.window_combo.currentData() == "__recorded__"
+
+
+# ============================================================
+# Main toolbar (replaces the side, sub- and canvas tab strips)
+# ============================================================
+
+def _toolbar_button(window, text):
+    from PySide6.QtWidgets import QToolButton
+    for button in window.main_toolbar.findChildren(QToolButton):
+        if button.text() == text:
+            return button
+    raise AssertionError(f"no toolbar button {text!r}")
+
+
+def test_main_toolbar_has_the_five_workflow_buttons_with_icons(qapp):
+    window = MainWindow()
+    for text in ("Load", "Process", "Fit Spectrum", "Fit Curves", "Compare"):
+        button = _toolbar_button(window, text)
+        assert not button.icon().isNull(), f"{text} has no icon"
+        assert button.isCheckable()
+    # The left-hand strips are hidden, not removed -- the pages all
+    # still live in their tab widgets, which is what keeps code-driven
+    # switching working.
+    assert not window.side_tabs.isTabBarVisible()
+    assert not window.analysis_sub_tabs.isTabBarVisible()
+    assert not window.spectral_fitting_sub_tabs.isTabBarVisible()
+
+
+def test_main_toolbar_buttons_share_one_width(qapp):
+    # A split button's arrow made it wider than its neighbours.
+    window = MainWindow()
+    widths = {text: _toolbar_button(window, text).width()
+              for text in ("Load", "Process", "Fit Spectrum", "Fit Curves", "Compare")}
+    assert len(set(widths.values())) == 1, widths
+    assert _toolbar_button(window, "Fit Curves").minimumWidth() == \
+        _toolbar_button(window, "Fit Curves").maximumWidth()
+
+
+def test_main_toolbar_buttons_raise_their_panels(qapp):
+    window = MainWindow()
+    for text, panel in (("Process", "Processing"), ("Fit Spectrum", "Spectral Fitting"),
+                        ("Fit Curves", "Analysis"), ("Compare", "Compare"), ("Load", "Data")):
+        _toolbar_button(window, text).click()
+        assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == panel
+        assert _toolbar_button(window, text).isChecked()
+
+
+def test_main_toolbar_follows_panel_changes_made_elsewhere(qapp):
+    # Ctrl+number in the Window menu, or any code path that raises a
+    # panel, must move the toolbar's highlight with it.
+    window = MainWindow()
+    window._show_side_tab("Analysis")
+    assert _toolbar_button(window, "Fit Curves").isChecked()
+    assert not _toolbar_button(window, "Load").isChecked()
+
+
+def test_fit_button_dropdowns_replace_the_sub_tabs(qapp):
+    window = MainWindow()
+    button = _toolbar_button(window, "Fit Curves")
+    entries = [a.text() for a in button.menu().actions()]
+    assert entries == [window.analysis_sub_tabs.tabText(i)
+                       for i in range(window.analysis_sub_tabs.count())]
+
+    enmr = next(a for a in button.menu().actions() if a.text() == "eNMR")
+    enmr.trigger()
+    assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Analysis"
+    assert window.analysis_sub_tabs.tabText(window.analysis_sub_tabs.currentIndex()) == "eNMR"
+    assert window.analysis_sub_tabs.headingText() == "eNMR"
+
+    # Back to Load, then the button itself: returns to the last sub-panel.
+    _toolbar_button(window, "Load").click()
+    button.click()
+    assert window.analysis_sub_tabs.tabText(window.analysis_sub_tabs.currentIndex()) == "eNMR"
+
+    # A sub-tab changed by code moves the menu's tick too.
+    window.analysis_sub_tabs.setCurrentIndex(0)
+    checked = [a.text() for a in button.menu().actions() if a.isChecked()]
+    assert checked == [window.analysis_sub_tabs.tabText(0)]
+
+    spectral = _toolbar_button(window, "Fit Spectrum")
+    assert [a.text() for a in spectral.menu().actions()] == ["Peak Picking", "Integration"]
+
+
+def test_load_dropdown_holds_the_file_menus_open_actions(qapp):
+    window = MainWindow()
+    actions = _toolbar_button(window, "Load").menu().actions()
+    assert window._open_action in actions
+    assert window._open_files_action in actions
+
+
+def test_plot_views_keep_their_own_strip_above_the_plot(qapp):
+    # A View menu on the toolbar was tried and was "not too intuitive"
+    # -- the switch for the plot sits next to the plot.
+    window = MainWindow()
+    assert window.canvas_tabs.isTabBarVisible()
+    assert not any(b.text().startswith("View")
+                   for b in window.main_toolbar.findChildren(QToolButton))
 
 
 # ============================================================

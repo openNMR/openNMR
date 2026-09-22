@@ -21,14 +21,15 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QFontDatabase, QKeySequence, QPalette
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup, QFontDatabase, QIcon, QKeySequence, QPalette
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
-    QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox,
+    QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolBar, QToolButton,
+    QVBoxLayout, QWidget,
 )
 from PySide6.QtWidgets import QColorDialog
 from PySide6.QtGui import QColor
@@ -563,6 +564,7 @@ class MainWindow(QMainWindow):
         self.dimension_box.setVisible(False)
 
         self._build_menu_bar()
+        self._build_main_toolbar()
         self._build_status_bar()
 
     def _build_status_bar(self) -> None:
@@ -619,6 +621,143 @@ class MainWindow(QMainWindow):
             bits.append(str(spectrum.metadata.pulse_program))
         self._status_experiment.setText("  ·  ".join(bits))
 
+    _TOOLBAR_ICON_DIR = os.path.join(os.path.dirname(__file__), "resources", "toolbar")
+
+    def _build_main_toolbar(self) -> None:
+        """The workflow toolbar along the top: Load, Process, Fit
+        Spectrum, Fit Curves, Compare.
+
+        It replaces the left-hand tab strips rather than the panels
+        behind them. ``side_tabs`` and the two sub-tab widgets still
+        exist and still hold every page; only their button strips are
+        hidden. So everything that switches panel by code -- entering
+        Processing raising its live preview, the Window menu's
+        Ctrl+number entries -- keeps working unchanged, and this
+        toolbar only has to follow along.
+
+        The plot views keep their own strip, directly above the plot.
+        A "View:" menu on this toolbar was tried first and dropped:
+        "I still need some way to switch between views like spectrum,
+        fit, and processing. The top bar is one way but it isn't too
+        intuitive." The switch belongs next to the thing it switches.
+
+        The two Fit buttons are split buttons: the button itself returns
+        to whichever sub-panel was last open there, and its arrow picks
+        another. Load's arrow holds the File menu's two Open actions.
+
+        Real user request: "a full toolbar along the top instead of the
+        tabs on the left and right ... some kind of dropdown menu to
+        replace the current subtabs"."""
+        toolbar = QToolBar("Main", self)
+        toolbar.setObjectName("main_toolbar")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        # A QToolBar's right-click menu offers to hide it, and with the
+        # tab strips gone there would be no way back to a panel.
+        toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+        toolbar.setIconSize(QSize(32, 32))
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        self.main_toolbar = toolbar
+
+        # (button text, icon file, side tab it raises, its sub-tabs,
+        # extra actions for its dropdown)
+        modes = (
+            ("Load", "load", "Data", None,
+             (self._open_action, self._open_files_action)),
+            ("Process", "processing", "Processing", None, ()),
+            ("Fit Spectrum", "spectrum_fitting", "Spectral Fitting",
+             self.spectral_fitting_sub_tabs, ()),
+            ("Fit Curves", "curve_fitting", "Analysis", self.analysis_sub_tabs, ()),
+            ("Compare", "compare", "Compare", None, ()),
+        )
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_buttons: dict[int, QToolButton] = {}
+        for label, icon_name, side_tab, sub_tabs, extra_actions in modes:
+            index = self._side_tab_index(side_tab)
+            button = QToolButton(toolbar)
+            button.setText(label)
+            button.setIcon(self._toolbar_icon(icon_name))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            button.setCheckable(True)
+            button.setAutoRaise(True)
+            button.setAccessibleName(label)
+            tooltip = label
+            if sub_tabs is not None:
+                tooltip += " -- " + ", ".join(
+                    sub_tabs.tabText(i) for i in range(sub_tabs.count()))
+            button.setToolTip(tooltip)
+            button.clicked.connect(
+                lambda _checked=False, i=index: self.side_tabs.setCurrentIndex(i))
+            menu = self._build_mode_menu(button, index, sub_tabs, extra_actions)
+            if menu is not None:
+                button.setMenu(menu)
+                button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+            self._mode_group.addButton(button)
+            self._mode_buttons[index] = button
+            toolbar.addWidget(button)
+        # One width for all five. A split button's arrow otherwise makes
+        # it wider than its neighbours, and the row reads as uneven.
+        width = max(button.sizeHint().width() for button in self._mode_buttons.values())
+        for button in self._mode_buttons.values():
+            button.setFixedWidth(width)
+        self.side_tabs.currentChanged.connect(self._sync_mode_buttons)
+        self._sync_mode_buttons(self.side_tabs.currentIndex())
+
+        self.side_tabs.setTabBarVisible(False)
+        self.spectral_fitting_sub_tabs.setTabBarVisible(False, show_heading=True)
+        self.analysis_sub_tabs.setTabBarVisible(False, show_heading=True)
+
+    def _toolbar_icon(self, name: str) -> QIcon:
+        """A toolbar icon from ``resources/toolbar`` -- an empty icon,
+        not an error, if it is missing, so a button still shows its
+        text. The PNGs are generated from ``assets/tab_icons`` by
+        ``packaging/make_toolbar_icons.py``."""
+        path = os.path.join(self._TOOLBAR_ICON_DIR, f"{name}.png")
+        return QIcon(path) if os.path.exists(path) else QIcon()
+
+    def _side_tab_index(self, name: str) -> int:
+        for index in range(self.side_tabs.count()):
+            if self.side_tabs.tabText(index) == name:
+                return index
+        raise KeyError(name)
+
+    def _build_mode_menu(self, button, side_index: int, sub_tabs, extra_actions):
+        """The dropdown for one toolbar button: its extra actions, then
+        one checkable entry per sub-tab. ``None`` if it has neither."""
+        if sub_tabs is None and not extra_actions:
+            return None
+        menu = QMenu(button)
+        for action in extra_actions:
+            menu.addAction(action)
+        if sub_tabs is None:
+            return menu
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        actions = []
+        for sub_index in range(sub_tabs.count()):
+            action = menu.addAction(sub_tabs.tabText(sub_index))
+            action.setCheckable(True)
+            group.addAction(action)
+            action.triggered.connect(
+                lambda _checked=False, s=sub_index, w=sub_tabs:
+                self._show_sub_panel(side_index, w, s))
+            actions.append(action)
+        actions[sub_tabs.currentIndex()].setChecked(True)
+        # However the sub-tab changes, the menu's tick follows it.
+        sub_tabs.currentChanged.connect(
+            lambda i, acts=actions: acts[i].setChecked(True) if 0 <= i < len(acts) else None)
+        return menu
+
+    def _show_sub_panel(self, side_index: int, sub_tabs, sub_index: int) -> None:
+        sub_tabs.setCurrentIndex(sub_index)
+        self.side_tabs.setCurrentIndex(side_index)
+
+    def _sync_mode_buttons(self, index: int) -> None:
+        button = self._mode_buttons.get(index)
+        if button is not None:
+            button.setChecked(True)
+
     def _build_menu_bar(self) -> None:
         """A real top-level menu bar -- native on macOS (the app's own
         menu bar at the screen top, "openNMR" auto-named as the
@@ -634,6 +773,7 @@ class MainWindow(QMainWindow):
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._on_open_clicked)
         file_menu.addAction(open_action)
+        self._open_action = open_action
 
         open_files_action = QAction("Open &File(s)…", self)
         open_files_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
@@ -644,6 +784,7 @@ class MainWindow(QMainWindow):
         )
         open_files_action.triggered.connect(self._on_open_files_clicked)
         file_menu.addAction(open_files_action)
+        self._open_files_action = open_files_action
 
         save_figure_action = QAction("&Save Figure As…", self)
         save_figure_action.setShortcut(QKeySequence.StandardKey.Save)

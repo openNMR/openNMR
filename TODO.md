@@ -1,8 +1,8 @@
 # openNMR -- working notes and backlog
 
-## Where things stand (2026-09-18)
+## Where things stand (2026-09-21)
 
-**2146 tests passing, none failing** (full suite, 9m01s). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
+**2154 tests passing, none failing** (full suite). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -44,6 +44,27 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## A workflow toolbar replaces the tab strips (2026-09-21)
+
+User: *"a full toolbar along the top instead of the tabs on the left and right ... load, processing, fitting (spectrum), fitting (curves), and the compare ... some kind of dropdown menu to replace the current subtabs"*, then supplied the icons (`assets/tab_icons/`, Affinity Designer sources plus 1080 px PNG exports).
+
+### What was built
+
+* **Five checkable buttons** -- Load, Process, Fit Spectrum, Fit Curves, Compare -- each raising its left panel. The two Fit buttons are **split buttons**: the button returns to the sub-panel last open there, the arrow picks another (Peak Picking/Integration; Curve Fitting/eNMR/VOCS/Imaging/CSA). Load's arrow holds the File menu's two Open actions.
+* **The plot views keep their strip above the plot.** A "View: <name>" menu at the right-hand end of the toolbar replaced it at first and was **rejected** the same day: *"I still need some way to switch between views like spectrum, fit, and processing. The top bar is one way but it isn't too intuitive."* The switch for the plot sits next to the plot.
+* **All five buttons share one width** (the widest one's size hint). A split button's arrow otherwise made it wider than its neighbours.
+* **The left-hand strips are hidden, not removed.** `side_tabs` and both sub-tab widgets still hold every page (`WrappingTabWidget.setTabBarVisible`). So the code paths that switch panel themselves (Processing raising its preview, Window-menu Ctrl+number) are untouched, and the toolbar only follows `currentChanged`. Reverting is three `setTabBarVisible(True)` lines.
+* **Hidden sub-tab strips show a bold heading** with the current sub-panel's name, since nothing else on screen says which one is open.
+* **Icons**: `packaging/make_toolbar_icons.py` turns the exports into 128 px transparent squares in `gui/resources/toolbar/`, each drawing scaled to fit and centred so tightly cropped exports of different aspect ratios still sit at one visual size. The user's second round of exports is RGBA and used as-is; an opaque-white export (the first round) still has its border-connected white removed. **Re-run it after re-exporting an icon.**
+* **Packaging**: `pyproject.toml` package-data now includes `resources/toolbar/*.png`, and `packaging/build.py` passes `--add-data` for `gui/resources`. The latter was also missing for the window logo, which the frozen app has never had (`app.py` guards it with `os.path.exists`, so it failed silently).
+
+### Open
+
+* **Dark mode**: the black linework (FID, curve-fit axes, the delta) nearly disappears on a dark toolbar. Needs either light variants of the icons or a backdrop behind them.
+* **Names disagree**: the toolbar says Process/Fit Spectrum/Fit Curves; the Window menu's Panel entries and `_show_side_tab` still use the tab names Processing/Spectral Fitting/Analysis. Deliberately left alone this round -- renaming the tabs touches tests and the name-based lookups.
+* **Not decided yet**, from the design discussion: keep the spectrum list visible in every mode (it currently lives only behind Load), move CSA to Fit Spectrum (it fits one spectrum's lineshape, not a curve), have the plot follow the mode automatically, and click-the-active-button to collapse the left panel.
+* **Left panel content clips on the right** in an offscreen render at 1300 px -- present on HEAD before this change too, so not caused by it; unverified on a real screen.
 
 ## CSA lineshape fitting in the GUI, and Euan's simple requests (2026-09-19)
 

@@ -21,7 +21,8 @@ import os
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOGO_PNG = os.path.join(REPO_ROOT, "src", "opennmr", "gui", "resources", "logo.png")
+RESOURCES_DIR = os.path.join(REPO_ROOT, "src", "opennmr", "gui", "resources")
+LOGO_PNG = os.path.join(RESOURCES_DIR, "logo.png")
 ENTRY_POINT = os.path.join(REPO_ROOT, "packaging", "entrypoint.py")
 BUILD_DIR = os.path.join(REPO_ROOT, "build")
 DIST_DIR = os.path.join(REPO_ROOT, "dist")
@@ -137,6 +138,9 @@ def main() -> int:
         # runtime too (see its QT_PLUGIN_PATH comment) -- same root
         # cause, different failure mode.
         "--exclude-module", "PyQt6",
+        # The window logo and the toolbar icons are loaded from files
+        # beside gui/, which PyInstaller does not collect on its own.
+        "--add-data", f"{RESOURCES_DIR}{os.pathsep}opennmr/gui/resources",
     ]
     icon = _make_icon()
     if icon:
