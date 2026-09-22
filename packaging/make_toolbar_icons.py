@@ -52,6 +52,9 @@ FRINGE_PX = 4
 HOLE_FRACTION = 0.005
 
 ICONS = ("load", "processing", "spectrum_fitting", "curve_fitting", "compare")
+# Drawn placeholders are committed for these until the user supplies
+# artwork; a missing source is skipped and the placeholder left alone.
+OPTIONAL_ICONS = ("simulate", "settings")
 
 
 def _read_rgb(path: str) -> np.ndarray:
@@ -122,9 +125,12 @@ def fit_square(image: QImage) -> QImage:
 
 def main() -> int:
     os.makedirs(OUT_DIR, exist_ok=True)
-    for name in ICONS:
+    for name in ICONS + OPTIONAL_ICONS:
         source = os.path.join(SOURCE_DIR, f"icon_{name}.png")
         if not os.path.exists(source):
+            if name in OPTIONAL_ICONS:
+                print(f"no {source} yet -- keeping the placeholder")
+                continue
             print(f"missing: {source}", file=sys.stderr)
             return 1
         target = os.path.join(OUT_DIR, f"{name}.png")

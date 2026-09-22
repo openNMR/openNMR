@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-21)
 
-**2167 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
+**2194 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -44,6 +44,25 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Settings, open experiments beside every mode that uses them, and Simulate (2026-09-22)
+
+User: *"make settings, and the open experiments lists. Create the simulations button, calling it ... simulate ... port in the simple things like diffusion simulator (add in different gradient shapes and experiment types to also demonstrate those differences), and the bloch pulse simulator. Remove the extra stuff from the analyse button that appears when you hover over it."* Items 1-3 of the previous round's plan.
+
+### Built
+
+* **Settings** -- a non-modal dialog (`_SettingsDialog`) from a gear at the right-hand end of the toolbar, File > Settings... and Cmd+, (`PreferencesRole`, so openNMR > Settings... on macOS). It hosts the **Imaging** controls, which leave Analyse: they are the same widgets (`_imaging_panel`, built where the sub-tab used to be), so every handler is unchanged. Non-modal because those values belong to the *selected* spectrum. A Plot Style... button sits under them. The gear is a `ModeButton` with `checkable=False`: an action, not a mode.
+* **Open experiments** moved out of the Load panel into a vertical splitter under the side tabs (`left_panel`), shown in **Load, Analyse and Compare** (`_PANELS_SHOWING_OPEN_EXPERIMENTS`) and hidden elsewhere. One list shown or hidden, not a copy per panel -- a widget has one parent. Load looks as it did; Compare and Analyse gain it. The central splitter's first child is now `left_panel`, not `side_tabs`.
+* **Simulate** -- a sixth toolbar button (placeholder computer icon, `resources/toolbar/simulate.png`, drawn to match; `make_toolbar_icons.py` replaces it once `assets/tab_icons/icon_simulate.png` exists, and likewise the gear). Its panel's sub-panels come from its dropdown. Entering it shows and raises a new **Simulation** plot view (`SimulationCanvas`, a plain matplotlib canvas -- `MplCanvas` is built around a spectrum) and runs the current simulation so it is never empty; leaving hides the view again. Backend in the new `opennmr.simulate` package:
+  * **Diffusion (PFG)** -- `simulate.diffusion`, a port of `leonmr.sim_diffusion` with the same defaults (1H, delta 1 ms, DELTA 20 ms, 17 T/m, D swept 1e-8..1e-15), **exact to the original for rect/PGSE** (tested against its formula). The b-value comes from the existing `processing.diffusion.b_value`, so every gradient shape (rect, half-sine, SMSQ10, Gaussian, trapezoid with ramp) and sequence (PGSE, PGSTE, bipolar with tau, Oneshot) is available, and **"Compare gradient shapes" / "Compare sequence types"** draw all of them at one D with everything else fixed, with b(max) and I/I0 at max listed per curve. An impossible combination (a tau leaving no diffusion time) is listed with its reason rather than raising. The original's `seismic` colour map was dropped: it is white in the middle, so the middle curves were invisible.
+  * **Shaped pulse (Bloch)** -- `simulate.bloch`, a port of `leonmr/bloch_sim.py`. The BURP tables and `generate_shape` are a **byte-identical copy** (diffed), because they must match the pulse programmes' own synthesis. `simulate_pulse` is vectorised over offsets and power scales -- same arithmetic, matching the original loop to 1e-10 in the tests, hundreds of times faster. New: power from a **flip angle** (`peak_b1_for_flip_angle`, via the shape's coherent integration factor, which reproduces the Bruker files' SHAPE_INTEGFAC for EBURP2/REBURP to 6 s.f.), alongside peak B1 and the original's hard-pulse calibration (RFAsh0/P1Hard/RFA0/LPMaxFraction). Choosing EBURP2 or REBURP sets the flip they are designed for.
+* **Analyse's tooltip** is just "Analyse" -- it listed every sub-panel.
+* **Found and fixed: duplicated Window-menu shortcut.** Panel shortcuts ran Ctrl+1..5 and the view shortcuts *continued the same count*, so Compare (panel) and Spectrum View were both Ctrl+5 -- ambiguous, so Qt fired neither -- and the views ran on to "Ctrl+10", which is no key. Panels are now Ctrl+1..6, views Ctrl+Shift+1..6, and a test asserts uniqueness.
+
+### Open
+
+* EBURP1/BURP need Fourier coefficients and are not offered in the GUI (available from `opennmr.simulate.bloch`).
+* Still from the plan: CSA fitting/simulation split (with CSA and quadrupolar simulation joining Simulate), a clickable starting point for CSA fitting, plot views as sidebar icons, fit results populating the tables.
 
 ## Icon-only toolbar, Quantify as one page, and the plan for the rest (2026-09-22)
 

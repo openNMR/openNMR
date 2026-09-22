@@ -112,7 +112,7 @@ def test_main_window_side_tabs_scroll_instead_of_growing_the_window(qapp):
     from PySide6.QtWidgets import QScrollArea
 
     window = MainWindow()
-    left_tabs = window.centralWidget().widget(0)
+    left_tabs = window.side_tabs
     for i in range(left_tabs.count()):
         page = left_tabs.widget(i)
         assert isinstance(page, QScrollArea)
@@ -7163,7 +7163,7 @@ def test_quantify_is_one_page_peaks_then_regions_then_the_fit(qapp):
     # sub-tabs (Peak Picking / Integration).
     window = MainWindow()
     labels = [window.analysis_sub_tabs.tabText(i) for i in range(window.analysis_sub_tabs.count())]
-    assert labels == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]
+    assert labels == ["Curve Fitting", "eNMR", "VOCS", "CSA"]  # Imaging moved to Settings
     assert not hasattr(window, "spectral_fitting_sub_tabs")
 
     page = window.side_tabs.widget(window._spectral_fitting_tab_index)
@@ -7580,10 +7580,10 @@ def _toolbar_button(window, text):
     raise AssertionError(f"no toolbar button {text!r}")
 
 
-_MODES = ("Load", "Process", "Quantify", "Analyse", "Compare")
+_MODES = ("Load", "Process", "Quantify", "Analyse", "Compare", "Simulate")
 
 
-def test_main_toolbar_has_the_five_workflow_buttons_with_icons(qapp):
+def test_main_toolbar_has_the_workflow_buttons_with_icons(qapp):
     window = MainWindow()
     assert list(window.mode_buttons) == list(_MODES)
     for text in _MODES:
@@ -7697,6 +7697,146 @@ def test_window_menu_panel_entries_use_the_toolbar_names(qapp):
     assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Quantify"
 
 
+def test_analyse_tooltip_is_just_its_name(qapp):
+    # "Remove the extra stuff from the analyse button that appears when
+    # you hover over it" -- it listed every sub-panel.
+    window = MainWindow()
+    assert _toolbar_button(window, "Analyse").toolTip() == "Analyse"
+    assert _toolbar_button(window, "Simulate").toolTip() == "Simulate"
+
+
+def test_window_menu_shortcuts_are_unique(qapp):
+    # Compare (panel) and Spectrum View both had Ctrl+5, which Qt fires
+    # for neither.
+    window = MainWindow()
+    window_menu = _menu_by_title(window, "Window")
+    shortcuts = [a.shortcut().toString() for a in window_menu.actions() if not a.shortcut().isEmpty()]
+    assert len(shortcuts) == len(set(shortcuts)), shortcuts
+
+
+# ------------------------------------------------------------
+# Settings
+# ------------------------------------------------------------
+
+def test_settings_gear_opens_a_dialog_holding_the_imaging_controls(qapp):
+    # "Imaging should be removed from analysis and be part of settings".
+    window = MainWindow()
+    analysis = [window.analysis_sub_tabs.tabText(i) for i in range(window.analysis_sub_tabs.count())]
+    assert "Imaging" not in analysis
+    assert window._settings_dialog.isAncestorOf(window.imaging_max_gradient_spin)
+
+    gear = window.settings_button.button
+    assert not gear.isCheckable()  # an action, not a mode
+    assert not gear.icon().isNull()
+    gear.click()
+    try:
+        assert window._settings_dialog.isVisible()
+        assert not window._settings_dialog.isModal()
+    finally:
+        window._settings_dialog.close()
+
+
+def test_settings_is_in_the_file_menu_with_the_preferences_role(qapp):
+    from PySide6.QtGui import QAction, QKeySequence
+    window = MainWindow()
+    assert window._settings_action.menuRole() == QAction.MenuRole.PreferencesRole
+    assert window._settings_action.shortcut() == QKeySequence(QKeySequence.StandardKey.Preferences)
+
+
+# ------------------------------------------------------------
+# Open experiments, visible in Load, Analyse and Compare
+# ------------------------------------------------------------
+
+def test_open_experiments_show_in_load_analyse_and_compare_only(qapp):
+    window = MainWindow()
+    box = window.open_experiments_box
+    assert box.isAncestorOf(window.spectrum_list)
+    data_page = window.side_tabs.widget(window._side_tab_index("Data"))
+    assert not data_page.isAncestorOf(window.spectrum_list)
+    for panel, shown in (("Data", True), ("Processing", False), ("Quantify", False),
+                         ("Analysis", True), ("Compare", True), ("Simulate", False)):
+        window._show_side_tab(panel)
+        assert box.isHidden() is not shown, panel
+
+
+# ------------------------------------------------------------
+# Simulate
+# ------------------------------------------------------------
+
+def test_simulate_raises_its_own_plot_and_hides_it_on_leaving(qapp):
+    window = MainWindow()
+    tab = window.canvas_tabs.indexOf(window.simulation_canvas)
+    assert not window.canvas_tabs.isTabVisible(tab)
+    _toolbar_button(window, "Simulate").click()
+    assert window.canvas_tabs.isTabVisible(tab)
+    assert window.canvas_tabs.currentWidget() is window.simulation_canvas
+    # Never shown empty: the current simulation has run.
+    assert window.simulation_canvas.figure.axes
+    assert "b at max gradient" in window.sim_diffusion_summary_label.text()
+    _toolbar_button(window, "Load").click()
+    assert window.canvas_tabs.currentWidget() is window.canvas
+    assert not window.canvas_tabs.isTabVisible(tab)
+
+
+def test_simulate_dropdown_lists_its_simulations(qapp):
+    window = MainWindow()
+    menu = window.mode_buttons["Simulate"].menu()
+    assert [a.text() for a in menu.actions()] == ["Diffusion (PFG)", "Shaped pulse (Bloch)"]
+    menu.actions()[1].trigger()
+    assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Simulate"
+    assert window.simulate_sub_tabs.currentIndex() == 1
+    assert "Peak B1" in window.bloch_summary_label.text()
+
+
+def test_diffusion_simulation_compares_shapes_and_sequences(qapp):
+    window = MainWindow()
+    window._show_side_tab("Simulate")
+    window.sim_d_edit.setText("2e-9")
+    window.sim_compare_combo.setCurrentIndex(window.sim_compare_combo.findData("shape"))
+    ax = window.simulation_canvas.figure.axes[0]
+    assert len(ax.lines) == 5
+    summary = window.sim_diffusion_summary_label.text()
+    assert "Half-sine" in summary and "Rectangular" in summary
+    assert window._sim_form.isRowVisible(window.sim_ramp_spin)  # comparing across it
+
+    window.sim_compare_combo.setCurrentIndex(window.sim_compare_combo.findData("sequence"))
+    assert len(window.simulation_canvas.figure.axes[0].lines) == 4
+
+    window.sim_compare_combo.setCurrentIndex(0)
+    window.sim_d_edit.setText("")
+    window._run_diffusion_simulation()
+    assert len(window.simulation_canvas.figure.axes[0].lines) == 8  # the leonmr decade sweep
+    assert not window._sim_form.isRowVisible(window.sim_tau_spin)  # PGSE has no tau
+
+
+def test_diffusion_simulation_reports_bad_input_instead_of_raising(qapp):
+    window = MainWindow()
+    window._show_side_tab("Simulate")
+    window.sim_d_edit.setText("-1")
+    window._run_diffusion_simulation()
+    assert window.sim_diffusion_summary_label.text().startswith("Cannot simulate")
+
+
+def test_bloch_simulation_gives_the_requested_flip(qapp):
+    window = MainWindow()
+    window._show_side_tab("Simulate")
+    window.simulate_sub_tabs.setCurrentIndex(1)
+    window.bloch_shape_combo.setCurrentIndex(window.bloch_shape_combo.findData("GAUSSIAN"))
+    window.bloch_flip_spin.setValue(90.0)
+    window.bloch_n_offsets_spin.setValue(51)
+    window._run_bloch_simulation()
+    assert "Mz = 0.000" in window.bloch_summary_label.text() or "Mz = -0.000" in window.bloch_summary_label.text()
+    assert len(window.simulation_canvas.figure.axes) == 3  # shape, its phase twin, profile
+
+    # The BURP shapes offer the flip they were designed for.
+    window.bloch_shape_combo.setCurrentIndex(window.bloch_shape_combo.findData("REBURP"))
+    assert window.bloch_flip_spin.value() == 180.0
+
+    window.bloch_power_mode_combo.setCurrentIndex(window.bloch_power_mode_combo.findData("hard"))
+    assert window._bloch_form.isRowVisible(window.bloch_hard_width_spin)
+    assert not window._bloch_form.isRowVisible(window.bloch_flip_spin)
+
+
 def test_plot_views_keep_their_own_strip_above_the_plot(qapp):
     # A View menu on the toolbar was tried and was "not too intuitive"
     # -- the switch for the plot sits next to the plot.
@@ -7722,10 +7862,13 @@ def test_main_window_left_panel_has_a_usable_minimum_width(qapp):
 # Multi-canvas plot tabs (Spectrum / FID / Compare / Fit)
 # ============================================================
 
-def test_main_window_has_six_canvas_tabs(qapp):
+def test_main_window_canvas_tabs(qapp):
     window = MainWindow()
     labels = [window.canvas_tabs.tabText(i) for i in range(window.canvas_tabs.count())]
-    assert labels == ["FID", "Processing Preview", "Spectrum", "Spectral Fit", "Fit", "Compare"]
+    assert labels == ["FID", "Processing Preview", "Spectrum", "Spectral Fit", "Fit", "Compare",
+                      "Simulation"]
+    # Simulation shows only while the Simulate panel is open.
+    assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.simulation_canvas)) is False
     assert window.canvas_tabs.widget(0) is window.fid_canvas
     assert window.canvas_tabs.widget(1) is window.processing_preview_canvas
     assert window.canvas_tabs.widget(2) is window.canvas
@@ -11153,7 +11296,7 @@ def test_main_window_quantify_is_its_own_top_level_tab(qapp):
     assert side.index("Quantify") < side.index("Analysis")
     analysis = [window.analysis_sub_tabs.tabText(i)
                 for i in range(window.analysis_sub_tabs.count())]
-    assert analysis == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]
+    assert analysis == ["Curve Fitting", "eNMR", "VOCS", "CSA"]  # Imaging moved to Settings
 
 
 def test_main_window_curve_fit_names_what_it_will_fit(qapp, tmp_path):

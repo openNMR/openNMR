@@ -25,7 +25,7 @@ class ModeButton(QWidget):
     """``button`` is the icon; ``arrow`` is the dropdown beneath it."""
 
     def __init__(self, label: str, icon, icon_size: QSize, menu: QMenu | None = None,
-                 parent=None) -> None:
+                 parent=None, checkable: bool = True) -> None:
         super().__init__(parent)
         self.label = label
 
@@ -36,7 +36,8 @@ class ModeButton(QWidget):
         self.button.setIcon(icon)
         self.button.setIconSize(icon_size)
         self.button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.button.setCheckable(True)
+        # Not checkable for an action (Settings) rather than a mode.
+        self.button.setCheckable(checkable)
         self.button.setAutoRaise(True)
         self.button.setAccessibleName(label)
         self.button.setToolTip(label)
