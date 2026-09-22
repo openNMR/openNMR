@@ -53,13 +53,18 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 
 ## GUI layout (`src/opennmr/gui/main_window.py`)
 
-- **Toolbar** (`_build_main_toolbar`): Load, Process, Fit Spectrum, Fit
-  Curves, Compare. Each raises a left-hand panel held in `side_tabs`.
-- **Left panels and sub-panels** are `WrappingTabWidget`s
-  (`gui/widgets/wrapping_tabs.py`) with their button strips hidden. A
-  sub-panel added with `addTab` to `spectral_fitting_sub_tabs` or
-  `analysis_sub_tabs` appears in its toolbar button's dropdown
-  automatically.
+- **Toolbar** (`_build_main_toolbar`): Load, Process, Quantify, Analyse,
+  Compare -- icons only, one `ModeButton` each
+  (`gui/widgets/mode_button.py`), with any dropdown arrow centred under
+  its icon. Each raises a left-hand panel held in `side_tabs` (tab names
+  Data, Processing, Quantify, Analysis, Compare).
+- **Quantify** is one page: Peaks, Integration Regions, then the
+  Spectral Fitting section (`_build_spectral_fit_section`). Whether the
+  fit uses the regions is two explicit checkboxes there.
+- **Analyse's sub-panels** live in `analysis_sub_tabs`, a
+  `WrappingTabWidget` (`gui/widgets/wrapping_tabs.py`) with its strip
+  hidden. A sub-panel added there with `addTab` appears in the Analyse
+  dropdown automatically.
 - **Plot views** (`canvas_tabs`: FID, Processing Preview, Spectrum,
   Spectral Fit, Fit, Compare) keep a visible strip directly above the
   plot. A toolbar "View" menu was tried and rejected as unintuitive.
@@ -69,3 +74,6 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   After re-exporting one, run `python packaging/make_toolbar_icons.py`
   to regenerate `gui/resources/toolbar/`. The editable Affinity
   Designer sources are not in git.
+- **Planned GUI work** (Settings dialog, open-experiments list,
+  Simulations mode, view sidebar) is in the newest `TODO.md` round --
+  check there before starting any of it.

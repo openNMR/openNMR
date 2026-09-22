@@ -594,7 +594,7 @@ def test_main_window_remove_peak_shortcut_is_scoped_to_peak_table(qapp, tmp_path
 def test_main_window_menu_window_panel_actions_switch_side_tabs(qapp):
     window = MainWindow()
     window_menu = _menu_by_title(window, "Window")
-    analysis_action = next(a for a in window_menu.actions() if a.text() == "Analysis")
+    analysis_action = next(a for a in window_menu.actions() if a.text() == "Analyse")
     analysis_action.trigger()
     assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Analysis"
 
@@ -7156,30 +7156,120 @@ def test_main_window_clear_resets_analysis_tab(qapp, tmp_path):
 # Advanced (fit tolerance/S-N) collapsed by default
 # ============================================================
 
-def test_main_window_peak_picking_and_integration_are_separate_subtabs(qapp):
-    # Explicit user feedback: the combined "Spectral Fitting" sub-tab
-    # held peak-picking, integration, and fit-bounds tuning all at
-    # once -- "too much information at once for casual users". Peak
-    # Picking and Integration (alternative "step 1"s, per their own
-    # tooltips) are now separate sub-tabs.
+def test_quantify_is_one_page_peaks_then_regions_then_the_fit(qapp):
+    # "combine integration and peak picking onto the same page, and
+    # just keep the spectrum fitting button and slice changer at the
+    # bottom (with its own heading in the side bar)". They had been two
+    # sub-tabs (Peak Picking / Integration).
     window = MainWindow()
     labels = [window.analysis_sub_tabs.tabText(i) for i in range(window.analysis_sub_tabs.count())]
-    # Peak Picking and Integration moved out to their own top-level
-    # Spectral Fitting tab -- explicit user request, see
-    # test_main_window_spectral_fitting_is_its_own_top_level_tab. They
-    # are still two separate sub-tabs, which is what this test is
-    # actually about; only their parent changed.
     assert labels == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]
-    spectral = [window.spectral_fitting_sub_tabs.tabText(i)
-                for i in range(window.spectral_fitting_sub_tabs.count())]
-    assert spectral == ["Peak Picking", "Integration"]
+    assert not hasattr(window, "spectral_fitting_sub_tabs")
 
-    peak_picking_tab = window.spectral_fitting_sub_tabs.widget(0)
-    integration_tab = window.spectral_fitting_sub_tabs.widget(1)
-    assert peak_picking_tab.isAncestorOf(window.peak_table)
-    assert integration_tab.isAncestorOf(window.region_table)
-    assert not peak_picking_tab.isAncestorOf(window.region_table)
-    assert not integration_tab.isAncestorOf(window.peak_table)
+    page = window.side_tabs.widget(window._spectral_fitting_tab_index)
+    for widget in (window.peak_table, window.region_table, window.spectral_fit_heading,
+                   window.view_slice_fit_spin, window.analysis_results_label,
+                   window.fit_within_regions_checkbox):
+        assert page.isAncestorOf(widget)
+
+    def y(widget):
+        return widget.mapTo(page, widget.rect().topLeft()).y()
+
+    # Positions only exist once Qt has laid the page out.
+    window._show_side_tab("Quantify")
+    window.show()
+    qapp.processEvents()
+    try:
+        assert y(window.peak_table) < y(window.region_table) < y(window.spectral_fit_heading)
+        assert y(window.spectral_fit_heading) < y(window.view_slice_fit_spin)
+    finally:
+        window.close()
+    assert window.spectral_fit_heading.text() == "Spectral Fitting"
+    assert window.spectral_fit_heading.font().bold()
+
+
+def test_spectral_fit_report_is_a_table_matching_the_peak_table(qapp):
+    # "a sensible table, basically matching the results of the peak pick
+    # table but with the outputs" -- it was a line of text per peak.
+    window = MainWindow()
+    x = np.linspace(10.0, 0.0, 800)
+    y = (processing_fitting.lorentzian(x, 3.0, 0.05, 1.0)
+         + processing_fitting.lorentzian(x, 6.0, 0.05, 3.0))
+    spectrum = NMRSpectrum(
+        data=y, axes=[NMRAxis(kind="frequency", ppm=x, hz=x * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0),
+    )
+    window._add_peak_row(3.0, 0.05)
+    window._add_peak_row(6.0, 0.05)
+    results = window._fit_peaks([spectrum])
+    window._display_slice_fit(results[0])
+
+    table = window.spectral_fit_table
+    columns = [table.horizontalHeaderItem(c).text().replace("\n", " ")
+               for c in range(table.columnCount())]
+    # The peak table's own columns first, in its order, then the outputs.
+    assert columns[:3] == list(window._PEAK_TABLE_COLUMNS[:3])
+    assert columns[3:] == ["Amplitude", "Area", "Area (%)"]
+    assert table.rowCount() == 2
+    # Numbered like the peak table, so row n here is row n there.
+    assert [table.verticalHeaderItem(r).text() for r in range(2)] == ["1", "2"]
+
+    shift_1 = table.item(0, 0).text()
+    assert shift_1.startswith("3.0") and "\n± " in shift_1
+    # Area share: the second peak is three times the first.
+    shares = [float(table.item(r, 5).text()) for r in range(2)]
+    assert abs(sum(shares) - 100.0) < 0.5
+    assert abs(shares[1] / shares[0] - 3.0) < 0.1
+    assert "RMSE" in window.spectral_fit_params_label.text()
+
+    tsv = window._spectral_fit_table_as_tsv().splitlines()
+    assert tsv[0].split("\t") == ["Peak"] + columns
+    assert tsv[1].split("\t")[0] == "1"
+    assert " ± " in tsv[1]  # one line per cell in the copy
+    assert len(tsv) == 3
+
+    window._clear_spectral_fit_report()
+    assert table.rowCount() == 0
+    assert window.spectral_fit_params_label.text() == ""
+
+
+def test_value_error_formatting_keeps_only_supported_digits(qapp):
+    fmt = MainWindow._format_value_error
+    assert fmt(1.50234, 0.00031) == "1.50234 ± 0.00031"
+    assert fmt(1.50234, 0.031) == "1.502 ± 0.031"
+    assert fmt(1234.5, 12.0) == "1234 ± 12"   # banker's rounding of .5 either way is fine
+    assert fmt(0.5, 0.0, fixed=True) == "0.5 (fixed)"
+    assert fmt(2.0, float("nan")) == "2"
+    assert fmt(2.0, None) == "2"
+
+
+def test_fit_uses_the_regions_only_as_the_two_boxes_say(qapp, monkeypatch):
+    # Any defined region used to restrict the fit, silently. It is now
+    # one visible option, independent of the amplitude cap.
+    window = MainWindow()
+    window._add_region_row(1.0, 2.0)
+    window._add_peak_row(1.5, 0.1)
+    spectrum = _make_1d_peak_spectrum(x0=1.5, fwhm=0.1)
+    seen = {}
+
+    def fake_fit(slices, peak_defs, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(processing_fitting, "NMR2D_fit_slices", fake_fit)
+
+    def run():
+        seen.clear()
+        with pytest.raises(RuntimeError):
+            window._fit_peaks([spectrum])
+        return seen["fit_regions"], seen["amplitude_bound_regions"]
+
+    assert window.fit_within_regions_checkbox.isChecked()  # the old behaviour, by default
+    assert run() == ([(1.0, 2.0)], None)
+    window.fit_within_regions_checkbox.setChecked(False)
+    assert run() == (None, None)
+    window.amplitude_bound_regions_checkbox.setChecked(True)
+    assert run() == (None, [(1.0, 2.0)])
 
 
 def test_main_window_peak_advanced_section_collapsed_by_default(qapp):
@@ -7490,34 +7580,64 @@ def _toolbar_button(window, text):
     raise AssertionError(f"no toolbar button {text!r}")
 
 
+_MODES = ("Load", "Process", "Quantify", "Analyse", "Compare")
+
+
 def test_main_toolbar_has_the_five_workflow_buttons_with_icons(qapp):
     window = MainWindow()
-    for text in ("Load", "Process", "Fit Spectrum", "Fit Curves", "Compare"):
+    assert list(window.mode_buttons) == list(_MODES)
+    for text in _MODES:
         button = _toolbar_button(window, text)
         assert not button.icon().isNull(), f"{text} has no icon"
         assert button.isCheckable()
+        # Icons only -- "trial removing the words". The name stays as
+        # the tooltip and accessible name.
+        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert button.toolTip().startswith(text)
+        assert button.accessibleName() == text
     # The left-hand strips are hidden, not removed -- the pages all
     # still live in their tab widgets, which is what keeps code-driven
     # switching working.
     assert not window.side_tabs.isTabBarVisible()
     assert not window.analysis_sub_tabs.isTabBarVisible()
-    assert not window.spectral_fitting_sub_tabs.isTabBarVisible()
 
 
 def test_main_toolbar_buttons_share_one_width(qapp):
     # A split button's arrow made it wider than its neighbours.
     window = MainWindow()
-    widths = {text: _toolbar_button(window, text).width()
-              for text in ("Load", "Process", "Fit Spectrum", "Fit Curves", "Compare")}
+    widths = {text: window.mode_buttons[text].width() for text in _MODES}
     assert len(set(widths.values())) == 1, widths
-    assert _toolbar_button(window, "Fit Curves").minimumWidth() == \
-        _toolbar_button(window, "Fit Curves").maximumWidth()
+    icons = {text: _toolbar_button(window, text).width() for text in _MODES}
+    assert len(set(icons.values())) == 1, icons
+
+
+def test_dropdown_arrows_sit_centred_under_their_icons(qapp):
+    # "the dropdown arrows for the icons should be below the icon and
+    # centred". Buttons without a menu keep an empty slot, so every
+    # icon sits at the same height.
+    window = MainWindow()
+    window.show()
+    qapp.processEvents()
+    try:
+        for text in _MODES:
+            mode = window.mode_buttons[text]
+            icon, arrow = mode.button.geometry(), mode.arrow.geometry()
+            assert arrow.top() >= icon.bottom()
+            assert abs(arrow.center().x() - icon.center().x()) <= 1
+        assert window.mode_buttons["Analyse"].arrow.isEnabled()
+        assert window.mode_buttons["Load"].arrow.isEnabled()
+        assert not window.mode_buttons["Process"].arrow.isEnabled()
+        assert not window.mode_buttons["Quantify"].arrow.isEnabled()
+        tops = {window.mode_buttons[t].button.geometry().top() for t in _MODES}
+        assert len(tops) == 1
+    finally:
+        window.close()
 
 
 def test_main_toolbar_buttons_raise_their_panels(qapp):
     window = MainWindow()
-    for text, panel in (("Process", "Processing"), ("Fit Spectrum", "Spectral Fitting"),
-                        ("Fit Curves", "Analysis"), ("Compare", "Compare"), ("Load", "Data")):
+    for text, panel in (("Process", "Processing"), ("Quantify", "Quantify"),
+                        ("Analyse", "Analysis"), ("Compare", "Compare"), ("Load", "Data")):
         _toolbar_button(window, text).click()
         assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == panel
         assert _toolbar_button(window, text).isChecked()
@@ -7528,42 +7648,53 @@ def test_main_toolbar_follows_panel_changes_made_elsewhere(qapp):
     # panel, must move the toolbar's highlight with it.
     window = MainWindow()
     window._show_side_tab("Analysis")
-    assert _toolbar_button(window, "Fit Curves").isChecked()
+    assert _toolbar_button(window, "Analyse").isChecked()
     assert not _toolbar_button(window, "Load").isChecked()
 
 
-def test_fit_button_dropdowns_replace_the_sub_tabs(qapp):
+def test_analyse_dropdown_replaces_the_sub_tabs(qapp):
     window = MainWindow()
-    button = _toolbar_button(window, "Fit Curves")
-    entries = [a.text() for a in button.menu().actions()]
+    button = _toolbar_button(window, "Analyse")
+    menu = window.mode_buttons["Analyse"].menu()
+    entries = [a.text() for a in menu.actions()]
     assert entries == [window.analysis_sub_tabs.tabText(i)
                        for i in range(window.analysis_sub_tabs.count())]
 
-    enmr = next(a for a in button.menu().actions() if a.text() == "eNMR")
+    enmr = next(a for a in menu.actions() if a.text() == "eNMR")
     enmr.trigger()
     assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Analysis"
     assert window.analysis_sub_tabs.tabText(window.analysis_sub_tabs.currentIndex()) == "eNMR"
     assert window.analysis_sub_tabs.headingText() == "eNMR"
 
-    # Back to Load, then the button itself: returns to the last sub-panel.
+    # Back to Load, then the icon itself: returns to the last sub-panel.
     _toolbar_button(window, "Load").click()
     button.click()
     assert window.analysis_sub_tabs.tabText(window.analysis_sub_tabs.currentIndex()) == "eNMR"
 
     # A sub-tab changed by code moves the menu's tick too.
     window.analysis_sub_tabs.setCurrentIndex(0)
-    checked = [a.text() for a in button.menu().actions() if a.isChecked()]
+    checked = [a.text() for a in menu.actions() if a.isChecked()]
     assert checked == [window.analysis_sub_tabs.tabText(0)]
 
-    spectral = _toolbar_button(window, "Fit Spectrum")
-    assert [a.text() for a in spectral.menu().actions()] == ["Peak Picking", "Integration"]
+    # Quantify is one page: no menu at all.
+    assert window.mode_buttons["Quantify"].menu() is None
 
 
 def test_load_dropdown_holds_the_file_menus_open_actions(qapp):
     window = MainWindow()
-    actions = _toolbar_button(window, "Load").menu().actions()
+    actions = window.mode_buttons["Load"].menu().actions()
     assert window._open_action in actions
     assert window._open_files_action in actions
+
+
+def test_window_menu_panel_entries_use_the_toolbar_names(qapp):
+    window = MainWindow()
+    window_menu = _menu_by_title(window, "Window")
+    names = [a.text() for a in window_menu.actions()]
+    for text in _MODES:
+        assert text in names
+    next(a for a in window_menu.actions() if a.text() == "Quantify").trigger()
+    assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Quantify"
 
 
 def test_plot_views_keep_their_own_strip_above_the_plot(qapp):
@@ -7931,7 +8062,8 @@ def test_main_window_view_slice_fit_shows_data_and_fit_curve(qapp):
     assert any(label.startswith("Peak 1") for label in labels)
     assert "Baseline" in labels
     assert "Slice 3" in window.spectral_fit_canvas.ax.get_title()
-    assert "Peak 1" in window.spectral_fit_params_label.text()
+    assert window.spectral_fit_table.rowCount() == 1
+    assert window.spectral_fit_table.verticalHeaderItem(0).text() == "1"
 
     # Explicit user request: left/right buttons, matching the pattern
     # already used for View curve fit (peak #) and the phasing-tab
@@ -7969,7 +8101,8 @@ def test_main_window_analysis_tab_labels_renamed_for_clarity(qapp):
     wanted = ("Spectrum fit (slice #):", "View curve fit (peak #):")
     labels = [
         child.text()
-        for parent in (window.spectral_fitting_sub_tabs, window.analysis_sub_tabs)
+        for parent in (window.side_tabs.widget(window._spectral_fitting_tab_index),
+                       window.analysis_sub_tabs)
         for child in parent.findChildren(QLabel) if child.text() in wanted
     ]
     assert set(labels) == set(wanted)
@@ -11008,20 +11141,16 @@ def test_gradient_calibration_dialog_prefills_from_the_analysis_tab(qapp):
 # and the Spectral Fitting tab split
 # ============================================================
 
-def test_main_window_spectral_fitting_is_its_own_top_level_tab(qapp):
+def test_main_window_quantify_is_its_own_top_level_tab(qapp):
     # "Fitting spectra should be its own tab" -- Peak Picking and
     # Integration were sub-tabs of Analysis sitting beside Curve
     # Fitting, which put a prerequisite and its consumer at the same
-    # level and hid the order between them.
+    # level and hid the order between them. Now named Quantify.
     window = MainWindow()
     side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
-    assert "Spectral Fitting" in side
+    assert "Quantify" in side
     # Step 1 before step 2.
-    assert side.index("Spectral Fitting") < side.index("Analysis")
-
-    spectral = [window.spectral_fitting_sub_tabs.tabText(i)
-                for i in range(window.spectral_fitting_sub_tabs.count())]
-    assert spectral == ["Peak Picking", "Integration"]
+    assert side.index("Quantify") < side.index("Analysis")
     analysis = [window.analysis_sub_tabs.tabText(i)
                 for i in range(window.analysis_sub_tabs.count())]
     assert analysis == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]

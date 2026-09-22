@@ -72,6 +72,7 @@ from .widgets.canvas import MplCanvas
 from .widgets.drag_control import DragHandle
 from .widgets.relative_spinbox import RelativeDoubleSpinBox
 from .widgets.data_browser import DataBrowser
+from .widgets.mode_button import ModeButton
 from .widgets.wrapping_tabs import WrappingTabWidget
 from .loader import background_load_enabled
 
@@ -509,10 +510,10 @@ class MainWindow(QMainWindow):
         self.side_tabs = tabs = WrappingTabWidget()
         tabs.addTab(self._scrollable(self._build_spectra_tab()), "Data")
         self._processing_tab_index = tabs.addTab(self._scrollable(self._build_processing_tab()), "Processing")
-        # Spectral Fitting before Analysis: it is step 1, and the tab
+        # Quantify before Analysis: it is step 1, and the tab
         # order is the workflow order.
         self._spectral_fitting_tab_index = tabs.addTab(
-            self._scrollable(self._build_spectral_fitting_tab()), "Spectral Fitting")
+            self._scrollable(self._build_spectral_fitting_tab()), "Quantify")
         tabs.addTab(self._scrollable(self._build_analysis_tab()), "Analysis")
         tabs.addTab(self._scrollable(self._build_compare_tab()), "Compare")
         # No Output tab any more -- its controls live in the Plot Style
@@ -624,16 +625,22 @@ class MainWindow(QMainWindow):
     _TOOLBAR_ICON_DIR = os.path.join(os.path.dirname(__file__), "resources", "toolbar")
 
     def _build_main_toolbar(self) -> None:
-        """The workflow toolbar along the top: Load, Process, Fit
-        Spectrum, Fit Curves, Compare.
+        """The workflow toolbar along the top: Load, Process, Quantify,
+        Analyse, Compare -- verbs, one per step, icons only.
 
         It replaces the left-hand tab strips rather than the panels
-        behind them. ``side_tabs`` and the two sub-tab widgets still
-        exist and still hold every page; only their button strips are
-        hidden. So everything that switches panel by code -- entering
-        Processing raising its live preview, the Window menu's
-        Ctrl+number entries -- keeps working unchanged, and this
-        toolbar only has to follow along.
+        behind them. ``side_tabs`` and ``analysis_sub_tabs`` still exist
+        and still hold every page; only their button strips are hidden.
+        So everything that switches panel by code -- entering Processing
+        raising its live preview, the Window menu's Ctrl+number entries
+        -- keeps working unchanged, and this toolbar only has to follow
+        along.
+
+        Each button is a :class:`ModeButton`: the icon raises its panel,
+        and where there is a menu its arrow sits centred underneath.
+        Analyse's menu picks a sub-panel (the icon returns to whichever
+        was last open); Load's holds the File menu's two Open actions.
+        Quantify has no menu -- its peaks, regions and fit share one page.
 
         The plot views keep their own strip, directly above the plot.
         A "View:" menu on this toolbar was tried first and dropped:
@@ -641,13 +648,9 @@ class MainWindow(QMainWindow):
         fit, and processing. The top bar is one way but it isn't too
         intuitive." The switch belongs next to the thing it switches.
 
-        The two Fit buttons are split buttons: the button itself returns
-        to whichever sub-panel was last open there, and its arrow picks
-        another. Load's arrow holds the File menu's two Open actions.
-
         Real user request: "a full toolbar along the top instead of the
         tabs on the left and right ... some kind of dropdown menu to
-        replace the current subtabs"."""
+        replace the current subtabs"; then "trial removing the words"."""
         toolbar = QToolBar("Main", self)
         toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
@@ -655,57 +658,44 @@ class MainWindow(QMainWindow):
         # A QToolBar's right-click menu offers to hide it, and with the
         # tab strips gone there would be no way back to a panel.
         toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
-        toolbar.setIconSize(QSize(32, 32))
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
         self.main_toolbar = toolbar
 
-        # (button text, icon file, side tab it raises, its sub-tabs,
+        # (button name, icon file, side tab it raises, its sub-tabs,
         # extra actions for its dropdown)
         modes = (
             ("Load", "load", "Data", None,
              (self._open_action, self._open_files_action)),
             ("Process", "processing", "Processing", None, ()),
-            ("Fit Spectrum", "spectrum_fitting", "Spectral Fitting",
-             self.spectral_fitting_sub_tabs, ()),
-            ("Fit Curves", "curve_fitting", "Analysis", self.analysis_sub_tabs, ()),
+            ("Quantify", "spectrum_fitting", "Quantify", None, ()),
+            ("Analyse", "curve_fitting", "Analysis", self.analysis_sub_tabs, ()),
             ("Compare", "compare", "Compare", None, ()),
         )
         self._mode_group = QButtonGroup(self)
         self._mode_group.setExclusive(True)
         self._mode_buttons: dict[int, QToolButton] = {}
+        self.mode_buttons: dict[str, ModeButton] = {}
         for label, icon_name, side_tab, sub_tabs, extra_actions in modes:
             index = self._side_tab_index(side_tab)
-            button = QToolButton(toolbar)
-            button.setText(label)
-            button.setIcon(self._toolbar_icon(icon_name))
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            button.setCheckable(True)
-            button.setAutoRaise(True)
-            button.setAccessibleName(label)
-            tooltip = label
+            menu = self._build_mode_menu(toolbar, index, sub_tabs, extra_actions)
+            mode = ModeButton(label, self._toolbar_icon(icon_name), QSize(32, 32), menu, toolbar)
             if sub_tabs is not None:
-                tooltip += " -- " + ", ".join(
-                    sub_tabs.tabText(i) for i in range(sub_tabs.count()))
-            button.setToolTip(tooltip)
-            button.clicked.connect(
+                mode.button.setToolTip(label + " -- " + ", ".join(
+                    sub_tabs.tabText(i) for i in range(sub_tabs.count())))
+            mode.button.clicked.connect(
                 lambda _checked=False, i=index: self.side_tabs.setCurrentIndex(i))
-            menu = self._build_mode_menu(button, index, sub_tabs, extra_actions)
-            if menu is not None:
-                button.setMenu(menu)
-                button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-            self._mode_group.addButton(button)
-            self._mode_buttons[index] = button
-            toolbar.addWidget(button)
-        # One width for all five. A split button's arrow otherwise makes
-        # it wider than its neighbours, and the row reads as uneven.
-        width = max(button.sizeHint().width() for button in self._mode_buttons.values())
-        for button in self._mode_buttons.values():
-            button.setFixedWidth(width)
+            self._mode_group.addButton(mode.button)
+            self._mode_buttons[index] = mode.button
+            self.mode_buttons[label] = mode
+            toolbar.addWidget(mode)
+        # One width for all five, so the icons sit evenly spaced.
+        width = max(mode.button.sizeHint().width() for mode in self.mode_buttons.values())
+        for mode in self.mode_buttons.values():
+            mode.setButtonWidth(width)
         self.side_tabs.currentChanged.connect(self._sync_mode_buttons)
         self._sync_mode_buttons(self.side_tabs.currentIndex())
 
         self.side_tabs.setTabBarVisible(False)
-        self.spectral_fitting_sub_tabs.setTabBarVisible(False, show_heading=True)
         self.analysis_sub_tabs.setTabBarVisible(False, show_heading=True)
 
     def _toolbar_icon(self, name: str) -> QIcon:
@@ -722,12 +712,12 @@ class MainWindow(QMainWindow):
                 return index
         raise KeyError(name)
 
-    def _build_mode_menu(self, button, side_index: int, sub_tabs, extra_actions):
+    def _build_mode_menu(self, parent, side_index: int, sub_tabs, extra_actions):
         """The dropdown for one toolbar button: its extra actions, then
         one checkable entry per sub-tab. ``None`` if it has neither."""
         if sub_tabs is None and not extra_actions:
             return None
-        menu = QMenu(button)
+        menu = QMenu(parent)
         for action in extra_actions:
             menu.addAction(action)
         if sub_tabs is None:
@@ -908,12 +898,15 @@ class MainWindow(QMainWindow):
         # index after Processing, and these actions silently pointed at
         # the wrong panels -- "Analysis" opened Spectral Fitting. A name
         # lookup cannot drift when the tab order changes again.
-        for shortcut_num, label in enumerate(
-                ("Data", "Processing", "Spectral Fitting", "Analysis", "Compare"), start=1):
+        # Labelled with the toolbar's own names, so the menu and the
+        # toolbar agree; each resolves to its panel's tab name.
+        for shortcut_num, (label, panel) in enumerate(
+                (("Load", "Data"), ("Process", "Processing"), ("Quantify", "Quantify"),
+                 ("Analyse", "Analysis"), ("Compare", "Compare")), start=1):
             action = QAction(label, self)
             action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
             action.triggered.connect(
-                lambda _checked=False, name=label: self._show_side_tab(name))
+                lambda _checked=False, name=panel: self._show_side_tab(name))
             window_menu.addAction(action)
 
         # " View" suffix: the canvas tab's own name would otherwise
@@ -2591,7 +2584,7 @@ class MainWindow(QMainWindow):
         self.curve_fit_summary_label.setText("")
         self.dosy_results_label.setText("")
         self.gradient_calibration_label.setText("")
-        self.spectral_fit_params_label.setText("")
+        self._clear_spectral_fit_report()
         self.analysis_status_label.setText("Select a pseudo-2D spectrum (e.g. a T1/T2 relaxation series) to fit.")
         self._current_analysis_index = None
         self._slice_fit_results = None
@@ -9006,35 +8999,46 @@ class MainWindow(QMainWindow):
     # per-slice amplitude series.
 
     _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta", "Fixed")
+    # The peak table's own first three columns, then the fit's outputs.
+    # Headers wrap onto two lines -- six columns share a side panel.
+    _SPECTRAL_FIT_TABLE_COLUMNS = ("Shift\n(ppm)", "FWHM\n(ppm)", "Eta", "Amplitude", "Area", "Area\n(%)")
     _REGION_TABLE_COLUMNS = ("Low (ppm)", "High (ppm)")
 
     def _build_spectral_fitting_tab(self) -> QWidget:
-        """Step 1 of the analysis workflow, as its own top-level tab:
-        get a number out of each spectrum (or each slice of a series),
-        by fitting peak shapes or by integrating regions.
+        """The Quantify panel -- step 1 of the analysis workflow: get a
+        number out of each spectrum (or each slice of a series).
 
-        Explicit user request -- "Fitting spectra should be its own
-        tab". It was two sub-tabs of Analysis sitting beside Curve
-        Fitting, which put a *prerequisite* and the thing that consumes
-        it at the same level and made the order between them invisible.
-        Now the two tabs are the two steps, and each says so."""
+        One page, top to bottom: the peaks, the integration regions,
+        then a *Spectral Fitting* section that fits the peaks and holds
+        the fit's slice viewer and report. Real user request: "combine
+        integration and peak picking onto the same page, and just keep
+        the spectrum fitting button and slice changer at the bottom
+        (with its own heading in the side bar) with whatever reports".
+        They had been two sub-tabs, which hid that the fit can use the
+        regions -- the options saying how now sit in the fit section,
+        in plain view."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         self.spectral_fitting_status_label = QLabel(
-            "Step 1 — measure an intensity per spectrum. Fit peak shapes "
-            "(Peak Picking) or integrate regions (Integration); either works "
-            "on a single 1D spectrum or on every slice of a pseudo-2D series. "
-            "Whichever you run last is what the Analysis tab's Fit Curve then "
+            "Step 1 — measure an intensity per spectrum: integrate regions, "
+            "or pick peaks and fit them (Spectral Fitting, below). Either "
+            "works on a single 1D spectrum or on every slice of a pseudo-2D "
+            "series. Whichever you run last is what Analyse's Fit Curve then "
             "fits a relaxation/diffusion curve to."
         )
         self.spectral_fitting_status_label.setWordWrap(True)
         layout.addWidget(self.spectral_fitting_status_label)
 
-        self.spectral_fitting_sub_tabs = WrappingTabWidget()
-        self.spectral_fitting_sub_tabs.addTab(self._build_peak_picking_subtab(), "Peak Picking")
-        self.spectral_fitting_sub_tabs.addTab(self._build_integration_subtab(), "Integration")
-        layout.addWidget(self.spectral_fitting_sub_tabs)
+        layout.addWidget(self._build_peaks_box())
+
+        layout.addWidget(self._build_region_box())
+        self.integration_results_label = QLabel("")
+        self.integration_results_label.setWordWrap(True)
+        layout.addWidget(self.integration_results_label)
+
+        layout.addWidget(self._build_spectral_fit_section())
+        layout.addStretch(1)
         return tab
 
     def _build_analysis_tab(self) -> QWidget:
@@ -9043,7 +9047,7 @@ class MainWindow(QMainWindow):
 
         self.analysis_status_label = QLabel(
             "Step 2 — fit a curve to the per-spectrum intensities from the "
-            "Spectral Fitting tab. Needs a pseudo-2D series selected in Data "
+            "Quantify panel. Needs a pseudo-2D series selected in Data "
             "(or right-clicked there), or a stack of 1D spectra in Compare."
         )
         self.analysis_status_label.setWordWrap(True)
@@ -9269,10 +9273,9 @@ class MainWindow(QMainWindow):
             raise ValueError("Add at least one CSA site before fitting.")
         return sites
 
-    def _build_peak_picking_subtab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
+    def _build_peaks_box(self) -> QGroupBox:
+        """The peak table and the ways of filling it: by hand, by
+        clicking the plot, or by auto-pick."""
         peak_box = QGroupBox("Peaks (pseudo-Voigt)")
         peak_layout = QVBoxLayout(peak_box)
 
@@ -9398,6 +9401,46 @@ class MainWindow(QMainWindow):
         )
         prominence_row.addWidget(self.auto_pick_prominence_spin)
         peak_layout.addLayout(prominence_row)
+        return peak_box
+
+    def _build_spectral_fit_section(self) -> QWidget:
+        """The bottom of the Quantify panel: fitting the peaks above.
+
+        A bold heading and a rule rather than a group box, so it reads
+        as the start of the next stage rather than one more box of
+        settings. Holds how the fit uses the regions, the series
+        options, the fit itself, and its per-slice viewer and report."""
+        section = QWidget()
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 8, 0, 0)
+
+        rule = QFrame()
+        rule.setFrameShape(QFrame.Shape.HLine)
+        rule.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(rule)
+        self.spectral_fit_heading = QLabel("Spectral Fitting")
+        heading_font = self.spectral_fit_heading.font()
+        heading_font.setBold(True)
+        heading_font.setPointSizeF(heading_font.pointSizeF() * 1.15)
+        self.spectral_fit_heading.setFont(heading_font)
+        layout.addWidget(self.spectral_fit_heading)
+
+        # --- How the fit uses the integration regions --------------
+        # Both were implicit or buried: any defined region *always*
+        # restricted the fit, and the amplitude cap sat inside Advanced.
+        # With peaks and regions on one page that coupling would be a
+        # surprise, so both are explicit, visible and independent.
+        regions_group = QGroupBox("Use the integration regions")
+        regions_layout = QVBoxLayout(regions_group)
+        self.fit_within_regions_checkbox = QCheckBox("Fit only inside the regions")
+        self.fit_within_regions_checkbox.setChecked(True)
+        self.fit_within_regions_checkbox.setToolTip(
+            "Restrict the fit to the data inside the Integration Regions "
+            "above, so unrelated signal elsewhere in the spectrum cannot "
+            "drag it off. Off: the whole spectrum is fitted, whatever "
+            "regions exist. No effect while the region table is empty."
+        )
+        regions_layout.addWidget(self.fit_within_regions_checkbox)
 
         # --- Across a pseudo-2D series -----------------------------
         # Deliberately NOT inside the collapsed "Advanced" block below,
@@ -9483,7 +9526,8 @@ class MainWindow(QMainWindow):
         anchor_row.addStretch(1)
         series_layout.addLayout(anchor_row)
 
-        peak_layout.addWidget(self.series_fit_group)
+        layout.addWidget(regions_group)
+        layout.addWidget(self.series_fit_group)
 
         # Position tolerance / S-N gating are fit-quality tuning knobs,
         # not part of picking a peak itself -- a casual user's first
@@ -9515,7 +9559,7 @@ class MainWindow(QMainWindow):
         tolerance_row.addWidget(self.position_tolerance_spin)
         advanced_layout.addLayout(tolerance_row)
 
-        self.amplitude_bound_regions_checkbox = QCheckBox("Bound amplitude using region integrals")
+        self.amplitude_bound_regions_checkbox = QCheckBox("Bound peak amplitudes by region integrals")
         self.amplitude_bound_regions_checkbox.setToolTip(
             "For each peak whose starting shift falls inside one of the "
             "Integration Regions above, cap its amplitude using that "
@@ -9531,7 +9575,7 @@ class MainWindow(QMainWindow):
             "never overrides a peak's own explicit amplitude bound (Set "
             "Bounds... dialog)."
         )
-        advanced_layout.addWidget(self.amplitude_bound_regions_checkbox)
+        regions_layout.addWidget(self.amplitude_bound_regions_checkbox)
 
         noise_row = QHBoxLayout()
         noise_row.addWidget(QLabel("Noise region (ppm):"))
@@ -9563,9 +9607,7 @@ class MainWindow(QMainWindow):
             "Advanced (fit tolerance and S/N)", advanced_content,
         )
         self.peak_advanced_content = advanced_content  # for tests -- see isHidden's own note in _collapsible_section
-        peak_layout.addWidget(advanced_section)
-
-        layout.addWidget(peak_box)
+        layout.addWidget(advanced_section)
 
         fit_button = QPushButton("Fit Spectrum")
         fit_button.setToolTip(
@@ -9606,11 +9648,46 @@ class MainWindow(QMainWindow):
         slice_fit_row.addLayout(slice_fit_spin_row)
         layout.addLayout(slice_fit_row)
 
+        # The fit's results as a table laid out like the peak table
+        # above -- one row per peak, same order, same shift/FWHM/eta
+        # columns -- plus what the fit produces. Real user request:
+        # "a sensible table, basically matching the results of the peak
+        # pick table but with the outputs". It was a line of
+        # "shift=...±..., fwhm=..." text per peak.
+        self.spectral_fit_table = QTableWidget(0, len(self._SPECTRAL_FIT_TABLE_COLUMNS))
+        self.spectral_fit_table.setHorizontalHeaderLabels(self._SPECTRAL_FIT_TABLE_COLUMNS)
+        # Sized to contents, not stretched: a value is never cut off to
+        # fit the panel -- if the panel is narrow, the table scrolls
+        # sideways instead. Word wrap off so "± 0.00012" stays on its
+        # own single line under its value.
+        self.spectral_fit_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.spectral_fit_table.horizontalHeader().setStretchLastSection(True)
+        self.spectral_fit_table.setWordWrap(False)
+        self.spectral_fit_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Taller than the peak table's cap: each row holds two lines.
+        self.spectral_fit_table.setMaximumHeight(220)
+        self.spectral_fit_table.setToolTip(
+            "Fitted values for the slice shown above, one row per peak in "
+            "the same order as the peak table, with 1-sigma uncertainties. "
+            "Area (%) is each peak's share of the total fitted area -- the "
+            "relative quantity, e.g. for a ratio of species. A value held "
+            "fixed during the fit is marked (fixed) and has no uncertainty.\n\n"
+            "Right-click to copy the table (tab-separated, pastes into a "
+            "spreadsheet). Export Fit Report writes every slice to CSV."
+        )
+        self.spectral_fit_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.spectral_fit_table.customContextMenuRequested.connect(self._on_spectral_fit_table_menu)
+        layout.addWidget(self.spectral_fit_table)
+
+        # One line under the table: fit quality, and any parameter that
+        # ended up against its bound.
         self.spectral_fit_params_label = QLabel("")
         self.spectral_fit_params_label.setWordWrap(True)
         self.spectral_fit_params_label.setToolTip(
-            "Fitted parameters (with 1-sigma uncertainties) for the "
-            "slice shown above, one line per peak."
+            "How well the slice shown above was fitted (RMSE and reduced "
+            "chi-squared of the residual), and any parameter that finished "
+            "at one of its bounds -- a sign that bound may be too tight."
         )
         layout.addWidget(self.spectral_fit_params_label)
 
@@ -9623,28 +9700,7 @@ class MainWindow(QMainWindow):
         )
         export_report_button.clicked.connect(self._on_export_fit_report_clicked)
         layout.addWidget(export_report_button)
-
-        layout.addStretch(1)
-        return tab
-
-    def _build_integration_subtab(self) -> QWidget:
-        """Region integration -- the peak-fitting-free alternative to
-        Peak Picking's own Fit Spectrum for producing a per-slice value
-        Fit Curve can use. Split out into its own sub-tab (previously
-        stacked directly under Peak Picking's own peak table/tuning
-        controls) since the two are alternative "step 1"s, not part of
-        the same flow -- explicit user feedback that the combined tab
-        held too much at once for a casual user to take in."""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.addWidget(self._build_region_box())
-
-        self.integration_results_label = QLabel("")
-        self.integration_results_label.setWordWrap(True)
-        layout.addWidget(self.integration_results_label)
-
-        layout.addStretch(1)
-        return tab
+        return section
 
     def _build_curve_fitting_subtab(self) -> QWidget:
         tab = QWidget()
@@ -9656,7 +9712,7 @@ class MainWindow(QMainWindow):
             "tab's right-click 'Fit Curve' action on a pseudo-2D row, "
             "and the Compare tab's Fit Curve (button or right-click) "
             "on a checked stack of 1D spectra -- not used by Fit "
-            "Spectrum, which lives in the Spectral Fitting sub-tab."
+            "Spectrum, which lives in the Quantify panel."
         )
         relax_form = QFormLayout(relax_box)
 
@@ -9667,7 +9723,7 @@ class MainWindow(QMainWindow):
         self.curve_fit_source_label.setWordWrap(True)
         self.curve_fit_source_label.setToolTip(
             "Fit Curve always fits the per-slice intensities produced by the "
-            "Spectral Fitting tab — it never re-fits peaks itself. This line "
+            "Quantify panel — it never re-fits peaks itself. This line "
             "names what is currently staged, so a stale or missing spectral "
             "fit is visible before you run anything."
         )
@@ -10313,7 +10369,7 @@ class MainWindow(QMainWindow):
 
         # **SCORE's report belongs with SCORE.** It used to be written
         # into `analysis_results_label`, which is built by
-        # `_build_peak_picking_subtab` and is that sub-tab's own results
+        # `_build_spectral_fit_section` and is that section's own results
         # display -- so running a resolution here printed its report on
         # a different tab, beside a peak table it explicitly does not
         # use. Reported directly: "why is the SCORE report in the peak
@@ -11298,7 +11354,7 @@ class MainWindow(QMainWindow):
             "into a real position axis (right-click -> Axis Units -> "
             "mm). For T2-by-integration across an imaging series, "
             "switch to mm here, then use Integration Regions on the "
-            "Spectral Fitting sub-tab as usual -- no separate workflow."
+            "Quantify panel as usual -- no separate workflow."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -11647,7 +11703,7 @@ class MainWindow(QMainWindow):
         return regions
 
     def _spectral_fitting_tab_active(self) -> bool:
-        """Whether the Spectral Fitting side tab is the one showing.
+        """Whether the Quantify side tab is the one showing.
 
         Peak triangles and shaded integration regions are annotations
         belonging to *that* tab's controls. Left on the Spectrum view
@@ -13749,11 +13805,11 @@ class MainWindow(QMainWindow):
         workflow, shared by a plain 1D spectrum (``entries`` is a
         single-item list), a pseudo-2D series (every slice), and a
         Compare-tab stack (every checked entry). Bounded to the
-        Integration Regions table's own regions when any are defined
-        (``fit_regions`` -- restricts which part of the spectrum the
-        fit itself considers, so unrelated signal elsewhere can't drag
-        it off) -- entirely optional, an empty region table fits the
-        whole spectrum exactly as before. Also optionally S/N-gated
+        Integration Regions table's own regions when any are defined and
+        :attr:`fit_within_regions_checkbox` is checked (``fit_regions`` --
+        restricts which part of the spectrum the fit itself considers,
+        so unrelated signal elsewhere can't drag it off); an empty region
+        table, or the box unchecked, fits the whole spectrum. Also optionally S/N-gated
         (:meth:`_read_sn_gating_kwargs`) -- once a peak's signal-to-
         noise (against a user-marked noise region) falls below the
         threshold across a series, its amplitude is fixed to zero
@@ -13773,9 +13829,10 @@ class MainWindow(QMainWindow):
         if not peak_defs:
             raise ValueError("Add at least one peak to fit.")
         prepared = [self._ensure_slice_info(s, i + 1) for i, s in enumerate(entries)]
-        fit_regions = self._read_region_defs() or None
+        regions = self._read_region_defs() or None
+        fit_regions = regions if self.fit_within_regions_checkbox.isChecked() else None
         sn_kwargs = self._read_sn_gating_kwargs()
-        amplitude_bound_regions = fit_regions if self.amplitude_bound_regions_checkbox.isChecked() else None
+        amplitude_bound_regions = regions if self.amplitude_bound_regions_checkbox.isChecked() else None
         seed_mode = self.seed_mode_combo.currentData()
         # Only meaningful for a real series -- a single 1D spectrum has
         # no other slice to take a lineshape from, and passing an
@@ -13814,7 +13871,7 @@ class MainWindow(QMainWindow):
         hundreds of slices, and a popup per slice would make the whole
         feature unusable at that scale."""
         fit_regions = self._read_region_defs()
-        if not fit_regions:
+        if not fit_regions or not self.fit_within_regions_checkbox.isChecked():
             return
         affected: dict[int, int] = {}
         for result in results:
@@ -13898,7 +13955,7 @@ class MainWindow(QMainWindow):
         self.view_slice_fit_spin.blockSignals(True)
         self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.blockSignals(False)
-        self.spectral_fit_params_label.setText("")
+        self._clear_spectral_fit_report()
         self.integration_results_label.setText(
             f"Integrated {len(results)} slice(s) across {n_regions} region(s) -- "
             f"ready for Fit Curve (Value source: Integrated region)."
@@ -15525,7 +15582,7 @@ class MainWindow(QMainWindow):
         if not results:
             return (
                 "No measured intensities yet — run Fit Spectrum or Integrate "
-                "Regions on the Spectral Fitting tab first. Fit Curve fits those "
+                "Regions on the Quantify panel first. Fit Curve fits those "
                 "results; it never re-fits peaks itself."
             )
         n_peaks = self._peak_count_in(results)
@@ -15534,7 +15591,7 @@ class MainWindow(QMainWindow):
         return (
             f"Will fit: {n_peaks} {noun}{'s' if n_peaks != 1 else ''} × {len(results)} "
             f"slice{'s' if len(results) != 1 else ''}, from the last {kind} on the "
-            f"Spectral Fitting tab."
+            f"Quantify panel."
         )
 
     def _refresh_staged_measurement_label(self) -> None:
@@ -15872,21 +15929,108 @@ class MainWindow(QMainWindow):
         self._display_slice_fit(result, switch_tab=True)
 
     @staticmethod
-    def _format_fit_params(per_peak: list[dict], peak_labels: list[str]) -> str:
-        lines = []
-        for label, peak in zip(peak_labels, per_peak):
-            parts = [
-                f"{name}={value:.4g}±{error:.2g}"
-                for name, value, error in zip(peak["names"], peak["params"], peak["errors"])
-            ]
-            lines.append(f"{label}: " + ", ".join(parts))
+    def _format_value_error(value: float, error: float | None, fixed: bool = False) -> str:
+        """``1.502 ± 0.0003`` -- the error to 2 significant figures and
+        the value to the same decimal place, so the digits shown are the
+        ones the uncertainty supports. Falls back to 4 significant
+        figures when there is no usable error."""
+        if fixed:
+            return f"{value:.4g} (fixed)"
+        if error is None or not np.isfinite(error) or error <= 0:
+            return f"{value:.4g}"
+        decimals = max(0, 1 - int(np.floor(np.log10(error))))
+        if abs(value) >= 1e5 or (value != 0 and abs(value) < 1e-4):
+            return f"{value:.4g} ± {error:.2g}"
+        return f"{value:.{decimals}f} ± {error:.{decimals}f}"
+
+    def _fill_spectral_fit_table(self, result: dict, per_peak: list[dict]) -> None:
+        """One row per peak: shift, FWHM and eta as in the peak table,
+        then amplitude, area and each area's share of the total."""
+        table = self.spectral_fit_table
+        table.setRowCount(len(per_peak))
+        integrals = result.get("integrals")
+        integral_errors = result.get("integral_errors")
+        integrals_norm = result.get("integrals_norm")
+        for row, peak in enumerate(per_peak):
+            values = dict(zip(peak["names"], peak["params"]))
+            errors = dict(zip(peak["names"], peak["errors"]))
+            fixed = dict(zip(peak["names"], peak["fixed"]))
+            cells = []
+            for name in ("shift", "fwhm", "eta", "amplitude"):
+                if name in values:
+                    cells.append(self._format_value_error(
+                        float(values[name]), float(errors[name]), bool(fixed[name])))
+                else:
+                    cells.append("—")  # Gaussian/Lorentzian: no eta
+            if integrals is not None and row < len(integrals):
+                area_error = (float(integral_errors[row])
+                              if integral_errors is not None and row < len(integral_errors) else None)
+                cells.append(self._format_value_error(float(integrals[row]), area_error))
+            else:
+                cells.append("—")
+            if integrals_norm is not None and row < len(integrals_norm):
+                cells.append(f"{float(integrals_norm[row]):.1f}")
+            else:
+                cells.append("—")
+            for column, text in enumerate(cells):
+                # The uncertainty on its own line: "value ± error" in one
+                # line does not fit six columns in a side panel.
+                item = QTableWidgetItem(text.replace(" ± ", "\n± ").replace(" (fixed)", "\n(fixed)"))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, column, item)
+        # Numbered like the peak table's rows, so row n here is row n there.
+        table.setVerticalHeaderLabels([str(i + 1) for i in range(len(per_peak))])
+        table.resizeRowsToContents()
+
+    @staticmethod
+    def _format_fit_summary(result: dict) -> str:
+        quality = result.get("fit_quality") or {}
+        parts = []
+        if "rmse" in quality:
+            parts.append(f"RMSE {quality['rmse']:.3g}")
+        if "reduced_chi2" in quality:
+            parts.append(f"reduced χ² {quality['reduced_chi2']:.3g}")
+        text = "  ·  ".join(parts)
+        warnings = result.get("warnings") or []
+        if warnings:
+            text += ("\n" if text else "") + "At a bound: " + "; ".join(warnings)
+        return text
+
+    def _clear_spectral_fit_report(self) -> None:
+        self.spectral_fit_table.setRowCount(0)
+        self.spectral_fit_params_label.setText("")
+
+    def _spectral_fit_table_as_tsv(self) -> str:
+        """The table as tab-separated text, header included -- what a
+        spreadsheet expects on paste."""
+        table = self.spectral_fit_table
+        # One line per cell in the copy, so a spreadsheet gets one row
+        # per peak: headers and values rejoined onto a single line.
+        header = ["Peak"] + [table.horizontalHeaderItem(c).text().replace("\n", " ")
+                             for c in range(table.columnCount())]
+        lines = ["\t".join(header)]
+        for row in range(table.rowCount()):
+            label = table.verticalHeaderItem(row)
+            cells = [label.text() if label else str(row + 1)]
+            for column in range(table.columnCount()):
+                item = table.item(row, column)
+                cells.append(item.text().replace("\n", " ") if item else "")
+            lines.append("\t".join(cells))
         return "\n".join(lines)
+
+    def _on_spectral_fit_table_menu(self, pos) -> None:
+        menu = QMenu(self.spectral_fit_table)
+        copy_action = menu.addAction("Copy Table")
+        copy_action.setEnabled(self.spectral_fit_table.rowCount() > 0)
+        chosen = menu.exec(self.spectral_fit_table.viewport().mapToGlobal(pos))
+        if chosen is copy_action:
+            QApplication.clipboard().setText(self._spectral_fit_table_as_tsv())
 
     @staticmethod
     def _build_fit_report_csv(slice_results: list[dict], relaxation_results: list[dict] | None = None) -> str:
         """Fitting-wizard roadmap item: "a more readable, exportable
         fit report." A plain in-app label only ever shows one slice's
-        own spectral-fit parameters at a time (:attr:`spectral_fit_params_label`)
+        own spectral-fit parameters at a time (:attr:`spectral_fit_table`)
         -- nothing aggregates across a whole pseudo-2D series, and
         nothing writes to a file at all. This builds one CSV (a
         genuinely readable table -- opens directly in Excel/Origin/
@@ -16011,7 +16155,7 @@ class MainWindow(QMainWindow):
     def _display_slice_fit(self, result: dict, switch_tab: bool = False) -> None:
         """Draw one spectral-fit result (data, total fit, and each
         peak's own component) into the Spectral Fit canvas, and its
-        numeric parameters into ``spectral_fit_params_label`` --
+        numeric parameters into ``spectral_fit_table`` --
         shared by browsing slices via ``view_slice_fit_spin`` and by
         ``_silo_other_canvas_tabs`` restoring a reselected
         spectrum's already-computed fit."""
@@ -16025,7 +16169,8 @@ class MainWindow(QMainWindow):
             components=result.get("components"), peak_labels=peak_labels, title=title,
             spectrum=result.get("slice"),
         )
-        self.spectral_fit_params_label.setText(self._format_fit_params(per_peak, peak_labels))
+        self._fill_spectral_fit_table(result, per_peak)
+        self.spectral_fit_params_label.setText(self._format_fit_summary(result))
         if switch_tab:
             self.canvas_tabs.setCurrentWidget(self.spectral_fit_canvas)
 
@@ -16173,7 +16318,7 @@ class MainWindow(QMainWindow):
         self.curve_fit_summary_label.setText("")
         self.dosy_results_label.setText("")
         self.gradient_calibration_label.setText("")
-        self.spectral_fit_params_label.setText("")
+        self._clear_spectral_fit_report()
 
         state = spectrum.metadata.raw.get("analysis_state")
         if state is None:
@@ -16713,7 +16858,7 @@ class MainWindow(QMainWindow):
             self._display_slice_fit(slice_fit_results[0], switch_tab=False)
         else:
             self.spectral_fit_canvas.clear()
-            self.spectral_fit_params_label.setText("")
+            self._clear_spectral_fit_report()
 
         # The Compare tab plots whatever is multi-selected in the
         # Spectra list, not this single spectrum -- it has no

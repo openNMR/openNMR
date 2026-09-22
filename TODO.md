@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-21)
 
-**2162 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
+**2167 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -44,6 +44,27 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Icon-only toolbar, Quantify as one page, and the plan for the rest (2026-09-22)
+
+User, after living with the first toolbar: rename and regroup the modes, arrows under the icons, "trial removing the words", and merge peak picking and integration onto one page with the fit at the bottom.
+
+### Built
+
+* **Icons only, arrows centred underneath.** Each toolbar button is now a `ModeButton` (`gui/widgets/mode_button.py`): the icon on top raises the panel, a small arrow below opens the menu. `QToolButton`'s own split mode puts the arrow beside the icon, which is what made menu buttons wider and off-centre. A button with no menu keeps an empty arrow slot, so all icons sit at one height. Names live on as tooltips and accessible names.
+* **Verbs throughout: Load, Process, Quantify, Analyse, Compare.** "Fit Spectrum" -> **Quantify** (user: "the focus is more on the peak picking and integration"); "Fit Curves" -> **Analyse** (British spelling, the user's). The Window menu's Ctrl+1..5 entries now use the same names, which settles the mismatch left open by the previous round. The side tab behind Quantify is renamed to match; the one behind Analyse is still called "Analysis" internally.
+* **Quantify is one page, no sub-panels and no dropdown.** Top to bottom: Peaks, Integration Regions, then a **Spectral Fitting** section under its own bold heading and rule -- region options, series options, Advanced, Fit Spectrum, the slice viewer and the report. `spectral_fitting_sub_tabs` no longer exists.
+* **The fit uses the regions only as two visible boxes say.** Found while doing this: *any* defined integration region silently restricted the spectral fit (`_fit_peaks` passed the region table as `fit_regions` unconditionally). With peaks and regions on one page that would surprise people, so it is now **"Fit only inside the regions"** (on by default, preserving the old behaviour) beside **"Bound peak amplitudes by region integrals"** (moved out of Advanced). The two are independent; previously the cap could only apply when the restriction did. The near-region-edge warning now only fires when the fit was actually restricted.
+* **The fit report is a table.** User: *"a sensible table, basically matching the results of the peak pick table but with the outputs."* It was a line of `shift=...±..., fwhm=...` text per peak. `spectral_fit_table` has the peak table's Shift/FWHM/Eta columns in the same order, then **Amplitude, Area and Area (%)** -- the last being each peak's share of the total fitted area, the relative number a quantification usually wants. Rows are numbered like the peak table. Each cell shows the value with its 1-sigma uncertainty underneath, rounded so the value carries only the digits its uncertainty supports (`_format_value_error`); a fixed parameter reads "(fixed)". Columns size to their contents and the table scrolls sideways rather than truncating -- a first version with stretched columns cut every value off at side-panel width. Right-click > Copy Table gives tab-separated text, one line per peak, for a spreadsheet. Fit quality (RMSE, reduced chi-squared) and any at-bound warnings sit on one line underneath.
+
+### Agreed plan, not built yet (in order)
+
+1. **Settings dialog** (not a panel), from a gear at the right-hand end of the toolbar and Cmd+, (openNMR > Settings... on macOS). **Imaging moves out of Analyse into it** -- its only control is the max-gradient box. Plot Style, series palette and default units are candidates to follow.
+2. **Open experiments visible outside Load**: in **Load, Compare and Analyse**. A widget has one parent, so the plan is a resizable, collapsible list at the top of the left panel, shown in those three modes, with each mode's panel beneath.
+3. **Simulations mode**, a sixth toolbar button (placeholder computer icon until the user draws one): PFG planning (`leonmr.sim_diffusion`), Bloch/shaped pulses (`leonmr/bloch_sim.py`), CSA and quadrupolar lineshape simulation on Euan's `notebook/simulations`. Simulated curves probably need a "Simulation" plot view.
+4. **CSA: fitting and simulation are split** (user agreed). Fitting belongs with spectral fitting in Quantify, simulation in Simulations, sharing the model code. **The CSA fit also needs a clickable starting point** -- at present the only way in is filling the sites table and pressing Fit; picking delta_iso (and the span edges) off the plot, as Pick from Plot does for peaks, is the obvious shape.
+5. **Plot views as icons in a sidebar** -- the user wants to revisit how the view strip works. Waits on icons for FID, Processing Preview, Spectrum, Spectral Fit, Fit, Compare.
+6. Idea, not decided: **fit results populating the tables above** (fitted shift/FWHM/area back into the peak table, fitted areas beside each region), so the report is not the only place results appear.
 
 ## A workflow toolbar replaces the tab strips (2026-09-21)
 
