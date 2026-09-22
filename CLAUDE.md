@@ -38,7 +38,10 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 ```
 
 - `tests/conftest.py` sets Qt to offscreen and pins loads to run
-  synchronously; no display is needed.
+  synchronously; no display is needed. It also deletes every window a
+  test leaves open, after each test -- without that, the suite's
+  several hundred `MainWindow`s leak to ~13 GB and GitHub's runner kills
+  the job. Tests need not close their own windows.
 - Real instrument data lives in `test_data/`, which is **gitignored**.
   Tests that need it skip when it is absent, so a fresh clone runs the
   suite with those skipped. A new real-data test must do the same
