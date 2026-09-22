@@ -12950,6 +12950,10 @@ def _bruker_1d_folder(tmp_path, name="1"):
     """A minimal loadable Bruker 1D experiment, copied from the real
     test data so every reader path behaves as it does in use."""
     source = os.path.join("test_data", "Bruker Example Data")
+    # test_data is gitignored, so a fresh clone has none: skip, like
+    # every other real-data test, rather than fail.
+    if not os.path.isdir(source):
+        pytest.skip(f"needs {source}")
     matches = MainWindow._scan_for_spectra(source)
     assert matches, "expected a loadable Bruker experiment in test_data"
     target = tmp_path / name
