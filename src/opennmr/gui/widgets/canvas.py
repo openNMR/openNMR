@@ -268,6 +268,43 @@ class _Toolbar(NavigationToolbar2QT):
 
     toolitems = [item for item in NavigationToolbar2QT.toolitems if item[0] not in ("Subplots", "Customize")]
 
+    def home(self, *args) -> None:
+        """The house icon resets through :meth:`MplCanvas.reset_view`,
+        like View > Home. matplotlib's own home only replays its
+        navigation stack, which the canvas's scroll-zoom and drag-pan
+        never write to -- so after either, the house icon did nothing
+        (reported on the FID and Processing views, true of every plot)."""
+        owner = self.parent()
+        if isinstance(owner, MplCanvas):
+            owner.reset_view()
+        else:
+            super().home(*args)
+
+    def pan(self, *args) -> None:
+        super().pan(*args)
+        self._notify_mode_changed()
+
+    def zoom(self, *args) -> None:
+        super().zoom(*args)
+        self._notify_mode_changed()
+
+    def _notify_mode_changed(self) -> None:
+        owner = self.parent()
+        if isinstance(owner, MplCanvas):
+            owner._on_navigation_mode_changed()
+
+    def press_pan(self, event) -> None:
+        owner = self.parent()
+        if isinstance(owner, MplCanvas):
+            owner.note_natural_view()
+        super().press_pan(event)
+
+    def press_zoom(self, event) -> None:
+        owner = self.parent()
+        if isinstance(owner, MplCanvas):
+            owner.note_natural_view()
+        super().press_zoom(event)
+
     def save_figure(self, *args) -> None:
         """Overridden so a saved figure is never silently missing
         points the live view dropped purely for faster interactive
@@ -478,6 +515,11 @@ class MplCanvas(QWidget):
     #: or the crosshair, so MainWindow can keep the matching menu item
     #: (and every other canvas) in step. Emitted on a real change only.
     measurementModeChanged = Signal(bool)
+    #: Click-to-pick / drag-to-select switched on or off -- including
+    #: *by the canvas*, when another interaction mode takes over (see
+    #: _release_other_modes), so the button that started it can uncheck.
+    pickModeChanged = Signal(bool)
+    regionSelectModeChanged = Signal(bool)
     crosshairEnabledChanged = Signal(bool)
 
     #: The user picked a different result to show from this canvas's
@@ -610,6 +652,10 @@ class MplCanvas(QWidget):
         layout.addWidget(self.canvas)
 
         self._pan_start = None  # (x_pixel, y_pixel, xlim, ylim) while dragging
+        # The view a fresh plot drew, {Axes: (xlim, ylim)} -- what Home
+        # returns to. Recorded lazily, the first time the view is about
+        # to change (see note_natural_view); cleared by _clear_figure.
+        self._home_limits = None
         self._legend_visible = False
         self._legend_loc = "best"
         # --- Legend appearance ------------------------------------
@@ -964,15 +1010,31 @@ class MplCanvas(QWidget):
     def set_pick_mode(self, enabled: bool) -> None:
         """Toggle click-to-pick: while on, a plain left-click emits
         :attr:`peakPicked` with the clicked x-data value instead of
-        starting a pan drag."""
+        starting a pan drag.
+
+        One interaction mode at a time (explicit user request): turning
+        this on releases Measure, Select Region and the toolbar's
+        pan/zoom -- with pan still on, the toolbar consumed every click
+        and picking silently did nothing."""
+        enabled = bool(enabled)
+        changed = enabled != self._pick_mode
+        if enabled:
+            self._release_other_modes(keep="pick")
         self._pick_mode = enabled
         self._refresh_cursor()
+        if changed:
+            self.pickModeChanged.emit(enabled)
 
     def set_region_select_mode(self, enabled: bool) -> None:
         """Toggle drag-to-select-a-region: while on, a left-click-drag
         emits :attr:`regionSelected` with the dragged (lo, hi) x-range
         on release, instead of starting a pan drag -- the range
-        equivalent of :func:`set_pick_mode`'s single click."""
+        equivalent of :func:`set_pick_mode`'s single click. Releases the
+        other interaction modes, as :meth:`set_pick_mode` does."""
+        enabled = bool(enabled)
+        changed = enabled != self._region_select_mode
+        if enabled:
+            self._release_other_modes(keep="region")
         self._region_select_mode = enabled
         if not enabled:
             self._clear_region_select_patch()
@@ -982,6 +1044,39 @@ class MplCanvas(QWidget):
         # _refresh_cursor deliberately leaves the shape alone while a
         # drag is in flight, so refreshing first would be a no-op and
         # the cross would stay behind after the mode was switched off.
+        self._refresh_cursor()
+        if changed:
+            self.regionSelectModeChanged.emit(enabled)
+
+    def _release_other_modes(self, keep: str) -> None:
+        """Switch off every interaction mode except ``keep`` -- one of
+        ``"pick"``, ``"region"``, ``"measure"``, ``"nav"`` (the toolbar's
+        pan/zoom). Only the most recently chosen mode stays active
+        (explicit user request), so a click always means one thing.
+
+        The Crosshair is a display overlay, not a click mode, and is
+        left alone here; it is exclusive with Measure only (see
+        :meth:`set_measurement_mode` / :meth:`set_crosshair_enabled`)."""
+        if keep != "pick" and self._pick_mode:
+            self.set_pick_mode(False)
+        if keep != "region" and self._region_select_mode:
+            self.set_region_select_mode(False)
+        if keep != "measure" and self._measurement_mode:
+            self.set_measurement_mode(False)
+        if keep != "nav" and self.toolbar.mode:
+            # The base-class toggles, not _Toolbar's overrides: this is
+            # the canvas releasing the tool, not the user choosing one.
+            if self.toolbar.mode.name == "PAN":
+                NavigationToolbar2QT.pan(self.toolbar)
+            elif self.toolbar.mode.name == "ZOOM":
+                NavigationToolbar2QT.zoom(self.toolbar)
+
+    def _on_navigation_mode_changed(self) -> None:
+        """The user picked the toolbar's pan or zoom tool: release the
+        click modes, which that tool would otherwise leave armed but
+        unreachable."""
+        if self.toolbar.mode:
+            self._release_other_modes(keep="nav")
         self._refresh_cursor()
 
     def _add_toolbar_toggle(self, text: str, tooltip: str, slot, checked: bool) -> QToolButton:
@@ -1007,6 +1102,10 @@ class MplCanvas(QWidget):
         ``ax.lines`` for the export/unit-switch paths that walk it."""
         enabled = bool(enabled)
         changed = enabled != self._crosshair_enabled
+        if enabled and self._measurement_mode:
+            # Crosshair and Measure are exclusive (explicit user
+            # request): the most recently chosen one wins.
+            self.set_measurement_mode(False)
         self._crosshair_enabled = enabled
         self._sync_toggle(getattr(self, "_crosshair_button", None), enabled)
         if not enabled:
@@ -1025,6 +1124,10 @@ class MplCanvas(QWidget):
         annotation on the view, not part of the plot."""
         enabled = bool(enabled)
         changed = enabled != self._measurement_mode
+        if enabled:
+            self._release_other_modes(keep="measure")
+            if self._crosshair_enabled:
+                self.set_crosshair_enabled(False)
         self._measurement_mode = enabled
         self._sync_toggle(getattr(self, "_measure_button", None), enabled)
         self._refresh_cursor()
@@ -1147,6 +1250,7 @@ class MplCanvas(QWidget):
         would be a cursor that sticks only on certain regions, which is
         exactly the symptom this is fixing.
         """
+        self.note_natural_view()
         try:
             self._dispatch_scroll(event)
         finally:
@@ -1906,6 +2010,7 @@ class MplCanvas(QWidget):
         # destroyed. Same choke point, same reasoning as the crosshair
         # teardown above.
         self._last_cursor_shape = None
+        self._home_limits = None
         self._cancel_navigation_drag()
         self.figure.clear()
 
@@ -2026,6 +2131,7 @@ class MplCanvas(QWidget):
         )
         self._apply_current_axis_style()
         if preserve_view:
+            self.note_natural_view()
             self.ax.set_xlim(xlim)
             self.ax.set_ylim(ylim)
             self._restore_projection_intensity_limits(projection_limits)
@@ -2051,9 +2157,42 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None:
             self._redraw_contour(preserve_view=False)
             return
-        self.toolbar.home()
+        live = set(self.figure.axes)
+        if self._home_limits and any(ax in live for ax in self._home_limits):
+            for ax, (xlim, ylim, auto_x, auto_y) in self._home_limits.items():
+                if ax not in live:
+                    continue
+                # An axis the plot left on autoscale is re-autoscaled,
+                # not pinned to the number seen when recording: that
+                # number can be provisional (matplotlib finishes
+                # autoscaling at render, after later artists join), and
+                # pinning it cut the baseline off a processing preview.
+                if auto_x or auto_y:
+                    ax.set_autoscalex_on(auto_x)
+                    ax.set_autoscaley_on(auto_y)
+                    ax.relim(visible_only=True)
+                    ax.autoscale_view(scalex=auto_x, scaley=auto_y)
+                if not auto_x:
+                    ax.set_xlim(xlim)
+                if not auto_y:
+                    ax.set_ylim(ylim)
+        else:
+            NavigationToolbar2QT.home(self.toolbar)
         self._apply_layout()
         self.canvas.draw_idle()
+
+    def note_natural_view(self) -> None:
+        """Record every Axes' limits as the view Home returns to --
+        once per fresh plot, the first time its view is about to change
+        (a scroll-zoom, a drag-pan, a toolbar zoom/pan) or a redraw is
+        about to re-apply a zoom the user already had.
+
+        Public for callers outside the canvas that redraw and then put
+        a kept zoom back themselves: call this between the two."""
+        if self._home_limits is None and self.figure.axes:
+            self._home_limits = {
+                ax: (ax.get_xlim(), ax.get_ylim(), ax.get_autoscalex_on(), ax.get_autoscaley_on())
+                for ax in self.figure.axes}
 
     def _on_press(self, event) -> None:
         # getattr, not a plain attribute access -- a real matplotlib
@@ -2113,6 +2252,7 @@ class MplCanvas(QWidget):
                     event.inaxes, float(event.xdata), float(event.ydata)
                 )
             return
+        self.note_natural_view()
         self._pan_start = (event.x, event.y, event.inaxes.get_xlim(), event.inaxes.get_ylim(), event.inaxes)
 
     def _on_motion(self, event) -> None:
@@ -3990,6 +4130,7 @@ class MplCanvas(QWidget):
         """Put back what :meth:`processing_preview_limits` captured."""
         if not limits:
             return
+        self.note_natural_view()  # the fresh draw's own view, before the kept zoom
         axes = self.figure.axes
         for ax, (xlim, ylim) in zip(axes[:2], limits):
             ax.set_xlim(xlim)
@@ -4424,7 +4565,10 @@ class MplCanvas(QWidget):
         self._apply_layout()
         self.canvas.draw_idle()
 
-    def show_1d_heatmap(self, spectra: list[NMRSpectrum]) -> None:
+    def show_1d_heatmap(self, spectra: list[NMRSpectrum], normalize: bool = True,
+                        row_labels: list[str] | None = None,
+                        colorbar_label: str | None = None,
+                        first_row_on_top: bool = False) -> None:
         """Plot several 1D spectra (a pseudo-2D series' own slices) as
         rows of a heatmap -- real roadmap ask: "pseudo-2D/stacked-1D
         data should be plottable as either a contour or a heatmap."
@@ -4434,9 +4578,24 @@ class MplCanvas(QWidget):
 
         Not a :attr:`_contour_spectrum` either, same reasoning as
         :meth:`show_2d_overlay` -- this is several interpolated-onto-
-        one-axis 1D traces, not one spectrum's own 2D array."""
+        one-axis 1D traces, not one spectrum's own 2D array.
+
+        Used by the Compare tile's "Heatmap" layout too, which passes
+        ``normalize`` (its Normalize choice), ``row_labels`` (one per
+        row -- every row labelled up to 15, an even subset beyond),
+        ``colorbar_label`` (a colour bar is drawn whenever one is given:
+        a heatmap without a scale cannot be read quantitatively) and
+        ``first_row_on_top`` (so rows read in the list's own order)."""
         self.clear()  # already leaves self.ax as a fresh, single subplot
-        plotting.plot_1d_heatmap(spectra, ax=self.ax, fig=self.figure)
+        tick_mode = "none"
+        if row_labels:
+            tick_mode = "all" if len(row_labels) <= 15 else "auto"
+        plotting.plot_1d_heatmap(
+            spectra, ax=self.ax, fig=self.figure, normalize=normalize,
+            y_values=row_labels, y_ticks=tick_mode,
+            colorbar=colorbar_label is not None, colorbar_label=colorbar_label)
+        if first_row_on_top:
+            self.ax.invert_yaxis()
         self._apply_view_options()
         # Crosshairs here too: reading a value off this plot is
         # exactly what it is for (heatmap).
@@ -4708,6 +4867,7 @@ class MplCanvas(QWidget):
         self._apply_view_options()
         self._apply_layout()
         if limits:
+            self.note_natural_view()
             self.ax.set_xlim(limits[0])
             self.ax.set_ylim(limits[1])
         # Crosshairs here too: a DOSY map is read off the plot.

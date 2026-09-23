@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction, QActionGroup, QFont, QFontDatabase, QIcon, QKeySequence, QPalette, QPixmap,
 )
@@ -101,6 +101,74 @@ _RESOURCES_DIR = os.path.join(os.path.dirname(__file__), "resources")
 #: a longer drop-down is harder to use, not more capable. Anything
 #: beyond it can still be typed.
 _QUAD_NUCLIDE_CHOICES = 24
+
+
+class _ExperimentDropList(QListWidget):
+    """The Compare list, accepting experiments dragged in from the Open
+    experiments list (explicit user request).
+
+    Emits :attr:`experimentsDropped` with the dragged session rows and
+    the list row they were dropped on (-1 = after the last). The rows
+    are read from the drag's own item-model payload rather than from the
+    source list's selection, so what lands is exactly what was dragged.
+    Drops that did not come from another list (files from the desktop,
+    a drag started in this list) are refused."""
+
+    experimentsDropped = Signal(list, int)
+    _MIME = "application/x-qabstractitemmodeldatalist"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+
+    def _acceptable(self, event) -> bool:
+        return event.mimeData().hasFormat(self._MIME) and event.source() is not self
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        if self._acceptable(event):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        if self._acceptable(event):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        if not self._acceptable(event):
+            event.ignore()
+            return
+        rows = self.rows_from_mime(event.mimeData())
+        at = self.indexAt(event.position().toPoint()).row()
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        if rows:
+            self.experimentsDropped.emit(rows, at)
+
+    @classmethod
+    def rows_from_mime(cls, mime) -> list[int]:
+        """Source rows in a QListWidget drag payload, in order, once each."""
+        from PySide6.QtCore import QDataStream, QIODevice
+        # Held in a name, not passed inline: QDataStream keeps a pointer
+        # into the QByteArray, and a temporary is freed by Python while
+        # the stream still reads from it (a segfault, not an exception).
+        payload = mime.data(cls._MIME)
+        stream = QDataStream(payload, QIODevice.OpenModeFlag.ReadOnly)
+        rows: list[int] = []
+        while not stream.atEnd():
+            row, _column, n_roles = stream.readInt32(), stream.readInt32(), stream.readInt32()
+            for _ in range(n_roles):
+                stream.readInt32()
+                stream.readQVariant()
+            if row not in rows:
+                rows.append(row)
+        return rows
 
 
 def _launcher_icon(name: str) -> QIcon:
@@ -186,6 +254,9 @@ _ZERO_FILL_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        # Compare entries the user dragged in from Open experiments --
+        # kept through selection-driven rebuilds of the Compare list.
+        self._compare_pinned_entries: list[tuple[int, int | None]] = []
         # Arial (falling back gracefully if it isn't installed), not
         # matplotlib's own DejaVu Sans -- explicit user request: "add
         # Arial as the default font, not the unpleasant matplotlib
@@ -514,6 +585,8 @@ class MainWindow(QMainWindow):
         for _canvas in self._measurement_canvases():
             _canvas.measurementModeChanged.connect(self._on_canvas_measurement_mode_changed)
             _canvas.crosshairEnabledChanged.connect(self._on_canvas_crosshair_changed)
+        self.canvas.pickModeChanged.connect(self._on_canvas_pick_mode_changed)
+        self.canvas.regionSelectModeChanged.connect(self._on_canvas_region_select_mode_changed)
 
         # Every canvas, not just the Spectrum one: a label falling off
         # the figure is worth saying so wherever it happens, and each
@@ -1599,6 +1672,11 @@ class MainWindow(QMainWindow):
 
         self.spectrum_list = QListWidget()
         self.spectrum_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # A drag source for the Compare list (explicit user request) --
+        # copy only: dragging out never removes anything from here.
+        self.spectrum_list.setDragEnabled(True)
+        self.spectrum_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.spectrum_list.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.spectrum_list.setToolTip(
             "Ctrl/Cmd-click (or Shift-click) to select several spectra "
             "and compare them on the Compare tile."
@@ -1720,13 +1798,18 @@ class MainWindow(QMainWindow):
         self.compare_status_label.setWordWrap(True)
         layout.addWidget(self.compare_status_label)
 
-        self.compare_list = QListWidget()
+        self.compare_list = _ExperimentDropList()
+        self.compare_list.experimentsDropped.connect(self._on_experiments_dropped_on_compare)
         self.compare_list.setToolTip(
             "The spectra currently in this comparison -- either "
             "manually multi-selected 1D spectra, or every slice of a "
             "single selected pseudo-2D spectrum. Uncheck one to drop "
             "it from the plot; select a row and use Move Up/Down to "
-            "change the stack order. Right-click for Fit Curve."
+            "change the stack order. Right-click for Fit Curve.\n\n"
+            "Drag experiments here from the Open experiments list to add "
+            "them (dropped where you release; a pseudo-2D series adds all "
+            "its slices). Dragged-in entries stay when the Open "
+            "experiments selection changes."
         )
         # This list never actually holds keyboard focus (rows are set
         # current programmatically, e.g. after a rebuild, not by the
@@ -1777,7 +1860,13 @@ class MainWindow(QMainWindow):
         compare_form = QFormLayout()
 
         self.layout_mode_combo = QComboBox()
-        self.layout_mode_combo.addItems(["Stacked", "Superimposed"])
+        self.layout_mode_combo.addItems(["Stacked", "Superimposed", "Heatmap"])
+        self.layout_mode_combo.setToolTip(
+            "Stacked: one panel per spectrum. Superimposed: all on one axis.\n"
+            "Heatmap: one row per spectrum, colour = intensity, rows in the "
+            "list's order (top first). Every row is interpolated onto the ppm "
+            "range all the checked spectra share; Normalize sets what the "
+            "colour scale means.")
         self.layout_mode_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
         compare_form.addRow("Layout:", self.layout_mode_combo)
 
@@ -2754,15 +2843,8 @@ class MainWindow(QMainWindow):
         # would otherwise leave the Compare list's stored indices
         # silently pointing at the wrong spectrum (removing one
         # spectrum doesn't necessarily fire itemSelectionChanged, if
-        # the set of *selected* items didn't itself change) -- rebuild
-        # from scratch rather than try to renumber it in place.
-        rows = self._selected_rows()
-        if len(rows) > 1:
-            self._populate_compare_list(rows)
-            self._refresh_compare_view()
-        else:
-            self.compare_list.clear()
-            self._update_compare_tab_visibility()
+        # the set of *selected* items didn't itself change).
+        self._after_session_row_removed(row)
 
     def _on_clear_clicked(self) -> None:
         self.session.clear()
@@ -2784,6 +2866,7 @@ class MainWindow(QMainWindow):
         self._update_fit_tab_visibility(None)
         self._update_processing_preview_tab_visibility(None)
         self.compare_status_label.setText("Select at least two 1D spectra to compare.")
+        self._compare_pinned_entries = []
         self.compare_list.clear()
         self._update_compare_tab_visibility()
         self.peak_table.setRowCount(0)
@@ -2916,6 +2999,7 @@ class MainWindow(QMainWindow):
         elif chosen is remove_action:
             self.session.remove(index)
             self.spectrum_list.takeItem(index)
+            self._after_session_row_removed(index)
 
     def _set_nucleus(self, index: int, nucleus: str) -> None:
         """Apply a nucleus override and refresh the UI to match --
@@ -4751,6 +4835,10 @@ class MainWindow(QMainWindow):
         n = len(self.session)
         rows = [r for r in rows if 0 <= r < n]
         entries = [(r, None) for r in rows]
+        # Dragged-in entries are the user's own additions, not a
+        # reflection of the selection: keep them (see
+        # _on_experiments_dropped_on_compare).
+        entries += [e for e in self._compare_pinned_entries if e not in entries]
         self._rebuild_compare_list(entries)
 
     def _populate_compare_list_from_pseudo2d(self, row: int, spectrum) -> None:
@@ -4761,9 +4849,16 @@ class MainWindow(QMainWindow):
         multi-select)."""
         n_slices = spectrum.data.shape[0]
         entries = [(row, slice_index) for slice_index in range(1, n_slices + 1)]
+        # A fresh "look at this series" replaces the list, dragged-in
+        # entries included.
+        self._compare_pinned_entries = []
         self._rebuild_compare_list(entries, preserve_previous=False)
 
-    def _rebuild_compare_list(self, entries: list[tuple[int, int | None]], preserve_previous: bool = True) -> None:
+    def _rebuild_compare_list(self, entries: list[tuple[int, int | None]], preserve_previous: bool = True,
+                              order: list | None = None) -> None:
+        """``order``, if given, is the exact row order to use (a drop
+        at a chosen position); otherwise rows already listed keep their
+        place and new ones go at the end."""
         previous_checked = {}
         previous_order = []
         previous_current_entry = None
@@ -4777,7 +4872,11 @@ class MainWindow(QMainWindow):
             if current_item is not None:
                 previous_current_entry = current_item.data(Qt.ItemDataRole.UserRole)
         entries_set = set(entries)
-        new_order = [e for e in previous_order if e in entries_set] + [e for e in entries if e not in previous_order]
+        if order is not None:
+            new_order = [e for e in order if e in entries_set]
+        else:
+            new_order = ([e for e in previous_order if e in entries_set]
+                         + [e for e in entries if e not in previous_order])
 
         self.compare_list.blockSignals(True)
         self.compare_list.clear()
@@ -4805,6 +4904,61 @@ class MainWindow(QMainWindow):
             self.compare_list.setCurrentRow(-1)
         self.compare_list.blockSignals(False)
         self._update_compare_tab_visibility()
+
+    def _on_experiments_dropped_on_compare(self, rows: list[int], at: int = -1) -> None:
+        """Add experiments dragged from the Open experiments list to the
+        Compare list, at the row they were dropped on (``-1``: the end).
+
+        A 1D or genuine-2D experiment is one entry; a pseudo-2D series
+        adds every slice, as selecting it alone does. Entries already
+        listed stay where they are (no duplicates). Added entries are
+        checked and *pinned*: they survive the selection-driven rebuilds
+        (:meth:`_populate_compare_list`) that would otherwise drop
+        anything not currently selected."""
+        n = len(self.session)
+        new: list[tuple[int, int | None]] = []
+        for row in rows:
+            if not (0 <= row < n):
+                continue
+            spectrum = self.session.spectra[row]
+            if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
+                new += [(row, k) for k in range(1, spectrum.data.shape[0] + 1)]
+            else:
+                new.append((row, None))
+        current = [self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
+                   for i in range(self.compare_list.count())]
+        new = [e for e in dict.fromkeys(new) if e not in current]
+        if not new:
+            return
+        at = len(current) if at is None or not (0 <= at <= len(current)) else at
+        order = current[:at] + new + current[at:]
+        self._compare_pinned_entries += [e for e in new if e not in self._compare_pinned_entries]
+        self._rebuild_compare_list(order, order=order)
+        self.statusBar().showMessage(
+            f"Added {len(new)} entr{'y' if len(new) == 1 else 'ies'} to Compare.", 5000)
+        self._refresh_compare_view()
+
+    def _after_session_row_removed(self, removed: int) -> None:
+        """Keep the Compare list honest after ``session.remove(removed)``.
+
+        Every later session row shifts down by one, so stored entries
+        would otherwise point at the wrong spectrum. Pinned (dragged-in)
+        entries are renumbered; the list is then rebuilt from the
+        selection plus those pins. Used by both removal routes -- the
+        right-click Remove previously skipped this and left Compare
+        pointing at shifted spectra."""
+        self._compare_pinned_entries = [
+            (r - 1 if r > removed else r, k)
+            for r, k in self._compare_pinned_entries if r != removed
+        ]
+        rows = self._selected_rows()
+        if len(rows) > 1 or self._compare_pinned_entries:
+            self.compare_list.clear()  # stale indices: never "preserve" them
+            self._populate_compare_list(rows if len(rows) > 1 else [])
+            self._refresh_compare_view_if_active(switch_tab=False)
+        else:
+            self.compare_list.clear()
+            self._update_compare_tab_visibility()
 
     def _compare_entry_label(self, entry: tuple[int, int | None]) -> str:
         session_index, slice_index = entry
@@ -4881,16 +5035,39 @@ class MainWindow(QMainWindow):
         and Fit Curve (relaxation/diffusion) across a "stack of 1D
         data" -- both gated on there being at least one checked entry,
         since neither makes sense before a stack actually exists."""
-        if not self._compare_checked_entries():
+        clicked = self.compare_list.itemAt(pos)
+        has_checked = bool(self._compare_checked_entries())
+        if clicked is None and not has_checked:
             return
         menu = QMenu(self)
-        plot_action = menu.addAction("Plot")
-        fit_curve_action = menu.addAction("Fit Curve (relaxation/diffusion)…")
+        plot_action = fit_curve_action = remove_action = None
+        if has_checked:
+            plot_action = menu.addAction("Plot")
+            fit_curve_action = menu.addAction("Fit Curve (relaxation/diffusion)…")
+        if clicked is not None:
+            # Dragged-in entries survive selection changes, so they
+            # need a way out that unchecking (which keeps them) isn't.
+            if has_checked:
+                menu.addSeparator()
+            remove_action = menu.addAction("Remove from comparison")
         chosen = menu.exec(self.compare_list.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
         if chosen is plot_action:
             self._refresh_compare_view()
         elif chosen is fit_curve_action:
             self._on_fit_curve_compare_stack_action()
+        elif chosen is remove_action:
+            self._remove_compare_entry(clicked.data(Qt.ItemDataRole.UserRole))
+
+    def _remove_compare_entry(self, entry) -> None:
+        """Drop one entry from the Compare list (and its pin)."""
+        self._compare_pinned_entries = [e for e in self._compare_pinned_entries if e != entry]
+        order = [self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
+                 for i in range(self.compare_list.count())]
+        order = [e for e in order if e != entry]
+        self._rebuild_compare_list(order, order=order)
+        self._refresh_compare_view_if_active(switch_tab=False)
 
     def _on_fit_curve_compare_stack_action(self) -> None:
         stack = self._compare_checked_1d_stack()
@@ -5013,7 +5190,7 @@ class MainWindow(QMainWindow):
             bits.append(f"{len(skipped_mass)} skipped (no sample mass set).")
         self.compare_status_label.setText(" ".join(bits))
 
-        mode = "stack" if self.layout_mode_combo.currentIndex() == 0 else "overlay"
+        mode = ("stack", "overlay", "heatmap")[self.layout_mode_combo.currentIndex()]
 
         # Rendering a "Stacked" Compare view is one subplot per
         # spectrum -- fine for a typical handful, but a pseudo-2D
@@ -5031,6 +5208,10 @@ class MainWindow(QMainWindow):
             return
         self._compare_view_stale = False
 
+        if mode == "heatmap":
+            self._show_compare_heatmap(plot_spectra, plot_rows, norm_mode, switch_tab)
+            return
+
         try:
             self.compare_canvas.show_compare(plot_spectra, mode=mode, normalize=(norm_mode == "max"))
             if switch_tab:
@@ -5042,6 +5223,43 @@ class MainWindow(QMainWindow):
             self._on_compare_list_current_row_changed(self.compare_list.currentRow())
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to plot comparison", str(exc))
+
+    #: What the heatmap's colour scale means, per Normalize choice --
+    #: written on the colour bar, so the figure says it without the GUI.
+    _COMPARE_HEATMAP_SCALE_LABELS = {
+        "none": "Intensity (a.u.)",
+        "max": "Intensity / own maximum",
+        "mass": "Intensity per gram (a.u. g$^{-1}$)",
+    }
+
+    def _show_compare_heatmap(self, spectra: list, rows: list[int], norm_mode: str,
+                              switch_tab: bool) -> None:
+        """The Compare tile's "Heatmap" layout (explicit user request):
+        one row per checked spectrum, in the list's order from the top,
+        each labelled with its name, and a labelled colour bar.
+
+        Rendering is :func:`opennmr.plotting.plot_1d_heatmap` -- the
+        same function a notebook calls, so a figure made either way is
+        the same figure. Rows are interpolated onto the ppm range every
+        checked spectrum covers; that range is reported in the status
+        line, since data outside it is not shown."""
+        labels = [self.compare_list.item(row).text().split(" · ")[0] for row in rows]
+        try:
+            self.compare_canvas.show_1d_heatmap(
+                spectra, normalize=(norm_mode == "max"), row_labels=labels,
+                colorbar_label=self._COMPARE_HEATMAP_SCALE_LABELS[norm_mode],
+                first_row_on_top=True)
+        except ValueError as exc:
+            # e.g. no ppm range common to every checked spectrum
+            self.compare_status_label.setText(f"Cannot draw a heatmap: {exc}")
+            self.compare_canvas.clear()
+            return
+        lo, hi = sorted(self.compare_canvas.ax.get_xlim())
+        self.compare_status_label.setText(
+            self.compare_status_label.text()
+            + f" Heatmap over {hi:.4g} to {lo:.4g} ppm, the range all of them cover.")
+        if switch_tab:
+            self.canvas_tabs.setCurrentWidget(self.compare_canvas)
 
     def _refresh_compare_2d_overlay(self, rows_and_candidates: list[tuple[int, object]],
                                      switch_tab: bool, force_render: bool) -> None:
@@ -6075,6 +6293,7 @@ class MainWindow(QMainWindow):
             xlim = canvas.ax.get_xlim() if preserve_xlim else None
             canvas.show_spectrum(trace)
             if xlim is not None:
+                canvas.note_natural_view()  # so Home still reaches the full view
                 canvas.ax.set_xlim(xlim)
         else:
             canvas.update_data(trace)
@@ -7316,6 +7535,7 @@ class MainWindow(QMainWindow):
         try:
             xlim, ylim = self.canvas.ax.get_xlim(), self.canvas.ax.get_ylim()
             self.canvas.show_spectrum(spectrum)
+            self.canvas.note_natural_view()  # so Home still reaches the full view
             self.canvas.ax.set_xlim(xlim)
             self.canvas.ax.set_ylim(ylim)
             self.canvas.canvas.draw_idle()
@@ -13680,12 +13900,33 @@ class MainWindow(QMainWindow):
             canvas.set_crosshair_enabled(enabled)
 
     def _on_canvas_measurement_mode_changed(self, enabled: bool) -> None:
+        """One canvas's Measure changed -- from its own toolbar button,
+        or because another mode took over there. Keep every canvas and
+        the menu in step, so Measure is never on in a view the user is
+        not looking at while the menu says it is off. (The setters only
+        emit on a real change, so this cannot loop.)"""
         if self.measurement_menu_action.isChecked() != enabled:
             self.measurement_menu_action.setChecked(enabled)
+        for canvas in self._measurement_canvases():
+            canvas.set_measurement_mode(enabled)
 
     def _on_canvas_crosshair_changed(self, enabled: bool) -> None:
+        """As :meth:`_on_canvas_measurement_mode_changed`, for the
+        Crosshair."""
         if self.crosshair_menu_action.isChecked() != enabled:
             self.crosshair_menu_action.setChecked(enabled)
+        for canvas in self._measurement_canvases():
+            canvas.set_crosshair_enabled(enabled)
+
+    def _on_canvas_pick_mode_changed(self, enabled: bool) -> None:
+        # The canvas switched picking off because another mode took
+        # over: uncheck the Fitting tab's button so it tells the truth.
+        if self.pick_peak_button.isChecked() != enabled:
+            self.pick_peak_button.setChecked(enabled)
+
+    def _on_canvas_region_select_mode_changed(self, enabled: bool) -> None:
+        if self.select_region_button.isChecked() != enabled:
+            self.select_region_button.setChecked(enabled)
 
     def _measurement_canvases(self) -> list:
         """Every plot canvas a mode toggle should apply to."""

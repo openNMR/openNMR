@@ -211,13 +211,14 @@ def plot_1d_heatmap(spectra: list[NMRSpectrum], ax=None, fig=None, x_unit: str =
     nucgamma = find_gamma(spectra[0].metadata.nucleus, field=field, SFO1=spectra[0].metadata.sfo1)
     labeltext = NUC_label(nucgamma["Nuclide"], x_unit=x_unit)
 
-    try:
-        cmap_obj = get_contour_cmap(cmap)
-    except ValueError:
-        # A name outside CONTOUR_CMAP_NAMES still goes through the
-        # luminance filter -- the point is that no colour this package
-        # draws with is invisible, not that only the listed ones are.
-        cmap_obj = readable_cmap(cmap)
+    # The **full** colour map, not get_contour_cmap/readable_cmap's
+    # trimmed one. That trim drops the light end so thin *lines* keep
+    # 3:1 contrast on a white background (MAX_LINE_LUMINANCE); a heatmap
+    # is filled cells covering the whole axes, with no white behind them
+    # to vanish into, so trimming only threw away half the colour range
+    # -- the strongest signal came out mid-scale teal instead of
+    # viridis's yellow. Matches notebook NMR1dheatmap, which never trimmed.
+    cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
 
     row_positions = np.arange(len(spectra))
     im = ax.pcolormesh(x_common, row_positions, data_matrix, cmap=cmap_obj,

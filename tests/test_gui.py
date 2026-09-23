@@ -4629,19 +4629,23 @@ def test_main_window_click_modes_reset_when_the_experiment_changes(qapp, tmp_pat
     window._load(_make_1d_dataset(tmp_path, name="one"), vendor="bruker")
     window._load(_make_1d_dataset(tmp_path, name="two"), vendor="bruker")
 
-    window.pick_peak_button.setChecked(True)
-    window.select_region_button.setChecked(True)
-    window.measurement_menu_action.setChecked(True)
-    assert window.canvas._pick_mode is True
+    # One mode at a time (they are mutually exclusive since
+    # 2026-09-23), so each is armed on its own and must be reset by the
+    # experiment change.
+    for arm, armed in (
+        (window.pick_peak_button, lambda: window.canvas._pick_mode),
+        (window.select_region_button, lambda: window.canvas._region_select_mode),
+        (window.measurement_menu_action, lambda: window.canvas._measurement_mode),
+    ):
+        window._select_single_row(1)
+        arm.setChecked(True)
+        assert armed() is True
 
-    window._select_single_row(0)
+        window._select_single_row(0)
 
-    assert window.pick_peak_button.isChecked() is False
-    assert window.select_region_button.isChecked() is False
-    assert window.measurement_menu_action.isChecked() is False
-    # The canvas is disarmed too, not just the button un-drawn.
-    assert window.canvas._pick_mode is False
-    assert window.canvas._region_select_mode is False
+        assert arm.isChecked() is False
+        # The canvas is disarmed too, not just the button un-drawn.
+        assert armed() is False
 
 
 def test_main_window_per_spectrum_settings_survive_the_experiment_change(qapp, tmp_path):
