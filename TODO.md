@@ -12,7 +12,18 @@
 
 Ordered by how ready it is to be picked up, not by importance. Section 0 is built and waiting; **everything from section 1 down has been *mentioned* and is *not built***.
 
-### 0. Built, tested, not wired in -- pick these up first (2026-09-23)
+### 0. ~~Built, tested, not wired in~~ **Wired in 2026-09-23 (Euan's branch)** -- what remains is listed here
+
+**Done**, all four seams below: `io.load()`/the GUI open Spinsolve PGSTE folders (`spinsolve.read_spectrum`, registered as vendor `"spinsolve"`); the Auto values source and "Read δ/Δ from file" use `bruker_pfg.read_pfg_params` for Bruker with or without `diff.xml`; and both show *where* each value came from (Values row, fit report, a line under the PFG boxes). The vendor logic lives in `notebook/diffusion.py` (`recorded_b_values`, `recorded_pfg_params`), so a notebook gets the same numbers as the GUI. Tests: `tests/test_pfg_wiring.py` (synthetic datasets, expected values from Stejskal-Tanner written out by hand).
+
+**Still open:**
+- **Spinsolve is not live-reprocessable from its FID.** `read_spectrum` deliberately does not store `fid`/`fid_raw`/`fid_dt`: the GUI's generic FID path would pick them up and has no way to apply this format's conjugate, putting the peak at the mirrored shift. The data arrive processed as the instrument showed them (display.par's exponential, acqu.par's zero-fill); phase/baseline/fitting all work. Teaching the generic path a per-vendor conjugate would lift this.
+- **Spinsolve T1/T2 folders are left unrecognised**, not opened wrong: `is_spinsolve_pfg` matches them too, but their `delayTimes.txt` holds delays. `is_spinsolve_diffusion` claims a folder only with `data.2d.txt` or `acqu.par`'s `bigDelta`/`littleDelta` -- inferred from the PGSTE dataset's keys; no T1/T2 folder was available to confirm those protocols lack them.
+- Only synthetic data was available on the branch that wired this in; run `tests/test_spinsolve.py` and `tests/test_bruker_pfg.py` where `test_data/` exists, and open the real datasets in the GUI once.
+- `core.registry`'s 1H gamma is 2.675221e8 rad/s/T cut to 7 significant figures (3.3e-7 below CODATA 2018) -- irrelevant to any measured D, noted so nobody chases a 1e-7 mismatch.
+
+*(Original entry, as written before wiring:)*
+
 
 **Two format readers are finished and deliberately left unregistered**, so that merging Euan's branch cannot conflict with them. Neither is imported by `io/__init__.py` or touched by the GUI; nothing else in `src/` changed. Wiring each in is a call swap, not new logic. Full rounds are the two newest entries below.
 

@@ -655,3 +655,147 @@ if __name__ == "__main__":  # pragma: no cover -- a look at one folder
 
     for folder in (sys.argv[1:] or find_spinsolve_experiments(".")):
         pprint(selftest(folder))
+
+
+# ============================================================
+# NMRSpectrum adapter and registration (wired in 2026-09-23)
+# ============================================================
+#
+# TODO.md section 0, seam 3: join ``io.load()``'s auto-detection. The
+# reader above is unchanged; this only presents its result the way every
+# other vendor does, so the GUI and ``opennmr.io.load`` open it with no
+# Spinsolve-specific code of their own.
+
+def is_spinsolve_diffusion(path: str) -> bool:
+    """True only for a Spinsolve **diffusion** (PGSTE/PFG) folder.
+
+    :func:`is_spinsolve_pfg` also matches Spinsolve's T1/T2 arrays --
+    same files, but there ``delayTimes.txt`` holds *delays*, not
+    b-values. Registering on that detector alone would open a T1 series
+    labelled as diffusion, with its delays read as b-values. So a folder
+    is claimed only when it carries something only a diffusion protocol
+    writes: the DOSY Toolbox header (``data.2d.txt``), or ``acqu.par``'s
+    ``bigDelta``/``littleDelta``. A T1/T2 folder is left unrecognised
+    (openable by nobody) rather than opened wrong.
+
+    The acqu.par criterion is inferred from the PGSTE dataset's keys;
+    no Spinsolve T1/T2 folder has been available to confirm that those
+    protocols lack them.
+    """
+    if not is_spinsolve_pfg(path):
+        return False
+    if os.path.isfile(os.path.join(path, "data.2d.txt")):
+        return True
+    try:
+        acqu = read_par(os.path.join(path, "acqu.par"))
+    except OSError:
+        return False
+    return "bigDelta" in acqu and "littleDelta" in acqu
+
+
+def read_spectrum(path: str, source: str = "data.2d",
+                  line_broadening: float | None = None,
+                  zero_fill: int | None = None, **_ignored):
+    """Read a Spinsolve PGSTE folder as a pseudo-2D
+    :class:`~opennmr.core.spectrum.NMRSpectrum` (one row per gradient
+    step), processed exactly as :meth:`SpinsolvePFG.spectra` does --
+    the instrument's own apodization and zero-fill by default, the
+    conjugate FT, per-step phase -- so it is the spectrum the validated
+    diffusion fit was checked on.
+
+    The ppm axis is **descending**, as every other vendor's is; rows and
+    points are reversed together, so nothing moves relative to its
+    shift.
+
+    What the GUI and notebook helpers need for a diffusion fit travels
+    in ``metadata.raw``:
+
+    ``b_values``       s/m^2, one per row -- ``delayTimes.txt``
+    ``b_source``       where those came from, as a sentence
+    ``pfg_params``     ``delta``/``DELTA`` (s), ``sequence``, ``shape``,
+                       ``gamma`` (Hz/T), ``gradient`` (T/m, or None)
+    ``processing``     the apodization/zero-fill actually applied
+    ``reference_fit``  Spinsolve's own ``fit.csv`` rows, to compare with
+
+    Deliberately **not** stored: ``fid``/``fid_raw``/``fid_dt``. The
+    GUI's generic FID-reprocessing path picks those keys up, and it has
+    no way to apply this format's conjugate -- it would put the peak at
+    the mirrored shift. Until that path learns the convention, Spinsolve
+    data is reprocessed by re-reading with ``line_broadening``/
+    ``zero_fill``, not live from the FID. Other keyword arguments (e.g.
+    processing a caller passes for every vendor) are ignored.
+    """
+    from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+
+    pfg = read_spinsolve_pfg(path, source=source)
+    applied_lb = pfg.display_line_broadening() if line_broadening is None else float(line_broadening)
+    applied_zf = int(pfg.acqu.get("zeroFill", 1) or 1) if zero_fill is None else int(zero_fill)
+    spec = pfg.spectra(line_broadening=applied_lb, zero_fill=applied_zf)[:, ::-1]
+    ppm = pfg.ppm_axis(applied_zf)[::-1]
+
+    b_source = ("delayTimes.txt (Spinsolve's own b-values; despite the name they are "
+                "b in s/m^2 for PGSTE)")
+    if pfg.gradients is not None:
+        try:
+            recomputed = pfg.b_from_gradients()
+            rel = float(np.max(np.abs(recomputed - pfg.b)) / np.max(np.abs(pfg.b)))
+            b_source += f"; agrees with data.2d.txt's gradient list to {rel:.1e} relative"
+        except (ValueError, ZeroDivisionError):
+            pass
+
+    metadata = NMRMetadata(
+        vendor="spinsolve",
+        nucleus=pfg.nucleus,
+        sfo1=pfg.b1_freq,
+        bf1=pfg.b1_freq,
+        ns=pfg.acqu.get("nrScans"),
+        source_path=path,
+        pseudo_2d=True,
+        pulse_program=os.path.basename(os.path.normpath(path)) or None,
+        raw={
+            "b_values": np.asarray(pfg.b, dtype=float),
+            "b_source": b_source,
+            "is_diffusion": True,
+            "pfg_params": {
+                "delta": pfg.delta, "DELTA": pfg.big_delta,
+                "sequence": "pgse", "shape": "rect",
+                "gamma": pfg.gamma, "gradient": pfg.gradients,
+                "sources": {
+                    "delta": ("data.2d.txt 'Diffusion Encoding Time'" if pfg.dosy is not None
+                              else "acqu.par littleDelta + gradRamp"),
+                    "DELTA": ("data.2d.txt 'Diffusion Delay'" if pfg.dosy is not None
+                              else "acqu.par bigDelta"),
+                },
+            },
+            "processing": {"line_broadening_hz": applied_lb, "zero_fill": applied_zf,
+                           "source": source},
+            "reference_fit": pfg.reference_fit,
+            "acqu": pfg.acqu,
+        },
+    )
+    return NMRSpectrum(
+        data=np.ascontiguousarray(spec.real),
+        axes=[NMRAxis(kind="index", index=np.arange(1, pfg.nsteps + 1), label="gradient step"),
+              NMRAxis(kind="frequency", ppm=ppm, hz=ppm * pfg.b1_freq)],
+        metadata=metadata,
+        data_imag=np.ascontiguousarray(spec.imag),
+    )
+
+
+def peek(path: str, **_ignored) -> dict[str, Any]:
+    """Shape and nucleus from ``acqu.par`` alone, without reading the
+    matrix -- what the folder browser needs to list a dataset."""
+    acqu = read_par(os.path.join(path, "acqu.par"))
+    zero_fill = int(acqu.get("zeroFill", 1) or 1)
+    return {
+        "vendor": "spinsolve", "ndim": 2,
+        "shape": (int(acqu.get("nrSteps", 0)), int(acqu.get("nrPnts", 0)) * max(zero_fill, 1)),
+        "nucleus": str(acqu.get("rxChannel", "1H")), "nucleus_indirect": None,
+        "pseudo_2d": True,
+        "pulse_program": os.path.basename(os.path.normpath(path)) or None,
+    }
+
+
+from . import base as _base  # noqa: E402 -- registration needs the functions above
+
+_base.register("spinsolve", is_spinsolve_diffusion, read_spectrum, peek=peek)

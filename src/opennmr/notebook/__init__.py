@@ -113,6 +113,7 @@ from .simpson import (
 # etc. below now resolve to the .utils/.plotting names, not pnmr_simulator's
 # re-export -- same object either way, just naming the canonical source here.
 
+from .diffusion import recorded_b_values, recorded_pfg_params
 from .bms_spectrum import generate_bms_spectrum_dict
 from .bms.io_utils import make_particle
 
@@ -135,6 +136,8 @@ __all__ = [
     "NMR2dimport", "NMR2Dplotter", "NMR2D_multi_plot", "NMR2D_overlay_plot",
     "NMR2d_get_trace", "NMR2D_get_slices", "prepare_trace_for_fit",
     "NMR2D_plot_slices", "NMR2D_summary_plot",
+    # diffusion: where a PFG series' b-values and timings come from
+    "recorded_b_values", "recorded_pfg_params",
     # fitting
     "gaussian", "lorentzian", "pseudo_voigt",
     "estimate_baseline_from_edges", "estimate_baseline_robust",

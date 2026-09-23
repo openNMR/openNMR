@@ -53,6 +53,7 @@ from ..plotting import accessibility as plot_accessibility
 from ..notebook import bridge as notebook_bridge
 from ..notebook import csa_fitting as notebook_csa
 from ..notebook import simulations as notebook_simulations
+from ..notebook import diffusion as notebook_diffusion
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from ..io import bruker as io_bruker
@@ -2752,6 +2753,7 @@ class MainWindow(QMainWindow):
         self.curve_fit_summary_label.setText("")
         self.dosy_results_label.setText("")
         self.gradient_calibration_label.setText("")
+        self.pfg_params_source_label.setText("")
         self._clear_spectral_fit_report()
         self.analysis_status_label.setText("Select a pseudo-2D spectrum (e.g. a T1/T2 relaxation series) to fit.")
         self._current_analysis_index = None
@@ -11693,8 +11695,11 @@ class MainWindow(QMainWindow):
         pfg_buttons = QHBoxLayout()
         self.pfg_read_params_button = QPushButton("Read δ/Δ from file")
         self.pfg_read_params_button.setToolTip(
-            "Fill δ, Δ and the gradient ramp from this experiment's own "
-            "acquisition file, where it records them.\n\n"
+            "Fill δ, Δ (and τ, sequence and ramp where recorded) from this "
+            "experiment's own files, and list where each value came from.\n\n"
+            "Bruker: diff.xml, or without one, the pulse programme's own "
+            "parameter documentation (so a bipolar sequence's 'little DELTA "
+            "* 0.5' is doubled, not taken as δ). Spinsolve: data.2d.txt.\n\n"
             "X-Pulse records δ as the gradient *plateau* with ramps counted "
             "separately, while the trapezoid b-value wants plateau plus one ramp "
             "— this does that arithmetic, so the box ends up holding what the "
@@ -11738,6 +11743,17 @@ class MainWindow(QMainWindow):
         calibration_row_label = QLabel("")
         relax_form.addRow(calibration_row_label, self.gradient_calibration_label)
         self.pfg_widgets.append((calibration_row_label, self.gradient_calibration_label))
+
+        # Where "Read δ/Δ from file" found each value (and anything the
+        # reader flagged) -- kept beside the boxes it filled rather than
+        # only in the transient status bar.
+        self.pfg_params_source_label = QLabel("")
+        self.pfg_params_source_label.setWordWrap(True)
+        self.pfg_params_source_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        pfg_source_row_label = QLabel("")
+        relax_form.addRow(pfg_source_row_label, self.pfg_params_source_label)
+        self.pfg_widgets.append((pfg_source_row_label, self.pfg_params_source_label))
 
         # --- Starting guesses / bounds / fixed ----------------------
         # Explicit user request: "offer somewhere for guess values".
@@ -14915,6 +14931,9 @@ class MainWindow(QMainWindow):
         note = getattr(self, "_values_note", None)
         if note:
             text = f"⚠ {note}\n{text}"
+        provenance = getattr(self, "_values_provenance", None)
+        if provenance:
+            text += f"\nFrom: {provenance}"
         if n_slices is not None and values.size > n_slices:
             # Not a warning: the surplus is simply unused, which is how
             # Bruker treats a vdlist longer than F1 TD.
@@ -14939,6 +14958,7 @@ class MainWindow(QMainWindow):
         # Cleared on every call: whatever the last resolve had to say
         # about *this* one is the only thing worth reporting.
         self._values_note = None
+        self._values_provenance = None
 
         if source == self._MANUAL_LIST_SOURCE:
             text = self.manual_delays_edit.text().strip()
@@ -15031,10 +15051,23 @@ class MainWindow(QMainWindow):
         # meaning anything physical (e.g. for quickly checking whether
         # a series decays monotonically at all).
         source_path = spectrum.metadata.source_path
-        if spectrum.metadata.vendor == "bruker" and source_path:
+        if is_diffusion:
+            # TODO.md section 0, seam 2: one call for every vendor that
+            # records b -- Bruker diff.xml *or* a dosy-AU difflist with
+            # delta/Delta from the pulse programme, Spinsolve's
+            # delayTimes.txt -- with where they came from, so the Values
+            # row can say it rather than show bare numbers.
+            recorded = notebook_diffusion.recorded_b_values(spectrum)
+            if recorded is not None and recorded["b"] is not None:
+                self._values_provenance = recorded["source"]
+                if recorded["warnings"]:
+                    self._values_note = "; ".join(recorded["warnings"])
+                return recorded["b"]
+            reader_warnings = (recorded or {}).get("warnings") or []
+        else:
+            reader_warnings = []
+        if spectrum.metadata.vendor == "bruker" and source_path and not is_diffusion:
             try:
-                if is_diffusion:
-                    return io_bruker.read_diff_xml(source_path, nucleus=spectrum.metadata.nucleus)["B"]
                 return io_bruker.read_vdlist(source_path)
             except FileNotFoundError:
                 pass
@@ -15047,6 +15080,10 @@ class MainWindow(QMainWindow):
             "no value list found for this experiment — using slice index "
             "(1, 2, 3, …), so any fitted rate is per-slice, not physical. "
             "Set Values to List file, Manual or Start + step.")
+        if reader_warnings:
+            # Why the recorded b-values could not be used, e.g. a pulse
+            # programme that does not document delta.
+            self._values_note += " (" + "; ".join(reader_warnings) + ")"
         return np.arange(1, n_slices + 1, dtype=float)
 
     def _refresh_max_gradient_controls(self, spectrum) -> None:
@@ -15240,38 +15277,62 @@ class MainWindow(QMainWindow):
         self._refresh_imaging_gradient()
 
     def _on_read_pfg_params_clicked(self) -> None:
-        """Fill δ/Δ/ramp from the experiment's own acquisition file."""
+        """Fill δ/Δ/τ/ramp/sequence/shape from the experiment's own files.
+
+        Every vendor goes through
+        :func:`opennmr.notebook.diffusion.recorded_pfg_params` (TODO.md
+        section 0, seam 1): X-Pulse's acquisition parameters as before,
+        and now Bruker **with or without diff.xml** (delta/Delta read
+        from the pulse programme's own parameter documentation) and
+        Spinsolve. Where each value came from, and anything the reader
+        wants seen before the numbers are trusted, is shown with them
+        (seam 4) rather than leaving bare numbers in the boxes."""
         index = self._selected_index()
         if index is None:
             return
         spectrum = self.session.spectra[index]
-        found = processing_diffusion.pfg_params_from_metadata(spectrum)
-        if not found:
+        found = notebook_diffusion.recorded_pfg_params(spectrum)
+        timings = {key for key in ("delta", "DELTA", "tau", "ramp") if key in found}
+        if not timings:
+            detail = "\n\n" + "\n".join(f"• {w}" for w in found.get("warnings", [])) \
+                if found.get("warnings") else ""
             QMessageBox.information(
                 self, "Nothing recorded",
-                "This experiment's own acquisition file doesn't record the PFG timings in a "
-                "form this reader knows about.\n\nFor Bruker, use a diff.xml instead -- it "
-                "carries TopSpin's own precomputed b-values, which are better than "
-                "reconstructing them from timings.",
+                "This experiment's own files don't record the PFG timings in a form "
+                "openNMR can read. Enter δ and Δ by hand, or use the Values row's "
+                "Manual / List file sources." + detail,
             )
             return
 
         applied = []
+        sources = found.get("sources", {})
+
+        def _from(key: str) -> str:
+            return f"  [{sources[key]}]" if key in sources else ""
+
         ramp = found.get("ramp", 0.0)
         if "delta" in found:
-            # The file records the plateau; the b-value expression wants
-            # plateau plus one ramp. Doing that here means the box holds
-            # what the formula needs, not what the file literally said.
+            # The file may record the plateau; the b-value expression
+            # wants plateau plus one ramp. Doing that here means the box
+            # holds what the formula needs, not what the file literally said.
             effective = processing_diffusion.effective_delta(
                 found["delta"], ramp, found.get("delta_is_plateau_only", False))
             self.pfg_delta_spin.setValue(effective * 1000.0)
             applied.append(f"δ = {effective * 1000:.4g} ms"
-                            + (f" (plateau {found['delta'] * 1000:.4g} + ramp "
-                               f"{ramp * 1000:.4g})" if found.get("delta_is_plateau_only") and ramp
-                               else ""))
+                           + (f" (plateau {found['delta'] * 1000:.4g} + ramp "
+                              f"{ramp * 1000:.4g})" if found.get("delta_is_plateau_only") and ramp
+                              else "") + _from("delta"))
         if "DELTA" in found:
             self.pfg_big_delta_spin.setValue(found["DELTA"] * 1000.0)
-            applied.append(f"Δ = {found['DELTA'] * 1000:.4g} ms")
+            applied.append(f"Δ = {found['DELTA'] * 1000:.4g} ms" + _from("DELTA"))
+        if found.get("tau"):
+            self.pfg_tau_spin.setValue(found["tau"] * 1000.0)
+            applied.append(f"τ = {found['tau'] * 1000:.4g} ms" + _from("tau"))
+        if found.get("sequence"):
+            seq_index = self.pfg_sequence_combo.findData(found["sequence"])
+            if seq_index >= 0:
+                self.pfg_sequence_combo.setCurrentIndex(seq_index)
+                applied.append(f"sequence = {self.pfg_sequence_combo.itemText(seq_index)}")
         if ramp:
             self.pfg_ramp_spin.setValue(ramp * 1000.0)
             shape_index = self.pfg_shape_combo.findData("trapezoid")
@@ -15281,8 +15342,25 @@ class MainWindow(QMainWindow):
                 # rectangular would discard the number just read.
                 self.pfg_shape_combo.setCurrentIndex(shape_index)
             applied.append(f"ramp = {ramp * 1000:.4g} ms (shape set to trapezoid)")
+        elif found.get("shape"):
+            shape_index = self.pfg_shape_combo.findData(found["shape"])
+            if shape_index >= 0:
+                # Bruker dosy-AU: difflist already includes the shape's
+                # integral factor, so the reader says "rect" -- setting
+                # the real shape here would count it twice.
+                self.pfg_shape_combo.setCurrentIndex(shape_index)
+                applied.append(f"shape = {self.pfg_shape_combo.itemText(shape_index)}")
 
-        self.statusBar().showMessage("Read from the acquisition file:  " + ";  ".join(applied), 10000)
+        self.statusBar().showMessage(
+            "Read from the experiment's files:  " + ";  ".join(applied), 15000)
+        details = list(found.get("warnings", []))
+        if found.get("b_note"):
+            details.insert(0, found["b_note"])
+        # Kept on the panel, not just in the transient status bar: this
+        # is the record of where the numbers in the boxes came from.
+        self.pfg_params_source_label.setText(
+            "Read from file:\n" + "\n".join(f"• {line}" for line in applied)
+            + ("\n" + "\n".join(f"⚠ {w}" for w in details) if details else ""))
 
     def _pfg_settings(self) -> dict:
         """The δ/Δ/τ/G/shape/sequence inputs as one dict in SI units --
@@ -15676,6 +15754,12 @@ class MainWindow(QMainWindow):
         note = getattr(self, "_values_note", None)
         if note:
             summary = f"⚠ {note}\n\n{summary}"
+        provenance = getattr(self, "_values_provenance", None)
+        if provenance:
+            # The record of how the x-axis was arrived at stays with the
+            # number it produced (project rule: an easy-to-follow log of
+            # how an answer was reached).
+            summary += f"\n\n{self.delays_row_label.text().rstrip(':')} from: {provenance}"
         self.curve_fit_summary_label.setText(summary)
         self._global_fit_result = global_result
 
@@ -17990,11 +18074,16 @@ class MainWindow(QMainWindow):
         self.curve_fit_summary_label.setText("")
         self.dosy_results_label.setText("")
         self.gradient_calibration_label.setText("")
+        self.pfg_params_source_label.setText("")
         self._clear_spectral_fit_report()
 
         state = spectrum.metadata.raw.get("analysis_state")
         if state is None:
-            self.fit_type_combo.setCurrentIndex(0)
+            # A reader that knows the series is diffusion-weighted (a
+            # Spinsolve PGSTE folder is nothing else) says so; defaulting
+            # it to Relaxation would fit its b-values as delays.
+            self.fit_type_combo.setCurrentIndex(
+                1 if spectrum.metadata.raw.get("is_diffusion") else 0)
             self.custom_equation_edit.clear()
             self.custom_p0_edit.clear()
             self.value_source_combo.setCurrentIndex(0)
