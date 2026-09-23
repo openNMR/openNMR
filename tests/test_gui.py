@@ -6908,6 +6908,99 @@ def test_main_window_amplitude_bound_regions_round_trips_through_reselection(qap
     assert window.amplitude_bound_regions_checkbox.isChecked()
 
 
+# ============================================================
+# "Use the integration regions" -- ported from upstream (Leo, 14a6fd3).
+# Any defined region used to restrict the fit silently; it is now one
+# visible option, independent of the amplitude cap.
+# ============================================================
+
+def test_fit_uses_the_regions_only_as_the_two_boxes_say(qapp, monkeypatch):
+    window = MainWindow()
+    window._add_region_row(1.0, 2.0)
+    window._add_peak_row(1.5, 0.1)
+    spectrum = _make_1d_peak_spectrum(x0=1.5, fwhm=0.1)
+    seen = {}
+
+    def fake_fit(slices, peak_defs, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(processing_fitting, "NMR2D_fit_slices", fake_fit)
+
+    def run():
+        seen.clear()
+        with pytest.raises(RuntimeError):
+            window._fit_peaks([spectrum])
+        return seen["fit_regions"], seen["amplitude_bound_regions"]
+
+    assert window.fit_within_regions_checkbox.isChecked()  # the old behaviour, by default
+    assert run() == ([(1.0, 2.0)], None)
+    window.fit_within_regions_checkbox.setChecked(False)
+    assert run() == (None, None)
+    window.amplitude_bound_regions_checkbox.setChecked(True)
+    assert run() == (None, [(1.0, 2.0)])
+    window.fit_within_regions_checkbox.setChecked(True)
+    assert run() == ([(1.0, 2.0)], [(1.0, 2.0)])
+
+
+def test_region_options_are_visible_in_the_isotropic_section_not_advanced(qapp):
+    # The whole point of the port: neither option may be hidden. Both
+    # live in the Isotropic section's own "Use the integration regions"
+    # group, outside the collapsed-by-default Advanced block.
+    window = MainWindow()
+    group = window.fit_regions_group
+    assert group.isAncestorOf(window.fit_within_regions_checkbox)
+    assert group.isAncestorOf(window.amplitude_bound_regions_checkbox)
+    assert not window.peak_advanced_content.isAncestorOf(group)
+    isotropic = next(s for s in window.findChildren(CollapsibleSection)
+                     if s.title() == "Isotropic (Gauss/Lor)")
+    assert isotropic.isAncestorOf(group)
+
+
+def test_fit_within_regions_round_trips_through_reselection(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window.fit_within_regions_checkbox.setChecked(False)
+    window._save_current_analysis_state()
+
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    assert window.fit_within_regions_checkbox.isChecked()  # b: default (on)
+
+    window._select_single_row(0)
+    assert not window.fit_within_regions_checkbox.isChecked()
+
+
+def test_fit_within_regions_defaults_on_for_a_state_saved_before_it_existed(qapp, tmp_path):
+    # A state saved by an older build has no "fit_within_regions" key.
+    # Those builds always fitted inside the regions, so that is what
+    # restoring must give back -- not whatever the box currently shows.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._save_current_analysis_state()
+    window.session.spectra[0].metadata.raw["analysis_state"].pop("fit_within_regions")
+
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    window.fit_within_regions_checkbox.setChecked(False)
+    window._select_single_row(0)
+    assert window.fit_within_regions_checkbox.isChecked()
+
+
+def test_no_region_edge_warning_when_regions_did_not_constrain_the_fit(qapp, monkeypatch):
+    # The edge warning only means something when the fit window was the
+    # region. With "Fit only inside the regions" off there is no edge,
+    # so the check must return before even looking at the results.
+    window = MainWindow()
+    window._add_region_row(1.0, 2.0)
+    window.fit_within_regions_checkbox.setChecked(False)
+
+    def must_not_run(*a, **k):
+        raise AssertionError("edge check ran although regions did not constrain the fit")
+
+    monkeypatch.setattr(processing_fitting, "extract_params_and_errors", must_not_run)
+    window._warn_if_fit_near_region_edge([{"popt": None, "pcov": None,
+                                           "peak_defs": [], "is_free": None}])
+
+
 def test_main_window_fit_spectrum_warns_when_result_lands_near_region_edge(qapp, monkeypatch):
     # Fitting-wizard roadmap item: "a sensible warning when a fit
     # result lands too close to its own region edge." Region (4.9,

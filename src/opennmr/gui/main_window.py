@@ -10488,6 +10488,24 @@ class MainWindow(QMainWindow):
         # that is the *normal* way to fit a series, not a tuning knob, and
         # burying it behind a disclosure toggle meant it may as well not
         # have existed.
+        # --- How the fit uses the Integration regions ----------------
+        # Ported from upstream (Leo, 14a6fd3). Previously any defined
+        # region *always* restricted the fit, silently, and the
+        # amplitude cap sat inside Advanced. Both are now explicit,
+        # visible and independent. Default on = the old behaviour.
+        self.fit_regions_group = QGroupBox("Use the integration regions")
+        regions_layout = QVBoxLayout(self.fit_regions_group)
+        self.fit_within_regions_checkbox = QCheckBox("Fit only inside the regions")
+        self.fit_within_regions_checkbox.setChecked(True)
+        self.fit_within_regions_checkbox.setToolTip(
+            "Restrict the fit to the data inside the Integration regions, "
+            "so unrelated signal elsewhere in the spectrum cannot drag it "
+            "off. Off: the whole spectrum is fitted, whatever regions "
+            "exist. No effect while the region table is empty."
+        )
+        regions_layout.addWidget(self.fit_within_regions_checkbox)
+        peak_layout.addWidget(self.fit_regions_group)
+
         self.series_fit_group = QGroupBox("Across a pseudo-2D series")
         series_layout = QVBoxLayout(self.series_fit_group)
 
@@ -10595,10 +10613,10 @@ class MainWindow(QMainWindow):
         tolerance_row.addWidget(self.position_tolerance_spin)
         advanced_layout.addLayout(tolerance_row)
 
-        self.amplitude_bound_regions_checkbox = QCheckBox("Bound amplitude using region integrals")
+        self.amplitude_bound_regions_checkbox = QCheckBox("Bound peak amplitudes by region integrals")
         self.amplitude_bound_regions_checkbox.setToolTip(
             "For each peak whose starting shift falls inside one of the "
-            "Integration Regions above, cap its amplitude using that "
+            "Integration regions (Integration section), cap its amplitude using that "
             "region's own raw (unfitted) integral -- converted via the "
             "peak's lineshape/FWHM -- instead of leaving it unbounded "
             "above. Recomputed fresh per slice, so it tracks a genuinely "
@@ -10611,7 +10629,7 @@ class MainWindow(QMainWindow):
             "never overrides a peak's own explicit amplitude bound (Set "
             "Bounds... dialog)."
         )
-        advanced_layout.addWidget(self.amplitude_bound_regions_checkbox)
+        regions_layout.addWidget(self.amplitude_bound_regions_checkbox)
 
         noise_row = QHBoxLayout()
         noise_row.addWidget(QLabel("Noise region (ppm):"))
@@ -14902,9 +14920,13 @@ class MainWindow(QMainWindow):
         if not peak_defs:
             raise ValueError("Add at least one peak to fit.")
         prepared = [self._ensure_slice_info(s, i + 1) for i, s in enumerate(entries)]
-        fit_regions = self._read_region_defs() or None
+        regions = self._read_region_defs() or None
+        fit_regions = regions if self.fit_within_regions_checkbox.isChecked() else None
         sn_kwargs = self._read_sn_gating_kwargs()
-        amplitude_bound_regions = fit_regions if self.amplitude_bound_regions_checkbox.isChecked() else None
+        # Independent of fit_within_regions: capping amplitudes from the
+        # region integrals is meaningful whether or not the fit window
+        # is restricted to those regions.
+        amplitude_bound_regions = regions if self.amplitude_bound_regions_checkbox.isChecked() else None
         seed_mode = self.seed_mode_combo.currentData()
         # Only meaningful for a real series -- a single 1D spectrum has
         # no other slice to take a lineshape from, and passing an
@@ -14943,7 +14965,7 @@ class MainWindow(QMainWindow):
         hundreds of slices, and a popup per slice would make the whole
         feature unusable at that scale."""
         fit_regions = self._read_region_defs()
-        if not fit_regions:
+        if not fit_regions or not self.fit_within_regions_checkbox.isChecked():
             return
         affected: dict[int, int] = {}
         for result in results:
@@ -17321,6 +17343,7 @@ class MainWindow(QMainWindow):
             "seed_mode": self.seed_mode_combo.currentIndex(),
             "anchor_slice": self.anchor_slice_spin.value(),
             "amplitude_bound_regions": self.amplitude_bound_regions_checkbox.isChecked(),
+            "fit_within_regions": self.fit_within_regions_checkbox.isChecked(),
             "sn_noise_region": self.sn_noise_region_edit.text(),
             "sn_threshold": self.sn_threshold_spin.value(),
             "results_text": self.analysis_results_label.text(),
@@ -17422,6 +17445,7 @@ class MainWindow(QMainWindow):
             self.seed_mode_combo.setCurrentIndex(0)
             self.anchor_slice_spin.setValue(1)
             self.amplitude_bound_regions_checkbox.setChecked(False)
+            self.fit_within_regions_checkbox.setChecked(True)
             self.sn_noise_region_edit.clear()
             self.sn_threshold_spin.setValue(3.0)
             self.diffusion_components_spin.setValue(2)
@@ -17483,6 +17507,9 @@ class MainWindow(QMainWindow):
             self.seed_mode_combo.setCurrentIndex(state.get("seed_mode", 0))
             self.anchor_slice_spin.setValue(state.get("anchor_slice", 1))
             self.amplitude_bound_regions_checkbox.setChecked(state.get("amplitude_bound_regions", False))
+            # States saved before this option existed always fitted
+            # inside the regions -- restore that, not a new default.
+            self.fit_within_regions_checkbox.setChecked(state.get("fit_within_regions", True))
             self.sn_noise_region_edit.setText(state.get("sn_noise_region", ""))
             self.sn_threshold_spin.setValue(state.get("sn_threshold", 3.0))
             self.analysis_results_label.setText(state["results_text"])
