@@ -70,6 +70,8 @@ from ..processing import score as processing_score
 from ..processing import slicing as processing_slicing
 from ..processing import vocs as processing_vocs
 from ..processing.slicing import get_trace
+from ..simulate import bloch as simulate_bloch
+from ..simulate import diffusion as simulate_diffusion
 from .session import Session
 from .widgets.canvas import MplCanvas
 from .widgets.drag_control import DragHandle
@@ -77,6 +79,7 @@ from .widgets.relative_spinbox import RelativeDoubleSpinBox
 from .widgets.data_browser import DataBrowser
 from .widgets.wrapping_tabs import WrappingTabWidget
 from .widgets.collapsible_section import CollapsibleSection
+from .widgets.simulation_canvas import SimulationCanvas
 from .loader import background_load_enabled
 
 #: Where the launcher-tile icons (Load/Save/Compare, Processing,
@@ -514,6 +517,11 @@ class MainWindow(QMainWindow):
         self.canvas_tabs.addTab(self.spectral_fit_canvas, "Spectral Fit")
         self.canvas_tabs.addTab(self.fit_canvas, "Fit")
         self.canvas_tabs.addTab(self.compare_canvas, "Compare")
+        # Simulations' Diffusion/Bloch plots: attenuation curves and
+        # pulse profiles, not spectra -- see SimulationCanvas. Hidden
+        # until one of them runs (see _show_simulation_view).
+        self.simulation_canvas = SimulationCanvas()
+        self.canvas_tabs.addTab(self.simulation_canvas, "Simulation")
         # No more "Preview as FID" checkbox -- clicking the FID tab
         # itself is what shows/refreshes the current spectrum's FID.
         self.canvas_tabs.currentChanged.connect(self._on_canvas_tab_changed)
@@ -528,6 +536,7 @@ class MainWindow(QMainWindow):
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), False)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.compare_canvas), False)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.processing_preview_canvas), False)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.simulation_canvas), False)
         # FID was added first (so it appears leftmost in the tab bar),
         # but Spectrum is the actual default/most-used view (see
         # self.canvas's own docstring above) -- without this, a plain
@@ -584,7 +593,7 @@ class MainWindow(QMainWindow):
         # Last of the seven: genuinely new (not moved from an old tab)
         # -- forward-simulate a CSA or quadrupolar powder pattern and
         # export it to Load/Save/Compare -- explicit user request.
-        tabs.addTab(self._scrollable(self._build_simulations_panel()), "Simulate",
+        self._simulations_tab_index = tabs.addTab(self._scrollable(self._build_simulations_panel()), "Simulate",
                     icon=_launcher_icon("launcher_simulations.png"))
         # No Output tab any more -- its controls live in the Plot Style
         # dialog (View ▸ Plot Style…, or right-click any plot). Built
@@ -6562,6 +6571,12 @@ class MainWindow(QMainWindow):
         # call each way is enough.
         self._sync_region_shading()
         self._refresh_peak_markers()
+        if index != self._simulations_tab_index:
+            # The Simulation plot shows nothing about the data; don't
+            # leave it up (or in the tab bar) once Simulations is left.
+            if self.canvas_tabs.currentWidget() is self.simulation_canvas:
+                self.canvas_tabs.setCurrentWidget(self.canvas)
+            self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.simulation_canvas), False)
         if index != self._processing_tab_index:
             self.canvas.set_pivot_marker(None)
             self.processing_preview_canvas.set_pivot_marker(None)
@@ -9595,8 +9610,365 @@ class MainWindow(QMainWindow):
             "CSA", content=self._build_simulate_csa_subtab()))
         layout.addWidget(CollapsibleSection(
             "Quadrupolar", content=self._build_simulate_quadrupolar_subtab()))
+        # Ported from upstream (Leo, 1c5613e) -- experiment planning
+        # rather than lineshapes; drawn on the Simulation plot.
+        layout.addWidget(CollapsibleSection(
+            "Diffusion (PFG)", content=self._build_diffusion_sim_subtab()))
+        layout.addWidget(CollapsibleSection(
+            "Shaped pulse (Bloch)", content=self._build_bloch_sim_subtab()))
         layout.addStretch(1)
         return tab
+
+    # ------------------------------------------------------------------
+    # Simulations: Diffusion (PFG) and Shaped pulse (Bloch) sections.
+    # Ported from upstream (Leo, 1c5613e: "a simulations button ... port
+    # in the simple things like diffusion simulator ... and the bloch
+    # pulse simulator"), as two more collapsible sections of the
+    # Simulations launcher tile rather than sub-tabs of a separate
+    # Simulate mode. Backed by opennmr.simulate.
+    # ------------------------------------------------------------------
+
+    def _show_simulation_view(self) -> None:
+        """Attenuation curves and pulse profiles are not spectra, so
+        they draw on their own Simulation plot (SimulationCanvas), shown
+        only once one of these simulations has run and hidden again on
+        leaving the Simulations tile (see _on_side_tab_changed)."""
+        tab = self.canvas_tabs.indexOf(self.simulation_canvas)
+        self.canvas_tabs.setTabVisible(tab, True)
+        self.canvas_tabs.setCurrentWidget(self.simulation_canvas)
+
+    @staticmethod
+    def _sim_spin(minimum: float, maximum: float, value: float, decimals: int,
+                  suffix: str, tooltip: str) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setDecimals(decimals)
+        spin.setValue(value)
+        spin.setSuffix(suffix)
+        spin.setToolTip(tooltip)
+        return spin
+
+    def _build_diffusion_sim_subtab(self) -> QWidget:
+        """Expected PFG attenuation against gradient strength -- a port
+        of ``leonmr.sim_diffusion`` (same defaults), extended to every
+        gradient shape and sequence type the b-value code models, with a
+        side-by-side comparison of either."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        box = QGroupBox("Experiment")
+        form = QFormLayout(box)
+        self.sim_nucleus_combo = QComboBox()
+        self.sim_nucleus_combo.setEditable(True)
+        self.sim_nucleus_combo.addItems(["1H", "2H", "7Li", "13C", "19F", "23Na", "31P"])
+        self.sim_nucleus_combo.setToolTip("Sets gamma. Type any nucleus, e.g. 17O.")
+        form.addRow("Nucleus:", self.sim_nucleus_combo)
+
+        self.sim_d_edit = QLineEdit()
+        self.sim_d_edit.setPlaceholderText("blank: 1e-8 … 1e-15, one per decade")
+        self.sim_d_edit.setToolTip(
+            "Diffusion coefficient(s) in m²/s, comma-separated. Blank draws one "
+            "curve per decade from 1e-8 to 1e-15, to see which range a set of "
+            "parameters can measure. A comparison uses the first value (1e-9 "
+            "if blank).")
+        form.addRow("D (m²/s):", self.sim_d_edit)
+
+        self.sim_delta_spin = self._sim_spin(
+            0.01, 100.0, 1.0, 3, " ms",
+            "Gradient pulse duration δ. For a bipolar pair, the total of both lobes.")
+        form.addRow("δ:", self.sim_delta_spin)
+        self.sim_DELTA_spin = self._sim_spin(
+            0.1, 10000.0, 20.0, 2, " ms", "Diffusion delay Δ, leading edge to leading edge.")
+        form.addRow("Δ:", self.sim_DELTA_spin)
+        self.sim_max_gradient_spin = self._sim_spin(
+            0.001, 100.0, 17.0, 3, " T/m",
+            "Maximum gradient strength (1 T/m = 100 G/cm). The default, 17 T/m, "
+            "is a Bruker diffBB probe; a benchtop is nearer 0.5 T/m.")
+        form.addRow("Max gradient:", self.sim_max_gradient_spin)
+
+        self.sim_shape_combo = QComboBox()
+        for key, label in processing_diffusion.GRADIENT_SHAPE_LABELS.items():
+            self.sim_shape_combo.addItem(label, key)
+        self._narrow_combo(self.sim_shape_combo)
+        self.sim_shape_combo.setToolTip(
+            "Gradient pulse shape. A shaped pulse has less area than a rectangle "
+            "of the same peak amplitude and duration, so a smaller b-value and "
+            "less attenuation -- 'Compare gradient shapes' below shows how much.")
+        form.addRow("Gradient shape:", self.sim_shape_combo)
+        self.sim_ramp_spin = self._sim_spin(
+            0.0, 50.0, 0.1, 3, " ms", "Rise time of each trapezoid edge.")
+        form.addRow("Ramp:", self.sim_ramp_spin)
+
+        self.sim_sequence_combo = QComboBox()
+        for key, spec in processing_diffusion.DIFFUSION_SEQUENCES.items():
+            self.sim_sequence_combo.addItem(spec["label"], key)
+        self._narrow_combo(self.sim_sequence_combo)
+        self.sim_sequence_combo.setToolTip(
+            "Sequence type -- sets the diffusion-time correction. A bipolar pair "
+            "loses τ/2 of diffusion time to the recovery delay between its lobes.")
+        form.addRow("Sequence:", self.sim_sequence_combo)
+        self.sim_tau_spin = self._sim_spin(
+            0.0, 100.0, 0.2, 3, " ms", "Recovery delay between the lobes of a bipolar pair.")
+        form.addRow("τ:", self.sim_tau_spin)
+        self._sim_form = form
+        layout.addWidget(box)
+
+        compare_row = QHBoxLayout()
+        compare_row.addWidget(QLabel("Show:"))
+        self.sim_compare_combo = QComboBox()
+        self.sim_compare_combo.addItem("This experiment", None)
+        self.sim_compare_combo.addItem("Compare gradient shapes", "shape")
+        self.sim_compare_combo.addItem("Compare sequence types", "sequence")
+        self.sim_compare_combo.setToolTip(
+            "Draw every gradient shape (or every sequence type) at once, "
+            "everything else held fixed, to see how much each changes the "
+            "attenuation at the same nominal gradient.")
+        compare_row.addWidget(self.sim_compare_combo)
+        compare_row.addStretch(1)
+        layout.addLayout(compare_row)
+
+        self.sim_diffusion_summary_label = QLabel("")
+        self.sim_diffusion_summary_label.setWordWrap(True)
+        self.sim_diffusion_summary_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.sim_diffusion_summary_label)
+
+        for widget in (self.sim_delta_spin, self.sim_DELTA_spin, self.sim_max_gradient_spin,
+                       self.sim_ramp_spin, self.sim_tau_spin):
+            widget.valueChanged.connect(lambda _v: self._run_diffusion_simulation())
+        for combo in (self.sim_shape_combo, self.sim_sequence_combo, self.sim_compare_combo):
+            combo.currentIndexChanged.connect(lambda _i: self._run_diffusion_simulation())
+        self.sim_nucleus_combo.currentTextChanged.connect(lambda _t: self._run_diffusion_simulation())
+        self.sim_d_edit.editingFinished.connect(self._run_diffusion_simulation)
+        self._sync_diffusion_sim_rows()
+        layout.addStretch(1)
+        return tab
+
+    def _sync_diffusion_sim_rows(self) -> None:
+        """Ramp only for a trapezoid, τ only for a bipolar sequence --
+        or while comparing across that very option."""
+        vary = self.sim_compare_combo.currentData()
+        shape = self.sim_shape_combo.currentData()
+        sequence = self.sim_sequence_combo.currentData()
+        self._sim_form.setRowVisible(
+            self.sim_ramp_spin,
+            vary == "shape" or shape in processing_diffusion.SHAPES_WITH_RAMP)
+        self._sim_form.setRowVisible(
+            self.sim_tau_spin,
+            vary == "sequence" or processing_diffusion.DIFFUSION_SEQUENCES[sequence]["uses_tau"])
+
+    def _parse_sim_d_values(self) -> list[float] | None:
+        text = self.sim_d_edit.text().strip()
+        if not text:
+            return None
+        values = [float(part) for part in text.replace(";", ",").split(",") if part.strip()]
+        if not values or any(v <= 0 for v in values):
+            raise ValueError("D must be one or more positive numbers in m²/s, e.g. 1e-9, 2e-10.")
+        return values
+
+    def _run_diffusion_simulation(self) -> None:
+        self._sync_diffusion_sim_rows()
+        self._show_simulation_view()
+        figure = self.simulation_canvas.figure
+        figure.clear()
+        ax = figure.add_subplot(111)
+        common = dict(
+            delta_ms=self.sim_delta_spin.value(), DELTA_ms=self.sim_DELTA_spin.value(),
+            max_gradient=self.sim_max_gradient_spin.value(),
+            shape=self.sim_shape_combo.currentData(), sequence=self.sim_sequence_combo.currentData(),
+            tau_ms=self.sim_tau_spin.value(), ramp_ms=self.sim_ramp_spin.value(),
+        )
+        nucleus = self.sim_nucleus_combo.currentText().strip()
+        vary = self.sim_compare_combo.currentData()
+        try:
+            D_values = self._parse_sim_d_values()
+            if vary is None:
+                curve = simulate_diffusion.pfg_attenuation(nucleus, D=D_values, **common)
+                curves = [curve]
+                lines = [f"b at max gradient: {curve['b'][-1]:.3g} s/m²"]
+                lines += [f"D = {D:.2g} m²/s → I/I₀ at max = {curve['intensity'][i, -1]:.3g}"
+                          for i, D in enumerate(curve["D"])]
+                title = f"{nucleus}: δ = {common['delta_ms']:g} ms, Δ = {common['DELTA_ms']:g} ms"
+            else:
+                D = (D_values or [1e-9])[0]
+                curves = simulate_diffusion.compare_attenuation(nucleus, D=D, vary=vary, **common)
+                lines = []
+                for c in curves:
+                    if c["intensity"] is None:
+                        lines.append(f"{c['label']}: not drawn -- {c['error']}")
+                    else:
+                        lines.append(f"{c['label']}: b(max) = {c['b'][-1]:.3g} s/m², "
+                                     f"I/I₀ at max = {c['intensity'][0, -1]:.3g}")
+                what = "gradient shapes" if vary == "shape" else "sequence types"
+                title = f"{nucleus}, D = {D:.2g} m²/s: {what} compared"
+        except (ValueError, KeyError, TypeError) as exc:
+            self.sim_diffusion_summary_label.setText(f"Cannot simulate: {exc}")
+            self.simulation_canvas.draw()
+            return
+        simulate_diffusion.plot_attenuation(curves, ax)
+        ax.set_title(title, fontsize=10)
+        figure.tight_layout()
+        self.simulation_canvas.draw()
+        self.sim_diffusion_summary_label.setText("\n".join(lines))
+
+    #: GUI names for the shapes generate_shape knows without coefficients.
+    _BLOCH_SHAPES = (
+        ("GAUSSIAN", "Gaussian"),
+        ("SINC", "Sinc (Hamming-windowed)"),
+        ("EBURP2", "E-BURP-2 (90° excitation)"),
+        ("REBURP", "RE-BURP (180° refocusing)"),
+    )
+
+    def _build_bloch_sim_subtab(self) -> QWidget:
+        """Excitation profile of a shaped pulse -- a port of
+        ``leonmr/bloch_sim.py`` (its shapes are the X-Pulse pulse
+        programmes' own). Power can be given as a flip angle, as a peak
+        B1, or from a calibrated hard 90° as the original's
+        ``simulate_selective_pulse`` takes it."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        box = QGroupBox("Pulse")
+        form = QFormLayout(box)
+        self.bloch_shape_combo = QComboBox()
+        for key, label in self._BLOCH_SHAPES:
+            self.bloch_shape_combo.addItem(label, key)
+        self._narrow_combo(self.bloch_shape_combo)
+        self.bloch_shape_combo.setToolTip(
+            "The on-the-fly shapes of the X-Pulse selective sequences. EBURP1/"
+            "BURP need Fourier coefficients and are available from "
+            "opennmr.simulate.bloch rather than here.")
+        form.addRow("Shape:", self.bloch_shape_combo)
+        self.bloch_duration_spin = self._sim_spin(
+            10.0, 100000.0, 1000.0, 0, " µs",
+            "Pulse duration. Also the time resolution: one point per µs, as the "
+            "hardware synthesises it.")
+        form.addRow("Duration:", self.bloch_duration_spin)
+
+        self.bloch_power_mode_combo = QComboBox()
+        self.bloch_power_mode_combo.addItem("Flip angle", "flip")
+        self.bloch_power_mode_combo.addItem("Peak B1", "b1")
+        self.bloch_power_mode_combo.addItem("Hard-pulse calibration", "hard")
+        self.bloch_power_mode_combo.setToolTip(
+            "How the pulse power is given. Flip angle: the peak B1 that gives "
+            "that rotation on resonance. Hard-pulse calibration: a relative TX "
+            "amplitude referenced to a calibrated hard 90°, as read off a pulse "
+            "programme's panel (RFAsh0 / P1Hard / RFA0).")
+        form.addRow("Power from:", self.bloch_power_mode_combo)
+        self.bloch_flip_spin = self._sim_spin(1.0, 720.0, 90.0, 1, "°", "On-resonance flip angle.")
+        form.addRow("Flip angle:", self.bloch_flip_spin)
+        self.bloch_b1_spin = self._sim_spin(
+            1.0, 1.0e6, 1000.0, 1, " Hz", "B1 at the shape's peak, as a nutation frequency.")
+        form.addRow("Peak B1:", self.bloch_b1_spin)
+        self.bloch_tx_spin = self._sim_spin(0.0, 1.0, 0.1, 4, "", "The shaped pulse's relative TX amplitude (RFAsh0).")
+        form.addRow("TX amplitude:", self.bloch_tx_spin)
+        self.bloch_hard_width_spin = self._sim_spin(
+            0.1, 1000.0, 10.0, 2, " µs", "Width of the calibrated hard 90° (P1Hard).")
+        form.addRow("Hard 90° width:", self.bloch_hard_width_spin)
+        self.bloch_hard_amp_spin = self._sim_spin(
+            0.0001, 1.0, 1.0, 4, "", "Relative TX amplitude of that hard 90° (RFA0).")
+        form.addRow("Hard 90° amplitude:", self.bloch_hard_amp_spin)
+        self.bloch_lp_spin = self._sim_spin(
+            0.0001, 10.0, 1.0, 4, "",
+            "LP-vs-HP maximum power ratio (LPMaxFraction), if the shaped pulse is on "
+            "a different port from the hard-pulse calibration. 1 if the same.")
+        form.addRow("LP max fraction:", self.bloch_lp_spin)
+        self._bloch_form = form
+        layout.addWidget(box)
+
+        sweep_box = QGroupBox("Sweep")
+        sweep_form = QFormLayout(sweep_box)
+        self.bloch_offset_spin = self._sim_spin(
+            0.0, 1.0e7, 0.0, 0, " Hz",
+            "Offsets simulated run from minus to plus this. 0: about twice the "
+            "shape's naive bandwidth (4/duration), the original's default.")
+        self.bloch_offset_spin.setSpecialValueText("auto")
+        sweep_form.addRow("± Offset:", self.bloch_offset_spin)
+        self.bloch_n_offsets_spin = QSpinBox()
+        self.bloch_n_offsets_spin.setRange(3, 5001)
+        self.bloch_n_offsets_spin.setValue(401)
+        self.bloch_n_offsets_spin.setToolTip("Number of offsets across the sweep.")
+        sweep_form.addRow("Points:", self.bloch_n_offsets_spin)
+        self.bloch_power_scales_edit = QLineEdit("1.0")
+        self.bloch_power_scales_edit.setToolTip(
+            "Multipliers on the power, comma-separated -- e.g. 0.8, 1.0, 1.2 to "
+            "see how sensitive the profile is to a ±20% miscalibration.")
+        sweep_form.addRow("Power scales:", self.bloch_power_scales_edit)
+        layout.addWidget(sweep_box)
+
+        run_button = QPushButton("Simulate Pulse")
+        run_button.clicked.connect(self._run_bloch_simulation)
+        layout.addWidget(run_button)
+        self.bloch_summary_label = QLabel("")
+        self.bloch_summary_label.setWordWrap(True)
+        layout.addWidget(self.bloch_summary_label)
+
+        self.bloch_power_mode_combo.currentIndexChanged.connect(lambda _i: self._sync_bloch_rows())
+        self.bloch_shape_combo.currentIndexChanged.connect(self._on_bloch_shape_changed)
+        self._sync_bloch_rows()
+        layout.addStretch(1)
+        return tab
+
+    def _sync_bloch_rows(self) -> None:
+        mode = self.bloch_power_mode_combo.currentData()
+        self._bloch_form.setRowVisible(self.bloch_flip_spin, mode == "flip")
+        self._bloch_form.setRowVisible(self.bloch_b1_spin, mode == "b1")
+        for widget in (self.bloch_tx_spin, self.bloch_hard_width_spin,
+                       self.bloch_hard_amp_spin, self.bloch_lp_spin):
+            self._bloch_form.setRowVisible(widget, mode == "hard")
+
+    def _on_bloch_shape_changed(self, _index: int) -> None:
+        """The BURP shapes are designed for one flip each; offer it."""
+        shape = self.bloch_shape_combo.currentData()
+        if shape == "EBURP2":
+            self.bloch_flip_spin.setValue(90.0)
+        elif shape == "REBURP":
+            self.bloch_flip_spin.setValue(180.0)
+
+    def _bloch_peak_b1(self, shape: str, duration_us: float) -> tuple[float, str]:
+        mode = self.bloch_power_mode_combo.currentData()
+        if mode == "flip":
+            flip = self.bloch_flip_spin.value()
+            return (simulate_bloch.peak_b1_for_flip_angle(shape, duration_us, flip),
+                    f"for a {flip:g}° flip on resonance")
+        if mode == "b1":
+            return self.bloch_b1_spin.value(), "as entered"
+        return (simulate_bloch.hard_pulse_to_b1_hz(
+                    self.bloch_tx_spin.value(), self.bloch_hard_width_spin.value(),
+                    self.bloch_hard_amp_spin.value(), self.bloch_lp_spin.value()),
+                "from the hard-pulse calibration")
+
+    def _run_bloch_simulation(self) -> None:
+        shape = self.bloch_shape_combo.currentData()
+        duration = self.bloch_duration_spin.value()
+        try:
+            peak_b1, source = self._bloch_peak_b1(shape, duration)
+            scales = [float(p) for p in self.bloch_power_scales_edit.text().replace(";", ",").split(",")
+                      if p.strip()] or [1.0]
+            half = self.bloch_offset_spin.value()
+            lo, hi = (-half, half) if half > 0 else simulate_bloch.default_offset_range_hz(duration)
+            offsets = np.linspace(lo, hi, self.bloch_n_offsets_spin.value())
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                sim = simulate_bloch.simulate_pulse(shape, duration, peak_b1, offsets,
+                                                    power_scales=scales)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except ValueError as exc:
+            self.bloch_summary_label.setText(f"Cannot simulate: {exc}")
+            return
+        label = dict(self._BLOCH_SHAPES)[shape]
+        self._show_simulation_view()
+        simulate_bloch.plot_pulse_simulation(
+            sim, self.simulation_canvas.figure,
+            title=f"{label}, {duration:g} µs, peak B1 {peak_b1:.1f} Hz")
+        self.simulation_canvas.draw()
+        centre = int(np.argmin(np.abs(sim["offsets_hz"])))
+        nominal = int(np.argmin(np.abs(sim["power_scales"] - 1.0)))
+        self.bloch_summary_label.setText(
+            f"Peak B1 = {peak_b1:.1f} Hz ({source}).\n"
+            f"On resonance: Mz = {sim['Mz'][nominal, centre]:.3f}, "
+            f"|Mxy| = {np.hypot(sim['Mx'][nominal, centre], sim['My'][nominal, centre]):.3f}.")
 
     def _build_simulate_csa_subtab(self) -> QWidget:
         """Forward-simulate a single CSA powder pattern (static or

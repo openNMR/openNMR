@@ -7685,10 +7685,11 @@ def test_main_window_left_panel_has_a_usable_minimum_width(qapp):
 # Multi-canvas plot tabs (Spectrum / FID / Compare / Fit)
 # ============================================================
 
-def test_main_window_has_six_canvas_tabs(qapp):
+def test_main_window_has_seven_canvas_tabs(qapp):
     window = MainWindow()
     labels = [window.canvas_tabs.tabText(i) for i in range(window.canvas_tabs.count())]
-    assert labels == ["FID", "Processing Preview", "Spectrum", "Spectral Fit", "Fit", "Compare"]
+    assert labels == ["FID", "Processing Preview", "Spectrum", "Spectral Fit", "Fit", "Compare",
+                      "Simulation"]
     assert window.canvas_tabs.widget(0) is window.fid_canvas
     assert window.canvas_tabs.widget(1) is window.processing_preview_canvas
     assert window.canvas_tabs.widget(2) is window.canvas
@@ -7698,6 +7699,8 @@ def test_main_window_has_six_canvas_tabs(qapp):
     assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.fit_canvas)) is False
     assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.compare_canvas)) is False
     assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.processing_preview_canvas)) is False
+    # Simulation: only once a Diffusion/Bloch simulation has run.
+    assert window.canvas_tabs.isTabVisible(window.canvas_tabs.indexOf(window.simulation_canvas)) is False
 
 
 def test_main_window_selecting_spectrum_switches_to_spectrum_tab(qapp, tmp_path):
@@ -15906,3 +15909,109 @@ def test_pseudo2d_stack_is_its_own_plot_type(qapp, tmp_path, monkeypatch):
     assert window.canvas.plot_kind() == "pseudo2d"
     assert window.canvas.style_settings()["labelsize"] == 16
     assert window.canvas.style_settings()["compare_colormap"] == "tol_muted"
+
+
+# ============================================================
+# Simulations: Diffusion (PFG) and Shaped pulse (Bloch) sections --
+# ported from upstream (Leo, 1c5613e), adapted from his Simulate mode
+# (toolbar button + sub-tabs) to two collapsible sections of the
+# Simulations launcher tile.
+# ============================================================
+
+def _enter_simulations(window):
+    window.side_tabs.setCurrentIndex(window._simulations_tab_index)
+
+
+def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
+    window = MainWindow()
+    page = window.side_tabs.widget(window._simulations_tab_index)
+    titles = [s.title() for s in page.findChildren(CollapsibleSection)]
+    assert titles == ["CSA", "Quadrupolar", "Diffusion (PFG)", "Shaped pulse (Bloch)"]
+
+
+def test_simulation_plot_shows_on_run_and_hides_on_leaving_the_tile(qapp):
+    window = MainWindow()
+    tab = window.canvas_tabs.indexOf(window.simulation_canvas)
+    assert not window.canvas_tabs.isTabVisible(tab)
+    _enter_simulations(window)
+    # Entering alone does not steal the plot: CSA/Quadrupolar draw on
+    # the spectrum canvases, so only running one of these raises it.
+    assert not window.canvas_tabs.isTabVisible(tab)
+    window._run_diffusion_simulation()
+    assert window.canvas_tabs.isTabVisible(tab)
+    assert window.canvas_tabs.currentWidget() is window.simulation_canvas
+    assert window.simulation_canvas.figure.axes
+    assert "b at max gradient" in window.sim_diffusion_summary_label.text()
+
+    window.side_tabs.setCurrentIndex(0)
+    assert window.canvas_tabs.currentWidget() is window.canvas
+    assert not window.canvas_tabs.isTabVisible(tab)
+
+
+def test_diffusion_simulation_compares_shapes_and_sequences(qapp):
+    window = MainWindow()
+    _enter_simulations(window)
+    window.sim_d_edit.setText("2e-9")
+    window.sim_compare_combo.setCurrentIndex(window.sim_compare_combo.findData("shape"))
+    ax = window.simulation_canvas.figure.axes[0]
+    assert len(ax.lines) == 5
+    summary = window.sim_diffusion_summary_label.text()
+    assert "Half-sine" in summary and "Rectangular" in summary
+    assert window._sim_form.isRowVisible(window.sim_ramp_spin)  # comparing across it
+
+    window.sim_compare_combo.setCurrentIndex(window.sim_compare_combo.findData("sequence"))
+    assert len(window.simulation_canvas.figure.axes[0].lines) == 4
+
+    window.sim_compare_combo.setCurrentIndex(0)
+    window.sim_d_edit.setText("")
+    window._run_diffusion_simulation()
+    assert len(window.simulation_canvas.figure.axes[0].lines) == 8  # the leonmr decade sweep
+    assert not window._sim_form.isRowVisible(window.sim_tau_spin)  # PGSE has no tau
+
+
+def test_diffusion_simulation_matches_stejskal_tanner(qapp):
+    # Independent physics check through the GUI path: rectangular PGSE,
+    # I/I0 = exp(-gamma^2 G^2 delta^2 (Delta - delta/3) D) at max gradient.
+    window = MainWindow()
+    _enter_simulations(window)
+    window.sim_nucleus_combo.setCurrentText("1H")
+    window.sim_shape_combo.setCurrentIndex(window.sim_shape_combo.findData("rect"))
+    window.sim_delta_spin.setValue(1.0)
+    window.sim_DELTA_spin.setValue(20.0)
+    window.sim_max_gradient_spin.setValue(0.5)
+    window.sim_d_edit.setText("2e-9")
+    window._run_diffusion_simulation()
+    gamma = 267.52218744e6
+    b = gamma**2 * 0.5**2 * 1e-3**2 * (20e-3 - 1e-3 / 3)
+    expected = np.exp(-b * 2e-9)
+    reported = float(window.sim_diffusion_summary_label.text().split("I/I₀ at max = ")[1].split()[0])
+    assert reported == pytest.approx(expected, rel=2e-3)
+
+
+def test_diffusion_simulation_reports_bad_input_instead_of_raising(qapp):
+    window = MainWindow()
+    _enter_simulations(window)
+    window.sim_d_edit.setText("-1")
+    window._run_diffusion_simulation()
+    assert window.sim_diffusion_summary_label.text().startswith("Cannot simulate")
+
+
+def test_bloch_simulation_gives_the_requested_flip(qapp):
+    window = MainWindow()
+    _enter_simulations(window)
+    window.bloch_shape_combo.setCurrentIndex(window.bloch_shape_combo.findData("GAUSSIAN"))
+    window.bloch_flip_spin.setValue(90.0)
+    window.bloch_n_offsets_spin.setValue(51)
+    window._run_bloch_simulation()
+    text = window.bloch_summary_label.text()
+    assert "Mz = 0.000" in text or "Mz = -0.000" in text
+    assert len(window.simulation_canvas.figure.axes) == 3  # shape, its phase twin, profile
+    assert window.canvas_tabs.currentWidget() is window.simulation_canvas
+
+    # The BURP shapes offer the flip they were designed for.
+    window.bloch_shape_combo.setCurrentIndex(window.bloch_shape_combo.findData("REBURP"))
+    assert window.bloch_flip_spin.value() == 180.0
+
+    window.bloch_power_mode_combo.setCurrentIndex(window.bloch_power_mode_combo.findData("hard"))
+    assert window._bloch_form.isRowVisible(window.bloch_hard_width_spin)
+    assert not window._bloch_form.isRowVisible(window.bloch_flip_spin)
