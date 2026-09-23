@@ -639,6 +639,17 @@ class MplCanvas(QWidget):
         # Font family for every piece of text on the figure. None
         # leaves matplotlib's own default alone.
         self._font_family: str | None = None
+        # Chemical-shift axis label -- the delta/nuclide/unit text
+        # NUC_label builds. 'brackets' is opennmr's own default
+        # (see core.registry.NUC_label); 'slash' is the older
+        # "delta (^NUC) / ppm" form some people still prefer for
+        # manuscripts. ``_axis_label_template``, when set, overrides
+        # both entirely -- a literal custom label (see
+        # _chemical_shift_label). Explicit user request: "people
+        # should be allowed to swap between these or to even supply
+        # their own custom label".
+        self._axis_label_style: str = "brackets"
+        self._axis_label_template: str | None = None
         self._aspect_ratio: float | None = None  # None = unlocked
 
         # Per-instance style state (Output tab / MainWindow.set_style) --
@@ -657,6 +668,8 @@ class MplCanvas(QWidget):
         #: two plots of the same samples agree without being set up
         #: twice. Individual series can override it; see SeriesStyle.
         self._series_colormap = "viridis"
+        #: What kind of plot is showing -- see plotKindChanged.
+        self._plot_kind: str | None = None
         #: Per-view series styling, keyed by the view that owns it.
         #: Written when a view is created and only ever *read* at draw
         #: time -- the rule that stops a colour resetting on a redraw.
@@ -681,7 +694,7 @@ class MplCanvas(QWidget):
         # Persists across a rebuild the same way legend/aspect-lock do
         # (see show_spectrum's own docstring) -- an explicit opt-out of
         # plot_1d's/plot_2d_contour's default rendering-only
-        # downsampling (see opennmr.plotting.style.downsample_indices/
+        # downsampling (see opennmr.plotting.style.downsample_1d/
         # downsample_2d), for on-screen viewing. Exporting/saving a
         # figure always uses full resolution regardless of this (see
         # export_full_resolution) -- this only controls what's
@@ -2206,6 +2219,18 @@ class MplCanvas(QWidget):
     #: owns the dialog and the controls in it.
     plotStyleRequested = Signal()
 
+    #: Emitted with ``"1d"``, ``"2d"``, ``"pseudo2d"`` or ``"compare"``
+    #: when this canvas is about to draw a *different kind* of plot
+    #: from the last one -- before drawing it, so a listener can hand
+    #: it that kind's saved default style (see
+    #: :meth:`apply_style_defaults`) and the plot is drawn in it first
+    #: time. Not emitted for another plot of the same kind: that would
+    #: undo whatever the user has changed on this plot since.
+    plotKindChanged = Signal(str)
+
+    #: The plot kinds :attr:`plotKindChanged` reports.
+    PLOT_KINDS = ("1d", "2d", "pseudo2d", "compare")
+
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
 
@@ -2525,6 +2550,80 @@ class MplCanvas(QWidget):
                 for text in legend.get_texts():
                     text.set_fontfamily(self._font_family)
 
+    def _chemical_shift_label(self, spectrum, x_unit: str = "ppm") -> str:
+        """This canvas's own axis-label style/template, applied to
+        ``spectrum``'s own nucleus -- the single place every ppm axis
+        label on this canvas is built, so the Plot Style panel's
+        "Axis label" controls reach every view (Spectrum, 2D contour,
+        the Fit tab, Compare, the Processing preview) without a
+        ``style``/``template`` parameter threaded through each of
+        :mod:`opennmr.plotting`'s own ``plot_1d``/``plot_2d_contour``
+        calls, which build the same label with their own standalone
+        (always-``'brackets'``) default for notebook use.
+
+        Falls back to ``spectrum.metadata.nucleus`` verbatim (skipping
+        :func:`~opennmr.core.registry.find_gamma`) if that lookup
+        fails, e.g. an unrecognised or blank nucleus string -- a
+        best-effort label beats no plot at all.
+        """
+        try:
+            nuclide = find_gamma(spectrum.metadata.nucleus, SFO1=spectrum.metadata.sfo1)["Nuclide"]
+        except Exception:
+            nuclide = spectrum.metadata.nucleus or "?"
+        return NUC_label(nuclide, x_unit=x_unit, style=self._axis_label_style,
+                          template=self._axis_label_template)
+
+    def _unit_label(self, quantity: str, unit: str) -> str:
+        """A non-nuclide axis label -- "Frequency"/Hz, "Position"/mm
+        -- in this canvas's own brackets/slash style. No ``template``
+        here: the custom-label box's placeholders (``{element}``,
+        ``{mass}``, ...) are nuclide-specific and would not mean
+        anything for a quantity that has neither."""
+        if self._axis_label_style == "slash":
+            return f"{quantity} / {unit}"
+        return f"{quantity} ({unit})"
+
+    def _refresh_axis_labels(self) -> None:
+        """Recompute every ppm/unit axis label currently on screen
+        from this canvas's own axis-label style/template -- called by
+        :meth:`set_style` whenever either changes, so the effect is
+        visible immediately rather than only on the view's next full
+        redraw.
+
+        Covers the views built from a *stored* spectrum reference:
+        the Spectrum tab (``self.ax`` + ``_current_1d_spectrum``),
+        the 2D contour (``self.ax``'s x/y, via ``_contour_for_display``),
+        and a Compare stack's shared bottom label. The Fit tab and
+        Processing preview rebuild their own axis label from scratch
+        on their next redraw instead (a style-only change doesn't
+        itself trigger one) -- reaching them here would need the same
+        fit/preview state their own draw methods already hold.
+        """
+        if self._contour_spectrum is not None and self.ax is not None:
+            _spec, xlabel, ylabel = self._contour_for_display()
+            if xlabel is not None:
+                self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
+            if ylabel is not None:
+                self.ax.set_ylabel(ylabel, fontsize=self._AXIS_LABELSIZE)
+            return
+        if self._current_1d_spectrum is not None and self.ax is not None:
+            if self._axis_unit == "ppm":
+                label = self._chemical_shift_label(self._current_1d_spectrum, x_unit="ppm")
+                self._ppm_label = label
+            else:
+                label = self._unit_axis_label(self._axis_unit)
+            if label is not None:
+                self.ax.set_xlabel(label, fontsize=self._AXIS_LABELSIZE)
+            return
+        if self._compare_axes and self._compare_spectra:
+            if self._axis_unit == "ppm":
+                label = self._chemical_shift_label(self._compare_spectra[-1], x_unit="ppm")
+                self._ppm_label = label
+            else:
+                label = self._unit_axis_label(self._axis_unit)
+            if label is not None:
+                self._compare_axes[-1].set_xlabel(label, fontsize=self._AXIS_LABELSIZE)
+
     def _apply_title_and_font(self, ax) -> None:
         """One axes' title visibility and font family.
 
@@ -2718,6 +2817,8 @@ class MplCanvas(QWidget):
             "dosy_clevels": self._dosy_clevels,
             "title_visible": self._title_visible,
             "font_family": self._font_family,
+            "axis_label_style": self._axis_label_style,
+            "axis_label_template": self._axis_label_template,
             "legend_frameon": self._legend_frameon,
             "legend_fontsize": self._legend_fontsize,
             "legend_framealpha": self._legend_framealpha,
@@ -2728,7 +2829,8 @@ class MplCanvas(QWidget):
                   minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
                   trace_color=None, contour_linewidth=None, contour_clevels=None,
                   contour_level_mode=None, contour_power=None,
-                  title_visible=None, font_family=None, legend_frameon=None,
+                  title_visible=None, font_family=None, axis_label_style=None,
+                  axis_label_template=None, legend_frameon=None,
                   legend_fontsize=None, legend_framealpha=None, legend_facecolor=None) -> None:
         """The Output tab's live style panel -- updates whichever of
         these aren't ``None``, both as the new per-instance default
@@ -2769,6 +2871,15 @@ class MplCanvas(QWidget):
             # stored as None, so _apply_title_and_font's own truthiness
             # check is the only place that decision is made.
             self._font_family = font_family or None
+        if axis_label_style is not None:
+            if axis_label_style not in ("brackets", "slash"):
+                raise ValueError("axis_label_style must be 'brackets' or 'slash'")
+            self._axis_label_style = axis_label_style
+        if axis_label_template is not None:
+            # "" from the panel's line edit means "no custom template,
+            # use axis_label_style instead" -- same None-vs-falsy-
+            # sentinel convention as font_family just above.
+            self._axis_label_template = axis_label_template or None
         if legend_frameon is not None:
             self._legend_frameon = bool(legend_frameon)
         if legend_fontsize is not None:
@@ -2836,6 +2947,8 @@ class MplCanvas(QWidget):
         # font pass after it) threw away the font family the first had
         # just applied to its Text artists.
         self._apply_current_axis_style()
+        if axis_label_style is not None or axis_label_template is not None:
+            self._refresh_axis_labels()
         for ax in self.figure.get_axes():
             if grid is not None:
                 ax.grid(grid, **({"alpha": 0.3} if grid else {}))
@@ -2845,6 +2958,62 @@ class MplCanvas(QWidget):
         # scratch) -- nothing to update on the already-drawn axes here.
 
         self.canvas.draw_idle()
+
+    def plot_kind(self) -> str | None:
+        """The kind of plot showing -- ``"1d"``, ``"2d"``,
+        ``"pseudo2d"``, ``"compare"`` -- or ``None`` before the first
+        one (or for a view with no per-kind default, e.g. a FID)."""
+        return self._plot_kind
+
+    def _enter_plot_kind(self, kind: str) -> None:
+        """Record that a ``kind`` plot is about to be drawn, announcing
+        it if that is a change -- see :attr:`plotKindChanged`."""
+        if kind == self._plot_kind:
+            return
+        self._plot_kind = kind
+        self.plotKindChanged.emit(kind)
+
+    #: set_style's keyword arguments, for filtering a saved style dict
+    #: (which also carries export and bookkeeping keys) down to them.
+    _STYLE_KEYS = (
+        "linewidth", "labelsize", "tick_length", "tick_width", "minor_ticks", "grid",
+        "legend_loc", "compare_colormap", "trace_color", "contour_linewidth",
+        "contour_clevels", "contour_level_mode", "contour_power", "title_visible",
+        "font_family", "axis_label_style", "axis_label_template", "legend_frameon",
+        "legend_fontsize", "legend_framealpha", "legend_facecolor",
+    )
+
+    def apply_style_defaults(self, style: dict) -> None:
+        """Adopt ``style`` -- a saved per-plot-kind default, in
+        :meth:`style_settings`' own keys (unknown ones ignored) -- as
+        this canvas's style, **ahead of a redraw that is about to
+        happen anyway**.
+
+        Differs from :meth:`set_style` in one way: the contour
+        settings (levels, spacing, exponent, line width) are stored
+        without rebuilding whatever contour is on screen now, since it
+        is about to be replaced -- and the level settings also become
+        what this canvas resets to for each *new* 2D spectrum, which
+        otherwise goes back to the built-in defaults (see
+        :meth:`show_spectrum`). So a saved 2D default holds for every
+        2D shown, not only the first."""
+        values = {k: v for k, v in style.items() if k in self._STYLE_KEYS and v is not None}
+        if "contour_clevels" in values:
+            clevels = max(2, int(values["contour_clevels"]))
+            self._contour_clevels = self._dosy_clevels = clevels
+            self._CONTOUR_CLEVELS_DEFAULT = clevels
+        if "contour_level_mode" in values:
+            mode = "power" if values["contour_level_mode"] == "power" else "linear"
+            self._contour_level_mode = self._CONTOUR_LEVEL_MODE_DEFAULT = mode
+        if "contour_power" in values:
+            self._contour_power = self._CONTOUR_POWER_DEFAULT = float(values["contour_power"])
+        if "contour_linewidth" in values:
+            self._contour_linewidth = float(values["contour_linewidth"])
+        for key in ("contour_clevels", "contour_level_mode", "contour_power", "contour_linewidth"):
+            values.pop(key, None)
+        if values.get("axis_label_style") not in (None, "brackets", "slash"):
+            values.pop("axis_label_style")
+        self.set_style(**values)
 
     def set_export_settings(self, *, dpi=None, fig_width=None, fig_height=None) -> None:
         """DPI/figure size (inches) for **exported** figures only --
@@ -3132,9 +3301,18 @@ class MplCanvas(QWidget):
         self._imaging_gamma_hz_per_t = gamma_hz_per_t
         self._imaging_max_gradient_g_per_cm = max_gradient_g_per_cm
 
-    #: Axis label for each non-ppm display unit. ppm's own label is
-    #: nucleus-dependent and comes from ``NUC_label`` instead.
-    _UNIT_LABELS = {"hz": "Frequency / Hz", "khz": "Frequency / kHz", "mm": "Position / mm"}
+    #: (quantity, unit) for each non-ppm display unit, fed to
+    #: :meth:`_unit_label` for this canvas's own brackets/slash
+    #: style. ppm's own label is nucleus-dependent and comes from
+    #: :meth:`_chemical_shift_label`/``NUC_label`` instead.
+    _UNIT_QUANTITIES = {"hz": ("Frequency", "Hz"), "khz": ("Frequency", "kHz"), "mm": ("Position", "mm")}
+
+    def _unit_axis_label(self, unit: str) -> str | None:
+        """The full axis label for a non-ppm display ``unit``
+        ("hz"/"khz"/"mm"), in this canvas's own style -- ``None``
+        for an unrecognised unit."""
+        pair = self._UNIT_QUANTITIES.get(unit)
+        return self._unit_label(*pair) if pair else None
 
     def _imaging_hz_per_mm(self) -> float | None:
         """Hz per mm for the current imaging gradient, or ``None`` when
@@ -3185,11 +3363,30 @@ class MplCanvas(QWidget):
         a 1D view, and ``set_axis_unit`` only ever rewrote line data.
         """
         spectrum = self._contour_spectrum
-        if spectrum is None or self._axis_unit == "ppm":
+        if spectrum is None:
             return spectrum, None, None
+        if self._axis_unit == "ppm":
+            # Still computed explicitly, in this canvas's own
+            # style/template, rather than left for plot_2d_contour's
+            # own (always-'brackets') NUC_label default -- see
+            # _chemical_shift_label. Mirrors plot_2d_contour's own
+            # homonuclear/pseudo-2D logic for the F1 (y) label so the
+            # two only ever disagree on style, never on which axis
+            # gets which nucleus.
+            xlabel = self._chemical_shift_label(spectrum, x_unit="ppm")
+            if spectrum.metadata.homonuclear:
+                ylabel = xlabel
+            elif not spectrum.is_pseudo_2d:
+                indirect = copy.copy(spectrum)
+                indirect.metadata = dataclasses.replace(
+                    spectrum.metadata, nucleus=spectrum.metadata.nucleus_indirect)
+                ylabel = self._chemical_shift_label(indirect, x_unit="ppm")
+            else:
+                ylabel = None  # plot_2d_contour's own 'Slice number' default
+            return spectrum, xlabel, ylabel
         converted = copy.copy(spectrum)
         converted.axes = list(spectrum.axes)
-        label = self._UNIT_LABELS.get(self._axis_unit)
+        label = self._unit_axis_label(self._axis_unit)
         xlabel = ylabel = None
         for dim in (0, 1):
             values = self._axis_values_in_unit(spectrum.axes[dim], self._axis_unit)
@@ -3243,19 +3440,19 @@ class MplCanvas(QWidget):
         axis = self._current_1d_spectrum.axes[0]
         if unit == "ppm":
             x = axis.values("ppm")
-            label = self._ppm_label
+            label = self._chemical_shift_label(self._current_1d_spectrum, x_unit="ppm")
         elif unit == "hz":
             x = axis.values("hz")
-            label = "Frequency / Hz"
+            label = self._unit_axis_label("hz")
         elif unit == "khz":
             x = axis.values("hz") / 1000.0
-            label = "Frequency / kHz"
+            label = self._unit_axis_label("khz")
         else:
             hz_per_mm = self._imaging_hz_per_mm()
             if not hz_per_mm:
                 return
             x = axis.values("hz") / hz_per_mm
-            label = self._UNIT_LABELS["mm"]
+            label = self._unit_axis_label("mm")
 
         # Before the loop below, not after: it rewrites the x data of
         # *every* line on the Axes, and the crosshair's own axvline/
@@ -3276,6 +3473,8 @@ class MplCanvas(QWidget):
         self.ax.set_xlim(float(np.min(x)), float(np.max(x)))
         self.ax.invert_xaxis()
         self.ax.set_xlabel(label)
+        if unit == "ppm":
+            self._ppm_label = label
         self._axis_unit = unit
         self.canvas.draw_idle()
 
@@ -3296,7 +3495,8 @@ class MplCanvas(QWidget):
         whole switch being refused -- one unconvertible row in a stack
         should not veto the others."""
         converted_any = False
-        label = self._UNIT_LABELS.get(unit)
+        label = self._unit_axis_label(unit)
+        last_spectrum = None
         for row_ax, spectrum in zip(self._compare_axes, self._compare_spectra):
             if not row_ax.lines:
                 continue
@@ -3308,11 +3508,14 @@ class MplCanvas(QWidget):
                     line.set_xdata(values)
             row_ax.set_xlim(float(np.min(values)), float(np.max(values)))
             converted_any = True
+            last_spectrum = spectrum
         if not converted_any:
             return
         self._compare_axes[0].invert_xaxis()
-        self._compare_axes[-1].set_xlabel(
-            label if unit != "ppm" else self._ppm_label, fontsize=self._AXIS_LABELSIZE)
+        if unit == "ppm" and last_spectrum is not None:
+            label = self._chemical_shift_label(last_spectrum, x_unit="ppm")
+            self._ppm_label = label
+        self._compare_axes[-1].set_xlabel(label, fontsize=self._AXIS_LABELSIZE)
         self._axis_unit = unit
         # The crosshair's lines live on these Axes too, and would be
         # rewritten by the loop above if they matched a row's length --
@@ -3530,6 +3733,8 @@ class MplCanvas(QWidget):
         :func:`opennmr.plotting.plot_2d_contour`. Preserves this
         canvas's legend-visible/aspect-lock choices across the
         rebuild."""
+        if spectrum.ndim in (1, 2):
+            self._enter_plot_kind("1d" if spectrum.ndim == 1 else "2d")
         self._clear_figure()
         self._extracted_from_spectrum = None
         self._extracted_trace = None
@@ -3554,6 +3759,10 @@ class MplCanvas(QWidget):
             xmin, xmax, labeltext = plotting.plot_1d(
                 self.ax, spectrum, full_resolution=self._full_resolution,
                 color=self._trace_color)
+            # This canvas's own axis-label style/template, not
+            # plot_1d's own (always-'brackets') default -- see
+            # _chemical_shift_label.
+            labeltext = self._chemical_shift_label(spectrum, x_unit="ppm")
             self._ppm_label = labeltext
             self.ax.lines[0].set_label(_spectrum_label(spectrum))
             self.ax.set_xlim(xmin, xmax)
@@ -3623,9 +3832,13 @@ class MplCanvas(QWidget):
 
         ``mode`` : ``"magnitude"`` (default, ``|fid|`` -- a single
         clean decay/echo envelope, easiest for judging alignment/decay
-        shape) or ``"real"`` (one oscillating component, closer to
-        what phase-sensitive detection actually recorded). Plots one
-        line either way, not both real and imaginary together.
+        shape), ``"real"`` (one oscillating component, closer to what
+        phase-sensitive detection actually recorded), or
+        ``"real_imag"`` (both the real and imaginary components, each
+        its own coloured line with a legend -- explicit user request:
+        a raw FID's imaginary part carries real information (e.g. how
+        well-balanced the quadrature channels are) that magnitude or
+        real alone each throw away).
 
         ``window_envelope`` : the currently-selected apodization
         window's own shape (real-valued, same length as ``fid``, from
@@ -3665,10 +3878,15 @@ class MplCanvas(QWidget):
             raise ValueError("x_unit must be 'time' or 'points'")
         scale = dt if x_unit == "time" else 1.0
         t = np.arange(len(fid)) * scale
-        if mode not in ("magnitude", "real"):
-            raise ValueError("mode must be 'magnitude' or 'real'")
-        y = np.real(fid) if mode == "real" else np.abs(fid)
-        self.ax.plot(t, y, label="Real" if mode == "real" else "Magnitude")
+        if mode not in ("magnitude", "real", "real_imag"):
+            raise ValueError("mode must be 'magnitude', 'real', or 'real_imag'")
+        if mode == "real_imag":
+            self.ax.plot(t, np.real(fid), color="black", label="Real")
+            self.ax.plot(t, np.imag(fid), color=self._FID_IMAG_COLOR, label="Imaginary")
+            self._legend_visible = True
+        else:
+            y = np.real(fid) if mode == "real" else np.abs(fid)
+            self.ax.plot(t, y, label="Real" if mode == "real" else "Magnitude")
         if window_envelope is not None:
             peak = np.max(np.abs(fid))
             self.ax.plot(t, np.asarray(window_envelope) * peak, "--", color="gray", label="Window", zorder=0)
@@ -3739,7 +3957,17 @@ class MplCanvas(QWidget):
         Always downsampled (regardless of :attr:`_full_resolution`) --
         this view is about responsiveness while tweaking, not final
         inspection; the committed Spectrum tab view is unaffected and
-        stays full-resolution as normal.
+        stays full-resolution as normal. The downsampling itself is
+        :func:`opennmr.plotting.style.downsample_1d`'s peak-preserving
+        binning, not an arbitrary evenly-spaced pick, so this no longer
+        trades correctness for speed -- a genuine peak stays visible
+        here the same way it does on the (full-resolution) Spectrum
+        tab, just possibly at a lower point density.
+
+        ``fid_mode="real_imag"`` plots the FID's real and imaginary
+        parts as two separate coloured lines with a small legend,
+        instead of the usual single real/magnitude line -- see
+        :meth:`show_fid`'s own ``mode`` docstring for the rationale.
 
         ``preserve_view`` : keep whatever zoom/pan the two panels
         already have, instead of refitting to the new data. Right for a
@@ -3780,10 +4008,14 @@ class MplCanvas(QWidget):
             raise ValueError("fid_x_unit must be 'time' or 'points'")
         fid_scale = dt if fid_x_unit == "time" else 1.0
         t = np.arange(len(fid)) * fid_scale
-        if fid_mode not in ("magnitude", "real"):
-            raise ValueError("fid_mode must be 'magnitude' or 'real'")
-        y = np.real(fid) if fid_mode == "real" else np.abs(fid)
-        fid_ax.plot(t, y, color="black", linewidth=1.0)
+        if fid_mode not in ("magnitude", "real", "real_imag"):
+            raise ValueError("fid_mode must be 'magnitude', 'real', or 'real_imag'")
+        if fid_mode == "real_imag":
+            fid_ax.plot(t, np.real(fid), color="black", linewidth=1.0, label="Real")
+            fid_ax.plot(t, np.imag(fid), color=self._FID_IMAG_COLOR, linewidth=1.0, label="Imaginary")
+        else:
+            y = np.real(fid) if fid_mode == "real" else np.abs(fid)
+            fid_ax.plot(t, y, color="black", linewidth=1.0)
         if window_envelope is not None:
             peak = np.max(np.abs(fid)) if len(fid) else 0.0
             fid_ax.plot(t, np.asarray(window_envelope) * peak, "--", color="gray", linewidth=1.0, zorder=0)
@@ -3791,6 +4023,8 @@ class MplCanvas(QWidget):
             fid_ax.axvline(tdeff_index * fid_scale, linestyle="--", color="red")
         if echo_top_index is not None and 0 <= echo_top_index < len(fid):
             fid_ax.axvline(echo_top_index * fid_scale, linestyle="--", color="green")
+        if fid_mode == "real_imag":
+            fid_ax.legend(**self._legend_kwargs())
         fid_ax.set_xlabel("Time (s)" if fid_x_unit == "time" else "Points", fontsize=self._AXIS_LABELSIZE)
         fid_ax.set_ylabel("FID Intensity", fontsize=self._AXIS_LABELSIZE)
         if title:
@@ -3801,6 +4035,7 @@ class MplCanvas(QWidget):
                                    labelsize=self._AXIS_LABELSIZE)
 
         xmin, xmax, labeltext = plotting.plot_1d(spec_ax, spectrum, full_resolution=False)
+        labeltext = self._chemical_shift_label(spectrum, x_unit="ppm")
         spec_ax.set_xlim(xmin, xmax)
         spec_ax.invert_xaxis()
         spec_ax.set_xlabel(labeltext, fontsize=self._AXIS_LABELSIZE)
@@ -3845,8 +4080,7 @@ class MplCanvas(QWidget):
         if self._processing_preview_spec_ax is None or not self._processing_preview_spec_ax.lines:
             return False
         y = spectrum.normalized()
-        idx = plotting.downsample_indices(len(y))
-        new_ydata = y if idx is None else y[idx]
+        _, new_ydata = plotting.downsample_1d(None, y)
         if len(new_ydata) != len(self._processing_preview_spec_ax.lines[0].get_ydata()):
             return False
         self._processing_preview_spec_ax.lines[0].set_ydata(new_ydata)
@@ -3855,7 +4089,7 @@ class MplCanvas(QWidget):
 
     def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack", normalize: bool = False,
                       row_labels: list[str] | None = None, shared_scale: bool = False,
-                      series_renameable: bool = False) -> None:
+                      series_renameable: bool = False, plot_kind: str = "compare") -> None:
         """Plot several 1D spectra together for comparison.
 
         ``mode="overlay"`` : every spectrum on one shared axes at y=0
@@ -3905,7 +4139,13 @@ class MplCanvas(QWidget):
         branch below) where a vertical offset is meaningless anyway
         (nothing else to offset from) -- removed rather than kept as a
         control with no real effect, matching the explicit ask that
-        stacked-spectrum spacing "should be automatic"."""
+        stacked-spectrum spacing "should be automatic".
+
+        ``plot_kind`` -- what :attr:`plotKindChanged` reports this as:
+        ``"compare"``, or ``"pseudo2d"`` when the rows are the slices of
+        one pseudo-2D spectrum, so each gets its own saved default
+        style."""
+        self._enter_plot_kind(plot_kind)
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
@@ -3920,7 +4160,8 @@ class MplCanvas(QWidget):
 
         self._compare_kwargs = {"mode": mode, "normalize": normalize,
                                  "row_labels": row_labels, "shared_scale": shared_scale,
-                                 "series_renameable": series_renameable}
+                                 "series_renameable": series_renameable,
+                                 "plot_kind": plot_kind}
         # Both modes, not just "stack" -- the stack branch below set
         # this for its own unit-conversion needs, which left an overlay
         # Compare invisible to _active_series_view and so unstyleable.
@@ -3949,6 +4190,12 @@ class MplCanvas(QWidget):
                 this_xmin, this_xmax, labeltext = plotting.plot_1d(
                     row_ax, spectrum, normalize=normalize, color=colors[i], full_resolution=self._full_resolution,
                 )
+                # This canvas's own axis-label style/template -- see
+                # _chemical_shift_label. Only the last row's own
+                # label ends up used (set on axes[-1] below, since
+                # the stack shares one x-axis), matching what was
+                # already true of plot_1d's own returned labeltext.
+                labeltext = self._chemical_shift_label(spectrum, x_unit="ppm")
                 # Let a tall peak spill into a neighbouring row instead
                 # of being hard-clipped at this row's own axes edge --
                 # explicit user request, matching how a classic NMR
@@ -4204,10 +4451,9 @@ class MplCanvas(QWidget):
         self.ax.plot(x, y_fit, color="red", linestyle="--", linewidth=2.0, label="Fit (total)", zorder=100)
 
         if spectrum is not None:
-            nuclide = find_gamma(spectrum.metadata.nucleus, SFO1=spectrum.metadata.sfo1)["Nuclide"]
-            xlabel = NUC_label(nuclide, x_unit="ppm")
+            xlabel = self._chemical_shift_label(spectrum, x_unit="ppm")
         else:
-            xlabel = "Shift (ppm)"
+            xlabel = self._unit_label("Shift", "ppm")
         xmin, xmax = float(np.min(x)), float(np.max(x))
         self.ax.set_xlim(xmin, xmax)
         self.ax.invert_xaxis()
@@ -4568,12 +4814,14 @@ class MplCanvas(QWidget):
         its values have.
 
         Re-derives the same rendering-only downsampling
-        :func:`opennmr.plotting.plot_1d` applied to the x-data already
-        on screen (see :func:`opennmr.plotting.style.downsample_indices`'s
-        own docstring for why this reproduces the identical indices
-        without needing to remember them) -- otherwise a high-point-
-        count spectrum's full-length new y-data wouldn't match the
-        already-downsampled x-data's length at all, let alone quickly.
+        :func:`opennmr.plotting.plot_1d` applied to the y-data already
+        on screen (see :func:`opennmr.plotting.style.downsample_1d`'s
+        own docstring: the bin structure depends only on length, so
+        this reproduces bins aligned to the x already plotted even
+        though it's never given that x at all) -- otherwise a high-
+        point-count spectrum's full-length new y-data wouldn't match
+        the already-downsampled x-data's length at all, let alone
+        quickly.
 
         Falls back to a full :meth:`show_spectrum` rebuild (preserving
         ppm zoom across it -- the range doesn't change, only the point
@@ -4589,8 +4837,7 @@ class MplCanvas(QWidget):
             self.show_spectrum(spectrum)
             return
         y = spectrum.normalized()
-        idx = plotting.downsample_indices(len(y))
-        new_ydata = y if idx is None else y[idx]
+        _, new_ydata = plotting.downsample_1d(None, y)
         if len(new_ydata) != len(self.ax.lines[0].get_ydata()):
             # Both limits, not just x. The in-place branch below leaves
             # the y view exactly as it was (it only swaps ydata), so
@@ -4678,10 +4925,8 @@ class MplCanvas(QWidget):
         re-plots from a spectrum object, which this method doesn't
         even have access to) -- full resolution from the line's own
         stashed ``_opennmr_full_res``, or freshly re-derived
-        downsampled data from that same full-resolution array
-        (:func:`opennmr.plotting.style.downsample_indices` is
-        deterministic in array length alone, so this reproduces
-        exactly what the original plot call would have shown).
+        downsampled data from that same full-resolution array via
+        :func:`opennmr.plotting.style.downsample_1d`.
 
         A 2D contour has no equivalent in-place swap (a
         ``QuadContourSet``, unlike a ``Line2D``, has no reusable
@@ -4698,8 +4943,7 @@ class MplCanvas(QWidget):
                 line.set_data(*full_data)
             else:
                 x_full, y_full = full_data
-                idx = plotting.downsample_indices(len(y_full))
-                line.set_data((x_full, y_full) if idx is None else (x_full[idx], y_full[idx]))
+                line.set_data(*plotting.downsample_1d(x_full, y_full))
         if self._contour_spectrum is not None:
             self.show_spectrum(self._contour_spectrum)
         self.canvas.draw_idle()
@@ -4821,6 +5065,13 @@ class MplCanvas(QWidget):
     #: first-click marker so it can be cleared once the pair completes.
     _MEASUREMENT_COLOR = "tab:red"
     _MEASUREMENT_PENDING_GID = "measurement_pending"
+
+    #: Imaginary-part colour for the FID's "Real + Imaginary" display
+    #: mode (:meth:`show_fid`, :meth:`show_processing_preview`) --
+    #: real stays the plain default line colour (black); distinct from
+    #: "tab:red"/"green" (already TDeff-cutoff/Echo-top markers on the
+    #: same axes) and "gray" (the window-envelope overlay).
+    _FID_IMAG_COLOR = "tab:blue"
 
     def _measurement_axes_for(self, ax):
         """``(x_axis, y_axis)`` -- the :class:`NMRAxis` objects the data

@@ -10,3 +10,4 @@ dist/
 # Real instrument data used for manual/interactive validation --
 # not committed (large, and likely not meant for git history).
 /test_data/
+Claude outputs/

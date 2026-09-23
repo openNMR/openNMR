@@ -73,3 +73,80 @@ def test_get_trace_window_crops_axis():
     trace = slicing.get_trace(spec, axis="f1", index=1, window=(2.0, 6.0))
     assert trace.axes[0].ppm.max() <= 6.0
     assert trace.axes[0].ppm.min() >= 2.0
+
+
+def _make_trace(ppm, data, vendor="bruker", nucleus="1H", sfo1=400.0):
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * sfo1)
+    metadata = NMRMetadata(vendor=vendor, nucleus=nucleus, sfo1=sfo1)
+    return NMRSpectrum(data=np.asarray(data, dtype=float), axes=[axis], metadata=metadata)
+
+
+def test_build_pseudo2d_stacks_traces_in_order():
+    ppm = np.linspace(0, 10, 5)
+    traces = [_make_trace(ppm, np.full(5, i)) for i in range(3)]
+    stacked = slicing.build_pseudo2d(traces)
+    assert stacked.ndim == 2
+    assert stacked.data.shape == (3, 5)
+    np.testing.assert_allclose(stacked.data[0], np.zeros(5))
+    np.testing.assert_allclose(stacked.data[2], np.full(5, 2))
+
+
+def test_build_pseudo2d_marks_result_as_pseudo_2d():
+    ppm = np.linspace(0, 10, 4)
+    traces = [_make_trace(ppm, [1, 2, 3, 4]), _make_trace(ppm, [5, 6, 7, 8])]
+    stacked = slicing.build_pseudo2d(traces)
+    assert stacked.is_pseudo_2d is True
+    assert stacked.axes[0].kind == "index"
+    np.testing.assert_array_equal(stacked.axes[0].index, [1, 2])
+    assert stacked.axes[1].kind == "frequency"
+    np.testing.assert_allclose(stacked.axes[1].ppm, ppm)
+
+
+def test_build_pseudo2d_inherits_metadata_from_first_trace():
+    ppm = np.linspace(0, 10, 4)
+    traces = [_make_trace(ppm, [1, 2, 3, 4], nucleus="19F", sfo1=376.5),
+              _make_trace(ppm, [5, 6, 7, 8], nucleus="19F", sfo1=376.5)]
+    stacked = slicing.build_pseudo2d(traces)
+    assert stacked.metadata.vendor == "bruker"
+    assert stacked.metadata.nucleus == "19F"
+    assert stacked.metadata.sfo1 == pytest.approx(376.5)
+
+
+def test_build_pseudo2d_rejects_a_single_trace():
+    ppm = np.linspace(0, 10, 4)
+    with pytest.raises(ValueError, match="at least two"):
+        slicing.build_pseudo2d([_make_trace(ppm, [1, 2, 3, 4])])
+
+
+def test_build_pseudo2d_rejects_mismatched_axes():
+    ppm_a = np.linspace(0, 10, 4)
+    ppm_b = np.linspace(0, 5, 4)
+    with pytest.raises(ValueError, match="ppm axis"):
+        slicing.build_pseudo2d([_make_trace(ppm_a, [1, 2, 3, 4]), _make_trace(ppm_b, [5, 6, 7, 8])])
+
+
+def test_build_pseudo2d_rejects_mismatched_lengths():
+    with pytest.raises(ValueError, match="ppm axis"):
+        slicing.build_pseudo2d([
+            _make_trace(np.linspace(0, 10, 4), [1, 2, 3, 4]),
+            _make_trace(np.linspace(0, 10, 6), [1, 2, 3, 4, 5, 6]),
+        ])
+
+
+def test_build_pseudo2d_rejects_a_2d_trace():
+    ppm = np.linspace(0, 10, 4)
+    good = _make_trace(ppm, [1, 2, 3, 4])
+    bad = _make_2d(n_f2=4)
+    with pytest.raises(ValueError, match="not 1D"):
+        slicing.build_pseudo2d([good, bad])
+
+
+def test_build_pseudo2d_rejects_a_trace_with_no_ppm_axis():
+    index_axis = NMRAxis(kind="index", index=np.arange(1, 5))
+    no_ppm_trace = NMRSpectrum(
+        data=np.array([1.0, 2.0, 3.0, 4.0]), axes=[index_axis],
+        metadata=NMRMetadata(vendor="bruker"),
+    )
+    ppm = np.linspace(0, 10, 4)
+    with pytest.raises(ValueError, match="ppm"):
+        slicing.build_pseudo2d([no_ppm_trace, _make_trace(ppm, [1, 2, 3, 4])])

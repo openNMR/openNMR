@@ -35,7 +35,10 @@ def plot_1d(ax, spectrum: NMRSpectrum, x_unit: str = "ppm", normalize: bool = Tr
     for a caller plotting a stack of these (see :func:`plot_1d_stack`).
 
     Rendered at no more than :data:`opennmr.plotting.style.DOWNSAMPLE_1D_MAX_POINTS`
-    points (evenly, via :func:`opennmr.plotting.style.downsample_indices`)
+    points (via :func:`opennmr.plotting.style.downsample_1d`'s peak-
+    preserving binning, not an arbitrary evenly-spaced pick -- a
+    narrow, well-digitized peak can otherwise fall entirely between
+    two evenly-spaced samples and vanish from a downsampled view)
     unless ``full_resolution=True`` -- display only, ``xmin``/``xmax``
     are always the true full-resolution range regardless, and nothing
     about ``spectrum`` itself is ever touched either way. Explicit user
@@ -55,7 +58,7 @@ def plot_1d(ax, spectrum: NMRSpectrum, x_unit: str = "ppm", normalize: bool = Tr
     resolution even while the live view isn't, without re-plotting
     from ``spectrum`` again.
     """
-    from .style import downsample_indices
+    from .style import downsample_1d, DOWNSAMPLE_1D_MAX_POINTS
 
     x = spectrum.axis_values(0, unit=x_unit.lower())
     y = spectrum.normalized() if normalize else spectrum.data
@@ -67,10 +70,9 @@ def plot_1d(ax, spectrum: NMRSpectrum, x_unit: str = "ppm", normalize: bool = Tr
     nucgamma = find_gamma(spectrum.metadata.nucleus, field=field, SFO1=spectrum.metadata.sfo1)
     labeltext = NUC_label(nucgamma["Nuclide"], x_unit=x_unit)
 
-    idx = None if full_resolution else downsample_indices(len(y))
-    x_plot, y_plot = (x, y) if idx is None else (x[idx], y[idx])
+    x_plot, y_plot = (x, y) if full_resolution else downsample_1d(x, y)
     line, = ax.plot(x_plot, y_plot + y_offset, color=color, linewidth=linewidth)
-    if downsample_indices(len(y)) is not None:  # would need it at the default cap, regardless of full_resolution
+    if len(y) > DOWNSAMPLE_1D_MAX_POINTS:  # would need it at the default cap, regardless of full_resolution
         line._opennmr_full_res = (x, y + y_offset)
 
     return xmin, xmax, labeltext

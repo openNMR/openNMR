@@ -15,7 +15,8 @@ Tools for importing, plotting, and fitting Bruker NMR data (1D and 2D).
 """
 
 from .utils import (
-    find_gamma, NUC_label, read_bruker_metadata, read_vdlist, compute_BF1_SFO1,
+    find_gamma, NUC_label, read_bruker_metadata, read_bruker_fid, read_vdlist,
+    compute_BF1_SFO1,
 )
 
 from .plotting import (
@@ -23,10 +24,18 @@ from .plotting import (
     apply_tick_style, apply_spine_style, save_figure,
     plot_spectrum_dict, plot_comparison, plot_stacked_spectra,
 )
+# Colour-blind-/print-friendly palette checks -- the same functions the
+# GUI's Plot Style panel uses, so a notebook figure can be checked (and
+# a palette chosen) exactly as the GUI does it.
+from ..plotting.accessibility import (
+    friendly_palettes, max_safe_series, describe_accessibility, palette_distinctness,
+    is_colourblind_safe, is_print_safe, trace_colour_presets, series_colours,
+)
 
 from .one_d import (
     NMR1dimport, NMR1dplot, NMR1dheatmap,
     vocs_f1, vocs_f2, vocs_power, pulse_to_w1, apply_VOCS, VOCSSum,
+    CPMGprocess, CPMGplot,
 )
 
 from .two_d import (
@@ -109,14 +118,19 @@ from .bms.io_utils import make_particle
 
 __all__ = [
     # utils
-    "find_gamma", "NUC_label", "read_bruker_metadata", "read_vdlist", "compute_BF1_SFO1",
+    "find_gamma", "NUC_label", "read_bruker_metadata", "read_bruker_fid",
+    "read_vdlist", "compute_BF1_SFO1",
     # plotting
     "setup_plotting", "get_stack_colormap", "get_contour_cmap", "downsample_2d",
     "apply_tick_style", "apply_spine_style", "save_figure",
     "plot_spectrum_dict", "plot_comparison", "plot_stacked_spectra",
+    # colour accessibility
+    "friendly_palettes", "max_safe_series", "describe_accessibility", "palette_distinctness",
+    "is_colourblind_safe", "is_print_safe", "trace_colour_presets", "series_colours",
     # one_d
     "NMR1dimport", "NMR1dplot", "NMR1dheatmap",
     "vocs_f1", "vocs_f2", "vocs_power", "pulse_to_w1", "apply_VOCS", "VOCSSum",
+    "CPMGprocess", "CPMGplot",
     # two_d
     "NMR2dimport", "NMR2Dplotter", "NMR2D_multi_plot", "NMR2D_overlay_plot",
     "NMR2d_get_trace", "NMR2D_get_slices", "prepare_trace_for_fit",

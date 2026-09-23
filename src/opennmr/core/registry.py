@@ -185,19 +185,38 @@ def find_gamma(isotope, field='', SFO1=''):
     return {'Nuclide': isotope, 'gamma': gamma}
 
 
-def NUC_label(NUC, alt_label='on', x_unit='ppm'):
+def NUC_label(NUC, x_unit='ppm', style='brackets', template=None):
     """
-    labeltext = NUC_label(NUC, alt_label='on', x_unit='ppm')
+    labeltext = NUC_label(NUC, x_unit='ppm', style='brackets', template=None)
 
     NUC : str
         Nuclide as '#X', e.g. '17O', '27Al'.
 
-    alt_label : 'on' or 'off'
-        'on' (default): "delta (^NUC) / x_unit", e.g. "delta (1H) / ppm".
-        'off': "delta ^NUC (x_unit)", e.g. "delta 1H (ppm)".
-
     x_unit : 'ppm' or 'Hz'
         Assigns the x unit for the plot. Default = 'ppm'.
+
+    style : 'brackets' or 'slash'
+        'brackets' (default): "delta ^NUC (x_unit)", fully mathregular
+        (upright, not italic) throughout -- e.g. a rendered
+        "δ ¹H (ppm)".
+        'slash' : the older "delta (^NUC) / x_unit" form, e.g.
+        a rendered "δ (¹H) / ppm".
+
+        This is the *default* for every axis label built from a
+        nuclide across the package (GUI and notebook alike) -- change
+        it once here, or per call, rather than at each of the many
+        call sites. The GUI's Plot Style dialog exposes this as a
+        per-plot "Axis label" choice, which overrides this default at
+        the canvas level; see
+        :meth:`opennmr.gui.widgets.canvas.MplCanvas._chemical_shift_label`.
+
+    template : str, optional
+        A fully custom label, overriding ``style`` entirely. Formatted
+        with ``str.format`` against ``nuc`` (e.g. "1H"), ``mass``
+        (e.g. "1"), ``element`` (e.g. "H") and ``unit`` (e.g. "ppm"),
+        so e.g. ``"{element}-{mass} shift ({unit})"`` -> "H-1 shift
+        (ppm)". Plain text unless the caller includes their own
+        ``$...$`` mathtext.
     """
     if not NUC:
         # No nucleus recorded (e.g. a conventional 2D dataset whose
@@ -206,16 +225,31 @@ def NUC_label(NUC, alt_label='on', x_unit='ppm'):
         NUC = "?"
     NUCalpha = NUC.strip('0123456789')
     NUCnum = NUC[:len(NUC) - len(NUCalpha)]
-    if alt_label == 'off':
+
+    if template:
+        return template.format(nuc=NUC, mass=NUCnum, element=NUCalpha, unit=x_unit)
+
+    # A bare element with no mass-number prefix (e.g. NUC='?' for an
+    # unrecorded nucleus) gets no superscript at all, rather than an
+    # empty ^{} that mathtext renders as a stray raised nothing.
+    superscript = r'^{\mathregular{' + NUCnum + r'}}' if NUCnum else ''
+    superscript_slash = r'{}^{' + NUCnum + r'}' if NUCnum else ''
+
+    if style == 'slash':
         labeltext = (
-            r'$\mathregular{\delta} \,\, {}^{' + NUCnum + r'}$'
-            + NUCalpha + " (" + x_unit + ")"
-        )
-    elif alt_label == 'on':
-        labeltext = (
-            r'$\mathregular{\delta} \,\, ({}^{' + NUCnum + r'}$'
+            r'$\mathregular{\delta} \,\, (' + superscript_slash + r'$'
             + NUCalpha + ") / " + x_unit
         )
+    elif style == 'brackets':
+        # Fully mathregular (upright) throughout, including the unit
+        # in its own brackets -- not just the delta and superscript --
+        # so the whole label renders in one consistent, non-italic
+        # face (matplotlib's mathtext otherwise italicises anything
+        # outside an explicit \mathregular{}).
+        labeltext = (
+            r'$\delta\ ' + superscript
+            + r'\mathregular{' + NUCalpha + r'}\ \mathregular{(' + x_unit + r')}$'
+        )
     else:
-        raise ValueError("alt_label must be 'on' or 'off'")
+        raise ValueError("style must be 'brackets' or 'slash'")
     return labeltext

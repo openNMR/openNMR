@@ -814,6 +814,30 @@ def test_show_fid_envelope_scaled_to_fid_peak(qapp):
     np.testing.assert_allclose(window_line.get_ydata(), 2.0)  # 0.5 * peak(4.0)
 
 
+def test_show_fid_real_imag_mode_plots_two_labeled_lines_with_legend(qapp):
+    # Explicit user request: show both real and imaginary parts of the
+    # FID, in separate colours, rather than only ever one line.
+    canvas = MplCanvas()
+    fid = np.exp(-np.arange(50) / 10.0) * np.exp(1j * np.arange(50) * 0.3)
+    canvas.show_fid(fid, dt=1e-4, mode="real_imag")
+    assert len(canvas.ax.lines) == 2
+    labels = [line.get_label() for line in canvas.ax.lines]
+    assert set(labels) == {"Real", "Imaginary"}
+    real_line = next(line for line in canvas.ax.lines if line.get_label() == "Real")
+    imag_line = next(line for line in canvas.ax.lines if line.get_label() == "Imaginary")
+    np.testing.assert_allclose(real_line.get_ydata(), np.real(fid))
+    np.testing.assert_allclose(imag_line.get_ydata(), np.imag(fid))
+    assert real_line.get_color() != imag_line.get_color()
+    assert canvas.ax.get_legend() is not None
+
+
+def test_show_fid_invalid_mode_raises(qapp):
+    canvas = MplCanvas()
+    fid = np.ones(10, dtype=complex)
+    with pytest.raises(ValueError):
+        canvas.show_fid(fid, dt=1e-4, mode="not_a_mode")
+
+
 def test_show_fid_clears_contour_state(qapp):
     canvas = MplCanvas()
     canvas.show_spectrum(_make_2d())
@@ -918,7 +942,7 @@ def test_set_axis_unit_hz_updates_xdata_and_label(qapp):
     canvas.set_axis_unit("hz")
 
     np.testing.assert_allclose(canvas.ax.lines[0].get_xdata(), spectrum.axes[0].hz)
-    assert canvas.ax.get_xlabel() == "Frequency / Hz"
+    assert canvas.ax.get_xlabel() == "Frequency (Hz)"
     assert canvas._axis_unit == "hz"
 
 
@@ -930,7 +954,7 @@ def test_set_axis_unit_khz_scales_hz_by_1000(qapp):
     canvas.set_axis_unit("khz")
 
     np.testing.assert_allclose(canvas.ax.lines[0].get_xdata(), spectrum.axes[0].hz / 1000.0)
-    assert canvas.ax.get_xlabel() == "Frequency / kHz"
+    assert canvas.ax.get_xlabel() == "Frequency (kHz)"
 
 
 def test_set_axis_unit_back_to_ppm_restores_original_xdata_and_label(qapp):
@@ -964,7 +988,7 @@ def test_set_axis_unit_switches_a_contour(qapp):
     # past the data, so the endpoints are not the data's own.
     span = abs(canvas.ax.get_xlim()[1] - canvas.ax.get_xlim()[0])
     assert span == pytest.approx(float(hz.max() - hz.min()), rel=0.25)
-    assert canvas.ax.get_xlabel() == "Frequency / Hz"
+    assert canvas.ax.get_xlabel() == "Frequency (Hz)"
 
     # The underlying spectrum is untouched -- slicing and referencing
     # still reason in ppm.
@@ -983,7 +1007,7 @@ def test_set_axis_unit_mm_on_a_contour_needs_a_gradient(qapp):
     canvas.set_imaging_gradient_params(gamma_hz_per_t=42.577e6, max_gradient_g_per_cm=50.0)
     canvas.set_axis_unit("mm")
     assert canvas._axis_unit == "mm"
-    assert canvas.ax.get_xlabel() == "Position / mm"
+    assert canvas.ax.get_xlabel() == "Position (mm)"
 
 
 def test_nearest_slice_index_follows_the_displayed_unit(qapp):
@@ -1050,7 +1074,7 @@ def test_set_axis_unit_mm_converts_hz_offset_to_position(qapp):
     hz_per_mm = gamma_hz_per_t * max_gradient_g_per_cm * 1e-5
     expected = spectrum.axes[0].hz / hz_per_mm
     np.testing.assert_allclose(canvas.ax.lines[0].get_xdata(), expected)
-    assert canvas.ax.get_xlabel() == "Position / mm"
+    assert canvas.ax.get_xlabel() == "Position (mm)"
     assert canvas._axis_unit == "mm"
 
 
@@ -1093,6 +1117,37 @@ def test_update_data_matches_downsampled_length_for_high_point_count(qapp):
     spectrum.data = spectrum.data * 2.0  # simulate a phase/data change
     canvas.update_data(spectrum)  # must not raise (length mismatch)
     assert len(canvas.ax.lines[0].get_ydata()) == DOWNSAMPLE_1D_MAX_POINTS
+
+
+def test_update_data_finds_a_peak_that_moved(qapp):
+    # The fast in-place refresh path recomputes the peak-preserving
+    # binning from scratch every time (bin *boundaries* are fixed by
+    # length/max_points alone, but *which* sample wins each bin is
+    # data-dependent) -- it must not reuse a stale bin choice from
+    # before the data changed.
+    from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    ppm = np.linspace(0, 10, n)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    data = np.zeros(n)
+    data[1000] = 1.0
+    spectrum = NMRSpectrum(data=data, axes=[axis], metadata=metadata)
+
+    canvas = MplCanvas()
+    canvas.show_spectrum(spectrum)
+    assert canvas.ax.lines[0].get_ydata().max() == pytest.approx(1.0)
+
+    spectrum.data = np.zeros(n)
+    spectrum.data[n - 1000] = 1.0  # peak relocated to the other end
+    canvas.update_data(spectrum)
+
+    y = canvas.ax.lines[0].get_ydata()
+    assert y.max() == pytest.approx(1.0)
+    # The relocated peak shows up near the end, not still near the start.
+    assert np.argmax(y) > 0.8 * len(y)
 
 
 # ============================================================
@@ -1416,6 +1471,31 @@ def test_show_compare_stack_creates_one_subplot_per_spectrum(qapp):
     assert len(canvas._compare_axes) == 3
     assert all(len(ax.lines) == 1 for ax in canvas._compare_axes)
     assert canvas.ax is canvas._compare_axes[-1]  # bottom row, where x-ticks are shown
+
+
+def test_show_compare_stack_preserves_a_narrow_peak(qapp):
+    # Explicit user report: spectra shown in "Compare" were processed
+    # with only the real data at reduced resolution, so a well-defined
+    # peak elsewhere could show up as a handful of points here. Compare
+    # needed no code changes of its own -- both its "stack" and
+    # "overlay" modes already render through plot_1d/plot_1d_stack, so
+    # this pins that the fix actually reaches this tab.
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    ppm = np.linspace(0, 10, n)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    data = np.zeros(n)
+    data[12345] = 1.0
+    spec = NMRSpectrum(data=data, axes=[axis], metadata=metadata)
+
+    canvas = MplCanvas()
+    canvas.show_compare([spec, _make_1d_at(5.0)], mode="stack", normalize=False)
+    canvas.canvas.draw()
+
+    row = canvas._compare_axes[0]
+    assert len(row.lines[0].get_xdata()) == DOWNSAMPLE_1D_MAX_POINTS  # still downsampled...
+    assert row.lines[0].get_ydata().max() == pytest.approx(1.0)  # ...but the peak survives
 
 
 def test_show_compare_stack_shares_x_axis(qapp):
@@ -3593,6 +3673,106 @@ def test_processing_preview_panel_bodies_keep_the_plain_cursor(qapp):
 
 
 # ============================================================
+# Processing preview: real+imaginary FID display, and the spectrum
+# panel matching the Spectrum tab's own resolution (explicit user
+# report: "the processed spectrum ... does not look correct ... only
+# made of three or four points" in this view)
+# ============================================================
+
+def test_show_processing_preview_real_imag_plots_two_lines_on_fid_ax_with_legend(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    spectrum = _make_1d()
+    fid = np.exp(-np.linspace(0, 5, 128)) * np.exp(2j * np.pi * 10 * np.linspace(0, 1, 128))
+    canvas.show_processing_preview(fid, dt=1e-4, spectrum=spectrum, fid_mode="real_imag")
+    canvas.canvas.draw()
+
+    fid_ax = canvas._processing_preview_fid_ax
+    spec_ax = canvas._processing_preview_spec_ax
+    assert fid_ax is not spec_ax
+    assert len(fid_ax.lines) == 2
+    labels = [line.get_label() for line in fid_ax.lines]
+    assert set(labels) == {"Real", "Imaginary"}
+    real_line = next(line for line in fid_ax.lines if line.get_label() == "Real")
+    imag_line = next(line for line in fid_ax.lines if line.get_label() == "Imaginary")
+    np.testing.assert_allclose(real_line.get_ydata(), np.real(fid))
+    np.testing.assert_allclose(imag_line.get_ydata(), np.imag(fid))
+    assert real_line.get_color() != imag_line.get_color()
+    assert fid_ax.get_legend() is not None
+    # The legend/two-line change is scoped to the FID panel only --
+    # the spectrum panel (self.ax) is untouched by fid_mode.
+    assert spec_ax.get_legend() is None
+
+
+def test_show_processing_preview_default_fid_mode_is_still_one_line(qapp):
+    canvas = _processing_preview_canvas(qapp)
+    fid_ax = canvas._processing_preview_fid_ax
+    assert len(fid_ax.lines) == 1
+    assert fid_ax.get_legend() is None
+
+
+def test_show_processing_preview_invalid_fid_mode_raises(qapp):
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    spectrum = _make_1d()
+    fid = np.ones(64, dtype=complex)
+    with pytest.raises(ValueError):
+        canvas.show_processing_preview(fid, dt=1e-4, spectrum=spectrum, fid_mode="not_a_mode")
+
+
+def test_show_processing_preview_spectrum_panel_preserves_a_narrow_peak(qapp):
+    # The actual reported bug: a peak well-defined on the Spectrum tab
+    # showed as only 3-4 points here, because the old evenly-spaced
+    # index downsampling could step clean over it. The panel is still
+    # downsampled (this view always is, for responsiveness), but the
+    # downsampling must now be peak-preserving like everywhere else.
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    ppm = np.linspace(0, 10, n)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    data = np.zeros(n)
+    data[12345] = 1.0
+    spectrum = NMRSpectrum(data=data, axes=[axis], metadata=metadata)
+
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    fid = np.ones(64, dtype=complex)
+    canvas.show_processing_preview(fid, dt=1e-4, spectrum=spectrum)
+    canvas.canvas.draw()
+
+    spec_ax = canvas._processing_preview_spec_ax
+    assert len(spec_ax.lines[0].get_xdata()) == DOWNSAMPLE_1D_MAX_POINTS
+    assert spec_ax.lines[0].get_ydata().max() == pytest.approx(1.0)
+
+
+def test_update_processing_preview_spectrum_finds_a_peak_that_moved(qapp):
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+    n = DOWNSAMPLE_1D_MAX_POINTS * 3
+    ppm = np.linspace(0, 10, n)
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    data = np.zeros(n)
+    data[1000] = 1.0
+    spectrum = NMRSpectrum(data=data, axes=[axis], metadata=metadata)
+
+    canvas = MplCanvas()
+    canvas.figure.set_size_inches(9, 7)
+    fid = np.ones(64, dtype=complex)
+    canvas.show_processing_preview(fid, dt=1e-4, spectrum=spectrum)
+    canvas.canvas.draw()
+
+    spectrum2 = NMRSpectrum(data=np.zeros(n), axes=[axis], metadata=metadata)
+    spectrum2.data[n - 1000] = 1.0  # peak relocated to the other end
+    assert canvas.update_processing_preview_spectrum(spectrum2) is True
+
+    spec_ax = canvas._processing_preview_spec_ax
+    y = spec_ax.lines[0].get_ydata()
+    assert y.max() == pytest.approx(1.0)
+    assert np.argmax(y) > 0.8 * len(y)
+
+
+# ============================================================
 # Plot style: title, fonts, contour levels, legend appearance
 # ============================================================
 
@@ -3685,6 +3865,103 @@ def test_font_family_reaches_every_piece_of_text(qapp):
 
     canvas.set_style(font_family="")     # the panel's "Default" entry
     assert canvas._font_family is None
+
+
+def test_default_axis_label_is_brackets_not_slash(qapp):
+    """Explicit user request: "the axis labels should also be...
+    brackets... not a slash ppm" -- opennmr's own default, out of the
+    box, before anyone touches the Plot Style panel."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    label = canvas.ax.get_xlabel()
+    assert r"\mathregular{(ppm)}" in label
+    assert " / " not in label
+
+
+def test_axis_label_style_slash_updates_the_live_label(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_style(axis_label_style="slash")
+    assert " / ppm" in canvas.ax.get_xlabel()
+    assert canvas._ppm_label == canvas.ax.get_xlabel()
+
+    canvas.set_style(axis_label_style="brackets")
+    assert r"\mathregular{(ppm)}" in canvas.ax.get_xlabel()
+
+
+def test_axis_label_style_rejects_an_unknown_value(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    with pytest.raises(ValueError):
+        canvas.set_style(axis_label_style="parentheses")
+
+
+def test_axis_label_custom_template_overrides_the_style(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_style(axis_label_template="{element}-{mass} shift ({unit})")
+    assert canvas.ax.get_xlabel() == "H-1 shift (ppm)"
+
+    # Blank clears it, falling back to the style choice again.
+    canvas.set_style(axis_label_template="")
+    assert canvas._axis_label_template is None
+    assert r"\mathregular{(ppm)}" in canvas.ax.get_xlabel()
+
+
+def test_axis_label_style_follows_a_non_ppm_unit_switch(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_axis_unit("hz")
+    assert canvas.ax.get_xlabel() == "Frequency (Hz)"
+
+    canvas.set_style(axis_label_style="slash")
+    assert canvas.ax.get_xlabel() == "Frequency / Hz"
+
+
+def test_2d_contour_axis_labels_use_each_axis_own_nucleus(qapp):
+    """Heteronuclear: F2/x is the direct nucleus, F1/y the indirect
+    one -- style changes have to reach both, and independently of
+    whichever nucleus each one happens to be."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_2d())   # 1H direct, 13C indirect
+    assert "1" in canvas.ax.get_xlabel() and "H" in canvas.ax.get_xlabel()
+    assert "13" in canvas.ax.get_ylabel() and "C" in canvas.ax.get_ylabel()
+    assert " / " not in canvas.ax.get_xlabel() and " / " not in canvas.ax.get_ylabel()
+
+    canvas.set_style(axis_label_style="slash")
+    assert " / " in canvas.ax.get_xlabel() and " / " in canvas.ax.get_ylabel()
+
+
+def test_2d_contour_homonuclear_shares_one_label_on_both_axes(qapp):
+    canvas = MplCanvas()
+    spectrum = _make_2d()
+    spectrum.metadata.homonuclear = True
+    canvas.show_spectrum(spectrum)
+    assert canvas.ax.get_xlabel() == canvas.ax.get_ylabel()
+
+
+def test_compare_stack_axis_label_respects_the_style(qapp):
+    canvas = MplCanvas()
+    canvas.show_compare([_make_1d(), _make_1d()], mode="stack")
+    axes = canvas._compare_axes
+    canvas.set_style(axis_label_style="slash")
+    assert " / ppm" in axes[-1].get_xlabel()
+
+
+def test_style_settings_round_trips_axis_label_settings(qapp):
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d())
+    canvas.set_style(axis_label_style="slash", axis_label_template="{unit}")
+    settings = canvas.style_settings()
+    assert settings["axis_label_style"] == "slash"
+    assert settings["axis_label_template"] == "{unit}"
+
+    other = MplCanvas()
+    other.show_spectrum(_make_1d())
+    other.set_style(axis_label_style=settings["axis_label_style"],
+                     axis_label_template=settings["axis_label_template"])
+    assert other._axis_label_style == "slash"
+    assert other._axis_label_template == "{unit}"
 
 
 def test_contour_levels_set_through_the_style_panel_drive_both_maps(qapp):
@@ -3866,3 +4143,53 @@ def test_the_scroll_refresh_survives_a_dispatch_that_raises(qapp):
     with pytest.raises(RuntimeError):
         canvas._on_scroll(strip)
     assert _shape(canvas) == Qt.CursorShape.SizeHorCursor
+
+
+# ============================================================
+# Plot kinds (per-type default styles)
+# ============================================================
+
+def test_plot_kind_is_announced_only_when_it_changes(qapp):
+    canvas = MplCanvas()
+    seen = []
+    canvas.plotKindChanged.connect(seen.append)
+    canvas.show_spectrum(_make_1d())
+    canvas.show_spectrum(_make_1d())
+    canvas.show_spectrum(_make_2d())
+    canvas.show_compare([_make_1d(), _make_1d()], mode="overlay")
+    canvas.show_compare([_make_1d(), _make_1d()], mode="stack", plot_kind="pseudo2d")
+    assert seen == ["1d", "2d", "compare", "pseudo2d"]
+    assert canvas.plot_kind() == "pseudo2d"
+
+
+def test_plot_kind_is_announced_before_drawing(qapp):
+    canvas = MplCanvas()
+    canvas.plotKindChanged.connect(lambda _k: canvas.apply_style_defaults({"trace_color": "#882255"}))
+    canvas.show_spectrum(_make_1d())
+    assert matplotlib.colors.to_hex(canvas.ax.lines[0].get_color()) == "#882255"
+
+
+def test_a_series_restyle_keeps_the_plot_kind(qapp):
+    canvas = MplCanvas()
+    seen = []
+    canvas.show_compare([_make_1d(), _make_1d()], mode="stack", plot_kind="pseudo2d")
+    canvas.plotKindChanged.connect(seen.append)
+    canvas.set_style(compare_colormap="magma")
+    canvas.restyle_series()
+    assert seen == [] and canvas.plot_kind() == "pseudo2d"
+
+
+def test_apply_style_defaults_sets_new_2d_reset_values(qapp):
+    canvas = MplCanvas()
+    canvas.apply_style_defaults({"contour_clevels": 13, "contour_level_mode": "linear",
+                                 "contour_power": 2.0, "contour_linewidth": 1.4,
+                                 "dpi": 600, "unknown": 1, "axis_label_style": "bogus"})
+    canvas.show_spectrum(_make_2d())
+    settings = canvas.style_settings()
+    assert settings["contour_clevels"] == 13
+    assert settings["contour_level_mode"] == "linear"
+    assert settings["contour_power"] == pytest.approx(2.0)
+    assert settings["contour_linewidth"] == pytest.approx(1.4)
+    # Only this instance: the class default is untouched.
+    assert MplCanvas._CONTOUR_CLEVELS_DEFAULT == 7
+    assert MplCanvas().style_settings()["contour_clevels"] == 7

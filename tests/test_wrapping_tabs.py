@@ -1,4 +1,5 @@
 import pytest
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from opennmr.gui.widgets.wrapping_tabs import WrappingTabWidget
@@ -146,3 +147,70 @@ def test_wrapping_tabs_strip_reports_height_for_width(qapp):
 
     assert widget._bar.sizePolicy().hasHeightForWidth()
     assert widget._bar.heightForWidth(200) > widget._bar.heightForWidth(2000)
+
+
+# ============================================================
+# addTab(icon=...) -- the top-level launcher tiles (Load/Save/Compare,
+# Processing, Advanced Processing, Fitting, Relaxation, Applications,
+# Simulations) need an icon-above-text look; every existing sub-tab
+# caller keeps its plain text-only button by simply not passing one.
+# ============================================================
+
+def _solid_icon(qapp):
+    pixmap = QPixmap(16, 16)
+    pixmap.fill()
+    return QIcon(pixmap)
+
+
+def test_addtab_without_icon_stays_text_only(qapp):
+    widget = WrappingTabWidget()
+    widget.addTab(QLabel("Peak Picking"), "Peak Picking")
+    button = widget._buttons[0]
+    assert button.icon().isNull()
+    # No icon set at all -- explicitly not switched to icon-with-text.
+    from PySide6.QtCore import Qt as _Qt
+    assert button.toolButtonStyle() != _Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+
+
+def test_addtab_with_icon_sets_icon_and_text_under_icon_style(qapp):
+    from PySide6.QtCore import Qt as _Qt
+    widget = WrappingTabWidget()
+    icon = _solid_icon(qapp)
+    widget.addTab(QLabel("Processing"), "Processing", icon=icon)
+    button = widget._buttons[0]
+    assert not button.icon().isNull()
+    assert button.toolButtonStyle() == _Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+    assert button.text() == "Processing"
+    assert button.iconSize() == WrappingTabWidget._ICON_SIZE
+
+
+def test_launcher_icon_size_is_large_enough_for_detailed_artwork(qapp):
+    """Real user report: at the previous 28px, the launcher icons'
+    fine linework (thin multi-colour illustrations, originally
+    ~354x354) was lost -- e.g. the Processing FID icon's individual
+    oscillation lines merged into a single muddy wedge. Not a
+    rendering-quality assertion (that needs eyes on it -- see the
+    session's own before/after size comparison), just a floor that
+    stops this specific regression from creeping back in silently."""
+    assert WrappingTabWidget._ICON_SIZE.width() >= 40
+    assert WrappingTabWidget._ICON_SIZE.height() >= 40
+
+
+def test_addtab_icon_and_no_icon_can_be_mixed_in_one_strip(qapp):
+    # The launcher and an ordinary sub-tab strip use the same class --
+    # confirms passing icon= on some tabs and not others doesn't
+    # confuse indexing/labels/current-page tracking.
+    widget = WrappingTabWidget()
+    icon = _solid_icon(qapp)
+    page_a, page_b = QLabel("A"), QLabel("B")
+    widget.addTab(page_a, "A", icon=icon)
+    widget.addTab(page_b, "B")
+
+    assert widget.tabText(0) == "A"
+    assert widget.tabText(1) == "B"
+    assert not widget._buttons[0].icon().isNull()
+    assert widget._buttons[1].icon().isNull()
+
+    widget.setCurrentWidget(page_b)
+    assert widget._buttons[1].isChecked()
+    assert not widget._buttons[0].isChecked()

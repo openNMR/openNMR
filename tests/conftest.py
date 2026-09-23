@@ -24,3 +24,35 @@ os.environ.setdefault("OPENNMR_BACKGROUND_LOAD", "0")
 import matplotlib
 
 matplotlib.use("Agg")
+
+
+import sys
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_interface_settings(tmp_path, monkeypatch):
+    """Keep the GUI's interface settings (Settings tab: font size,
+    per-type style auto-apply) out of the real ~/.opennmr, and put the
+    application font back after every test.
+
+    The font is process-wide -- one QApplication serves the whole run
+    -- so a test that enlarges it would otherwise enlarge every widget
+    in every later test. Only touches the GUI if a test already
+    imported it: non-GUI tests pay nothing."""
+    main_window = sys.modules.get("opennmr.gui.main_window")
+    if main_window is not None:
+        monkeypatch.setattr(main_window.MainWindow, "_UI_SETTINGS_PATH",
+                            str(tmp_path / "ui_settings.json"))
+    app = None
+    font = None
+    if "PySide6.QtWidgets" in sys.modules:
+        from PySide6.QtGui import QFont
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        font = QFont(app.font()) if app is not None else None
+    yield
+    if app is not None and font is not None:
+        app.setFont(font)

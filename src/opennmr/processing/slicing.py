@@ -194,3 +194,73 @@ def get_slices(spectrum: NMRSpectrum, rows: list[int] | None = None, row_shifts:
                     tr.data = tr.data / m
 
     return slices
+
+
+def build_pseudo2d(traces: list[NMRSpectrum]) -> NMRSpectrum:
+    """Stack a list of already-computed 1D traces -- all sharing the
+    same chemical-shift (ppm) axis -- into one pseudo-2D
+    :class:`NMRSpectrum`. The reverse of :func:`get_slices`' own row
+    extraction: instead of pulling slices *out* of a pseudo-2D
+    dataset, this puts a derived series *back together* into one, so
+    it can be viewed, compared and exported exactly like any other
+    pseudo-2D dataset.
+
+    Explicit user request, for the GUI's Fitting panel: "an option to
+    have these fitted peaks be exported to a pseudo-2d dataset" --
+    e.g. one trace per slice holding that slice's reconstructed fitted
+    lineshape (Isotropic), or its raw data masked to the integration
+    regions that produced its integral (Integration). Deliberately
+    generic rather than baked into either caller: both need exactly
+    this same "stack compatible 1D traces into a 2D dataset" step,
+    and nothing about it is specific to fitting.
+
+    Every trace must be 1D and carry a chemical-shift axis (``ppm``
+    set); a trace with no ppm values, or one whose ppm axis doesn't
+    match the first trace's (same length, matching values), raises
+    rather than silently interpolating or truncating -- interpolating
+    would invent intensity values that were never actually measured
+    or fitted at those positions.
+    """
+    if len(traces) < 2:
+        raise ValueError(
+            "build_pseudo2d needs at least two traces -- a single slice "
+            "is not a series."
+        )
+
+    first = traces[0]
+    if first.ndim != 1:
+        raise ValueError(f"Trace 1 is not 1D (ndim={first.ndim}).")
+    ref_axis = first.axes[0]
+    ref_ppm = ref_axis.ppm
+    if ref_ppm is None:
+        raise ValueError(
+            "Trace 1 has no chemical-shift (ppm) axis -- build_pseudo2d "
+            "only stacks frequency-domain traces."
+        )
+
+    rows = [np.asarray(first.data, dtype=float)]
+    for i, trace in enumerate(traces[1:], start=2):
+        if trace.ndim != 1:
+            raise ValueError(f"Trace {i} is not 1D (ndim={trace.ndim}).")
+        axis = trace.axes[0]
+        if (axis.ppm is None or len(axis.ppm) != len(ref_ppm)
+                or not np.allclose(axis.ppm, ref_ppm)):
+            raise ValueError(
+                f"Trace {i} does not share trace 1's ppm axis -- every "
+                "trace must be measured/fitted on the same axis to be "
+                "stacked into one pseudo-2D dataset."
+            )
+        rows.append(np.asarray(trace.data, dtype=float))
+
+    data = np.vstack(rows)
+    f1_axis = NMRAxis(kind="index", index=np.arange(1, len(traces) + 1), label="Slice")
+    f2_axis = NMRAxis(kind="frequency", ppm=ref_ppm, hz=ref_axis.hz)
+    metadata = NMRMetadata(
+        vendor=first.metadata.vendor,
+        nucleus=first.metadata.nucleus,
+        sfo1=first.metadata.sfo1,
+        source_path=first.metadata.source_path,
+        procno=first.metadata.procno,
+        pseudo_2d=True,
+    )
+    return NMRSpectrum(data=data, axes=[f1_axis, f2_axis], metadata=metadata)

@@ -499,6 +499,131 @@ def _resolve_external_projection(source, lo, hi, import_kwargs=None):
     )
 
 
+# ============================================================
+# Insets
+# ============================================================
+
+#: Keys that only make sense for a standalone figure (typeface,
+#: figure size, saving, ...) and are therefore not valid inside an
+#: ``inset`` spec dict -- an inset always shares the parent figure
+#: and is never saved independently.
+_INSET_FIGURE_LEVEL_KEYS = {
+    "ax", "fig", "save_fig", "fig_name", "save_format",
+    "pl_width", "pl_height", "font", "output_format",
+}
+
+
+def _draw_2d_insets(parent_ax, fig, inset, default_data, plot_func, data_key):
+    """
+    Draw one or more insets on ``parent_ax`` by recursively calling
+    ``plot_func`` (:func:`NMR2Dplotter` or :func:`NMR2D_overlay_plot`)
+    into a new inset axes -- so each inset accepts *exactly* the same
+    keyword arguments as the plot it is an inset of, plus its own
+    placement/size and (optionally) its own data.
+
+    Parameters
+    ----------
+    parent_ax : matplotlib.axes.Axes
+        The main contour/overlay axes to place the inset(s) on.
+
+    fig : matplotlib.figure.Figure
+        The shared figure (forwarded to ``plot_func`` so it does not
+        try to create a new one).
+
+    inset : dict or list of dict
+        One spec per inset. Each dict must contain ``bounds`` --
+        ``(x0, y0, width, height)`` in ``parent_ax`` axes-fraction
+        coordinates (0-1), passed to ``parent_ax.inset_axes`` to set
+        the inset's placement and size. Two optional keys are
+        reserved: ``mark_inset`` (bool, default False) draws a
+        connector/box between the inset and the region of the parent
+        axes it corresponds to (via ``indicate_inset_zoom``), and
+        ``mark_inset_kwargs`` forwards extra keyword arguments to that
+        call (e.g. ``edgecolor``, ``alpha``). Every other key is
+        forwarded to ``plot_func`` for that inset -- including
+        ``dataset``/``datasets`` (whichever ``plot_func`` expects) to
+        show different data in the inset than in the parent plot;
+        if omitted, the inset defaults to the same data as the parent.
+
+    default_data : dataset dict, or list of dataset dicts
+        Data to fall back on for an inset spec that doesn't supply its
+        own ``dataset``/``datasets``.
+
+    plot_func : callable
+        :func:`NMR2Dplotter` or :func:`NMR2D_overlay_plot`.
+
+    data_key : str
+        ``"dataset"`` or ``"datasets"`` -- the name ``plot_func`` uses
+        for its first (data) argument.
+
+    Returns
+    -------
+    list of matplotlib.axes.Axes
+        The created inset axes, in the order given in ``inset``.
+    """
+
+    specs = inset if isinstance(inset, (list, tuple)) else [inset]
+
+    inset_axes = []
+    for i, spec in enumerate(specs):
+
+        if "bounds" not in spec:
+            raise ValueError(
+                f"inset[{i}] is missing required key 'bounds' "
+                f"(x0, y0, width, height in axes-fraction coordinates)."
+            )
+
+        spec = dict(spec)
+        bounds = spec.pop("bounds")
+        if len(bounds) != 4:
+            raise ValueError(
+                f"inset[{i}]['bounds'] must be (x0, y0, width, height); got {bounds!r}."
+            )
+
+        mark_inset = spec.pop("mark_inset", False)
+        mark_inset_kwargs = spec.pop("mark_inset_kwargs", None) or {}
+
+        bad = _INSET_FIGURE_LEVEL_KEYS & set(spec)
+        if bad:
+            raise ValueError(
+                f"inset[{i}] contains figure-level keys not valid inside an inset "
+                f"spec: {sorted(bad)}; an inset always shares the parent figure."
+            )
+
+        data = spec.pop(data_key, default_data)
+
+        # NMR2Dplotter's projections are drawn via
+        # mpl_toolkits.axes_grid1's AxesDivider (make_axes_locatable +
+        # append_axes), which is not compatible with an axes that is
+        # itself dynamically positioned relative to a parent axes --
+        # exactly what an inset (ax.inset_axes) is. Enabling it here
+        # doesn't raise; it silently mispositions the inset (and/or
+        # its projection strips) once the divider replaces the
+        # inset's own placement logic. So this is refused outright
+        # rather than producing a wrong figure -- an inset always has
+        # show_projections=False.
+        if plot_func is NMR2Dplotter:
+            if spec.get("show_projections", False):
+                raise ValueError(
+                    f"inset[{i}]: show_projections is not supported inside "
+                    f"an inset (matplotlib's AxesDivider, which projections "
+                    f"rely on, silently mispositions an already axes-"
+                    f"fraction-positioned inset axes rather than raising). "
+                    f"Leave show_projections unset for insets."
+                )
+            spec["show_projections"] = False
+
+        inset_ax = parent_ax.inset_axes(bounds)
+        plot_func(data, ax=inset_ax, fig=fig, **spec)
+
+        if mark_inset:
+            parent_ax.indicate_inset_zoom(inset_ax, **mark_inset_kwargs)
+
+        inset_axes.append(inset_ax)
+
+    return inset_axes
+
+
 def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonuclear=False,
                   contour_fraction_x=0.25, contour_fraction_y=0.25,
                   ncontourpts_x=16384, ncontourpts_y=1024,
@@ -509,10 +634,11 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
                   f1_external_kwargs=None, f2_external_kwargs=None,
                   external_projection_color='crimson',
                   field='400', xlabel=None, ylabel=None, xlims=None, ylims=None,
-                  font='Arial', fontsize=None, output_format='',
+                  font='Arial', fontsize=12, output_format='',
                   colour_spectra=None, equal_tickspacing=False, tick_number=None,
                   tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
                   show_nQ_line=False, nQ=1, nQ_colours=None,
+                  inset=None,
                   ax=None, fig=None, save_fig=False, fig_name='nmr_2d_spectrum',
                   save_format='png'):
     """
@@ -613,6 +739,34 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
 
     nQ_colours : list of str, optional
         Colours for each diagonal in ``nQ``. Defaults to grey for all.
+
+    inset : dict or list of dict, optional
+        Add one or more insets to the contour. Each dict must contain
+        ``bounds`` -- ``(x0, y0, width, height)`` in axes-fraction
+        coordinates of *this* plot's axes, defining the inset's
+        placement and size (via ``ax.inset_axes``). Every other key
+        accepts exactly the same keyword arguments as
+        :func:`NMR2Dplotter` itself (``xlims``/``ylims``, ``factor``,
+        ``clevels``, ``colour_spectra``, ``fontsize``, ...) other than
+        ``show_projections`` (see below), applied to that inset only --
+        so an inset can, for example, zoom into a crowded region with different
+        contour levels or a smaller font. ``dataset`` may also be set
+        per inset to show a different spectrum than the parent plot;
+        if omitted, the inset shows the same ``dataset``. An inset
+        always has ``show_projections=False`` regardless of what is
+        passed -- setting it to a truthy value raises ``ValueError``,
+        since the projections rely on an AxesDivider mechanism that is
+        not compatible with an inset's own (already axes-fraction-
+        positioned) axes and would silently mislay the figure rather
+        than raise. Two more reserved keys: ``mark_inset`` (bool,
+        default False) draws a connector box linking the inset to the region of the parent
+        contour it corresponds to; ``mark_inset_kwargs`` forwards
+        extra arguments to that connector (e.g. ``edgecolor``).
+        Figure-level keys (``font``, ``output_format``, ``pl_width``/
+        ``pl_height``, ``save_fig``, ...) are not valid inside an
+        inset spec -- it always shares the parent figure. Default
+        None (no inset). The created inset axes are accessible
+        afterwards via ``ax.child_axes``.
 
     tick_dir : {'in', 'out', 'inout'}, optional
 
@@ -918,8 +1072,25 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
         fig.set_figwidth(pl_width)
         fig.subplots_adjust(left=0.15, right=0.88, bottom=0.12, top=0.88)
 
-        if save_fig:
-            save_figure(fig, fig_name=fig_name, save_format=save_format)
+    # ----- inset(s) -----
+    #
+    # Deliberately placed after every other layout change above (the
+    # projections' AxesDivider siblings, `subplots_adjust`): forcing a
+    # draw and only then creating the inset is required for
+    # correctness here. `ax.inset_axes` places the inset relative to
+    # `ax`'s bounding box as matplotlib has it cached at the time of
+    # the call, and an axes whose position was just set indirectly via
+    # an AxesDivider locator (as happens above whenever projections
+    # are shown) does not have a correct cached box until a draw
+    # actually runs that locator once. Skipping this and creating the
+    # inset straight after adding projections silently produces an
+    # inset with a nonsensical (sometimes negative-size) bounding box.
+    if inset is not None:
+        fig.canvas.draw()
+        _draw_2d_insets(ax, fig, inset, dataset, NMR2Dplotter, "dataset")
+
+    if standalone and save_fig:
+        save_figure(fig, fig_name=fig_name, save_format=save_format)
 
     return fig, ax
 
@@ -1135,6 +1306,7 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
                         equal_tickspacing=False, tick_number=None,
                         tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
                         show_nQ_line=False, nQ=1, nQ_colours=None,
+                        inset=None,
                         ax=None, fig=None, save_fig=False, fig_name='nmr_2d_overlay',
                         save_format='png'):
     """
@@ -1209,6 +1381,17 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
         Same meaning as the corresponding :func:`NMR2Dplotter`
         arguments -- axis labels are generated from the (shared)
         nuclides of ``datasets[0]``.
+
+    inset : dict or list of dict, optional
+        Add one or more insets to the overlay. Same mechanism as
+        :func:`NMR2Dplotter`'s ``inset`` -- each dict needs ``bounds``
+        (``(x0, y0, width, height)`` in axes-fraction coordinates);
+        every other key accepts exactly the same keyword arguments as
+        :func:`NMR2D_overlay_plot` itself. Use ``datasets`` per inset
+        to overlay different spectra than the parent plot (defaults to
+        the same ``datasets``). ``mark_inset``/``mark_inset_kwargs``
+        draw a connector box to the corresponding region of the parent
+        axes. Default None (no inset).
 
     ax : matplotlib.axes.Axes, optional
         If given, plot into this axis instead of creating a new
@@ -1407,8 +1590,16 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
         fig.set_figwidth(pl_width)
         fig.subplots_adjust(left=0.15, right=0.88, bottom=0.12, top=0.88)
 
-        if save_fig:
-            save_figure(fig, fig_name=fig_name, save_format=save_format)
+    # ----- inset(s) -----
+    #
+    # See NMR2Dplotter's own inset block for why the draw has to
+    # happen first, right here, and not any earlier.
+    if inset is not None:
+        fig.canvas.draw()
+        _draw_2d_insets(ax, fig, inset, datasets, NMR2D_overlay_plot, "datasets")
+
+    if standalone and save_fig:
+        save_figure(fig, fig_name=fig_name, save_format=save_format)
 
     return fig, ax
 

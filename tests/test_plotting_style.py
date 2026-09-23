@@ -6,7 +6,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from opennmr.plotting import style
-from opennmr.plotting.style import downsample_2d
+from opennmr.plotting.style import downsample_2d, downsample_1d
 
 
 # ============================================================
@@ -111,6 +111,126 @@ def test_downsample_2d_output_shape_matches_requested_caps():
     assert data_ds.shape == (256, 16384)
     assert len(x_ds) == 16384
     assert len(y_ds) == 256
+
+
+# ============================================================
+# downsample_1d -- max-magnitude-preserving, not evenly-spaced
+# index-skipping (the 1D counterpart of downsample_2d above; see the
+# function's own docstring for the real "a well-defined peak becomes
+# 3-4 points" bug this fixed in the Processing/Compare tabs)
+# ============================================================
+
+def _spike_index_missed_by_naive_stride(n, max_points):
+    """An index guaranteed to fall *between* two of
+    ``downsample_indices``'s own evenly-spaced picks -- the middle of
+    the widest gap in ``np.linspace(0, n-1, max_points, dtype=int)`` --
+    so a test placing a spike there is actually exercising the "falls
+    between two strides" failure mode, not relying on a hand-picked
+    constant that happens to dodge it for one particular n/max_points."""
+    naive_idx = np.linspace(0, n - 1, max_points, dtype=int)
+    gap_i = int(np.argmax(np.diff(naive_idx)))
+    mid = (int(naive_idx[gap_i]) + int(naive_idx[gap_i + 1])) // 2
+    assert mid not in set(naive_idx.tolist())  # actually missed, not a coincidence
+    return mid
+
+
+def test_downsample_1d_preserves_a_narrow_spike():
+    # The exact real-world failure mode: an evenly-spaced index pick
+    # can step clean over a narrow, well-digitized peak and lose it
+    # almost entirely.
+    n = 50000
+    spike_idx = _spike_index_missed_by_naive_stride(n, 8000)
+    y = np.zeros(n)
+    y[spike_idx] = 100.0
+    x = np.arange(n, dtype=float)
+
+    x_ds, y_ds = downsample_1d(x, y, max_points=8000)
+
+    assert len(y_ds) == 8000
+    assert y_ds.max() == pytest.approx(100.0)
+
+
+def test_downsample_1d_naive_index_skip_would_have_lost_the_same_spike():
+    # Confirms the test above is actually discriminating -- the OLD
+    # evenly-spaced-index approach (downsample_indices) misses the
+    # same spike, so "preserves the spike" above is a real
+    # improvement, not a tautology that would pass either way.
+    n = 50000
+    spike_idx = _spike_index_missed_by_naive_stride(n, 8000)
+    y = np.zeros(n)
+    y[spike_idx] = 100.0
+
+    naive_idx = np.linspace(0, n - 1, 8000, dtype=int)
+    naive_ds = y[naive_idx]
+
+    assert naive_ds.max() < 100.0
+
+
+def test_downsample_1d_preserves_sign():
+    y = np.zeros(64)
+    y[10] = -5.0
+    y[11] = 3.0  # smaller magnitude, same bin-ish neighborhood
+    x = np.arange(64, dtype=float)
+
+    _, y_ds = downsample_1d(x, y, max_points=16)
+
+    # The largest-magnitude value in the bin containing indices 10/11
+    # is -5.0 -- must survive as negative, not get sign-dropped.
+    assert y_ds.min() == pytest.approx(-5.0)
+
+
+def test_downsample_1d_returns_unchanged_when_already_within_limits():
+    y = np.random.default_rng(0).normal(size=64)
+    x = np.arange(64, dtype=float)
+
+    x_ds, y_ds = downsample_1d(x, y, max_points=8000)
+
+    np.testing.assert_array_equal(x_ds, x)
+    np.testing.assert_array_equal(y_ds, y)
+
+
+def test_downsample_1d_handles_length_not_evenly_divisible_by_target():
+    # Real acquisition sizes rarely divide evenly into a target point
+    # count -- must not crash, and must still land on the requested
+    # output length (trimming a few trailing points rather than
+    # failing).
+    y = np.random.default_rng(1).normal(size=39418)
+    x = np.arange(39418, dtype=float)
+
+    x_ds, y_ds = downsample_1d(x, y, max_points=16384)
+
+    assert len(y_ds) == 16384
+    assert len(x_ds) == 16384
+
+
+def test_downsample_1d_x_none_returns_none_x_and_correct_length_y():
+    # x=None is the fast in-place-refresh path (re-plotting a phased
+    # spectrum's y-values without re-deriving the unchanged x already
+    # on screen) -- see the function's own docstring.
+    y = np.random.default_rng(2).normal(size=50000)
+
+    x_ds, y_ds = downsample_1d(None, y, max_points=8000)
+
+    assert x_ds is None
+    assert len(y_ds) == 8000
+
+
+def test_downsample_1d_x_none_still_finds_a_relocated_peak():
+    # Bin *boundaries* depend only on len(y)/max_points, never on
+    # data values -- so re-calling with x=None after the underlying
+    # peak has moved (e.g. a phase change) must still find the new
+    # peak, not silently reuse a stale bin choice from before.
+    n = 50000
+    y1 = np.zeros(n)
+    y1[5000] = 10.0
+    _, y1_ds = downsample_1d(None, y1, max_points=8000)
+    assert y1_ds.max() == pytest.approx(10.0)
+
+    y2 = np.zeros(n)
+    y2[45000] = 10.0
+    _, y2_ds = downsample_1d(None, y2, max_points=8000)
+    assert y2_ds.max() == pytest.approx(10.0)
+    assert np.argmax(y1_ds) != np.argmax(y2_ds)
 
 
 # ============================================================
@@ -424,3 +544,72 @@ def test_tick_and_label_sizes_stay_together_across_a_view_change():
 
     drawn = {round(t.get_fontsize(), 2) for t in ax.get_xticklabels() if t.get_text()}
     assert drawn == {round(label_size, 2)}
+
+
+# ============================================================
+# apply_default_font -- the GUI's one-time global typeface default
+# (see the module docstring for why setup_plotting itself never runs
+# from GUI code, and apply_default_font's own docstring for why
+# typeface is the one piece of that safe to set globally anyway)
+# ============================================================
+
+def test_apply_default_font_sets_family_and_mathtext():
+    plt.rcdefaults()
+    try:
+        style.apply_default_font("Arial")
+        assert plt.rcParams["font.family"] == ["sans-serif"]
+        assert plt.rcParams["font.sans-serif"][0] == "Arial"
+        assert plt.rcParams["mathtext.fontset"] == "custom"
+        assert plt.rcParams["mathtext.rm"] == "Arial"
+        assert plt.rcParams["mathtext.it"] == "Arial:italic"
+        assert plt.rcParams["mathtext.bf"] == "Arial:bold"
+        assert plt.rcParams["mathtext.default"] == "regular"
+    finally:
+        plt.rcdefaults()
+
+
+def test_apply_default_font_falls_back_gracefully_when_the_font_is_missing():
+    # A machine without "Arial" installed still gets *a* sans-serif,
+    # not a warning and a silent substitution to whatever matplotlib
+    # feels like -- explicit user request: "add Arial as the default
+    # font, not the unpleasant matplotlib default".
+    plt.rcdefaults()
+    try:
+        style.apply_default_font("Arial")
+        fallbacks = plt.rcParams["font.sans-serif"]
+        assert "DejaVu Sans" in fallbacks
+        assert "sans-serif" in fallbacks
+    finally:
+        plt.rcdefaults()
+
+
+def test_apply_default_font_does_not_touch_axis_or_tick_sizing():
+    # The one thing that must stay false: this is not setup_plotting.
+    # A GUI canvas keeps its own linewidth/tick sizing per instance
+    # (see MplCanvas), and a global rcParam change here would silently
+    # restyle every open canvas the same way calling setup_plotting
+    # from GUI code would.
+    plt.rcdefaults()
+    default_linewidth = plt.rcParams["axes.linewidth"]
+    try:
+        style.apply_default_font("Arial")
+        assert plt.rcParams["axes.linewidth"] == default_linewidth
+    finally:
+        plt.rcdefaults()
+
+
+def test_setup_plotting_still_sets_its_own_tick_and_axis_rcparams():
+    # Regression guard for factoring the font/mathtext rcParams out of
+    # setup_plotting into apply_default_font -- everything else it did
+    # before must still happen.
+    plt.rcdefaults()
+    try:
+        result = style.setup_plotting(font="Arial", fontsize=16)
+        assert plt.rcParams["axes.labelsize"] == 16
+        assert plt.rcParams["xtick.direction"] == "in"
+        assert plt.rcParams["axes.linewidth"] == pytest.approx(result["lw"])
+        # And it still gets the same typeface apply_default_font would.
+        assert plt.rcParams["mathtext.rm"] == "Arial"
+        assert plt.rcParams["font.sans-serif"][0] == "Arial"
+    finally:
+        plt.rcdefaults()

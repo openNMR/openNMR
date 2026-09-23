@@ -22,7 +22,9 @@ from io import StringIO
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QFontDatabase, QKeySequence, QPalette
+from PySide6.QtGui import (
+    QAction, QActionGroup, QFont, QFontDatabase, QIcon, QKeySequence, QPalette, QPixmap,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
@@ -44,13 +46,15 @@ def _is_dark_colour(colour) -> bool:
 
 from .. import io
 from .. import plotting
+from ..plotting import accessibility as plot_accessibility
 # The notebook package's CSA fitter, reached through its own bridge --
 # see opennmr.notebook.bridge for why a conversion rather than a
 # re-read from disk.
 from ..notebook import bridge as notebook_bridge
 from ..notebook import csa_fitting as notebook_csa
+from ..notebook import simulations as notebook_simulations
 from ..core import registry as core_registry
-from ..core.spectrum import NMRAxis, NMRSpectrum
+from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from ..io import bruker as io_bruker
 from ..io import lists as io_lists
 from ..io import persistence as io_persistence
@@ -72,7 +76,27 @@ from .widgets.drag_control import DragHandle
 from .widgets.relative_spinbox import RelativeDoubleSpinBox
 from .widgets.data_browser import DataBrowser
 from .widgets.wrapping_tabs import WrappingTabWidget
+from .widgets.collapsible_section import CollapsibleSection
 from .loader import background_load_enabled
+
+#: Where the launcher-tile icons (Load/Save/Compare, Processing,
+#: Advanced Processing, Fitting, Relaxation, Applications,
+#: Simulations) live -- plain files rather than a Qt resource (.qrc)
+#: bundle, matching how app.py's own window icon
+#: (resources/logo.png) is already loaded, and covered by the same
+#: existing "opennmr.gui" -> "resources/*.png" package-data glob (see
+#: pyproject.toml), so nothing extra had to be added there.
+_RESOURCES_DIR = os.path.join(os.path.dirname(__file__), "resources")
+
+
+def _launcher_icon(name: str) -> QIcon:
+    """``QIcon`` for a side-panel launcher tile, or a null (empty)
+    icon if the file is missing -- a missing icon file should never
+    crash the GUI, just show a text-only button (WrappingTabWidget's
+    own ``addTab`` already handles ``icon=None`` that way)."""
+    path = os.path.join(_RESOURCES_DIR, name)
+    return QIcon(path) if os.path.exists(path) else QIcon()
+
 
 #: Genuinely unbounded spinbox range for phase controls -- a slider's
 #: fixed pixel-to-range mapping would force a tradeoff between coarse
@@ -92,7 +116,7 @@ _PHASE1_STEP_MULTIPLIER = 20.0
 #: ``ft._WINDOWS``, it's translated to a no-op exponential (lb=0) by
 #: ``MainWindow._resolve_window_kwargs``.
 #: (display label, ``processing.relaxation.RELAXATION_MODELS`` key)
-#: shown in the Analysis tab's model combo.
+#: shown in the Relaxation tab's model combo.
 _RELAXATION_MODEL_ITEMS = [
     ("Inversion recovery (T1)", "inversion_recovery"),
     ("Saturation recovery (T1)", "saturation_recovery"),
@@ -104,7 +128,7 @@ _RELAXATION_MODEL_ITEMS = [
 ]
 
 #: (display label, ``processing.relaxation.RELAXATION_MODELS`` key)
-#: shown in the Analysis tab's model combo when "Diffusion (PFG)" is
+#: shown in the Relaxation tab's model combo when "Diffusion (PFG)" is
 #: the selected fit type.
 _DIFFUSION_MODEL_ITEMS = [
     ("Stejskal-Tanner (D)", "stejskal_tanner"),
@@ -148,6 +172,14 @@ _ZERO_FILL_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        # Arial (falling back gracefully if it isn't installed), not
+        # matplotlib's own DejaVu Sans -- explicit user request: "add
+        # Arial as the default font, not the unpleasant matplotlib
+        # default". Global and one-time (see apply_default_font's own
+        # docstring for why that is fine here, unlike setup_plotting),
+        # so it has to run before any canvas -- and therefore any
+        # plot -- is created, not after.
+        plotting.apply_default_font("Arial")
         self.setWindowTitle("openNMR")
         self.resize(1100, 700)
         self.setAcceptDrops(True)  # drag a data folder straight in -- see dropEvent
@@ -505,15 +537,55 @@ class MainWindow(QMainWindow):
         # that was just drawn to self.canvas.
         self.canvas_tabs.setCurrentWidget(self.canvas)
 
+        # Seven launcher-tile buttons replacing the old Data/Processing/
+        # Spectral Fitting/Analysis/Compare tabs -- explicit user
+        # request, migrated one button at a time (see each panel
+        # builder's own docstring for exactly what moved from where).
+        # Still being migrated: Analysis is wired in below under its
+        # *old* name/shape until it gets its own pass -- WrappingTabWidget
+        # doesn't care whether a tab has an icon or not, so old
+        # (text-only) and new (icon) tabs coexist fine mid-migration.
         self.side_tabs = tabs = WrappingTabWidget()
-        tabs.addTab(self._scrollable(self._build_spectra_tab()), "Data")
-        self._processing_tab_index = tabs.addTab(self._scrollable(self._build_processing_tab()), "Processing")
-        # Spectral Fitting before Analysis: it is step 1, and the tab
-        # order is the workflow order.
-        self._spectral_fitting_tab_index = tabs.addTab(
-            self._scrollable(self._build_spectral_fitting_tab()), "Spectral Fitting")
-        tabs.addTab(self._scrollable(self._build_analysis_tab()), "Analysis")
-        tabs.addTab(self._scrollable(self._build_compare_tab()), "Compare")
+        tabs.addTab(self._scrollable(self._build_load_save_compare_panel()), "Open",
+                    icon=_launcher_icon("launcher_load_save_compare.png"))
+        self._processing_tab_index = tabs.addTab(
+            self._scrollable(self._build_processing_tab()), "Process",
+            icon=_launcher_icon("launcher_processing.png"))
+        # Advanced Processing: for now, just VOCS (moved out of the old
+        # Analysis tab -- explicit user request, "for now, this is just
+        # the 'VOCS' processing"). _build_vocs_subtab already returns a
+        # complete, self-contained panel (its own settings/apply/sum
+        # group boxes), so it is used directly rather than wrapped in
+        # a single redundant CollapsibleSection -- one more processing
+        # method arriving later is exactly when that wrapping earns
+        # its keep, not before.
+        tabs.addTab(self._scrollable(self._build_vocs_subtab()), "Adv. Proc.",
+                    icon=_launcher_icon("launcher_advanced_processing.png"))
+        # Fitting before Analysis/Relaxation: it is step 1 (measure an
+        # intensity per spectrum/slice), and the tab order is the
+        # workflow order. Replaces the old "Spectral Fitting" tab --
+        # Peak Picking (renamed "Isotropic (Gauss/Lor)") and
+        # Integration move here, plus CSA (renamed "CSA/Dipolar"),
+        # moved out of Analysis -- explicit user request collecting
+        # every *spectral* fit in one place, as three independent
+        # collapsible sections instead of two peer tabs plus a third
+        # sitting elsewhere.
+        self._fitting_tab_index = tabs.addTab(
+            self._scrollable(self._build_fitting_panel()), "Fit",
+            icon=_launcher_icon("launcher_fitting.png"))
+        tabs.addTab(self._scrollable(self._build_relaxation_panel()), "Dynamics",
+                    icon=_launcher_icon("launcher_relaxation.png"))
+        # Sixth of the seven launcher buttons: eNMR and Imaging, moved
+        # out of the old "Analysis" tab (now fully retired -- see
+        # _build_applications_panel) into their own collapsible
+        # sections -- explicit user request.
+        tabs.addTab(self._scrollable(self._build_applications_panel()), "Apply",
+                    icon=_launcher_icon("launcher_applications.png"))
+        # Last of the seven: genuinely new (not moved from an old tab)
+        # -- forward-simulate a CSA or quadrupolar powder pattern and
+        # export it to Load/Save/Compare -- explicit user request.
+        tabs.addTab(self._scrollable(self._build_simulations_panel()), "Simulate",
+                    icon=_launcher_icon("launcher_simulations.png"))
         # No Output tab any more -- its controls live in the Plot Style
         # dialog (View ▸ Plot Style…, or right-click any plot). Built
         # here all the same, once, so every handler that reads
@@ -523,9 +595,21 @@ class MainWindow(QMainWindow):
         self._style_dialog = None
         for canvas in self._all_canvases():
             canvas.plotStyleRequested.connect(self._on_plot_style_clicked)
+            canvas.plotKindChanged.connect(
+                lambda kind, c=canvas: self._on_canvas_plot_kind_changed(c, kind))
         # Before any tab is current, so _style_target_canvases falls
         # back to every canvas and the saved defaults land everywhere.
         self._apply_saved_style_defaults()
+        # Settings, after the seven workflow buttons rather than among
+        # them: it is not a step in working up a spectrum. Explicit user
+        # request -- "a new settings tab, where users can define their
+        # default plot styles for 1-d, 2-d (etc) plots", and where the
+        # interface font size lives. Added after the style panel is
+        # built (its per-kind defaults are that panel's settings).
+        self._settings_tab_index = tabs.addTab(
+            self._scrollable(self._build_settings_panel()), "Settings",
+            icon=_launcher_icon("launcher_settings.png"))
+        self._apply_saved_ui_settings()
         # Entering the Processing tab switches the canvas to its own
         # live dual preview automatically (see _show_processing_preview);
         # leaving it switches back, so that speculative preview state
@@ -675,7 +759,7 @@ class MainWindow(QMainWindow):
         # confines the Delete/Backspace *keyboard* accelerator to firing
         # only while the Data tab's own list has focus -- previously it
         # fired window-wide, so Backspace pressed anywhere (e.g. while
-        # browsing the Analysis tab) deleted the selected spectrum, easy
+        # browsing the Applications tab) deleted the selected spectrum, easy
         # to trigger by accident. The menu item itself still works from
         # anywhere via a click, since that doesn't go through the
         # shortcut-context check at all.
@@ -768,12 +852,23 @@ class MainWindow(QMainWindow):
         # the wrong panels -- "Analysis" opened Spectral Fitting. A name
         # lookup cannot drift when the tab order changes again.
         for shortcut_num, label in enumerate(
-                ("Data", "Processing", "Spectral Fitting", "Analysis", "Compare"), start=1):
+                ("Load/Save/Compare", "Processing", "Advanced Processing", "Fitting",
+                 "Relaxation", "Applications", "Simulations"), start=1):
             action = QAction(label, self)
             action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
             action.triggered.connect(
                 lambda _checked=False, name=label: self._show_side_tab(name))
             window_menu.addAction(action)
+
+        # Settings sits outside the numbered Panel shortcuts (Ctrl+1..7,
+        # then the views from Ctrl+8) so adding it renumbers nothing;
+        # Ctrl+, is the usual preferences shortcut.
+        self.settings_menu_action = QAction("Settings…", self)
+        self.settings_menu_action.setShortcut(QKeySequence("Ctrl+,"))
+        self.settings_menu_action.setToolTip(
+            "Interface font size, and the default plot style for each kind of plot.")
+        self.settings_menu_action.triggered.connect(lambda: self._show_side_tab("Settings"))
+        window_menu.addAction(self.settings_menu_action)
 
         # " View" suffix: the canvas tab's own name would otherwise
         # collide with the identically-named Panel entry above it for
@@ -792,9 +887,9 @@ class MainWindow(QMainWindow):
             window_menu.addAction(action)
             shortcut_num += 1
 
-        # Quick access to the Analysis tab's own controls from anywhere
-        # -- no new capability, every action here already exists as a
-        # button/combo in the Spectral Fitting / Curve Fitting sub-tabs;
+        # Quick access to the Fitting/Relaxation tabs' own controls from
+        # anywhere -- no new capability, every action here already
+        # exists as a button/combo on the Fitting or Relaxation tab;
         # this just saves switching to that side-tab first.
         analysis_menu = menu_bar.addMenu("&Analysis")
         fit_spectrum_menu_action = QAction("Fit &Spectrum", self)
@@ -1225,7 +1320,7 @@ class MainWindow(QMainWindow):
         if not rows:
             QMessageBox.information(
                 self, "Nothing selected",
-                "Select a spectrum in the Data tab to report its processing.",
+                "Select a spectrum in the Load/Save/Compare panel to report its processing.",
             )
             return
         if len(rows) == 1:
@@ -1379,7 +1474,27 @@ class MainWindow(QMainWindow):
     # Data tab: open / list / remove / nucleus override
     # ============================================================
 
-    def _build_spectra_tab(self) -> QWidget:
+    def _build_load_save_compare_panel(self) -> QWidget:
+        """The "Load/Save/Compare" launcher button's panel -- the old
+        "Data" tab (browse/open, the selected-spectrum summary, the
+        list of open experiments) and the old standalone "Compare" tab
+        merged into one, per explicit user request: "'Load/Save/
+        Compare' -- this should be the same as the Data and Compare
+        tabs combined." "Browse a folder" stays permanently visible at
+        the top (also explicit: "at the top"); "Selected spectrum" and
+        "Open experiments/compare" are :class:`CollapsibleSection`\ s
+        below it -- the latter folding the *entire* old Compare tab in
+        underneath the open-experiments list, since they're one
+        dropdown now, not two side-by-side tabs.
+
+        Builds exactly the same widgets under exactly the same
+        ``self.*`` attribute names as the old "Data" and "Compare"
+        tabs did (their own builders, ``_build_spectra_tab`` and
+        ``_build_compare_tab``, have since been removed now every
+        panel has migrated) -- every handler elsewhere that reads
+        e.g. ``self.compare_list`` or ``self.spectrum_list`` keeps
+        working unchanged; only *where* these widgets get built and
+        laid out has moved."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
@@ -1406,7 +1521,7 @@ class MainWindow(QMainWindow):
         self.spectrum_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.spectrum_list.setToolTip(
             "Ctrl/Cmd-click (or Shift-click) to select several spectra "
-            "and compare them in the Compare tab."
+            "and compare them below (Open experiments / Compare)."
         )
         self.spectrum_list.currentRowChanged.connect(self._on_selection_changed)
         self.spectrum_list.itemSelectionChanged.connect(self._on_list_selection_changed)
@@ -1414,11 +1529,9 @@ class MainWindow(QMainWindow):
         self.spectrum_list.customContextMenuRequested.connect(self._on_spectrum_list_context_menu)
 
         # Browse a folder's experiments without going back through
-        # Open… each time. Labelled, because the two lists are easy to
-        # confuse: this one is what is on disk, the one below is what
-        # is open. Ordered browse -> selected-spectrum info -> open
-        # experiments on explicit request, which also puts the two
-        # lists at opposite ends rather than adjacent.
+        # Open… each time. Always visible (not a CollapsibleSection --
+        # explicit user request: "at the top"), since it's the primary
+        # way data gets into the session at all.
         browser_box = QGroupBox("Browse a folder")
         browser_layout = QVBoxLayout(browser_box)
         browser_layout.setContentsMargins(4, 4, 4, 4)
@@ -1428,8 +1541,9 @@ class MainWindow(QMainWindow):
         browser_layout.addWidget(self.data_browser)
         layout.addWidget(browser_box, 1)
 
-        info_box = QGroupBox("Selected spectrum")
-        info_form = QFormLayout(info_box)
+        # --- Selected spectrum (collapsible) ---------------------------
+        info_content = QWidget()
+        info_form = QFormLayout(info_content)
         self.info_label = QLabel("—")
         self.info_label.setWordWrap(True)
         info_form.addRow(self.info_label)
@@ -1471,16 +1585,20 @@ class MainWindow(QMainWindow):
         self.pseudo2d_view_combo.currentIndexChanged.connect(self._on_pseudo2d_view_changed)
         info_form.addRow("View:", self.pseudo2d_view_combo)
 
-        layout.addWidget(info_box)
+        info_section = CollapsibleSection("Selected spectrum", content=info_content)
+        layout.addWidget(info_section)
 
-        # The open experiments, and the buttons that act on them,
-        # directly beneath the info panel that describes the selected
-        # one -- so "what is selected" reads immediately above the list
-        # the selection is made in.
-        open_box = QGroupBox("Open experiments")
-        open_layout = QVBoxLayout(open_box)
-        open_layout.setContentsMargins(4, 4, 4, 4)
-        open_layout.addWidget(self.spectrum_list)
+        # --- Open experiments / Compare (collapsible) -------------------
+        # One dropdown, not two side-by-side tabs any more: the list of
+        # what's open, directly above the full former-Compare-tab
+        # controls that act on a multi-selection from that same list --
+        # explicit user request: "'Open experiments/compare' ... should
+        # list experiments you want to compare and again have all the
+        # options the current 'Compare' tab has."
+        open_compare_content = QWidget()
+        open_compare_layout = QVBoxLayout(open_compare_content)
+        open_compare_layout.setContentsMargins(4, 4, 4, 4)
+        open_compare_layout.addWidget(self.spectrum_list)
 
         remove_button = QPushButton("Remove")
         remove_button.clicked.connect(self._on_remove_clicked)
@@ -1489,8 +1607,142 @@ class MainWindow(QMainWindow):
         remove_row = QHBoxLayout()
         remove_row.addWidget(remove_button)
         remove_row.addWidget(clear_button)
-        open_layout.addLayout(remove_row)
-        layout.addWidget(open_box, 1)
+        open_compare_layout.addLayout(remove_row)
+
+        compare_intro_label = QLabel(
+            "Ctrl/Cmd-click (or Shift-click) several 1D spectra in the "
+            "list above to start a comparison -- or just select a "
+            "single pseudo-2D spectrum there, which fills this in "
+            "with its own slices automatically, in order. Fine-tune "
+            "either here: check/uncheck to include or exclude, Move Up/"
+            "Down to reorder the plot. Right-click for Plot (jump to "
+            "the Compare canvas tab) or Fit Curve (relaxation/"
+            "diffusion) across whatever's checked here."
+        )
+        compare_intro_label.setWordWrap(True)
+        open_compare_layout.addWidget(compare_intro_label)
+
+        self.compare_status_label = QLabel("Select at least two 1D spectra to compare.")
+        self.compare_status_label.setWordWrap(True)
+        open_compare_layout.addWidget(self.compare_status_label)
+
+        self.compare_list = QListWidget()
+        self.compare_list.setToolTip(
+            "The spectra currently in this comparison -- either "
+            "manually multi-selected 1D spectra, or every slice of a "
+            "single selected pseudo-2D spectrum. Uncheck one to drop "
+            "it from the plot; select a row and use Move Up/Down to "
+            "change the stack order. Right-click for Fit Curve."
+        )
+        # This list never actually holds keyboard focus (rows are set
+        # current programmatically, e.g. after a rebuild, not by the
+        # user clicking into the widget first) -- on macOS specifically,
+        # Qt's native style renders an unfocused "current" row's
+        # highlight in a much fainter inactive gray, easy to miss
+        # entirely against a list of otherwise-identical checkable rows.
+        # Forcing the inactive highlight colors to match the active ones
+        # makes the current row look the same regardless of focus.
+        compare_list_palette = self.compare_list.palette()
+        for role in (QPalette.ColorRole.Highlight, QPalette.ColorRole.HighlightedText):
+            compare_list_palette.setColor(QPalette.ColorGroup.Inactive, role,
+                                           compare_list_palette.color(QPalette.ColorGroup.Active, role))
+        self.compare_list.setPalette(compare_list_palette)
+        self.compare_list.itemChanged.connect(lambda _item: self._refresh_compare_view_if_active())
+        self.compare_list.currentRowChanged.connect(self._on_compare_list_current_row_changed)
+        self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
+        open_compare_layout.addWidget(self.compare_list)
+
+        # Checking a long list one row at a time is the slow path
+        # everything downstream depends on (Fit Curve, VOCS Sum, the
+        # plot itself) -- explicit user request while combining a VOCS
+        # series: "make it easier to select all ... instead of one at
+        # a time".
+        check_row = QHBoxLayout()
+        check_all_button = QPushButton("Check All")
+        check_all_button.setToolTip("Include every spectrum listed here in the comparison.")
+        check_all_button.clicked.connect(lambda: self._set_all_compare_checked(True))
+        uncheck_all_button = QPushButton("Uncheck All")
+        uncheck_all_button.setToolTip("Exclude every spectrum listed here from the comparison.")
+        uncheck_all_button.clicked.connect(lambda: self._set_all_compare_checked(False))
+        check_row.addWidget(check_all_button)
+        check_row.addWidget(uncheck_all_button)
+        open_compare_layout.addLayout(check_row)
+
+        reorder_row = QHBoxLayout()
+        move_up_button = QPushButton("Move Up")
+        move_up_button.setToolTip("Move the selected row earlier in the comparison's plot order.")
+        move_up_button.clicked.connect(lambda: self._on_move_compare_item(-1))
+        move_down_button = QPushButton("Move Down")
+        move_down_button.setToolTip("Move the selected row later in the comparison's plot order.")
+        move_down_button.clicked.connect(lambda: self._on_move_compare_item(1))
+        reorder_row.addWidget(move_up_button)
+        reorder_row.addWidget(move_down_button)
+        open_compare_layout.addLayout(reorder_row)
+
+        compare_form = QFormLayout()
+
+        self.layout_mode_combo = QComboBox()
+        self.layout_mode_combo.addItems(["Stacked", "Superimposed"])
+        self.layout_mode_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
+        compare_form.addRow("Layout:", self.layout_mode_combo)
+
+        self.compare_normalize_combo = QComboBox()
+        self.compare_normalize_combo.addItems(["None", "Max intensity", "By sample mass"])
+        self.compare_normalize_combo.setToolTip(
+            "None: as loaded (already per-scan -- every importer divides "
+            "by NS). Max intensity: each spectrum scaled to its own peak "
+            "height, for shape comparison regardless of concentration. "
+            "By sample mass: divided by the mass set via the spectrum "
+            "list's right-click \"Set sample mass…\" -- spectra with "
+            "no mass set are skipped."
+        )
+        self.compare_normalize_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
+        compare_form.addRow("Normalize:", self.compare_normalize_combo)
+
+        open_compare_layout.addLayout(compare_form)
+
+        compare_action_row = QHBoxLayout()
+        compare_plot_button = QPushButton("Plot")
+        compare_plot_button.setToolTip(
+            "(Re-)draw the comparison from whatever's checked above and "
+            "jump to the Compare canvas tab -- also happens automatically "
+            "on every checkbox/control change; this is just an explicit, "
+            "always-available way to do the same thing on demand."
+        )
+        compare_plot_button.clicked.connect(self._refresh_compare_view)
+        compare_action_row.addWidget(compare_plot_button)
+        compare_fit_curve_button = QPushButton("Fit Curve…")
+        compare_fit_curve_button.setToolTip(
+            "Fit a relaxation/diffusion model across whatever's checked "
+            "above (needs at least two 1D spectra) -- fits each checked "
+            "entry's peaks first if they haven't been already."
+        )
+        compare_fit_curve_button.clicked.connect(self._on_fit_curve_compare_stack_action)
+        compare_action_row.addWidget(compare_fit_curve_button)
+        open_compare_layout.addLayout(compare_action_row)
+
+        combine_row = QHBoxLayout()
+        combine_row.addWidget(QLabel("Operation:"))
+        self.combine_op_combo = QComboBox()
+        self.combine_op_combo.addItem("Sum", "sum")
+        self.combine_op_combo.addItem("Average", "average")
+        self.combine_op_combo.addItem("Subtract from first", "subtract")
+        self._narrow_combo(self.combine_op_combo)
+        combine_row.addWidget(self.combine_op_combo)
+        combine_button = QPushButton("Combine (Compare stack)")
+        combine_button.setToolTip(
+            "Add/subtract/average whatever's checked above (needs at "
+            "least two 1D spectra), interpolated onto a common ppm "
+            "axis over their overlapping range -- added back into the "
+            "session as a new spectrum."
+        )
+        combine_button.clicked.connect(self._on_combine_spectra_clicked)
+        combine_row.addWidget(combine_button)
+        open_compare_layout.addLayout(combine_row)
+
+        open_compare_section = CollapsibleSection("Open experiments / Compare", content=open_compare_content)
+        layout.addWidget(open_compare_section, 1)
 
         return tab
 
@@ -1500,8 +1752,8 @@ class MainWindow(QMainWindow):
         always used before the (reverted) single-non-native-dialog
         attempt, but styled with Qt's own cross-platform dialog widget
         instead of the OS-native panel. See the button's own
-        construction comment in :meth:`_build_spectra_tab` for why the
-        original non-native attempt was reverted: real user reports
+        construction comment in :meth:`_build_load_save_compare_panel`
+        for why the original non-native attempt was reverted: real user reports
         that a non-native dialog in ``ExistingFiles`` mode (offering
         *files and folders together*) didn't actually let a folder be
         *selected* (only navigated into) in practice. This is
@@ -2847,7 +3099,7 @@ class MainWindow(QMainWindow):
         the same thing that method already does."""
         n_slices = spectrum.data.shape[0]
         slices = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))
-        self.canvas.show_compare(slices["rows"], mode="stack", normalize=True)
+        self.canvas.show_compare(slices["rows"], mode="stack", normalize=True, plot_kind="pseudo2d")
         self.canvas_tabs.setCurrentWidget(self.canvas)
 
     def _show_pseudo2d_heatmap(self, spectrum) -> None:
@@ -2863,149 +3115,6 @@ class MainWindow(QMainWindow):
         slices = processing_slicing.get_slices(spectrum, rows=list(range(1, n_slices + 1)))
         self.canvas.show_1d_heatmap(slices["rows"])
         self.canvas_tabs.setCurrentWidget(self.canvas)
-
-    # ============================================================
-    # Compare tab: multi-spectrum stack/overlay
-    # ============================================================
-
-    def _build_compare_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        compare_intro_label = QLabel(
-            "Ctrl/Cmd-click (or Shift-click) several 1D spectra in the "
-            "Data tab's list to start a comparison -- or just select "
-            "a single pseudo-2D spectrum there, which fills this in "
-            "with its own slices automatically, in order. Fine-tune "
-            "either here: check/uncheck to include or exclude, Move Up/"
-            "Down to reorder the plot. Right-click for Plot (jump to "
-            "the Compare canvas tab) or Fit Curve (relaxation/"
-            "diffusion) across whatever's checked here."
-        )
-        compare_intro_label.setWordWrap(True)
-        layout.addWidget(compare_intro_label)
-
-        self.compare_status_label = QLabel("Select at least two 1D spectra to compare.")
-        self.compare_status_label.setWordWrap(True)
-        layout.addWidget(self.compare_status_label)
-
-        self.compare_list = QListWidget()
-        self.compare_list.setToolTip(
-            "The spectra currently in this comparison -- either "
-            "manually multi-selected 1D spectra, or every slice of a "
-            "single selected pseudo-2D spectrum. Uncheck one to drop "
-            "it from the plot; select a row and use Move Up/Down to "
-            "change the stack order. Right-click for Fit Curve."
-        )
-        # This list never actually holds keyboard focus (rows are set
-        # current programmatically, e.g. after a rebuild, not by the
-        # user clicking into the widget first) -- on macOS specifically,
-        # Qt's native style renders an unfocused "current" row's
-        # highlight in a much fainter inactive gray, easy to miss
-        # entirely against a list of otherwise-identical checkable rows.
-        # Forcing the inactive highlight colors to match the active ones
-        # makes the current row look the same regardless of focus.
-        compare_list_palette = self.compare_list.palette()
-        for role in (QPalette.ColorRole.Highlight, QPalette.ColorRole.HighlightedText):
-            compare_list_palette.setColor(QPalette.ColorGroup.Inactive, role,
-                                           compare_list_palette.color(QPalette.ColorGroup.Active, role))
-        self.compare_list.setPalette(compare_list_palette)
-        self.compare_list.itemChanged.connect(lambda _item: self._refresh_compare_view_if_active())
-        self.compare_list.currentRowChanged.connect(self._on_compare_list_current_row_changed)
-        self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
-        layout.addWidget(self.compare_list)
-
-        # Checking a long list one row at a time is the slow path
-        # everything downstream depends on (Fit Curve, VOCS Sum, the
-        # plot itself) -- explicit user request while combining a VOCS
-        # series: "make it easier to select all ... instead of one at
-        # a time".
-        check_row = QHBoxLayout()
-        check_all_button = QPushButton("Check All")
-        check_all_button.setToolTip("Include every spectrum listed here in the comparison.")
-        check_all_button.clicked.connect(lambda: self._set_all_compare_checked(True))
-        uncheck_all_button = QPushButton("Uncheck All")
-        uncheck_all_button.setToolTip("Exclude every spectrum listed here from the comparison.")
-        uncheck_all_button.clicked.connect(lambda: self._set_all_compare_checked(False))
-        check_row.addWidget(check_all_button)
-        check_row.addWidget(uncheck_all_button)
-        layout.addLayout(check_row)
-
-        reorder_row = QHBoxLayout()
-        move_up_button = QPushButton("Move Up")
-        move_up_button.setToolTip("Move the selected row earlier in the comparison's plot order.")
-        move_up_button.clicked.connect(lambda: self._on_move_compare_item(-1))
-        move_down_button = QPushButton("Move Down")
-        move_down_button.setToolTip("Move the selected row later in the comparison's plot order.")
-        move_down_button.clicked.connect(lambda: self._on_move_compare_item(1))
-        reorder_row.addWidget(move_up_button)
-        reorder_row.addWidget(move_down_button)
-        layout.addLayout(reorder_row)
-
-        form = QFormLayout()
-
-        self.layout_mode_combo = QComboBox()
-        self.layout_mode_combo.addItems(["Stacked", "Superimposed"])
-        self.layout_mode_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
-        form.addRow("Layout:", self.layout_mode_combo)
-
-        self.compare_normalize_combo = QComboBox()
-        self.compare_normalize_combo.addItems(["None", "Max intensity", "By sample mass"])
-        self.compare_normalize_combo.setToolTip(
-            "None: as loaded (already per-scan -- every importer divides "
-            "by NS). Max intensity: each spectrum scaled to its own peak "
-            "height, for shape comparison regardless of concentration. "
-            "By sample mass: divided by the mass set via the spectrum "
-            "list's right-click \"Set sample mass…\" -- spectra with "
-            "no mass set are skipped."
-        )
-        self.compare_normalize_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
-        form.addRow("Normalize:", self.compare_normalize_combo)
-
-        layout.addLayout(form)
-
-        compare_action_row = QHBoxLayout()
-        compare_plot_button = QPushButton("Plot")
-        compare_plot_button.setToolTip(
-            "(Re-)draw the comparison from whatever's checked above and "
-            "jump to the Compare canvas tab -- also happens automatically "
-            "on every checkbox/control change; this is just an explicit, "
-            "always-available way to do the same thing on demand."
-        )
-        compare_plot_button.clicked.connect(self._refresh_compare_view)
-        compare_action_row.addWidget(compare_plot_button)
-        compare_fit_curve_button = QPushButton("Fit Curve…")
-        compare_fit_curve_button.setToolTip(
-            "Fit a relaxation/diffusion model across whatever's checked "
-            "above (needs at least two 1D spectra) -- fits each checked "
-            "entry's peaks first if they haven't been already."
-        )
-        compare_fit_curve_button.clicked.connect(self._on_fit_curve_compare_stack_action)
-        compare_action_row.addWidget(compare_fit_curve_button)
-        layout.addLayout(compare_action_row)
-
-        combine_row = QHBoxLayout()
-        combine_row.addWidget(QLabel("Operation:"))
-        self.combine_op_combo = QComboBox()
-        self.combine_op_combo.addItem("Sum", "sum")
-        self.combine_op_combo.addItem("Average", "average")
-        self.combine_op_combo.addItem("Subtract from first", "subtract")
-        self._narrow_combo(self.combine_op_combo)
-        combine_row.addWidget(self.combine_op_combo)
-        combine_button = QPushButton("Combine (Compare stack)")
-        combine_button.setToolTip(
-            "Add/subtract/average whatever's checked above (needs at "
-            "least two 1D spectra), interpolated onto a common ppm "
-            "axis over their overlapping range -- added back into the "
-            "session as a new spectrum."
-        )
-        combine_button.clicked.connect(self._on_combine_spectra_clicked)
-        combine_row.addWidget(combine_button)
-        layout.addLayout(combine_row)
-
-        layout.addStretch(1)
-        return tab
 
     #: Where per-type figure-style defaults are persisted -- a plain
     #: JSON dict of {type_key: style_dict}, deliberately not tied to
@@ -3102,6 +3211,40 @@ class MainWindow(QMainWindow):
         self.output_font_family_combo.currentIndexChanged.connect(self._on_output_style_changed)
         style_form.addRow("Font family:", self.output_font_family_combo)
 
+        # --- Axis label style ---------------------------------------
+        # A chemical-shift axis label (built by NUC_label) defaults to
+        # opennmr's own "brackets" form -- e.g. a rendered "delta 1H
+        # (ppm)", fully mathregular -- rather than the older "delta
+        # (1H) / ppm" some people still write in manuscripts. Explicit
+        # user request: "People should be allowed to swap between
+        # these or to even supply their own custom label if they
+        # want." Non-nuclide unit labels ("Frequency (Hz)", etc.)
+        # follow the same brackets/slash choice; see
+        # MplCanvas._unit_label.
+        self.output_axis_label_style_combo = QComboBox()
+        self.output_axis_label_style_combo.addItem("Brackets: δ ¹H (ppm)", "brackets")
+        self.output_axis_label_style_combo.addItem("Slash: δ (¹H) / ppm", "slash")
+        self._narrow_combo(self.output_axis_label_style_combo)
+        self.output_axis_label_style_combo.setToolTip(
+            "How a chemical-shift axis label is written. Ignored while "
+            "the custom label below has text in it."
+        )
+        self.output_axis_label_style_combo.currentIndexChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Axis label:", self.output_axis_label_style_combo)
+
+        self.output_axis_label_template_edit = QLineEdit()
+        self.output_axis_label_template_edit.setPlaceholderText(
+            "Blank = automatic, e.g. {element}-{mass} shift ({unit})")
+        self.output_axis_label_template_edit.setToolTip(
+            "A fully custom chemical-shift axis label, overriding the "
+            "choice above -- leave blank to use it instead.\n\n"
+            "Placeholders: {nuc} (\"1H\"), {mass} (\"1\"), {element} "
+            "(\"H\"), {unit} (\"ppm\"). Plain text otherwise -- include "
+            "your own $...$ for mathtext if you want it."
+        )
+        self.output_axis_label_template_edit.editingFinished.connect(self._on_output_style_changed)
+        style_form.addRow("Custom label:", self.output_axis_label_template_edit)
+
         # --- Title ------------------------------------------------
         # Off by default, on request. Several views set a title as they
         # draw (a slice number, a DOSY caption, the fitted peak); this
@@ -3119,7 +3262,7 @@ class MainWindow(QMainWindow):
 
         # --- Contour levels ---------------------------------------
         # The same number the right-click "Set Contour Levels..." dialog
-        # and the Analysis tab's DOSY levels box set. Explicit user
+        # and the Relaxation tab's DOSY levels box set. Explicit user
         # request: "change number of contour levels directly (linked to
         # the other boxes where it might be used)".
         self.output_contour_levels_spin = QSpinBox()
@@ -3128,7 +3271,7 @@ class MainWindow(QMainWindow):
         self.output_contour_levels_spin.setToolTip(
             "How many contour rings are drawn, on a 2D map and a DOSY alike.\n\n"
             "The same setting as the right-click “Set Contour Levels…” dialog "
-            "and the Analysis tab's own DOSY levels box — changing it in any "
+            "and the Relaxation tab's own DOSY levels box — changing it in any "
             "of them moves the others."
         )
         self.output_contour_levels_spin.valueChanged.connect(self._on_contour_levels_changed)
@@ -3288,9 +3431,32 @@ class MainWindow(QMainWindow):
         style_form.addRow("Legend background:", self.legend_color_button)
         self._sync_legend_frame_controls()
 
+        # --- Accessible palettes -----------------------------------
+        # Explicit user request: "options for both the colourmap and
+        # trace colours to have 'Colour blind-friendly' and
+        # 'Print-friendly' colours". The sets are *measured* on the
+        # colours each map actually draws (see
+        # opennmr.plotting.accessibility), and each entry says how many
+        # series it stays distinguishable for -- a map is only ever
+        # friendly *up to* some number of traces.
+        self.output_palette_filter_combo = QComboBox()
+        for label, key in self._PALETTE_FILTERS:
+            self.output_palette_filter_combo.addItem(label, key)
+        self._narrow_combo(self.output_palette_filter_combo)
+        self.output_palette_filter_combo.setToolTip(
+            "Narrow the colour maps below to ones that stay distinguishable:\n\n"
+            "• Colour blind-friendly — every pair of series colours still differs "
+            "clearly under simulated protanopia, deuteranopia and tritanopia.\n"
+            "• Print-friendly — every pair differs in lightness, so the traces "
+            "can still be told apart printed or photocopied in greyscale.\n\n"
+            "Each map is listed with the most series it passes for; the line "
+            "under the map checks the plot you are looking at."
+        )
+        self.output_palette_filter_combo.currentIndexChanged.connect(self._on_palette_filter_changed)
+        style_form.addRow("Palette set:", self.output_palette_filter_combo)
+
         self.output_colormap_combo = QComboBox()
-        self.output_colormap_combo.addItems(plotting.CONTOUR_CMAP_NAMES)
-        self.output_colormap_combo.setCurrentText("viridis")
+        self._populate_series_colormap_combo("all", "viridis")
         self._narrow_combo(self.output_colormap_combo)
         self.output_colormap_combo.setToolTip(
             "Default colours for every plot that draws several series at once — "
@@ -3303,6 +3469,18 @@ class MainWindow(QMainWindow):
         self.output_colormap_combo.currentIndexChanged.connect(self._on_series_colormap_changed)
         style_form.addRow("Series colour map:", self.output_colormap_combo)
 
+        self.series_accessibility_label = QLabel("")
+        self.series_accessibility_label.setWordWrap(True)
+        self.series_accessibility_label.setToolTip(
+            "Checked on the colours this plot actually draws, individually set "
+            "ones included: colour blind-friendly means every pair differs by "
+            f"ΔE ≥ {plot_accessibility.MIN_DELTA_E:g} (CIELAB) under normal vision "
+            "and simulated protanopia, deuteranopia and tritanopia; "
+            f"print-friendly means every pair differs by ΔL* ≥ "
+            f"{plot_accessibility.MIN_DELTA_L:g} in lightness."
+        )
+        style_form.addRow(self.series_accessibility_label)
+
         # --- The single trace's own colour --------------------------
         # plot_1d has always taken a colour; nothing ever passed one,
         # so every Spectrum-tab trace was black while Compare had a
@@ -3312,11 +3490,34 @@ class MainWindow(QMainWindow):
         self.trace_color_button.setToolTip(
             "The colour of this plot's own 1D trace — the Spectrum, FID and "
             "Processing preview lines.\n\n"
-            "The Compare tab draws several traces at once and takes its colours "
-            "from the colour map above instead."
+            "The Load/Save/Compare panel's Compare view draws several traces "
+            "at once and takes its colours from the colour map above instead."
         )
         self.trace_color_button.clicked.connect(self._on_trace_color_clicked)
-        style_form.addRow("Trace colour:", self.trace_color_button)
+        # Presets beside the free colour picker: colour-blind-friendly
+        # (Okabe–Ito / Tol) and print-friendly (prints as a strong dark
+        # line in greyscale) single-trace colours -- the trace-colour
+        # half of the accessibility request.
+        self.trace_color_presets_button = QPushButton("Presets")
+        self.trace_color_presets_button.setToolTip(
+            "Colour blind-friendly and print-friendly trace colours.")
+        self.trace_color_presets_menu = QMenu(self.trace_color_presets_button)
+        self._trace_preset_actions = {}
+        for kind, title in (("colourblind", "Colour blind-friendly"),
+                            ("print", "Print-friendly")):
+            submenu = self.trace_color_presets_menu.addMenu(title)
+            for label, colour in plot_accessibility.trace_colour_presets(kind):
+                action = submenu.addAction(self._colour_swatch_icon(colour), f"{label}  {colour}")
+                action.triggered.connect(
+                    lambda _checked=False, c=colour: self._set_trace_colour(c))
+                self._trace_preset_actions[(kind, colour)] = action
+        self.trace_color_presets_button.setMenu(self.trace_color_presets_menu)
+        trace_row = QWidget()
+        trace_row_layout = QHBoxLayout(trace_row)
+        trace_row_layout.setContentsMargins(0, 0, 0, 0)
+        trace_row_layout.addWidget(self.trace_color_button, 1)
+        trace_row_layout.addWidget(self.trace_color_presets_button)
+        style_form.addRow("Trace colour:", trace_row)
         self._refresh_trace_color_button()
 
         self.output_contour_linewidth_spin = QDoubleSpinBox()
@@ -3401,7 +3602,9 @@ class MainWindow(QMainWindow):
         template_layout = QVBoxLayout(template_box)
         template_intro = QLabel(
             "Save the current styling above as the default for one "
-            "spectrum type, or load a previously-saved one back in."
+            "spectrum type, or load a previously-saved one back in. "
+            "Settings ▸ Default plot styles manages the same defaults, "
+            "which are used automatically for each kind of plot."
         )
         template_intro.setWordWrap(True)
         template_layout.addWidget(template_intro)
@@ -3434,6 +3637,8 @@ class MainWindow(QMainWindow):
             "contour_linewidth": self.output_contour_linewidth_spin.value(),
             "title_visible": self.output_title_checkbox.isChecked(),
             "font_family": self.output_font_family_combo.currentData(),
+            "axis_label_style": self.output_axis_label_style_combo.currentData(),
+            "axis_label_template": self.output_axis_label_template_edit.text().strip(),
             "legend_frameon": self.output_legend_frame_checkbox.isChecked(),
             "legend_fontsize": self.output_legend_fontsize_spin.value(),
             "legend_framealpha": self.output_legend_alpha_spin.value(),
@@ -3459,7 +3664,7 @@ class MainWindow(QMainWindow):
         same samples come out consistent. An individually set series
         colour survives, because `_assign_series` reuses what is
         already there."""
-        colormap = self.output_colormap_combo.currentText()
+        colormap = self._series_colormap_name()
         for canvas in self._all_canvases():
             canvas.set_style(compare_colormap=colormap)
             # Redraw, not just record: the palette supplies the colours
@@ -3470,6 +3675,113 @@ class MainWindow(QMainWindow):
             # way". Colours set deliberately are left alone.
             canvas.restyle_series()
         self._refresh_slice_colour_rows()
+
+    #: The Plot Style panel's palette filters: (label, criterion for
+    #: plotting.accessibility.friendly_palettes, or "all").
+    _PALETTE_FILTERS = (
+        ("All colour maps", "all"),
+        ("Colour blind-friendly", "colourblind"),
+        ("Print-friendly (greyscale)", "print"),
+        ("Colour blind- and print-friendly", "both"),
+    )
+
+    def _populate_series_colormap_combo(self, criterion: str, keep: str | None) -> None:
+        """Fill the series colour-map combo for filter ``criterion``,
+        keeping ``keep`` selected if it is still listed (else the first,
+        i.e. best-rated, entry). Signals blocked: the caller decides
+        whether the palette actually changed.
+
+        Item *data* is always the map's own name; the text adds a
+        readable name and, when filtered, how many series it stays
+        friendly for."""
+        combo = self.output_colormap_combo
+        blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            if criterion == "all":
+                entries = [(name, None) for name in plot_accessibility.series_palette_names()]
+            else:
+                entries = plot_accessibility.friendly_palettes(criterion)
+            for name, safe_n in entries:
+                label = plot_accessibility.PALETTE_DISPLAY_NAMES.get(name, name)
+                if safe_n is not None:
+                    label = f"{label}  (≤ {safe_n} series)"
+                combo.addItem(label, name)
+            index = combo.findData(keep) if keep else -1
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            combo.blockSignals(blocked)
+
+    def _series_colormap_name(self) -> str:
+        """The series colour map chosen -- the item's data (the map's
+        own name), not its display text."""
+        return self.output_colormap_combo.currentData() or self.output_colormap_combo.currentText()
+
+    def _select_series_colormap(self, name: str) -> None:
+        """Show ``name`` as the chosen series colour map without firing
+        the change handler. If the current palette filter hides it, the
+        filter goes back to "All" -- a saved or per-plot choice must be
+        displayed, not silently replaced by the filter's first entry."""
+        if not name:
+            return
+        if self.output_colormap_combo.findData(name) < 0:
+            blocked = self.output_palette_filter_combo.blockSignals(True)
+            self.output_palette_filter_combo.setCurrentIndex(
+                self.output_palette_filter_combo.findData("all"))
+            self.output_palette_filter_combo.blockSignals(blocked)
+            self._populate_series_colormap_combo("all", name)
+        index = self.output_colormap_combo.findData(name)
+        if index >= 0:
+            blocked = self.output_colormap_combo.blockSignals(True)
+            self.output_colormap_combo.setCurrentIndex(index)
+            self.output_colormap_combo.blockSignals(blocked)
+        self._refresh_series_accessibility_label()
+
+    def _on_palette_filter_changed(self, *_args) -> None:
+        """Re-list the colour maps for the chosen filter. The current
+        map stays if it passes; otherwise the best-rated one that does
+        is applied -- choosing "Colour blind-friendly" should leave the
+        plot colour-blind-friendly, not just shorten a list."""
+        before = self._series_colormap_name()
+        criterion = self.output_palette_filter_combo.currentData()
+        self._populate_series_colormap_combo(criterion, before)
+        if self._series_colormap_name() != before:
+            self._on_series_colormap_changed()
+        else:
+            self._refresh_series_accessibility_label()
+
+    def _refresh_series_accessibility_label(self) -> None:
+        """Say whether the plot in view is colour-blind- and
+        print-friendly, measured on the colours it actually draws.
+
+        With fewer than two series on the plot there is nothing to
+        confuse, so it describes the chosen map instead."""
+        if not hasattr(self, "series_accessibility_label"):
+            return
+        canvas = self._series_target_canvas()
+        colours = [entry.colour for entry in canvas.series()] if canvas is not None else []
+        if len(colours) >= 2:
+            text = plot_accessibility.describe_accessibility(colours)
+            ok = (plot_accessibility.is_colourblind_safe(colours)
+                  and plot_accessibility.is_print_safe(colours))
+            self.series_accessibility_label.setText(("✓ " if ok else "⚠ ") + "This plot, " + text)
+            return
+        name = self._series_colormap_name()
+        blind = plot_accessibility.max_safe_series(name, "colourblind")
+        grey = plot_accessibility.max_safe_series(name, "print")
+
+        def _limit(n):
+            return f"up to {n} series" if n >= 2 else "not for 2 or more series"
+
+        display = plot_accessibility.PALETTE_DISPLAY_NAMES.get(name, name)
+        self.series_accessibility_label.setText(
+            f"{display}: colour blind-friendly {_limit(blind)}; print-friendly {_limit(grey)}.")
+
+    @staticmethod
+    def _colour_swatch_icon(colour: str, size: int = 14) -> QIcon:
+        pixmap = QPixmap(size, size)
+        pixmap.fill(QColor(colour))
+        return QIcon(pixmap)
 
     def _refresh_slice_colour_rows(self) -> None:
         """One row per series on the current plot: a colour swatch and
@@ -3514,8 +3826,8 @@ class MainWindow(QMainWindow):
             name.setToolTip(
                 "The name this series goes by in this plot's legend."
                 if entry.can_rename else
-                "Named by its spectrum -- use the Data tab's right-click "
-                "Rename… to change it everywhere at once.")
+                "Named by its spectrum -- use the Load/Save/Compare panel's "
+                "right-click Rename… to change it everywhere at once.")
             name.editingFinished.connect(
                 lambda key=entry.key, box=name: self._on_series_renamed(key, box.text()))
             row_layout.addWidget(name)
@@ -3527,6 +3839,7 @@ class MainWindow(QMainWindow):
         self.slice_colour_layout.removeWidget(self.reset_series_colours_button)
         self.slice_colour_layout.addWidget(self.reset_series_colours_button)
         self.slice_colour_group.setVisible(bool(entries))
+        self._refresh_series_accessibility_label()
 
     def _on_series_colour_clicked(self, key: str) -> None:
         canvas = self._series_target_canvas()
@@ -3578,8 +3891,13 @@ class MainWindow(QMainWindow):
         chosen = QColorDialog.getColor(QColor(current), self, "Trace colour")
         if not chosen.isValid():
             return
-        for canvas in targets:
-            canvas.set_style(trace_color=chosen.name())
+        self._set_trace_colour(chosen.name())
+
+    def _set_trace_colour(self, colour: str) -> None:
+        """Set the trace colour on the plot(s) the style panel acts on --
+        shared by the colour picker and the accessible presets."""
+        for canvas in self._style_target_canvases():
+            canvas.set_style(trace_color=colour)
         self._refresh_trace_color_button()
 
     def _style_target_canvases(self) -> list:
@@ -3621,7 +3939,7 @@ class MainWindow(QMainWindow):
 
     def _on_contour_levels_changed(self, value: int) -> None:
         """One number, three controls. The Plot Style box, the
-        right-click "Set Contour Levels…" dialog and the Analysis tab's
+        right-click "Set Contour Levels…" dialog and the Relaxation tab's
         DOSY levels spin all set the same thing, so this pushes the new
         value at the canvases *and* at the DOSY box, blocking that
         box's own signal so it does not immediately echo back."""
@@ -3719,11 +4037,7 @@ class MainWindow(QMainWindow):
             check.blockSignals(True)
             check.setChecked(bool(value))
             check.blockSignals(False)
-        self.output_colormap_combo.blockSignals(True)
-        index = self.output_colormap_combo.findText(settings["compare_colormap"])
-        if index >= 0:
-            self.output_colormap_combo.setCurrentIndex(index)
-        self.output_colormap_combo.blockSignals(False)
+        self._select_series_colormap(settings["compare_colormap"])
         self.output_legend_loc_combo.blockSignals(True)
         loc = self.output_legend_loc_combo.findText(settings["legend_loc"])
         if loc >= 0:
@@ -3737,6 +4051,14 @@ class MainWindow(QMainWindow):
         if family >= 0:
             self.output_font_family_combo.setCurrentIndex(family)
         self.output_font_family_combo.blockSignals(False)
+        self.output_axis_label_style_combo.blockSignals(True)
+        axis_style = self.output_axis_label_style_combo.findData(settings["axis_label_style"])
+        if axis_style >= 0:
+            self.output_axis_label_style_combo.setCurrentIndex(axis_style)
+        self.output_axis_label_style_combo.blockSignals(False)
+        self.output_axis_label_template_edit.blockSignals(True)
+        self.output_axis_label_template_edit.setText(settings["axis_label_template"] or "")
+        self.output_axis_label_template_edit.blockSignals(False)
         self._legend_facecolor = settings["legend_facecolor"]
         self._refresh_legend_color_button()
         self._sync_legend_frame_controls()
@@ -3807,13 +4129,30 @@ class MainWindow(QMainWindow):
                 check.blockSignals(True)
                 check.setChecked(saved[key])
                 check.blockSignals(False)
-        for combo, key in ((self.output_colormap_combo, "compare_colormap"),
-                            (self.output_legend_loc_combo, "legend_loc")):
+        if isinstance(saved.get("compare_colormap"), str):
+            self._select_series_colormap(saved["compare_colormap"])
+        for combo, key in ((self.output_legend_loc_combo, "legend_loc"),):
             index = combo.findText(str(saved.get(key, "")))
             if index >= 0:
                 combo.blockSignals(True)
                 combo.setCurrentIndex(index)
                 combo.blockSignals(False)
+        # These two carry a *data* value distinct from their displayed
+        # text (e.g. font_family's "" for "Default"), so findData, not
+        # findText -- unlike the pair just above, whose displayed text
+        # doubles as its own value.
+        for combo, key in ((self.output_font_family_combo, "font_family"),
+                            (self.output_axis_label_style_combo, "axis_label_style")):
+            if key in saved:
+                index = combo.findData(saved.get(key) or "")
+                if index >= 0:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(index)
+                    combo.blockSignals(False)
+        if isinstance(saved.get("axis_label_template"), str):
+            self.output_axis_label_template_edit.blockSignals(True)
+            self.output_axis_label_template_edit.setText(saved["axis_label_template"])
+            self.output_axis_label_template_edit.blockSignals(False)
         kwargs = self._current_output_style_kwargs()
         export = self._current_output_export_kwargs()
         for canvas in self._all_canvases():
@@ -3896,40 +4235,300 @@ class MainWindow(QMainWindow):
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
-    def _on_save_figure_style_template(self) -> None:
+    def _style_payload(self) -> dict:
+        """The style panel's current settings as one saveable dict --
+        every per-plot style setting (the trace colour and series map
+        included, which the per-type defaults used to leave out), plus
+        the export settings."""
+        payload = dict(self._current_output_style_kwargs())
+        targets = self._style_target_canvases()
+        payload["trace_color"] = (targets[0].style_settings()["trace_color"]
+                                  if targets else "black")
+        payload["compare_colormap"] = self._series_colormap_name()
+        payload["contour_clevels"] = self.output_contour_levels_spin.value()
+        payload["contour_level_mode"] = self.output_contour_mode_combo.currentData()
+        payload["contour_power"] = self.output_contour_power_spin.value()
+        payload["legend_loc"] = self.output_legend_loc_combo.currentText()
+        payload.update(self._current_output_export_kwargs())
+        return payload
+
+    def _figure_style_label(self, key: str) -> str:
+        return next((label for label, k in self._FIGURE_STYLE_TYPES if k == key), key)
+
+    def _save_figure_style(self, key: str, payload: dict) -> bool:
         styles = self._load_figure_styles()
-        key = self.output_type_combo.currentData()
-        styles[key] = {**self._current_output_style_kwargs(), **self._current_output_export_kwargs()}
-        os.makedirs(os.path.dirname(self._FIGURE_STYLES_PATH), exist_ok=True)
-        with open(self._FIGURE_STYLES_PATH, "w") as f:
-            json.dump(styles, f, indent=2)
+        styles[key] = payload
+        try:
+            os.makedirs(os.path.dirname(self._FIGURE_STYLES_PATH), exist_ok=True)
+            with open(self._FIGURE_STYLES_PATH, "w", encoding="utf-8") as f:
+                json.dump(styles, f, indent=2, sort_keys=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save default", str(exc))
+            return False
+        self._refresh_settings_type_rows()
+        return True
+
+    def _apply_type_style_to(self, canvas, style: dict, *, redraw: bool) -> None:
+        """Put saved per-type ``style`` onto ``canvas``.
+
+        ``redraw=False`` is for a plot that is about to be drawn anyway
+        (see :meth:`MplCanvas.apply_style_defaults`); ``True`` restyles
+        what is on screen now, contour included."""
+        canvas.apply_style_defaults(style)
+        if redraw:
+            contour = {k: style[k] for k in ("contour_linewidth", "contour_clevels",
+                                              "contour_level_mode", "contour_power")
+                       if style.get(k) is not None}
+            if contour:
+                canvas.set_style(**contour)
+            if style.get("compare_colormap"):
+                canvas.restyle_series()
+        export = {k: style[k] for k in ("dpi", "fig_width", "fig_height")
+                  if isinstance(style.get(k), (int, float))}
+        if export:
+            canvas.set_export_settings(**export)
+        if "dpi" in export:
+            export["dpi"] = int(export["dpi"])
+        targets = self._style_target_canvases()
+        if len(targets) == 1 and targets[0] is canvas:
+            self._load_style_controls_from(canvas)
+            for spin, key in ((self.output_dpi_spin, "dpi"), (self.output_fig_width_spin, "fig_width"),
+                              (self.output_fig_height_spin, "fig_height")):
+                if key in export:
+                    blocked = spin.blockSignals(True)
+                    spin.setValue(export[key])
+                    spin.blockSignals(blocked)
+
+    def _on_save_figure_style_template(self, key: str | None = None) -> None:
+        """Save the panel's current style as the default for plot type
+        ``key`` (the Plot Style dialog's own type combo when not
+        given)."""
+        key = key or self.output_type_combo.currentData()
+        if not self._save_figure_style(key, self._style_payload()):
+            return
         QMessageBox.information(
-            self, "Saved", f"Saved current styling as the default for '{self.output_type_combo.currentText()}'.",
+            self, "Saved", f"Saved the current plot style as the default for "
+                           f"'{self._figure_style_label(key)}' plots.",
         )
 
-    def _on_load_figure_style_template(self) -> None:
-        styles = self._load_figure_styles()
-        key = self.output_type_combo.currentData()
-        style = styles.get(key)
-        if style is None:
+    def _on_load_figure_style_template(self, key: str | None = None) -> None:
+        """Apply plot type ``key``'s saved default to the plot(s) the
+        style panel acts on, now."""
+        key = key or self.output_type_combo.currentData()
+        style = self._load_figure_styles().get(key)
+        if not isinstance(style, dict):
             QMessageBox.information(
                 self, "No saved default",
-                f"No styling has been saved yet for '{self.output_type_combo.currentText()}'.",
+                f"No style has been saved yet for '{self._figure_style_label(key)}' plots.",
             )
             return
-        self.output_linewidth_spin.setValue(style.get("linewidth", MplCanvas._AXIS_LINEWIDTH))
-        self.output_fontsize_spin.setValue(style.get("labelsize", MplCanvas._AXIS_LABELSIZE))
-        self.output_tick_length_spin.setValue(style.get("tick_length", MplCanvas._TICK_LENGTH))
-        self.output_tick_width_spin.setValue(style.get("tick_width", MplCanvas._TICK_WIDTH))
-        self.output_minor_ticks_checkbox.setChecked(style.get("minor_ticks", True))
-        self.output_grid_checkbox.setChecked(style.get("grid", False))
-        self.output_colormap_combo.setCurrentText(style.get("compare_colormap", "viridis"))
-        self.output_dpi_spin.setValue(style.get("dpi", 300))
-        self.output_fig_width_spin.setValue(style.get("fig_width", 6.4))
-        self.output_fig_height_spin.setValue(style.get("fig_height", 4.8))
-        # Every spin/combo above already applies itself on change
-        # (_on_output_style_changed/_on_output_export_settings_changed)
-        # -- no separate "apply" step needed.
+        for canvas in self._style_target_canvases():
+            self._apply_type_style_to(canvas, style, redraw=True)
+
+    def _on_clear_figure_style_template(self, key: str) -> None:
+        styles = self._load_figure_styles()
+        if styles.pop(key, None) is None:
+            return
+        try:
+            with open(self._FIGURE_STYLES_PATH, "w", encoding="utf-8") as f:
+                json.dump(styles, f, indent=2, sort_keys=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not clear default", str(exc))
+        self._refresh_settings_type_rows()
+
+    def _on_canvas_plot_kind_changed(self, canvas, kind: str) -> None:
+        """A canvas is about to draw a different kind of plot: give it
+        that kind's saved default style first, if there is one and the
+        Settings tab says to. Only on a *change* of kind (see
+        :attr:`MplCanvas.plotKindChanged`), so selecting another 1D
+        spectrum never undoes what was just set on the 1D plot."""
+        if not getattr(self, "_ui_settings", {}).get("auto_apply_type_styles", True):
+            return
+        style = self._load_figure_styles().get(kind)
+        if isinstance(style, dict):
+            self._apply_type_style_to(canvas, style, redraw=False)
+
+    # ------------------------------------------------------------
+    # Settings tab
+    # ------------------------------------------------------------
+
+    #: Interface (not plot) settings: the menu/panel font size and
+    #: whether per-type plot defaults apply themselves. Same
+    #: "user-level JSON dotfile" pattern as _PLOT_STYLE_CONFIG_PATH.
+    _UI_SETTINGS_PATH = os.path.expanduser("~/.opennmr/ui_settings.json")
+
+    #: Allowed interface font sizes (points). Below 7 pt the panel text
+    #: is unreadable; above 28 the side panel cannot fit a form row.
+    UI_FONT_SIZE_RANGE = (7, 28)
+
+    def _load_ui_settings(self) -> dict:
+        try:
+            with open(self._UI_SETTINGS_PATH, encoding="utf-8") as handle:
+                settings = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return settings if isinstance(settings, dict) else {}
+
+    def _save_ui_settings(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._UI_SETTINGS_PATH), exist_ok=True)
+            with open(self._UI_SETTINGS_PATH, "w", encoding="utf-8") as handle:
+                json.dump(self._ui_settings, handle, indent=2, sort_keys=True)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not save settings: {exc}", 8000)
+
+    def _build_settings_panel(self) -> QWidget:
+        """The Settings launcher button: interface font size, and the
+        default plot style for each kind of plot."""
+        self._ui_settings = self._load_ui_settings()
+        app = QApplication.instance()
+        #: The font the app started with, so "Reset" can go back to it.
+        self._system_ui_font = QFont(app.font()) if app is not None else QFont()
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+
+        # --- Interface ------------------------------------------------
+        interface = QWidget()
+        interface_form = QFormLayout(interface)
+        self.ui_font_size_spin = QSpinBox()
+        self.ui_font_size_spin.setRange(*self.UI_FONT_SIZE_RANGE)
+        self.ui_font_size_spin.setSuffix(" pt")
+        self.ui_font_size_spin.setValue(self._default_ui_point_size())
+        self.ui_font_size_spin.setToolTip(
+            "Text size for the menus, buttons and panels. Section titles stay "
+            "proportionally larger.\n\n"
+            "Plot text (axis labels, ticks, legend) is set separately, in Plot "
+            "Style, because it belongs to the figure you export."
+        )
+        self.ui_font_size_spin.valueChanged.connect(self._on_ui_font_size_changed)
+        font_row = QWidget()
+        font_row_layout = QHBoxLayout(font_row)
+        font_row_layout.setContentsMargins(0, 0, 0, 0)
+        font_row_layout.addWidget(self.ui_font_size_spin, 1)
+        self.ui_font_reset_button = QPushButton("Reset")
+        self.ui_font_reset_button.setToolTip("Back to the system's own interface font size.")
+        self.ui_font_reset_button.clicked.connect(self._on_ui_font_reset_clicked)
+        font_row_layout.addWidget(self.ui_font_reset_button)
+        interface_form.addRow("Menu font size:", font_row)
+        layout.addWidget(CollapsibleSection("Interface", content=interface))
+
+        # --- Default plot styles --------------------------------------
+        defaults = QWidget()
+        defaults_layout = QVBoxLayout(defaults)
+        intro = QLabel(
+            "Save the plot style you have set up (Plot Style…, or right-click a "
+            "plot) as the default for one kind of plot. It is used whenever a "
+            "plot of that kind is drawn after a different kind — changes you "
+            "make to the plot afterwards are kept.")
+        intro.setWordWrap(True)
+        defaults_layout.addWidget(intro)
+        self.auto_apply_type_styles_checkbox = QCheckBox("Use these defaults automatically")
+        self.auto_apply_type_styles_checkbox.setChecked(
+            bool(self._ui_settings.get("auto_apply_type_styles", True)))
+        self.auto_apply_type_styles_checkbox.setToolTip(
+            "Off: the defaults are only applied when you press Apply.")
+        self.auto_apply_type_styles_checkbox.toggled.connect(self._on_auto_apply_type_styles_toggled)
+        defaults_layout.addWidget(self.auto_apply_type_styles_checkbox)
+
+        self.settings_type_status_labels = {}
+        self.settings_type_save_buttons = {}
+        self.settings_type_apply_buttons = {}
+        self.settings_type_clear_buttons = {}
+        for label, key in self._FIGURE_STYLE_TYPES:
+            name = QLabel(f"<b>{label}</b>")
+            status = QLabel("")
+            save = QPushButton("Save current")
+            save.setToolTip(f"Save the style of the plot you are looking at as the "
+                            f"default for {label} plots.")
+            save.clicked.connect(lambda _c=False, k=key: self._on_save_figure_style_template(k))
+            apply_button = QPushButton("Apply")
+            apply_button.setToolTip(f"Apply the saved {label} default to the plot you "
+                                    f"are looking at, now.")
+            apply_button.clicked.connect(lambda _c=False, k=key: self._on_load_figure_style_template(k))
+            clear = QPushButton("Clear")
+            clear.setToolTip(f"Forget the saved {label} default.")
+            clear.clicked.connect(lambda _c=False, k=key: self._on_clear_figure_style_template(k))
+            # Name and state on one line, the actions under it: the side
+            # panel is narrow, and four columns side by side clipped the
+            # state off its right edge.
+            title_row = QHBoxLayout()
+            title_row.addWidget(name)
+            title_row.addWidget(status)
+            title_row.addStretch(1)
+            button_row = QHBoxLayout()
+            for button in (save, apply_button, clear):
+                button_row.addWidget(button)
+            button_row.addStretch(1)
+            defaults_layout.addLayout(title_row)
+            defaults_layout.addLayout(button_row)
+            self.settings_type_status_labels[key] = status
+            self.settings_type_save_buttons[key] = save
+            self.settings_type_apply_buttons[key] = apply_button
+            self.settings_type_clear_buttons[key] = clear
+        open_style_button = QPushButton("Open Plot Style…")
+        open_style_button.clicked.connect(self._on_plot_style_clicked)
+        defaults_layout.addWidget(open_style_button)
+        layout.addWidget(CollapsibleSection("Default plot styles", content=defaults))
+
+        layout.addStretch(1)
+        self._refresh_settings_type_rows()
+        return panel
+
+    def _refresh_settings_type_rows(self) -> None:
+        if not hasattr(self, "settings_type_status_labels"):
+            return
+        styles = self._load_figure_styles()
+        for key, status in self.settings_type_status_labels.items():
+            saved = isinstance(styles.get(key), dict)
+            status.setText("saved" if saved else "not set")
+            status.setStyleSheet("" if saved else "color: gray;")
+            self.settings_type_apply_buttons[key].setEnabled(saved)
+            self.settings_type_clear_buttons[key].setEnabled(saved)
+
+    def _default_ui_point_size(self) -> int:
+        size = self._system_ui_font.pointSizeF()
+        low, high = self.UI_FONT_SIZE_RANGE
+        return int(min(max(round(size) if size > 0 else 9, low), high))
+
+    def _apply_ui_font_size(self, size: float | None) -> None:
+        """Set the whole interface's font size (``None``: back to the
+        system's). Through the application font, so every panel, menu,
+        dialog and tooltip follows -- and the section titles, which
+        scale from it."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        font = QFont(self._system_ui_font)
+        if size is not None:
+            font.setPointSizeF(float(size))
+        app.setFont(font)
+
+    def _apply_saved_ui_settings(self) -> None:
+        size = self._ui_settings.get("ui_font_size")
+        low, high = self.UI_FONT_SIZE_RANGE
+        if isinstance(size, (int, float)) and low <= size <= high:
+            blocked = self.ui_font_size_spin.blockSignals(True)
+            self.ui_font_size_spin.setValue(int(size))
+            self.ui_font_size_spin.blockSignals(blocked)
+            self._apply_ui_font_size(size)
+
+    def _on_ui_font_size_changed(self, value: int) -> None:
+        self._apply_ui_font_size(value)
+        self._ui_settings["ui_font_size"] = int(value)
+        self._save_ui_settings()
+
+    def _on_ui_font_reset_clicked(self) -> None:
+        self._ui_settings.pop("ui_font_size", None)
+        self._save_ui_settings()
+        blocked = self.ui_font_size_spin.blockSignals(True)
+        self.ui_font_size_spin.setValue(self._default_ui_point_size())
+        self.ui_font_size_spin.blockSignals(blocked)
+        self._apply_ui_font_size(None)
+
+    def _on_auto_apply_type_styles_toggled(self, checked: bool) -> None:
+        self._ui_settings["auto_apply_type_styles"] = bool(checked)
+        self._save_ui_settings()
 
     def _load_probe_config(self) -> dict:
         try:
@@ -4349,14 +4948,21 @@ class MainWindow(QMainWindow):
     # Processing tab: live phase adjustment
     # ============================================================
 
-    def _build_fid_processing_box(self) -> QGroupBox:
+    def _build_fid_processing_box(self) -> QWidget:
         """A group of pre-FFT (raw-FID) reprocessing controls --
         apodization/window, zero-fill, echo alignment, FID shift,
         linear prediction -- distinct from the Phase group below it,
         which operates on the already-transformed spectrum in place.
         Always visible: each change only takes effect on "Reprocess",
-        not live."""
-        box = self.fid_processing_box = QGroupBox("FID processing (before FFT)")
+        not live.
+
+        A plain ``QWidget``, not ``QGroupBox`` -- this becomes a
+        :class:`~opennmr.gui.widgets.collapsible_section.CollapsibleSection`\\ 's
+        body (see :meth:`_build_processing_tab`'s "FID Processing"
+        section), which already draws its own header/border; a nested
+        QGroupBox frame+title inside that would just double up on the
+        same "FID processing (before FFT)" label for no benefit."""
+        box = self.fid_processing_box = QWidget()
         box.setToolTip(
             "Reprocess from the raw time-domain FID with different "
             "apodization, zero-fill, echo alignment, FID shift, or "
@@ -4369,12 +4975,15 @@ class MainWindow(QMainWindow):
         self.fid_display_combo = QComboBox()
         self.fid_display_combo.addItem("Real", "real")
         self.fid_display_combo.addItem("Magnitude", "magnitude")
+        self.fid_display_combo.addItem("Real + Imaginary", "real_imag")
         self.fid_display_combo.setToolTip(
             "How the FID preview plots the (complex) time-domain data -- "
             "Magnitude (|FID|, a single clean decay/echo envelope, easiest "
-            "for judging alignment/decay shape) or Real (one oscillating "
+            "for judging alignment/decay shape), Real (one oscillating "
             "component, closer to what phase-sensitive detection actually "
-            "recorded). A view setting only -- doesn't affect processing."
+            "recorded), or Real + Imaginary (both components together, in "
+            "separate colours). A view setting only -- doesn't affect "
+            "processing."
         )
         self.fid_display_combo.currentIndexChanged.connect(lambda _i: self._refresh_fid_display_preview())
         form.addRow("Preview:", self.fid_display_combo)
@@ -6803,15 +7412,29 @@ class MainWindow(QMainWindow):
         # what makes them processing controls rather than descriptions
         # of the selection. Their visibility is still driven from
         # _refresh_selection_display, unchanged -- only the parent
-        # layout moved.
+        # layout moved. Folded into the "FID Processing" dropdown below
+        # (rather than left loose above it) so the whole tab really is
+        # just the three named dropdowns, per explicit request: "each
+        # of the 'FID Processing', 'Phase' and 'Reference' sections
+        # should be dropdown boxes."
         mode_row = QHBoxLayout()
         mode_row.addWidget(self.process_indirect_button)
         mode_row.addWidget(self.magnitude_button)
-        layout.addLayout(mode_row)
 
-        layout.addWidget(self._build_fid_processing_box())
+        fid_section_content = QWidget()
+        fid_section_layout = QVBoxLayout(fid_section_content)
+        fid_section_layout.setContentsMargins(0, 0, 0, 0)
+        fid_section_layout.addLayout(mode_row)
+        fid_section_layout.addWidget(self._build_fid_processing_box())
+        layout.addWidget(CollapsibleSection("FID Processing", content=fid_section_content))
 
-        self.dimension_box = QGroupBox("Dimension")
+        # "Dimension" (which slice/axis the Phase controls below act
+        # on) folds into the "Phase" dropdown rather than getting a
+        # fourth of its own -- it configures Phase, it doesn't stand
+        # alone. Built here exactly as before; only *where* it ends up
+        # in the final layout (inside the Phase CollapsibleSection,
+        # near the end of this method) has changed.
+        self.dimension_box = QWidget()
         dim_form = QFormLayout(self.dimension_box)
 
         self.slice_spin = QSpinBox()
@@ -6852,9 +7475,7 @@ class MainWindow(QMainWindow):
         self.dim_row_label = QLabel("Dimension:")
         dim_form.addRow(self.dim_row_label, self.dim_combo)
 
-        layout.addWidget(self.dimension_box)
-
-        phase_box = QGroupBox("Phase")
+        phase_box = QWidget()
         form = QFormLayout(phase_box)
 
         self.phase0_handle, self.phase0_spin, self.phase0_current_display = self._make_phase_control()
@@ -7152,12 +7773,22 @@ class MainWindow(QMainWindow):
         form.addRow(self.baseline_preview_checkbox)
         self._refresh_baseline_options_visibility()
 
-        layout.addWidget(phase_box)
-        layout.addWidget(self._build_reference_box())
+        # "Phase" dropdown: the Dimension/slice-target controls built
+        # above it, immediately followed by the phase controls they
+        # configure -- one section, since Dimension doesn't stand on
+        # its own (see the comment where self.dimension_box was built).
+        phase_section_content = QWidget()
+        phase_section_layout = QVBoxLayout(phase_section_content)
+        phase_section_layout.setContentsMargins(0, 0, 0, 0)
+        phase_section_layout.addWidget(self.dimension_box)
+        phase_section_layout.addWidget(phase_box)
+        layout.addWidget(CollapsibleSection("Phase", content=phase_section_content))
+
+        layout.addWidget(CollapsibleSection("Reference", content=self._build_reference_box()))
         layout.addStretch(1)
         return tab
 
-    def _build_reference_box(self) -> QGroupBox:
+    def _build_reference_box(self) -> QWidget:
         """Spectral reference (SR) correction -- an absolute Hz offset
         from the spectrum's own SFO1 base frequency, applied to the
         direct (F2) axis so a peak at a known position reads
@@ -7171,8 +7802,12 @@ class MainWindow(QMainWindow):
         the spectrum's current SR, and re-entering the same value is a
         no-op -- re-applying always recomputes from the spectrum's
         original, as-loaded axis (:meth:`_capture_original_axis`)
-        rather than compounding onto whatever the axis currently is."""
-        box = QGroupBox("Reference (SR)")
+        rather than compounding onto whatever the axis currently is.
+
+        A plain ``QWidget``, not ``QGroupBox`` -- becomes a
+        CollapsibleSection's body (see :meth:`_build_processing_tab`'s
+        "Reference" section) which already provides its own header."""
+        box = QWidget()
         box.setToolTip(
             "Spectral reference: an absolute Hz offset from this "
             "spectrum's own SFO1 base frequency, applied to the "
@@ -8853,7 +9488,7 @@ class MainWindow(QMainWindow):
             self.processing_status_label.setText(status)
 
     # ============================================================
-    # Analysis tab: pseudo-Voigt peak fitting -> per-slice relaxation
+    # Fitting / Relaxation workflow: pseudo-Voigt peak fitting -> per-slice relaxation
     # ============================================================
     #
     # Workflow (all backend pieces already existed, ported from
@@ -8867,61 +9502,627 @@ class MainWindow(QMainWindow):
     _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta", "Fixed")
     _REGION_TABLE_COLUMNS = ("Low (ppm)", "High (ppm)")
 
-    def _build_spectral_fitting_tab(self) -> QWidget:
-        """Step 1 of the analysis workflow, as its own top-level tab:
-        get a number out of each spectrum (or each slice of a series),
-        by fitting peak shapes or by integrating regions.
+    def _build_fitting_panel(self) -> QWidget:
+        """The "Fitting" launcher button -- collects every *spectral*
+        fit into one place, as three independent collapsible sections
+        rather than two peer sub-tabs (Peak Picking, Integration) plus
+        a third (CSA) sitting inside the old "Analysis" tab. Explicit
+        user request: three collapsible sections, "Isotropic
+        (Gauss/Lor)", "Integration" and "CSA/Dipolar" -- renamed from
+        "Peak Picking" and "CSA" respectively (see _build_csa_subtab's
+        own docstring for why "CSA/Dipolar" is CSA-only for now: no
+        dipolar-coupling fitter exists in this codebase yet).
 
-        Explicit user request -- "Fitting spectra should be its own
-        tab". It was two sub-tabs of Analysis sitting beside Curve
-        Fitting, which put a *prerequisite* and the thing that consumes
-        it at the same level and made the order between them invisible.
-        Now the two tabs are the two steps, and each says so."""
+        Distinct from Relaxation's own Curve Fitting: this tab turns a
+        spectrum (or every slice of a pseudo-2D series) into a
+        per-slice number; Curve Fitting then fits a relaxation/
+        diffusion model to that series of numbers, never to a
+        spectrum directly."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        self.spectral_fitting_status_label = QLabel(
-            "Step 1 — measure an intensity per spectrum. Fit peak shapes "
-            "(Peak Picking) or integrate regions (Integration); either works "
-            "on a single 1D spectrum or on every slice of a pseudo-2D series. "
-            "Whichever you run last is what the Analysis tab's Fit Curve then "
-            "fits a relaxation/diffusion curve to."
+        self.fitting_status_label = QLabel(
+            "Measure an intensity per spectrum, or per slice of a "
+            "pseudo-2D series: fit peak shapes (Isotropic), integrate "
+            "a region (Integration), or fit a CSA powder lineshape "
+            "(CSA/Dipolar). Whichever you run last is what "
+            "Relaxation's Fit Curve then fits a relaxation/diffusion "
+            "curve to."
         )
-        self.spectral_fitting_status_label.setWordWrap(True)
-        layout.addWidget(self.spectral_fitting_status_label)
+        self.fitting_status_label.setWordWrap(True)
+        layout.addWidget(self.fitting_status_label)
 
-        self.spectral_fitting_sub_tabs = WrappingTabWidget()
-        self.spectral_fitting_sub_tabs.addTab(self._build_peak_picking_subtab(), "Peak Picking")
-        self.spectral_fitting_sub_tabs.addTab(self._build_integration_subtab(), "Integration")
-        layout.addWidget(self.spectral_fitting_sub_tabs)
+        layout.addWidget(CollapsibleSection(
+            "Isotropic (Gauss/Lor)", content=self._build_peak_picking_subtab()))
+        layout.addWidget(CollapsibleSection(
+            "Integration", content=self._build_integration_subtab()))
+        layout.addWidget(CollapsibleSection(
+            "CSA/Dipolar", content=self._build_csa_subtab()))
+        layout.addStretch(1)
         return tab
 
-    def _build_analysis_tab(self) -> QWidget:
+    def _build_applications_panel(self) -> QWidget:
+        """The "Applications" launcher button -- eNMR and Imaging,
+        moved out of the old "Analysis" tab to their own top-level
+        button, each its own independent collapsible section. Explicit
+        user request: "this is where the eNMR and Imaging sections
+        (currently in the 'Analysis' tab) should go; eNMR and Imaging
+        should be their own separate collapsable sections".
+
+        The last of the old "Analysis" tab's content to move out --
+        with this, the old ``_build_analysis_tab`` builder (and the
+        "Analysis" tab it built) has been fully removed."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(CollapsibleSection(
+            "eNMR", content=self._build_enmr_subtab()))
+        layout.addWidget(CollapsibleSection(
+            "Imaging", content=self._build_imaging_subtab()))
+        layout.addStretch(1)
+        return tab
+
+    def _build_simulations_panel(self) -> QWidget:
+        """The "Simulations" launcher button -- the last of the seven,
+        and genuinely new (nothing here moved from an old tab).
+        Explicit user request: "simulate static/MAS NMR spectra,
+        exportable to 'Open experiments' for comparison".
+
+        Two independent collapsible sections, one per interaction --
+        CSA and Quadrupolar -- matching the Fitting tab's own
+        "one section per interaction" structure (and its "CSA/Dipolar"
+        section's own name: dipolar has no simulator here either, for
+        the same reason CSA/Dipolar fitting is CSA-only for now).
+
+        Explicit, discussed scope limit: CSA covers static and finite-
+        MAS (both already fast, powder-averaged functions in
+        :mod:`opennmr.notebook.simulations`); Quadrupolar covers static
+        only, first-order or exact. MAS quadrupolar has no powder-
+        averaged simulator in this codebase yet -- only a single-
+        crystallite explicit density-matrix propagator
+        (``mas_quadrupolar_fid``), and building a fast, validated
+        powder-averaged version of it is real new numerical work
+        (either loop it over a powder grid -- likely too slow for
+        interactive use -- or write an analytic gamma-averaging
+        version the way ``finite_mas_csa_spectrum`` does for CSA).
+        Left for its own follow-up task rather than shipped slow or
+        unvalidated."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(CollapsibleSection(
+            "CSA", content=self._build_simulate_csa_subtab()))
+        layout.addWidget(CollapsibleSection(
+            "Quadrupolar", content=self._build_simulate_quadrupolar_subtab()))
+        layout.addStretch(1)
+        return tab
+
+    def _build_simulate_csa_subtab(self) -> QWidget:
+        """Forward-simulate a single CSA powder pattern (static or
+        finite-MAS sidebands) from user-entered tensor parameters --
+        the reverse of the Fitting tab's CSA/Dipolar section, which
+        goes from a measured spectrum to a tensor. Single site: the
+        Fitting tab's multi-site table exists to sum sites against
+        real overlapping data, which a from-scratch simulation has no
+        counterpart need for yet.
+
+        :func:`opennmr.notebook.simulations.make_static_csa_spectrum` /
+        ``finite_mas_csa_spectrum`` already are the simulators, with
+        their own powder-averaging and broadening options -- this
+        wraps them the way the CSA/Dipolar fitting section wraps
+        ``fit_csa_spectrum``: controls, an action, a preview on the
+        shared Fit canvas, and a button to keep the result."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        self.analysis_status_label = QLabel(
-            "Step 2 — fit a curve to the per-spectrum intensities from the "
-            "Spectral Fitting tab. Needs a pseudo-2D series selected in Data "
-            "(or right-clicked there), or a stack of 1D spectra in Compare."
+        blurb = QLabel(
+            "Simulate a chemical-shift-anisotropy powder pattern from "
+            "tensor parameters, then export it as a spectrum to compare "
+            "against real data in Load/Save/Compare."
         )
-        self.analysis_status_label.setWordWrap(True)
-        layout.addWidget(self.analysis_status_label)
+        blurb.setWordWrap(True)
+        layout.addWidget(blurb)
 
-        # Peak Picking and Integration moved out to their own top-level
-        # "Spectral Fitting" tab (see _build_spectral_fitting_tab) --
-        # they are step 1 and this is step 2, and having all three side
-        # by side as peers hid that. What is left here is everything
-        # that acts on an already-measured series.
-        self.analysis_sub_tabs = WrappingTabWidget()
-        self.analysis_sub_tabs.addTab(self._build_curve_fitting_subtab(), "Curve Fitting")
-        self.analysis_sub_tabs.addTab(self._build_enmr_subtab(), "eNMR")
-        self.analysis_sub_tabs.addTab(self._build_vocs_subtab(), "VOCS")
-        self.analysis_sub_tabs.addTab(self._build_imaging_subtab(), "Imaging")
-        self.analysis_sub_tabs.addTab(self._build_csa_subtab(), "CSA")
-        layout.addWidget(self.analysis_sub_tabs)
+        form = QFormLayout()
 
+        self.sim_csa_nucleus_edit = QLineEdit()
+        self.sim_csa_nucleus_edit.setPlaceholderText("e.g. 13C")
+        self.sim_csa_nucleus_edit.setToolTip(
+            "The observed nucleus, as its usual isotope label -- used to "
+            "label the plot axis correctly. Seeded from the selected "
+            "spectrum's own nucleus where one is selected.")
+        form.addRow("Nucleus:", self.sim_csa_nucleus_edit)
+
+        self.sim_csa_diso_spin = QDoubleSpinBox()
+        self.sim_csa_diso_spin.setRange(-1.0e5, 1.0e5)
+        self.sim_csa_diso_spin.setDecimals(3)
+        self.sim_csa_diso_spin.setSuffix(" ppm")
+        form.addRow("δiso:", self.sim_csa_diso_spin)
+
+        self.sim_csa_convention_combo = QComboBox()
+        self.sim_csa_convention_combo.addItem("Haeberlen (Δ, η)", "Haeberlen")
+        self.sim_csa_convention_combo.addItem("Herzfeld-Berger (span, skew)", "Herzfeld-Berger")
+        self.sim_csa_convention_combo.setToolTip(
+            "Which pair of anisotropy parameters the two rows below mean. "
+            "Both describe the same tensor.")
+        form.addRow("Convention:", self.sim_csa_convention_combo)
+
+        self.sim_csa_aniso_spin = QDoubleSpinBox()
+        self.sim_csa_aniso_spin.setRange(-1.0e5, 1.0e5)
+        self.sim_csa_aniso_spin.setDecimals(3)
+        self.sim_csa_aniso_spin.setValue(100.0)
+        self.sim_csa_aniso_spin.setSuffix(" ppm")
+        form.addRow("Span or Δ:", self.sim_csa_aniso_spin)
+
+        self.sim_csa_skeweta_spin = QDoubleSpinBox()
+        self.sim_csa_skeweta_spin.setRange(-1.0, 1.0)
+        self.sim_csa_skeweta_spin.setDecimals(3)
+        self.sim_csa_skeweta_spin.setSingleStep(0.1)
+        form.addRow("Skew or η:", self.sim_csa_skeweta_spin)
+
+        self.sim_csa_regime_combo = QComboBox()
+        self.sim_csa_regime_combo.addItem("Static powder", True)
+        self.sim_csa_regime_combo.addItem("Finite MAS (sidebands)", False)
+        self.sim_csa_regime_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_simulate_csa_controls())
+        form.addRow("Regime:", self.sim_csa_regime_combo)
+
+        self.sim_csa_mas_spin = QDoubleSpinBox()
+        self.sim_csa_mas_spin.setRange(0.0, 200000.0)
+        self.sim_csa_mas_spin.setDecimals(0)
+        self.sim_csa_mas_spin.setSuffix(" Hz")
+        self.sim_csa_mas_spin.setToolTip("Sample spinning rate, for the finite-MAS lineshape.")
+        form.addRow("MAS rate:", self.sim_csa_mas_spin)
+
+        self.sim_csa_larmor_spin = QDoubleSpinBox()
+        self.sim_csa_larmor_spin.setRange(0.0, 5000.0)
+        self.sim_csa_larmor_spin.setDecimals(4)
+        self.sim_csa_larmor_spin.setSuffix(" MHz")
+        self.sim_csa_larmor_spin.setToolTip(
+            "The observed nucleus's Larmor frequency (its SFO1) -- needed to "
+            "convert sideband spacing (in Hz, from the MAS rate) into ppm. "
+            "Seeded from the selected spectrum's own SFO1 where one is "
+            "selected. Not needed for the static lineshape.")
+        form.addRow("Larmor frequency:", self.sim_csa_larmor_spin)
+
+        self.sim_csa_lineshape_combo = QComboBox()
+        self.sim_csa_lineshape_combo.addItem("Gaussian", "gaussian")
+        self.sim_csa_lineshape_combo.addItem("Lorentzian", "lorentzian")
+        self.sim_csa_lineshape_combo.addItem("Pseudo-Voigt", "pseudo_voigt")
+        self.sim_csa_lineshape_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_simulate_csa_controls())
+        form.addRow("Broadening:", self.sim_csa_lineshape_combo)
+
+        self.sim_csa_fwhm_spin = QDoubleSpinBox()
+        self.sim_csa_fwhm_spin.setRange(0.0, 1.0e4)
+        self.sim_csa_fwhm_spin.setDecimals(3)
+        self.sim_csa_fwhm_spin.setValue(2.0)
+        self.sim_csa_fwhm_spin.setSuffix(" ppm")
+        form.addRow("Broadening FWHM:", self.sim_csa_fwhm_spin)
+
+        self.sim_csa_eta_spin = QDoubleSpinBox()
+        self.sim_csa_eta_spin.setRange(0.0, 1.0)
+        self.sim_csa_eta_spin.setDecimals(2)
+        self.sim_csa_eta_spin.setValue(0.5)
+        self.sim_csa_eta_spin.setToolTip(
+            "Gaussian/Lorentzian mixing fraction for the pseudo-Voigt "
+            "broadening kernel (0 = Gaussian, 1 = Lorentzian) -- unrelated "
+            "to the CSA tensor's own η above.")
+        form.addRow("Broadening η:", self.sim_csa_eta_spin)
+
+        self.sim_csa_powder_combo = QComboBox()
+        self.sim_csa_powder_combo.addItem("ZCW", "zcw")
+        self.sim_csa_powder_combo.addItem("Rectangular (θ/φ)", "rectangular")
+        form.addRow("Powder averaging:", self.sim_csa_powder_combo)
+
+        self.sim_csa_orientations_spin = QSpinBox()
+        self.sim_csa_orientations_spin.setRange(50, 500000)
+        self.sim_csa_orientations_spin.setSingleStep(500)
+        self.sim_csa_orientations_spin.setValue(4000)
+        form.addRow("Orientations:", self.sim_csa_orientations_spin)
+
+        self.sim_csa_ppm_min_spin = QDoubleSpinBox()
+        self.sim_csa_ppm_min_spin.setRange(-1.0e6, 1.0e6)
+        self.sim_csa_ppm_min_spin.setDecimals(2)
+        self.sim_csa_ppm_min_spin.setValue(-100.0)
+        self.sim_csa_ppm_min_spin.setSuffix(" ppm")
+        form.addRow("Axis min:", self.sim_csa_ppm_min_spin)
+
+        self.sim_csa_ppm_max_spin = QDoubleSpinBox()
+        self.sim_csa_ppm_max_spin.setRange(-1.0e6, 1.0e6)
+        self.sim_csa_ppm_max_spin.setDecimals(2)
+        self.sim_csa_ppm_max_spin.setValue(100.0)
+        self.sim_csa_ppm_max_spin.setSuffix(" ppm")
+        form.addRow("Axis max:", self.sim_csa_ppm_max_spin)
+
+        self.sim_csa_points_spin = QSpinBox()
+        self.sim_csa_points_spin.setRange(64, 1 << 20)
+        self.sim_csa_points_spin.setValue(4096)
+        form.addRow("Axis points:", self.sim_csa_points_spin)
+
+        layout.addLayout(form)
+
+        self.sim_csa_simulate_button = QPushButton("Simulate")
+        self.sim_csa_simulate_button.clicked.connect(self._on_simulate_csa_clicked)
+        layout.addWidget(self.sim_csa_simulate_button)
+
+        self.sim_csa_results_label = QLabel("")
+        self.sim_csa_results_label.setWordWrap(True)
+        layout.addWidget(self.sim_csa_results_label)
+
+        self.sim_csa_export_button = QPushButton("Export to Open Experiments…")
+        self.sim_csa_export_button.setEnabled(False)
+        self.sim_csa_export_button.setToolTip(
+            "Add the simulated pattern as a spectrum in Load/Save/Compare, "
+            "for side-by-side comparison against real data.")
+        self.sim_csa_export_button.clicked.connect(self._on_export_simulated_csa_clicked)
+        layout.addWidget(self.sim_csa_export_button)
+
+        layout.addStretch(1)
+        self._refresh_simulate_csa_controls()
         return tab
+
+    def _refresh_simulate_csa_controls(self) -> None:
+        """MAS rate and Larmor frequency only mean anything for the
+        finite-MAS lineshape; broadening η only for pseudo-Voigt --
+        same "grey out what the current choice makes irrelevant"
+        pattern as the CSA/Dipolar fitting section's own
+        ``_refresh_csa_controls``."""
+        is_static = bool(self.sim_csa_regime_combo.currentData())
+        self.sim_csa_mas_spin.setEnabled(not is_static)
+        self.sim_csa_larmor_spin.setEnabled(not is_static)
+        self.sim_csa_eta_spin.setEnabled(
+            self.sim_csa_lineshape_combo.currentData() == "pseudo_voigt")
+
+    def _build_simulate_quadrupolar_subtab(self) -> QWidget:
+        """Forward-simulate a static quadrupolar powder pattern from
+        spin/coupling parameters. Static only -- see
+        :meth:`_build_simulations_panel`'s own docstring for why finite
+        MAS is out of scope here for now."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        blurb = QLabel(
+            "Simulate a static quadrupolar powder pattern, then export it "
+            "as a spectrum to compare against real data in "
+            "Load/Save/Compare. Finite-MAS quadrupolar simulation is not "
+            "yet available (see the tooltip on Method, below, for why)."
+        )
+        blurb.setWordWrap(True)
+        layout.addWidget(blurb)
+
+        form = QFormLayout()
+
+        self.sim_quad_nucleus_edit = QLineEdit()
+        self.sim_quad_nucleus_edit.setPlaceholderText("e.g. 27Al")
+        self.sim_quad_nucleus_edit.setToolTip(
+            "The observed nucleus, as its usual isotope label -- used to "
+            "label the plot axis correctly. Seeded from the selected "
+            "spectrum's own nucleus where one is selected.")
+        form.addRow("Nucleus:", self.sim_quad_nucleus_edit)
+
+        self.sim_quad_spin_spin = QDoubleSpinBox()
+        self.sim_quad_spin_spin.setRange(1.0, 9.5)
+        self.sim_quad_spin_spin.setSingleStep(0.5)
+        self.sim_quad_spin_spin.setDecimals(1)
+        self.sim_quad_spin_spin.setValue(1.5)
+        self.sim_quad_spin_spin.setToolTip(
+            "Nuclear spin quantum number I (integer or half-integer, I ≥ 1 "
+            "-- I = 1/2 has no quadrupole moment).")
+        form.addRow("Spin I:", self.sim_quad_spin_spin)
+
+        self.sim_quad_cq_spin = QDoubleSpinBox()
+        self.sim_quad_cq_spin.setRange(-1.0e4, 1.0e4)
+        self.sim_quad_cq_spin.setDecimals(4)
+        self.sim_quad_cq_spin.setValue(1.0)
+        self.sim_quad_cq_spin.setSuffix(" MHz")
+        self.sim_quad_cq_spin.setToolTip("Quadrupolar coupling constant, C_Q.")
+        form.addRow("C_Q:", self.sim_quad_cq_spin)
+
+        self.sim_quad_eta_spin = QDoubleSpinBox()
+        self.sim_quad_eta_spin.setRange(0.0, 1.0)
+        self.sim_quad_eta_spin.setDecimals(3)
+        self.sim_quad_eta_spin.setSingleStep(0.1)
+        form.addRow("η_Q:", self.sim_quad_eta_spin)
+
+        self.sim_quad_larmor_spin = QDoubleSpinBox()
+        self.sim_quad_larmor_spin.setRange(0.0, 5000.0)
+        self.sim_quad_larmor_spin.setDecimals(4)
+        self.sim_quad_larmor_spin.setSuffix(" MHz")
+        self.sim_quad_larmor_spin.setToolTip(
+            "The observed nucleus's Larmor frequency (its SFO1). Seeded "
+            "from the selected spectrum's own SFO1 where one is selected.")
+        form.addRow("Larmor frequency:", self.sim_quad_larmor_spin)
+
+        self.sim_quad_method_combo = QComboBox()
+        self.sim_quad_method_combo.addItem("First-order only", "first_order")
+        self.sim_quad_method_combo.addItem("Exact (diagonalization)", "exact")
+        self.sim_quad_method_combo.setToolTip(
+            "First-order only: each transition at its first-order-"
+            "perturbation-theory shift -- misses the second- (and "
+            "higher-) order quadrupolar shift altogether.\n\n"
+            "Exact: each transition at its true, exactly-diagonalized "
+            "frequency, including every quadrupolar order -- matters "
+            "most at low field / high C_Q, e.g. the central transition's "
+            "second-order shift, which first-order-only cannot show at "
+            "all.\n\n"
+            "Finite-MAS quadrupolar simulation is not available yet: no "
+            "powder-averaged MAS simulator exists in this codebase, only a "
+            "slow single-crystallite propagator -- a fast, validated "
+            "version is real new numerical work, left for its own "
+            "follow-up task.")
+        form.addRow("Method:", self.sim_quad_method_combo)
+
+        self.sim_quad_fwhm_spin = QDoubleSpinBox()
+        self.sim_quad_fwhm_spin.setRange(0.0, 1.0e4)
+        self.sim_quad_fwhm_spin.setDecimals(3)
+        self.sim_quad_fwhm_spin.setValue(2.0)
+        self.sim_quad_fwhm_spin.setSuffix(" ppm")
+        form.addRow("Broadening FWHM:", self.sim_quad_fwhm_spin)
+
+        self.sim_quad_powder_combo = QComboBox()
+        self.sim_quad_powder_combo.addItem("ZCW", "zcw")
+        self.sim_quad_powder_combo.addItem("Rectangular (θ/φ)", "rectangular")
+        form.addRow("Powder averaging:", self.sim_quad_powder_combo)
+
+        self.sim_quad_orientations_spin = QSpinBox()
+        self.sim_quad_orientations_spin.setRange(50, 500000)
+        self.sim_quad_orientations_spin.setSingleStep(500)
+        self.sim_quad_orientations_spin.setValue(4000)
+        self.sim_quad_orientations_spin.setToolTip(
+            "Each orientation costs a matrix diagonalization -- unlike "
+            "static CSA, there is no cheap closed-form shortcut here, so "
+            "raising this trades speed for a smoother pattern.")
+        form.addRow("Orientations:", self.sim_quad_orientations_spin)
+
+        self.sim_quad_ppm_min_spin = QDoubleSpinBox()
+        self.sim_quad_ppm_min_spin.setRange(-1.0e6, 1.0e6)
+        self.sim_quad_ppm_min_spin.setDecimals(2)
+        self.sim_quad_ppm_min_spin.setValue(-500.0)
+        self.sim_quad_ppm_min_spin.setSuffix(" ppm")
+        form.addRow("Axis min:", self.sim_quad_ppm_min_spin)
+
+        self.sim_quad_ppm_max_spin = QDoubleSpinBox()
+        self.sim_quad_ppm_max_spin.setRange(-1.0e6, 1.0e6)
+        self.sim_quad_ppm_max_spin.setDecimals(2)
+        self.sim_quad_ppm_max_spin.setValue(500.0)
+        self.sim_quad_ppm_max_spin.setSuffix(" ppm")
+        form.addRow("Axis max:", self.sim_quad_ppm_max_spin)
+
+        self.sim_quad_points_spin = QSpinBox()
+        self.sim_quad_points_spin.setRange(64, 1 << 20)
+        self.sim_quad_points_spin.setValue(4096)
+        form.addRow("Axis points:", self.sim_quad_points_spin)
+
+        layout.addLayout(form)
+
+        self.sim_quad_simulate_button = QPushButton("Simulate")
+        self.sim_quad_simulate_button.clicked.connect(self._on_simulate_quadrupolar_clicked)
+        layout.addWidget(self.sim_quad_simulate_button)
+
+        self.sim_quad_results_label = QLabel("")
+        self.sim_quad_results_label.setWordWrap(True)
+        layout.addWidget(self.sim_quad_results_label)
+
+        self.sim_quad_export_button = QPushButton("Export to Open Experiments…")
+        self.sim_quad_export_button.setEnabled(False)
+        self.sim_quad_export_button.setToolTip(
+            "Add the simulated pattern as a spectrum in Load/Save/Compare, "
+            "for side-by-side comparison against real data.")
+        self.sim_quad_export_button.clicked.connect(self._on_export_simulated_quadrupolar_clicked)
+        layout.addWidget(self.sim_quad_export_button)
+
+        layout.addStretch(1)
+        return tab
+
+    def _refresh_simulation_controls(self, spectrum) -> None:
+        """Seed the Simulations tab's Larmor-frequency and nucleus
+        fields from the selected spectrum's own SFO1/nucleus, the same
+        "seeded, never forced" pattern as ``_refresh_csa_controls``'s
+        MAS-rate seeding: only fills a field that is still empty/zero,
+        never overwrites a value already entered."""
+        if spectrum is None:
+            return
+        sfo1 = getattr(spectrum.metadata, "sfo1", None)
+        nucleus = getattr(spectrum.metadata, "nucleus", None)
+        if sfo1:
+            if hasattr(self, "sim_csa_larmor_spin") and not self.sim_csa_larmor_spin.value():
+                self.sim_csa_larmor_spin.setValue(sfo1)
+            if hasattr(self, "sim_quad_larmor_spin") and not self.sim_quad_larmor_spin.value():
+                self.sim_quad_larmor_spin.setValue(sfo1)
+        if nucleus:
+            if hasattr(self, "sim_csa_nucleus_edit") and not self.sim_csa_nucleus_edit.text():
+                self.sim_csa_nucleus_edit.setText(nucleus)
+            if hasattr(self, "sim_quad_nucleus_edit") and not self.sim_quad_nucleus_edit.text():
+                self.sim_quad_nucleus_edit.setText(nucleus)
+
+    def _simulated_spectrum_axis_warning(self, ppm_axis, spectrum_data) -> str:
+        """A powder pattern clipped by too narrow a ppm axis is a
+        genuine correctness problem, not a cosmetic one -- silently
+        truncating a lineshape at the axis edge would misrepresent the
+        simulated pattern. Checked after every simulation rather than
+        guessed at up front, since the right axis width depends on
+        parameters (aniso, C_Q, MAS sidebands) this doesn't try to
+        anticipate."""
+        maximum = float(np.max(np.abs(spectrum_data))) if spectrum_data.size else 0.0
+        if maximum <= 0:
+            return ""
+        edge = max(abs(spectrum_data[0]), abs(spectrum_data[-1]))
+        if edge > 0.01 * maximum:
+            return (
+                "\n\nWarning: intensity at the ppm axis edge is "
+                f"{edge / maximum:.1%} of the peak -- the pattern is likely "
+                "clipped. Widen Axis min/max and simulate again."
+            )
+        return ""
+
+    def _on_simulate_csa_clicked(self) -> None:
+        nucleus = self.sim_csa_nucleus_edit.text().strip()
+        if not core_registry.find_gamma(nucleus):
+            QMessageBox.warning(
+                self, "Simulate CSA",
+                "Enter a recognised nucleus (e.g. '13C', '27Al') -- needed "
+                "to label the plotted axis correctly.")
+            return
+        ppm_min = self.sim_csa_ppm_min_spin.value()
+        ppm_max = self.sim_csa_ppm_max_spin.value()
+        if ppm_max <= ppm_min:
+            QMessageBox.warning(self, "Simulate CSA", "Axis max must be greater than axis min.")
+            return
+        ppm_axis = np.linspace(ppm_min, ppm_max, self.sim_csa_points_spin.value())
+
+        convention = self.sim_csa_convention_combo.currentData()
+        csa = notebook_simulations.csa_definition(
+            self.sim_csa_diso_spin.value(), self.sim_csa_aniso_spin.value(),
+            self.sim_csa_skeweta_spin.value(), convention=convention)
+
+        is_static = bool(self.sim_csa_regime_combo.currentData())
+        scheme = self.sim_csa_powder_combo.currentData()
+        grid_kwargs = self._csa_grid_kwargs(scheme, self.sim_csa_orientations_spin.value())
+        lineshape = self.sim_csa_lineshape_combo.currentData()
+        eta = self.sim_csa_eta_spin.value()
+
+        if is_static:
+            result = notebook_simulations.make_static_csa_spectrum(
+                csa, ppm_axis, fwhm=self.sim_csa_fwhm_spin.value(),
+                powder_scheme=scheme, lineshape=lineshape, eta=eta, **grid_kwargs)
+            regime_label = "static"
+        else:
+            mas_hz = self.sim_csa_mas_spin.value()
+            larmor_mhz = self.sim_csa_larmor_spin.value()
+            if mas_hz <= 0:
+                QMessageBox.warning(
+                    self, "Simulate CSA",
+                    "The finite-MAS lineshape needs a spinning rate. Set "
+                    "MAS rate, or switch Regime to Static powder.")
+                return
+            if larmor_mhz <= 0:
+                QMessageBox.warning(
+                    self, "Simulate CSA",
+                    "The finite-MAS lineshape needs a Larmor frequency, to "
+                    "convert sideband spacing from Hz to ppm.")
+                return
+            result = notebook_simulations.finite_mas_csa_spectrum(
+                csa, ppm_axis, larmor_Hz=larmor_mhz * 1.0e6, mas_Hz=mas_hz,
+                fwhm=self.sim_csa_fwhm_spin.value(), powder_scheme=scheme,
+                lineshape=lineshape, eta=eta, **grid_kwargs)
+            regime_label = f"finite MAS, {mas_hz:g} Hz"
+
+        spectrum_data = np.asarray(result["real_spec"], dtype=float)
+        axis = NMRAxis(kind="frequency", ppm=ppm_axis)
+        metadata = NMRMetadata(
+            vendor="simulated", nucleus=nucleus,
+            sfo1=(self.sim_csa_larmor_spin.value() or None) if not is_static else None,
+            raw={"simulation": {
+                "kind": "csa", "convention": convention,
+                "d_iso": self.sim_csa_diso_spin.value(),
+                "aniso": self.sim_csa_aniso_spin.value(),
+                "skew_eta": self.sim_csa_skeweta_spin.value(),
+                "regime": regime_label,
+            }},
+        )
+        self._simulated_csa_spectrum = NMRSpectrum(data=spectrum_data, axes=[axis], metadata=metadata)
+
+        self.fit_canvas.show_spectrum(self._simulated_csa_spectrum)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+        warning = self._simulated_spectrum_axis_warning(ppm_axis, spectrum_data)
+        self.sim_csa_results_label.setText(
+            f"Simulated {regime_label} CSA pattern, {convention} convention, "
+            f"δiso = {self.sim_csa_diso_spin.value():g} ppm.{warning}")
+        self.sim_csa_export_button.setEnabled(True)
+
+    def _on_export_simulated_csa_clicked(self) -> None:
+        spectrum = getattr(self, "_simulated_csa_spectrum", None)
+        if spectrum is None:
+            return
+        self._add_derived_spectrum(spectrum, "Simulated CSA")
+
+    def _on_simulate_quadrupolar_clicked(self) -> None:
+        nucleus = self.sim_quad_nucleus_edit.text().strip()
+        if not core_registry.find_gamma(nucleus):
+            QMessageBox.warning(
+                self, "Simulate quadrupolar",
+                "Enter a recognised nucleus (e.g. '27Al', '17O') -- needed "
+                "to label the plotted axis correctly.")
+            return
+        ppm_min = self.sim_quad_ppm_min_spin.value()
+        ppm_max = self.sim_quad_ppm_max_spin.value()
+        if ppm_max <= ppm_min:
+            QMessageBox.warning(self, "Simulate quadrupolar", "Axis max must be greater than axis min.")
+            return
+        larmor_mhz = self.sim_quad_larmor_spin.value()
+        if larmor_mhz <= 0:
+            QMessageBox.warning(
+                self, "Simulate quadrupolar",
+                "Simulating a quadrupolar pattern needs a Larmor frequency.")
+            return
+        spin_i = self.sim_quad_spin_spin.value()
+        c_q_hz = self.sim_quad_cq_spin.value() * 1.0e6
+        eta_q = self.sim_quad_eta_spin.value()
+        ppm_axis = np.linspace(ppm_min, ppm_max, self.sim_quad_points_spin.value())
+        scheme = self.sim_quad_powder_combo.currentData()
+        grid_kwargs = self._csa_grid_kwargs(scheme, self.sim_quad_orientations_spin.value())
+        method = self.sim_quad_method_combo.currentData()
+
+        # NOT static_quadrupolar_spectrum vs. _exact -- both of those
+        # diagonalize the exact H_Z + H_Q Hamiltonian (their own module
+        # docstring for the non-"_exact" one says so: "computed via the
+        # same exact diagonalization as static_quadrupolar_spectrum_
+        # exact"), so calling one or the other for "Method" would offer
+        # a choice that does nothing. The real first-order/exact split
+        # lives in static_quadrupolar_spectrum_decomposed, which
+        # returns both from one calculation: central_first_order +
+        # satellites_first_order is the genuine first-order-only
+        # pattern (each transition's exact-diagonalization eigenbasis,
+        # evaluated at its first-order-perturbation-theory shift
+        # instead of its exact one), and total is the exact pattern.
+        try:
+            result = notebook_simulations.static_quadrupolar_spectrum_decomposed(
+                spin_i, c_q_hz, eta_q, ppm_axis, larmor_Hz=larmor_mhz * 1.0e6,
+                fwhm=self.sim_quad_fwhm_spin.value(), powder_scheme=scheme, **grid_kwargs)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Simulate quadrupolar", str(exc))
+            return
+
+        if method == "exact":
+            spectrum_data = np.asarray(result["total"], dtype=float)
+        else:
+            spectrum_data = np.asarray(
+                result["central_first_order"] + result["satellites_first_order"], dtype=float)
+        axis = NMRAxis(kind="frequency", ppm=ppm_axis)
+        metadata = NMRMetadata(
+            vendor="simulated", nucleus=nucleus, sfo1=larmor_mhz,
+            raw={"simulation": {
+                "kind": "quadrupolar", "method": method, "I": spin_i,
+                "C_Q_Hz": c_q_hz, "eta_Q": eta_q,
+            }},
+        )
+        self._simulated_quadrupolar_spectrum = NMRSpectrum(data=spectrum_data, axes=[axis], metadata=metadata)
+
+        self.fit_canvas.show_spectrum(self._simulated_quadrupolar_spectrum)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+        warning = self._simulated_spectrum_axis_warning(ppm_axis, spectrum_data)
+        method_label = "exact" if method == "exact" else "first-order"
+        self.sim_quad_results_label.setText(
+            f"Simulated static quadrupolar pattern ({method_label}), I = {spin_i:g}, "
+            f"C_Q = {self.sim_quad_cq_spin.value():g} MHz, η_Q = {eta_q:g}.{warning}")
+        self.sim_quad_export_button.setEnabled(True)
+
+    def _on_export_simulated_quadrupolar_clicked(self) -> None:
+        spectrum = getattr(self, "_simulated_quadrupolar_spectrum", None)
+        if spectrum is None:
+            return
+        self._add_derived_spectrum(spectrum, "Simulated quadrupolar")
+
+    def _build_relaxation_panel(self) -> QWidget:
+        """The "Relaxation" launcher button -- Curve Fitting, moved
+        out of the old "Analysis" tab to its own top-level button.
+        Explicit user request: "this is where the 'Curve fitting' (in
+        the current 'Analysis' tab) should go". The sole section for
+        now, so it's used directly rather than wrapped in a redundant
+        single CollapsibleSection -- same call as Advanced
+        Processing's own VOCS-only panel."""
+        return self._build_curve_fitting_subtab()
 
     #: Columns of the CSA sites table.
     _CSA_COLUMNS = ("Label", "δiso / ppm", "Span or Δ / ppm", "Skew or η", "FWHM / ppm")
@@ -9053,6 +10254,26 @@ class MainWindow(QMainWindow):
         self.csa_results_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.csa_results_label)
+
+        # Permanently disabled for now, not just until a fit runs --
+        # Fit CSA Lineshape only ever fits one slice at a time (see
+        # _on_csa_fit_clicked's own row= handling), so there is no
+        # multi-slice series here to stack into a pseudo-2D dataset.
+        # Present anyway (rather than omitted) so Isotropic/
+        # Integration/CSA-Dipolar offer the same action consistently,
+        # and so it's ready the moment CSA fitting gains its own
+        # multi-slice workflow.
+        self.export_csa_pseudo2d_button = QPushButton("Export CSA Fit to Pseudo-2D…")
+        self.export_csa_pseudo2d_button.setToolTip(
+            "Fit CSA Lineshape only ever fits one slice at a time, so "
+            "there is no series yet to stack into a pseudo-2D dataset "
+            "-- this stays disabled until CSA fitting gains its own "
+            "multi-slice workflow."
+        )
+        self.export_csa_pseudo2d_button.setEnabled(False)
+        self.export_csa_pseudo2d_button.clicked.connect(self._on_export_csa_pseudo2d_clicked)
+        layout.addWidget(self.export_csa_pseudo2d_button)
+
         layout.addStretch(1)
 
         self._refresh_csa_controls()
@@ -9483,6 +10704,25 @@ class MainWindow(QMainWindow):
         export_report_button.clicked.connect(self._on_export_fit_report_clicked)
         layout.addWidget(export_report_button)
 
+        # Explicit user request: fitted peaks exported to a pseudo-2D
+        # dataset, so the fitted series can be viewed/compared exactly
+        # like the raw data it came from. Starts disabled -- enabled
+        # by _refresh_fit_export_buttons only once Fit Spectrum has
+        # actually produced a multi-slice peak fit (a single slice is
+        # not a series to export).
+        self.export_isotropic_pseudo2d_button = QPushButton("Export Fit to Pseudo-2D…")
+        self.export_isotropic_pseudo2d_button.setToolTip(
+            "Reconstruct every fitted slice's summed peak lineshape on "
+            "the full ppm axis and stack them into a new pseudo-2D "
+            "spectrum -- lets the fitted series be viewed/compared "
+            "exactly like the raw data. Needs Fit Spectrum to have "
+            "been run across at least two slices."
+        )
+        self.export_isotropic_pseudo2d_button.setEnabled(False)
+        self.export_isotropic_pseudo2d_button.clicked.connect(
+            self._on_export_isotropic_pseudo2d_clicked)
+        layout.addWidget(self.export_isotropic_pseudo2d_button)
+
         layout.addStretch(1)
         return tab
 
@@ -9502,6 +10742,24 @@ class MainWindow(QMainWindow):
         self.integration_results_label.setWordWrap(True)
         layout.addWidget(self.integration_results_label)
 
+        # Isotropic's own counterpart, for a plain region integral: no
+        # fitted lineshape exists to reconstruct, so this stacks each
+        # slice's own (baseline-subtracted) data, masked to zero
+        # outside the integrated regions -- showing exactly what
+        # contributed to that slice's integral.
+        self.export_integration_pseudo2d_button = QPushButton("Export Integration to Pseudo-2D…")
+        self.export_integration_pseudo2d_button.setToolTip(
+            "Stack every integrated slice's own data -- masked to "
+            "zero outside the regions above, so it's clear what "
+            "actually contributed to each integral -- into a new "
+            "pseudo-2D spectrum. Needs Integrate Regions to have been "
+            "run across at least two slices."
+        )
+        self.export_integration_pseudo2d_button.setEnabled(False)
+        self.export_integration_pseudo2d_button.clicked.connect(
+            self._on_export_integration_pseudo2d_clicked)
+        layout.addWidget(self.export_integration_pseudo2d_button)
+
         layout.addStretch(1)
         return tab
 
@@ -9509,13 +10767,22 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
+        self.analysis_status_label = QLabel(
+            "Fit a curve to the per-spectrum intensities from the "
+            "Fitting tab. Needs a pseudo-2D series selected in "
+            "Load/Save/Compare (or right-clicked there), or a stack "
+            "of 1D spectra checked in its Compare view."
+        )
+        self.analysis_status_label.setWordWrap(True)
+        layout.addWidget(self.analysis_status_label)
+
         relax_box = QGroupBox("Fit Curve settings (relaxation / diffusion)")
         relax_box.setToolTip(
-            "Configures the Fit Curve button below, and the Data "
-            "tab's right-click 'Fit Curve' action on a pseudo-2D row, "
-            "and the Compare tab's Fit Curve (button or right-click) "
-            "on a checked stack of 1D spectra -- not used by Fit "
-            "Spectrum, which lives in the Spectral Fitting sub-tab."
+            "Configures the Fit Curve button below, and the "
+            "Load/Save/Compare panel's right-click 'Fit Curve' action "
+            "on a pseudo-2D row, and its Fit Curve (button or "
+            "right-click) on a checked stack of 1D spectra -- not "
+            "used by Fit Spectrum, which lives in the Fitting tab."
         )
         relax_form = QFormLayout(relax_box)
 
@@ -9526,7 +10793,7 @@ class MainWindow(QMainWindow):
         self.curve_fit_source_label.setWordWrap(True)
         self.curve_fit_source_label.setToolTip(
             "Fit Curve always fits the per-slice intensities produced by the "
-            "Spectral Fitting tab — it never re-fits peaks itself. This line "
+            "Fitting tab — it never re-fits peaks itself. This line "
             "names what is currently staged, so a stale or missing spectral "
             "fit is visible before you run anything."
         )
@@ -10117,7 +11384,8 @@ class MainWindow(QMainWindow):
             "pseudo-2D series -- reuses Step 1's results if already "
             "computed, or runs it now. For a stack of separately-loaded "
             "1D spectra instead of one pseudo-2D series, use the "
-            "Compare tab's own Fit Curve button/context-menu item."
+            "Load/Save/Compare panel's own Fit Curve button/"
+            "context-menu item."
         )
         fit_curve_button.clicked.connect(self._on_fit_curve_button_clicked)
         relax_form.addRow(fit_curve_button)
@@ -10155,7 +11423,7 @@ class MainWindow(QMainWindow):
             self._on_score_component_row_changed)
         relax_form.addRow(self.score_component_list)
 
-        # Running the resolution from the Analysis tab, not only from
+        # Running the resolution from the Relaxation tab, not only from
         # the menu bar -- explicit user request. The menu action stays;
         # this is the same handler, next to the controls whose Values
         # source it depends on.
@@ -10461,7 +11729,7 @@ class MainWindow(QMainWindow):
 
         # Hidden until there is a map for it to act on: every control
         # in here is a no-op without one, and an always-visible panel
-        # of dead controls in the middle of the Analysis tab reads as
+        # of dead controls in the middle of the Relaxation tab reads as
         # broken rather than as not-yet-applicable.
         self.dosy_display_box.setVisible(False)
         self.fit_canvas.dosyLevelFloorChanged.connect(self._on_dosy_scroll_floor_changed)
@@ -10781,7 +12049,7 @@ class MainWindow(QMainWindow):
         if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
             self._enmr_problem(
                 "eNMR needs a pseudo-2D series (one row per applied voltage) "
-                "selected in the Data tab.", title="Not supported",
+                "selected in the Load/Save/Compare panel.", title="Not supported",
                 severity="information")
             return
         if spectrum.data_imag is None:
@@ -11092,12 +12360,12 @@ class MainWindow(QMainWindow):
         sum_layout = QVBoxLayout(sum_box)
         sum_intro = QLabel(
             "Corrects and combines every spectrum checked in the "
-            "Compare tab onto one common ppm axis, added as a new "
-            "spectrum. Intensities are preserved: each offset "
-            "contributes in proportion to how well it excited that "
-            "shift, so overlapping regions gain signal-to-noise "
-            "rather than amplitude. Use Check All on the Compare tab "
-            "to include a whole VOCS series at once."
+            "Load/Save/Compare panel onto one common ppm axis, added "
+            "as a new spectrum. Intensities are preserved: each "
+            "offset contributes in proportion to how well it excited "
+            "that shift, so overlapping regions gain signal-to-noise "
+            "rather than amplitude. Use Check All there to include a "
+            "whole VOCS series at once."
         )
         sum_intro.setWordWrap(True)
         sum_layout.addWidget(sum_intro)
@@ -11120,7 +12388,7 @@ class MainWindow(QMainWindow):
         sum_layout.addWidget(selection_sum_button)
 
         sum_button = QPushButton("VOCS Sum (Compare stack)")
-        sum_button.setToolTip("Combine whatever is checked on the Compare tab instead.")
+        sum_button.setToolTip("Combine whatever is checked in the Load/Save/Compare panel instead.")
         sum_button.clicked.connect(self._on_vocs_sum_clicked)
         sum_layout.addWidget(sum_button)
         layout.addWidget(sum_box)
@@ -11141,14 +12409,14 @@ class MainWindow(QMainWindow):
         (``io.bruker.read_diff_xml``).
 
         T2-by-integration across a pseudo-2D imaging series needs no
-        new feature here at all: the Spectral Fitting sub-tab's
-        Integration Regions -> Fit Curve pathway already does exactly
-        this, generically -- select a pseudo-2D imaging spectrum's own
-        slices, switch the Spectrum tab to mm via the toggle this
-        gradient enables, drag out a region the same way as any other
-        integration. Time-resolved uptake/exchange tracking is
-        explicitly out of scope (not this sub-tab, not this project's
-        current session)."""
+        new feature here at all: the Fitting tab's own Integration
+        section's Integration Regions -> Fit Curve pathway already
+        does exactly this, generically -- select a pseudo-2D imaging
+        spectrum's own slices, switch the Spectrum tab to mm via the
+        toggle this gradient enables, drag out a region the same way
+        as any other integration. Time-resolved uptake/exchange
+        tracking is explicitly out of scope (not this sub-tab, not
+        this project's current session)."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
@@ -11157,7 +12425,7 @@ class MainWindow(QMainWindow):
             "into a real position axis (right-click -> Axis Units -> "
             "mm). For T2-by-integration across an imaging series, "
             "switch to mm here, then use Integration Regions on the "
-            "Spectral Fitting sub-tab as usual -- no separate workflow."
+            "Fitting tab's Integration section as usual -- no separate workflow."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -11384,8 +12652,8 @@ class MainWindow(QMainWindow):
         if not stack:
             QMessageBox.information(
                 self, "Nothing to combine",
-                "Check at least one 1D spectrum in the Compare tab first, "
-                "or select several in the spectrum list and use its right-click "
+                "Check at least one 1D spectrum in the Load/Save/Compare panel "
+                "first, or select several in the spectrum list and use its right-click "
                 "“VOCS Sum (selected spectra)”.",
             )
             return
@@ -11505,8 +12773,10 @@ class MainWindow(QMainWindow):
             regions.append((min(lo, hi), max(lo, hi)))
         return regions
 
-    def _spectral_fitting_tab_active(self) -> bool:
-        """Whether the Spectral Fitting side tab is the one showing.
+    def _fitting_tab_active(self) -> bool:
+        """Whether the Fitting side tab (Isotropic/Integration/
+        CSA-Dipolar -- formerly the standalone "Spectral Fitting"
+        tab) is the one showing.
 
         Peak triangles and shaded integration regions are annotations
         belonging to *that* tab's controls. Left on the Spectrum view
@@ -11517,7 +12787,7 @@ class MainWindow(QMainWindow):
         integrated regions should only be visible while in the
         spectral fitting tab"."""
         return (getattr(self, "side_tabs", None) is not None
-                and self.side_tabs.currentIndex() == self._spectral_fitting_tab_index)
+                and self.side_tabs.currentIndex() == self._fitting_tab_index)
 
     def _sync_region_shading(self) -> None:
         """Reflect the region table's current contents as shaded spans
@@ -11536,7 +12806,7 @@ class MainWindow(QMainWindow):
         redraw that canvas; the region *definitions* themselves are
         unaffected and stay correct for fitting/integration regardless."""
         self.canvas.set_regions(
-            self._read_region_defs() if self._spectral_fitting_tab_active() else [])
+            self._read_region_defs() if self._fitting_tab_active() else [])
 
     def _refresh_peak_markers(self) -> None:
         """Reflect the peak table's current contents as triangle
@@ -11562,7 +12832,7 @@ class MainWindow(QMainWindow):
             except ValueError:
                 continue
         self.canvas.set_peak_markers(
-            (shifts or None) if self._spectral_fitting_tab_active() else None)
+            (shifts or None) if self._fitting_tab_active() else None)
 
     def _on_select_region_toggled(self, checked: bool) -> None:
         # Mirrors _on_pick_peak_toggled: region-select only ever
@@ -11843,7 +13113,7 @@ class MainWindow(QMainWindow):
         # Pick mode only ever listens on self.canvas (the Spectrum
         # tab) -- clicking elsewhere (Compare, Fit, Spectral Fit, the
         # Processing-preview tab, all reachable without leaving the
-        # Analysis tab this button lives on) silently did nothing,
+        # Fitting tab this button lives on) silently did nothing,
         # which is almost certainly why this "doesn't seem to work"
         # was reported: nothing was wrong with picking itself, the
         # canvas being clicked just wasn't the one listening.
@@ -11914,7 +13184,7 @@ class MainWindow(QMainWindow):
             return
         requested = self.auto_pick_prominence_spin.value() / 100.0 * span
         if noise <= 0 or requested >= 3.0 * noise:
-            self.analysis_status_label.setText(f"Auto-Pick found {len(peaks)} peak(s).")
+            self.fitting_status_label.setText(f"Auto-Pick found {len(peaks)} peak(s).")
             return
         message = (
             f"⚠ Auto-Pick: a prominence of {self.auto_pick_prominence_spin.value():g}% is "
@@ -11922,7 +13192,7 @@ class MainWindow(QMainWindow):
             f"normally called at — some of the {len(peaks)} found are likely noise. "
             f"Check them against the spectrum before fitting."
         )
-        self.analysis_status_label.setText(message)
+        self.fitting_status_label.setText(message)
         self.statusBar().showMessage(message, 15000)
 
     #: Fraction of the acquired FID above which predicting *more*
@@ -14109,7 +15379,7 @@ class MainWindow(QMainWindow):
         return global_result["per_dataset"], global_result
 
     def _format_curve_fit_summary(self, results: list[dict], global_result: dict | None) -> str:
-        """The Analysis tab's own results text: the full, unit-carrying
+        """The Relaxation tab's own results text: the full, unit-carrying
         report for a single peak, or a compact one-line-per-peak table
         plus the shared-parameter block for several.
 
@@ -14379,7 +15649,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "Not supported",
                 "A DOSY map needs a pseudo-2D PFG series (one row per gradient step) "
-                "selected in the Data tab.",
+                "selected in the Load/Save/Compare panel.",
             )
             return
 
@@ -14578,7 +15848,7 @@ class MainWindow(QMainWindow):
         display panel's current settings.
 
         The map itself is reused, never recomputed: an inverse Laplace
-        transform per column is the slowest thing in the Analysis tab,
+        transform per column is the slowest thing in the Relaxation tab,
         and reselecting a spectrum is not a request to re-run it."""
         dosy = spectrum.metadata.raw.get("dosy_result")
         if not dosy:
@@ -14771,7 +16041,7 @@ class MainWindow(QMainWindow):
     def _on_score_clicked(self) -> None:
         """Resolve the selected series into component spectra by SCORE.
 
-        Deliberately **does not** go through the Spectral Fitting tab:
+        Deliberately **does not** go through the Fitting tab:
         SCORE fits the whole data matrix and never needs a peak table
         or an integration region at all. That is the point of it, and
         the status message says so, because arriving here after picking
@@ -15384,7 +16654,7 @@ class MainWindow(QMainWindow):
         if not results:
             return (
                 "No measured intensities yet — run Fit Spectrum or Integrate "
-                "Regions on the Spectral Fitting tab first. Fit Curve fits those "
+                "Regions on the Fitting tab first. Fit Curve fits those "
                 "results; it never re-fits peaks itself."
             )
         n_peaks = self._peak_count_in(results)
@@ -15393,12 +16663,111 @@ class MainWindow(QMainWindow):
         return (
             f"Will fit: {n_peaks} {noun}{'s' if n_peaks != 1 else ''} × {len(results)} "
             f"slice{'s' if len(results) != 1 else ''}, from the last {kind} on the "
-            f"Spectral Fitting tab."
+            f"Fitting tab."
         )
 
     def _refresh_staged_measurement_label(self) -> None:
         if hasattr(self, "curve_fit_source_label"):
             self.curve_fit_source_label.setText(self._describe_staged_measurement())
+        self._refresh_fit_export_buttons()
+
+    def _refresh_fit_export_buttons(self) -> None:
+        """Enable each Fitting section's "Export ... to Pseudo-2D…"
+        button only when the currently staged measurement (see
+        :meth:`_describe_staged_measurement`, the same source of
+        truth -- not the live :attr:`_slice_fit_results`, which can
+        go stale across a reselection) actually matches that
+        section's own kind of result and spans at least two slices --
+        a single slice is not a series, and stacking a lone slice
+        into a "pseudo-2D" dataset would misrepresent what happened."""
+        if not hasattr(self, "export_isotropic_pseudo2d_button"):
+            return  # Fitting panel not built yet
+        index = self._selected_index()
+        results = None
+        if index is not None:
+            results = self.session.spectra[index].metadata.raw.get("slice_fit_results")
+        is_series = bool(results) and len(results) > 1
+        is_peak_fit = is_series and "peak_defs" in results[0]
+        is_integration = is_series and "regions" in results[0]
+        self.export_isotropic_pseudo2d_button.setEnabled(bool(is_peak_fit))
+        self.export_integration_pseudo2d_button.setEnabled(bool(is_integration))
+
+    def _slices_to_pseudo2d_traces(self, results: list[dict], values) -> list[NMRSpectrum]:
+        """One :class:`NMRSpectrum` trace per slice, sharing that
+        slice's own ppm axis (from ``result["slice"]``) but with
+        ``values[i]`` as its data -- shared prep for both
+        :meth:`_on_export_isotropic_pseudo2d_clicked` (``values`` is
+        each slice's ``y_fit``) and
+        :meth:`_on_export_integration_pseudo2d_clicked` (``values`` is
+        each slice's region-masked data)."""
+        traces = []
+        for result, y in zip(results, values):
+            base = result["slice"]
+            traces.append(NMRSpectrum(
+                data=np.asarray(y, dtype=float), axes=[base.axes[0]], metadata=base.metadata,
+            ))
+        return traces
+
+    def _on_export_isotropic_pseudo2d_clicked(self) -> None:
+        """Reconstruct every fitted slice's summed lineshape (Fit
+        Spectrum's own ``y_fit`` -- the sum of every fitted peak) on
+        the full ppm axis, and stack them into a new pseudo-2D
+        spectrum. Explicit user request, so a fitted series can be
+        viewed/compared exactly like the raw data it came from."""
+        index = self._selected_index()
+        if index is None:
+            return
+        results = self.session.spectra[index].metadata.raw.get("slice_fit_results")
+        if not results or len(results) < 2 or "peak_defs" not in results[0]:
+            return  # button is disabled in this state; defensive only
+        traces = self._slices_to_pseudo2d_traces(results, [r["y_fit"] for r in results])
+        try:
+            pseudo2d = processing_slicing.build_pseudo2d(traces)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self._add_derived_spectrum(pseudo2d, f"Fit({self.session.label(index)})")
+
+    def _on_export_integration_pseudo2d_clicked(self) -> None:
+        """Stack every integrated slice's own (baseline-subtracted)
+        data, masked to zero outside the regions that were integrated,
+        into a new pseudo-2D spectrum -- shows exactly what
+        contributed to each slice's integral, since a plain region
+        integral has no fitted lineshape to reconstruct instead."""
+        index = self._selected_index()
+        if index is None:
+            return
+        results = self.session.spectra[index].metadata.raw.get("slice_fit_results")
+        if not results or len(results) < 2 or "regions" not in results[0]:
+            return  # button is disabled in this state; defensive only
+        masked_values = []
+        for result in results:
+            x = np.asarray(result["x"], dtype=float)
+            y = np.asarray(result["y"], dtype=float)
+            mask = np.zeros_like(y, dtype=bool)
+            for lo, hi in result["regions"]:
+                mask |= (x >= min(lo, hi)) & (x <= max(lo, hi))
+            masked_values.append(np.where(mask, y, 0.0))
+        traces = self._slices_to_pseudo2d_traces(results, masked_values)
+        try:
+            pseudo2d = processing_slicing.build_pseudo2d(traces)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self._add_derived_spectrum(pseudo2d, f"Integration({self.session.label(index)})")
+
+    def _on_export_csa_pseudo2d_clicked(self) -> None:
+        """The button this is wired to stays disabled (see
+        :meth:`_build_csa_subtab`) -- CSA fitting only ever fits one
+        slice at a time, so there is no series yet to stack into a
+        pseudo-2D dataset. A real, documented response rather than a
+        silent no-op, in case this is ever triggered outside the UI
+        (e.g. a test driving the action directly)."""
+        QMessageBox.information(
+            self, "Export CSA Fit to Pseudo-2D",
+            "CSA fitting only fits one slice at a time, so there is no "
+            "series yet to export as a pseudo-2D dataset.",
+        )
 
     def _on_view_relaxation_peak_changed(self, value: int) -> None:
         self._display_relaxation_peak(value - 1)
@@ -15678,11 +17047,12 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_fit_curve_button_clicked(self) -> None:
-        """"Fit Curve" as a real button in the Analysis tab -- the
+        """"Fit Curve" as a real button in the Relaxation tab -- the
         currently selected spectrum stands in for the ``index`` a
-        right-click on a specific Spectra-tab row would otherwise
-        supply (see :meth:`_on_fit_curve_pseudo2d_action`, still also
-        reachable that way for a row that isn't the current selection)."""
+        right-click on a specific Load/Save/Compare row would
+        otherwise supply (see :meth:`_on_fit_curve_pseudo2d_action`,
+        still also reachable that way for a row that isn't the
+        current selection)."""
         index = self._selected_index()
         if index is None:
             return
@@ -15692,17 +17062,17 @@ class MainWindow(QMainWindow):
                 self, "Not supported",
                 "Fit Curve needs a pseudo-2D series (e.g. a T1/T2/diffusion "
                 "series) selected here. For a stack of separately-loaded 1D "
-                "spectra instead, use the Compare tab's own Fit Curve button.",
+                "spectra instead, use the Load/Save/Compare panel's own Fit Curve button.",
             )
             return
         self._on_fit_curve_pseudo2d_action(index)
 
     def _on_fit_curve_pseudo2d_action(self, index: int) -> None:
-        """"Fit Curve" from the Data tab's right-click menu, only
-        offered for a pseudo-2D row (see
+        """"Fit Curve" from the Load/Save/Compare panel's right-click
+        menu, only offered for a pseudo-2D row (see
         :meth:`_on_spectrum_list_context_menu`). Selects that row
         first (so the peak table/Values-source/model shown are that
-        spectrum's own siloed Analysis-tab state, not whatever was
+        spectrum's own siloed Relaxation-tab state, not whatever was
         showing for a different selection), then reuses its spectral
         fit if one already exists (from "Fit Spectrum"), or runs one
         now with the peak_defs just brought into view."""
@@ -15898,7 +17268,7 @@ class MainWindow(QMainWindow):
         elif spectrum.ndim == 1:
             self.analysis_status_label.setText(
                 "Fit Spectrum: peaks in this spectrum. For a relaxation/diffusion curve, either select "
-                "a pseudo-2D series instead, or build a stack of 1D spectra in the Compare tab."
+                "a pseudo-2D series instead, or build a stack of 1D spectra in the Load/Save/Compare panel."
             )
         else:
             self.analysis_status_label.setText(
@@ -16458,8 +17828,8 @@ class MainWindow(QMainWindow):
         Nothing here recomputes: a curve fit, an inverse Laplace
         transform, a SCORE resolution and an eNMR fit are all stored
         the moment they are produced, and switching between them is a
-        display choice, not a reason to re-run the slowest thing in the
-        Analysis tab."""
+        display choice, not a reason to re-run the slowest step that
+        produced it."""
         if spectrum is None:
             index = self._selected_index()
             if index is None:
@@ -16638,6 +18008,7 @@ class MainWindow(QMainWindow):
         self.info_label.setText("\n".join(bits))
 
         self._refresh_csa_controls(spectrum)
+        self._refresh_simulation_controls(spectrum)
 
         # Both tabs' gradient controls, in one place -- see
         # _refresh_max_gradient_controls.
@@ -16830,7 +18201,7 @@ class _DosySettingsDialog(QDialog):
 
     Only ``alpha`` and the intensity threshold really change what the
     map says; the D range and grid size are framing. They are all in
-    one dialog rather than scattered through the Analysis tab because
+    one dialog rather than scattered through the Relaxation tab because
     a DOSY is a one-shot action, not a setting you leave configured.
     """
 
@@ -16935,7 +18306,7 @@ class _GradientCalibrationDialog(QDialog):
     """Inputs for measuring a probe's absolute maximum gradient from a
     standard of known D.
 
-    Prefilled from the Analysis tab's own PFG settings, since a
+    Prefilled from the Relaxation tab's own PFG settings, since a
     calibration is run with the same δ/Δ/shape/sequence as the
     experiments it is going to be used for -- and if it isn't, the
     number it produces doesn't transfer."""

@@ -28,9 +28,13 @@ plotted directly, e.g.::
     plt.plot(spec['x_ppm'], spec['real_spec'])
 """
 
+from math import comb
+
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import fftconvolve
+
+from .utils import find_isotope_info
 
 
 # ============================================================
@@ -1204,3 +1208,390 @@ def mas_quadrupolar_fid(I, C_Q, eta_Q, larmor_Hz, mas_Hz, theta, phi,
         signal[j] = np.trace(rho @ Iplus)
 
     return signal
+
+# ============================================================
+# J-COUPLING (SCALAR-COUPLED) MULTIPLETS
+# ============================================================
+#
+# First-order (weak-coupling) multiplet simulation: the observed
+# nucleus is coupled to one or more *groups* of equivalent nuclei,
+# each group defined by (nuclide, how many equivalent nuclei n, the
+# J coupling in Hz to that group). Several independent groups can be
+# combined (e.g. a 13C coupled to 1H, 31P and 19F simultaneously,
+# each with its own n and J) -- their splitting patterns simply
+# convolve.
+#
+# Natural isotopic abundance is folded in per group: for a coupling
+# partner whose NMR-active isotope is not ~100% abundant (13C, 2H,
+# ...), only a fraction of molecules actually have an active spin at
+# each of the n equivalent sites -- the rest have a spin-0 isotope
+# there (e.g. 12C) that does not split the line at all. This is
+# handled as a binomial mixture over "how many of the n sites are
+# NMR-active" (see `jcoupling_group_pattern`), which is exactly what
+# produces the familiar small J-coupling *satellites* either side of
+# a large uncoupled centreband for a low-abundance partner (13C
+# satellites in a 1H spectrum, for example), rather than a full
+# multiplet with no centreband (the 100%-abundance case, e.g. 1H,
+# 19F, 31P partners).
+#
+# This is first-order/weak-coupling only (no roofing/second-order
+# strong-coupling distortion -- that needs full density-matrix
+# simulation and is a different scope to the existing CSA/
+# quadrupolar machinery in this module).
+#
+# Workflow
+# --------
+#
+#   couplings = [
+#       {'nuclide': '1H',  'n': 2, 'J_Hz': 7.0},
+#       {'nuclide': '31P', 'n': 1, 'J_Hz': 140.0},
+#   ]
+#   spec = jcoupled_spectrum(100.0, larmor_Hz, couplings, ppm_axis, fwhm=2.0)
+#   plt.plot(spec['x_ppm'], spec['real_spec'])
+#
+# or, for several distinct chemical sites at once:
+#
+#   sites = [
+#       {'ppm': 100.0, 'relative_intensity': 1.0, 'couplings': couplings_A},
+#       {'ppm': 40.0,  'relative_intensity': 2.0, 'couplings': couplings_B},
+#   ]
+#   spec = multi_site_jcoupled_spectrum(sites, larmor_Hz, ppm_axis, fwhm=2.0)
+#
+# ============================================================
+
+
+def spin_multiplet_pattern(n, I, J_Hz):
+    """
+    First-order stick multiplet from `n` magnetically-equivalent spin-I
+    nuclei, each coupled with the same J (Hz) to the observed spin.
+
+    Works for any spin I, not just I=1/2: reduces to the familiar
+    Pascal's-triangle binomial pattern (n+1 lines, intensities
+    C(n,k)) for I=1/2, and generalises correctly to higher-spin
+    coupling partners (e.g. n equivalent 14N (I=1), 27Al (I=5/2), ...)
+    via the multinomial expansion of (sum_{m=-I}^{I} x^m)^n.
+
+    Parameters
+    ----------
+    n : int
+        Number of equivalent coupled nuclei (n=0 -> single line, no
+        splitting).
+    I : float
+        Spin quantum number of the coupled nuclei (e.g. 0.5, 1, 1.5).
+    J_Hz : float
+        Scalar coupling constant, in Hz.
+
+    Returns
+    -------
+    freqs_Hz : ndarray
+        Frequency offsets (Hz) of each line, relative to the
+        uncoupled position, sorted ascending. Spans
+        -n*I*J_Hz to +n*I*J_Hz in steps of J_Hz.
+    weights : ndarray
+        Relative intensity of each line, normalised to sum to 1.
+    """
+    if n <= 0:
+        return np.array([0.0]), np.array([1.0])
+
+    m_single = np.round(np.arange(-I, I + 1e-9, 1.0), 6)
+
+    # Multinomial expansion via repeated convolution: total_M is the
+    # sum of n i.i.d. m values, each drawn (with equal weight) from
+    # m_single -- exactly analogous to summing n dice.
+    totals = {0.0: 1}
+    for _ in range(n):
+        new_totals = {}
+        for m_tot, w_tot in totals.items():
+            for m in m_single:
+                key = round(m_tot + m, 6)
+                new_totals[key] = new_totals.get(key, 0) + w_tot
+        totals = new_totals
+
+    m_sorted = np.array(sorted(totals.keys()))
+    weights = np.array([totals[m] for m in m_sorted], dtype=float)
+    weights /= weights.sum()
+    freqs_Hz = m_sorted * J_Hz
+    return freqs_Hz, weights
+
+
+def jcoupling_group_pattern(n, J_Hz, nuclide=None, spin=None, abundance=None):
+    """
+    Stick pattern for one coupling *group* -- n equivalent coupling-
+    partner sites of a given nuclide, each coupled with the same J --
+    folding in natural isotopic abundance.
+
+    Each of the n sites is independently NMR-active with probability
+    p = abundance/100 (binomial), and an inactive site (the other,
+    spin-0 isotope, e.g. 12C when nuclide='13C') contributes no
+    splitting at all. The result is a mixture over k = 0..n active
+    sites: weight C(n,k) p^k (1-p)^(n-k) for the k-site multiplet
+    from :func:`spin_multiplet_pattern`. For an ~100%-abundant
+    partner (1H, 19F, 31P, ...) this collapses to the plain n-site
+    multiplet with no separate centreband; for a low-abundance
+    partner (13C, 2H, ...) most of the weight sits in the k=0
+    (uncoupled centreband) term, with the k>=1 terms forming small
+    satellites either side of it.
+
+    Parameters
+    ----------
+    n : int
+        Number of equivalent coupling-partner sites of this nuclide.
+    J_Hz : float
+        Scalar coupling constant to this group, in Hz.
+    nuclide : str, optional
+        Coupling-partner nuclide, e.g. '1H', '31P', '19F', '13C'.
+        Used to look up `spin`/`abundance` via
+        :func:`nmrtools.utils.find_isotope_info` when those are not
+        given explicitly. Required unless both `spin` and
+        `abundance` are given directly.
+    spin : float, optional
+        Overrides the table lookup for the coupling-partner spin.
+    abundance : float, optional
+        Overrides the table lookup for the coupling-partner natural
+        abundance (%, 0-100). Pass 100.0 to force the "always
+        active, no satellites" treatment regardless of the real
+        isotope (e.g. for an isotopically-enriched sample).
+
+    Returns
+    -------
+    freqs_Hz : ndarray
+        Frequency offsets (Hz), sorted ascending.
+    weights : ndarray
+        Relative intensities, normalised to sum to 1.
+    """
+    if spin is None or abundance is None:
+        if nuclide is None:
+            raise ValueError(
+                "Provide 'nuclide' (to look up spin/abundance), or pass "
+                "both 'spin' and 'abundance' explicitly."
+            )
+        info = find_isotope_info(nuclide)
+        if spin is None:
+            spin = info['spin']
+        if abundance is None:
+            abundance = info['abundance']
+
+    p = abundance / 100.0
+
+    totals = {}
+    for k in range(0, n + 1):
+        binom_weight = comb(n, k) * (p ** k) * ((1.0 - p) ** (n - k))
+        if binom_weight <= 0.0:
+            continue
+        freqs_k, weights_k = spin_multiplet_pattern(k, spin, J_Hz)
+        for f, w in zip(freqs_k, weights_k):
+            key = round(float(f), 6)
+            totals[key] = totals.get(key, 0.0) + binom_weight * float(w)
+
+    freqs_Hz = np.array(sorted(totals.keys()))
+    weights = np.array([totals[f] for f in freqs_Hz])
+    weights /= weights.sum()
+    return freqs_Hz, weights
+
+
+def combine_jcouplings(couplings, intensity_threshold=1e-8):
+    """
+    Combine several independent J-coupling groups (e.g. a nucleus
+    coupled to 1H *and* 31P *and* 19F simultaneously, each with its
+    own n and J) into one overall stick pattern by convolving their
+    individual patterns.
+
+    Parameters
+    ----------
+    couplings : list of dict
+        One entry per coupling group, each with keys:
+
+        ``nuclide`` : str
+            Coupling-partner nuclide, e.g. ``'1H'``, ``'31P'``,
+            ``'19F'``, ``'13C'``.
+        ``n`` : int
+            Number of equivalent nuclei of this nuclide coupled (with
+            the same J) to the observed spin.
+        ``J_Hz`` : float
+            Scalar coupling constant to this group, in Hz.
+        ``spin`` : float, optional
+            Overrides the table spin for this nuclide.
+        ``abundance`` : float, optional
+            Overrides the table natural abundance (%) for this
+            nuclide -- see :func:`jcoupling_group_pattern`.
+
+    intensity_threshold : float, optional
+        Lines with combined relative weight below this (after
+        normalising the total to 1) are dropped -- keeps the stick
+        list from growing enormous when several low-abundance groups
+        (each spawning many small satellite combinations) are
+        combined.
+
+    Returns
+    -------
+    freqs_Hz : ndarray
+        Combined frequency offsets (Hz), relative to the fully
+        uncoupled position, sorted ascending.
+    weights : ndarray
+        Combined relative intensities, normalised to sum to 1.
+    """
+    total_freqs = np.array([0.0])
+    total_weights = np.array([1.0])
+
+    for group in couplings:
+        freqs_g, weights_g = jcoupling_group_pattern(
+            n=group['n'], J_Hz=group['J_Hz'],
+            nuclide=group.get('nuclide'),
+            spin=group.get('spin'), abundance=group.get('abundance'),
+        )
+        new_freqs = (total_freqs[:, None] + freqs_g[None, :]).ravel()
+        new_weights = (total_weights[:, None] * weights_g[None, :]).ravel()
+
+        merged = {}
+        for f, w in zip(new_freqs, new_weights):
+            key = round(float(f), 6)
+            merged[key] = merged.get(key, 0.0) + float(w)
+
+        total_freqs = np.array(sorted(merged.keys()))
+        total_weights = np.array([merged[f] for f in total_freqs])
+
+    total_weights /= total_weights.sum()
+
+    if intensity_threshold is not None:
+        keep = total_weights >= intensity_threshold
+        total_freqs = total_freqs[keep]
+        total_weights = total_weights[keep]
+        total_weights /= total_weights.sum()
+
+    order = np.argsort(total_freqs)
+    return total_freqs[order], total_weights[order]
+
+
+def jcoupled_spectrum(center_ppm, larmor_Hz, couplings, ppm_axis, fwhm=2.0,
+                       lineshape='lorentzian', eta=0.0, intensity_threshold=1e-8):
+    """
+    Simulate a first-order J-coupled multiplet spectrum for one
+    chemical site.
+
+    Parameters
+    ----------
+    center_ppm : float
+        Uncoupled chemical shift of the observed site, in ppm.
+    larmor_Hz : float
+        Observe (Larmor) frequency of the *observed* nucleus, in Hz
+        (e.g. from :func:`nmrtools.utils.compute_BF1_SFO1`) -- used
+        only to convert each line's J-coupling offset (Hz) into ppm.
+    couplings : list of dict
+        See :func:`combine_jcouplings`.
+    ppm_axis : ndarray
+        Output ppm axis.
+    fwhm : float, optional
+        Linewidth (ppm) of each individual multiplet line. Default 2.0.
+    lineshape : {'gaussian', 'lorentzian', 'pseudo_voigt'}, optional
+        Broadening kernel. Default 'lorentzian' (more physically
+        typical for scalar-coupled multiplets than the CSA/
+        quadrupolar powder patterns elsewhere in this module, which
+        default to 'gaussian').
+    eta : float, optional
+        Gaussian/Lorentzian mixing fraction, only used when
+        ``lineshape='pseudo_voigt'``.
+    intensity_threshold : float, optional
+        See :func:`combine_jcouplings`.
+
+    Returns
+    -------
+    dict with keys:
+
+    ``x_ppm``, ``real_spec``, ``normalised_real_spec``
+        As for the other ``*_spectrum`` functions in this module --
+        plottable directly.
+    ``stick_ppm``, ``stick_intensity``
+        The underlying (unbroadened) multiplet stick positions (ppm)
+        and relative intensities, useful for annotating a plot or
+        checking the pattern independently of the chosen linewidth.
+    """
+    freqs_Hz, weights = combine_jcouplings(
+        couplings, intensity_threshold=intensity_threshold,
+    )
+    stick_ppm = center_ppm + freqs_Hz / larmor_Hz * 1.0e6
+
+    spectrum = np.zeros_like(ppm_axis, dtype=float)
+    dx = ppm_axis[1] - ppm_axis[0]
+    idx = (stick_ppm - ppm_axis[0]) / dx
+    i0 = np.floor(idx).astype(int)
+    frac = idx - i0
+    valid = (i0 >= 0) & (i0 < len(ppm_axis) - 1)
+    np.add.at(spectrum, i0[valid], weights[valid] * (1.0 - frac[valid]))
+    np.add.at(spectrum, i0[valid] + 1, weights[valid] * frac[valid])
+
+    spectrum = _apply_broadening(spectrum, ppm_axis, fwhm=fwhm,
+                                  lineshape=lineshape, eta=eta)
+    maximum = np.max(spectrum)
+    normalised = spectrum / maximum if maximum > 0 else spectrum
+
+    return {
+        "x_ppm": ppm_axis,
+        "real_spec": spectrum,
+        "normalised_real_spec": normalised,
+        "stick_ppm": stick_ppm,
+        "stick_intensity": weights,
+    }
+
+
+def multi_site_jcoupled_spectrum(sites, larmor_Hz, ppm_axis, fwhm=2.0,
+                                  lineshape='lorentzian', eta=0.0,
+                                  intensity_threshold=1e-8):
+    """
+    Sum :func:`jcoupled_spectrum` over several distinct chemical
+    sites (e.g. a molecule with more than one resolved resonance,
+    each with its own coupling network) onto one shared ppm axis.
+
+    Parameters
+    ----------
+    sites : list of dict
+        One entry per site, with keys:
+
+        ``ppm`` : float
+            Uncoupled chemical shift of this site.
+        ``couplings`` : list of dict
+            This site's coupling groups -- see
+            :func:`combine_jcouplings`. Pass ``[]`` for an
+            uncoupled singlet.
+        ``relative_intensity`` : float, optional
+            Relative weight of this site before summing (e.g.
+            proportional to the number of equivalent observed nuclei
+            at that site). Default 1.0.
+        ``fwhm`` : float, optional
+            Per-site linewidth override (ppm); falls back to the
+            function's `fwhm` argument if omitted.
+
+    larmor_Hz, ppm_axis, lineshape, eta, intensity_threshold
+        As for :func:`jcoupled_spectrum`, shared across all sites.
+
+    Returns
+    -------
+    dict with keys ``x_ppm``, ``real_spec``, ``normalised_real_spec``
+    (summed over all sites) and ``sites``, a list of the individual
+    per-site :func:`jcoupled_spectrum` result dicts (each still
+    carrying its own ``stick_ppm``/``stick_intensity``), in case you
+    want to plot or inspect them separately.
+    """
+    total_spectrum = np.zeros_like(ppm_axis, dtype=float)
+    site_results = []
+
+    for site in sites:
+        rel_intensity = site.get('relative_intensity', 1.0)
+        site_fwhm = site.get('fwhm', fwhm)
+        result = jcoupled_spectrum(
+            center_ppm=site['ppm'], larmor_Hz=larmor_Hz,
+            couplings=site.get('couplings', []), ppm_axis=ppm_axis,
+            fwhm=site_fwhm, lineshape=lineshape, eta=eta,
+            intensity_threshold=intensity_threshold,
+        )
+        total_spectrum += rel_intensity * result['real_spec']
+        site_results.append(result)
+
+    maximum = np.max(total_spectrum)
+    normalised = total_spectrum / maximum if maximum > 0 else total_spectrum
+
+    return {
+        "x_ppm": ppm_axis,
+        "real_spec": total_spectrum,
+        "normalised_real_spec": normalised,
+        "sites": site_results,
+    }

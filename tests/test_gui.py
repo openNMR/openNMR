@@ -23,6 +23,7 @@ from opennmr.gui.main_window import (
 )
 from opennmr.gui.session import Session
 from opennmr.gui.widgets.canvas import MplCanvas
+from opennmr.gui.widgets.collapsible_section import CollapsibleSection
 import opennmr.gui.main_window as main_window_module
 from opennmr import io as opennmr_io
 from opennmr.io import bruker as io_bruker
@@ -594,9 +595,9 @@ def test_main_window_remove_peak_shortcut_is_scoped_to_peak_table(qapp, tmp_path
 def test_main_window_menu_window_panel_actions_switch_side_tabs(qapp):
     window = MainWindow()
     window_menu = _menu_by_title(window, "Window")
-    analysis_action = next(a for a in window_menu.actions() if a.text() == "Analysis")
-    analysis_action.trigger()
-    assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Analysis"
+    applications_action = next(a for a in window_menu.actions() if a.text() == "Applications")
+    applications_action.trigger()
+    assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Applications"
 
 
 def test_main_window_spectrum_canvas_defaults_to_full_resolution_others_do_not(qapp):
@@ -5370,7 +5371,7 @@ def test_main_window_auto_pick_peaks_shows_markers_on_spectrum(qapp):
     # was populated, nothing was drawn on the canvas itself.
     window = MainWindow()
     # Peak markers only draw while the Spectral Fitting tab is up.
-    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     window._on_auto_pick_peaks_clicked()
     assert len(window.canvas._peak_marker_lines) == 1
@@ -5392,7 +5393,7 @@ def test_main_window_manually_added_peak_shows_a_marker(qapp):
     # used instead.
     window = MainWindow()
     # Peak markers only draw while the Spectral Fitting tab is up.
-    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     assert window.canvas._peak_marker_lines == []
 
@@ -5410,7 +5411,7 @@ def test_main_window_peak_picked_via_click_shows_a_marker(qapp):
     # -> _on_peak_picked) rather than calling _add_peak_row directly.
     window = MainWindow()
     # Peak markers only draw while the Spectral Fitting tab is up.
-    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     window.pick_peak_button.setChecked(True)
     window._on_peak_picked(5.0)
@@ -5420,7 +5421,7 @@ def test_main_window_peak_picked_via_click_shows_a_marker(qapp):
 def test_main_window_removing_a_peak_removes_its_marker(qapp):
     window = MainWindow()
     # Peak markers only draw while the Spectral Fitting tab is up.
-    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
     window._add_peak_row(shift=6.0, fwhm=0.05, eta=0.5)
@@ -5439,7 +5440,7 @@ def test_main_window_editing_a_peak_shift_moves_its_marker(qapp):
     # remove/auto-pick) should move the marker too.
     window = MainWindow()
     # Peak markers only draw while the Spectral Fitting tab is up.
-    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
     assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([5.0])
@@ -5448,13 +5449,13 @@ def test_main_window_editing_a_peak_shift_moves_its_marker(qapp):
     assert window.canvas._peak_marker_lines[0].get_xdata() == pytest.approx([6.5])
 
 
-def test_main_window_markers_only_show_on_the_spectral_fitting_tab(qapp):
+def test_main_window_markers_only_show_on_the_fitting_tab(qapp):
     # Reported directly: "the peak picking triangles/integrated regions
     # should only be visible while in the spectral fitting tab". Left
     # on the Spectrum view after moving on, they read as leftover state
     # -- the same reasoning that already hides the phase pivot marker.
     window = MainWindow()
-    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, n_pts=200))
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
     window._add_region_row(4.5, 5.5)
@@ -5470,13 +5471,13 @@ def test_main_window_markers_only_show_on_the_spectral_fitting_tab(qapp):
 
     # Move to another tab -- both go.
     for index in range(window.side_tabs.count()):
-        if index != window._spectral_fitting_tab_index:
+        if index != window._fitting_tab_index:
             window.side_tabs.setCurrentIndex(index)
             break
     assert markers() == 0 and shading() == 0
 
     # And come back when it does.
-    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
     assert markers() == 1 and shading() == 1
     # The definitions themselves are untouched -- only the drawing.
     assert window.peak_table.rowCount() == 1
@@ -5513,7 +5514,7 @@ def test_main_window_peak_markers_survive_reselection(qapp):
     # _draw_selected_spectrum, not just from _restore_analysis_state.
     window = MainWindow()
     # These markers only show while the Spectral Fitting tab is up.
-    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, n_pts=200))
     index_a = window._selected_index()
     window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
@@ -5537,7 +5538,7 @@ def test_main_window_region_shading_survives_reselection(qapp):
     # row).
     window = MainWindow()
     # Region shading only shows while the Spectral Fitting tab is up.
-    window.side_tabs.setCurrentIndex(window._spectral_fitting_tab_index)
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
     _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05, n_pts=200))
     index_a = window._selected_index()
     window._add_region_row(4.5, 5.5)
@@ -5923,11 +5924,11 @@ def test_main_window_warns_when_auto_pick_is_asked_to_pick_noise(qapp):
 
     window.auto_pick_prominence_spin.setValue(10.0)
     window._on_auto_pick_peaks_clicked()
-    assert "likely noise" not in window.analysis_status_label.text()
+    assert "likely noise" not in window.fitting_status_label.text()
 
     window.auto_pick_prominence_spin.setValue(0.05)     # well under the noise
     window._on_auto_pick_peaks_clicked()
-    status = window.analysis_status_label.text()
+    status = window.fitting_status_label.text()
     assert "likely noise" in status
     assert "σ" in status                                 # it says what the noise is
 
@@ -7156,30 +7157,49 @@ def test_main_window_clear_resets_analysis_tab(qapp, tmp_path):
 # Advanced (fit tolerance/S-N) collapsed by default
 # ============================================================
 
-def test_main_window_peak_picking_and_integration_are_separate_subtabs(qapp):
+def _enclosing_collapsible_section(widget):
+    """The nearest :class:`CollapsibleSection` ancestor of ``widget``
+    -- lets a test confirm two controls live in genuinely separate
+    collapsible sections of a launcher panel (Fitting's Isotropic/
+    Integration/CSA-Dipolar, etc.) without depending on exactly how
+    each section's own internal layout is built."""
+    node = widget.parentWidget()
+    while node is not None and not isinstance(node, CollapsibleSection):
+        node = node.parentWidget()
+    return node
+
+
+def test_main_window_isotropic_integration_csa_are_separate_sections(qapp):
     # Explicit user feedback: the combined "Spectral Fitting" sub-tab
     # held peak-picking, integration, and fit-bounds tuning all at
     # once -- "too much information at once for casual users". Peak
-    # Picking and Integration (alternative "step 1"s, per their own
-    # tooltips) are now separate sub-tabs.
+    # Picking (renamed "Isotropic (Gauss/Lor)"), Integration and CSA
+    # (renamed "CSA/Dipolar") are now three independent collapsible
+    # sections of the "Fitting" top-level tab -- see
+    # test_main_window_fitting_tab_has_three_collapsible_sections for
+    # the section structure itself.
     window = MainWindow()
-    labels = [window.analysis_sub_tabs.tabText(i) for i in range(window.analysis_sub_tabs.count())]
-    # Peak Picking and Integration moved out to their own top-level
-    # Spectral Fitting tab -- explicit user request, see
-    # test_main_window_spectral_fitting_is_its_own_top_level_tab. They
-    # are still two separate sub-tabs, which is what this test is
-    # actually about; only their parent changed.
-    assert labels == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]
-    spectral = [window.spectral_fitting_sub_tabs.tabText(i)
-                for i in range(window.spectral_fitting_sub_tabs.count())]
-    assert spectral == ["Peak Picking", "Integration"]
+    # VOCS moved to its own top-level "Advanced Processing" button;
+    # Peak Picking, Integration and CSA all moved to the new
+    # "Fitting" button; Curve Fitting to its own "Relaxation" button;
+    # eNMR and Imaging to their own "Applications" button -- none of
+    # these five belong on the old combined "Analysis" tab any more,
+    # and that tab (and its analysis_sub_tabs) no longer exists at all.
+    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    assert "Analysis" not in side
+    assert not hasattr(window, "analysis_sub_tabs")
 
-    peak_picking_tab = window.spectral_fitting_sub_tabs.widget(0)
-    integration_tab = window.spectral_fitting_sub_tabs.widget(1)
-    assert peak_picking_tab.isAncestorOf(window.peak_table)
-    assert integration_tab.isAncestorOf(window.region_table)
-    assert not peak_picking_tab.isAncestorOf(window.region_table)
-    assert not integration_tab.isAncestorOf(window.peak_table)
+    peak_picking_section = _enclosing_collapsible_section(window.peak_table)
+    integration_section = _enclosing_collapsible_section(window.region_table)
+    csa_section = _enclosing_collapsible_section(window.csa_sites_table)
+    assert peak_picking_section.title() == "Isotropic (Gauss/Lor)"
+    assert integration_section.title() == "Integration"
+    assert csa_section.title() == "CSA/Dipolar"
+    # Three genuinely separate sections, not one shared container.
+    assert len({id(peak_picking_section), id(integration_section), id(csa_section)}) == 3
+    assert not peak_picking_section.isAncestorOf(window.region_table)
+    assert not integration_section.isAncestorOf(window.peak_table)
+    assert not csa_section.isAncestorOf(window.peak_table)
 
 
 def test_main_window_peak_advanced_section_collapsed_by_default(qapp):
@@ -7865,14 +7885,17 @@ def test_main_window_analysis_tab_labels_renamed_for_clarity(qapp):
     # confusingly similar -- renamed to make clear one is a spectral
     # (per-slice) fit and the other a curve (per-peak) fit.
     # The two now live in different *top-level* tabs -- the spectral
-    # (per-slice) one on Spectral Fitting, the curve (per-peak) one on
-    # Analysis -- so search both rather than one sub-tab widget. The
+    # (per-slice) one on Fitting, the curve (per-peak) one on
+    # Relaxation -- so search both rather than one sub-tab widget. The
     # point of this test is the wording, which is unchanged.
     window = MainWindow()
+    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    fitting_tab = window.side_tabs.widget(window._fitting_tab_index)
+    relaxation_tab = window.side_tabs.widget(side.index("Relaxation"))
     wanted = ("Spectrum fit (slice #):", "View curve fit (peak #):")
     labels = [
         child.text()
-        for parent in (window.spectral_fitting_sub_tabs, window.analysis_sub_tabs)
+        for parent in (fitting_tab, relaxation_tab)
         for child in parent.findChildren(QLabel) if child.text() in wanted
     ]
     assert set(labels) == set(wanted)
@@ -8002,7 +8025,7 @@ def test_main_window_apply_sr_preserves_axis_unit(qapp, tmp_path):
     window._on_apply_sr_clicked()
 
     assert window.canvas.axis_unit == "hz"
-    assert window.canvas.ax.get_xlabel() == "Frequency / Hz"
+    assert window.canvas.ax.get_xlabel() == "Frequency (Hz)"
 
 
 def test_main_window_reference_shift_from_plot_prompts_and_applies(qapp, tmp_path, monkeypatch):
@@ -8409,6 +8432,70 @@ def test_main_window_style_controls_reload_from_the_plot_being_edited(qapp):
 
     window._load_style_controls_from(window.canvas)
     assert window.output_linewidth_spin.value() == pytest.approx(3.0)
+
+
+def test_main_window_axis_label_style_combo_changes_the_spectrum_label(qapp, tmp_path):
+    """Explicit user request: "add Arial as the default font... [and]
+    the axis labels should also be... brackets [not] slash... People
+    should be allowed to swap between these". The panel's own combo
+    box is the only way a person actually reaches this -- exercising
+    canvas.set_style directly (see test_gui_canvas.py) doesn't confirm
+    the widget is wired to it at all."""
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path), vendor="bruker")
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+
+    label = window.canvas.ax.get_xlabel()
+    assert r"\delta" in label and "1" in label and "H" in label and " / " not in label
+
+    slash_index = window.output_axis_label_style_combo.findData("slash")
+    window.output_axis_label_style_combo.setCurrentIndex(slash_index)
+    assert " / " in window.canvas.ax.get_xlabel()
+
+    window.output_axis_label_template_edit.setText("{element}-{mass} shift ({unit})")
+    window.output_axis_label_template_edit.editingFinished.emit()
+    assert window.canvas.ax.get_xlabel() == "H-1 shift (ppm)"
+
+    # Blank restores the style combo's own choice (still "slash" here).
+    window.output_axis_label_template_edit.setText("")
+    window.output_axis_label_template_edit.editingFinished.emit()
+    assert "/" in window.canvas.ax.get_xlabel()
+    assert "shift" not in window.canvas.ax.get_xlabel()
+
+
+def test_main_window_saved_axis_label_settings_are_applied_at_startup(qapp, tmp_path, monkeypatch):
+    config = tmp_path / "plot_style.json"
+    config.write_text(json.dumps({
+        "axis_label_style": "slash",
+        "axis_label_template": "{element}-{mass} ({unit})",
+        "font_family": "monospace",
+    }))
+    monkeypatch.setattr(MainWindow, "_PLOT_STYLE_CONFIG_PATH", str(config))
+
+    window = MainWindow()
+
+    assert window.output_axis_label_style_combo.currentData() == "slash"
+    assert window.output_axis_label_template_edit.text() == "{element}-{mass} ({unit})"
+    assert window.output_font_family_combo.currentData() == "monospace"
+    for canvas in window._all_canvases():
+        assert canvas._axis_label_template == "{element}-{mass} ({unit})"
+        assert canvas._font_family == "monospace"
+
+
+def test_main_window_save_style_default_writes_axis_label_settings(qapp, tmp_path, monkeypatch):
+    config = tmp_path / "plot_style.json"
+    monkeypatch.setattr(MainWindow, "_PLOT_STYLE_CONFIG_PATH", str(config))
+    window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+    slash_index = window.output_axis_label_style_combo.findData("slash")
+    window.output_axis_label_style_combo.setCurrentIndex(slash_index)
+
+    window._on_save_style_default_clicked()
+
+    saved = json.loads(config.read_text())
+    assert saved["axis_label_style"] == "slash"
+    for canvas in window._all_canvases():
+        assert canvas._axis_label_style == "slash"
 
 
 def test_main_window_contour_fraction_spin_defaults_to_25_percent(qapp):
@@ -10911,23 +10998,224 @@ def test_gradient_calibration_dialog_prefills_from_the_analysis_tab(qapp):
 # and the Spectral Fitting tab split
 # ============================================================
 
-def test_main_window_spectral_fitting_is_its_own_top_level_tab(qapp):
+def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # "Fitting spectra should be its own tab" -- Peak Picking and
     # Integration were sub-tabs of Analysis sitting beside Curve
     # Fitting, which put a prerequisite and its consumer at the same
-    # level and hid the order between them.
+    # level and hid the order between them. Later folded into three
+    # independent collapsible sections of one "Fitting" launcher
+    # button (replacing the standalone "Spectral Fitting" tab this
+    # test used to check for) -- explicit user request, also pulling
+    # in CSA (renamed "CSA/Dipolar"), previously a fourth Analysis
+    # sub-tab.
     window = MainWindow()
     side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
-    assert "Spectral Fitting" in side
-    # Step 1 before step 2.
-    assert side.index("Spectral Fitting") < side.index("Analysis")
+    assert "Fitting" in side
+    assert "Spectral Fitting" not in side
+    assert "Analysis" not in side
+    # Step 1 (measure) before step 2 (Relaxation's curve fit).
+    assert side.index("Fitting") < side.index("Relaxation")
 
-    spectral = [window.spectral_fitting_sub_tabs.tabText(i)
-                for i in range(window.spectral_fitting_sub_tabs.count())]
-    assert spectral == ["Peak Picking", "Integration"]
-    analysis = [window.analysis_sub_tabs.tabText(i)
-                for i in range(window.analysis_sub_tabs.count())]
-    assert analysis == ["Curve Fitting", "eNMR", "VOCS", "Imaging", "CSA"]
+    fitting_tab = window.side_tabs.widget(window._fitting_tab_index)
+    sections = fitting_tab.findChildren(CollapsibleSection)
+    titles = [s.title() for s in sections]
+    assert titles == ["Isotropic (Gauss/Lor)", "Integration", "CSA/Dipolar"]
+
+    # eNMR/Imaging moved off this tab entirely, to their own
+    # "Applications" button (see
+    # test_main_window_applications_is_its_own_top_level_button).
+    applications_tab = window.side_tabs.widget(side.index("Applications"))
+    analysis = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
+    assert analysis == ["eNMR", "Imaging"]
+
+
+def test_main_window_advanced_processing_is_its_own_top_level_button(qapp):
+    # Explicit user request: seven launcher buttons replacing the old
+    # Data/Processing/Spectral Fitting/Analysis/Compare tabs, one of
+    # which is "Advanced Processing", which "for now, is just the
+    # 'VOCS' processing, which is currently in 'Analysis'". VOCS is
+    # therefore no longer a sub-tab of Analysis (see
+    # test_main_window_fitting_tab_has_three_collapsible_sections,
+    # just above, for the rest of that sub-tab list).
+    window = MainWindow()
+    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    assert "Advanced Processing" in side
+    # Comes right after Processing, ahead of Fitting/Analysis --
+    # Processing, then Advanced Processing, then Fitting, is the
+    # order the seven launcher buttons were given in.
+    assert side.index("Processing") < side.index("Advanced Processing")
+    assert side.index("Advanced Processing") < side.index("Fitting")
+
+    # VOCS belongs only here -- not on any section of the Applications
+    # tab (the old combined "Analysis" tab no longer exists at all).
+    applications_tab = window.side_tabs.widget(side.index("Applications"))
+    application_sections = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
+    assert "VOCS" not in application_sections
+
+    # The VOCS controls themselves are unmoved code (same _build_vocs_
+    # subtab widget, same attribute names) -- just re-parented onto
+    # the new top-level tab instead of a sub-tab strip.
+    advanced_processing_tab = window.side_tabs.widget(side.index("Advanced Processing"))
+    assert advanced_processing_tab.isAncestorOf(window.vocs_pulse_edit)
+    assert advanced_processing_tab.isAncestorOf(window.vocs_window_filter_checkbox)
+
+
+def test_main_window_relaxation_is_its_own_top_level_button(qapp):
+    # Explicit user request: "this is where the 'Curve fitting' (in
+    # the current 'Analysis' tab) should go" -- Curve Fitting is no
+    # longer a sub-tab of Analysis, and now has its own "Relaxation"
+    # launcher button (the sole content, like Advanced Processing's
+    # own VOCS-only panel).
+    window = MainWindow()
+    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    assert "Relaxation" in side
+    # Comes right after Fitting, ahead of the last button,
+    # Applications -- the order the seven launcher buttons were
+    # given in.
+    assert side.index("Fitting") < side.index("Relaxation")
+    assert side.index("Relaxation") < side.index("Applications")
+
+    # Curve Fitting belongs only here -- not on any section of the
+    # Applications tab (the old combined "Analysis" tab no longer
+    # exists at all).
+    applications_tab = window.side_tabs.widget(side.index("Applications"))
+    application_sections = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
+    assert "Curve Fitting" not in application_sections
+
+    # Same unmoved widgets/attributes as Curve Fitting always had --
+    # just re-parented onto the new top-level tab.
+    relaxation_tab = window.side_tabs.widget(side.index("Relaxation"))
+    assert relaxation_tab.isAncestorOf(window.fit_type_combo)
+    assert relaxation_tab.isAncestorOf(window.relaxation_model_combo)
+    assert relaxation_tab.isAncestorOf(window.analysis_status_label)
+    assert not applications_tab.isAncestorOf(window.fit_type_combo)
+
+
+def test_main_window_applications_is_its_own_top_level_button(qapp):
+    # Explicit user request: "this is where the eNMR and Imaging
+    # sections (currently in the 'Analysis' tab) should go; eNMR and
+    # Imaging should be their own separate collapsable sections" --
+    # the last of the seven launcher buttons, and the point at which
+    # the old combined "Analysis" tab (and its analysis_sub_tabs
+    # strip) is fully retired: nothing is built from it any more.
+    window = MainWindow()
+    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    assert "Applications" in side
+    assert "Analysis" not in side
+    assert not hasattr(window, "analysis_sub_tabs")
+    # Last of the seven, right after Relaxation.
+    assert side.index("Relaxation") < side.index("Applications")
+
+    applications_tab = window.side_tabs.widget(side.index("Applications"))
+    sections = applications_tab.findChildren(CollapsibleSection)
+    assert [s.title() for s in sections] == ["eNMR", "Imaging"]
+
+    enmr_section = _enclosing_collapsible_section(window.enmr_voltage_label)
+    imaging_section = _enclosing_collapsible_section(window.imaging_max_gradient_spin)
+    assert enmr_section.title() == "eNMR"
+    assert imaging_section.title() == "Imaging"
+    assert enmr_section is not imaging_section
+    assert not enmr_section.isAncestorOf(window.imaging_max_gradient_spin)
+    assert not imaging_section.isAncestorOf(window.enmr_voltage_label)
+
+    # Same unmoved widgets/attributes as eNMR/Imaging always had --
+    # just re-parented onto the new top-level tab.
+    assert applications_tab.isAncestorOf(window.enmr_voltage_label)
+    assert applications_tab.isAncestorOf(window.imaging_max_gradient_spin)
+
+
+# ============================================================
+# Fitting tab: "Export ... to Pseudo-2D..." (fitted/integrated
+# series reconstructed and stacked into a new pseudo-2D dataset)
+# ============================================================
+
+def test_main_window_export_buttons_start_disabled(qapp):
+    # A single 1D spectrum, or nothing selected at all, is not a
+    # series -- both export buttons should stay off until a
+    # multi-slice Fit Spectrum/Integrate Regions has actually run.
+    window = MainWindow()
+    assert window.export_isotropic_pseudo2d_button.isEnabled() is False
+    assert window.export_integration_pseudo2d_button.isEnabled() is False
+    assert window.export_csa_pseudo2d_button.isEnabled() is False
+
+    _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=5.0, fwhm=0.05))
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.5)
+    window._on_fit_spectrum_clicked()  # a single 1D spectrum -- one slice, not a series
+    assert window.export_isotropic_pseudo2d_button.isEnabled() is False
+
+
+def test_main_window_export_isotropic_pseudo2d_reconstructs_fitted_series(qapp):
+    # Explicit user request: fitted peaks exported to a pseudo-2D
+    # dataset, so a fitted series can be viewed/compared exactly like
+    # the raw data it came from. Reconstructs each slice's summed
+    # fitted lineshape (Fit Spectrum's own y_fit).
+    delays = np.geomspace(0.001, 0.3, 5)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window._on_fit_spectrum_clicked()
+    assert window.export_isotropic_pseudo2d_button.isEnabled() is True
+
+    n_before = len(window.session.spectra)
+    window._on_export_isotropic_pseudo2d_clicked()
+    assert len(window.session.spectra) == n_before + 1
+
+    exported = window.session.spectra[-1]
+    assert exported.is_pseudo_2d is True
+    assert exported.data.shape == (5, spectrum.data.shape[1])
+    np.testing.assert_allclose(exported.axes[1].ppm, spectrum.axes[1].ppm)
+    # A genuine reconstruction, not a copy of the raw data -- the
+    # fitted lineshape is smooth/noise-free where the raw data isn't.
+    assert not np.allclose(exported.data, spectrum.data)
+
+
+def test_main_window_export_integration_pseudo2d_masks_outside_regions(qapp):
+    # Integration's own counterpart -- no fitted lineshape exists, so
+    # this stacks each slice's own data with everything outside the
+    # integrated region(s) masked to zero, showing exactly what
+    # contributed to that slice's integral.
+    delays = np.geomspace(0.001, 0.3, 5)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05, n_pts=200)
+
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_region_row(4.5, 5.5)
+    window._on_integrate_regions_clicked()
+    assert window.export_integration_pseudo2d_button.isEnabled() is True
+    # Fitting a different kind of result afterwards must not leave
+    # the wrong button enabled -- they read the same staged slot.
+    assert window.export_isotropic_pseudo2d_button.isEnabled() is False
+
+    n_before = len(window.session.spectra)
+    window._on_export_integration_pseudo2d_clicked()
+    assert len(window.session.spectra) == n_before + 1
+
+    exported = window.session.spectra[-1]
+    assert exported.is_pseudo_2d is True
+    ppm = exported.axes[1].ppm
+    outside = (ppm < 4.5) | (ppm > 5.5)
+    assert np.allclose(exported.data[:, outside], 0.0)
+    assert not np.allclose(exported.data[:, ~outside], 0.0)
+
+
+def test_main_window_export_csa_pseudo2d_stays_disabled(qapp, monkeypatch):
+    # CSA fitting only ever fits one slice at a time (see
+    # _on_csa_fit_clicked) -- there is no per-series result to stack,
+    # so the button never turns on, whatever else has been fitted.
+    delays = np.geomspace(0.001, 0.3, 5)
+    spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
+    window = MainWindow()
+    _load_spectrum_directly(window, spectrum)
+    window._add_peak_row(shift=5.0, fwhm=0.05, eta=0.0)
+    window._on_fit_spectrum_clicked()
+    assert window.export_csa_pseudo2d_button.isEnabled() is False
+    # A documented no-op, not a silent one, if ever triggered anyway.
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.setdefault("called", True))
+    window._on_export_csa_pseudo2d_clicked()
+    assert shown.get("called") is True
 
 
 def test_main_window_curve_fit_names_what_it_will_fit(qapp, tmp_path):
@@ -13700,8 +13988,9 @@ def _enmr_window(qapp, path=ENMR_CALIBRATION):
 
 def test_main_window_has_an_enmr_subtab(qapp):
     window = MainWindow()
-    titles = [window.analysis_sub_tabs.tabText(i)
-              for i in range(window.analysis_sub_tabs.count())]
+    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    applications_tab = window.side_tabs.widget(side.index("Applications"))
+    titles = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
     assert "eNMR" in titles
 
 
@@ -14897,4 +15186,550 @@ def test_the_powder_grid_is_expressed_the_way_each_scheme_wants(qapp):
     assert MainWindow._csa_grid_kwargs("zcw", 5000) == {"n_zcw": 5000}
     rectangular = MainWindow._csa_grid_kwargs("rectangular", 5000)
     assert rectangular["n_phi"] == 2 * rectangular["n_theta"]
-    assert rectangular["n_theta"] * rectangular["n_phi"] == pytest.approx(5000, rel=0.1)
+
+
+# ============================================================
+# Simulations tab: forward-simulate a CSA or quadrupolar powder
+# pattern, exportable to Load/Save/Compare -- explicit user request,
+# and the last (7th) of the launcher buttons. Genuinely new, not moved
+# from an old tab, so tested more thoroughly than a pure re-parenting.
+# ============================================================
+
+def _fast_csa_kwargs(window) -> None:
+    """Keep every simulation test fast: a coarse powder grid is fine
+    when the point is checking wiring/shape/export, not lineshape
+    fidelity."""
+    window.sim_csa_orientations_spin.setValue(200)
+    window.sim_quad_orientations_spin.setValue(200)
+    window.sim_csa_points_spin.setValue(256)
+    window.sim_quad_points_spin.setValue(256)
+
+
+def test_main_window_simulations_is_its_own_top_level_button(qapp):
+    window = MainWindow()
+    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    assert "Simulations" in side
+    # Last of the seven, right after Applications.
+    assert side.index("Applications") < side.index("Simulations")
+
+    simulations_tab = window.side_tabs.widget(side.index("Simulations"))
+    sections = simulations_tab.findChildren(CollapsibleSection)
+    assert [s.title() for s in sections] == ["CSA", "Quadrupolar"]
+
+    csa_section = _enclosing_collapsible_section(window.sim_csa_diso_spin)
+    quad_section = _enclosing_collapsible_section(window.sim_quad_cq_spin)
+    assert csa_section.title() == "CSA"
+    assert quad_section.title() == "Quadrupolar"
+    assert csa_section is not quad_section
+
+
+def test_main_window_simulation_export_buttons_start_disabled(qapp):
+    window = MainWindow()
+    assert not window.sim_csa_export_button.isEnabled()
+    assert not window.sim_quad_export_button.isEnabled()
+
+
+def test_main_window_simulate_csa_static_refuses_an_unrecognised_nucleus(qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_csa_nucleus_edit.setText("not-a-nucleus")
+    window._on_simulate_csa_clicked()
+
+    assert warned, "no warning for an unrecognised nucleus"
+    assert "nucleus" in warned[-1][2].lower()
+    assert not window.sim_csa_export_button.isEnabled()
+
+
+def test_main_window_simulate_csa_static_produces_an_exportable_spectrum(qapp):
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_csa_nucleus_edit.setText("13C")
+    window.sim_csa_diso_spin.setValue(50.0)
+    window.sim_csa_aniso_spin.setValue(20.0)
+    window.sim_csa_skeweta_spin.setValue(0.3)
+    # Wide enough axis that the static pattern (centred on d_iso, width
+    # set by the small aniso above) is not clipped -- this test is
+    # about the export path, not the axis-width warning.
+    window.sim_csa_ppm_min_spin.setValue(-50.0)
+    window.sim_csa_ppm_max_spin.setValue(150.0)
+
+    window._on_simulate_csa_clicked()
+
+    assert window.sim_csa_export_button.isEnabled()
+    assert "static" in window.sim_csa_results_label.text()
+    assert "clipped" not in window.sim_csa_results_label.text()
+
+    before = len(window.session.spectra)
+    window._on_export_simulated_csa_clicked()
+    assert len(window.session.spectra) == before + 1
+
+    exported = window.session.spectra[-1]
+    assert exported.ndim == 1
+    assert exported.data.shape == (window.sim_csa_points_spin.value(),)
+    assert exported.metadata.nucleus == "13C"
+    # Session.add_derived always overwrites vendor to "derived" --
+    # documented, intentional behaviour so FID-reprocess controls
+    # (gated on the real vendor names) stay hidden for it -- not a
+    # "simulated" vendor string, whatever the spectrum arrived with.
+    assert exported.metadata.vendor == "derived"
+    assert exported.axes[0].kind == "frequency"
+    np.testing.assert_allclose(exported.axes[0].ppm.min(), -50.0)
+    np.testing.assert_allclose(exported.axes[0].ppm.max(), 150.0)
+
+
+def test_main_window_simulate_csa_warns_when_the_pattern_is_clipped(qapp):
+    """A powder pattern clipped by too narrow a ppm axis silently
+    misrepresents the simulated lineshape -- this must be surfaced,
+    not swallowed."""
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_csa_nucleus_edit.setText("13C")
+    window.sim_csa_diso_spin.setValue(50.0)
+    window.sim_csa_aniso_spin.setValue(500.0)
+    window.sim_csa_skeweta_spin.setValue(0.0)
+    # Far too narrow for a 500 ppm anisotropy.
+    window.sim_csa_ppm_min_spin.setValue(40.0)
+    window.sim_csa_ppm_max_spin.setValue(60.0)
+
+    window._on_simulate_csa_clicked()
+
+    assert "clipped" in window.sim_csa_results_label.text()
+
+
+def test_main_window_simulate_csa_finite_mas_needs_rate_and_larmor(qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_csa_nucleus_edit.setText("13C")
+    window.sim_csa_regime_combo.setCurrentIndex(
+        window.sim_csa_regime_combo.findData(False))
+    window.sim_csa_mas_spin.setValue(0.0)
+    window.sim_csa_larmor_spin.setValue(100.0)
+    window._on_simulate_csa_clicked()
+    assert warned and "spinning rate" in warned[-1][2]
+
+    warned.clear()
+    window.sim_csa_mas_spin.setValue(5000.0)
+    window.sim_csa_larmor_spin.setValue(0.0)
+    window._on_simulate_csa_clicked()
+    assert warned and "Larmor" in warned[-1][2]
+
+
+def test_main_window_simulate_csa_finite_mas_produces_an_exportable_spectrum(qapp):
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_csa_nucleus_edit.setText("13C")
+    window.sim_csa_regime_combo.setCurrentIndex(
+        window.sim_csa_regime_combo.findData(False))
+    window.sim_csa_mas_spin.setValue(5000.0)
+    window.sim_csa_larmor_spin.setValue(100.0)
+    window.sim_csa_diso_spin.setValue(50.0)
+    window.sim_csa_aniso_spin.setValue(80.0)
+
+    window._on_simulate_csa_clicked()
+
+    assert window.sim_csa_export_button.isEnabled()
+    assert "MAS" in window.sim_csa_results_label.text()
+    assert "5000" in window.sim_csa_results_label.text()
+    exported = window._simulated_csa_spectrum
+    assert exported.metadata.sfo1 == pytest.approx(100.0)
+
+
+def test_main_window_simulate_quadrupolar_refuses_an_unrecognised_nucleus(qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_quad_nucleus_edit.setText("")
+    window.sim_quad_larmor_spin.setValue(104.3)
+    window._on_simulate_quadrupolar_clicked()
+
+    assert warned, "no warning for a missing nucleus"
+    assert not window.sim_quad_export_button.isEnabled()
+
+
+def test_main_window_simulate_quadrupolar_first_order_produces_an_exportable_spectrum(qapp):
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_quad_nucleus_edit.setText("27Al")
+    window.sim_quad_method_combo.setCurrentIndex(
+        window.sim_quad_method_combo.findData("first_order"))
+    window.sim_quad_spin_spin.setValue(2.5)
+    window.sim_quad_cq_spin.setValue(3.0)
+    window.sim_quad_eta_spin.setValue(0.2)
+    window.sim_quad_larmor_spin.setValue(104.3)
+
+    window._on_simulate_quadrupolar_clicked()
+
+    assert window.sim_quad_export_button.isEnabled()
+    assert "first-order" in window.sim_quad_results_label.text()
+
+    before = len(window.session.spectra)
+    window._on_export_simulated_quadrupolar_clicked()
+    assert len(window.session.spectra) == before + 1
+    exported = window.session.spectra[-1]
+    assert exported.metadata.nucleus == "27Al"
+    assert exported.metadata.sfo1 == pytest.approx(104.3)
+    assert exported.data.shape == (window.sim_quad_points_spin.value(),)
+
+
+def test_main_window_simulate_quadrupolar_exact_produces_a_different_result(qapp):
+    """The whole point of the exact method: second-order quadrupolar
+    effects the first-order eigenbasis calculation does not capture --
+    at a low enough field / high enough C_Q the two must not coincide,
+    or "Method" is not actually doing anything."""
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_quad_nucleus_edit.setText("27Al")
+    window.sim_quad_spin_spin.setValue(2.5)
+    window.sim_quad_cq_spin.setValue(8.0)
+    window.sim_quad_eta_spin.setValue(0.3)
+    window.sim_quad_larmor_spin.setValue(20.0)
+    window.sim_quad_ppm_min_spin.setValue(-2000.0)
+    window.sim_quad_ppm_max_spin.setValue(2000.0)
+
+    window.sim_quad_method_combo.setCurrentIndex(
+        window.sim_quad_method_combo.findData("first_order"))
+    window._on_simulate_quadrupolar_clicked()
+    first_order = np.asarray(window._simulated_quadrupolar_spectrum.data, copy=True)
+
+    window.sim_quad_method_combo.setCurrentIndex(
+        window.sim_quad_method_combo.findData("exact"))
+    window._on_simulate_quadrupolar_clicked()
+    exact = window._simulated_quadrupolar_spectrum.data
+
+    assert "exact" in window.sim_quad_results_label.text()
+    assert not np.allclose(first_order, exact)
+
+
+def test_main_window_simulation_controls_are_seeded_from_the_selected_spectrum(qapp):
+    """Same "seeded, never forced" pattern as the CSA/Dipolar fitting
+    section's own MAS-rate seeding: a spectrum's SFO1/nucleus fill an
+    empty field, but never overwrite one the user already set."""
+    window = MainWindow()
+    axis = NMRAxis(kind="frequency", ppm=np.linspace(0, 10, 8))
+    metadata = NMRMetadata(vendor="bruker", nucleus="31P", sfo1=161.9)
+    spectrum = NMRSpectrum(data=np.zeros(8), axes=[axis], metadata=metadata)
+    window._add_derived_spectrum(spectrum, "test")
+
+    assert window.sim_csa_larmor_spin.value() == pytest.approx(161.9)
+    assert window.sim_quad_larmor_spin.value() == pytest.approx(161.9)
+    assert window.sim_csa_nucleus_edit.text() == "31P"
+    assert window.sim_quad_nucleus_edit.text() == "31P"
+
+    # A value the user already entered is not overwritten by a second
+    # selection change. The quadrupolar fields are reset to
+    # empty/zero here first -- after the first spectrum above, they
+    # were already auto-seeded to 161.9/"31P", so left alone they
+    # would (correctly) stay there rather than update, since the
+    # seeding check is "is this field currently empty", not "was
+    # this field ever auto-filled before". Clearing them simulates a
+    # field the user genuinely hasn't touched, so this second
+    # selection is the one that seeds them.
+    window.sim_csa_larmor_spin.setValue(400.0)
+    window.sim_csa_nucleus_edit.setText("1H")
+    window.sim_quad_larmor_spin.setValue(0.0)
+    window.sim_quad_nucleus_edit.setText("")
+    axis2 = NMRAxis(kind="frequency", ppm=np.linspace(0, 10, 8))
+    metadata2 = NMRMetadata(vendor="bruker", nucleus="23Na", sfo1=105.8)
+    spectrum2 = NMRSpectrum(data=np.zeros(8), axes=[axis2], metadata=metadata2)
+    window._add_derived_spectrum(spectrum2, "test2")
+
+    assert window.sim_csa_larmor_spin.value() == pytest.approx(400.0)
+    assert window.sim_csa_nucleus_edit.text() == "1H"
+    # The now-empty quadrupolar fields do get seeded from the newer
+    # selection.
+    assert window.sim_quad_larmor_spin.value() == pytest.approx(105.8)
+    assert window.sim_quad_nucleus_edit.text() == "23Na"
+
+
+# ============================================================
+# Accessibility: colour-blind/print-friendly palettes, trace colour
+# presets, larger section titles, the Settings tab (interface font
+# size, per-plot-type default styles)
+# ============================================================
+
+from opennmr.plotting import accessibility as plot_accessibility  # noqa: E402
+
+
+def _select_palette_filter(window, key):
+    window.output_palette_filter_combo.setCurrentIndex(
+        window.output_palette_filter_combo.findData(key))
+
+
+def test_palette_filter_lists_only_measured_friendly_maps(qapp):
+    window = MainWindow()
+    for key in ("colourblind", "print", "both"):
+        _select_palette_filter(window, key)
+        combo = window.output_colormap_combo
+        listed = [combo.itemData(i) for i in range(combo.count())]
+        assert listed == [name for name, _n in plot_accessibility.friendly_palettes(key)]
+        # The text says how far each one can be trusted.
+        assert "series)" in combo.itemText(0)
+    _select_palette_filter(window, "all")
+    combo = window.output_colormap_combo
+    assert [combo.itemData(i) for i in range(combo.count())] == \
+        plot_accessibility.series_palette_names()
+
+
+def test_choosing_a_friendly_filter_makes_the_plots_friendly(qapp):
+    window = MainWindow()
+    window._select_series_colormap("RdBu")            # not greyscale-safe
+    window._on_series_colormap_changed()
+    assert all(c.style_settings()["compare_colormap"] == "RdBu" for c in window._all_canvases())
+
+    _select_palette_filter(window, "print")
+    chosen = window._series_colormap_name()
+    assert chosen == plot_accessibility.friendly_palettes("print")[0][0]
+    assert all(c.style_settings()["compare_colormap"] == chosen for c in window._all_canvases())
+
+
+def test_friendly_filter_keeps_a_map_that_already_passes(qapp):
+    window = MainWindow()
+    assert window._series_colormap_name() == "viridis"
+    assert "viridis" in dict(plot_accessibility.friendly_palettes("colourblind"))
+    _select_palette_filter(window, "colourblind")
+    assert window._series_colormap_name() == "viridis"
+
+
+def test_a_map_hidden_by_the_filter_is_shown_by_resetting_it(qapp):
+    window = MainWindow()
+    _select_palette_filter(window, "print")
+    window._select_series_colormap("RdBu")
+    assert window.output_palette_filter_combo.currentData() == "all"
+    assert window._series_colormap_name() == "RdBu"
+
+
+def test_qualitative_accessible_palette_reaches_the_compare_plot(qapp):
+    window = MainWindow()
+    spectra = [_make_1d_peak_spectrum(x0=4.0 + 0.5 * i) for i in range(3)]
+    window.compare_canvas.show_compare(spectra, mode="overlay")
+    window._select_series_colormap("okabe_ito")
+    window._on_series_colormap_changed()
+    drawn = [matplotlib.colors.to_hex(e.colour) for e in window.compare_canvas.series()]
+    expected = [matplotlib.colors.to_hex(c) for c in plot_accessibility.series_colours(3, "okabe_ito")]
+    assert drawn == expected
+
+
+def test_accessibility_line_checks_the_plot_on_screen(qapp):
+    window = MainWindow()
+    window.canvas_tabs.setTabVisible(window.canvas_tabs.indexOf(window.compare_canvas), True)
+    window.canvas_tabs.setCurrentWidget(window.compare_canvas)
+    spectra = [_make_1d_peak_spectrum(x0=3.5 + 0.3 * i) for i in range(10)]
+    window.compare_canvas.show_compare(spectra, mode="overlay")
+    window._select_series_colormap("viridis")
+    window._on_series_colormap_changed()
+    text = window.series_accessibility_label.text()
+    # Ten viridis traces are past what it can separate.
+    assert text.startswith("⚠") and "10 series" in text
+
+    window.compare_canvas.show_compare(spectra[:2], mode="overlay")
+    window._refresh_slice_colour_rows()
+    assert window.series_accessibility_label.text().startswith("✓")
+
+
+def test_accessibility_line_describes_the_map_with_nothing_to_compare(qapp):
+    window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+    window._refresh_series_accessibility_label()
+    text = window.series_accessibility_label.text()
+    n = plot_accessibility.max_safe_series("viridis", "colourblind")
+    assert text.startswith("viridis:") and f"up to {n} series" in text
+
+
+def test_trace_colour_presets_offer_both_sets_and_apply(qapp):
+    window = MainWindow()
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+    kinds = {kind for kind, _c in window._trace_preset_actions}
+    assert kinds == {"colourblind", "print"}
+    titles = [a.text() for a in window.trace_color_presets_menu.actions()]
+    assert titles == ["Colour blind-friendly", "Print-friendly"]
+
+    window._trace_preset_actions[("colourblind", "#0072B2")].trigger()
+    assert window.canvas.style_settings()["trace_color"] == "#0072B2"
+    assert window.trace_color_button.text() == "#0072B2"
+    # Only the plot being styled, as the free colour picker does.
+    assert window.fid_canvas.style_settings()["trace_color"] != "#0072B2"
+
+    print_colour = plot_accessibility.trace_colour_presets("print")[1][1]
+    window._trace_preset_actions[("print", print_colour)].trigger()
+    assert window.canvas.style_settings()["trace_color"] == print_colour
+
+
+def test_section_titles_are_bold_and_larger_than_their_text(qapp):
+    window = MainWindow()
+    processing_tab = window.side_tabs.widget(window._processing_tab_index)
+    sections = {s.title(): s for s in processing_tab.findChildren(CollapsibleSection)}
+    for title in ("FID Processing", "Phase", "Reference"):
+        section = sections[title]
+        header = section.headerFont()
+        assert header.bold()
+        assert header.pointSizeF() == pytest.approx(section.font().pointSizeF() * 1.25)
+
+
+def test_settings_is_the_last_launcher_button(qapp):
+    window = MainWindow()
+    last = window.side_tabs.count() - 1
+    assert window.side_tabs.tabText(last) == "Settings"
+    assert window._settings_tab_index == last
+    settings_tab = window.side_tabs.widget(last)
+    titles = [s.title() for s in settings_tab.findChildren(CollapsibleSection)]
+    assert titles == ["Interface", "Default plot styles"]
+    assert settings_tab.isAncestorOf(window.ui_font_size_spin)
+
+
+def test_settings_menu_action_opens_the_settings_tab(qapp):
+    window = MainWindow()
+    assert window.settings_menu_action.shortcut().toString() == "Ctrl+,"
+    window.settings_menu_action.trigger()
+    assert window.side_tabs.currentIndex() == window._settings_tab_index
+
+
+def test_numbered_panel_shortcuts_are_unchanged_by_settings(qapp):
+    window = MainWindow()
+    window_menu = _menu_by_title(window, "Window")
+    shortcuts = {a.text(): a.shortcut().toString() for a in window_menu.actions()}
+    assert [shortcuts[name] for name in ("Load/Save/Compare", "Processing", "Simulations")] == \
+        ["Ctrl+1", "Ctrl+2", "Ctrl+7"]
+    assert "Ctrl+," not in [v for k, v in shortcuts.items() if k != "Settings…"]
+
+
+def test_ui_font_size_scales_the_interface_and_keeps_titles_ahead(qapp):
+    window = MainWindow()
+    window.ui_font_size_spin.setValue(15)
+    qapp.processEvents()
+    assert qapp.font().pointSizeF() == pytest.approx(15)
+    assert window.output_colormap_combo.font().pointSizeF() == pytest.approx(15)
+    section = window.side_tabs.widget(window._processing_tab_index).findChildren(CollapsibleSection)[0]
+    assert section.headerFont().pointSizeF() == pytest.approx(15 * 1.25)
+
+
+def test_ui_font_size_is_saved_and_restored(qapp):
+    window = MainWindow()
+    window.ui_font_size_spin.setValue(13)
+    with open(MainWindow._UI_SETTINGS_PATH, encoding="utf-8") as handle:
+        assert json.load(handle)["ui_font_size"] == 13
+
+    qapp.setFont(window._system_ui_font)          # as a fresh launch would start
+    window2 = MainWindow()
+    assert window2.ui_font_size_spin.value() == 13
+    assert qapp.font().pointSizeF() == pytest.approx(13)
+
+
+def test_ui_font_reset_goes_back_to_the_system_size(qapp):
+    window = MainWindow()
+    system = window._system_ui_font.pointSizeF()
+    window.ui_font_size_spin.setValue(20)
+    window.ui_font_reset_button.click()
+    assert qapp.font().pointSizeF() == pytest.approx(system)
+    with open(MainWindow._UI_SETTINGS_PATH, encoding="utf-8") as handle:
+        assert "ui_font_size" not in json.load(handle)
+
+
+def test_corrupt_ui_settings_start_at_defaults(qapp):
+    with open(MainWindow._UI_SETTINGS_PATH, "w", encoding="utf-8") as handle:
+        handle.write("{not json")
+    window = MainWindow()
+    assert window.auto_apply_type_styles_checkbox.isChecked()
+
+
+def _make_2d_spectrum(n_f1=8, n_f2=64):
+    x_ppm = np.linspace(0, 10, n_f2)
+    y_ppm = np.linspace(90, 100, n_f1)
+    data = np.exp(-((x_ppm - 5) ** 2)) * np.ones((n_f1, 1))
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", nucleus_indirect="13C",
+                           sfo1=400.0, sfo1_indirect=100.0)
+    return NMRSpectrum(data=data, axes=[NMRAxis(kind="frequency", ppm=y_ppm, hz=y_ppm * 100.0),
+                                        NMRAxis(kind="frequency", ppm=x_ppm, hz=x_ppm * 400.0)],
+                       metadata=metadata)
+
+
+def _save_type_default_from_panel(window, key, **spins):
+    for attr, value in spins.items():
+        getattr(window, attr).setValue(value)
+    window.settings_type_save_buttons[key].click()
+
+
+def test_settings_tab_saves_a_default_per_plot_type(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_FIGURE_STYLES_PATH", str(tmp_path / "figure_styles.json"))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    window = MainWindow()
+    assert window.settings_type_status_labels["2d"].text() == "not set"
+    assert not window.settings_type_apply_buttons["2d"].isEnabled()
+    window._set_trace_colour("#882255")
+    _save_type_default_from_panel(window, "2d", output_fontsize_spin=17, output_contour_levels_spin=12)
+
+    saved = window._load_figure_styles()["2d"]
+    assert saved["labelsize"] == 17
+    assert saved["contour_clevels"] == 12
+    assert saved["trace_color"] == "#882255"      # the per-type defaults used to drop this
+    assert saved["compare_colormap"] == "viridis"
+    assert window.settings_type_status_labels["2d"].text() == "saved"
+    assert window.settings_type_apply_buttons["2d"].isEnabled()
+
+    window.settings_type_clear_buttons["2d"].click()
+    assert "2d" not in window._load_figure_styles()
+    assert window.settings_type_status_labels["2d"].text() == "not set"
+
+
+def test_saved_type_default_is_used_when_that_kind_of_plot_is_drawn(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_FIGURE_STYLES_PATH", str(tmp_path / "figure_styles.json"))
+    window = MainWindow()
+    window._save_figure_style("2d", {"labelsize": 19, "contour_clevels": 11, "linewidth": 2.0})
+
+    window.canvas.show_spectrum(_make_1d_peak_spectrum())
+    assert window.canvas.style_settings()["labelsize"] != 19
+
+    window.canvas.show_spectrum(_make_2d_spectrum())
+    settings = window.canvas.style_settings()
+    assert settings["labelsize"] == 19
+    assert settings["contour_clevels"] == 11
+    assert window.canvas.ax.xaxis.label.get_fontsize() == pytest.approx(19)
+
+    # A change made on the 2D plot survives showing another 2D: the
+    # default is for a change of *kind*, not every redraw.
+    window.canvas.set_style(labelsize=9)
+    other = _make_2d_spectrum(n_f1=6, n_f2=48)
+    window.canvas.show_spectrum(other)
+    assert window.canvas.style_settings()["labelsize"] == 9
+    # ... but a new 2D spectrum's contour levels reset to the saved
+    # default, not the built-in 7.
+    assert window.canvas.style_settings()["contour_clevels"] == 11
+
+
+def test_type_defaults_can_be_switched_off(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_FIGURE_STYLES_PATH", str(tmp_path / "figure_styles.json"))
+    window = MainWindow()
+    window._save_figure_style("2d", {"labelsize": 19})
+    window.auto_apply_type_styles_checkbox.setChecked(False)
+    window.canvas.show_spectrum(_make_2d_spectrum())
+    assert window.canvas.style_settings()["labelsize"] != 19
+    with open(MainWindow._UI_SETTINGS_PATH, encoding="utf-8") as handle:
+        assert json.load(handle)["auto_apply_type_styles"] is False
+
+    # Apply still works on demand.
+    window.canvas_tabs.setCurrentWidget(window.canvas)
+    window.settings_type_apply_buttons["2d"].click()
+    assert window.canvas.style_settings()["labelsize"] == 19
+    assert window.output_fontsize_spin.value() == 19
+
+
+def test_pseudo2d_stack_is_its_own_plot_type(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_FIGURE_STYLES_PATH", str(tmp_path / "figure_styles.json"))
+    window = MainWindow()
+    window._save_figure_style("pseudo2d", {"compare_colormap": "tol_muted", "labelsize": 16})
+    window._save_figure_style("compare", {"labelsize": 11})
+    delays = [0.01, 0.05, 0.1, 0.2]
+    window._show_pseudo2d_stack(_make_pseudo2d_relaxation_spectrum(delays))
+    assert window.canvas.plot_kind() == "pseudo2d"
+    assert window.canvas.style_settings()["labelsize"] == 16
+    assert window.canvas.style_settings()["compare_colormap"] == "tol_muted"

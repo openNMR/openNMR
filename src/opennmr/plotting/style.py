@@ -29,6 +29,13 @@ import matplotlib.colors as cl
 from matplotlib import cm
 from matplotlib.ticker import MaxNLocator
 
+# Registers the colour-blind-friendly qualitative palettes (Okabe-Ito,
+# Tol) with matplotlib, so every colormap argument in the package --
+# notebook API included, which imports this module -- accepts them.
+from .accessibility import is_qualitative, register_palettes
+
+register_palettes()
+
 VALID_SAVE_FORMATS = ("png", "pdf", "svg")
 
 #: Relative luminance above which a colour is treated as **too light to
@@ -323,6 +330,45 @@ def apply_spine_style(ax, top=False, right=False, bottom=True, left=True, linewi
     return ax
 
 
+def apply_default_font(font='Arial'):
+    """Set the process-wide matplotlib default typeface -- both for
+    ordinary text (``font.family``/``font.sans-serif``, falling back
+    through a chain of very-likely-installed sans faces so a machine
+    without ``font`` installed still gets *a* clean sans-serif rather
+    than a warning and a silent substitution to matplotlib's own
+    default) and for mathtext (``mathtext.rm``/``it``/``bf``, which
+    govern the actual glyphs behind every ``\mathregular{}`` in a
+    nuclide axis label -- see :func:`opennmr.core.registry.NUC_label`
+    -- since those are never reachable through a per-``Text``-artist
+    ``set_fontfamily()`` call).
+
+    This is deliberately **not** ``setup_plotting``: that also pins
+    tick/spine sizing and figure dimensions, which the GUI canvas has
+    to keep per-instance (see this module's own docstring for why the
+    GUI never calls ``setup_plotting`` itself). Typeface is different
+    -- there is exactly one matplotlib font manager and one mathtext
+    engine per process, so "the default face" can only ever be one
+    global choice, however many canvases are open, and setting it
+    once is not the kind of per-canvas restyling that docstring warns
+    against.
+
+    Called once at GUI startup (see
+    :class:`opennmr.gui.main_window.MainWindow`) so the very first
+    plot already has a pleasant default instead of matplotlib's own
+    DejaVu Sans -- explicit user request: "add Arial as the default
+    font, not the unpleasant matplotlib default". ``setup_plotting``
+    also calls this, so a standalone script/notebook figure gets the
+    same default typeface as the GUI, not a second one.
+    """
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = [font, 'DejaVu Sans', 'Bitstream Vera Sans', 'Arial', 'Helvetica', 'sans-serif']
+    plt.rcParams['mathtext.fontset'] = 'custom'
+    plt.rcParams['mathtext.rm'] = font
+    plt.rcParams['mathtext.it'] = f'{font}:italic'
+    plt.rcParams['mathtext.bf'] = f'{font}:bold'
+    plt.rcParams['mathtext.default'] = 'regular'
+
+
 def setup_plotting(font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
                     output_format=''):
     """Apply the shared matplotlib style and resolve figure dimensions
@@ -348,17 +394,15 @@ def setup_plotting(font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
     lw = pl_width / 3.375
     ticklen = lw * 5
 
-    plt.rcParams['font.sans-serif'] = [font, 'DejaVu Sans', 'Bitstream Vera Sans', 'Arial', 'Helvetica', 'sans-serif']
-
-    plt.rcParams['mathtext.fontset'] = 'custom'
-    plt.rcParams['mathtext.rm'] = font      
-    plt.rcParams['mathtext.it'] = f'{font}:italic'
-    plt.rcParams['mathtext.bf'] = f'{font}:bold'
-    plt.rcParams['mathtext.default'] = 'regular'  
+    # Typeface (family + mathtext) is factored out into its own
+    # function -- see apply_default_font's docstring for why the GUI
+    # also calls it directly, on its own, without the rest of what
+    # this function sets.
+    apply_default_font(font)
 
     params = {
         'legend.fontsize': 'large',
-        'font.family': 'sans-serif',
+        # 'font.family'/'font.sans-serif' -- set by apply_default_font above.
         'font.weight': 'regular',
         'axes.labelsize': fontsize,
         'axes.titlesize': fontsize,
@@ -443,7 +487,13 @@ def usable_cmap_positions(cmap, max_luminance: float = None,
     there.
     """
     positions = np.linspace(0.0, 1.0, int(samples))
-    luminance = np.array([relative_luminance(cmap(p)[:3]) for p in positions])
+    # Vectorised form of relative_luminance over every sample at once
+    # (same linearisation and weights) -- the per-sample loop was the
+    # bulk of the time the palette accessibility checks took.
+    channels = np.asarray(cmap(positions), dtype=float)[:, :3]
+    linear = np.where(channels <= 0.03928, channels / 12.92,
+                      ((channels + 0.055) / 1.055) ** 2.4)
+    luminance = linear @ np.array([0.2126, 0.7152, 0.0722])
     cap = MAX_LINE_LUMINANCE if max_luminance is None else max_luminance
     usable = positions[luminance <= cap]
     if usable.size:
@@ -515,9 +565,24 @@ def stack_colors(n, color='black', max_luminance: float = None):
     Every returned colour is guaranteed under the cap: a map with
     nothing dark enough in it (an all-white one) has its darkest colour
     scaled toward black rather than being handed back unusable.
+
+    A *qualitative* palette (a short listed map -- ``okabe_ito``,
+    ``tol_muted``, ``Dark2``, ``tab10`` ...) is not sampled at all:
+    series take its entries in turn, see
+    :func:`opennmr.plotting.accessibility.ordered_qualitative_colours`.
     """
     if n <= 0:
         return []
+    if color not in ('black', 'diverging') and is_qualitative(color):
+        # A set of categories, not a ramp: series take its entries in
+        # turn (cycling past the end), in the order that keeps the
+        # first n as far apart as possible -- sampling it like a ramp
+        # skipped entries and, via readable_cmap, blended neighbours
+        # into colours belonging to neither. See
+        # accessibility.ordered_qualitative_colours.
+        from .accessibility import ordered_qualitative_colours
+        palette = ordered_qualitative_colours(color, max_luminance)
+        return [palette[i % len(palette)] for i in range(n)]
     cmap = get_stack_colormap(color)
     usable = usable_cmap_positions(cmap, max_luminance)
     if n == 1:
@@ -730,7 +795,8 @@ def _max_abs_bin(data, coords, n_bins, axis):
     return reduced, reduced_coords
 
 
-#: Default cap for :func:`downsample_indices` -- rendering (not
+#: Default cap for :func:`downsample_1d` (and the older, no-longer-
+#: used-internally :func:`downsample_indices`) -- rendering (not
 #: fitting/processing) more points than this per 1D line rarely adds
 #: visible detail at any normal screen resolution, but does cost real
 #: time redrawing, especially for a *dynamic* view (phase-dragging
@@ -752,13 +818,54 @@ def downsample_indices(n, max_points=DOWNSAMPLE_1D_MAX_POINTS):
     actually needed.
 
     Deterministic in ``n``/``max_points`` alone (no data-dependent
-    peak-preservation logic) so that re-deriving it later for a
-    same-length array -- e.g. :meth:`~opennmr.gui.widgets.canvas.MplCanvas.update_data`
-    updating a line's y-values in place after :func:`~opennmr.plotting.oned.plot_1d`
-    already downsampled its x -- reproduces the exact same indices,
-    without either function needing to remember or pass them to the
-    other.
+    peak-preservation logic) -- naive even-striding, kept here for any
+    external caller that wants exactly that. **Not used by this
+    project's own GUI rendering any more** (see :func:`downsample_1d`):
+    reported directly as a real problem, not just a cosmetic one --
+    a narrow, well-digitized peak can fall entirely between two
+    evenly-spaced samples, showing "a well-defined peak" as a mostly
+    flat line broken by a couple of stray points, since which sample
+    each stride happens to land on has nothing to do with where the
+    signal actually is.
     """
     if n <= max_points:
         return None
     return np.linspace(0, n - 1, max_points, dtype=int)
+
+
+def downsample_1d(x, y, max_points=DOWNSAMPLE_1D_MAX_POINTS):
+    """Peak-preserving downsample of a 1D line for *display* only --
+    :func:`downsample_2d`'s own ``_max_abs_bin`` binning, applied to a
+    line instead of a contour's rows/columns. Splits ``y`` into
+    ``max_points`` contiguous bins and keeps the largest-magnitude
+    (signed) sample in each bin, rather than an arbitrary evenly-
+    spaced pick (:func:`downsample_indices`'s naive striding) that can
+    land entirely off a narrow peak and miss it altogether -- reported
+    directly as "a peak that's well-defined elsewhere is only made of
+    three or four points" in a downsampled view.
+
+    Returns ``(x, y)`` unchanged (same objects, not copies) when
+    ``len(y) <= max_points`` -- no downsampling needed at all, the
+    same no-op contract :func:`downsample_2d` and
+    :func:`downsample_indices` both already have.
+
+    ``x`` may be ``None`` when only the downsampled *y*-values are
+    needed and the corresponding x is already known to be unchanged --
+    e.g. refreshing an existing line's y-data in place after a phase
+    change, where the x already on screen doesn't need re-deriving.
+    The bin *boundaries* only ever depend on ``len(y)``/``max_points``
+    (never on ``x``'s own values, or ``y``'s), so re-calling this with
+    new ``y`` values always reproduces bins aligned to whatever x was
+    already plotted -- only *which* sample wins each bin can change,
+    because that part *is* data-dependent (a phase change can move
+    where the largest-magnitude sample in a bin actually is). Returns
+    ``None`` in place of the x half whenever the input ``x`` was
+    ``None``.
+    """
+    y = np.asarray(y)
+    n = len(y)
+    if n <= max_points:
+        return x, y
+    coords = np.arange(n) if x is None else np.asarray(x)
+    y_ds, x_ds = _max_abs_bin(y, coords, max_points, axis=0)
+    return (None if x is None else x_ds), y_ds

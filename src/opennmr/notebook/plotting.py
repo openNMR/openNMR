@@ -48,6 +48,7 @@ from .utils import NUC_label
 # One implementation of the too-light-colour rule, in the live
 # plotting package; this legacy copy delegates rather than repeating it.
 from ..plotting.style import readable_cmap
+from ..plotting.accessibility import is_qualitative, ordered_qualitative_colours
 
 # Output formats every save-capable plotting function in nmrtools
 # accepts for its ``save_format`` argument.
@@ -244,6 +245,13 @@ def get_stack_colormap(colour='black'):
         return cl.LinearSegmentedColormap.from_list(
             "", ["#000000", "#000000", "#000000", "#000000"]
         )
+
+    if is_qualitative(colour):
+        # A set of categories (okabe_ito, tol_muted, Dark2, tab10 ...):
+        # handed back as a list of its readable entries, in the order
+        # series should take them, never resampled into a ramp that
+        # blends neighbouring categories together.
+        return cl.ListedColormap(ordered_qualitative_colours(colour), name=f"{colour}_readable")
 
     try:
         # Through the shared luminance filter, so this legacy notebook

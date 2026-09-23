@@ -17,11 +17,19 @@ always visible when the window is smaller" -- worst case is the
 Analysis sub-tabs (5) inside an already-narrow side panel, but the
 canvas strip has 6, so this is applied to all of them rather than
 special-cased.
+
+``addTab`` also takes an optional ``icon`` -- used for the top-level
+side-panel launcher (Load/Save/Compare, Processing, Advanced
+Processing, Fitting, Relaxation, Applications, Simulations), which
+needed a row of icon tiles rather than plain text buttons, while every
+other (sub-tab) caller keeps its existing text-only look by simply not
+passing one.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QButtonGroup, QLayout, QSizePolicy, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
@@ -184,13 +192,35 @@ class WrappingTabWidget(QWidget):
 
     # -- QTabWidget API ------------------------------------------------
 
-    def addTab(self, widget: QWidget, label: str) -> int:  # noqa: N802
+    #: Icon size for a tab added with ``icon=`` -- big enough to read
+    #: as a launcher tile (see the module docstring) rather than a
+    #: decorative sliver next to the label. 28px was too small for
+    #: these particular icons: real user report, "the icons in the
+    #: new GUI are (very ugly) versions of my originals" -- the source
+    #: files were never swapped for anything else (verified byte-for-
+    #: byte identical to the user's own reference images), but each is
+    #: a detailed multi-colour illustration around 354x354, and
+    #: downscaling that much fine linework to 28px lost it almost
+    #: entirely (confirmed by rendering at both sizes: e.g. the
+    #: Processing FID icon's individual oscillation lines merged into
+    #: a single muddy wedge). 48px keeps the linework legible at the
+    #: sizes actually tested (28/40/48/56).
+    _ICON_SIZE = QSize(48, 48)
+
+    def addTab(self, widget: QWidget, label: str, icon: QIcon | None = None) -> int:  # noqa: N802
         index = self._stack.addWidget(widget)
         button = QToolButton(self._bar)
         button.setText(label)
         button.setCheckable(True)
         button.setToolTip(label)
         button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        if icon is not None:
+            # Icon-above-text, launcher-tile style -- every other
+            # (sub-tab) caller omits icon and keeps the plain
+            # text-only button this class always had.
+            button.setIcon(icon)
+            button.setIconSize(self._ICON_SIZE)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         button.clicked.connect(lambda _checked, w=widget: self.setCurrentWidget(w))
         self._group.addButton(button)
         self._bar_layout.addWidget(button)

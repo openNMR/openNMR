@@ -55,6 +55,33 @@ def test_plot_1d_does_not_downsample_below_the_cap():
     plt.close(fig)
 
 
+def test_plot_1d_downsampling_preserves_a_narrow_peak():
+    # Explicit user report: a peak well-defined in the full-resolution
+    # ("Spectrum") view was reduced to "three or four points" in a
+    # downsampled ("Processing"/"Compare") view -- the old evenly-
+    # spaced-index downsampling could step clean over a narrow peak.
+    # Regression check at the plot_1d level (see
+    # test_plotting_style.py for the underlying downsample_1d unit
+    # tests): a narrow spike placed off any round stride must still
+    # survive at close to its true height.
+    from opennmr.plotting.style import DOWNSAMPLE_1D_MAX_POINTS
+
+    n = DOWNSAMPLE_1D_MAX_POINTS * 6
+    ppm = np.linspace(0, 10, n)
+    data = np.zeros(n)
+    spike_idx = int(n * 0.37) + 3  # off any round stride
+    data[spike_idx] = 1.0
+    metadata = NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0)
+    axis = NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)
+    spec = NMRSpectrum(data=data, axes=[axis], metadata=metadata)
+
+    fig, ax = plt.subplots()
+    oned.plot_1d(ax, spec, normalize=False)
+    y_plotted = ax.lines[0].get_ydata()
+    assert y_plotted.max() == pytest.approx(1.0)
+    plt.close(fig)
+
+
 def test_plot_1d_stack_standalone():
     specs = [_make_1d(center_ppm=c) for c in (4.0, 5.0, 6.0)]
     fig, ax = oned.plot_1d_stack(specs)
