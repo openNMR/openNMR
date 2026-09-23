@@ -860,17 +860,20 @@ class MainWindow(QMainWindow):
         # index after Processing, and these actions silently pointed at
         # the wrong panels -- "Analysis" opened Spectral Fitting. A name
         # lookup cannot drift when the tab order changes again.
-        for shortcut_num, label in enumerate(
-                ("Load/Save/Compare", "Processing", "Advanced Processing", "Fitting",
-                 "Relaxation", "Applications", "Simulations"), start=1):
+        #
+        # The menu keeps the descriptive names; the launcher tiles carry
+        # short labels. Each entry maps to its tile's own label -- when
+        # the tiles were renamed ("Open", "Dynamics", ...) these lookups
+        # silently stopped matching and every Panel entry did nothing.
+        for shortcut_num, (label, tile) in enumerate(self._WINDOW_MENU_PANELS, start=1):
             action = QAction(label, self)
             action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
             action.triggered.connect(
-                lambda _checked=False, name=label: self._show_side_tab(name))
+                lambda _checked=False, name=tile: self._show_side_tab(name))
             window_menu.addAction(action)
 
-        # Settings sits outside the numbered Panel shortcuts (Ctrl+1..7,
-        # then the views from Ctrl+8) so adding it renumbers nothing;
+        # Settings sits outside the numbered Panel shortcuts (Ctrl+1..7;
+        # the views are Ctrl+Shift+1..6) so adding it renumbers nothing;
         # Ctrl+, is the usual preferences shortcut.
         self.settings_menu_action = QAction("Settings…", self)
         self.settings_menu_action.setShortcut(QKeySequence("Ctrl+,"))
@@ -885,16 +888,20 @@ class MainWindow(QMainWindow):
         # labels throughout is clearer than relying on the section
         # headers alone to disambiguate.
         window_menu.addSection("View")
-        for canvas_widget in (
+        # Ctrl+Shift+n (the scheme upstream chose for the same clash).
+        # These used to continue the Panel numbering without first
+        # incrementing it: Spectrum View repeated Ctrl+7 (Qt then fires
+        # neither action) and the last three got "Ctrl+10".."Ctrl+12",
+        # which are not key sequences at all.
+        for view_num, canvas_widget in enumerate((
             self.canvas, self.fid_canvas, self.processing_preview_canvas,
             self.spectral_fit_canvas, self.fit_canvas, self.compare_canvas,
-        ):
+        ), start=1):
             label = self.canvas_tabs.tabText(self.canvas_tabs.indexOf(canvas_widget)) + " View"
             action = QAction(label, self)
-            action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
+            action.setShortcut(QKeySequence(f"Ctrl+Shift+{view_num}"))
             action.triggered.connect(lambda _checked=False, w=canvas_widget: self.canvas_tabs.setCurrentWidget(w))
             window_menu.addAction(action)
-            shortcut_num += 1
 
         # Quick access to the Fitting/Relaxation tabs' own controls from
         # anywhere -- no new capability, every action here already
@@ -9482,6 +9489,18 @@ class MainWindow(QMainWindow):
         self.pivot_slider.setValue(500)  # centre, matching the ppm value just set above
         self.pivot_slider.blockSignals(False)
         self._pivot_ppm_reference = centre_ppm
+
+    #: Window > Panel entries: (menu label, launcher tile label), in
+    #: tile order. Ctrl+1..7 follow this order.
+    _WINDOW_MENU_PANELS = (
+        ("Load/Save/Compare", "Open"),
+        ("Processing", "Process"),
+        ("Advanced Processing", "Adv. Proc."),
+        ("Fitting", "Fit"),
+        ("Relaxation", "Dynamics"),
+        ("Applications", "Apply"),
+        ("Simulations", "Simulate"),
+    )
 
     def _show_side_tab(self, name: str) -> None:
         """Raise the left-panel tab called ``name``. A no-op if there is

@@ -592,12 +592,52 @@ def test_main_window_remove_peak_shortcut_is_scoped_to_peak_table(qapp, tmp_path
     assert window.spectrum_list.count() == 1
 
 
+def _side_tab_names(window):
+    """The launcher tiles under their descriptive names (the Window
+    menu's), in tile order: the tiles themselves carry short labels
+    ("Open", "Dynamics", ...), which the structural tests below should
+    not have to track. Tiles without a menu entry keep their label."""
+    names = {tile: label for label, tile in MainWindow._WINDOW_MENU_PANELS}
+    return [names.get(window.side_tabs.tabText(i), window.side_tabs.tabText(i))
+            for i in range(window.side_tabs.count())]
+
+
 def test_main_window_menu_window_panel_actions_switch_side_tabs(qapp):
     window = MainWindow()
     window_menu = _menu_by_title(window, "Window")
     applications_action = next(a for a in window_menu.actions() if a.text() == "Applications")
     applications_action.trigger()
-    assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Applications"
+    assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Apply"
+
+
+def test_every_window_menu_panel_entry_reaches_its_tile(qapp):
+    # The tiles were renamed to short labels ("Open", "Dynamics", ...)
+    # while the menu still looked them up by the old names, so every
+    # Panel entry silently did nothing. Each must land on a real tile,
+    # and the tiles must appear in the menu in their own order.
+    window = MainWindow()
+    tiles = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    window_menu = _menu_by_title(window, "Window")
+    for label, tile in MainWindow._WINDOW_MENU_PANELS:
+        assert tile in tiles, tile
+        window.side_tabs.setCurrentIndex(tiles.index("Settings"))
+        next(a for a in window_menu.actions() if a.text() == label).trigger()
+        assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == tile
+    assert [t for _l, t in MainWindow._WINDOW_MENU_PANELS] == tiles[:len(MainWindow._WINDOW_MENU_PANELS)]
+
+
+def test_window_menu_shortcuts_are_unique_and_valid(qapp):
+    # Spectrum View repeated Simulations' Ctrl+7 (Qt fires neither) and
+    # three views got "Ctrl+10".."Ctrl+12", which are not shortcuts.
+    # Upstream (Leo) has the equivalent uniqueness test for his menu.
+    window = MainWindow()
+    window_menu = _menu_by_title(window, "Window")
+    actions = [a for a in window_menu.actions() if not a.isSeparator() and a.text()]
+    shortcuts = [a.shortcut().toString() for a in actions if not a.shortcut().isEmpty()]
+    assert "" not in shortcuts
+    assert len(shortcuts) == len(set(shortcuts)), shortcuts
+    views = [a for a in actions if a.text().endswith(" View")]
+    assert [a.shortcut().toString() for a in views] == [f"Ctrl+Shift+{n}" for n in range(1, 7)]
 
 
 def test_main_window_spectrum_canvas_defaults_to_full_resolution_others_do_not(qapp):
@@ -7356,7 +7396,7 @@ def test_main_window_isotropic_integration_csa_are_separate_sections(qapp):
     # eNMR and Imaging to their own "Applications" button -- none of
     # these five belong on the old combined "Analysis" tab any more,
     # and that tab (and its analysis_sub_tabs) no longer exists at all.
-    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    side = _side_tab_names(window)
     assert "Analysis" not in side
     assert not hasattr(window, "analysis_sub_tabs")
 
@@ -8065,7 +8105,7 @@ def test_main_window_analysis_tab_labels_renamed_for_clarity(qapp):
     # Relaxation -- so search both rather than one sub-tab widget. The
     # point of this test is the wording, which is unchanged.
     window = MainWindow()
-    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    side = _side_tab_names(window)
     fitting_tab = window.side_tabs.widget(window._fitting_tab_index)
     relaxation_tab = window.side_tabs.widget(side.index("Relaxation"))
     wanted = ("Spectrum fit (slice #):", "View curve fit (peak #):")
@@ -11185,7 +11225,7 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # in CSA (renamed "CSA/Dipolar"), previously a fourth Analysis
     # sub-tab.
     window = MainWindow()
-    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    side = _side_tab_names(window)
     assert "Fitting" in side
     assert "Spectral Fitting" not in side
     assert "Analysis" not in side
@@ -11214,7 +11254,7 @@ def test_main_window_advanced_processing_is_its_own_top_level_button(qapp):
     # test_main_window_fitting_tab_has_three_collapsible_sections,
     # just above, for the rest of that sub-tab list).
     window = MainWindow()
-    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    side = _side_tab_names(window)
     assert "Advanced Processing" in side
     # Comes right after Processing, ahead of Fitting/Analysis --
     # Processing, then Advanced Processing, then Fitting, is the
@@ -11243,7 +11283,7 @@ def test_main_window_relaxation_is_its_own_top_level_button(qapp):
     # launcher button (the sole content, like Advanced Processing's
     # own VOCS-only panel).
     window = MainWindow()
-    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    side = _side_tab_names(window)
     assert "Relaxation" in side
     # Comes right after Fitting, ahead of the last button,
     # Applications -- the order the seven launcher buttons were
@@ -11275,7 +11315,7 @@ def test_main_window_applications_is_its_own_top_level_button(qapp):
     # the old combined "Analysis" tab (and its analysis_sub_tabs
     # strip) is fully retired: nothing is built from it any more.
     window = MainWindow()
-    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    side = _side_tab_names(window)
     assert "Applications" in side
     assert "Analysis" not in side
     assert not hasattr(window, "analysis_sub_tabs")
@@ -13317,6 +13357,11 @@ def _bruker_1d_folder(tmp_path, name="1"):
     """A minimal loadable Bruker 1D experiment, copied from the real
     test data so every reader path behaves as it does in use."""
     source = os.path.join("test_data", "Bruker Example Data")
+    # test_data is gitignored, so a fresh clone has none: skip, like
+    # every other real-data test, rather than fail. (From upstream,
+    # Leo 1e63c6a -- lost when the merge took this file whole.)
+    if not os.path.isdir(source):
+        pytest.skip(f"needs {source}")
     matches = MainWindow._scan_for_spectra(source)
     assert matches, "expected a loadable Bruker experiment in test_data"
     target = tmp_path / name
@@ -14164,7 +14209,7 @@ def _enmr_window(qapp, path=ENMR_CALIBRATION):
 
 def test_main_window_has_an_enmr_subtab(qapp):
     window = MainWindow()
-    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    side = _side_tab_names(window)
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     titles = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
     assert "eNMR" in titles
@@ -15383,14 +15428,16 @@ def _fast_csa_kwargs(window) -> None:
 
 def test_main_window_simulations_is_its_own_top_level_button(qapp):
     window = MainWindow()
-    side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    side = _side_tab_names(window)
     assert "Simulations" in side
     # Last of the seven, right after Applications.
     assert side.index("Applications") < side.index("Simulations")
 
     simulations_tab = window.side_tabs.widget(side.index("Simulations"))
     sections = simulations_tab.findChildren(CollapsibleSection)
-    assert [s.title() for s in sections] == ["CSA", "Quadrupolar"]
+    # Diffusion (PFG) and Shaped pulse (Bloch): ported from upstream.
+    assert [s.title() for s in sections] == ["CSA", "Quadrupolar", "Diffusion (PFG)",
+                                             "Shaped pulse (Bloch)"]
 
     csa_section = _enclosing_collapsible_section(window.sim_csa_diso_spin)
     quad_section = _enclosing_collapsible_section(window.sim_quad_cq_spin)
