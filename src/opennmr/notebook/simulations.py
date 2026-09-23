@@ -150,6 +150,20 @@ def herzfeld_berger_csa_tensor(d_iso, span, skew):
     return np.diag(csa_principal)
 
 
+def csa_axis_limits(d_iso, span_or_Delta, factor=1.5, fwhm=0.0):
+    """ppm axis limits ``(low, high)`` that frame a CSA powder pattern:
+    ``d_iso +/- factor * |span_or_Delta|``.
+
+    Works for either convention: a Haeberlen pattern runs from
+    ``d_iso + Delta`` to ``d_iso - Delta(1 + eta)/2`` and a Herzfeld-Berger
+    one lies within ``d_iso +/- 2*span/3``, so 1.5 x either leaves margin
+    on both sides. The half-width never drops below five broadening
+    FWHMs (or 1 ppm), so a near-zero anisotropy still frames its line.
+    """
+    half = max(factor * abs(float(span_or_Delta)), 5.0 * abs(float(fwhm)), 1.0)
+    return float(d_iso) - half, float(d_iso) + half
+
+
 def csa_definition(d_iso, span_or_Delta, skew_or_eta, convention='Haeberlen'):
     if convention == 'Haeberlen':
         return haeberlen_csa_tensor(d_iso, span_or_Delta, skew_or_eta)

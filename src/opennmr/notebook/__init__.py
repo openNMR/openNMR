@@ -67,7 +67,7 @@ from .relaxation import (
 from .arithmetic import combine_spectra, combine_spectra_as_results
 
 from .simulations import (
-    haeberlen_csa_tensor, herzfeld_berger_csa_tensor, csa_definition,
+    haeberlen_csa_tensor, herzfeld_berger_csa_tensor, csa_definition, csa_axis_limits,
     csa_frequency, powder_orientations, powder_orientations_octant, 
     static_csa, make_static_csa_spectrum, finite_mas_csa_spectrum,
     static_quadrupolar_spectrum_exact

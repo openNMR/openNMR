@@ -10470,6 +10470,19 @@ class MainWindow(QMainWindow):
         self.sim_csa_orientations_spin.setValue(4000)
         form.addRow("Orientations:", self.sim_csa_orientations_spin)
 
+        # Axis follows the tensor (explicit user request): δiso ±
+        # 1.5 × |span or Δ|, re-applied whenever either changes, until
+        # the user sets an axis limit by hand.
+        self.sim_csa_auto_axis_check = QCheckBox("Auto: δiso ± 1.5 × |span or Δ|")
+        self.sim_csa_auto_axis_check.setChecked(True)
+        self.sim_csa_auto_axis_check.setToolTip(
+            "Keep the ppm axis framed on the pattern: δiso ± 1.5 × |span or Δ| "
+            "(never narrower than ± 5 × the broadening FWHM). Typing an axis "
+            "limit turns this off; tick it again to snap back.")
+        self.sim_csa_auto_axis_check.toggled.connect(
+            lambda on: self._sync_sim_csa_axis() if on else None)
+        form.addRow("Axis:", self.sim_csa_auto_axis_check)
+
         self.sim_csa_ppm_min_spin = QDoubleSpinBox()
         self.sim_csa_ppm_min_spin.setRange(-1.0e6, 1.0e6)
         self.sim_csa_ppm_min_spin.setDecimals(2)
@@ -10483,6 +10496,12 @@ class MainWindow(QMainWindow):
         self.sim_csa_ppm_max_spin.setValue(100.0)
         self.sim_csa_ppm_max_spin.setSuffix(" ppm")
         form.addRow("Axis max:", self.sim_csa_ppm_max_spin)
+        # A hand edit means "this axis, please": stop following the tensor.
+        for spin in (self.sim_csa_ppm_min_spin, self.sim_csa_ppm_max_spin):
+            spin.valueChanged.connect(lambda _v: self.sim_csa_auto_axis_check.setChecked(False))
+        for spin in (self.sim_csa_diso_spin, self.sim_csa_aniso_spin, self.sim_csa_fwhm_spin):
+            spin.valueChanged.connect(lambda _v: self._sync_sim_csa_axis())
+        self._sync_sim_csa_axis()
 
         self.sim_csa_points_spin = QSpinBox()
         self.sim_csa_points_spin.setRange(64, 1 << 20)
@@ -10748,6 +10767,19 @@ class MainWindow(QMainWindow):
                 "clipped. Widen Axis min/max and simulate again."
             )
         return ""
+
+    def _sync_sim_csa_axis(self) -> None:
+        """Set Axis min/max from δiso and span/Δ while Auto is ticked --
+        without the change counting as a hand edit (signals blocked)."""
+        if not self.sim_csa_auto_axis_check.isChecked():
+            return
+        low, high = notebook_simulations.csa_axis_limits(
+            self.sim_csa_diso_spin.value(), self.sim_csa_aniso_spin.value(),
+            fwhm=self.sim_csa_fwhm_spin.value())
+        for spin, value in ((self.sim_csa_ppm_min_spin, low), (self.sim_csa_ppm_max_spin, high)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
 
     def _on_simulate_csa_clicked(self) -> None:
         nucleus = self.sim_csa_nucleus_edit.text().strip()
