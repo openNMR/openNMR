@@ -113,7 +113,7 @@ def test_main_window_side_tabs_scroll_instead_of_growing_the_window(qapp):
     from PySide6.QtWidgets import QScrollArea
 
     window = MainWindow()
-    left_tabs = window.centralWidget().widget(0)
+    left_tabs = window.side_tabs
     for i in range(left_tabs.count()):
         page = left_tabs.widget(i)
         assert isinstance(page, QScrollArea)
@@ -7717,8 +7717,10 @@ def test_main_window_left_panel_has_a_usable_minimum_width(qapp):
     window = MainWindow()
     splitter = window.centralWidget()
     assert isinstance(splitter, QSplitter)
-    tabs = splitter.widget(0)
-    assert tabs.minimumWidth() >= 250
+    left_column = splitter.widget(0)
+    assert left_column is window.left_splitter
+    assert left_column.minimumWidth() >= 250
+    assert window.side_tabs.minimumWidth() >= 250
 
 
 # ============================================================
@@ -15821,8 +15823,8 @@ def test_numbered_panel_shortcuts_are_unchanged_by_settings(qapp):
     window = MainWindow()
     window_menu = _menu_by_title(window, "Window")
     shortcuts = {a.text(): a.shortcut().toString() for a in window_menu.actions()}
-    assert [shortcuts[name] for name in ("Load/Save/Compare", "Processing", "Simulations")] == \
-        ["Ctrl+1", "Ctrl+2", "Ctrl+7"]
+    assert [shortcuts[name] for name in ("Load/Save", "Processing", "Compare", "Simulations")] == \
+        ["Ctrl+1", "Ctrl+2", "Ctrl+7", "Ctrl+8"]
     assert "Ctrl+," not in [v for k, v in shortcuts.items() if k != "Settings…"]
 
 
@@ -16062,3 +16064,95 @@ def test_bloch_simulation_gives_the_requested_flip(qapp):
     window.bloch_power_mode_combo.setCurrentIndex(window.bloch_power_mode_combo.findData("hard"))
     assert window._bloch_form.isRowVisible(window.bloch_hard_width_spin)
     assert not window._bloch_form.isRowVisible(window.bloch_flip_spin)
+
+
+
+# ============================================================
+# Compare as its own launcher tile; the Open experiments list shared
+# under the tiles on every tile but Simulate (explicit user request,
+# 2026-09-23).
+# ============================================================
+
+def test_compare_is_its_own_tile_with_its_icon(qapp):
+    window = MainWindow()
+    tiles = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+    assert tiles[window._compare_tab_index] == "Compare"
+    # After the data tiles, before Simulate (which needs no open data).
+    assert tiles.index("Apply") < tiles.index("Compare") < tiles.index("Simulate")
+    assert not window.side_tabs._buttons[window._compare_tab_index].icon().isNull()
+
+
+def test_compare_icon_resource_matches_its_asset():
+    # The tile icon is the designed asset, copied unchanged into the
+    # package resources (as every other launcher icon is).
+    import hashlib
+    here = os.path.dirname(__file__)
+    resource = os.path.join(here, "..", "src", "opennmr", "gui", "resources", "launcher_comparison.png")
+    asset = os.path.join(here, "..", "assets", "launcher_comparison.png")
+    digest = lambda path: hashlib.md5(open(path, "rb").read()).hexdigest()
+    assert digest(resource) == digest(asset)
+
+
+def test_compare_controls_moved_out_of_open(qapp):
+    window = MainWindow()
+    open_page = window.side_tabs.widget(0)
+    compare_page = window.side_tabs.widget(window._compare_tab_index)
+    for widget in (window.compare_list, window.compare_status_label,
+                   window.layout_mode_combo, window.compare_normalize_combo,
+                   window.combine_op_combo):
+        assert compare_page.isAncestorOf(widget)
+        assert not open_page.isAncestorOf(widget)
+    # Open keeps browsing and the selected-spectrum summary only.
+    assert [s.title() for s in open_page.findChildren(CollapsibleSection)] == ["Selected spectrum"]
+    assert open_page.isAncestorOf(window.data_browser)
+    assert not open_page.isAncestorOf(window.spectrum_list)
+
+
+def test_open_experiments_list_sits_under_the_tiles(qapp):
+    window = MainWindow()
+    assert window.open_experiments_box.isAncestorOf(window.spectrum_list)
+    assert window.left_splitter.indexOf(window.side_tabs) == 0
+    assert window.left_splitter.indexOf(window.open_experiments_box) == 1
+    assert not window.side_tabs.isAncestorOf(window.spectrum_list)
+
+
+def test_open_experiments_list_shows_on_every_tile_but_simulate(qapp):
+    window = MainWindow()
+    window.show()
+    try:
+        for index in range(window.side_tabs.count()):
+            window.side_tabs.setCurrentIndex(index)
+            qapp.processEvents()
+            name = window.side_tabs.tabText(index)
+            assert window.open_experiments_box.isVisible() == (name != "Simulate"), name
+    finally:
+        window.close()
+
+
+def test_switching_experiment_from_another_tile_keeps_that_tile(qapp, tmp_path):
+    # The point of the shared list: change experiment without going
+    # back to Open.
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._fitting_tab_index)
+    window.spectrum_list.setCurrentRow(0)
+    assert window._selected_index() == 0
+    assert window.side_tabs.currentIndex() == window._fitting_tab_index
+
+
+def test_multi_selecting_while_on_compare_fills_the_comparison(qapp, tmp_path):
+    window = MainWindow()
+    window._load(_make_1d_dataset(tmp_path, name="a"), vendor="bruker")
+    window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
+    window.side_tabs.setCurrentIndex(window._compare_tab_index)
+    _select_rows(window, [0, 1])
+    assert window.compare_list.count() == 2
+    assert window.side_tabs.currentIndex() == window._compare_tab_index
+
+
+def test_window_menu_compare_entry_opens_the_compare_tile(qapp):
+    window = MainWindow()
+    window_menu = _menu_by_title(window, "Window")
+    next(a for a in window_menu.actions() if a.text() == "Compare").trigger()
+    assert window.side_tabs.currentIndex() == window._compare_tab_index

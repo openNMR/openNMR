@@ -82,8 +82,8 @@ from .widgets.collapsible_section import CollapsibleSection
 from .widgets.simulation_canvas import SimulationCanvas
 from .loader import background_load_enabled
 
-#: Where the launcher-tile icons (Load/Save/Compare, Processing,
-#: Advanced Processing, Fitting, Relaxation, Applications,
+#: Where the launcher-tile icons (Open, Processing, Advanced
+#: Processing, Fitting, Relaxation, Applications, Compare,
 #: Simulations) live -- plain files rather than a Qt resource (.qrc)
 #: bundle, matching how app.py's own window icon
 #: (resources/logo.png) is already loaded, and covered by the same
@@ -592,7 +592,13 @@ class MainWindow(QMainWindow):
                     icon=_launcher_icon("launcher_applications.png"))
         # Last of the seven: genuinely new (not moved from an old tab)
         # -- forward-simulate a CSA or quadrupolar powder pattern and
-        # export it to Load/Save/Compare -- explicit user request.
+        # export it to Open experiments -- explicit user request.
+        # Compare: its own tile (explicit user request), out of Open.
+        # After the data tiles and before Simulate, which works without
+        # any open data.
+        self._compare_tab_index = tabs.addTab(
+            self._scrollable(self._build_compare_panel()), "Compare",
+            icon=_launcher_icon("launcher_comparison.png"))
         self._simulations_tab_index = tabs.addTab(self._scrollable(self._build_simulations_panel()), "Simulate",
                     icon=_launcher_icon("launcher_simulations.png"))
         # No Output tab any more -- its controls live in the Plot Style
@@ -626,8 +632,21 @@ class MainWindow(QMainWindow):
         # editing it.
         tabs.currentChanged.connect(self._on_side_tab_changed)
 
+        # Left column: the tiles, and under them the Open experiments
+        # list, on every tile but Simulate (explicit user request), so
+        # switching experiment never needs a trip back to Open. A
+        # splitter, so the user can trade list height for panel height.
+        self.left_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.left_splitter.addWidget(tabs)
+        self.left_splitter.addWidget(self.open_experiments_box)
+        self.left_splitter.setChildrenCollapsible(False)
+        self.left_splitter.setStretchFactor(0, 3)
+        self.left_splitter.setStretchFactor(1, 1)
+        self.left_splitter.setSizes([560, 180])
+        self._sync_open_experiments_visibility(tabs.currentIndex())
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(tabs)
+        splitter.addWidget(self.left_splitter)
         splitter.addWidget(self.canvas_tabs)
         # Both panels now get a share of any extra space from resizing
         # the window larger (canvas 3x the left panel's) -- previously
@@ -648,6 +667,7 @@ class MainWindow(QMainWindow):
         # a child widget's minimumWidth -- Qt just won't let the user
         # drag past it), matching "with an option still to change".
         tabs.setMinimumWidth(280)
+        self.left_splitter.setMinimumWidth(280)
 
         self.setCentralWidget(splitter)
         self._set_processing_enabled(False)
@@ -872,7 +892,7 @@ class MainWindow(QMainWindow):
                 lambda _checked=False, name=tile: self._show_side_tab(name))
             window_menu.addAction(action)
 
-        # Settings sits outside the numbered Panel shortcuts (Ctrl+1..7;
+        # Settings sits outside the numbered Panel shortcuts (Ctrl+1..8;
         # the views are Ctrl+Shift+1..6) so adding it renumbers nothing;
         # Ctrl+, is the usual preferences shortcut.
         self.settings_menu_action = QAction("Settings…", self)
@@ -1336,7 +1356,7 @@ class MainWindow(QMainWindow):
         if not rows:
             QMessageBox.information(
                 self, "Nothing selected",
-                "Select a spectrum in the Load/Save/Compare panel to report its processing.",
+                "Select a spectrum in the Open experiments list to report its processing.",
             )
             return
         if len(rows) == 1:
@@ -1491,7 +1511,10 @@ class MainWindow(QMainWindow):
     # ============================================================
 
     def _build_load_save_compare_panel(self) -> QWidget:
-        """The "Load/Save/Compare" launcher button's panel -- the old
+        """The "Open" launcher tile. Since 2026-09-23 Compare is its own
+        tile and the open-experiments list is a shared box under the
+        tiles (see __init__), so this tile holds "Browse a folder" and
+        "Selected spectrum". History: the "Load/Save/Compare" panel -- the old
         "Data" tab (browse/open, the selected-spectrum summary, the
         list of open experiments) and the old standalone "Compare" tab
         merged into one, per explicit user request: "'Load/Save/
@@ -1537,7 +1560,7 @@ class MainWindow(QMainWindow):
         self.spectrum_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.spectrum_list.setToolTip(
             "Ctrl/Cmd-click (or Shift-click) to select several spectra "
-            "and compare them below (Open experiments / Compare)."
+            "and compare them on the Compare tile."
         )
         self.spectrum_list.currentRowChanged.connect(self._on_selection_changed)
         self.spectrum_list.itemSelectionChanged.connect(self._on_list_selection_changed)
@@ -1604,17 +1627,18 @@ class MainWindow(QMainWindow):
         info_section = CollapsibleSection("Selected spectrum", content=info_content)
         layout.addWidget(info_section)
 
-        # --- Open experiments / Compare (collapsible) -------------------
-        # One dropdown, not two side-by-side tabs any more: the list of
-        # what's open, directly above the full former-Compare-tab
-        # controls that act on a multi-selection from that same list --
-        # explicit user request: "'Open experiments/compare' ... should
-        # list experiments you want to compare and again have all the
-        # options the current 'Compare' tab has."
-        open_compare_content = QWidget()
-        open_compare_layout = QVBoxLayout(open_compare_content)
-        open_compare_layout.setContentsMargins(4, 4, 4, 4)
-        open_compare_layout.addWidget(self.spectrum_list)
+        # --- Open experiments (shared, not part of this tile) -----------
+        # The list of what is open, where the user switches between
+        # experiments. Built here beside the rest of the old Data tab's
+        # widgets, but *not* added to this tile: __init__ puts it in a
+        # box under the launcher tiles, so it is on screen on every
+        # tile but Simulate (explicit user request -- see
+        # _sync_open_experiments_visibility). Its multi-selection is
+        # what the Compare tile compares.
+        self.open_experiments_box = QGroupBox("Open experiments")
+        open_experiments_layout = QVBoxLayout(self.open_experiments_box)
+        open_experiments_layout.setContentsMargins(4, 4, 4, 4)
+        open_experiments_layout.addWidget(self.spectrum_list, 1)
 
         remove_button = QPushButton("Remove")
         remove_button.clicked.connect(self._on_remove_clicked)
@@ -1623,11 +1647,24 @@ class MainWindow(QMainWindow):
         remove_row = QHBoxLayout()
         remove_row.addWidget(remove_button)
         remove_row.addWidget(clear_button)
-        open_compare_layout.addLayout(remove_row)
+        open_experiments_layout.addLayout(remove_row)
+
+        return tab
+
+    def _build_compare_panel(self) -> QWidget:
+        """The "Compare" launcher tile -- the Compare controls that used
+        to sit under the open-experiments list in the Open tile, moved
+        to a tile of their own (explicit user request). The widgets and
+        their ``self.*`` names are unchanged, so every handler reading
+        e.g. ``self.compare_list`` works as before. What gets compared
+        is still the multi-selection in the Open experiments list,
+        which stays on screen on this tile (see __init__)."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
 
         compare_intro_label = QLabel(
             "Ctrl/Cmd-click (or Shift-click) several 1D spectra in the "
-            "list above to start a comparison -- or just select a "
+            "Open experiments list to start a comparison -- or just select a "
             "single pseudo-2D spectrum there, which fills this in "
             "with its own slices automatically, in order. Fine-tune "
             "either here: check/uncheck to include or exclude, Move Up/"
@@ -1636,11 +1673,11 @@ class MainWindow(QMainWindow):
             "diffusion) across whatever's checked here."
         )
         compare_intro_label.setWordWrap(True)
-        open_compare_layout.addWidget(compare_intro_label)
+        layout.addWidget(compare_intro_label)
 
         self.compare_status_label = QLabel("Select at least two 1D spectra to compare.")
         self.compare_status_label.setWordWrap(True)
-        open_compare_layout.addWidget(self.compare_status_label)
+        layout.addWidget(self.compare_status_label)
 
         self.compare_list = QListWidget()
         self.compare_list.setToolTip(
@@ -1667,7 +1704,7 @@ class MainWindow(QMainWindow):
         self.compare_list.currentRowChanged.connect(self._on_compare_list_current_row_changed)
         self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
-        open_compare_layout.addWidget(self.compare_list)
+        layout.addWidget(self.compare_list, 1)
 
         # Checking a long list one row at a time is the slow path
         # everything downstream depends on (Fit Curve, VOCS Sum, the
@@ -1683,7 +1720,7 @@ class MainWindow(QMainWindow):
         uncheck_all_button.clicked.connect(lambda: self._set_all_compare_checked(False))
         check_row.addWidget(check_all_button)
         check_row.addWidget(uncheck_all_button)
-        open_compare_layout.addLayout(check_row)
+        layout.addLayout(check_row)
 
         reorder_row = QHBoxLayout()
         move_up_button = QPushButton("Move Up")
@@ -1694,7 +1731,7 @@ class MainWindow(QMainWindow):
         move_down_button.clicked.connect(lambda: self._on_move_compare_item(1))
         reorder_row.addWidget(move_up_button)
         reorder_row.addWidget(move_down_button)
-        open_compare_layout.addLayout(reorder_row)
+        layout.addLayout(reorder_row)
 
         compare_form = QFormLayout()
 
@@ -1716,7 +1753,7 @@ class MainWindow(QMainWindow):
         self.compare_normalize_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
         compare_form.addRow("Normalize:", self.compare_normalize_combo)
 
-        open_compare_layout.addLayout(compare_form)
+        layout.addLayout(compare_form)
 
         compare_action_row = QHBoxLayout()
         compare_plot_button = QPushButton("Plot")
@@ -1736,7 +1773,7 @@ class MainWindow(QMainWindow):
         )
         compare_fit_curve_button.clicked.connect(self._on_fit_curve_compare_stack_action)
         compare_action_row.addWidget(compare_fit_curve_button)
-        open_compare_layout.addLayout(compare_action_row)
+        layout.addLayout(compare_action_row)
 
         combine_row = QHBoxLayout()
         combine_row.addWidget(QLabel("Operation:"))
@@ -1755,10 +1792,7 @@ class MainWindow(QMainWindow):
         )
         combine_button.clicked.connect(self._on_combine_spectra_clicked)
         combine_row.addWidget(combine_button)
-        open_compare_layout.addLayout(combine_row)
-
-        open_compare_section = CollapsibleSection("Open experiments / Compare", content=open_compare_content)
-        layout.addWidget(open_compare_section, 1)
+        layout.addLayout(combine_row)
 
         return tab
 
@@ -3506,7 +3540,7 @@ class MainWindow(QMainWindow):
         self.trace_color_button.setToolTip(
             "The colour of this plot's own 1D trace — the Spectrum, FID and "
             "Processing preview lines.\n\n"
-            "The Load/Save/Compare panel's Compare view draws several traces "
+            "The Compare tile's plot draws several traces "
             "at once and takes its colours from the colour map above instead."
         )
         self.trace_color_button.clicked.connect(self._on_trace_color_clicked)
@@ -3842,7 +3876,7 @@ class MainWindow(QMainWindow):
             name.setToolTip(
                 "The name this series goes by in this plot's legend."
                 if entry.can_rename else
-                "Named by its spectrum -- use the Load/Save/Compare panel's "
+                "Named by its spectrum -- use the Open experiments list's "
                 "right-click Rename… to change it everywhere at once.")
             name.editingFinished.connect(
                 lambda key=entry.key, box=name: self._on_series_renamed(key, box.text()))
@@ -6578,6 +6612,7 @@ class MainWindow(QMainWindow):
         # call each way is enough.
         self._sync_region_shading()
         self._refresh_peak_markers()
+        self._sync_open_experiments_visibility(index)
         if index != self._simulations_tab_index:
             # The Simulation plot shows nothing about the data; don't
             # leave it up (or in the tab bar) once Simulations is left.
@@ -9490,15 +9525,24 @@ class MainWindow(QMainWindow):
         self.pivot_slider.blockSignals(False)
         self._pivot_ppm_reference = centre_ppm
 
+    #: Tiles that hide the shared Open experiments list: Simulate works
+    #: without any open data. Every other tile shows it.
+    _TILES_WITHOUT_OPEN_EXPERIMENTS = ("Simulate",)
+
+    def _sync_open_experiments_visibility(self, index: int) -> None:
+        self.open_experiments_box.setVisible(
+            self.side_tabs.tabText(index) not in self._TILES_WITHOUT_OPEN_EXPERIMENTS)
+
     #: Window > Panel entries: (menu label, launcher tile label), in
     #: tile order. Ctrl+1..7 follow this order.
     _WINDOW_MENU_PANELS = (
-        ("Load/Save/Compare", "Open"),
+        ("Load/Save", "Open"),
         ("Processing", "Process"),
         ("Advanced Processing", "Adv. Proc."),
         ("Fitting", "Fit"),
         ("Relaxation", "Dynamics"),
         ("Applications", "Apply"),
+        ("Compare", "Compare"),
         ("Simulations", "Simulate"),
     )
 
@@ -10010,7 +10054,7 @@ class MainWindow(QMainWindow):
         blurb = QLabel(
             "Simulate a chemical-shift-anisotropy powder pattern from "
             "tensor parameters, then export it as a spectrum to compare "
-            "against real data in Load/Save/Compare."
+            "against real data (it is added to Open experiments)."
         )
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
@@ -10145,8 +10189,8 @@ class MainWindow(QMainWindow):
         self.sim_csa_export_button = QPushButton("Export to Open Experiments…")
         self.sim_csa_export_button.setEnabled(False)
         self.sim_csa_export_button.setToolTip(
-            "Add the simulated pattern as a spectrum in Load/Save/Compare, "
-            "for side-by-side comparison against real data.")
+            "Add the simulated pattern as a spectrum in Open experiments, "
+            "for side-by-side comparison against real data on the Compare tile.")
         self.sim_csa_export_button.clicked.connect(self._on_export_simulated_csa_clicked)
         layout.addWidget(self.sim_csa_export_button)
 
@@ -10177,7 +10221,7 @@ class MainWindow(QMainWindow):
         blurb = QLabel(
             "Simulate a static quadrupolar powder pattern, then export it "
             "as a spectrum to compare against real data in "
-            "Load/Save/Compare. Finite-MAS quadrupolar simulation is not "
+            "Open experiments. Finite-MAS quadrupolar simulation is not "
             "yet available (see the tooltip on Method, below, for why)."
         )
         blurb.setWordWrap(True)
@@ -10299,8 +10343,8 @@ class MainWindow(QMainWindow):
         self.sim_quad_export_button = QPushButton("Export to Open Experiments…")
         self.sim_quad_export_button.setEnabled(False)
         self.sim_quad_export_button.setToolTip(
-            "Add the simulated pattern as a spectrum in Load/Save/Compare, "
-            "for side-by-side comparison against real data.")
+            "Add the simulated pattern as a spectrum in Open experiments, "
+            "for side-by-side comparison against real data on the Compare tile.")
         self.sim_quad_export_button.clicked.connect(self._on_export_simulated_quadrupolar_clicked)
         layout.addWidget(self.sim_quad_export_button)
 
@@ -11213,8 +11257,8 @@ class MainWindow(QMainWindow):
         self.analysis_status_label = QLabel(
             "Fit a curve to the per-spectrum intensities from the "
             "Fitting tab. Needs a pseudo-2D series selected in "
-            "Load/Save/Compare (or right-clicked there), or a stack "
-            "of 1D spectra checked in its Compare view."
+            "Open experiments (or right-clicked there), or a stack "
+            "of 1D spectra checked on the Compare tile."
         )
         self.analysis_status_label.setWordWrap(True)
         layout.addWidget(self.analysis_status_label)
@@ -11222,9 +11266,9 @@ class MainWindow(QMainWindow):
         relax_box = QGroupBox("Fit Curve settings (relaxation / diffusion)")
         relax_box.setToolTip(
             "Configures the Fit Curve button below, and the "
-            "Load/Save/Compare panel's right-click 'Fit Curve' action "
-            "on a pseudo-2D row, and its Fit Curve (button or "
-            "right-click) on a checked stack of 1D spectra -- not "
+            "Open experiments list's right-click 'Fit Curve' action "
+            "on a pseudo-2D row, and the Compare tile's Fit Curve (button "
+            "or right-click) on a checked stack of 1D spectra -- not "
             "used by Fit Spectrum, which lives in the Fitting tab."
         )
         relax_form = QFormLayout(relax_box)
@@ -11827,7 +11871,7 @@ class MainWindow(QMainWindow):
             "pseudo-2D series -- reuses Step 1's results if already "
             "computed, or runs it now. For a stack of separately-loaded "
             "1D spectra instead of one pseudo-2D series, use the "
-            "Load/Save/Compare panel's own Fit Curve button/"
+            "Compare tile's own Fit Curve button/"
             "context-menu item."
         )
         fit_curve_button.clicked.connect(self._on_fit_curve_button_clicked)
@@ -12492,7 +12536,7 @@ class MainWindow(QMainWindow):
         if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
             self._enmr_problem(
                 "eNMR needs a pseudo-2D series (one row per applied voltage) "
-                "selected in the Load/Save/Compare panel.", title="Not supported",
+                "selected in Open experiments.", title="Not supported",
                 severity="information")
             return
         if spectrum.data_imag is None:
@@ -12803,7 +12847,7 @@ class MainWindow(QMainWindow):
         sum_layout = QVBoxLayout(sum_box)
         sum_intro = QLabel(
             "Corrects and combines every spectrum checked in the "
-            "Load/Save/Compare panel onto one common ppm axis, added "
+            "Compare tile onto one common ppm axis, added "
             "as a new spectrum. Intensities are preserved: each "
             "offset contributes in proportion to how well it excited "
             "that shift, so overlapping regions gain signal-to-noise "
@@ -12831,7 +12875,7 @@ class MainWindow(QMainWindow):
         sum_layout.addWidget(selection_sum_button)
 
         sum_button = QPushButton("VOCS Sum (Compare stack)")
-        sum_button.setToolTip("Combine whatever is checked in the Load/Save/Compare panel instead.")
+        sum_button.setToolTip("Combine whatever is checked on the Compare tile instead.")
         sum_button.clicked.connect(self._on_vocs_sum_clicked)
         sum_layout.addWidget(sum_button)
         layout.addWidget(sum_box)
@@ -13095,8 +13139,8 @@ class MainWindow(QMainWindow):
         if not stack:
             QMessageBox.information(
                 self, "Nothing to combine",
-                "Check at least one 1D spectrum in the Load/Save/Compare panel "
-                "first, or select several in the spectrum list and use its right-click "
+                "Check at least one 1D spectrum on the Compare tile "
+                "first, or select several in the Open experiments list and use its right-click "
                 "“VOCS Sum (selected spectra)”.",
             )
             return
@@ -16096,7 +16140,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "Not supported",
                 "A DOSY map needs a pseudo-2D PFG series (one row per gradient step) "
-                "selected in the Load/Save/Compare panel.",
+                "selected in Open experiments.",
             )
             return
 
@@ -17496,7 +17540,7 @@ class MainWindow(QMainWindow):
     def _on_fit_curve_button_clicked(self) -> None:
         """"Fit Curve" as a real button in the Relaxation tab -- the
         currently selected spectrum stands in for the ``index`` a
-        right-click on a specific Load/Save/Compare row would
+        right-click on a specific Open experiments row would
         otherwise supply (see :meth:`_on_fit_curve_pseudo2d_action`,
         still also reachable that way for a row that isn't the
         current selection)."""
@@ -17509,13 +17553,13 @@ class MainWindow(QMainWindow):
                 self, "Not supported",
                 "Fit Curve needs a pseudo-2D series (e.g. a T1/T2/diffusion "
                 "series) selected here. For a stack of separately-loaded 1D "
-                "spectra instead, use the Load/Save/Compare panel's own Fit Curve button.",
+                "spectra instead, use the Compare tile's own Fit Curve button.",
             )
             return
         self._on_fit_curve_pseudo2d_action(index)
 
     def _on_fit_curve_pseudo2d_action(self, index: int) -> None:
-        """"Fit Curve" from the Load/Save/Compare panel's right-click
+        """"Fit Curve" from the Open experiments list's right-click
         menu, only offered for a pseudo-2D row (see
         :meth:`_on_spectrum_list_context_menu`). Selects that row
         first (so the peak table/Values-source/model shown are that
@@ -17811,7 +17855,7 @@ class MainWindow(QMainWindow):
         elif spectrum.ndim == 1:
             self.analysis_status_label.setText(
                 "Fit Spectrum: peaks in this spectrum. For a relaxation/diffusion curve, either select "
-                "a pseudo-2D series instead, or build a stack of 1D spectra in the Load/Save/Compare panel."
+                "a pseudo-2D series instead, or build a stack of 1D spectra on the Compare tile."
             )
         else:
             self.analysis_status_label.setText(
