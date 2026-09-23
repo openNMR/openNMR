@@ -17,3 +17,6 @@ Claude outputs/
 # packaging/make_toolbar_icons.py builds the GUI's icons from those.
 /assets/design_sources/
 *.afdesign~lock~
+
+# Simulation output (large data files) -- kept locally, not committed.
+/bms_simulation/
