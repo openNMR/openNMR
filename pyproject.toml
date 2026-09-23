@@ -36,5 +36,5 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"opennmr.gui" = ["resources/*.png"]
+"opennmr.gui" = ["resources/*.png", "resources/toolbar/*.png"]
 "opennmr.topspin" = ["resources/*.py"]

@@ -31,7 +31,7 @@ from __future__ import annotations
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
-    QButtonGroup, QLayout, QSizePolicy, QStackedWidget, QToolButton,
+    QButtonGroup, QLabel, QLayout, QSizePolicy, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -181,11 +181,19 @@ class WrappingTabWidget(QWidget):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._stack = QStackedWidget(self)
+        # Stands in for the strip once something else (the main
+        # toolbar) does the switching -- see setTabBarVisible.
+        self._heading = QLabel(self)
+        heading_font = self._heading.font()
+        heading_font.setBold(True)
+        self._heading.setFont(heading_font)
+        self._heading.hide()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         layout.addWidget(self._bar)
+        layout.addWidget(self._heading)
         layout.addWidget(self._stack, 1)
 
         self._stack.currentChanged.connect(self._on_stack_changed)
@@ -274,6 +282,26 @@ class WrappingTabWidget(QWidget):
             return not self._buttons[index].isHidden()
         return False
 
+    # -- beyond QTabWidget --------------------------------------------
+
+    def setTabBarVisible(self, visible: bool, *, show_heading: bool = False) -> None:  # noqa: N802
+        """Show or hide the strip of tab buttons.
+
+        Hidden, the pages are switched from outside (the main
+        toolbar's menus) and this is just a stack. ``show_heading``
+        then puts the current tab's name where the strip was, since
+        with no strip nothing else on screen says which page this is."""
+        self._bar.setVisible(visible)
+        self._heading.setVisible(not visible and show_heading)
+        self._heading.setText(self.tabText(self.currentIndex()))
+
+    def isTabBarVisible(self) -> bool:  # noqa: N802
+        return not self._bar.isHidden()
+
+    def headingText(self) -> str:  # noqa: N802
+        """The heading shown in place of a hidden strip ('' if none)."""
+        return self._heading.text() if not self._heading.isHidden() else ""
+
     # -- internals -----------------------------------------------------
 
     def _on_stack_changed(self, index: int) -> None:
@@ -282,4 +310,5 @@ class WrappingTabWidget(QWidget):
         the index directly."""
         if 0 <= index < len(self._buttons):
             self._buttons[index].setChecked(True)
+        self._heading.setText(self.tabText(index))
         self.currentChanged.emit(index)

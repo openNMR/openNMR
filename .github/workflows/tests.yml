@@ -1,0 +1,50 @@
+name: Tests
+
+# Runs the full pytest suite on every push and pull request to main.
+#
+# test_data/ (real instrument data) is gitignored, so it is not here:
+# every test that needs it skips, and this checks everything else. A
+# new real-data test must skip when test_data/ is absent, or it fails
+# here -- which is the point: this is what a fresh clone sees.
+#
+# Linux only, and one Python version: the suite takes several minutes,
+# and the question this answers is "does the committed code pass",
+# not platform coverage. build.yml covers building on all three.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same branch supersedes a run still in progress.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Qt needs these shared libraries even with the offscreen
+      # platform that tests/conftest.py selects.
+      - name: Install Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 \
+            libdbus-1-3 libfontconfig1
+
+      - name: Install opennmr with test extras
+        run: pip install -e ".[test]"
+
+      - name: Run tests
+        run: pytest -q -rs

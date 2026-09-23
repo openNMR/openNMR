@@ -11,3 +11,9 @@ dist/
 # not committed (large, and likely not meant for git history).
 /test_data/
 Claude outputs/
+
+# Editable design sources (Affinity Designer) -- kept locally, not
+# committed. Only their PNG exports in assets/tab_icons/ are tracked;
+# packaging/make_toolbar_icons.py builds the GUI's icons from those.
+/assets/design_sources/
+*.afdesign~lock~

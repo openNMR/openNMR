@@ -1,8 +1,8 @@
 # openNMR -- working notes and backlog
 
-## Where things stand (2026-09-18)
+## Where things stand (2026-09-21)
 
-**2146 tests passing, none failing** (full suite, 9m01s). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
+**2194 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -44,6 +44,67 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Settings, open experiments beside every mode that uses them, and Simulate (2026-09-22)
+
+User: *"make settings, and the open experiments lists. Create the simulations button, calling it ... simulate ... port in the simple things like diffusion simulator (add in different gradient shapes and experiment types to also demonstrate those differences), and the bloch pulse simulator. Remove the extra stuff from the analyse button that appears when you hover over it."* Items 1-3 of the previous round's plan.
+
+### Built
+
+* **Settings** -- a non-modal dialog (`_SettingsDialog`) from a gear at the right-hand end of the toolbar, File > Settings... and Cmd+, (`PreferencesRole`, so openNMR > Settings... on macOS). It hosts the **Imaging** controls, which leave Analyse: they are the same widgets (`_imaging_panel`, built where the sub-tab used to be), so every handler is unchanged. Non-modal because those values belong to the *selected* spectrum. A Plot Style... button sits under them. The gear is a `ModeButton` with `checkable=False`: an action, not a mode.
+* **Open experiments** moved out of the Load panel into a vertical splitter under the side tabs (`left_panel`), shown in **Load, Analyse and Compare** (`_PANELS_SHOWING_OPEN_EXPERIMENTS`) and hidden elsewhere. One list shown or hidden, not a copy per panel -- a widget has one parent. Load looks as it did; Compare and Analyse gain it. The central splitter's first child is now `left_panel`, not `side_tabs`.
+* **Simulate** -- a sixth toolbar button (placeholder computer icon, `resources/toolbar/simulate.png`, drawn to match; `make_toolbar_icons.py` replaces it once `assets/tab_icons/icon_simulate.png` exists, and likewise the gear). Its panel's sub-panels come from its dropdown. Entering it shows and raises a new **Simulation** plot view (`SimulationCanvas`, a plain matplotlib canvas -- `MplCanvas` is built around a spectrum) and runs the current simulation so it is never empty; leaving hides the view again. Backend in the new `opennmr.simulate` package:
+  * **Diffusion (PFG)** -- `simulate.diffusion`, a port of `leonmr.sim_diffusion` with the same defaults (1H, delta 1 ms, DELTA 20 ms, 17 T/m, D swept 1e-8..1e-15), **exact to the original for rect/PGSE** (tested against its formula). The b-value comes from the existing `processing.diffusion.b_value`, so every gradient shape (rect, half-sine, SMSQ10, Gaussian, trapezoid with ramp) and sequence (PGSE, PGSTE, bipolar with tau, Oneshot) is available, and **"Compare gradient shapes" / "Compare sequence types"** draw all of them at one D with everything else fixed, with b(max) and I/I0 at max listed per curve. An impossible combination (a tau leaving no diffusion time) is listed with its reason rather than raising. The original's `seismic` colour map was dropped: it is white in the middle, so the middle curves were invisible.
+  * **Shaped pulse (Bloch)** -- `simulate.bloch`, a port of `leonmr/bloch_sim.py`. The BURP tables and `generate_shape` are a **byte-identical copy** (diffed), because they must match the pulse programmes' own synthesis. `simulate_pulse` is vectorised over offsets and power scales -- same arithmetic, matching the original loop to 1e-10 in the tests, hundreds of times faster. New: power from a **flip angle** (`peak_b1_for_flip_angle`, via the shape's coherent integration factor, which reproduces the Bruker files' SHAPE_INTEGFAC for EBURP2/REBURP to 6 s.f.), alongside peak B1 and the original's hard-pulse calibration (RFAsh0/P1Hard/RFA0/LPMaxFraction). Choosing EBURP2 or REBURP sets the flip they are designed for.
+* **Analyse's tooltip** is just "Analyse" -- it listed every sub-panel.
+* **Found and fixed: duplicated Window-menu shortcut.** Panel shortcuts ran Ctrl+1..5 and the view shortcuts *continued the same count*, so Compare (panel) and Spectrum View were both Ctrl+5 -- ambiguous, so Qt fired neither -- and the views ran on to "Ctrl+10", which is no key. Panels are now Ctrl+1..6, views Ctrl+Shift+1..6, and a test asserts uniqueness.
+
+### Open
+
+* EBURP1/BURP need Fourier coefficients and are not offered in the GUI (available from `opennmr.simulate.bloch`).
+* Still from the plan: CSA fitting/simulation split (with CSA and quadrupolar simulation joining Simulate), a clickable starting point for CSA fitting, plot views as sidebar icons, fit results populating the tables.
+
+## Icon-only toolbar, Quantify as one page, and the plan for the rest (2026-09-22)
+
+User, after living with the first toolbar: rename and regroup the modes, arrows under the icons, "trial removing the words", and merge peak picking and integration onto one page with the fit at the bottom.
+
+### Built
+
+* **Icons only, arrows centred underneath.** Each toolbar button is now a `ModeButton` (`gui/widgets/mode_button.py`): the icon on top raises the panel, a small arrow below opens the menu. `QToolButton`'s own split mode puts the arrow beside the icon, which is what made menu buttons wider and off-centre. A button with no menu keeps an empty arrow slot, so all icons sit at one height. Names live on as tooltips and accessible names.
+* **Verbs throughout: Load, Process, Quantify, Analyse, Compare.** "Fit Spectrum" -> **Quantify** (user: "the focus is more on the peak picking and integration"); "Fit Curves" -> **Analyse** (British spelling, the user's). The Window menu's Ctrl+1..5 entries now use the same names, which settles the mismatch left open by the previous round. The side tab behind Quantify is renamed to match; the one behind Analyse is still called "Analysis" internally.
+* **Quantify is one page, no sub-panels and no dropdown.** Top to bottom: Peaks, Integration Regions, then a **Spectral Fitting** section under its own bold heading and rule -- region options, series options, Advanced, Fit Spectrum, the slice viewer and the report. `spectral_fitting_sub_tabs` no longer exists.
+* **The fit uses the regions only as two visible boxes say.** Found while doing this: *any* defined integration region silently restricted the spectral fit (`_fit_peaks` passed the region table as `fit_regions` unconditionally). With peaks and regions on one page that would surprise people, so it is now **"Fit only inside the regions"** (on by default, preserving the old behaviour) beside **"Bound peak amplitudes by region integrals"** (moved out of Advanced). The two are independent; previously the cap could only apply when the restriction did. The near-region-edge warning now only fires when the fit was actually restricted.
+* **The fit report is a table.** User: *"a sensible table, basically matching the results of the peak pick table but with the outputs."* It was a line of `shift=...±..., fwhm=...` text per peak. `spectral_fit_table` has the peak table's Shift/FWHM/Eta columns in the same order, then **Amplitude, Area and Area (%)** -- the last being each peak's share of the total fitted area, the relative number a quantification usually wants. Rows are numbered like the peak table. Each cell shows the value with its 1-sigma uncertainty underneath, rounded so the value carries only the digits its uncertainty supports (`_format_value_error`); a fixed parameter reads "(fixed)". Columns size to their contents and the table scrolls sideways rather than truncating -- a first version with stretched columns cut every value off at side-panel width. Right-click > Copy Table gives tab-separated text, one line per peak, for a spreadsheet. Fit quality (RMSE, reduced chi-squared) and any at-bound warnings sit on one line underneath.
+
+### Agreed plan, not built yet (in order)
+
+1. **Settings dialog** (not a panel), from a gear at the right-hand end of the toolbar and Cmd+, (openNMR > Settings... on macOS). **Imaging moves out of Analyse into it** -- its only control is the max-gradient box. Plot Style, series palette and default units are candidates to follow.
+2. **Open experiments visible outside Load**: in **Load, Compare and Analyse**. A widget has one parent, so the plan is a resizable, collapsible list at the top of the left panel, shown in those three modes, with each mode's panel beneath.
+3. **Simulations mode**, a sixth toolbar button (placeholder computer icon until the user draws one): PFG planning (`leonmr.sim_diffusion`), Bloch/shaped pulses (`leonmr/bloch_sim.py`), CSA and quadrupolar lineshape simulation on Euan's `notebook/simulations`. Simulated curves probably need a "Simulation" plot view.
+4. **CSA: fitting and simulation are split** (user agreed). Fitting belongs with spectral fitting in Quantify, simulation in Simulations, sharing the model code. **The CSA fit also needs a clickable starting point** -- at present the only way in is filling the sites table and pressing Fit; picking delta_iso (and the span edges) off the plot, as Pick from Plot does for peaks, is the obvious shape.
+5. **Plot views as icons in a sidebar** -- the user wants to revisit how the view strip works. Waits on icons for FID, Processing Preview, Spectrum, Spectral Fit, Fit, Compare.
+6. Idea, not decided: **fit results populating the tables above** (fitted shift/FWHM/area back into the peak table, fitted areas beside each region), so the report is not the only place results appear.
+
+## A workflow toolbar replaces the tab strips (2026-09-21)
+
+User: *"a full toolbar along the top instead of the tabs on the left and right ... load, processing, fitting (spectrum), fitting (curves), and the compare ... some kind of dropdown menu to replace the current subtabs"*, then supplied the icons (`assets/tab_icons/`, Affinity Designer sources plus 1080 px PNG exports).
+
+### What was built
+
+* **Five checkable buttons** -- Load, Process, Fit Spectrum, Fit Curves, Compare -- each raising its left panel. The two Fit buttons are **split buttons**: the button returns to the sub-panel last open there, the arrow picks another (Peak Picking/Integration; Curve Fitting/eNMR/VOCS/Imaging/CSA). Load's arrow holds the File menu's two Open actions.
+* **The plot views keep their strip above the plot.** A "View: <name>" menu at the right-hand end of the toolbar replaced it at first and was **rejected** the same day: *"I still need some way to switch between views like spectrum, fit, and processing. The top bar is one way but it isn't too intuitive."* The switch for the plot sits next to the plot.
+* **All five buttons share one width** (the widest one's size hint). A split button's arrow otherwise made it wider than its neighbours.
+* **The left-hand strips are hidden, not removed.** `side_tabs` and both sub-tab widgets still hold every page (`WrappingTabWidget.setTabBarVisible`). So the code paths that switch panel themselves (Processing raising its preview, Window-menu Ctrl+number) are untouched, and the toolbar only follows `currentChanged`. Reverting is three `setTabBarVisible(True)` lines.
+* **Hidden sub-tab strips show a bold heading** with the current sub-panel's name, since nothing else on screen says which one is open.
+* **Icons**: `packaging/make_toolbar_icons.py` turns the exports into 128 px transparent squares in `gui/resources/toolbar/`, each drawing scaled to fit and centred so tightly cropped exports of different aspect ratios still sit at one visual size. The user's second round of exports is RGBA and used as-is; an opaque-white export (the first round) still has its border-connected white removed. **Re-run it after re-exporting an icon.**
+* **Packaging**: `pyproject.toml` package-data now includes `resources/toolbar/*.png`, and `packaging/build.py` passes `--add-data` for `gui/resources`. The latter was also missing for the window logo, which the frozen app has never had (`app.py` guards it with `os.path.exists`, so it failed silently).
+
+### Open
+
+* **Dark mode**: the black linework (FID, curve-fit axes, the delta) nearly disappears on a dark toolbar. Needs either light variants of the icons or a backdrop behind them.
+* **Names disagree**: the toolbar says Process/Fit Spectrum/Fit Curves; the Window menu's Panel entries and `_show_side_tab` still use the tab names Processing/Spectral Fitting/Analysis. Deliberately left alone this round -- renaming the tabs touches tests and the name-based lookups.
+* **Not decided yet**, from the design discussion: keep the spectrum list visible in every mode (it currently lives only behind Load), move CSA to Fit Spectrum (it fits one spectrum's lineshape, not a curve), have the plot follow the mode automatically, and click-the-active-button to collapse the left panel.
+* **Left panel content clips on the right** in an offscreen render at 1300 px -- present on HEAD before this change too, so not caused by it; unverified on a real screen.
 
 ## CSA lineshape fitting in the GUI, and Euan's simple requests (2026-09-19)
 

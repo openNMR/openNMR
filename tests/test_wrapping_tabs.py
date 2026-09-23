@@ -149,8 +149,7 @@ def test_wrapping_tabs_strip_reports_height_for_width(qapp):
     assert widget._bar.heightForWidth(200) > widget._bar.heightForWidth(2000)
 
 
-# ============================================================
-# addTab(icon=...) -- the top-level launcher tiles (Load/Save/Compare,
+# =====================================================# addTab(icon=...) -- the top-level launcher tiles (Load/Save/Compare,
 # Processing, Advanced Processing, Fitting, Relaxation, Applications,
 # Simulations) need an icon-above-text look; every existing sub-tab
 # caller keeps its plain text-only button by simply not passing one.
@@ -214,3 +213,23 @@ def test_addtab_icon_and_no_icon_can_be_mixed_in_one_strip(qapp):
     widget.setCurrentWidget(page_b)
     assert widget._buttons[1].isChecked()
     assert not widget._buttons[0].isChecked()
+=======
+def test_hidden_strip_can_show_the_current_tab_as_a_heading(qapp):
+    # The main toolbar switches pages once the strips are hidden, so a
+    # nested strip shows the page's name instead -- otherwise nothing
+    # on screen says which sub-panel is open.
+    widget, pages = _tabs(qapp)
+    assert widget.isTabBarVisible()
+    assert widget.headingText() == ""
+
+    widget.setTabBarVisible(False, show_heading=True)
+    assert not widget.isTabBarVisible()
+    assert widget.headingText() == "One"
+    widget.setCurrentWidget(pages[2])
+    assert widget.headingText() == "Three"
+
+    widget.setTabBarVisible(False)
+    assert widget.headingText() == ""
+    widget.setTabBarVisible(True)
+    assert widget.isTabBarVisible()
+    assert widget.headingText() == ""
