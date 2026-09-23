@@ -2702,7 +2702,7 @@ class MainWindow(QMainWindow):
         self.curve_fit_summary_label.setText("")
         self.dosy_results_label.setText("")
         self.gradient_calibration_label.setText("")
-        self.spectral_fit_params_label.setText("")
+        self._clear_spectral_fit_report()
         self.analysis_status_label.setText("Select a pseudo-2D spectrum (e.g. a T1/T2 relaxation series) to fit.")
         self._current_analysis_index = None
         self._slice_fit_results = None
@@ -9501,6 +9501,9 @@ class MainWindow(QMainWindow):
 
     _PEAK_TABLE_COLUMNS = ("Shift (ppm)", "FWHM (ppm)", "Eta", "Fixed")
     _REGION_TABLE_COLUMNS = ("Low (ppm)", "High (ppm)")
+    #: Spectral-fit results table (ported from upstream, Leo 14a6fd3):
+    #: the peak table's own Shift/FWHM/Eta columns, then the outputs.
+    _SPECTRAL_FIT_TABLE_COLUMNS = ("Shift\n(ppm)", "FWHM\n(ppm)", "Eta", "Amplitude", "Area", "Area\n(%)")
 
     def _build_fitting_panel(self) -> QWidget:
         """The "Fitting" launcher button -- collects every *spectral*
@@ -10704,11 +10707,42 @@ class MainWindow(QMainWindow):
         slice_fit_row.addLayout(slice_fit_spin_row)
         layout.addLayout(slice_fit_row)
 
+        # The fit's results as a table laid out like the peak table --
+        # one row per peak, same order, same shift/FWHM/eta columns --
+        # plus what the fit produces. Ported from upstream (Leo,
+        # 14a6fd3); it was a line of "shift=...±..." text per peak.
+        self.spectral_fit_table = QTableWidget(0, len(self._SPECTRAL_FIT_TABLE_COLUMNS))
+        self.spectral_fit_table.setHorizontalHeaderLabels(self._SPECTRAL_FIT_TABLE_COLUMNS)
+        # Sized to contents, not stretched: a value is never cut off to
+        # fit the panel -- a narrow panel scrolls sideways instead.
+        self.spectral_fit_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.spectral_fit_table.horizontalHeader().setStretchLastSection(True)
+        self.spectral_fit_table.setWordWrap(False)
+        self.spectral_fit_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Taller than the peak table's cap: each row holds two lines.
+        self.spectral_fit_table.setMaximumHeight(220)
+        self.spectral_fit_table.setToolTip(
+            "Fitted values for the slice shown above, one row per peak in "
+            "the same order as the peak table, with 1-sigma uncertainties "
+            "rounded to the digits they support. Area (%) is each peak's "
+            "share of the total fitted area -- the relative quantity, e.g. "
+            "for a ratio of species. A value held fixed during the fit is "
+            "marked (fixed) and has no uncertainty.\n\n"
+            "Right-click to copy the table (tab-separated, pastes into a "
+            "spreadsheet). Export Fit Report writes every slice to CSV."
+        )
+        self.spectral_fit_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.spectral_fit_table.customContextMenuRequested.connect(self._on_spectral_fit_table_menu)
+        layout.addWidget(self.spectral_fit_table)
+
+        # One line under the table: fit quality, and any parameter that
+        # ended up against its bound.
         self.spectral_fit_params_label = QLabel("")
         self.spectral_fit_params_label.setWordWrap(True)
         self.spectral_fit_params_label.setToolTip(
-            "Fitted parameters (with 1-sigma uncertainties) for the "
-            "slice shown above, one line per peak."
+            "Fit quality for the slice shown above (RMSE, reduced "
+            "chi-squared), and any parameter that finished at a bound."
         )
         layout.addWidget(self.spectral_fit_params_label)
 
@@ -15049,7 +15083,7 @@ class MainWindow(QMainWindow):
         self.view_slice_fit_spin.blockSignals(True)
         self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.blockSignals(False)
-        self.spectral_fit_params_label.setText("")
+        self._clear_spectral_fit_report()
         self.integration_results_label.setText(
             f"Integrated {len(results)} slice(s) across {n_regions} region(s) -- "
             f"ready for Fit Curve (Value source: Integrated region)."
@@ -17123,15 +17157,110 @@ class MainWindow(QMainWindow):
         self._display_slice_fit(result, switch_tab=True)
 
     @staticmethod
-    def _format_fit_params(per_peak: list[dict], peak_labels: list[str]) -> str:
-        lines = []
-        for label, peak in zip(peak_labels, per_peak):
-            parts = [
-                f"{name}={value:.4g}±{error:.2g}"
-                for name, value, error in zip(peak["names"], peak["params"], peak["errors"])
-            ]
-            lines.append(f"{label}: " + ", ".join(parts))
+    def _format_value_error(value: float, error: float | None, fixed: bool = False) -> str:
+        """``1.502 ± 0.0003`` -- the error to 2 significant figures and
+        the value rounded to the same place, so the digits shown are
+        the ones the uncertainty supports. Falls back to 4 significant
+        figures when there is no usable error.
+
+        Ported from upstream (Leo, 14a6fd3), with one correction: an
+        error of 100 or more now rounds the value to the tens/hundreds
+        place too (``1230 ± 150``, not ``1234 ± 150``) -- upstream
+        clamped the decimal count at 0, which kept digits the error
+        does not support."""
+        if fixed:
+            return f"{value:.4g} (fixed)"
+        if error is None or not np.isfinite(error) or error <= 0:
+            return f"{value:.4g}"
+        if abs(value) >= 1e5 or (value != 0 and abs(value) < 1e-4):
+            return f"{value:.4g} ± {error:.2g}"
+        decimals = 1 - int(np.floor(np.log10(error)))
+        if decimals >= 0:
+            return f"{value:.{decimals}f} ± {error:.{decimals}f}"
+        quantum = 10.0 ** (-decimals)
+        return f"{round(value / quantum) * quantum:.0f} ± {round(error / quantum) * quantum:.0f}"
+
+    def _fill_spectral_fit_table(self, result: dict, per_peak: list[dict]) -> None:
+        """One row per peak: shift, FWHM and eta as in the peak table,
+        then amplitude, area and each area's share of the total."""
+        table = self.spectral_fit_table
+        table.setRowCount(len(per_peak))
+        integrals = result.get("integrals")
+        integral_errors = result.get("integral_errors")
+        integrals_norm = result.get("integrals_norm")
+        for row, peak in enumerate(per_peak):
+            values = dict(zip(peak["names"], peak["params"]))
+            errors = dict(zip(peak["names"], peak["errors"]))
+            fixed = dict(zip(peak["names"], peak.get("fixed", [False] * len(peak["names"]))))
+            cells = []
+            for name in ("shift", "fwhm", "eta", "amplitude"):
+                if name in values:
+                    cells.append(self._format_value_error(
+                        float(values[name]), float(errors[name]), bool(fixed[name])))
+                else:
+                    cells.append("—")  # Gaussian/Lorentzian: no eta
+            if integrals is not None and row < len(integrals):
+                area_error = (float(integral_errors[row])
+                              if integral_errors is not None and row < len(integral_errors) else None)
+                cells.append(self._format_value_error(float(integrals[row]), area_error))
+            else:
+                cells.append("—")
+            if integrals_norm is not None and row < len(integrals_norm):
+                cells.append(f"{float(integrals_norm[row]):.1f}")
+            else:
+                cells.append("—")
+            for column, text in enumerate(cells):
+                # The uncertainty on its own line: "value ± error" on one
+                # line does not fit six columns in a side panel.
+                item = QTableWidgetItem(text.replace(" ± ", "\n± ").replace(" (fixed)", "\n(fixed)"))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, column, item)
+        # Numbered like the peak table's rows, so row n here is row n there.
+        table.setVerticalHeaderLabels([str(i + 1) for i in range(len(per_peak))])
+        table.resizeRowsToContents()
+
+    @staticmethod
+    def _format_fit_summary(result: dict) -> str:
+        quality = result.get("fit_quality") or {}
+        parts = []
+        if "rmse" in quality:
+            parts.append(f"RMSE {quality['rmse']:.3g}")
+        if "reduced_chi2" in quality:
+            parts.append(f"reduced χ² {quality['reduced_chi2']:.3g}")
+        text = "  ·  ".join(parts)
+        warnings = result.get("warnings") or []
+        if warnings:
+            text += ("\n" if text else "") + "At a bound: " + "; ".join(warnings)
+        return text
+
+    def _clear_spectral_fit_report(self) -> None:
+        self.spectral_fit_table.setRowCount(0)
+        self.spectral_fit_params_label.setText("")
+
+    def _spectral_fit_table_as_tsv(self) -> str:
+        """The table as tab-separated text, header included -- what a
+        spreadsheet expects on paste. One line per peak: the two-line
+        cells are rejoined onto a single line."""
+        table = self.spectral_fit_table
+        header = ["Peak"] + [table.horizontalHeaderItem(c).text().replace("\n", " ")
+                             for c in range(table.columnCount())]
+        lines = ["\t".join(header)]
+        for row in range(table.rowCount()):
+            label = table.verticalHeaderItem(row)
+            cells = [label.text() if label else str(row + 1)]
+            for column in range(table.columnCount()):
+                item = table.item(row, column)
+                cells.append(item.text().replace("\n", " ") if item else "")
+            lines.append("\t".join(cells))
         return "\n".join(lines)
+
+    def _on_spectral_fit_table_menu(self, pos) -> None:
+        menu = QMenu(self.spectral_fit_table)
+        copy_action = menu.addAction("Copy Table")
+        copy_action.setEnabled(self.spectral_fit_table.rowCount() > 0)
+        chosen = menu.exec(self.spectral_fit_table.viewport().mapToGlobal(pos))
+        if chosen is copy_action:
+            QApplication.clipboard().setText(self._spectral_fit_table_as_tsv())
 
     @staticmethod
     def _build_fit_report_csv(slice_results: list[dict], relaxation_results: list[dict] | None = None) -> str:
@@ -17262,7 +17391,7 @@ class MainWindow(QMainWindow):
     def _display_slice_fit(self, result: dict, switch_tab: bool = False) -> None:
         """Draw one spectral-fit result (data, total fit, and each
         peak's own component) into the Spectral Fit canvas, and its
-        numeric parameters into ``spectral_fit_params_label`` --
+        numeric parameters into ``spectral_fit_table`` --
         shared by browsing slices via ``view_slice_fit_spin`` and by
         ``_silo_other_canvas_tabs`` restoring a reselected
         spectrum's already-computed fit."""
@@ -17276,7 +17405,8 @@ class MainWindow(QMainWindow):
             components=result.get("components"), peak_labels=peak_labels, title=title,
             spectrum=result.get("slice"),
         )
-        self.spectral_fit_params_label.setText(self._format_fit_params(per_peak, peak_labels))
+        self._fill_spectral_fit_table(result, per_peak)
+        self.spectral_fit_params_label.setText(self._format_fit_summary(result))
         if switch_tab:
             self.canvas_tabs.setCurrentWidget(self.spectral_fit_canvas)
 
@@ -17425,7 +17555,7 @@ class MainWindow(QMainWindow):
         self.curve_fit_summary_label.setText("")
         self.dosy_results_label.setText("")
         self.gradient_calibration_label.setText("")
-        self.spectral_fit_params_label.setText("")
+        self._clear_spectral_fit_report()
 
         state = spectrum.metadata.raw.get("analysis_state")
         if state is None:
@@ -17969,7 +18099,7 @@ class MainWindow(QMainWindow):
             self._display_slice_fit(slice_fit_results[0], switch_tab=False)
         else:
             self.spectral_fit_canvas.clear()
-            self.spectral_fit_params_label.setText("")
+            self._clear_spectral_fit_report()
 
         # The Compare tab plots whatever is multi-selected in the
         # Spectra list, not this single spectrum -- it has no

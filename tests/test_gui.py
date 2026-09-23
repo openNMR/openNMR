@@ -6909,6 +6909,84 @@ def test_main_window_amplitude_bound_regions_round_trips_through_reselection(qap
 
 
 # ============================================================
+# Spectral-fit results table -- ported from upstream (Leo, 14a6fd3)
+# ============================================================
+
+def test_spectral_fit_report_is_a_table_matching_the_peak_table(qapp):
+    # "a sensible table, basically matching the results of the peak pick
+    # table but with the outputs" -- it was a line of text per peak.
+    window = MainWindow()
+    x = np.linspace(10.0, 0.0, 800)
+    y = (processing_fitting.lorentzian(x, 3.0, 0.05, 1.0)
+         + processing_fitting.lorentzian(x, 6.0, 0.05, 3.0))
+    spectrum = NMRSpectrum(
+        data=y, axes=[NMRAxis(kind="frequency", ppm=x, hz=x * 400.0)],
+        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0),
+    )
+    window._add_peak_row(3.0, 0.05)
+    window._add_peak_row(6.0, 0.05)
+    results = window._fit_peaks([spectrum])
+    window._display_slice_fit(results[0])
+
+    table = window.spectral_fit_table
+    columns = [table.horizontalHeaderItem(c).text().replace("\n", " ")
+               for c in range(table.columnCount())]
+    # The peak table's own columns first, in its order, then the outputs.
+    assert columns[:3] == list(window._PEAK_TABLE_COLUMNS[:3])
+    assert columns[3:] == ["Amplitude", "Area", "Area (%)"]
+    assert table.rowCount() == 2
+    # Numbered like the peak table, so row n here is row n there.
+    assert [table.verticalHeaderItem(r).text() for r in range(2)] == ["1", "2"]
+
+    shift_1 = table.item(0, 0).text()
+    assert shift_1.startswith("3.0") and "\n± " in shift_1
+    # Area share: the second peak is three times the first.
+    shares = [float(table.item(r, 5).text()) for r in range(2)]
+    assert abs(sum(shares) - 100.0) < 0.5
+    assert abs(shares[1] / shares[0] - 3.0) < 0.1
+    assert "RMSE" in window.spectral_fit_params_label.text()
+
+    tsv = window._spectral_fit_table_as_tsv().splitlines()
+    assert tsv[0].split("\t") == ["Peak"] + columns
+    assert tsv[1].split("\t")[0] == "1"
+    assert " ± " in tsv[1]  # one line per cell in the copy
+    assert len(tsv) == 3
+
+    window._clear_spectral_fit_report()
+    assert table.rowCount() == 0
+    assert window.spectral_fit_params_label.text() == ""
+
+
+def test_spectral_fit_table_sits_in_the_isotropic_section(qapp):
+    window = MainWindow()
+    isotropic = next(s for s in window.findChildren(CollapsibleSection)
+                     if s.title() == "Isotropic (Gauss/Lor)")
+    assert isotropic.isAncestorOf(window.spectral_fit_table)
+    assert isotropic.isAncestorOf(window.spectral_fit_params_label)
+
+
+def test_value_error_formatting_keeps_only_supported_digits(qapp):
+    fmt = MainWindow._format_value_error
+    assert fmt(1.50234, 0.00031) == "1.50234 ± 0.00031"
+    assert fmt(1.50234, 0.031) == "1.502 ± 0.031"
+    assert fmt(1234.5, 12.0) == "1234 ± 12"   # banker's rounding of .5 either way is fine
+    assert fmt(0.5, 0.0, fixed=True) == "0.5 (fixed)"
+    assert fmt(2.0, float("nan")) == "2"
+    assert fmt(2.0, None) == "2"
+
+
+def test_value_error_formatting_rounds_to_tens_when_the_error_is_large(qapp):
+    # Correction to the upstream formatter: with an error >= 100 it kept
+    # every integer digit ("1234 ± 150"), more than the error supports.
+    fmt = MainWindow._format_value_error
+    assert fmt(1234.5, 150.0) == "1230 ± 150"
+    assert fmt(98765.0, 4321.0) == "98800 ± 4300"
+    assert fmt(-1234.5, 150.0) == "-1230 ± 150"
+    assert fmt(55.0, 99.0) == "55 ± 99"          # boundary: still 0 decimals
+    assert fmt(1234.0, 100.0) == "1230 ± 100"    # boundary: first rounded case
+
+
+# ============================================================
 # "Use the integration regions" -- ported from upstream (Leo, 14a6fd3).
 # Any defined region used to restrict the fit silently; it is now one
 # visible option, independent of the amplitude cap.
@@ -7947,7 +8025,9 @@ def test_main_window_view_slice_fit_shows_data_and_fit_curve(qapp):
     assert any(label.startswith("Peak 1") for label in labels)
     assert "Baseline" in labels
     assert "Slice 3" in window.spectral_fit_canvas.ax.get_title()
-    assert "Peak 1" in window.spectral_fit_params_label.text()
+    # Results are a table now (one row per peak), not a text line.
+    assert window.spectral_fit_table.rowCount() == 1
+    assert window.spectral_fit_table.verticalHeaderItem(0).text() == "1"
 
     # Explicit user request: left/right buttons, matching the pattern
     # already used for View curve fit (peak #) and the phasing-tab
