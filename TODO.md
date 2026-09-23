@@ -74,6 +74,97 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
 
+## Dark-mode fixes, a theme toggle, tiles on top, quadrupolar nucleus (2026-09-23)
+
+User, on the soft-edge sheet from the round below: *"A lot of the small buttons like the up/down arrows are really messed up in the dark mode, and many buttons have no distinction from the background colour."* Plus: *"add a toggle in settings to switch between light and dark modes (default is still system settings)"*, *"the big buttons should be a persistent row along the top of the app"*, and *"ensure that the quadrupolar simulation nucleus is the same kind of box as for PFG (dropdown but editable) and reads the nuclear spin directly from the table to avoid mismatches"*.
+
+### Three measurements, three causes
+
+Everything below was diagnosed by measuring, because all three symptoms had plausible wrong explanations.
+
+* **"No distinction from the background."** `palette(button)` is **byte-identical to `palette(window)`** on this platform -- #efefef both, contrast **1.00:1** -- so painting a button `background: palette(button)` made it invisible. `style.py` now *builds* the palette instead of reading ambiguous roles from the platform's, with `Button` deliberately offset from `Window` and a distinct mid-grey **border** role (the thing that actually makes a button read as one: light **1.47:1** against the window, dark **2.20:1**). A test pins those ratios.
+* **"Up/down arrows really messed up."** A stylesheet rule on a widget class drops it out of the native renderer for *every* property, so a styled `QSpinBox` paints no arrows unless every sub-control is respecified with its own `image:`. `QSpinBox`, `QDoubleSpinBox`, `QComboBox`, `QSlider`, `QScrollBar`, `QCheckBox`, `QRadioButton` and `QHeaderView` are now in a named `_NEVER_STYLED` list and absent from the sheet -- listed rather than merely omitted so a later edit has to delete one first. They take their softening from the palette.
+* **A full-suite failure the same sheet caused.** `test_ui_font_size_scales_the_interface_and_keeps_titles_ahead` broke: `output_colormap_combo` stayed at 9pt while the app font went to 15pt. Bisected to **any** application stylesheet -- one naming only `QGroupBox` does it too -- marking existing widgets' fonts as explicitly set. Fix is `style.refresh_fonts()`, re-applying the *same* sheet after `setFont`, called from `_apply_ui_font_size`. **Clearing the sheet first does not work** (measured: widgets stay at the stale size); only the re-set re-resolves them.
+
+### Built
+
+* **Appearance toggle** in Settings ▸ Interface: Follow system / Light / Dark, saved to the UI settings JSON. "Follow system" resolves to the matching palette rather than leaving the platform's alone, so the guaranteed button contrast holds in every mode. `_apply_ui_theme` also asks each canvas to restyle, tolerating a canvas that has no `set_theme`.
+* **Launcher tiles as a persistent full-width row** above both columns. New `WrappingTabWidget.takeTabBar()` reparents the strip out; it still drives the stack because the wiring is signal-based, not positional. The splitter is no longer the central widget, so it is exposed as `window.main_splitter`.
+* **Quadrupolar nucleus** is now an editable `QComboBox` matching the PFG simulator's, offering only **I ≥ 1** nuclides (a spin-1/2 has no quadrupole moment, so listing one would offer an impossible simulation) and filling **Spin I from the nuclide table** on change. New `core.registry.find_spin()` and `quadrupolar_nuclides()`; `find_gamma()` gained a `spin` key. The handler is silent on unrecognised text because it fires per keystroke -- "2" on the way to "23Na" must not warn or reset.
+
+### Round 2: the theme was only half applied
+
+Tried the above in a dark-mode OS and reported, in light mode: *"background behind the mpl controls is still dark, the file dropdown arrows are white, as are the arrows in the spinboxes, background of the phase up/down arrow buttons is still dark, many fonts like in the table and eg the export curve fit (CSV) button are light grey"*, then *"And the phase pivot bar too"*.
+
+**Every one of those was the same cause, and it was the fix above biting back.** The widgets deliberately left out of the stylesheet (`_NEVER_STYLED`) are drawn by the *platform* style, which on macOS follows the **operating system's** appearance and ignores `QPalette` for its sub-controls. Confirmed: `defaults read -g AppleInterfaceStyle` -> `Dark`. So with the OS dark and openNMR set to light, the combo/spin arrows, the `pivot_slider` (a plain `QSlider`), the matplotlib `NavigationToolbar2QT` background and the table text all kept rendering in the system appearance. Not styling them fixed the arrows and cost them the theme.
+
+`apply_theme` now installs the **Fusion** style, which resolves those sub-controls from the palette, so one palette decides the whole window; plus `styleHints().setColorScheme()` (Qt 6.11 here) for chrome Fusion does not draw. **Cost, stated plainly: the app no longer looks natively macOS.** That is the price of a toggle that works at all -- the native style cannot be repainted into an appearance the OS is not in.
+
+A latent bug fell out of the same change: `apply_theme` *sets* the colour scheme, so "follow system" would have read its own last choice back and latched onto it. `remember_system_theme()` samples the platform once at startup, before anything overrides it, and `system_prefers_dark` reads that rather than `styleHints()`.
+
+### Round 3: the one widget no style can reach
+
+*"The phasing buttons are still dark in light mode, maybe make them blue like the headings?"* -- `DragHandle.paintEvent` painted with **literal** colours (fill `QColor(80, 80, 80)`, glyph `QColor(220, 220, 220)`). No palette, style or stylesheet can reach a literal, so it was dark in both themes and always had been. Now drawn from `palette(Highlight)` with `HighlightedText` for the glyph -- the accent blue the user asked for -- and it gained hover/pressed states it never had. A test greps `paintEvent` for `QColor(` so a literal cannot creep back. It was the **only** custom-painted widget in `gui/`; checked, not assumed.
+
+### Round 4: two follow-ups on the quadrupolar box
+
+* *"shouldn't let spin be editable also, just set by nucleus"* -- `sim_quad_spin_spin` is now `setReadOnly(True)` with `NoButtons` and no focus. Read-only rather than disabled, so the value stays at full contrast and legible.
+* **A regression the full suite caught**, worth recording because the mistake is easy to repeat: converting the nucleus `QLineEdit` to a `QComboBox` silently broke the "seeded, never forced" logic, which tests `if not <field text>`. A combo with items is **never** empty -- it starts on item 0 -- so seeding stopped happening and the box always read `2H`. Fixed with `setCurrentIndex(-1)`, which on an editable combo gives a genuinely empty line edit and restores the original semantics. Tightened at the same time: a **spin-1/2 spectrum no longer seeds it at all**, because filling it with 31P would pair a nuclide this simulation cannot run with a Spin I describing a different one -- the exact mismatch reading I from the table exists to prevent.
+
+### Open
+
+* The dark palette is hand-picked, not derived from the system accent colour; a user with a non-blue accent still gets openNMR's blue highlight.
+
+### Settled, not open
+
+Both raised as trade-offs and both decided by the user, recorded here so they are not re-litigated as oversights:
+
+* **Plots stay light in every theme.** A figure here is the same object that gets exported, and an exported figure belongs on white -- so a dark interface wraps light plots and what you see is what you export. *"Figure should still always be light I should think."* `_apply_ui_theme` therefore touches only the interface palette; the speculative `canvas.set_theme` hook an earlier draft called was removed rather than left implying a future dark canvas. Revisiting this means separating on-screen colours from export colours first: one setting cannot serve both.
+* **Fusion is forced unconditionally**, so the app looks the same on every OS rather than native on each. *"Fusion is good, a constant aesthetic is good across OSs."* No native-style escape hatch.
+* `_apply_ui_theme` calls `canvas.set_theme` if it exists -- **no canvas implements one yet**, so matplotlib figures stay light-on-white inside a dark interface. That is the obvious next piece and is deliberately not guessed at here.
+* The combo offers the first 24 quadrupolar nuclides by mass number; the table has 90. Anything else can still be typed, but there is no search.
+* Still unverified on Windows/Linux, as below.
+
+
+## Spinsolve preview, softer edges, and Compare's scroll-to-scale (2026-09-23)
+
+User, after pulling `euan-merge`: *"the new spinsolve data loads and can be processed but there is no processing preview available. Also right now all the buttons are very harsh and squared, can the edges be softened a bit? For compare, the x-axis scroll to zoom is a bit of an issue when there are lots of spectra stacked and you want to scale the y intensity."*
+
+Also fixed on the way in: two defects that arrived with the branch. `tests/test_wrapping_tabs.py` carried a **stray `=======` from an unresolved merge conflict** in `01d854f` -- a syntax error that blocked collection of the entire suite, and had been on `euan-merge` for eight commits. Both sides' tests were distinct, so both were kept. `tests/test_gui.py` asserted the old literal status-bar string, which `6cdbfdf` correctly generalised when it added per-value source tags. **CI never caught either: `.github/workflows/tests.yml` only triggers on `main`.** Adding `euan-merge` to that trigger list is the obvious follow-up and is *not* done.
+
+### 1. Spinsolve had no processing preview
+
+Two gates, both closed. `_raw_fid_reprocessing_available` is a hard-coded vendor allowlist that did not include `"spinsolve"`, and `read_spectrum` deliberately withheld `fid`/`fid_raw`/`fid_dt` -- on the stated reasoning that the generic reprocessing path "has no way to apply this format's conjugate -- it would put the peak at the mirrored shift."
+
+**Measured, that reasoning was half wrong.** `processing.ft.fft_spectrum` builds a *descending* frequency axis (`-fftshift(fftfreq)`), which is the same mirroring the reader's `fft(conj(fid))` achieved: pushed through the generic path the peak lands at **0.2207 ppm**, exactly where the reader puts it. Not mirrored at all. What the two *did* differ by was subtler and worse for a live preview: the generic path returned the **complex conjugate, one bin over** (the one bin being the even-length `fftshift` reversal the adapter's `[::-1]` introduced). Real parts agreed; imaginary parts were negated -- so a phase drag would have rotated the preview opposite to the Spectrum tab.
+
+Fixed at the root rather than papered over: `SpinsolvePFG.spectra()` now goes through `ft.apodize`/`ft.zero_fill`/`ft.fft_spectrum` instead of a hand-rolled `fftshift(fft(conj(fid)))`, and `ppm_axis()` descends like every other vendor's, so the adapter's reversal is gone. Reader and preview now agree to **1e-9** once the instrument's recorded phase (-0.50 deg here) is removed -- and every vendor works that way, the loaded spectrum carrying the recorded phase while the preview starts unphased. Still reproduces `fit.csv`: D 1.33526e-10 vs 1.338e-10 (0.20%), I0 82.169 vs 82.116 (0.065%).
+
+### 2. Buttons were hard-edged
+
+**Nothing in `src/opennmr/gui/` set a `border-radius` anywhere.** New `gui/style.py`: `soft_edges_qss(radius=6)` plus `apply_soft_edges(app)`, called from `app.main()` and from `MainWindow.__init__` (idempotent via a marker comment) so an embedded window and the test suite look like the packaged app.
+
+Deliberately minimal, and the reason is a real constraint rather than taste: **on macOS, styling any property of a widget class drops that class out of the native renderer for every property**, so an over-specified sheet turns a native app flat. The sheet therefore sets corner radius, border and padding only, and takes every colour from `palette()` roles -- no literal colour appears in it, which a test asserts -- so system light/dark and the user's accent colour still come through. `RADIUS = 6` / `CONTAINER_RADIUS = 8` are the only knobs; 0 restores the old squares.
+
+### 3. Compare's scroll-to-scale, measured
+
+`_hovering_x_axis` tested `event.y < bbox.y0` -- **unbounded below**. In a stacked Compare (one axes per row, `hspace=0.0`) the region under one row *is* the next row down, so every inter-row gap claimed the x-zoom. Swept vertically down a 12-row stack, 60 sample points:
+
+| | before | after |
+|---|---|---|
+| scaled intensity | 42% (and interleaved `xxBxBBxBBxBxxB…`) | **83%** |
+| zoomed x | 52% | 17% (the real tick strip) |
+| did nothing | 5% | **0%** |
+
+Two changes. `_x_strip_depth(ax)` bounds the strip to the decorations that are actually there, via `get_tightbbox()`: a stacked row that draws no tick labels (every row but the bottom, sharing one x axis) gets **zero** depth and so claims nothing. A panel with nothing below it keeps the old unbounded behaviour, which is every single-panel view -- aiming below the axis label still works there, pinned by its own test. Second, the `_compare_axes` intensity branch moved **above** the `event.ydata is None` guard, and the `ax is None` early return now lets a Compare through: that branch reads no cursor y and no `ax`, rescaling each row from its own ylim, so the gaps can drive it. A stacked Compare is the one view with no meaningful "nowhere".
+
+### Open
+
+* The `euan-merge` CI trigger (above).
+* `RADIUS` is not user-configurable from the GUI; it is a constant in `gui/style.py`. A Settings control is the obvious next step if 6px is not the right number.
+* The soft-edge sheet has not been eyeballed on Windows or Linux, only reasoned about -- the palette-role approach is what should make it portable, but nobody has looked.
+
+
 ## Bruker PFG gradients without a diff.xml (2026-09-23)
 
 User: *"plan out a better way to include bruker gradient info if the diff module is not used to create the experiment (ie no diff.xml file). They should still use difflist which is the gradient strengths in G/cm. Maybe this can also read the associated pp and pull out the values for delta ... and DELTA ... Prepare this method for easy integration with either the current GUI or the soon-to-be-merged one"*

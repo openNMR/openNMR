@@ -4193,3 +4193,278 @@ def test_apply_style_defaults_sets_new_2d_reset_values(qapp):
     # Only this instance: the class default is untouched.
     assert MplCanvas._CONTOUR_CLEVELS_DEFAULT == 7
     assert MplCanvas().style_settings()["contour_clevels"] == 7
+
+
+# ============================================================
+# Scroll-to-scale on a tall stacked Compare
+# ============================================================
+
+def _gap_scroll_event(canvas, upper_ax, lower_ax, button="up"):
+    """A scroll event in the gap *between* two stacked Compare rows --
+    below ``upper_ax``'s data rectangle and above ``lower_ax``'s.
+    matplotlib reports no ``inaxes``/``ydata`` there, which is exactly
+    what made this region do nothing."""
+    upper, lower = upper_ax.get_window_extent(), lower_ax.get_window_extent()
+    y = (upper.y0 + lower.y1) / 2.0
+    x = (upper.x0 + upper.x1) / 2.0
+    return SimpleNamespace(inaxes=None, xdata=None, ydata=None, x=x, y=y, button=button)
+
+
+def _tall_stack(qapp, count=12):
+    canvas = MplCanvas()
+    canvas.show_compare([_make_1d_at(3.0, amplitude=1 + 0.1 * i) for i in range(count)],
+                        mode="stack")
+    canvas.canvas.draw()
+    return canvas
+
+
+def test_only_the_bottom_row_of_a_stack_has_an_x_strip(qapp):
+    """The defect: the x strip used to be "everything below this axes",
+    which in a stack is the next row down. More than half a tall
+    stack's height then resolved to the x-zoom, interleaved row by row,
+    so scrolling to scale intensity zoomed x about half the time."""
+    canvas = _tall_stack(qapp)
+    rows = canvas._compare_axes
+    assert canvas._x_strip_depth(rows[-1]) > 0          # bottom row: real tick labels
+    for ax in rows[:-1]:
+        # Every other row shares that x axis and draws no labels, so it
+        # has no strip -- and therefore cannot claim the gap under it.
+        assert canvas._x_strip_depth(ax) == 0.0
+
+
+def test_scrolling_between_stacked_rows_scales_intensity_not_x(qapp):
+    canvas = _tall_stack(qapp)
+    rows = canvas._compare_axes
+    before_x = rows[0].get_xlim()
+    before_y = [ax.get_ylim() for ax in rows]
+
+    canvas._on_scroll(_gap_scroll_event(canvas, rows[3], rows[4], button="up"))
+
+    assert rows[0].get_xlim() == pytest.approx(before_x)   # x untouched
+    after_y = [ax.get_ylim() for ax in rows]
+    assert all(a != b for a, b in zip(before_y, after_y))  # every row rescaled
+    # Each row still pinned at its own baseline, which is the whole
+    # point of one axes per row.
+    assert all(a[0] == pytest.approx(b[0]) for a, b in zip(before_y, after_y))
+
+
+def test_the_bottom_rows_own_x_strip_still_zooms_x(qapp):
+    # The fix must not cost the gesture it bounds: aiming at the real
+    # tick labels under the bottom row still zooms x.
+    canvas = _tall_stack(qapp)
+    rows = canvas._compare_axes
+    before_x = rows[-1].get_xlim()
+    before_y = [ax.get_ylim() for ax in rows]
+
+    canvas._on_scroll(_x_strip_scroll_event(rows[-1], xdata=3.0, button="up"))
+
+    assert rows[-1].get_xlim() != pytest.approx(before_x)
+    assert [ax.get_ylim() for ax in rows] == before_y
+
+
+def test_a_single_panel_keeps_its_unbounded_x_strip(qapp):
+    """A lone 1D plot has nothing below it, so the region under its
+    axis label still belongs to the x-zoom -- bounding the strip is
+    only meaningful where another panel is there to claim it."""
+    canvas = MplCanvas()
+    canvas.show_spectrum(_make_1d_at(3.0))
+    canvas.canvas.draw()
+    bbox = canvas.ax.get_window_extent()
+    assert canvas._x_strip_depth(canvas.ax) == pytest.approx(bbox.y0)
+    deep = SimpleNamespace(inaxes=None, xdata=None, ydata=None,
+                           x=(bbox.x0 + bbox.x1) / 2, y=1.0, button="up")
+    assert canvas._hovering_x_axis(canvas.ax, deep)
+
+
+def test_theme_gives_buttons_contrast_against_the_panel(qapp):
+    """The first version painted buttons `palette(button)`, which on
+    this platform is byte-identical to `palette(window)` (#efefef both,
+    1.00:1) -- reported as "many buttons have no distinction from the
+    background colour". The palette is now built here rather than
+    inherited, so the border role is what has to separate them."""
+    from PySide6.QtGui import QPalette
+
+    from opennmr.gui import style
+
+    def luminance(colour):
+        return (0.2126 * colour.redF() + 0.7152 * colour.greenF()
+                + 0.0722 * colour.blueF())
+
+    def contrast(a, b):
+        high, low = max(luminance(a), luminance(b)), min(luminance(a), luminance(b))
+        return (high + 0.05) / (low + 0.05)
+
+    role = QPalette.ColorRole
+    for mode in ("light", "dark"):
+        assert style.apply_theme(mode, qapp) == mode
+        palette = qapp.palette()
+        button = palette.color(role.Button)
+        window = palette.color(role.Window)
+        border = palette.color(role.Mid)
+        assert button != window                        # never the 1.00:1 case again
+        assert contrast(border, window) > 1.3          # the outline is what reads
+        assert contrast(border, button) > 1.3
+        # Text has to stay legible on the button it sits on.
+        assert contrast(palette.color(role.ButtonText), button) > 3.0
+    style.apply_theme("system", qapp)
+
+
+def test_widgets_with_subcontrols_are_left_native(qapp):
+    """Styling a QSpinBox leaves its up/down arrows unpainted unless
+    every sub-control is respecified with its own image -- reported as
+    "the small buttons like the up/down arrows are really messed up in
+    the dark mode". They are deliberately not in the sheet at all."""
+    from opennmr.gui import style
+
+    sheet = style.theme_qss()
+    for widget in style._NEVER_STYLED:
+        assert widget not in sheet
+
+
+def test_setting_the_app_font_still_reaches_existing_widgets(qapp):
+    """Installing *any* application stylesheet marks already-created
+    widgets' fonts as explicitly set, after which setFont no longer
+    reaches them -- measured, a combo stayed at 9pt while the app went
+    to 15pt. style.refresh_fonts re-applies the sheet, which re-resolves
+    them; clearing it first does not work."""
+    from PySide6.QtWidgets import QComboBox, QSpinBox
+
+    from opennmr.gui import style
+
+    style.apply_theme("light", qapp)
+    combo, spin = QComboBox(), QSpinBox()
+    font = qapp.font()
+    font.setPointSizeF(15.0)
+    qapp.setFont(font)
+    style.refresh_fonts(qapp)
+    qapp.processEvents()
+
+    assert combo.font().pointSizeF() == pytest.approx(15.0)
+    assert spin.font().pointSizeF() == pytest.approx(15.0)
+    font.setPointSizeF(13.0)
+    qapp.setFont(font)
+    style.refresh_fonts(qapp)
+    style.apply_theme("system", qapp)
+
+
+def test_theme_modes_resolve(qapp):
+    from opennmr.gui import style
+
+    assert style.resolve_mode("light", qapp) == "light"
+    assert style.resolve_mode("dark", qapp) == "dark"
+    assert style.resolve_mode("system", qapp) in ("light", "dark")
+    # An unknown value must not raise -- a stale settings file is not a
+    # reason to fail to start.
+    assert style.resolve_mode("chartreuse", qapp) == "light"
+
+
+def test_theme_stylesheet_is_applied_and_replaces_its_own(qapp):
+    """The buttons were reported as "very harsh and squared" -- nothing
+    in the GUI set a border-radius at all. The sheet stays deliberately
+    small (see gui/style.py): corners, borders and padding only, every
+    colour from a palette() role, so both themes come off one sheet."""
+    from opennmr.gui import style
+
+    qapp.setStyleSheet("")
+    style.apply_theme("light", qapp)
+    sheet = qapp.styleSheet()
+    assert "border-radius" in sheet
+    assert f"border-radius: {style.RADIUS}px" in sheet
+
+    # Switching theme replaces this module's own sheet rather than
+    # stacking another copy of it.
+    style.apply_theme("dark", qapp)
+    assert qapp.styleSheet().count("QPushButton, QToolButton {") == 1
+
+    # Never a literal colour: that is what would freeze the app into one
+    # theme regardless of the palette installed above it.
+    assert "#" not in style.theme_qss()
+    style.apply_theme("system", qapp)
+
+
+def test_theme_radius_is_tunable():
+    from opennmr.gui import style
+
+    assert "border-radius: 0px" in style.theme_qss(radius=0)
+    assert "border-radius: 12px" in style.theme_qss(radius=12)
+
+
+def test_theme_makes_natively_drawn_widgets_follow_the_palette(qapp):
+    """The bug this closes: widgets left out of the stylesheet are
+    drawn by the *platform* style, which on macOS follows the operating
+    system's light/dark appearance and ignores QPalette for its
+    sub-controls. With the OS dark and openNMR set to light that gave
+    white spin-box and combo arrows, a dark phase-pivot slider, a dark
+    background behind the matplotlib toolbar and grey table text --
+    all reported at once, all the same cause.
+
+    Fusion resolves those sub-controls from the palette, so one palette
+    decides the whole window."""
+    from PySide6.QtGui import QPalette
+    from PySide6.QtWidgets import QComboBox, QSlider, QSpinBox
+
+    from opennmr.gui import style
+
+    style.apply_theme("dark", qapp)
+    # Read the real style, not the QStyleSheetStyle wrapping it.
+    sheet = qapp.styleSheet()
+    qapp.setStyleSheet("")
+    assert qapp.style().objectName() == "fusion"
+    qapp.setStyleSheet(sheet)
+
+    role = QPalette.ColorRole
+    for widget in (QSpinBox(), QComboBox(), QSlider()):
+        palette = widget.palette()
+        # The dark palette really reaches them -- these are the widgets
+        # that were rendering in the other appearance entirely.
+        assert palette.color(role.Window).name() == "#26262b"
+        assert palette.color(role.Text).name() == "#e6e6ea"
+
+    style.apply_theme("light", qapp)
+    for widget in (QSpinBox(), QComboBox(), QSlider()):
+        assert widget.palette().color(role.Text).name() == "#1b1b1f"
+    style.apply_theme("system", qapp)
+
+
+def test_follow_system_reads_the_system_not_our_own_last_choice(qapp):
+    """apply_theme sets styleHints().colorScheme itself, so asking it
+    back would return openNMR's own last choice and "follow system"
+    would latch onto whatever was applied first."""
+    from opennmr.gui import style
+
+    style._SYSTEM_IS_DARK = True
+    assert style.resolve_mode("system", qapp) == "dark"
+    style.apply_theme("light", qapp)          # forces the scheme to Light
+    assert style.resolve_mode("system", qapp) == "dark"   # still the system's
+
+    style._SYSTEM_IS_DARK = False
+    assert style.resolve_mode("system", qapp) == "light"
+    style._SYSTEM_IS_DARK = None
+    style.apply_theme("system", qapp)
+
+
+def test_drag_handle_is_painted_from_the_palette(qapp):
+    """The phase drag handles were the one control that ignored the
+    theme entirely: paintEvent used literal QColors (fill 80,80,80),
+    which no palette or style can reach. Reported as "the phasing
+    buttons are still dark in light mode"."""
+    import inspect
+
+    from PySide6.QtGui import QPalette
+
+    from opennmr.gui import style
+    from opennmr.gui.widgets.drag_control import DragHandle
+
+    source = inspect.getsource(DragHandle.paintEvent)
+    assert "QColor(" not in source          # no literal colour survives
+
+    style.apply_theme("light", qapp)
+    handle = DragHandle()
+    light = handle.palette().color(QPalette.ColorRole.Highlight)
+    style.apply_theme("dark", qapp)
+    dark = DragHandle().palette().color(QPalette.ColorRole.Highlight)
+    # It is drawn in the accent colour, and both themes define one.
+    assert light.isValid() and dark.isValid()
+    # Painting must not raise in either theme.
+    handle.render(handle.grab())
+    style.apply_theme("system", qapp)

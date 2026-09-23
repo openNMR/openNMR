@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from opennmr import io
+from opennmr.processing import ft
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.io import spinsolve
 from opennmr.notebook import diffusion as nb_diffusion
@@ -124,13 +125,45 @@ def test_spinsolve_loads_as_a_pseudo_2d_with_the_peak_on_the_right_side(pgste):
     assert ppm[0] > ppm[-1]                         # descending, like every vendor
     peak = ppm[int(np.argmax(spectrum.data[0]))]
     resolution = abs(ppm[1] - ppm[0])
-    # Without the format's conjugate the peak lands at the mirror image
-    # about the centre, 2*4.7 - 2.0 = 7.4 ppm -- and still looks fine.
+    # On an ascending ppm axis this peak lands at the mirror image about
+    # the centre, 2*4.7 - 2.0 = 7.4 ppm -- and still looks like a fine
+    # spectrum. fft_spectrum's descending frequency axis is what puts it
+    # on the right side.
     assert peak == pytest.approx(p["peak_ppm"], abs=2 * resolution)
-    # Not stored: the GUI's generic FID path would reprocess it
-    # without the conjugate (see read_spectrum's docstring).
+    # Stored, so the Processing tab's live preview works. These were
+    # once withheld on the belief that the generic path would mirror the
+    # peak; it does not. What it did differ by was a complex conjugate
+    # one bin over, and the reader now goes through fft_spectrum too, so
+    # the two agree -- which is the real contract, asserted next.
     for key in ("fid", "fid_raw", "fid_dt"):
-        assert key not in spectrum.metadata.raw
+        assert key in spectrum.metadata.raw
+    assert spectrum.metadata.raw["fid_raw"].shape == (p["nsteps"], p["npts"])
+
+
+def test_spinsolve_preview_reproduces_the_loaded_spectrum(pgste):
+    """The Processing tab reprocesses metadata.raw["fid_raw"] through
+    processing.ft. If the reader's own transform disagreed with that
+    pipeline, every phase drag would move the preview one way and the
+    Spectrum tab the other -- which is what a hand-rolled fft(conj(fid))
+    in the reader used to do."""
+    folder, _b, _g = pgste
+    spectrum = io.load(folder)
+    raw = spectrum.metadata.raw
+    n = spectrum.data.shape[1]
+
+    windowed = ft.apodize(raw["fid_raw"][0].astype(complex), raw["fid_dt"],
+                          window="exponential",
+                          lb=raw["processing"]["line_broadening_hz"])
+    _, preview = ft.fft_spectrum(ft.zero_fill(windowed, n), raw["fid_dt"])
+    preview = preview / n
+
+    loaded = spectrum.data[0] + 1j * spectrum.data_imag[0]
+    # The reader applies the instrument's recorded phase and the preview
+    # starts unphased -- every vendor works that way -- so compare after
+    # removing that one rotation, not before.
+    rotation = loaded[np.argmax(np.abs(loaded))] / preview[np.argmax(np.abs(preview))]
+    assert abs(abs(rotation) - 1.0) < 1e-6
+    assert np.allclose(preview * rotation, loaded, atol=1e-9 * np.abs(loaded).max())
 
 
 def test_spinsolve_b_values_survive_the_comma_locale(pgste):

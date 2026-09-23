@@ -11,6 +11,7 @@ import matplotlib.colors
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QAbstractSpinBox
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
     QSplitter, QTableWidgetItem,
@@ -7715,7 +7716,10 @@ def test_main_window_unmodified_spectrum_still_gets_fresh_defaults(qapp, tmp_pat
 
 def test_main_window_left_panel_has_a_usable_minimum_width(qapp):
     window = MainWindow()
-    splitter = window.centralWidget()
+    # The tiles are a persistent full-width row above both columns, so
+    # the splitter is no longer the central widget -- it is held as
+    # window.main_splitter instead.
+    splitter = window.main_splitter
     assert isinstance(splitter, QSplitter)
     left_column = splitter.widget(0)
     assert left_column is window.left_splitter
@@ -12623,7 +12627,13 @@ def test_main_window_reads_pfg_timings_from_a_real_acquisition_file(qapp):
     assert window.pfg_ramp_spin.value() == pytest.approx(0.5)
     # A recorded ramp *is* the statement that the gradients are ramped.
     assert window.pfg_shape_combo.currentData() == "trapezoid"
-    assert "Read from the acquisition file" in window.statusBar().currentMessage()
+    # The message gained per-value source tags when the Bruker/Spinsolve
+    # readers were wired in, so it names the experiment's files rather
+    # than "the acquisition file" -- assert on what it now promises:
+    # the values, and where each one came from.
+    message = window.statusBar().currentMessage()
+    assert "Read from the experiment's files" in message
+    assert "[xpulse acquisition parameters]" in message
 
 
 def test_main_window_says_so_when_no_timings_are_recorded(qapp, monkeypatch, tmp_path):
@@ -15574,7 +15584,7 @@ def test_main_window_simulate_quadrupolar_refuses_an_unrecognised_nucleus(qapp, 
 
     window = MainWindow()
     _fast_csa_kwargs(window)
-    window.sim_quad_nucleus_edit.setText("")
+    window.sim_quad_nucleus_combo.setCurrentText("")
     window.sim_quad_larmor_spin.setValue(104.3)
     window._on_simulate_quadrupolar_clicked()
 
@@ -15585,7 +15595,7 @@ def test_main_window_simulate_quadrupolar_refuses_an_unrecognised_nucleus(qapp, 
 def test_main_window_simulate_quadrupolar_first_order_produces_an_exportable_spectrum(qapp):
     window = MainWindow()
     _fast_csa_kwargs(window)
-    window.sim_quad_nucleus_edit.setText("27Al")
+    window.sim_quad_nucleus_combo.setCurrentText("27Al")
     window.sim_quad_method_combo.setCurrentIndex(
         window.sim_quad_method_combo.findData("first_order"))
     window.sim_quad_spin_spin.setValue(2.5)
@@ -15614,7 +15624,7 @@ def test_main_window_simulate_quadrupolar_exact_produces_a_different_result(qapp
     or "Method" is not actually doing anything."""
     window = MainWindow()
     _fast_csa_kwargs(window)
-    window.sim_quad_nucleus_edit.setText("27Al")
+    window.sim_quad_nucleus_combo.setCurrentText("27Al")
     window.sim_quad_spin_spin.setValue(2.5)
     window.sim_quad_cq_spin.setValue(8.0)
     window.sim_quad_eta_spin.setValue(0.3)
@@ -15649,7 +15659,11 @@ def test_main_window_simulation_controls_are_seeded_from_the_selected_spectrum(q
     assert window.sim_csa_larmor_spin.value() == pytest.approx(161.9)
     assert window.sim_quad_larmor_spin.value() == pytest.approx(161.9)
     assert window.sim_csa_nucleus_edit.text() == "31P"
-    assert window.sim_quad_nucleus_edit.text() == "31P"
+    # 31P is spin-1/2, so it has no quadrupole moment and must NOT seed
+    # the quadrupolar simulator: filling it would pair a nuclide this
+    # simulation cannot run for with a Spin I describing a different
+    # one. The CSA box above, which any nucleus is valid for, is seeded.
+    assert window.sim_quad_nucleus_combo.currentText() == ""
 
     # A value the user already entered is not overwritten by a second
     # selection change. The quadrupolar fields are reset to
@@ -15663,7 +15677,7 @@ def test_main_window_simulation_controls_are_seeded_from_the_selected_spectrum(q
     window.sim_csa_larmor_spin.setValue(400.0)
     window.sim_csa_nucleus_edit.setText("1H")
     window.sim_quad_larmor_spin.setValue(0.0)
-    window.sim_quad_nucleus_edit.setText("")
+    window.sim_quad_nucleus_combo.setCurrentText("")
     axis2 = NMRAxis(kind="frequency", ppm=np.linspace(0, 10, 8))
     metadata2 = NMRMetadata(vendor="bruker", nucleus="23Na", sfo1=105.8)
     spectrum2 = NMRSpectrum(data=np.zeros(8), axes=[axis2], metadata=metadata2)
@@ -15674,7 +15688,7 @@ def test_main_window_simulation_controls_are_seeded_from_the_selected_spectrum(q
     # The now-empty quadrupolar fields do get seeded from the newer
     # selection.
     assert window.sim_quad_larmor_spin.value() == pytest.approx(105.8)
-    assert window.sim_quad_nucleus_edit.text() == "23Na"
+    assert window.sim_quad_nucleus_combo.currentText() == "23Na"
 
 
 # ============================================================
@@ -16156,3 +16170,78 @@ def test_window_menu_compare_entry_opens_the_compare_tile(qapp):
     window_menu = _menu_by_title(window, "Window")
     next(a for a in window_menu.actions() if a.text() == "Compare").trigger()
     assert window.side_tabs.currentIndex() == window._compare_tab_index
+
+
+def test_launcher_tiles_are_a_persistent_row_above_both_columns(qapp):
+    """Explicit request: "the big buttons should be a persistent row
+    along the top of the app". In the side panel they wrapped to three
+    or four rows at any usable width and ate the panel's own height."""
+    window = MainWindow()
+    assert window.tile_bar is not None
+    # Above the splitter in the shell, not inside the left column.
+    shell = window.centralWidget()
+    layout = shell.layout()
+    assert layout.indexOf(window.tile_bar) < layout.indexOf(window.main_splitter)
+    assert window.tile_bar.parent() is shell
+    # It still switches panels.
+    window.side_tabs.setCurrentIndex(2)
+    assert window.side_tabs._buttons[2].isChecked()
+    window.side_tabs._buttons[1].click()
+    assert window.side_tabs.currentIndex() == 1
+
+
+def test_appearance_setting_switches_theme_and_persists(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_UI_SETTINGS_PATH", str(tmp_path / "ui.json"))
+    window = MainWindow()
+    # Default is "follow system", not a forced light or dark.
+    assert window.ui_theme_combo.currentData() == "system"
+
+    dark_index = window.ui_theme_combo.findData("dark")
+    window.ui_theme_combo.setCurrentIndex(dark_index)
+    qapp.processEvents()
+    assert window._ui_settings["ui_theme"] == "dark"
+    assert (tmp_path / "ui.json").exists()
+
+    # A fresh window picks the saved choice back up.
+    reopened = MainWindow()
+    assert reopened.ui_theme_combo.currentData() == "dark"
+
+    window.ui_theme_combo.setCurrentIndex(window.ui_theme_combo.findData("system"))
+    qapp.processEvents()
+
+
+def test_quadrupolar_nucleus_is_an_editable_combo_that_fills_spin(qapp):
+    """Explicit request: same kind of box as the PFG simulator's, and
+    the spin read from the table so the two cannot disagree."""
+    window = MainWindow()
+    combo = window.sim_quad_nucleus_combo
+    assert combo.isEditable()                       # like sim_nucleus_combo
+    assert window.sim_nucleus_combo.isEditable()
+    listed = [combo.itemText(i) for i in range(combo.count())]
+    assert "27Al" in listed and "23Na" in listed
+    # Spin-1/2 nuclides have no quadrupole moment, so they are not offered.
+    assert "1H" not in listed and "13C" not in listed
+
+    combo.setCurrentText("27Al")
+    qapp.processEvents()
+    assert window.sim_quad_spin_spin.value() == pytest.approx(2.5)
+    combo.setCurrentText("2H")
+    qapp.processEvents()
+    assert window.sim_quad_spin_spin.value() == pytest.approx(1.0)
+    combo.setCurrentText("23Na")
+    qapp.processEvents()
+    assert window.sim_quad_spin_spin.value() == pytest.approx(1.5)
+
+    # Mid-typing is not a nuclide; it must not reset or warn.
+    before = window.sim_quad_spin_spin.value()
+    combo.setCurrentText("2")
+    qapp.processEvents()
+    assert window.sim_quad_spin_spin.value() == pytest.approx(before)
+
+    # I is a property of the nuclide, not a free parameter: derived
+    # from the box above and not typeable beside it, so the two cannot
+    # be made to disagree by hand.
+    assert window.sim_quad_spin_spin.isReadOnly()
+    assert window.sim_quad_spin_spin.buttonSymbols() == QAbstractSpinBox.ButtonSymbols.NoButtons
+    # Read-only, not disabled -- the value must stay legible.
+    assert window.sim_quad_spin_spin.isEnabled()

@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
+    QAbstractSpinBox, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
     QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 from PySide6.QtWidgets import QColorDialog
@@ -74,6 +74,8 @@ from ..processing.slicing import get_trace
 from ..simulate import bloch as simulate_bloch
 from ..simulate import diffusion as simulate_diffusion
 from .session import Session
+from . import style as style_module
+from .style import apply_theme, remember_system_theme
 from .widgets.canvas import MplCanvas
 from .widgets.drag_control import DragHandle
 from .widgets.relative_spinbox import RelativeDoubleSpinBox
@@ -91,6 +93,14 @@ from .loader import background_load_enabled
 #: existing "opennmr.gui" -> "resources/*.png" package-data glob (see
 #: pyproject.toml), so nothing extra had to be added there.
 _RESOURCES_DIR = os.path.join(os.path.dirname(__file__), "resources")
+
+
+#: How many quadrupolar nuclides to offer in the simulator's combo.
+#: The table carries 90; the list is ordered by mass number, so the
+#: first couple of dozen are the ones actually measured day to day and
+#: a longer drop-down is harder to use, not more capable. Anything
+#: beyond it can still be typed.
+_QUAD_NUCLIDE_CHOICES = 24
 
 
 def _launcher_icon(name: str) -> QIcon:
@@ -184,6 +194,14 @@ class MainWindow(QMainWindow):
         # so it has to run before any canvas -- and therefore any
         # plot -- is created, not after.
         plotting.apply_default_font("Arial")
+        # Soften the square corners. Idempotent and applied here as
+        # well as in app.main(), so an embedded MainWindow (and the
+        # test suite, which never goes through main()) looks the same
+        # as the packaged app rather than only the shipped entry point
+        # being styled. See gui/style.py for why the sheet is as small
+        # as it is.
+        remember_system_theme()
+        apply_theme("system")
         self.setWindowTitle("openNMR")
         self.resize(1100, 700)
         self.setAcceptDrops(True)  # drag a data folder straight in -- see dropEvent
@@ -670,7 +688,29 @@ class MainWindow(QMainWindow):
         tabs.setMinimumWidth(280)
         self.left_splitter.setMinimumWidth(280)
 
-        self.setCentralWidget(splitter)
+        # The launcher tiles as one persistent row across the top of
+        # the window, above both columns, rather than a strip inside
+        # the left panel -- explicit user request. In the side panel
+        # they had to wrap to three or four rows at any usable panel
+        # width (that is what WrappingTabWidget's flow layout is for),
+        # which cost the panel the height its own controls needed; a
+        # full-width row fits them all on one line and keeps them on
+        # screen whichever panel is open. The strip still drives
+        # side_tabs' stack -- see WrappingTabWidget.takeTabBar.
+        #: The horizontal left-panel/canvas splitter. Held as an
+        #: attribute because it is no longer the central widget -- the
+        #: tile row sits above it in a shell -- so it cannot be reached
+        #: with centralWidget() any more.
+        self.main_splitter = splitter
+        self.tile_bar = tabs.takeTabBar()
+        shell = QWidget()
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(6, 4, 6, 0)
+        shell_layout.setSpacing(4)
+        shell_layout.addWidget(self.tile_bar)
+        shell_layout.addWidget(splitter, 1)
+
+        self.setCentralWidget(shell)
         self._set_processing_enabled(False)
         self.process_indirect_button.setVisible(False)
         self.pseudo2d_view_combo.setVisible(False)
@@ -4463,6 +4503,20 @@ class MainWindow(QMainWindow):
         self.ui_font_reset_button.clicked.connect(self._on_ui_font_reset_clicked)
         font_row_layout.addWidget(self.ui_font_reset_button)
         interface_form.addRow("Menu font size:", font_row)
+
+        # Appearance. "Follow system" is the default and is not "leave
+        # the palette alone" -- see gui/style.apply_theme: it resolves
+        # to the matching light/dark palette, so buttons keep their
+        # guaranteed contrast against the panel either way.
+        self.ui_theme_combo = QComboBox()
+        for mode in style_module.THEME_MODES:
+            self.ui_theme_combo.addItem(style_module.THEME_LABELS[mode], mode)
+        self.ui_theme_combo.setToolTip(
+            "Light or dark interface. 'Follow system' tracks the operating "
+            "system's own setting.\n\nPlot colours are set separately, in "
+            "Plot Style, because they belong to the figure you export.")
+        self.ui_theme_combo.currentIndexChanged.connect(self._on_ui_theme_changed)
+        interface_form.addRow("Appearance:", self.ui_theme_combo)
         layout.addWidget(CollapsibleSection("Interface", content=interface))
 
         # --- Default plot styles --------------------------------------
@@ -4555,8 +4609,43 @@ class MainWindow(QMainWindow):
         if size is not None:
             font.setPointSizeF(float(size))
         app.setFont(font)
+        # An application stylesheet freezes the fonts of widgets that
+        # already exist, so this control stops reaching them until the
+        # sheet is re-applied -- see style.refresh_fonts.
+        style_module.refresh_fonts(app)
+
+    def _on_ui_theme_changed(self, _index: int) -> None:
+        mode = self.ui_theme_combo.currentData() or "system"
+        self._apply_ui_theme(mode)
+        self._ui_settings["ui_theme"] = mode
+        self._save_ui_settings()
+
+    def _apply_ui_theme(self, mode: str) -> str:
+        """Install the interface palette for ``mode``.
+
+        **The plots are deliberately left alone.** A figure here is the
+        same object that gets exported, and a figure belongs in a
+        report or a paper on white -- so a dark interface wraps light
+        plots rather than tinting them, and what you see is what you
+        export. Settled explicitly ("Figure should still always be
+        light I should think") rather than left as an oversight, so
+        nobody has to re-derive it from the absence of any code doing
+        the tinting. Changing this later means separating on-screen
+        colours from export colours first; one setting cannot serve
+        both.
+        """
+        return style_module.apply_theme(mode)
 
     def _apply_saved_ui_settings(self) -> None:
+        mode = self._ui_settings.get("ui_theme")
+        if mode in style_module.THEME_MODES:
+            index = self.ui_theme_combo.findData(mode)
+            if index >= 0:
+                blocked = self.ui_theme_combo.blockSignals(True)
+                self.ui_theme_combo.setCurrentIndex(index)
+                self.ui_theme_combo.blockSignals(blocked)
+            self._apply_ui_theme(mode)
+
         size = self._ui_settings.get("ui_font_size")
         low, high = self.UI_FONT_SIZE_RANGE
         if isinstance(size, (int, float)) and low <= size <= high:
@@ -5452,7 +5541,7 @@ class MainWindow(QMainWindow):
         window)."""
         if spectrum.metadata.raw.get("read_2d_shape_guess_failed"):
             return False
-        if spectrum.metadata.vendor in ("xpulse", "varian", "jeol"):
+        if spectrum.metadata.vendor in ("xpulse", "varian", "jeol", "spinsolve"):
             return True
         if spectrum.metadata.vendor == "bruker" and spectrum.metadata.source_path:
             base = spectrum.metadata.source_path
@@ -10231,23 +10320,58 @@ class MainWindow(QMainWindow):
 
         form = QFormLayout()
 
-        self.sim_quad_nucleus_edit = QLineEdit()
-        self.sim_quad_nucleus_edit.setPlaceholderText("e.g. 27Al")
-        self.sim_quad_nucleus_edit.setToolTip(
-            "The observed nucleus, as its usual isotope label -- used to "
-            "label the plot axis correctly. Seeded from the selected "
-            "spectrum's own nucleus where one is selected.")
-        form.addRow("Nucleus:", self.sim_quad_nucleus_edit)
+        # Editable combo, matching the PFG simulator's own nucleus box
+        # (sim_nucleus_combo) rather than the bare QLineEdit this used
+        # to be -- explicit user request that the two look the same.
+        # Only I >= 1 nuclides are offered: a spin-1/2 has no
+        # quadrupole moment, so listing one would offer a simulation
+        # that cannot be run. Still editable, so an unlisted nuclide
+        # can be typed.
+        self.sim_quad_nucleus_combo = QComboBox()
+        self.sim_quad_nucleus_combo.setEditable(True)
+        self.sim_quad_nucleus_combo.addItems(
+            core_registry.quadrupolar_nuclides(_QUAD_NUCLIDE_CHOICES))
+        # Starts with *nothing* selected, not on the first item. The
+        # seeding below fills this only while it is empty ("seeded,
+        # never forced"), and a combo sitting on its first entry would
+        # never look empty again -- so it would silently stop being
+        # seeded and always read 2H. setCurrentIndex(-1) on an editable
+        # combo gives an empty line edit, which restores exactly the
+        # QLineEdit semantics the seeding was written against.
+        self.sim_quad_nucleus_combo.setCurrentIndex(-1)
+        self.sim_quad_nucleus_combo.lineEdit().setPlaceholderText("e.g. 27Al")
+        self.sim_quad_nucleus_combo.setToolTip(
+            "The observed nucleus, as its usual isotope label -- sets the "
+            "plot axis and fills Spin I from the nuclide table. Type any "
+            "quadrupolar nucleus, e.g. 17O. Seeded from the selected "
+            "spectrum's own nucleus when that nucleus is quadrupolar.")
+        form.addRow("Nucleus:", self.sim_quad_nucleus_combo)
 
         self.sim_quad_spin_spin = QDoubleSpinBox()
         self.sim_quad_spin_spin.setRange(1.0, 9.5)
         self.sim_quad_spin_spin.setSingleStep(0.5)
         self.sim_quad_spin_spin.setDecimals(1)
         self.sim_quad_spin_spin.setValue(1.5)
+        # Read-only, and without the stepper arrows: I is a property of
+        # the nuclide, not a free parameter, so it is *derived* from the
+        # box above rather than typed beside it -- explicit user request
+        # ("shouldn't let spin be editable also, just set by nucleus").
+        # ReadOnly rather than disabled so the value stays at full
+        # contrast and can still be read at a glance; NoButtons so
+        # nothing on screen invites a nudge that would be discarded on
+        # the next nucleus change anyway.
+        self.sim_quad_spin_spin.setReadOnly(True)
+        self.sim_quad_spin_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.sim_quad_spin_spin.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.sim_quad_spin_spin.setToolTip(
-            "Nuclear spin quantum number I (integer or half-integer, I ≥ 1 "
-            "-- I = 1/2 has no quadrupole moment).")
+            "Nuclear spin quantum number I. Read from the nuclide table for "
+            "the nucleus above, so the two cannot disagree -- pick a "
+            "different nucleus to change it.")
         form.addRow("Spin I:", self.sim_quad_spin_spin)
+        # Read I from the same table the gamma comes from, rather than
+        # leaving it to be typed next to an unrelated nucleus string.
+        self.sim_quad_nucleus_combo.currentTextChanged.connect(
+            self._on_quad_nucleus_changed)
 
         self.sim_quad_cq_spin = QDoubleSpinBox()
         self.sim_quad_cq_spin.setRange(-1.0e4, 1.0e4)
@@ -10371,8 +10495,17 @@ class MainWindow(QMainWindow):
         if nucleus:
             if hasattr(self, "sim_csa_nucleus_edit") and not self.sim_csa_nucleus_edit.text():
                 self.sim_csa_nucleus_edit.setText(nucleus)
-            if hasattr(self, "sim_quad_nucleus_edit") and not self.sim_quad_nucleus_edit.text():
-                self.sim_quad_nucleus_edit.setText(nucleus)
+            # Only when the spectrum's own nucleus is actually
+            # quadrupolar. Seeding a spin-1/2 here would fill the box
+            # with a nuclide this simulation cannot be run for and
+            # leave Spin I describing a different one -- the exact
+            # nucleus/spin mismatch reading I from the table exists to
+            # prevent. A 31P spectrum leaves the box empty instead.
+            spin = core_registry.find_spin(nucleus)
+            if (hasattr(self, "sim_quad_nucleus_combo")
+                    and not self.sim_quad_nucleus_combo.currentText()
+                    and spin is not None and spin >= 1.0):
+                self.sim_quad_nucleus_combo.setCurrentText(nucleus)
 
     def _simulated_spectrum_axis_warning(self, ppm_axis, spectrum_data) -> str:
         """A powder pattern clipped by too narrow a ppm axis is a
@@ -10476,8 +10609,24 @@ class MainWindow(QMainWindow):
             return
         self._add_derived_spectrum(spectrum, "Simulated CSA")
 
+    def _on_quad_nucleus_changed(self, text: str) -> None:
+        """Fill Spin I from the nuclide table whenever the nucleus
+        changes.
+
+        Silent when the text is not (yet) a recognised nuclide -- this
+        fires on every keystroke of an editable combo, so "2" on the
+        way to "23Na" must not warn or reset anything. The spin box
+        stays editable for a nuclide the table does not carry.
+        """
+        spin = core_registry.find_spin(text.strip())
+        if spin is None or spin < 1.0:
+            return
+        low, high = self.sim_quad_spin_spin.minimum(), self.sim_quad_spin_spin.maximum()
+        if low <= spin <= high:
+            self.sim_quad_spin_spin.setValue(spin)
+
     def _on_simulate_quadrupolar_clicked(self) -> None:
-        nucleus = self.sim_quad_nucleus_edit.text().strip()
+        nucleus = self.sim_quad_nucleus_combo.currentText().strip()
         if not core_registry.find_gamma(nucleus):
             QMessageBox.warning(
                 self, "Simulate quadrupolar",

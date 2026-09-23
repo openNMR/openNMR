@@ -298,6 +298,30 @@ class WrappingTabWidget(QWidget):
     def isTabBarVisible(self) -> bool:  # noqa: N802
         return not self._bar.isHidden()
 
+    def takeTabBar(self) -> QWidget:  # noqa: N802
+        """Remove the strip from this widget and hand it back, so a
+        caller can place it somewhere else in the window.
+
+        The strip stays fully live -- its buttons still drive this
+        widget's stack -- because the wiring is signal-based, not
+        positional. Used to run the launcher tiles as one persistent
+        row across the top of the window (explicit user request) while
+        the pages they switch stay in the left column; without this the
+        strip can only sit directly above its own pages, which in a
+        narrow side panel means the tiles wrap to three or four rows
+        and eat the panel.
+
+        The caller owns the returned widget and must parent it, or it
+        is destroyed. Idempotent: calling twice returns the same strip.
+        """
+        self._layout().removeWidget(self._bar)
+        self._bar.setParent(None)
+        self._bar.setVisible(True)
+        return self._bar
+
+    def _layout(self):
+        return self.layout()
+
     def headingText(self) -> str:  # noqa: N802
         """The heading shown in place of a hidden strip ('' if none)."""
         return self._heading.text() if not self._heading.isHidden() else ""

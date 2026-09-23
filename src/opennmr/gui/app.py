@@ -21,12 +21,17 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
+from .style import apply_theme, remember_system_theme
 
 _LOGO_PATH = os.path.join(os.path.dirname(__file__), "resources", "logo.png")
 
 
 def main() -> int:
     app = QApplication(sys.argv)
+    # Before apply_theme, which overrides both the palette and the
+    # colour scheme it would otherwise be read back from.
+    remember_system_theme(app)
+    apply_theme("system", app)
     if os.path.exists(_LOGO_PATH):
         app.setWindowIcon(QIcon(_LOGO_PATH))
     window = MainWindow()

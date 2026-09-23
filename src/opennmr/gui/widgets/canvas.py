@@ -1204,7 +1204,16 @@ class MplCanvas(QWidget):
             ax = strip_ax
         else:
             ax = event.inaxes if event.inaxes is not None else (self.ax if on_y_strip else None)
-        if ax is None:
+        # A stacked Compare is the one view with no "nowhere": its rows
+        # are thin and the gaps between them are not, so a scroll aimed
+        # at a gap -- where there is no inaxes to resolve -- has an
+        # obvious meaning (scale the stack) and used to have none. The
+        # compare branch below reads no `ax`, so letting None through
+        # to it is safe; every other branch tests `ax is <something>`
+        # or `ax in <set>`, both False for None, and the bare
+        # `ax.get_ylim()` fallback at the end is unreachable while
+        # _compare_axes is set because that branch always returns.
+        if ax is None and not self._compare_axes:
             return
 
         factor = 1 / self.ZOOM_FACTOR if event.button == "up" else self.ZOOM_FACTOR
@@ -1250,10 +1259,19 @@ class MplCanvas(QWidget):
             self._adjust_contour_levels(event)
             return
 
-        if event.ydata is None:
-            return
-
         if self._compare_axes:
+            # Deliberately **above** the `event.ydata is None` guard
+            # below, and reached whether or not the cursor is inside a
+            # row's own data rectangle. Every row is rescaled from its
+            # own ylim by `factor` -- no cursor y value is read at all
+            # -- so the gaps between rows (where matplotlib reports no
+            # ydata) can scale the stack too. They used to fall into
+            # that guard and do nothing, which on a tall stack is most
+            # of the places you would naturally aim: rows are thin, the
+            # inter-row gaps are not, and half of "nothing happened"
+            # was really "you hit the row above's x strip and zoomed x
+            # instead" (see _x_strip_depth).
+            #
             # Every row together by the same relative factor (each
             # still pinned at its own baseline) unless one row has
             # been clicked to select it -- see _selected_compare_index's
@@ -1270,6 +1288,9 @@ class MplCanvas(QWidget):
                 row_ymin, row_ymax = row_ax.get_ylim()
                 row_ax.set_ylim(row_ymin, row_ymin + (row_ymax - row_ymin) * factor)
             self.canvas.draw_idle()
+            return
+
+        if event.ydata is None:
             return
 
         if ax in self._freeform_zoom_axes:
@@ -1481,15 +1502,52 @@ class MplCanvas(QWidget):
             proj_ax.set_xlim(xmax - (xmax - xmin) * factor, xmax)
         self.canvas.draw_idle()
 
-    @staticmethod
-    def _hovering_x_axis(ax, event) -> bool:
-        """True if the cursor is below ``ax``'s plot area, within its
-        horizontal span -- its x-tick-label strip -- rather than over
-        the plotted data itself. ``event.inaxes`` alone can't detect
-        this: matplotlib only sets it while the cursor is inside the
-        axes' own data rectangle, not its margins."""
+    def _x_strip_depth(self, ax) -> float:
+        """How far below ``ax``'s data rectangle its x-tick strip
+        reaches, in pixels.
+
+        **Bounded, unlike the "everything below this axes" it
+        replaces.** In a stacked Compare the region under one row *is*
+        the next row down, so an unbounded strip handed more than half
+        the plot to the x-zoom: measured on a 12-row stack, 52% of a
+        vertical sweep resolved to the x strip against 42% to a row
+        body, interleaving every few pixels, so scrolling to scale
+        intensity zoomed x instead about half the time. Reported as
+        "the x-axis scroll to zoom is a bit of an issue when there are
+        lots of spectra stacked and you want to scale the y intensity."
+
+        A panel with nothing below it keeps the old behaviour and runs
+        to the bottom of the figure -- that is every single-panel view,
+        where there is no other panel for the region to belong to and
+        aiming below the axis label should still work. Otherwise the
+        strip is only as deep as the decorations actually are, which
+        for a stacked row that draws no tick labels at all (every row
+        but the bottom, sharing one x axis) is zero: no strip, so the
+        gap above it falls through to the intensity zoom.
+        """
         bbox = ax.get_window_extent()
-        return bbox.x0 <= event.x <= bbox.x1 and event.y < bbox.y0
+        below = any(other is not ax and other.get_window_extent().y0 < bbox.y0
+                    for other in self.figure.axes)
+        if not below:
+            return float(bbox.y0)
+        try:
+            tight = ax.get_tightbbox()
+        except Exception:  # noqa: BLE001 -- renderer not ready; fall back to no strip
+            return 0.0
+        if tight is None:
+            return 0.0
+        return float(max(bbox.y0 - tight.y0, 0.0))
+
+    def _hovering_x_axis(self, ax, event) -> bool:
+        """True if the cursor is in ``ax``'s x-tick-label strip --
+        below its plot area, within its horizontal span, and no deeper
+        than :meth:`_x_strip_depth`. ``event.inaxes`` alone can't
+        detect this: matplotlib only sets it while the cursor is inside
+        the axes' own data rectangle, not its margins."""
+        bbox = ax.get_window_extent()
+        if not (bbox.x0 <= event.x <= bbox.x1 and event.y < bbox.y0):
+            return False
+        return event.y >= bbox.y0 - self._x_strip_depth(ax)
 
     @staticmethod
     def _data_x_at(ax, event) -> float | None:

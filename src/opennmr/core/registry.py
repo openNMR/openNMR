@@ -182,7 +182,41 @@ def find_gamma(isotope, field='', SFO1=''):
         gamma = df_closest["Gyromagnetic Ratio (MHz/T)"].iloc[0]
         isotope = str(df_closest["Nuclide"].iloc[0])
 
-    return {'Nuclide': isotope, 'gamma': gamma}
+    return {'Nuclide': isotope, 'gamma': gamma, 'spin': find_spin(isotope)}
+
+
+def find_spin(isotope):
+    """Nuclear spin quantum number I of ``isotope``, as a float, or
+    ``None`` when the nuclide is not in the table.
+
+    The same table :func:`find_gamma` reads, so a nucleus and its spin
+    can never disagree -- which is the point: I was previously typed
+    into the quadrupolar simulator by hand next to a free-text nucleus
+    box, and nothing checked that '27Al' and 'I = 1.5' described the
+    same nuclide.
+    """
+    df = _GAMMA_DF
+    match = df.loc[df['Nuclide'] == isotope, 'Spin']
+    if match.empty:
+        return None
+    try:
+        return float(match.iloc[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def quadrupolar_nuclides(limit: int | None = None) -> list[str]:
+    """Every nuclide in the table with I >= 1 -- the ones a
+    quadrupolar simulation can actually be run for. Ordered as the
+    table is (by mass number), so common light nuclei come first."""
+    names = []
+    for nuclide, spin in zip(_GAMMA_DF['Nuclide'], _GAMMA_DF['Spin']):
+        try:
+            if float(spin) >= 1.0:
+                names.append(str(nuclide))
+        except (TypeError, ValueError):
+            continue
+    return names[:limit] if limit else names
 
 
 def NUC_label(NUC, x_unit='ppm', style='brackets', template=None):

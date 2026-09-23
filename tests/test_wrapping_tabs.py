@@ -213,7 +213,8 @@ def test_addtab_icon_and_no_icon_can_be_mixed_in_one_strip(qapp):
     widget.setCurrentWidget(page_b)
     assert widget._buttons[1].isChecked()
     assert not widget._buttons[0].isChecked()
-=======
+
+
 def test_hidden_strip_can_show_the_current_tab_as_a_heading(qapp):
     # The main toolbar switches pages once the strips are hidden, so a
     # nested strip shows the page's name instead -- otherwise nothing
@@ -233,3 +234,41 @@ def test_hidden_strip_can_show_the_current_tab_as_a_heading(qapp):
     widget.setTabBarVisible(True)
     assert widget.isTabBarVisible()
     assert widget.headingText() == ""
+
+
+def test_taken_tab_bar_still_drives_the_stack(qapp):
+    """The launcher tiles run as one persistent row across the top of
+    the window while their pages stay in the left column. The strip is
+    wired to the stack by signals, not by position, so moving it must
+    not break switching -- which is the whole reason this is a
+    reparent rather than a rebuilt second strip."""
+    from PySide6.QtWidgets import QWidget as _QWidget
+
+    widget, pages = _tabs(qapp)
+    bar = widget.takeTabBar()
+    assert bar.parent() is None
+    host = _QWidget()          # a caller must adopt it or Qt destroys it
+    bar.setParent(host)
+
+    widget._buttons[2].click()
+    assert widget.currentIndex() == 2
+    assert widget.currentWidget() is pages[2]
+
+    # ...and the other direction: a programmatic page change still
+    # checks the right button in the detached strip.
+    widget.setCurrentWidget(pages[0])
+    assert widget._buttons[0].isChecked()
+    assert not widget._buttons[2].isChecked()
+
+    # Idempotent -- a second call hands back the same strip.
+    assert widget.takeTabBar() is bar
+
+
+def test_taking_the_tab_bar_leaves_the_pages_filling_the_widget(qapp):
+    widget, pages = _tabs(qapp)
+    before = widget.count()
+    bar = widget.takeTabBar()
+    bar.setParent(None)
+    assert widget.count() == before
+    assert widget.currentWidget() is pages[0]
+    assert widget.layout().indexOf(widget._stack) >= 0

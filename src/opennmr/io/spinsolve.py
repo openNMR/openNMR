@@ -54,6 +54,7 @@ from typing import Any
 import numpy as np
 
 from ..processing import diffusion as _diffusion
+from ..processing import ft as _ft
 from ..processing import relaxation as _relaxation
 
 
@@ -371,11 +372,19 @@ class SpinsolvePFG:
         return np.arange(self.npoints) * self.dwell
 
     def ppm_axis(self, zero_fill: int | None = None) -> np.ndarray:
-        """Chemical shift axis for :meth:`spectra`, **ascending** (the
-        spectrum is plotted with it reversed, as in the Spinsolve UI).
+        """Chemical shift axis for :meth:`spectra`, **descending** --
+        the convention every other vendor in this package uses, and the
+        one :func:`opennmr.processing.ft.fft_spectrum` builds.
+
+        ``acqu.par``'s ``lowestFrequency`` is the low-ppm edge of the
+        window, so the centre is that plus half the sweep width; the
+        rest is whatever ``fft_spectrum`` says, rather than a second
+        hand-rolled axis that could drift from it.
         """
         n = self._ft_size(zero_fill)
-        return (self.lowest_frequency + np.arange(n) * self.sweep_width / n) / self.b1_freq
+        centre_hz = self.lowest_frequency + self.sweep_width / 2.0
+        freq_hz, _ = _ft.fft_spectrum(np.zeros(n), self.dwell)
+        return (freq_hz + centre_hz) / self.b1_freq
 
     def _ft_size(self, zero_fill: int | None) -> int:
         if zero_fill is None:
@@ -393,11 +402,20 @@ class SpinsolvePFG:
         recorded in ``display.par``; ``zero_fill`` to ``acqu.par``'s
         ``zeroFill`` factor. Both reproduce what the instrument showed.
 
-        The conjugate before the transform is what puts the spectrum on
-        an ascending-ppm axis, matching the region ``display.par``
-        records -- ``numpy``'s forward transform alone comes out
-        mirrored. Scaling by ``1/n`` matches Spinsolve's intensities, so
-        an integral here is directly comparable with ``fit.csv``'s A.
+        **The transform is the shared one**, :func:`opennmr.processing.
+        ft.fft_spectrum`, not a private one. That matters beyond reuse:
+        its frequency axis descends, which is the same mirroring this
+        format needs and which a bare forward transform on an ascending
+        axis gets backwards (the peak lands at 9.25 ppm instead of
+        0.22). Going through it means the GUI's live processing preview,
+        which reprocesses the cached raw FID through exactly these
+        functions, reproduces this output rather than its complex
+        conjugate one bin over -- which is what an earlier hand-rolled
+        ``fft(conj(fid))`` here did, and why Spinsolve data had no
+        preview at all.
+
+        Scaling by ``1/n`` matches Spinsolve's intensities, so an
+        integral here is directly comparable with ``fit.csv``'s A.
         """
         if line_broadening is None:
             line_broadening = self.display_line_broadening()
@@ -405,8 +423,10 @@ class SpinsolvePFG:
 
         fid = self.fid
         if line_broadening:
-            fid = fid * np.exp(-np.pi * line_broadening * self.time)[None, :]
-        spec = np.fft.fftshift(np.fft.fft(np.conj(fid), n, axis=1), axes=1) / n
+            fid = _ft.apodize(fid.astype(complex), self.dwell,
+                              window="exponential", lb=line_broadening)
+        _, spec = _ft.fft_spectrum(_ft.zero_fill(fid.astype(complex), n), self.dwell)
+        spec = spec / n
 
         if phase:
             ph0 = self.ph0 if self.ph0 is not None else np.zeros(self.nsteps)
@@ -703,9 +723,10 @@ def read_spectrum(path: str, source: str = "data.2d",
     conjugate FT, per-step phase -- so it is the spectrum the validated
     diffusion fit was checked on.
 
-    The ppm axis is **descending**, as every other vendor's is; rows and
-    points are reversed together, so nothing moves relative to its
-    shift.
+    The ppm axis is **descending**, as every other vendor's is --
+    :meth:`SpinsolvePFG.spectra` now produces it that way through the
+    shared :func:`opennmr.processing.ft.fft_spectrum`, so no reversal
+    happens here.
 
     What the GUI and notebook helpers need for a diffusion fit travels
     in ``metadata.raw``:
@@ -717,21 +738,28 @@ def read_spectrum(path: str, source: str = "data.2d",
     ``processing``     the apodization/zero-fill actually applied
     ``reference_fit``  Spinsolve's own ``fit.csv`` rows, to compare with
 
-    Deliberately **not** stored: ``fid``/``fid_raw``/``fid_dt``. The
-    GUI's generic FID-reprocessing path picks those keys up, and it has
-    no way to apply this format's conjugate -- it would put the peak at
-    the mirrored shift. Until that path learns the convention, Spinsolve
-    data is reprocessed by re-reading with ``line_broadening``/
-    ``zero_fill``, not live from the FID. Other keyword arguments (e.g.
-    processing a caller passes for every vendor) are ignored.
+    ``fid`` / ``fid_raw`` / ``fid_dt``  the raw time-domain rows, so the
+                       Processing tab's live preview works
+
+    Those three were once withheld, on the reasoning that the generic
+    reprocessing path could not apply this format's conjugate and would
+    mirror the peak. Measured rather than assumed, that turned out to be
+    wrong in one direction and right in another: ``fft_spectrum``'s
+    frequency axis already descends, so the shift is **not** mirrored --
+    but the old hand-rolled ``fft(conj(fid))`` here produced the complex
+    *conjugate* of it, one bin over, so a phase drag in the preview
+    would have rotated opposite to the Spectrum tab. Both paths now go
+    through ``fft_spectrum``, so they agree, and the FID can be cached.
+    Other keyword arguments (e.g. processing a caller passes for every
+    vendor) are ignored.
     """
     from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 
     pfg = read_spinsolve_pfg(path, source=source)
     applied_lb = pfg.display_line_broadening() if line_broadening is None else float(line_broadening)
     applied_zf = int(pfg.acqu.get("zeroFill", 1) or 1) if zero_fill is None else int(zero_fill)
-    spec = pfg.spectra(line_broadening=applied_lb, zero_fill=applied_zf)[:, ::-1]
-    ppm = pfg.ppm_axis(applied_zf)[::-1]
+    spec = pfg.spectra(line_broadening=applied_lb, zero_fill=applied_zf)
+    ppm = pfg.ppm_axis(applied_zf)
 
     b_source = ("delayTimes.txt (Spinsolve's own b-values; despite the name they are "
                 "b in s/m^2 for PGSTE)")
@@ -769,6 +797,13 @@ def read_spectrum(path: str, source: str = "data.2d",
             },
             "processing": {"line_broadening_hz": applied_lb, "zero_fill": applied_zf,
                            "source": source},
+            # Both keys, as every other vendor stores them: "fid_raw"
+            # is what the Processing tab reprocesses from, "fid" what
+            # the FID preview draws. Untouched rows -- apodization and
+            # zero-filling are the live controls' job, not the reader's.
+            "fid": np.ascontiguousarray(pfg.fid),
+            "fid_raw": np.ascontiguousarray(pfg.fid),
+            "fid_dt": pfg.dwell,
             "reference_fit": pfg.reference_fit,
             "acqu": pfg.acqu,
         },
