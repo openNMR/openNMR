@@ -227,6 +227,52 @@ def build_csa_model(x_ppm_sorted, params, n_sites, x_ref=None, **sim_kwargs):
 # Peak-definition / per-site option handling
 # ============================================================
 
+#: Accepted spellings of each broadening kernel, in ``p0``'s ``"type"``
+#: or the ``lineshape=`` argument.
+_LINESHAPE_ALIASES = {
+    "gaussian": "gaussian", "gauss": "gaussian", "g": "gaussian",
+    "lorentzian": "lorentzian", "lorentz": "lorentzian", "l": "lorentzian",
+    "pseudo_voigt": "pseudo_voigt", "pseudovoigt": "pseudo_voigt", "pv": "pseudo_voigt",
+    "voigt": "pseudo_voigt",
+}
+
+
+def canonical_lineshape(name) -> str:
+    """``'Pseudo-Voigt'`` -> ``'pseudo_voigt'`` etc.; raises on anything
+    that is not Gaussian, Lorentzian or pseudo-Voigt."""
+    key = str(name).strip().lower().replace("-", "_").replace(" ", "_")
+    if key not in _LINESHAPE_ALIASES:
+        raise ValueError(
+            f"Unknown lineshape {name!r}; use 'gaussian', 'lorentzian', or 'pseudo_voigt'.")
+    return _LINESHAPE_ALIASES[key]
+
+
+def resolve_lineshape(p0, lineshape=None) -> str:
+    """The broadening kernel a CSA fit uses.
+
+    ``lineshape`` wins when given. Otherwise the sites' own ``"type"``
+    (as written in an isotropic peak definition, e.g.
+    ``"pseudo-voigt"``) -- previously ignored, so a ``p0`` saying
+    pseudo-Voigt was silently fitted as a Gaussian. All sites share one
+    kernel (the simulator broadens every site the same way), so
+    differing types are an error rather than a guess. No type anywhere:
+    Gaussian, the historical default."""
+    sites = [p0] if isinstance(p0, dict) else list(p0 or [])
+    types = {canonical_lineshape(site["type"]) for site in sites
+             if isinstance(site, dict) and site.get("type") is not None}
+    if lineshape is not None:
+        chosen = canonical_lineshape(lineshape)
+        if types and types != {chosen}:
+            print(f"Note: lineshape={lineshape!r} overrides the sites' own "
+                  f"type ({', '.join(sorted(types))}).")
+        return chosen
+    if len(types) > 1:
+        raise ValueError(
+            f"Sites ask for different lineshapes ({', '.join(sorted(types))}); a CSA fit "
+            f"broadens every site with one kernel -- give them one type, or pass lineshape=.")
+    return types.pop() if types else "gaussian"
+
+
 def _normalise_peak_defs(p0):
     """
     Accept ``p0`` as a single dict (one site) or a list/tuple of dicts
@@ -404,6 +450,19 @@ def initialise_csa_params(p0, b0_init, b1_init, x=None, y=None, fixed=None):
         ])
 
     fixed_matrix = _resolve_fixed_matrix(fixed, n_sites, labels)
+    # A site's own "fixed" (as an isotropic peak definition writes it,
+    # e.g. {"d_iso": True, "fwhm": False}) -- previously ignored, so a
+    # parameter marked fixed inside p0 was silently fitted.
+    for site_idx, site in enumerate(peak_defs):
+        own = site.get("fixed")
+        if not own:
+            continue
+        names = ([n for n, is_fixed in own.items() if is_fixed] if isinstance(own, dict)
+                 else list(own))
+        bad = [n for n in names if n not in _CSA_PARAM_NAMES]
+        if bad:
+            raise ValueError(f"Unknown parameter name(s) {bad} in p0[{site_idx}]['fixed'].")
+        fixed_matrix[site_idx].update(names)
     is_free = []
     for site_idx in range(n_sites):
         is_free.extend(name not in fixed_matrix[site_idx] for name in _CSA_PARAM_NAMES)
@@ -412,6 +471,50 @@ def initialise_csa_params(p0, b0_init, b1_init, x=None, y=None, fixed=None):
     is_free.extend([True, True])  # flipped to fixed by fit_csa_spectrum, cf. fit_spectrum
 
     return np.array(values, dtype=float), np.array(is_free, dtype=bool), labels
+
+
+def sideband_window_warning(d_iso_ppm, mas_Hz, larmor_Hz, fit_regions=None, x_ppm=None):
+    """A warning (str) when a finite-MAS fit window holds no first-order
+    spinning sideband of a site, else ``None``.
+
+    The sidebands, at ``d_iso +/- mas_Hz / larmor_Hz`` (ppm), are what
+    pin the MAS rate *and* the anisotropy. Without them the fit only
+    sees the centreband, which every MAS rate reproduces equally well:
+    on a 79Br KBr spectrum at 20 kHz, a +/-40 ppm window gave R^2 0.9933
+    at 20, 40 and 60 kHz alike, with Delta = -30, +240 and +485 ppm.
+
+    ``fit_regions`` as :func:`fit_csa_spectrum` takes them (``None`` =
+    the whole of ``x_ppm``)."""
+    if not mas_Hz or not larmor_Hz:
+        return None
+    spacing = float(mas_Hz) / float(larmor_Hz) * 1.0e6
+    if fit_regions is None:
+        if x_ppm is None:
+            return None
+        windows = [(float(np.min(x_ppm)), float(np.max(x_ppm)))]
+    else:
+        windows = [(min(lo, hi), max(lo, hi)) for lo, hi in fit_regions]
+    sidebands = (d_iso_ppm - spacing, d_iso_ppm + spacing)
+    if any(lo <= sb <= hi for sb in sidebands for lo, hi in windows):
+        return None
+    return (f"The fit window holds no spinning sideband of the site at {d_iso_ppm:.4g} ppm "
+            f"(first sidebands at {sidebands[1]:.4g} and {sidebands[0]:.4g} ppm for "
+            f"{mas_Hz / 1e3:.4g} kHz). Without sidebands the MAS rate and the anisotropy are "
+            f"not determined by this fit -- widen the window to include them.")
+
+
+def merge_site_bounds(p0, bounds=None):
+    """``bounds`` plus each site's own ``"bounds"`` (``{name: (lo, hi)}``
+    inside its p0 dict, as an isotropic peak definition writes them),
+    keyed by site label for :func:`build_csa_bounds`. A site's own entry
+    wins over a ``bounds`` entry for the same site and parameter."""
+    peak_defs, labels = _normalise_peak_defs(p0)
+    merged = dict(bounds or {})
+    for label, site in zip(labels, peak_defs):
+        own = site.get("bounds")
+        if own:
+            merged[label] = {**dict(merged.get(label, {})), **dict(own)}
+    return merged or None
 
 
 def build_csa_bounds(n_sites, labels=None, convention="Haeberlen", bounds=None,
@@ -506,7 +609,7 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
                       n_theta=60, n_phi=120, use_octant_symmetry=True,
                       n_time=1024, n_sidebands=15, subtract_residual_mean=True,
                       powder_scheme='rectangular', n_zcw=None,
-                      lineshape="gaussian",
+                      lineshape=None,
                       fit_regions=None, use_normalised=True,
                       baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
                       bounds=None, fixed=None,
@@ -577,10 +680,13 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
         ``[(xmin, xmax), ...]`` in ppm. If None, the complete spectrum
         is fitted.
     use_normalised : bool, optional
-        Fit the spectrum normalised to its maximum absolute intensity
-        (recommended -- keeps parameter scales close to 1 for the
-        optimiser). Amplitudes (all sites) and baseline are rescaled
-        back afterwards.
+        Kept for compatibility; no longer changes the fit. The optimiser
+        **always** works on the spectrum scaled to its maximum absolute
+        intensity (``scale``), because fitting raw intensities (~1e10 on
+        a real spectrum) leaves it badly conditioned: on a 79Br KBr
+        dataset ``use_normalised=False`` stopped at R^2 0.966 /
+        Delta -117.8 ppm against 0.984 / -110.0 ppm scaled. Everything
+        returned is in raw units either way.
     baseline_regions, baseline_sigma, baseline_max_iter :
         See :func:`nmrtools.fitting.estimate_baseline_robust`. The
         baseline is estimated once, globally, and shared by all sites.
@@ -604,13 +710,11 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
     pcov_free : ndarray
         Covariance of the free parameters only -- expand with
         :func:`nmrtools.fitting.expand_pcov`.
-        CAVEAT: unlike ``popt``, this is NOT rescaled back to raw
-        units when ``use_normalised=True`` (same caveat as
-        :func:`nmrtools.fitting.fit_spectrum`'s ``pcov_free`` --
-        flagged there in more detail). Uncertainties derived from it
-        (``check_csa_bound_hits``, ``print_csa_fit_report``) are
-        systematically too small by roughly a factor of ``scale``
-        whenever ``use_normalised=True``.
+        In raw units, like ``popt``: the amplitude rows/columns are
+        rescaled by ``scale``. (They were not, so amplitude
+        uncertainties -- and the integral errors
+        :mod:`csa_relaxation` derives from them -- came out too small
+        by that factor. Shape parameters were unaffected.)
     is_free : ndarray(bool)
     scale : float
     fit_info : dict
@@ -625,14 +729,13 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
 
     x_full = results["x_ppm"]
 
-    if use_normalised:
-        y_raw = results["real_spectrum"]
-        scale = np.max(np.abs(y_raw))
-        scale = scale if scale != 0 else 1.0
-        y_full = y_raw / scale
-    else:
-        y_full = results["real_spectrum"]
-        scale = 1.0
+    # Always condition the optimiser (see use_normalised above); every
+    # intensity-axis quantity is converted in and out of this scale.
+    y_raw = np.asarray(results["real_spectrum"], dtype=float)
+    scale = float(np.max(np.abs(y_raw))) if y_raw.size else 1.0
+    scale = scale if scale != 0 else 1.0
+    y_full = y_raw / scale
+    lineshape = resolve_lineshape(p0, lineshape)
 
     # The CSA simulator bins its powder average onto a uniform,
     # ascending ppm axis (see the module docstring), so sort once here
@@ -657,6 +760,12 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
     )
     is_free[-2:] = False  # baseline held fixed, as in fit_spectrum
     n_sites = len(labels)
+    amp_idx = np.arange(n_sites) * 6 + 4
+    # An amplitude the caller supplied is in raw units; the optimiser
+    # works in scaled ones. (Estimated amplitudes already are.)
+    for site_i, site in enumerate(_normalise_peak_defs(p0)[0]):
+        if "amplitude" in site:
+            p0_arr[amp_idx[site_i]] = float(site["amplitude"]) / scale
 
     if not static and larmor_Hz is None:
         larmor_Hz = results["SFO1"] * 1.0e6
@@ -694,20 +803,34 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
     )
 
     lower, upper = build_csa_bounds(
-        n_sites, labels=labels, convention=convention, bounds=bounds,
+        n_sites, labels=labels, convention=convention,
+        bounds=merge_site_bounds(p0, bounds),
         positive_intensity=positive_intensity,
         allow_negative_intensity=allow_negative_intensity,
     )
     lower = np.append(lower, [-np.inf, -np.inf])
     upper = np.append(upper, [np.inf, np.inf])
+    # Amplitude bounds are given in raw units, like amplitudes.
+    lower[amp_idx] = lower[amp_idx] / scale
+    upper[amp_idx] = upper[amp_idx] / scale
 
     assert len(p0_arr) == len(is_free) == len(lower) == len(upper), "parameter length mismatch"
 
     all_names = _all_param_names(labels)
     free_idx = np.flatnonzero(is_free)
-    for i, val, lo, hi in zip(free_idx, p0_arr[is_free], lower[is_free], upper[is_free]):
-        if val < lo or val > hi:
-            print(f"BAD INITIAL PARAMETER {all_names[i]}: value={val}, bounds=({lo}, {hi})")
+    start_notes = []
+    for i in free_idx:
+        lo, hi = lower[i], upper[i]
+        if not (lo <= p0_arr[i] <= hi):
+            # A start outside its own bounds (e.g. bounds set after the
+            # starting value) made curve_fit fail with only "Initial
+            # guess is outside of provided bounds". Start at the nearest
+            # bound instead, and say so.
+            moved = float(np.clip(p0_arr[i], lo, hi))
+            start_notes.append(f"{all_names[i]}: starting value {p0_arr[i]:g} is outside its "
+                               f"bounds ({lo:g}, {hi:g}); started at {moved:g} instead")
+            print("Note: " + start_notes[-1])
+            p0_arr[i] = moved
 
     def model_wrapper(x, *free_params):
         full = p0_arr.copy()
@@ -726,23 +849,35 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
     popt = p0_arr.copy()
     popt[is_free] = popt_free
 
-    if use_normalised:
-        popt = popt.copy()
-        # Bugfix (carried over from the single-site version): every
-        # amplitude and the baseline (b0, b1) -- all intensity-axis
-        # quantities -- must be rescaled back to raw units here;
-        # leaving any of them in curve_fit's internal normalised scale
-        # silently mixes units within a single popt vector. Same bug,
-        # same fix, as nmrtools.fitting.fit_spectrum's rescale_params.
-        amp_idx = np.arange(n_sites) * 6 + 4
-        popt[amp_idx] *= scale   # amplitude, every site
-        popt[-2:] *= scale       # baseline b0, b1
+    # Every intensity-axis quantity back to raw units: amplitudes and
+    # the baseline in popt, and the matching rows/columns of pcov.
+    popt[amp_idx] *= scale   # amplitude, every site
+    popt[-2:] *= scale       # baseline b0, b1
+    unit = np.ones(len(popt))
+    unit[amp_idx] = scale
+    unit[-2:] = scale
+    free_unit = unit[is_free]
+    pcov_free = np.asarray(pcov_free) * np.outer(free_unit, free_unit)
+
+    warnings = list(start_notes)
+    if not static:
+        for site_i in range(n_sites):
+            text = sideband_window_warning(popt[site_i * 6], mas_Hz, larmor_Hz,
+                                           fit_regions=fit_regions, x_ppm=x_sorted)
+            if text and text not in warnings:
+                warnings.append(text)
 
     fit_info = {
         "sim_kwargs": sim_kwargs,
         "n_sites": n_sites,
         "labels": labels,
         "x_ref": x_ref,
+        # What the fit window was, so a report can say it.
+        "fit_regions": (None if fit_regions is None
+                        else [(float(min(a, b)), float(max(a, b))) for a, b in fit_regions]),
+        # Things to read before trusting the numbers (see
+        # sideband_window_warning).
+        "warnings": warnings,
     }
 
     return popt, pcov_free, is_free, scale, fit_info
@@ -1049,7 +1184,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
                        larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                        n_theta=60, n_phi=120, use_octant_symmetry=True,
                        n_time=1024, n_sidebands=15, subtract_residual_mean=True,
-                       powder_scheme='rectangular', n_zcw=None, lineshape="gaussian",
+                       powder_scheme='rectangular', n_zcw=None, lineshape=None,
                        fit_regions=None, baseline_regions=None,
                        baseline_sigma=2.5, baseline_max_iter=10, normalise=True,
                        bounds=None, fixed=None,
@@ -1147,13 +1282,13 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
     pcov = expand_pcov(pcov_free, is_free, len(popt))
 
     lower, upper = build_csa_bounds(
-        n_sites, labels=labels, convention=convention, bounds=bounds,
+        n_sites, labels=labels, convention=convention, bounds=merge_site_bounds(p0, bounds),
         positive_intensity=positive_intensity,
         allow_negative_intensity=allow_negative_intensity,
     )
     lower = np.append(lower, [-np.inf, -np.inf])
     upper = np.append(upper, [np.inf, np.inf])
-    warnings = check_csa_bound_hits(popt, pcov, is_free, lower, upper, labels)
+    warnings = list(fit_info.get("warnings", [])) + check_csa_bound_hits(popt, pcov, is_free, lower, upper, labels)
 
     x_full = results['x_ppm']
     order = np.argsort(x_full)

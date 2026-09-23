@@ -69,7 +69,7 @@ from .fitting import build_region_mask, expand_pcov, fit_quality
 from .two_d import NMR2dimport, NMR2D_get_slices, prepare_trace_for_fit, NMR2D_plot_slices
 from .csa_fitting import (
     fit_csa_spectrum, csa_model_full, evaluate_csa_fit,
-    check_csa_bound_hits, build_csa_bounds, print_csa_fit_report,
+    check_csa_bound_hits, build_csa_bounds, print_csa_fit_report, merge_site_bounds,
 )
 from .relaxation import NMR2D_fit_relaxation, NMR2D_plot_relaxation, print_relaxation_report, _select_series
 from .plotting import save_figure
@@ -230,7 +230,7 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
                           larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                           n_theta=60, n_phi=120, use_octant_symmetry=True,
                           n_time=1024, n_sidebands=15, subtract_residual_mean=True,
-                          powder_scheme='rectangular', n_zcw=None, lineshape="gaussian",
+                          powder_scheme='rectangular', n_zcw=None, lineshape=None,
                           fit_regions=None, normalise=True,
                           baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
                           bounds=None, fixed=None,
@@ -383,7 +383,7 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
 
             if show_warnings:
                 lower, upper = build_csa_bounds(
-                    n_sites, labels=ref_fit_info["labels"], convention=convention, bounds=bounds,
+                    n_sites, labels=ref_fit_info["labels"], convention=convention, bounds=merge_site_bounds(p0, bounds),
                     positive_intensity=positive_intensity,
                     allow_negative_intensity=allow_negative_intensity,
                 )
@@ -484,7 +484,7 @@ def NMR2D_fit_csa_slices(slices, p0, mode="rows", convention="Haeberlen", static
                 if show_warnings:
                     n_sites = fit_info["n_sites"]
                     lower, upper = build_csa_bounds(
-                        n_sites, labels=fit_info["labels"], convention=convention, bounds=bounds,
+                        n_sites, labels=fit_info["labels"], convention=convention, bounds=merge_site_bounds(p0, bounds),
                         positive_intensity=positive_intensity,
                         allow_negative_intensity=allow_negative_intensity,
                     )
@@ -526,7 +526,7 @@ def NMR2D_csa_relaxation_workflow(datapath, p0, procno=1,
                                    larmor_Hz=None, mas_Hz=None, rotor_angle="magic",
                                    n_theta=60, n_phi=120, use_octant_symmetry=True,
                                    n_time=1024, n_sidebands=15, subtract_residual_mean=True,
-                                   powder_scheme='rectangular', n_zcw=None, lineshape="gaussian",
+                                   powder_scheme='rectangular', n_zcw=None, lineshape=None,
                                    fit_regions=None, baseline_regions=None, baseline_sigma=2.5,
                                    baseline_max_iter=10, normalise=True,
                                    bounds=None, fixed=None,

@@ -54,6 +54,8 @@ from ..notebook import bridge as notebook_bridge
 from ..notebook import csa_fitting as notebook_csa
 from ..notebook import simulations as notebook_simulations
 from ..notebook import diffusion as notebook_diffusion
+from ..notebook import fitting as notebook_fitting
+from ..notebook.fitting import expand_pcov
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from ..io import bruker as io_bruker
@@ -10934,7 +10936,13 @@ class MainWindow(QMainWindow):
         return self._build_curve_fitting_subtab()
 
     #: Columns of the CSA sites table.
-    _CSA_COLUMNS = ("Label", "δiso / ppm", "Span or Δ / ppm", "Skew or η", "FWHM / ppm")
+    _CSA_COLUMNS = ("Label", "δiso / ppm", "Span or Δ / ppm", "Skew or η", "FWHM / ppm",
+                    "L fraction")
+    #: Table column -> fit_csa_spectrum parameter name.
+    _CSA_COLUMN_PARAMS = {1: "d_iso", 2: "span_or_Delta", 3: "skew_or_eta", 4: "fwhm", 5: "eta"}
+    #: Item roles on a site row's label cell: its bounds and fixed flags.
+    _CSA_BOUNDS_ROLE = Qt.ItemDataRole.UserRole
+    _CSA_FIXED_ROLE = Qt.ItemDataRole.UserRole + 1
 
     def _build_csa_subtab(self) -> QWidget:
         """Fit a static or finite-MAS CSA powder lineshape to the
@@ -10968,8 +10976,14 @@ class MainWindow(QMainWindow):
         self.csa_sites_table.setToolTip(
             "Starting values, one row per site. δiso is the isotropic shift; "
             "the second and third columns are read as span/skew or Δ/η "
-            "depending on the convention below."
+            "depending on the convention below. L fraction is the "
+            "pseudo-Voigt broadening's Lorentzian share (0 = Gaussian, "
+            "1 = Lorentzian), shown when Broadening is Pseudo-Voigt.\n\n"
+            "Right-click a value to fix it, or for Set Bounds / Fixed "
+            "Parameters… (fixed values are shown in italics)."
         )
+        self.csa_sites_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.csa_sites_table.customContextMenuRequested.connect(self._on_csa_sites_context_menu)
         layout.addWidget(self.csa_sites_table)
 
         row_buttons = QHBoxLayout()
@@ -10999,7 +11013,21 @@ class MainWindow(QMainWindow):
         self.csa_static_combo.addItem("Finite MAS (sidebands)", False)
         self.csa_static_combo.currentIndexChanged.connect(
             lambda _i: self._refresh_csa_controls())
-        form.addRow("Lineshape:", self.csa_static_combo)
+        # "Regime", not "Lineshape": the broadening kernel below is the
+        # lineshape a user means when they say Gaussian/Lorentzian.
+        form.addRow("Regime:", self.csa_static_combo)
+
+        self.csa_broadening_combo = QComboBox()
+        self.csa_broadening_combo.addItem("Gaussian", "gaussian")
+        self.csa_broadening_combo.addItem("Lorentzian", "lorentzian")
+        self.csa_broadening_combo.addItem("Pseudo-Voigt", "pseudo_voigt")
+        self.csa_broadening_combo.setToolTip(
+            "The peak shape each crystallite's line is broadened with. "
+            "Pseudo-Voigt fits each site's Lorentzian fraction (the table's "
+            "L fraction column) along with its width.")
+        self.csa_broadening_combo.currentIndexChanged.connect(
+            lambda _i: self._sync_csa_broadening_column())
+        form.addRow("Broadening:", self.csa_broadening_combo)
 
         self.csa_mas_spin = QDoubleSpinBox()
         self.csa_mas_spin.setRange(0.0, 200000.0)
@@ -11046,23 +11074,73 @@ class MainWindow(QMainWindow):
             "count."
         )
         form.addRow("Orientations (final):", self.csa_render_orientations_spin)
+
+        # The fit window is this section's own setting. It used to be
+        # the Integration regions table, silently: a region drawn
+        # around a centreband for integration cut the sidebands out of
+        # the CSA fit, and without them every MAS rate fits equally
+        # well (see csa_fitting.sideband_window_warning).
+        self.csa_window_combo = QComboBox()
+        self.csa_window_combo.addItem("Whole spectrum", "all")
+        self.csa_window_combo.addItem("Range (ppm)", "range")
+        self.csa_window_combo.addItem("Integration regions", "regions")
+        self.csa_window_combo.setToolTip(
+            "Which part of the spectrum the fit sees. Include the spinning "
+            "sidebands for a finite-MAS fit: they are what determine the "
+            "anisotropy (and would expose a wrong MAS rate).")
+        self.csa_window_combo.currentIndexChanged.connect(
+            lambda _i: self._sync_csa_window_controls())
+        form.addRow("Fit window:", self.csa_window_combo)
+        window_row = QHBoxLayout()
+        self.csa_window_lo_spin = QDoubleSpinBox()
+        self.csa_window_hi_spin = QDoubleSpinBox()
+        for spin, value in ((self.csa_window_lo_spin, -500.0), (self.csa_window_hi_spin, 500.0)):
+            spin.setRange(-1.0e6, 1.0e6)
+            spin.setDecimals(2)
+            spin.setSuffix(" ppm")
+            spin.setValue(value)
+        window_row.addWidget(self.csa_window_lo_spin)
+        window_row.addWidget(QLabel("to"))
+        window_row.addWidget(self.csa_window_hi_spin)
+        self.csa_window_range_label = QLabel("")
+        form.addRow(self.csa_window_range_label, window_row)
+        self._csa_window_range_widgets = (self.csa_window_range_label, self.csa_window_lo_spin,
+                                          self.csa_window_hi_spin)
         layout.addLayout(form)
 
         self.csa_fit_button = QPushButton("Fit CSA Lineshape")
         self.csa_fit_button.setToolTip(
-            "Fit every site in the table at once, against the selected "
-            "spectrum's own region selection if one is set."
+            "Fit every site in the table at once, over the Fit window above."
         )
         self.csa_fit_button.clicked.connect(self._on_csa_fit_clicked)
         layout.addWidget(self.csa_fit_button)
 
+        # Results as a table, like the isotropic fit's: one row per site,
+        # each value with its 1-sigma uncertainty rounded to the digits
+        # it supports; Copy Table on right-click. The line above it says
+        # how the fit was set up and anything to check before trusting it.
         self.csa_results_label = QLabel("")
         self.csa_results_label.setWordWrap(True)
-        self.csa_results_label.setFont(QFontDatabase.systemFont(
-            QFontDatabase.SystemFont.FixedFont))
         self.csa_results_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.csa_results_label)
+        self.csa_results_table = QTableWidget(0, 0)
+        self.csa_results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.csa_results_table.setWordWrap(False)
+        self.csa_results_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.csa_results_table.horizontalHeader().setStretchLastSection(True)
+        self.csa_results_table.setMaximumHeight(220)
+        self.csa_results_table.setToolTip(
+            "Fitted values per site with 1-sigma uncertainties. Area (%) is "
+            "each site's share of the total fitted intensity (its whole "
+            "powder pattern, sidebands included). A value held fixed is "
+            "marked (fixed).\n\nRight-click to copy the table, or the full "
+            "text report.")
+        self.csa_results_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.csa_results_table.customContextMenuRequested.connect(self._on_csa_results_menu)
+        self.csa_results_table.setVisible(False)
+        layout.addWidget(self.csa_results_table)
 
         # Permanently disabled for now, not just until a fit runs --
         # Fit CSA Lineshape only ever fits one slice at a time (see
@@ -11086,7 +11164,124 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
 
         self._refresh_csa_controls()
+        self._sync_csa_broadening_column()
+        self._sync_csa_window_controls()
         return tab
+
+    def _sync_csa_broadening_column(self) -> None:
+        """The L fraction column only means something for pseudo-Voigt."""
+        self.csa_sites_table.setColumnHidden(
+            5, self.csa_broadening_combo.currentData() != "pseudo_voigt")
+
+    def _sync_csa_window_controls(self) -> None:
+        show = self.csa_window_combo.currentData() == "range"
+        for widget in self._csa_window_range_widgets:
+            widget.setVisible(show)
+
+    # ---- right-click: fix / bounds, as the isotropic peak table has ----
+
+    _CSA_PARAM_LABELS = {"d_iso": "δiso (ppm)", "span_or_Delta": "Span or Δ (ppm)",
+                         "skew_or_eta": "Skew or η", "fwhm": "FWHM (ppm)",
+                         "amplitude": "Amplitude", "eta": "L fraction"}
+
+    def _csa_row_constraints(self, row: int) -> tuple[dict, dict]:
+        item = self.csa_sites_table.item(row, 0)
+        if item is None:
+            return {}, {}
+        return (dict(item.data(self._CSA_BOUNDS_ROLE) or {}),
+                dict(item.data(self._CSA_FIXED_ROLE) or {}))
+
+    def _set_csa_row_constraints(self, row: int, bounds: dict, fixed: dict) -> None:
+        item = self.csa_sites_table.item(row, 0)
+        if item is None:
+            item = QTableWidgetItem(f"Site {row + 1}")
+            self.csa_sites_table.setItem(row, 0, item)
+        item.setData(self._CSA_BOUNDS_ROLE, bounds or None)
+        item.setData(self._CSA_FIXED_ROLE, fixed or None)
+        # Say it on the table: fixed values in italics, and the label's
+        # tooltip lists every constraint on the row.
+        for column, name in self._CSA_COLUMN_PARAMS.items():
+            cell = self.csa_sites_table.item(row, column)
+            if cell is None:
+                continue
+            font = cell.font()
+            font.setItalic(bool(fixed.get(name)))
+            cell.setFont(font)
+            cell.setToolTip("Fixed" if fixed.get(name) else
+                            (f"Bounds {bounds[name][0]:g} to {bounds[name][1]:g}"
+                             if name in bounds else ""))
+        notes = [f"{self._CSA_PARAM_LABELS[n]} fixed" for n, on in fixed.items() if on]
+        notes += [f"{self._CSA_PARAM_LABELS[n]} in [{lo:g}, {hi:g}]" for n, (lo, hi) in bounds.items()]
+        item.setToolTip("\n".join(notes))
+
+    def _on_csa_sites_context_menu(self, pos) -> None:
+        index = self.csa_sites_table.indexAt(pos)
+        row = index.row() if index.isValid() else self.csa_sites_table.currentRow()
+        if row < 0:
+            return
+        bounds, fixed = self._csa_row_constraints(row)
+        menu = QMenu(self)
+        toggle_action = None
+        name = self._CSA_COLUMN_PARAMS.get(index.column()) if index.isValid() else None
+        if name is not None:
+            label = self._CSA_PARAM_LABELS[name]
+            toggle_action = menu.addAction(f"Unfix {label}" if fixed.get(name) else f"Fix {label}")
+        dialog_action = menu.addAction("Set Bounds / Fixed Parameters…")
+        clear_action = menu.addAction("Clear Bounds and Fixed") if (bounds or fixed) else None
+        chosen = menu.exec(self.csa_sites_table.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is toggle_action:
+            fixed[name] = not fixed.get(name, False)
+            self._set_csa_row_constraints(row, bounds, {k: v for k, v in fixed.items() if v})
+        elif chosen is dialog_action:
+            self._on_set_csa_bounds(row)
+        elif chosen is clear_action:
+            self._set_csa_row_constraints(row, {}, {})
+
+    def _on_set_csa_bounds(self, row: int) -> None:
+        """Per-parameter bounds and Fixed flags for one site -- the same
+        dialog the isotropic peak table offers."""
+        bounds, fixed = self._csa_row_constraints(row)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Bounds / fixed parameters -- CSA site {row + 1}")
+        form = QFormLayout(dialog)
+        edits, checks = {}, {}
+        for name, label in self._CSA_PARAM_LABELS.items():
+            edit = QLineEdit()
+            if name in bounds:
+                edit.setText(f"{bounds[name][0]:g}, {bounds[name][1]:g}")
+            edit.setPlaceholderText("optional, 'low, high'")
+            check = QCheckBox("Fixed")
+            check.setChecked(bool(fixed.get(name)))
+            holder = QWidget()
+            holder_layout = QHBoxLayout(holder)
+            holder_layout.setContentsMargins(0, 0, 0, 0)
+            holder_layout.addWidget(edit)
+            holder_layout.addWidget(check)
+            form.addRow(f"{label}:", holder)
+            edits[name], checks[name] = edit, check
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_bounds = {}
+        for name, edit in edits.items():
+            text = edit.text().strip()
+            if not text:
+                continue
+            try:
+                lo_str, hi_str = text.split(",")
+                lo, hi = float(lo_str), float(hi_str)
+            except ValueError:
+                QMessageBox.critical(self, "Invalid bounds",
+                                     f"{self._CSA_PARAM_LABELS[name]}: expected 'low, high', got {text!r}.")
+                return
+            new_bounds[name] = (min(lo, hi), max(lo, hi))
+        self._set_csa_row_constraints(
+            row, new_bounds, {name: True for name, check in checks.items() if check.isChecked()})
 
     def _add_csa_site(self, values=None) -> None:
         """Append a site row, seeded from ``values`` or from a plain
@@ -11095,7 +11290,9 @@ class MainWindow(QMainWindow):
         goes nowhere, so a visible, obviously-a-placeholder set of
         numbers is more useful than an empty row."""
         defaults = values or ("Site %d" % (self.csa_sites_table.rowCount() + 1),
-                              "0", "100", "0", "5")
+                              "0", "100", "0", "5", "0.5")
+        if len(defaults) == 5:  # no L fraction given: an even mix
+            defaults = tuple(defaults) + ("0.5",)
         row = self.csa_sites_table.rowCount()
         self.csa_sites_table.insertRow(row)
         for column, value in enumerate(defaults):
@@ -11121,8 +11318,15 @@ class MainWindow(QMainWindow):
         editable."""
         is_static = bool(self.csa_static_combo.currentData())
         self.csa_mas_spin.setEnabled(not is_static)
-        if spectrum is None or self.csa_mas_spin.value():
+        if spectrum is None:
             return
+        # Re-seed whenever the experiment changes: MASR belongs to the
+        # experiment, and the box used to keep the previous one's rate
+        # (it only filled itself when empty). A hand edit still stands
+        # for as long as the same experiment stays selected.
+        if getattr(self, "_csa_mas_seeded_for", None) is spectrum and self.csa_mas_spin.value():
+            return
+        self._csa_mas_seeded_for = spectrum
         try:
             recorded = float(spectrum.metadata.raw.get("acqus", {}).get("MASR", 0) or 0)
         except (AttributeError, TypeError, ValueError):
@@ -11147,13 +11351,22 @@ class MainWindow(QMainWindow):
 
             label_item = self.csa_sites_table.item(row, 0)
             label = (label_item.text().strip() if label_item is not None else "") or f"Site {row + 1}"
-            sites.append({
+            site = {
                 "label": label,
                 "d_iso": cell(1, "δiso"),
                 "span_or_Delta": cell(2, "span/Δ"),
                 "skew_or_eta": cell(3, "skew/η"),
                 "fwhm": cell(4, "FWHM"),
-            })
+                "type": self.csa_broadening_combo.currentData(),
+            }
+            eta_item = self.csa_sites_table.item(row, 5)
+            site["eta"] = cell(5, "L fraction") if eta_item is not None and eta_item.text().strip() else 0.5
+            bounds, fixed = self._csa_row_constraints(row)
+            if fixed:
+                site["fixed"] = {name: True for name, on in fixed.items() if on}
+            if bounds:
+                site["bounds"] = {name: tuple(bnd) for name, bnd in bounds.items()}
+            sites.append(site)
         if not sites:
             raise ValueError("Add at least one CSA site before fitting.")
         return sites
@@ -16475,6 +16688,10 @@ class MainWindow(QMainWindow):
             "popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
             "x": x_sorted, "y_fit": fitted, "components": components, "results": results,
             "convention": common["convention"], "spectrum_index": index,
+            # How the fit was set up -- what the report says it did.
+            "sites": sites, "fit_regions": fit_regions, "static": static,
+            "mas_Hz": common.get("mas_Hz"), "scheme": scheme, "fit_n": fitting_n,
+            "render_n": self.csa_render_orientations_spin.value(),
         }
         self._draw_csa_fit()
         self._report_csa_fit()
@@ -16502,6 +16719,12 @@ class MainWindow(QMainWindow):
         fitted back as Δ = 126 ppm against a true 200 ppm. See
         :meth:`_report_csa_fit`, which warns when the fitted pattern
         reaches the edge."""
+        mode = self.csa_window_combo.currentData() if hasattr(self, "csa_window_combo") else "regions"
+        if mode == "all":
+            return None
+        if mode == "range":
+            lo, hi = self.csa_window_lo_spin.value(), self.csa_window_hi_spin.value()
+            return [(min(lo, hi), max(lo, hi))]
         regions = []
         for row in range(self.region_table.rowCount()):
             try:
@@ -16525,55 +16748,175 @@ class MainWindow(QMainWindow):
         # one component per site.
         components = result.get("components")
         labels = result["info"]["labels"] if components else None
+        index = result.get("spectrum_index")
+        spectrum = (self.session.spectra[index]
+                    if index is not None and 0 <= index < len(self.session) else None)
         self.fit_canvas.show_slice_fit(
             result["x"], np.asarray(results["real_spectrum"])[order], result["y_fit"],
             components=components, peak_labels=labels,
             title=f"CSA fit ({result['convention']})",
+            # For the nucleus-labelled, high-to-low axis every other
+            # spectrum plot has (it read "Shift (ppm)" without it).
+            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None,
         )
+        # The Fit view is hidden for anything but a pseudo-2D series;
+        # a CSA fit drawn there needs its tab, or it cannot be found
+        # again once the user looks at another view.
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
+    _CSA_BROADENING_NAMES = {"gaussian": "Gaussian", "lorentzian": "Lorentzian",
+                             "pseudo_voigt": "pseudo-Voigt"}
+
     def _report_csa_fit(self) -> None:
-        """The fit report, plus the two warnings that matter."""
+        """The CSA fit's results as a table, like the isotropic fit's
+        (explicit user request), under one line saying how the fit was
+        set up and what to check before trusting it.
+
+        Uncertainties are 1-sigma from the fit's covariance -- in raw
+        units, since fit_csa_spectrum now rescales it (it did not, so
+        amplitude errors were too small by the normalisation factor) --
+        rounded by :meth:`_format_value_error` to the digits they
+        support."""
         result = self._csa_fit_result
         if not result:
             return
         info = result["info"]
+        popt = np.asarray(result["popt"], dtype=float)
+        is_free = np.asarray(result["is_free"], dtype=bool)
+        pcov_full = expand_pcov(np.asarray(result["pcov"]), is_free, len(popt))
+        errors = np.sqrt(np.clip(np.diag(pcov_full), 0.0, None))
+        labels = list(info["labels"])
+        n_sites = info["n_sites"]
+        lineshape = info["sim_kwargs"].get("lineshape", "gaussian")
+        haeberlen = result["convention"] == "Haeberlen"
+
+        # --- the table ------------------------------------------------
+        columns = [("δiso\n(ppm)", 0), ("Δ\n(ppm)" if haeberlen else "Span\n(ppm)", 1),
+                   ("η" if haeberlen else "Skew", 2), ("FWHM\n(ppm)", 3)]
+        if lineshape == "pseudo_voigt":
+            columns.append(("L fraction", 5))
+        columns.append(("Amplitude", 4))
+        x = np.asarray(result["x"], dtype=float)
+        components = result.get("components")
+        if n_sites > 1 and components:
+            integrate = getattr(np, "trapezoid", None) or np.trapz  # NumPy < 2 has only trapz
+            areas = np.array([abs(integrate(np.asarray(c, dtype=float), x))
+                              for c in components[:n_sites]])
+            shares = 100.0 * areas / areas.sum() if areas.sum() else np.full(n_sites, np.nan)
+        else:
+            shares = np.full(n_sites, 100.0)
+
+        table = self.csa_results_table
+        headers = [name for name, _i in columns] + ["Area\n(%)"]
+        table.clear()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(n_sites)
+        table.setVerticalHeaderLabels(labels)
+        for site in range(n_sites):
+            for column, (_name, offset) in enumerate(columns):
+                i = site * 6 + offset
+                text = self._format_value_error(float(popt[i]), float(errors[i]), not is_free[i])
+                item = QTableWidgetItem(text.replace(" ± ", "\n± ").replace(" (fixed)", "\n(fixed)"))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(site, column, item)
+            share = QTableWidgetItem("—" if not np.isfinite(shares[site]) else f"{shares[site]:.1f}")
+            share.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(site, len(columns), share)
+        table.resizeRowsToContents()
+        table.setVisible(True)
+
+        # --- how it was set up, how good it is, what to check ---------
+        order = np.argsort(result["results"]["x_ppm"])
+        measured = np.asarray(result["results"]["real_spectrum"], dtype=float)[order]
+        window = result.get("fit_regions")
+        mask = (notebook_fitting.build_region_mask(x, window) if window
+                else np.ones(x.size, dtype=bool))
+        y, y_fit = measured[mask], np.asarray(result["y_fit"], dtype=float)[mask]
+        quality = notebook_fitting.fit_quality(y, y_fit, int(is_free.sum()))
+        total = float(np.sum((y - y.mean()) ** 2))
+        r2 = 1.0 - float(np.sum((y - y_fit) ** 2)) / total if total else float("nan")
+
+        regime = ("static powder" if result.get("static", True)
+                  else f"finite MAS at {result['mas_Hz'] / 1e3:g} kHz")
+        larmor = info["sim_kwargs"].get("larmor_Hz")
+        window_text = ("whole spectrum" if not window else
+                       ", ".join(f"{hi:g} to {lo:g} ppm" for lo, hi in window))
+        scheme = "ZCW" if result.get("scheme") == "zcw" else "θ/φ grid"
+        lines = [
+            f"CSA fit report — {result['convention']}, {regime}"
+            + (f" (Larmor {larmor / 1e6:.6g} MHz)" if larmor and not result.get("static", True) else "")
+            + f", {self._CSA_BROADENING_NAMES.get(lineshape, lineshape)} broadening; "
+            f"window {window_text}; {scheme}, {result.get('fit_n')} orientations to fit, "
+            f"{result.get('render_n')} to draw.",
+            f"R² {r2:.4f}  ·  RMSE {quality['rmse']:.3g}  ·  reduced χ² {quality['reduced_chi2']:.3g}",
+        ]
+        warnings = list(info.get("warnings", []))
+        edge = self._csa_edge_warning(result)
+        if edge:
+            warnings.append(edge.lstrip("⚠ "))
+        try:
+            lower, upper = notebook_csa.build_csa_bounds(
+                n_sites, labels=labels, convention=result["convention"],
+                bounds=notebook_csa.merge_site_bounds(result.get("sites") or [], None))
+            lower = np.append(lower, [-np.inf, -np.inf])
+            upper = np.append(upper, [np.inf, np.inf])
+            warnings += notebook_csa.check_csa_bound_hits(popt, pcov_full, is_free, lower, upper, labels)
+        except Exception:  # noqa: BLE001 -- a bound check must never sink a good fit
+            pass
+        lines += [f"⚠ {w}" for w in warnings]
+        self.csa_results_label.setText("\n".join(lines))
+
+    def _csa_text_report(self) -> str:
+        """The notebook's own text report plus the setup line -- what
+        Copy Full Report gives, for a lab book or a log."""
+        result = self._csa_fit_result
+        if not result:
+            return ""
         order = np.argsort(result["results"]["x_ppm"])
         measured = np.asarray(result["results"]["real_spectrum"])[order]
-        # `print_csa_fit_report` writes its report to stdout rather
-        # than returning it, so capture that instead of reimplementing
-        # it here -- it carries the per-site uncertainties and the fit
-        # quality, and a second implementation of a report is exactly
-        # the kind of copy that drifts.
         buffer = StringIO()
         try:
             with contextlib.redirect_stdout(buffer):
                 notebook_csa.print_csa_fit_report(
                     result["x"], measured, result["y_fit"],
                     result["popt"], result["pcov"], result["is_free"],
-                    info["labels"], convention=result["convention"],
+                    result["info"]["labels"], convention=result["convention"],
                 )
-            report = buffer.getvalue().strip()
-        except Exception:  # noqa: BLE001 -- a report must never sink a good fit
-            report = ""
-        if not report:
-            report = self._csa_summary(result)
-        edge = self._csa_edge_warning(result)
-        self.csa_results_label.setText(f"{edge}\n\n{report}" if edge else report)
+        except Exception:  # noqa: BLE001
+            pass
+        return self.csa_results_label.text() + "\n\n" + buffer.getvalue().strip()
 
-    def _csa_summary(self, result) -> str:
-        """A compact per-site summary, used when the notebook's own
-        report writes to stdout rather than returning text."""
-        labels = result["info"]["labels"]
-        popt, convention = result["popt"], result["convention"]
-        second, third = (("Δ", "η") if convention == "Haeberlen" else ("span", "skew"))
-        lines = [f"CSA fit ({convention})"]
-        for site, label in enumerate(labels):
-            d_iso, aniso, asym, fwhm, amplitude = popt[site * 5: site * 5 + 5]
-            lines.append(
-                f"  {label}: δiso {d_iso:8.2f} ppm   {second} {aniso:8.2f} ppm   "
-                f"{third} {asym:6.3f}   FWHM {fwhm:6.2f} ppm   amp {amplitude:.3g}")
+    @staticmethod
+    def _table_as_tsv(table, corner: str = "") -> str:
+        """Any results table as tab-separated text, header included, one
+        line per row (two-line cells rejoined) -- what a spreadsheet
+        expects on paste."""
+        header = [corner] + [table.horizontalHeaderItem(c).text().replace("\n", " ")
+                             for c in range(table.columnCount())]
+        lines = ["\t".join(header)]
+        for row in range(table.rowCount()):
+            label = table.verticalHeaderItem(row)
+            cells = [label.text() if label else str(row + 1)]
+            for column in range(table.columnCount()):
+                item = table.item(row, column)
+                cells.append(item.text().replace("\n", " ") if item else "")
+            lines.append("\t".join(cells))
         return "\n".join(lines)
+
+    def _on_csa_results_menu(self, pos) -> None:
+        menu = QMenu(self.csa_results_table)
+        copy_table = menu.addAction("Copy Table")
+        copy_report = menu.addAction("Copy Full Report")
+        has_rows = self.csa_results_table.rowCount() > 0
+        copy_table.setEnabled(has_rows)
+        copy_report.setEnabled(has_rows)
+        chosen = menu.exec(self.csa_results_table.viewport().mapToGlobal(pos))
+        if chosen is copy_table:
+            QApplication.clipboard().setText(self._table_as_tsv(self.csa_results_table, "Site"))
+        elif chosen is copy_report:
+            QApplication.clipboard().setText(self._csa_text_report())
 
     def _csa_edge_warning(self, result) -> str:
         """Warn when the fitted lineshape still has intensity at the
