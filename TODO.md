@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-21)
 
-**2194 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
+**2220 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
 - **Load speed**: the EXSY benchmark (2048 x 65536) reads in **3.7 s**, against a 9.268 s starting point.
@@ -10,7 +10,25 @@
 
 ## What's next
 
-Everything below has been *mentioned* and is *not built*. Ordered by how ready it is to be picked up, not by importance.
+Ordered by how ready it is to be picked up, not by importance. Section 0 is built and waiting; **everything from section 1 down has been *mentioned* and is *not built***.
+
+### 0. Built, tested, not wired in -- pick these up first (2026-09-23)
+
+**Two format readers are finished and deliberately left unregistered**, so that merging Euan's branch cannot conflict with them. Neither is imported by `io/__init__.py` or touched by the GUI; nothing else in `src/` changed. Wiring each in is a call swap, not new logic. Full rounds are the two newest entries below.
+
+| Reader | Entry point | What it does |
+|---|---|---|
+| `io/spinsolve.py` | `read_spinsolve_pfg(folder)` | Magritek Spinsolve PGSTE/PFG folders -- raw FID, b-values, diffusion fit. Reproduces the instrument's own `fit.csv` D to 0.05%. |
+| `io/bruker_pfg.py` | `read_pfg_params(path)` | Bruker PFG gradient axis **with or without `diff.xml`**: `difflist` + delta/DELTA parsed out of the pulse programme's own comment block. |
+
+Seams that already exist, for whoever wires them:
+
+1. **`processing.diffusion.pfg_params_from_metadata(spectrum)`** -- consumed by `_on_read_pfg_params_clicked` (`main_window.py` ~14141). `BrukerPFG.as_pfg_params()` returns the same flat seconds dict, so the Bruker branch is one `elif vendor == "bruker"`. That handler's current text even tells the user to "use a diff.xml instead"; this removes the need.
+2. **The Auto values-source** (`main_window.py` ~13930) does `io_bruker.read_diff_xml(...)["B"]` inside `try: ... except FileNotFoundError`. `bruker_pfg.read_pfg_params(path).b` covers both branches in one call.
+3. **`io.base.register()`** -- `spinsolve.py` needs that plus an `NMRSpectrum` adapter to join `io.load()`'s auto-detection. `is_spinsolve_pfg()` is already the detector.
+4. **`.sources` / `.warnings`** on `BrukerPFG` are display strings (e.g. `"acqus P30 x 2 ('gradient pulse (little DELTA * 0.5)')"`), so the GUI can say *where* a value came from instead of showing a bare number.
+
+Each module has a `selftest(folder)` that re-runs its checks against the instrument's own recorded answers -- point it at a new dataset to see whether the reader still holds.
 
 ### 1. ~~Waiting on a decision~~ -- all six settled 2026-09-08
 
@@ -43,6 +61,109 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+
+## Bruker PFG gradients without a diff.xml (2026-09-23)
+
+User: *"plan out a better way to include bruker gradient info if the diff module is not used to create the experiment (ie no diff.xml file). They should still use difflist which is the gradient strengths in G/cm. Maybe this can also read the associated pp and pull out the values for delta ... and DELTA ... Prepare this method for easy integration with either the current GUI or the soon-to-be-merged one"*
+
+### Built
+
+`src/opennmr/io/bruker_pfg.py` and `tests/test_bruker_pfg.py` (15 tests). **Nothing existing was edited** -- same containment as the Spinsolve round, for the same merge reason. Entry point `read_pfg_params(path)` -> `BrukerPFG`, which resolves the gradient axis *whether or not* there is a `diff.xml` and tags every value with where it came from (`.sources`) plus anything the caller should know before trusting it (`.warnings`).
+
+### The trap that had to be closed first
+
+**`difflist` does not always hold gradients.** The user's premise -- "difflist ... is the gradient strengths in G/cm" -- is right for the `dosy`-AU case and *wrong* for the diff-module case, which was worth checking before building on it:
+
+| set up via | `difflist` holds | range |
+|---|---|---|
+| `dosy` AU (`ledbpgp2s`, no `diff.xml`) | gradient amplitude, **G/cm** | 1 .. 51 |
+| TopSpin diff module (`diffSte`, `diffDste`) | **b-values, s/m^2** | 9.6e7 .. 3.8e10 |
+
+Verified: on `bruker_PFG/150` and `Diff50.../11`, `difflist` equals `diff.xml`'s own `B` digit for digit. Reading those as G/cm would give gradients of 1e8 G/cm and a b-axis out by twenty orders of magnitude -- and would still fit. `read_difflist` decides from the diff-module's own files (`diff.xml`/`diffConf.xml`/`diffHistory.txt`) with a magnitude guard behind it, and **returns which it is** rather than letting the caller assume.
+
+### delta and DELTA from the pulse programme
+
+Bruker's stock sequences document their own parameters in a trailing comment block, so nothing is keyed on a parameter *number*:
+
+```
+;p30: gradient pulse (little DELTA * 0.5)
+;d20: diffusion time (big DELTA)
+;d16: delay for gradient recovery
+```
+
+`describe_diffusion_pulseprogram` matches Bruker's own wording ("little DELTA", "big DELTA"/"diffusion time", "gradient recovery"). **The `* 0.5` is why the wording is parsed rather than the name**: on a bipolar sequence p30 is half of delta, and taking it as delta understates b by 4x. Bipolar-ness is read **structurally** from the body (`p30:gp6*-1*diff` -- the same pulse replayed negated on one channel), not from the sequence name, and that also yields the gradient channel (6) for the `gpnam`/`GPZ` lookups. A programme documenting none of this comes back `resolved = False` rather than guessing -- which is exactly what the diff-module sequences do, and they have a `diff.xml` instead.
+
+### The shape factor is already in difflist -- do not apply it twice
+
+The `dosy` AU writes `difflist = gradient_calib x SHAPE_INTEGFAC x GPZ/100 x Difframp`. On the reference dataset that identity holds to **1e-5**: `53.5 G/cm x 0.97737556561086 x 1.00 x Difframp == difflist`. So `difflist` is the *effective*, shape-corrected amplitude and the b-value must be taken with `shape="rect"`. Applying `smsq10` on top would double-count and understate D by 0.9^2 = 19%. `read_pfg_params` rebuilds that product from the four files and **warns** if it ever fails to reproduce `difflist`; passing `shape=` explicitly also warns. Note `gpnam6` here is `Difftrap`, not the `SMSQ10.100` the pulse programme's comment suggests -- another reason not to take the shape from the sequence's documentation.
+
+### Verified
+
+`test_data/NMR400_KT_DPC_ALSK_AL_70B_3/10` (`ledbpgp2s`, 1H, 32 steps, 298.0 K): delta = 2 x p30 = **4.42 ms**, DELTA = d20 = **60 ms**, tau = d16 = **0.2 ms**, gradients **1.046 .. 51.244 G/cm**, b **8.94e6 .. 2.15e10 s/m^2**. Fitting the solute's three resolved peaks (0.09, 0.24, 0.34 ppm) gives **D = 1.78e-10 m^2/s** with the three agreeing to **<1%** and rmse 1.4% of I0. There is no `diff.xml` to check against, so the b-axis is pinned by that internal consistency plus the `difflist` reconstruction above.
+
+### Ready for the GUI, not wired to it
+
+Three seams exist already and none were touched:
+
+1. `BrukerPFG.as_pfg_params()` returns the same flat seconds dict as `processing.diffusion.pfg_params_from_metadata`, which is what `_on_read_pfg_params_clicked` consumes -- so the Bruker branch is a call swap, not new GUI code. (That handler's current message even tells the user to "use a diff.xml instead"; this removes the need.)
+2. The values-source "Auto" path (`main_window.py` ~13930) does `read_diff_xml(...)["B"]` inside a `try: except FileNotFoundError`. `read_pfg_params(path).b` covers both branches in one call.
+3. `.sources` / `.warnings` are strings meant to be shown, so the GUI can say *where* delta came from rather than presenting a bare number.
+
+### Open
+
+* Only **one** `dosy`-AU dataset exists in `test_data/`. The monopolar branch (`;p30: gradient pulse (little DELTA)`, `ledgp2s`/`stegp1s`) is implemented and unit-tested on synthetic text, but never against a real file.
+* **tau is taken as `d16` alone.** Strictly the bipolar inter-lobe delay also contains the 180 pulse (p2 = 24 us here), which would make tau 224 us rather than 200. Measured effect on b: **0.02%**. Recorded rather than modelled; resolving `p2=p1*2` out of the programme body is a parser rabbit hole for a number well under the fit's own uncertainty.
+* **The solvent's D looks low.** CHCl3 at 7.29 ppm fits 1.61e-9 m^2/s against a neat-liquid literature ~2.3e-9 at 25 C. The solute dominates the spectrum ~40:1, so genuine obstruction/viscosity in a concentrated solution is the likely explanation and the solute's own D is internally consistent -- but a neat-solvent or water-standard dataset acquired the same way is what would actually settle whether `gradient_calib`'s 5.35 G/mm is still true for this probe. `calibrate_max_gradient` already exists for exactly that.
+* `Oneshot` sequences are not special-cased: they would resolve as `bipolar`, which is what `processing.diffusion` models for them anyway (the unbalancing factor is deliberately not modelled there).
+
+
+## Spinsolve PGSTE reader, standalone (2026-09-23)
+
+User: *"I have added some spinsolve PFG data to the test_data folder, I want you to figure out how to parse the raw data and any associated diffusion information in the folder. I don't need to have this added to the GUI yet, since we will soon merge Euan's updated version with this one, so just work on this as an independent function for now."*
+
+### Built
+
+`src/opennmr/io/spinsolve.py` and `tests/test_spinsolve.py` (11 tests). **Deliberately not registered** with `io.base` and not imported by `io/__init__.py`, so it cannot conflict with Euan's merge -- wiring it in later is one `base.register()` call plus an `NMRSpectrum` adapter. Entry point `read_spinsolve_pfg(folder)` -> `SpinsolvePFG`, with `find_spinsolve_experiments(root)` to walk a Spinsolve date tree and `selftest(folder)` to re-run the checks below on a new dataset.
+
+### What the format turned out to be
+
+A PGSTE folder holds the same matrix **four times** and the diffusion axis **twice**:
+
+* `data.2d` -- **the raw FID**, and the one to read. Prospa V1.1 binary: 32-byte header, then five `int32` (`dataType`, nx, ny, nz, nq), then the data. The magic reads `SORPATAD1.1V` on disk because it is three 4-char tags (`PROS`, `DATA`, `V1.1`) each stored **byte-reversed**. `dataType` 501 = interleaved complex float32; `data.1d` is 504 = a float32 x-axis column *then* interleaved complex float32, and holds whichever single row the UI had selected (`display.par`'s `StackIndex`).
+* `data.2d.bin` -- the same numbers as **big-endian int64 in units of 1e-4**, blocked (every real, then every imaginary) rather than interleaved. Agrees with `data.2d` to exactly half a quantum, which is what pins the scale factor as exactly 1e4 rather than approximately.
+* `data_enhanced.2d` -- Spinsolve's **already-apodized** copy (one window applied identically to every row, plus a linear phase ramp). Same shape as the raw FID, so it is easy to read by mistake; `source=` selects it explicitly.
+* `delayTimes.txt` -- **a misnomer inherited from the T1/T2 protocols.** For PGSTE it holds the **b-values** in s/m^2, not delays. Written in the acquiring PC's locale, so here `2,600749E+07` -- comma decimal separator.
+* `data.2d.txt` -- DOSY Toolbox ASCII header. The only place the **gradient amplitude array (T/m)**, gamma, and the true delta/DELTA appear.
+
+### The traps
+
+* **`acqu.par`'s `littleDelta` is not delta.** It is 3 ms, the plateau; the sequence plays 3.1 ms, `littleDelta + gradRamp`. Using 3 ms puts D out by 7%. `data.2d.txt`'s "Diffusion Encoding Time" is the value to trust; the reader falls back to `littleDelta + gradRamp` only when that file is missing.
+* **The FT needs a conjugate.** `fftshift(fft(fid))` on an ascending-ppm axis puts this sample's single peak at **9.25 ppm**; `fftshift(fft(conj(fid)))` puts it at **0.22 ppm**, inside the integral region `display.par` records and where `data.jpg` shows it. Both look like spectra, so this is pinned by a test rather than left to inspection.
+* **Intensities need the `1/n` FFT scaling** (n = the zero-filled length) to be comparable with `fit.csv`'s A.
+* `acqu.par` keys can start with a digit (`90PulseLength`), values carry **unescaped inner quotes** (`graphTitle`), and `display.par` contains a stray key-less `= 0` line. All three are handled rather than raising.
+
+### Verified against the instrument's own answers
+
+Reading `data.2d`, applying the 1 Hz exponential from `display.par`, zero-filling 4x (`acqu.par`'s `zeroFill`), FTing and integrating `display.par`'s own region reproduces `fit.csv`:
+
+| | openNMR | Spinsolve | |
+|---|---|---|---|
+| D | 1.33864e-10 m^2/s | 1.338e-10 | **0.05%** |
+| I0 | 82.210 | 82.116 | **0.11%** |
+
+and b recomputed from the gradient array matches `delayTimes.txt` to **1.2e-5** relative.
+
+### Reused, not rewritten
+
+The b-value and the fit both delegate to `processing/diffusion.py` (`b_value`, `build_diffusion_model`) and `processing/relaxation.py` (`fit_relaxation`) -- the same engine the Bruker and X-Pulse PFG paths use -- so Spinsolve gets multi-component, stretched and log-space-D fitting and typed uncertainties without any of it being written twice. Only the b-axis and the integrals are this module's own work. `gamma` is stored in **Hz/T** to match that engine; `data.2d.txt` states it in rad s^-1 T^-1 and is converted on read.
+
+### Open
+
+* Only **one** Spinsolve dataset exists in `test_data/` (1H, PGSTE CDEC, 64 steps). The `dataType` codes 500/502/503 and the non-1H gamma path are implemented but unexercised.
+* The **per-step phase sign** (`exp(+i*ph0)` vs `exp(-i*ph0)`) cannot be settled from this dataset: every `phaseShifts.txt` entry is within 0.3 degrees of zero, so both conventions fit equally well. A visibly mis-phased dataset would settle it.
+* The exact window `data_enhanced.2d` carries was not reverse-engineered -- it rises then falls, so it is some Lorentz-to-Gauss-like enhancement, but `display.par` only records a 1 Hz exponential. Since the raw FID is right there, it was not worth chasing.
+* Not wired into the GUI, `io.base`, or `NMRSpectrum`, on purpose (see above).
 
 
 ## Settings, open experiments beside every mode that uses them, and Simulate (2026-09-22)

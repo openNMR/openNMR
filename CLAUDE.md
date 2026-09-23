@@ -20,6 +20,13 @@ was already in progress, so start every session with the first section.
    CSA fitting, SIMPSON, pNMR, BMS, simulations) is the fitting and
    simulation engine. The GUI calls into it, through
    `notebook/bridge.py`, rather than reimplementing it.
+5. **Check `TODO.md`'s "What's next" section 0 before writing a
+   reader or a PFG/diffusion feature.** Finished, tested modules are
+   parked there unregistered so they cannot conflict with an in-flight
+   merge -- currently `io/spinsolve.py` (Magritek Spinsolve PGSTE) and
+   `io/bruker_pfg.py` (Bruker gradients without a `diff.xml`). They
+   are invisible to `grep` for GUI features because nothing calls them
+   yet, which is exactly how they get rebuilt from scratch by mistake.
 
 ## After changing something
 
