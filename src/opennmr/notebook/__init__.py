@@ -35,7 +35,7 @@ from ..plotting.accessibility import (
 from .one_d import (
     NMR1dimport, NMR1dplot, NMR1dheatmap,
     vocs_f1, vocs_f2, vocs_power, pulse_to_w1, apply_VOCS, VOCSSum,
-    CPMGprocess, CPMGplot,
+    CPMGprocess, CPMGplot, cpmg_echo_layout, cpmg_to_spectrum,
 )
 
 from .two_d import (
@@ -152,7 +152,7 @@ __all__ = [
     # one_d
     "NMR1dimport", "NMR1dplot", "NMR1dheatmap",
     "vocs_f1", "vocs_f2", "vocs_power", "pulse_to_w1", "apply_VOCS", "VOCSSum",
-    "CPMGprocess", "CPMGplot",
+    "CPMGprocess", "CPMGplot", "cpmg_echo_layout", "cpmg_to_spectrum",
     # two_d
     "NMR2dimport", "NMR2Dplotter", "NMR2D_multi_plot", "NMR2D_overlay_plot",
     "NMR2d_get_trace", "NMR2D_get_slices", "prepare_trace_for_fit",

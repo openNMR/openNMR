@@ -19,6 +19,12 @@ import numpy as np
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 
 
+#: ``metadata.raw`` entries holding *acquisition* parameters (Bruker's
+#: acqus/acqu2s/acqu3s, X-Pulse's exp_params and JCAMP header) --
+#: copied onto an extracted trace, see :func:`get_trace`.
+_ACQUISITION_KEYS = ("acqus", "acqu2s", "acqu3s", "exp_params", "params")
+
+
 def get_trace(spectrum: NMRSpectrum, axis: str = "f1", index: int | None = None,
               shift: float | None = None, width: int = 1, combine: str = "sum",
               window: tuple[float, float] | None = None) -> NMRSpectrum:
@@ -43,7 +49,10 @@ def get_trace(spectrum: NMRSpectrum, axis: str = "f1", index: int | None = None,
 
     The returned spectrum's ``metadata.raw["slice"]`` records
     ``slice_type`` (``"row"``/``"column"``), ``index``, ``shift``,
-    ``shift_unit`` (``"ppm"`` or ``"index"``), and ``width``.
+    ``shift_unit`` (``"ppm"`` or ``"index"``), ``width``, and
+    ``dimension`` (``"F1"`` for a column, ``"F2"`` for a row). The 2D's
+    acquisition parameter tables are carried over too, so a named pulse
+    or delay (``P3``, ``D1``, ...) can still be looked up on the trace.
     """
     if spectrum.ndim != 2:
         raise ValueError("get_trace expects a 2D NMRSpectrum.")
@@ -128,14 +137,25 @@ def get_trace(spectrum: NMRSpectrum, axis: str = "f1", index: int | None = None,
     else:
         new_axis = trace_axis
 
+    # The acquisition parameter tables travel with the trace: they are
+    # facts about the experiment the trace came from (pulse lengths,
+    # delays, spinning rate), and without them nothing that asks for
+    # one by name works on a kept slice -- VOCS on an F1 column of a
+    # J-HMQC failed with "no recorded acquisition parameters" (user
+    # report). Processing tables (procs/proc2s) are deliberately not
+    # carried: they describe how the *2D* was processed, not the trace.
+    parent_raw = spectrum.metadata.raw or {}
+    raw = {key: parent_raw[key] for key in _ACQUISITION_KEYS if key in parent_raw}
+    raw["slice"] = {
+        "slice_type": slice_type, "index": actual_index, "shift": actual_shift,
+        "shift_unit": shift_unit, "width": width,
+        # Which dimension the trace runs along -- a column runs along F1.
+        "dimension": "F2" if axis == "f1" else "F1",
+    }
     metadata = NMRMetadata(
         vendor=spectrum.metadata.vendor, nucleus=nucleus, sfo1=sfo1,
         source_path=spectrum.metadata.source_path, procno=spectrum.metadata.procno,
-        pseudo_2d=pseudo2d,
-        raw={"slice": {
-            "slice_type": slice_type, "index": actual_index, "shift": actual_shift,
-            "shift_unit": shift_unit, "width": width,
-        }},
+        pseudo_2d=pseudo2d, raw=raw,
     )
     return NMRSpectrum(data=y, axes=[new_axis], metadata=metadata, data_imag=y_imag)
 

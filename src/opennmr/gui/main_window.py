@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QColorDialog
 from .widgets.notes_editor import ExperimentNotesEditor
+from .cpmg_panel import CpmgProcessingPanel
 from ..notebook import notes as nb_notes
 from PySide6.QtGui import QColor
 
@@ -658,15 +659,9 @@ class MainWindow(QMainWindow):
         self._processing_tab_index = tabs.addTab(
             self._scrollable(self._build_processing_tab()), "Process",
             icon=_launcher_icon("launcher_processing.png"))
-        # Advanced Processing: for now, just VOCS (moved out of the old
-        # Analysis tab -- explicit user request, "for now, this is just
-        # the 'VOCS' processing"). _build_vocs_subtab already returns a
-        # complete, self-contained panel (its own settings/apply/sum
-        # group boxes), so it is used directly rather than wrapped in
-        # a single redundant CollapsibleSection -- one more processing
-        # method arriving later is exactly when that wrapping earns
-        # its keep, not before.
-        tabs.addTab(self._scrollable(self._build_vocs_subtab()), "Adv. Proc.",
+        # Advanced Processing: VOCS and CPMG, each a collapsible section
+        # (see _build_advanced_processing_panel).
+        tabs.addTab(self._scrollable(self._build_advanced_processing_panel()), "Adv. Proc.",
                     icon=_launcher_icon("launcher_advanced_processing.png"))
         # Fitting before Analysis/Relaxation: it is step 1 (measure an
         # intensity per spectrum/slice), and the tab order is the
@@ -13614,6 +13609,23 @@ class MainWindow(QMainWindow):
         self.enmr_clear_repeats_button.setEnabled(False)
         self.statusBar().showMessage("Cleared the kept repeats.", 5000)
 
+    def _build_advanced_processing_panel(self) -> QWidget:
+        """The "Adv. Proc." tile: VOCS and CPMG, each its own collapsible
+        section (explicit user request, 2026-09-24, when CPMG arrived).
+        CPMG is :class:`opennmr.gui.cpmg_panel.CpmgProcessingPanel`,
+        which follows the Open experiments selection."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.vocs_section = CollapsibleSection("VOCS", content=self._build_vocs_subtab())
+        layout.addWidget(self.vocs_section)
+        self.cpmg_panel = CpmgProcessingPanel()
+        self.cpmg_panel.spectrum_ready.connect(self._add_derived_spectrum)
+        self.cpmg_section = CollapsibleSection("CPMG", content=self.cpmg_panel)
+        layout.addWidget(self.cpmg_section)
+        layout.addStretch(1)
+        return panel
+
     def _build_vocs_subtab(self) -> QWidget:
         """Variable Offset Cumulative Spectroscopy -- corrects a 1D
         spectrum's frequency-dependent excitation-profile roll-off
@@ -13636,7 +13648,12 @@ class MainWindow(QMainWindow):
             "The acquisition parameter (from this spectrum's recorded "
             "acqus table, e.g. Bruker's P1) giving the 90-degree pulse "
             "length in microseconds -- used to compute the RF "
-            "nutation frequency the VOCS correction is centred on."
+            "nutation frequency the VOCS correction is centred on.\n\n"
+            "For a column extracted from a heteronuclear 2D (the F1 "
+            "trace), name the pulse on the F1 nucleus's channel, which "
+            "is usually not P1.\n\n"
+            "Or type the length itself, e.g. 2.5 (microseconds), for a "
+            "spectrum with no parameter table."
         )
         settings_form.addRow("Pulse param:", self.vocs_pulse_edit)
 
@@ -13951,6 +13968,22 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "VOCS correction failed", str(exc))
             return
         self._add_derived_spectrum(corrected, f"VOCS({self.session.label(index)})")
+        self.statusBar().showMessage(self._vocs_summary(spectrum), 10000)
+
+    def _vocs_summary(self, spectrum) -> str:
+        """One line saying what VOCS used -- which pulse, how long, and
+        on which nucleus's axis -- so a wrong channel is visible."""
+        pulse = self.vocs_pulse_edit.text().strip() or "P1"
+        try:
+            length = processing_vocs.pulse_length_us(spectrum, pulse)
+        except ValueError:
+            return "VOCS applied."
+        named = "" if processing_vocs._as_pulse_length(pulse) is not None else f"{pulse.upper()} = "
+        nucleus = spectrum.metadata.nucleus or "?"
+        along = (spectrum.metadata.raw or {}).get("slice", {}).get("dimension")
+        where = f"{nucleus} ({along} trace)" if along else nucleus
+        return (f"VOCS applied: {named}{length:g} \u00b5s, "
+                f"\u03bd1 = {processing_vocs.pulse_to_w1(length) / 1e3:.3g} kHz, on the {where} axis.")
 
     def _on_vocs_sum_clicked(self) -> None:
         stack = self._compare_checked_1d_stack()
@@ -19655,6 +19688,8 @@ class MainWindow(QMainWindow):
         row = self.spectrum_list.currentRow()
         self.notes_editor.set_spectrum(
             self.session.spectra[row] if 0 <= row < len(self.session) else None)
+        if not 0 <= row < len(self.session):
+            self.cpmg_panel.set_source(None)
 
     def _on_notes_saved(self, spectrum, where: str) -> None:
         row = self._row_of_spectrum(spectrum)
@@ -19678,6 +19713,7 @@ class MainWindow(QMainWindow):
         # The title/notes box follows the selection (and a reprocess to
         # another procno, which has its own Bruker title).
         self.notes_editor.set_spectrum(spectrum)
+        self.cpmg_panel.set_source(spectrum, self.session.label(row))
         meta = spectrum.metadata
 
         bits = [f"Vendor: {meta.vendor}", f"Nucleus: {meta.nucleus or '—'}"]

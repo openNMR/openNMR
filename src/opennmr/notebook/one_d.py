@@ -1455,6 +1455,135 @@ def _cpmg_phase_correction(spectrum, phase0=0.0, phase1=0.0):
     return spectrum * np.exp(1j * phase)
 
 
+def _cpmg_reference(data_path, procno, meta):
+    """``(SF, SR)`` for the ppm axis of a CPMG spectrum, in MHz / Hz.
+
+    The same referencing :mod:`opennmr.io.bruker` uses for every other
+    Bruker spectrum: ``SF`` from ``pdata/<procno>/procs`` when there is
+    one (so a spectrum referenced in TopSpin keeps its ``SR``), else
+    ``BF1`` with no ``SR``.
+    """
+    bf1 = float(meta["OBS"])
+    procs_path = os.path.join(data_path, "pdata", str(procno), "procs")
+    sf = None
+    if os.path.isfile(procs_path):
+        from ..io.jcampdx import parse_jcampdx_params
+        try:
+            sf = float(parse_jcampdx_params(procs_path).get("SF"))
+        except (TypeError, ValueError):
+            sf = None
+    if not sf:
+        sf = bf1
+    return sf, (sf - bf1) * 1e6
+
+
+def cpmg_echo_layout(data_path, fid=None, meta=None, fid_name="fid",
+                     echo_delay_index=6, blanking_delay_index=3,
+                     blanking_cnst_index=20, num_echoes_index=22,
+                     first_point='auto', first_point_offset=20, safety=10):
+    """
+    Where :func:`CPMGprocess` will cut a CPMG echo train, without
+    processing anything -- for checking the split before running it.
+
+    Reads ``acqus`` (and the raw FID, unless ``fid`` is given) and
+    resolves the echo spacing, blanking, echo count and the first echo
+    exactly as :func:`CPMGprocess` does.
+
+    Returns
+    -------
+    dict
+        ``dwell_us`` (per complex point), ``echo_length_us`` (``D[echo]``),
+        ``blanking_us`` (``2 D[blanking] + CNST[blanking]``),
+        ``num_echoes`` (``L[count]``), ``period_exact`` (echo period in
+        points -- not necessarily a whole number), ``period`` (whole
+        points kept per echo window), ``first_point``, ``starts`` (the
+        index each echo window starts at), ``trim`` (points dropped
+        from each end of each window: blanking plus ``safety``),
+        ``echo_points`` (points per co-added echo), ``fid``, ``meta``,
+        and the indices used, for the record.
+
+    Raises
+    ------
+    ValueError
+        If a parameter array or index is missing, the spacing is not
+        positive, or the FID is too short for the echo train.
+    """
+
+    if meta is None:
+        meta = read_bruker_metadata(os.path.join(data_path, "acqus"))
+
+    for name, index in (("D", echo_delay_index), ("D", blanking_delay_index),
+                        ("CNST", blanking_cnst_index), ("L", num_echoes_index)):
+        values = meta.get(name)
+        if values is None:
+            raise ValueError(f"The {name} array is not in acqus at {data_path!r}.")
+        if not 0 <= int(index) < len(values):
+            raise ValueError(f"{name}{index} is out of range: acqus has {name}0..{name}{len(values) - 1}.")
+
+    if not meta.get("SW_h"):
+        raise ValueError("SW_h is missing from acqus, so the dwell time is unknown.")
+
+    if fid is None:
+        fid = read_bruker_fid(data_path, meta=meta, fid_name=fid_name)
+
+    dw = 0.5e6 / meta["SW_h"]  # half the dwell per complex point, microseconds
+    echo_length = 1e6 * meta["D"][echo_delay_index]  # microseconds
+    blanking = 2e6 * meta["D"][blanking_delay_index] + meta["CNST"][blanking_cnst_index]
+    num_echoes = int(meta["L"][num_echoes_index])
+
+    if num_echoes < 1:
+        raise ValueError(f"L{num_echoes_index} = {num_echoes}: no echoes to split.")
+
+    period_exact = (echo_length + blanking) / (2 * dw)
+    if period_exact <= 0:
+        raise ValueError(
+            f"The echo period is not positive (D{echo_delay_index} = {echo_length:g} us, "
+            f"blanking = {blanking:g} us). Check the acqus indices.")
+
+    if first_point == 'auto':
+        first = _cpmg_first_echo_point(fid, offset=first_point_offset)
+    else:
+        first = int(first_point)
+
+    period = int(period_exact)
+    blanking_p = int(0.5 * blanking / (2 * dw)) + 2
+    # Points dropped from each end of a window. Clamped at zero: a
+    # safety larger than half the blanking would otherwise turn into a
+    # negative slice index and silently take the wrong points.
+    trim = max(0, int(0.5 * blanking / (2 * dw) - safety))
+    begin = int(first - blanking / (2 * dw) + blanking_p)
+
+    # Each echo starts at its own exact position, rounded, rather than
+    # at a multiple of a truncated whole-point period. The two are
+    # identical whenever the period is a whole number of points; when
+    # it is not, the truncated version drifts by the fraction every
+    # echo -- 0.4 point/echo over 200 echoes puts the last echo 80
+    # points (most of an echo) away from where it was cut.
+    starts = begin + np.rint(np.arange(num_echoes) * period_exact).astype(int)
+
+    needed = int(starts[-1]) + period
+    if begin < 0 or needed > len(fid):
+        raise ValueError(
+            "Raw FID is too short for the requested echo train "
+            f"(need points {begin}..{needed}, the FID has {len(fid)}). "
+            "Check first_point and the echo/blanking acqus indices.")
+
+    echo_points = period - 2 * trim
+    if echo_points <= 0:
+        raise ValueError(
+            f"Nothing is left of each echo after trimming {trim} points from each end "
+            f"of a {period}-point window. Reduce safety or check the blanking indices.")
+
+    return {
+        "dwell_us": 2 * dw, "echo_length_us": echo_length, "blanking_us": blanking,
+        "num_echoes": num_echoes, "period_exact": period_exact, "period": period,
+        "first_point": first, "begin": begin, "starts": starts, "trim": trim,
+        "echo_points": echo_points, "fid": fid, "meta": meta,
+        "indices": {"echo_delay": echo_delay_index, "blanking_delay": blanking_delay_index,
+                    "blanking_cnst": blanking_cnst_index, "num_echoes": num_echoes_index},
+    }
+
+
 def CPMGprocess(data_path, procno=1, mass=1, fid_name="fid",
                  echo_delay_index=6, blanking_delay_index=3,
                  blanking_cnst_index=20, num_echoes_index=22,
@@ -1483,10 +1612,9 @@ def CPMGprocess(data_path, procno=1, mass=1, fid_name="fid",
         not ``pdata``).
 
     procno : int, optional
-        Unused for the processing itself (there is no ``pdata`` to
-        read from); kept for interface symmetry with
-        :func:`NMR1dimport` and reserved for a future comparison
-        overlay of the vendor-processed spikelet spectrum. Default 1.
+        Only used for referencing: ``SF`` (and so ``SR``) is read from
+        ``pdata/<procno>/procs`` when it exists, as for any other
+        Bruker spectrum; otherwise ``BF1`` is used. Default 1.
 
     mass : float, optional
         Sample mass used to scale the spectrum, as in
@@ -1593,10 +1721,10 @@ def CPMGprocess(data_path, procno=1, mass=1, fid_name="fid",
     -----
     No digital-filter (group-delay) correction is applied to the raw
     FID -- see :func:`nmrtools.utils.read_bruker_fid`. The ppm axis is
-    built directly from the raw ``O1``/``SFO1`` in ``acqus`` (unlike
-    :func:`NMR1dimport`, which uses the referenced ``SF`` from a
-    processed ``procs``); if the experiment carries a separate
-    referencing offset, it is not applied here.
+    ``(offset + O1 - SR) / SF``, the same referencing as
+    :mod:`opennmr.io.bruker`. Each echo window starts at its own exact
+    position (see :func:`cpmg_echo_layout`), so a period that is not a
+    whole number of points does not drift along the train.
 
     Examples
     --------
@@ -1605,53 +1733,30 @@ def CPMGprocess(data_path, procno=1, mass=1, fid_name="fid",
     >>> results = CPMGprocess(r"C:\\data\\exp11", first_point=1050)  # override auto-detect
     """
 
-    acqus = os.path.join(data_path, "acqus")
-    meta = read_bruker_metadata(acqus)
+    layout = cpmg_echo_layout(
+        data_path, fid_name=fid_name, echo_delay_index=echo_delay_index,
+        blanking_delay_index=blanking_delay_index, blanking_cnst_index=blanking_cnst_index,
+        num_echoes_index=num_echoes_index, first_point=first_point,
+        first_point_offset=first_point_offset, safety=safety)
+    meta, fid = layout["meta"], layout["fid"]
+    num_echoes, period, trim = layout["num_echoes"], layout["period"], layout["trim"]
+    first = layout["first_point"]
+    dw = layout["dwell_us"] / 2
 
-    for name, arr_key in (("D", "D"), ("CNST", "CNST"), ("L", "L")):
-        if meta.get(arr_key) is None:
-            raise ValueError(f"{name} array not found in acqus at {acqus!r}.")
+    echoes = [fid[start + trim: start + period - trim] for start in layout["starts"]]
+    echoes_real = [e.real for e in echoes]
+    echoes_imag = [e.imag for e in echoes]
 
-    fid = read_bruker_fid(data_path, meta=meta, fid_name=fid_name)
-
-    dw = 0.5e6 / meta["SW_h"]  # dwell time per complex point, microseconds
-    echo_length = 1e6 * meta["D"][echo_delay_index]  # microseconds
-    blanking = (
-        2e6 * meta["D"][blanking_delay_index] + meta["CNST"][blanking_cnst_index]
-    )
-    num_echoes = int(meta["L"][num_echoes_index])
-
-    if num_echoes_added is None:
-        num_echoes_added = num_echoes
-
-    if first_point == 'auto':
-        first = _cpmg_first_echo_point(fid, offset=first_point_offset)
-    else:
-        first = int(first_point)
-
-    period = int((echo_length + blanking) / (2 * dw))
-    blanking_p = int(0.5 * blanking / (2 * dw)) + 2
-    blanking_pp = int(0.5 * blanking / (2 * dw) - safety)
-    begin = int(first - blanking / (2 * dw) + blanking_p)
-
-    real_cut = fid.real[begin: begin + num_echoes * period]
-    imag_cut = fid.imag[begin: begin + num_echoes * period]
-
-    if len(real_cut) < num_echoes * period:
-        raise ValueError(
-            "Raw FID is too short for the requested echo train "
-            f"(need {num_echoes * period} points from index {begin}, "
-            f"only {len(fid) - begin} available). Check first_point and "
-            "the echo/blanking acqus indices."
-        )
-
-    echoes_real_full = np.array_split(real_cut, num_echoes)
-    echoes_imag_full = np.array_split(imag_cut, num_echoes)
-
-    echoes_real = [e[blanking_pp: period - blanking_pp] for e in echoes_real_full]
-    echoes_imag = [e[blanking_pp: period - blanking_pp] for e in echoes_imag_full]
-
-    sl = slice(cutout, num_echoes_added)
+    cutout = int(cutout)
+    if not 0 <= cutout < num_echoes:
+        raise ValueError(f"cutout = {cutout}, but only {num_echoes} echoes were acquired.")
+    # num_echoes_added counts from cutout, as documented above (it used
+    # to be taken as the index to stop at, so cutout=2,
+    # num_echoes_added=200 co-added 198 echoes, not 200).
+    stop = num_echoes if num_echoes_added is None else min(num_echoes, cutout + int(num_echoes_added))
+    if stop <= cutout:
+        raise ValueError(f"num_echoes_added = {num_echoes_added}: no echoes to co-add.")
+    sl = slice(cutout, stop)
     real_added = np.sum(echoes_real[sl], axis=0)
     imag_added = np.sum(echoes_imag[sl], axis=0)
 
@@ -1680,8 +1785,14 @@ def CPMGprocess(data_path, procno=1, mass=1, fid_name="fid",
     # spectrum and axis together to match nmrtools' descending
     # ppm/Hz convention (as in NMR1dimport).
     dt = 2 * dw * 1e-6  # seconds between successive points of fid_windowed
-    hz_axis = np.fft.fftshift(np.fft.fftfreq(si, d=dt)) + meta["O1"]
-    ppm_axis = hz_axis / meta["SFO1"]
+    # Referenced like every other Bruker spectrum (io.bruker's
+    # _ppm_hz_axis): offset from the carrier, minus SR, over SF (BF1
+    # when there is no procs). Dividing by SFO1 instead, as this did
+    # before, is wrong by the fraction O1/BF1 -- 1 ppm at 1000 ppm for
+    # a 100 kHz offset at 100 MHz, and it ignored a TopSpin SR.
+    sf, sr = _cpmg_reference(data_path, procno, meta)
+    hz_axis = np.fft.fftshift(np.fft.fftfreq(si, d=dt)) + meta["O1"] - sr
+    ppm_axis = hz_axis / sf
 
     spectrum = spectrum[::-1]
     hz_axis = hz_axis[::-1]
@@ -1726,10 +1837,48 @@ def CPMGprocess(data_path, procno=1, mass=1, fid_name="fid",
         'imag_spectrum': imag_spectrum, 'normalised_imag_spectrum': imag_spectrum_norm,
         'nuclide': meta["NUC"], 'BF1': meta["OBS"], 'SFO1': meta["SFO1"], 'path': data_path,
         'num_echoes': num_echoes, 'num_echoes_used': len(echoes_real[sl]),
-        'first_point': first,
+        'first_point': first, 'SF': sf, 'SR': sr, 'O1': meta["O1"], 'dwell_us': layout["dwell_us"],
+        'period_exact': layout["period_exact"], 'period': period, 'echo_starts': layout["starts"],
+        'cutout': cutout,
         'echoes_real': echoes_real[sl], 'echoes_imag': echoes_imag[sl],
         'fid_coadded': fid_coadded, 'fid_windowed': fid_windowed, 'window': window,
     }
+
+
+def cpmg_to_spectrum(results, procno=1):
+    """
+    A :func:`CPMGprocess` result as an :class:`opennmr.core.spectrum.NMRSpectrum`
+    -- what the GUI adds to Open experiments, and what the rest of
+    openNMR (phasing, fitting, VOCS, Compare) works on.
+
+    The experiment's ``acqus`` travels with it (``metadata.raw["acqus"]``),
+    so pulse lengths can still be looked up by name, e.g. for VOCS on a
+    set of CPMG pieces. A magnitude-mode result has no imaginary part.
+    ``metadata.raw["cpmg"]`` records the echo split that produced it.
+    """
+    from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+    from ..io.jcampdx import parse_jcampdx_params
+
+    path = results["path"]
+    acqus_path = os.path.join(path, "acqus")
+    acqus = parse_jcampdx_params(acqus_path) if os.path.isfile(acqus_path) else {}
+    magnitude = not np.any(results["imag_spectrum"])
+    record = {key: results[key] for key in (
+        "num_echoes", "num_echoes_used", "cutout", "first_point", "period", "period_exact",
+        "dwell_us", "SF", "SR")}
+    record["magnitude"] = bool(magnitude)
+    record["co_added_points"] = int(len(results["fid_coadded"]))
+    metadata = NMRMetadata(
+        vendor="bruker", nucleus=results["nuclide"], sfo1=float(results["SF"]),
+        bf1=float(results["BF1"]), o1=float(results["O1"]), source_path=path, procno=procno,
+        pulse_program=acqus.get("PULPROG"), probe=acqus.get("PROBHD"),
+        raw={"acqus": acqus, "cpmg": record},
+    )
+    axis = NMRAxis(kind="frequency", ppm=np.asarray(results["x_ppm"], dtype=float),
+                   hz=np.asarray(results["x_Hz"], dtype=float))
+    return NMRSpectrum(
+        data=np.asarray(results["real_spectrum"], dtype=float), axes=[axis], metadata=metadata,
+        data_imag=None if magnitude else np.asarray(results["imag_spectrum"], dtype=float))
 
 
 def CPMGplot(results, colour='black', xlims='default', xlabel=None,

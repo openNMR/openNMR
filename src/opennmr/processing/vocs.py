@@ -101,10 +101,40 @@ def pulse_to_w1(pulse_length_us: float) -> float:
     return 1e6 / (4.0 * pulse_length_us)
 
 
-def _pulse_length_us(spectrum: NMRSpectrum, pulse: str) -> float:
+def _as_pulse_length(pulse) -> float | None:
+    """``pulse`` as a pulse length in microseconds when it is a number
+    (``2.5``, ``"2.5"``, ``"2.5 us"``) rather than a parameter name;
+    ``None`` for a name. Raises for a number that is not positive."""
+    if isinstance(pulse, (int, float)) and not isinstance(pulse, bool):
+        value = float(pulse)
+    else:
+        text = str(pulse).strip().lower()
+        for suffix in ("\u00b5s", "us"):
+            if text.endswith(suffix):
+                text = text[: -len(suffix)].strip()
+                break
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError(f"A pulse length must be a positive number of microseconds, not {pulse!r}.")
+    return value
+
+
+def pulse_length_us(spectrum: NMRSpectrum, pulse) -> float:
+    """The 90-degree pulse length (microseconds) VOCS will use for
+    ``spectrum``: ``pulse`` itself when it is a number, else the named
+    acquisition parameter (see :func:`_pulse_length_us`)."""
+    return _pulse_length_us(spectrum, pulse)
+
+
+def _pulse_length_us(spectrum: NMRSpectrum, pulse) -> float:
     """Look up a pulse length (microseconds) from a spectrum's recorded
     acquisition parameters, by the name a pulse programme uses for it
-    (``P1``, ``P2``, ...).
+    (``P1``, ``P2``, ...) -- or, when ``pulse`` is itself a number
+    (``2.5``, ``"2.5 us"``), that length directly. The number is the
+    fallback for a spectrum with no parameter table at all.
 
     Goes through :func:`opennmr.core.acquisition.acquisition_constants`
     rather than indexing ``metadata.raw["acqus"]`` directly. **A direct
@@ -122,15 +152,19 @@ def _pulse_length_us(spectrum: NMRSpectrum, pulse: str) -> float:
     ``0.0`` -- and ``pulse_to_w1(0)`` is a division by zero, which
     would surface as a bare ``ZeroDivisionError`` rather than
     something a user can act on."""
-    key = pulse.strip().lower()
+    direct = _as_pulse_length(pulse)
+    if direct is not None:
+        return direct
+    key = str(pulse).strip().lower()
     constants = acquisition_constants(spectrum)
     value = constants.get(key)
     if value is None or value <= 0:
         if not constants:
             raise ValueError(
                 f"This spectrum has no recorded acquisition parameters, so {pulse} "
-                f"cannot be looked up (a derived spectrum has none, and neither "
-                f"does a vendor whose reader retains no parameter table)."
+                f"cannot be looked up (e.g. the result of spectrum arithmetic, or a "
+                f"vendor whose reader keeps no parameter table). Enter the 90-degree "
+                f"pulse length in microseconds instead, e.g. 2.5."
             )
         # Only the pulses actually set, in index order -- listing all
         # 64 slots would bury the two or three that are really in use.

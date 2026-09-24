@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-21)
 
-*2026-09-24: full suite without `test_data/` after the pNMR, J-coupling, strong-coupling and title/notes rounds: 2588 passed, 161 skipped, 0 failed (after the sixth round). Re-count with `test_data/` present.*
+*2026-09-24: full suite without `test_data/` after the pNMR, J-coupling, strong-coupling, title/notes, VOCS-slice and CPMG rounds: 2604 passed, 161 skipped, 0 failed (after the eighth round). Re-count with `test_data/` present.*
 
 **2220 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
@@ -76,6 +76,52 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
 
+## CPMG echo co-addition in Advanced Processing (2026-09-24, eighth round)
+
+User: *"Can we now add in the CPMG Skyline projection processing to "Advanced Processing" (making the VOCS and CPMG Skyline as separate collapsable sections)"* -- clarified: wire in the notebook's existing `CPMGprocess` (co-add the echoes of a raw Bruker echo train, apodise, zero-fill, FT). There is no skyline step in it; a per-echo 2D + skyline projection, or a skyline combination of several spectra, was offered and not chosen.
+
+### Built
+- Adv. Proc. is now two `CollapsibleSection`s: **VOCS** (unchanged content) and **CPMG** (`gui/cpmg_panel.py`, `CpmgProcessingPanel`, `MainWindow.cpmg_panel`). The panel follows the Open experiments selection; selecting a CPMG *result* keeps the raw experiment as the source, so settings can be tweaked and re-run.
+  - Pulse-programme indices (d6 echo length, d3 blanking, cnst20, l22 echo count by default) as spin boxes.
+  - Echo split: first point auto (+offset) or manual, safety, skip first N echoes, echoes to co-add. *Check echo split* reports the resolved timings/period and draws |FID| with every echo window shaded (alternating shades; co-added blue, left-out grey; zoomable), before anything is processed.
+  - Processing: apodisation (zeroed edges, shape, alpha), zero-fill (Auto or points), magnitude or phase-sensitive (then phase with the normal Phase controls). Result added to Open experiments as `CPMG <expno>`; a log line records everything used.
+- Notebook (`notebook/one_d.py`, exported): `cpmg_echo_layout` (the split, without processing -- what the preview uses and what `CPMGprocess` now calls), `cpmg_to_spectrum` (result -> `NMRSpectrum`, with `acqus` carried so VOCS/named constants work on it, and `raw["cpmg"]` recording the split).
+
+### Fixed in `CPMGprocess` on the way (behaviour changes -- flagged to the user)
+1. **ppm axis referencing.** Was `(offset + O1) / SFO1`; now `(offset + O1 - SR) / SF` with `SF` from `pdata/<procno>/procs` (else BF1) -- the same as `io.bruker`. The old form was low by the fraction O1/BF1 (1.1 ppm at 1120 ppm for a 100 kHz offset at 100 MHz) and ignored a TopSpin SR. Sign convention checked against `io.bruker.read_1d` on the same synthetic acqus: both put the line at the same ppm.
+2. **Fractional echo period.** Echo windows were cut at multiples of `int(period)`, so a 53.4-point period drifted 0.4 point per echo (80 points by echo 200); measured on a synthetic 200-echo train the co-added echo lost ~10x in amplitude. Each echo now starts at `rint(k * period_exact)`; identical when the period is a whole number of points.
+3. **`num_echoes_added` counts from `cutout`**, as its docstring always said (the code used it as the stop index: `cutout=2, num_echoes_added=200` co-added 198). Clamped to the echoes available; `cutout >= echoes` raises.
+4. `trim` (blanking - safety) clamped at 0 -- a large safety made a negative slice index.
+Unchanged: auto first point (first non-zero + offset), no digital-filter removal, apodisation window, zero-fill rule.
+
+### Not done
+- A per-echo 2D (echo number x frequency) with a skyline projection; a skyline (point-wise max) combination of several CPMG pieces beside VOCS Sum. Both straightforward on top of `cpmg_echo_layout` if wanted.
+- No real CPMG dataset was available to check against; everything is on synthetic trains built to the function's own model.
+
+### Tests
+`tests/test_cpmg.py` (12): peak position vs `io.bruker` reader (plain, 100 kHz offset, with SR), fractional period (no drift, within half a point), whole period unchanged, echoes-added semantics, layout errors explained, result as spectrum (acqus carried, magnitude/phase, VOCS works); GUI: two sections, end-to-end process + re-process from the result, refusal without a source, a bad index shown not raised.
+
+
+## VOCS on a column extracted from a 2D (2026-09-24, seventh round)
+
+User: *"If I have a 2-d experiment such as a J-HMQC, and I want to extract a column corresponding to a peak at a fixed F2 ... store that column for processing. If I then wanted to account for the finite pulse for the F1 dimension, I should be able to use the VOCS section. However, because this is an extracted slice, I end up with the error 'This spectrum has no recorded acquisition parameters, so P1 cannot be looked up ...'"* -- and a pointer to the notebook workaround (`NMR1dimport(..., heteronuclear_2d_slice=True)`: axis from `acqu2s`, pulse lengths from `acqus`).
+
+### What was wrong
+`processing.slicing.get_trace` built the trace's metadata with `raw={"slice": ...}` only, so every acquisition table of the 2D was dropped and `acquisition_constants(trace)` was empty. Anything that asks for a parameter by name (VOCS pulse, fit-equation constants, MASR) failed on any kept slice, not just VOCS.
+
+### Built
+- `get_trace` copies the acquisition tables (`acqus`, `acqu2s`, `acqu3s`, X-Pulse `exp_params`/`params`) onto the trace, and records `slice["dimension"]` (`"F1"` for a column). Processing tables (`procs`/`proc2s`) are deliberately not carried -- they describe the 2D's processing. This is the notebook workaround's logic: the trace's own axis is already the F1 axis (nucleus/SFO1 from the indirect dimension), and pulse lengths come from `acqus`, where Bruker keeps the whole `P` array for all channels.
+- VOCS accepts a pulse length as a number (`2.5`, `"2.5 us"`, `"2.5 µs"`) as well as a parameter name -- the fallback for spectra that genuinely have no table (arithmetic results, readers that keep none); the no-table error now says so. `processing.vocs.pulse_length_us` exposes the resolution.
+- GUI: after Apply VOCS the status bar says what was used ("VOCS applied: P3 = 4 µs, ν1 = 62.5 kHz, on the 13C (F1 trace) axis"), so a pulse on the wrong channel is visible. The pulse field's tooltip notes that an F1 column needs the F1 channel's pulse (usually not P1).
+
+### Caveats
+- For a column, `acquisition_constants` also returns F2 scalars such as `td`/`sw` from `acqus` (the acquisition table is the 2D's, not the trace's). Nothing uses those for a trace today.
+- The VOCS profile is centred on the middle of the trace's axis, taken as the carrier -- true for a full TopSpin F1 (and F2) window; not for a trace cut with `window=` (the GUI never does).
+
+### Tests
+`tests/test_vocs_slices.py` (4): a column carries the tables (and not procs), VOCS on an F1 column uses the F1 Hz axis and P3, numeric pulse lengths (and the errors), and the GUI path (keep a column, Apply VOCS with P3, no error, summary message).
+
+
 ## Experiment title / notes under Open experiments (2026-09-24, sixth round)
 
 User: *"For bruker-based data, is there a way to get the title (contained in /path/to/experiment/pdata/{procno}/title) to appear, perhaps alongside the "Open experiments" section (in all menus apart from Simulate)? Is it possible to make this editable so that people can add any notes there? I think having something that can also act as a title for other formats (non-Bruker) would also be good."* Chosen when asked: edits to a Bruker title **write back to `pdata/<procno>/title`** (not a sidecar), and a notes box under the list (rows get the first line as a tooltip, not in their names).
@@ -88,7 +134,7 @@ User: *"For bruker-based data, is there a way to get the title (contained in /pa
 - Row tooltips = first line of the title, kept current via the list *model's* `rowsInserted` (the view's signals are blocked in `_select_single_row`).
 
 ### Not done / caveats
-- A pseudo-2D slice kept as its own spectrum shares its parent's `source_path`/procno, so its notes *are* the parent's title (the location line says so).
+- A slice kept as its own spectrum is registered as `derived` (`Session.add_derived`), so its notes are session-only and never touch the parent's title. (Corrected in the seventh round; the first write-up of this round said the opposite.)
 - A title that was pure ASCII as acquired is treated as UTF-8; a non-ASCII character typed into it is written as UTF-8, which Windows TopSpin may display as two characters. Could be decided from the TopSpin install path recorded in `acqus` if it matters.
 - The Data browser tree does not show titles yet (would cost a file read per experiment on expand -- cheap, if wanted).
 
