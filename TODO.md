@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-21)
 
-*2026-09-24: full suite without `test_data/` after the pNMR, J-coupling and strong-coupling rounds: 2560 passed, 161 skipped, 0 failed. Re-count with `test_data/` present.*
+*2026-09-24: full suite without `test_data/` after the pNMR, J-coupling, strong-coupling and title/notes rounds: 2588 passed, 161 skipped, 0 failed (after the sixth round). Re-count with `test_data/` present.*
 
 **2220 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
@@ -74,6 +74,47 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+
+## Experiment title / notes under Open experiments (2026-09-24, sixth round)
+
+User: *"For bruker-based data, is there a way to get the title (contained in /path/to/experiment/pdata/{procno}/title) to appear, perhaps alongside the "Open experiments" section (in all menus apart from Simulate)? Is it possible to make this editable so that people can add any notes there? I think having something that can also act as a title for other formats (non-Bruker) would also be good."* Chosen when asked: edits to a Bruker title **write back to `pdata/<procno>/title`** (not a sidecar), and a notes box under the list (rows get the first line as a tooltip, not in their names).
+
+### Built
+- `io.bruker.title_path`, `read_title(path, procno)` (CRLF normalised, trailing blank lines dropped, UTF-8 then Latin-1 -- Windows TopSpin writes the ANSI code page), `write_title(path, procno, text)`: first overwrite copies the acquired title to `title.orig` (never overwritten again); written in the encoding the *original* had (judged from `title.orig`, because an ASCII edit decodes as UTF-8 and would otherwise forget that this TopSpin writes Latin-1); temp file + rename; refuses a `pdata/<procno>` that does not exist.
+- `io.persistence.load_notes_sidecar` / `save_notes_sidecar` (the `notes` key of `opennmr_metadata.json`, other keys untouched); `save_metadata_sidecar` now carries `notes` across its rebuild.
+- `notebook/notes.py` (exported from `opennmr.notebook`): `experiment_notes`, `set_experiment_notes`, `notes_location`, `notes_first_line`. Bruker -> the title file; other formats -> the sidecar, showing the format's own title until edited (JEOL header title + comment, Varian/OpenVnmrJ `text`; those files are never written); no file on disk (simulated/derived) -> `metadata.raw["notes"]`, session only.
+- `gui/widgets/notes_editor.py`: `ExperimentNotesEditor`, in a splitter under the Open experiments list (so it hides with the list on Simulate). Saves 800 ms after typing stops, on focus-out, on selecting another experiment, before a row is removed/cleared, and on window close. A failed save (read-only folder) shows in red under the box and in the status bar, never raises. Re-reads from disk on reselection, so a TopSpin edit shows up; not while the box has focus. Remove/Clear All moved into the list's half of the splitter.
+- Row tooltips = first line of the title, kept current via the list *model's* `rowsInserted` (the view's signals are blocked in `_select_single_row`).
+
+### Not done / caveats
+- A pseudo-2D slice kept as its own spectrum shares its parent's `source_path`/procno, so its notes *are* the parent's title (the location line says so).
+- A title that was pure ASCII as acquired is treated as UTF-8; a non-ASCII character typed into it is written as UTF-8, which Windows TopSpin may display as two characters. Could be decided from the TopSpin install path recorded in `acqus` if it matters.
+- The Data browser tree does not show titles yet (would cost a file read per experiment on expand -- cheap, if wanted).
+
+### Tests
+`tests/test_experiment_notes.py` (16): title read/CRLF/Latin-1, backup-once and encoding kept, no backup without an original, missing procno refused, per-procno titles; notebook round trips for Bruker, sidecar (keeps other keys, empty edit is kept, survives `save_metadata_sidecar`), Varian `text` default untouched, session-only notes; GUI: shows/saves on selection switch and idle timer, flushes on remove/clear, failed save reported, box lives inside Open experiments.
+
+
+## Folder-scan and proc-number limits; genuine Bruker 2Ds open with F1 processed (2026-09-24, fifth round)
+
+User: (1) *"The maximum number of datasets that can be loaded in from a head folder is 500. Can we increase the limit to account for, say, 2000?"* (2) *"If I want to switch the proc no of an experiment, my maximum is 999. In reality, I will have any integer."* (3) *"Is it possible to pre-process F1 in the case of bruker-detected 2-d data? Having to re-process every time is quite inconvenient"* -- clarified: every *new* genuine 2D opened as pseudo-2D and had to be switched with Process Indirect Dimension (a reopened one already remembered).
+
+### Built
+
+1. `MainWindow.SCAN_LIMIT = 10_000` (was a silent `max_matches=500`). A scan that reaches it now says so: an information box in Open Folder, and the Data browser's status line.
+2. Change proc number: `QInputDialog.getInt(..., 1, 2_147_483_647)` (was 1..999).
+3. **Measured first** on a real 43-experiment folder (`800_NB_MHz_Lyon/2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_VT_20260223`), reading parameter files only: all **7 EXSYs** (`exsy_echo3.enb`, FnMODE 5, F1 1H/2H, no list) have `proc2s FT_mod = 4` and `2rr 2ri 2ir 2ii`; all **36 series** (`satrec2Decho3`, `hahnecho2D`, `hahnecho4`; F1 off, 34 with a vdlist) have `FT_mod = 0` and `2rr 2ii` (two unprocessed). TopSpin's own record of whether it transformed F1 separates them perfectly -- and also covers the case the metadata rule never could (a series with a real F1 nucleus and no list, e.g. `bruker_T2/11`, processed xf2-only).
+   - `io.bruker.recorded_f1_transform(path, procno)` and `suggest_pseudo_2d(path, procno) -> (pseudo_2d, reason)`: genuine 2D only if F1 has a nucleus **and** TopSpin Fourier-transformed F1; otherwise (F1 off, xf2 only, never processed as a 2D) pseudo-2D, the old default.
+   - `MainWindow._bruker_2d_default`: the user's own saved choice wins; otherwise the rule. The reason is kept in `metadata.raw["pseudo_2d_basis"]` and shown as the status-bar experiment tooltip ("Opened as a genuine 2D: TopSpin Fourier-transformed F1 (proc2s FT_mod = 4)").
+   - **Found and fixed on the way:** the metadata sidecar wrote `pseudo_2d` on every save (phasing, mass...), so a saved `true` could just be the old forced default rather than a choice. A toggle now also records `pseudo_2d_chosen` (kept across later saves while the state is unchanged); an unchosen saved `true` no longer blocks the rule. A saved `false` is always a choice (only the toggle could produce it) and is honoured as before.
+
+### Not changed
+- A genuine 2D never processed in TopSpin still opens as pseudo-2D (no evidence either way); the toggle remains, and is remembered.
+- X-Pulse and other vendors: unchanged.
+
+### Tests
+`tests/test_scan_and_procno_limits.py` (3: 1200-experiment scan, truncation notice in both places, proc-number range), `tests/test_bruker_2d_default.py` (9: the rule's four cases, genuine 2D opens transformed with the reason shown, xf2-only series stays pseudo, user's choice wins and survives reloads/saves, an unchosen saved state does not block the rule).
 
 
 ## Isotope-resolved coupling groups, strong coupling, and the isotope table's spins (2026-09-24, fourth round)

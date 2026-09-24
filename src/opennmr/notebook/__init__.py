@@ -81,6 +81,8 @@ from .spin_system import (
     equivalent_solutions,
 )
 
+from .notes import experiment_notes, set_experiment_notes, notes_location, notes_first_line
+
 from .csa_fitting import (
     csa_model_full, build_csa_model, fit_csa_spectrum, evaluate_csa_fit,
     print_csa_fit_report, NMR1dplot_with_csa_fit, NMRCSAFitWorkflow
@@ -219,4 +221,6 @@ __all__ = [
     "jcoupling_site_lineshape", "build_jcoupling_model", "initialise_jcoupling_params", "build_jcoupling_bounds",
     "fit_jcoupling_spectrum", "evaluate_jcoupling_fit", "print_jcoupling_fit_report", "NMR1dplot_with_jcoupling_fit",
     "NMRJCouplingFitWorkflow", "jcoupling_chemist_notation",
+    # notes
+    "experiment_notes", "set_experiment_notes", "notes_location", "notes_first_line",
 ]

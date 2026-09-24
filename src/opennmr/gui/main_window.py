@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 from PySide6.QtWidgets import QColorDialog
+from .widgets.notes_editor import ExperimentNotesEditor
+from ..notebook import notes as nb_notes
 from PySide6.QtGui import QColor
 
 
@@ -846,6 +848,8 @@ class MainWindow(QMainWindow):
         kind = ("pseudo-2D" if (spectrum.ndim == 2 and spectrum.is_pseudo_2d)
                 else f"{spectrum.ndim}D")
         bits.append(f"{kind} {'x'.join(str(int(n)) for n in shape)}")
+        basis = spectrum.metadata.raw.get("pseudo_2d_basis") if spectrum.ndim == 2 else None
+        self._status_experiment.setToolTip(f"Opened as {basis}." if basis else "")
         if spectrum.metadata.pulse_program:
             bits.append(str(spectrum.metadata.pulse_program))
         self._status_experiment.setText("  ·  ".join(bits))
@@ -1761,7 +1765,36 @@ class MainWindow(QMainWindow):
         self.open_experiments_box = QGroupBox("Open experiments")
         open_experiments_layout = QVBoxLayout(self.open_experiments_box)
         open_experiments_layout.setContentsMargins(4, 4, 4, 4)
-        open_experiments_layout.addWidget(self.spectrum_list, 1)
+        # The selected experiment's title/notes under the list, in a
+        # splitter so either can be given the room (explicit user
+        # request: show the Bruker pdata/<procno>/title, editable, and
+        # a title of the same kind for every other format). Reading and
+        # writing is opennmr.notebook.notes, shared with notebook use.
+        self.notes_editor = ExperimentNotesEditor()
+        self.notes_editor.saved.connect(self._on_notes_saved)
+        self.notes_editor.failed.connect(self._on_notes_save_failed)
+        self.open_experiments_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.open_experiments_splitter.setChildrenCollapsible(False)
+        # The list keeps its Remove/Clear buttons directly under it; the
+        # notes sit below both.
+        list_part = QWidget()
+        list_part_layout = QVBoxLayout(list_part)
+        list_part_layout.setContentsMargins(0, 0, 0, 0)
+        list_part_layout.addWidget(self.spectrum_list, 1)
+        self.open_experiments_splitter.addWidget(list_part)
+        self.open_experiments_splitter.addWidget(self.notes_editor)
+        self.open_experiments_splitter.setStretchFactor(0, 3)
+        self.open_experiments_splitter.setStretchFactor(1, 2)
+        open_experiments_layout.addWidget(self.open_experiments_splitter, 1)
+        # Model signals, not the view's: _select_single_row blocks the
+        # view's signals, but every row added or removed still passes
+        # through the model. A pending edit is saved before its row goes.
+        list_model = self.spectrum_list.model()
+        list_model.rowsInserted.connect(self._on_open_rows_inserted)
+        list_model.rowsAboutToBeRemoved.connect(lambda *_: self.notes_editor.flush())
+        list_model.modelAboutToBeReset.connect(self.notes_editor.flush)
+        list_model.rowsRemoved.connect(self._on_open_rows_removed)
+        list_model.modelReset.connect(self._on_open_rows_removed)
 
         remove_button = QPushButton("Remove")
         remove_button.clicked.connect(self._on_remove_clicked)
@@ -1770,7 +1803,7 @@ class MainWindow(QMainWindow):
         remove_row = QHBoxLayout()
         remove_row.addWidget(remove_button)
         remove_row.addWidget(clear_button)
-        open_experiments_layout.addLayout(remove_row)
+        list_part_layout.addLayout(remove_row)
 
         return tab
 
@@ -2025,6 +2058,11 @@ class MainWindow(QMainWindow):
             self._open_one(*matches[0])
             return
 
+        if self._scan_was_truncated(matches):
+            QMessageBox.information(
+                self, "Folder scan stopped early",
+                f"Only the first {len(matches):,} experiments under {directory} are listed -- "
+                f"the scan stops there. Open a subfolder to see the rest.")
         for path, vendor in self._prompt_select_spectra(matches, directory):
             self._open_one(path, vendor)
 
@@ -2073,8 +2111,19 @@ class MainWindow(QMainWindow):
         return [int(chunk) if chunk.isdigit() else chunk.lower()
                 for chunk in cls._NATURAL_SORT_SPLIT_RE.split(name)]
 
+    #: Most experiments one folder scan returns. Was 500, which a single
+    #: busy data folder can exceed (explicit user request: "account for,
+    #: say, 2000"); a scan that stops here says so rather than silently
+    #: showing a partial list (see _scan_was_truncated).
+    SCAN_LIMIT = 10_000
+
     @classmethod
-    def _scan_for_spectra(cls, directory: str, max_depth: int = 6, max_matches: int = 500) -> list[tuple[str, str]]:
+    def _scan_was_truncated(cls, matches) -> bool:
+        return len(matches) >= cls.SCAN_LIMIT
+
+    @classmethod
+    def _scan_for_spectra(cls, directory: str, max_depth: int = 6,
+                          max_matches: int | None = None) -> list[tuple[str, str]]:
         """Find every Bruker experiment and X-Pulse spectrum under
         ``directory`` -- so opening works whether the user picks a
         single experiment folder directly, or a parent folder holding
@@ -2098,6 +2147,8 @@ class MainWindow(QMainWindow):
         separate matches once the one real 2D dataset they belong to
         is already found.
         """
+        if max_matches is None:
+            max_matches = cls.SCAN_LIMIT
         matches: list[tuple[str, str]] = []
 
         def walk(path: str, depth: int) -> None:
@@ -2192,6 +2243,8 @@ class MainWindow(QMainWindow):
             self._loader = None
         # Same for a pNMR enumeration running in the background.
         self.pnmr_panel.shutdown()
+        # And an edit to the title/notes still inside its save delay.
+        self.notes_editor.flush()
         super().closeEvent(event)
 
     def _open_one(self, path: str, vendor: str) -> None:
@@ -2372,8 +2425,8 @@ class MainWindow(QMainWindow):
         rather than by being kept in step by hand."""
         add_kwargs: dict = {}
         if vendor == "bruker":
-            presel = io_persistence.load_metadata_sidecar(path)
-            add_kwargs["pseudo_2d"] = (presel or {}).get("pseudo_2d") is not False
+            presel = io_persistence.load_metadata_sidecar(path) or {}
+            add_kwargs["pseudo_2d"], _basis = self._bruker_2d_default(path, presel)
             # Magnitude mode has to be decided here too, for the same
             # reason: it is applied by the *reader* (there is
             # deliberately no second in-memory implementation, see
@@ -2393,6 +2446,27 @@ class MainWindow(QMainWindow):
             add_kwargs.update(folded)
 
         return add_kwargs
+
+    @staticmethod
+    def _bruker_2d_default(path: str, saved: dict) -> tuple[bool, str]:
+        """(pseudo_2d, why) for a Bruker experiment's first read.
+
+        The user's own saved choice wins: a saved genuine-2D (only ever
+        set with Process Indirect Dimension), or a saved pseudo-2D marked
+        as chosen. Otherwise TopSpin's own record decides -- genuine 2D
+        only if TopSpin Fourier-transformed F1 (see
+        io.bruker.suggest_pseudo_2d). Before 2026-09-24 every Bruker 2D
+        opened as pseudo-2D, so each genuine 2D had to be switched by
+        hand the first time (explicit user request to stop that)."""
+        choice = saved.get("pseudo_2d")
+        if choice is False:
+            return False, "a genuine 2D: your saved choice (Process Indirect Dimension)"
+        if choice is True and saved.get("pseudo_2d_chosen"):
+            return True, "a series: your saved choice (Process Indirect Dimension)"
+        try:
+            return io_bruker.suggest_pseudo_2d(path, procno=int(saved.get("procno") or 1))
+        except Exception:  # noqa: BLE001 -- unreadable parameters: the old default
+            return True, ""
 
     def _load(self, path: str, vendor: str, preloaded=None) -> None:
         # Decide the pseudo-2D treatment *before* the read, not after.
@@ -2433,6 +2507,10 @@ class MainWindow(QMainWindow):
         # straight to a reader that would reject an unknown keyword.
         if vendor == "bruker":
             spectrum.metadata.raw["_read_used_saved_processing"] = True
+            if spectrum.ndim == 2:
+                _pseudo, basis = self._bruker_2d_default(
+                    path, io_persistence.load_metadata_sidecar(path) or {})
+                spectrum.metadata.raw["pseudo_2d_basis"] = basis
 
         index = len(self.session) - 1
         # Loaded early (before the pseudo-2D default below) so a
@@ -2832,7 +2910,9 @@ class MainWindow(QMainWindow):
         if not directory:
             return
         matches = self._scan_for_spectra(directory)
-        self.data_browser.set_matches(directory, matches)
+        self.data_browser.set_matches(
+            directory, matches,
+            truncated_at=self.SCAN_LIMIT if self._scan_was_truncated(matches) else None)
 
     def _on_browser_spectrum_activated(self, path: str, vendor: str) -> None:
         """Load an experiment picked in the browser -- the same path
@@ -3102,7 +3182,9 @@ class MainWindow(QMainWindow):
             "pdata/<n> to use for TopSpin's own recorded processing "
             "parameters (window/phase/zero-fill) -- the raw ser/fid "
             "data is still read by default regardless of proc number:",
-            current, 1, 999,
+            # Any positive integer: TopSpin's own PROCNO has no 999 cap
+            # (explicit user request). 2**31 - 1 is the dialog's maximum.
+            current, 1, 2_147_483_647,
         )
         if not ok or value == current:
             return
@@ -3192,6 +3274,12 @@ class MainWindow(QMainWindow):
         try:
             self.session.reload(index, pseudo_2d=wants_pseudo_2d, **self._current_phase_kwargs(spectrum))
             new_spectrum = self.session.spectra[index]
+            # A deliberate choice: remembered, and it overrides the
+            # automatic default next time (see _bruker_2d_default).
+            new_spectrum.metadata.raw["pseudo_2d_chosen"] = True
+            new_spectrum.metadata.raw["pseudo_2d_basis"] = (
+                ("a series" if wants_pseudo_2d else "a genuine 2D")
+                + ": your choice (Process Indirect Dimension)")
             if phase0_f1 is not None:
                 new_spectrum.metadata.raw["phase0_f1"] = phase0_f1
             if phase1_f1 is not None:
@@ -19533,8 +19621,63 @@ class MainWindow(QMainWindow):
         if action is not None and action.isChecked():
             action.setChecked(False)
 
+    # --- Title / notes under Open experiments ------------------------
+    def _row_of_spectrum(self, spectrum) -> int:
+        for row, candidate in enumerate(self.session.spectra):
+            if candidate is spectrum:
+                return row
+        return -1
+
+    def _update_row_notes_tooltip(self, row: int, text: str | None = None) -> None:
+        """Give row ``row`` of Open experiments the first line of its
+        title as a tooltip (the list's own help tooltip when there is
+        none). ``text`` saves a re-read when the caller already has it."""
+        item = self.spectrum_list.item(row)
+        if item is None or not 0 <= row < len(self.session):
+            return
+        if text is None:
+            try:
+                text = nb_notes.experiment_notes(self.session.spectra[row])
+            except OSError:
+                text = ""
+        item.setToolTip(nb_notes.notes_first_line(text))
+
+    def _on_open_rows_inserted(self, _parent, first: int, last: int) -> None:
+        for row in range(first, last + 1):
+            self._update_row_notes_tooltip(row)
+
+    def _on_open_rows_removed(self, *_args) -> None:
+        """The experiment whose notes are shown may have just been
+        removed -- show the current row's instead, or nothing."""
+        current = self.notes_editor.spectrum
+        if current is not None and self._row_of_spectrum(current) >= 0:
+            return
+        row = self.spectrum_list.currentRow()
+        self.notes_editor.set_spectrum(
+            self.session.spectra[row] if 0 <= row < len(self.session) else None)
+
+    def _on_notes_saved(self, spectrum, where: str) -> None:
+        row = self._row_of_spectrum(spectrum)
+        if row >= 0:
+            text = self.notes_editor.text() if spectrum is self.notes_editor.spectrum else None
+            self._update_row_notes_tooltip(row, text)
+        # Saving the Bruker title of one procno leaves any other open
+        # copy of the same experiment/procno showing the old text in
+        # its tooltip -- refresh those too (cheap: a small file each).
+        meta = spectrum.metadata
+        for other_row, other in enumerate(self.session.spectra):
+            if other is not spectrum and other.metadata.source_path == meta.source_path:
+                self._update_row_notes_tooltip(other_row)
+        self.statusBar().showMessage(f"Title/notes saved to {where}", 4000)
+
+    def _on_notes_save_failed(self, _spectrum, message: str) -> None:
+        self.statusBar().showMessage(message, 10000)
+
     def _refresh_selection_display(self, row: int) -> None:
         spectrum = self.session.spectra[row]
+        # The title/notes box follows the selection (and a reprocess to
+        # another procno, which has its own Bruker title).
+        self.notes_editor.set_spectrum(spectrum)
         meta = spectrum.metadata
 
         bits = [f"Vendor: {meta.vendor}", f"Nucleus: {meta.nucleus or '—'}"]

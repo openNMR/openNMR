@@ -53,6 +53,9 @@ _PROCESSING_RAW_BLOCKLIST = frozenset({
     "acqus", "procs", "proc2s", "params", "exp_params",
     "fid", "fid_raw",
     "window_unsupported", "read_2d_shape_guess_failed", "loaded_from_processed",
+    # How a 2D came to open as it did: re-derived on every load, and the
+    # choice itself lives in the metadata sidecar (pseudo_2d_chosen).
+    "pseudo_2d_basis", "pseudo_2d_chosen",
     # Re-derived from the vendor's own PH_mod on every load, so it
     # would be a stale copy -- and, worse, an actively wrong one for
     # the case that matters: "requested" only describes *this*
@@ -141,7 +144,43 @@ def save_metadata_sidecar(spectrum) -> None:
         # comment for why that default exists in the first place).
         "pseudo_2d": meta.pseudo_2d if spectrum.ndim == 2 else None,
     }
+    # Whether that pseudo_2d is the user's own choice (Process Indirect
+    # Dimension) or just the state it opened in -- only a choice
+    # overrides the automatic default on the next load. Kept across saves
+    # while the state is unchanged, since a reload rebuilds metadata.raw.
+    previous = load_metadata_sidecar(source_path) or {}
+    chosen = bool(meta.raw.get("pseudo_2d_chosen")) or (
+        bool(previous.get("pseudo_2d_chosen")) and previous.get("pseudo_2d") == payload["pseudo_2d"])
+    if spectrum.ndim == 2 and chosen:
+        payload["pseudo_2d_chosen"] = True
+    # The user's own title/notes (non-Bruker formats -- a Bruker title
+    # lives in pdata/<procno>/title) are written by save_notes_sidecar,
+    # not rebuilt from the spectrum, so carry them across.
+    if isinstance(previous.get("notes"), str):
+        payload["notes"] = previous["notes"]
     _write_json(metadata_sidecar_path(source_path), payload)
+
+
+def load_notes_sidecar(source_path: str) -> str | None:
+    """The title/notes saved for ``source_path`` in its
+    ``opennmr_metadata.json``, or ``None`` when none were ever saved."""
+    notes = (load_metadata_sidecar(source_path) or {}).get("notes")
+    return notes if isinstance(notes, str) else None
+
+
+def save_notes_sidecar(source_path: str, text: str) -> str:
+    """Store ``text`` as the title/notes of ``source_path`` in its
+    ``opennmr_metadata.json``, leaving every other key as it was (a
+    sidecar is created holding just the notes if there is none yet).
+    Returns the sidecar path. Raises ``FileNotFoundError`` if
+    ``source_path`` does not exist."""
+    if not source_path or not os.path.exists(source_path):
+        raise FileNotFoundError(f"No such experiment: {source_path!r}")
+    path = metadata_sidecar_path(source_path)
+    payload = _read_json(path) or {"opennmr_metadata_version": _METADATA_VERSION}
+    payload["notes"] = text
+    _write_json(path, payload)
+    return path
 
 
 def load_metadata_sidecar(source_path: str) -> dict | None:

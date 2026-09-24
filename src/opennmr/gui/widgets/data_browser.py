@@ -129,10 +129,12 @@ class DataBrowser(QWidget):
 
     # -- population ----------------------------------------------------
 
-    def set_matches(self, root: str, matches: list[tuple[str, str]]) -> None:
+    def set_matches(self, root: str, matches: list[tuple[str, str]],
+                    truncated_at: int | None = None) -> None:
         """Show ``matches`` -- ``(path, vendor)`` pairs, as returned by
         the same scan Open… uses -- grouped by their folders under
-        ``root``."""
+        ``root``. ``truncated_at``: the scan stopped at this many, so
+        the folder holds more than are listed -- said in the status line."""
         self._root = root
         self._tree.clear()
         self._root_label.setText(root)
@@ -141,8 +143,10 @@ class DataBrowser(QWidget):
             self._status.setText("No loadable experiments found in this folder.")
             return
         self._status.setText(
-            f"{len(matches)} experiment{'s' if len(matches) != 1 else ''}. "
+            f"{len(matches):,} experiment{'s' if len(matches) != 1 else ''}. "
             f"Double-click to load."
+            + (f" The scan stops at {truncated_at:,}: this folder holds more -- browse a "
+               f"subfolder to see them." if truncated_at else "")
         )
 
         folders: dict[str, QTreeWidgetItem] = {}

@@ -1616,6 +1616,135 @@ def has_variable_list(path: str) -> bool:
     return any(os.path.isfile(os.path.join(path, name)) for name in _VARIABLE_LIST_NAMES)
 
 
+def recorded_f1_transform(path: str, procno: int = 1) -> int | None:
+    """TopSpin's own record of the Fourier transform it applied along F1
+    for ``pdata/<procno>``: ``proc2s``'s ``FT_mod`` (0 = none, i.e. the
+    data were processed with ``xf2`` only; non-zero = F1 was
+    transformed, as ``xfb``/``xf1`` do). ``None`` when there is no
+    ``proc2s`` or no ``FT_mod`` in it -- not processed as a 2D in TopSpin."""
+    if not os.path.exists(os.path.join(path, "pdata", str(procno), "proc2s")):
+        return None
+    value = _read_procs(path, procno, proc2=True).get("FT_mod")
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def suggest_pseudo_2d(path: str, procno: int = 1) -> tuple[bool, str]:
+    """Whether a Bruker 2D should *open* as a pseudo-2D series (no F1
+    transform) or as a genuine 2D, and why -- the default before any
+    choice of the user's.
+
+    Genuine 2D only on positive evidence: **TopSpin itself Fourier-
+    transformed F1** (``proc2s`` ``FT_mod`` != 0) and F1 has a nucleus
+    (``acqu2s`` ``NUC1`` != "off"). Everything else -- F1 "off", an
+    ``xf2``-only processing, or data never processed in TopSpin --
+    opens as a pseudo-2D, as every Bruker 2D did before this rule.
+
+    Measured before adopting it (2026-09-24) on a 43-experiment 800 MHz
+    folder: all 7 EXSYs (``exsy_echo3``, FnMODE 5) have ``FT_mod`` 4 and
+    ``2rr/2ri/2ir/2ii``; all 36 relaxation series (``satrec2Decho3``,
+    ``hahnecho2D``, ``hahnecho4``) have ``FT_mod`` 0 and only ``2rr/2ii``
+    (or nothing, unprocessed). The earlier metadata-only signals are
+    weaker: ``FnMODE`` does not separate QF COSY/HMBC from series, and a
+    series with a real F1 nucleus and no list file (``bruker_T2/11``) has
+    no metadata evidence at all -- but was processed ``xf2``-only, so
+    this rule opens it as a series.
+
+    A genuine 2D never processed in TopSpin still opens as pseudo-2D;
+    Process Indirect Dimension remains the switch, and is remembered.
+    """
+    if not os.path.isfile(os.path.join(path, "acqu2s")):
+        return True, ""
+    nuc2 = str(parse_jcampdx_params(os.path.join(path, "acqu2s")).get("NUC1", "")).strip()
+    if nuc2.lower() == "off":
+        return True, "a series: F1 has no nucleus (acqu2s NUC1 = off)"
+    ft = recorded_f1_transform(path, procno)
+    if ft is None:
+        return True, ("treated as a series: not processed as a 2D in TopSpin, so there is no "
+                      "record of how F1 should be handled")
+    if ft == 0:
+        return True, "a series: TopSpin processed it with xf2 only (F1 not transformed)"
+    return False, f"a genuine 2D: TopSpin Fourier-transformed F1 (proc2s FT_mod = {ft})"
+
+
+def title_path(path: str, procno: int = 1) -> str:
+    """Where TopSpin keeps the free-text title of ``pdata/<procno>``."""
+    return os.path.join(path, "pdata", str(procno), "title")
+
+
+def _decode_title(raw: bytes) -> tuple[str, str]:
+    # TopSpin on Windows writes the title in the ANSI code page, so a
+    # degree sign or a Greek letter is not UTF-8. Try UTF-8 first (what
+    # it writes on Linux, and what an ASCII title is anyway), then
+    # Latin-1, which decodes any byte -- nothing is lost on a re-save.
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return raw.decode("latin-1"), "latin-1"
+
+
+def read_title(path: str, procno: int = 1) -> str | None:
+    """The TopSpin title of ``pdata/<procno>`` (the text ``edti`` edits),
+    with Windows line endings and trailing blank lines removed. ``None``
+    when there is no title file; ``""`` when there is an empty one."""
+    try:
+        with open(title_path(path, procno), "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    text, _ = _decode_title(raw)
+    return text.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+
+
+def write_title(path: str, procno: int, text: str) -> str:
+    """Replace the TopSpin title of ``pdata/<procno>`` with ``text``, so
+    TopSpin and openNMR show the same thing. Returns the file written.
+
+    Before the *first* overwrite of an existing title the original is
+    copied to ``title.orig`` next to it (never overwritten afterwards),
+    so the title as acquired can always be recovered. Written in the
+    encoding the file already had (UTF-8 for a new file; Latin-1 when
+    that is what TopSpin wrote, falling back to UTF-8 only if the new
+    text has a character Latin-1 cannot hold), with a single trailing
+    newline, via a temporary file so a failed write never leaves a
+    truncated title. Raises ``FileNotFoundError`` when ``pdata/<procno>``
+    does not exist -- a title is never written into a folder that is not
+    already a processed dataset.
+    """
+    pdata = os.path.join(path, "pdata", str(procno))
+    if not os.path.isdir(pdata):
+        raise FileNotFoundError(f"No processed data folder {pdata}")
+    target = title_path(path, procno)
+    encoding = "utf-8"
+    backup = target + ".orig"
+    if os.path.isfile(target) and not os.path.exists(backup):
+        with open(target, "rb") as f:
+            existing = f.read()
+        with open(backup, "wb") as f:
+            f.write(existing)
+    # The encoding is judged from the title as TopSpin wrote it (the
+    # backup), not the current file: once an edit is plain ASCII it
+    # decodes as UTF-8 and would lose the fact that this TopSpin writes
+    # Latin-1.
+    for source in (backup, target):
+        if os.path.isfile(source):
+            with open(source, "rb") as f:
+                _, encoding = _decode_title(f.read())
+            break
+    body = text.replace("\r\n", "\n").replace("\r", "\n").rstrip() + "\n"
+    try:
+        payload = body.encode(encoding)
+    except UnicodeEncodeError:
+        payload = body.encode("utf-8")
+    tmp = target + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(payload)
+    os.replace(tmp, target)
+    return target
+
+
 def peek(path: str, procno: int = 1, homonuclear: bool = False) -> dict:
     """Metadata-only probe: shape/nucleus/block-layout from
     ``acqus``/``acqu2s``/``procs``/``proc2s`` alone, never touching
