@@ -398,7 +398,13 @@ def lorentzian_broadening(spectrum, ppm_axis, fwhm=2.0):
         return spectrum
     dx = abs(ppm_axis[1] - ppm_axis[0])
     gamma = fwhm / 2.0  # HWHM
-    n_kernel = len(ppm_axis)
+    # An odd-length kernel, centred on its middle sample: with an
+    # even length, fftconvolve(mode="same") aligns sample (n-1)//2, one
+    # before the kernel's peak at n//2, so every line came out one grid
+    # point off -- on every 2^n-point axis, i.e. almost all real data.
+    # (Found 2026-09-24: a J-coupling fit's centres were all off by
+    # exactly one point.)
+    n_kernel = len(ppm_axis) if len(ppm_axis) % 2 else len(ppm_axis) + 1
     x_kernel = (np.arange(n_kernel) - n_kernel // 2) * dx
     kernel = gamma / (np.pi * (x_kernel ** 2 + gamma ** 2))
     kernel = kernel / kernel.sum()
@@ -1328,7 +1334,43 @@ def spin_multiplet_pattern(n, I, J_Hz):
     return freqs_Hz, weights
 
 
-def jcoupling_group_pattern(n, J_Hz, nuclide=None, spin=None, abundance=None):
+def element_isotopes(nuclide):
+    """Every NMR-active isotope of ``nuclide``'s element in the table, as
+    a list of dicts (``nuclide``, ``spin``, ``gamma`` in Hz/T,
+    ``abundance`` in %), plus the spin-0 remainder of the element,
+    ``100 - sum(abundances)`` %, as the second return value.
+
+    >>> element_isotopes('11B')   # ([10B 19.9 %, 11B 80.1 %], 0.0)
+    """
+    from .utils import _GAMMA_DF
+    element = str(nuclide).lstrip("0123456789")
+    out = []
+    for iso in _GAMMA_DF["Nuclide"]:
+        iso = str(iso)
+        if iso.lstrip("0123456789") != element:
+            continue
+        info = find_isotope_info(iso)
+        if info["spin"] > 0 and info["abundance"] > 0:
+            out.append(info)
+    if not any(i["nuclide"] == nuclide for i in out):
+        raise KeyError(f"'{nuclide}' is not an NMR-active isotope with a natural abundance "
+                       f"in the table.")
+    spin_zero = max(0.0, 100.0 - sum(i["abundance"] for i in out))
+    return out, spin_zero
+
+
+def _convolve_patterns(a, b):
+    """Convolve two stick patterns given as {freq_Hz (rounded): weight}."""
+    out = {}
+    for fa, wa in a.items():
+        for fb, wb in b.items():
+            key = round(fa + fb, 6)
+            out[key] = out.get(key, 0.0) + wa * wb
+    return out
+
+
+def jcoupling_group_pattern(n, J_Hz, nuclide=None, spin=None, abundance=None,
+                            all_isotopes=False):
     """
     Stick pattern for one coupling *group* -- n equivalent coupling-
     partner sites of a given nuclide, each coupled with the same J --
@@ -1365,6 +1407,19 @@ def jcoupling_group_pattern(n, J_Hz, nuclide=None, spin=None, abundance=None):
         abundance (%, 0-100). Pass 100.0 to force the "always
         active, no satellites" treatment regardless of the real
         isotope (e.g. for an isotopically-enriched sample).
+    all_isotopes : bool, optional
+        Include *every* NMR-active isotope of the partner's element, each
+        at its natural abundance, instead of treating all but `nuclide`
+        as spin-0. `J_Hz` is the coupling to `nuclide`; each other
+        isotope's J is scaled by the ratio of gyromagnetic ratios
+        (J is proportional to gamma of the partner), and uses that
+        isotope's own spin. Each of the n positions independently holds
+        one isotope (or a spin-0 one), so e.g. 19F in BF4- (n=1 boron)
+        gives the 11B 1:1:1:1 quartet (80.1 %) plus the 10B 1:1:1:1:1:1:1
+        septet at J x gamma(10B)/gamma(11B) (19.9 %). Isotope shifts
+        and quadrupolar relaxation (which often collapses couplings to
+        Cl, Br, 14N...) are not modelled. Cannot be combined with
+        `spin`/`abundance` overrides.
 
     Returns
     -------
@@ -1373,6 +1428,28 @@ def jcoupling_group_pattern(n, J_Hz, nuclide=None, spin=None, abundance=None):
     weights : ndarray
         Relative intensities, normalised to sum to 1.
     """
+    if all_isotopes:
+        if nuclide is None:
+            raise ValueError("all_isotopes needs the partner 'nuclide'.")
+        if spin is not None or abundance is not None:
+            raise ValueError("all_isotopes uses each isotope's own spin and natural "
+                             "abundance; do not also give 'spin' or 'abundance'.")
+        isotopes, spin_zero = element_isotopes(nuclide)
+        gamma_ref = find_isotope_info(nuclide)["gamma"]
+        single = {0.0: spin_zero / 100.0} if spin_zero > 0 else {}
+        for iso in isotopes:
+            J_iso = J_Hz * iso["gamma"] / gamma_ref
+            f1, w1 = spin_multiplet_pattern(1, iso["spin"], J_iso)
+            for f, w in zip(f1, w1):
+                key = round(float(f), 6)
+                single[key] = single.get(key, 0.0) + iso["abundance"] / 100.0 * float(w)
+        totals = {0.0: 1.0}
+        for _ in range(int(n)):
+            totals = _convolve_patterns(totals, single)
+        freqs_Hz = np.array(sorted(totals.keys()))
+        weights = np.array([totals[f] for f in freqs_Hz])
+        return freqs_Hz, weights / weights.sum()
+
     if spin is None or abundance is None:
         if nuclide is None:
             raise ValueError(
@@ -1428,6 +1505,9 @@ def combine_jcouplings(couplings, intensity_threshold=1e-8):
         ``abundance`` : float, optional
             Overrides the table natural abundance (%) for this
             nuclide -- see :func:`jcoupling_group_pattern`.
+        ``all_isotopes`` : bool, optional
+            Include every magnetic isotope of the partner's element,
+            with gamma-scaled J -- see :func:`jcoupling_group_pattern`.
 
     intensity_threshold : float, optional
         Lines with combined relative weight below this (after
@@ -1452,6 +1532,7 @@ def combine_jcouplings(couplings, intensity_threshold=1e-8):
             n=group['n'], J_Hz=group['J_Hz'],
             nuclide=group.get('nuclide'),
             spin=group.get('spin'), abundance=group.get('abundance'),
+            all_isotopes=bool(group.get('all_isotopes', False)),
         )
         new_freqs = (total_freqs[:, None] + freqs_g[None, :]).ravel()
         new_weights = (total_weights[:, None] * weights_g[None, :]).ravel()
@@ -1476,8 +1557,72 @@ def combine_jcouplings(couplings, intensity_threshold=1e-8):
     return total_freqs[order], total_weights[order]
 
 
+#: Sticks evaluated per block in multiplet_lineshape, bounding its
+#: temporary (block x points) array.
+_MULTIPLET_BLOCK_ELEMENTS = 4_000_000
+
+
+def _line_profile(dx_ppm, fwhm, lineshape, eta, normalise):
+    """One line's profile at offsets ``dx_ppm`` from its centre.
+    normalise='peak': height 1 at the centre; 'area': unit integral
+    (per ppm). Pseudo-Voigt shares one FWHM between its parts, as
+    :func:`pseudo_voigt_broadening` does: ``eta*L + (1-eta)*G``."""
+    key = str(lineshape).lower().replace("-", "_")
+    gamma = 0.5 * fwhm
+    sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    lor = gamma * gamma / (dx_ppm * dx_ppm + gamma * gamma)
+    gau = np.exp(-0.5 * (dx_ppm / sigma) ** 2)
+    if normalise == "area":
+        lor = lor / (np.pi * gamma)
+        gau = gau / (sigma * np.sqrt(2.0 * np.pi))
+    if key == "lorentzian":
+        return lor
+    if key == "gaussian":
+        return gau
+    if key in ("pseudo_voigt", "pv"):
+        e = float(np.clip(eta, 0.0, 1.0))
+        return e * lor + (1.0 - e) * gau
+    raise ValueError(f"Unknown lineshape {lineshape!r}; use 'gaussian', 'lorentzian', "
+                     f"or 'pseudo_voigt'.")
+
+
+def multiplet_lineshape(x_ppm, stick_ppm, weights, fwhm, lineshape='lorentzian', eta=0.0,
+                        normalise='area'):
+    """
+    Exact sum of closed-form lines, one per stick: ``sum_k w_k *
+    profile(x - x_k)``, evaluated at the points ``x_ppm`` (any order, any
+    spacing -- no grid needed).
+
+    Unlike placing sticks on a grid and convolving (the ``method='grid'``
+    path of :func:`jcoupled_spectrum`), every line sits exactly at its
+    own position with exactly its own width, so a fitted shift or
+    linewidth does not depend on where the lines fall between data
+    points.
+
+    normalise : 'area' (each line integrates to its weight, per ppm) or
+        'peak' (each line's height is its weight).
+    """
+    x = np.asarray(x_ppm, dtype=float)
+    sticks = np.asarray(stick_ppm, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    out = np.zeros(x.shape, dtype=float)
+    if sticks.size == 0 or x.size == 0:
+        return out
+    if not fwhm > 0:
+        raise ValueError(f"fwhm must be > 0, got {fwhm}.")
+    block = max(1, _MULTIPLET_BLOCK_ELEMENTS // max(x.size, 1))
+    flat = x.ravel()
+    acc = np.zeros(flat.size, dtype=float)
+    for start in range(0, sticks.size, block):
+        sl = slice(start, start + block)
+        prof = _line_profile(flat[None, :] - sticks[sl, None], fwhm, lineshape, eta, normalise)
+        acc += w[sl] @ prof
+    return acc.reshape(x.shape)
+
+
 def jcoupled_spectrum(center_ppm, larmor_Hz, couplings, ppm_axis, fwhm=2.0,
-                       lineshape='lorentzian', eta=0.0, intensity_threshold=1e-8):
+                       lineshape='lorentzian', eta=0.0, intensity_threshold=1e-8,
+                       method='analytic'):
     """
     Simulate a first-order J-coupled multiplet spectrum for one
     chemical site.
@@ -1506,6 +1651,16 @@ def jcoupled_spectrum(center_ppm, larmor_Hz, couplings, ppm_axis, fwhm=2.0,
         ``lineshape='pseudo_voigt'``.
     intensity_threshold : float, optional
         See :func:`combine_jcouplings`.
+    method : {'analytic', 'grid'}, optional
+        'analytic' (default): every line is an exact closed-form profile
+        at its own position (:func:`multiplet_lineshape`), scaled so the
+        spectrum sums to ~1 over the axis points, as the grid method's
+        does. 'grid': the original method -- sticks shared between the
+        two nearest axis points, then convolved with the broadening
+        kernel. The grid method needs a uniformly spaced axis, drops
+        sticks outside it, and widens each line slightly (by up to the
+        point spacing) in a way that depends on where it falls between
+        points; fits built on it came out 2-3% narrow on typical 1H data.
 
     Returns
     -------
@@ -1524,17 +1679,26 @@ def jcoupled_spectrum(center_ppm, larmor_Hz, couplings, ppm_axis, fwhm=2.0,
     )
     stick_ppm = center_ppm + freqs_Hz / larmor_Hz * 1.0e6
 
-    spectrum = np.zeros_like(ppm_axis, dtype=float)
-    dx = ppm_axis[1] - ppm_axis[0]
-    idx = (stick_ppm - ppm_axis[0]) / dx
-    i0 = np.floor(idx).astype(int)
-    frac = idx - i0
-    valid = (i0 >= 0) & (i0 < len(ppm_axis) - 1)
-    np.add.at(spectrum, i0[valid], weights[valid] * (1.0 - frac[valid]))
-    np.add.at(spectrum, i0[valid] + 1, weights[valid] * frac[valid])
+    if method == 'analytic':
+        ppm_axis = np.asarray(ppm_axis, dtype=float)
+        spacing = abs(ppm_axis[1] - ppm_axis[0]) if ppm_axis.size > 1 else 1.0
+        spectrum = spacing * multiplet_lineshape(
+            ppm_axis, stick_ppm, weights, fwhm, lineshape=lineshape, eta=eta,
+            normalise='area')
+    elif method == 'grid':
+        spectrum = np.zeros_like(ppm_axis, dtype=float)
+        dx = ppm_axis[1] - ppm_axis[0]
+        idx = (stick_ppm - ppm_axis[0]) / dx
+        i0 = np.floor(idx).astype(int)
+        frac = idx - i0
+        valid = (i0 >= 0) & (i0 < len(ppm_axis) - 1)
+        np.add.at(spectrum, i0[valid], weights[valid] * (1.0 - frac[valid]))
+        np.add.at(spectrum, i0[valid] + 1, weights[valid] * frac[valid])
 
-    spectrum = _apply_broadening(spectrum, ppm_axis, fwhm=fwhm,
-                                  lineshape=lineshape, eta=eta)
+        spectrum = _apply_broadening(spectrum, ppm_axis, fwhm=fwhm,
+                                      lineshape=lineshape, eta=eta)
+    else:
+        raise ValueError(f"method must be 'analytic' or 'grid', got {method!r}.")
     maximum = np.max(spectrum)
     normalised = spectrum / maximum if maximum > 0 else spectrum
 
@@ -1549,7 +1713,7 @@ def jcoupled_spectrum(center_ppm, larmor_Hz, couplings, ppm_axis, fwhm=2.0,
 
 def multi_site_jcoupled_spectrum(sites, larmor_Hz, ppm_axis, fwhm=2.0,
                                   lineshape='lorentzian', eta=0.0,
-                                  intensity_threshold=1e-8):
+                                  intensity_threshold=1e-8, method='analytic'):
     """
     Sum :func:`jcoupled_spectrum` over several distinct chemical
     sites (e.g. a molecule with more than one resolved resonance,
@@ -1574,7 +1738,7 @@ def multi_site_jcoupled_spectrum(sites, larmor_Hz, ppm_axis, fwhm=2.0,
             Per-site linewidth override (ppm); falls back to the
             function's `fwhm` argument if omitted.
 
-    larmor_Hz, ppm_axis, lineshape, eta, intensity_threshold
+    larmor_Hz, ppm_axis, lineshape, eta, intensity_threshold, method
         As for :func:`jcoupled_spectrum`, shared across all sites.
 
     Returns
@@ -1595,7 +1759,7 @@ def multi_site_jcoupled_spectrum(sites, larmor_Hz, ppm_axis, fwhm=2.0,
             center_ppm=site['ppm'], larmor_Hz=larmor_Hz,
             couplings=site.get('couplings', []), ppm_axis=ppm_axis,
             fwhm=site_fwhm, lineshape=lineshape, eta=eta,
-            intensity_threshold=intensity_threshold,
+            intensity_threshold=intensity_threshold, method=method,
         )
         total_spectrum += rel_intensity * result['real_spec']
         site_results.append(result)

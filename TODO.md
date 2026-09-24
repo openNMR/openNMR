@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-24: full suite without `test_data/` after the pNMR, J-coupling and strong-coupling rounds: 2560 passed, 161 skipped, 0 failed. Re-count with `test_data/` present.*
+
 **2220 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
 - **Reading real data is solved for every hypercomplex mode.** Against TopSpin's own `2rr`: Echo-Antiecho `Cyclosporine/203` **+0.9948** and `/204` **+0.9939**; States-TPPI `2p5mm/2011` **+0.9986**, `/2016` **+0.9990**, `/2019` (the EXSY benchmark) **+0.9956**, `/2023` +0.9493, `/6` +0.9623.
@@ -72,6 +74,142 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+
+## Isotope-resolved coupling groups, strong coupling, and the isotope table's spins (2026-09-24, fourth round)
+
+User: *"add the coupling group in, please, as well as strong coupling (higher order) effects"* -- i.e. a coupling group covering every magnetic isotope of the partner element (last round's caveat), and exact higher-order spectra.
+
+### Found on the way: 24 wrong nuclear spins in the isotope tables
+
+Checking 199Hg satellites showed **199Hg with I = 3/2 (it is 1/2)**. Compared every row of both copies of the table (`notebook/utils._GAMMA_TABLE` and `core/registry._GAMMA_TABLE`) against the IAEA nuclear-moments spins as tabulated at https://www.kherb.io/docs/nmr_table.csv: **24 spins were wrong, one contiguous block 161Dy ... 209Bi** (a shifted column): e.g. 183W 5/2 (is 1/2), 187Os 3/2 (1/2), 199Hg 3/2 (1/2), 203Tl 3/2 (1/2), **205Tl 4 (1/2)**, 207Pb 3/2 (1/2), 209Bi 7/2 (9/2), 171Yb 3/2 (1/2), 177Hf 1/2 (7/2)... All corrected in both copies; every other row already matched. Anything using those nuclei's spins -- first-order multiplets/satellites (a 199Hg or 207Pb partner drew a quartet, not a doublet), `find_spin`, `quadrupolar_nuclides` -- was wrong before. `tests/test_spin_system.py::test_every_tabulated_spin_is_right` pins the whole column against the reference, with the source. **Gyromagnetic ratios were not changed**: the heavy-element values differ from the IAEA-moment-derived ones by up to ~1.5% (e.g. 207Pb 8.8816 vs 9.0038 MHz/T), which is a reference-convention difference (IUPAC frequency ratios vs bare-nucleus moments), not a transcription error -- worth a deliberate decision on which convention the table should follow.
+
+### Built
+
+- **All isotopes of a partner element** (`simulations.jcoupling_group_pattern(..., all_isotopes=True)`, `element_isotopes()`): each of the n positions independently holds one isotope at natural abundance; J is to the named isotope and the others' Js are scaled by gamma ratio; spin-0 remainder gives the centre line. n-fold convolution of the single-position pattern, so it equals the old behaviour exactly when only one isotope is magnetic (tested). E.g. 19F of BF4-: the 11B quartet (80.1%) plus the 10B 1:1:1:1:1:1:1 septet at J x 0.335 (19.9%). Carried through `jcoupling_fitting` (`all_isotopes` in the topology; one J fitted). GUI: an **All isotopes** tick per coupling group (refused together with an abundance override); the pattern line lists the isotopes. Not modelled: isotope shifts, and quadrupolar relaxation collapsing couplings to Cl/Br/14N.
+- **Strong coupling: `notebook/spin_system.py`** (exported from `opennmr.notebook`). Explicit spins (label, nuclide, shift, `n` magnetically equivalent copies) and J between them. Exact Hamiltonian -- full J I.I between like nuclei, J IzIz between unlike -- diagonalised per block of conserved total m per nuclide (10 spin-1/2: largest block 252; 12: 924; refused above `MAX_BLOCK_DIM` = 3500). Any spin I. Transitions of the observed nuclide, intensities normalised so each observed spin sums to 1.
+  - Verified three independent ways: the closed-form AB quartet (positions and roofing), the weak-coupling limit against the first-order code, and a brute-force full-Hilbert-space Kronecker-product diagonalisation written in the test (ABX with a negative J, A2B3, a spin-1 2H plus an equivalent 19F2 pair, a strongly coupled 19F pair seen from 1H) -- agreement to ~1e-14.
+  - `spin_system_spectrum` (exact analytic lines; lines within fwhm/1000 drawn as one, lines < 1e-7 of the tallest dropped -- a 12-spin system has ~10^6 transitions), `coupling_strengths` (|dnu/J| per like-nucleus pair).
+  - `fit_spin_system_spectrum`: shifts, Js (any sign), shared linewidth, height, **and the baseline offset** (see below). A shift that cannot affect the observed spectrum (a spin of another nucleus with no like-nucleus partner, e.g. the 31P of an ABX) is held and reported, instead of wandering (it went to 238 ppm unheld). Iteration budget counts the finite-difference Jacobian (`curve_fit`'s own `maxfev` does not -- a wandering start could run ~10 min); tolerances 1e-12.
+  - **`equivalent_solutions`: the ABX ambiguity.** Measured: fitting an ABX observed on AB converged to a *different* parameter set (dnu 7.5 instead of 8.0 Hz, J_AX/J_BX 12.5/-3.5 instead of 12.0/-3.0) that reproduces the 1H spectrum to 6e-6 of the peak height -- only the X (31P) intensities differ. Each X state gives an AB quartet fixing only |dnu_AB +/- dJ/2|, so exchanging dnu_AB with dJ/2 (keeping nu_A+nu_B, J_AX+J_BX, J_AB) is the other solution. The search refits from that exchange for every observed pair sharing an unobserved partner, keeps solutions within 2% RMS of the best, and merges solutions differing only by flipping the signs of all Js to one partner (unmeasurable). Sign-flip restarts were tried first and rejected: slow (minutes) and they only found that trivial symmetry.
+- **GUI** (`gui/jcoupling_panels.py`): both J-coupling panels have a **model selector** -- "First order: sites and coupling groups" / "Spin system: exact, with strong coupling". `SpinSystemEditor`: spins table + symmetric J matrix (upper triangle edited, lower mirrored), live readout of |dnu/J| per like pair (strong < 3, intermediate < 10) and largest block; right-click fix/bounds on shifts and Js when fitting. Simulate: linewidth (Hz); results say which pairs are strongly coupled ("a first-order simulation would be visibly wrong here"); notebook code; export. Fit: linewidth start, "Look for other solutions that fit equally well" (default on) -> a **Solution** selector when there are several, with the explanation; R^2 < 0.98 warning; Use fitted values as start; Open in Simulate (reproduces the fit).
+
+### Noted, not changed
+
+- The first-order fitter (`jcoupling_fitting`, as the CSA fitter) estimates the baseline once and holds it. Lorentzian tails raise that estimate inside a multiplet's window (0.3% of the height in the ABX test), and J bends slightly to compensate (8e-4 Hz there). The spin-system fitter fits the offset instead; the same change in `fit_jcoupling_spectrum` would be one line if wanted.
+- Large spin systems are slow to *draw* (exact lines at every point: ~9 s for 10 spins, ~25 s for 12 on 20k points); fitting is practical to ~8 spins.
+
+### Tests
+
+`tests/test_spin_system.py` (21, incl. the spin-table check for both tables), `tests/test_gui_jcoupling.py` now 28.
+
+
+## J-coupling in Simulate and Fit (2026-09-24, third round)
+
+User: wire Euan's J-coupling simulator (`notebook/simulations.py`) and fitter (`notebook/jcoupling_fitting.py`) into the GUI -- J-coupling at the **top of Simulate**, and **between Integration and CSA/Dipolar** in Fit.
+
+### Checked first, and what was wrong
+
+Fitted an exact analytic Lorentzian triplet on a realistic 1H axis (32768 points, 0.171 Hz/point, descending):
+
+1. **Every fitted centre was off by exactly one data point (-0.171 Hz) whenever the axis had an even number of points** -- i.e. all real (2^n) data. Cause: `simulations.lorentzian_broadening` built an even-length kernel peaked at index n//2, and `fftconvolve(mode="same")` centres at (n-1)//2. Odd-length axes were fine (+0.0005 Hz). **This also affected every Lorentzian (and pseudo-Voigt) CSA simulation/fit** on an even axis (the CSA default is 4096 points). Fixed: the kernel is always odd-length. Test: `test_broadening_keeps_a_line_where_it_is`.
+2. **Linewidths came out 2-3% narrow**, varying with where lines fell between points: sticks were shared between the two nearest grid points before convolving, which widens each line by up to a point spacing. J itself was fine (+/-0.0004 Hz).
+3. **A site's fitted amplitude meant different things on different axes**: each site's shape was divided by its maximum *on the axis it was evaluated on*. The fit used the whole axis, `print_jcoupling_fit_report` the fit region only, so a report's components/integrals could describe a different model from the one fitted.
+
+Fix for 2 and 3: `simulations.multiplet_lineshape` -- exact closed-form lines at each stick's own position, evaluated at any points (no grid). `jcoupled_spectrum`/`multi_site_jcoupled_spectrum` use it by default (`method="analytic"`; `method="grid"` keeps the old path). `jcoupling_site_lineshape` uses it and scales each site to height 1 **at its tallest line position** (axis-independent: "amplitude" = the multiplet's height there, including neighbouring lines' tails -- not always the curve's maximum when lines overlap). The fit now evaluates the model on the fitted points only (faster; valid for disjoint windows). After: centre and J within 1e-4 Hz, linewidth within 1e-4 Hz, on odd and even axes.
+
+Also found, **not changed** (other callers depend on it): `notebook/bridge.results_from_spectrum` substitutes **SFO1 = 1.0 MHz** when a spectrum has none, which would silently mis-scale any Hz<->ppm conversion downstream. The J-coupling panel reads SFO1 from the spectrum's metadata itself and refuses to fit without it. Worth making the bridge raise, or return None, and fixing its callers.
+
+### Built
+
+- **`gui/jcoupling_panels.py`**: `JCouplingSitesEditor` (sites table -- label, shift ppm, FWHM **in Hz**, plus intensity when simulating -- and, below, the selected site's coupling groups: partner, n, J Hz, abundance (blank = natural), optional bond label; a live line naming the pattern, e.g. "dq (J(P) = 140.0 Hz, J(H) = 7.0 Hz); 8 lines", with notes when a partner is low-abundance (satellites) or its element has another magnetic isotope that the model treats as non-magnetic (10B beside 11B, 37Cl, 15N/14N...)).
+  - `JCouplingSimulationPanel` (`MainWindow.jcoupling_sim_panel`): observe nucleus, field (T, with the 1H and observe frequencies shown), lineshape; auto axis (every line +/-10 FWHM) and auto points (>= 12 per narrowest line); warnings for clipped or under-sampled axes; Export to Open experiments; Copy notebook code (a test `exec`s it and compares).
+  - `JCouplingFitPanel` (`MainWindow.jcoupling_fit_panel`): lineshape; "Shift may move +/-" (default 0.05 ppm -- the module docstring's own advice to bound centres, as a default); fit window: *Around the sites* (default: each starting multiplet plus a margin), Range, Integration regions, Whole spectrum; right-click Fix / Set bounds on shift, width and each J. Results table (shift, each J, FWHM Hz, height, area %, chemist notation), R^2/RMSE/reduced chi^2, warnings (J collapsed to 0, shift stopped at its window edge, engine notes), Copy Table / Copy Full Report (the notebook's own report with notation), **Use fitted values as start**, **Open in Simulate** (converts fitted heights to the simulator's area-based intensities so the simulation reproduces the fitted curve -- tested to 1e-4).
+- `MainWindow`: `_integration_regions`, `_jcoupling_fit_target` (selected spectrum or displayed slice, as CSA), `_draw_jcoupling_fit` (one continuous range across the windows, shaded per site), `_send_jcoupling_to_simulation`.
+- Exports: `spin_multiplet_pattern`, `jcoupling_group_pattern`, `combine_jcouplings`, `multiplet_lineshape`, `jcoupled_spectrum`, `multi_site_jcoupled_spectrum`, `jcoupling_chemist_notation` from `opennmr.notebook`.
+
+### Physics caveats (stated in the GUI, not fixed)
+
+- First order only (no roofing / strong coupling), as the notebook module says.
+- A partner's *other* isotopes are treated as spin-0. Right for 13C/12C, 29Si, 195Pt, 117/119Sn; wrong for B (10B, 19.9%, I=3 has its own septet), Cl, Br, Cu, N... The editor flags it; entering 100% abundance models a pure isotope. A proper fix would let a coupling group carry several isotopes with their own J (scaled by gamma).
+
+### Tests
+
+`tests/test_jcoupling.py` (27: patterns from Pascal/spin-1 by hand, 13C satellite weights, convolution, centring regression on even/odd axes, exact lineshape, analytic-vs-grid agreement, multi-site areas, exact triplet and two-site fits, axis-independence regression, fixed J, notation) and `tests/test_gui_jcoupling.py` (20). `test_gui.py`'s section-order lists updated.
+
+
+## pNMR (CIF): load saved settings, background enumeration, 20x faster runs (2026-09-24, second round)
+
+User: *"make something that will load the saved parameters JSON into the panel, and also run large-volume enumerations in the background"* -- the two follow-ups left open by the round below.
+
+### Measured first
+
+A 4x4x1 supercell of a disordered O3 NaMO2 cell (48 Na sites, 3 shells, 263,424 configurations) took **20.6 s**, of which **13.5 s was `_broadened_spectrum`** -- a Python loop computing an 8192-point Gaussian for every row -- and ~6.6 s enumerating/tabulating, including enumerating all 48 statistically identical Na sites separately. So "run it in the background" alone would have left a 20 s wait; both costs were fixed as well.
+
+### Built
+
+- **Faster, same answers** (`notebook/pnmr_simulator.py`):
+  - `_broadened_spectrum` sums rows with identical `Total_shift` (`np.unique` + `bincount`; that case had 364 distinct shifts for 263k rows), then broadens the distinct shifts in vectorised blocks of `_BROADEN_BLOCK` (1024). Exact -- no truncated tails or binning; a test checks it against the one-Gaussian-per-row loop to 1e-12.
+  - `enumerate_local_environments` enumerates each distinct environment once (key: per shell, the multiset of neighbour occupancies) and shares the configuration list between sites with that key; `build_shift_table` reuses its rows likewise. Tested against a per-site enumeration done the long way.
+  - The same case now runs in **0.9 s** (spectrum identical to 1.2e-14 relative; table contents identical, p to 4e-16). A 6x6x2 supercell (216 sites, 1.19 M configurations) runs in ~4.8 s.
+  - Consequences: shift-table **column order is now fixed** (Site, Config, shells in order with species alphabetical, Total_shift, p) instead of whichever order the first configuration produced; and equivalent sites number their Configs in the same (canonical) order. Content is unchanged.
+- **Engine hooks**, all optional: `generate_spectrum_dict(progress=, report=, max_configurations=)`. `progress(stage, done, total)` may raise `EnumerationCancelled` to abandon a run (nothing is written); `report` receives the run's warnings instead of print/`warnings.warn` (thread-safe collection); `max_configurations` refuses with `TooManyConfigurations` (carrying the estimate) *before* enumerating. `estimate_configurations()` gives sites / distinct environments / rows / rough bytes cheaply (it counts each shell's compositions, not their product). An unknown nuclide now fails before any work rather than after the enumeration.
+- **Parameters files**: `simulation_parameters()`, `save_simulation_parameters(path, **kwargs)`, `load_simulation_parameters(path, cif_filename=None)` -> `generate_spectrum_dict` kwargs, so `nmr.generate_spectrum_dict(**nmr.load_simulation_parameters(p))` reruns a saved simulation. Files now carry `"format": "opennmr.pnmr_simulation_parameters"`, `"version": 1` and the `output_dir` used; files from the first round (no format/version) still load. A CIF that has moved is looked for by name beside the JSON and one folder up (the default output folder is `<cif folder>/pnmr_simulation`), else `FileNotFoundError` naming it.
+- **GUI** (`gui/pnmr_panel.py`):
+  - *Load settings…* / *Save settings…* in step 1, and a `.json` dropped on the drop zone loads settings. Loading fills every step and Initialises (Enumerate is one click away). What cannot be honoured is listed in one dialog and the log, never dropped silently: sites/species not in the CIF, shifts for species that are no longer contributors, shifts for undefined shells, a non-zero carrier offset or gamma override (the panel always uses 0 / the table value). A species the CIF lacks refuses the load. If the CIF is missing the user is asked to locate it. **The output folder is deliberately not restored**, so rerunning a loaded set-up cannot overwrite the run it came from (the log says so).
+  - *Enumerate sites* runs on a worker thread (`PnmrEnumerator`, the `gui/loader.py` pattern: a QObject moved to a lazily-created QThread; synchronous when `OPENNMR_BACKGROUND_LOAD=0`, as under test). A progress bar and stage label; the button becomes **Cancel**, which stops the run at the next site/block (real cancellation, via the progress callback). Every other input is locked while it runs. `MainWindow.closeEvent` calls `pnmr_panel.shutdown()` (cancel + join).
+  - A run over `PnmrSimulationPanel.MAX_CONFIGURATIONS` (5 M rows) asks first, quoting the estimate.
+  - The load log lists at most 12 site labels (a supercell CIF written by pymatgen labels every atom).
+
+### Tried and rejected
+
+- `multiprocessing` for the enumeration: rejected for the reasons in `gui/loader.py` (spawn on Windows/macOS, PyInstaller, pickling a multi-million-row table back). With the speed-ups above, the GIL-bound thread keeps the window responsive and finishes in seconds for realistic cells.
+- Truncating each Gaussian to +/-N sigma or FFT-convolving a binned stick spectrum: faster still, but not exact; the unique-shift aggregation made them unnecessary.
+
+### Still open
+
+- The shift table is still one row per (site, configuration). For very large supercells that table, not the arithmetic, is the limit (~1 GB around 5 M rows). An option to emit one row per *distinct environment* with a site count would shrink it by the number of equivalent sites, but changes the table's format that `pnmr_fit` and saved CSVs rely on -- a decision for the user.
+- `warnings.catch_warnings` in the worker (to log pymatgen's CIF-parser notes) is process-wide; a warning raised on the GUI thread during a run would land in that run's log.
+
+### Tests
+
+`tests/test_pnmr_simulator.py` now 51, `tests/test_gui_pnmr.py` 30 (settings round trip -> identical spectrum, JSON drop, moved/missing CIF, what-cannot-be-restored report, limit question both ways, a real background thread: locking, Cancel, window close mid-run).
+
+
+## Simulate > pNMR (CIF): the notebook's section 5, step by step (2026-09-24)
+
+User: add the CIF "bond pathway" pNMR simulation (`generate_spectrum_dict`) to Simulate, stepwise -- load a CIF (Browse or drag and drop), pick the species to observe from a dropdown, optionally only some of its sites (e.g. C3, C5, C7), "Initialise" once sites of interest and ignored sites are chosen so ignored sites are not offered as contributors, "Add a shell" with radial cutoffs and per-species contributions, broadening (default 1.0 ppm) and field (default 11.7 T), "Enumerate sites", save the table to a chosen `output_dir`, and a "Plot" button with the option to add the result to Open experiments.
+
+### Built
+
+- **`gui/pnmr_panel.py`** (`PnmrSimulationPanel`, `MainWindow.pnmr_panel`), the "pNMR (CIF)" section of the Simulate tile. Five steps plus a log: 1 Structure (Browse / drop zone), 2 Sites (observe, site checklist, ignore species, ignore sites, search radius, *Initialise structure*), 3 Shells (table: name, r min, r max, one column per remaining contributor; *Add shell* suggests limits from the gaps in the distance histogram), 4 Spectrum (nuclide, field, sigma, axis, points, occupancy weighting, output folder, *Enumerate sites*, table preview, *Save table as...*), 5 Plot (+ "Add to Open experiments"). Distance histogram (neighbours per site, stacked by species, occupancy-weighted, shells shaded) on the Simulation plot; the spectrum on the Fit canvas, as the CSA/quadrupolar simulations do.
+- **Results are tied to their inputs.** Changing a step-2 choice disables the shell table and Enumerate until Initialise is pressed again; changing anything after Enumerate disables Plot until it is re-run. Plot therefore always shows what the controls say.
+- **Engine additions** (`notebook/pnmr_simulator.py`, all exported from `opennmr.notebook`, all optional/backward compatible): site labels in `site_data`; `sites_of_interest=` and `ignore_sites=` on `read_cif_with_occupancies`/`get_neighbors_by_shell`/`shell_distance_histogram`/`generate_spectrum_dict`/`pnmr_fit.predict_environments`; `neighbour_distance_table`, `shell_composition`, `suggest_shell_bins`, `contributing_species`, `site_label_table`, `structure_species`, `candidate_nuclides`, `validate_shell_bins`, `site_weights`, `shift_table_from_structure` (shared by the simulation and `predict_environments`, so the two cannot drift apart). `generate_spectrum_dict` also writes `<nuclide>_simulation_parameters.json` beside the table and records the inputs in `shift_table.attrs["parameters"]`.
+- The log shows each step and the exact `generate_spectrum_dict` call; *Copy notebook code* puts it on the clipboard (a test `exec`s it and checks it reproduces the GUI's spectrum).
+
+### Correctness changes to existing behaviour (read these)
+
+1. **Sites are now weighted by occupancy** (`weight_by_occupancy=True`, default). Before, every site of interest counted equally, so a 30%-occupied Na site (P2 Na_f/Na_e) or Li on a TM site (occ 0.05) contributed as much as a full one. Identical results whenever all chosen sites have the same occupancy (e.g. a single-Wyckoff O3 Na site). `weight_by_occupancy=False` restores the old weighting; the GUI has a checkbox.
+2. **`real_spectrum` was divided by the number of sites twice** (`build_shift_table` already normalised p over the table; `_broadened_spectrum` divided again). The normalised spectrum was unaffected; the absolute scale now equals the stick probabilities (a test checks peak heights against the binomial weights).
+3. **Overlapping shells are refused** (`validate_shell_bins`): `get_neighbors_by_shell` assigns a neighbour to the first matching shell, so an overlap silently under-counted the later shell. Also refused: d_min >= d_max, duplicate/empty names, and shell names that collide with shift-table columns ("p", "Site", "Config", "Total_shift" -- "p" would have overwritten the probability).
+4. `generate_spectrum_dict` refuses broadening <= 0, B0 <= 0 and a zero-width xlims, and no longer creates `output_dir` when `save_shift_table=False`.
+5. Peaks-outside-xlims warnings are now `PnmrWarning` (a `UserWarning` subclass) so the GUI can show them apart from pymatgen's CIF-parser notes.
+6. `notebook/__init__.py`: the uncommitted J-coupling edit had dropped `csa_axis_limits` from the `.simulations` import, so `tests/test_sim_csa_axis.py` failed at collection. Restored. Also, `__all__` had `"SIMPSONread_fid" "SIMPSONplot_fid"` (missing comma -- one concatenated, non-existent name). Fixed.
+
+### Known semantics, documented rather than changed
+
+- `ignore_species` drops a neighbour **site** if *any* occupant is ignored, so ignoring Br- on a Cl/Br-shared site also removes the Cl-. The panel says so after Initialise ("Also left out, ...").
+- The model treats every neighbour position's occupancy as independent (random solid solution), including two images of the same cell site.
+- pymatgen merges a position shared by several CIF rows into one site with one of those rows' labels (e.g. `X1`/`X1b` -> `X1b`).
+
+### Tests
+
+`tests/test_pnmr_simulator.py` (32) and `tests/test_gui_pnmr.py` (18), both `importorskip("pymatgen")`. Analytic cases: a rock-salt Na(Cl0.5Br0.5) cell (binomial(6, 1/2) shifts, 6/12 neighbour counts, suggested shells), and a P1 cell with Na1 (occ 1) and Na2 (occ 0.5) for site choice and weighting. pymatgen is **not** a declared dependency (it is imported lazily; the panel explains how to install it) -- added as the `pnmr` extra and to `test`.
+
+### Not built (possible next steps)
+
+- Load settings back from a saved `*_simulation_parameters.json`.
+- Running Enumerate off the GUI thread (a large supercell with many disordered neighbours enumerates slowly; it currently runs with a wait cursor).
 
 
 ## Dark-mode fixes, a theme toggle, tiles on top, quadrupolar nucleus (2026-09-23)

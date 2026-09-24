@@ -22,7 +22,9 @@ dependencies = [
 # it. It stays here because the reader/filter/window replacements are
 # pinned by tests that compare against it byte-for-byte, which is the
 # only reason those replacements can be trusted.
-test = ["pytest", "nmrglue"]
+test = ["pytest", "nmrglue", "pymatgen"]
+# CIF-based pNMR simulation (notebook.pnmr_simulator, Simulate > pNMR (CIF)).
+pnmr = ["pymatgen"]
 build = ["pyinstaller"]
 
 [project.scripts]

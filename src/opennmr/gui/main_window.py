@@ -85,6 +85,8 @@ from .widgets.data_browser import DataBrowser
 from .widgets.wrapping_tabs import WrappingTabWidget
 from .widgets.collapsible_section import CollapsibleSection
 from .widgets.simulation_canvas import SimulationCanvas
+from .pnmr_panel import PnmrSimulationPanel
+from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
 from .loader import background_load_enabled
 
 #: Where the launcher-tile icons (Open, Processing, Advanced
@@ -2188,6 +2190,8 @@ class MainWindow(QMainWindow):
         if self._loader is not None:
             self._loader.shutdown()
             self._loader = None
+        # Same for a pNMR enumeration running in the background.
+        self.pnmr_panel.shutdown()
         super().closeEvent(event)
 
     def _open_one(self, path: str, vendor: str) -> None:
@@ -9930,6 +9934,17 @@ class MainWindow(QMainWindow):
             "Isotropic (Gauss/Lor)", content=self._build_peak_picking_subtab()))
         layout.addWidget(CollapsibleSection(
             "Integration", content=self._build_integration_subtab()))
+        # First-order multiplets (explicit user request: "between
+        # Integration and CSA/Dipolar"). Its own module; the fitter is
+        # notebook.jcoupling_fitting.
+        self.jcoupling_fit_panel = JCouplingFitPanel(
+            get_target=self._jcoupling_fit_target,
+            get_regions=self._integration_regions,
+            draw_fit=self._draw_jcoupling_fit,
+            format_value_error=self._format_value_error,
+            send_to_simulation=self._send_jcoupling_to_simulation,
+            send_spin_system=self._send_spin_system_to_simulation)
+        layout.addWidget(CollapsibleSection("J-coupling", content=self.jcoupling_fit_panel))
         layout.addWidget(CollapsibleSection(
             "CSA/Dipolar", content=self._build_csa_subtab()))
         layout.addStretch(1)
@@ -9982,6 +9997,14 @@ class MainWindow(QMainWindow):
         unvalidated."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        # First-order J-coupled multiplets, at the top (explicit user
+        # request). The simulator is notebook.simulations.
+        self.jcoupling_sim_panel = JCouplingSimulationPanel(
+            plot_spectrum=self._show_simulated_spectrum,
+            add_to_open=self._add_derived_spectrum)
+        self._jcoupling_sim_section = CollapsibleSection(
+            "J-coupling", content=self.jcoupling_sim_panel)
+        layout.addWidget(self._jcoupling_sim_section)
         layout.addWidget(CollapsibleSection(
             "CSA", content=self._build_simulate_csa_subtab()))
         layout.addWidget(CollapsibleSection(
@@ -9992,8 +10015,85 @@ class MainWindow(QMainWindow):
             "Diffusion (PFG)", content=self._build_diffusion_sim_subtab()))
         layout.addWidget(CollapsibleSection(
             "Shaped pulse (Bloch)", content=self._build_bloch_sim_subtab()))
+        # CIF -> paramagnetic shift "bond pathway" simulation: the
+        # notebook's section 5, step by step (explicit user request). Its
+        # own module; the physics is notebook.pnmr_simulator.
+        self.pnmr_panel = PnmrSimulationPanel(
+            self.simulation_canvas, self._show_simulation_view,
+            plot_spectrum=self._show_simulated_spectrum,
+            add_to_open=self._add_derived_spectrum)
+        layout.addWidget(CollapsibleSection("pNMR (CIF)", content=self.pnmr_panel))
         layout.addStretch(1)
         return tab
+
+    # ---- J-coupling (Fit and Simulate): the main-window side ----------
+
+    def _integration_regions(self) -> list[tuple[float, float]]:
+        """The Integration section's regions, (low, high) each."""
+        regions = []
+        for row in range(self.region_table.rowCount()):
+            try:
+                lo = float(self.region_table.item(row, 0).text())
+                hi = float(self.region_table.item(row, 1).text())
+            except (AttributeError, ValueError):
+                continue
+            regions.append((min(lo, hi), max(lo, hi)))
+        return regions
+
+    def _jcoupling_fit_target(self):
+        """(spectrum, row, index) the J-coupling fit should use: the
+        selected spectrum, or the displayed slice of a 2D one -- as the
+        CSA fit does."""
+        index = self._selected_index()
+        if index is None:
+            raise ValueError("Select a spectrum in Open experiments first.")
+        spectrum = self.session.spectra[index]
+        row = None
+        if spectrum.ndim == 2:
+            row = max(self.slice_spin.value() - 1, 0) if spectrum.is_pseudo_2d else 0
+        return spectrum, row, index
+
+    def _draw_jcoupling_fit(self, result: dict) -> None:
+        """Data, total fit and one shaded curve per site, on the Fit view,
+        over one continuous range spanning the fit window(s) -- separate
+        windows are not joined by a line across the gap, and the model
+        (exact anywhere) is shown between them too."""
+        x = result["x"]
+        regions = result.get("regions")
+        if regions:
+            lo = min(r[0] for r in regions)
+            hi = max(r[1] for r in regions)
+            keep = (x >= lo) & (x <= hi)
+        else:
+            keep = np.ones(x.size, dtype=bool)
+        # show_slice_fit takes the baseline as the last component.
+        components = [np.asarray(c)[keep] for c in result["components"]]
+        spectrum = result.get("spectrum")
+        self.fit_canvas.show_slice_fit(
+            x[keep], result["y"][keep], result["y_fit"][keep],
+            components=components, peak_labels=list(result["info"]["labels"]),
+            title="J-coupling fit",
+            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _send_jcoupling_to_simulation(self, nucleus, larmor_Hz, sites, lineshape, eta) -> None:
+        self.jcoupling_sim_panel.set_from_fit(nucleus, larmor_Hz, sites, lineshape, eta)
+        self._jcoupling_sim_section.setExpanded(True)
+        self._show_side_tab("Simulate")
+
+    def _send_spin_system_to_simulation(self, nucleus, larmor_Hz, spins, couplings, fwhm_Hz,
+                                        lineshape, eta) -> None:
+        self.jcoupling_sim_panel.set_spin_system_from_fit(nucleus, larmor_Hz, spins, couplings,
+                                                          fwhm_Hz, lineshape, eta)
+        self._jcoupling_sim_section.setExpanded(True)
+        self._show_side_tab("Simulate")
+
+    def _show_simulated_spectrum(self, spectrum: NMRSpectrum) -> None:
+        """Draw a simulated spectrum where the CSA and quadrupolar
+        simulations draw theirs."""
+        self.fit_canvas.show_spectrum(spectrum)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
     # ------------------------------------------------------------------
     # Simulations: Diffusion (PFG) and Shaped pulse (Bloch) sections.

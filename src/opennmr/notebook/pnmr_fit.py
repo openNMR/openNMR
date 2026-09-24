@@ -119,7 +119,7 @@ import matplotlib.pyplot as plt
 
 from .pnmr_simulator import (
     read_cif_with_occupancies, get_neighbors_by_shell,
-    enumerate_local_environments, build_shift_table,
+    enumerate_local_environments, build_shift_table, shift_table_from_structure,
 )
 from .fitting import (
     fit_spectrum, evaluate_fit, compute_integrals, compute_integral_errors,
@@ -135,7 +135,9 @@ from .one_d import NMR1dimport
 # ===========================================================================
 def predict_environments(cif_filename, atom_of_interest, shell_bins, shift_dict,
                           ignore_species=None, vacancy_tol=5,
-                          warn_missing_shifts=True, verbose=False) -> pd.DataFrame:
+                          warn_missing_shifts=True, verbose=False,
+                          sites_of_interest=None, ignore_sites=None,
+                          weight_by_occupancy=True) -> pd.DataFrame:
     """
     Enumerate every disordered local environment for `atom_of_interest`
     sites in `cif_filename`, and the total shift/probability predicted for
@@ -159,18 +161,18 @@ def predict_environments(cif_filename, atom_of_interest, shell_bins, shift_dict,
     composition.
     """
     structure, site_data = read_cif_with_occupancies(
-        cif_filename, atom_of_interest=atom_of_interest,
+        cif_filename, atom_of_interest=None,
         vacancy_tol=vacancy_tol, insert_vacancies=True, verbose=verbose,
     )
     shell_names = [name for name, _, _ in shell_bins]
-    neighbors_info = get_neighbors_by_shell(
-        structure, site_data, shell_bins, ignore_species=ignore_species,
-    )
-    local_envs = enumerate_local_environments(
-        site_data, neighbors_info, atom_of_interest, shell_names,
-    )
-    shift_table = build_shift_table(
-        local_envs, shift_dict, warn_missing=warn_missing_shifts, print_table=False,
+    # The same filtering and site weighting as generate_spectrum_dict --
+    # one shared function, so a fit and a simulation of the same inputs
+    # always describe the same environments with the same probabilities.
+    shift_table = shift_table_from_structure(
+        structure, site_data, atom_of_interest, shell_bins, shift_dict,
+        ignore_species=ignore_species, ignore_sites=ignore_sites,
+        sites_of_interest=sites_of_interest, weight_by_occupancy=weight_by_occupancy,
+        warn_missing_shifts=warn_missing_shifts,
     )
     if shift_table.empty:
         raise ValueError(

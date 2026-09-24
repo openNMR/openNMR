@@ -11245,7 +11245,8 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     fitting_tab = window.side_tabs.widget(window._fitting_tab_index)
     sections = fitting_tab.findChildren(CollapsibleSection)
     titles = [s.title() for s in sections]
-    assert titles == ["Isotropic (Gauss/Lor)", "Integration", "CSA/Dipolar"]
+    # J-coupling between Integration and CSA/Dipolar (test_gui_jcoupling.py).
+    assert titles == ["Isotropic (Gauss/Lor)", "Integration", "J-coupling", "CSA/Dipolar"]
 
     # eNMR/Imaging moved off this tab entirely, to their own
     # "Applications" button (see
@@ -15451,9 +15452,11 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
 
     simulations_tab = window.side_tabs.widget(side.index("Simulations"))
     sections = simulations_tab.findChildren(CollapsibleSection)
-    # Diffusion (PFG) and Shaped pulse (Bloch): ported from upstream.
-    assert [s.title() for s in sections] == ["CSA", "Quadrupolar", "Diffusion (PFG)",
-                                             "Shaped pulse (Bloch)"]
+    # Diffusion (PFG) and Shaped pulse (Bloch): ported from upstream;
+    # pNMR (CIF): the notebook's CIF shift simulation (test_gui_pnmr.py).
+    # J-coupling first (test_gui_jcoupling.py).
+    assert [s.title() for s in sections] == ["J-coupling", "CSA", "Quadrupolar", "Diffusion (PFG)",
+                                             "Shaped pulse (Bloch)", "pNMR (CIF)"]
 
     csa_section = _enclosing_collapsible_section(window.sim_csa_diso_spin)
     quad_section = _enclosing_collapsible_section(window.sim_quad_cq_spin)
@@ -15993,7 +15996,8 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     window = MainWindow()
     page = window.side_tabs.widget(window._simulations_tab_index)
     titles = [s.title() for s in page.findChildren(CollapsibleSection)]
-    assert titles == ["CSA", "Quadrupolar", "Diffusion (PFG)", "Shaped pulse (Bloch)"]
+    assert titles == ["J-coupling", "CSA", "Quadrupolar", "Diffusion (PFG)", "Shaped pulse (Bloch)",
+                      "pNMR (CIF)"]
 
 
 def test_simulation_plot_shows_on_run_and_hides_on_leaving_the_tile(qapp):

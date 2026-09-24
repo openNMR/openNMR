@@ -70,7 +70,15 @@ from .simulations import (
     haeberlen_csa_tensor, herzfeld_berger_csa_tensor, csa_definition, csa_axis_limits,
     csa_frequency, powder_orientations, powder_orientations_octant, 
     static_csa, make_static_csa_spectrum, finite_mas_csa_spectrum,
-    static_quadrupolar_spectrum_exact
+    static_quadrupolar_spectrum_exact,
+    spin_multiplet_pattern, jcoupling_group_pattern, combine_jcouplings,
+    multiplet_lineshape, jcoupled_spectrum, multi_site_jcoupled_spectrum, element_isotopes,
+)
+
+from .spin_system import (
+    expand_spin_system, block_sizes, spin_system_transitions, spin_system_spectrum,
+    coupling_strengths, fit_spin_system_spectrum, evaluate_spin_system_fit, fitted_system,
+    equivalent_solutions,
 )
 
 from .csa_fitting import (
@@ -88,6 +96,11 @@ from .pnmr_simulator import (
     local_environment_distribution, combine_labeled_shells, enumerate_local_environments,
     build_shift_table, _broadened_spectrum, generate_spectrum_dict,
     shell_distance_histogram,
+    mark_sites_of_interest, species_element, candidate_nuclides, structure_species,
+    site_label_table, contributing_species, neighbour_distance_table, shell_composition,
+    validate_shell_bins, site_weights, shift_table_from_structure, suggest_shell_bins,
+    estimate_configurations, simulation_parameters, save_simulation_parameters,
+    load_simulation_parameters, EnumerationCancelled, TooManyConfigurations, PnmrWarning,
 )
 
 from .pnmr_fit import (
@@ -103,6 +116,12 @@ from .simpson import (
     SIMPSONimport, CSDMimport, SIMPSONread_shape, SIMPSONapodization_window, SIMPSONread_fid,
     SIMPSONplot_fid, SIMPSONread_single_point_fid, SIMPSONread_fid_series, SIMPSONplot_1d_stack, SIMPSONplot_shape,
     SIMPSONplot_fid_series,
+)
+
+from .jcoupling_fitting import (
+    jcoupling_site_lineshape, build_jcoupling_model, initialise_jcoupling_params, build_jcoupling_bounds,
+    fit_jcoupling_spectrum, evaluate_jcoupling_fit, print_jcoupling_fit_report, NMR1dplot_with_jcoupling_fit,
+    NMRJCouplingFitWorkflow, jcoupling_chemist_notation,
 )
 
 # NOTE: compute_BF1_SFO1, plot_spectrum_dict and plot_comparison used to be
@@ -160,6 +179,12 @@ __all__ = [
     "csa_frequency", "powder_orientations", "powder_orientations_octant", 
     "static_csa", "make_static_csa_spectrum", "finite_mas_csa_spectrum",
     "static_quadrupolar_spectrum_exact",
+    "spin_multiplet_pattern", "jcoupling_group_pattern", "combine_jcouplings",
+    "multiplet_lineshape", "jcoupled_spectrum", "multi_site_jcoupled_spectrum", "element_isotopes",
+    # spin_system (strong coupling)
+    "expand_spin_system", "block_sizes", "spin_system_transitions", "spin_system_spectrum",
+    "coupling_strengths", "fit_spin_system_spectrum", "evaluate_spin_system_fit",
+    "fitted_system", "equivalent_solutions",
     # csa_fitting
     "csa_model_full", "build_csa_model", "fit_csa_spectrum", "evaluate_csa_fit",
     "print_csa_fit_report", "NMR1dplot_with_csa_fit", "NMRCSAFitWorkflow",
@@ -171,6 +196,11 @@ __all__ = [
     "local_environment_distribution", "combine_labeled_shells", "enumerate_local_environments",
     "build_shift_table", "_broadened_spectrum", "generate_spectrum_dict",
     "shell_distance_histogram",
+    "mark_sites_of_interest", "species_element", "candidate_nuclides", "structure_species",
+    "site_label_table", "contributing_species", "neighbour_distance_table", "shell_composition",
+    "validate_shell_bins", "site_weights", "shift_table_from_structure", "suggest_shell_bins",
+    "estimate_configurations", "simulation_parameters", "save_simulation_parameters",
+    "load_simulation_parameters", "EnumerationCancelled", "TooManyConfigurations", "PnmrWarning",
     # bms
     "generate_bms_spectrum_dict", "make_particle",
     # pnmr_fit
@@ -182,7 +212,11 @@ __all__ = [
     "merge_groups_to_picks", "print_shift_drift_report", 
     "refit_merged_groups", "fit_cif_envelope",
     # simpson
-    "SIMPSONimport", "CSDMimport", "SIMPSONread_shape", "SIMPSONapodization_window", "SIMPSONread_fid"
+    "SIMPSONimport", "CSDMimport", "SIMPSONread_shape", "SIMPSONapodization_window", "SIMPSONread_fid",
     "SIMPSONplot_fid", "SIMPSONread_single_point_fid", "SIMPSONread_fid_series", "SIMPSONplot_1d_stack", "SIMPSONplot_shape",
     "SIMPSONplot_fid_series",
+    # jcoupling_fitting
+    "jcoupling_site_lineshape", "build_jcoupling_model", "initialise_jcoupling_params", "build_jcoupling_bounds",
+    "fit_jcoupling_spectrum", "evaluate_jcoupling_fit", "print_jcoupling_fit_report", "NMR1dplot_with_jcoupling_fit",
+    "NMRJCouplingFitWorkflow", "jcoupling_chemist_notation",
 ]
