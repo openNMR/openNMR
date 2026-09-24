@@ -335,6 +335,9 @@ class PnmrSimulationPanel(QWidget):
             self._log(f"Could not read {path}: {exc}")
             return False
 
+        # Native separators: Qt gives a dropped file as C:/Users/..., the
+        # file dialog and everything else as C:\\Users\\... on Windows.
+        path = os.path.normpath(path)
         self.cif_path = path
         self._structure, self._site_data = structure, site_data
         self.cif_path_edit.setText(path)
