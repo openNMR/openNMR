@@ -169,6 +169,72 @@ class _ExperimentDropList(QListWidget):
         return _rows_from_list_drag(mime, cls._MIME)
 
 
+class _ExperimentSourceList(QListWidget):
+    """The Open experiments list: a drag source that does not select.
+
+    A plain ``QListWidget`` selects a row on mouse *press*, and selecting
+    a row shows it on the Spectrum canvas -- so starting to drag a 1D
+    onto a 2D's projection replaced the 2D with the 1D before the drag
+    had even left the list, leaving nothing to drop onto. Real user
+    report: "all that happens is that the 1-d spectrum I want to put on
+    the projection appears in the Spectrum window".
+
+    So a plain left press on a row is held back: moving past the drag
+    distance starts a drag of that row (or of the whole selection, if
+    the row is already part of it) with the selection and the plot
+    untouched; releasing without moving replays the press, and it is an
+    ordinary click. Presses with a modifier (Ctrl/Shift extending a
+    selection), other buttons and the keyboard go straight to Qt as
+    before. The drag also serves the Compare list, which it no longer
+    disturbs either."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._pending_press = None  # (press event copy, row) while undecided
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        self._pending_press = None
+        if (event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            index = self.indexAt(event.position().toPoint())
+            if index.isValid():
+                self._pending_press = (event.clone(), index.row())
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        if self._pending_press is not None:
+            press, row = self._pending_press
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._pending_press = None
+            elif ((event.position() - press.position()).manhattanLength()
+                  >= QApplication.startDragDistance()):
+                self._pending_press = None
+                selected = sorted({i.row() for i in self.selectedIndexes()})
+                rows = selected if row in selected else [row]
+                self._start_drag(self.model().mimeData([self.model().index(r, 0) for r in rows]))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        if self._pending_press is not None:
+            press, _row = self._pending_press
+            self._pending_press = None
+            super().mousePressEvent(press)  # it was a click after all
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self, mime) -> None:
+        """Run the drag. A seam of its own because a real ``QDrag``
+        blocks in its own event loop, which a headless test cannot
+        finish."""
+        from PySide6.QtGui import QDrag
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
+
+
 def _launcher_icon(name: str) -> QIcon:
     """``QIcon`` for a side-panel launcher tile, or a null (empty)
     icon if the file is missing -- a missing icon file should never
@@ -1666,7 +1732,7 @@ class MainWindow(QMainWindow):
         # File -> Open… (Cmd+O) and File -> Open File(s)… (Cmd+Shift+O),
         # so nothing was lost with the button -- see _build_menu_bar.
 
-        self.spectrum_list = QListWidget()
+        self.spectrum_list = _ExperimentSourceList()
         self.spectrum_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # A drag source for the Compare list (explicit user request) --
         # copy only: dragging out never removes anything from here.

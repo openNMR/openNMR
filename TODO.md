@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-21)
 
-*2026-09-25: full suite without `test_data/` or pymatgen, after the projection-style/axis-label round: 2585 passed, 163 skipped, 0 failed.*
+*2026-09-25: full suite without `test_data/` or pymatgen, after the drag-from-Open-experiments fix: 2588 passed, 163 skipped, 0 failed.*
 
 *2026-09-24: full suite without `test_data/` after the pNMR, J-coupling, strong-coupling, title/notes, VOCS-slice, CPMG and Compare-2D rounds: 2615 passed, 161 skipped, 0 failed (after the ninth round). Re-count with `test_data/` present.*
 
@@ -77,6 +77,22 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Fix: dragging a 1D onto a 2D's projection did nothing (2026-09-25, third round)
+
+User: *"The drag and drop external projection does not seem to work... I cannot drag the 1-d into the projection on F1 or F2; all that happens is that the 1-d spectrum I want to put on the projection appears in the Spectrum window."*
+
+### What was wrong
+`spectrum_list` was a plain `QListWidget`, which selects a row on mouse **press**, and selecting a row shows it on the Spectrum canvas. Pressing on the 1D to start dragging it therefore swapped the 2D out for the 1D *before* the drag left the list. By the time it reached the plot there was no contour, and the canvas's drop filter (correctly) refused it. The first round's tests fed the drop straight to the canvas and never started a drag from the list, so they could not see this.
+
+### Fixed
+`MainWindow._ExperimentSourceList` replaces it.
+- A plain left press on a row is held back. Moving past `startDragDistance` starts a drag of that row (or of the whole selection, if the row is part of it), with selection and plot untouched. Releasing without moving replays the press as an ordinary click.
+- Ctrl/Shift presses, other buttons and the keyboard go straight to Qt.
+- The drag itself is `_start_drag(mime)`, a seam, because a real `QDrag` runs its own event loop, which a headless test cannot finish.
+- Dragging into Compare no longer changes the plot either.
+
+Regression test `test_dragging_a_1d_out_of_open_experiments_leaves_the_2d_on_screen` drives real mouse events on the list's viewport, then drops the payload the list produced. It fails on the old `QListWidget` with exactly the reported symptom (the canvas showing the 1D after the press). There are also tests that a plain click still selects and shows, and that Ctrl-click still extends the selection at once.
 
 ## Projection style by right-clicking the strip; separate F2/F1 axis labels (2026-09-25, second round)
 

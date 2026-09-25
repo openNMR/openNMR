@@ -319,3 +319,80 @@ def test_external_projection_follows_a_unit_change_through_the_2ds_own_axis(qapp
     assert line.get_gid() == "external_projection_f2"
     peak_x = line.get_xdata()[np.argmax(line.get_ydata())]
     assert peak_x == pytest.approx(5.0 * 400, abs=15)  # 5 ppm on the 2D's 400 MHz axis
+
+
+# --- the drag has to start from the list without changing the plot --------
+def _mouse(kind, pos, buttons=Qt.MouseButton.LeftButton, button=Qt.MouseButton.LeftButton,
+           modifiers=Qt.KeyboardModifier.NoModifier):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent
+    types = {"press": QEvent.Type.MouseButtonPress, "move": QEvent.Type.MouseMove,
+             "release": QEvent.Type.MouseButtonRelease}
+    return QMouseEvent(types[kind], QPointF(pos), QPointF(pos), button, buttons, modifiers)
+
+
+def test_dragging_a_1d_out_of_open_experiments_leaves_the_2d_on_screen(qapp, monkeypatch):
+    """The user-reported bug: pressing on the 1D to drag it selected it,
+    which put the 1D on the Spectrum canvas -- so the drop found no
+    contour. Driven through real mouse events on the list itself."""
+    window = _window_with(qapp, [(_hsqc(), "HSQC"), (_one_d("1H"), "1H")])
+    window._select_single_row(0)
+    qapp.processEvents()
+    hsqc, proton = window.session.spectra
+    canvas, source = window.canvas, window.spectrum_list
+    assert canvas._contour_spectrum is hsqc
+    dragged = []
+    monkeypatch.setattr(source, "_start_drag", dragged.append)
+
+    viewport = source.viewport()
+    start = source.visualItemRect(source.item(1)).center()
+    QApplication.sendEvent(viewport, _mouse("press", start))
+    assert canvas._contour_spectrum is hsqc  # nothing selected on press
+    far = start + type(start)(QApplication.startDragDistance() + 5, 0)
+    QApplication.sendEvent(viewport, _mouse("move", far))
+    QApplication.sendEvent(viewport, _mouse("release", far, buttons=Qt.MouseButton.NoButton))
+    qapp.processEvents()
+
+    assert len(dragged) == 1
+    assert canvas._contour_spectrum is hsqc and source.currentRow() == 0
+    from opennmr.gui.widgets.canvas import _rows_from_list_drag
+    assert _rows_from_list_drag(dragged[0], canvas._LIST_DRAG_MIME) == [1]
+
+    # ...and that payload, dropped on the top strip, lands.
+    bbox = canvas._proj_axes["f2"].get_window_extent()
+    dpr = canvas.canvas.device_pixel_ratio
+    pos = QPointF((bbox.x0 + bbox.x1) / 2 / dpr, canvas.canvas.height() - (bbox.y0 + bbox.y1) / 2 / dpr)
+    for kind in ("enter", "drop"):
+        from PySide6.QtGui import QDragEnterEvent
+        event = (QDragEnterEvent(pos.toPoint(), Qt.DropAction.CopyAction, dragged[0],
+                                 Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+                 if kind == "enter" else
+                 QDropEvent(pos, Qt.DropAction.CopyAction, dragged[0],
+                            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        assert canvas.eventFilter(canvas.canvas, event) is True and event.isAccepted()
+    qapp.processEvents()
+    assert canvas.external_projection("f2")["spectrum"] is proton
+
+
+def test_a_plain_click_in_open_experiments_still_selects_and_shows(qapp):
+    window = _window_with(qapp, [(_hsqc(), "HSQC"), (_one_d("1H"), "1H")])
+    window._select_single_row(0)
+    qapp.processEvents()
+    source = window.spectrum_list
+    at = source.visualItemRect(source.item(1)).center()
+    QApplication.sendEvent(source.viewport(), _mouse("press", at))
+    QApplication.sendEvent(source.viewport(), _mouse("release", at, buttons=Qt.MouseButton.NoButton))
+    qapp.processEvents()
+    assert source.currentRow() == 1
+    assert window.canvas._contour_spectrum is None  # the 1D is shown now
+
+
+def test_ctrl_click_still_extends_the_selection_straight_away(qapp):
+    window = _window_with(qapp, [(_one_d("1H"), "A"), (_one_d("1H", peak=4), "B")])
+    window._select_single_row(0)
+    qapp.processEvents()
+    source = window.spectrum_list
+    at = source.visualItemRect(source.item(1)).center()
+    QApplication.sendEvent(source.viewport(), _mouse(
+        "press", at, modifiers=Qt.KeyboardModifier.ControlModifier))
+    assert source.item(1).isSelected() and source.item(0).isSelected()
