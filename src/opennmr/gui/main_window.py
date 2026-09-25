@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QColorDialog
 from .widgets.notes_editor import ExperimentNotesEditor
 from .cpmg_panel import CpmgProcessingPanel
+from .compare_2d import Compare2DControls
 from ..notebook import notes as nb_notes
 from PySide6.QtGui import QColor
 
@@ -58,6 +59,7 @@ from ..notebook import csa_fitting as notebook_csa
 from ..notebook import simulations as notebook_simulations
 from ..notebook import diffusion as notebook_diffusion
 from ..notebook import fitting as notebook_fitting
+from ..notebook import two_d as notebook_two_d
 from ..notebook.fitting import expand_pcov
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
@@ -160,22 +162,11 @@ class _ExperimentDropList(QListWidget):
 
     @classmethod
     def rows_from_mime(cls, mime) -> list[int]:
-        """Source rows in a QListWidget drag payload, in order, once each."""
-        from PySide6.QtCore import QDataStream, QIODevice
-        # Held in a name, not passed inline: QDataStream keeps a pointer
-        # into the QByteArray, and a temporary is freed by Python while
-        # the stream still reads from it (a segfault, not an exception).
-        payload = mime.data(cls._MIME)
-        stream = QDataStream(payload, QIODevice.OpenModeFlag.ReadOnly)
-        rows: list[int] = []
-        while not stream.atEnd():
-            row, _column, n_roles = stream.readInt32(), stream.readInt32(), stream.readInt32()
-            for _ in range(n_roles):
-                stream.readInt32()
-                stream.readQVariant()
-            if row not in rows:
-                rows.append(row)
-        return rows
+        """Source rows in a QListWidget drag payload, in order, once each
+        (shared with the plot's own drop target, which decodes the same
+        payload when a 1D is dropped on a 2D's projection)."""
+        from .widgets.canvas import _rows_from_list_drag
+        return _rows_from_list_drag(mime, cls._MIME)
 
 
 def _launcher_icon(name: str) -> QIcon:
@@ -552,6 +543,7 @@ class MainWindow(QMainWindow):
         self.canvas.referenceCalibrationRequested.connect(self._on_reference_calibration_from_plot)
         self.canvas.sliceKeepRequested.connect(self._on_slice_keep_requested)
         self.canvas.measurementCompleted.connect(self._on_measurement_completed)
+        self.canvas.externalProjectionDropped.connect(self._on_external_projection_dropped)
         self.fid_canvas = MplCanvas()
         self.fid_canvas.measurementCompleted.connect(self._on_measurement_completed)
         self.compare_canvas = MplCanvas()
@@ -1482,6 +1474,7 @@ class MainWindow(QMainWindow):
                 spectrum, label=self.session.label(rows[0]),
                 subject="The spectrum" if spectrum.ndim == 1 else "Spectra",
             )
+            text += self._external_projection_report(spectrum)
         else:
             text = processing_report.compare_processing(
                 [self.session.spectra[row] for row in rows],
@@ -1682,7 +1675,9 @@ class MainWindow(QMainWindow):
         self.spectrum_list.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.spectrum_list.setToolTip(
             "Ctrl/Cmd-click (or Shift-click) to select several spectra "
-            "and compare them on the Compare tile."
+            "and compare them on the Compare tile.\n"
+            "Drag a 1D onto a 2D contour's top or left projection to use it "
+            "as that projection."
         )
         self.spectrum_list.currentRowChanged.connect(self._on_selection_changed)
         self.spectrum_list.itemSelectionChanged.connect(self._on_list_selection_changed)
@@ -1916,6 +1911,15 @@ class MainWindow(QMainWindow):
         compare_form.addRow("Normalize:", self.compare_normalize_combo)
 
         layout.addLayout(compare_form)
+
+        # 2D spectra: overlay or side by side, and insets (explicit user
+        # request, bringing in the notebook's NMR2D_overlay_plot /
+        # NMR2D_multi_plot / inset=). Shown only when a 2D is checked.
+        self.compare_2d_controls = Compare2DControls()
+        self.compare_2d_controls.changed.connect(self._on_compare_controls_changed)
+        self.compare_2d_controls.add_inset_requested.connect(self._on_add_compare_inset)
+        self.compare_2d_controls.setVisible(False)
+        layout.addWidget(self.compare_2d_controls)
 
         compare_action_row = QHBoxLayout()
         compare_plot_button = QPushButton("Plot")
@@ -2930,6 +2934,7 @@ class MainWindow(QMainWindow):
     def _on_clear_clicked(self) -> None:
         self.session.clear()
         self.spectrum_list.clear()
+        self.canvas.prune_external_projections([])
         for canvas in (
             self.canvas, self.fid_canvas, self.processing_preview_canvas,
             self.compare_canvas, self.fit_canvas, self.spectral_fit_canvas,
@@ -4994,6 +4999,124 @@ class MainWindow(QMainWindow):
         self.compare_list.blockSignals(False)
         self._update_compare_tab_visibility()
 
+    # -- external projections (a 1D dropped onto a 2D contour) ---------
+
+    _PROJECTION_NAMES = {"f2": "F2 (top)", "f1": "F1 (left)"}
+
+    def _on_external_projection_dropped(self, rows: list[int], target: str) -> None:
+        """A row of Open experiments was dropped on the 2D contour
+        (explicit user request: "drag and drop an open 1-d spectrum as
+        an external projection").
+
+        ``target`` is the strip it was released over (``"f2"``/``"f1"``),
+        or ``"auto"`` for the contour body, in which case the dimension
+        is taken from the nuclei and only asked when they leave it open.
+        Every dimension is checked by
+        :func:`opennmr.notebook.check_external_projection` -- the same
+        check a notebook's ``NMR2Dplotter`` runs -- and a nucleus that
+        does not match, or cannot be confirmed, is asked about before
+        anything is drawn (default: No)."""
+        contour = self.canvas._contour_spectrum
+        if contour is None or contour.ndim != 2:
+            return
+        rows = [r for r in rows if 0 <= r < len(self.session)]
+        one_d = [r for r in rows if self.session.spectra[r].ndim == 1]
+        if not one_d:
+            if rows:
+                QMessageBox.warning(
+                    self, "External projection",
+                    f"{self.session.label(rows[0])} is not a 1D spectrum. Only a 1D "
+                    "spectrum can be used as a projection.")
+            return
+        row = one_d[0]
+        spectrum, label = self.session.spectra[row], self.session.label(row)
+        extra = (f" (only the first 1D of the {len(rows)} dragged is used)"
+                 if len(rows) > 1 else "")
+
+        dims = self._choose_projection_dimensions(contour, spectrum, label, target)
+        applied = []
+        for dim in dims:
+            if self._confirm_external_projection(contour, spectrum, label, dim):
+                self.canvas.set_external_projection(dim, spectrum, label)
+                applied.append(dim)
+        if applied:
+            notes = []
+            for dim in applied:
+                notes += notebook_two_d.check_external_projection(contour, spectrum, dim)["notes"]
+            names = " and ".join(self._PROJECTION_NAMES[d] for d in applied)
+            self.statusBar().showMessage(
+                f"{label} is now the {names} projection{extra}. "
+                + (" ".join(notes) + " " if notes else "")
+                + "Right-click the plot to go back to the computed projection.", 15000)
+
+    def _choose_projection_dimensions(self, contour, spectrum, label: str, target: str) -> list[str]:
+        """Which strip(s) a drop means. A strip it was released over
+        wins; on the contour body the nuclei decide when exactly one
+        dimension matches, and the user is asked otherwise (a
+        homonuclear 2D -- where "both" is a real answer -- or no
+        recorded nucleus)."""
+        if target in ("f1", "f2"):
+            return [target]
+        if contour.is_pseudo_2d:
+            return ["f2"]
+        matching = [d for d in ("f2", "f1")
+                    if notebook_two_d.check_external_projection(contour, spectrum, d)["nucleus_match"]]
+        if len(matching) == 1:
+            return matching
+        choices = ["F2 (top)", "F1 (left)", "Both"]
+        choice, ok = QInputDialog.getItem(
+            self, "External projection",
+            f"Use {label} as which projection?\n(Drop it straight onto the top "
+            "or left strip to skip this question.)",
+            choices, 0, False)
+        if not ok:
+            return []
+        return {"F2 (top)": ["f2"], "F1 (left)": ["f1"], "Both": ["f2", "f1"]}[choice]
+
+    def _confirm_external_projection(self, contour, spectrum, label: str, dim: str) -> bool:
+        """``True`` when ``spectrum`` may be drawn as ``dim``'s
+        projection: it passes the check, or the user says to use it
+        anyway. A drop that cannot be drawn at all (a pseudo-2D's F1, no
+        overlap) is refused with a warning."""
+        report = notebook_two_d.check_external_projection(contour, spectrum, dim)
+        name = self._PROJECTION_NAMES[dim]
+        if not report["allowed"]:
+            QMessageBox.warning(
+                self, "External projection",
+                f"{label} cannot be the {name} projection.\n\n" + "\n\n".join(report["problems"]))
+            return False
+        if not report["problems"]:
+            return True
+        advice = ""
+        other = "f1" if dim == "f2" else "f2"
+        if report["nucleus_match"] is False and not contour.is_pseudo_2d:
+            other_report = notebook_two_d.check_external_projection(contour, spectrum, other)
+            if other_report["nucleus_match"]:
+                advice = (f"\n\nIt does match the {self._PROJECTION_NAMES[other]} axis -- "
+                          f"drop it on that strip instead.")
+        reply = QMessageBox.question(
+            self, "External projection -- check the nucleus",
+            "\n\n".join(report["problems"]) + advice
+            + f"\n\nUse {label} as the {name} projection anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.statusBar().showMessage(f"{name} projection left unchanged.", 5000)
+            return False
+        return True
+
+    def _external_projection_report(self, spectrum) -> str:
+        """A line for the processing report when the plot of
+        ``spectrum`` shows a projection that is *not* computed from it
+        -- a figure made that way should say so."""
+        lines = []
+        for dim, held in self.canvas.external_projections_for(spectrum).items():
+            lines.append(
+                f"The {self._PROJECTION_NAMES[dim]} projection shown is not computed from "
+                f"this 2D: it is the separately acquired 1D spectrum {held['label']}.")
+        return ("\n\n" + " ".join(lines)) if lines else ""
+
     def _on_experiments_dropped_on_compare(self, rows: list[int], at: int = -1) -> None:
         """Add experiments dragged from the Open experiments list to the
         Compare list, at the row they were dropped on (``-1``: the end).
@@ -5040,6 +5163,10 @@ class MainWindow(QMainWindow):
             (r - 1 if r > removed else r, k)
             for r, k in self._compare_pinned_entries if r != removed
         ]
+        # A projection made from the removed 1D (or belonging to the
+        # removed 2D) goes with it rather than lingering on the plot
+        # with nothing in the list to say where it came from.
+        self.canvas.prune_external_projections(self.session.spectra)
         rows = self._selected_rows()
         if len(rows) > 1 or self._compare_pinned_entries:
             self.compare_list.clear()  # stale indices: never "preserve" them
@@ -5230,8 +5357,12 @@ class MainWindow(QMainWindow):
         # the existing 1D-only logic below unchanged (which already
         # skips non-1D entries and reports them as such).
         two_d_rows_and_candidates = [(row, c) for row, c in rows_and_candidates if c.ndim == 2]
-        if len(rows_and_candidates) == len(two_d_rows_and_candidates) and 2 <= len(two_d_rows_and_candidates) <= 3:
-            self._refresh_compare_2d_overlay(two_d_rows_and_candidates, switch_tab=switch_tab, force_render=force_render)
+        self.compare_2d_controls.setVisible(bool(two_d_rows_and_candidates))
+        # Every checked entry a 2D (one or more): overlay or side-by-side
+        # panels, with insets -- see _refresh_compare_2d. A single 2D is
+        # drawn too, so an inset can be put on one spectrum.
+        if rows_and_candidates and len(rows_and_candidates) == len(two_d_rows_and_candidates):
+            self._refresh_compare_2d(two_d_rows_and_candidates, switch_tab=switch_tab, force_render=force_render)
             return
 
         rows_and_1d = [(row, c) for row, c in rows_and_candidates if c.ndim == 1]
@@ -5350,34 +5481,136 @@ class MainWindow(QMainWindow):
         if switch_tab:
             self.canvas_tabs.setCurrentWidget(self.compare_canvas)
 
-    def _refresh_compare_2d_overlay(self, rows_and_candidates: list[tuple[int, object]],
-                                     switch_tab: bool, force_render: bool) -> None:
-        """:meth:`_refresh_compare_view`'s own 2-3-genuine-2D-spectra
-        branch -- see its own comment for why this is a separate
-        method rather than folded into the 1D logic. Mirrors that
-        method's own "defer the draw until Compare is actually
-        visited" staleness guard, but has no mass-normalization/
-        per-row-highlight concept to carry over (an overlay's own
-        legend, from each spectrum's ``Session.label``, already
-        identifies which contour is which)."""
+    def _refresh_compare_2d(self, rows_and_candidates: list[tuple[int, object]],
+                            switch_tab: bool, force_render: bool) -> None:
+        """:meth:`_refresh_compare_view`'s all-2D branch: an overlay
+        (2-6 compatible spectra) or side-by-side panels, per the 2D
+        controls, with their insets. An overlay that is not possible
+        (one spectrum, too many, or mismatched nuclei/experiment type)
+        is drawn side by side, and the status line says why -- the
+        spectra are still shown rather than nothing. Keeps the 1D
+        path's "draw when Compare is actually visited" guard."""
         if not force_render and not switch_tab and self.canvas_tabs.currentWidget() is not self.compare_canvas:
             self._compare_view_stale = True
             return
         self._compare_view_stale = False
         self._compare_plot_row_positions = {}
 
+        controls = self.compare_2d_controls
         labels = [self.session.label(row) for row, _c in rows_and_candidates]
         spectra = [c for _row, c in rows_and_candidates]
+        n = len(spectra)
+        controls.set_panel_count(n)
+        layout = controls.layout_key()
+        note = ""
+        if layout == "overlay":
+            try:
+                if not 2 <= n <= plotting.twod.MAX_OVERLAY_SPECTRA:
+                    raise ValueError(
+                        f"an overlay takes 2 to {plotting.twod.MAX_OVERLAY_SPECTRA} spectra "
+                        f"({n} checked).")
+                plotting.twod._check_overlay_compatible(spectra)
+            except ValueError as exc:
+                note = f" Can't overlay: {exc} Showing them side by side."
+                layout = "row" if n <= 3 else "grid"
+        options = controls.plot_options()
         try:
-            self.compare_canvas.show_2d_overlay(spectra, labels=labels)
-            self.compare_status_label.setText(f"Overlaying {len(spectra)} 2D spectra.")
+            try:
+                self._draw_compare_2d(spectra, labels, layout, with_insets=True, **options)
+            except ValueError as exc:
+                # A bad inset (a range with no data in it) must not
+                # take the whole plot with it.
+                self._draw_compare_2d(spectra, labels, layout, with_insets=False, **options)
+                note += f" Insets not drawn: {exc}"
+            what = (f"Overlaying {n} 2D spectra." if layout == "overlay"
+                    else f"Showing {n} 2D spectr{'um' if n == 1 else 'a'} side by side.")
+            self.compare_status_label.setText(what + note)
             if switch_tab:
                 self.canvas_tabs.setCurrentWidget(self.compare_canvas)
         except ValueError as exc:
             self.compare_status_label.setText(str(exc))
             self.compare_canvas.clear()
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-            QMessageBox.critical(self, "Failed to overlay spectra", str(exc))
+            QMessageBox.critical(self, "Failed to plot the 2D spectra", str(exc))
+
+    def _draw_compare_2d(self, spectra, labels, layout: str, with_insets: bool,
+                         factor: float, clevels: int) -> None:
+        controls = self.compare_2d_controls
+        if layout == "overlay":
+            self.compare_canvas.show_2d_overlay(
+                spectra, labels=labels, insets=controls.inset_specs() if with_insets else None,
+                factor=factor, clevels=clevels)
+        else:
+            insets = ([controls.inset_specs(panel=i) for i in range(len(spectra))]
+                      if with_insets else None)
+            self.compare_canvas.show_2d_panels(
+                spectra, labels=labels, layout=layout,
+                projections=controls.projections_check.isChecked(),
+                link_axes=controls.link_check.isChecked(), insets=insets,
+                factor=factor, clevels=clevels)
+
+    def _on_add_compare_inset(self) -> None:
+        """Turn the zoomed region of the Compare 2D plot into an inset
+        (the redraw then shows the full view again, with the inset)."""
+        region = self.compare_canvas.zoomed_2d_region()
+        if region is None:
+            self.compare_status_label.setText(
+                "Zoom into a region of the 2D plot first (the magnifier on the plot "
+                "toolbar), then Add inset.")
+            return
+        panel, xlims, ylims = region
+        controls = self.compare_2d_controls
+        canvas = self.compare_canvas
+        overlay = len(canvas._panel_axes) == 1
+        # The corner farthest from the region, so the inset never hides
+        # the box marking what it shows; an overlay's legend sits
+        # upper right, so that corner is only a last resort there.
+        (hx0, hx1), (hy0, hy1) = canvas._panel_home_limits[panel]
+        fx = (sum(xlims) / 2 - hx0) / (hx1 - hx0)
+        fy = (sum(ylims) / 2 - hy0) / (hy1 - hy0)
+        centres = {"upper right": (0.8, 0.8), "upper left": (0.2, 0.8),
+                   "lower left": (0.2, 0.2), "lower right": (0.8, 0.2)}
+        used = {inset["corner"] for inset in controls.insets()}
+
+        def _score(name):
+            cx, cy = centres[name]
+            penalty = (name in used) + (overlay and name == "upper right" and canvas.ax.get_legend() is not None)
+            return (penalty, -((cx - fx) ** 2 + (cy - fy) ** 2))
+
+        corner = min(centres, key=_score)
+        if overlay or controls.link_check.isChecked():
+            panel = None
+        inset = controls.add_inset(panel, xlims, ylims, corner=corner,
+                                   factor=self._inset_floor_for(xlims, ylims, panel))
+        if inset["factor"]:
+            self.compare_status_label.setText(
+                self.compare_status_label.text() + f" The inset's lowest contour was set to "
+                f"{inset['factor'] * 100:.2g} % so the peaks in it show; edit it under Insets.")
+
+    def _inset_floor_for(self, xlims, ylims, panel) -> float | None:
+        """A lowest contour (fraction of each whole spectrum's maximum)
+        low enough that the strongest signal in the inset region is
+        drawn -- ``None`` when the plot's own already shows it. An inset
+        is usually made to look at something weak, and an empty inset
+        at the plot's own levels would read as "nothing there"."""
+        factor = self.compare_2d_controls.plot_options()["factor"]
+        spectra = [self._resolve_compare_entry(e) for _r, e in self._compare_checked_rows_and_entries()]
+        spectra = [s for s in spectra if s is not None and s.ndim == 2]
+        if panel is not None and panel < len(spectra):
+            spectra = [spectra[panel]]
+        ratios = []
+        for spectrum in spectra:
+            peak = float(np.max(np.abs(spectrum.data)))
+            try:
+                region = plotting.crop_2d(spectrum, xlims, ylims)
+            except ValueError:
+                continue
+            if peak > 0:
+                ratios.append(float(np.max(region.data)) / peak)
+        weakest = min((r for r in ratios if r > 0), default=None)
+        if weakest is None or weakest >= 1.5 * factor:
+            return None
+        return max(round(weakest / 2, 5), 1e-5)
 
     def _on_compare_list_current_row_changed(self, row: int) -> None:
         """Highlight (tint the background of) whichever row of the

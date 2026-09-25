@@ -42,6 +42,7 @@ from .two_d import (
     NMR2dimport, NMR2Dplotter, NMR2D_multi_plot, NMR2D_overlay_plot,
     NMR2d_get_trace, NMR2D_get_slices, prepare_trace_for_fit,
     NMR2D_plot_slices, NMR2D_summary_plot,
+    canonical_nucleus, check_external_projection,
 )
 
 from .fitting import (
@@ -156,7 +157,7 @@ __all__ = [
     # two_d
     "NMR2dimport", "NMR2Dplotter", "NMR2D_multi_plot", "NMR2D_overlay_plot",
     "NMR2d_get_trace", "NMR2D_get_slices", "prepare_trace_for_fit",
-    "NMR2D_plot_slices", "NMR2D_summary_plot",
+    "NMR2D_plot_slices", "NMR2D_summary_plot", "canonical_nucleus", "check_external_projection",
     # diffusion: where a PFG series' b-values and timings come from
     "recorded_b_values", "recorded_pfg_params",
     # fitting

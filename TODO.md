@@ -2,7 +2,9 @@
 
 ## Where things stand (2026-09-21)
 
-*2026-09-24: full suite without `test_data/` after the pNMR, J-coupling, strong-coupling, title/notes, VOCS-slice and CPMG rounds: 2604 passed, 161 skipped, 0 failed (after the eighth round). Re-count with `test_data/` present.*
+*2026-09-25: full suite without `test_data/` or pymatgen, after the projection-style/axis-label round: 2585 passed, 163 skipped, 0 failed.*
+
+*2026-09-24: full suite without `test_data/` after the pNMR, J-coupling, strong-coupling, title/notes, VOCS-slice, CPMG and Compare-2D rounds: 2615 passed, 161 skipped, 0 failed (after the ninth round). Re-count with `test_data/` present.*
 
 **2220 tests passing, none failing** (full suite, with `test_data/`; a fresh clone without it skips the real-data tests and passes the rest). The 18 failures that had been sitting in the working tree are gone too -- see the 2026-09-18 round for what they were. Working tree has uncommitted work (background loading, the Data-tab folder browser, cloud-backed data, the crosshair/measurement round, the PFG/DOSY round, the series-fitting/phase round, the reference-deconvolution/eNMR round, and the two-pairings eNMR round below). **`src/` no longer imports nmrglue.**
 
@@ -74,6 +76,91 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+
+## Projection style by right-clicking the strip; separate F2/F1 axis labels (2026-09-25, second round)
+
+User: *"Can we control the plot style of the projections by right clicking the projection specifically? Also, can we add something where, for 2-d spectra, we can edit the labels of both axes separately? e.g., if someone wanted to keep the name of the F2 axis but change F1."*
+
+### What already existed
+Projections were always drawn in black (crimson if external), with one `projection_size` for both strips and no way to set either from the GUI. Plot Style's "Custom label" is one template for *every* chemical-shift axis on a canvas, so it could not change F1 without changing F2. The notebook's `NMR2Dplotter` already takes `xlabel`/`ylabel` separately, so the notebook side of the labels needed nothing.
+
+### Built
+- **`projection_style={"f1": {...}, "f2": {...}}`** on `plotting.twod.plot_2d_contour` *and* the notebook's `NMR2Dplotter`: `color`, `linewidth`, `linestyle`, `size` (inches, per strip) and `visible`. Both validate through one function, `plotting.twod.projection_line_kwargs`; a misspelt key such as `colour` raises rather than doing nothing. A set colour overrides the external projection's crimson.
+- **Right-clicking a strip** (the canvas records `event.inaxes` on every right-press, as `_last_right_click_axes`) puts *"F1 (left)/F2 (top) Projection Style…"* and *"Hide … Projection"* at the top of the menu.
+  - The dialog (`_ProjectionStyleDialog`) has colour (with Default), line width, line style, strip size, show, "Apply to both projections" and Restore Defaults. Changes preview live, and Cancel restores the earlier settings.
+  - The style is per canvas, like the rest of Plot Style, so it carries over to the next 2D. A hidden strip gets *"Show F1/F2 Projection"* on the contour's menu, and dropping a 1D onto a hidden strip shows it again.
+  - API: `set_projection_style` / `projection_style` / `reset_projection_style`.
+- **Edit Axis Labels (F2 / F1)…** on the contour's right-click menu (`_AxisLabelsDialog`): one box per axis, where blank means automatic.
+  - An untouched axis stays automatic (no override stored), so it keeps following Plot Style's label style.
+  - Each box has a preview rendered by matplotlib itself. A label that cannot be drawn disables OK and shows why.
+  - `set_axis_label_override` refuses such a label too (`_render_label`). **An unknown mathtext command raises only at draw time, and would otherwise break the whole canvas.**
+  - Labels are stored per 2D, keyed like the external projections, and forgotten when the 2D is removed. They survive redraws, full-resolution export and reselection.
+  - `{nuc}`/`{mass}`/`{element}`/`{unit}` are filled in *for that axis* by plain replacement, not `str.format`, which would choke on the braces in mathtext (`$^{13}$C`).
+  - A label without `{unit}` is shown only in the unit it was typed in; in any other unit the axis falls back to the automatic label. This stops a typed "(ppm)" staying on an axis switched to Hz. Pseudo-2D: F1 is not editable (it is a slice number).
+- Tests: `tests/test_projection_style_and_labels.py` (18). The notebook's external-projection check is now exercised through a real `NMR2Dplotter` call (`test_two_d._make_dataset`), not by source inspection.
+
+### Tried and rejected
+- Pre-filling the label boxes with the automatic label: its raw text is `$\mathregular{...}$`, which is unreadable. Replaced by blank plus the rendered preview and a "Start from automatic" button.
+- Patching `QMenu.exec` in a test hangs the suite (PySide opens the real menu). Use `MplCanvas._exec_context_menu`, the seam that already exists for this.
+
+### Not done / open
+- Projection style is not part of Plot Style's *Apply to all plots* / *Save as default*.
+- The Compare tile's 2D panels and overlays do not use per-2D labels or projection style.
+
+## Drag a 1D onto a 2D as an external projection (2026-09-25)
+
+User: *"When a 2-d dataset is loaded, can we add something so that a user can drag and drop an open 1-d spectrum as an external projection? Obvs there should be a warning about whether it's the same nucleus along the dimension where they are dragging and dropping."*
+
+### What already existed
+The notebook's `NMR2Dplotter` already took `f1_external_projection`/`f2_external_projection` (an `NMR1dimport` dict or a Bruker path), cropped to the displayed range, drawn in crimson. It checked nothing about the nucleus. The GUI draws through `plotting.twod.plot_2d_contour`, which had no external projections at all.
+
+### Built
+- **One check, shared by notebook and GUI**: `notebook.two_d.check_external_projection(dataset, projection, dimension)` (exported from `opennmr.notebook`). It accepts an `NMRSpectrum` or the notebook's dicts on either side. It returns `allowed` (False for a pseudo-2D's F1, or no ppm overlap), `nucleus_match` (True/False/None when either nucleus is unrecorded), `coverage`, `problems` (ask about these) and `notes` (just report). Nuclei are compared through `canonical_nucleus`, which reads `13C`/`C13`/`<13C>`/`Proton`/`Carbon13`/`off`. A homonuclear 2D's F1 takes the direct nucleus.
+  - `NMR2Dplotter` now raises a `UserWarning` when an external projection's nucleus does not match. It still draws, since a notebook has no dialog. A path source is not imported just to check it.
+- **Drawing**: `plot_2d_contour(f1_external=, f2_external=, external_projection_color='crimson')` takes a 1D `NMRSpectrum`, an `NMR1dimport` dict or an `(x, y)` pair. The trace is cropped to the displayed range *before* its intensity limits are set, so a solvent line outside the 2D cannot set the scale. The lower limit is `min - 2% of span`, not the computed projection's `min*0.9`, which sits above a trace that dips below zero. F1 keeps the computed one's orientation (descending xlim). A pseudo-2D's F1 is refused. Lines carry `gid="external_projection_f1/f2"`.
+- **GUI drop**: the plot accepts drags from Open experiments (the same `application/x-qabstractitemmodeldatalist` payload the Compare list takes, decoded by the now-shared `canvas._rows_from_list_drag`). Drop handling is an event filter on the `FigureCanvasQTAgg`. File drops are ignored there, so they still reach the main window's folder drop. While dragging, the strip under the cursor is tinted.
+  - Released over the top/left strip, that strip is the target. Released over the contour, the nuclei decide when exactly one dimension matches; otherwise it asks F2 / F1 / Both (homonuclear, or no nucleus recorded).
+  - `MainWindow._confirm_external_projection`: a mismatch or an unconfirmable nucleus asks first (`QMessageBox.question`, default **No**). If the 1D matches the *other* axis, the message says to drop it on that strip. Anything that cannot be drawn is refused with a warning. Partial coverage goes to the status line.
+  - The signal is emitted via `QTimer.singleShot(0, ...)`, outside Qt's drag loop, because a modal dialog inside a drop is unreliable on Windows.
+- **Canvas state** (`MplCanvas.set_external_projection` / `clear_external_projection` / `external_projection` / `external_projections_for` / `prune_external_projections`): kept per 2D, keyed by `id()` with the 2D held alongside, so a recycled id cannot leak.
+  - The projections survive level scrolls, reprocessing, unit changes, full-resolution export and switching to another spectrum and back.
+  - The 1D is held by reference, so re-phasing it shows at the next redraw.
+  - Removing either spectrum from Open experiments (or Clear All) drops the projection.
+  - Right-click > *Remove External F2/F1 Projection (label)*.
+  - The strip's intensity zoom is reset when its content changes (`_redraw_contour(fresh_projections=...)`).
+- **Units**: in Hz/kHz/mm the 1D's ppm is mapped through the *2D's own* axis (linear fit ppm → unit), not the 1D's Hz axis. A 1D recorded at another field has a different Hz axis for the same shifts. Tested with a 600 MHz 1D on a 400 MHz 2D.
+- **Processing report**: for a 2D showing one, File > Processing Report adds "The F2 (top) projection shown is not computed from this 2D: it is the separately acquired 1D spectrum …", so a figure made this way says so.
+- Tests: `tests/test_external_projection.py` (33).
+  - Qt 6 does not deliver a synthetic `QDropEvent` through `sendEvent` without a real drag, so the tests call `canvas.eventFilter(canvas.canvas, event)` directly. That is the code path a real drop runs.
+
+### Not done / open
+- Only the first 1D of a multi-row drag is used (said in the status line). Several 1Ds on one strip (a stacked projection) was not asked for.
+- The external trace is crimson, as in the notebook. It may want to follow the Plot Style trace colour for figures; not decided.
+- No chemical-shift referencing check between the 1D and the 2D beyond ppm overlap. A 1D referenced differently will simply sit offset.
+
+## 2D spectra in Compare: overlay (up to 6), side by side, insets (2026-09-24, ninth round)
+
+User: *"I have, in the notebook, something that can, for 2-d datasets: Overlay multiple 2-d spectra on top of each other; Plot 2-d spectra side-by-side; Add insets to 2-d spectra. In the "Compare" tab, can we add these 2-d functions in?"* Chosen when asked: insets made by **zooming, then "Add inset"** (then editable); overlay limit **raised to 6** (notebook too).
+
+### What already existed
+Compare already overlaid 2-3 genuine 2Ds automatically (`plotting.twod.overlay_plot`, the GUI port of `NMR2D_overlay_plot`). `plotting.twod.multi_plot` (port of `NMR2D_multi_plot`) existed but was never wired in, and could only make its own figure. The port had no insets at all.
+
+### Built
+- `plotting/twod.py`: `draw_insets` (+ `inset_bounds`, `crop_2d`, `MAX_OVERLAY_SPECTRA = 6`); `insets=` on `plot_2d_contour` and `overlay_plot`; `multi_plot(fig=...)` draws into an existing figure (GUI canvas) without touching global style/size.
+  - An inset is drawn from **its region at full resolution** (the parent is downsampled for speed, which a zoom would expose) with **levels from the whole spectrum**, so a contour means the same intensity in inset and parent; an inset may lower its own floor. F1/F2 labels face into the plot (a right-corner inset puts F1 labels left; a lower-corner inset puts F2 labels on top) so they never print over the parent's labels. Box + connectors via `indicate_inset_zoom`.
+  - Not the notebook's recursion into the full plotter: that builds an `AxesDivider` on the inset, which replaces the inset's placement (the notebook refuses projections in insets for this reason).
+- `canvas.show_2d_overlay(..., insets, factor, clevels)`, new `canvas.show_2d_panels(spectra, labels, layout, projections, link_axes, insets, ...)`, `canvas.zoomed_2d_region()`. Linked panels use limit callbacks, **not** `sharex`: each panel inverts its own axes, and inverting a shared axis once per panel flips it back and forth.
+- `gui/compare_2d.py`: `Compare2DControls` (the "2D spectra" box in Compare, shown when a 2D is checked): Layout (Overlay / Side by side: row, column, grid), Link zoom, Projections, lowest contour %, levels; Insets list + editor (panel or all, F2/F1 range, corner, size, lowest contour, connector).
+- `MainWindow._refresh_compare_2d` replaces `_refresh_compare_2d_overlay`: any all-2D selection (including a single 2D, so one spectrum can get an inset). An overlay that is impossible (1 spectrum, >6, mismatched nuclei/type) is drawn side by side and the status line says why. A bad inset (range with no data) draws the plot without insets and says so.
+- *Add inset from zoom*: region from the zoomed axes; corner = the one farthest from the region (never hiding its own box; avoids the overlay legend's upper-right); lowest contour set automatically, and reported, when the region's strongest signal is under the plot's floor (an inset made to show a weak peak would otherwise be empty). With linked panels or an overlay the inset goes on every panel.
+- Notebook `NMR2D_overlay_plot`: 2-6 datasets (was 2-3).
+
+### Changed test
+`test_main_window_compare_2d_overlay_only_applies_to_2_or_3_spectra` pinned the old limit; replaced by `..._takes_up_to_six_spectra` (4 overlay; 7 side by side with the reason).
+
+### Tests
+`tests/test_compare_2d.py` (11): crop edges/empty range, inset levels = whole-spectrum levels, placement/label sides/orientation, overlay 2-6, `multi_plot(fig=)` with per-panel insets, notebook limit; GUI: single 2D drawn, add inset from zoom (not-zoomed message, corner, automatic floor, full view restored), linked/unlinked panels and per-panel inset, impossible overlay shown side by side with reason, bad inset keeps the plot.
 
 
 ## CPMG echo co-addition in Advanced Processing (2026-09-24, eighth round)

@@ -13,7 +13,8 @@ from .accessibility import (
     ACCESSIBLE_QUALITATIVE_PALETTES, PALETTE_DISPLAY_NAMES,
 )
 from .oned import plot_1d, plot_1d_stack, plot_1d_heatmap
-from .twod import plot_2d_contour, multi_plot, overlay_plot
+from .twod import (plot_2d_contour, multi_plot, overlay_plot, draw_insets, inset_bounds, crop_2d,
+                   projection_line_kwargs, PROJECTION_STYLE_KEYS)
 from .fit import (plot_1d_with_fit, plot_2d_integrals, plot_relaxation, plot_dosy,
                   overlay_dosy, plot_score_components)
 
@@ -29,7 +30,7 @@ __all__ = [
     "series_colours", "trace_colour_presets", "ordered_qualitative_colours", "is_qualitative",
     "ACCESSIBLE_QUALITATIVE_PALETTES", "PALETTE_DISPLAY_NAMES",
     "plot_1d", "plot_1d_stack", "plot_1d_heatmap",
-    "plot_2d_contour", "multi_plot", "overlay_plot",
+    "plot_2d_contour", "multi_plot", "overlay_plot", "draw_insets", "inset_bounds", "crop_2d",
     "plot_1d_with_fit", "plot_2d_integrals", "plot_relaxation", "plot_dosy", "overlay_dosy",
     "plot_score_components",
 ]

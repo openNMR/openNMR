@@ -14,6 +14,8 @@ Ported from ``nmrtools2``'s ``two_d.py``.
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
@@ -452,6 +454,220 @@ def _draw_traces_panel(ax, divider, entries, *, axis_kind,
     return panel
 
 
+#: Most spectra :func:`overlay_plot` accepts. Raised from 3 on explicit
+#: request ("allow up to 6"); past that, flat-colour contours stop
+#: being told apart, and side-by-side panels are the better view.
+MAX_OVERLAY_SPECTRA = 6
+
+#: Where a GUI inset "corner" puts an inset, as ``(x0, y0)`` of its
+#: lower-left corner given its size ``s`` and margin ``m`` (axes fraction).
+INSET_CORNERS = {
+    "upper right": lambda s, m: (1 - s - m, 1 - s - m),
+    "upper left": lambda s, m: (m, 1 - s - m),
+    "lower left": lambda s, m: (m, m),
+    "lower right": lambda s, m: (1 - s - m, m),
+}
+
+
+def inset_bounds(corner: str = "upper right", size: float = 0.4, margin: float = 0.03):
+    """``(x0, y0, width, height)`` in axes fraction for a square inset of
+    ``size`` (fraction of the parent axes) in ``corner``."""
+    if corner not in INSET_CORNERS:
+        raise ValueError(f"corner must be one of {sorted(INSET_CORNERS)}, not {corner!r}")
+    if not 0.05 <= size <= 0.9:
+        raise ValueError("size must be between 0.05 and 0.9 of the parent axes")
+    x0, y0 = INSET_CORNERS[corner](size, margin)
+    return (x0, y0, size, size)
+
+
+def crop_2d(spectrum: NMRSpectrum, xlims=None, ylims=None) -> NMRSpectrum:
+    """``spectrum`` restricted to ``xlims`` (F2, ppm) and ``ylims`` (F1:
+    ppm, or slice index for a pseudo-2D), either order. Keeps one point
+    beyond each edge so contours run to the edge of an inset rather than
+    stopping a point short. Raises if a range holds no points."""
+    def _window(values, lims):
+        if lims is None:
+            return slice(None)
+        lo, hi = sorted(float(v) for v in lims)
+        inside = np.nonzero((values >= lo) & (values <= hi))[0]
+        if inside.size == 0:
+            raise ValueError(f"The range {lo:g} to {hi:g} contains no data points.")
+        return slice(max(int(inside.min()) - 1, 0), int(inside.max()) + 2)
+
+    f2, f1 = spectrum.axes[1], spectrum.axes[0]
+    f1_values = f1.index.astype(float) if spectrum.is_pseudo_2d else f1.ppm
+    cols = _window(f2.ppm, xlims)
+    rows = _window(f1_values, ylims)
+
+    def _axis(axis, window):
+        return dataclasses.replace(axis, **{name: getattr(axis, name)[window]
+                                            for name in ("ppm", "hz", "index")
+                                            if getattr(axis, name) is not None})
+
+    return dataclasses.replace(
+        spectrum, data=spectrum.data[rows, cols],
+        data_imag=None if spectrum.data_imag is None else spectrum.data_imag[rows, cols],
+        axes=[_axis(f1, rows), _axis(f2, cols)])
+
+
+def _levels_from_full(spectrum, factor, clevels, level_mode, power):
+    """Contour levels from the *whole* spectrum's peak, so an inset's
+    contours mean the same intensities as the plot it zooms into."""
+    peak = float(np.amax(np.abs(spectrum.data)))
+    if peak == 0:
+        return [], None
+    levels = _contour_levels(factor * peak, peak, clevels, level_mode, power)
+    negative = ([-lv for lv in levels] if float(np.amin(spectrum.data)) < -factor * peak else None)
+    return levels, negative
+
+
+def draw_insets(parent_ax, spectra, insets, *, colours=None, factor=0.07, clevels=7,
+                level_mode="power", power=1.25, contour_linewidth=0.8, fontsize=12,
+                colour_spectra=None):
+    """Draw zoomed insets of ``spectra`` (one spectrum, or the overlaid
+    set) on ``parent_ax``.
+
+    Each inset in ``insets`` is a dict with ``xlims`` (F2) and ``ylims``
+    (F1) -- the region shown -- and either ``bounds``
+    (``(x0, y0, w, h)``, axes fraction) or ``corner``/``size`` (see
+    :func:`inset_bounds`). Optional: ``mark_inset`` (default True) draws
+    the box and connectors to the region on the parent; ``factor``
+    overrides the lowest contour level for that inset only.
+
+    **The inset is drawn from the data in its region at full
+    resolution** (the parent is usually downsampled for speed, which a
+    zoom would expose), **with levels taken from each whole spectrum**,
+    so the same contour means the same intensity in the inset and in
+    the parent. Lower ``factor`` for an inset to bring out weak peaks.
+
+    Unlike the notebook's ``NMR2Dplotter(inset=...)``, which recursed
+    into the full plotter, this never builds an ``AxesDivider`` on the
+    inset -- that replaces the inset's own placement and silently
+    mislays it (the notebook refuses projections in insets for the same
+    reason).
+
+    Returns the inset axes, in order.
+    """
+    spectra = list(spectra) if isinstance(spectra, (list, tuple)) else [spectra]
+    colours = colours or ["black"] * len(spectra)
+    ref = spectra[0]
+    created = []
+    for i, spec in enumerate(insets or []):
+        if "xlims" not in spec or "ylims" not in spec:
+            raise ValueError(f"inset {i + 1} needs both xlims (F2) and ylims (F1).")
+        bounds = spec.get("bounds") or inset_bounds(spec.get("corner", "upper right"), spec.get("size", 0.4))
+        inset_factor = spec.get("factor") or factor
+        ax = parent_ax.inset_axes(bounds)
+        ax.set_zorder(parent_ax.get_zorder() + 5)
+        for spectrum, colour in zip(spectra, colours):
+            region = crop_2d(spectrum, spec["xlims"], spec["ylims"])
+            levels, negative = _levels_from_full(spectrum, inset_factor, clevels, level_mode, power)
+            if not levels:
+                continue
+            x = region.axes[1].ppm
+            y = region.axes[0].index.astype(float) if region.is_pseudo_2d else region.axes[0].ppm
+            max_x, max_y = _cap_contour_points(len(x), len(y))
+            data = region.data
+            if (max_x, max_y) != (len(x), len(y)):
+                data, x, y = downsample_2d(data, x, y, max_points_x=max_x, max_points_y=max_y)
+            if len(spectra) == 1 and colour_spectra:
+                masked = np.ma.masked_where(data <= 0, data)
+                ax.contour(x, y, masked, levels=levels, cmap=get_contour_cmap(colour_spectra),
+                           norm=LogNorm(), linewidths=contour_linewidth)
+            else:
+                ax.contour(x, y, data, levels=levels, colors=[colour], linewidths=contour_linewidth)
+            if negative is not None and len(spectra) == 1:
+                ax.contour(x, y, data, levels=sorted(negative), colors=NEGATIVE_CONTOUR_COLOUR,
+                           linewidths=contour_linewidth)
+        ax.set_xlim(max(spec["xlims"]), min(spec["xlims"]))       # high ppm on the left
+        lo, hi = sorted(spec["ylims"])
+        if ref.is_pseudo_2d:
+            ax.set_ylim(lo, hi)
+            ax.set_yticks([])
+        else:
+            ax.set_ylim(hi, lo)                                     # as the parent: high ppm at the bottom
+        ax.tick_params(labelsize=0.75 * fontsize, direction="in", length=3, pad=2)
+        # F1 labels on the side facing into the plot, so an inset in a
+        # right-hand corner does not print over the parent's own
+        # right-hand F1 labels.
+        if bounds[0] + bounds[2] / 2 > 0.5:
+            ax.yaxis.tick_left()
+        else:
+            ax.yaxis.tick_right()
+        # Likewise F2 labels on top for an inset in a lower corner, clear
+        # of the parent's own F2 labels.
+        if bounds[1] + bounds[3] / 2 < 0.5:
+            ax.xaxis.tick_top()
+        ax.set_facecolor(parent_ax.get_facecolor())
+        if spec.get("mark_inset", True):
+            parent_ax.indicate_inset_zoom(ax, edgecolor=spec.get("edgecolor", "0.35"), alpha=0.9)
+        created.append(ax)
+    return created
+
+
+#: What a projection strip's style may set -- see
+#: :func:`projection_line_kwargs`.
+PROJECTION_STYLE_KEYS = ("color", "linewidth", "linestyle", "size", "visible")
+
+
+def projection_line_kwargs(projection_style, dimension: str) -> dict:
+    """One strip's entry of a ``projection_style`` dict, checked: the
+    keys :data:`PROJECTION_STYLE_KEYS` allows, ``None`` values dropped
+    (``None`` = "leave the default"). Shared by
+    :func:`plot_2d_contour` and the notebook's ``NMR2Dplotter`` so the
+    two accept exactly the same thing.
+
+    A misspelt key is an error rather than silently ignored -- a
+    ``"colour"`` that did nothing would look like a bug in the plot."""
+    if not projection_style:
+        return {}
+    style = projection_style.get(dimension) or {}
+    unknown = set(style) - set(PROJECTION_STYLE_KEYS)
+    if unknown:
+        raise ValueError(
+            f"Unknown projection_style key(s) for {dimension}: {sorted(unknown)}; "
+            f"allowed: {list(PROJECTION_STYLE_KEYS)}")
+    return {k: v for k, v in style.items() if v is not None}
+
+
+def _external_projection_trace(source, limits):
+    """``(x, intensity)`` of an external projection, cropped to the
+    contour's displayed ``limits`` (either order) -- see
+    :func:`plot_2d_contour`'s ``f1_external``/``f2_external``.
+
+    Cropped so that a peak outside the contour's range (a solvent line,
+    a spinning sideband) cannot set the strip's intensity scale."""
+    if isinstance(source, NMRSpectrum):
+        if source.ndim != 1:
+            raise ValueError("An external projection must be a 1D spectrum.")
+        x, y = source.axes[0].ppm, source.data
+    elif isinstance(source, dict):
+        x, y = source["x_ppm"], source["real_spectrum"]
+    else:
+        x, y = source
+    x = np.asarray(x, dtype=np.float64)
+    y = np.real(np.asarray(y)).astype(np.float64)
+    lo, hi = min(limits), max(limits)
+    mask = (x >= lo) & (x <= hi)
+    if np.count_nonzero(mask) < 2:
+        raise ValueError(
+            f"The external projection ({x.min():.4g} to {x.max():.4g}) does not "
+            f"overlap the contour's displayed range ({lo:.4g} to {hi:.4g}).")
+    return x[mask], y[mask]
+
+
+def _external_projection_limits(y, proj_scale=1.0):
+    """``(bottom, top)`` intensity limits for an external projection:
+    its own baseline at the bottom (2% headroom below the lowest point)
+    and its tallest peak at ``proj_scale`` of the strip. Written out
+    rather than copying the computed projection's ``min*0.9``, which
+    puts the lower limit *above* the data whenever the trace dips below
+    zero -- the usual case for a real, noisy 1D."""
+    ymin, ymax = float(np.min(y)), float(np.max(y))
+    span = (ymax - ymin) or 1.0
+    return ymin - 0.02 * span, ymin + span * proj_scale
+
+
 def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_fraction_y=0.25,
                      ncontourpts_x=16384, ncontourpts_y=1024,
                      pl_height=7.0, pl_width=7.0, factor=0.07, clevels=7,
@@ -465,10 +681,36 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                      show_nQ_line=False, nQ=1, nQ_colors=None,
                      slices=None, slice_panel_size=1.0, slice_panel_pad=0.95,
                      slice_offset_fraction=0.85, slice_colors=None, slice_linewidth=2.0,
-                     contour_linewidth: float = 0.8,
+                     contour_linewidth: float = 0.8, insets=None,
+                     f1_external=None, f2_external=None,
+                     external_projection_color='crimson', projection_style=None,
                      ax=None, fig=None, save_fig=False, fig_name='nmr_2d_spectrum',
                      save_format='png'):
     """Plot a 2D NMR spectrum as a contour plot with F1/F2 projections.
+
+    ``f1_external``/``f2_external`` : a separately acquired 1D spectrum
+    to draw *instead of* the computed F1 (left)/F2 (top) projection --
+    a 1D :class:`NMRSpectrum`, an ``NMR1dimport`` dict, or an
+    ``(x, intensity)`` pair already in the contour's displayed unit.
+    Cropped to the contour's displayed range, scaled on its own, and
+    drawn in ``external_projection_color`` so it cannot be mistaken
+    for the computed projection. Nothing here checks the nucleus: that
+    is :func:`opennmr.notebook.check_external_projection`'s job, run by
+    whoever chose the 1D. ``f1_external`` is refused for a pseudo-2D
+    (its F1 is a slice number, not a shift). The same feature as the
+    notebook's ``NMR2Dplotter(f1_external_projection=...)``.
+
+    ``projection_style`` : per-strip appearance, ``{"f1": {...}, "f2":
+    {...}}`` with any of ``color``, ``linewidth``, ``linestyle``,
+    ``size`` (the strip's depth in inches, replacing
+    ``projection_size`` for that strip) and ``visible`` (``False``
+    hides that strip, as ``show_projections`` would). Anything not
+    given keeps its default -- black for a computed projection,
+    ``external_projection_color`` for an external one. See
+    :func:`projection_line_kwargs`.
+
+    ``insets`` : zoomed insets, see :func:`draw_insets` (drawn with this
+    plot's own contour settings unless an inset overrides ``factor``).
 
     ``projection_mode`` : ``'sum'`` for conventional projections;
     ``'max'`` (of ``abs()``) for pseudo-2D relaxation/diffusion series,
@@ -680,12 +922,20 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             ax.plot(x_line, n * x_line, linestyle='--', linewidth=1.5,
                     color=colour, alpha=0.8, zorder=10)
 
-    show_f2_projection = show_projections in (True, 'f2')
-    show_f1_projection = show_projections in (True, 'f1')
     if show_projections not in (True, False, 'f1', 'f2'):
         raise ValueError("show_projections must be True, False, 'f1', or 'f2'")
+    f2_style = projection_line_kwargs(projection_style, "f2")
+    f1_style = projection_line_kwargs(projection_style, "f1")
+    show_f2_projection = show_projections in (True, 'f2') and f2_style.pop("visible", True)
+    show_f1_projection = show_projections in (True, 'f1') and f1_style.pop("visible", True)
+    f2_size = f2_style.pop("size", projection_size)
+    f1_size = f1_style.pop("size", projection_size)
 
     proj_axes = {"f1": None, "f2": None}
+    if f1_external is not None and pseudo2d:
+        raise ValueError(
+            "f1_external is not supported for pseudo-2D data (the F1 axis is a "
+            "slice/experiment number, not a chemical shift).")
 
     if show_f2_projection or show_f1_projection:
         spec_float = np.asarray(data, dtype=np.float64)
@@ -708,16 +958,23 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             # bigger") -- the divider gives the contour whatever the
             # projections don't take, so this is the one knob that
             # trades between them.
-            ax_f2 = divider.append_axes("top", projection_size, pad=projection_pad, sharex=ax)
+            ax_f2 = divider.append_axes("top", f2_size, pad=projection_pad, sharex=ax)
             ax_f2.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False, labeltop=False)
             ax_f2.tick_params(axis='y', which='both', left=False, right=False, labelleft=False, labelright=False)
-            f2_projection = np.sum(spec_float, axis=0) if mode == "sum" else np.max(spec_float, axis=0)
-            ax_f2.plot(x_ppm, f2_projection + (0.02 * np.min(f2_projection)), 'k')
-            ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
+            if f2_external is not None:
+                ext_x, ext_y = _external_projection_trace(f2_external, ax.get_xlim())
+                ax_f2.plot(ext_x, ext_y, gid="external_projection_f2",
+                           **{"color": external_projection_color, **f2_style})
+                ax_f2.set_ylim(_external_projection_limits(ext_y, proj_scale))
+            else:
+                f2_projection = np.sum(spec_float, axis=0) if mode == "sum" else np.max(spec_float, axis=0)
+                ax_f2.plot(x_ppm, f2_projection + (0.02 * np.min(f2_projection)),
+                           **{"color": "k", **f2_style})
+                ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
             proj_axes["f2"] = ax_f2
 
         if show_f1_projection:
-            ax_f1 = divider.append_axes("left", projection_size, pad=projection_pad, sharey=ax)
+            ax_f1 = divider.append_axes("left", f1_size, pad=projection_pad, sharey=ax)
             ax_f1.tick_params(axis='x', which='both', bottom=False, top=False, labelbottom=False, labeltop=False)
             ax_f1.tick_params(axis='y', which='both', left=False, right=False, labelleft=False, labelright=False)
             f1_projection = np.sum(spec_float, axis=1) if mode == "sum" else np.max(spec_float, axis=1)
@@ -745,8 +1002,19 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             # (`MplCanvas._zoom_projection_intensity`) still works
             # unchanged: it pins whichever end `set_xlim`'s second
             # element is, which is still the baseline end here.
-            ax_f1.plot(f1_projection + (0.02 * np.min(f1_projection)), y_axis, 'k')
-            ax_f1.set_xlim([np.max(f1_projection) * proj_scale, np.min(f1_projection) * 0.99])
+            if f1_external is not None:
+                # Same orientation as the computed one below it: true
+                # values, descending xlim, peaks pointing away from the
+                # contour.
+                ext_x, ext_y = _external_projection_trace(f1_external, ax.get_ylim())
+                ax_f1.plot(ext_y, ext_x, gid="external_projection_f1",
+                           **{"color": external_projection_color, **f1_style})
+                bottom, top = _external_projection_limits(ext_y, proj_scale)
+                ax_f1.set_xlim([top, bottom])
+            else:
+                ax_f1.plot(f1_projection + (0.02 * np.min(f1_projection)), y_axis,
+                           **{"color": "k", **f1_style})
+                ax_f1.set_xlim([np.max(f1_projection) * proj_scale, np.min(f1_projection) * 0.99])
             proj_axes["f1"] = ax_f1
 
         for proj_ax in proj_axes.values():
@@ -771,6 +1039,12 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             axis_label=(labeltextx if slices[0].get("axis", "f1") == "f1" else labeltexty),
         )
 
+    if insets:
+        proj_axes["insets"] = draw_insets(
+            ax, spectrum, insets, factor=factor, clevels=clevels, level_mode=level_mode,
+            power=power, contour_linewidth=contour_linewidth, fontsize=fontsize,
+            colour_spectra=colour_spectra)
+
     if standalone:
         fig.set_figheight(pl_height)
         fig.set_figwidth(pl_width)
@@ -785,7 +1059,7 @@ def multi_plot(spectra: list[NMRSpectrum], layout="row", panel_kwargs=None, titl
                panel_width=5.0, panel_height=5.0, pl_width=None, pl_height=None,
                font='Arial', fontsize=12, output_format='',
                save_fig=False, fig_name='nmr_2d_multi', save_format='png',
-               **shared_kwargs):
+               fig=None, **shared_kwargs):
     """Plot multiple 2D contour panels (:func:`plot_2d_contour`) on one
     figure, arranged in a row, column, or grid -- one panel per
     spectrum. Ported from ``nmrtools2``'s ``NMR2D_multi_plot``.
@@ -799,6 +1073,11 @@ def multi_plot(spectra: list[NMRSpectrum], layout="row", panel_kwargs=None, titl
     ``pl_height``, ``font``, ``fontsize``, ``output_format``) are
     owned by this function at the figure level -- passing them in
     ``**shared_kwargs`` or ``panel_kwargs`` raises ``ValueError``.
+
+    ``fig`` : draw into this (already cleared) figure instead of a new
+    one -- for a GUI canvas. Figure size and ``setup_plotting`` are then
+    left alone, since they would change the whole application's state.
+    Per-panel ``insets`` go in ``panel_kwargs`` (see :func:`draw_insets`).
 
     Returns ``fig, axes`` (one ``Axes`` per panel, in ``spectra`` order).
     """
@@ -831,7 +1110,9 @@ def multi_plot(spectra: list[NMRSpectrum], layout="row", panel_kwargs=None, titl
         if bad:
             raise ValueError(f"panel_kwargs[{i}] contains figure-level keys not valid per panel: {sorted(bad)}")
 
-    setup_plotting(font=font, fontsize=fontsize, output_format=output_format)
+    embedded = fig is not None
+    if not embedded:
+        setup_plotting(font=font, fontsize=fontsize, output_format=output_format)
 
     if layout == "row":
         nrows, ncols = 1, n
@@ -846,7 +1127,8 @@ def multi_plot(spectra: list[NMRSpectrum], layout="row", panel_kwargs=None, titl
     if pl_height is None:
         pl_height = panel_height * nrows
 
-    fig = plt.figure(figsize=(pl_width, pl_height))
+    if not embedded:
+        fig = plt.figure(figsize=(pl_width, pl_height))
     gs = fig.add_gridspec(nrows, ncols)
 
     axes = []
@@ -855,12 +1137,13 @@ def multi_plot(spectra: list[NMRSpectrum], layout="row", panel_kwargs=None, titl
         ax = fig.add_subplot(gs[r, c])
         kw = dict(shared_kwargs)
         kw.update(panel_kwargs[i])
-        plot_2d_contour(spectrum, ax=ax, fig=fig, **kw)
+        plot_2d_contour(spectrum, ax=ax, fig=fig, fontsize=fontsize, **kw)
         if titles is not None:
-            ax.set_title(titles[i])
+            ax.set_title(titles[i], fontsize=fontsize)
         axes.append(ax)
 
-    fig.tight_layout()
+    if not embedded:
+        fig.tight_layout()
     if save_fig:
         save_figure(fig, fig_name=fig_name, save_format=save_format)
 
@@ -897,10 +1180,10 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
                   font='Arial', fontsize=12, output_format='',
                   equal_tickspacing=False, tick_number=None,
                   tick_dir='in', tick_length=4, tick_width=1.0, tick_pad=4,
-                  show_nQ_line=False, nQ=1, nQ_colors=None,
+                  show_nQ_line=False, nQ=1, nQ_colors=None, insets=None,
                   ax=None, fig=None, save_fig=False, fig_name='nmr_2d_overlay',
                   save_format='png'):
-    """Overlay 2-3 2D NMR spectra as line contours on one set of axes,
+    """Overlay 2-6 2D NMR spectra as line contours on one set of axes,
     each in its own flat colour (cf. :func:`multi_plot`'s side-by-side
     panels). Ported from ``nmrtools2``'s ``NMR2D_overlay_plot``.
 
@@ -912,10 +1195,13 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
     :func:`opennmr.plotting.style.get_stack_colormap`) or an explicit
     list of matplotlib colours, one per spectrum.
 
+    ``insets`` : zoomed insets of the overlay, see :func:`draw_insets`.
+
     Returns ``fig, ax``.
     """
-    if not (2 <= len(spectra) <= 3):
-        raise ValueError(f"overlay_plot accepts 2 or 3 spectra, got {len(spectra)}.")
+    if not (2 <= len(spectra) <= MAX_OVERLAY_SPECTRA):
+        raise ValueError(
+            f"overlay_plot accepts 2 to {MAX_OVERLAY_SPECTRA} spectra, got {len(spectra)}.")
 
     _check_overlay_compatible(spectra)
     n = len(spectra)
@@ -1048,6 +1334,10 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
 
     if labels is not None:
         ax.legend(**(legend_kwargs or {}))
+
+    if insets:
+        draw_insets(ax, spectra, insets, colours=resolved_colours, factor=factor, clevels=clevels,
+                    contour_linewidth=contour_linewidth, fontsize=fontsize)
 
     if standalone:
         fig.set_figheight(pl_height)

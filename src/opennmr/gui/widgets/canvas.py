@@ -19,9 +19,9 @@ import dataclasses
 import matplotlib.colors
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSpinBox,
     QToolButton, QVBoxLayout, QWidget,
 )
@@ -320,6 +320,261 @@ class _Toolbar(NavigationToolbar2QT):
             bound_save(*args)
 
 
+class _ProjectionStyleDialog(QDialog):
+    """One projection strip's look: colour, line width, line style,
+    size, shown or hidden -- opened by right-clicking the strip.
+
+    Emits :attr:`changed` on every edit so the plot previews it live;
+    the canvas undoes the preview on Cancel."""
+
+    changed = Signal()
+
+    def __init__(self, parent, dimension: str, style: dict, default_colour: str = "black") -> None:
+        super().__init__(parent)
+        name = "F2 (top)" if dimension == "f2" else "F1 (left)"
+        self.setWindowTitle(f"{name} projection style")
+        self._default_colour = default_colour
+        self._colour = style.get("color")
+        form = QFormLayout(self)
+
+        colour_row = QHBoxLayout()
+        self.colour_button = QPushButton()
+        self.colour_button.setToolTip("Pick the line colour.")
+        self.colour_button.clicked.connect(self._on_pick_colour)
+        self.colour_default_button = QPushButton("Default")
+        self.colour_default_button.setToolTip(
+            "Black for a projection computed from the 2D, crimson for a dropped-in 1D.")
+        self.colour_default_button.clicked.connect(lambda: self.set_colour(None))
+        colour_row.addWidget(self.colour_button, 1)
+        colour_row.addWidget(self.colour_default_button)
+        form.addRow("Colour:", colour_row)
+
+        import matplotlib as _mpl
+        self.linewidth_spin = QDoubleSpinBox()
+        self.linewidth_spin.setRange(0.1, 10.0)
+        self.linewidth_spin.setSingleStep(0.1)
+        self.linewidth_spin.setValue(float(style.get("linewidth", _mpl.rcParams["lines.linewidth"])))
+        form.addRow("Line width:", self.linewidth_spin)
+
+        self.linestyle_combo = QComboBox()
+        for label, value in MplCanvas.PROJECTION_LINESTYLES:
+            self.linestyle_combo.addItem(label, value)
+        self.linestyle_combo.setCurrentIndex(max(0, self.linestyle_combo.findData(style.get("linestyle", "-"))))
+        form.addRow("Line style:", self.linestyle_combo)
+
+        self.size_spin = QDoubleSpinBox()
+        self.size_spin.setRange(0.2, 4.0)
+        self.size_spin.setSingleStep(0.1)
+        self.size_spin.setSuffix(" in")
+        self.size_spin.setValue(float(style.get("size", 1.0)))
+        self.size_spin.setToolTip(
+            "How deep the strip is. The contour takes whatever space the strips leave.")
+        form.addRow("Strip size:", self.size_spin)
+
+        self.visible_check = QCheckBox("Show this projection")
+        self.visible_check.setChecked(style.get("visible", True) is not False)
+        form.addRow(self.visible_check)
+
+        self.both_check = QCheckBox("Apply to both projections")
+        self.both_check.setToolTip("Give the F1 and F2 strips the same style.")
+        form.addRow(self.both_check)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel
+                                   | QDialogButtonBox.StandardButton.RestoreDefaults)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(self.restore_defaults)
+        form.addRow(buttons)
+
+        self._refresh_colour_button()
+        for signal in (self.linewidth_spin.valueChanged, self.linestyle_combo.currentIndexChanged,
+                       self.size_spin.valueChanged, self.visible_check.toggled, self.both_check.toggled):
+            signal.connect(lambda *_: self.changed.emit())
+
+    def _refresh_colour_button(self) -> None:
+        shown = self._colour or self._default_colour
+        self.colour_button.setText(shown if self._colour else f"{shown} (default)")
+        self.colour_button.setStyleSheet(
+            f"QPushButton {{ border-left: 14px solid {matplotlib.colors.to_hex(shown)}; }}")
+
+    def set_colour(self, colour) -> None:
+        self._colour = colour
+        self._refresh_colour_button()
+        self.changed.emit()
+
+    def _on_pick_colour(self) -> None:
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QColorDialog
+        start = QColor(matplotlib.colors.to_hex(self._colour or self._default_colour))
+        colour = QColorDialog.getColor(start, self, "Projection colour")
+        if colour.isValid():
+            self.set_colour(colour.name())
+
+    def restore_defaults(self) -> None:
+        import matplotlib as _mpl
+        for widget in (self.linewidth_spin, self.linestyle_combo, self.size_spin, self.visible_check):
+            widget.blockSignals(True)
+        self.linewidth_spin.setValue(float(_mpl.rcParams["lines.linewidth"]))
+        self.linestyle_combo.setCurrentIndex(0)
+        self.size_spin.setValue(1.0)
+        self.visible_check.setChecked(True)
+        for widget in (self.linewidth_spin, self.linestyle_combo, self.size_spin, self.visible_check):
+            widget.blockSignals(False)
+        self._colour = None
+        self._refresh_colour_button()
+        self.changed.emit()
+
+    def apply_to_both(self) -> bool:
+        return self.both_check.isChecked()
+
+    def style(self) -> dict:
+        """The settings as ``projection_style`` takes them, left out
+        where they equal the default so a later change of default
+        still reaches them."""
+        import matplotlib as _mpl
+        style = {}
+        if self._colour:
+            style["color"] = self._colour
+        if abs(self.linewidth_spin.value() - float(_mpl.rcParams["lines.linewidth"])) > 1e-9:
+            style["linewidth"] = self.linewidth_spin.value()
+        if self.linestyle_combo.currentData() != "-":
+            style["linestyle"] = self.linestyle_combo.currentData()
+        if abs(self.size_spin.value() - 1.0) > 1e-9:
+            style["size"] = self.size_spin.value()
+        if not self.visible_check.isChecked():
+            style["visible"] = False
+        return style
+
+
+def _render_label(text: str, fontsize: float = 12.0, dpi: float = 100.0):
+    """``(png_bytes, None)`` for ``text`` drawn exactly as matplotlib
+    would draw an axis label, or ``(None, error message)`` when it
+    cannot be drawn.
+
+    Rendering, not just parsing, is the check: an unknown mathtext
+    command (``$\\foo$``) is only found when matplotlib draws, and
+    raised there it would take the whole plot down with it."""
+    import io
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    figure = Figure(figsize=(0.1, 0.1), dpi=dpi)
+    FigureCanvasAgg(figure)
+    figure.text(0, 0, text, fontsize=fontsize)
+    buffer = io.BytesIO()
+    try:
+        figure.savefig(buffer, format="png", bbox_inches="tight", pad_inches=0.02,
+                       transparent=True)
+    except Exception as exc:  # noqa: BLE001 -- any failure means "cannot be drawn"
+        message = str(exc).strip().splitlines()
+        return None, (message[-1] if message else type(exc).__name__)
+    return buffer.getvalue(), None
+
+
+class _AxisLabelsDialog(QDialog):
+    """Edit a 2D's two axis labels separately -- explicit user request:
+    "keep the name of the F2 axis but change F1".
+
+    Blank = the automatic label (which keeps following Plot Style's
+    label settings). Each axis shows a preview drawn by matplotlib
+    itself, so mathtext is seen as it will print, and OK is refused
+    while a label cannot be drawn."""
+
+    def __init__(self, parent, *, f2_text: str, f1_text: str, f2_auto: str, f1_auto: str,
+                 f1_enabled: bool = True) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Axis labels")
+        self.resize(560, 0)
+        self._auto = {"f2": f2_auto, "f1": f1_auto}
+        layout = QVBoxLayout(self)
+        self.edits, self.previews = {}, {}
+        for dim, title, text in (("f2", "F2 (horizontal axis)", f2_text),
+                                 ("f1", "F1 (vertical axis)", f1_text)):
+            layout.addWidget(QLabel(f"<b>{title}</b>"))
+            row = QHBoxLayout()
+            edit = QLineEdit("" if text == self._auto[dim] else text)
+            edit.setPlaceholderText("Automatic")
+            edit.setClearButtonEnabled(True)
+            copy_button = QPushButton("Start from automatic")
+            copy_button.setToolTip(
+                "Put the automatic label's own text in the box, to edit rather than retype.")
+            copy_button.clicked.connect(lambda _checked=False, e=edit, d=dim: e.setText(self._auto[d]))
+            row.addWidget(edit, 1)
+            row.addWidget(copy_button)
+            layout.addLayout(row)
+            preview = QLabel()
+            preview.setMinimumHeight(28)
+            preview.setWordWrap(True)
+            layout.addWidget(preview)
+            if dim == "f1" and not f1_enabled:
+                for widget in (edit, copy_button):
+                    widget.setEnabled(False)
+                edit.setPlaceholderText("A pseudo-2D's vertical axis is a slice number")
+            self.edits[dim], self.previews[dim] = edit, preview
+            edit.textChanged.connect(lambda _t, d=dim: self._refresh_preview(d))
+        hint = QLabel(
+            "Blank = automatic. Mathtext works, e.g. $\\delta$ $^{13}$C (ppm). "
+            "{nuc}, {mass}, {element} and {unit} are filled in for that axis. "
+            "A label without {unit} is used only in the unit it was typed in; "
+            "in another unit the axis shows its automatic label.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: palette(mid);")
+        # A wrapped QLabel reports a one-line height before the dialog
+        # is laid out, which clipped this to two lines.
+        hint.setMinimumHeight(hint.fontMetrics().lineSpacing() * 4 + 4)
+        layout.addWidget(hint)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                        | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self._errors = {}
+        for dim in ("f2", "f1"):
+            self._refresh_preview(dim)
+
+    def _refresh_preview(self, dim: str) -> None:
+        from PySide6.QtGui import QPixmap
+        text = self.edits[dim].text().strip() or self._auto[dim]
+        preview = self.previews[dim]
+        png, error = _render_label(text) if text else (None, None)
+        self._errors[dim] = error
+        if error:
+            preview.setPixmap(QPixmap())
+            preview.setText(f"<span style='color:#b00020'>Cannot be drawn: {error}</span>")
+        elif png:
+            pixmap = QPixmap()
+            pixmap.loadFromData(png, "PNG")
+            preview.setText("")
+            preview.setPixmap(pixmap)
+        ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok) if hasattr(self, "buttons") else None
+        if ok is not None:
+            ok.setEnabled(not any(self._errors.values()))
+
+    def f2_text(self) -> str:
+        return self.edits["f2"].text().strip() or self._auto["f2"]
+
+    def f1_text(self) -> str:
+        return self.edits["f1"].text().strip() or self._auto["f1"]
+
+
+def _rows_from_list_drag(mime, fmt: str) -> list[int]:
+    """Source rows of a QListWidget drag payload, in order, once each --
+    the same decoding as the Compare list's own drop target."""
+    from PySide6.QtCore import QDataStream, QIODevice
+    # Held in a name: QDataStream reads from the QByteArray without
+    # owning it, and a temporary would be freed underneath it.
+    payload = mime.data(fmt)
+    stream = QDataStream(payload, QIODevice.OpenModeFlag.ReadOnly)
+    rows: list[int] = []
+    while not stream.atEnd():
+        row, _column, n_roles = stream.readInt32(), stream.readInt32(), stream.readInt32()
+        for _ in range(n_roles):
+            stream.readInt32()
+            stream.readQVariant()
+        if row not in rows:
+            rows.append(row)
+    return rows
+
+
 class MplCanvas(QWidget):
     """A matplotlib figure + navigation toolbar (pan/zoom/save), ready
     to plot an :class:`NMRSpectrum` via :func:`show_spectrum`.
@@ -529,6 +784,22 @@ class MplCanvas(QWidget):
     #: one is the owner's job.
     viewSwitchRequested = Signal(str)
 
+    #: A row (or rows) of the Open experiments list was dropped on this
+    #: canvas while it shows a 2D contour -- ``(session_rows, target)``,
+    #: ``target`` being ``"f2"``/``"f1"`` when released over that
+    #: projection strip and ``"auto"`` over the contour itself (the
+    #: owner then picks the dimension from the nuclei). The canvas only
+    #: reports the drop: checking the nucleus and asking the user are
+    #: the owner's, which knows what the rows are.
+    externalProjectionDropped = Signal(list, str)
+
+    #: Qt's own payload type for a drag out of a QListWidget -- the
+    #: Open experiments list's.
+    _LIST_DRAG_MIME = "application/x-qabstractitemmodeldatalist"
+
+    #: Tint of a projection strip while a drop there would replace it.
+    _DROP_HIGHLIGHT_COLOUR = "#dbe8fb"
+
     #: Tag applied to every persistent integration-region axvspan (see
     #: :func:`set_regions`) so they can be found and cleared by gid on
     #: the next call, without needing to track a separate reference
@@ -650,6 +921,26 @@ class MplCanvas(QWidget):
         layout.addWidget(self._slice_bar)
 
         layout.addWidget(self.canvas)
+
+        # External projections: a 1D dropped onto a contour's
+        # projection strip (see externalProjectionDropped). Keyed by the
+        # 2D's id() with the 2D itself kept alongside, so switching to
+        # another spectrum and back finds them again, and a recycled
+        # id can never hand one 2D's projections to another.
+        self._external_projections: dict[int, dict] = {}
+        # Each projection strip's own look (right-click the strip):
+        # color/linewidth/linestyle/size/visible, as
+        # plotting.twod.projection_line_kwargs takes it. Per canvas,
+        # like the rest of Plot Style -- it carries over to the next 2D.
+        self._projection_style: dict[str, dict] = {"f1": {}, "f2": {}}
+        # Per-2D axis-label overrides, {"f2"/"f1": {"text", "unit"}} --
+        # per spectrum, since a label says what *that* spectrum's axis
+        # is. Same keying as _external_projections.
+        self._axis_label_overrides: dict[int, dict] = {}
+        self._last_right_click_axes = None
+        self._drop_highlight = None  # (Axes, previous facecolor) while hovering a strip
+        self.canvas.setAcceptDrops(True)
+        self.canvas.installEventFilter(self)
 
         self._pan_start = None  # (x_pixel, y_pixel, xlim, ylim) while dragging
         # The view a fresh plot drew, {Axes: (xlim, ylim)} -- what Home
@@ -915,6 +1206,9 @@ class MplCanvas(QWidget):
         #: The 2D overlay's own spectra and labels, kept for the same
         #: reason.
         self._overlay_spectra: list = []
+        self._overlay_kwargs: dict = {}
+        self._panel_axes: list = []
+        self._panel_home_limits: list = []
         self._overlay_labels: list | None = None
         # The DOSY map currently shown (processing.ilt.dosy_map's own
         # output) and its contour floor, mirroring _contour_spectrum/
@@ -1750,6 +2044,379 @@ class MplCanvas(QWidget):
         see :meth:`set_nq_line`."""
         return {"show_nQ_line": self._show_nq_line, "nQ": self._nq_values}
 
+    # -- external projections -------------------------------------------
+
+    def external_projection(self, dimension: str):
+        """The 1D shown as the current contour's ``"f1"``/``"f2"``
+        projection, as ``{"spectrum", "label"}``, or ``None`` when that
+        strip shows the projection computed from the 2D itself."""
+        entry = self._external_projection_entry()
+        return None if entry is None else entry.get(dimension)
+
+    def external_projections_for(self, spectrum) -> dict:
+        """``{"f1"/"f2": {"spectrum", "label"}}`` set on the 2D
+        ``spectrum``, whether or not it is the one shown right now."""
+        entry = self._external_projections.get(id(spectrum))
+        if entry is None or entry["owner"] is not spectrum:
+            return {}
+        return {d: entry[d] for d in ("f2", "f1") if d in entry}
+
+    def _external_projection_entry(self, create: bool = False):
+        return self._per_2d_entry(self._external_projections, create)
+
+    def _per_2d_entry(self, store: dict, create: bool = False, spectrum=None):
+        """The current (or given) 2D's entry in a per-2D ``store`` --
+        keyed by ``id()``, with the 2D itself kept as ``"owner"`` so a
+        recycled id can never hand one 2D's settings to another."""
+        spectrum = self._contour_spectrum if spectrum is None else spectrum
+        if spectrum is None:
+            return None
+        entry = store.get(id(spectrum))
+        if entry is not None and entry["owner"] is not spectrum:
+            entry = None
+            del store[id(spectrum)]
+        if entry is None and create:
+            entry = store[id(spectrum)] = {"owner": spectrum}
+        return entry
+
+    def set_external_projection(self, dimension: str, spectrum: NMRSpectrum,
+                                label: str | None = None) -> None:
+        """Draw the 1D ``spectrum`` as the current contour's
+        ``dimension`` (``"f2"`` top, ``"f1"`` left) projection, in
+        place of the one computed from the 2D, until cleared.
+
+        The caller is responsible for having checked that it belongs
+        there (:func:`opennmr.notebook.check_external_projection`);
+        this only refuses what cannot be drawn at all. The 1D is held
+        by reference, so reprocessing it (phase, baseline) shows up at
+        the next redraw of the contour."""
+        if dimension not in ("f1", "f2"):
+            raise ValueError("dimension must be 'f1' or 'f2'")
+        if self._contour_spectrum is None:
+            raise ValueError("No 2D contour is shown.")
+        if spectrum is None or spectrum.ndim != 1:
+            raise ValueError("An external projection must be a 1D spectrum.")
+        if dimension == "f1" and self._contour_spectrum.is_pseudo_2d:
+            raise ValueError("A pseudo-2D's F1 axis is a slice number, not a shift.")
+        entry = self._external_projection_entry(create=True)
+        entry[dimension] = {"spectrum": spectrum, "label": label or _spectrum_label(spectrum)}
+        # A strip the user had hidden comes back: dropping onto it is
+        # asking to see the 1D there.
+        self._projection_style[dimension].pop("visible", None)
+        self._redraw_contour(preserve_view=True, fresh_projections=(dimension,))
+
+    def clear_external_projection(self, dimension: str | None = None) -> None:
+        """Go back to the computed projection on ``dimension``, or on
+        both strips when ``dimension`` is ``None``."""
+        entry = self._external_projection_entry()
+        if entry is None:
+            return
+        dims = ("f1", "f2") if dimension is None else (dimension,)
+        changed = tuple(d for d in dims if entry.pop(d, None) is not None)
+        if changed and self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=True, fresh_projections=changed)
+
+    def prune_external_projections(self, alive) -> None:
+        """Forget external projections belonging to, or made from, a
+        spectrum no longer in ``alive`` (the session's spectra) -- after
+        a row is removed from Open experiments. Redraws if the current
+        contour lost one."""
+        alive_ids = {id(s) for s in alive}
+        current_changed = False
+        for key in list(self._external_projections):
+            entry = self._external_projections[key]
+            if id(entry["owner"]) not in alive_ids:
+                del self._external_projections[key]
+                continue
+            for dim in ("f1", "f2"):
+                held = entry.get(dim)
+                if held is not None and id(held["spectrum"]) not in alive_ids:
+                    del entry[dim]
+                    current_changed |= entry["owner"] is self._contour_spectrum
+        for key in list(self._axis_label_overrides):
+            if id(self._axis_label_overrides[key]["owner"]) not in alive_ids:
+                del self._axis_label_overrides[key]
+        if current_changed and self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=True, fresh_projections=("f1", "f2"))
+
+    def _external_projection_kwargs(self) -> dict:
+        """``f1_external``/``f2_external`` for
+        :func:`opennmr.plotting.plot_2d_contour`, both call sites, in
+        the contour's *displayed* unit.
+
+        Converted through the 2D's own axis (every unit here is linear
+        in ppm), not the 1D's Hz axis: a 1D recorded at another field
+        has a different Hz axis for the same shifts, and only the ppm
+        values are comparable between the two."""
+        entry = self._external_projection_entry()
+        if not entry:
+            return {}
+        kwargs = {}
+        for dim, axis_index in (("f2", 1), ("f1", 0)):
+            held = entry.get(dim)
+            if held is None:
+                continue
+            spectrum = held["spectrum"]
+            if self._axis_unit == "ppm":
+                kwargs[f"{dim}_external"] = spectrum
+                continue
+            axis = self._contour_spectrum.axes[axis_index]
+            values = self._axis_values_in_unit(axis, self._axis_unit)
+            if values is None or axis.ppm is None or len(axis.ppm) < 2:
+                continue  # not expressible in this unit: the computed one stays
+            slope, intercept = np.polyfit(np.asarray(axis.ppm, float), np.asarray(values, float), 1)
+            kwargs[f"{dim}_external"] = (slope * np.asarray(spectrum.axes[0].ppm, float) + intercept,
+                                         spectrum.data)
+        return kwargs
+
+    def projection_drop_target(self, pos) -> str | None:
+        """Where a drop at widget position ``pos`` (a ``QPointF``) would
+        land: ``"f2"``/``"f1"`` over that projection strip, ``"auto"``
+        anywhere else on a contour, ``None`` when no contour is shown
+        (nothing to drop onto)."""
+        if self._contour_spectrum is None:
+            return None
+        x, y = self.canvas.mouseEventCoords(pos)
+        for dim in ("f2", "f1"):
+            ax = self._proj_axes.get(dim)
+            if ax is not None and ax.bbox.contains(x, y):
+                return dim
+        return "auto"
+
+    def _set_drop_highlight(self, target) -> None:
+        ax = self._proj_axes.get(target) if target in ("f1", "f2") else None
+        if self._drop_highlight is not None and self._drop_highlight[0] is ax:
+            return
+        if self._drop_highlight is not None:
+            old_ax, old_colour = self._drop_highlight
+            old_ax.set_facecolor(old_colour)
+            self._drop_highlight = None
+        if ax is not None:
+            self._drop_highlight = (ax, ax.get_facecolor())
+            ax.set_facecolor(self._DROP_HIGHLIGHT_COLOUR)
+        self.canvas.draw_idle()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 -- Qt override
+        """Drags from the Open experiments list onto the plot. Anything
+        else -- files from the desktop in particular -- is left alone
+        (``return False`` with the event ignored), so it carries on up
+        to the main window's own folder drop."""
+        if obj is not self.canvas:
+            return super().eventFilter(obj, event)
+        kind = event.type()
+        if kind not in (QEvent.Type.DragEnter, QEvent.Type.DragMove,
+                        QEvent.Type.DragLeave, QEvent.Type.Drop):
+            return False
+        if kind == QEvent.Type.DragLeave:
+            self._set_drop_highlight(None)
+            return False
+        if not event.mimeData().hasFormat(self._LIST_DRAG_MIME):
+            event.ignore()
+            return False
+        target = self.projection_drop_target(event.position())
+        if target is None:
+            event.ignore()
+            return True
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        if kind == QEvent.Type.Drop:
+            self._set_drop_highlight(None)
+            rows = _rows_from_list_drag(event.mimeData(), self._LIST_DRAG_MIME)
+            if rows:
+                # Deferred: the owner may ask a question, and a modal
+                # dialog opened inside Qt's drag loop is unreliable
+                # (Windows in particular leaves the drag cursor stuck).
+                QTimer.singleShot(0, lambda: self.externalProjectionDropped.emit(rows, target))
+        else:
+            self._set_drop_highlight(target)
+        return True
+
+    # -- projection strip style ----------------------------------------
+
+    #: Line styles offered for a projection strip, (label, matplotlib).
+    PROJECTION_LINESTYLES = (("Solid", "-"), ("Dashed", "--"), ("Dotted", ":"), ("Dash-dot", "-."))
+
+    def projection_style(self, dimension: str) -> dict:
+        """A copy of the ``"f1"``/``"f2"`` strip's own style settings
+        (only what has been changed from the defaults)."""
+        return dict(self._projection_style[dimension])
+
+    def set_projection_style(self, dimension: str, **style) -> None:
+        """Change one projection strip's look -- any of ``color``,
+        ``linewidth``, ``linestyle``, ``size`` (inches), ``visible``.
+        ``None`` puts that setting back to its default. Redraws a
+        contour on screen, keeping the zoom."""
+        if dimension not in ("f1", "f2"):
+            raise ValueError("dimension must be 'f1' or 'f2'")
+        from ...plotting.twod import PROJECTION_STYLE_KEYS
+        unknown = set(style) - set(PROJECTION_STYLE_KEYS)
+        if unknown:
+            raise ValueError(f"Unknown projection style key(s): {sorted(unknown)}")
+        current = self._projection_style[dimension]
+        for key, value in style.items():
+            if value is None:
+                current.pop(key, None)
+            else:
+                current[key] = value
+        if current.get("visible") is True:
+            current.pop("visible")  # shown is the default: keep the dict minimal
+        if self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=True)
+
+    def reset_projection_style(self, dimension: str | None = None) -> None:
+        for dim in (("f1", "f2") if dimension is None else (dimension,)):
+            self._projection_style[dim] = {}
+        if self._contour_spectrum is not None:
+            self._redraw_contour(preserve_view=True)
+
+    def _projection_style_kwargs(self) -> dict:
+        style = {d: dict(v) for d, v in self._projection_style.items() if v}
+        return {"projection_style": style} if style else {}
+
+    def _projection_default_colour(self, dimension: str) -> str:
+        """What the strip is drawn in when no colour is set: crimson
+        for an external 1D, black for the computed projection -- the
+        style dialog shows this rather than a blank swatch."""
+        return "crimson" if self.external_projection(dimension) is not None else "black"
+
+    def _projection_dimension_of(self, ax) -> str | None:
+        for dim in ("f2", "f1"):
+            if ax is not None and ax is self._proj_axes.get(dim):
+                return dim
+        return None
+
+    def _prompt_projection_style(self, dimension: str) -> None:
+        """The right-click "Projection Style…" dialog for one strip.
+        Changes show live; Cancel puts back what was there before."""
+        before = {d: dict(v) for d, v in self._projection_style.items()}
+        dialog = _ProjectionStyleDialog(
+            self, dimension, self._projection_style[dimension],
+            default_colour=self._projection_default_colour(dimension))
+
+        def preview() -> None:
+            style = dialog.style()
+            dims = ("f1", "f2") if dialog.apply_to_both() else (dimension,)
+            for dim in ("f1", "f2"):
+                self._projection_style[dim] = dict(style if dim in dims else before[dim])
+            if self._contour_spectrum is not None:
+                self._redraw_contour(preserve_view=True)
+
+        dialog.changed.connect(preview)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._projection_style = before
+            if self._contour_spectrum is not None:
+                self._redraw_contour(preserve_view=True)
+            return
+        preview()
+
+    # -- per-axis labels on a 2D -----------------------------------------
+
+    _UNIT_TEXT = {"ppm": "ppm", "hz": "Hz", "khz": "kHz", "mm": "mm"}
+
+    def axis_label_override(self, dimension: str, spectrum=None):
+        """The label typed for the current (or given) 2D's
+        ``"f2"``/``"f1"`` axis, as ``{"text", "unit"}``, or ``None``
+        when that axis uses the automatic label."""
+        entry = self._per_2d_entry(self._axis_label_overrides, spectrum=spectrum)
+        return None if entry is None else entry.get(dimension)
+
+    def set_axis_label_override(self, dimension: str, text: str | None) -> None:
+        """Label the current 2D's ``"f2"`` (horizontal) or ``"f1"``
+        (vertical) axis with ``text`` instead of the automatic label;
+        blank or ``None`` goes back to automatic. The other axis is not
+        touched.
+
+        ``{nuc}``, ``{mass}``, ``{element}`` and ``{unit}`` are filled
+        in for *that* axis (so ``"δ {nuc} / {unit}"`` stays right
+        through a unit change). Everything else is kept exactly as
+        typed, braces included, so mathtext like ``$^{13}$C`` works.
+
+        A label with no ``{unit}`` is tied to the unit it was typed in:
+        switching the axis to Hz (say) shows the automatic Hz label
+        rather than a label still saying "ppm", and switching back
+        brings the typed one back."""
+        if dimension not in ("f1", "f2"):
+            raise ValueError("dimension must be 'f1' or 'f2'")
+        if self._contour_spectrum is None:
+            raise ValueError("No 2D contour is shown.")
+        text = (text or "").strip()
+        if text:
+            _png, error = _render_label(text)
+            if error:
+                raise ValueError(f"This label cannot be drawn: {error}")
+        entry = self._per_2d_entry(self._axis_label_overrides, create=True)
+        if text:
+            entry[dimension] = {"text": text, "unit": self._axis_unit}
+        else:
+            entry.pop(dimension, None)
+        # A full rebuild rather than set_xlabel: the extracted-slice
+        # panel carries its own copy of the axis label, and a longer
+        # label needs the layout pass a rebuild ends with.
+        self._redraw_contour(preserve_view=True)
+
+    def _axis_nucleus(self, spectrum, dimension: str) -> str | None:
+        meta = spectrum.metadata
+        if dimension == "f2":
+            raw, sfo1 = meta.nucleus, meta.sfo1
+        else:
+            raw = meta.nucleus_indirect or (meta.nucleus if meta.homonuclear else None)
+            sfo1 = meta.sfo1_indirect if meta.nucleus_indirect else meta.sfo1
+        try:
+            return find_gamma(raw, SFO1=sfo1)["Nuclide"]
+        except Exception:
+            return raw
+
+    def _apply_axis_label_override(self, spectrum, dimension: str, automatic):
+        """``automatic`` unless this 2D's ``dimension`` has a typed
+        label that applies in the current unit -- see
+        :meth:`set_axis_label_override`."""
+        held = self.axis_label_override(dimension, spectrum=spectrum)
+        if held is None:
+            return automatic
+        text = held["text"]
+        if "{unit}" not in text and held["unit"] != self._axis_unit:
+            return automatic
+        nuc = self._axis_nucleus(spectrum, dimension) or "?"
+        element = nuc.strip("0123456789")
+        mass = nuc[:len(nuc) - len(element)]
+        for key, value in (("{nuc}", nuc), ("{mass}", mass), ("{element}", element),
+                           ("{unit}", self._UNIT_TEXT.get(self._axis_unit, self._axis_unit))):
+            text = text.replace(key, value)
+        return text
+
+    def _automatic_axis_labels(self):
+        """``(f2_label, f1_label)`` the contour gets with no typed
+        labels -- what the label dialog offers to go back to."""
+        spectrum = self._contour_spectrum
+        entry = self._axis_label_overrides.pop(id(spectrum), None)
+        try:
+            _spec, xlabel, ylabel = self._contour_for_display()
+        finally:
+            if entry is not None:
+                self._axis_label_overrides[id(spectrum)] = entry
+        return xlabel, ylabel
+
+    def _prompt_axis_labels(self) -> None:
+        """Right-click "Edit Axis Labels (F2 / F1)…": each axis on its
+        own line, pre-filled with what it shows now."""
+        spectrum = self._contour_spectrum
+        if spectrum is None:
+            return
+        auto_x, auto_y = self._automatic_axis_labels()
+        _spec, current_x, current_y = self._contour_for_display()
+        dialog = _AxisLabelsDialog(
+            self, f2_text=current_x or "", f1_text=current_y or "",
+            f2_auto=auto_x or "", f1_auto=auto_y or "",
+            f1_enabled=not spectrum.is_pseudo_2d)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        for dim, typed, auto in (("f2", dialog.f2_text(), auto_x), ("f1", dialog.f1_text(), auto_y)):
+            if dim == "f1" and spectrum.is_pseudo_2d:
+                continue
+            # Unchanged from the automatic label = no override, so it
+            # keeps following the Plot Style label settings.
+            self.set_axis_label_override(dim, None if typed == (auto or "") else typed)
+
     def _slice_panel_kwargs(self) -> dict:
         """``slices`` override for
         :func:`opennmr.plotting.plot_2d_contour`, both call sites --
@@ -1993,6 +2660,12 @@ class MplCanvas(QWidget):
         self._compare_kwargs = None
         self._overlay_spectra = []
         self._overlay_labels = None
+        self._overlay_kwargs = {}
+        # Side-by-side 2D panels (Compare): their Axes and the limits
+        # each was drawn at, which is how a zoom is recognised for
+        # "Add inset from zoom".
+        self._panel_axes = []
+        self._panel_home_limits = []
         # A DOSY's own state describes Axes about to be destroyed. The
         # redraw path re-sets it immediately afterwards; every other
         # view leaves it cleared, which is what makes "is this a DOSY?"
@@ -2099,7 +2772,11 @@ class MplCanvas(QWidget):
         y_values = display_spectrum.axes[0].ppm
         return xlims, (float(np.min(y_values)), float(np.max(y_values)))
 
-    def _redraw_contour(self, preserve_view: bool) -> None:
+    def _redraw_contour(self, preserve_view: bool, fresh_projections=()) -> None:
+        """Rebuild the contour. ``fresh_projections``: strips (``"f1"``/
+        ``"f2"``) whose intensity zoom is *not* carried over, because
+        what they show has just changed (an external projection added
+        or removed) -- the old zoom belonged to the old trace."""
         xlim, ylim = (self.ax.get_xlim(), self.ax.get_ylim()) if preserve_view else (None, None)
         # The projection strips are their own Axes with their own
         # intensity zoom, and a rebuild threw it away -- so scrolling the
@@ -2107,6 +2784,9 @@ class MplCanvas(QWidget):
         # projections at the same time. Real user report: "the 2D
         # projections shouldn't reset when I scale the contours".
         projection_limits = self._projection_intensity_limits() if preserve_view else {}
+        for dim in fresh_projections:
+            projection_limits.pop(dim, None)
+        self._drop_highlight = None  # its Axes is about to go
         self._clear_figure()
         # _clear_figure resets this; a contour rebuild is still a
         # contour, so it opts straight back in rather than waiting
@@ -2128,6 +2808,7 @@ class MplCanvas(QWidget):
             xlims=xlims, ylims=ylims,
             **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
             **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
+            **self._external_projection_kwargs(), **self._projection_style_kwargs(),
         )
         self._apply_current_axis_style()
         if preserve_view:
@@ -2201,6 +2882,12 @@ class MplCanvas(QWidget):
         # missing the attribute entirely (some existing tests' own
         # minimal doubles, built before this needed to handle the
         # non-fit-mode case too) must not raise AttributeError here.
+        if event.button == 3:
+            # Which Axes the right-click landed in, for the context menu
+            # (a projection strip gets its own style entry). Reset on
+            # every right-click, so a click outside every Axes never
+            # inherits the previous one's.
+            self._last_right_click_axes = getattr(event, "inaxes", None)
         if event.button == 3 and getattr(event, "xdata", None) is not None:
             # Captured here (a real matplotlib event, with xdata/ydata
             # already correctly computed) rather than re-derived from
@@ -2432,6 +3119,24 @@ class MplCanvas(QWidget):
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
 
+        # Right-clicked on a projection strip: its own style first --
+        # what the click was aimed at. Explicit user request: "control
+        # the plot style of the projections by right clicking the
+        # projection specifically".
+        strip = (self._projection_dimension_of(self._last_right_click_axes)
+                 if self._contour_spectrum is not None else None)
+        if strip is not None:
+            name = "F2 (top)" if strip == "f2" else "F1 (left)"
+            strip_action = menu.addAction(f"{name} Projection Style…")
+            strip_action.setToolTip(
+                "Colour, line width and style, size, or hide this projection.")
+            strip_action.triggered.connect(
+                lambda _checked=False, d=strip: self._prompt_projection_style(d))
+            hide_action = menu.addAction(f"Hide {name} Projection")
+            hide_action.triggered.connect(
+                lambda _checked=False, d=strip: self.set_projection_style(d, visible=False))
+            menu.addSeparator()
+
         style_action = menu.addAction("Plot Style…")
         style_action.setToolTip("Line width, fonts, ticks, colours and export settings for this plot.")
         style_action.triggered.connect(self.plotStyleRequested.emit)
@@ -2530,6 +3235,25 @@ class MplCanvas(QWidget):
                 clear_slices_action = menu.addAction(
                     f"Clear Extracted Slices ({len(self._contour_slices)})"
                 )
+            labels_action = menu.addAction("Edit Axis Labels (F2 / F1)…")
+            labels_action.setToolTip(
+                "Type your own label for either axis; the other keeps its own.")
+            labels_action.triggered.connect(self._prompt_axis_labels)
+            for dim in ("f2", "f1"):
+                if self._projection_style[dim].get("visible") is False:
+                    show_action = menu.addAction(f"Show {dim.upper()} Projection")
+                    show_action.triggered.connect(
+                        lambda _checked=False, d=dim: self.set_projection_style(d, visible=None))
+            for dim in ("f2", "f1"):
+                held = self.external_projection(dim)
+                if held is None:
+                    continue
+                remove_action = menu.addAction(
+                    f"Remove External {dim.upper()} Projection ({held['label']})")
+                remove_action.setToolTip(
+                    "Go back to the projection computed from the 2D itself.")
+                remove_action.triggered.connect(
+                    lambda _checked=False, d=dim: self.clear_external_projection(d))
 
         show_contour_action = None
         keep_slice_action = None
@@ -2921,7 +3645,7 @@ class MplCanvas(QWidget):
         if view == "dosy_overlay":
             self._draw_dosy(preserve_view=True)
         elif view == "overlay_2d":
-            self.show_2d_overlay(self._overlay_spectra, self._overlay_labels)
+            self.show_2d_overlay(self._overlay_spectra, self._overlay_labels, **self._overlay_kwargs)
         elif view == "slices":
             self._redraw_contour(preserve_view=True)
         elif view == "compare":
@@ -3581,7 +4305,7 @@ class MplCanvas(QWidget):
                 ylabel = self._chemical_shift_label(indirect, x_unit="ppm")
             else:
                 ylabel = None  # plot_2d_contour's own 'Slice number' default
-            return spectrum, xlabel, ylabel
+            return spectrum, *self._labels_with_overrides(spectrum, xlabel, ylabel)
         converted = copy.copy(spectrum)
         converted.axes = list(spectrum.axes)
         label = self._unit_axis_label(self._axis_unit)
@@ -3597,7 +4321,13 @@ class MplCanvas(QWidget):
                 xlabel = label
             else:
                 ylabel = label
-        return converted, xlabel, ylabel
+        return converted, *self._labels_with_overrides(spectrum, xlabel, ylabel)
+
+    def _labels_with_overrides(self, spectrum, xlabel, ylabel):
+        xlabel = self._apply_axis_label_override(spectrum, "f2", xlabel)
+        if not spectrum.is_pseudo_2d:
+            ylabel = self._apply_axis_label_override(spectrum, "f1", ylabel)
+        return xlabel, ylabel
 
     def _contour_unit_available(self, unit: str) -> bool:
         """Whether the current contour can be shown in ``unit`` at all
@@ -4001,6 +4731,7 @@ class MplCanvas(QWidget):
                 xlims=xlims, ylims=ylims,
                 **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
                 **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
+                **self._external_projection_kwargs(), **self._projection_style_kwargs(),
             )
             self._apply_current_axis_style()
         else:
@@ -4526,7 +5257,8 @@ class MplCanvas(QWidget):
                            edgecolor="none", alpha=1.0),
             )
 
-    def show_2d_overlay(self, spectra: list[NMRSpectrum], labels: list[str] | None = None) -> None:
+    def show_2d_overlay(self, spectra: list[NMRSpectrum], labels: list[str] | None = None,
+                        insets=None, factor: float | None = None, clevels: int | None = None) -> None:
         """Overlay 2-3 2D/pseudo-2D spectra as flat-colour line contours
         on one set of axes -- real roadmap ask: "a way to overlay
         multiple 2D contours." Thin wrapper around
@@ -4546,6 +5278,9 @@ class MplCanvas(QWidget):
         self.clear()  # already leaves self.ax as a fresh, single subplot
         self._overlay_spectra = list(spectra)
         self._overlay_labels = list(labels) if labels is not None else None
+        self._overlay_kwargs = {"insets": insets, "factor": factor, "clevels": clevels}
+        levels = {"factor": factor or self._CONTOUR_FACTOR_DEFAULT,
+                  "clevels": clevels or self._CONTOUR_CLEVELS_DEFAULT}
         entries = self._assign_series("overlay_2d", [
             (str(i), (labels[i] if labels and i < len(labels) else f"Spectrum {i + 1}"), True)
             for i in range(len(spectra))
@@ -4553,8 +5288,9 @@ class MplCanvas(QWidget):
         plotting.overlay_plot(
             spectra, ax=self.ax, fig=self.figure,
             labels=[entry.label for entry in entries] if labels is not None else None,
-            colours=[entry.colour for entry in entries],
-            **self._contour_fraction_kwargs())
+            colours=[entry.colour for entry in entries], insets=insets,
+            fontsize=self._AXIS_LABELSIZE, contour_linewidth=self._contour_linewidth,
+            **levels, **self._contour_fraction_kwargs())
         if labels is not None:
             self.ax.legend(**self._legend_kwargs())
             self._legend_visible = True
@@ -4563,7 +5299,86 @@ class MplCanvas(QWidget):
         # exactly what it is for (2D overlay).
         self._crosshair_ready = True
         self._apply_layout()
+        self._panel_axes = [self.ax]
+        self._panel_home_limits = [(self.ax.get_xlim(), self.ax.get_ylim())]
         self.canvas.draw_idle()
+
+    def show_2d_panels(self, spectra: list[NMRSpectrum], labels: list[str] | None = None,
+                       layout: str = "row", projections: bool = False, link_axes: bool = False,
+                       insets=None, factor: float | None = None, clevels: int | None = None) -> None:
+        """2D spectra side by side -- one contour panel each, in a row,
+        column or grid (:func:`opennmr.plotting.twod.multi_plot`, the
+        GUI's port of the notebook's ``NMR2D_multi_plot``).
+
+        ``insets`` : a list per panel (``None``/``[]`` for none) of
+        :func:`opennmr.plotting.twod.draw_insets` specs.
+        ``link_axes`` : every panel starts on the range they all span
+        and zooming one zooms them all. Done with limit callbacks, not
+        matplotlib's ``sharex``: each panel inverts its own axes, and
+        inverting a shared axis once per panel flips it back and forth.
+        """
+        self.clear()
+        self._clear_figure()
+        n = len(spectra)
+        insets = list(insets) if insets is not None else [None] * n
+        levels = {"factor": factor or self._CONTOUR_FACTOR_DEFAULT,
+                  "clevels": clevels or self._CONTOUR_CLEVELS_DEFAULT}
+        panel_kwargs = [{"insets": insets[i] or None} for i in range(n)]
+        _fig, axes = plotting.multi_plot(
+            spectra, layout=layout, fig=self.figure, titles=labels, panel_kwargs=panel_kwargs,
+            show_projections=projections, square_aspect=True,
+            fontsize=self._AXIS_LABELSIZE, tick_length=self._TICK_LENGTH,
+            tick_width=self._TICK_WIDTH, contour_linewidth=self._contour_linewidth,
+            **levels, **self._contour_fraction_kwargs(), **self._nq_line_kwargs())
+        self.ax = axes[0]
+        if link_axes and n > 1:
+            xs = [lim for ax in axes for lim in ax.get_xlim()]
+            same_f1 = len({bool(sp.is_pseudo_2d) for sp in spectra}) == 1
+            for ax in axes:
+                ax.set_xlim(max(xs), min(xs))
+            if same_f1:
+                ys = [lim for ax in axes for lim in ax.get_ylim()]
+                pseudo = spectra[0].is_pseudo_2d
+                for ax in axes:
+                    ax.set_ylim((min(ys), max(ys)) if pseudo else (max(ys), min(ys)))
+            self._link_panel_limits(axes, link_y=same_f1)
+        self._panel_axes = list(axes)
+        self._panel_home_limits = [(ax.get_xlim(), ax.get_ylim()) for ax in axes]
+        self._crosshair_ready = False
+        self._apply_layout()
+        self.canvas.draw_idle()
+
+    @staticmethod
+    def _link_panel_limits(axes, link_y: bool) -> None:
+        """Zoom/pan on one panel applies to all (see show_2d_panels)."""
+        busy = {"on": False}
+
+        def _follow(source, which):
+            if busy["on"]:
+                return
+            busy["on"] = True
+            try:
+                limits = source.get_xlim() if which == "x" else source.get_ylim()
+                for other in axes:
+                    if other is not source:
+                        (other.set_xlim if which == "x" else other.set_ylim)(limits)
+            finally:
+                busy["on"] = False
+
+        for ax in axes:
+            ax.callbacks.connect("xlim_changed", lambda a: _follow(a, "x"))
+            if link_y:
+                ax.callbacks.connect("ylim_changed", lambda a: _follow(a, "y"))
+
+    def zoomed_2d_region(self):
+        """``(panel, xlims, ylims)`` of the 2D overlay/panel the user has
+        zoomed into (0-based panel), or ``None`` if none is zoomed. With
+        linked panels every panel moves together; the first is reported."""
+        for i, (ax, (x0, y0)) in enumerate(zip(self._panel_axes, self._panel_home_limits)):
+            x, y = ax.get_xlim(), ax.get_ylim()
+            if not (np.allclose(x, x0) and np.allclose(y, y0)):
+                return i, tuple(float(v) for v in x), tuple(float(v) for v in y)
+        return None
 
     def show_1d_heatmap(self, spectra: list[NMRSpectrum], normalize: bool = True,
                         row_labels: list[str] | None = None,

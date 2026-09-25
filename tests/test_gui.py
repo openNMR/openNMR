@@ -4550,20 +4550,23 @@ def test_main_window_compare_2d_overlay_rejects_incompatible_spectra(qapp, tmp_p
     assert "nuclide" in window.compare_status_label.text().lower()
 
 
-def test_main_window_compare_2d_overlay_only_applies_to_2_or_3_spectra(qapp, tmp_path):
-    # 4 (compatible) 2D spectra selected together falls through to the
-    # existing 1D-only logic (which reports them all as "not 1D")
-    # rather than attempting an overlay outside overlay_plot's own
-    # documented 2-3-spectra range.
+def test_main_window_compare_2d_overlay_takes_up_to_six_spectra(qapp, tmp_path):
+    # The limit was 2-3 (the notebook's own); raised to 6 on explicit
+    # request. Past that, the spectra are shown side by side, and the
+    # status line says why, rather than nothing being drawn.
     window = MainWindow()
-    for name in ("a2d", "b2d", "c2d", "d2d"):
+    names = [f"s{i}" for i in range(7)]
+    for name in names:
         window._load(_make_2d_dataset(tmp_path, name=name), vendor="bruker")
         window.process_indirect_button.setChecked(True)
 
     _select_rows(window, [0, 1, 2, 3])
+    assert "Overlaying 4 2D spectra" in window.compare_status_label.text()
 
-    assert "not 1D" in window.compare_status_label.text()
-    assert "Select at least two" in window.compare_status_label.text()
+    _select_rows(window, list(range(7)))
+    text = window.compare_status_label.text()
+    assert "Can't overlay" in text and "side by side" in text
+    assert len(window.compare_canvas._panel_axes) == 7
 
 
 def test_main_window_compare_superimposed_layout_runs(qapp, tmp_path):

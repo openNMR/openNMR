@@ -439,6 +439,179 @@ def _prepare_2d_contour(dataset, contour_fraction_x=0.25, contour_fraction_y=0.2
     return contour_x, contour_y, contour_spectrum, thresvec, y_axis
 
 
+#: Spelled-out nucleus names some vendors record instead of "13C"-style
+#: labels (JEOL headers, older Varian ``tn`` values).
+_NUCLEUS_ALIASES = {
+    "proton": "1H", "hydrogen": "1H", "deuterium": "2H", "deuteron": "2H",
+    "carbon": "13C", "carbon13": "13C", "nitrogen": "15N", "nitrogen15": "15N",
+    "fluorine": "19F", "fluorine19": "19F", "phosphorus": "31P", "phosphorus31": "31P",
+    "silicon": "29Si", "silicon29": "29Si",
+}
+
+
+def canonical_nucleus(name):
+    """
+    ``"13C"``-style label for a nucleus as any vendor spells it, or
+    ``None`` if ``name`` is missing or unreadable.
+
+    Accepts ``"13C"``, ``"C13"``, ``"<13C>"``, ``" 1h "``, ``"Proton"``,
+    ``"Carbon13"`` ... so two datasets can be compared on the nucleus
+    they actually observed rather than on how their files spell it.
+    ``"off"``/``"none"`` (an unused Bruker channel) give ``None``.
+    """
+    import re
+
+    if name is None:
+        return None
+    text = str(name).strip().strip("<>").strip()
+    if not text or text.lower() in ("off", "none", "unknown", "nan"):
+        return None
+    key = re.sub(r"[^a-z0-9]", "", text.lower())
+    if key in _NUCLEUS_ALIASES:
+        return _NUCLEUS_ALIASES[key]
+    match = (re.fullmatch(r"(\d+)\s*-?\s*([A-Za-z]{1,2})", text)
+             or re.fullmatch(r"([A-Za-z]{1,2})\s*-?\s*(\d+)", text))
+    if not match:
+        return None
+    a, b = match.groups()
+    mass, symbol = (a, b) if a.isdigit() else (b, a)
+    return f"{int(mass)}{symbol.capitalize()}"
+
+
+def _projection_axis_info(dataset, dimension):
+    """``(nucleus, ppm_axis, pseudo_2d)`` for one dimension of a 2D --
+    an :class:`~opennmr.core.spectrum.NMRSpectrum` or an
+    :func:`NMR2dimport` dict. ``dimension`` is ``"f2"`` (direct) or
+    ``"f1"`` (indirect)."""
+    if dimension not in ("f1", "f2"):
+        raise ValueError("dimension must be 'f1' or 'f2'")
+    if isinstance(dataset, dict):
+        homonuclear = bool(dataset.get("homonuclear"))
+        pseudo = bool(dataset.get("pseudo_2d"))
+        if dimension == "f2":
+            return dataset.get("NUC1"), np.asarray(dataset["x_ppm"]), pseudo
+        nucleus = dataset.get("NUC1") if homonuclear else dataset.get("NUC2")
+        return nucleus, (None if pseudo else np.asarray(dataset["y_ppm"])), pseudo
+    meta = dataset.metadata
+    pseudo = bool(dataset.is_pseudo_2d)
+    if dimension == "f2":
+        return meta.nucleus, dataset.axes[1].ppm, pseudo
+    nucleus = meta.nucleus_indirect or (meta.nucleus if meta.homonuclear else None)
+    return nucleus, (None if pseudo else dataset.axes[0].ppm), pseudo
+
+
+def _projection_trace_info(projection):
+    """``(nucleus, x_ppm)`` for a would-be external projection -- an
+    :class:`NMRSpectrum` (1D), an :func:`NMR1dimport` dict, or a plain
+    ``(x_ppm, intensity)`` pair (nucleus unknown)."""
+    if isinstance(projection, dict):
+        return projection.get("nuclide"), np.asarray(projection["x_ppm"])
+    if isinstance(projection, (tuple, list)) and len(projection) == 2:
+        return None, np.asarray(projection[0])
+    if getattr(projection, "ndim", None) != 1:
+        raise ValueError("An external projection must be a 1D spectrum.")
+    return projection.metadata.nucleus, projection.axes[0].ppm
+
+
+def check_external_projection(dataset, projection, dimension="f2"):
+    """
+    Check whether a 1D spectrum can stand in as the F1 or F2 projection
+    of a 2D, *before* drawing it -- the check the GUI runs when a 1D is
+    dropped onto a contour, and that :func:`NMR2Dplotter` runs on its
+    ``f1_external_projection``/``f2_external_projection``.
+
+    Parameters
+    ----------
+    dataset : NMRSpectrum or dict
+        The 2D (an ``NMRSpectrum``, or the dict from :func:`NMR2dimport`).
+    projection : NMRSpectrum, dict or (x_ppm, intensity)
+        The 1D (an ``NMRSpectrum``, or the dict from :func:`NMR1dimport`).
+    dimension : ``"f2"`` (direct, top) or ``"f1"`` (indirect, left)
+
+    Returns
+    -------
+    dict with
+        ``allowed`` : False only when it cannot be drawn at all (a
+            pseudo-2D's F1 is a slice number, not a shift; or the 1D
+            has no points in the 2D's range).
+        ``nucleus_match`` : True / False / None (None: either nucleus
+            is not recorded, so it could not be checked).
+        ``axis_nucleus``, ``projection_nucleus`` : canonical labels.
+        ``coverage`` : fraction of the 2D axis's ppm span the 1D covers.
+        ``problems`` : list of messages that should stop and ask
+            (refusal reasons, nucleus mismatch, nucleus unknown).
+        ``notes`` : list of messages worth reporting but not asking
+            about (partial coverage).
+    """
+    axis_nucleus_raw, axis_ppm, pseudo = _projection_axis_info(dataset, dimension)
+    proj_nucleus_raw, proj_ppm = _projection_trace_info(projection)
+    axis_nucleus = canonical_nucleus(axis_nucleus_raw)
+    proj_nucleus = canonical_nucleus(proj_nucleus_raw)
+    label = "F2 (direct)" if dimension == "f2" else "F1 (indirect)"
+    result = {
+        "allowed": True, "nucleus_match": None, "axis_nucleus": axis_nucleus,
+        "projection_nucleus": proj_nucleus, "coverage": 0.0,
+        "problems": [], "notes": [],
+    }
+
+    if dimension == "f1" and pseudo:
+        result["allowed"] = False
+        result["problems"].append(
+            "The F1 axis of a pseudo-2D is a slice/experiment number, not a "
+            "chemical shift, so a 1D spectrum cannot be its projection.")
+        return result
+
+    if axis_nucleus and proj_nucleus:
+        result["nucleus_match"] = axis_nucleus == proj_nucleus
+        if not result["nucleus_match"]:
+            result["problems"].append(
+                f"Nucleus mismatch: the 1D spectrum is {proj_nucleus}, but the "
+                f"{label} axis of the 2D is {axis_nucleus}.")
+    else:
+        missing = []
+        if not proj_nucleus:
+            missing.append("the 1D spectrum")
+        if not axis_nucleus:
+            missing.append(f"the 2D's {label} axis")
+        result["problems"].append(
+            "Could not confirm the nucleus: none is recorded for "
+            + " or ".join(missing) + ".")
+
+    lo, hi = float(np.min(axis_ppm)), float(np.max(axis_ppm))
+    p_lo, p_hi = float(np.min(proj_ppm)), float(np.max(proj_ppm))
+    overlap = max(0.0, min(hi, p_hi) - max(lo, p_lo))
+    span = hi - lo
+    result["coverage"] = (overlap / span) if span > 0 else 0.0
+    inside = np.count_nonzero((proj_ppm >= lo) & (proj_ppm <= hi))
+    if inside < 2:
+        result["allowed"] = False
+        result["problems"].append(
+            f"The 1D spectrum ({p_lo:.4g} to {p_hi:.4g} ppm) does not overlap "
+            f"the 2D's {label} axis ({lo:.4g} to {hi:.4g} ppm).")
+    elif result["coverage"] < 0.999:
+        result["notes"].append(
+            f"The 1D spectrum covers {100 * result['coverage']:.0f}% of the "
+            f"{label} axis; the rest of the projection strip is left empty.")
+    return result
+
+
+def _warn_external_projection(dataset, source, dimension):
+    """:func:`NMR2Dplotter`'s side of :func:`check_external_projection`:
+    a notebook has no dialog to ask in, so a mismatch is a
+    ``UserWarning`` (the plot is still drawn, as asked). A path is not
+    imported just to check it."""
+    import warnings
+
+    if isinstance(source, str):
+        return
+    try:
+        report = check_external_projection(dataset, source, dimension)
+    except (KeyError, ValueError, TypeError):
+        return
+    for message in report["problems"] if report["nucleus_match"] is False else []:
+        warnings.warn(f"{dimension}_external_projection: {message}", UserWarning, stacklevel=3)
+
+
 def _resolve_external_projection(source, lo, hi, import_kwargs=None):
     """
     Resolve an "external" 1D projection trace -- the output of
@@ -632,7 +805,7 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
                   projection_size=2.0, projection_pad=0.1,
                   f1_external_projection=None, f2_external_projection=None,
                   f1_external_kwargs=None, f2_external_kwargs=None,
-                  external_projection_color='crimson',
+                  external_projection_color='crimson', projection_style=None,
                   field='400', xlabel=None, ylabel=None, xlims=None, ylims=None,
                   font='Arial', fontsize=12, output_format='',
                   colour_spectra=None, equal_tickspacing=False, tick_number=None,
@@ -730,6 +903,14 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
         remains visually distinct from a projection computed from
         ``dataset`` (which is always plotted in black). Default
         ``'crimson'``.
+
+    projection_style : dict, optional
+        Per-strip appearance, ``{'f1': {...}, 'f2': {...}}``, with any of
+        ``color``, ``linewidth``, ``linestyle``, ``size`` (that strip's
+        depth in inches, replacing ``projection_size``) and ``visible``
+        (``False`` hides it). E.g. ``{'f1': {'color': 'navy',
+        'linewidth': 0.8}, 'f2': {'visible': False}}``. The same dict
+        the GUI builds when a projection strip is right-clicked.
 
     show_nQ_line, nQ : bool, float or list of float, optional
         If True, overlay one or more diagonal lines through the
@@ -964,11 +1145,16 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
 
     # ----- projections -----
 
-    show_f2_projection = show_projections in (True, 'f2')
-    show_f1_projection = show_projections in (True, 'f1')
-
     if show_projections not in (True, False, 'f1', 'f2'):
         raise ValueError("show_projections must be True, False, 'f1', or 'f2'")
+
+    from ..plotting.twod import projection_line_kwargs
+    f2_style = projection_line_kwargs(projection_style, "f2")
+    f1_style = projection_line_kwargs(projection_style, "f1")
+    show_f2_projection = show_projections in (True, 'f2') and f2_style.pop("visible", True)
+    show_f1_projection = show_projections in (True, 'f1') and f1_style.pop("visible", True)
+    f2_size = f2_style.pop("size", projection_size)
+    f1_size = f1_style.pop("size", projection_size)
 
     if f1_external_projection is not None and pseudo2d:
         raise ValueError(
@@ -1009,13 +1195,14 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
 
         if show_f2_projection:
 
-            ax_f2 = divider.append_axes("top", projection_size, pad=projection_pad, sharex=ax)
+            ax_f2 = divider.append_axes("top", f2_size, pad=projection_pad, sharex=ax)
             ax_f2.tick_params(axis='x', which='both', bottom=False, top=False,
                                labelbottom=False, labeltop=False)
             ax_f2.tick_params(axis='y', which='both', left=False, right=False,
                                labelleft=False, labelright=False)
 
             if f2_external_projection is not None:
+                _warn_external_projection(dataset, f2_external_projection, "f2")
                 # Same displayed range as the contour's own F2 axis,
                 # whatever it was cropped to above (xlims, f2l/f2r, or
                 # the dataset's full range).
@@ -1033,19 +1220,21 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
                                   else np.max(spec_positive, axis=0))
                 f2_colour = 'k'
 
-            ax_f2.plot(f2_x, f2_projection + (0.02 * np.min(f2_projection)), f2_colour)
+            ax_f2.plot(f2_x, f2_projection + (0.02 * np.min(f2_projection)),
+                       **{"color": f2_colour, **f2_style})
             ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
             proj_axes.append(ax_f2)
 
         if show_f1_projection:
 
-            ax_f1 = divider.append_axes("left", projection_size, pad=projection_pad, sharey=ax)
+            ax_f1 = divider.append_axes("left", f1_size, pad=projection_pad, sharey=ax)
             ax_f1.tick_params(axis='x', which='both', bottom=False, top=False,
                                labelbottom=False, labeltop=False)
             ax_f1.tick_params(axis='y', which='both', left=False, right=False,
                                labelleft=False, labelright=False)
 
             if f1_external_projection is not None:
+                _warn_external_projection(dataset, f1_external_projection, "f1")
                 # Same displayed range as the contour's own F1 axis.
                 f1_lo, f1_hi = sorted(ax.get_ylim())
                 f1_x, f1_projection = _resolve_external_projection(
@@ -1058,7 +1247,8 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
                                   else np.max(spec_positive, axis=1))
                 f1_colour = 'k'
 
-            ax_f1.plot(-f1_projection + (0.02 * np.min(-f1_projection)), f1_x, f1_colour)
+            ax_f1.plot(-f1_projection + (0.02 * np.min(-f1_projection)), f1_x,
+                       **{"color": f1_colour, **f1_style})
             ax_f1.set_xlim([np.min(-f1_projection) * proj_scale, np.max(-f1_projection) * 0.99])
             proj_axes.append(ax_f1)
 
@@ -1310,7 +1500,7 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
                         ax=None, fig=None, save_fig=False, fig_name='nmr_2d_overlay',
                         save_format='png'):
     """
-    Overlay 2-3 2D NMR spectra as line contours on one set of axes,
+    Overlay 2-6 2D NMR spectra as line contours on one set of axes,
     each in its own flat colour -- for directly comparing spectra
     (e.g. before/after a reaction, different conditions), rather than
     :func:`NMR2D_multi_plot`'s side-by-side panels.
@@ -1332,7 +1522,7 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
     Parameters
     ----------
     datasets : list of dict or str
-        2 or 3 datasets to overlay (output of :func:`NMR2dimport`, or
+        2 to 6 datasets to overlay (output of :func:`NMR2dimport`, or
         raw Bruker paths -- imported internally exactly as
         :func:`NMR2Dplotter` accepts). Each is imported/cropped using
         the *same* ``procno``/``f1l``/``f1r``/``f2l``/``f2r``/
@@ -1416,9 +1606,12 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
     fig, ax
     """
 
-    if not (2 <= len(datasets) <= 3):
+    # Up to 6 (was 3), matching the GUI's Compare overlay -- explicit
+    # request. Past that, flat-colour contours stop being told apart;
+    # use NMR2D_multi_plot's side-by-side panels instead.
+    if not (2 <= len(datasets) <= 6):
         raise ValueError(
-            f"NMR2D_overlay_plot accepts 2 or 3 datasets, got {len(datasets)}."
+            f"NMR2D_overlay_plot accepts 2 to 6 datasets, got {len(datasets)}."
         )
 
     datasets = [
