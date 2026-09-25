@@ -597,3 +597,110 @@ def plot_stacked_spectra(spectra, labels=None, offset_step=0.2, colours=None,
     _save_spectrum_figure(fig, fname, path, f"{safe_nuclide}_stack_{channel}_{axis}.png")
 
     return ax
+
+
+# ============================================================
+# Quadrupolar: first order vs second order vs exact
+# ============================================================
+_QUAD_ORDER_STYLE = {
+    # colour index into Okabe-Ito (colour-blind safe) and a line style,
+    # so the three stay distinguishable in greyscale print too.
+    "first": (1, (0, (4, 2)), "First order"),
+    "second": (3, "-", "Second order"),
+    "exact": (0, (0, (1, 1.5)), "Exact"),
+}
+
+
+def plot_quadrupolar_orders(comparison, nuclide="", components=None, show_difference=True,
+                            scale="each", ax=None, invert_x=True, xlims='default', show_yaxis=False,
+                            tick_dir='in', tick_length=4.0, tick_width=1.0, tick_pad=4.0,
+                            tick_number=None, pl_width=3.375, pl_height=3.375,
+                            font='Arial', fontsize=12, linewidth=1.2, fname=None,
+                            figure=None):
+    """
+    Overlay the first-order, second-order and exact quadrupolar patterns
+    returned by :func:`opennmr.notebook.simulations.quadrupolar_order_comparison`.
+
+    scale : 'each' (default) scales every trace to its own maximum, to
+        compare lineshapes; 'shared' keeps the orders on one absolute
+        scale (all have the same area), scaled so the tallest reaches 1
+        -- honest about heights, but a first-order central transition
+        (a single sharp line) then dwarfs everything else.
+
+    components : None, or a transition group ('CT', 'ST1', ...) to plot
+        that group only instead of the total.
+    show_difference : draw 'second - first' (what second order adds)
+        and 'exact - second' (third and higher orders) in a panel below.
+    fname : path to save the figure to (png/pdf/svg), or None.
+    figure : an existing (empty) matplotlib Figure to draw into, e.g.
+        the GUI's simulation plot; a new figure is made when None.
+    font : font family to set in rcParams, or None to leave it alone.
+
+    Returns the main Axes (and the difference Axes as ``ax.difference_ax``
+    when drawn).
+    """
+    from ..plotting.accessibility import ordered_qualitative_colours
+    if font:
+        plt.rcParams['font.family'] = font
+    palette = ordered_qualitative_colours("okabe_ito")
+    orders = [o for o in ("first", "second", "exact") if o in comparison]
+    if not orders:
+        raise ValueError("comparison holds no 'first', 'second' or 'exact' result.")
+
+    def trace(order):
+        res = comparison[order]
+        return res["components"].get(components, np.zeros_like(res["x_ppm"])) \
+            if components else res["real_spec"]
+
+    x = comparison[orders[0]]["x_ppm"]
+    if scale not in ("each", "shared"):
+        raise ValueError("scale must be 'each' or 'shared'.")
+    shared = max(float(np.max(trace(o))) for o in orders) or 1.0
+    norm = {o: (float(np.max(trace(o))) or 1.0) if scale == "each" else shared for o in orders}
+    diff_pairs = [(a, b) for a, b in (("second", "first"), ("exact", "second"))
+                  if a in comparison and b in comparison] if show_difference else []
+
+    if ax is None:
+        fig = figure if figure is not None else plt.figure(
+            figsize=(pl_width, pl_height * (1.35 if diff_pairs else 1.0)))
+        if diff_pairs:
+            ax, dax = fig.subplots(2, 1, sharex=True,
+                                   gridspec_kw={"height_ratios": [3, 1], "hspace": 0.05})
+        else:
+            ax, dax = fig.subplots(), None
+    else:
+        fig, dax = ax.figure, None
+
+    for order in orders:
+        colour, style, label = _QUAD_ORDER_STYLE[order]
+        ax.plot(x, trace(order) / norm[order], color=palette[colour], ls=style, lw=linewidth,
+                label=label)
+    ax.legend(fontsize=fontsize * 0.8, frameon=False)
+    _apply_axis_style(ax, tick_dir, tick_length, tick_width, tick_pad, tick_number,
+                      fontsize, show_yaxis)
+
+    if dax is not None:
+        for a, b in diff_pairs:
+            colour, style, _ = _QUAD_ORDER_STYLE[a]
+            dax.plot(x, trace(a) / norm[a] - trace(b) / norm[b], color=palette[colour], ls=style,
+                     lw=linewidth * 0.9, label=f"{_QUAD_ORDER_STYLE[a][2]} − "
+                                                 f"{_QUAD_ORDER_STYLE[b][2].lower()}")
+        dax.axhline(0.0, color="0.6", lw=0.6)
+        dax.legend(fontsize=fontsize * 0.7, frameon=False)
+        _apply_axis_style(dax, tick_dir, tick_length, tick_width, tick_pad, tick_number,
+                          fontsize, show_yaxis)
+        ax.difference_ax = dax
+        label_ax = dax
+    else:
+        label_ax = ax
+
+    label_ax.set_xlabel(NUC_label(nuclide, x_unit="ppm") if nuclide else "Shift (ppm)",
+                        fontsize=fontsize)
+    if xlims == 'default':
+        if invert_x:
+            ax.set_xlim(max(x), min(x))
+    else:
+        ax.set_xlim(max(xlims), min(xlims)) if invert_x else ax.set_xlim(min(xlims), max(xlims))
+    if fname:
+        fig.savefig(fname, dpi=300, bbox_inches="tight")
+    return ax

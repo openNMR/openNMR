@@ -22,7 +22,7 @@ from .utils import (
 from .plotting import (
     setup_plotting, get_stack_colormap, get_contour_cmap, downsample_2d,
     apply_tick_style, apply_spine_style, save_figure,
-    plot_spectrum_dict, plot_comparison, plot_stacked_spectra,
+    plot_spectrum_dict, plot_comparison, plot_stacked_spectra, plot_quadrupolar_orders,
 )
 # Colour-blind-/print-friendly palette checks -- the same functions the
 # GUI's Plot Style panel uses, so a notebook figure can be checked (and
@@ -71,7 +71,10 @@ from .simulations import (
     haeberlen_csa_tensor, herzfeld_berger_csa_tensor, csa_definition, csa_axis_limits,
     csa_frequency, powder_orientations, powder_orientations_octant, 
     static_csa, make_static_csa_spectrum, finite_mas_csa_spectrum,
-    static_quadrupolar_spectrum_exact,
+    quadrupolar_static_spectrum, quadrupolar_mas_spectrum, quadrupolar_spectrum,
+    quadrupolar_order_comparison, quadrupolar_transition_frequencies,
+    quadrupolar_transition_table, quadrupolar_axis_limits, quadrupolar_nu_Q,
+    quadrupolar_ct_isotropic_shift_Hz, larmor_frequency_Hz, zcw_angles,
     spin_multiplet_pattern, jcoupling_group_pattern, combine_jcouplings,
     multiplet_lineshape, jcoupled_spectrum, multi_site_jcoupled_spectrum, element_isotopes,
 )
@@ -146,7 +149,7 @@ __all__ = [
     # plotting
     "setup_plotting", "get_stack_colormap", "get_contour_cmap", "downsample_2d",
     "apply_tick_style", "apply_spine_style", "save_figure",
-    "plot_spectrum_dict", "plot_comparison", "plot_stacked_spectra",
+    "plot_spectrum_dict", "plot_comparison", "plot_stacked_spectra", "plot_quadrupolar_orders",
     # colour accessibility
     "friendly_palettes", "max_safe_series", "describe_accessibility", "palette_distinctness",
     "is_colourblind_safe", "is_print_safe", "trace_colour_presets", "series_colours",
@@ -181,7 +184,10 @@ __all__ = [
     "haeberlen_csa_tensor", "herzfeld_berger_csa_tensor", "csa_definition",
     "csa_frequency", "powder_orientations", "powder_orientations_octant", 
     "static_csa", "make_static_csa_spectrum", "finite_mas_csa_spectrum",
-    "static_quadrupolar_spectrum_exact",
+    "quadrupolar_static_spectrum", "quadrupolar_mas_spectrum", "quadrupolar_spectrum",
+    "quadrupolar_order_comparison", "quadrupolar_transition_frequencies",
+    "quadrupolar_transition_table", "quadrupolar_axis_limits", "quadrupolar_nu_Q",
+    "quadrupolar_ct_isotropic_shift_Hz", "larmor_frequency_Hz", "zcw_angles",
     "spin_multiplet_pattern", "jcoupling_group_pattern", "combine_jcouplings",
     "multiplet_lineshape", "jcoupled_spectrum", "multi_site_jcoupled_spectrum", "element_isotopes",
     # spin_system (strong coupling)

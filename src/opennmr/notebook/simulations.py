@@ -7,16 +7,12 @@ Workflow
 
     CSA, static     -> csa_definition -> make_static_csa_spectrum
     CSA, spinning    -> csa_definition -> finite_mas_csa_spectrum
-    Quadrupolar, static (first-order only)
-                     -> static_quadrupolar_spectrum
-    Quadrupolar, static (exact, all orders)
-                     -> static_quadrupolar_spectrum_exact
-    Quadrupolar, static (exact, decomposed into
-    central/satellite and first-/second-order contributions)
-                     -> static_quadrupolar_spectrum_decomposed
-    Quadrupolar, spinning (explicit density-matrix propagation,
-    single crystallite)
-                     -> mas_quadrupolar_fid
+    Quadrupolar, static  -> quadrupolar_static_spectrum
+    Quadrupolar, MAS     -> quadrupolar_mas_spectrum
+        (either: order='first' | 'second' | 'exact',
+         transitions='ct' | 'st' | 'all'; see the QUADRUPOLAR NMR
+         section, and quadrupolar_order_comparison to see what each
+         order contributes)
 
 All of the ``*_spectrum*`` functions return a dict containing at least
 ``x_ppm``, ``real_spec`` and ``normalised_real_spec``, so they can be
@@ -99,18 +95,10 @@ from .utils import find_isotope_info
 #     is a rectangular-grid-only trick and is not combined with ZCW
 #     here; SOPHE/REPULSION sets are still not implemented.
 #
-# NOT DONE (flagged, not fixed)
-#   - The exact-diagonalization quadrupolar functions still do one
-#     np.linalg.eigh call per crystallite in a Python loop rather than
-#     a single batched eigh over a stacked array of Hamiltonians.
-#     eigh does support batching (input shape (N,n,n) -> eigenvalues
-#     (N,n)), which would remove the Python-loop overhead; not done
-#     here because the variable number of allowed transitions per
-#     orientation makes the transition-selection step awkward to
-#     vectorise cleanly, and I did not want to introduce a subtle
-#     indexing bug under time pressure. Flagged as the next efficiency
-#     step if the exact quadrupolar functions turn out to be a
-#     bottleneck.
+# QUADRUPOLAR (2026-09-25): the per-crystallite loops and the
+# single-crystallite MAS propagator were replaced by one vectorised
+# engine (static + MAS, first/second order/exact, CT and/or STs) --
+# see the QUADRUPOLAR NMR section's own header.
 # ============================================================
 
 
@@ -678,14 +666,73 @@ def finite_mas_csa_spectrum(csa, ppm_axis, larmor_Hz, mas_Hz,
 # ============================================================
 # QUADRUPOLAR NMR
 # ============================================================
+#
+# One engine for static and MAS powder patterns of a quadrupolar
+# nucleus (I >= 1), at three levels of theory, for any choice of
+# transitions:
+#
+#     order='first'   Zeeman + first-order quadrupolar shift
+#     order='second'  + second-order shift (perturbation theory)
+#     order='exact'   exact diagonalisation of H_Z + H_Q
+#
+#     transitions='ct'   central transition (-1/2 <-> +1/2) only
+#                 'st'   satellite transitions only
+#                 'all'  CT and STs together
+#                 'ST1', ['CT', 'ST2'], ...  named groups
+#
+# Workflow
+# --------
+#
+#     larmor = larmor_frequency_Hz('27Al', 11.7467)
+#     axis = np.linspace(*quadrupolar_axis_limits(2.5, 3e6, 0.3, larmor,
+#                                                 transitions='ct'), 4096)
+#     static = quadrupolar_static_spectrum(2.5, 3e6, 0.3, larmor, axis,
+#                                          order='exact', transitions='ct')
+#     mas = quadrupolar_mas_spectrum(2.5, 3e6, 0.3, larmor, 12.5e3, axis,
+#                                    order='second', transitions='all')
+#     orders = quadrupolar_order_comparison(2.5, 3e6, 0.3, larmor, axis,
+#                                           mas_Hz=12.5e3)
+#
+# Why this is fast (and why the per-time-step version was slow)
+# -------------------------------------------------------------
+# In the high-field limit every transition frequency depends only on
+# the direction of B0 in the EFG principal-axis frame (PAS), b. The
+# first-order shift is a rank-2 function of b and the second-order
+# shift is built from three scalars of b (see _quad_b_invariants), so
+# both are closed-form array expressions -- no matrices at all. Under
+# MAS, b rotates about the rotor axis, so the frequency of each
+# crystallite is a Fourier series in the rotor phase with at most 4
+# harmonics (2 at first order). It is therefore sampled exactly at a
+# handful of rotor phases, integrated to a phase analytically in the
+# Fourier domain, and the gamma-averaged sideband intensities are
+# |a_k|^2 of the one-period signal (gamma-COMPUTE; the same idea as
+# finite_mas_csa_spectrum). Every crystallite is processed at once as
+# arrays. 'exact' does the same with batched np.linalg.eigh calls on
+# the (2I+1)x(2I+1) Hamiltonian at each sampled rotor phase.
+#
+# Conventions
+# -----------
+# H_Q/h = C_Q / [4I(2I-1)] * [3Iz^2 - I(I+1) + eta_Q (Ix^2 - Iy^2)] in
+# the PAS, |V_zz| >= |V_yy| >= |V_xx|, C_Q = e^2 q Q / h in Hz. The
+# Zeeman term is -nu0 (b . I) with nu0 = |gamma B0|, so ppm offsets do
+# not depend on the sign of gamma. Transition "m-1 <-> m" is labelled
+# by its upper m. Relative intensities are |<m-1|I+|m>|^2 =
+# I(I+1) - m(m-1) (perturbative orders) or the exact eigenvector
+# matrix elements ('exact'), normalised so that ALL 2I transitions of
+# a crystallite sum to 1: a CT-only spectrum therefore integrates to
+# the CT's true share of the total (9/35 for I=5/2).
+# ============================================================
+
+QUADRUPOLAR_ORDERS = ("first", "second", "exact")
+
 
 def spin_operators(I):
     """
     Return spin operators Ix, Iy, Iz for arbitrary spin I.
     Operators are dimensionless, i.e. eigenvalues of Iz are m
-    rather than hbar*m.
+    rather than hbar*m. Basis order is m = I, I-1, ..., -I.
     """
-    n = int(2 * I + 1)
+    n = int(round(2 * I + 1))
     m = np.arange(I, -I - 1, -1, dtype=float)
     Iz = np.diag(m)
     Ip = np.zeros((n, n), dtype=complex)
@@ -701,533 +748,544 @@ def spin_operators(I):
     return Ix, Iy, Iz
 
 
-def _quad_operators(I, C_Q, eta_Q):
-    """
-    Build the orientation-INDEPENDENT parts of the quadrupolar problem
-    once: Ix, Iy, Iz and H_Q. These do not depend on (theta, phi), so
-    hoisting them out of the per-crystallite powder loop is the single
-    biggest efficiency win available here (the original code rebuilt
-    Ix@Ix, Iy@Iy, Iz@Iz and re-assembled H_Q from scratch at every one
-    of up to ~45,000 orientations).
+def larmor_frequency_Hz(nucleus, B0_T):
+    """|gamma| * B0 in Hz for a nuclide label such as '27Al'."""
+    return abs(float(find_isotope_info(nucleus)["gamma"])) * float(B0_T)
 
-    H_Q/h = C_Q / [4 I (2I-1)] * [3 Iz^2 - I(I+1) + eta (Ix^2 - Iy^2)]
 
-    FIX: denominator is 4*I*(2I-1), not 6*I*(2I-1) as in the original
-    quadrupolar_hamiltonian (mas_quadrupolar_fid already had this
-    right; the two were inconsistent).
-    """
-    if I < 1:
+def quadrupolar_nu_Q(I, C_Q):
+    """nu_Q = 3 C_Q / [2I(2I-1)] in Hz -- the first-order splitting
+    between adjacent satellite transitions for eta_Q = 0, theta = 0."""
+    I = float(I)
+    return 3.0 * C_Q / (2.0 * I * (2.0 * I - 1.0))
+
+
+def _check_quad_inputs(I, eta_Q, larmor_Hz):
+    I = float(I)
+    if I < 1.0:
         raise ValueError("Quadrupolar interaction requires I >= 1.")
-    if not np.isclose(2 * I, round(2 * I)):
-        raise ValueError("I must be integer or half-integer.")
-    if not (0.0 <= eta_Q <= 1.0):
-        raise ValueError("eta_Q should normally be between 0 and 1.")
-    Ix, Iy, Iz = spin_operators(I)
-    n = int(2 * I + 1)
-    prefactor = C_Q / (4.0 * I * (2.0 * I - 1.0))
-    H_Q = prefactor * (
-        3.0 * Iz @ Iz
-        - I * (I + 1.0) * np.eye(n)
-        + eta_Q * (Ix @ Ix - Iy @ Iy)
-    )
-    return Ix, Iy, Iz, H_Q
-
-
-def quadrupolar_hamiltonian(I, C_Q, eta_Q, theta, phi, larmor_Hz, _ops=None):
-    """
-    Return the total spin Hamiltonian in Hz for one crystallite.
-
-    _ops: optional pre-built (Ix, Iy, Iz, H_Q) tuple from
-    _quad_operators, to avoid rebuilding it when called repeatedly
-    over a powder grid at fixed (I, C_Q, eta_Q).
-    """
-    if _ops is None:
-        Ix, Iy, Iz, H_Q = _quad_operators(I, C_Q, eta_Q)
-    else:
-        Ix, Iy, Iz, H_Q = _ops
-
-    nx = np.sin(theta) * np.cos(phi)
-    ny = np.sin(theta) * np.sin(phi)
-    nz = np.cos(theta)
-    Iz_lab = nx * Ix + ny * Iy + nz * Iz
-    H_Z = -larmor_Hz * Iz_lab
-    return H_Z + H_Q
-
-
-def _transverse_basis(n):
-    """Two unit vectors perpendicular to n (handles n along +/- z)."""
-    ref = np.array([0.0, 0.0, 1.0])
-    e1 = np.cross(n, ref)
-    if np.linalg.norm(e1) < 1e-10:
-        ref = np.array([1.0, 0.0, 0.0])
-        e1 = np.cross(n, ref)
-    e1 = e1 / np.linalg.norm(e1)
-    e2 = np.cross(n, e1)
-    return e1, e2
-
-
-def quadrupolar_transitions(I, C_Q, eta_Q, theta, phi, larmor_Hz,
-                             intensity_threshold=1e-10, _ops=None):
-    """
-    Calculate all observable transitions for one crystallite.
-    """
-    if _ops is None:
-        _ops = _quad_operators(I, C_Q, eta_Q)
-    Ix, Iy, Iz, H_Q = _ops
-    H = quadrupolar_hamiltonian(I, C_Q, eta_Q, theta, phi, larmor_Hz, _ops=_ops)
-    eigenvalues, eigenvectors = np.linalg.eigh(H)
-
-    n = np.array([
-        np.sin(theta) * np.cos(phi),
-        np.sin(theta) * np.sin(phi),
-        np.cos(theta),
-    ])
-    e1, e2 = _transverse_basis(n)
-    I1 = e1[0] * Ix + e1[1] * Iy + e1[2] * Iz
-    I2 = e2[0] * Ix + e2[1] * Iy + e2[2] * Iz
-    I1_eig = eigenvectors.conj().T @ I1 @ eigenvectors
-    I2_eig = eigenvectors.conj().T @ I2 @ eigenvectors
-
-    n_states = len(eigenvalues)
-    frequencies = []
-    intensities = []
-    for a in range(n_states):
-        for b in range(a + 1, n_states):
-            frequency = eigenvalues[b] - eigenvalues[a]
-            if frequency <= 0:
-                continue
-            matrix_element = abs(I1_eig[a, b]) ** 2 + abs(I2_eig[a, b]) ** 2
-            if matrix_element < intensity_threshold:
-                continue
-            frequencies.append(frequency)
-            intensities.append(matrix_element)
-    return np.asarray(frequencies), np.asarray(intensities)
-
-
-def static_quadrupolar_spectrum(I, C_Q, eta_Q, ppm_axis, larmor_Hz,
-                                 n_theta=150, n_phi=300, fwhm=2.0,
-                                 intensity_threshold=1e-10,
-                                 powder_scheme='rectangular', n_zcw=None):
-    """
-    Simulate a static powder quadrupolar spectrum (first-order-only
-    transition energies from the eigenbasis, but computed via the same
-    exact diagonalization as static_quadrupolar_spectrum_exact -- see
-    that function's docstring for the distinction from the perturbative
-    decomposition used in static_quadrupolar_spectrum_decomposed).
-
-    powder_scheme, n_zcw : see get_powder_grid / zcw_angles. Every
-    orientation here costs a np.linalg.eigh call, so 'zcw' typically
-    reaches the same convergence with substantially fewer orientations
-    than the rectangular grid.
-    """
-    if I < 1:
-        raise ValueError("Quadrupolar interaction requires I >= 1.")
-    ops = _quad_operators(I, C_Q, eta_Q)  # built once, reused every orientation
-    theta, phi, wts = get_powder_grid(
-        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
-    )
-    spectrum = np.zeros_like(ppm_axis, dtype=float)
-    for k in range(len(wts)):
-        frequencies_Hz, intensities = quadrupolar_transitions(
-            I=I, C_Q=C_Q, eta_Q=eta_Q,
-            theta=theta[k], phi=phi[k], larmor_Hz=larmor_Hz,
-            intensity_threshold=intensity_threshold, _ops=ops,
-        )
-        shifts_ppm = (frequencies_Hz - larmor_Hz) / larmor_Hz * 1.0e6
-        for shift, intensity in zip(shifts_ppm, intensities):
-            i = np.searchsorted(ppm_axis, shift)
-            if i <= 0 or i >= len(ppm_axis):
-                continue
-            x1 = ppm_axis[i - 1]
-            x2 = ppm_axis[i]
-            frac = (shift - x1) / (x2 - x1)
-            weight = wts[k] * intensity
-            spectrum[i - 1] += weight * (1.0 - frac)
-            spectrum[i] += weight * frac
-    spectrum = gaussian_broadening(spectrum, ppm_axis, fwhm=fwhm)
-    maximum = np.max(spectrum)
-    normalised = spectrum / maximum if maximum > 0 else spectrum
-    return {"x_ppm": ppm_axis, "real_spec": spectrum, "normalised_real_spec": normalised}
-
-
-def quadrupolar_transitions_exact(I, C_Q, eta_Q, theta, phi, larmor_Hz,
-                                   intensity_threshold=1e-10, _ops=None):
-    """
-    Calculate quadrupolar transitions by exact diagonalization of
-    H = H_Z + H_Q, so the returned frequencies contain first-, second-,
-    and higher-order quadrupolar effects (no perturbative truncation).
-    """
-    if _ops is None:
-        _ops = _quad_operators(I, C_Q, eta_Q)
-    Ix, Iy, Iz, H_Q = _ops
-    H = quadrupolar_hamiltonian(I, C_Q, eta_Q, theta, phi, larmor_Hz, _ops=_ops)
-    eigenvalues, eigenvectors = np.linalg.eigh(H)
-
-    n = np.array([
-        np.sin(theta) * np.cos(phi),
-        np.sin(theta) * np.sin(phi),
-        np.cos(theta),
-    ])
-    e1, e2 = _transverse_basis(n)
-    I1 = e1[0] * Ix + e1[1] * Iy + e1[2] * Iz
-    I2 = e2[0] * Ix + e2[1] * Iy + e2[2] * Iz
-    I1_eig = eigenvectors.conj().T @ I1 @ eigenvectors
-    I2_eig = eigenvectors.conj().T @ I2 @ eigenvectors
-
-    frequencies = []
-    intensities = []
-    transition_indices = []
-    n_states = len(eigenvalues)
-    for a in range(n_states):
-        for b in range(a + 1, n_states):
-            frequency = eigenvalues[b] - eigenvalues[a]
-            if frequency <= 0:
-                continue
-            intensity = np.abs(I1_eig[a, b]) ** 2 + np.abs(I2_eig[a, b]) ** 2
-            if intensity < intensity_threshold:
-                continue
-            frequencies.append(frequency)
-            intensities.append(intensity)
-            transition_indices.append((a, b))
-    return (np.asarray(frequencies), np.asarray(intensities),
-            np.asarray(transition_indices))
-
-
-def static_quadrupolar_spectrum_exact(I, C_Q, eta_Q, ppm_axis, larmor_Hz,
-                                       n_theta=150, n_phi=300, fwhm=2.0,
-                                       intensity_threshold=1e-10,
-                                       powder_scheme='rectangular', n_zcw=None):
-    """
-    Static powder quadrupolar spectrum including exact first-, second-,
-    and higher-order quadrupolar effects via exact diagonalization of
-    H_Z + H_Q for every crystallite orientation.
-
-    powder_scheme, n_zcw : see get_powder_grid / zcw_angles.
-    """
-    if I < 1:
-        raise ValueError("Quadrupolar interaction requires I >= 1.")
-    if larmor_Hz <= 0:
+    if not np.isclose(2.0 * I, round(2.0 * I)):
+        raise ValueError("I must be an integer or half-integer.")
+    if not (0.0 <= float(eta_Q) <= 1.0):
+        raise ValueError("eta_Q must lie between 0 and 1.")
+    if not larmor_Hz or larmor_Hz <= 0:
         raise ValueError("larmor_Hz must be > 0.")
-    if C_Q < 0:
-        print("Warning: C_Q is negative. This is allowed, but changes the "
-              "ordering of the quadrupolar principal values.")
-
-    ops = _quad_operators(I, C_Q, eta_Q)
-    theta, phi, wts = get_powder_grid(
-        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
-    )
-    spectrum = np.zeros_like(ppm_axis, dtype=float)
-
-    for k in range(len(wts)):
-        frequencies_Hz, intensities, transition_indices = quadrupolar_transitions_exact(
-            I=I, C_Q=C_Q, eta_Q=eta_Q,
-            theta=theta[k], phi=phi[k], larmor_Hz=larmor_Hz,
-            intensity_threshold=intensity_threshold, _ops=ops,
-        )
-        shifts_ppm = (frequencies_Hz - larmor_Hz) / larmor_Hz * 1.0e6
-        for shift, intensity in zip(shifts_ppm, intensities):
-            i = np.searchsorted(ppm_axis, shift)
-            if i <= 0 or i >= len(ppm_axis):
-                continue
-            x1 = ppm_axis[i - 1]
-            x2 = ppm_axis[i]
-            frac = (shift - x1) / (x2 - x1)
-            weight = wts[k] * intensity
-            spectrum[i - 1] += weight * (1.0 - frac)
-            spectrum[i] += weight * frac
-
-    spectrum = gaussian_broadening(spectrum, ppm_axis, fwhm=fwhm)
-    maximum = np.max(spectrum)
-    normalised = spectrum / maximum if maximum > 0 else spectrum
-    return {"x_ppm": ppm_axis, "real_spec": spectrum, "normalised_real_spec": normalised}
+    return I
 
 
-def quadrupolar_transition_decomposition(I, C_Q, eta_Q, theta, phi, larmor_Hz,
-                                          intensity_threshold=1e-10, _ops=None):
+def _format_m(m):
+    """'+3/2', '-1/2', '0', '+1' -- quantum numbers as usually written."""
+    if np.isclose(m, 0.0):
+        return "0"
+    sign = "+" if m > 0 else "−"
+    twice = int(round(2 * abs(m)))
+    return f"{sign}{twice}/2" if twice % 2 else f"{sign}{twice // 2}"
+
+
+def quadrupolar_transition_table(I):
     """
-    Calculate exact quadrupolar transitions and classify them by their
-    dominant Zeeman quantum numbers, separating central vs satellite
-    transitions and first- vs second-order(+) frequency contributions.
+    Every single-quantum transition of spin I, as a list of dicts with
+    ``m`` (upper m of the pair m-1 <-> m), ``label`` (e.g.
+    '+1/2↔+3/2') and ``group``: 'CT' for -1/2 <-> +1/2, 'ST1' for
+    the pair of transitions next to it (+-1/2 <-> +-3/2), 'ST2' for the
+    next, and so on. For integer spins every transition is a satellite
+    (the two lines of a 2H Pake doublet are 'ST1').
     """
-    if _ops is None:
-        _ops = _quad_operators(I, C_Q, eta_Q)
-    Ix, Iy, Iz, H_Q = _ops
-
-    n = np.array([
-        np.sin(theta) * np.cos(phi),
-        np.sin(theta) * np.sin(phi),
-        np.cos(theta),
-    ])
-    I_B0 = n[0] * Ix + n[1] * Iy + n[2] * Iz
-
-    H_Z = -larmor_Hz * I_B0
-    H = H_Z + H_Q
-    eigenvalues, eigenvectors = np.linalg.eigh(H)
-
-    m_values, zeeman_vectors = np.linalg.eigh(I_B0)
-    order_m = np.argsort(m_values)
-    m_values = m_values[order_m]
-    zeeman_vectors = zeeman_vectors[:, order_m]
-
-    overlaps = np.abs(zeeman_vectors.conj().T @ eigenvectors) ** 2
-    dominant_m_index = np.argmax(overlaps, axis=0)
-    dominant_m = m_values[dominant_m_index]
-
-    e1, e2 = _transverse_basis(n)
-    I1 = e1[0] * Ix + e1[1] * Iy + e1[2] * Iz
-    I2 = e2[0] * Ix + e2[1] * Iy + e2[2] * Iz
-    I1_eig = eigenvectors.conj().T @ I1 @ eigenvectors
-    I2_eig = eigenvectors.conj().T @ I2 @ eigenvectors
-
-    transitions = []
-    n_states = len(eigenvalues)
-    for a in range(n_states):
-        for b in range(a + 1, n_states):
-            frequency = eigenvalues[b] - eigenvalues[a]
-            if frequency <= 0:
-                continue
-            intensity = np.abs(I1_eig[a, b]) ** 2 + np.abs(I2_eig[a, b]) ** 2
-            if intensity < intensity_threshold:
-                continue
-            m_lower = dominant_m[a]
-            m_upper = dominant_m[b]
-            delta_m = m_upper - m_lower
-            if not np.isclose(abs(delta_m), 1.0):
-                continue
-
-            is_central = np.isclose(m_lower, -0.5) and np.isclose(m_upper, +0.5)
-            if is_central:
-                transition_type = "central"
-                perturbative_order = 2
-            else:
-                transition_type = "satellite"
-                perturbative_order = 1
-
-            zeeman_frequency = larmor_Hz
-            idx_lower = dominant_m_index[a]
-            idx_upper = dominant_m_index[b]
-            E1_lower = np.real(
-                zeeman_vectors[:, idx_lower].conj() @ H_Q @ zeeman_vectors[:, idx_lower]
-            )
-            E1_upper = np.real(
-                zeeman_vectors[:, idx_upper].conj() @ H_Q @ zeeman_vectors[:, idx_upper]
-            )
-            first_order_shift = E1_upper - E1_lower
-            total_shift = frequency - zeeman_frequency
-            second_order_and_higher = total_shift - first_order_shift
-
-            transitions.append({
-                "frequency_Hz": frequency,
-                "intensity": intensity,
-                "m_lower": m_lower,
-                "m_upper": m_upper,
-                "delta_m": delta_m,
-                "type": transition_type,
-                "order": perturbative_order,
-                "frequency_zeeman_Hz": zeeman_frequency,
-                "first_order_shift_Hz": first_order_shift,
-                "second_order_shift_Hz": second_order_and_higher,
-            })
-    return transitions
+    I = float(I)
+    half_integer = not float(I).is_integer()
+    table = []
+    for m in np.arange(I, -I, -1.0):
+        if half_integer and np.isclose(m, 0.5):
+            group = "CT"
+        else:
+            group = f"ST{int(np.ceil(abs(m - 0.5) - 1e-9))}"
+        table.append({
+            "m": float(m),
+            "label": f"{_format_m(m - 1.0)}↔{_format_m(m)}",
+            "group": group,
+            "weight": I * (I + 1.0) - m * (m - 1.0),
+        })
+    return table
 
 
-def static_quadrupolar_spectrum_decomposed(I, C_Q, eta_Q, ppm_axis, larmor_Hz,
-                                            n_theta=150, n_phi=300, fwhm=2.0,
-                                            intensity_threshold=1e-10,
-                                            powder_scheme='rectangular', n_zcw=None):
+def _select_transitions(I, transitions):
+    """Rows of quadrupolar_transition_table picked by ``transitions``."""
+    table = quadrupolar_transition_table(I)
+    groups = {row["group"] for row in table}
+    if isinstance(transitions, str):
+        key = transitions.strip().lower()
+        if key in ("all", "ct+st", "both"):
+            return table
+        if key == "ct":
+            if "CT" not in groups:
+                raise ValueError(
+                    f"I = {float(I):g} is an integer spin: it has no central "
+                    "transition. Use transitions='all' (or 'st').")
+            return [row for row in table if row["group"] == "CT"]
+        if key in ("st", "sts", "satellites"):
+            return [row for row in table if row["group"] != "CT"]
+        wanted = {transitions.strip().upper()}
+    else:
+        wanted = {str(t).strip().upper() for t in transitions}
+    unknown = wanted - groups
+    if unknown:
+        raise ValueError(
+            f"Unknown transition group(s) {sorted(unknown)} for I = {float(I):g}; "
+            f"available: {sorted(groups)}.")
+    return [row for row in table if row["group"] in wanted]
+
+
+def _efg_principal(eta_Q):
+    """Principal values of V / eq (traceless, V_zz = 1)."""
+    return np.array([-(1.0 - eta_Q) / 2.0, -(1.0 + eta_Q) / 2.0, 1.0])
+
+
+def _quad_b_invariants(eta_Q, b):
     """
-    Static powder quadrupolar spectrum separated into central and
-    satellite transitions, each further split into a first-order
-    representation and the (exact - first-order) residual.
+    The three scalars every perturbative quadrupolar frequency is
+    built from, for unit vectors ``b`` (B0 direction in the PAS,
+    shape (..., 3)), with V in units of eq and x', y', z' any lab frame
+    with z' along B0:
 
-    powder_scheme, n_zcw : see get_powder_grid / zcw_angles.
+        V0 = V_z'z'                                   (first order)
+        P1 = V_x'z'^2 + V_y'z'^2    = |V b|^2 - V0^2
+        P2 = (V_x'x' - V_y'y')^2 + 4 V_x'y'^2
+           = 2 (tr V^2 - V0^2 - 2 P1) - V0^2
+
+    All three are invariant to rotations about B0, which is why no
+    third Euler angle is needed.
     """
-    ops = _quad_operators(I, C_Q, eta_Q)
-    theta, phi, wts = get_powder_grid(
-        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
-    )
+    v = _efg_principal(eta_Q)
+    b2 = b * b
+    V0 = b2 @ v
+    P1 = np.maximum(b2 @ (v * v) - V0 * V0, 0.0)
+    P2 = np.maximum(2.0 * (np.sum(v * v) - V0 * V0 - 2.0 * P1) - V0 * V0, 0.0)
+    return V0, P1, P2
 
-    central = np.zeros_like(ppm_axis, dtype=float)
-    satellites = np.zeros_like(ppm_axis, dtype=float)
-    central_first_order = np.zeros_like(ppm_axis, dtype=float)
-    satellites_first_order = np.zeros_like(ppm_axis, dtype=float)
 
-    for k in range(len(wts)):
-        transitions = quadrupolar_transition_decomposition(
-            I=I, C_Q=C_Q, eta_Q=eta_Q,
-            theta=theta[k], phi=phi[k], larmor_Hz=larmor_Hz,
-            intensity_threshold=intensity_threshold, _ops=ops,
-        )
-        for tr in transitions:
-            frequency = tr["frequency_Hz"]
-            intensity = tr["intensity"]
-            first_order_shift = tr["first_order_shift_Hz"]
+def _second_order_energy(I, m, P1, P2):
+    """Second-order energy of Zeeman level m, in units of K^2 / nu0
+    (K = C_Q / [2I(2I-1)]). Standard non-degenerate perturbation
+    theory with E_Z(m) = -nu0 m; |<m+-1|H_Q|m>|^2 = K^2/4 P1
+    (2m+-1)^2 c+-(m)^2 and |<m+-2|H_Q|m>|^2 = K^2/16 P2 c+-(m)^2
+    c+-(m+-1)^2, c+-(m)^2 = I(I+1) - m(m+-1)."""
+    s = I * (I + 1.0)
+    cp = lambda mm: s - mm * (mm + 1.0)
+    cm = lambda mm: s - mm * (mm - 1.0)
+    first = cp(m) * (2.0 * m + 1.0) ** 2 - cm(m) * (2.0 * m - 1.0) ** 2
+    second = cp(m) * cp(m + 1.0) - cm(m) * cm(m - 1.0)
+    return P1 * first / 4.0 + P2 * second / 32.0
 
-            shift_ppm = (frequency - larmor_Hz) / larmor_Hz * 1.0e6
-            first_order_frequency = larmor_Hz + first_order_shift
-            first_order_ppm = (first_order_frequency - larmor_Hz) / larmor_Hz * 1.0e6
 
-            if tr["type"] == "central":
-                target_exact = central
-                target_first = central_first_order
-            else:
-                target_exact = satellites
-                target_first = satellites_first_order
+def _perturbative_offsets(I, C_Q, eta_Q, larmor_Hz, b, m, order):
+    """
+    Transition frequencies minus nu0 (Hz), shape b.shape[:-1] + (len(m),),
+    for the transitions m-1 <-> m at first or second order.
+    """
+    m = np.asarray(m, dtype=float)
+    K = C_Q / (2.0 * I * (2.0 * I - 1.0))
+    V0, P1, P2 = _quad_b_invariants(eta_Q, b)
+    nu = -1.5 * K * V0[..., None] * (2.0 * m - 1.0)
+    if order == "second":
+        P1 = P1[..., None]
+        P2 = P2[..., None]
+        nu = nu + (K * K / larmor_Hz) * (
+            _second_order_energy(I, m - 1.0, P1, P2) - _second_order_energy(I, m, P1, P2))
+    return nu
 
-            i = np.searchsorted(ppm_axis, shift_ppm)
-            if 0 < i < len(ppm_axis):
-                x1 = ppm_axis[i - 1]
-                x2 = ppm_axis[i]
-                frac = (shift_ppm - x1) / (x2 - x1)
-                weight = wts[k] * intensity
-                target_exact[i - 1] += weight * (1.0 - frac)
-                target_exact[i] += weight * frac
 
-            i = np.searchsorted(ppm_axis, first_order_ppm)
-            if 0 < i < len(ppm_axis):
-                x1 = ppm_axis[i - 1]
-                x2 = ppm_axis[i]
-                frac = (first_order_ppm - x1) / (x2 - x1)
-                weight = wts[k] * intensity
-                target_first[i - 1] += weight * (1.0 - frac)
-                target_first[i] += weight * frac
+def _exact_offsets(I, C_Q, eta_Q, larmor_Hz, b, m, chunk_size=50000):
+    """
+    Exact transition frequencies minus nu0 (Hz) and intensities for the
+    transitions m-1 <-> m, by batched diagonalisation of
+    H = -nu0 (b . I) + H_Q over every direction in ``b``.
 
-    central = gaussian_broadening(central, ppm_axis, fwhm=fwhm)
-    satellites = gaussian_broadening(satellites, ppm_axis, fwhm=fwhm)
-    central_first_order = gaussian_broadening(central_first_order, ppm_axis, fwhm=fwhm)
-    satellites_first_order = gaussian_broadening(satellites_first_order, ppm_axis, fwhm=fwhm)
+    Levels are assigned by energy order (level m is the (I-m)-th
+    lowest), which is unambiguous while nu0 >> nu_Q -- the regime in
+    which "central" and "satellite" transitions mean anything.
+    Intensities are 2 x the transverse (perpendicular to B0) squared
+    matrix element, i.e. I(I+1) - m(m-1) when H_Q -> 0.
+    """
+    m = np.asarray(m, dtype=float)
+    Ix, Iy, Iz = spin_operators(I)
+    v = _efg_principal(eta_Q)
+    K = C_Q / (2.0 * I * (2.0 * I - 1.0))
+    H_Q = K * (v[0] * Ix @ Ix + v[1] * Iy @ Iy + v[2] * Iz @ Iz)
+    ops = np.stack([Ix, Iy, Iz])                       # (3, d, d)
+    lead = b.shape[:-1]
+    flat = b.reshape(-1, 3)
+    j = np.round(I - m).astype(int)                    # index of level m
+    nu = np.empty((flat.shape[0], len(m)))
+    inten = np.empty((flat.shape[0], len(m)))
+    for start in range(0, flat.shape[0], chunk_size):
+        bb = flat[start:start + chunk_size]
+        H = H_Q[None] - larmor_Hz * np.einsum("nk,kij->nij", bb, ops)
+        E, U = np.linalg.eigh(H)
+        nu[start:start + chunk_size] = E[:, j + 1] - E[:, j] - larmor_Hz
+        upper = U[:, :, j]                             # level m   (n, d, T)
+        lower = U[:, :, j + 1]                         # level m-1
+        mel = np.einsum("ndt,kde,net->nkt", lower.conj(), ops, upper)  # (n, 3, T)
+        along_b = np.einsum("nk,nkt->nt", bb, mel)
+        inten[start:start + chunk_size] = 2.0 * (
+            np.sum(np.abs(mel) ** 2, axis=1) - np.abs(along_b) ** 2)
+    return nu.reshape(lead + (len(m),)), inten.reshape(lead + (len(m),))
 
-    central_second_order = central - central_first_order
-    satellites_second_order = satellites - satellites_first_order
-    total = central + satellites
-    maximum = np.max(total)
-    normalised = total / maximum if maximum > 0 else total
 
+def quadrupolar_transition_frequencies(I, C_Q, eta_Q, larmor_Hz, theta, phi,
+                                       order="exact", transitions="all"):
+    """
+    Transition frequencies (as offsets from nu0, in Hz) and intensities
+    for crystallites with B0 at polar angles (theta, phi) in the EFG
+    PAS -- a single orientation or arrays of them.
+
+    Returns a dict with ``offset_Hz`` and ``intensity`` (shape
+    (n_orientations, n_transitions)), plus ``m``, ``label``, ``group``
+    describing each column. Useful for inspecting one crystallite, or
+    for comparing orders directly: ``exact - second`` is the third-
+    and-higher-order remainder.
+    """
+    I = _check_quad_inputs(I, eta_Q, larmor_Hz)
+    if order not in QUADRUPOLAR_ORDERS:
+        raise ValueError(f"order must be one of {QUADRUPOLAR_ORDERS}.")
+    rows = _select_transitions(I, transitions)
+    m = np.array([row["m"] for row in rows])
+    theta = np.atleast_1d(np.asarray(theta, dtype=float))
+    phi = np.atleast_1d(np.asarray(phi, dtype=float))
+    b = np.stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi),
+                  np.cos(theta)], axis=-1)
+    total_weight = sum(row["weight"] for row in quadrupolar_transition_table(I))
+    if order == "exact":
+        nu, inten = _exact_offsets(I, C_Q, eta_Q, larmor_Hz, b, m)
+    else:
+        nu = _perturbative_offsets(I, C_Q, eta_Q, larmor_Hz, b, m, order)
+        inten = np.broadcast_to(np.array([row["weight"] for row in rows]), nu.shape).copy()
     return {
-        "x_ppm": ppm_axis,
-        "central": central,
-        "satellites": satellites,
-        "central_first_order": central_first_order,
-        "satellites_first_order": satellites_first_order,
-        "central_second_order": central_second_order,
-        "satellites_second_order": satellites_second_order,
-        "total": total,
-        "real_spec": total,
-        "normalised_real_spec": normalised,
+        "offset_Hz": nu,
+        "intensity": inten / total_weight,
+        "m": m,
+        "label": [row["label"] for row in rows],
+        "group": [row["group"] for row in rows],
     }
 
 
-def quadrupolar_second_order_map(I, C_Q, eta_Q, larmor_Hz, n_theta=100, n_phi=200,
-                                  powder_scheme='rectangular', n_zcw=None):
+def quadrupolar_ct_isotropic_shift_Hz(I, C_Q, eta_Q, larmor_Hz):
     """
-    Calculate the exact and first-order frequencies of each transition
-    over a powder grid -- useful for visualising the second-order
-    central-transition shift as a function of crystallite orientation.
+    Second-order quadrupolar-induced isotropic shift of the central
+    transition (Hz; always negative), i.e. the centre of gravity of
+    the CT under MAS relative to delta_iso:
 
-    powder_scheme, n_zcw : see get_powder_grid / zcw_angles.
+        -(3/40) C_Q^2 / nu0 * [I(I+1) - 3/4] / [I^2 (2I-1)^2] * (1 + eta^2/3)
     """
-    ops = _quad_operators(I, C_Q, eta_Q)
-    theta, phi, wts = get_powder_grid(
-        n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw,
-    )
-    records = []
-    for k in range(len(wts)):
-        transitions = quadrupolar_transition_decomposition(
-            I=I, C_Q=C_Q, eta_Q=eta_Q,
-            theta=theta[k], phi=phi[k], larmor_Hz=larmor_Hz, _ops=ops,
-        )
-        for tr in transitions:
-            records.append({
-                "theta": theta[k],
-                "phi": phi[k],
-                "weight": wts[k],
-                "type": tr["type"],
-                "m_lower": tr["m_lower"],
-                "m_upper": tr["m_upper"],
-                "exact_frequency_Hz": tr["frequency_Hz"],
-                "first_order_frequency_Hz": larmor_Hz + tr["first_order_shift_Hz"],
-                "second_order_shift_Hz": tr["second_order_shift_Hz"],
-                "intensity": tr["intensity"],
-            })
-    return records
+    I = float(I)
+    return (-(3.0 / 40.0) * C_Q ** 2 / larmor_Hz
+            * (I * (I + 1.0) - 0.75) / (I ** 2 * (2.0 * I - 1.0) ** 2)
+            * (1.0 + eta_Q ** 2 / 3.0))
 
 
-def rotation_matrix(axis, angle):
-    """Rodrigues rotation matrix."""
-    axis = np.asarray(axis, dtype=float)
-    axis = axis / np.linalg.norm(axis)
-    K = np.array([
-        [0.0, -axis[2], axis[1]],
-        [axis[2], 0.0, -axis[0]],
-        [-axis[1], axis[0], 0.0],
-    ])
-    I3 = np.eye(3)
-    return I3 + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
+def _bin_sticks(ppm_axis, positions_ppm, weights):
+    """Linear-interpolation histogram of sticks onto ``ppm_axis``
+    (ascending or descending, uniformly spaced)."""
+    out = np.zeros(len(ppm_axis))
+    positions_ppm = np.ravel(positions_ppm)
+    weights = np.ravel(weights)
+    dx = ppm_axis[1] - ppm_axis[0]
+    idx = (positions_ppm - ppm_axis[0]) / dx
+    i0 = np.floor(idx).astype(np.int64)
+    frac = idx - i0
+    ok = (i0 >= 0) & (i0 < len(ppm_axis) - 1) & (weights != 0)
+    i0, frac, w = i0[ok], frac[ok], weights[ok]
+    out += np.bincount(i0, w * (1.0 - frac), minlength=len(ppm_axis))
+    out += np.bincount(i0 + 1, w * frac, minlength=len(ppm_axis))
+    return out
 
 
-def efg_orientation(theta, phi):
-    """Rotation taking EFG PAS vectors into the laboratory frame."""
-    Rz = rotation_matrix(np.array([0., 0., 1.]), phi)
-    Ry = rotation_matrix(np.array([0., 1., 0.]), theta)
-    return Rz @ Ry
+def _quad_result(ppm_axis, components, fwhm, lineshape, eta, info):
+    """Broaden each transition group, sum, and pack the result dict."""
+    broadened = {}
+    for group, stick in components.items():
+        broadened[group] = (_apply_broadening(stick, ppm_axis, fwhm=fwhm,
+                                              lineshape=lineshape, eta=eta)
+                            if fwhm > 0 else stick)
+    total = np.sum(list(broadened.values()), axis=0) if broadened else np.zeros(len(ppm_axis))
+    maximum = np.max(total) if total.size else 0.0
+    return {
+        "x_ppm": ppm_axis,
+        "real_spec": total,
+        "normalised_real_spec": total / maximum if maximum > 0 else total,
+        "components": broadened,
+        **info,
+    }
 
 
-def mas_quadrupolar_fid(I, C_Q, eta_Q, larmor_Hz, mas_Hz, theta, phi,
-                         rotor_angle='magic', n_rotor_periods=32,
-                         n_steps_per_rotor=256):
+def _quad_log(regime, I, C_Q, eta_Q, larmor_Hz, order, rows, delta_iso, extra=""):
+    groups = sorted({row["group"] for row in rows}, key=lambda g: (g != "CT", g))
+    order_text = {"first": "first-order perturbation theory",
+                  "second": "second-order perturbation theory",
+                  "exact": "exact diagonalisation of H_Z + H_Q"}[order]
+    return (f"{regime} quadrupolar powder pattern: I = {I:g}, C_Q = {C_Q / 1e6:g} MHz, "
+            f"eta_Q = {eta_Q:g}, nu0 = {larmor_Hz / 1e6:.6g} MHz, "
+            f"nu_Q = {quadrupolar_nu_Q(I, C_Q) / 1e3:.4g} kHz, delta_iso = {delta_iso:g} ppm; "
+            f"{order_text}; transitions {', '.join(groups)}{extra}.")
+
+
+def quadrupolar_static_spectrum(I, C_Q, eta_Q, larmor_Hz, ppm_axis, order="exact",
+                                transitions="all", delta_iso=0.0, fwhm=1.0,
+                                lineshape="gaussian", eta=0.0, n_zcw=17711,
+                                powder_scheme="zcw", n_theta=150, n_phi=300):
     """
-    Explicit stepwise density-matrix propagation under MAS for a single
-    crystallite. NOTE: this is the most expensive way to get a MAS FID
-    -- the gamma-COMPUTE approach already used in finite_mas_csa_spectrum
-    (compute the modulation analytically over one rotor period and FFT)
-    is applicable to the quadrupolar case too and would avoid explicit
-    propagation altogether. Flagged as a bigger structural improvement;
-    not implemented here, only the propagator itself was fixed/sped up.
-    """
-    Ix, Iy, Iz, H_Q = _quad_operators(I, C_Q, eta_Q)
-    n_states = int(2 * I + 1)
+    Static powder pattern of a quadrupolar nucleus.
 
-    if rotor_angle == 'magic':
-        beta = np.arccos(1.0 / np.sqrt(3.0))
+    Parameters
+    ----------
+    I : float
+        Spin (>= 1), e.g. 2.5 for 27Al.
+    C_Q : float
+        Quadrupolar coupling constant e^2qQ/h, in Hz.
+    eta_Q : float
+        Asymmetry parameter, 0..1.
+    larmor_Hz : float
+        |gamma B0| in Hz (see larmor_frequency_Hz).
+    ppm_axis : ndarray
+        Uniformly spaced ppm axis (either direction).
+    order : {'first', 'second', 'exact'}
+    transitions : {'all', 'ct', 'st'} or group name(s) such as 'ST1'
+    delta_iso : float
+        Isotropic chemical shift, ppm.
+    fwhm, lineshape, eta
+        Broadening, as make_static_csa_spectrum (fwhm in ppm; 0 = none).
+    n_zcw / powder_scheme / n_theta, n_phi
+        Powder average, as get_powder_grid. The default ZCW set is
+        large because each orientation is cheap here.
+
+    Returns
+    -------
+    dict with ``x_ppm``, ``real_spec`` (sum of the selected
+    transitions), ``normalised_real_spec``, ``components`` (one
+    broadened spectrum per transition group: 'CT', 'ST1', ...),
+    ``order``, ``transitions`` (labels), ``n_orientations`` and
+    ``log`` (a one-line description of what was simulated).
+    """
+    I = _check_quad_inputs(I, eta_Q, larmor_Hz)
+    ppm_axis = np.asarray(ppm_axis, dtype=float)
+    theta, phi, wts = get_powder_grid(n_theta, n_phi, powder_scheme=powder_scheme,
+                                      n_zcw=n_zcw)
+    freqs = quadrupolar_transition_frequencies(I, C_Q, eta_Q, larmor_Hz, theta, phi,
+                                               order=order, transitions=transitions)
+    ppm = delta_iso + freqs["offset_Hz"] / larmor_Hz * 1e6
+    weight = wts[:, None] * freqs["intensity"]
+    components = {}
+    for col, group in enumerate(freqs["group"]):
+        stick = _bin_sticks(ppm_axis, ppm[:, col], weight[:, col])
+        components[group] = components.get(group, 0.0) + stick
+    rows = _select_transitions(I, transitions)
+    info = {
+        "order": order, "regime": "static", "transitions": freqs["label"],
+        "n_orientations": len(wts),
+        "log": _quad_log("Static", I, C_Q, eta_Q, larmor_Hz, order, rows, delta_iso,
+                         f"; {len(wts)} orientations ({powder_scheme})"),
+    }
+    return _quad_result(ppm_axis, components, fwhm, lineshape, eta, info)
+
+
+def _rotor_frame(theta, phi):
+    """Rotor-axis unit vectors r (from polar angles in the PAS) and
+    two unit vectors e1, e2 completing a right-handed frame."""
+    r = np.column_stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi),
+                         np.cos(theta)])
+    ref = np.zeros_like(r)
+    ref[:, 2] = 1.0
+    near_z = np.abs(r[:, 2]) > 0.9
+    ref[near_z] = [1.0, 0.0, 0.0]
+    e1 = np.cross(r, ref)
+    e1 /= np.linalg.norm(e1, axis=1)[:, None]
+    e2 = np.cross(r, e1)
+    return r, e1, e2
+
+
+def quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, order="second",
+                             transitions="all", delta_iso=0.0, rotor_angle="magic",
+                             fwhm=1.0, lineshape="gaussian", eta=0.0, n_zcw=4181,
+                             powder_scheme="zcw", n_theta=40, n_phi=80,
+                             n_gamma=None, n_time=None, max_n_time=65536):
+    """
+    Finite-speed MAS powder pattern of a quadrupolar nucleus: the
+    centreband lineshape and every spinning sideband, for the CT, the
+    STs, or both, at first order, second order or exactly.
+
+    Method (gamma-COMPUTE): for each crystallite, the transition
+    frequency is sampled at ``n_gamma`` rotor phases (exact for the
+    perturbative orders -- they contain no harmonic above the 4th --
+    and converged for 'exact'), its mean nu_c is the centreband
+    position, the rest is integrated to a phase in the Fourier
+    domain, and the gamma-averaged intensity of sideband k (at
+    nu_c + k * mas_Hz) is |a_k|^2, a_k being the k-th Fourier
+    coefficient of exp(2 pi i * phase) over one rotor period.
+
+    Parameters (beyond quadrupolar_static_spectrum's)
+    ----------
+    mas_Hz : float
+        Spinning rate, Hz (> 0).
+    rotor_angle : 'magic' or float (degrees)
+    n_zcw : int
+        Rotor-axis orientations (ZCW). The rotor phase supplies the
+        third angle, so a 2-angle set is the complete powder average.
+    n_gamma : int, optional
+        Rotor-phase samples per period: default 16 for the perturbative
+        orders (exact), 32 for 'exact'.
+    n_time : int, optional
+        Time points per rotor period for the sideband FFT (a power of
+        two). Default: chosen from the largest frequency excursion so
+        that no sideband aliases. Raises if that would exceed
+        ``max_n_time`` (a static simulation is then the better tool).
+
+    Notes
+    -----
+    The CT's centreband carries the second-order MAS lineshape and the
+    isotropic quadrupolar shift (quadrupolar_ct_isotropic_shift_Hz);
+    at first order the CT is a single line at delta_iso. 'exact'
+    assumes the eigenstates follow the rotation adiabatically (true for
+    nu0 >> nu_Q) and uses the rotor-period-averaged intensity of each
+    crystallite.
+    """
+    I = _check_quad_inputs(I, eta_Q, larmor_Hz)
+    if order not in QUADRUPOLAR_ORDERS:
+        raise ValueError(f"order must be one of {QUADRUPOLAR_ORDERS}.")
+    if not mas_Hz or mas_Hz <= 0:
+        raise ValueError("mas_Hz must be > 0 (use quadrupolar_static_spectrum for static).")
+    ppm_axis = np.asarray(ppm_axis, dtype=float)
+    rows = _select_transitions(I, transitions)
+    m = np.array([row["m"] for row in rows])
+    total_weight = sum(row["weight"] for row in quadrupolar_transition_table(I))
+    beta = (np.arccos(1.0 / np.sqrt(3.0)) if rotor_angle == "magic"
+            else np.deg2rad(float(rotor_angle)))
+    if n_gamma is None:
+        n_gamma = 32 if order == "exact" else 16
+    n_gamma = int(n_gamma)
+
+    theta, phi, wts = get_powder_grid(n_theta, n_phi, powder_scheme=powder_scheme,
+                                      n_zcw=n_zcw)
+    r, e1, e2 = _rotor_frame(theta, phi)
+    gam = 2.0 * np.pi * np.arange(n_gamma) / n_gamma
+    b = (np.cos(beta) * r[:, None, :]
+         + np.sin(beta) * (np.cos(gam)[None, :, None] * e1[:, None, :]
+                           + np.sin(gam)[None, :, None] * e2[:, None, :]))  # (N, G, 3)
+
+    if order == "exact":
+        nu, inten = _exact_offsets(I, C_Q, eta_Q, larmor_Hz, b, m)
+        inten = inten.mean(axis=1)                                          # (N, T)
     else:
-        beta = np.deg2rad(rotor_angle)
+        nu = _perturbative_offsets(I, C_Q, eta_Q, larmor_Hz, b, m, order)   # (N, G, T)
+        inten = np.broadcast_to(np.array([row["weight"] for row in rows]),
+                                (len(wts), len(m)))
+    inten = inten / total_weight
 
-    rotor_axis = np.array([
-        np.sin(theta) * np.cos(phi),
-        np.sin(theta) * np.sin(phi),
-        np.cos(theta),
-    ])
-    e1, e2 = _transverse_basis(rotor_axis)
+    # Fourier series of the frequency in the rotor phase.
+    coeff = np.fft.fft(nu, axis=1) / n_gamma                                # (N, G, T)
+    centre = coeff[:, 0, :].real                                            # (N, T)
+    k_g = np.fft.fftfreq(n_gamma, d=1.0 / n_gamma).round().astype(int)
+    keep = (k_g != 0) & (np.abs(k_g) < n_gamma / 2)
+    excursion = float(np.max(np.abs(nu - centre[:, None, :]))) if nu.size else 0.0
 
-    n0 = np.cos(beta) * rotor_axis + np.sin(beta) * e1
-    Iz_lab0 = n0[0] * Ix + n0[1] * Iy + n0[2] * Iz
-    rho = Iz_lab0.astype(complex)
+    if n_time is None:
+        need = 2.0 * (1.3 * excursion / mas_Hz + 4 * n_gamma) + 16
+        n_time = int(2 ** np.ceil(np.log2(max(need, 64))))
+    n_time = int(n_time)
+    if n_time > max_n_time:
+        raise ValueError(
+            f"The spinning sidebands span about {2 * excursion / mas_Hz:.0f} x the "
+            f"MAS rate, needing {n_time} points per rotor period (max_n_time = "
+            f"{max_n_time}). Spin faster, simulate fewer transitions (e.g. "
+            "transitions='ct'), or use the static simulation.")
+    if n_time < n_gamma:
+        raise ValueError("n_time must be >= n_gamma.")
 
-    Iplus = 2.0 * (0.5 * (Ix + 1j * Iy))
+    k_t = np.fft.fftfreq(n_time, d=1.0 / n_time).round().astype(int)
+    # phase (cycles) Fourier coefficients: c_k / (2 pi i k nu_r) * (2 pi) -> c_k / (i k nu_r) / (2 pi)
+    phase_coeff = np.zeros_like(coeff)
+    phase_coeff[:, keep, :] = coeff[:, keep, :] / (2j * np.pi * k_g[keep, None] * mas_Hz)
+    slots = np.mod(k_g[keep], n_time)
 
-    dt = 1.0 / (mas_Hz * n_steps_per_rotor)
-    n_total = n_rotor_periods * n_steps_per_rotor
-    signal = np.zeros(n_total, dtype=complex)
+    components = {row["group"]: np.zeros(len(ppm_axis)) for row in rows}
+    groups = [row["group"] for row in rows]
+    n_trans = len(m)
+    chunk = max(1, int(4.0e6 // (n_time * n_trans)))
+    sideband_Hz = k_t * mas_Hz
+    for start in range(0, len(wts), chunk):
+        stop = min(start + chunk, len(wts))
+        spectrum_coeff = np.zeros((stop - start, n_time, n_trans), dtype=complex)
+        spectrum_coeff[:, slots, :] = phase_coeff[start:stop][:, keep, :]
+        phase = np.fft.ifft(spectrum_coeff, axis=1).real * n_time           # cycles
+        signal = np.exp(2j * np.pi * phase)
+        a = np.fft.fft(signal, axis=1) / n_time
+        power = (a.real ** 2 + a.imag ** 2)                                 # (c, n_time, T)
+        weight = wts[start:stop, None, None] * inten[start:stop, None, :] * power
+        position = delta_iso + (centre[start:stop, None, :] + sideband_Hz[None, :, None]) \
+            / larmor_Hz * 1e6
+        for col, group in enumerate(groups):
+            components[group] += _bin_sticks(ppm_axis, position[:, :, col], weight[:, :, col])
 
-    for j in range(n_total):
-        gamma = 2.0 * np.pi * j / n_steps_per_rotor
-        b = (np.cos(beta) * rotor_axis
-             + np.sin(beta) * (np.cos(gamma) * e1 + np.sin(gamma) * e2))
-        Iz_lab = b[0] * Ix + b[1] * Iy + b[2] * Iz
-        H_Z = -larmor_Hz * Iz_lab
-        H = H_Z + H_Q
+    rotor_text = "magic angle" if rotor_angle == "magic" else f"{float(rotor_angle):g} deg"
+    info = {
+        "order": order, "regime": "mas", "mas_Hz": float(mas_Hz),
+        "transitions": [row["label"] for row in rows],
+        "n_orientations": len(wts), "n_gamma": n_gamma, "n_time": n_time,
+        "log": _quad_log(f"MAS ({mas_Hz / 1e3:g} kHz, {rotor_text})", I, C_Q, eta_Q,
+                         larmor_Hz, order, rows, delta_iso,
+                         f"; {len(wts)} rotor orientations x {n_gamma} rotor phases, "
+                         f"{n_time} points per rotor period"),
+    }
+    return _quad_result(ppm_axis, components, fwhm, lineshape, eta, info)
 
-        # FIX/EFFICIENCY: H is Hermitian at every step, so build the
-        # propagator from its eigendecomposition rather than a general
-        # Pade-approximant matrix exponential (scipy.linalg.expm),
-        # which was also being imported inside the innermost loop.
-        evals, evecs = np.linalg.eigh(H)
-        U = evecs @ np.diag(np.exp(-1j * 2.0 * np.pi * evals * dt)) @ evecs.conj().T
 
-        rho = U @ rho @ U.conj().T
-        signal[j] = np.trace(rho @ Iplus)
+def quadrupolar_spectrum(I, C_Q, eta_Q, larmor_Hz, ppm_axis, mas_Hz=0.0, **kwargs):
+    """Static (``mas_Hz`` = 0) or MAS quadrupolar powder pattern --
+    dispatches to quadrupolar_static_spectrum / quadrupolar_mas_spectrum
+    with the same keyword arguments."""
+    if mas_Hz and mas_Hz > 0:
+        return quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, **kwargs)
+    kwargs.pop("rotor_angle", None)
+    for key in ("n_gamma", "n_time", "max_n_time"):
+        kwargs.pop(key, None)
+    return quadrupolar_static_spectrum(I, C_Q, eta_Q, larmor_Hz, ppm_axis, **kwargs)
 
-    return signal
+
+def quadrupolar_order_comparison(I, C_Q, eta_Q, larmor_Hz, ppm_axis, mas_Hz=0.0,
+                                 orders=QUADRUPOLAR_ORDERS, **kwargs):
+    """
+    The same pattern at several levels of theory, for seeing what each
+    order contributes: returns ``{order: result}`` (results as
+    quadrupolar_spectrum), plus ``'second_minus_first'`` and
+    ``'exact_minus_second'`` difference spectra (on the shared
+    normalisation, not renormalised) where both orders were computed.
+    """
+    out = {order: quadrupolar_spectrum(I, C_Q, eta_Q, larmor_Hz, ppm_axis, mas_Hz=mas_Hz,
+                                       order=order, **kwargs)
+           for order in orders}
+    if "first" in out and "second" in out:
+        out["second_minus_first"] = out["second"]["real_spec"] - out["first"]["real_spec"]
+    if "second" in out and "exact" in out:
+        out["exact_minus_second"] = out["exact"]["real_spec"] - out["second"]["real_spec"]
+    return out
+
+
+def quadrupolar_axis_limits(I, C_Q, eta_Q, larmor_Hz, transitions="all", delta_iso=0.0,
+                            fwhm=0.0, margin=0.15):
+    """
+    ppm axis limits ``(low, high)`` that frame a quadrupolar pattern:
+    the full static second-order range of the selected transitions
+    (which also contains all their MAS sidebands of significant
+    intensity), widened by ``margin`` of that range on each side and
+    by at least five broadening FWHMs.
+    """
+    I = _check_quad_inputs(I, eta_Q, larmor_Hz)
+    theta, phi, _ = zcw_angles(2584)
+    freqs = quadrupolar_transition_frequencies(I, C_Q, eta_Q, larmor_Hz, theta, phi,
+                                               order="second", transitions=transitions)
+    ppm = delta_iso + freqs["offset_Hz"] / larmor_Hz * 1e6
+    low, high = float(np.min(ppm)), float(np.max(ppm))
+    pad = max(margin * (high - low), 5.0 * abs(float(fwhm)), 1.0)
+    return low - pad, high + pad
+
 
 # ============================================================
 # J-COUPLING (SCALAR-COUPLED) MULTIPLETS

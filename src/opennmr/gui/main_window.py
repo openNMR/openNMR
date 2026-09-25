@@ -10364,19 +10364,10 @@ class MainWindow(QMainWindow):
         section's own name: dipolar has no simulator here either, for
         the same reason CSA/Dipolar fitting is CSA-only for now).
 
-        Explicit, discussed scope limit: CSA covers static and finite-
-        MAS (both already fast, powder-averaged functions in
-        :mod:`opennmr.notebook.simulations`); Quadrupolar covers static
-        only, first-order or exact. MAS quadrupolar has no powder-
-        averaged simulator in this codebase yet -- only a single-
-        crystallite explicit density-matrix propagator
-        (``mas_quadrupolar_fid``), and building a fast, validated
-        powder-averaged version of it is real new numerical work
-        (either loop it over a powder grid -- likely too slow for
-        interactive use -- or write an analytic gamma-averaging
-        version the way ``finite_mas_csa_spectrum`` does for CSA).
-        Left for its own follow-up task rather than shipped slow or
-        unvalidated."""
+        CSA and Quadrupolar each cover static and finite MAS, from the
+        powder-averaged functions in :mod:`opennmr.notebook.simulations`
+        (quadrupolar: first order, second order or exact; CT, STs or
+        both -- ``quadrupolar_spectrum``)."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         # First-order J-coupled multiplets, at the top (explicit user
@@ -11025,18 +11016,18 @@ class MainWindow(QMainWindow):
             self.sim_csa_lineshape_combo.currentData() == "pseudo_voigt")
 
     def _build_simulate_quadrupolar_subtab(self) -> QWidget:
-        """Forward-simulate a static quadrupolar powder pattern from
-        spin/coupling parameters. Static only -- see
-        :meth:`_build_simulations_panel`'s own docstring for why finite
-        MAS is out of scope here for now."""
+        """Forward-simulate a static or MAS quadrupolar powder pattern
+        from spin/coupling parameters, at first order, second order or
+        exactly, for the central transition, the satellites or both
+        (``notebook.simulations.quadrupolar_spectrum``)."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         blurb = QLabel(
-            "Simulate a static quadrupolar powder pattern, then export it "
-            "as a spectrum to compare against real data in "
-            "Open experiments. Finite-MAS quadrupolar simulation is not "
-            "yet available (see the tooltip on Method, below, for why)."
+            "Simulate a static or MAS quadrupolar powder pattern, then "
+            "export it as a spectrum to compare against real data in "
+            "Open experiments. Tick \u201cCompare orders\u201d to see what "
+            "second order (and beyond) adds to the first-order pattern."
         )
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
@@ -11110,6 +11101,15 @@ class MainWindow(QMainWindow):
         self.sim_quad_eta_spin.setSingleStep(0.1)
         form.addRow("η_Q:", self.sim_quad_eta_spin)
 
+        self.sim_quad_diso_spin = QDoubleSpinBox()
+        self.sim_quad_diso_spin.setRange(-1.0e5, 1.0e5)
+        self.sim_quad_diso_spin.setDecimals(3)
+        self.sim_quad_diso_spin.setSuffix(" ppm")
+        self.sim_quad_diso_spin.setToolTip(
+            "Isotropic chemical shift. The quadrupolar-induced shift of the "
+            "central transition comes on top of this, from second order.")
+        form.addRow("δiso:", self.sim_quad_diso_spin)
+
         self.sim_quad_larmor_spin = QDoubleSpinBox()
         self.sim_quad_larmor_spin.setRange(0.0, 5000.0)
         self.sim_quad_larmor_spin.setDecimals(4)
@@ -11119,24 +11119,57 @@ class MainWindow(QMainWindow):
             "from the selected spectrum's own SFO1 where one is selected.")
         form.addRow("Larmor frequency:", self.sim_quad_larmor_spin)
 
+        self.sim_quad_regime_combo = QComboBox()
+        self.sim_quad_regime_combo.addItem("Static powder", "static")
+        self.sim_quad_regime_combo.addItem("MAS (centreband + sidebands)", "mas")
+        self.sim_quad_regime_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_simulate_quad_controls())
+        form.addRow("Regime:", self.sim_quad_regime_combo)
+
+        self.sim_quad_mas_spin = QDoubleSpinBox()
+        self.sim_quad_mas_spin.setRange(0.0, 200000.0)
+        self.sim_quad_mas_spin.setDecimals(0)
+        self.sim_quad_mas_spin.setSingleStep(1000.0)
+        self.sim_quad_mas_spin.setValue(10000.0)
+        self.sim_quad_mas_spin.setSuffix(" Hz")
+        self.sim_quad_mas_spin.setToolTip(
+            "Spinning rate at the magic angle. Every spinning sideband is "
+            "simulated, so the satellites' sideband manifold appears too.")
+        form.addRow("MAS rate:", self.sim_quad_mas_spin)
+
+        self.sim_quad_transitions_combo = QComboBox()
+        self.sim_quad_transitions_combo.addItem("CT + satellites", "all")
+        self.sim_quad_transitions_combo.addItem("Central transition only", "ct")
+        self.sim_quad_transitions_combo.addItem("Satellites only", "st")
+        self.sim_quad_transitions_combo.setToolTip(
+            "Which single-quantum transitions to simulate. The central "
+            "transition (−1/2 ↔ +1/2) exists for half-integer spins only. "
+            "Intensities keep their true shares either way, e.g. the CT "
+            "carries 9/35 of the total for I = 5/2.")
+        form.addRow("Transitions:", self.sim_quad_transitions_combo)
+
         self.sim_quad_method_combo = QComboBox()
-        self.sim_quad_method_combo.addItem("First-order only", "first_order")
         self.sim_quad_method_combo.addItem("Exact (diagonalization)", "exact")
+        self.sim_quad_method_combo.addItem("Second-order perturbation", "second_order")
+        self.sim_quad_method_combo.addItem("First-order only", "first_order")
         self.sim_quad_method_combo.setToolTip(
-            "First-order only: each transition at its first-order-"
-            "perturbation-theory shift -- misses the second- (and "
-            "higher-) order quadrupolar shift altogether.\n\n"
-            "Exact: each transition at its true, exactly-diagonalized "
-            "frequency, including every quadrupolar order -- matters "
-            "most at low field / high C_Q, e.g. the central transition's "
-            "second-order shift, which first-order-only cannot show at "
-            "all.\n\n"
-            "Finite-MAS quadrupolar simulation is not available yet: no "
-            "powder-averaged MAS simulator exists in this codebase, only a "
-            "slow single-crystallite propagator -- a fast, validated "
-            "version is real new numerical work, left for its own "
-            "follow-up task.")
+            "First-order only: each transition at its first-order shift -- "
+            "the central transition is then a single line at δiso.\n\n"
+            "Second-order: adds the second-order shift (perturbation "
+            "theory), which gives the central transition its static and "
+            "MAS lineshapes and its isotropic quadrupolar shift.\n\n"
+            "Exact: diagonalizes H_Z + H_Q, so every order is included; "
+            "exact − second-order shows the third- and higher-order part, "
+            "which matters only at low field / very large C_Q.")
         form.addRow("Method:", self.sim_quad_method_combo)
+
+        self.sim_quad_compare_check = QCheckBox("Compare orders (first, second, exact)")
+        self.sim_quad_compare_check.setToolTip(
+            "Also draw all three levels of theory together on the Simulation "
+            "plot, each scaled to its own maximum, with their differences "
+            "underneath -- what second order adds to first, and what is "
+            "left beyond second order.")
+        form.addRow("", self.sim_quad_compare_check)
 
         self.sim_quad_fwhm_spin = QDoubleSpinBox()
         self.sim_quad_fwhm_spin.setRange(0.0, 1.0e4)
@@ -11155,10 +11188,22 @@ class MainWindow(QMainWindow):
         self.sim_quad_orientations_spin.setSingleStep(500)
         self.sim_quad_orientations_spin.setValue(4000)
         self.sim_quad_orientations_spin.setToolTip(
-            "Each orientation costs a matrix diagonalization -- unlike "
-            "static CSA, there is no cheap closed-form shortcut here, so "
-            "raising this trades speed for a smoother pattern.")
+            "Powder orientations. Cheap for first and second order "
+            "(closed-form frequencies); exact costs one small "
+            "diagonalization per orientation (and per rotor phase under "
+            "MAS). Static patterns want more (≈20,000) than MAS (≈4,000).")
         form.addRow("Orientations:", self.sim_quad_orientations_spin)
+
+        # Same "follows the parameters until edited by hand" pattern as
+        # the CSA section's Auto axis. Applied when Simulate is pressed,
+        # since framing needs a (quick) pass over the powder.
+        self.sim_quad_auto_axis_check = QCheckBox("Auto: frame the selected transitions")
+        self.sim_quad_auto_axis_check.setChecked(True)
+        self.sim_quad_auto_axis_check.setToolTip(
+            "Set the ppm axis from the full second-order range of the "
+            "selected transitions (plus a margin) each time Simulate is "
+            "pressed. Typing an axis limit turns this off.")
+        form.addRow("Axis:", self.sim_quad_auto_axis_check)
 
         self.sim_quad_ppm_min_spin = QDoubleSpinBox()
         self.sim_quad_ppm_min_spin.setRange(-1.0e6, 1.0e6)
@@ -11173,6 +11218,8 @@ class MainWindow(QMainWindow):
         self.sim_quad_ppm_max_spin.setValue(500.0)
         self.sim_quad_ppm_max_spin.setSuffix(" ppm")
         form.addRow("Axis max:", self.sim_quad_ppm_max_spin)
+        for spin in (self.sim_quad_ppm_min_spin, self.sim_quad_ppm_max_spin):
+            spin.valueChanged.connect(lambda _v: self.sim_quad_auto_axis_check.setChecked(False))
 
         self.sim_quad_points_spin = QSpinBox()
         self.sim_quad_points_spin.setRange(64, 1 << 20)
@@ -11198,7 +11245,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.sim_quad_export_button)
 
         layout.addStretch(1)
+        self._refresh_simulate_quad_controls()
         return tab
+
+    def _refresh_simulate_quad_controls(self) -> None:
+        """MAS rate only means something in the MAS regime."""
+        if hasattr(self, "sim_quad_mas_spin"):
+            self.sim_quad_mas_spin.setEnabled(
+                self.sim_quad_regime_combo.currentData() == "mas")
 
     def _refresh_simulation_controls(self, spectrum) -> None:
         """Seed the Simulations tab's Larmor-frequency and nucleus
@@ -11383,55 +11437,98 @@ class MainWindow(QMainWindow):
         spin_i = self.sim_quad_spin_spin.value()
         c_q_hz = self.sim_quad_cq_spin.value() * 1.0e6
         eta_q = self.sim_quad_eta_spin.value()
-        ppm_axis = np.linspace(ppm_min, ppm_max, self.sim_quad_points_spin.value())
-        scheme = self.sim_quad_powder_combo.currentData()
-        grid_kwargs = self._csa_grid_kwargs(scheme, self.sim_quad_orientations_spin.value())
+        larmor_hz = larmor_mhz * 1.0e6
+        delta_iso = self.sim_quad_diso_spin.value()
+        transitions = self.sim_quad_transitions_combo.currentData()
         method = self.sim_quad_method_combo.currentData()
-
-        # NOT static_quadrupolar_spectrum vs. _exact -- both of those
-        # diagonalize the exact H_Z + H_Q Hamiltonian (their own module
-        # docstring for the non-"_exact" one says so: "computed via the
-        # same exact diagonalization as static_quadrupolar_spectrum_
-        # exact"), so calling one or the other for "Method" would offer
-        # a choice that does nothing. The real first-order/exact split
-        # lives in static_quadrupolar_spectrum_decomposed, which
-        # returns both from one calculation: central_first_order +
-        # satellites_first_order is the genuine first-order-only
-        # pattern (each transition's exact-diagonalization eigenbasis,
-        # evaluated at its first-order-perturbation-theory shift
-        # instead of its exact one), and total is the exact pattern.
+        order = {"first_order": "first", "second_order": "second", "exact": "exact"}[method]
+        is_mas = self.sim_quad_regime_combo.currentData() == "mas"
+        mas_hz = self.sim_quad_mas_spin.value() if is_mas else 0.0
+        if is_mas and mas_hz <= 0:
+            QMessageBox.warning(
+                self, "Simulate quadrupolar",
+                "The MAS lineshape needs a spinning rate. Set MAS rate, or "
+                "switch Regime to Static powder.")
+            return
+        fwhm = self.sim_quad_fwhm_spin.value()
         try:
-            result = notebook_simulations.static_quadrupolar_spectrum_decomposed(
-                spin_i, c_q_hz, eta_q, ppm_axis, larmor_Hz=larmor_mhz * 1.0e6,
-                fwhm=self.sim_quad_fwhm_spin.value(), powder_scheme=scheme, **grid_kwargs)
+            if self.sim_quad_auto_axis_check.isChecked():
+                low, high = notebook_simulations.quadrupolar_axis_limits(
+                    spin_i, c_q_hz, eta_q, larmor_hz, transitions=transitions,
+                    delta_iso=delta_iso, fwhm=fwhm)
+                for spin, value in ((self.sim_quad_ppm_min_spin, low),
+                                    (self.sim_quad_ppm_max_spin, high)):
+                    spin.blockSignals(True)
+                    spin.setValue(value)
+                    spin.blockSignals(False)
+            ppm_axis = np.linspace(self.sim_quad_ppm_min_spin.value(),
+                                   self.sim_quad_ppm_max_spin.value(),
+                                   self.sim_quad_points_spin.value())
+            scheme = self.sim_quad_powder_combo.currentData()
+            kwargs = dict(transitions=transitions, delta_iso=delta_iso, fwhm=fwhm,
+                          powder_scheme=scheme,
+                          **self._csa_grid_kwargs(scheme, self.sim_quad_orientations_spin.value()))
+            started = time.perf_counter()
+            if self.sim_quad_compare_check.isChecked():
+                comparison = notebook_simulations.quadrupolar_order_comparison(
+                    spin_i, c_q_hz, eta_q, larmor_hz, ppm_axis, mas_Hz=mas_hz, **kwargs)
+                result = comparison[order]
+            else:
+                comparison = None
+                result = notebook_simulations.quadrupolar_spectrum(
+                    spin_i, c_q_hz, eta_q, larmor_hz, ppm_axis, mas_Hz=mas_hz,
+                    order=order, **kwargs)
+            elapsed = time.perf_counter() - started
         except ValueError as exc:
             QMessageBox.warning(self, "Simulate quadrupolar", str(exc))
             return
 
-        if method == "exact":
-            spectrum_data = np.asarray(result["total"], dtype=float)
-        else:
-            spectrum_data = np.asarray(
-                result["central_first_order"] + result["satellites_first_order"], dtype=float)
+        spectrum_data = np.asarray(result["real_spec"], dtype=float)
         axis = NMRAxis(kind="frequency", ppm=ppm_axis)
+        regime_label = f"MAS {mas_hz / 1e3:g} kHz" if is_mas else "static"
         metadata = NMRMetadata(
             vendor="simulated", nucleus=nucleus, sfo1=larmor_mhz,
             raw={"simulation": {
-                "kind": "quadrupolar", "method": method, "I": spin_i,
-                "C_Q_Hz": c_q_hz, "eta_Q": eta_q,
+                "kind": "quadrupolar", "method": method, "order": order, "I": spin_i,
+                "C_Q_Hz": c_q_hz, "eta_Q": eta_q, "delta_iso_ppm": delta_iso,
+                "regime": "mas" if is_mas else "static", "mas_Hz": mas_hz,
+                "transitions": transitions, "log": result["log"],
             }},
         )
         self._simulated_quadrupolar_spectrum = NMRSpectrum(data=spectrum_data, axes=[axis], metadata=metadata)
 
         self.fit_canvas.show_spectrum(self._simulated_quadrupolar_spectrum)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+        if comparison is not None:
+            self._draw_quadrupolar_order_comparison(comparison, nucleus)
 
         warning = self._simulated_spectrum_axis_warning(ppm_axis, spectrum_data)
-        method_label = "exact" if method == "exact" else "first-order"
+        method_label = {"first": "first-order", "second": "second-order", "exact": "exact"}[order]
+        ct_note = ""
+        if transitions in ("all", "ct") and not float(spin_i).is_integer():
+            shift = notebook_simulations.quadrupolar_ct_isotropic_shift_Hz(
+                spin_i, c_q_hz, eta_q, larmor_hz) / larmor_hz * 1e6
+            ct_note = (f" CT isotropic quadrupolar shift: {shift:.3g} ppm "
+                       f"(CT centre of gravity at {delta_iso + shift:.4g} ppm"
+                       + (", from second order on)." if order != "first" else
+                          "; not shown at first order)."))
         self.sim_quad_results_label.setText(
-            f"Simulated static quadrupolar pattern ({method_label}), I = {spin_i:g}, "
-            f"C_Q = {self.sim_quad_cq_spin.value():g} MHz, η_Q = {eta_q:g}.{warning}")
+            f"Simulated {regime_label} quadrupolar pattern ({method_label}), I = {spin_i:g}, "
+            f"C_Q = {self.sim_quad_cq_spin.value():g} MHz, η_Q = {eta_q:g}, "
+            f"ν_Q = {notebook_simulations.quadrupolar_nu_Q(spin_i, c_q_hz) / 1e3:.4g} kHz, "
+            f"in {elapsed:.2f} s.{ct_note}{warning}")
+        self.sim_quad_results_label.setToolTip(result["log"])
         self.sim_quad_export_button.setEnabled(True)
+
+    def _draw_quadrupolar_order_comparison(self, comparison, nucleus) -> None:
+        """First vs second order vs exact on the Simulation plot."""
+        from ..notebook.plotting import plot_quadrupolar_orders
+        figure = self.simulation_canvas.figure
+        figure.clear()
+        plot_quadrupolar_orders(comparison, nuclide=nucleus, figure=figure, font=None,
+                                fontsize=10)
+        self.simulation_canvas.draw()
+        self._show_simulation_view()
 
     def _on_export_simulated_quadrupolar_clicked(self) -> None:
         spectrum = getattr(self, "_simulated_quadrupolar_spectrum", None)

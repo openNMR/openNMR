@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-25 (quadrupolar round): full suite without `test_data/`, with pymatgen: 2694 passed, 161 skipped, 1 failed (`test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log` -- pre-existing, fails on HEAD too; pymatgen-only).*
+
 *2026-09-25: full suite without `test_data/` or pymatgen, after the drag-from-Open-experiments fix: 2588 passed, 163 skipped, 0 failed.*
 
 *2026-09-24: full suite without `test_data/` after the pNMR, J-coupling, strong-coupling, title/notes, VOCS-slice, CPMG and Compare-2D rounds: 2615 passed, 161 skipped, 0 failed (after the ninth round). Re-count with `test_data/` present.*
@@ -76,6 +78,37 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+
+## Quadrupolar simulator rebuilt: static + fast MAS, first/second order/exact, CT and/or STs (2026-09-25, fourth round)
+
+User: replace the quadrupolar functions in `notebook/simulations.py` with the static simulator from `SCRIPT_Quad_Simulator_V2_20260925.ipynb` (exact / first- / second-order, CT/ST labels), and remake the MAS part, which took ~40 s for 10 crystallites. Must be able to see first- and second-order effects, and to simulate CT only or CTs and STs together.
+
+### Why the notebook's MAS was slow (and also wrong)
+- **Slow**: a Python loop over 4096 rotor phases per crystallite, and every step called `find_isotope_info` twice (a pandas DataFrame filter), rebuilt the spin operators with Python loops, built the rotated EFG and ran `eigh` -- ~1 ms of overhead per step, ~4 s per crystallite. Nothing about the quadrupole makes it harder than CSA: in high field every frequency is a closed-form function of the B0 direction in the PAS (rank 2 at first order; three rotation invariants at second order), a Fourier series in the rotor phase with at most 4 harmonics.
+- **Wrong**: it subtracted each crystallite's mean frequency, which *removes the MAS CT lineshape and the isotropic quadrupolar shift* (both live in that mean); it FFT'd one rotor period, so the axis only had points at multiples of the spinning rate; `abs()` of the summed FID mixed in dispersive signal (the gamma-averaged intensity is |a_k|^2 per crystallite); the broadening kernel was defined on that coarse grid.
+
+### Built (`notebook/simulations.py`, QUADRUPOLAR NMR section -- replaces every previous quadrupolar function)
+- `quadrupolar_static_spectrum`, `quadrupolar_mas_spectrum`, `quadrupolar_spectrum` (dispatch on `mas_Hz`), `quadrupolar_order_comparison` (first/second/exact + difference spectra), `quadrupolar_transition_frequencies` (per orientation), `quadrupolar_transition_table`, `quadrupolar_axis_limits`, `quadrupolar_ct_isotropic_shift_Hz`, `quadrupolar_nu_Q`, `larmor_frequency_Hz`. `order='first'|'second'|'exact'`; `transitions='ct'|'st'|'all'|'ST1'|[...]`; `delta_iso`; results carry `components` per transition group and a one-line `log`.
+- Intensities are normalised so all 2I transitions sum to 1: a CT-only spectrum integrates to the CT's true share (9/35 for I = 5/2).
+- MAS: gamma-COMPUTE. 16 rotor-phase samples (exact for perturbative orders; 32 for exact), phase integrated in the Fourier domain, sidebands |a_k|^2 at c0 + k nu_r; n_time chosen from the largest excursion so no sideband aliases (raises past `max_n_time`). Exact MAS = batched `eigh` at each sampled rotor phase (adiabatic; rotor-averaged intensities).
+- Speed (VM, 2 cores): MAS CT 4181 crystallites second order 0.04 s, exact 0.55 s; CT+STs ~0.5 s (second) / 1.2 s (exact). Static 17711 orientations: <0.01 s perturbative, 0.09 s exact.
+- `notebook/plotting.py`: `plot_quadrupolar_orders` -- first/second/exact overlaid (Okabe-Ito + distinct dashes), difference panel below; `scale='each'|'shared'`; `figure=` to draw into the GUI's plot.
+- GUI, Simulations > Quadrupolar: Regime (Static / MAS) + MAS rate, Transitions (CT + satellites / CT only / satellites only), Method (Exact / Second-order / First-order), δiso, "Compare orders" (draws `plot_quadrupolar_orders` on the Simulation plot; the exported spectrum is still the chosen method's), Auto axis (framed at Simulate time; typing a limit turns it off). The result line reports ν_Q, time taken and the CT isotropic quadrupolar shift; the full log is its tooltip and in the exported spectrum's metadata.
+
+### Validation (`tests/test_quadrupolar_simulation.py`, 22 tests; 4 new GUI tests in `test_gui.py`)
+- Per-orientation first/second/exact against a dense lab-frame reference (rotated EFG, explicit Rayleigh-Schroedinger sums): agree to <1e-4 Hz, I = 1, 3/2, 5/2, 7/2. Also checked against the notebook's own functions: <1e-6 Hz.
+- Second - exact below the third-order scale; CT powder mean = the textbook isotropic shift; eta = 0 static CT edges at +A and -16A/9; 2H Pake horns at +-3C_Q/8; intensity shares.
+- MAS sideband intensities against an explicit average over starting rotor phases of the time signal integrated step by step (agree to ~1e-7 relative when converged); MAS CT centre of gravity = delta_iso + isotropic shift; MAS second vs exact.
+
+### Removed
+`static_quadrupolar_spectrum`, `_exact`, `_decomposed`, `quadrupolar_transitions(_exact)`, `quadrupolar_transition_decomposition`, `quadrupolar_second_order_map`, `quadrupolar_hamiltonian`, `_quad_operators`, `mas_quadrupolar_fid`, `rotation_matrix`, `efg_orientation`, `_transverse_basis`. Only `static_quadrupolar_spectrum_exact` was exported from `opennmr.notebook`; nothing else in `src/` or the tutorial notebooks used them.
+
+### Not done / open
+- The notebook's "second-order intensities" (from first-order-corrected states) were not carried over: perturbative orders use Zeeman intensities, 'exact' uses the true eigenvectors. The difference is O(C_Q/nu0).
+- GUI MAS is magic-angle only (`rotor_angle` is available in the notebook function). No CSA + quadrupolar combination, no finite pulse / excitation effects (CT-selective vs non-selective intensities), no quadrupolar *fitting* yet -- the fast engine makes a `curve_fit` over C_Q, eta_Q, delta_iso practical.
+- ZCW with stick binning leaves small "powder ripples" at low broadening; raise Orientations or FWHM.
+- Pre-existing, unrelated failure (fails on HEAD too, only when pymatgen is installed): `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`.
 
 
 ## Fix: dragging a 1D onto a 2D's projection did nothing (2026-09-25, third round)

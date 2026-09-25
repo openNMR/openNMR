@@ -15656,6 +15656,88 @@ def test_main_window_simulate_quadrupolar_exact_produces_a_different_result(qapp
     assert not np.allclose(first_order, exact)
 
 
+def test_main_window_simulate_quadrupolar_mas_ct_is_fast_framed_and_reports_the_shift(qapp):
+    """MAS quadrupolar (2026-09-25): a CT-only, second-order MAS pattern
+    is simulated in well under a second, framed automatically, and the
+    result line states the CT isotropic quadrupolar shift."""
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_quad_nucleus_combo.setCurrentText("27Al")
+    window.sim_quad_cq_spin.setValue(5.0)
+    window.sim_quad_eta_spin.setValue(0.2)
+    window.sim_quad_larmor_spin.setValue(130.3)
+    window.sim_quad_regime_combo.setCurrentIndex(window.sim_quad_regime_combo.findData("mas"))
+    assert window.sim_quad_mas_spin.isEnabled()
+    window.sim_quad_mas_spin.setValue(20000.0)
+    window.sim_quad_transitions_combo.setCurrentIndex(
+        window.sim_quad_transitions_combo.findData("ct"))
+    window.sim_quad_method_combo.setCurrentIndex(
+        window.sim_quad_method_combo.findData("second_order"))
+    assert window.sim_quad_auto_axis_check.isChecked()
+
+    t0 = time.perf_counter()
+    window._on_simulate_quadrupolar_clicked()
+    assert time.perf_counter() - t0 < 5.0
+
+    text = window.sim_quad_results_label.text()
+    assert "MAS 20 kHz" in text and "second-order" in text
+    assert "CT isotropic quadrupolar shift" in text
+    assert "clipped" not in text
+    # framed on the CT: well inside +-200 ppm, not the default +-500
+    assert -200 < window.sim_quad_ppm_min_spin.value() < 0 < window.sim_quad_ppm_max_spin.value() < 200
+    sim = window._simulated_quadrupolar_spectrum.metadata.raw["simulation"]
+    assert sim["regime"] == "mas" and sim["mas_Hz"] == 20000.0 and sim["transitions"] == "ct"
+    # the CT centre of gravity sits at the isotropic quadrupolar shift
+    data = window._simulated_quadrupolar_spectrum.data
+    ppm = window._simulated_quadrupolar_spectrum.axes[0].ppm
+    from opennmr.notebook import simulations as notebook_sims
+    expected = notebook_sims.quadrupolar_ct_isotropic_shift_Hz(
+        2.5, 5e6, 0.2, 130.3e6) / 130.3
+    assert np.sum(ppm * data) / np.sum(data) == pytest.approx(expected, abs=0.05)
+
+
+def test_main_window_simulate_quadrupolar_static_hides_the_mas_rate(qapp):
+    window = MainWindow()
+    window.sim_quad_regime_combo.setCurrentIndex(window.sim_quad_regime_combo.findData("static"))
+    assert not window.sim_quad_mas_spin.isEnabled()
+
+
+def test_main_window_simulate_quadrupolar_ct_only_refused_for_an_integer_spin(qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_quad_nucleus_combo.setCurrentText("2H")
+    window.sim_quad_cq_spin.setValue(0.16)
+    window.sim_quad_larmor_spin.setValue(61.4)
+    window.sim_quad_transitions_combo.setCurrentIndex(
+        window.sim_quad_transitions_combo.findData("ct"))
+    window._on_simulate_quadrupolar_clicked()
+    assert warned and "central transition" in warned[0][2]
+    assert not window.sim_quad_export_button.isEnabled()
+
+
+def test_main_window_simulate_quadrupolar_compare_orders_draws_all_three(qapp):
+    window = MainWindow()
+    _fast_csa_kwargs(window)
+    window.sim_quad_nucleus_combo.setCurrentText("23Na")
+    window.sim_quad_cq_spin.setValue(2.0)
+    window.sim_quad_larmor_spin.setValue(105.8)
+    window.sim_quad_transitions_combo.setCurrentIndex(
+        window.sim_quad_transitions_combo.findData("ct"))
+    window.sim_quad_compare_check.setChecked(True)
+    window._on_simulate_quadrupolar_clicked()
+
+    axes = window.simulation_canvas.figure.axes
+    assert len(axes) == 2                                  # orders + differences
+    labels = [line.get_label() for line in axes[0].get_lines()]
+    assert labels == ["First order", "Second order", "Exact"]
+    assert window.canvas_tabs.currentWidget() is window.simulation_canvas
+    # the exported spectrum is still the chosen method's (exact by default)
+    assert window._simulated_quadrupolar_spectrum.metadata.raw["simulation"]["order"] == "exact"
+
+
 def test_main_window_simulation_controls_are_seeded_from_the_selected_spectrum(qapp):
     """Same "seeded, never forced" pattern as the CSA/Dipolar fitting
     section's own MAS-rate seeding: a spectrum's SFO1/nucleus fill an
