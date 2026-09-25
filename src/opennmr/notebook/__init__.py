@@ -90,6 +90,11 @@ from .combined_hamiltonian import (
     site_transition_frequencies, plot_combined, sites_to_json, sites_from_json,
 )
 
+from .combined_fitting import (
+    fit_combined, fit_combined_multistart, print_combined_fit_report, plot_combined_fit,
+    NMRCombinedFitWorkflow, site_parameter_names,
+)
+
 from .spin_system import (
     expand_spin_system, block_sizes, spin_system_transitions, spin_system_spectrum,
     coupling_strengths, fit_spin_system_spectrum, evaluate_spin_system_fit, fitted_system,
@@ -208,6 +213,9 @@ __all__ = [
     # combined Hamiltonian
     "Site", "simulate_combined", "combined_axis_limits", "combined_to_python",
     "site_transition_frequencies", "plot_combined", "sites_to_json", "sites_from_json",
+    # combined-Hamiltonian fitting
+    "fit_combined", "fit_combined_multistart", "print_combined_fit_report",
+    "plot_combined_fit", "NMRCombinedFitWorkflow", "site_parameter_names",
     # spin_system (strong coupling)
     "expand_spin_system", "block_sizes", "spin_system_transitions", "spin_system_spectrum",
     "coupling_strengths", "fit_spin_system_spectrum", "evaluate_spin_system_fit",

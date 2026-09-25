@@ -281,7 +281,7 @@ def fit_quadrupolar_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, 
     order : 'second' (default: fast) or 'exact' (slower, esp. under
         MAS; worth it only at low field / very large C_Q), or 'first'.
     transitions : 'ct' (default for half-integer spins), 'all', 'st', ...
-    n_zcw : powder orientations while fitting. Default 10946 static,
+    n_zcw : powder orientations while fitting. Default 28657 static,
         4181 MAS (each MAS orientation costs an FFT). Too few leaves
         powder "ripple" that the fit absorbs into a larger fwhm; check
         the result is unchanged at a larger value.
@@ -324,7 +324,7 @@ def fit_quadrupolar_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, 
         raise ValueError(f"Unknown lineshape {lineshape!r}.")
     mas_Hz = float(mas_Hz or 0.0)
     if n_zcw is None:
-        n_zcw = 4181 if mas_Hz else 10946
+        n_zcw = 4181 if mas_Hz else 28657
 
     sites, labels = _normalise_sites(p0)
     n_sites = len(sites)
@@ -592,11 +592,11 @@ def print_quadrupolar_fit_report(x, y, y_fit, popt, pcov_full, is_free, fit_info
                 continue
             text = (f"{popt[i]:.6g} (fixed)" if not is_free[i]
                     else f"{popt[i]:.6g} ± {errors[i]:.2g}")
-            lines.append(f"  {_QUAD_PARAM_LABELS[name]:<14}= {text}")
+            lines.append(f"  {_QUAD_PARAM_LABELS[name]:<16}= {text}")
         d = derived[s]
-        lines.append(f"  {'P_Q (MHz)':<14}= {d['P_Q']:.6g} ± {d['P_Q_err']:.2g}")
+        lines.append(f"  {'P_Q (MHz)':<16}= {d['P_Q']:.6g} ± {d['P_Q_err']:.2g}")
         if "delta_cg" in d:
-            lines.append(f"  {'CT c.o.g. (ppm)':<14}= {d['delta_cg']:.6g} ± {d['delta_cg_err']:.2g}")
+            lines.append(f"  {'CT c.o.g. (ppm)':<16}= {d['delta_cg']:.6g} ± {d['delta_cg_err']:.2g}")
         lines.append("")
     lines += [f"R^2 = {r2:.5f}   RMSE = {metrics['rmse']:.4g}   reduced chi^2 = "
               f"{metrics['reduced_chi2']:.4g}",

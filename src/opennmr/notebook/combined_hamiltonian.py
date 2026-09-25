@@ -347,6 +347,52 @@ def _powder(site, n_zcw, use_symmetry, static):
 # Simulation
 # ============================================================
 
+def _site_sticks(site, ppm_axis, larmor_Hz, mas_Hz, order, transitions, beta_r, n_zcw,
+                 n_gamma=None, n_time=None, max_n_time=65536, use_symmetry=True):
+    """One site's unbroadened spectrum per transition group, for amount 1:
+    ``({group: sticks binned on ppm_axis}, powder info)``. Everything
+    except the broadening and the amount, which are applied afterwards
+    (so a fit can change them without re-simulating)."""
+    rows = _rows(site, transitions)
+    groups = [r["group"] for r in rows]
+    comp = {g: np.zeros(len(ppm_axis)) for g in groups}
+    j_ppm, j_w = _j_lines(site, larmor_Hz)
+    theta, phi, wts, octant = _powder(site, n_zcw, use_symmetry, static=not mas_Hz)
+    if not mas_Hz:
+        b = np.stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi),
+                      np.cos(theta)], -1)
+        nu, inten = _site_frequencies(site, larmor_Hz, b, rows, order)
+        position = site.delta_iso + nu / larmor_Hz * 1e6
+        weight = wts[:, None] * inten
+        for dj, wj in zip(j_ppm, j_w):
+            for col, g in enumerate(groups):
+                comp[g] += _bin_sticks(ppm_axis, position[:, col] + dj, wj * weight[:, col])
+        return comp, {"orientations": len(wts), "octant": octant}
+    g_n = int(n_gamma) if n_gamma else (32 if order == "exact" else 16)
+    r, e1, e2 = _rotor_frame(theta, phi)
+    gam = 2.0 * np.pi * np.arange(g_n) / g_n
+    b = (np.cos(beta_r) * r[:, None, :]
+         + np.sin(beta_r) * (np.cos(gam)[None, :, None] * e1[:, None, :]
+                             + np.sin(gam)[None, :, None] * e2[:, None, :]))
+    nu, inten = _site_frequencies(site, larmor_Hz, b, rows, order)
+    inten = inten.mean(axis=1)
+    prep = _mas_prepare(nu, mas_Hz, g_n, n_time, max_n_time)
+    for _a, _b, centre, sb_Hz, weight in _mas_sticks(prep, inten, wts):
+        position = site.delta_iso + (centre[:, None, :] + sb_Hz[None, :, None]) / larmor_Hz * 1e6
+        for dj, wj in zip(j_ppm, j_w):
+            for col, g in enumerate(groups):
+                comp[g] += _bin_sticks(ppm_axis, position[:, :, col] + dj, wj * weight[:, :, col])
+    return comp, {"orientations": len(wts), "octant": octant, "n_gamma": g_n,
+                  "n_time": prep["n_time"]}
+
+
+def _broaden_site(site, comp, ppm_axis):
+    return {g: site.amount * (_apply_broadening(c, ppm_axis, fwhm=site.fwhm,
+                                                lineshape=site.lineshape, eta=site.eta)
+                              if site.fwhm > 0 else c)
+            for g, c in comp.items()}
+
+
 def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, order="second",
                       transitions="all", rotor_angle="magic", n_zcw=None, n_gamma=None,
                       n_time=None, max_n_time=65536, use_symmetry=True):
@@ -366,8 +412,11 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     transitions : 'all' | 'ct' | 'st' | group names -- applied to every
         site (a spin-1/2 site has only its one transition).
     rotor_angle : 'magic' or degrees.
-    n_zcw : powder orientation density per site (default 10946 static,
-        4181 MAS): that many points in one octant when that is exact
+    n_zcw : powder orientation density per site (default 75025 static --
+        cheap, and fine enough that a 0.4 ppm-broadened pattern shows no
+        powder ripple (0.5% vs 7.5% at 10946) -- 4181 MAS, where the
+        pattern converges much faster): that many points in one octant
+        when that is exact
         (see the module notes); otherwise the full sphere, with 8x as
         many for a static pattern so the density is the same.
     n_gamma, n_time, max_n_time : MAS sampling, as quadrupolar_mas_spectrum.
@@ -402,7 +451,7 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     if mas_Hz < 0:
         raise ValueError("mas_Hz must be >= 0.")
     if n_zcw is None:
-        n_zcw = 4181 if mas_Hz else 10946
+        n_zcw = 4181 if mas_Hz else 75025
     ppm_axis = np.asarray(ppm_axis, dtype=float)
     beta_r = (np.arccos(1.0 / np.sqrt(3.0)) if rotor_angle == "magic"
               else np.deg2rad(float(rotor_angle)))
@@ -410,47 +459,13 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     site_spectra, components, notes = {}, {}, []
     used = {}
     for site in sites:
-        rows = _rows(site, transitions)
-        groups = [r["group"] for r in rows]
-        comp = {g: np.zeros(len(ppm_axis)) for g in groups}
-        j_ppm, j_w = _j_lines(site, larmor_Hz)
-        theta, phi, wts, octant = _powder(site, n_zcw, use_symmetry, static=not mas_Hz)
-        if not mas_Hz:
-            b = np.stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi),
-                          np.cos(theta)], -1)
-            nu, inten = _site_frequencies(site, larmor_Hz, b, rows, order)
-            position = site.delta_iso + nu / larmor_Hz * 1e6
-            weight = wts[:, None] * inten
-            for dj, wj in zip(j_ppm, j_w):
-                for col, g in enumerate(groups):
-                    comp[g] += _bin_sticks(ppm_axis, position[:, col] + dj, wj * weight[:, col])
-            used[site.label] = {"orientations": len(wts), "octant": octant}
-        else:
-            g_n = int(n_gamma) if n_gamma else (32 if order == "exact" else 16)
-            r, e1, e2 = _rotor_frame(theta, phi)
-            gam = 2.0 * np.pi * np.arange(g_n) / g_n
-            b = (np.cos(beta_r) * r[:, None, :]
-                 + np.sin(beta_r) * (np.cos(gam)[None, :, None] * e1[:, None, :]
-                                     + np.sin(gam)[None, :, None] * e2[:, None, :]))
-            nu, inten = _site_frequencies(site, larmor_Hz, b, rows, order)
-            inten = inten.mean(axis=1)
-            prep = _mas_prepare(nu, mas_Hz, g_n, n_time, max_n_time)
-            for _a, _b, centre, sb_Hz, weight in _mas_sticks(prep, inten, wts):
-                position = site.delta_iso + (centre[:, None, :] + sb_Hz[None, :, None]) \
-                    / larmor_Hz * 1e6
-                for dj, wj in zip(j_ppm, j_w):
-                    for col, g in enumerate(groups):
-                        comp[g] += _bin_sticks(ppm_axis, position[:, :, col] + dj,
-                                               wj * weight[:, :, col])
-            used[site.label] = {"orientations": len(wts), "octant": octant,
-                                "n_gamma": g_n, "n_time": prep["n_time"]}
-        broadened = {g: site.amount * (_apply_broadening(c, ppm_axis, fwhm=site.fwhm,
-                                                         lineshape=site.lineshape, eta=site.eta)
-                                       if site.fwhm > 0 else c)
-                     for g, c in comp.items()}
+        comp, powder = _site_sticks(site, ppm_axis, larmor_Hz, mas_Hz, order, transitions,
+                                    beta_r, n_zcw, n_gamma, n_time, max_n_time, use_symmetry)
+        used[site.label] = powder
+        broadened = _broaden_site(site, comp, ppm_axis)
         components[site.label] = broadened
         site_spectra[site.label] = np.sum(list(broadened.values()), axis=0)
-        if not octant and use_symmetry:
+        if not powder["octant"] and use_symmetry:
             notes.append(f"{site.label}: CSA not coincident with the EFG, so the full sphere "
                          "was averaged (no octant symmetry)")
 
@@ -552,10 +567,11 @@ def sites_from_json(text):
 
 def plot_combined(result, nuclide="", show_sites=True, ax=None, pl_width=3.375,
                   pl_height=3.375, fontsize=12, font=None, linewidth=1.2, fname=None,
-                  figure=None):
+                  figure=None, xlims=None):
     """Total spectrum (and each site, dashed) on a descending ppm axis,
     colour-blind-safe. ``figure``: draw into an existing Figure (the
-    GUI's Simulation plot)."""
+    GUI's Simulation plot). ``xlims``: (low, high) ppm to show, e.g. the
+    centreband of a MAS spectrum whose axis also holds sidebands."""
     import matplotlib.pyplot as plt
     from .plotting import _apply_axis_style
     from .utils import NUC_label
@@ -577,7 +593,12 @@ def plot_combined(result, nuclide="", show_sites=True, ax=None, pl_width=3.375,
                     color=colours[1 + i % (len(colours) - 1)], label=label)
         ax.legend(frameon=False, fontsize=fontsize * 0.8)
     _apply_axis_style(ax, "in", 4.0, 1.0, 4.0, None, fontsize, False)
-    ax.set_xlim(max(x), min(x))
+    lo, hi = (min(xlims), max(xlims)) if xlims else (min(x), max(x))
+    ax.set_xlim(hi, lo)
+    if xlims:                      # scale to what is shown
+        shown = (x >= lo) & (x <= hi)
+        top = max(float(np.max(result["real_spec"][shown])) / scale, 1e-12)
+        ax.set_ylim(-0.03 * top, 1.05 * top)
     ax.set_xlabel(NUC_label(nuclide, x_unit="ppm") if nuclide else "Shift (ppm)",
                   fontsize=fontsize)
     if fname:

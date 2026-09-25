@@ -217,7 +217,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.orientations_spin.setSpecialValueText("auto")
         self.orientations_spin.setValue(0)
         self.orientations_spin.setToolTip(
-            "Powder orientation density (auto: 10,946 static, 4,181 MAS). One octant is used "
+            "Powder orientation density (auto: 75,025 static, 4,181 MAS). One octant is used "
             "when that is exact; a CSA not aligned with the EFG needs the full sphere.")
         form.addRow("Orientations:", self.orientations_spin)
         v.addLayout(form)

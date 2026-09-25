@@ -1058,7 +1058,7 @@ def _quad_log(regime, I, C_Q, eta_Q, larmor_Hz, order, rows, delta_iso, extra=""
 
 def quadrupolar_static_spectrum(I, C_Q, eta_Q, larmor_Hz, ppm_axis, order="exact",
                                 transitions="all", delta_iso=0.0, fwhm=1.0,
-                                lineshape="gaussian", eta=0.0, n_zcw=17711,
+                                lineshape="gaussian", eta=0.0, n_zcw=75025,
                                 powder_scheme="zcw", n_theta=150, n_phi=300,
                                 use_symmetry=True):
     """

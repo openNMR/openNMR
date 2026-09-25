@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-25 (combined fitting + tutorial round): 2902 tests collected; all pass without `test_data/` except the known pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`.*
+
 *2026-09-25 (combined Hamiltonian round): 2895 tests collected; all pass without `test_data/` except the known pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`.*
 
 *2026-09-25 (quadrupolar fitting round): full suite without `test_data/`, with pymatgen: 2709 passed, 161 skipped, 1 failed (the same pre-existing pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`).*
@@ -83,6 +85,31 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Tutorial notebook: quadrupolar + combined-Hamiltonian simulation and fitting; combined fitting built (2026-09-25, seventh round)
+
+User: *"add, to the jupyter notebook, details and examples of how to use the quadrupolar simulation and fitting code, and how to combine CSA, quadrupole and/or J-coupling to simulate and also fit using the combined Hamiltonian."*
+
+Combined-Hamiltonian **fitting did not exist yet** (the previous commit's title says "fitting"; it contains the simulator only), so it was built first, then documented.
+
+### Built
+- **`notebook/combined_fitting.py`**: `fit_combined(results, sites, vary=, fixed=, bounds=, mas_Hz=, order=, transitions=, fit_regions=, fit_baseline=, ...)` -- per-site parameters named `delta_iso, amount, fwhm, [eta], aniso, asym, [alpha, beta, gamma], C_Q, eta_Q, J1, J2, ...` (`site_parameter_names`); Euler angles fixed unless asked for; amounts started by NNLS; per-site stick spectra cached (a Jacobian column re-simulates only the site it touches; amount/FWHM changes re-simulate nothing). Returns fitted `Site`s, a parameter table with 1σ errors, derived shares (%, numbers of nuclei), P_Q and CT centre of gravity with propagated errors, quality, warnings, log. `fit_combined_multistart` (grid of starts, best χ², optional coarse screening), `print_combined_fit_report`, `plot_combined_fit` (data/fit/sites/residual), `NMRCombinedFitWorkflow`. Exported from `opennmr.notebook`. `combined_hamiltonian._site_sticks` split out of `simulate_combined` for this.
+- **Tutorial** (`SCRIPT_openNMR_Tutorial_20260917.ipynb`, insertions only, executed outputs included): §3.3 quadrupolar simulation (orders compared, CT/ST components, MAS, per-orientation frequencies), §3.4 Combined Hamiltonian (Site API, physics and Euler convention, one interaction at a time static and MAS, two sites, Copy-as-Python), §4.3 quadrupolar fitting (start estimate, static and MAS, workflow on real data, what to check), §4.4 combined fitting (parameter names, vary/fixed/bounds, what a spectrum does and does not determine, the MAS-then-static route with multi-start, workflow on real data).
+
+### Found while writing the examples (all now in the tutorial text or fixed)
+- **A fast-MAS CT spectrum barely determines a CSA**: at 20 kHz the CT sidebands hold < 1 % of the intensity, and Δ = +60/η = 0.2 vs Δ = −26/η = 0 differ by 0.3 % in χ². Fit C_Q/η_Q/δiso/J/amounts from MAS, then the CSA from a static (or slow-MAS) spectrum with those fixed.
+- **Static CSA+quadrupolar fits are multimodal**: of 8 starts, 5 reached Δ = 60.0 / η = 0.200 and 3 stopped at R² 0.26–0.47 -- hence `fit_combined_multistart` and the "poor fit" warning.
+- The baseline-on-the-pattern warning checked only the *fitted* pattern; a fit dragged off by that baseline can move its own pattern out of the zone (R² 0.52, no warning). It now checks the starting model too.
+- **Static powder defaults were too low for publication-quality lineshapes**: a 0.4 ppm-broadened CSA+quadrupolar pattern had 7.5 % powder ripple at 10946 orientations, 0.5 % at 75025 -- which costs 0.04 s. Defaults raised: static simulation 75025 (`simulate_combined`, `quadrupolar_static_spectrum`), static fitting 28657 (`fit_combined`, `fit_quadrupolar_spectrum`); MAS unchanged (already converged). GUI tooltips updated.
+- `plot_combined` gained `xlims` (show the centreband when the axis also holds sidebands); site colours in `plot_combined_fit` moved clear of the fit's vermilion.
+
+### Tests
+`tests/test_combined_fitting.py` (7): parameter names; MAS recovery of C_Q, η_Q, δiso, J and the 2:1 ratio; static CSA with MAS values fixed via multi-start; vary/fixed/bounds (Euler only on request) and errors; NNLS amount start from absurd amounts; baseline warning and `fit_baseline`; report/plot/CSV/workflow. `test_combined_hamiltonian.py`: the quadrupolar-alone comparison now passes the orientation count explicitly (the default changed). Full suite, 2902 collected: all pass except the known pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`.
+
+### Not done / open
+- **No GUI for combined fitting yet** -- the notebook functions are ready for a "Fit to selected spectrum" action in Simulate > Combined Hamiltonian (or a Fit > Combined section): free/fixed per parameter per site, multi-start, and the same report.
+- Joint fitting of several spectra (two fields, or MAS + static together) would remove the need for the two-step route; not built.
+- Six §1.6 cells of the tutorial notebook have no cell `id` (pre-existing; nbformat warns).
 
 ## Combined Hamiltonian: CSA + quadrupolar + J on one site, static and MAS (2026-09-25, sixth round)
 

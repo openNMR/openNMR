@@ -51,7 +51,7 @@ def test_adding_interactions_chains_and_round_trips():
 def test_quadrupolar_alone_matches_the_quadrupolar_simulator(mas):
     ax = np.linspace(-80, 60, 4096)
     a = simulate_combined(Site("27Al", 12, fwhm=0.5).add_quadrupolar(4.2, 0.35), ax, NU0_AL,
-                          mas_Hz=mas, transitions="ct")["real_spec"]
+                          mas_Hz=mas, transitions="ct", n_zcw=4181 if mas else 10946)["real_spec"]
     b = S.quadrupolar_spectrum(2.5, 4.2e6, 0.35, NU0_AL, ax, mas_Hz=mas, transitions="ct",
                                delta_iso=12, fwhm=0.5, n_zcw=4181 if mas else 10946)["real_spec"]
     assert _rel(a, b) < 1e-3

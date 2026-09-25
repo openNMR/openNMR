@@ -184,7 +184,7 @@ class QuadrupolarFitPanel(QWidget):
         self.orientations_spin.setValue(0)
         self.orientations_spin.setToolTip(
             "Powder orientations while fitting (in one octant, which is exact by symmetry, so "
-            "8× denser than a whole-sphere set). Auto: 10,946 static, 4,181 MAS. Too few leaves "
+            "8× denser than a whole-sphere set). Auto: 28,657 static, 4,181 MAS. Too few leaves "
             "powder ripple that the fit absorbs into a larger FWHM.")
         form.addRow("Orientations (fitting):", self.orientations_spin)
         self.render_orientations_spin = QSpinBox()
