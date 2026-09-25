@@ -999,6 +999,29 @@ def _bin_sticks(ppm_axis, positions_ppm, weights):
     return out
 
 
+def _quad_powder(n_zcw, powder_scheme, n_theta, n_phi, use_symmetry):
+    """Powder set for the quadrupolar engine.
+
+    With ``use_symmetry`` (ZCW only) the orientations are restricted to
+    one octant of the sphere -- the first n_zcw-ish points of a ZCW set
+    8x as large that fall in it -- which is EXACT here: the EFG tensor
+    has D2h symmetry, so a pi rotation about any PAS axis leaves every
+    frequency and intensity unchanged, and time reversal (b -> -b)
+    leaves the eigenvalues unchanged. Every static observable is then
+    invariant to independent sign flips of the three components of b,
+    i.e. the same in all eight octants. (Under MAS a single sign flip
+    reverses the sense of rotation, which mirrors the sideband pattern
+    of that crystallite, k -> -k; quadrupolar_mas_spectrum symmetrises
+    the sidebands accordingly.) Same cost as n_zcw full-sphere points,
+    8x the orientation density, so much less powder "ripple"."""
+    if powder_scheme == "zcw" and use_symmetry:
+        theta, phi, _ = zcw_angles(8 * int(n_zcw))
+        keep = (theta <= np.pi / 2) & (phi < np.pi / 2)
+        theta, phi = theta[keep], phi[keep]
+        return theta, phi, np.full(theta.size, 1.0 / theta.size)
+    return get_powder_grid(n_theta, n_phi, powder_scheme=powder_scheme, n_zcw=n_zcw)
+
+
 def _quad_result(ppm_axis, components, fwhm, lineshape, eta, info):
     """Broaden each transition group, sum, and pack the result dict."""
     broadened = {}
@@ -1031,7 +1054,8 @@ def _quad_log(regime, I, C_Q, eta_Q, larmor_Hz, order, rows, delta_iso, extra=""
 def quadrupolar_static_spectrum(I, C_Q, eta_Q, larmor_Hz, ppm_axis, order="exact",
                                 transitions="all", delta_iso=0.0, fwhm=1.0,
                                 lineshape="gaussian", eta=0.0, n_zcw=17711,
-                                powder_scheme="zcw", n_theta=150, n_phi=300):
+                                powder_scheme="zcw", n_theta=150, n_phi=300,
+                                use_symmetry=True):
     """
     Static powder pattern of a quadrupolar nucleus.
 
@@ -1056,6 +1080,10 @@ def quadrupolar_static_spectrum(I, C_Q, eta_Q, larmor_Hz, ppm_axis, order="exact
     n_zcw / powder_scheme / n_theta, n_phi
         Powder average, as get_powder_grid. The default ZCW set is
         large because each orientation is cheap here.
+    use_symmetry : bool
+        Compute n_zcw orientations in one octant instead of the whole
+        sphere -- exact by symmetry, 8x the density for the same cost
+        (see _quad_powder). ZCW only.
 
     Returns
     -------
@@ -1067,8 +1095,7 @@ def quadrupolar_static_spectrum(I, C_Q, eta_Q, larmor_Hz, ppm_axis, order="exact
     """
     I = _check_quad_inputs(I, eta_Q, larmor_Hz)
     ppm_axis = np.asarray(ppm_axis, dtype=float)
-    theta, phi, wts = get_powder_grid(n_theta, n_phi, powder_scheme=powder_scheme,
-                                      n_zcw=n_zcw)
+    theta, phi, wts = _quad_powder(n_zcw, powder_scheme, n_theta, n_phi, use_symmetry)
     freqs = quadrupolar_transition_frequencies(I, C_Q, eta_Q, larmor_Hz, theta, phi,
                                                order=order, transitions=transitions)
     ppm = delta_iso + freqs["offset_Hz"] / larmor_Hz * 1e6
@@ -1082,7 +1109,9 @@ def quadrupolar_static_spectrum(I, C_Q, eta_Q, larmor_Hz, ppm_axis, order="exact
         "order": order, "regime": "static", "transitions": freqs["label"],
         "n_orientations": len(wts),
         "log": _quad_log("Static", I, C_Q, eta_Q, larmor_Hz, order, rows, delta_iso,
-                         f"; {len(wts)} orientations ({powder_scheme})"),
+                         f"; {len(wts)} orientations ({powder_scheme}"
+                         + (", one octant, exact by symmetry)" if powder_scheme == "zcw"
+                            and use_symmetry else ")")),
     }
     return _quad_result(ppm_axis, components, fwhm, lineshape, eta, info)
 
@@ -1106,7 +1135,7 @@ def quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, order="
                              transitions="all", delta_iso=0.0, rotor_angle="magic",
                              fwhm=1.0, lineshape="gaussian", eta=0.0, n_zcw=4181,
                              powder_scheme="zcw", n_theta=40, n_phi=80,
-                             n_gamma=None, n_time=None, max_n_time=65536):
+                             n_gamma=None, n_time=None, max_n_time=65536, use_symmetry=True):
     """
     Finite-speed MAS powder pattern of a quadrupolar nucleus: the
     centreband lineshape and every spinning sideband, for the CT, the
@@ -1129,6 +1158,11 @@ def quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, order="
     n_zcw : int
         Rotor-axis orientations (ZCW). The rotor phase supplies the
         third angle, so a 2-angle set is the complete powder average.
+    use_symmetry : bool
+        Rotor axes in one octant only, with each crystallite's sideband
+        pattern symmetrised (k and -k averaged) -- exact by the EFG's
+        D2h symmetry plus time reversal (see _quad_powder); 8x the
+        orientation density for the same cost.
     n_gamma : int, optional
         Rotor-phase samples per period: default 16 for the perturbative
         orders (exact), 32 for 'exact'.
@@ -1162,8 +1196,8 @@ def quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, order="
         n_gamma = 32 if order == "exact" else 16
     n_gamma = int(n_gamma)
 
-    theta, phi, wts = get_powder_grid(n_theta, n_phi, powder_scheme=powder_scheme,
-                                      n_zcw=n_zcw)
+    theta, phi, wts = _quad_powder(n_zcw, powder_scheme, n_theta, n_phi, use_symmetry)
+    symmetrise = powder_scheme == "zcw" and use_symmetry
     r, e1, e2 = _rotor_frame(theta, phi)
     gam = 2.0 * np.pi * np.arange(n_gamma) / n_gamma
     b = (np.cos(beta) * r[:, None, :]
@@ -1218,6 +1252,8 @@ def quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, order="
         signal = np.exp(2j * np.pi * phase)
         a = np.fft.fft(signal, axis=1) / n_time
         power = (a.real ** 2 + a.imag ** 2)                                 # (c, n_time, T)
+        if symmetrise:
+            power = 0.5 * (power + power[:, np.mod(-np.arange(n_time), n_time), :])
         weight = wts[start:stop, None, None] * inten[start:stop, None, :] * power
         position = delta_iso + (centre[start:stop, None, :] + sideband_Hz[None, :, None]) \
             / larmor_Hz * 1e6

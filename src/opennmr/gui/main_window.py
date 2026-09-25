@@ -92,6 +92,7 @@ from .widgets.collapsible_section import CollapsibleSection
 from .widgets.simulation_canvas import SimulationCanvas
 from .pnmr_panel import PnmrSimulationPanel
 from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
+from .quadrupolar_panels import QuadrupolarFitPanel
 from .loader import background_load_enabled
 
 #: Where the launcher-tile icons (Open, Processing, Advanced
@@ -10304,8 +10305,8 @@ class MainWindow(QMainWindow):
         self.fitting_status_label = QLabel(
             "Measure an intensity per spectrum, or per slice of a "
             "pseudo-2D series: fit peak shapes (Isotropic), integrate "
-            "a region (Integration), or fit a CSA powder lineshape "
-            "(CSA/Dipolar). Whichever you run last is what "
+            "a region (Integration), or fit a CSA or quadrupolar powder "
+            "lineshape (CSA/Dipolar, Quadrupolar). Whichever you run last is what "
             "Relaxation's Fit Curve then fits a relaxation/diffusion "
             "curve to."
         )
@@ -10329,6 +10330,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(CollapsibleSection("J-coupling", content=self.jcoupling_fit_panel))
         layout.addWidget(CollapsibleSection(
             "CSA/Dipolar", content=self._build_csa_subtab()))
+        # Static and MAS quadrupolar lineshapes; the fitter is
+        # notebook.quadrupolar_fitting, the model Simulate > Quadrupolar's.
+        self.quad_fit_panel = QuadrupolarFitPanel(
+            get_target=self._jcoupling_fit_target,
+            get_regions=self._integration_regions,
+            draw_fit=self._draw_quadrupolar_fit,
+            format_value_error=self._format_value_error,
+            send_to_simulation=self._send_quadrupolar_to_simulation)
+        layout.addWidget(CollapsibleSection("Quadrupolar", content=self.quad_fit_panel))
         layout.addStretch(1)
         return tab
 
@@ -10380,8 +10390,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._jcoupling_sim_section)
         layout.addWidget(CollapsibleSection(
             "CSA", content=self._build_simulate_csa_subtab()))
-        layout.addWidget(CollapsibleSection(
-            "Quadrupolar", content=self._build_simulate_quadrupolar_subtab()))
+        self._quad_sim_section = CollapsibleSection(
+            "Quadrupolar", content=self._build_simulate_quadrupolar_subtab())
+        layout.addWidget(self._quad_sim_section)
         # Ported from upstream (Leo, 1c5613e) -- experiment planning
         # rather than lineshapes; drawn on the Simulation plot.
         layout.addWidget(CollapsibleSection(
@@ -10449,6 +10460,51 @@ class MainWindow(QMainWindow):
             spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _draw_quadrupolar_fit(self, result: dict) -> None:
+        """Data, fit and (for several sites) each site on the Fit view,
+        over the fit window."""
+        x = result["x"]
+        regions = result.get("regions")
+        keep = ((x >= min(r[0] for r in regions)) & (x <= max(r[1] for r in regions))
+                if regions else np.ones(x.size, dtype=bool))
+        n_sites = result["info"]["n_sites"]
+        components = ([np.asarray(c)[keep] for c in result["components"]]
+                      if n_sites > 1 else None)
+        spectrum = result.get("spectrum")
+        self.fit_canvas.show_slice_fit(
+            x[keep], result["y"][keep], result["y_fit"][keep], components=components,
+            peak_labels=list(result["info"]["labels"]) if components else None,
+            title="Quadrupolar fit",
+            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _send_quadrupolar_to_simulation(self, fitted: dict) -> None:
+        """A fitted site into Simulate > Quadrupolar, ready to re-simulate
+        (or to compare orders) -- the same settings the fit used."""
+        self.sim_quad_nucleus_combo.setCurrentText(fitted["nucleus"])
+        self.sim_quad_cq_spin.setValue(fitted["C_Q_MHz"])
+        self.sim_quad_eta_spin.setValue(fitted["eta_Q"])
+        self.sim_quad_diso_spin.setValue(fitted["delta_iso"])
+        self.sim_quad_fwhm_spin.setValue(fitted["fwhm"])
+        self.sim_quad_larmor_spin.setValue(fitted["larmor_MHz"])
+        regime = "mas" if fitted["mas_Hz"] else "static"
+        self.sim_quad_regime_combo.setCurrentIndex(self.sim_quad_regime_combo.findData(regime))
+        if fitted["mas_Hz"]:
+            self.sim_quad_mas_spin.setValue(fitted["mas_Hz"])
+        self.sim_quad_transitions_combo.setCurrentIndex(
+            self.sim_quad_transitions_combo.findData(fitted["transitions"]))
+        self.sim_quad_method_combo.setCurrentIndex(self.sim_quad_method_combo.findData(
+            {"first": "first_order", "second": "second_order"}.get(fitted["order"], "exact")))
+        self.sim_quad_auto_axis_check.setChecked(False)
+        lo, hi = fitted["ppm_range"]
+        for spin, value in ((self.sim_quad_ppm_min_spin, lo), (self.sim_quad_ppm_max_spin, hi)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        self._quad_sim_section.setExpanded(True)
+        self._show_side_tab("Simulate")
 
     def _send_jcoupling_to_simulation(self, nucleus, larmor_Hz, sites, lineshape, eta) -> None:
         self.jcoupling_sim_panel.set_from_fit(nucleus, larmor_Hz, sites, lineshape, eta)
@@ -20130,6 +20186,8 @@ class MainWindow(QMainWindow):
 
         self._refresh_csa_controls(spectrum)
         self._refresh_simulation_controls(spectrum)
+        if hasattr(self, "quad_fit_panel"):
+            self.quad_fit_panel.seed_from_spectrum(spectrum)
 
         # Both tabs' gradient controls, in one place -- see
         # _refresh_max_gradient_controls.

@@ -11248,8 +11248,10 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     fitting_tab = window.side_tabs.widget(window._fitting_tab_index)
     sections = fitting_tab.findChildren(CollapsibleSection)
     titles = [s.title() for s in sections]
-    # J-coupling between Integration and CSA/Dipolar (test_gui_jcoupling.py).
-    assert titles == ["Isotropic (Gauss/Lor)", "Integration", "J-coupling", "CSA/Dipolar"]
+    # J-coupling between Integration and CSA/Dipolar (test_gui_jcoupling.py);
+    # Quadrupolar last (test_gui_quadrupolar_fit.py).
+    assert titles == ["Isotropic (Gauss/Lor)", "Integration", "J-coupling", "CSA/Dipolar",
+                      "Quadrupolar"]
 
     # eNMR/Imaging moved off this tab entirely, to their own
     # "Applications" button (see

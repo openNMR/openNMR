@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-25 (quadrupolar fitting round): full suite without `test_data/`, with pymatgen: 2709 passed, 161 skipped, 1 failed (the same pre-existing pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`).*
+
 *2026-09-25 (quadrupolar round): full suite without `test_data/`, with pymatgen: 2694 passed, 161 skipped, 1 failed (`test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log` -- pre-existing, fails on HEAD too; pymatgen-only).*
 
 *2026-09-25: full suite without `test_data/` or pymatgen, after the drag-from-Open-experiments fix: 2588 passed, 163 skipped, 0 failed.*
@@ -79,6 +81,28 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Quadrupolar fitting, static and MAS (2026-09-25, fifth round)
+
+User: *"Can we now add quadrupolar (static and MAS) to the fit section? (And likewise add it to the notebook functions)"*
+
+### Built
+- **`notebook/quadrupolar_fitting.py`** (new): `fit_quadrupolar_spectrum` (one or more sites; per site δiso ppm, C_Q MHz, η_Q, FWHM ppm, amplitude, pseudo-Voigt fraction; spin from `results['nuclide']` or `I=`; Larmor from SFO1; static or MAS; `order` second/exact/first; `transitions` ct/all/st; global or per-site `fixed`/`bounds` as in the CSA fitter; `fit_baseline`), `estimate_quadrupolar_start` (C_Q from the pattern's width by matching simulations -- CT width ∝ C_Q², first-order ∝ C_Q -- and δiso from the centre of gravity less the CT isotropic shift), `evaluate_quad_fit`, `quadrupolar_derived` (P_Q and the CT centre of gravity, with errors propagated from the covariance -- checked against Monte Carlo), `print_quadrupolar_fit_report`, `NMR1dplot_with_quad_fit` (data, fit, sites, residual panel), `NMRQuadFitWorkflow` (import → start → fit → report/plot/CSV). Exported from `opennmr.notebook`.
+- **GUI, Fit > Quadrupolar** (new section after CSA/Dipolar; `gui/quadrupolar_panels.py`): sites table (right-click fix / bounds, italics when fixed), Add/Remove site, Estimate from data, nucleus/Larmor/MAS rate seeded from the selected spectrum (MASR switches Regime to MAS), Transitions, Model, Broadening, Fit window, Fit the baseline too, orientations (fit/final). Results table: δiso, C_Q, η_Q, P_Q, CT c.o.g., FWHM, amplitude, Area % with 1σ; right-click Copy Table / Copy Full Report; the setup line + R²/RMSE/χ²/time + warnings above it; "Send to Simulate > Quadrupolar" fills the simulator with the fitted site and the fit's settings.
+- **Simulator: octant powder sampling** (`simulations._quad_powder`, `use_symmetry=True` default for ZCW). Exact, not an approximation: the EFG's D2h symmetry (π rotations about PAS axes) plus time reversal (b → −b leaves the spectrum of H_Z + H_Q unchanged) make every static observable the same in all eight octants. Under MAS a single sign flip reverses the rotation sense, which mirrors a crystallite's sideband pattern (k → −k), so the MAS sidebands are symmetrised. Same cost, 8× the orientation density. Measured against converged references: static max error 25% → 8% (sharp CT singularities at 0.8 ppm broadening), MAS 6.2% → 0.3%, at 4181 orientations.
+
+### Found on the way (and handled)
+- **A baseline estimated on the pattern biases everything.** A broad CT whose wing reached into the outer 5% of the spectrum gave δiso −4.86 (true −5.00), C_Q 5.97 (6.00), amplitude −18%, and a good-looking R². The fit now warns when the fitted pattern has >1% of its height inside the baseline-estimation zone, or runs past the fit window, and `fit_baseline=True` (GUI: "Fit the baseline too") recovers the truth (δiso −4.998, C_Q 6.000).
+- Powder ripple from too few orientations is absorbed into a larger FWHM (0.8 → 1.44 ppm at 10946 full-sphere orientations on a 6 MHz CT); the octant sampling above removed most of it.
+- `diff_step=1e-4` in `curve_fit`: the default relative step (~1.5e-8) is below the powder pattern's bin-to-bin roughness.
+
+### Tests
+`tests/test_quadrupolar_fitting.py` (11) and `tests/test_gui_quadrupolar_fit.py` (4): recovery of known parameters from exact-model, finer-grid, noisy synthetic data (static CT from an estimated start, MAS CT, two overlapping sites with a fixed η_Q, 2H with the exact model), bounds and |C_Q|, integer spin refuses CT, derived-quantity errors vs Monte Carlo, report/plot/CSV/workflow, clipping and baseline warnings; GUI seeding (nucleus, SFO1, MASR), Estimate, Fit, results table, fixed parameter, Send to Simulate, refusals. Changed: `test_main_window_fitting_tab_has_three_collapsible_sections` now expects "Quadrupolar" last.
+
+### Not done / open
+- Fitting several spectra together (e.g. two fields -- the standard way to separate δiso from C_Q, which the report points at when they are >95% correlated) is not built; nor a CSA + quadrupolar model, nor pulse-excitation effects on relative CT/ST intensities.
+- The GUI fit blocks while it runs (two MAS sites ≈ 15 s); CSA's does too. Exact MAS fits are slow (seconds per evaluation) -- fit second order, then compare with Simulate's "Compare orders".
+- The sites table is not updated with the fitted values (as in CSA); Send to Simulate carries the first site only.
 
 ## Quadrupolar simulator rebuilt: static + fast MAS, first/second order/exact, CT and/or STs (2026-09-25, fourth round)
 

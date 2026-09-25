@@ -79,6 +79,12 @@ from .simulations import (
     multiplet_lineshape, jcoupled_spectrum, multi_site_jcoupled_spectrum, element_isotopes,
 )
 
+from .quadrupolar_fitting import (
+    fit_quadrupolar_spectrum, evaluate_quad_fit, estimate_quadrupolar_start,
+    quadrupolar_derived, print_quadrupolar_fit_report, NMR1dplot_with_quad_fit,
+    NMRQuadFitWorkflow,
+)
+
 from .spin_system import (
     expand_spin_system, block_sizes, spin_system_transitions, spin_system_spectrum,
     coupling_strengths, fit_spin_system_spectrum, evaluate_spin_system_fit, fitted_system,
@@ -190,6 +196,10 @@ __all__ = [
     "quadrupolar_ct_isotropic_shift_Hz", "larmor_frequency_Hz", "zcw_angles",
     "spin_multiplet_pattern", "jcoupling_group_pattern", "combine_jcouplings",
     "multiplet_lineshape", "jcoupled_spectrum", "multi_site_jcoupled_spectrum", "element_isotopes",
+    # quadrupolar fitting
+    "fit_quadrupolar_spectrum", "evaluate_quad_fit", "estimate_quadrupolar_start",
+    "quadrupolar_derived", "print_quadrupolar_fit_report", "NMR1dplot_with_quad_fit",
+    "NMRQuadFitWorkflow",
     # spin_system (strong coupling)
     "expand_spin_system", "block_sizes", "spin_system_transitions", "spin_system_spectrum",
     "coupling_strengths", "fit_spin_system_spectrum", "evaluate_spin_system_fit",
