@@ -15460,7 +15460,8 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     # Diffusion (PFG) and Shaped pulse (Bloch): ported from upstream;
     # pNMR (CIF): the notebook's CIF shift simulation (test_gui_pnmr.py).
     # J-coupling first (test_gui_jcoupling.py).
-    assert [s.title() for s in sections] == ["J-coupling", "CSA", "Quadrupolar", "Diffusion (PFG)",
+    assert [s.title() for s in sections] == ["J-coupling", "CSA", "Quadrupolar",
+                                             "Combined Hamiltonian", "Diffusion (PFG)",
                                              "Shaped pulse (Bloch)", "pNMR (CIF)"]
 
     csa_section = _enclosing_collapsible_section(window.sim_csa_diso_spin)
@@ -16083,8 +16084,8 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     window = MainWindow()
     page = window.side_tabs.widget(window._simulations_tab_index)
     titles = [s.title() for s in page.findChildren(CollapsibleSection)]
-    assert titles == ["J-coupling", "CSA", "Quadrupolar", "Diffusion (PFG)", "Shaped pulse (Bloch)",
-                      "pNMR (CIF)"]
+    assert titles == ["J-coupling", "CSA", "Quadrupolar", "Combined Hamiltonian",
+                      "Diffusion (PFG)", "Shaped pulse (Bloch)", "pNMR (CIF)"]
 
 
 def test_simulation_plot_shows_on_run_and_hides_on_leaving_the_tile(qapp):

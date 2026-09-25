@@ -1009,11 +1009,16 @@ def _quad_powder(n_zcw, powder_scheme, n_theta, n_phi, use_symmetry):
     frequency and intensity unchanged, and time reversal (b -> -b)
     leaves the eigenvalues unchanged. Every static observable is then
     invariant to independent sign flips of the three components of b,
-    i.e. the same in all eight octants. (Under MAS a single sign flip
-    reverses the sense of rotation, which mirrors the sideband pattern
-    of that crystallite, k -> -k; quadrupolar_mas_spectrum symmetrises
-    the sidebands accordingly.) Same cost as n_zcw full-sphere points,
-    8x the orientation density, so much less powder "ripple"."""
+    i.e. the same in all eight octants. Under MAS a reflected rotor axis
+    turns the other way, so its frequency trajectory is time-reversed;
+    the time-reversed signal is the complex conjugate of the original,
+    so every |a_k|^2 is unchanged -- all eight octants give the same
+    sidebands and no symmetrisation is needed. (An earlier version
+    averaged k with -k here; that was wrong -- harmless for
+    quadrupolar-only patterns, whose satellite pairs are mirror images,
+    but it makes a CSA sideband pattern symmetric.) Same cost as n_zcw
+    full-sphere points, 8x the orientation density, so much less powder
+    "ripple"."""
     if powder_scheme == "zcw" and use_symmetry:
         theta, phi, _ = zcw_angles(8 * int(n_zcw))
         keep = (theta <= np.pi / 2) & (phi < np.pi / 2)
@@ -1131,6 +1136,60 @@ def _rotor_frame(theta, phi):
     return r, e1, e2
 
 
+def _mas_prepare(nu, mas_Hz, n_gamma, n_time=None, max_n_time=65536):
+    """Fourier analysis of frequencies ``nu`` (Hz; shape (N, n_gamma, T):
+    crystallites x equally spaced rotor phases x transitions) for
+    gamma-COMPUTE: centreband positions, phase coefficients, and a
+    time grid fine enough that no sideband aliases. Shared by every MAS
+    simulation built on these frequencies (quadrupolar_mas_spectrum,
+    combined_hamiltonian)."""
+    coeff = np.fft.fft(nu, axis=1) / n_gamma
+    centre = coeff[:, 0, :].real
+    k_g = np.fft.fftfreq(n_gamma, d=1.0 / n_gamma).round().astype(int)
+    keep = (k_g != 0) & (np.abs(k_g) < n_gamma / 2)
+    excursion = float(np.max(np.abs(nu - centre[:, None, :]))) if nu.size else 0.0
+    if n_time is None:
+        need = 2.0 * (1.3 * excursion / mas_Hz + 4 * n_gamma) + 16
+        n_time = int(2 ** np.ceil(np.log2(max(need, 64))))
+    n_time = int(n_time)
+    if n_time > max_n_time:
+        raise ValueError(
+            f"The spinning sidebands span about {2 * excursion / mas_Hz:.0f} x the "
+            f"MAS rate, needing {n_time} points per rotor period (max_n_time = "
+            f"{max_n_time}). Spin faster, simulate fewer transitions (e.g. "
+            "transitions='ct'), or use the static simulation.")
+    if n_time < n_gamma:
+        raise ValueError("n_time must be >= n_gamma.")
+    phase_coeff = np.zeros_like(coeff)
+    # phase in cycles: integral of c_k exp(2 pi i k nu_r t) dt = c_k / (2 pi i k nu_r) exp(...)
+    phase_coeff[:, keep, :] = coeff[:, keep, :] / (2j * np.pi * k_g[keep, None] * mas_Hz)
+    return {"centre": centre, "phase_coeff": phase_coeff[:, keep, :],
+            "slots": np.mod(k_g[keep], n_time), "n_time": n_time, "mas_Hz": float(mas_Hz),
+            "k_t": np.fft.fftfreq(n_time, d=1.0 / n_time).round().astype(int)}
+
+
+def _mas_sticks(prep, inten, wts, max_elements=4.0e6):
+    """Yield ``(start, stop, centre (c, T), sideband_Hz (n_time,), weight
+    (c, n_time, T))`` chunk by chunk: the gamma-averaged intensity of
+    sideband k of each crystallite and transition is |a_k|^2, a_k the
+    k-th Fourier coefficient of exp(2 pi i phase) over one rotor period,
+    times the crystallite weight ``wts`` and transition intensity
+    ``inten`` (N, T)."""
+    n_time = prep["n_time"]
+    n_cryst, n_trans = prep["centre"].shape
+    chunk = max(1, int(max_elements // (n_time * n_trans)))
+    sideband_Hz = prep["k_t"] * prep["mas_Hz"]
+    for start in range(0, n_cryst, chunk):
+        stop = min(start + chunk, n_cryst)
+        spectrum_coeff = np.zeros((stop - start, n_time, n_trans), dtype=complex)
+        spectrum_coeff[:, prep["slots"], :] = prep["phase_coeff"][start:stop]
+        phase = np.fft.ifft(spectrum_coeff, axis=1).real * n_time           # cycles
+        a = np.fft.fft(np.exp(2j * np.pi * phase), axis=1) / n_time
+        power = a.real ** 2 + a.imag ** 2                                   # (c, n_time, T)
+        weight = wts[start:stop, None, None] * inten[start:stop, None, :] * power
+        yield start, stop, prep["centre"][start:stop], sideband_Hz, weight
+
+
 def quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, order="second",
                              transitions="all", delta_iso=0.0, rotor_angle="magic",
                              fwhm=1.0, lineshape="gaussian", eta=0.0, n_zcw=4181,
@@ -1159,9 +1218,8 @@ def quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, order="
         Rotor-axis orientations (ZCW). The rotor phase supplies the
         third angle, so a 2-angle set is the complete powder average.
     use_symmetry : bool
-        Rotor axes in one octant only, with each crystallite's sideband
-        pattern symmetrised (k and -k averaged) -- exact by the EFG's
-        D2h symmetry plus time reversal (see _quad_powder); 8x the
+        Rotor axes in one octant only -- exact by the EFG's D2h
+        symmetry plus time reversal (see _quad_powder); 8x the
         orientation density for the same cost.
     n_gamma : int, optional
         Rotor-phase samples per period: default 16 for the perturbative
@@ -1197,7 +1255,6 @@ def quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, order="
     n_gamma = int(n_gamma)
 
     theta, phi, wts = _quad_powder(n_zcw, powder_scheme, n_theta, n_phi, use_symmetry)
-    symmetrise = powder_scheme == "zcw" and use_symmetry
     r, e1, e2 = _rotor_frame(theta, phi)
     gam = 2.0 * np.pi * np.arange(n_gamma) / n_gamma
     b = (np.cos(beta) * r[:, None, :]
@@ -1213,50 +1270,12 @@ def quadrupolar_mas_spectrum(I, C_Q, eta_Q, larmor_Hz, mas_Hz, ppm_axis, order="
                                 (len(wts), len(m)))
     inten = inten / total_weight
 
-    # Fourier series of the frequency in the rotor phase.
-    coeff = np.fft.fft(nu, axis=1) / n_gamma                                # (N, G, T)
-    centre = coeff[:, 0, :].real                                            # (N, T)
-    k_g = np.fft.fftfreq(n_gamma, d=1.0 / n_gamma).round().astype(int)
-    keep = (k_g != 0) & (np.abs(k_g) < n_gamma / 2)
-    excursion = float(np.max(np.abs(nu - centre[:, None, :]))) if nu.size else 0.0
-
-    if n_time is None:
-        need = 2.0 * (1.3 * excursion / mas_Hz + 4 * n_gamma) + 16
-        n_time = int(2 ** np.ceil(np.log2(max(need, 64))))
-    n_time = int(n_time)
-    if n_time > max_n_time:
-        raise ValueError(
-            f"The spinning sidebands span about {2 * excursion / mas_Hz:.0f} x the "
-            f"MAS rate, needing {n_time} points per rotor period (max_n_time = "
-            f"{max_n_time}). Spin faster, simulate fewer transitions (e.g. "
-            "transitions='ct'), or use the static simulation.")
-    if n_time < n_gamma:
-        raise ValueError("n_time must be >= n_gamma.")
-
-    k_t = np.fft.fftfreq(n_time, d=1.0 / n_time).round().astype(int)
-    # phase (cycles) Fourier coefficients: c_k / (2 pi i k nu_r) * (2 pi) -> c_k / (i k nu_r) / (2 pi)
-    phase_coeff = np.zeros_like(coeff)
-    phase_coeff[:, keep, :] = coeff[:, keep, :] / (2j * np.pi * k_g[keep, None] * mas_Hz)
-    slots = np.mod(k_g[keep], n_time)
-
+    prep = _mas_prepare(nu, mas_Hz, n_gamma, n_time, max_n_time)
+    n_time = prep["n_time"]
     components = {row["group"]: np.zeros(len(ppm_axis)) for row in rows}
     groups = [row["group"] for row in rows]
-    n_trans = len(m)
-    chunk = max(1, int(4.0e6 // (n_time * n_trans)))
-    sideband_Hz = k_t * mas_Hz
-    for start in range(0, len(wts), chunk):
-        stop = min(start + chunk, len(wts))
-        spectrum_coeff = np.zeros((stop - start, n_time, n_trans), dtype=complex)
-        spectrum_coeff[:, slots, :] = phase_coeff[start:stop][:, keep, :]
-        phase = np.fft.ifft(spectrum_coeff, axis=1).real * n_time           # cycles
-        signal = np.exp(2j * np.pi * phase)
-        a = np.fft.fft(signal, axis=1) / n_time
-        power = (a.real ** 2 + a.imag ** 2)                                 # (c, n_time, T)
-        if symmetrise:
-            power = 0.5 * (power + power[:, np.mod(-np.arange(n_time), n_time), :])
-        weight = wts[start:stop, None, None] * inten[start:stop, None, :] * power
-        position = delta_iso + (centre[start:stop, None, :] + sideband_Hz[None, :, None]) \
-            / larmor_Hz * 1e6
+    for start, stop, centre, sideband_Hz, weight in _mas_sticks(prep, inten, wts):
+        position = delta_iso + (centre[:, None, :] + sideband_Hz[None, :, None]) / larmor_Hz * 1e6
         for col, group in enumerate(groups):
             components[group] += _bin_sticks(ppm_axis, position[:, :, col], weight[:, :, col])
 

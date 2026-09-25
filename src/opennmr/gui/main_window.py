@@ -93,6 +93,7 @@ from .widgets.simulation_canvas import SimulationCanvas
 from .pnmr_panel import PnmrSimulationPanel
 from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
+from .combined_panels import CombinedHamiltonianPanel
 from .loader import background_load_enabled
 
 #: Where the launcher-tile icons (Open, Processing, Advanced
@@ -10393,6 +10394,16 @@ class MainWindow(QMainWindow):
         self._quad_sim_section = CollapsibleSection(
             "Quadrupolar", content=self._build_simulate_quadrupolar_subtab())
         layout.addWidget(self._quad_sim_section)
+        # Any mix of CSA, quadrupolar and J on the same site (explicit
+        # user request: add interactions to a site rather than one
+        # simulator per combination). notebook.combined_hamiltonian.
+        self.combined_sim_panel = CombinedHamiltonianPanel(
+            plot_spectrum=self._show_simulated_spectrum,
+            add_to_open=self._add_derived_spectrum,
+            draw_sites=self._draw_combined_sites)
+        self._combined_sim_section = CollapsibleSection(
+            "Combined Hamiltonian", content=self.combined_sim_panel)
+        layout.addWidget(self._combined_sim_section)
         # Ported from upstream (Leo, 1c5613e) -- experiment planning
         # rather than lineshapes; drawn on the Simulation plot.
         layout.addWidget(CollapsibleSection(
@@ -10479,6 +10490,16 @@ class MainWindow(QMainWindow):
             spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _draw_combined_sites(self, result: dict, nucleus: str) -> None:
+        """Total and each site of a combined simulation on the Simulation
+        plot (the total alone is on the spectrum plot, for export)."""
+        from ..notebook.combined_hamiltonian import plot_combined
+        figure = self.simulation_canvas.figure
+        figure.clear()
+        plot_combined(result, nuclide=nucleus, figure=figure, fontsize=10)
+        self.simulation_canvas.draw()
+        self._show_simulation_view()
 
     def _send_quadrupolar_to_simulation(self, fitted: dict) -> None:
         """A fitted site into Simulate > Quadrupolar, ready to re-simulate
@@ -20188,6 +20209,8 @@ class MainWindow(QMainWindow):
         self._refresh_simulation_controls(spectrum)
         if hasattr(self, "quad_fit_panel"):
             self.quad_fit_panel.seed_from_spectrum(spectrum)
+        if hasattr(self, "combined_sim_panel"):
+            self.combined_sim_panel.seed_from_spectrum(spectrum)
 
         # Both tabs' gradient controls, in one place -- see
         # _refresh_max_gradient_controls.

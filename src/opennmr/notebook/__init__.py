@@ -85,6 +85,11 @@ from .quadrupolar_fitting import (
     NMRQuadFitWorkflow,
 )
 
+from .combined_hamiltonian import (
+    Site, simulate_combined, combined_axis_limits, combined_to_python,
+    site_transition_frequencies, plot_combined, sites_to_json, sites_from_json,
+)
+
 from .spin_system import (
     expand_spin_system, block_sizes, spin_system_transitions, spin_system_spectrum,
     coupling_strengths, fit_spin_system_spectrum, evaluate_spin_system_fit, fitted_system,
@@ -200,6 +205,9 @@ __all__ = [
     "fit_quadrupolar_spectrum", "evaluate_quad_fit", "estimate_quadrupolar_start",
     "quadrupolar_derived", "print_quadrupolar_fit_report", "NMR1dplot_with_quad_fit",
     "NMRQuadFitWorkflow",
+    # combined Hamiltonian
+    "Site", "simulate_combined", "combined_axis_limits", "combined_to_python",
+    "site_transition_frequencies", "plot_combined", "sites_to_json", "sites_from_json",
     # spin_system (strong coupling)
     "expand_spin_system", "block_sizes", "spin_system_transitions", "spin_system_spectrum",
     "coupling_strengths", "fit_spin_system_spectrum", "evaluate_spin_system_fit",

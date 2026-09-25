@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-25 (combined Hamiltonian round): 2895 tests collected; all pass without `test_data/` except the known pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`.*
+
 *2026-09-25 (quadrupolar fitting round): full suite without `test_data/`, with pymatgen: 2709 passed, 161 skipped, 1 failed (the same pre-existing pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`).*
 
 *2026-09-25 (quadrupolar round): full suite without `test_data/`, with pymatgen: 2694 passed, 161 skipped, 1 failed (`test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log` -- pre-existing, fails on HEAD too; pymatgen-only).*
@@ -81,6 +83,31 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Combined Hamiltonian: CSA + quadrupolar + J on one site, static and MAS (2026-09-25, sixth round)
+
+User: *"I want to be able to combine some/all of CSA, J-coupling and quadrupolar interactions ... I do not want separate functions for each combination, but instead would like to just 'add' an interaction to the same site ... probably a separate section, for example called 'Combined Hamiltonian'. We can start with simulating and move to fitting later."*
+
+### Built
+- **`notebook/combined_hamiltonian.py`**: `Site(nucleus, delta_iso, label, amount, fwhm, lineshape)` with `.add_csa(aniso, asym, convention, euler)`, `.add_quadrupolar(C_Q MHz, eta_Q)`, `.add_jcoupling(nuclide, n, J_Hz)` (any number), generic `.add(kind, ...)`, `.remove`, `.to_dict/.from_dict`; `simulate_combined(sites, ppm_axis, larmor_Hz|B0_T, mas_Hz, order, transitions, ...)` → total, per-site, per-transition-group spectra and a log; `site_transition_frequencies` (per orientation), `combined_axis_limits`, `combined_to_python` (notebook code that reproduces a GUI simulation), `sites_to_json/from_json`, `plot_combined`. Exported from `opennmr.notebook`.
+- Physics: frequencies add (CSA first order, quadrupolar first/second/exact, heteronuclear weak J as a multiplet convolution via `combine_jcouplings`); CSA orientation in the EFG frame by ZYZ Euler angles (β, α = polar angles of δzz in the EFG frame). One engine for static and MAS (the quadrupolar simulator's gamma-COMPUTE, now factored into `simulations._mas_prepare/_mas_sticks`).
+- Powder: one octant only when exact (no CSA, or CSA axes coincident with the EFG's); otherwise the full sphere, with 8× the points for static patterns (a tilted CSA+quadrupolar static pattern was 15% off at 4181 full-sphere points). Forcing the octant on a tilted CSA gives a 92% error -- the automatic check is necessary.
+- **GUI, Simulate > Combined Hamiltonian** (after Quadrupolar; `gui/combined_panels.py`): shared nucleus/Larmor/regime/MAS/transitions/quadrupolar theory/orientations; a site list (Add, Duplicate, Remove); the selected site's label, δiso, amount, broadening, and its interactions -- "Add interaction ▾" (CSA, Quadrupolar, J-coupling; CSA and quadrupolar once per site, quadrupolar only for I ≥ 1), each with its own Remove; Euler angles enabled only with an EFG. Auto axis, Simulate (total on the spectrum plot, each site on the Simulation plot), Export to Open Experiments, **Copy as Python**. Seeded from the selected spectrum (nucleus, SFO1, MASR).
+
+### Bug found and fixed (in the previous round's code)
+- `quadrupolar_mas_spectrum`'s octant shortcut **averaged sideband k with −k**, on the argument that a reflected rotor axis mirrors the sideband pattern. It does not: the reflected trajectory is time-reversed, the time-reversed signal is the complex conjugate, and |a_k|² is unchanged. Harmless for quadrupolar-only patterns (each satellite pair is a mirror pair; CT sidebands are tiny) -- which is why the tests passed -- but it made CSA sideband patterns symmetric. Removed; a CSA-only MAS site now matches `finite_mas_csa_spectrum` sideband by sideband (e.g. −1: 0.330 vs 0.330, +1: 0.1454 vs 0.1455) and the test checks the asymmetry.
+- Auto axis under MAS: the static range does not contain the sidebands of a CSA spun slower than its width; `combined_axis_limits(mas_Hz=...)` frames on a quick coarse MAS simulation instead.
+
+### Tests
+`tests/test_combined_hamiltonian.py` (19): each interaction alone equals its dedicated simulator (quadrupolar static/MAS, CSA static, CSA finite-MAS incl. sideband asymmetry, J multiplet); CSA+quadrupolar per-orientation frequencies vs an independent dense calculation (scipy ZYZ rotation, explicit RS sums) at four Euler sets; Euler meaning; octant only when exact (vs full-sphere references); MAS sidebands of a tilted CSA+quadrupolar crystallite vs an explicit rotor-phase average; J under MAS; several sites, amounts, CT shares; spin-1/2; Python export reproduces the result; axis framing incl. MAS sidebands; plot. `tests/test_gui_combined.py` (5): building a site by adding interactions equals the notebook call; one CSA/one EFG per site; spin-1/2 disables quadrupolar/transitions; duplicate/rename/remove and the per-site plot; Copy as Python reproduces the GUI result; seeding and refusals. Changed: the two Simulate section-order tests now include "Combined Hamiltonian".
+
+Full suite (2895 collected, run in chunks on the VM, without `test_data/`, with pymatgen): all pass except the known pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`.
+
+### Not done / open
+- **Fitting** with combined sites (next step, by request): the engine is already vectorised and deterministic, so `fit_combined` can follow the quadrupolar fitter's pattern (flatten each site's parameters, fixed/bounds per site and per interaction).
+- Heteronuclear **dipolar** coupling (first order, orientation-dependent) would slot in as a fourth interaction the same way; homonuclear/strong coupling needs `spin_system`, not this.
+- CSA–quadrupolar cross terms beyond first order are neglected (≲1e-6 of the CSA); J is isotropic only (no anisotropic J).
+- The GUI's Simulate > CSA / Quadrupolar / J-coupling sections remain; they could become presets of this section.
 
 ## Quadrupolar fitting, static and MAS (2026-09-25, fifth round)
 
