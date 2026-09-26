@@ -442,3 +442,27 @@ def test_spin_fit_fixed_j(qapp):  # noqa: F811
     assert got["J A-B (Hz)"] == 7.5
     k = fit.result["info"]["names"].index("J A-B (Hz)")
     assert "(fixed)" in fit.results_table.item(k, 0).text()
+
+
+def test_a_spin_system_fit_and_its_chosen_solution_come_back(qapp):  # noqa: F811
+    # Saved with the spectrum (processing log / Load Progress): the
+    # second of two equally good ABX solutions is still the one shown.
+    window, fit = _abx_window(qapp)
+    assert fit.fit()
+    fit.solution_combo.setCurrentIndex(1)
+    shown = (fit.table_as_tsv(), fit.results_label.text())
+    saved = window.session.spectra[0].metadata.raw["fits"]["jcoupling"]
+    assert serialize_decode(saved["result"])["chosen"] == 1
+    window._add_derived_spectrum(NMRSpectrum(
+        data=np.zeros(8), axes=[NMRAxis(kind="frequency", ppm=np.linspace(1, 0, 8))],
+        metadata=NMRMetadata(vendor="simulated", nucleus="1H")), "blank")
+    assert fit.result is None and not fit.solution_combo.isVisibleTo(fit)
+    window._select_single_row(0)
+    assert fit.solution_combo.currentIndex() == 1 and fit.solution_combo.isVisibleTo(fit)
+    assert (fit.table_as_tsv(), fit.results_label.text()) == shown
+    assert fit.spin_mode() and len(fit.spin_editor.labels()) == 3
+
+
+def serialize_decode(value):
+    from opennmr.io import serialize
+    return serialize.decode(value)

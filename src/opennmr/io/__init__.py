@@ -11,3 +11,10 @@ from . import bruker_pfg  # noqa: F401 -- PFG gradient axis with or without diff
 __all__ = ["load", "peek", "detect_vendor", "registered_vendors", "register",
            "find_value_lists", "read_value_list",
            "bruker", "xpulse", "varian", "jeol", "spinsolve", "bruker_pfg", "lists"]
+
+# openNMR's own dataset folders (a saved simulation or derived spectrum,
+# see io.history.save_spectrum_folder). Registered last: its marker file
+# never appears in a vendor's folder, so order only matters for speed.
+from . import history  # noqa: E402,F401
+register("opennmr", history.is_dataset_folder, history.read_spectrum_folder,
+         peek=history._peek_spectrum_folder)

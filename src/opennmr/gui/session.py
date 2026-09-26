@@ -193,11 +193,39 @@ class Session:
         (gated via ``MainWindow._fid_reprocessable``, which only
         recognises the real vendor names) correctly stay hidden for
         it. Returns the new spectrum's session index."""
+        # Where it came from, before source_path is overwritten with the
+        # label: the experiment folder it was derived from (a slice, a
+        # CPMG sum, a VOCS correction), or None for a simulation. Kept
+        # here rather than in metadata.raw, which a derived spectrum
+        # can share with its parent. Used to suggest where Save
+        # Progress puts it (io.history.default_dataset_folder).
+        origin = spectrum.metadata.source_path
+        if not (origin and os.path.exists(origin)):
+            origin = None
+        origin_vendor = spectrum.metadata.vendor
         metadata = dataclasses.replace(spectrum.metadata, vendor="derived", source_path=label)
         spectrum = dataclasses.replace(spectrum, metadata=metadata)
         self.spectra.append(spectrum)
-        self._load_info.append({"path": None, "vendor": "derived", "kwargs": {}})
+        self._load_info.append({"path": None, "vendor": "derived", "kwargs": {},
+                                "origin": origin, "origin_vendor": origin_vendor})
         return len(self.spectra) - 1
+
+    def info(self, index: int) -> dict:
+        """The live bookkeeping dict for spectrum ``index`` (how it was
+        loaded, where a derived one came from, its processing history
+        -- see :mod:`opennmr.io.history`). Moves with the spectrum on
+        :meth:`swap`/:meth:`remove`, and survives :meth:`reload`/
+        :meth:`reset`, which replace only its ``kwargs``."""
+        return self._load_info[index]
+
+    def rebase(self, index: int, spectrum: NMRSpectrum, path: str, vendor: str) -> None:
+        """Make spectrum ``index`` a disk-backed one read from ``path``
+        -- a derived spectrum just saved as an openNMR dataset folder
+        (:func:`opennmr.io.history.save_spectrum_folder`). Its other
+        bookkeeping (history, origin) is kept."""
+        self.spectra[index] = spectrum
+        info = self._load_info[index]
+        info.update({"path": path, "vendor": vendor, "kwargs": {}})
 
     def remove(self, index: int) -> None:
         del self.spectra[index]

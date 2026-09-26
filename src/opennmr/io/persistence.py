@@ -204,17 +204,28 @@ def save_processing_sidecar(spectrum) -> None:
     source_path = spectrum.metadata.source_path
     if not source_path or not os.path.exists(source_path):
         return
+    payload = {"opennmr_processing_version": _PROCESSING_VERSION, "state": processing_state(spectrum)}
+    _write_json(processing_sidecar_path(source_path), payload)
+
+
+def processing_state(spectrum) -> dict:
+    """The part of ``spectrum.metadata.raw`` that is its processing /
+    analysis recipe -- exactly what :func:`save_processing_sidecar`
+    writes, and what a reopened spectrum has merged back into its
+    ``metadata.raw``. Shared with :mod:`opennmr.io.history`, so a save
+    point records the same state a restart would restore, by
+    construction. Keys starting with ``_`` are session bookkeeping
+    (e.g. ``_read_used_saved_processing``) and never part of it."""
     state = {}
-    for key, value in spectrum.metadata.raw.items():
-        if key in _PROCESSING_RAW_BLOCKLIST:
+    for key, value in (spectrum.metadata.raw or {}).items():
+        if key in _PROCESSING_RAW_BLOCKLIST or key.startswith("_"):
             continue
         try:
             json.dumps(value)
-        except TypeError:
+        except (TypeError, ValueError):
             continue
         state[key] = value
-    payload = {"opennmr_processing_version": _PROCESSING_VERSION, "state": state}
-    _write_json(processing_sidecar_path(source_path), payload)
+    return state
 
 
 def load_processing_sidecar(source_path: str, vendor: str | None = None) -> dict | None:

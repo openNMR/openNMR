@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from . import panel_state
 from ..notebook import combined_hamiltonian as ch
 from ..notebook.utils import _GAMMA_DF, find_isotope_info
 
@@ -366,6 +367,37 @@ class CombinedHamiltonianPanel(QWidget):
             "" if spin >= 1 else "The observed nucleus is spin-1/2: no quadrupole moment.")
         self._actions["jcoupling"].setEnabled(site is not None)
 
+    # ---- saved state (simulation history) -----------------------------
+
+    #: The "Selected site" fields show one site of site_dicts; the model
+    #: itself is saved, not these.
+    _SITE_FIELDS = ("label_edit", "diso_spin", "amount_spin", "fwhm_spin", "lineshape_combo",
+                    "pv_eta_spin")
+
+    def get_state(self) -> dict:
+        state = {"widgets": panel_state.capture_widgets(self, exclude=self._SITE_FIELDS),
+                 "sites": copy.deepcopy(self.site_dicts), "current": self._current}
+        state["extra"] = {f"Site {s.get('label')}": _describe_site(s) for s in self.site_dicts}
+        return state
+
+    def set_state(self, state: dict) -> None:
+        state = state or {}
+        panel_state.restore_widgets(self, state.get("widgets") or {})
+        self.site_list.blockSignals(True)
+        self.site_list.clear()
+        self.site_list.blockSignals(False)
+        self.site_dicts = []
+        self._current = -1
+        for site in state.get("sites") or []:
+            self.add_site(site)
+        current = int(state.get("current", 0) or 0)
+        if self.site_dicts:
+            self.site_list.setCurrentRow(min(max(current, 0), len(self.site_dicts) - 1))
+        else:
+            self._on_site_selected(-1)
+        self._sync_spin()
+        self._sync_controls()
+
     def current_site(self):
         return self.site_dicts[self._current] if 0 <= self._current < len(self.site_dicts) else None
 
@@ -606,3 +638,19 @@ class CombinedHamiltonianPanel(QWidget):
             QGuiApplication.clipboard().setText(self.python_code())
         except (ValueError, KeyError) as exc:
             QMessageBox.warning(self, "Copy as Python", str(exc))
+
+
+def _describe_site(site: dict) -> str:
+    """A site as one readable line, for the simulation log."""
+    bits = [f"δiso {site.get('delta_iso', 0):g} ppm", f"amount {site.get('amount', 1):g}",
+            f"FWHM {site.get('fwhm', 0):g} ppm ({site.get('lineshape', '')})"]
+    for i in site.get("interactions") or []:
+        kind = i.get("type")
+        if kind == "csa":
+            bits.append(f"CSA Δ {i.get('aniso', 0):g} ppm, η {i.get('asym', 0):g} "
+                        f"({i.get('convention', '')}), Euler {tuple(i.get('euler', ()))}")
+        elif kind == "quadrupolar":
+            bits.append(f"C_Q {i.get('C_Q', 0):g} MHz, η_Q {i.get('eta_Q', 0):g}")
+        elif kind == "jcoupling":
+            bits.append(f"J to {i.get('n', 1)}×{i.get('nuclide', '?')} {i.get('J_Hz', 0):g} Hz")
+    return "; ".join(bits)

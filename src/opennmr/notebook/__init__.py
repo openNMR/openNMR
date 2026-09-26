@@ -102,6 +102,11 @@ from .spin_system import (
 )
 
 from .notes import experiment_notes, set_experiment_notes, notes_location, notes_first_line
+from .progress import (
+    processing_log, processing_history, list_save_points, save_point_state,
+    save_progress, load_progress, log_event, load_saved_spectrum,
+    saved_fits, simulation_log, simulation_history, log_simulation,
+)
 
 from .csa_fitting import (
     csa_model_full, build_csa_model, fit_csa_spectrum, evaluate_csa_fit,
@@ -256,4 +261,8 @@ __all__ = [
     "NMRJCouplingFitWorkflow", "jcoupling_chemist_notation",
     # notes
     "experiment_notes", "set_experiment_notes", "notes_location", "notes_first_line",
+    # progress (processing log and save points, shared with the GUI)
+    "processing_log", "processing_history", "list_save_points", "save_point_state",
+    "save_progress", "load_progress", "log_event", "load_saved_spectrum",
+    "saved_fits", "simulation_log", "simulation_history", "log_simulation",
 ]

@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import registry as core_registry
+from ..io import serialize
+from . import panel_state
 from ..notebook import bridge as notebook_bridge
 from ..notebook import fitting as notebook_fitting
 from ..notebook import quadrupolar_fitting as qfit
@@ -40,8 +42,11 @@ class QuadrupolarFitPanel(QWidget):
     with a dict of the first site's values and the fit's setup."""
 
     def __init__(self, get_target, get_regions, draw_fit, format_value_error,
-                 send_to_simulation=None, parent=None) -> None:
+                 send_to_simulation=None, on_fitted=None, parent=None) -> None:
         super().__init__(parent)
+        # Called after every successful fit (the processing log, saved
+        # with the spectrum). Optional, so the panel works on its own.
+        self._on_fitted = on_fitted or (lambda: None)
         self._get_target = get_target
         self._get_regions = get_regions
         self._draw_fit = draw_fit
@@ -228,6 +233,50 @@ class QuadrupolarFitPanel(QWidget):
 
         self.add_site()
         self._sync_controls()
+
+    # ---- saved state (processing log / Load Progress) ------------------
+
+    def get_state(self) -> dict:
+        """Every input, including the sites and their bounds/fixes."""
+        return panel_state.default_state(self)
+
+    def set_state(self, state: dict) -> None:
+        panel_state.restore_default_state(self, state)
+        for row in range(self.sites_table.rowCount()):
+            bounds, fixed = self._constraints(row)
+            self.set_constraints(row, bounds, fixed)  # the italics and tooltips
+        self._sync_controls()
+        self.spin_label.setText("—" if self.spin() is None else f"{self.spin():g}")
+
+    def result_state(self):
+        """The last fit, encoded exactly (without the spectrum object,
+        which the caller re-attaches)."""
+        if not self.result:
+            return None
+        return serialize.encode({k: v for k, v in self.result.items() if k != "spectrum"})
+
+    def restore_result(self, encoded, spectrum=None) -> None:
+        """Show a saved fit's table and report as they were -- nothing
+        is re-fitted and nothing is redrawn."""
+        result = serialize.decode(encoded)
+        result["spectrum"] = spectrum
+        self.result = result
+        self._report()
+        self.send_button.setEnabled(self._send_to_simulation is not None)
+
+    def clear_result(self) -> None:
+        self.result = None
+        self.results_label.setText("")
+        self.results_table.clear()
+        self.results_table.setRowCount(0)
+        self.results_table.setVisible(False)
+        self.send_button.setEnabled(False)
+
+    def report_text(self) -> str:
+        """What the log records of the fit: the summary line(s) and table."""
+        if not self.result:
+            return ""
+        return self.results_label.text() + "\n" + panel_state.table_text(self.results_table)
 
     # ---- controls ------------------------------------------------------
 
@@ -490,6 +539,7 @@ class QuadrupolarFitPanel(QWidget):
         self._draw_fit(self.result)
         self._report()
         self.send_button.setEnabled(self._send_to_simulation is not None)
+        self._on_fitted()
 
     # ---- report --------------------------------------------------------------
 

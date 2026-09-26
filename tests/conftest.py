@@ -42,6 +42,9 @@ def _isolate_interface_settings(tmp_path, monkeypatch):
     -- so a test that enlarges it would otherwise enlarge every widget
     in every later test. Only touches the GUI if a test already
     imported it: non-GUI tests pay nothing."""
+    # Simulation runs are journalled (io.history.record_simulation) in
+    # the simulations folder; never the real ~/Documents during tests.
+    monkeypatch.setenv("OPENNMR_SIMULATIONS_DIR", str(tmp_path / "simulations"))
     main_window = sys.modules.get("opennmr.gui.main_window")
     if main_window is not None:
         monkeypatch.setattr(main_window.MainWindow, "_UI_SETTINGS_PATH",

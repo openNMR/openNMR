@@ -2,6 +2,10 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-26 (fits + simulations logged/restorable round): full suite without `test_data/` or pymatgen: 2723 passed, 163 skipped, 0 failed.*
+
+*2026-09-26 (Save/Load Progress + processing log round): full suite without `test_data/` or pymatgen: 2708 passed, 163 skipped, 0 failed (49 new tests in `test_history.py` and `test_gui_progress.py`).*
+
 *2026-09-25 (combined fitting + tutorial round): 2902 tests collected; all pass without `test_data/` except the known pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`.*
 
 *2026-09-25 (combined Hamiltonian round): 2895 tests collected; all pass without `test_data/` except the known pymatgen-only `test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log`.*
@@ -85,6 +89,63 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Fits and simulations logged and restorable (2026-09-26, second round)
+
+User: *"Can you enable logging and restoring of fits and simulations, please?"* (The first round's log/save points covered only state in `metadata.raw`; the Fit ▸ CSA/J-coupling/Quadrupolar panels and every Simulate panel kept their own state and were not covered.)
+
+### Built
+- **`gui/panel_state.py`**: capture/restore a panel's inputs generically -- combo boxes (by data, falling back to text), spin boxes, check/radio/checkable group boxes, line/plain-text edits, and tables *with item data* (UserRole..+7, where the panels keep constraints, couplings, bounds). Combos/checks are restored first and values twice, so a combo that re-ranges or hides a spin box does not lose its value. Each value is stored with its display text and its form label, so logs read "Larmor frequency: 130.3000 MHz". `describe_state`, `table_text`.
+- **`io/serialize.py`**: exact JSON-safe encoding of fit results (numpy arrays as base64 raw bytes, tuples, complex, nan/inf, non-string dict keys); anything else is marked `__unsupported__` and `unsupported_keys` says where. Every fitter's result (quadrupolar, J first-order and spin-system, CSA) encodes with nothing unsupported once the spectrum object is dropped (tested).
+- Panels gained `get_state`/`set_state` (quadrupolar fit, J fit + sim, J sites and spin-system editors -- the latter's J matrix and constraints live in Python, not widgets -- combined Hamiltonian with its `site_dicts`, pNMR via its parameters JSON through `load_settings`), and fit panels `result_state`/`restore_result`/`clear_result`/`report_text`. MainWindow-hosted sections (CSA fit; CSA, quadrupolar, diffusion, Bloch simulations) go through `_Section` adapters built from attribute prefixes.
+- **Fits** (`MainWindow._store_fit`, via a new `on_fitted` callback on the fit panels and a call at the end of `_on_csa_fit_clicked`): stored in the fitted spectrum's `metadata.raw["fits"][panel]` = label, target, time, inputs, readable inputs, exact result, report. So the processing sidecar saves it, the log records it ("Quadrupolar fit of …" with the result table and the settings), save points hold it, Load Progress restores it, and reopening shows it.
+  - **Selecting a spectrum shows its own fits** (`_restore_fit_panels`): inputs and result table/report as they were, without re-fitting or redrawing. A panel with no fit of the selected spectrum keeps its inputs but **drops the other spectrum's result** -- previously a fit of spectrum A stayed on screen when B was selected and read as B's.
+  - The log's change entries keep only the fit's label/target/report/settings text (not inputs/result), so the history file does not duplicate arrays on every change.
+- **Simulations**: every successful run of every Simulate panel (CSA, quadrupolar, J-coupling, combined, diffusion, Bloch, pNMR) is journalled in `<simulations folder>/opennmr_simulation_history.json` + `opennmr_simulation_log.txt` (`io.history.record_simulation`): inputs (restorable) and result text. Re-runs of the same panel within 90 s are folded into one entry (`runs`). **File ▸ Simulation History…** lists them newest first with a preview; Restore puts the inputs back, opens Simulate with the section expanded, and re-runs it (not journalled again). pNMR is restored but not re-run (an enumeration can take minutes).
+  - Folder: `~/Documents/openNMR/simulations` (as for saved simulations), overridable with `OPENNMR_SIMULATIONS_DIR`; `tests/conftest.py` points it at `tmp_path` so tests never write to the real folder.
+- **Notebook**: `nb.saved_fits(path_or_spectrum)` returns the GUI's saved fits with their full results decoded (popt, pcov, y_fit, ...); `nb.simulation_log()`, `nb.simulation_history()`, `nb.log_simulation(label, parameters, summary)` (journalled as a notebook run; the GUI explains it cannot restore those).
+
+### Not done / open
+- A restored fit is shown as a table and report but **not redrawn** on the Fit canvas (restoring on every selection would steal the view); pressing Fit again redraws. A "Show fit" action would close this.
+- Isotropic (Gauss/Lor) peak fits and Integration were already in `analysis_state`/`slice_fit_results` and are unchanged; relaxation curve fits likewise.
+- Journalled simulation inputs include every control of the panel, relevant or not (e.g. MAS rate for a static run) -- complete rather than curated.
+- The combined-Hamiltonian panel has no fitting GUI yet (see the 2026-09-25 round), so there is nothing to store for it.
+
+### Tests
+`tests/test_gui_fit_sim_state.py` (14): encoding round trip; quadrupolar fit stored exactly and logged with result and settings; reselection shows the spectrum's own fit and not another's; J first-order restore (and "Use fitted values" from a restored result); CSA restore; fits through Save Progress / Load Progress / reopen and `nb.saved_fits`; every fit and simulate panel's inputs round-trip exactly; CSA simulation journalled, merged and restored with re-run; combined and J simulations restore their models; the Simulation History dialog; journal location; notebook journal entries. Plus `test_gui_jcoupling.py::test_a_spin_system_fit_and_its_chosen_solution_come_back`.
+
+## Save Progress / Load Progress and a per-spectrum processing log (2026-09-26)
+
+User: *"have a user 'save progress' on a spectrum, and ... create a log file for each spectrum handled ... used to 'save' and 'load' progress ... stored in the same location as the data itself (for Bruker, inside the data directory) ... human readable ... The same is true for simulated data; I am unsure where best these log files should be placed."*
+
+### What already existed (checked first)
+Every processing/analysis change was *already* auto-saved to `opennmr_processing.json` + `opennmr_metadata.json` in the experiment folder and restored on reopen (`io.persistence`). Missing: any human-readable record, any history, any way back to an earlier state, and anything for simulations/derived spectra. So this builds on that state rather than defining a second one.
+
+### Built
+- **`io/history.py`** (Qt-free). Two files next to the data (same dir-vs-file rule as the sidecars): `opennmr_history.json` (the record: changes, save points with full state, restores) and `opennmr_log.txt` (generated from the JSON on every write, **never parsed back** -- a hand-edited number in a text file must not be able to change what a restore produces).
+  - The tracked state is `persistence.processing_state(spectrum)` (new; exactly what the processing sidecar writes) plus mass/nucleus/pseudo-2D. A save point therefore records what a restart would restore, by construction.
+  - Changes are found by **diffing** that state at each debounced sidecar save, not by instrumenting controls, so a control added later is logged without a code change (unknown keys appear under their raw name). Readable labels/units in `KEY_INFO`; `analysis_state` is flattened so each fit setting is its own line; fit/integration result texts are logged verbatim (markup stripped); combo indices are logged by name via a new `analysis_state.option_names` (log-only, never read on restore).
+  - A burst of edits to the same settings within 90 s is merged into one entry (LB 0 → 10, not 0 → 1 → 10); an edit undone inside the burst leaves no entry. A setting first appearing at a blank value is not a change. Values > 20 kB (DOSY maps, per-slice fit tables) are fingerprinted in change entries, kept in full only in the state and save points.
+  - Summaries list only settings that mean something (LB only with EM/GM, LP order only with LP on, baseline parameters only for the method in use, the file's own nucleus omitted); everything is still stored and restored.
+  - openNMR **dataset folders** for spectra with nothing on disk: `opennmr_spectrum.npz` (data + axes, exact) + `opennmr_spectrum.json` + the usual sidecars/log. Registered as io vendor `"opennmr"`, so File ▸ Open / `io.load` reopen them. Save-point data snapshots (`opennmr_savepoints/savepoint_N.npz`) for anything that cannot be recomputed from a raw FID.
+- **GUI** (`gui/progress.py` dialogs; logic on `MainWindow`: `_begin_history`, `_record_history`, `_save_progress`, `_restore_progress`, `_apply_restored_state`). File menu: **Save Progress… (Ctrl+Shift+S)**, **Load Progress… (Ctrl+Shift+L)**, **Processing Log…**.
+  - Reference point = the state once the saved recipe is applied at load, with the controls' starting values filling untouched settings (`_fid_processing_control_values`, split out of `_persist_fid_processing_controls_to_metadata`), so the first LB edit logs "0 → 5 Hz" and not every other default.
+  - **Opening alone writes nothing** into a data folder; the "Opened" entry is written with the first change. A state that differs on opening from the log's last record (older openNMR, copied sidecars) is logged as such.
+  - Save Progress commits a phase still held only by the controls and the analysis panel first. Restore **re-reads the files with the original load kwargs (plus the saved pseudo-2D/magnitude choice) and applies the state through `_apply_loaded_processing_sidecar`** -- the reopen path -- rather than a second way of applying a recipe; non-reprocessable spectra restore from their snapshot. Restoring first keeps the current state as an "Automatic: before restoring ..." save point unless one already holds it. "Original" = re-read with no openNMR processing.
+  - Simulations/derived: history kept in memory (session `info(index)["history"]`, which moves with the spectrum and survives reload/reset) with a "Created" entry listing the simulation parameters and an "As created" save point holding the data. Save Progress asks for a folder: default `<parent expno>/opennmr_derived/<name>/` for anything derived from an experiment (Session.add_derived now records `origin`), `~/Documents/openNMR/simulations/<date>_<name>/` for simulations. After saving, the spectrum becomes vendor `opennmr` with that folder and is logged like any experiment.
+  - A log that cannot be written (read-only, offline cloud folder) is reported once on the status bar and in the log window, never raised mid-edit.
+  - **Fixed on the way:** closing the window within the 0.8 s sidecar debounce lost the last change (and now its log entry); `closeEvent` flushes it.
+- **Notebook** (`notebook/progress.py`): `processing_log`, `processing_history`, `list_save_points`, `save_point_state`, `save_progress` (a notebook simulation → dataset folder the GUI opens), `log_event` (your own lines), `load_progress`, `load_saved_spectrum`.
+
+### Deliberately not done / open
+- A notebook cannot re-apply a raw-FID experiment's saved *settings* (that is the GUI's processing chain, `_apply_loaded_processing_sidecar` and friends); `load_progress` raises `NotImplementedError` there and points to `save_point_state`. Moving that chain Qt-free would lift it.
+- Notebook processing functions (`one_d`, fitting on `results` dicts) are not auto-logged; `nb.log_event` is the manual route.
+- Only state that lives in `metadata.raw` is logged/restored. The panels that keep their own state outside it (Fit ▸ CSA/Quadrupolar/J-coupling/Combined, Simulate inputs, pNMR's own settings files) are not; their results are logged only if they reach `analysis_state`'s result texts.
+- Phase is logged as openNMR's own correction on top of the file's recorded PHC0/PHC1 (said in the log header), matching `phase0`/`phase1`'s meaning.
+- One sidecar/history per expno folder, shared across procnos -- as the existing sidecars already are.
+
+### Tests
+`tests/test_history.py` (27: diffing/wording, merging, save points, files, snapshots, dataset folders, summaries, notebook API) and `tests/test_gui_progress.py` (19: log follows edits, opening writes nothing, close flush, unwritable folder, save/restore exact data for 1D and 2D, original, across a restart, drift note, processed-only snapshots, simulations saved and reopened, dialogs).
 
 ## Tutorial notebook: quadrupolar + combined-Hamiltonian simulation and fitting; combined fitting built (2026-09-25, seventh round)
 

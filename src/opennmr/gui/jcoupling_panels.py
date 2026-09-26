@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from ..io import serialize
+from . import panel_state
 from ..notebook import fitting as notebook_fitting
 from ..notebook import jcoupling_fitting as jfit
 from ..notebook import simulations as nsim
@@ -226,6 +228,32 @@ class JCouplingSitesEditor(QWidget):
         self._sync_buttons()
         self._emit()
         return r
+
+    def get_state(self) -> dict:
+        """The sites table, with each site's couplings and constraints
+        (held in its items' data)."""
+        state = {"widgets": panel_state.capture_widgets(self, names=["sites_table"])}
+        lines = []
+        for r in range(self.sites_table.rowCount()):
+            label = self.sites_table.item(r, 0).text() if self.sites_table.item(r, 0) else f"Site {r + 1}"
+            couplings = ", ".join(f"{c.get('n', 1)}×{c.get('nuclide', '?')} {c.get('J_Hz', '?')} Hz"
+                                  for c in self._site_couplings(r))
+            if couplings:
+                lines.append((f"{label} couplings", couplings))
+        if lines:
+            state["extra"] = dict(lines)
+        return state
+
+    def set_state(self, state: dict) -> None:
+        panel_state.restore_widgets(self, (state or {}).get("widgets") or {})
+        for r in range(self.sites_table.rowCount()):
+            if self.sites_table.item(r, 0) is not None:
+                self._restyle_site(r)
+        if self.sites_table.rowCount():
+            self.sites_table.selectRow(0)
+        self._show_selected_couplings()
+        self._sync_buttons()
+        self._emit()
 
     def _unique_label(self) -> str:
         used = {self.sites_table.item(r, 0).text() for r in range(self.sites_table.rowCount())
@@ -708,6 +736,33 @@ class SpinSystemEditor(QWidget):
         self._rebuild_j()
         self._emit()
 
+    def get_state(self) -> dict:
+        """The spins table, the J matrix and the fixes/bounds -- the last
+        two live in Python, not in the widgets."""
+        labels = self.labels()
+        js = [f"{labels[i]}–{labels[j]} {self._J[i][j]} Hz"
+              for i in range(len(self._J)) for j in range(i + 1, len(self._J[i]))
+              if i < len(labels) and j < len(labels) and str(self._J[i][j]).strip()]
+        state = {"widgets": panel_state.capture_widgets(self, names=["spins_table"]),
+                 "model": {"J": serialize.encode(self._J),
+                           "constraints": serialize.encode(self._constraints)}}
+        if js:
+            state["extra"] = {"J couplings": ", ".join(js)}
+        return state
+
+    def set_state(self, state: dict) -> None:
+        state = state or {}
+        panel_state.restore_widgets(self, state.get("widgets") or {})
+        model = state.get("model") or {}
+        n = self.spins_table.rowCount()
+        J = [list(map(str, row)) for row in (serialize.decode(model.get("J")) or [])]
+        self._J = [(J[i] if i < len(J) else []) + [""] * max(0, n - (len(J[i]) if i < len(J) else 0))
+                   for i in range(n)]
+        self._constraints = serialize.decode(model.get("constraints")) or {}
+        self._rebuild_j()
+        self._restyle_spins()
+        self._emit()
+
     def set_J(self, a: str, b: str, J_Hz) -> None:
         labels = self.labels()
         i, j = sorted((labels.index(a), labels.index(b)))
@@ -1097,6 +1152,14 @@ class JCouplingSimulationPanel(QWidget):
         self._sync_axis()
         self._mark_stale()
 
+    def get_state(self) -> dict:
+        return panel_state.default_state(self)
+
+    def set_state(self, state: dict) -> None:
+        panel_state.restore_default_state(self, state)
+        self._update_frequency()
+        self._sync_axis()
+
     def _sync_axis(self) -> None:
         manual = not self.auto_axis_check.isChecked()
         self._axis_form.setRowVisible(self.ppm_min_spin, manual)
@@ -1370,8 +1433,11 @@ class JCouplingFitPanel(QWidget):
     """
 
     def __init__(self, get_target, get_regions, draw_fit, format_value_error,
-                 send_to_simulation, send_spin_system=None, parent=None) -> None:
+                 send_to_simulation, send_spin_system=None, on_fitted=None, parent=None) -> None:
         super().__init__(parent)
+        # Called after every successful fit, and when another solution is
+        # chosen (the processing log, saved with the spectrum).
+        self._on_fitted = on_fitted or (lambda: None)
         self._send_spin_system = send_spin_system or (lambda *a: None)
         self._get_target = get_target
         self._get_regions = get_regions
@@ -1524,6 +1590,58 @@ class JCouplingFitPanel(QWidget):
         self._window_form.setRowVisible(self._window_box,
                                         self.window_combo.currentData() == "range")
 
+    # ---- saved state (processing log / Load Progress) ------------------
+
+    def get_state(self) -> dict:
+        return panel_state.default_state(self)
+
+    def set_state(self, state: dict) -> None:
+        panel_state.restore_default_state(self, state)
+        self._sync_window()
+
+    def result_state(self):
+        if not self.result:
+            return None
+        return serialize.encode({k: v for k, v in self.result.items() if k != "spectrum"})
+
+    def restore_result(self, encoded, spectrum=None) -> None:
+        """Show a saved fit's table and report as they were, without
+        re-fitting or redrawing."""
+        r = serialize.decode(encoded)
+        r["spectrum"] = spectrum
+        self.result = r
+        if r.get("model") == "spin_system":
+            self.solution_combo.blockSignals(True)
+            self.solution_combo.clear()
+            for k, sol in enumerate(r["solutions"]):
+                self.solution_combo.addItem("1 (as fitted)" if k == 0 else
+                                            f"{k + 1}: differs in " + ", ".join(sol["differences"]))
+            self.solution_combo.setCurrentIndex(int(r.get("chosen", 0)))
+            self.solution_combo.blockSignals(False)
+            for w in self._solution_widgets:
+                w.setVisible(len(r["solutions"]) > 1)
+            self._report_spin_system()
+        else:
+            for w in self._solution_widgets:
+                w.setVisible(False)
+            self._report()
+        self._sync_result_buttons()
+
+    def clear_result(self) -> None:
+        self.result = None
+        self.results_label.setText("")
+        self.results_table.clear()
+        self.results_table.setRowCount(0)
+        self.results_table.setVisible(False)
+        for w in self._solution_widgets:
+            w.setVisible(False)
+        self._sync_result_buttons()
+
+    def report_text(self) -> str:
+        if not self.result:
+            return ""
+        return self.results_label.text() + "\n" + panel_state.table_text(self.results_table)
+
     def _sync_result_buttons(self) -> None:
         self.use_fitted_button.setEnabled(self.result is not None)
         self.to_simulation_button.setEnabled(self.result is not None)
@@ -1666,6 +1784,7 @@ class JCouplingFitPanel(QWidget):
         self._report()
         self._draw_fit(self.result)
         self._sync_result_buttons()
+        self._on_fitted()
         return True
 
     # ---- results ----------------------------------------------------------
@@ -1770,6 +1889,7 @@ class JCouplingFitPanel(QWidget):
             w.setVisible(len(solutions) > 1)
         self._select_solution(0)
         self._sync_result_buttons()
+        self._on_fitted()
         return True
 
     def _select_solution(self, k: int) -> None:
@@ -1788,6 +1908,7 @@ class JCouplingFitPanel(QWidget):
     def _on_solution_changed(self, k: int) -> None:
         if self.result and self.result.get("model") == "spin_system" and k >= 0:
             self._select_solution(k)
+            self._on_fitted()
 
     def _report_spin_system(self) -> None:
         r = self.result

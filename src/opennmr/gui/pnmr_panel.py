@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from . import panel_state
 from ..notebook import pnmr_simulator as pnmr
 from ..notebook.utils import compute_BF1_SFO1
 from ..plotting.accessibility import series_colours
@@ -1129,6 +1130,36 @@ class PnmrSimulationPanel(QWidget):
                                               "Simulation parameters (*.json)")
         if path:
             self.save_settings(path)
+
+    # ------------------------------------------------------------------
+    # Saved state (simulation history)
+    # ------------------------------------------------------------------
+    def get_state(self) -> dict:
+        """The run's parameters -- the same ones Save settings writes --
+        when every step is filled in, else just the plain controls."""
+        try:
+            kwargs = self.generate_kwargs()
+        except (ValueError, TypeError, AttributeError):
+            return {"widgets": panel_state.capture_widgets(self)}
+        kwargs = {k: v for k, v in kwargs.items() if k not in ("output_dir", "save_shift_table")}
+        extra = {k: (json.dumps(v, default=str) if isinstance(v, (list, dict, tuple)) else str(v))
+                 for k, v in kwargs.items()}
+        return {"kwargs": json.loads(json.dumps(kwargs, default=str)), "extra": extra}
+
+    def set_state(self, state: dict) -> bool:
+        """Put a saved run's parameters back into every step (as Load
+        settings does, through a temporary parameters file)."""
+        state = state or {}
+        if "kwargs" not in state:
+            panel_state.restore_widgets(self, state.get("widgets") or {})
+            return True
+        import tempfile
+        kwargs = dict(state["kwargs"])
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "restored_simulation_parameters.json")
+            pnmr.save_simulation_parameters(path, output_dir=None, **{
+                k: v for k, v in kwargs.items() if k != "output_dir"})
+            return self.load_settings(path)
 
     def save_settings(self, path: str) -> None:
         """The current inputs, as the parameters JSON load_settings reads."""

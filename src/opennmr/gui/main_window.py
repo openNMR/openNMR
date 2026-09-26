@@ -11,6 +11,7 @@ updates the canvas live.
 from __future__ import annotations
 
 import contextlib
+import copy
 import csv
 import dataclasses
 import json
@@ -66,6 +67,11 @@ from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from ..io import bruker as io_bruker
 from ..io import lists as io_lists
 from ..io import persistence as io_persistence
+from ..io import history as io_history
+from ..io import serialize as io_serialize
+from . import panel_state
+from .. import _version
+from . import progress as progress_dialogs
 from ..processing import arithmetic as processing_arithmetic
 from ..processing import diffusion as processing_diffusion
 from ..processing import fitting as processing_fitting
@@ -526,6 +532,13 @@ class MainWindow(QMainWindow):
         #: Set only inside _load's select-then-apply-sidecar window, to
         #: skip a draw that a following one is about to supersede.
         self._defer_spectrum_draw = False
+        # True while a load/restore is between its selection and its
+        # final state, so the processing history does not take its
+        # reference point too early (see _begin_history).
+        self._history_suspended = False
+        # True while a restored simulation is being re-run, which is not
+        # a new run to journal.
+        self._journal_suspended = False
         # The per-slice pseudo-Voigt fit results from the most recent
         # Analysis-tab fit (NMR2D_fit_slices's own "rows" output) --
         # lets "Spectrum fit (slice #)" browse the intermediate spectral
@@ -951,6 +964,36 @@ class MainWindow(QMainWindow):
         )
         processing_report_action.triggered.connect(self._on_processing_report_clicked)
         file_menu.addAction(processing_report_action)
+
+        file_menu.addSeparator()
+        self.save_progress_action = QAction("Save Pro&gress…", self)
+        self.save_progress_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.save_progress_action.setToolTip(
+            "Save the selected spectrum's current processing and analysis as a named "
+            "save point you can return to.\n\nEvery change is also logged as you go, in "
+            "opennmr_log.txt next to the data. A simulation or derived spectrum, which "
+            "has no data folder, is saved as an openNMR dataset folder you choose.")
+        self.save_progress_action.triggered.connect(self._on_save_progress_clicked)
+        file_menu.addAction(self.save_progress_action)
+        self.load_progress_action = QAction("&Load Progress…", self)
+        self.load_progress_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        self.load_progress_action.setToolTip(
+            "Return the selected spectrum to one of its save points, or to how it "
+            "was first loaded. The current state is kept as a save point first.")
+        self.load_progress_action.triggered.connect(self._on_load_progress_clicked)
+        file_menu.addAction(self.load_progress_action)
+        self.show_log_action = QAction("Processing &Log…", self)
+        self.show_log_action.setToolTip(
+            "What has been done to the selected spectrum, when, and every save "
+            "point -- the contents of its opennmr_log.txt.")
+        self.show_log_action.triggered.connect(self._on_show_log_clicked)
+        file_menu.addAction(self.show_log_action)
+        self.simulation_history_action = QAction("Simulation &History…", self)
+        self.simulation_history_action.setToolTip(
+            "Every simulation run, with its inputs -- restore any of them into its "
+            "Simulate panel and run it again.")
+        self.simulation_history_action.triggered.connect(self._on_simulation_history_clicked)
+        file_menu.addAction(self.simulation_history_action)
 
         file_menu.addSeparator()
         quit_action = QAction("&Quit", self)
@@ -2227,7 +2270,14 @@ class MainWindow(QMainWindow):
                 vendor = None
             if vendor is not None:
                 matches.append((path, vendor))
-                return  # don't descend into a recognised experiment's own subtree
+                # Don't descend into a recognised experiment's own
+                # subtree -- except for the spectra saved from it
+                # (Save Progress on a slice, CPMG sum, ...), which live
+                # in its opennmr_derived/ folder so they stay with it.
+                derived = os.path.join(path, "opennmr_derived") if os.path.isdir(path) else None
+                if derived and os.path.isdir(derived) and depth < max_depth:
+                    walk(derived, depth + 1)
+                return
 
             if depth >= max_depth:
                 return
@@ -2312,6 +2362,12 @@ class MainWindow(QMainWindow):
         self.pnmr_panel.shutdown()
         # And an edit to the title/notes still inside its save delay.
         self.notes_editor.flush()
+        # And the last processing change, if it is still inside the
+        # sidecar's debounce: without this it (and its log entry) was
+        # lost whenever the window closed less than 0.8 s after it.
+        if self._sidecar_save_timer.isActive():
+            self._sidecar_save_timer.stop()
+            self._run_debounced_sidecar_save()
         super().closeEvent(event)
 
     def _open_one(self, path: str, vendor: str) -> None:
@@ -2718,18 +2774,25 @@ class MainWindow(QMainWindow):
         # get a second, leaving a blank canvas.
         defer_draw = bool(saved_processing) and self._fid_reprocessable(spectrum)
         self._defer_spectrum_draw = defer_draw
+        # The history's reference point is taken once the saved recipe
+        # is applied, not at the selection in between.
+        self._history_suspended = True
         try:
-            self._select_single_row(index)
+            try:
+                self._select_single_row(index)
+            finally:
+                self._defer_spectrum_draw = False
+            if saved_processing:
+                # Seeding metadata.raw above only affects widget *values*
+                # (via _refresh_fid_processing_controls, already run by
+                # _select_single_row) and future persistence -- it doesn't
+                # by itself touch spectrum.data, which is still whatever
+                # the vendor's own default load just produced. Actually
+                # apply the restored recipe now.
+                self._apply_loaded_processing_sidecar(spectrum, index)
         finally:
-            self._defer_spectrum_draw = False
-        if saved_processing:
-            # Seeding metadata.raw above only affects widget *values*
-            # (via _refresh_fid_processing_controls, already run by
-            # _select_single_row) and future persistence -- it doesn't
-            # by itself touch spectrum.data, which is still whatever
-            # the vendor's own default load just produced. Actually
-            # apply the restored recipe now.
-            self._apply_loaded_processing_sidecar(spectrum, index)
+            self._history_suspended = False
+        self._begin_history(index, restored=bool(saved_processing))
 
         # No navigation mode is forced on load. Pan used to be switched
         # on for the first spectrum (an earlier explicit request) and
@@ -7575,30 +7638,40 @@ class MainWindow(QMainWindow):
         state was "still reset when changing between experiments"
         once these became live without this). Restored by
         :meth:`_refresh_fid_processing_controls` on reselection."""
-        raw = spectrum.metadata.raw
-        raw["live_window"] = self.window_combo.currentData()
-        raw["live_lb"] = self.lb_spin.value()
-        raw["live_gb"] = self.gb_spin.value()
-        raw["live_ssb"] = self.ssb_spin.value()
-        raw["live_zero_fill"] = self._zero_fill_value()
-        raw["live_fid_shift"] = self.fid_shift_spin.value()
-        raw["live_align_echo"] = self.align_echo_button.isChecked()
-        raw["live_echo_offset"] = self.echo_offset_spin.value()
-        raw["live_linear_predict_points"] = self.linear_predict_points_spin.value()
-        raw["live_linear_predict_order"] = self.linear_predict_order_spin.value()
-        raw["live_linear_predict_direction"] = self.linear_predict_direction_combo.currentData()
+        spectrum.metadata.raw.update(self._fid_processing_control_values())
         self._warn_about_linear_prediction(spectrum)
-        if self.tdeff_spin.isEnabled():  # any raw-FID-reprocessable vendor
-            raw["live_truncate"] = self.tdeff_spin.value()
-        if self.tdeff_f1_spin.isEnabled():  # genuine 2D only, any vendor -- see tdeff_f1_spin's own tooltip
-            raw["live_truncate_f1"] = self.tdeff_f1_spin.value()
-        if self.zero_fill_f1_spin.isEnabled():
-            raw["live_zero_fill_f1"] = self.zero_fill_f1_spin.value()
-        if self.window_f1_combo.isEnabled():
-            raw["live_window_f1"] = self.window_f1_combo.currentData()
-            raw["live_lb_f1"] = self.lb_f1_spin.value()
-            raw["live_ssb_f1"] = self.ssb_f1_spin.value()
         self._schedule_sidecar_save()
+
+    def _fid_processing_control_values(self) -> dict:
+        """The FID-processing controls' current values, under the
+        ``metadata.raw`` keys :meth:`_persist_fid_processing_controls_to_metadata`
+        stores them as. Split out so the processing history can take the
+        controls' *starting* values as its reference without writing
+        them anywhere (see :meth:`_begin_history`)."""
+        values = {
+            "live_window": self.window_combo.currentData(),
+            "live_lb": self.lb_spin.value(),
+            "live_gb": self.gb_spin.value(),
+            "live_ssb": self.ssb_spin.value(),
+            "live_zero_fill": self._zero_fill_value(),
+            "live_fid_shift": self.fid_shift_spin.value(),
+            "live_align_echo": self.align_echo_button.isChecked(),
+            "live_echo_offset": self.echo_offset_spin.value(),
+            "live_linear_predict_points": self.linear_predict_points_spin.value(),
+            "live_linear_predict_order": self.linear_predict_order_spin.value(),
+            "live_linear_predict_direction": self.linear_predict_direction_combo.currentData(),
+        }
+        if self.tdeff_spin.isEnabled():  # any raw-FID-reprocessable vendor
+            values["live_truncate"] = self.tdeff_spin.value()
+        if self.tdeff_f1_spin.isEnabled():  # genuine 2D only, any vendor -- see tdeff_f1_spin's own tooltip
+            values["live_truncate_f1"] = self.tdeff_f1_spin.value()
+        if self.zero_fill_f1_spin.isEnabled():
+            values["live_zero_fill_f1"] = self.zero_fill_f1_spin.value()
+        if self.window_f1_combo.isEnabled():
+            values["live_window_f1"] = self.window_f1_combo.currentData()
+            values["live_lb_f1"] = self.lb_f1_spin.value()
+            values["live_ssb_f1"] = self.ssb_f1_spin.value()
+        return values
 
     def _on_fid_processing_control_changed(self) -> None:
         """Unified live-update handler for every FID-processing
@@ -7684,6 +7757,717 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         io_persistence.save_metadata_sidecar(spectrum)
         io_persistence.save_processing_sidecar(spectrum)
+        # The same moment the state is persisted is the moment it is
+        # logged: what the log says was done is what a reopen restores.
+        self._record_history(index)
+
+    # ---- Fits and simulations: logged, saved and restorable ------------
+    #
+    # A fit belongs to the spectrum it was run on: its inputs, its full
+    # result (encoded exactly, io.serialize) and a readable report are
+    # kept in that spectrum's metadata.raw["fits"], so the processing
+    # sidecar saves them, the processing log records them, a save point
+    # holds them, and selecting the spectrum again shows them. A
+    # simulation belongs to no spectrum: every run goes in the simulation
+    # journal (io.history.record_simulation), whose entries can be
+    # restored from File > Simulation History.
+
+    #: Readable names, for the log and the dialogs.
+    _FIT_LABELS = {"csa": "CSA", "jcoupling": "J-coupling", "quadrupolar": "Quadrupolar"}
+    _SIMULATION_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "jcoupling": "J-coupling",
+                          "combined": "Combined Hamiltonian", "diffusion": "Diffusion (PFG)",
+                          "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)"}
+
+    def _fit_panels(self) -> dict:
+        """Each fit, as an object with get_state/set_state/result_state/
+        restore_result/clear_result/report_text."""
+        panels = {"jcoupling": self.jcoupling_fit_panel, "quadrupolar": self.quad_fit_panel}
+        panels["csa"] = _Section(
+            get_state=lambda: {"widgets": panel_state.capture_widgets(self, prefixes=["csa_"])},
+            set_state=self._csa_fit_set_state,
+            result_state=lambda: (io_serialize.encode(
+                {k: v for k, v in self._csa_fit_result.items() if k != "spectrum"})
+                if self._csa_fit_result else None),
+            restore_result=self._csa_fit_restore_result,
+            clear_result=self._csa_fit_clear_result,
+            report_text=lambda: (self.csa_results_label.text() + "\n"
+                                 + panel_state.table_text(self.csa_results_table))
+            if self._csa_fit_result else "")
+        return panels
+
+    def _csa_fit_set_state(self, state: dict) -> None:
+        panel_state.restore_widgets(self, (state or {}).get("widgets") or {})
+        for row in range(self.csa_sites_table.rowCount()):
+            bounds, fixed = self._csa_row_constraints(row)
+            if self.csa_sites_table.item(row, 0) is not None:
+                self._set_csa_row_constraints(row, bounds, fixed)
+
+    def _csa_fit_restore_result(self, encoded, spectrum=None) -> None:
+        result = io_serialize.decode(encoded)
+        row = self._row_of_spectrum(spectrum) if spectrum is not None else -1
+        result["spectrum_index"] = row if row >= 0 else result.get("spectrum_index")
+        self._csa_fit_result = result
+        self._report_csa_fit()
+
+    def _csa_fit_clear_result(self) -> None:
+        self._csa_fit_result = None
+        self.csa_results_label.setText("")
+        self.csa_results_table.setRowCount(0)
+        self.csa_results_table.setVisible(False)
+
+    def _simulation_panels(self) -> dict:
+        """Each simulation, as get_state/set_state, how to run it again,
+        and a readable result."""
+        def section(prefixes, rerun, summary, exclude_prefixes=()):
+            def names():
+                return [n for n in vars(self) if n.startswith(tuple(prefixes))
+                        and not n.startswith(tuple(exclude_prefixes))]
+            return _Section(
+                get_state=lambda: {"widgets": panel_state.capture_widgets(self, names=[
+                    n for n in names() if panel_state._is_input_name(n)])},
+                set_state=lambda state: panel_state.restore_widgets(
+                    self, (state or {}).get("widgets") or {}),
+                rerun=rerun, summary=summary, anchor=lambda: getattr(self, names()[0], None))
+        panel_summary = lambda panel: lambda: getattr(panel, "results_label", QLabel()).text()  # noqa: E731
+        return {
+            "csa": section(["sim_csa_"], self._on_simulate_csa_clicked,
+                           lambda: self.sim_csa_results_label.text()),
+            "quadrupolar": section(["sim_quad_"], self._on_simulate_quadrupolar_clicked,
+                                   lambda: self.sim_quad_results_label.text()),
+            "diffusion": section(["sim_"], self._run_diffusion_simulation,
+                                 lambda: self.sim_diffusion_summary_label.text(),
+                                 exclude_prefixes=("sim_csa_", "sim_quad_")),
+            "bloch": section(["bloch_"], self._run_bloch_simulation,
+                             lambda: self.bloch_summary_label.text()),
+            "jcoupling": _Section(get_state=self.jcoupling_sim_panel.get_state,
+                                  set_state=self.jcoupling_sim_panel.set_state,
+                                  rerun=self.jcoupling_sim_panel.simulate,
+                                  summary=panel_summary(self.jcoupling_sim_panel),
+                                  anchor=lambda: self.jcoupling_sim_panel),
+            "combined": _Section(get_state=self.combined_sim_panel.get_state,
+                                 set_state=self.combined_sim_panel.set_state,
+                                 rerun=self.combined_sim_panel.simulate,
+                                 summary=panel_summary(self.combined_sim_panel),
+                                 anchor=lambda: self.combined_sim_panel),
+            # Not re-run on restore: an enumeration can take minutes, and
+            # Load settings leaves it one click away.
+            "pnmr": _Section(get_state=self.pnmr_panel.get_state, set_state=self.pnmr_panel.set_state,
+                             rerun=None, summary=lambda: "", anchor=lambda: self.pnmr_panel),
+        }
+
+    def _store_fit(self, key: str, index: int | None = None) -> None:
+        """Record the fit just run by panel ``key`` on the spectrum it was
+        run on: inputs, exact result, readable report. Logged and saved
+        through the usual sidecar save."""
+        panel = self._fit_panels()[key]
+        if index is None:
+            result = getattr(panel, "result", None) or {}
+            index = result.get("spectrum_index", result.get("index"))
+            spectrum = result.get("spectrum")
+            if spectrum is not None:
+                row = self._row_of_spectrum(spectrum)
+                index = row if row >= 0 else index
+        if index is None or not (0 <= index < len(self.session)):
+            return
+        spectrum = self.session.spectra[index]
+        encoded = panel.result_state()
+        if encoded is None:
+            return
+        inputs = panel.get_state()
+        target = self.session.label(index)
+        if spectrum.ndim == 2:
+            row = self.slice_spin.value() if hasattr(self, "slice_spin") else None
+            target += f", slice {row}" if row is not None else ""
+        fits = dict(spectrum.metadata.raw.get("fits") or {})
+        fits[key] = {"label": self._FIT_LABELS.get(key, key), "target": target,
+                     "time": io_history._stamp(None), "inputs": inputs,
+                     "inputs_text": panel_state.describe_state(inputs),
+                     "result": encoded, "report": panel.report_text()}
+        spectrum.metadata.raw["fits"] = fits
+        self._schedule_sidecar_save(index)
+
+    def _restore_fit_panels(self, index: int) -> None:
+        """Show spectrum ``index``'s own saved fits in the fit panels. A
+        panel with no fit of this spectrum keeps its inputs (so they can
+        be reused) but drops the other spectrum's result, which would
+        otherwise read as this one's."""
+        if not (0 <= index < len(self.session)):
+            return
+        spectrum = self.session.spectra[index]
+        fits = spectrum.metadata.raw.get("fits") or {}
+        for key, panel in self._fit_panels().items():
+            saved = fits.get(key)
+            try:
+                if isinstance(saved, dict) and saved.get("result") is not None:
+                    panel.set_state(saved.get("inputs") or {})
+                    panel.restore_result(saved["result"], spectrum)
+                else:
+                    panel.clear_result()
+            except Exception as exc:  # noqa: BLE001 -- a saved fit that no longer fits the panel
+                panel.clear_result()
+                self.statusBar().showMessage(
+                    f"Couldn't show the saved {self._FIT_LABELS.get(key, key)} fit: {exc}", 8000)
+
+    def _journal_simulation(self, key: str, spectrum=None) -> None:
+        """Log a simulation run (see io.history.record_simulation). A
+        failure to write is reported, never raised."""
+        if self._journal_suspended:
+            return
+        section = self._simulation_panels()[key]
+        try:
+            inputs = section.get_state()
+        except Exception:  # noqa: BLE001 -- never let the log break a simulation
+            return
+        summary = section.summary() or ""
+        simulation = (spectrum.metadata.raw.get("simulation") if spectrum is not None else None)
+        if not summary and isinstance(simulation, dict):
+            summary = "\n".join(io_history._param_lines(
+                {k: v for k, v in simulation.items() if k != "sites"}))
+        try:
+            io_history.record_simulation(key, self._SIMULATION_LABELS.get(key, key), inputs,
+                                         panel_state.describe_state(inputs), summary)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Couldn't write the simulation log: {exc}", 10000)
+
+    def _on_panel_simulated(self, key: str, spectrum) -> None:
+        self._show_simulated_spectrum(spectrum)
+        self._journal_simulation(key, spectrum)
+
+    def _restore_simulation(self, entry: dict, rerun: bool = True) -> None:
+        """Put a journalled run's inputs back into its panel, open it,
+        and run it again (except pNMR, which is left ready to run)."""
+        key = entry.get("panel")
+        sections = self._simulation_panels()
+        if key == "notebook":
+            raise ValueError("This run was logged from a notebook (nb.log_simulation): re-run "
+                             "its cell there to reproduce it.")
+        if key not in sections:
+            raise ValueError(f"No simulation panel called {key!r}.")
+        section = sections[key]
+        section.set_state(entry.get("inputs") or {})
+        self._show_side_tab("Simulate")
+        anchor = section.anchor()
+        parent = anchor
+        while parent is not None:
+            if isinstance(parent, CollapsibleSection):
+                parent.setExpanded(True)
+                break
+            parent = parent.parentWidget()
+        if rerun and section.rerun is not None:
+            self._journal_suspended = True
+            try:
+                section.rerun()
+            finally:
+                self._journal_suspended = False
+
+    def _on_simulation_history_clicked(self) -> None:
+        journal = io_history.load_simulation_journal()
+        entries = journal.get("entries") or []
+        if not entries:
+            QMessageBox.information(
+                self, "Simulation history",
+                "No simulations logged yet. Every simulation you run is recorded in\n"
+                f"{io_history.simulation_journal_paths()[1]}")
+            return
+        dialog = progress_dialogs.SimulationHistoryDialog(
+            self, entries, io_history.simulation_journal_paths()[1])
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected() is None:
+            return
+        entry = next(e for e in entries if e.get("id") == dialog.selected())
+        try:
+            self._restore_simulation(entry, rerun=True)
+        except Exception as exc:  # noqa: BLE001 -- tell the user, keep the window
+            QMessageBox.warning(self, "Couldn't restore the simulation", str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Restored simulation #{entry['id']} ({entry.get('label')}).", 6000)
+
+    # ---- Processing history: the log, save points, restore ----------
+    #
+    # The record itself (what changed, save points, the text log) is
+    # io.history, Qt-free. What lives here is only what needs the
+    # window: the controls' starting values, committing pending edits
+    # before a save, and re-applying a restored state through the same
+    # path a reopen uses.
+
+    def _history_on_disk(self, spectrum) -> bool:
+        """Whether ``spectrum`` has a folder/file of its own to keep its
+        log next to (a simulation or derived spectrum does not, until
+        it is saved as an openNMR dataset folder)."""
+        meta = spectrum.metadata
+        return bool(meta.source_path) and meta.vendor != "derived" and os.path.exists(meta.source_path)
+
+    def _history_info(self, index: int) -> dict:
+        """Where spectrum ``index``'s history is kept in memory: the
+        session's own per-spectrum bookkeeping, which moves with the
+        spectrum and survives a reload (unlike ``metadata.raw``, which a
+        reload rebuilds and a derived spectrum can share)."""
+        try:
+            return self.session.info(index)
+        except (AttributeError, IndexError):
+            return {}
+
+    def _history_defaults(self, index: int) -> dict:
+        """The controls' current values for settings not yet written into
+        ``metadata.raw`` -- the reference a first edit is compared with,
+        so moving LB from 0 to 5 logs "0 → 5" instead of listing every
+        other control's untouched default alongside it."""
+        spectrum = self.session.spectra[index]
+        defaults: dict = {}
+        if index == self._selected_index():
+            if self._fid_reprocessable(spectrum):
+                defaults.update(self._fid_processing_control_values())
+            if self._current_analysis_index == index:
+                defaults["analysis_state"] = self._capture_analysis_state()
+        try:
+            return io_history._normalise(defaults)
+        except (TypeError, ValueError):
+            return {}
+
+    def _history_state(self, index: int) -> dict:
+        """The tracked state of spectrum ``index``: what is persisted,
+        with the starting defaults filling settings never touched."""
+        info = self._history_info(index)
+        defaults = (info.get("history") or {}).get("_defaults") or {}
+        return {**defaults, **io_history.tracked_state(self.session.spectra[index])}
+
+    def _ensure_history(self, index: int) -> dict | None:
+        info = self._history_info(index)
+        if not isinstance(info, dict) or not (0 <= index < len(self.session)):
+            return None
+        if "history" not in info:
+            self._begin_history(index)
+        return info.get("history")
+
+    def _begin_history(self, index: int, restored: bool = False) -> dict | None:
+        """Start (or pick up) spectrum ``index``'s history: its saved one
+        if the experiment has one, else a new one whose reference is the
+        state right now. Nothing is written until something changes --
+        merely opening a spectrum never writes into a data folder."""
+        info = self._history_info(index)
+        if not isinstance(info, dict):
+            return None
+        spectrum = self.session.spectra[index]
+        meta = spectrum.metadata
+        defaults = self._history_defaults(index)
+        current = {**defaults, **io_history.tracked_state(spectrum)}
+        on_disk = self._history_on_disk(spectrum)
+        saved = io_history.load_history(meta.source_path) if on_disk else None
+        version = _version.__version__
+        shape = " × ".join(str(n) for n in np.shape(spectrum.data))
+        what = ", ".join(bit for bit in (meta.vendor, meta.nucleus, f"{shape} points") if bit)
+        if saved is not None:
+            history = saved
+            history["source"] = {**io_history.describe_source(spectrum), **(history.get("source") or {}),
+                                 "source_path": meta.source_path}
+            io_history.add_event(history, f"Opened in openNMR {version} ({what})", kind="opened")
+            drift = io_history.diff_states(history.get("state") or {}, current)
+            lines = io_history.change_lines(drift, history.get("state"), current)
+            if lines:
+                io_history.add_event(
+                    history,
+                    "On opening, the saved state differed from this log's last record -- changed "
+                    "outside it (another openNMR version, or copied sidecar files). As found:\n"
+                    + "\n".join(lines), kind="external")
+            history["state"] = io_history._normalise(current)
+        else:
+            history = io_history.new_history(spectrum, state=current)
+            if meta.vendor == "derived":
+                origin = info.get("origin")
+                text = [f"Created in openNMR {version}: {self.session.label(index)} ({shape} points)"]
+                if origin:
+                    text.append(f"From: {origin}")
+                elif info.get("origin_vendor"):
+                    text.append(f"Produced by: {info['origin_vendor']}")
+                simulation = meta.raw.get("simulation")
+                if isinstance(simulation, dict):
+                    text.append("Simulation parameters:")
+                    text += ["  " + line for line in io_history._param_lines(simulation)]
+                io_history.add_event(history, "\n".join(text), kind="created")
+            else:
+                text = f"Opened in openNMR {version} ({what})"
+                summary = io_history.state_summary(current, history.get("source")) if restored else []
+                if summary:
+                    text += ("\nProcessing restored from an earlier session (saved before this log "
+                             "was kept):\n" + "\n".join("  " + line for line in summary))
+                else:
+                    text += " -- no earlier openNMR processing"
+                io_history.add_event(history, text, kind="opened")
+        history["_defaults"] = defaults
+        info["history"] = history
+        # A spectrum that cannot be recomputed from a raw FID gets its
+        # starting data kept, so "as created" can be returned to exactly.
+        if meta.vendor == "derived" and not io_history.savepoints(history):
+            self._add_savepoint(index, name="As created", auto=True)
+        return history
+
+    def _record_history(self, index: int) -> None:
+        """Log whatever changed in spectrum ``index``'s state since the
+        last record, and write the log if the spectrum has a folder."""
+        if self._history_suspended or not (0 <= index < len(self.session)):
+            return
+        info = self._history_info(index)
+        if not isinstance(info, dict):
+            return
+        if "history" not in info:
+            self._begin_history(index)
+            return
+        changes = io_history.record_state(info["history"], self._history_state(index))
+        if changes:
+            self._write_history(index)
+
+    def _write_history(self, index: int, raise_errors: bool = False) -> bool:
+        """Write spectrum ``index``'s history and regenerate its text log,
+        if it has a folder. A failure (read-only data, an offline cloud
+        folder) is reported once per spectrum on the status bar and
+        remembered for the log window -- never an exception mid-edit --
+        unless ``raise_errors``, for an explicit Save Progress."""
+        spectrum = self.session.spectra[index]
+        info = self._history_info(index)
+        history = info.get("history")
+        if history is None or not self._history_on_disk(spectrum):
+            return False
+        try:
+            io_history.write_history(spectrum.metadata.source_path, history, title=self.session.label(index))
+        except OSError as exc:
+            if raise_errors:
+                raise
+            if info.get("history_error") != str(exc):
+                self.statusBar().showMessage(
+                    f"Couldn't write the processing log for {self.session.label(index)}: {exc}", 10000)
+            info["history_error"] = str(exc)
+            return False
+        info.pop("history_error", None)
+        return True
+
+    def _run_sidecar_save_now(self, index: int) -> None:
+        if self._sidecar_save_timer.isActive():
+            self._sidecar_save_timer.stop()
+            self._run_debounced_sidecar_save()
+        self._sidecar_save_pending_index = index
+        self._run_debounced_sidecar_save()
+
+    def _flush_pending_state(self, index: int) -> None:
+        """Commit everything still held only by the controls (a phase
+        delta mid-edit, the analysis panel) into spectrum ``index`` and
+        persist/log it now, so a save point records what is on screen."""
+        if index == self._selected_index():
+            if self._phase_mode is not None:
+                self._capture_phase_reference()
+            self._save_current_analysis_state()
+        if self._live_reprocess_timer.isActive():
+            self._live_reprocess_timer.stop()
+            self._run_debounced_multi_row_reprocess()
+        self._run_sidecar_save_now(index)
+
+    def _snapshot_location(self, spectrum, number: int) -> tuple[str, str]:
+        """(absolute path, path relative to the history file) of save
+        point ``number``'s data snapshot."""
+        source = spectrum.metadata.source_path
+        folder = io_history.snapshot_dir(source)
+        path = os.path.join(folder, f"savepoint_{number}.npz")
+        return path, os.path.relpath(path, os.path.dirname(io_history.history_path(source)))
+
+    def _add_savepoint(self, index: int, name: str = "", note: str = "", auto: bool = False) -> dict:
+        """Record a save point for spectrum ``index`` (in memory, or
+        written next to its data). A spectrum that cannot be recomputed
+        from its raw FID also has its data kept, since the recipe alone
+        could not bring it back."""
+        info = self._history_info(index)
+        history = info["history"]
+        spectrum = self.session.spectra[index]
+        number = int(history.get("next_savepoint", 1))
+        snapshot = None
+        if not self._fid_reprocessable(spectrum):
+            if self._history_on_disk(spectrum):
+                path, snapshot = self._snapshot_location(spectrum, number)
+                io_history.write_snapshot(path, spectrum)
+            else:
+                info.setdefault("snapshots", {})[number] = (
+                    np.array(spectrum.data, copy=True),
+                    None if spectrum.data_imag is None else np.array(spectrum.data_imag, copy=True),
+                    copy.deepcopy(spectrum.axes))
+        entry = io_history.add_savepoint(history, self._history_state(index), name=name, note=note,
+                                         snapshot=snapshot)
+        if auto:
+            entry["auto"] = True
+        return entry
+
+    def _plain_name(self, index: int) -> str:
+        """Spectrum ``index``'s name without the nucleus/vendor suffix
+        the list adds -- for a derived spectrum, the label it was
+        created with ("Simulated CSA", "CPMG 12")."""
+        spectrum = self.session.spectra[index]
+        override = spectrum.metadata.raw.get("display_label")
+        if isinstance(override, str) and override.strip():
+            return override.strip()
+        if spectrum.metadata.vendor == "derived" and spectrum.metadata.source_path:
+            return str(spectrum.metadata.source_path)
+        return self.session.label(index)
+
+    def _save_as_dataset(self, index: int, folder: str) -> None:
+        """Give a simulation/derived spectrum a folder of its own -- an
+        openNMR dataset folder -- after which it is logged and saved
+        like any experiment."""
+        spectrum = self.session.spectra[index]
+        info = self._history_info(index)
+        label = self._plain_name(index)
+        if os.path.exists(folder) and (not os.path.isdir(folder) or os.listdir(folder)):
+            folder = io_history.unique_folder(folder)
+        io_history.save_spectrum_folder(spectrum, folder, label=label, origin=info.get("origin"),
+                                        origin_vendor=info.get("origin_vendor"))
+        raw = dict(spectrum.metadata.raw)  # never the parent's own dict
+        raw.setdefault("display_label", label)
+        raw["origin"] = info.get("origin")
+        raw["origin_vendor"] = info.get("origin_vendor")
+        notes = raw.pop("notes", None)
+        metadata = dataclasses.replace(spectrum.metadata, vendor="opennmr", source_path=folder, raw=raw)
+        rebased = dataclasses.replace(spectrum, metadata=metadata)
+        self.session.rebase(index, rebased, folder, "opennmr")
+        io_persistence.save_metadata_sidecar(rebased)
+        io_persistence.save_processing_sidecar(rebased)
+        if isinstance(notes, str) and notes.strip():
+            io_persistence.save_notes_sidecar(folder, notes)
+        history = info["history"]
+        history["source"] = io_history.describe_source(rebased)
+        # In-memory snapshots move next to the data now.
+        for number, (data, data_imag, axes) in sorted((info.pop("snapshots", None) or {}).items()):
+            stand_in = NMRSpectrum(data=data, axes=axes, metadata=metadata, data_imag=data_imag)
+            path, relative = self._snapshot_location(rebased, number)
+            io_history.write_snapshot(path, stand_in)
+            for entry in io_history.savepoints(history):
+                if entry.get("id") == number:
+                    entry["snapshot"] = relative
+        io_history.add_event(history, f"Saved as an openNMR dataset folder: {folder}", kind="saved")
+        self.spectrum_list.item(index).setText(self.session.label(index))
+
+    def _save_progress(self, index: int, name: str = "", note: str = "", folder: str | None = None) -> dict:
+        """File ▸ Save Progress without the dialog: commit what is on
+        screen, record a named save point, write the log. ``folder`` is
+        required (and used) only for a spectrum with no folder yet.
+        Raises ``OSError`` if the log cannot be written."""
+        self._flush_pending_state(index)
+        self._ensure_history(index)
+        spectrum = self.session.spectra[index]
+        if not self._history_on_disk(spectrum):
+            if not folder:
+                raise ValueError("This spectrum has no folder of its own -- choose where to save it.")
+            self._save_as_dataset(index, folder)
+        entry = self._add_savepoint(index, name=name, note=note)
+        self._write_history(index, raise_errors=True)
+        return entry
+
+    def _on_save_progress_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            QMessageBox.information(self, "Nothing selected",
+                                    "Select a spectrum in Open experiments to save its progress.")
+            return
+        self._ensure_history(index)
+        spectrum = self.session.spectra[index]
+        info = self._history_info(index)
+        history = info.get("history") or {}
+        label = self.session.label(index)
+        folder = None
+        where = ""
+        if self._history_on_disk(spectrum):
+            where = f"Saved in {io_history.history_path(spectrum.metadata.source_path)}; readable log: " \
+                    f"{io_history.log_path(spectrum.metadata.source_path)}"
+        else:
+            folder = io_history.default_dataset_folder(spectrum, self._plain_name(index),
+                                                       parent_path=info.get("origin"))
+        dialog = progress_dialogs.SaveProgressDialog(
+            self, label=label, default_name=f"Save point {history.get('next_savepoint', 1)}",
+            folder=folder, where=where)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name, note, folder = dialog.values()
+        try:
+            entry = self._save_progress(index, name=name, note=note, folder=folder)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Couldn't save progress", str(exc))
+            return
+        where = io_history.log_path(self.session.spectra[index].metadata.source_path)
+        self.statusBar().showMessage(f"Saved “{entry['name']}” -- log: {where}", 8000)
+
+    def _original_available(self, spectrum) -> bool:
+        """Whether "as first loaded" can be rebuilt by re-reading the
+        vendor's own files (true for any experiment on disk except an
+        openNMR dataset folder, whose "As created" save point is its
+        original instead)."""
+        return self._history_on_disk(spectrum) and spectrum.metadata.vendor != "opennmr"
+
+    def _restore_progress(self, index: int, which) -> None:
+        """Return spectrum ``index`` to save point ``which`` (its number
+        or name), or to ``progress.ORIGINAL``. The current state is kept
+        as an automatic save point first unless an existing one already
+        holds it, so a restore never loses work."""
+        self._flush_pending_state(index)
+        history = self._ensure_history(index)
+        spectrum = self.session.spectra[index]
+        if which == progress_dialogs.ORIGINAL:
+            if not self._original_available(spectrum):
+                raise ValueError("This spectrum has no original on disk to return to.")
+            entry, description = None, "the original (as first loaded)"
+        else:
+            entry = io_history.find_savepoint(history, which)
+            description = f"save point {entry['id']} “{entry['name']}”"
+        current = self._history_state(index)
+        if not any(point.get("state") == current for point in io_history.savepoints(history)):
+            self._add_savepoint(index, name=f"Automatic: before restoring {description}", auto=True)
+        io_history.add_event(history, f"Restored {description}", kind="restored")
+        if entry is None:
+            self._apply_restored_state(index, {}, {}, snapshot=None, reread=True)
+        else:
+            processing, metadata = io_history.split_state(entry.get("state") or {})
+            snapshot = self._savepoint_snapshot(index, entry)
+            reread = snapshot is None
+            if reread and not self._fid_reprocessable(spectrum):
+                raise ValueError(
+                    f"{description} has no data snapshot, and this spectrum cannot be recomputed "
+                    f"from a raw FID, so it cannot be restored exactly.")
+            self._apply_restored_state(index, processing, metadata, snapshot=snapshot, reread=reread)
+        self._run_sidecar_save_now(index)
+        self._write_history(index)
+
+    def _savepoint_snapshot(self, index: int, entry: dict):
+        """(data, data_imag, axes) kept with save point ``entry``, or None."""
+        info = self._history_info(index)
+        in_memory = (info.get("snapshots") or {}).get(entry.get("id"))
+        if in_memory is not None:
+            data, data_imag, axes = in_memory
+            return np.array(data, copy=True), None if data_imag is None else np.array(data_imag, copy=True), \
+                copy.deepcopy(axes)
+        relative = entry.get("snapshot")
+        if not relative:
+            return None
+        source = self.session.spectra[index].metadata.source_path
+        path = os.path.join(os.path.dirname(io_history.history_path(source)), relative)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"The data kept with save point {entry.get('id')} is missing: {path}")
+        return io_history.read_snapshot(path)
+
+    def _apply_restored_state(self, index: int, processing: dict, metadata: dict,
+                              snapshot=None, reread: bool = True) -> None:
+        """Put a saved state back.
+
+        ``reread``: re-read the experiment's own files with its original
+        load settings (plus the saved pseudo-2D/magnitude choice), then
+        apply ``processing`` exactly as reopening the experiment would
+        (:meth:`_apply_loaded_processing_sidecar`) -- one restore path,
+        the tested one, rather than a second way of applying a recipe.
+        Otherwise the data come from ``snapshot`` and the state is put
+        back beside them."""
+        spectrum = self.session.spectra[index]
+        processing = copy.deepcopy(processing)
+        # The analysis panel still shows the *current* state; stop the
+        # reselection below from saving that over the restored one.
+        if self._current_analysis_index == index:
+            self._current_analysis_index = None
+        self._history_suspended = True
+        try:
+            if reread:
+                kwargs = dict(self._original_load_kwargs.get(index, self.session.get_load_kwargs(index)))
+                if spectrum.ndim == 2:
+                    kwargs["pseudo_2d"] = bool(metadata.get("pseudo_2d", spectrum.is_pseudo_2d))
+                if spectrum.metadata.vendor == "bruker":
+                    if "magnitude_override" in processing:
+                        kwargs["magnitude"] = bool(processing["magnitude_override"])
+                    else:
+                        kwargs.pop("magnitude", None)
+                spectrum = self.session.reset(index, **kwargs)
+                raw = spectrum.metadata.raw
+                raw.setdefault("baseline_correct", False)
+                raw.setdefault("baseline_method", "linear")
+            else:
+                data, data_imag, axes = snapshot
+                raw = {key: value for key, value in spectrum.metadata.raw.items()
+                       if key not in io_persistence.processing_state(spectrum)}
+                spectrum = dataclasses.replace(
+                    spectrum, data=data, data_imag=data_imag, axes=axes,
+                    metadata=dataclasses.replace(spectrum.metadata, raw=raw))
+                self.session.spectra[index] = spectrum
+            raw.update(processing)
+            self.session.set_mass(index, metadata.get("mass_g"))
+            if metadata.get("nucleus"):
+                self.session.set_nucleus(index, metadata["nucleus"])
+            if metadata.get("nucleus_indirect"):
+                self.session.set_nucleus(index, metadata["nucleus_indirect"], indirect=True)
+            spectrum = self.session.spectra[index]
+            self.spectrum_list.item(index).setText(self.session.label(index))
+            recompute = reread and bool(processing) and self._fid_reprocessable(spectrum)
+            self._defer_spectrum_draw = recompute
+            try:
+                self._select_single_row(index)
+            finally:
+                self._defer_spectrum_draw = False
+            if recompute:
+                self._apply_loaded_processing_sidecar(spectrum, index)
+            elif not reread:
+                self._draw_selected_spectrum(spectrum, row=index)
+        finally:
+            self._history_suspended = False
+
+    def _on_load_progress_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            QMessageBox.information(self, "Nothing selected",
+                                    "Select a spectrum in Open experiments to load its progress.")
+            return
+        history = self._ensure_history(index) or {}
+        spectrum = self.session.spectra[index]
+        points = []
+        for entry in io_history.savepoints(history):
+            when = io_history._parse(entry.get("time"))
+            summary = io_history.state_summary(entry.get("state") or {}, history.get("source"))
+            details = [f"Save point {entry['id']}: {entry['name']}",
+                       f"Saved {when.strftime('%d %b %Y, %H:%M:%S') if when else '?'}"]
+            if entry.get("note"):
+                details += ["", entry["note"]]
+            details += ["", "State:"] + (["  " + line for line in summary] or ["  as loaded"])
+            points.append({"id": entry["id"], "name": entry["name"],
+                           "when": when.strftime("%d %b %Y %H:%M") if when else "", "details": "\n".join(details)})
+        original = None
+        if self._original_available(spectrum):
+            original = ("Re-read from the data files with the settings it was first opened with, "
+                        "and none of openNMR's processing, referencing or analysis.")
+        if not points and original is None:
+            QMessageBox.information(self, "No save points",
+                                    "This spectrum has no save points yet. Use File ▸ Save Progress… first.")
+            return
+        dialog = progress_dialogs.LoadProgressDialog(self, label=self.session.label(index), points=points,
+                                                     original_note=original)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selected() is None:
+            return
+        try:
+            self._restore_progress(index, dialog.selected())
+        except (OSError, ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Couldn't restore", str(exc))
+            return
+        self.statusBar().showMessage("Restored.", 5000)
+
+    def _on_show_log_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            QMessageBox.information(self, "Nothing selected",
+                                    "Select a spectrum in Open experiments to see its log.")
+            return
+        self._flush_pending_state(index)
+        history = self._ensure_history(index) or {}
+        spectrum = self.session.spectra[index]
+        info = self._history_info(index)
+        path = None
+        if self._history_on_disk(spectrum):
+            path = io_history.log_path(spectrum.metadata.source_path)
+            status = (f"Written to {path}" if os.path.exists(path) else
+                      "Not written yet -- the log file is created at the first change or save point.")
+            if info.get("history_error"):
+                status = f"Couldn't be written: {info['history_error']}"
+        else:
+            status = ("This spectrum has no folder of its own yet, so its log is kept in memory. "
+                      "File ▸ Save Progress… saves it (with the data) to a folder you choose.")
+        progress_dialogs.ProcessingLogDialog(
+            self, io_history.render_log(history, title=self.session.label(index)), path, status).exec()
 
     def _schedule_multi_row_reprocess(self, index: int) -> None:
         """(Re)start the debounce timer for a full
@@ -7977,6 +8761,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Failed to reset spectrum", str(exc))
             return
         self.spectrum_list.item(index).setText(self.session.label(index))
+        history = self._history_info(index).get("history")
+        if history is not None:
+            io_history.add_event(history, "Reset: processing discarded, back to how it was loaded",
+                                 kind="reset")
         self._on_selection_changed(index)
         # Without this, Reset only discards the *in-memory* state --
         # an old saved processing sidecar (see io.persistence) would
@@ -10327,7 +11115,8 @@ class MainWindow(QMainWindow):
             draw_fit=self._draw_jcoupling_fit,
             format_value_error=self._format_value_error,
             send_to_simulation=self._send_jcoupling_to_simulation,
-            send_spin_system=self._send_spin_system_to_simulation)
+            send_spin_system=self._send_spin_system_to_simulation,
+            on_fitted=lambda: self._store_fit("jcoupling"))
         layout.addWidget(CollapsibleSection("J-coupling", content=self.jcoupling_fit_panel))
         layout.addWidget(CollapsibleSection(
             "CSA/Dipolar", content=self._build_csa_subtab()))
@@ -10338,7 +11127,8 @@ class MainWindow(QMainWindow):
             get_regions=self._integration_regions,
             draw_fit=self._draw_quadrupolar_fit,
             format_value_error=self._format_value_error,
-            send_to_simulation=self._send_quadrupolar_to_simulation)
+            send_to_simulation=self._send_quadrupolar_to_simulation,
+            on_fitted=lambda: self._store_fit("quadrupolar"))
         layout.addWidget(CollapsibleSection("Quadrupolar", content=self.quad_fit_panel))
         layout.addStretch(1)
         return tab
@@ -10384,7 +11174,7 @@ class MainWindow(QMainWindow):
         # First-order J-coupled multiplets, at the top (explicit user
         # request). The simulator is notebook.simulations.
         self.jcoupling_sim_panel = JCouplingSimulationPanel(
-            plot_spectrum=self._show_simulated_spectrum,
+            plot_spectrum=lambda spectrum: self._on_panel_simulated("jcoupling", spectrum),
             add_to_open=self._add_derived_spectrum)
         self._jcoupling_sim_section = CollapsibleSection(
             "J-coupling", content=self.jcoupling_sim_panel)
@@ -10398,7 +11188,7 @@ class MainWindow(QMainWindow):
         # user request: add interactions to a site rather than one
         # simulator per combination). notebook.combined_hamiltonian.
         self.combined_sim_panel = CombinedHamiltonianPanel(
-            plot_spectrum=self._show_simulated_spectrum,
+            plot_spectrum=lambda spectrum: self._on_panel_simulated("combined", spectrum),
             add_to_open=self._add_derived_spectrum,
             draw_sites=self._draw_combined_sites)
         self._combined_sim_section = CollapsibleSection(
@@ -10415,7 +11205,7 @@ class MainWindow(QMainWindow):
         # own module; the physics is notebook.pnmr_simulator.
         self.pnmr_panel = PnmrSimulationPanel(
             self.simulation_canvas, self._show_simulation_view,
-            plot_spectrum=self._show_simulated_spectrum,
+            plot_spectrum=lambda spectrum: self._on_panel_simulated("pnmr", spectrum),
             add_to_open=self._add_derived_spectrum)
         layout.addWidget(CollapsibleSection("pNMR (CIF)", content=self.pnmr_panel))
         layout.addStretch(1)
@@ -10736,6 +11526,7 @@ class MainWindow(QMainWindow):
         figure.tight_layout()
         self.simulation_canvas.draw()
         self.sim_diffusion_summary_label.setText("\n".join(lines))
+        self._journal_simulation("diffusion")
 
     #: GUI names for the shapes generate_shape knows without coefficients.
     _BLOCH_SHAPES = (
@@ -10895,6 +11686,7 @@ class MainWindow(QMainWindow):
             f"Peak B1 = {peak_b1:.1f} Hz ({source}).\n"
             f"On resonance: Mz = {sim['Mz'][nominal, centre]:.3f}, "
             f"|Mxy| = {np.hypot(sim['Mx'][nominal, centre], sim['My'][nominal, centre]):.3f}.")
+        self._journal_simulation("bloch")
 
     def _build_simulate_csa_subtab(self) -> QWidget:
         """Forward-simulate a single CSA powder pattern (static or
@@ -11469,6 +12261,7 @@ class MainWindow(QMainWindow):
             f"Simulated {regime_label} CSA pattern, {convention} convention, "
             f"δiso = {self.sim_csa_diso_spin.value():g} ppm.{warning}")
         self.sim_csa_export_button.setEnabled(True)
+        self._journal_simulation("csa")
 
     def _on_export_simulated_csa_clicked(self) -> None:
         spectrum = getattr(self, "_simulated_csa_spectrum", None)
@@ -11596,6 +12389,7 @@ class MainWindow(QMainWindow):
             f"in {elapsed:.2f} s.{ct_note}{warning}")
         self.sim_quad_results_label.setToolTip(result["log"])
         self.sim_quad_export_button.setEnabled(True)
+        self._journal_simulation("quadrupolar")
 
     def _draw_quadrupolar_order_comparison(self, comparison, nucleus) -> None:
         """First vs second order vs exact on the Simulation plot."""
@@ -17421,6 +18215,7 @@ class MainWindow(QMainWindow):
         }
         self._draw_csa_fit()
         self._report_csa_fit()
+        self._store_fit("csa", index)
 
     @staticmethod
     def _csa_grid_kwargs(scheme: str, orientations: int) -> dict:
@@ -19474,6 +20269,15 @@ class MainWindow(QMainWindow):
             "guesses": self._capture_guess_table(),
             "global_fit": self.global_fit_check.isChecked(),
             "shared_params": self.shared_params_edit.text(),
+            # Readable names for the combo indices above -- only for
+            # the processing log (io.history), never read on restore.
+            "option_names": {
+                "fit_type": self.fit_type_combo.currentText(),
+                "model": self.relaxation_model_combo.currentText(),
+                "value_source": self.value_source_combo.currentText(),
+                "delay_source": self.delay_source_combo.currentText(),
+                "seed_mode": self.seed_mode_combo.currentText(),
+            },
             "pfg": {
                 "delta": self.pfg_delta_spin.value(),
                 "DELTA": self.pfg_big_delta_spin.value(),
@@ -19727,6 +20531,12 @@ class MainWindow(QMainWindow):
         self._refresh_selection_display(row)
         self._draw_selected_spectrum(spectrum, row=row)
         self._current_analysis_index = row
+        # First time this spectrum is shown: the controls now hold its
+        # starting state, which is the log's reference point.
+        # The fit panels show this spectrum's own fits (or none).
+        self._restore_fit_panels(row)
+        if not self._history_suspended:
+            self._ensure_history(row)
 
     def _compare_shows_current_pseudo2d_stack(self, row: int, spectrum) -> bool:
         """True if the Compare tab's list is currently showing exactly
@@ -20177,6 +20987,27 @@ class MainWindow(QMainWindow):
             if other is not spectrum and other.metadata.source_path == meta.source_path:
                 self._update_row_notes_tooltip(other_row)
         self.statusBar().showMessage(f"Title/notes saved to {where}", 4000)
+        self._log_notes_edit(spectrum)
+
+    def _log_notes_edit(self, spectrum) -> None:
+        """Note a title/notes edit in the spectrum's log. The editor saves
+        on every pause, so consecutive saves update one entry rather
+        than adding one per pause."""
+        row = self._row_of_spectrum(spectrum)
+        if row < 0:
+            return
+        history = self._history_info(row).get("history")
+        if history is None:
+            return
+        text = nb_notes.experiment_notes(spectrum)
+        first = nb_notes.notes_first_line(text) or "(cleared)"
+        entries = history["entries"]
+        if entries and entries[-1].get("kind") == "notes":
+            entries[-1]["text"] = f"Title/notes edited: “{first}”"
+            entries[-1]["updated"] = io_history._stamp(None)
+        else:
+            io_history.add_event(history, f"Title/notes edited: “{first}”", kind="notes")
+        self._write_history(row)
 
     def _on_notes_save_failed(self, _spectrum, message: str) -> None:
         self.statusBar().showMessage(message, 10000)
@@ -20790,3 +21621,15 @@ class _ScoreSettingsDialog(QDialog):
             "non_negative_during_fit": (self.non_negative_check.isChecked()
                                          and self.strict_check.isChecked()),
         }
+
+
+class _Section:
+    """A panel that lives inside MainWindow rather than in its own class,
+    given the same get_state/set_state/... interface the panel classes
+    have (see MainWindow._fit_panels / _simulation_panels)."""
+
+    def __init__(self, **functions) -> None:
+        self.rerun = None
+        for name, function in functions.items():
+            setattr(self, name, function)
+
