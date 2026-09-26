@@ -5838,6 +5838,55 @@ class MplCanvas(QWidget):
         self._apply_layout()
         self.canvas.draw_idle()
 
+    def show_parameter_trend(self, x, y, yerr=None, point_labels=None, xlabel: str = "x",
+                              ylabel: str = "", title: str = "") -> None:
+        """One fitted parameter along a set of experiments (a multi-
+        spectrum fit), with 1-sigma error bars: against ``x`` when every
+        experiment has a numeric one, else in fitting order with each
+        experiment named on the axis."""
+        self._contour_spectrum = None
+        self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = False
+        self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
+        self._current_1d_spectrum = None
+        self._preview_1d_spectrum = None
+        self._clear_figure()
+        self.ax = self.figure.add_subplot(111)
+        y = np.asarray(y, dtype=float)
+        err = None if yerr is None else np.nan_to_num(np.asarray(yerr, dtype=float))
+        numeric = all(isinstance(v, (int, float, np.floating, np.integer)) for v in (x or []))
+        if numeric and len(x) == len(y):
+            xs = np.asarray(x, dtype=float)
+            order = np.argsort(xs)
+            self.ax.errorbar(xs[order], y[order], yerr=None if err is None else err[order], fmt="o-",
+                             color="black", markersize=6.0, capsize=3, linewidth=1.2)
+            self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
+        else:
+            xs = np.arange(len(y))
+            self.ax.errorbar(xs, y, yerr=err, fmt="o-", color="black", markersize=6.0, capsize=3,
+                             linewidth=1.2)
+            self.ax.set_xticks(xs)
+            self.ax.set_xticklabels(list(point_labels or [str(i + 1) for i in xs]),
+                                    rotation=30, ha="right")
+            self.ax.set_xlabel("Experiment (fitting order)", fontsize=self._AXIS_LABELSIZE)
+        self.ax.set_ylabel(ylabel, fontsize=self._AXIS_LABELSIZE)
+        if title:
+            self.ax.set_title(title, fontsize=self._AXIS_LABELSIZE)
+        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=True,
+                                    linewidth=self._AXIS_LINEWIDTH)
+        plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                   minor=self._minor_ticks_visible, labelsize=self._AXIS_LABELSIZE)
+        self._legend_visible = False
+        self._apply_view_options()
+        self._crosshair_ready = True
+        self._apply_layout()
+        self.canvas.draw_idle()
+
     def update_data(self, spectrum: NMRSpectrum) -> None:
         """Refresh the currently-displayed 1D spectrum's y-data in
         place, preserving the current view (zoom/pan) -- unlike

@@ -2,6 +2,10 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-26 (Fit > Multi-spectrum round): full suite without `test_data/` or pymatgen: 2752 passed, 163 skipped, 0 failed.*
+
+*2026-09-26 (Fit > Combined Hamiltonian round): full suite without `test_data/` or pymatgen: 2732 passed, 163 skipped, 0 failed.*
+
 *2026-09-26 (fits + simulations logged/restorable round): full suite without `test_data/` or pymatgen: 2723 passed, 163 skipped, 0 failed.*
 
 *2026-09-26 (Save/Load Progress + processing log round): full suite without `test_data/` or pymatgen: 2708 passed, 163 skipped, 0 failed (49 new tests in `test_history.py` and `test_gui_progress.py`).*
@@ -89,6 +93,59 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Multi-spectrum fitting: series, isotopes, fields (2026-09-26, fourth round)
+
+User: *"three main cases: 1. sequential data (variable-temperature or variable-time) ... the best fit values from the first spectrum should feed into the second ... 2. different isotopes of the same material, e.g. 1H and 2H ... 3. the same isotope at different fields. For 2 and 3 there may be differences in MAS frequency and field. Fit, consistently, the same set of peaks across the datasets ... any number of experiments with any numbers in any order (e.g. 5, 302, 12, 2, 49)."*
+
+Design (not yet reviewed by the user -- check against real data): one engine on the Combined-Hamiltonian model (an isotropic line is a site with no interactions); **scopes** per parameter (per experiment / per nucleus / global); series = sequential seeding **plus** optional global parameters refined jointly; isotopes share δiso with an optional fitted **per-isotope δ offset**; across fields the linewidth is **split into Hz + ppm**; a new Fit section.
+
+### Built
+- **`notebook/multi_fitting.py`** (exported from `opennmr.notebook`): `make_experiment` (per-spectrum nucleus, ν0, MAS, order, transitions, orientations, window, baseline, x value), `fit_multi(experiments, sites_by_nucleus, scopes=, amounts=, vary=, fixed=, bounds=, seed=, joint=, preset=, progress=)`, `default_scopes(preset)` (series / isotopes / fields), `multi_fit_table`, `parameter_trend`, `multi_fit_to_csv`, `print_multi_fit_report`, `plot_multi_fit`, `plot_parameter_trend`, `MultiFitCancelled`.
+  - **Links** (`_Map`): a shared parameter is one key; each experiment's value comes through a link: identity; **C_Q scaled by |Q| ratio** (the EFG is shared; η_Q identical); **J scaled by γ_A·γ_X** (reduced coupling isotope-independent; J groups matched by index); δiso + per-nucleus **offset** (held at 0 unless varied); **width** = width_Hz/ν0(MHz) ⊕ width_ppm (quadrature for Gaussian, linear otherwise); **amount** = shared site amount × per-experiment scale (the first experiment's scale in each group held at 1 -- otherwise degenerate).
+  - **Sequential pass first, always**: `fit_combined` per experiment in the given order, seeded from the last fit of the same site (same nucleus; else the chemical parameters of another nucleus's last fit) or from the starting model. **R² drops along a series are flagged** (a seeded start can drift), as is any R² < 0.9. A failed single fit keeps its start and says so.
+  - **Joint refinement** when anything is shared: starts from the sequential results mapped back through the links (widths by regressing FWHM against 1/ν0; site shares averaged, scales from the totals), then `least_squares` over every spectrum at once, each weighted by its own residual RMS from the sequential pass. Errors from the joint Jacobian, propagated to every experiment's values (numerical gradient of each link), so a shared C_Q shows the same value and error in every column and a γ-scaled J the scaled error. Checked by Monte Carlo (8 noise realisations): scatter of a shared C_Q 0.0019 MHz vs reported 0.0016.
+  - A width split with one field in its group is **held at width_Hz = 0** and said, since the two parts cannot be separated.
+- **Fit > Multi-spectrum** (`gui/multi_fit_panel.MultiFitPanel`), last Fit section:
+  - Experiments table in fitting order: **Add selected** (list order), **Add by number…** (dataset folder + "5, 302, 12-14, 2", ranges either way; opens what is not open, switches to what is), Up/Down/Remove; per row MAS (from MASR), transitions, window, x value; **x from TE (K) or time since the first (DATE, min)**.
+  - Sites per nucleus: the Combined-Hamiltonian site editor (`_SiteEditor`, setup rows hidden -- the base panel now keeps `_setup_form`), a nucleus selector, **Copy sites from** another nucleus (labels, δ, widths, CSA; C_Q scaled by Q when both are quadrupolar).
+  - Parameters table: Site, Parameter, Nuclei, **Scope** (combo; widths offer "per nucleus / global (Hz + ppm)"), Free, Min, Max; δ offset rows where a site is in more than one nucleus. Situation preset (Series / Isotopes / Fields / Custom -- editing a scope switches to Custom), Site amounts, Start each fit (previous / starting model), theory, orientations, baseline.
+  - **Fit All** with a progress dialog and Cancel. Results: a table of every parameter across the experiments (scope in the row label), share/P_Q/CT c.o.g., summary with R² per spectrum, joint χ², width split and offsets, warnings; **Show**: any experiment's fit, or any parameter's **trend** against x (new `MplCanvas.show_parameter_trend`); right-click Copy Table / **Export CSV** / Copy Full Report.
+  - Saved with **every** spectrum in the fit (`fits["multi"]`: its own curves, everyone's parameters), so each spectrum's log records the fit it was part of and its save points hold it. Selecting one brings it back **only if the panel is empty or holds the same experiments** -- it never overwrites a set being built (`_restore_multi_fit`); opening/fitting sets `_busy` so selections made on the way cannot restore anything.
+
+### Not done / open
+- **Recovery note**: this round's session was interrupted and `notebook/multi_fitting.py` was rebuilt from its compiled bytecode (docstrings verbatim); all 20 multi-fit tests pass against the rebuilt file, but review it with fresh eyes.
+- Isotope links assume no isotope effect beyond a δ offset: secondary isotope effects on C_Q/J (e.g. 1H vs 2H bonded partners) and different relaxation/linewidth per isotope are not modelled -- widths are per experiment in the Isotopes preset for that reason.
+- "Add selected" adds in list order (Qt does not keep click order); arbitrary order via Up/Down or typing numbers.
+- Pseudo-2D rows are not experiments here (keep a slice first); a series inside one pseudo-2D stays with Fit > Isotropic's per-slice fits.
+- J groups are linked across isotopes by index; the user must add them in corresponding order.
+- Sharing site ratios across isotopes assumes the same isotopic distribution at every site (said in the tooltip); partially/selectively labelled samples need per-nucleus amounts.
+- Opening by number uses procno 1.
+- The fit blocks the window (with progress and Cancel) rather than running on a worker thread.
+
+### Tests
+`tests/test_multi_fitting.py` (11): presets; Q- and γ-scaling and offset links; a series in the given order, seeded, with trend and progress messages; a shared C_Q across a series fitted jointly; cancel; two fields and MAS rates sharing δ/C_Q/η_Q, recovering the Hz + ppm width split (150 Hz, 0.4 ppm) and a shared 2:1 site ratio with one scale held; one field holds width_Hz; 1H/2H sharing δ and J scaled by γ with propagated errors; a freed isotope offset (0.25 ppm) recovered; tables/CSV/report/plots; named errors. `tests/test_gui_multi_fit.py` (9): placement, expno parsing, opening by number in typed order with TE/DATE x values and no duplicates, a series through the GUI with trend drawn against x, two fields sharing a site, isotopes with per-nucleus sites, copying and custom scopes, stored with every spectrum and restored without overwriting a set in progress, named errors, state round trip.
+
+## Fit > Combined Hamiltonian in the GUI (2026-09-26, third round)
+
+User: *"Can we implement combined Hamiltonian fits into the GUI? After that we can tackle multi fitting."* The notebook engine (`notebook/combined_fitting.py`, 2026-09-25) was ready; this is its panel.
+
+### Built
+- **`gui/combined_panels.CombinedFitPanel`**, a subclass of the Simulate panel (whose constructor was split so the part below the site editor, `_build_actions`, can be replaced): the same nucleus/regime/transitions/order/orientations controls and site editor, then:
+  - a **Parameters** table rebuilt from the sites (`site_parameter_names`): Site, Parameter, Start (editable, writes into the site and the site editor), Free, Min, Max (blank = the engine's natural limits, shown in the tooltip), **Try starts** (comma-separated extra starting values). Choices are kept per (site label, parameter), survive rebuilds and follow a site rename. Euler angles start fixed, as in the engine.
+  - fit window (whole / Integration regions / ppm range), fit baseline, and "Screen starts at" (coarse powder set for a multi-start, then the best refitted at full quality).
+  - Fit runs `fit_combined`, or `fit_combined_multistart` when any Try starts are given (every combination; the engine's 64-start cap applies). All free parameters are passed explicitly as `vary`, bounds only where typed.
+  - Results: a table of every parameter (± 1σ, "(fixed)"), share %, P_Q and CT centre of gravity per site; a summary line with setup, multi-start count, quality, warnings; right-click Copy Table / Copy Full Report (`print_combined_fit_report`). Drawn on the Fit view with each site shaded (`_draw_combined_fit`).
+  - **Use fitted values as start** (keeps the parameter choices) and **Open in Simulate** (fills Simulate > Combined Hamiltonian, including regime/MAS/transitions/order, and simulates).
+- Stored, logged and restored like the other fits (`fits["combined"]`, via the previous round's machinery): the fitted `Site` objects are saved as dicts; the log's settings list every parameter's free/fixed, bounds and tried starts.
+- Seeded from the selected spectrum (nucleus, SFO1, MASR) like the quadrupolar fit.
+
+### Not done / open
+- The fit blocks the window while it runs (as the quadrupolar and CSA fits do); a multi-start multiplies that.
+- Fitting several spectra together is the next round (the user has nuances to raise first).
+
+### Tests
+`tests/test_gui_combined_fit.py` (9): placement and seeding; the table follows the sites (CSA adds Euler angles, fixed; start edits both ways; rename keeps choices); two-site MAS recovery of C_Q/η_Q/δiso/shares and the report; fixed and bounded parameters honoured; bad cells and an empty region window named; Try starts run a multi-start that recovers from a poor start; Use fitted values and Open in Simulate; stored with the spectrum, logged and restored on reselection; state round trip.
 
 ## Fits and simulations logged and restorable (2026-09-26, second round)
 

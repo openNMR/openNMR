@@ -18,12 +18,15 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QMenu, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMenu, QMessageBox,
+    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import panel_state
+from ..io import serialize
+from ..notebook import combined_fitting as cfit
 from ..notebook import combined_hamiltonian as ch
 from ..notebook.utils import _GAMMA_DF, find_isotope_info
 
@@ -149,6 +152,10 @@ class CombinedHamiltonianPanel(QWidget):
     name)`` exports it; ``draw_sites(result, nucleus)`` (optional) draws
     each site separately on the Simulation plot."""
 
+    BLURB = ("Build each site from its interactions: add a CSA, a quadrupolar coupling and any "
+             "number of J-couplings to the same site, in any combination. Static or MAS; every "
+             "site is simulated with all of its interactions together and the sites summed.")
+
     DEFAULT_INTERACTIONS = {
         "csa": {"type": "csa", "aniso": 100.0, "asym": 0.5, "convention": "Haeberlen",
                 "euler": (0.0, 0.0, 0.0)},
@@ -168,10 +175,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.spectrum: NMRSpectrum | None = None
 
         v = QVBoxLayout(self)
-        blurb = QLabel(
-            "Build each site from its interactions: add a CSA, a quadrupolar coupling and any "
-            "number of J-couplings to the same site, in any combination. Static or MAS; every "
-            "site is simulated with all of its interactions together and the sites summed.")
+        blurb = QLabel(self.BLURB)
         blurb.setWordWrap(True)
         v.addWidget(blurb)
 
@@ -222,6 +226,7 @@ class CombinedHamiltonianPanel(QWidget):
             "when that is exact; a CSA not aligned with the EFG needs the full sphere.")
         form.addRow("Orientations:", self.orientations_spin)
         v.addLayout(form)
+        self._setup_form = form
 
         # ---- sites ----
         sites_box = QGroupBox("Sites")
@@ -291,7 +296,16 @@ class CombinedHamiltonianPanel(QWidget):
         site_layout.addWidget(self.add_interaction_button)
         v.addWidget(self.site_box)
 
-        # ---- axis, actions ----
+        self._build_actions(v)
+        v.addStretch(1)
+
+        self._sync_spin()
+        self._sync_controls()
+        self.add_site()
+
+    def _build_actions(self, v) -> None:
+        """The part below the site editor: for Simulate, the axis and
+        Simulate/Export; Fit > Combined Hamiltonian replaces it."""
         aform = QFormLayout()
         self.auto_axis_check = QCheckBox("Auto: frame every site")
         self.auto_axis_check.setChecked(True)
@@ -330,11 +344,6 @@ class CombinedHamiltonianPanel(QWidget):
         row.addWidget(self.export_button)
         row.addWidget(self.python_button)
         v.addLayout(row)
-        v.addStretch(1)
-
-        self._sync_spin()
-        self._sync_controls()
-        self.add_site()
 
     # ---- helpers ----------------------------------------------------------------
 
@@ -654,3 +663,489 @@ def _describe_site(site: dict) -> str:
         elif kind == "jcoupling":
             bits.append(f"J to {i.get('n', 1)}×{i.get('nuclide', '?')} {i.get('J_Hz', 0):g} Hz")
     return "; ".join(bits)
+
+
+# ============================================================================
+# Fit > Combined Hamiltonian
+# ============================================================================
+
+#: Parameter table columns.
+_P_SITE, _P_NAME, _P_START, _P_FREE, _P_MIN, _P_MAX, _P_TRY = range(7)
+_P_HEADERS = ("Site", "Parameter", "Start", "Free", "Min", "Max", "Try starts")
+_PARAM_LABELS = {"delta_iso": "δiso (ppm)", "amount": "Amount", "fwhm": "FWHM (ppm)",
+                 "eta": "L fraction", "aniso": "Δ or span (ppm)", "asym": "η or skew",
+                 "alpha": "α (°)", "beta": "β (°)", "gamma": "γ (°)", "C_Q": "C_Q (MHz)",
+                 "eta_Q": "η_Q"}
+
+
+def _param_label(name: str) -> str:
+    return _PARAM_LABELS.get(name, f"{name} (Hz)" if name.startswith("J") else name)
+
+
+def _parse_float(text: str):
+    text = (text or "").strip()
+    if not text:
+        return None
+    return float(text)
+
+
+class CombinedFitPanel(CombinedHamiltonianPanel):
+    """Fit Combined-Hamiltonian sites to the selected spectrum: the same
+    site editor as Simulate > Combined Hamiltonian, plus a table of every
+    parameter -- start, free/fixed, bounds, and optional extra starting
+    values for a multi-start fit -- and the result as a table.
+
+    The maths is :func:`opennmr.notebook.combined_fitting.fit_combined`
+    (and ``fit_combined_multistart``), exactly as a notebook calls it.
+
+    Callbacks: ``get_target()`` -> (spectrum, row, index) or raises
+    ValueError; ``get_regions()`` -> the Integration regions;
+    ``draw_fit(result)``; ``format_value_error(value, error, fixed)``;
+    ``send_to_simulation(settings, site_dicts, nucleus)``; ``on_fitted()``.
+    """
+
+    BLURB = ("Fit sites built from any mix of CSA, quadrupolar and J interactions to the "
+             "selected 1D spectrum (or the displayed slice of a 2D), static or MAS. Build the "
+             "starting model as in Simulate, then choose below which parameters are free and "
+             "their bounds. Euler angles start fixed: one 1D lineshape rarely determines them.")
+
+    def __init__(self, get_target, get_regions, draw_fit, format_value_error,
+                 send_to_simulation=None, on_fitted=None, parent=None) -> None:
+        self._get_target = get_target
+        self._get_regions = get_regions
+        self._draw_fit = draw_fit
+        self._fmt = format_value_error
+        self._send_to_simulation = send_to_simulation
+        self._on_fitted = on_fitted or (lambda: None)
+        #: {site label: {parameter: {"free": bool, "min": str, "max": str, "try": str}}}
+        self.constraints: dict[str, dict[str, dict]] = {}
+        self._refreshing = False
+        super().__init__(plot_spectrum=lambda _s: None, add_to_open=lambda *_a: None,
+                         draw_sites=None, parent=parent)
+        self.refresh_parameter_table()
+
+    # ---- the part below the site editor ----------------------------------
+
+    def _build_actions(self, v) -> None:
+        box = QGroupBox("Parameters")
+        box_layout = QVBoxLayout(box)
+        note = QLabel("Start values come from the sites above (and can be typed here). Untick "
+                      "Free to hold a value. Min/Max blank: the natural limits. Try starts: extra "
+                      "starting values, comma-separated -- every combination is fitted and the "
+                      "best kept (a static CSA is often multimodal).")
+        note.setWordWrap(True)
+        box_layout.addWidget(note)
+        self.parameter_table = QTableWidget(0, len(_P_HEADERS))
+        self.parameter_table.setHorizontalHeaderLabels(list(_P_HEADERS))
+        self.parameter_table.verticalHeader().setVisible(False)
+        self.parameter_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.parameter_table.horizontalHeader().setStretchLastSection(True)
+        self.parameter_table.setMinimumHeight(150)
+        self.parameter_table.itemChanged.connect(self._on_parameter_edited)
+        box_layout.addWidget(self.parameter_table)
+        v.addWidget(box)
+
+        form = QFormLayout()
+        self.window_combo = QComboBox()
+        self.window_combo.addItem("Whole spectrum", "all")
+        self.window_combo.addItem("Integration regions", "regions")
+        self.window_combo.addItem("A ppm range", "range")
+        self.window_combo.currentIndexChanged.connect(lambda _i: self._sync_fit_controls())
+        form.addRow("Fit window:", self.window_combo)
+        self.window_lo_spin = _spin_box(-1e6, 1e6, -200.0, 2, " ppm")
+        self.window_hi_spin = _spin_box(-1e6, 1e6, 200.0, 2, " ppm")
+        form.addRow("Window low:", self.window_lo_spin)
+        form.addRow("Window high:", self.window_hi_spin)
+        self._fit_form = form
+        self.fit_baseline_check = QCheckBox("Fit the baseline too")
+        self.fit_baseline_check.setToolTip("Otherwise a linear baseline is estimated from the "
+                                           "outer 5% of the spectrum and held.")
+        form.addRow("", self.fit_baseline_check)
+        self.screen_orientations_spin = QSpinBox()
+        self.screen_orientations_spin.setRange(0, 500000)
+        self.screen_orientations_spin.setSingleStep(500)
+        self.screen_orientations_spin.setSpecialValueText("off")
+        self.screen_orientations_spin.setValue(0)
+        self.screen_orientations_spin.setToolTip(
+            "Multi-start only: fit every start with this coarser powder set, then refit only "
+            "the best with the full Orientations. Off: every start at full quality.")
+        form.addRow("Screen starts at:", self.screen_orientations_spin)
+        v.addLayout(form)
+
+        self.fit_button = QPushButton("Fit Combined Hamiltonian")
+        self.fit_button.clicked.connect(self.fit)
+        v.addWidget(self.fit_button)
+        self.results_label = QLabel("")
+        self.results_label.setWordWrap(True)
+        self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(self.results_label)
+        self.results_table = QTableWidget(0, 1)
+        self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.results_table.horizontalHeader().setStretchLastSection(True)
+        self.results_table.setMaximumHeight(260)
+        self.results_table.setToolTip("Fitted values with 1σ uncertainties; share = number of "
+                                      "nuclei (every transition counted). Right-click to copy.")
+        self.results_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.results_table.customContextMenuRequested.connect(self._on_results_menu)
+        self.results_table.setVisible(False)
+        v.addWidget(self.results_table)
+        row = QHBoxLayout()
+        self.use_fitted_button = QPushButton("Use fitted values as start")
+        self.use_fitted_button.clicked.connect(self.use_fitted_as_start)
+        self.send_button = QPushButton("Open in Simulate")
+        self.send_button.setToolTip("Put the fitted sites into Simulate > Combined Hamiltonian.")
+        self.send_button.clicked.connect(self._on_send)
+        for b in (self.use_fitted_button, self.send_button):
+            b.setEnabled(False)
+            row.addWidget(b)
+        v.addLayout(row)
+        self._sync_fit_controls()
+
+    def _sync_fit_controls(self) -> None:
+        manual = self.window_combo.currentData() == "range"
+        self._fit_form.setRowVisible(self.window_lo_spin, manual)
+        self._fit_form.setRowVisible(self.window_hi_spin, manual)
+
+    # ---- keeping the parameter table in step with the sites --------------
+
+    def add_site(self, site=None):
+        out = super().add_site(site)
+        self.refresh_parameter_table()
+        return out
+
+    def remove_site(self):
+        super().remove_site()
+        self.refresh_parameter_table()
+
+    def _on_label_edited(self, text):
+        site = self.current_site()
+        old = site["label"] if site is not None else None
+        super()._on_label_edited(text)
+        if old is not None and old in self.constraints and text not in self.constraints:
+            self.constraints[text] = self.constraints.pop(old)
+        self.refresh_parameter_table()
+
+    def _set(self, key, value):
+        super()._set(key, value)
+        self.refresh_parameter_table()
+
+    def _on_lineshape(self, _i):
+        super()._on_lineshape(_i)
+        self.refresh_parameter_table()
+
+    def _rebuild_interactions(self):
+        super()._rebuild_interactions()
+        for editor in getattr(self, "interaction_editors", []):
+            for box in editor.findChildren(QDoubleSpinBox) + editor.findChildren(QSpinBox):
+                box.valueChanged.connect(lambda _v: self.refresh_parameter_table())
+            for combo in editor.findChildren(QComboBox):
+                combo.currentIndexChanged.connect(lambda _i: self.refresh_parameter_table())
+        self.refresh_parameter_table()
+
+    def _parameter_rows(self):
+        for site in self.site_dicts:
+            for name in cfit.site_parameter_names(site):
+                yield site, name
+
+    def refresh_parameter_table(self) -> None:
+        """Rebuild the table from the sites, keeping each parameter's
+        free/bounds/try choices by (site label, parameter)."""
+        if not hasattr(self, "parameter_table") or self._refreshing:
+            return
+        self._refreshing = True
+        t = self.parameter_table
+        t.blockSignals(True)
+        try:
+            rows = list(self._parameter_rows())
+            t.setRowCount(len(rows))
+            for r, (site, name) in enumerate(rows):
+                c = self._constraint(site["label"], name)
+                lo, hi = cfit._default_bounds(site, name)
+                cells = [site["label"], _param_label(name), f"{cfit._get(site, name):.6g}", "",
+                         c["min"], c["max"], c["try"]]
+                for col, text in enumerate(cells):
+                    item = QTableWidgetItem(text)
+                    if col in (_P_SITE, _P_NAME, _P_FREE):
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if col == _P_FREE:
+                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                        item.setCheckState(Qt.CheckState.Checked if c["free"] else Qt.CheckState.Unchecked)
+                    if col in (_P_MIN, _P_MAX):
+                        item.setToolTip(f"Blank: {lo:g} to {hi:g}.")
+                    if col == _P_NAME:
+                        item.setData(Qt.ItemDataRole.UserRole, name)
+                    t.setItem(r, col, item)
+        finally:
+            t.blockSignals(False)
+            self._refreshing = False
+
+    def _constraint(self, label: str, name: str) -> dict:
+        per = self.constraints.setdefault(label, {})
+        if name not in per:
+            per[name] = {"free": name not in ("alpha", "beta", "gamma"), "min": "", "max": "",
+                         "try": ""}
+        return per[name]
+
+    def _on_parameter_edited(self, item) -> None:
+        r, col = item.row(), item.column()
+        label_item, name_item = self.parameter_table.item(r, _P_SITE), self.parameter_table.item(r, _P_NAME)
+        if label_item is None or name_item is None:
+            return
+        label, name = label_item.text(), name_item.data(Qt.ItemDataRole.UserRole)
+        c = self._constraint(label, name)
+        if col == _P_FREE:
+            c["free"] = item.checkState() == Qt.CheckState.Checked
+        elif col == _P_MIN:
+            c["min"] = item.text().strip()
+        elif col == _P_MAX:
+            c["max"] = item.text().strip()
+        elif col == _P_TRY:
+            c["try"] = item.text().strip()
+        elif col == _P_START:
+            site = next((s for s in self.site_dicts if s["label"] == label), None)
+            try:
+                value = float(item.text())
+            except ValueError:
+                self.refresh_parameter_table()
+                return
+            if site is not None:
+                cfit._set(site, name, value)
+                if site is self.current_site():
+                    self._on_site_selected(self._current)  # show it in the site editor
+
+    # ---- fitting --------------------------------------------------------------
+
+    def fit_regions(self):
+        mode = self.window_combo.currentData()
+        if mode == "all":
+            return None
+        if mode == "range":
+            lo, hi = self.window_lo_spin.value(), self.window_hi_spin.value()
+            return [(min(lo, hi), max(lo, hi))]
+        regions = self._get_regions() or None
+        if not regions:
+            raise ValueError("Fit window is 'Integration regions', but there are none -- draw "
+                             "them under Fit > Integration, or choose another window.")
+        return regions
+
+    def fit_arguments(self) -> dict:
+        """What the fit is called with: sites, vary, bounds, starts and the
+        settings. Raises ValueError, naming the cell, for anything unreadable."""
+        self.refresh_parameter_table()
+        sites = self.build_sites()
+        vary, bounds, starts = {}, {}, {}
+        for site, name in self._parameter_rows():
+            label = site["label"]
+            c = self._constraint(label, name)
+            if c["free"]:
+                vary.setdefault(label, []).append(name)
+            else:
+                vary.setdefault(label, [])
+            lo_default, hi_default = cfit._default_bounds(site, name)
+            try:
+                lo, hi = _parse_float(c["min"]), _parse_float(c["max"])
+            except ValueError:
+                raise ValueError(f"{label}, {_param_label(name)}: Min and Max must be numbers "
+                                 "(or blank).") from None
+            if lo is not None or hi is not None:
+                lo = lo_default if lo is None else lo
+                hi = hi_default if hi is None else hi
+                if lo >= hi:
+                    raise ValueError(f"{label}, {_param_label(name)}: Min must be below Max.")
+                bounds.setdefault(label, {})[name] = (lo, hi)
+            if c["try"]:
+                try:
+                    values = [float(v) for v in c["try"].replace(";", ",").split(",") if v.strip()]
+                except ValueError:
+                    raise ValueError(f"{label}, {_param_label(name)}: Try starts must be numbers "
+                                     "separated by commas.") from None
+                if values:
+                    starts.setdefault(label, {})[name] = [cfit._get(site, name)] + [
+                        v for v in values if v != cfit._get(site, name)]
+        settings = self.settings()
+        return {"sites": sites, "vary": vary, "bounds": bounds, "starts": starts,
+                "settings": settings, "fit_regions": self.fit_regions(),
+                "fit_baseline": self.fit_baseline_check.isChecked()}
+
+    def fit(self) -> bool:
+        try:
+            spectrum, row, index = self._get_target()
+            from ..notebook import bridge
+            results = bridge.results_from_spectrum(spectrum, row=row)
+            args = self.fit_arguments()
+        except (ValueError, IndexError, KeyError) as exc:
+            QMessageBox.warning(self, "Combined Hamiltonian fit", str(exc))
+            return False
+        kwargs = dict(vary=args["vary"], bounds=args["bounds"] or None,
+                      fit_regions=args["fit_regions"], fit_baseline=args["fit_baseline"],
+                      **args["settings"])
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        started = time.perf_counter()
+        try:
+            if args["starts"]:
+                fit = cfit.fit_combined_multistart(
+                    results, args["sites"], args["starts"], verbose=False,
+                    screen_n_zcw=self.screen_orientations_spin.value() or None, **kwargs)
+            else:
+                fit = cfit.fit_combined(results, args["sites"], **kwargs)
+        except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Combined Hamiltonian fit", f"The fit did not succeed:\n\n{exc}")
+            return False
+        QApplication.restoreOverrideCursor()
+        fit["elapsed"] = time.perf_counter() - started
+        fit["spectrum"] = spectrum
+        fit["spectrum_index"] = index
+        fit["site_labels"] = [s.label for s in args["sites"]]
+        self.result = fit
+        self._report()
+        self._draw_fit(fit)
+        self._sync_result_buttons()
+        self._on_fitted()
+        return True
+
+    def _sync_result_buttons(self) -> None:
+        on = self.result is not None
+        self.use_fitted_button.setEnabled(on)
+        self.send_button.setEnabled(on and self._send_to_simulation is not None)
+
+    # ---- results -----------------------------------------------------------
+
+    def _report(self) -> None:
+        r = self.result
+        rows = []
+        for p in r["parameters"]:
+            if not p["label"]:
+                label = f"baseline {p['name']}"
+            else:
+                label = f"{p['label']}: {_param_label(p['name'])}"
+            rows.append((label, self._fmt(float(p["value"]),
+                                          float(p["error"]) if p["error"] is not None else 0.0,
+                                          not p["free"])))
+        for site_label, d in r["derived"].items():
+            rows.append((f"{site_label}: share (%)", self._fmt(d["share_%"], d["share_%_err"], False)))
+            if "P_Q" in d:
+                rows.append((f"{site_label}: P_Q (MHz)", self._fmt(d["P_Q"], d["P_Q_err"], False)))
+            if "delta_cg" in d:
+                rows.append((f"{site_label}: CT c.o.g. (ppm)",
+                             self._fmt(d["delta_cg"], d["delta_cg_err"], False)))
+        t = self.results_table
+        t.clear()
+        t.setColumnCount(1)
+        t.setHorizontalHeaderLabels(["Value"])
+        t.setRowCount(len(rows))
+        t.setVerticalHeaderLabels([label for label, _v in rows])
+        for i, (_label, text) in enumerate(rows):
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            t.setItem(i, 0, item)
+        t.setVisible(True)
+        q = r["quality"]
+        head = r["log"].splitlines()
+        lines = [head[0].replace("Combined-Hamiltonian fit: ", "Combined-Hamiltonian fit — ")]
+        lines += [line for line in head[1:] if line.startswith("Multi-start")]
+        lines.append(f"R² {q['r2']:.5f}  ·  RMSE {q['rmse']:.3g}  ·  reduced χ² "
+                     f"{q['reduced_chi2']:.3g}  ·  {r.get('elapsed', 0.0):.1f} s. |C_Q| reported "
+                     "(its sign is not in a lineshape).")
+        lines += [f"⚠ {w}" for w in r["warnings"]]
+        self.results_label.setText("\n".join(lines))
+
+    def text_report(self) -> str:
+        if not self.result:
+            return ""
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            return cfit.print_combined_fit_report(self.result)
+
+    def _on_results_menu(self, pos) -> None:
+        menu = QMenu(self.results_table)
+        copy_table = menu.addAction("Copy Table")
+        copy_report = menu.addAction("Copy Full Report")
+        chosen = menu.exec(self.results_table.viewport().mapToGlobal(pos))
+        if chosen is copy_table:
+            QGuiApplication.clipboard().setText(panel_state.table_text(self.results_table, "\t"))
+        elif chosen is copy_report:
+            QGuiApplication.clipboard().setText(self.text_report())
+
+    def fitted_site_dicts(self) -> list[dict]:
+        """The fitted sites in the panel's own format (no nucleus)."""
+        out = []
+        for s in self.result["sites"]:
+            d = s.to_dict() if hasattr(s, "to_dict") else dict(s)
+            out.append({k: v for k, v in d.items() if k not in ("nucleus", "spin")})
+        return out
+
+    def use_fitted_as_start(self) -> None:
+        if not self.result:
+            return
+        current = max(self._current, 0)
+        fitted = self.fitted_site_dicts()
+        self.site_list.blockSignals(True)
+        self.site_list.clear()
+        self.site_list.blockSignals(False)
+        self.site_dicts = []
+        self._current = -1
+        for site in fitted:
+            CombinedHamiltonianPanel.add_site(self, site)
+        self.site_list.setCurrentRow(min(current, len(self.site_dicts) - 1))
+        self.refresh_parameter_table()
+
+    def _on_send(self) -> None:
+        if self.result and self._send_to_simulation is not None:
+            self._send_to_simulation(dict(self.result["settings"]), self.fitted_site_dicts(),
+                                     self.nucleus_combo.currentText().strip())
+
+    # ---- saved state (processing log / Load Progress) -----------------------
+
+    def get_state(self) -> dict:
+        state = super().get_state()
+        state["widgets"].pop("parameter_table", None)  # rebuilt from the sites + constraints
+        state["constraints"] = copy.deepcopy(self.constraints)
+        for site in self.site_dicts:
+            bits = []
+            for name in cfit.site_parameter_names(site):
+                c = self._constraint(site["label"], name)
+                bit = f"{_param_label(name)} {'free' if c['free'] else 'fixed'}"
+                if c["min"] or c["max"]:
+                    bit += f" in [{c['min'] or '…'}, {c['max'] or '…'}]"
+                if c["try"]:
+                    bit += f", also tried from {c['try']}"
+                bits.append(bit)
+            state["extra"][f"{site['label']} parameters"] = "; ".join(bits)
+        return state
+
+    def set_state(self, state: dict) -> None:
+        self.constraints = copy.deepcopy((state or {}).get("constraints") or {})
+        super().set_state(state)
+        self._sync_fit_controls()
+        self.refresh_parameter_table()
+
+    def result_state(self):
+        if not self.result:
+            return None
+        r = {k: v for k, v in self.result.items() if k not in ("spectrum", "sites")}
+        r["site_dicts"] = [s.to_dict() for s in self.result["sites"]]
+        return serialize.encode(r)
+
+    def restore_result(self, encoded, spectrum=None) -> None:
+        r = serialize.decode(encoded)
+        r["sites"] = [ch.Site.from_dict(d) for d in r.pop("site_dicts")]
+        r["spectrum"] = spectrum
+        self.result = r
+        self._report()
+        self._sync_result_buttons()
+
+    def clear_result(self) -> None:
+        self.result = None
+        self.results_label.setText("")
+        self.results_table.clear()
+        self.results_table.setRowCount(0)
+        self.results_table.setVisible(False)
+        self._sync_result_buttons()
+
+    def report_text(self) -> str:
+        if not self.result:
+            return ""
+        return self.results_label.text() + "\n" + panel_state.table_text(self.results_table)

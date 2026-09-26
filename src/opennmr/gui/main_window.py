@@ -99,7 +99,8 @@ from .widgets.simulation_canvas import SimulationCanvas
 from .pnmr_panel import PnmrSimulationPanel
 from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
-from .combined_panels import CombinedHamiltonianPanel
+from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
+from .multi_fit_panel import MultiFitPanel
 from .loader import background_load_enabled
 
 #: Where the launcher-tile icons (Open, Processing, Advanced
@@ -7773,7 +7774,8 @@ class MainWindow(QMainWindow):
     # restored from File > Simulation History.
 
     #: Readable names, for the log and the dialogs.
-    _FIT_LABELS = {"csa": "CSA", "jcoupling": "J-coupling", "quadrupolar": "Quadrupolar"}
+    _FIT_LABELS = {"csa": "CSA", "jcoupling": "J-coupling", "quadrupolar": "Quadrupolar",
+                   "combined": "Combined-Hamiltonian", "multi": "Multi-spectrum"}
     _SIMULATION_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "jcoupling": "J-coupling",
                           "combined": "Combined Hamiltonian", "diffusion": "Diffusion (PFG)",
                           "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)"}
@@ -7781,7 +7783,8 @@ class MainWindow(QMainWindow):
     def _fit_panels(self) -> dict:
         """Each fit, as an object with get_state/set_state/result_state/
         restore_result/clear_result/report_text."""
-        panels = {"jcoupling": self.jcoupling_fit_panel, "quadrupolar": self.quad_fit_panel}
+        panels = {"jcoupling": self.jcoupling_fit_panel, "quadrupolar": self.quad_fit_panel,
+                  "combined": self.combined_fit_panel, "multi": self.multi_fit_panel}
         panels["csa"] = _Section(
             get_state=lambda: {"widgets": panel_state.capture_widgets(self, prefixes=["csa_"])},
             set_state=self._csa_fit_set_state,
@@ -7897,6 +7900,9 @@ class MainWindow(QMainWindow):
         fits = spectrum.metadata.raw.get("fits") or {}
         for key, panel in self._fit_panels().items():
             saved = fits.get(key)
+            if key == "multi":
+                self._restore_multi_fit(panel, saved, spectrum)
+                continue
             try:
                 if isinstance(saved, dict) and saved.get("result") is not None:
                     panel.set_state(saved.get("inputs") or {})
@@ -7907,6 +7913,26 @@ class MainWindow(QMainWindow):
                 panel.clear_result()
                 self.statusBar().showMessage(
                     f"Couldn't show the saved {self._FIT_LABELS.get(key, key)} fit: {exc}", 8000)
+
+    def _restore_multi_fit(self, panel, saved, spectrum) -> None:
+        """A multi-spectrum fit is not one spectrum's, so selecting a
+        spectrum only brings a saved one back when it cannot overwrite
+        work in progress: the panel is empty, or holds the same
+        experiments. Otherwise the panel is left as it is (it names its
+        experiments, so what it shows is never misattributed)."""
+        if getattr(panel, "_busy", False) or not isinstance(saved, dict):
+            return
+        saved_keys = [e.get("key") for e in (saved.get("inputs") or {}).get("experiments") or []]
+        current = [e["key"] for e in panel.experiments]
+        if current and set(current) != set(saved_keys):
+            return
+        try:
+            panel.set_state(saved.get("inputs") or {})
+            if saved.get("result") is not None:
+                panel.restore_result(saved["result"], spectrum)
+        except Exception as exc:  # noqa: BLE001 -- an old record that no longer fits the panel
+            panel.clear_result()
+            self.statusBar().showMessage(f"Couldn't show the saved multi-spectrum fit: {exc}", 8000)
 
     def _journal_simulation(self, key: str, spectrum=None) -> None:
         """Log a simulation run (see io.history.record_simulation). A
@@ -11094,8 +11120,9 @@ class MainWindow(QMainWindow):
         self.fitting_status_label = QLabel(
             "Measure an intensity per spectrum, or per slice of a "
             "pseudo-2D series: fit peak shapes (Isotropic), integrate "
-            "a region (Integration), or fit a CSA or quadrupolar powder "
-            "lineshape (CSA/Dipolar, Quadrupolar). Whichever you run last is what "
+            "a region (Integration), or fit a CSA, quadrupolar or combined "
+            "powder lineshape (CSA/Dipolar, Quadrupolar, Combined Hamiltonian). "
+            "Whichever you run last is what "
             "Relaxation's Fit Curve then fits a relaxation/diffusion "
             "curve to."
         )
@@ -11130,6 +11157,33 @@ class MainWindow(QMainWindow):
             send_to_simulation=self._send_quadrupolar_to_simulation,
             on_fitted=lambda: self._store_fit("quadrupolar"))
         layout.addWidget(CollapsibleSection("Quadrupolar", content=self.quad_fit_panel))
+        # Any mix of CSA, quadrupolar and J per site (explicit user
+        # request); the fitter is notebook.combined_fitting, the model
+        # Simulate > Combined Hamiltonian's.
+        self.combined_fit_panel = CombinedFitPanel(
+            get_target=self._jcoupling_fit_target,
+            get_regions=self._integration_regions,
+            draw_fit=self._draw_combined_fit,
+            format_value_error=self._format_value_error,
+            send_to_simulation=self._send_combined_to_simulation,
+            on_fitted=lambda: self._store_fit("combined"))
+        self._combined_fit_section = CollapsibleSection(
+            "Combined Hamiltonian", content=self.combined_fit_panel)
+        layout.addWidget(self._combined_fit_section)
+        # One set of sites across several spectra: a series, isotopes,
+        # fields (explicit user request); notebook.multi_fitting.
+        self.multi_fit_panel = MultiFitPanel(
+            open_items=lambda: [(self._multi_key(i), self.session.label(i))
+                                for i in range(len(self.session))],
+            selected_keys=lambda: [self._multi_key(i) for i in self._selected_rows()],
+            resolve=self._multi_resolve,
+            open_expnos=self._multi_open_expnos,
+            draw_fit=self._draw_combined_fit,
+            draw_trend=self._draw_parameter_trend,
+            format_value_error=self._format_value_error,
+            on_fitted=self._store_multi_fit)
+        self._multi_fit_section = CollapsibleSection("Multi-spectrum", content=self.multi_fit_panel)
+        layout.addWidget(self._multi_fit_section)
         layout.addStretch(1)
         return tab
 
@@ -11280,6 +11334,131 @@ class MainWindow(QMainWindow):
             spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _draw_combined_fit(self, result: dict) -> None:
+        """Data, fit and (for several sites) each site on the Fit view,
+        over the fit window."""
+        x = np.asarray(result["x"])
+        regions = result["settings"].get("fit_regions")
+        keep = ((x >= min(min(r) for r in regions)) & (x <= max(max(r) for r in regions))
+                if regions else np.ones(x.size, dtype=bool))
+        curves = list(result["site_spectra"].values())
+        components = ([np.asarray(c)[keep] for c in curves] + [np.asarray(result["baseline"])[keep]]
+                      if len(curves) > 1 else None)
+        spectrum = result.get("spectrum")
+        self.fit_canvas.show_slice_fit(
+            x[keep], np.asarray(result["y"])[keep], np.asarray(result["y_fit"])[keep],
+            components=components,
+            peak_labels=list(result["site_spectra"]) if components else None,
+            title="Combined-Hamiltonian fit",
+            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    # ---- Fit > Multi-spectrum: the main-window side -----------------------
+
+    def _multi_key(self, index: int) -> str:
+        """What identifies an experiment for a multi-spectrum fit, across
+        sessions: its folder/file, or a derived spectrum's label."""
+        meta = self.session.spectra[index].metadata
+        if meta.vendor == "derived":
+            return f"derived:{meta.source_path}"
+        return str(meta.source_path or f"spectrum:{index}")
+
+    def _multi_index(self, key) -> int | None:
+        for i in range(len(self.session)):
+            if self._multi_key(i) == key:
+                return i
+        if isinstance(key, str) and not key.startswith(("derived:", "spectrum:")):
+            return self.session.index_for_path(key)
+        return None
+
+    def _multi_resolve(self, key):
+        index = self._multi_index(key)
+        if index is None:
+            return None
+        return self.session.spectra[index], self.session.label(index)
+
+    def _multi_open_expnos(self, folder: str, expnos: list[str]):
+        """Open ``folder``/``expno`` for each, in order (switching to any
+        already open). Returns (keys, problems)."""
+        keys, problems = [], []
+        if not folder or not os.path.isdir(folder):
+            return [], [f"No such folder: {folder or '(none given)'}"]
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for expno in expnos:
+                path = os.path.join(folder, expno)
+                if not os.path.isdir(path):
+                    problems.append(f"{expno}: not in {folder}")
+                    continue
+                try:
+                    vendor = io.detect_vendor(path)
+                except ValueError:
+                    problems.append(f"{expno}: not a recognised experiment")
+                    continue
+                index = self.session.index_for_path(path, vendor=vendor)
+                if index is None:
+                    self._load(path, vendor)
+                    index = self.session.index_for_path(path, vendor=vendor)
+                if index is None:
+                    problems.append(f"{expno}: could not be opened")
+                    continue
+                keys.append(self._multi_key(index))
+        finally:
+            QApplication.restoreOverrideCursor()
+        return keys, problems
+
+    def _draw_parameter_trend(self, x, y, err, labels, xlabel, ylabel, title) -> None:
+        self.fit_canvas.show_parameter_trend(x, y, err, point_labels=labels, xlabel=xlabel,
+                                             ylabel=ylabel, title=title)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _store_multi_fit(self) -> None:
+        """Keep the multi-spectrum fit with every spectrum in it: each one
+        its own curves and column, all of them the shared values, so
+        each spectrum's log and save points record the fit it was part of."""
+        panel = self.multi_fit_panel
+        if not panel.result:
+            return
+        inputs = panel.get_state()
+        inputs_text = panel_state.describe_state(inputs)
+        labels = [f["label"] for f in panel.result["experiments"]]
+        for position, key in enumerate(panel.result.get("keys", [])):
+            index = self._multi_index(key)
+            if index is None:
+                continue
+            spectrum = self.session.spectra[index]
+            fits = dict(spectrum.metadata.raw.get("fits") or {})
+            fits["multi"] = {
+                "label": "Multi-spectrum", "time": io_history._stamp(None),
+                "target": f"{labels[position]} (spectrum {position + 1} of {len(labels)}: "
+                          + ", ".join(labels) + ")",
+                "inputs": inputs, "inputs_text": inputs_text,
+                "result": panel.result_state_for(key), "report": panel.report_text_for(key)}
+            spectrum.metadata.raw["fits"] = fits
+            self._run_sidecar_save_now(index)
+
+    def _send_combined_to_simulation(self, settings: dict, site_dicts: list, nucleus: str) -> None:
+        """Fitted sites into Simulate > Combined Hamiltonian, simulated
+        over an automatic axis."""
+        panel = self.combined_sim_panel
+        panel.nucleus_combo.setCurrentText(nucleus)
+        panel.larmor_spin.setValue(settings["larmor_Hz"] / 1e6)
+        regime = "mas" if settings.get("mas_Hz") else "static"
+        panel.regime_combo.setCurrentIndex(panel.regime_combo.findData(regime))
+        if settings.get("mas_Hz"):
+            panel.mas_spin.setValue(settings["mas_Hz"])
+        panel.order_combo.setCurrentIndex(panel.order_combo.findData(settings.get("order", "second")))
+        index = panel.transitions_combo.findData(settings.get("transitions", "all"))
+        if index >= 0:
+            panel.transitions_combo.setCurrentIndex(index)
+        panel.set_state({"widgets": {}, "sites": site_dicts, "current": 0})
+        panel.auto_axis_check.setChecked(True)
+        self._combined_sim_section.setExpanded(True)
+        self._show_side_tab("Simulate")
+        panel.simulate()
 
     def _draw_combined_sites(self, result: dict, nucleus: str) -> None:
         """Total and each site of a combined simulation on the Simulation
@@ -21042,6 +21221,8 @@ class MainWindow(QMainWindow):
             self.quad_fit_panel.seed_from_spectrum(spectrum)
         if hasattr(self, "combined_sim_panel"):
             self.combined_sim_panel.seed_from_spectrum(spectrum)
+        if hasattr(self, "combined_fit_panel"):
+            self.combined_fit_panel.seed_from_spectrum(spectrum)
 
         # Both tabs' gradient controls, in one place -- see
         # _refresh_max_gradient_controls.

@@ -102,6 +102,11 @@ from .spin_system import (
 )
 
 from .notes import experiment_notes, set_experiment_notes, notes_location, notes_first_line
+from .multi_fitting import (
+    make_experiment, fit_multi, default_scopes, multi_fit_table, multi_fit_to_csv,
+    parameter_trend, print_multi_fit_report, plot_multi_fit, plot_parameter_trend,
+    MultiFitCancelled,
+)
 from .progress import (
     processing_log, processing_history, list_save_points, save_point_state,
     save_progress, load_progress, log_event, load_saved_spectrum,
@@ -261,6 +266,10 @@ __all__ = [
     "NMRJCouplingFitWorkflow", "jcoupling_chemist_notation",
     # notes
     "experiment_notes", "set_experiment_notes", "notes_location", "notes_first_line",
+    # multi_fitting (one set of sites across several spectra)
+    "make_experiment", "fit_multi", "default_scopes", "multi_fit_table", "multi_fit_to_csv",
+    "parameter_trend", "print_multi_fit_report", "plot_multi_fit", "plot_parameter_trend",
+    "MultiFitCancelled",
     # progress (processing log and save points, shared with the GUI)
     "processing_log", "processing_history", "list_save_points", "save_point_state",
     "save_progress", "load_progress", "log_event", "load_saved_spectrum",
