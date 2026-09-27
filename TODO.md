@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-27 (DNP round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2885 passed, 162 skipped, 0 failed (43 new tests in `test_dnp.py`, `test_gui_dnp.py`; with the DNP sweep in `test_data/` 2886 passed).*
+
 *2026-09-27 (browser multi-select round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2843 passed, 161 skipped, 0 failed (10 new tests in `test_data_browser.py`).*
 
 *2026-09-27 (CI fix: label-shrink test vs matplotlib 3.11): full suite without `test_data/` or pymatgen, on both matplotlib 3.10.9 (Py 3.11) and 3.11.2 (Py 3.12): 2833 passed, 161 skipped, 0 failed.*
@@ -97,6 +99,20 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## DNP: enhancement factors and field-sweep profiles (2026-09-27)
+
+User: a "DNP" collapsible box in Compare (and notebook functions): (1) the enhancement factor as the ratio of two picked peak intensities *and* of two integrated regions -- encourage both, force neither; (2) for a DNP field sweep, the field of each experiment from SFO1 and the nucleus's gyromagnetic ratio, and a picked peak's intensity or a dragged region's area tracked against field. Example: `400_MHz_Lyon/20260511_Na2CdMnFeCN6_171025A_DR_3p2mm/100236-100305` (23Na).
+
+- **SFO1 does not follow the line exactly.** It is set by hand: the line sat -7.6 to +13.8 kHz off its carrier (up to 1.26 mT for 23Na) against ~0.4 mT BSMS steps and a ~1.1 kHz line; SFO1 alone put 100288 below 100287. So the line is **found in every spectrum** (largest signal within ±window of the pick, on each spectrum's carrier-offset axis) and **B0 comes from the line's absolute frequency**; the SFO1 field is always reported alongside with the difference, and used only (flagged) where no line is found (S/N < 5 or maximum outside the window -- a noise maximum is never reported as a peak). Real-data checks: repeats agree to 7 uT (100267-69) and 26 uT (100300/04/05); 100287 < 100288 < 100289.
+- Absolute field needs the line's shift (nu = gamma B0 (1 + delta)): default read off the reference spectrum's ppm axis at the line; overridable. Moves the whole profile by 1e-6 per ppm, never its shape.
+- `metadata.sfo1` is SF (the ppm reference), **not** the carrier: DNP reads acqus SFO1 (fallback BF1 + O1). Data are per scan (readers divide by NS); RG is not normalised by the readers, so DNP corrects it (default on). TopSpin 1r files are not comparable across expnos (NC_proc -9..-13) and are not used.
+- **Baseline: local quadratic by default.** 100268/100269 (uw on/off) has a rolling baseline; global (Quantify's edge line) gave eps = 1.13 height / 1.18 area, none 1.24 / 1.52, local 1.10 / 1.07. Rejected: a *straight* local line (cut an area by a third under a curved baseline in testing), and ±3 FWHM for a peak's baseline window (Lorentzian tail 2.7% -> heights 2% low; now ±5 FWHM).
+- **Noise**: MAD of the residual about a 101-point quadratic Savitzky-Golay smooth. Rejected: edge SD (inflated ~20x by the roll) and point-to-point differences (~18% low: zero-filling correlates neighbours, lag-1 rho 0.4-0.6).
+- **Enhancement uncertainty has a systematic term** (ratio change with the peak's baseline window ±4/±6 FWHM and the region 20% narrower/wider): changing the region moved the area ratio ~10x its noise error. The height-vs-area agreement check uses noise + systematic.
+- Warns when a sweep mixes pulse programmes (this one: hahnecho4.enb and presat_zg).
+- Code: `notebook/dnp.py` (exported from `opennmr.notebook`), `gui/dnp_panel.py`, `MainWindow._dnp_*` / `_store_dnp`, new `MplCanvas.show_external_plot(draw)` (the GUI shows the notebook's own figures). Results kept in `metadata.raw["fits"]["dnp_enhancement" | "dnp_sweep"]` -> logged and saved; not re-shown in the panel on reselect.
+- Open: sweep error bars are noise only; field from the sweep-coil current / BSMS value (in the title) not read. Real-data test runs when the sweep is in `test_data/DNP/20260511_Na2CdMnFeCN6_171025A_DR_3p2mm/`.
 
 ## Browse a folder: open several experiments at once (2026-09-27)
 

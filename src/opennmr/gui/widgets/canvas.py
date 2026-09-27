@@ -5887,6 +5887,36 @@ class MplCanvas(QWidget):
         self._apply_layout()
         self.canvas.draw_idle()
 
+    def show_external_plot(self, draw) -> None:
+        """A figure drawn by a notebook plotting function -- ``draw(figure)``
+        receives this canvas's own (cleared) figure -- so the GUI shows
+        exactly the figure a notebook call produces, rather than a second
+        drawing of the same thing that could drift from it. Used by
+        Compare > DNP (``opennmr.notebook.dnp``'s plots).
+
+        View state is reset as for :meth:`show_parameter_trend`, so
+        nothing from a previous spectrum/contour view survives; pick and
+        region-select modes work on whatever Axes the click lands in, so
+        they work on these plots too."""
+        self._contour_spectrum = None
+        self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = False
+        self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
+        self._current_1d_spectrum = None
+        self._preview_1d_spectrum = None
+        self._clear_figure()
+        draw(self.figure)
+        self.ax = self.figure.axes[0] if self.figure.axes else self.figure.add_subplot(111)
+        self._legend_visible = False
+        self._crosshair_ready = True
+        self._apply_layout()
+        self.canvas.draw_idle()
+
     def update_data(self, spectrum: NMRSpectrum) -> None:
         """Refresh the currently-displayed 1D spectrum's y-data in
         place, preserving the current view (zoom/pan) -- unlike

@@ -101,6 +101,7 @@ from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
+from .dnp_panel import DnpPanel
 from .loader import background_load_enabled
 
 #: Where the launcher-tile icons (Open, Processing, Advanced
@@ -2072,7 +2073,91 @@ class MainWindow(QMainWindow):
         combine_row.addWidget(combine_button)
         layout.addLayout(combine_row)
 
+        # DNP: enhancement factors and field-sweep profiles over the
+        # spectra checked above (explicit user request);
+        # notebook.dnp. Collapsed until wanted -- most comparisons are
+        # not DNP.
+        self.dnp_panel = DnpPanel(
+            entries=self._dnp_entries, draw_spectra=self._dnp_draw_spectra,
+            draw_profile=self._dnp_draw_profile, arm=self._dnp_arm, store=self._store_dnp)
+        self._dnp_section = CollapsibleSection("DNP", content=self.dnp_panel, expanded=False)
+        self._dnp_section.toggled.connect(lambda expanded: expanded and self.dnp_panel.refresh())
+        layout.addWidget(self._dnp_section)
+        self.compare_list.itemChanged.connect(lambda _item: self.dnp_panel.refresh())
+        self.compare_list.model().rowsInserted.connect(lambda *_a: self.dnp_panel.refresh())
+        self.compare_list.model().rowsRemoved.connect(lambda *_a: self.dnp_panel.refresh())
+        self.compare_canvas.peakPicked.connect(self.dnp_panel.on_canvas_pick)
+        self.compare_canvas.regionSelected.connect(self.dnp_panel.on_canvas_region)
+        self.compare_canvas.pickModeChanged.connect(self._on_dnp_canvas_mode_changed)
+        self.compare_canvas.regionSelectModeChanged.connect(self._on_dnp_canvas_mode_changed)
+
         return tab
+
+    # -- Compare > DNP -------------------------------------------------
+
+    def _dnp_entries(self) -> list[dict]:
+        """The 1D spectra checked in the Compare list, in list order, as
+        the DNP panel wants them. ``index`` is the session row for a
+        whole spectrum -- where its DNP record is kept -- and None for a
+        slice of a pseudo-2D."""
+        entries = []
+        for row, entry in self._compare_checked_rows_and_entries():
+            spectrum = self._resolve_compare_entry(entry)
+            if spectrum is None or spectrum.ndim != 1:
+                continue
+            entries.append({"label": self.compare_list.item(row).text(), "spectrum": spectrum,
+                            "index": entry[0] if entry[1] is None else None})
+        return entries
+
+    def _dnp_show_canvas(self, canvas) -> None:
+        index = self.canvas_tabs.indexOf(canvas)
+        self.canvas_tabs.setTabVisible(index, True)
+        # Switch *before* drawing: selecting a stale Compare view re-renders
+        # the ordinary comparison, which would replace the DNP plot.
+        self.canvas_tabs.setCurrentWidget(canvas)
+
+    def _dnp_draw_spectra(self, draw) -> None:
+        self._dnp_show_canvas(self.compare_canvas)
+        self.compare_canvas.show_external_plot(draw)
+
+    def _dnp_draw_profile(self, draw) -> None:
+        self._dnp_show_canvas(self.fit_canvas)
+        self.fit_canvas.show_external_plot(draw)
+
+    def _dnp_arm(self, mode) -> None:
+        if mode == "peak":
+            self.compare_canvas.set_pick_mode(True)
+            self.statusBar().showMessage("DNP: click the peak on the Compare view.", 8000)
+        elif mode == "region":
+            self.compare_canvas.set_region_select_mode(True)
+            self.statusBar().showMessage("DNP: drag across the peak on the Compare view.", 8000)
+        else:
+            self.compare_canvas.set_pick_mode(False)
+            self.compare_canvas.set_region_select_mode(False)
+
+    def _on_dnp_canvas_mode_changed(self, _enabled: bool) -> None:
+        if not (self.compare_canvas._pick_mode or self.compare_canvas._region_select_mode):
+            self.dnp_panel.canvas_mode_released()
+
+    def _store_dnp(self, kind: str, record: dict, indices: list[int]) -> None:
+        """Keep a DNP result with every spectrum it used, like a fit: in
+        ``metadata.raw["fits"][kind]``, so it is in each spectrum's log,
+        sidecar and save points."""
+        entry = {"label": record["label"], "target": record["target"],
+                 "time": io_history._stamp(None), "inputs": {},
+                 "inputs_text": record["inputs_text"], "report": record["report"]}
+        try:
+            entry["result"] = io_serialize.encode(record["result"])
+        except Exception:  # noqa: BLE001 -- the readable report is still kept
+            entry["result"] = None
+        for index in sorted(set(indices)):
+            if not (0 <= index < len(self.session)):
+                continue
+            spectrum = self.session.spectra[index]
+            fits = dict(spectrum.metadata.raw.get("fits") or {})
+            fits[kind] = dict(entry)
+            spectrum.metadata.raw["fits"] = fits
+            self._schedule_sidecar_save(index)
 
     def _on_open_clicked(self) -> None:
         """The Open… button's own plain-click action -- the reliable

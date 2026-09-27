@@ -107,6 +107,12 @@ from .multi_fitting import (
     parameter_trend, print_multi_fit_report, plot_multi_fit, plot_parameter_trend,
     MultiFitCancelled,
 )
+from .dnp import (
+    carrier_frequency_mhz, carrier_offset_hz, field_from_frequency, field_from_sfo1,
+    peak_height, region_integral, enhancement, enhancement_report, print_enhancement_report,
+    field_sweep, field_sweep_table, field_sweep_to_csv, field_sweep_report,
+    print_field_sweep_report, plot_field_profile, plot_sweep_spectra, plot_enhancement_spectra,
+)
 from .progress import (
     processing_log, processing_history, list_save_points, save_point_state,
     save_progress, load_progress, log_event, load_saved_spectrum,
