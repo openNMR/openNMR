@@ -37,6 +37,18 @@ vendors now have a real ``peek``, and each is pinned by a test
 asserting it reports the same shape a real load produces; describing
 the whole of ``test_data`` (238 experiments, all four vendors) takes
 about 250 ms.
+
+**Several experiments can be opened at once.** The tree uses extended
+selection: Ctrl-click (Cmd-click on macOS) adds or removes one
+experiment, Shift-click takes the whole run between two. "Open
+Selected" (or Return) then opens every selected experiment, top to
+bottom in tree order -- not click order, so a Shift range of 10..15
+lands in the list as 10, 11, ... 15. Folders in a selection are
+skipped rather than opened wholesale: a Shift range that happens to
+cross a folder heading should not quietly load everything under it.
+A plain double-click still opens just the experiment under the cursor,
+because its first click has already reduced the selection to that one.
+Explicit user request.
 """
 
 from __future__ import annotations
@@ -46,7 +58,7 @@ import os
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QLabel, QPushButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QTreeWidgetItem, QTreeWidgetItemIterator, QVBoxLayout, QWidget,
 )
 
 from ... import io
@@ -83,6 +95,14 @@ class DataBrowser(QWidget):
         )
         self._choose_button.clicked.connect(self.browseRequested)
         button_row.addWidget(self._choose_button)
+        self._open_selected_button = QPushButton("Open Selected")
+        self._open_selected_button.setToolTip(
+            "Open every selected experiment. Ctrl-click (Cmd-click on macOS) "
+            "to pick separate experiments, Shift-click to pick a run of them."
+        )
+        self._open_selected_button.setEnabled(False)
+        self._open_selected_button.clicked.connect(self._open_selected)
+        button_row.addWidget(self._open_selected_button)
         button_row.addStretch(1)
         layout.addLayout(button_row)
 
@@ -101,11 +121,14 @@ class DataBrowser(QWidget):
         # noting" what the selected-spectrum panel notes already.
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
-        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tree.setToolTip(
-            "Double-click an experiment to load it. Folders group experiments; "
-            "only things this app can actually open are listed."
+            "Double-click an experiment to load it. Ctrl-click (Cmd-click on "
+            "macOS) or Shift-click to select several, then Open Selected or "
+            "press Return. Folders group experiments; only things this app "
+            "can actually open are listed."
         )
+        self._tree.itemSelectionChanged.connect(self._update_open_selected_button)
         # `itemActivated` only -- **not** also `itemDoubleClicked`.
         # A double-click emits both, so connecting both ran this
         # handler twice for one gesture and loaded the same experiment
@@ -138,13 +161,15 @@ class DataBrowser(QWidget):
         self._root = root
         self._tree.clear()
         self._root_label.setText(root)
+        self._update_open_selected_button()
 
         if not matches:
             self._status.setText("No loadable experiments found in this folder.")
             return
         self._status.setText(
             f"{len(matches):,} experiment{'s' if len(matches) != 1 else ''}. "
-            f"Double-click to load."
+            f"Double-click to load, or Ctrl/Shift-click to select several "
+            f"and Open Selected."
             + (f" The scan stops at {truncated_at:,}: this folder holds more -- browse a "
                f"subfolder to see them." if truncated_at else "")
         )
@@ -267,10 +292,50 @@ class DataBrowser(QWidget):
 
     def _on_item_activated(self, item: QTreeWidgetItem, _column: int = 0) -> None:
         path = item.data(0, _PATH_ROLE)
-        if path:
-            self.spectrumActivated.emit(path, item.data(0, _VENDOR_ROLE))
-        else:
+        if not path:
             item.setExpanded(not item.isExpanded())
+            return
+        # Return on a multi-selection opens all of it -- the activated
+        # item is just the one holding focus. A double-click never gets
+        # here with several selected: its first (unmodified) click has
+        # already cut the selection down to the item under the cursor.
+        selected = self.selected_paths()
+        if item.isSelected() and len(selected) > 1:
+            self._emit_all(selected)
+        else:
+            self.spectrumActivated.emit(path, item.data(0, _VENDOR_ROLE))
+
+    def selected_paths(self) -> list[tuple[str, str]]:
+        """Every selected experiment as ``(path, vendor)``, in tree
+        order (top to bottom), folders excluded. Tree order rather than
+        :meth:`QTreeWidget.selectedItems`, whose order is not defined --
+        a Shift range should open in the order it is listed."""
+        found = []
+        iterator = QTreeWidgetItemIterator(
+            self._tree, QTreeWidgetItemIterator.IteratorFlag.Selected)
+        while iterator.value() is not None:
+            item = iterator.value()
+            path = item.data(0, _PATH_ROLE)
+            if path:
+                found.append((path, item.data(0, _VENDOR_ROLE)))
+            iterator += 1
+        return found
+
+    def _open_selected(self) -> None:
+        self._emit_all(self.selected_paths())
+
+    def _emit_all(self, pairs: list[tuple[str, str]]) -> None:
+        # One emission per experiment, through the same signal a
+        # double-click uses, so each goes through MainWindow._open_one
+        # and its already-open / already-loading check individually.
+        for path, vendor in pairs:
+            self.spectrumActivated.emit(path, vendor)
+
+    def _update_open_selected_button(self) -> None:
+        count = len(self.selected_paths())
+        self._open_selected_button.setEnabled(count > 0)
+        self._open_selected_button.setText(
+            f"Open {count} Selected" if count > 1 else "Open Selected")
 
     def selected_path(self) -> tuple[str, str] | None:
         """The selected experiment, or ``None`` if a folder (or

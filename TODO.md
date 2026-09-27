@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-27 (browser multi-select round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2843 passed, 161 skipped, 0 failed (10 new tests in `test_data_browser.py`).*
+
 *2026-09-27 (CI fix: label-shrink test vs matplotlib 3.11): full suite without `test_data/` or pymatgen, on both matplotlib 3.10.9 (Py 3.11) and 3.11.2 (Py 3.12): 2833 passed, 161 skipped, 0 failed.*
 
 *2026-09-26 (Fit > Multi-spectrum round): full suite without `test_data/` or pymatgen: 2752 passed, 163 skipped, 0 failed.*
@@ -95,6 +97,16 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Browse a folder: open several experiments at once (2026-09-27)
+
+User: *"in the Open menu and Browse a folder section, one can select multiple experiments by doing either control and click (to select separate experiments that are not adjacent ...) or shift and click (if the experiments are sequential)."*
+
+- `gui/widgets/data_browser.py`: tree switched from `SingleSelection` to `ExtendedSelection` (Ctrl/Cmd-click toggles one, Shift-click takes a range). New **Open Selected** button next to Choose Folder… (reads "Open N Selected", disabled when no experiment is selected). Return on a multi-selection opens all of it. A plain double-click still opens only the item under the cursor, because its first click resets the selection.
+- Opens in **tree order**, not click order (`selected_paths()` walks the tree), so a range picked bottom-up still lands as 10, 11, ... 15.
+- **Folders in a selection are skipped**, not expanded into their contents: a Shift range that crosses a folder heading should not quietly load everything under it.
+- No `MainWindow` change: the browser emits the existing `spectrumActivated` once per experiment, so each one still goes through `_open_one` and its already-open / already-loading check.
+- Not changed: the separate prompt shown by Open… on a parent folder (`_prompt_select_spectra`) already used `ExtendedSelection`, so Ctrl/Shift already worked there.
 
 ## CI failure: label-shrink test broke on matplotlib 3.11 (2026-09-27)
 

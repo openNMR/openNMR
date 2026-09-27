@@ -262,3 +262,202 @@ def test_every_vendors_peek_reports_a_pulse_programme(vendor, path, expected):
     if not os.path.exists(path):
         pytest.skip(f"{path} not present")
     assert expected in str(io.peek(path, vendor=vendor).get("pulse_program"))
+
+
+# -- multi-select: Ctrl-click and Shift-click ---------------------------
+#
+# User request: "select multiple experiments by doing either control and
+# click (to select separate experiments that are not adjacent in the
+# list of experiments in the folder) or shift and click (if the
+# experiments are sequential)." These drive real mouse clicks with
+# modifiers through the tree's viewport, rather than calling
+# setSelected(), so they check the gesture and not just the bookkeeping.
+
+
+def _browser_with_experiments(tmp_path, names, subfolder=None):
+    matches = []
+    for name in names:
+        parent = tmp_path / subfolder if subfolder else tmp_path
+        expt = parent / name
+        expt.mkdir(parents=True)
+        matches.append((str(expt), "bruker"))
+    browser = DataBrowser()
+    browser.resize(400, 600)
+    browser.show()
+    browser.set_matches(str(tmp_path), matches)
+    return browser, [path for path, _vendor in matches]
+
+
+def _click(browser, item, modifier=Qt.KeyboardModifier.NoModifier):
+    from PySide6.QtTest import QTest
+
+    tree = browser._tree
+    tree.scrollToItem(item)
+    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, modifier,
+                     tree.visualItemRect(item).center())
+
+
+def _opened(browser):
+    opened = []
+    browser.spectrumActivated.connect(lambda path, vendor: opened.append(path))
+    return opened
+
+
+def test_ctrl_click_selects_experiments_that_are_not_adjacent(qapp, tmp_path):
+    browser, paths = _browser_with_experiments(tmp_path, ["10", "11", "12", "13", "14"])
+    tree = browser._tree
+    opened = _opened(browser)
+
+    _click(browser, tree.topLevelItem(0))
+    _click(browser, tree.topLevelItem(2), Qt.KeyboardModifier.ControlModifier)
+    _click(browser, tree.topLevelItem(4), Qt.KeyboardModifier.ControlModifier)
+
+    assert [p for p, _v in browser.selected_paths()] == [paths[0], paths[2], paths[4]]
+    assert browser._open_selected_button.isEnabled()
+    assert browser._open_selected_button.text() == "Open 3 Selected"
+
+    browser._open_selected_button.click()
+    assert opened == [paths[0], paths[2], paths[4]]
+
+
+def test_ctrl_click_on_a_selected_experiment_deselects_it(qapp, tmp_path):
+    browser, paths = _browser_with_experiments(tmp_path, ["10", "11", "12"])
+    tree = browser._tree
+
+    _click(browser, tree.topLevelItem(0))
+    _click(browser, tree.topLevelItem(2), Qt.KeyboardModifier.ControlModifier)
+    _click(browser, tree.topLevelItem(0), Qt.KeyboardModifier.ControlModifier)
+
+    assert [p for p, _v in browser.selected_paths()] == [paths[2]]
+    assert browser._open_selected_button.text() == "Open Selected"
+
+
+def test_shift_click_selects_a_run_of_experiments(qapp, tmp_path):
+    browser, paths = _browser_with_experiments(tmp_path, ["10", "11", "12", "13", "14"])
+    tree = browser._tree
+    opened = _opened(browser)
+
+    _click(browser, tree.topLevelItem(1))
+    _click(browser, tree.topLevelItem(3), Qt.KeyboardModifier.ShiftModifier)
+
+    assert [p for p, _v in browser.selected_paths()] == paths[1:4]
+    browser._open_selected_button.click()
+    assert opened == paths[1:4]
+
+
+def test_a_backwards_shift_range_still_opens_top_to_bottom(qapp, tmp_path):
+    # Opened in the order they are listed, not the order they were
+    # clicked -- a range picked from the bottom up should not land in
+    # the spectrum list reversed.
+    browser, paths = _browser_with_experiments(tmp_path, ["10", "11", "12", "13"])
+    tree = browser._tree
+    opened = _opened(browser)
+
+    _click(browser, tree.topLevelItem(3))
+    _click(browser, tree.topLevelItem(0), Qt.KeyboardModifier.ShiftModifier)
+    browser._open_selected()
+
+    assert opened == paths
+
+
+def test_return_on_a_multi_selection_opens_all_of_it(qapp, tmp_path):
+    browser, paths = _browser_with_experiments(tmp_path, ["10", "11", "12"])
+    tree = browser._tree
+    opened = _opened(browser)
+
+    _click(browser, tree.topLevelItem(0))
+    _click(browser, tree.topLevelItem(2), Qt.KeyboardModifier.ControlModifier)
+    # Return activates the item holding focus; Qt emits itemActivated.
+    tree.itemActivated.emit(tree.currentItem(), 0)
+
+    assert opened == [paths[0], paths[2]]
+
+
+def test_plain_double_click_after_a_multi_selection_opens_just_that_one(qapp, tmp_path):
+    # The first click of an unmodified double-click resets the selection
+    # to the item under the cursor, so this must not open the earlier
+    # multi-selection as a side effect.
+    from PySide6.QtTest import QTest
+
+    browser, paths = _browser_with_experiments(tmp_path, ["10", "11", "12"])
+    tree = browser._tree
+    opened = _opened(browser)
+
+    _click(browser, tree.topLevelItem(0))
+    _click(browser, tree.topLevelItem(1), Qt.KeyboardModifier.ControlModifier)
+    item = tree.topLevelItem(2)
+    center = tree.visualItemRect(item).center()
+    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, center)
+    tree.itemActivated.emit(item, 0)   # what the second click of the pair does
+
+    assert opened == [paths[2]]
+
+
+def test_folders_in_a_selection_are_skipped_not_opened_wholesale(qapp, tmp_path):
+    (tmp_path / "run2" / "20").mkdir(parents=True)
+    matches = [(str(tmp_path / n), "bruker") for n in ("10", "11")]
+    for path, _vendor in matches:
+        os.mkdir(path)
+    matches.append((str(tmp_path / "run2" / "20"), "bruker"))
+    browser = DataBrowser()
+    browser.resize(400, 600)
+    browser.show()
+    browser.set_matches(str(tmp_path), matches)
+    tree = browser._tree
+    items = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    folder = next(i for i in items if not i.data(0, _PATH_ROLE))
+    leaves = [i for i in items if i.data(0, _PATH_ROLE)]
+
+    for item in items:
+        item.setSelected(True)
+
+    assert folder.isSelected()
+    assert [p for p, _v in browser.selected_paths()] == [
+        leaf.data(0, _PATH_ROLE) for leaf in leaves]
+    assert str(tmp_path / "run2" / "20") not in [p for p, _v in browser.selected_paths()]
+
+
+def test_open_selected_is_disabled_with_nothing_or_only_a_folder_selected(qapp, tmp_path):
+    browser, _paths = _browser_with_experiments(tmp_path, ["20"], subfolder="run2")
+    assert not browser._open_selected_button.isEnabled()
+
+    folder = browser._tree.topLevelItem(0)
+    assert not folder.data(0, _PATH_ROLE)
+    folder.setSelected(True)
+    assert not browser._open_selected_button.isEnabled()
+
+
+def test_choosing_a_new_folder_resets_open_selected(qapp, tmp_path):
+    browser, _paths = _browser_with_experiments(tmp_path, ["10", "11"])
+    browser._tree.topLevelItem(0).setSelected(True)
+    browser._tree.topLevelItem(1).setSelected(True)
+    assert browser._open_selected_button.text() == "Open 2 Selected"
+
+    browser.set_matches(str(tmp_path), [])
+
+    assert not browser._open_selected_button.isEnabled()
+    assert browser._open_selected_button.text() == "Open Selected"
+
+
+def test_main_window_opens_each_selected_experiment_once(qapp, tmp_path, monkeypatch):
+    # End to end through MainWindow's own wiring: every selected
+    # experiment reaches _open_one (and so its already-open check),
+    # once each, in tree order.
+    from opennmr.gui.main_window import MainWindow
+
+    window = MainWindow()
+    calls = []
+    monkeypatch.setattr(window, "_open_one", lambda path, vendor: calls.append((path, vendor)))
+    paths = []
+    for name in ("10", "11", "12", "13"):
+        (tmp_path / name).mkdir()
+        paths.append(str(tmp_path / name))
+    window.data_browser.set_matches(str(tmp_path), [(p, "bruker") for p in paths])
+    tree = window.data_browser._tree
+    tree.topLevelItem(1).setSelected(True)
+    tree.topLevelItem(3).setSelected(True)
+
+    window.data_browser._open_selected_button.click()
+
+    assert calls == [(paths[1], "bruker"), (paths[3], "bruker")]
