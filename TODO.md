@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-27 (CI fix: label-shrink test vs matplotlib 3.11): full suite without `test_data/` or pymatgen, on both matplotlib 3.10.9 (Py 3.11) and 3.11.2 (Py 3.12): 2833 passed, 161 skipped, 0 failed.*
+
 *2026-09-26 (Fit > Multi-spectrum round): full suite without `test_data/` or pymatgen: 2752 passed, 163 skipped, 0 failed.*
 
 *2026-09-26 (Fit > Combined Hamiltonian round): full suite without `test_data/` or pymatgen: 2732 passed, 163 skipped, 0 failed.*
@@ -93,6 +95,15 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## CI failure: label-shrink test broke on matplotlib 3.11 (2026-09-27)
+
+User: GitHub Actions `Tests` run showed one `F` at ~55% and stopped at 72% with no summary.
+
+- The `F` was `tests/test_gui_canvas.py::test_canvas_shrinks_labels_rather_than_clipping_them` (found by lining up CI's pass/skip pattern against a local run). CI does a fresh `pip install`, so it got **matplotlib 3.11.2**; local environments were on 3.10.x.
+- The code was fine. The test assumed a 1.4 x 0.9 in canvas can't hold the 16 pt x label, so `fit_labels_within_figure` would have to shrink it. On 3.10 `tight_layout` gives up at that size, but on 3.11 it fits the label (123 px wide in a 140 px figure), so nothing shrank and `assert 16.0 < 16` failed.
+- Fix: the test now uses 1.1 x 0.9 in, where the full-size label is **wider than the figure**, so geometry forces the shrink whatever the layout engine does. The test checks that premise itself and fails with a clear message if a future change breaks it. Settles at 13.6 pt on both versions.
+- CI stopping at 72% with no summary means the job was **cancelled**, either by `timeout-minutes: 30` or by `cancel-in-progress` when a newer push arrived. Check the run's annotation. If it was the timeout, the suite has outgrown 30 min on the runner; options are a higher timeout or `pytest-xdist` (`-n auto`), which would need checking against the Qt/offscreen fixtures.
 
 ## Multi-spectrum fitting: series, isotopes, fields (2026-09-26, fourth round)
 

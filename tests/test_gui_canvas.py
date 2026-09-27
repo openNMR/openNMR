@@ -2392,11 +2392,29 @@ def test_canvas_shrinks_labels_rather_than_clipping_them(qapp):
     # resize the font". tight_layout alone reserves room only when the
     # figure is big enough and quietly gives up when it is not -- and a
     # GUI canvas is sized by the window, so that is an ordinary state.
+    #
+    # The size is chosen so the full-size x label is *wider than the
+    # figure itself*: no layout engine can fit it, so a shrink is forced
+    # by geometry alone. An earlier version used 1.4 x 0.9 in, which
+    # relied on tight_layout giving up there -- true on matplotlib 3.10,
+    # but 3.11's tight_layout fits the 16 pt label into that figure, so
+    # nothing needed shrinking and the test failed on CI's fresh install.
+    # The precondition below keeps that from silently recurring.
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
     from opennmr.plotting import clipped_labels
 
     canvas = MplCanvas()
-    canvas.figure.set_size_inches(1.4, 0.9)
+    canvas.figure.set_size_inches(1.1, 0.9)
     canvas.show_spectrum(_make_1d())
+
+    probe = Figure(dpi=canvas.figure.dpi)
+    full = probe.text(0, 0, canvas.ax.get_xlabel(), fontsize=canvas._AXIS_LABELSIZE)
+    full_width = full.get_window_extent(FigureCanvasAgg(probe).get_renderer()).width
+    assert full_width > canvas.figure.bbox.width, (
+        "test premise broken: the full-size label now fits this figure, "
+        "so choose a smaller one"
+    )
 
     assert clipped_labels(canvas.figure) == []
     # Shrunk to achieve it, rather than the label being left hanging
