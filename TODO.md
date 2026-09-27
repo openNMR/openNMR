@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-27 (wheel guard + field input round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2952 passed, 162 skipped, 0 failed (13 new tests in `test_gui_field_and_wheel.py`).*
+
 *2026-09-27 (adiabatic pulses + tensor pictures round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2939 passed, 162 skipped, 0 failed (39 new tests in `test_bloch_adiabatic.py`, `test_tensor_views.py`, `test_gui_adiabatic_tensors.py`).*
 
 *2026-09-27 (usability round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2900 passed, 162 skipped, 0 failed (new: `test_gui_usability.py`, 4 notes-drawer tests).*
@@ -103,6 +105,15 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## The wheel never changes a value box; Simulate takes nucleus + field (2026-09-27)
+
+User: scrolling with the pointer over a box (e.g. the Larmor frequency) changed its value -- "very annoying (and may cause unwanted problems)"; and Simulate should take the nucleus and the field in T rather than a Larmor frequency.
+
+- **Wheel guard** (`gui/widgets/wheel_guard.py`, installed once on the application by `MainWindow`): a wheel event aimed at a spin box, combo box or slider (or a spin box's own line edit) is never delivered to it; it goes to the nearest scroll area, so the panel scrolls. Even for a focused box (a focused-only rule would still change a box the user had just typed in and then scrolled over). Typing, arrow keys, spin buttons and drop-downs unchanged. Left alone: scroll bars, open drop-down lists, the plots (wheel zooms), the phase dials (`DragHandle`, whose wheel nudge is documented).
+- **Field input** (`gui/widgets/field_input.py`): `link_field` puts a "Field B0 (T)" row (with the magnet's 1H frequency beside it) before the Larmor row of Simulate > CSA, Quadrupolar and Combined Hamiltonian; the Larmor box becomes a read-only result, nu0 = |gamma|/2pi B0, and stays what every simulation reads (no simulation code changed). Changing the nucleus keeps the field (same magnet). Setting the Larmor frequency from code (fit results sent to Simulate, restored panels) moves the field to match. Fit panels keep taking the Larmor frequency from the spectrum.
+- **Seeding from a spectrum changed**: the Simulate panels now get the *field*, B0 = SFO1 / gamma of the spectrum's own nucleus, so a 31P spectrum puts a 23Na simulation on the same magnet at 23Na's frequency (before, the 31P frequency was copied into the 23Na simulation). Not seeded once the user has typed or stepped the field (`FieldSpinBox.userEdited`). `test_main_window_simulation_controls_are_seeded_from_the_selected_spectrum` rewritten for this.
+- 17O and other negative-gamma nuclei: the Larmor frequency is the magnitude.
 
 ## Adiabatic pulses in the Bloch simulator; 3D tensor pictures (2026-09-27)
 

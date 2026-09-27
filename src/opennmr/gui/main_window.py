@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QColorDialog
 from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.side_drawer import SideDrawer
+from .widgets.field_input import link_field
+from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
 from .compare_2d import Compare2DControls
 from ..notebook import notes as nb_notes
@@ -341,6 +343,9 @@ class MainWindow(QMainWindow):
         # so it has to run before any canvas -- and therefore any
         # plot -- is created, not after.
         plotting.apply_default_font("Arial")
+        # The wheel scrolls panels; it never changes a value box it passes
+        # over (explicit user request -- see widgets/wheel_guard.py).
+        wheel_guard.install()
         # Soften the square corners. Idempotent and applied here as
         # well as in app.main(), so an embedded MainWindow (and the
         # test suite, which never goes through main()) looks the same
@@ -11361,6 +11366,7 @@ class MainWindow(QMainWindow):
         self.combined_tensor_controls = TensorViewControls(self._combined_tensor_site,
                                                            self._draw_tensor_picture)
         self.combined_sim_panel.layout().addWidget(self.combined_tensor_controls)
+        self.combined_sim_field_link = self._link_panel_field(self.combined_sim_panel)
         self._combined_sim_section = CollapsibleSection(
             "Combined Hamiltonian", content=self.combined_sim_panel)
         layout.addWidget(self._combined_sim_section)
@@ -11576,6 +11582,17 @@ class MainWindow(QMainWindow):
         self._show_side_tab("Simulate")
         panel.simulate()
 
+    @staticmethod
+    def _link_panel_field(panel):
+        """Field (T) in front of a Combined-Hamiltonian-style panel's
+        Larmor box (its ``larmor_spin`` and ``nucleus_combo``)."""
+        from PySide6.QtWidgets import QFormLayout
+        for form in panel.findChildren(QFormLayout):
+            if form.getWidgetPosition(panel.larmor_spin)[0] >= 0:
+                return link_field(form, panel.larmor_spin, panel.nucleus_combo.currentText,
+                                  panel.nucleus_combo.currentTextChanged)
+        return None
+
     # ---- tensor pictures (Simulate > CSA / Quadrupolar / Combined) ------
 
     def _draw_tensor_picture(self, draw) -> None:
@@ -11604,7 +11621,7 @@ class MainWindow(QMainWindow):
             raise ValueError("enter a recognised nucleus (e.g. '27Al').")
         larmor = self.sim_quad_larmor_spin.value()
         if larmor <= 0:
-            raise ValueError("set the Larmor frequency (quadrupolar shifts in ppm depend on it).")
+            raise ValueError("set the field (quadrupolar shifts in ppm depend on it).")
         site = ch.Site(nucleus, delta_iso=self.sim_quad_diso_spin.value(),
                        spin=self.sim_quad_spin_spin.value(), label=f"{nucleus} site")
         site.add_quadrupolar(C_Q=self.sim_quad_cq_spin.value(), eta_Q=self.sim_quad_eta_spin.value())
@@ -12202,6 +12219,12 @@ class MainWindow(QMainWindow):
             "Seeded from the selected spectrum's own SFO1 where one is "
             "selected. Not needed for the static lineshape.")
         form.addRow("Larmor frequency:", self.sim_csa_larmor_spin)
+        # Enter the field; the Larmor frequency follows from the nucleus
+        # (explicit user request -- widgets/field_input.py).
+        self.sim_csa_field_link = link_field(
+            form, self.sim_csa_larmor_spin, lambda: self.sim_csa_nucleus_edit.text(),
+            self.sim_csa_nucleus_edit.textChanged)
+        self.sim_csa_field_spin = self.sim_csa_field_link.field_spin
 
         self.sim_csa_lineshape_combo = QComboBox()
         self.sim_csa_lineshape_combo.addItem("Gaussian", "gaussian")
@@ -12311,7 +12334,7 @@ class MainWindow(QMainWindow):
         ``_refresh_csa_controls``."""
         is_static = bool(self.sim_csa_regime_combo.currentData())
         self.sim_csa_mas_spin.setEnabled(not is_static)
-        self.sim_csa_larmor_spin.setEnabled(not is_static)
+        self.sim_csa_field_link.setEnabled(not is_static)
         self.sim_csa_eta_spin.setEnabled(
             self.sim_csa_lineshape_combo.currentData() == "pseudo_voigt")
 
@@ -12418,6 +12441,10 @@ class MainWindow(QMainWindow):
             "The observed nucleus's Larmor frequency (its SFO1). Seeded "
             "from the selected spectrum's own SFO1 where one is selected.")
         form.addRow("Larmor frequency:", self.sim_quad_larmor_spin)
+        self.sim_quad_field_link = link_field(
+            form, self.sim_quad_larmor_spin, lambda: self.sim_quad_nucleus_combo.currentText(),
+            self.sim_quad_nucleus_combo.currentTextChanged)
+        self.sim_quad_field_spin = self.sim_quad_field_link.field_spin
 
         self.sim_quad_regime_combo = QComboBox()
         self.sim_quad_regime_combo.addItem("Static powder", "static")
@@ -12568,10 +12595,12 @@ class MainWindow(QMainWindow):
         sfo1 = getattr(spectrum.metadata, "sfo1", None)
         nucleus = getattr(spectrum.metadata, "nucleus", None)
         if sfo1:
-            if hasattr(self, "sim_csa_larmor_spin") and not self.sim_csa_larmor_spin.value():
-                self.sim_csa_larmor_spin.setValue(sfo1)
-            if hasattr(self, "sim_quad_larmor_spin") and not self.sim_quad_larmor_spin.value():
-                self.sim_quad_larmor_spin.setValue(sfo1)
+            # The field, from the spectrum's own nucleus -- right whatever
+            # nucleus a panel simulates -- unless the user set it.
+            for name in ("sim_csa_field_link", "sim_quad_field_link", "combined_sim_field_link"):
+                link = getattr(self, name, None)
+                if link is not None:
+                    link.seed_from_spectrum(sfo1, nucleus)
         if nucleus:
             if hasattr(self, "sim_csa_nucleus_edit") and not self.sim_csa_nucleus_edit.text():
                 self.sim_csa_nucleus_edit.setText(nucleus)
@@ -12663,8 +12692,9 @@ class MainWindow(QMainWindow):
             if larmor_mhz <= 0:
                 QMessageBox.warning(
                     self, "Simulate CSA",
-                    "The finite-MAS lineshape needs a Larmor frequency, to "
-                    "convert sideband spacing from Hz to ppm.")
+                    "The finite-MAS lineshape needs the nucleus and the field "
+                    "(for the Larmor frequency), to convert sideband spacing from "
+                    "Hz to ppm.")
                 return
             result = notebook_simulations.finite_mas_csa_spectrum(
                 csa, ppm_axis, larmor_Hz=larmor_mhz * 1.0e6, mas_Hz=mas_hz,
@@ -12736,7 +12766,8 @@ class MainWindow(QMainWindow):
         if larmor_mhz <= 0:
             QMessageBox.warning(
                 self, "Simulate quadrupolar",
-                "Simulating a quadrupolar pattern needs a Larmor frequency.")
+                "Simulating a quadrupolar pattern needs the field (Field B₀), "
+                "for the Larmor frequency.")
             return
         spin_i = self.sim_quad_spin_spin.value()
         c_q_hz = self.sim_quad_cq_spin.value() * 1.0e6

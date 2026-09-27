@@ -15745,47 +15745,48 @@ def test_main_window_simulate_quadrupolar_compare_orders_draws_all_three(qapp):
 
 def test_main_window_simulation_controls_are_seeded_from_the_selected_spectrum(qapp):
     """Same "seeded, never forced" pattern as the CSA/Dipolar fitting
-    section's own MAS-rate seeding: a spectrum's SFO1/nucleus fill an
-    empty field, but never overwrite one the user already set."""
+    section's own MAS-rate seeding: a spectrum's field (from its SFO1 and
+    its own nucleus) and nucleus fill the Simulate panels, but never
+    overwrite a field or nucleus the user set.
+
+    Since 2026-09-27 the panels take the field (T) and compute the Larmor
+    frequency from it for their own nucleus (explicit user request), so
+    what is seeded is the magnet's field, not a frequency: a 31P spectrum
+    at 161.9 MHz puts a 23Na simulation on the same magnet at 23Na's
+    frequency, not at 161.9 MHz."""
+    from PySide6.QtTest import QTest
+    from opennmr.notebook.utils import find_gamma
     window = MainWindow()
     axis = NMRAxis(kind="frequency", ppm=np.linspace(0, 10, 8))
     metadata = NMRMetadata(vendor="bruker", nucleus="31P", sfo1=161.9)
     spectrum = NMRSpectrum(data=np.zeros(8), axes=[axis], metadata=metadata)
     window._add_derived_spectrum(spectrum, "test")
 
-    assert window.sim_csa_larmor_spin.value() == pytest.approx(161.9)
-    assert window.sim_quad_larmor_spin.value() == pytest.approx(161.9)
+    b0 = 161.9e6 / find_gamma("31P")["gamma"]
     assert window.sim_csa_nucleus_edit.text() == "31P"
+    assert window.sim_csa_field_spin.value() == pytest.approx(b0, abs=1e-4)
+    assert window.sim_csa_larmor_spin.value() == pytest.approx(161.9, abs=1e-3)
+    assert window.sim_quad_field_spin.value() == pytest.approx(b0, abs=1e-4)
     # 31P is spin-1/2, so it has no quadrupole moment and must NOT seed
-    # the quadrupolar simulator: filling it would pair a nuclide this
-    # simulation cannot run for with a Spin I describing a different
-    # one. The CSA box above, which any nucleus is valid for, is seeded.
+    # the quadrupolar simulator's nucleus.
     assert window.sim_quad_nucleus_combo.currentText() == ""
 
-    # A value the user already entered is not overwritten by a second
-    # selection change. The quadrupolar fields are reset to
-    # empty/zero here first -- after the first spectrum above, they
-    # were already auto-seeded to 161.9/"31P", so left alone they
-    # would (correctly) stay there rather than update, since the
-    # seeding check is "is this field currently empty", not "was
-    # this field ever auto-filled before". Clearing them simulates a
-    # field the user genuinely hasn't touched, so this second
-    # selection is the one that seeds them.
-    window.sim_csa_larmor_spin.setValue(400.0)
+    # A field the user typed is not overwritten by a later selection; one
+    # they left alone follows the new spectrum.
+    # (The field only matters -- and is only editable -- for finite MAS.)
+    window.sim_csa_regime_combo.setCurrentIndex(window.sim_csa_regime_combo.findData(False))
+    field = window.sim_csa_field_spin
+    field.lineEdit().selectAll()
+    QTest.keyClicks(field.lineEdit(), "14.1")
     window.sim_csa_nucleus_edit.setText("1H")
-    window.sim_quad_larmor_spin.setValue(0.0)
-    window.sim_quad_nucleus_combo.setCurrentText("")
-    axis2 = NMRAxis(kind="frequency", ppm=np.linspace(0, 10, 8))
     metadata2 = NMRMetadata(vendor="bruker", nucleus="23Na", sfo1=105.8)
-    spectrum2 = NMRSpectrum(data=np.zeros(8), axes=[axis2], metadata=metadata2)
+    spectrum2 = NMRSpectrum(data=np.zeros(8), axes=[axis], metadata=metadata2)
     window._add_derived_spectrum(spectrum2, "test2")
 
-    assert window.sim_csa_larmor_spin.value() == pytest.approx(400.0)
+    assert window.sim_csa_field_spin.value() == pytest.approx(14.1)
     assert window.sim_csa_nucleus_edit.text() == "1H"
-    # The now-empty quadrupolar fields do get seeded from the newer
-    # selection.
-    assert window.sim_quad_larmor_spin.value() == pytest.approx(105.8)
     assert window.sim_quad_nucleus_combo.currentText() == "23Na"
+    assert window.sim_quad_larmor_spin.value() == pytest.approx(105.8, abs=1e-3)
 
 
 # ============================================================

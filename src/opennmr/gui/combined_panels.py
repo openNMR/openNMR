@@ -578,7 +578,7 @@ class CombinedHamiltonianPanel(QWidget):
     def settings(self):
         larmor = self.larmor_spin.value()
         if larmor <= 0:
-            raise ValueError("Set the Larmor frequency.")
+            raise ValueError("Set the field (or the Larmor frequency).")
         mas = self.mas_spin.value() if self.regime_combo.currentData() == "mas" else 0.0
         if self.regime_combo.currentData() == "mas" and mas <= 0:
             raise ValueError("The MAS lineshape needs a spinning rate: set MAS rate, or switch "
