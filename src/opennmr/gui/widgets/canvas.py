@@ -3883,7 +3883,8 @@ class MplCanvas(QWidget):
 
     def plot_kind(self) -> str | None:
         """The kind of plot showing -- ``"1d"``, ``"2d"``,
-        ``"pseudo2d"``, ``"compare"`` -- or ``None`` before the first
+        ``"pseudo2d"``, ``"compare"``, ``"curve"`` (relaxation/diffusion
+        fits, parameter trends, DNP profiles) -- or ``None`` before the first
         one (or for a view with no per-kind default, e.g. a FID)."""
         return self._plot_kind
 
@@ -5778,7 +5779,12 @@ class MplCanvas(QWidget):
         modified**: this is a display transform, and the stored fit
         stays in seconds. A caller reading an x back off this axes (the
         right-click "Exclude Nearest Point") has to multiply by the
-        same factor."""
+        same factor.
+
+        A ``"curve"`` plot (see :meth:`_enter_plot_kind`): announced
+        before drawing, so a saved default style for curves is in place
+        when it is drawn. The data points take the trace colour."""
+        self._enter_plot_kind("curve")
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
@@ -5816,7 +5822,7 @@ class MplCanvas(QWidget):
             order = np.argsort(t)
             self.ax.plot(t[order], np.asarray(y_fit)[order], "--", color="red",
                           linewidth=2.0, label="Fit", zorder=3)
-        self.ax.plot(t, y, "o", color="black", markersize=8.0,
+        self.ax.plot(t, y, "o", color=self._trace_color, markersize=8.0,
                       label=result.get("peak_label", result.get("model", "Data")), zorder=2)
         if excluded_points is not None and len(excluded_points[0]):
             t_excluded, y_excluded = excluded_points
@@ -5831,6 +5837,7 @@ class MplCanvas(QWidget):
         plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
+        self._apply_current_axis_style()
         self._apply_view_options()
         # Crosshairs here too: reading a value off this plot is
         # exactly what it is for (curve fit).
@@ -5843,7 +5850,9 @@ class MplCanvas(QWidget):
         """One fitted parameter along a set of experiments (a multi-
         spectrum fit), with 1-sigma error bars: against ``x`` when every
         experiment has a numeric one, else in fitting order with each
-        experiment named on the axis."""
+        experiment named on the axis. A ``"curve"`` plot, like
+        :meth:`show_relaxation_fit`."""
+        self._enter_plot_kind("curve")
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
@@ -5864,11 +5873,11 @@ class MplCanvas(QWidget):
             xs = np.asarray(x, dtype=float)
             order = np.argsort(xs)
             self.ax.errorbar(xs[order], y[order], yerr=None if err is None else err[order], fmt="o-",
-                             color="black", markersize=6.0, capsize=3, linewidth=1.2)
+                             color=self._trace_color, markersize=6.0, capsize=3, linewidth=1.2)
             self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
         else:
             xs = np.arange(len(y))
-            self.ax.errorbar(xs, y, yerr=err, fmt="o-", color="black", markersize=6.0, capsize=3,
+            self.ax.errorbar(xs, y, yerr=err, fmt="o-", color=self._trace_color, markersize=6.0, capsize=3,
                              linewidth=1.2)
             self.ax.set_xticks(xs)
             self.ax.set_xticklabels(list(point_labels or [str(i + 1) for i in xs]),
@@ -5882,17 +5891,26 @@ class MplCanvas(QWidget):
         plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
                                    minor=self._minor_ticks_visible, labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = False
+        self._apply_current_axis_style()
         self._apply_view_options()
         self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
 
-    def show_external_plot(self, draw) -> None:
+    def show_external_plot(self, draw, kind: str | None = None) -> None:
         """A figure drawn by a notebook plotting function -- ``draw(figure)``
         receives this canvas's own (cleared) figure -- so the GUI shows
         exactly the figure a notebook call produces, rather than a second
         drawing of the same thing that could drift from it. Used by
         Compare > DNP (``opennmr.notebook.dnp``'s plots).
+
+        ``kind`` : the plot kind to announce first (``"curve"`` for a
+        profile, ``"compare"`` for overlaid spectra), so its saved default
+        style is in place. Whatever the kind, the canvas's current style
+        -- label size, font, ticks, spine width, minor ticks, legend -- is
+        applied to the finished figure, so it matches the rest of the app
+        and follows the Plot Style panel. ``draw`` may read
+        :meth:`style_settings` for what only it can apply (colours).
 
         View state is reset as for :meth:`show_parameter_trend`, so
         nothing from a previous spectrum/contour view survives; pick and
@@ -5909,9 +5927,15 @@ class MplCanvas(QWidget):
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self._preview_1d_spectrum = None
+        if kind is not None:
+            self._enter_plot_kind(kind)
         self._clear_figure()
         draw(self.figure)
         self.ax = self.figure.axes[0] if self.figure.axes else self.figure.add_subplot(111)
+        self._apply_current_axis_style()
+        if self._grid_visible:
+            for ax in self.figure.axes:
+                ax.grid(True, alpha=0.3)
         self._legend_visible = False
         self._crosshair_ready = True
         self._apply_layout()

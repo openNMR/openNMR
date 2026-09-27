@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-27 (usability round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2900 passed, 162 skipped, 0 failed (new: `test_gui_usability.py`, 4 notes-drawer tests).*
+
 *2026-09-27 (DNP round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2885 passed, 162 skipped, 0 failed (43 new tests in `test_dnp.py`, `test_gui_dnp.py`; with the DNP sweep in `test_data/` 2886 passed).*
 
 *2026-09-27 (browser multi-select round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2843 passed, 161 skipped, 0 failed (10 new tests in `test_data_browser.py`).*
@@ -99,6 +101,17 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Usability: collapsed sections, toolbar order, curve styles, notes drawer (2026-09-27)
+
+User: (1) every collapsible box collapsed by default, "it will look cleaner"; (2) the default plot style should apply to DNP profile plots and relaxation curves (plots of integrals etc.); (3) toolbar order Open, Process, Compare, Fit, Simulate, Dynamics, Adv. Proc., Apply, Settings; (4) Title/notes was small and took space from Open experiments -- move it to a section by the plot tabs, or a panel that opens from a long thin button at the window's right edge (click to open, click the border to close), or Ctrl/Cmd+T.
+
+- **Collapsed by default**: `CollapsibleSection(expanded=False)` is now the default (all 25 sections). Read as the *initial* state: a section the user opened stays open when they switch panels and come back -- re-collapsing on every switch would throw away their working state. Say if the other reading was meant. Code that sends the user to a section ("Open in Simulate", restoring a simulation) opens it itself, as before.
+- **Toolbar order** as asked. Panels are still *built* in the old order (builders read each other's widgets) and *added* in the new one; Ctrl+1..8 follow the toolbar.
+- **Curve styles**: a new plot kind "curve" ("Curves & profiles" in Settings ▸ Default plot styles) for relaxation/diffusion fits, parameter trends and DNP profiles. Until a curve default is saved, the **1D default** is used (`_FIGURE_STYLE_FALLBACK`). Before this, those plots announced no kind, so no saved default ever reached them. Data points now take the trace colour. DNP figures (notebook functions drawn on the GUI canvas through `show_external_plot(draw, kind)`) get the canvas style (fonts, ticks, spines, minor ticks, legend, grid); the profile takes the trace colour and label size, the sweep spectra take the Compare palette (via `stack_colors`, ordered by field; "black" falls back to viridis, since one colour cannot show which spectrum is which field).
+- **Title / notes drawer**: `widgets/side_drawer.py`. A 22 px strip at the far right ("▴ Title / notes ▴", vertical); click to open a resizable panel beside the plot, click the strip again to close; View ▸ Title / Notes, **Ctrl+T (Cmd+T on macOS)**. Closed by default; width remembered while the window is open; closing saves a pending edit; opening puts the cursor in the notes. Open experiments now has the whole lower box. Rejected: a tab next to FID/Spectrum -- it would replace the plot while writing notes about it.
+- Test note: `test_home_after_a_drag_pan` compared axis limits exactly; the 22 px strip changed Home's re-derived autoscale limits by 3e-16 relative. Now compared to 1e-12 (reason in the test).
+- CLAUDE.md's GUI-layout section updated (toolbar, sections, notes drawer, plot kinds).
 
 ## DNP: enhancement factors and field-sweep profiles (2026-09-27)
 

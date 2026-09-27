@@ -12,10 +12,18 @@ Each instance is independent -- opening one does **not** close any
 other (an accordion, where only one section can be open at a time,
 was considered and explicitly turned down: several of these panels
 group controls a user may well want visible side by side, e.g.
-Phase and Reference while working through Processing). Every section
-starts expanded, matching how these controls were all visible before
-this widget existed at all -- collapsing is something the user opts
-into per section, not a new default they have to undo everywhere.
+Phase and Reference while working through Processing).
+
+**Every section starts collapsed** (explicit user request, 2026-09-27:
+"all collapsible boxes should, on opening a menu, be collapsed by
+default -- it will look cleaner"). A panel then opens as a short list
+of headings to choose from. It originally started expanded, to match
+how the controls were all visible before this widget existed; that
+made every panel a long scroll on first sight. Code that sends the
+user to a particular section (e.g. "Open in Simulate") opens that
+section itself with :meth:`setExpanded`. A section the user opened
+stays open when they switch panels and come back -- collapsing their
+working state on every switch would undo what they had just set up.
 """
 
 from __future__ import annotations
@@ -53,8 +61,8 @@ class CollapsibleSection(QWidget):
     layout surgery). Pass nothing and call :meth:`setContentWidget`
     later if the content isn't built yet.
 
-    ``expanded`` -- initial state, default ``True`` (see module
-    docstring for why collapsing is opt-in, not the default).
+    ``expanded`` -- initial state, default ``False`` (see the module
+    docstring).
     """
 
     #: Emitted with the new expanded state whenever it changes, by a
@@ -62,7 +70,7 @@ class CollapsibleSection(QWidget):
     toggled = Signal(bool)
 
     def __init__(self, title: str, content: QWidget | None = None,
-                 parent: QWidget | None = None, expanded: bool = True) -> None:
+                 parent: QWidget | None = None, expanded: bool = False) -> None:
         super().__init__(parent)
         self._title = title
         self._content: QWidget | None = None

@@ -95,11 +95,16 @@ class DnpPanel(QWidget):
     ``arm(mode)``: turn the Compare view's pick (``"peak"``), region
     (``"region"``) or neither (``None``) mode on;
     ``store(kind, record, indices)``: keep a result with those spectra,
-    so it is logged and saved."""
+    so it is logged and saved;
+    ``style(which)``: the current plot style (``MplCanvas.style_settings``)
+    of the "spectra" or "profile" view, read while drawing so the
+    colours follow Plot Style and the saved defaults."""
 
-    def __init__(self, entries, draw_spectra, draw_profile, arm, store, parent=None) -> None:
+    def __init__(self, entries, draw_spectra, draw_profile, arm, store, style=None,
+                 parent=None) -> None:
         super().__init__(parent)
         self._entries = entries
+        self._style = style or (lambda _which: {})
         self._draw_spectra = draw_spectra
         self._draw_profile = draw_profile
         self._arm = arm
@@ -602,7 +607,11 @@ class DnpPanel(QWidget):
             fields = None
 
         def draw(figure):
+            cmap = self._style("spectra").get("compare_colormap") or "viridis"
+            if cmap == "black":
+                cmap = "viridis"        # one colour cannot show which spectrum is which field
             dnp.plot_sweep_spectra(spectra, result=result, aligned=aligned, figure=figure,
+                                   cmap=cmap,
                                    xlim_khz=(centre - 1.5 * window, centre + 1.5 * window))
             ax = figure.axes[0]
             if result is None:
@@ -710,8 +719,11 @@ class DnpPanel(QWidget):
             quantity = "intensity"
 
         def draw(figure):
+            style = self._style("profile")
             dnp.plot_field_profile(result, quantity=quantity, normalise=normalise,
-                                   field_unit=field_unit, relative=relative, figure=figure)
+                                   field_unit=field_unit, relative=relative, figure=figure,
+                                   color=style.get("trace_color") or "black",
+                                   fontsize=style.get("labelsize") or 12.0)
         self._draw_profile(draw)
 
     def export_csv(self) -> None:

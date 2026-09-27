@@ -81,7 +81,12 @@ def test_home_after_a_drag_pan(qapp, xpulse_window):
         canvas.canvas.callbacks.process(name, MouseEvent(name, canvas.canvas, x, y0, button=1))
     assert _limits(canvas) != full
     canvas.toolbar.home()
-    assert _limits(canvas) == full
+    # To 1e-12, not exactly: for an autoscaled axis Home re-derives the
+    # limits from the (display-downsampled) data rather than replaying
+    # stored numbers, and the last bit can differ with the canvas's
+    # pixel width (it did, by 3e-16 relative, when the Title / notes
+    # strip narrowed the plot by 22 px).
+    assert np.asarray(_limits(canvas)) == pytest.approx(np.asarray(full), rel=1e-12, abs=1e-15)
 
 
 def test_home_is_the_new_plots_view_not_the_last_ones(qapp, xpulse_window, tmp_path):

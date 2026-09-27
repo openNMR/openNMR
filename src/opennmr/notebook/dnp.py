@@ -1028,9 +1028,13 @@ def plot_sweep_spectra(spectra, result: dict | None = None, aligned: bool = Fals
     (kHz) -- the axis to pick the line or drag a region on. With a
     ``result``, the tracked line positions (and regions) are marked;
     ``aligned=True`` also shifts each spectrum so the tracked lines
-    coincide (display only). Colours run along the field."""
+    coincide (display only). Colours run along the field, from palette
+    ``cmap`` -- any name the Compare stack accepts (a matplotlib map,
+    'black', 'diverging', or a qualitative palette such as 'okabe_ito'),
+    through :func:`opennmr.plotting.style.stack_colors`, so the
+    too-light end of a map is never used."""
     import matplotlib.pyplot as plt
-    from ..plotting.style import apply_spine_style, apply_tick_style
+    from ..plotting.style import apply_spine_style, apply_tick_style, stack_colors
 
     spectra = list(spectra)
     if figure is None:
@@ -1042,14 +1046,15 @@ def plot_sweep_spectra(spectra, result: dict | None = None, aligned: bool = Fals
         fields = np.array([r["field_T"] for r in result["rows"]])
     else:
         fields = np.array([field_from_sfo1(s) for s in spectra])
-    span = np.ptp(fields) or 1.0
-    colours = plt.get_cmap(cmap)
+    palette = stack_colors(len(spectra), cmap)
+    rank = np.empty(len(spectra), dtype=int)
+    rank[np.argsort(fields, kind="stable")] = np.arange(len(spectra))
     for k, s in enumerate(spectra):
         off = carrier_offset_hz(s) / 1e3
         shift = 0.0
         if aligned and result is not None:
             shift = result["rows"][k]["shift_Hz"] / 1e3
-        colour = colours(0.9 * (fields[k] - fields.min()) / span)
+        colour = palette[rank[k]]
         ax.plot(off - shift, s.data, color=colour, linewidth=0.8,
                 label=(labels[k] if labels else None))
         if result is not None and not aligned:

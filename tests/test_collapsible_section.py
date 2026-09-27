@@ -16,50 +16,52 @@ def qapp():
 # the widget itself, which is exactly what expand/collapse toggles.
 
 
-def test_starts_expanded_by_default(qapp):
+def test_starts_collapsed_by_default(qapp):
+    # Explicit user request: every collapsible box starts collapsed, so a
+    # panel opens as a short list of headings.
     content = QLabel("body")
     section = CollapsibleSection("FID Processing", content=content)
-    assert section.isExpanded() is True
-    assert section._body.isHidden() is False
+    assert section.isExpanded() is False
+    assert section._body.isHidden() is True
     assert section.contentWidget() is content
 
 
-def test_can_start_collapsed(qapp):
+def test_can_start_expanded(qapp):
     content = QLabel("body")
-    section = CollapsibleSection("Phase", content=content, expanded=False)
-    assert section.isExpanded() is False
-    assert section._body.isHidden() is True
+    section = CollapsibleSection("Phase", content=content, expanded=True)
+    assert section.isExpanded() is True
+    assert section._body.isHidden() is False
 
 
 def test_clicking_header_toggles_body_visibility(qapp):
     content = QLabel("body")
     section = CollapsibleSection("Reference", content=content)
-    assert section._body.isHidden() is False
-
-    section._header.click()
-    assert section.isExpanded() is False
     assert section._body.isHidden() is True
 
     section._header.click()
     assert section.isExpanded() is True
     assert section._body.isHidden() is False
+
+    section._header.click()
+    assert section.isExpanded() is False
+    assert section._body.isHidden() is True
 
 
 def test_set_expanded_matches_click_behaviour(qapp):
     section = CollapsibleSection("VOCS", content=QLabel("x"))
-    section.setExpanded(False)
-    assert section.isExpanded() is False
-    assert section._body.isHidden() is True
     section.setExpanded(True)
     assert section.isExpanded() is True
     assert section._body.isHidden() is False
+    section.setExpanded(False)
+    assert section.isExpanded() is False
+    assert section._body.isHidden() is True
 
 
 def test_set_expanded_to_current_state_is_a_noop(qapp):
     section = CollapsibleSection("Imaging", content=QLabel("x"))
     seen = []
     section.toggled.connect(seen.append)
-    section.setExpanded(True)  # already expanded
+    section.setExpanded(False)  # already collapsed
     assert seen == []
 
 
@@ -69,7 +71,7 @@ def test_toggled_signal_emits_new_state(qapp):
     section.toggled.connect(seen.append)
     section._header.click()
     section._header.click()
-    assert seen == [False, True]
+    assert seen == [True, False]
 
 
 def test_independent_sections_do_not_affect_each_other(qapp):
@@ -78,10 +80,10 @@ def test_independent_sections_do_not_affect_each_other(qapp):
     a = CollapsibleSection("Curve Fitting", content=QLabel("a"))
     b = CollapsibleSection("Imaging", content=QLabel("b"))
 
-    a.setExpanded(False)
+    a.setExpanded(True)
 
-    assert a.isExpanded() is False
-    assert b.isExpanded() is True
+    assert a.isExpanded() is True
+    assert b.isExpanded() is False
 
 
 def test_header_shows_the_title_text(qapp):

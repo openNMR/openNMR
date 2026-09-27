@@ -212,11 +212,66 @@ def test_notes_save_failure_is_reported_not_raised(qapp, tmp_path, monkeypatch):
     assert "Couldn't save" in window.notes_editor.location_label.text()
 
 
-def test_notes_box_hidden_with_open_experiments_on_simulate(qapp):
+def test_notes_open_from_the_right_edge_not_under_open_experiments(qapp):
+    # User report: under Open experiments the notes box was "very small"
+    # and took the list's space. It now opens from a strip at the
+    # window's right edge, closed by default.
     window = MainWindow()
-    assert window.notes_editor.parent() is not None
-    # It lives inside the Open experiments box, so it shows and hides with it.
     widget = window.notes_editor
     while widget is not None and widget is not window.open_experiments_box:
         widget = widget.parentWidget()
-    assert widget is window.open_experiments_box
+    assert widget is None                                   # not in the list's box
+    drawer = window.notes_drawer
+    assert drawer.panel.isAncestorOf(window.notes_editor)
+    assert drawer.splitter.indexOf(window.canvas_tabs) == 0  # the plot, then the notes
+    assert not drawer.isOpen()
+    assert drawer.panel.isHidden()
+
+
+def test_notes_strip_opens_and_closes_the_panel(qapp):
+    window = MainWindow()
+    drawer = window.notes_drawer
+    drawer.strip.click()
+    assert drawer.isOpen() and not drawer.panel.isHidden()
+    assert window.notes_drawer_action.isChecked()           # View menu follows
+    drawer.strip.click()                                    # the strip, at the border, shuts it
+    assert not drawer.isOpen() and drawer.panel.isHidden()
+    assert not window.notes_drawer_action.isChecked()
+
+
+def test_ctrl_t_toggles_the_notes_panel(qapp):
+    from PySide6.QtGui import QKeySequence
+    window = MainWindow()
+    action = window.notes_drawer_action
+    # Ctrl+T -- Qt shows and binds it as Cmd+T on macOS.
+    assert action.shortcut() == QKeySequence("Ctrl+T")
+    action.trigger()
+    assert window.notes_drawer.isOpen()
+    action.trigger()
+    assert not window.notes_drawer.isOpen()
+
+
+def test_closing_the_notes_panel_saves_a_pending_edit(qapp, tmp_path):
+    a = _make_1d_dataset(tmp_path, name="a")
+    window = MainWindow()
+    window._load(a, vendor="bruker")
+    window._select_single_row(0)
+    window.notes_drawer.setOpen(True)
+    window.notes_editor.edit.setPlainText("typed, then closed")
+    assert window.notes_editor.is_dirty()
+    window.notes_drawer.setOpen(False)
+    assert io_bruker.read_title(a, 1) == "typed, then closed"
+
+
+def test_notes_panel_remembers_its_width(qapp):
+    window = MainWindow()
+    window.resize(1400, 900)
+    window.show()
+    qapp.processEvents()
+    drawer = window.notes_drawer
+    drawer.setOpen(True)
+    total = sum(drawer.splitter.sizes())
+    drawer.splitter.setSizes([total - 410, 410])
+    drawer.setOpen(False)
+    drawer.setOpen(True)
+    assert abs(drawer.splitter.sizes()[1] - 410) <= 2

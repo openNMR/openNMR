@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QColorDialog
 from .widgets.notes_editor import ExperimentNotesEditor
+from .widgets.side_drawer import SideDrawer
 from .cpmg_panel import CpmgProcessingPanel
 from .compare_2d import Compare2DControls
 from ..notebook import notes as nb_notes
@@ -729,46 +730,43 @@ class MainWindow(QMainWindow):
         # doesn't care whether a tab has an icon or not, so old
         # (text-only) and new (icon) tabs coexist fine mid-migration.
         self.side_tabs = tabs = WrappingTabWidget()
-        tabs.addTab(self._scrollable(self._build_load_save_compare_panel()), "Open",
-                    icon=_launcher_icon("launcher_load_save_compare.png"))
-        self._processing_tab_index = tabs.addTab(
-            self._scrollable(self._build_processing_tab()), "Process",
-            icon=_launcher_icon("launcher_processing.png"))
+        # The panels are *built* in their historical order -- later
+        # builders read widgets made by earlier ones -- and then *added*
+        # in the toolbar order below. The toolbar order is the user's
+        # (explicit request, 2026-09-27): "Open, Process, Compare, Fit,
+        # Simulate, Dynamics, Adv. Proc., Apply, Settings". Every
+        # ``_*_tab_index`` is taken from addTab, so it follows the order.
+        open_panel = self._scrollable(self._build_load_save_compare_panel())
+        processing_panel = self._scrollable(self._build_processing_tab())
         # Advanced Processing: VOCS and CPMG, each a collapsible section
         # (see _build_advanced_processing_panel).
-        tabs.addTab(self._scrollable(self._build_advanced_processing_panel()), "Adv. Proc.",
-                    icon=_launcher_icon("launcher_advanced_processing.png"))
-        # Fitting before Analysis/Relaxation: it is step 1 (measure an
-        # intensity per spectrum/slice), and the tab order is the
-        # workflow order. Replaces the old "Spectral Fitting" tab --
-        # Peak Picking (renamed "Isotropic (Gauss/Lor)") and
-        # Integration move here, plus CSA (renamed "CSA/Dipolar"),
-        # moved out of Analysis -- explicit user request collecting
-        # every *spectral* fit in one place, as three independent
-        # collapsible sections instead of two peer tabs plus a third
-        # sitting elsewhere.
-        self._fitting_tab_index = tabs.addTab(
-            self._scrollable(self._build_fitting_panel()), "Fit",
-            icon=_launcher_icon("launcher_fitting.png"))
-        tabs.addTab(self._scrollable(self._build_relaxation_panel()), "Dynamics",
-                    icon=_launcher_icon("launcher_relaxation.png"))
-        # Sixth of the seven launcher buttons: eNMR and Imaging, moved
-        # out of the old "Analysis" tab (now fully retired -- see
-        # _build_applications_panel) into their own collapsible
-        # sections -- explicit user request.
-        tabs.addTab(self._scrollable(self._build_applications_panel()), "Apply",
-                    icon=_launcher_icon("launcher_applications.png"))
-        # Last of the seven: genuinely new (not moved from an old tab)
-        # -- forward-simulate a CSA or quadrupolar powder pattern and
-        # export it to Open experiments -- explicit user request.
+        advanced_panel = self._scrollable(self._build_advanced_processing_panel())
+        # Fit: every *spectral* fit in one place (isotropic peaks,
+        # integration, CSA/Dipolar, J-coupling, quadrupolar, combined,
+        # multi-spectrum), each its own collapsible section.
+        fitting_panel = self._scrollable(self._build_fitting_panel())
+        dynamics_panel = self._scrollable(self._build_relaxation_panel())
+        # eNMR and Imaging (see _build_applications_panel).
+        applications_panel = self._scrollable(self._build_applications_panel())
         # Compare: its own tile (explicit user request), out of Open.
-        # After the data tiles and before Simulate, which works without
-        # any open data.
+        compare_panel = self._scrollable(self._build_compare_panel())
+        # Forward-simulate powder patterns etc. and export them to Open
+        # experiments.
+        simulations_panel = self._scrollable(self._build_simulations_panel())
+
+        tabs.addTab(open_panel, "Open", icon=_launcher_icon("launcher_load_save_compare.png"))
+        self._processing_tab_index = tabs.addTab(
+            processing_panel, "Process", icon=_launcher_icon("launcher_processing.png"))
         self._compare_tab_index = tabs.addTab(
-            self._scrollable(self._build_compare_panel()), "Compare",
-            icon=_launcher_icon("launcher_comparison.png"))
-        self._simulations_tab_index = tabs.addTab(self._scrollable(self._build_simulations_panel()), "Simulate",
-                    icon=_launcher_icon("launcher_simulations.png"))
+            compare_panel, "Compare", icon=_launcher_icon("launcher_comparison.png"))
+        self._fitting_tab_index = tabs.addTab(
+            fitting_panel, "Fit", icon=_launcher_icon("launcher_fitting.png"))
+        self._simulations_tab_index = tabs.addTab(
+            simulations_panel, "Simulate", icon=_launcher_icon("launcher_simulations.png"))
+        tabs.addTab(dynamics_panel, "Dynamics", icon=_launcher_icon("launcher_relaxation.png"))
+        tabs.addTab(advanced_panel, "Adv. Proc.",
+                    icon=_launcher_icon("launcher_advanced_processing.png"))
+        tabs.addTab(applications_panel, "Apply", icon=_launcher_icon("launcher_applications.png"))
         # No Output tab any more -- its controls live in the Plot Style
         # dialog (View ▸ Plot Style…, or right-click any plot). Built
         # here all the same, once, so every handler that reads
@@ -783,12 +781,11 @@ class MainWindow(QMainWindow):
         # Before any tab is current, so _style_target_canvases falls
         # back to every canvas and the saved defaults land everywhere.
         self._apply_saved_style_defaults()
-        # Settings, after the seven workflow buttons rather than among
-        # them: it is not a step in working up a spectrum. Explicit user
-        # request -- "a new settings tab, where users can define their
-        # default plot styles for 1-d, 2-d (etc) plots", and where the
-        # interface font size lives. Added after the style panel is
-        # built (its per-kind defaults are that panel's settings).
+        # Settings, last: it is not a step in working up a spectrum.
+        # Explicit user request -- "a new settings tab, where users can
+        # define their default plot styles for 1-d, 2-d (etc) plots", and
+        # where the interface font size lives. Added after the style
+        # panel is built (its per-kind defaults are that panel's settings).
         self._settings_tab_index = tabs.addTab(
             self._scrollable(self._build_settings_panel()), "Settings",
             icon=_launcher_icon("launcher_settings.png"))
@@ -813,9 +810,19 @@ class MainWindow(QMainWindow):
         self.left_splitter.setSizes([560, 180])
         self._sync_open_experiments_visibility(tabs.currentIndex())
 
+        # The plot, with the Title / notes panel opening from the
+        # window's right edge (a thin strip there; Ctrl/Cmd+T). Closed by
+        # default, so the plot has the full width until it is wanted.
+        notes_panel = QWidget()
+        notes_layout = QVBoxLayout(notes_panel)
+        notes_layout.setContentsMargins(6, 0, 4, 0)
+        notes_layout.addWidget(self.notes_editor)
+        self.notes_drawer = SideDrawer(self.canvas_tabs, notes_panel, "Title / notes")
+        self.notes_drawer.toggled.connect(self._on_notes_drawer_toggled)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.left_splitter)
-        splitter.addWidget(self.canvas_tabs)
+        splitter.addWidget(self.notes_drawer)
         # Both panels now get a share of any extra space from resizing
         # the window larger (canvas 3x the left panel's) -- previously
         # only the canvas did (stretch factor 0 is the QSplitter
@@ -1038,6 +1045,15 @@ class MainWindow(QMainWindow):
         # pan/zoom state, so these drive it rather than duplicating it --
         # the toolbar buttons stay in sync because they *are* the state.
         view_menu = menu_bar.addMenu("&View")
+        # Ctrl+T is Cmd+T on macOS (Qt maps Ctrl to Command there).
+        self.notes_drawer_action = QAction("&Title / Notes", self)
+        self.notes_drawer_action.setCheckable(True)
+        self.notes_drawer_action.setShortcut(QKeySequence("Ctrl+T"))
+        self.notes_drawer_action.setToolTip(
+            "Show or hide the selected experiment's title and notes, at the right of the plot.")
+        self.notes_drawer_action.triggered.connect(self.notes_drawer.setOpen)
+        view_menu.addAction(self.notes_drawer_action)
+        view_menu.addSeparator()
         pan_action = QAction("&Pan Mode", self)
         pan_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
         pan_action.setToolTip("Drag to pan the spectrum.")
@@ -1868,27 +1884,18 @@ class MainWindow(QMainWindow):
         self.open_experiments_box = QGroupBox("Open experiments")
         open_experiments_layout = QVBoxLayout(self.open_experiments_box)
         open_experiments_layout.setContentsMargins(4, 4, 4, 4)
-        # The selected experiment's title/notes under the list, in a
-        # splitter so either can be given the room (explicit user
-        # request: show the Bruker pdata/<procno>/title, editable, and
-        # a title of the same kind for every other format). Reading and
-        # writing is opennmr.notebook.notes, shared with notebook use.
+        # The selected experiment's title/notes (explicit user request:
+        # show the Bruker pdata/<procno>/title, editable, and a title of
+        # the same kind for every other format; reading and writing is
+        # opennmr.notebook.notes, shared with notebook use). Built here,
+        # shown in a panel that opens from the window's right edge (see
+        # __init__, self.notes_drawer): under this list it took the
+        # list's height and was itself too small to write in (user
+        # report, 2026-09-27).
         self.notes_editor = ExperimentNotesEditor()
         self.notes_editor.saved.connect(self._on_notes_saved)
         self.notes_editor.failed.connect(self._on_notes_save_failed)
-        self.open_experiments_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.open_experiments_splitter.setChildrenCollapsible(False)
-        # The list keeps its Remove/Clear buttons directly under it; the
-        # notes sit below both.
-        list_part = QWidget()
-        list_part_layout = QVBoxLayout(list_part)
-        list_part_layout.setContentsMargins(0, 0, 0, 0)
-        list_part_layout.addWidget(self.spectrum_list, 1)
-        self.open_experiments_splitter.addWidget(list_part)
-        self.open_experiments_splitter.addWidget(self.notes_editor)
-        self.open_experiments_splitter.setStretchFactor(0, 3)
-        self.open_experiments_splitter.setStretchFactor(1, 2)
-        open_experiments_layout.addWidget(self.open_experiments_splitter, 1)
+        open_experiments_layout.addWidget(self.spectrum_list, 1)
         # Model signals, not the view's: _select_single_row blocks the
         # view's signals, but every row added or removed still passes
         # through the model. A pending edit is saved before its row goes.
@@ -1906,7 +1913,7 @@ class MainWindow(QMainWindow):
         remove_row = QHBoxLayout()
         remove_row.addWidget(remove_button)
         remove_row.addWidget(clear_button)
-        list_part_layout.addLayout(remove_row)
+        open_experiments_layout.addLayout(remove_row)
 
         return tab
 
@@ -2079,7 +2086,8 @@ class MainWindow(QMainWindow):
         # not DNP.
         self.dnp_panel = DnpPanel(
             entries=self._dnp_entries, draw_spectra=self._dnp_draw_spectra,
-            draw_profile=self._dnp_draw_profile, arm=self._dnp_arm, store=self._store_dnp)
+            draw_profile=self._dnp_draw_profile, arm=self._dnp_arm, store=self._store_dnp,
+            style=self._dnp_style)
         self._dnp_section = CollapsibleSection("DNP", content=self.dnp_panel, expanded=False)
         self._dnp_section.toggled.connect(lambda expanded: expanded and self.dnp_panel.refresh())
         layout.addWidget(self._dnp_section)
@@ -2118,11 +2126,17 @@ class MainWindow(QMainWindow):
 
     def _dnp_draw_spectra(self, draw) -> None:
         self._dnp_show_canvas(self.compare_canvas)
-        self.compare_canvas.show_external_plot(draw)
+        self.compare_canvas.show_external_plot(draw, kind="compare")
 
     def _dnp_draw_profile(self, draw) -> None:
         self._dnp_show_canvas(self.fit_canvas)
-        self.fit_canvas.show_external_plot(draw)
+        self.fit_canvas.show_external_plot(draw, kind="curve")
+
+    def _dnp_style(self, which: str) -> dict:
+        """The style the DNP plots draw with: ``which`` "spectra" (the
+        Compare view) or "profile" (the Fit view)."""
+        canvas = self.compare_canvas if which == "spectra" else self.fit_canvas
+        return canvas.style_settings()
 
     def _dnp_arm(self, mode) -> None:
         if mode == "peak":
@@ -3610,7 +3624,16 @@ class MainWindow(QMainWindow):
     _FIGURE_STYLES_PATH = os.path.expanduser("~/.opennmr/figure_styles.json")
     _FIGURE_STYLE_TYPES = (
         ("1D spectrum", "1d"), ("2D contour", "2d"), ("Pseudo-2D stack", "pseudo2d"), ("Compare", "compare"),
+        ("Curves & profiles", "curve"),
     )
+    #: A plot kind with no saved default of its own uses this kind's
+    #: instead. Curves (relaxation/diffusion fits, integral and parameter
+    #: trends, DNP field profiles) never had a default before; the 1D
+    #: default is "the plot style" most users have saved, and is what
+    #: they expect those plots to follow (explicit user request: "the
+    #: default plot style should apply to the DNP profile plots,
+    #: relaxation curves"). Saving a "Curves & profiles" default overrides it.
+    _FIGURE_STYLE_FALLBACK = {"curve": "1d"}
     #: Same "user-level dotfile, survives an update/reinstall" reasoning
     #: as _FIGURE_STYLES_PATH -- a plain JSON dict of
     #: {probe_string: {config_key: value}}, explicit user request:
@@ -4831,7 +4854,10 @@ class MainWindow(QMainWindow):
         spectrum never undoes what was just set on the 1D plot."""
         if not getattr(self, "_ui_settings", {}).get("auto_apply_type_styles", True):
             return
-        style = self._load_figure_styles().get(kind)
+        styles = self._load_figure_styles()
+        style = styles.get(kind)
+        if not isinstance(style, dict) and kind in self._FIGURE_STYLE_FALLBACK:
+            style = styles.get(self._FIGURE_STYLE_FALLBACK[kind])
         if isinstance(style, dict):
             self._apply_type_style_to(canvas, style, redraw=False)
 
@@ -11134,16 +11160,16 @@ class MainWindow(QMainWindow):
             self.side_tabs.tabText(index) not in self._TILES_WITHOUT_OPEN_EXPERIMENTS)
 
     #: Window > Panel entries: (menu label, launcher tile label), in
-    #: tile order. Ctrl+1..7 follow this order.
+    #: tile order, so Ctrl+n opens the n-th toolbar button.
     _WINDOW_MENU_PANELS = (
         ("Load/Save", "Open"),
         ("Processing", "Process"),
-        ("Advanced Processing", "Adv. Proc."),
-        ("Fitting", "Fit"),
-        ("Relaxation", "Dynamics"),
-        ("Applications", "Apply"),
         ("Compare", "Compare"),
+        ("Fitting", "Fit"),
         ("Simulations", "Simulate"),
+        ("Relaxation", "Dynamics"),
+        ("Advanced Processing", "Adv. Proc."),
+        ("Applications", "Apply"),
     )
 
     def _show_side_tab(self, name: str) -> None:
@@ -21201,7 +21227,20 @@ class MainWindow(QMainWindow):
         if action is not None and action.isChecked():
             action.setChecked(False)
 
-    # --- Title / notes under Open experiments ------------------------
+    # --- Title / notes (the right-hand drawer) --------------------------
+
+    def _on_notes_drawer_toggled(self, open_: bool) -> None:
+        """Keep the View menu's check in step with the strip, and put the
+        cursor in the notes when the panel opens; a pending edit is saved
+        when it closes."""
+        action = getattr(self, "notes_drawer_action", None)
+        if action is not None and action.isChecked() != open_:
+            action.setChecked(open_)
+        if open_:
+            if self.notes_editor.edit.isEnabled():
+                self.notes_editor.edit.setFocus()
+        else:
+            self.notes_editor.flush()
     def _row_of_spectrum(self, spectrum) -> int:
         for row, candidate in enumerate(self.session.spectra):
             if candidate is spectrum:

@@ -60,14 +60,26 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 
 ## GUI layout (`src/opennmr/gui/main_window.py`)
 
-- **Toolbar** (`_build_main_toolbar`): Load, Process, Quantify, Analyse,
-  Compare, Simulate -- icons only, one `ModeButton` each
-  (`gui/widgets/mode_button.py`), with any dropdown arrow centred under
-  its icon -- then a Settings gear at the far end. Each mode raises a
-  left-hand panel held in `side_tabs` (tab names Data, Processing,
-  Quantify, Analysis, Compare, Simulate).
+- **Toolbar**: one row of launcher tiles (`self.tile_bar`, taken from
+  `side_tabs`, a `WrappingTabWidget`), in the user's order: Open,
+  Process, Compare, Fit, Simulate, Dynamics, Adv. Proc., Apply,
+  Settings. Panels are *built* in an older order (builders read each
+  other's widgets) and *added* in this one -- see `__init__`. Ctrl+1..8
+  (`_WINDOW_MENU_PANELS`) follow the toolbar order.
+- **Collapsible sections** (`widgets/collapsible_section.py`) start
+  collapsed. Code that sends the user to one opens it with
+  `setExpanded(True)`.
 - **Open experiments** (`open_experiments_box`) sit under the side tabs
-  in the `left_panel` splitter, shown in Load, Analyse and Compare.
+  in `left_splitter`, on every tile but Simulate.
+- **Title / notes** open from a strip at the window's right edge
+  (`self.notes_drawer`, `widgets/side_drawer.py`; View ▸ Title / Notes,
+  Ctrl/Cmd+T), closed by default. Not under Open experiments any more.
+- **Plot kinds and default styles**: a canvas announces its kind
+  (`_enter_plot_kind`: 1d, 2d, pseudo2d, compare, curve) before drawing;
+  MainWindow applies the saved default for that kind
+  (`~/.opennmr/figure_styles.json`; "curve" falls back to "1d").
+  Notebook figures shown in the GUI go through
+  `MplCanvas.show_external_plot(draw, kind)`.
 - **Settings** is a non-modal dialog (`_SettingsDialog`) hosting the
   imaging controls; add further settings there.
 - **Simulate** draws on its own `simulation_canvas` (plain matplotlib),

@@ -11275,10 +11275,10 @@ def test_main_window_advanced_processing_is_its_own_top_level_button(qapp):
     side = _side_tab_names(window)
     assert "Advanced Processing" in side
     # Comes right after Processing, ahead of Fitting/Analysis --
-    # Processing, then Advanced Processing, then Fitting, is the
-    # order the seven launcher buttons were given in.
-    assert side.index("Processing") < side.index("Advanced Processing")
-    assert side.index("Advanced Processing") < side.index("Fitting")
+    # Toolbar order (explicit user request, 2026-09-27): Open, Process,
+    # Compare, Fit, Simulate, Dynamics, Adv. Proc., Apply, Settings.
+    assert side.index("Fitting") < side.index("Relaxation") < side.index("Advanced Processing")
+    assert side.index("Advanced Processing") < side.index("Applications")
 
     # VOCS belongs only here -- not on any section of the Applications
     # tab (the old combined "Analysis" tab no longer exists at all).
@@ -15454,8 +15454,8 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     window = MainWindow()
     side = _side_tab_names(window)
     assert "Simulations" in side
-    # Last of the seven, right after Applications.
-    assert side.index("Applications") < side.index("Simulations")
+    # After Fit, before Dynamics (toolbar order, user request 2026-09-27).
+    assert side.index("Fitting") < side.index("Simulations") < side.index("Relaxation")
 
     simulations_tab = window.side_tabs.widget(side.index("Simulations"))
     sections = simulations_tab.findChildren(CollapsibleSection)
@@ -15934,8 +15934,9 @@ def test_numbered_panel_shortcuts_are_unchanged_by_settings(qapp):
     window = MainWindow()
     window_menu = _menu_by_title(window, "Window")
     shortcuts = {a.text(): a.shortcut().toString() for a in window_menu.actions()}
+    # Ctrl+n is the n-th toolbar button.
     assert [shortcuts[name] for name in ("Load/Save", "Processing", "Compare", "Simulations")] == \
-        ["Ctrl+1", "Ctrl+2", "Ctrl+7", "Ctrl+8"]
+        ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+5"]
     assert "Ctrl+," not in [v for k, v in shortcuts.items() if k != "Settings…"]
 
 
@@ -16189,8 +16190,8 @@ def test_compare_is_its_own_tile_with_its_icon(qapp):
     window = MainWindow()
     tiles = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
     assert tiles[window._compare_tab_index] == "Compare"
-    # After the data tiles, before Simulate (which needs no open data).
-    assert tiles.index("Apply") < tiles.index("Compare") < tiles.index("Simulate")
+    # Third, after Process (toolbar order, user request 2026-09-27).
+    assert tiles.index("Process") < tiles.index("Compare") < tiles.index("Fit")
     assert not window.side_tabs._buttons[window._compare_tab_index].icon().isNull()
 
 
