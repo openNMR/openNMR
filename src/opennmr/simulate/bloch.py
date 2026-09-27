@@ -27,6 +27,15 @@ Changed from the original:
   original's table comments use to validate the BURP shapes).
 * Plotting draws onto a supplied figure rather than ``pyplot``, so it
   embeds in the GUI.
+* **Adiabatic (frequency-swept) shapes** are new (explicit user request,
+  2026-09-27): hyperbolic secant (HSn), WURST-n and tanh/tan -- see
+  :func:`adiabatic_shape`. They are not added to :func:`generate_shape`,
+  which stays an exact copy of the pulse-programme function: an
+  adiabatic pulse's phase depends on its sweep width and duration, which
+  ``generate_shape(shape, n_steps)`` does not take. :func:`simulate_pulse`
+  routes them itself. Their power is set by an adiabaticity factor Q
+  (:func:`peak_b1_for_adiabaticity`), not a flip angle, which they do
+  not have.
 """
 
 import numpy as np
@@ -379,13 +388,191 @@ def _rotate_many(M, bx, by, bz, dt):
     return out
 
 
+# ============================================================
+# Adiabatic (frequency-swept) shapes
+# ============================================================
+
+#: The adiabatic shapes :func:`simulate_pulse` knows, with their
+#: parameters' defaults.
+#:
+#: * ``HS`` -- hyperbolic secant, HSn (Silver, Joseph & Hoult, J. Magn.
+#:   Reson. 59, 347 (1984); HSn: Tannus & Garwood, J. Magn. Reson. A 120,
+#:   133 (1996)). Amplitude sech(beta tau^n); the frequency follows the
+#:   integral of amplitude squared (offset-independent adiabaticity),
+#:   which for n = 1 is the classic (SW/2) tanh(beta tau)/tanh(beta).
+#:   beta = 5.3 truncates the amplitude at 1% (sech 5.3 = 0.01).
+#: * ``WURST`` -- WURST-n (Kupce & Freeman, J. Magn. Reson. A 115, 273
+#:   (1995)). Amplitude 1 - |sin(pi tau / 2)|^n, linear sweep.
+#: * ``TANH_TAN`` -- tanh/tan adiabatic full passage (Hwang, van Zijl &
+#:   Garwood, J. Magn. Reson. 133, 200 (1998)). Amplitude
+#:   tanh(xi (1 - |tau|)), frequency (SW/2) tan(kappa tau)/tan(kappa);
+#:   xi = 10, tan(kappa) = 20 as in that paper. Most of its frequency
+#:   excursion happens in the outer ~10% of the pulse, while the
+#:   amplitude ramps, so its inverted band is a small fraction of the
+#:   sweep unless the pulse is long -- see :func:`adiabaticity`.
+#:
+#: tau runs from -1 to +1 across the pulse; the frequency sweeps from
+#: -SW/2 to +SW/2.
+ADIABATIC_SHAPES = {
+    "HS": {"beta": 5.3, "n": 1},
+    "WURST": {"n": 20},
+    "TANH_TAN": {"xi": 10.0, "tan_kappa": 20.0},
+}
+
+
+def is_adiabatic(shape):
+    return str(shape).upper() in ADIABATIC_SHAPES
+
+
+def adiabatic_shape(shape, n_steps, duration_us, sweep_width_hz, **params):
+    """amp, phase_deg, freq_hz = adiabatic_shape(shape, n_steps, duration_us, sweep_width_hz, ...)
+
+    ``shape`` one of :data:`ADIABATIC_SHAPES` ('HS', 'WURST',
+    'TANH_TAN'); ``params`` override that shape's defaults there.
+    ``amp`` is peak-normalised to 1; ``freq_hz`` is the RF frequency's
+    offset from the carrier at each step (from -SW/2 to +SW/2), and
+    ``phase_deg`` its running integral, 360 deg x sum(freq x dt) --
+    which is how a frequency sweep is delivered as a phase-modulated
+    shape, and how :func:`simulate_pulse` applies it. The phase is zero
+    at the centre of the pulse."""
+    key = str(shape).upper()
+    if key not in ADIABATIC_SHAPES:
+        raise ValueError(f"Unknown adiabatic shape {shape!r}; use one of {sorted(ADIABATIC_SHAPES)}.")
+    unknown = set(params) - set(ADIABATIC_SHAPES[key])
+    if unknown:
+        raise ValueError(f"{key} takes {sorted(ADIABATIC_SHAPES[key])}, not {sorted(unknown)}.")
+    p = {**ADIABATIC_SHAPES[key], **{k: v for k, v in params.items() if v is not None}}
+    if sweep_width_hz is None or sweep_width_hz <= 0:
+        raise ValueError(f"{key} is frequency-swept: give its sweep width (Hz).")
+    n_steps = int(n_steps)
+    dt = duration_us * 1e-6 / n_steps
+    # 1 point per us, as the hardware synthesises it: the phase can only
+    # step by less than half a turn per point, i.e. |freq| < 1/(2 dt).
+    nyquist = 0.5 / dt
+    if sweep_width_hz / 2.0 >= nyquist:
+        raise ValueError(
+            f"A {sweep_width_hz / 1e3:g} kHz sweep cannot be synthesised at one point per "
+            f"{dt * 1e6:g} us: the frequency must stay within +/-{nyquist / 1e3:g} kHz. "
+            "Reduce the sweep width.")
+    tau = (np.arange(n_steps) + 0.5) / n_steps * 2.0 - 1.0          # step midpoints, -1..1
+    half = sweep_width_hz / 2.0
+    if key == "HS":
+        beta, n = float(p["beta"]), float(p["n"])
+        if beta <= 0 or n < 1:
+            raise ValueError("HS needs beta > 0 and n >= 1.")
+        amp = 1.0 / np.cosh(beta * np.abs(tau) ** n)
+        # Offset-independent adiabaticity: the sweep follows the running
+        # integral of amp^2 (exact tanh form for n = 1).
+        weight = amp ** 2
+        cumulative = np.cumsum(weight) - 0.5 * weight
+        freq = half * (2.0 * cumulative / np.sum(weight) - 1.0)
+    elif key == "WURST":
+        n = float(p["n"])
+        if n <= 0:
+            raise ValueError("WURST needs n > 0.")
+        amp = 1.0 - np.abs(np.sin(0.5 * np.pi * tau)) ** n
+        freq = half * tau
+    else:
+        xi, tan_kappa = float(p["xi"]), float(p["tan_kappa"])
+        if xi <= 0 or tan_kappa <= 0:
+            raise ValueError("tanh/tan needs xi > 0 and tan(kappa) > 0.")
+        kappa = np.arctan(tan_kappa)
+        amp = np.tanh(xi * (1.0 - np.abs(tau)))
+        freq = half * np.tan(kappa * tau) / tan_kappa
+    peak = np.max(np.abs(amp))
+    amp = amp / peak if peak > 0 else amp
+    turns = np.cumsum(freq) * dt
+    turns -= np.interp(0.0, tau, turns)
+    return amp, np.rad2deg(2.0 * np.pi * turns), freq
+
+
+#: Fraction of the sweep over which :func:`adiabaticity` reports the
+#: smallest crossing Q (for information; the power is set from Q0).
+ADIABATIC_BAND = 0.8
+
+
+def adiabaticity(shape, duration_us, sweep_width_hz, peak_b1_hz, band=ADIABATIC_BAND,
+                 **params):
+    """Adiabaticity of a frequency-swept pulse.
+
+    The sweep passes an isochromat at offset Omega at the time t where
+    nu(t) = Omega; its adiabaticity factor there is
+    Q(Omega) = 2 pi nu1(t)^2 / |d nu/dt| (nu1 the B1 nutation frequency,
+    nu the RF frequency, both Hz). Q >> 1 is adiabatic; ~5 is a common
+    working value.
+
+    Returns a dict:
+
+    * ``q0`` -- Q at the centre of the sweep: the standard design
+      parameter (Kupce & Freeman's Q0 for WURST; for HS, Q is the same at
+      every offset). :func:`peak_b1_for_adiabaticity` sets the power from it.
+    * ``q_band`` -- the smallest Q over the central ``band`` (default 80%)
+      of the sweep. Equal to ``q0`` for HS; lower for WURST (amplitude
+      falling towards the edges) and much lower for tanh/tan (its tan
+      sweep is fastest near the edges).
+    * ``offset_hz``, ``q`` -- Q against offset across the sweep.
+
+    **Q is a guide, not the answer.** It describes the passage through
+    resonance only. With tanh/tan the amplitude ramps while the frequency
+    is still sweeping fast, and a high B1 tilts the effective field too
+    quickly there: in a 500 us, 100 kHz tanh/tan pulse, 20 kHz of B1
+    inverts on resonance and 40 kHz does not (checked against a 100x
+    finer time step -- it is the pulse, not the integration). The
+    simulated profile (:func:`inverted_band_hz`) is what to trust."""
+    n_steps = max(3, int(round(duration_us)))
+    amp, _phase, freq = adiabatic_shape(shape, n_steps, duration_us, sweep_width_hz, **params)
+    dt = duration_us * 1e-6 / n_steps
+    rate = np.abs(np.gradient(freq, dt))                          # Hz/s
+    with np.errstate(divide="ignore"):
+        q = 2.0 * np.pi * (peak_b1_hz * amp) ** 2 / rate
+    inside = np.abs(freq) <= 0.5 * band * sweep_width_hz
+    centre = int(np.argmin(np.abs(freq)))
+    return {"q0": float(q[centre]), "q_band": float(np.min(q[inside])), "band": float(band),
+            "offset_hz": freq, "q": q}
+
+
+def peak_b1_for_adiabaticity(shape, duration_us, sweep_width_hz, q=5.0, **params):
+    """Peak B1 (Hz) giving adiabaticity ``q`` at the centre of the sweep
+    (``q0`` of :func:`adiabaticity`) -- the adiabatic counterpart of
+    :func:`peak_b1_for_flip_angle`. Q0 scales as B1 squared."""
+    if q <= 0:
+        raise ValueError("The adiabaticity factor must be positive.")
+    q1 = adiabaticity(shape, duration_us, sweep_width_hz, 1.0, **params)["q0"]
+    return float(np.sqrt(q / q1))
+
+
+def inverted_band_hz(sim, threshold=-0.9, power_index=None):
+    """(low, high) offsets (Hz) of the widest contiguous band where Mz <
+    ``threshold`` (default -0.9: 95% inversion), for the nominal power
+    (scale nearest 1) unless ``power_index`` is given; None if nowhere."""
+    if power_index is None:
+        power_index = int(np.argmin(np.abs(np.asarray(sim["power_scales"]) - 1.0)))
+    mz = np.asarray(sim["Mz"])[power_index]
+    offsets = np.asarray(sim["offsets_hz"])
+    inside = mz < threshold
+    best, start = None, None
+    for k, flag in enumerate(np.append(inside, False)):
+        if flag and start is None:
+            start = k
+        elif not flag and start is not None:
+            if best is None or k - start > best[1] - best[0]:
+                best = (start, k)
+            start = None
+    if best is None:
+        return None
+    return float(offsets[best[0]]), float(offsets[best[1] - 1])
+
+
 def simulate_pulse(shape, duration_us, peak_b1_hz, offsets_hz,
-                   burp_coeffs_A=None, burp_coeffs_B=None, power_scales=(1.0,)):
+                   burp_coeffs_A=None, burp_coeffs_B=None, power_scales=(1.0,),
+                   sweep_width_hz=None, adiabatic_params=None):
     """Bloch-simulate a shaped pulse (no relaxation) over a range of
     resonance offsets, starting from thermal equilibrium (Mz = 1).
 
     shape: 'GAUSSIAN', 'SINC', 'EBURP2', 'REBURP', or 'EBURP1'/'BURP'
-        (needs burp_coeffs_A/B).
+        (needs burp_coeffs_A/B); or an adiabatic shape, 'HS', 'WURST',
+        'TANH_TAN' (needs sweep_width_hz; adiabatic_params overrides the
+        shape's parameters -- see :data:`ADIABATIC_SHAPES`).
     duration_us: pulse duration [us] -- also sets the shape's time
         resolution (1 point/us, matching the real hardware synthesis).
     peak_b1_hz: B1 at the shape's peak amplitude, as a nutation
@@ -397,12 +584,26 @@ def simulate_pulse(shape, duration_us, peak_b1_hz, offsets_hz,
 
     Returns a dict: 'time_us', 'amp_profile', 'phase_profile_deg',
     'offsets_hz', 'power_scales', 'peak_b1_hz', and 'Mx'/'My'/'Mz' each
-    of shape (len(power_scales), len(offsets_hz)).
+    of shape (len(power_scales), len(offsets_hz)); for an adiabatic shape
+    also 'freq_profile_hz', 'sweep_width_hz', 'adiabatic_params' and
+    'adiabaticity' (:func:`adiabaticity` at the nominal power, without
+    its per-step arrays).
     """
     n_steps = int(round(duration_us))
     if n_steps < 1:
         raise ValueError("simulate_pulse: duration_us too short (need >=1 us).")
-    amp_profile, phase_profile = generate_shape(shape, n_steps, burp_coeffs_A, burp_coeffs_B)
+    extra = {}
+    if is_adiabatic(shape):
+        params = dict(adiabatic_params or {})
+        amp_profile, phase_profile, freq_profile = adiabatic_shape(
+            shape, n_steps, duration_us, sweep_width_hz, **params)
+        extra = {"freq_profile_hz": freq_profile, "sweep_width_hz": float(sweep_width_hz),
+                 "adiabatic_params": {**ADIABATIC_SHAPES[shape.upper()], **params},
+                 "adiabaticity": {k: v for k, v in adiabaticity(
+                     shape, duration_us, sweep_width_hz, peak_b1_hz, **params).items()
+                     if k in ("q0", "q_band", "band")}}
+    else:
+        amp_profile, phase_profile = generate_shape(shape, n_steps, burp_coeffs_A, burp_coeffs_B)
     phase_rad = np.deg2rad(phase_profile)
     dt = 1.0e-6  # 1 step = 1 us, matching the hardware's own 1 point/us synthesis
 
@@ -428,6 +629,7 @@ def simulate_pulse(shape, duration_us, peak_b1_hz, offsets_hz,
         "Mx": M[..., 0], "My": M[..., 1], "Mz": M[..., 2],
         "shape": shape.upper(),
         "duration_us": float(duration_us),
+        **extra,
     }
 
 
@@ -451,7 +653,11 @@ def peak_b1_for_flip_angle(shape, duration_us, flip_angle_deg,
     Exact for an amplitude-modulated shape on resonance, which is what
     this is for: a sensible starting power. Band-selective shapes
     (EBURP2, REBURP) are designed for one particular flip, and their
-    profile is only right at the power that gives it."""
+    profile is only right at the power that gives it. An adiabatic
+    shape has no flip angle: see :func:`peak_b1_for_adiabaticity`."""
+    if is_adiabatic(shape):
+        raise ValueError(f"{shape.upper()} is adiabatic: its effect does not scale with power the "
+                         "way a flip angle does. Set its power by adiabaticity (Q) instead.")
     n_steps = max(1, int(round(duration_us)))
     factor = integration_factor(shape, n_steps, burp_coeffs_A, burp_coeffs_B)
     if factor == 0:
@@ -459,10 +665,14 @@ def peak_b1_for_flip_angle(shape, duration_us, flip_angle_deg,
     return abs((flip_angle_deg / 360.0) / (duration_us * 1.0e-6 * factor))
 
 
-def default_offset_range_hz(duration_us):
+def default_offset_range_hz(duration_us, sweep_width_hz=None):
     """Roughly +/-2x the shape's naive time-bandwidth bandwidth
     (4/duration) -- the original ``simulate_selective_pulse`` default:
-    a generous starting guess, not a precise value."""
+    a generous starting guess, not a precise value. For an adiabatic
+    shape (``sweep_width_hz`` given): +/- the sweep width, so both edges
+    of the inverted band are in view."""
+    if sweep_width_hz:
+        return (-float(sweep_width_hz), float(sweep_width_hz))
     approx_bw_hz = 4.0e6 / duration_us
     return (-2.0 * approx_bw_hz, 2.0 * approx_bw_hz)
 
@@ -484,9 +694,16 @@ def plot_pulse_simulation(sim, fig, title=None):
     ax_shape.set_ylabel("Amplitude (normalised)")
     ax_shape.set_ylim(-0.05, 1.05)
     ax_phase = ax_shape.twinx()
-    ax_phase.plot(sim["time_us"], sim["phase_profile_deg"], color='tab:red',
-                  linestyle='--', label='Phase [deg]')
-    ax_phase.set_ylabel("Phase / deg", color='tab:red')
+    if "freq_profile_hz" in sim:
+        # A frequency-swept pulse's phase runs over many turns and says
+        # little; its frequency sweep is what defines it.
+        ax_phase.plot(sim["time_us"], np.asarray(sim["freq_profile_hz"]) / 1e3, color='tab:red',
+                      linestyle='--', label='Frequency [kHz]')
+        ax_phase.set_ylabel("RF offset / kHz", color='tab:red')
+    else:
+        ax_phase.plot(sim["time_us"], sim["phase_profile_deg"], color='tab:red',
+                      linestyle='--', label='Phase [deg]')
+        ax_phase.set_ylabel("Phase / deg", color='tab:red')
     ax_phase.tick_params(axis='y', labelcolor='tab:red')
     ax_shape.set_title("Pulse shape")
 

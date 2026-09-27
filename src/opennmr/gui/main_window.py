@@ -103,6 +103,7 @@ from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
 from .dnp_panel import DnpPanel
+from .tensor_view_panel import TensorViewControls
 from .loader import background_load_enabled
 
 #: Where the launcher-tile icons (Open, Processing, Advanced
@@ -11356,6 +11357,10 @@ class MainWindow(QMainWindow):
             plot_spectrum=lambda spectrum: self._on_panel_simulated("combined", spectrum),
             add_to_open=self._add_derived_spectrum,
             draw_sites=self._draw_combined_sites)
+        # CSA and quadrupolar together, in their relative orientation.
+        self.combined_tensor_controls = TensorViewControls(self._combined_tensor_site,
+                                                           self._draw_tensor_picture)
+        self.combined_sim_panel.layout().addWidget(self.combined_tensor_controls)
         self._combined_sim_section = CollapsibleSection(
             "Combined Hamiltonian", content=self.combined_sim_panel)
         layout.addWidget(self._combined_sim_section)
@@ -11570,6 +11575,49 @@ class MainWindow(QMainWindow):
         self._combined_sim_section.setExpanded(True)
         self._show_side_tab("Simulate")
         panel.simulate()
+
+    # ---- tensor pictures (Simulate > CSA / Quadrupolar / Combined) ------
+
+    def _draw_tensor_picture(self, draw) -> None:
+        """Show a notebook tensor picture on the Simulation plot."""
+        figure = self.simulation_canvas.figure
+        figure.clear()
+        draw(figure)
+        self._show_simulation_view()
+        self.simulation_canvas.draw()
+
+    def _csa_tensor_site(self):
+        from ..notebook import combined_hamiltonian as ch
+        nucleus = self.sim_csa_nucleus_edit.text().strip()
+        if not nucleus or not core_registry.find_gamma(nucleus):
+            raise ValueError("enter a recognised nucleus (e.g. '13C').")
+        site = ch.Site(nucleus, delta_iso=self.sim_csa_diso_spin.value(), label=f"{nucleus} site")
+        site.add_csa(aniso=self.sim_csa_aniso_spin.value(), asym=self.sim_csa_skeweta_spin.value(),
+                     convention=self.sim_csa_convention_combo.currentData())
+        larmor = self.sim_csa_larmor_spin.value()
+        return site, (larmor * 1e6 if larmor > 0 else None), "second"
+
+    def _quad_tensor_site(self):
+        from ..notebook import combined_hamiltonian as ch
+        nucleus = self.sim_quad_nucleus_combo.currentText().strip()
+        if not nucleus or not core_registry.find_gamma(nucleus):
+            raise ValueError("enter a recognised nucleus (e.g. '27Al').")
+        larmor = self.sim_quad_larmor_spin.value()
+        if larmor <= 0:
+            raise ValueError("set the Larmor frequency (quadrupolar shifts in ppm depend on it).")
+        site = ch.Site(nucleus, delta_iso=self.sim_quad_diso_spin.value(),
+                       spin=self.sim_quad_spin_spin.value(), label=f"{nucleus} site")
+        site.add_quadrupolar(C_Q=self.sim_quad_cq_spin.value(), eta_Q=self.sim_quad_eta_spin.value())
+        order = {"first_order": "first", "second_order": "second",
+                 "exact": "exact"}[self.sim_quad_method_combo.currentData()]
+        return site, larmor * 1e6, order
+
+    def _combined_tensor_site(self):
+        panel = self.combined_sim_panel
+        sites = panel.build_sites()
+        index = max(0, min(panel._current, len(sites) - 1))
+        settings = panel.settings()
+        return sites[index], settings["larmor_Hz"], settings["order"]
 
     def _draw_combined_sites(self, result: dict, nucleus: str) -> None:
         """Total and each site of a combined simulation on the Simulation
@@ -11818,12 +11866,16 @@ class MainWindow(QMainWindow):
         self.sim_diffusion_summary_label.setText("\n".join(lines))
         self._journal_simulation("diffusion")
 
-    #: GUI names for the shapes generate_shape knows without coefficients.
+    #: GUI names for the shapes generate_shape knows without coefficients,
+    #: then the adiabatic (frequency-swept) ones -- explicit user request.
     _BLOCH_SHAPES = (
         ("GAUSSIAN", "Gaussian"),
         ("SINC", "Sinc (Hamming-windowed)"),
         ("EBURP2", "E-BURP-2 (90° excitation)"),
         ("REBURP", "RE-BURP (180° refocusing)"),
+        ("HS", "Hyperbolic secant, HSn (adiabatic)"),
+        ("WURST", "WURST-n (adiabatic)"),
+        ("TANH_TAN", "tanh/tan (adiabatic)"),
     )
 
     def _build_bloch_sim_subtab(self) -> QWidget:
@@ -11842,10 +11894,32 @@ class MainWindow(QMainWindow):
             self.bloch_shape_combo.addItem(label, key)
         self._narrow_combo(self.bloch_shape_combo)
         self.bloch_shape_combo.setToolTip(
-            "The on-the-fly shapes of the X-Pulse selective sequences. EBURP1/"
+            "The on-the-fly shapes of the X-Pulse selective sequences, and adiabatic "
+            "(frequency-swept) inversion pulses: hyperbolic secant, WURST and tanh/tan. EBURP1/"
             "BURP need Fourier coefficients and are available from "
             "opennmr.simulate.bloch rather than here.")
         form.addRow("Shape:", self.bloch_shape_combo)
+        # Adiabatic shapes: the frequency sweep and each shape's parameters.
+        self.bloch_sweep_spin = self._sim_spin(
+            0.1, 999.0, 100.0, 1, " kHz",
+            "Total frequency sweep: the RF runs from −half to +half of this about the carrier. "
+            "At one point per µs it must stay within ±500 kHz.")
+        form.addRow("Sweep width:", self.bloch_sweep_spin)
+        self.bloch_hs_beta_spin = self._sim_spin(
+            0.1, 50.0, 5.3, 2, "", "Truncation: the amplitude is sech(β) at the ends (β = 5.3: 1%).")
+        form.addRow("HS β:", self.bloch_hs_beta_spin)
+        self.bloch_hs_n_spin = self._sim_spin(
+            1.0, 16.0, 1.0, 0, "", "HSn order: 1 is the classic sech/tanh; higher is flatter-topped.")
+        form.addRow("HS n:", self.bloch_hs_n_spin)
+        self.bloch_wurst_n_spin = self._sim_spin(
+            1.0, 200.0, 20.0, 0, "", "WURST-n: amplitude 1 − |sin(πτ/2)|ⁿ; larger n, flatter top.")
+        form.addRow("WURST n:", self.bloch_wurst_n_spin)
+        self.bloch_tanh_xi_spin = self._sim_spin(
+            0.1, 100.0, 10.0, 2, "", "tanh/tan amplitude rise, tanh(ξ(1 − |τ|)).")
+        form.addRow("tanh/tan ξ:", self.bloch_tanh_xi_spin)
+        self.bloch_tanh_kappa_spin = self._sim_spin(
+            0.1, 1000.0, 20.0, 2, "", "tanh/tan frequency sweep, tan(κτ)/tan(κ): the value of tan κ.")
+        form.addRow("tanh/tan tan κ:", self.bloch_tanh_kappa_spin)
         self.bloch_duration_spin = self._sim_spin(
             10.0, 100000.0, 1000.0, 0, " µs",
             "Pulse duration. Also the time resolution: one point per µs, as the "
@@ -11856,12 +11930,18 @@ class MainWindow(QMainWindow):
         self.bloch_power_mode_combo.addItem("Flip angle", "flip")
         self.bloch_power_mode_combo.addItem("Peak B1", "b1")
         self.bloch_power_mode_combo.addItem("Hard-pulse calibration", "hard")
+        self.bloch_power_mode_combo.addItem("Adiabaticity Q₀", "q")
         self.bloch_power_mode_combo.setToolTip(
             "How the pulse power is given. Flip angle: the peak B1 that gives "
             "that rotation on resonance. Hard-pulse calibration: a relative TX "
             "amplitude referenced to a calibrated hard 90°, as read off a pulse "
-            "programme's panel (RFAsh0 / P1Hard / RFA0).")
+            "programme's panel (RFAsh0 / P1Hard / RFA0). Adiabaticity: for an adiabatic "
+            "pulse, which has no flip angle -- Q₀ = 2π ν1² / (dν/dt) where the sweep crosses "
+            "the carrier; ~5 is a common working value.")
         form.addRow("Power from:", self.bloch_power_mode_combo)
+        self.bloch_q_spin = self._sim_spin(
+            0.1, 1000.0, 5.0, 2, "", "Adiabaticity factor at the centre of the sweep.")
+        form.addRow("Q₀:", self.bloch_q_spin)
         self.bloch_flip_spin = self._sim_spin(1.0, 720.0, 90.0, 1, "°", "On-resonance flip angle.")
         form.addRow("Flip angle:", self.bloch_flip_spin)
         self.bloch_b1_spin = self._sim_spin(
@@ -11917,7 +11997,30 @@ class MainWindow(QMainWindow):
         return tab
 
     def _sync_bloch_rows(self) -> None:
+        shape = self.bloch_shape_combo.currentData()
+        adiabatic = simulate_bloch.is_adiabatic(shape)
+        # A flip angle means nothing for an adiabatic pulse and Q means
+        # nothing for an amplitude-modulated one: offer only what applies.
+        model = self.bloch_power_mode_combo.model()
+        for row in range(self.bloch_power_mode_combo.count()):
+            data = self.bloch_power_mode_combo.itemData(row)
+            enabled = not ((adiabatic and data == "flip") or (not adiabatic and data == "q"))
+            model.item(row).setEnabled(enabled)
         mode = self.bloch_power_mode_combo.currentData()
+        if adiabatic and mode == "flip":
+            self.bloch_power_mode_combo.setCurrentIndex(self.bloch_power_mode_combo.findData("q"))
+            return                                    # re-entered via currentIndexChanged
+        if not adiabatic and mode == "q":
+            self.bloch_power_mode_combo.setCurrentIndex(self.bloch_power_mode_combo.findData("flip"))
+            return
+        for widget, visible in ((self.bloch_sweep_spin, adiabatic),
+                                (self.bloch_hs_beta_spin, shape == "HS"),
+                                (self.bloch_hs_n_spin, shape == "HS"),
+                                (self.bloch_wurst_n_spin, shape == "WURST"),
+                                (self.bloch_tanh_xi_spin, shape == "TANH_TAN"),
+                                (self.bloch_tanh_kappa_spin, shape == "TANH_TAN"),
+                                (self.bloch_q_spin, mode == "q")):
+            self._bloch_form.setRowVisible(widget, visible)
         self._bloch_form.setRowVisible(self.bloch_flip_spin, mode == "flip")
         self._bloch_form.setRowVisible(self.bloch_b1_spin, mode == "b1")
         for widget in (self.bloch_tx_spin, self.bloch_hard_width_spin,
@@ -11925,15 +12028,33 @@ class MainWindow(QMainWindow):
             self._bloch_form.setRowVisible(widget, mode == "hard")
 
     def _on_bloch_shape_changed(self, _index: int) -> None:
-        """The BURP shapes are designed for one flip each; offer it."""
+        """The BURP shapes are designed for one flip each; offer it.
+        Adiabatic shapes have their own rows and power mode."""
         shape = self.bloch_shape_combo.currentData()
         if shape == "EBURP2":
             self.bloch_flip_spin.setValue(90.0)
         elif shape == "REBURP":
             self.bloch_flip_spin.setValue(180.0)
+        self._sync_bloch_rows()
+
+    def _bloch_adiabatic_params(self, shape: str) -> dict:
+        if shape == "HS":
+            return {"beta": self.bloch_hs_beta_spin.value(), "n": int(self.bloch_hs_n_spin.value())}
+        if shape == "WURST":
+            return {"n": self.bloch_wurst_n_spin.value()}
+        if shape == "TANH_TAN":
+            return {"xi": self.bloch_tanh_xi_spin.value(),
+                    "tan_kappa": self.bloch_tanh_kappa_spin.value()}
+        return {}
 
     def _bloch_peak_b1(self, shape: str, duration_us: float) -> tuple[float, str]:
         mode = self.bloch_power_mode_combo.currentData()
+        if mode == "q":
+            q = self.bloch_q_spin.value()
+            return (simulate_bloch.peak_b1_for_adiabaticity(
+                        shape, duration_us, self.bloch_sweep_spin.value() * 1e3, q=q,
+                        **self._bloch_adiabatic_params(shape)),
+                    f"for Q₀ = {q:g} at the centre of the sweep")
         if mode == "flip":
             flip = self.bloch_flip_spin.value()
             return (simulate_bloch.peak_b1_for_flip_angle(shape, duration_us, flip),
@@ -11952,30 +12073,46 @@ class MainWindow(QMainWindow):
             peak_b1, source = self._bloch_peak_b1(shape, duration)
             scales = [float(p) for p in self.bloch_power_scales_edit.text().replace(";", ",").split(",")
                       if p.strip()] or [1.0]
+            adiabatic = simulate_bloch.is_adiabatic(shape)
+            sweep_hz = self.bloch_sweep_spin.value() * 1e3 if adiabatic else None
             half = self.bloch_offset_spin.value()
-            lo, hi = (-half, half) if half > 0 else simulate_bloch.default_offset_range_hz(duration)
+            lo, hi = ((-half, half) if half > 0
+                      else simulate_bloch.default_offset_range_hz(duration, sweep_hz))
             offsets = np.linspace(lo, hi, self.bloch_n_offsets_spin.value())
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
-                sim = simulate_bloch.simulate_pulse(shape, duration, peak_b1, offsets,
-                                                    power_scales=scales)
+                sim = simulate_bloch.simulate_pulse(
+                    shape, duration, peak_b1, offsets, power_scales=scales,
+                    sweep_width_hz=sweep_hz,
+                    adiabatic_params=self._bloch_adiabatic_params(shape) if adiabatic else None)
             finally:
                 QApplication.restoreOverrideCursor()
         except ValueError as exc:
             self.bloch_summary_label.setText(f"Cannot simulate: {exc}")
             return
         label = dict(self._BLOCH_SHAPES)[shape]
+        title = f"{label}, {duration:g} µs, peak B1 {peak_b1:.1f} Hz"
+        if "sweep_width_hz" in sim:
+            title += f", sweep {sim['sweep_width_hz'] / 1e3:g} kHz"
         self._show_simulation_view()
-        simulate_bloch.plot_pulse_simulation(
-            sim, self.simulation_canvas.figure,
-            title=f"{label}, {duration:g} µs, peak B1 {peak_b1:.1f} Hz")
+        simulate_bloch.plot_pulse_simulation(sim, self.simulation_canvas.figure, title=title)
         self.simulation_canvas.draw()
         centre = int(np.argmin(np.abs(sim["offsets_hz"])))
         nominal = int(np.argmin(np.abs(sim["power_scales"] - 1.0)))
-        self.bloch_summary_label.setText(
-            f"Peak B1 = {peak_b1:.1f} Hz ({source}).\n"
-            f"On resonance: Mz = {sim['Mz'][nominal, centre]:.3f}, "
-            f"|Mxy| = {np.hypot(sim['Mx'][nominal, centre], sim['My'][nominal, centre]):.3f}.")
+        lines = [f"Peak B1 = {peak_b1:.1f} Hz ({source}).",
+                 f"On resonance: Mz = {sim['Mz'][nominal, centre]:.3f}, "
+                 f"|Mxy| = {np.hypot(sim['Mx'][nominal, centre], sim['My'][nominal, centre]):.3f}."]
+        if "adiabaticity" in sim:
+            q = sim["adiabaticity"]
+            lines.append(f"Adiabaticity: Q₀ = {q['q0']:.3g} at the centre, {q['q_band']:.3g} at "
+                         f"worst over the central {q['band']:.0%} of the sweep.")
+            for index, scale in enumerate(sim["power_scales"]):
+                band = simulate_bloch.inverted_band_hz(sim, power_index=index)
+                where = (f"{band[0] / 1e3:.1f} to {band[1] / 1e3:.1f} kHz "
+                         f"({(band[1] - band[0]) / 1e3:.1f} kHz wide)" if band else "nowhere")
+                prefix = f"At {scale:g}× power: " if len(sim["power_scales"]) > 1 else ""
+                lines.append(f"{prefix}inverted (Mz < −0.9) from {where}.")
+        self.bloch_summary_label.setText("\n".join(lines))
         self._journal_simulation("bloch")
 
     def _build_simulate_csa_subtab(self) -> QWidget:
@@ -12149,6 +12286,10 @@ class MainWindow(QMainWindow):
         self.sim_csa_results_label = QLabel("")
         self.sim_csa_results_label.setWordWrap(True)
         layout.addWidget(self.sim_csa_results_label)
+        # The tensor being simulated, in 3D (explicit user request).
+        self.sim_csa_tensor_controls = TensorViewControls(self._csa_tensor_site,
+                                                          self._draw_tensor_picture)
+        layout.addWidget(self.sim_csa_tensor_controls)
 
         self.sim_csa_export_button = QPushButton("Export to Open Experiments…")
         self.sim_csa_export_button.setEnabled(False)
@@ -12394,6 +12535,9 @@ class MainWindow(QMainWindow):
         self.sim_quad_results_label = QLabel("")
         self.sim_quad_results_label.setWordWrap(True)
         layout.addWidget(self.sim_quad_results_label)
+        self.sim_quad_tensor_controls = TensorViewControls(self._quad_tensor_site,
+                                                           self._draw_tensor_picture)
+        layout.addWidget(self.sim_quad_tensor_controls)
 
         self.sim_quad_export_button = QPushButton("Export to Open Experiments…")
         self.sim_quad_export_button.setEnabled(False)

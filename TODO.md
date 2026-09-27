@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-27 (adiabatic pulses + tensor pictures round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2939 passed, 162 skipped, 0 failed (39 new tests in `test_bloch_adiabatic.py`, `test_tensor_views.py`, `test_gui_adiabatic_tensors.py`).*
+
 *2026-09-27 (usability round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2900 passed, 162 skipped, 0 failed (new: `test_gui_usability.py`, 4 notes-drawer tests).*
 
 *2026-09-27 (DNP round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2885 passed, 162 skipped, 0 failed (43 new tests in `test_dnp.py`, `test_gui_dnp.py`; with the DNP sweep in `test_data/` 2886 passed).*
@@ -101,6 +103,18 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Adiabatic pulses in the Bloch simulator; 3D tensor pictures (2026-09-27)
+
+User: add adiabatic shapes (tanh/tan, WURST, hyperbolic secant) to the Bloch simulator; visualise the simulated tensors (CSA, quadrupolar, both) "as ellipsoids? ... an isotropic shift would be a sphere of radius delta_iso. J would modify the isotropic sphere... not certain".
+
+- **Adiabatic shapes** (`simulate/bloch.py`): `adiabatic_shape` (HSn, WURST-n, tanh/tan; amplitude + frequency sweep -SW/2..+SW/2, phase = running integral), routed by `simulate_pulse(..., sweep_width_hz, adiabatic_params)`. `generate_shape` untouched (exact copy of the pulse-programme function). Sweep limited to +/-500 kHz (1 point/us). Sign convention and time-step convergence tested.
+- **Power by adiabaticity Q0** (`peak_b1_for_adiabaticity`): Q at the centre crossing, the literature parameter; `adiabaticity()` also reports the worst crossing-Q over 80% of the sweep; the GUI reports the simulated inverted band at each power scale -- the arbiter. Rejected: power from the worst crossing-Q (538 kHz of B1 for tanh/tan) and the global min |omega_eff|/|dtheta/dt| (falls as B1 rises, too pessimistic).
+- Findings, 500 us / 100 kHz / Q0 5: HS +/-46.5 kHz, same at 2x and 4x power; WURST-20 ~+/-33 kHz; tanh/tan only +/-2 kHz (its sweep happens during the amplitude ramps; too much B1 loses following there) -- it needs long pulses.
+- **Tensor pictures** (`notebook/tensor_views.py`, exported): frequency surface per transition from `site_transition_frequencies` (the simulator's engine) -- isotropic = sphere of radius |delta_iso|; CSA = ovaloid, *not* an ellipsoid (tested); "delta - delta_iso" view; quadrupolar per transition (first-order satellite formula tested); CSA + quad add per direction in the EFG frame. Glyphs: CSA ellipsoid |delta_ii| (flagged when signs are mixed), EFG principal axes (traceless: never an ellipsoid), in one frame.
+- **J**: isotropic J changes no shape -- it copies the whole surface at each multiplet offset; drawn as wireframes when visible, otherwise explained in the notes. Anisotropic J has the dipolar form, not in the simulator.
+- GUI: Bloch panel rows for sweep width and shape parameters, power mode "Adiabaticity Q0" (flip angle disabled for adiabatic shapes and vice versa); "Tensor picture (3D)" box in Simulate > CSA, Quadrupolar, Combined Hamiltonian, drawn on the Simulation plot (mouse-rotatable).
+- Also: the DNP functions from the DNP round were importable from `opennmr.notebook` but missing from its `__all__`; added, with the tensor and Bloch functions.
 
 ## Usability: collapsed sections, toolbar order, curve styles, notes drawer (2026-09-27)
 
