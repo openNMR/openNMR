@@ -639,7 +639,11 @@ class MainWindow(QMainWindow):
         self.canvas.externalProjectionDropped.connect(self._on_external_projection_dropped)
         self.fid_canvas = MplCanvas()
         self.fid_canvas.measurementCompleted.connect(self._on_measurement_completed)
-        self.compare_canvas = MplCanvas()
+        # Full resolution, like the Spectrum view: explicit user report
+        # (2026-09-28) that Compare "shows low-resolution data" -- it was
+        # the plot-time downsampling (8000 bins), which a zoom never
+        # refines. Comparing spectra is about their fine detail.
+        self.compare_canvas = MplCanvas(full_resolution=True)
         self.compare_canvas.measurementCompleted.connect(self._on_measurement_completed)
         # A legend by default: saying which trace is which is the point
         # of a comparison (explicit user request, 2026-09-28). Still

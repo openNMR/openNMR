@@ -1006,7 +1006,7 @@ def plot_field_profile(result: dict, quantity: str = "intensity", normalise=None
         if np.any(~found):
             ax.errorbar(field[~found], value[~found], yerr=error[~found], fmt="o", color=color,
                         markerfacecolor="white", markersize=5, capsize=2.5, linewidth=1.0,
-                        zorder=2, label="line not found (field from SFO1)")
+                        zorder=2, label="open: no line found (field from SFO1)")
             ax.legend(frameon=False, fontsize=fontsize * 0.75)
         if zero_line and np.nanmin(value) < 0 < np.nanmax(value):
             ax.axhline(0, color="0.5", linewidth=0.8, zorder=0)

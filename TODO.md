@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-28 (export crosshair, baseline-pinned scroll, DNP legend, full-res Compare round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2982 passed, 164 skipped, 0 failed (new: `test_gui_export_scroll.py`).*
+
 *2026-09-28 (legend style, trace labels, DNP spectra, crosshair round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2974 passed, 164 skipped, 0 failed (18 new tests in `test_gui_legend_style.py`).*
 
 *2026-09-28 (legend names + LaTeX round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2956 passed, 164 skipped, 0 failed (24 new tests in `test_gui_legend_names.py`).*
@@ -111,6 +113,16 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Exports without crosshair, baseline-pinned intensity scroll, DNP legend off, full-resolution Compare (2026-09-28)
+
+- **Asked**: (1) an export made after hovering with the crosshair on contained it; (2) scroll-zooming intensity should keep the spectrum's baseline still -- anchored at the midpoint of the spectrum's level at the two ends of the view -- instead of the bottom of the view (a baseline at 1 with the view from 0 crept up on every scroll); (3) the DNP field profile's "line not found" key came on by itself and could not be switched off; (4) Compare showed low-resolution data where Spectrum did not.
+- **Built**:
+  - (1) `MplCanvas.export_full_resolution` hides any visible crosshair line before saving, whatever the lines are drawn as (the non-data guides of the previous round are not figure children, so a save cannot draw them anyway; the test also covers the old axvline form).
+  - (2) `MplCanvas.baseline_anchor(ax)`: median of the first and last 1 % (>= 5 points) of the *visible* points of each data line, midpoint of the two, averaged over lines; `_zoom_intensity_about_baseline` scales ylim about it (screen fraction of the baseline unchanged). Used for plot kinds 1d, compare, pseudo2d and for every row of a stacked Compare; curve plots (relaxation, DNP profile) keep the pinned-bottom zoom. Falls back to the pinned bottom when no line can be read.
+  - (3) A notebook figure's own legend (`show_external_plot`) now follows the canvas's Show Legend, which is off on the Fit view by default; `_restyle_existing_legends` applies it on every restyle. The key's text is now "open: no line found (field from SFO1)" -- it marks open circles, points where no line was found in that spectrum and whose field is taken from SFO1.
+  - (4) `compare_canvas = MplCanvas(full_resolution=True)` -- the plot-time downsampling (8000 bins) was the cause, not real-vs-complex data. `test_gui.py::test_main_window_spectrum_canvas_defaults_to_full_resolution_others_do_not` updated accordingly.
+- **Watch**: a Compare stack of hundreds of pseudo-2D slices now draws every point of every slice (the stack view already defers drawing until Compare is shown). If that becomes slow, the right-click "Full resolution" toggle still exists per canvas.
 
 ## Legend key width, names on the traces, DNP spectra as 1D, crosshair zoom-out (2026-09-28)
 

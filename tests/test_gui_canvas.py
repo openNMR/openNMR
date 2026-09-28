@@ -125,21 +125,32 @@ def test_scroll_over_plot_body_zooms_y_intensity_only(qapp):
     assert ax.get_xlim() == pytest.approx((0, 10))  # x untouched
 
 
-def test_scroll_over_plot_body_pins_the_bottom(qapp):
+def _screen_fraction(ax, y):
+    low, high = ax.get_ylim()
+    return (y - low) / (high - low)
+
+
+def test_scroll_over_plot_body_pins_the_baseline(qapp):
+    # Was "pins the bottom": the bottom of the view only kept the
+    # baseline still when the two coincided. Now the spectrum's own
+    # baseline (midpoint of its level at the two ends of the view) stays
+    # put on screen, wherever the cursor is (user request, 2026-09-28).
     canvas = MplCanvas()
     canvas.show_spectrum(_make_1d())
     canvas.canvas.draw()
     ax = canvas.ax
     ax.set_ylim(-1, 1)
+    baseline = MplCanvas.baseline_anchor(ax)
+    before = _screen_fraction(ax, baseline)
     canvas._on_scroll(_body_scroll_event(ax, xdata=5.0, ydata=0.8, button="up"))
     ymin, ymax = ax.get_ylim()
-    assert ymin == pytest.approx(-1.0)  # bottom untouched regardless of cursor position
-    assert ymax < 1.0  # only the top moved
+    assert ymax - ymin < 2.0                                     # zoomed in
+    assert _screen_fraction(ax, baseline) == pytest.approx(before)
 
     canvas._on_scroll(_body_scroll_event(ax, xdata=5.0, ydata=0.1, button="down"))
     ymin2, ymax2 = ax.get_ylim()
-    assert ymin2 == pytest.approx(-1.0)
-    assert ymax2 > ymax
+    assert ymax2 - ymin2 > ymax - ymin
+    assert _screen_fraction(ax, baseline) == pytest.approx(before)
 
 
 def test_scroll_outside_axes_is_noop(qapp):
@@ -1548,7 +1559,10 @@ def test_show_compare_stack_scroll_zooms_every_row_together_by_default(qapp):
         range_before = ylim_before[1] - ylim_before[0]
         range_after = ax.get_ylim()[1] - ax.get_ylim()[0]
         assert range_after < range_before  # every row zoomed, not just the hovered one
-        assert ax.get_ylim()[0] == pytest.approx(ylim_before[0])  # each row's own baseline stays pinned
+        # each row's own baseline stays pinned on screen
+        base = MplCanvas.baseline_anchor(ax)
+        fraction_before = (base - ylim_before[0]) / range_before
+        assert (base - ax.get_ylim()[0]) / range_after == pytest.approx(fraction_before)
 
 
 def test_show_compare_stack_click_row_then_scroll_zooms_only_that_row(qapp):
@@ -4259,6 +4273,8 @@ def test_scrolling_between_stacked_rows_scales_intensity_not_x(qapp):
     rows = canvas._compare_axes
     before_x = rows[0].get_xlim()
     before_y = [ax.get_ylim() for ax in rows]
+    bases = [MplCanvas.baseline_anchor(ax) for ax in rows]
+    before_f = [(b - lo) / (hi - lo) for b, (lo, hi) in zip(bases, before_y)]
 
     canvas._on_scroll(_gap_scroll_event(canvas, rows[3], rows[4], button="up"))
 
@@ -4267,7 +4283,8 @@ def test_scrolling_between_stacked_rows_scales_intensity_not_x(qapp):
     assert all(a != b for a, b in zip(before_y, after_y))  # every row rescaled
     # Each row still pinned at its own baseline, which is the whole
     # point of one axes per row.
-    assert all(a[0] == pytest.approx(b[0]) for a, b in zip(before_y, after_y))
+    after_f = [(b - lo) / (hi - lo) for b, (lo, hi) in zip(bases, after_y)]
+    assert after_f == pytest.approx(before_f)
 
 
 def test_the_bottom_rows_own_x_strip_still_zooms_x(qapp):

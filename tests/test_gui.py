@@ -648,11 +648,15 @@ def test_main_window_spectrum_canvas_defaults_to_full_resolution_others_do_not(q
     # sampled spectrum in the spectrum tab." Every other canvas keeps
     # the fast/approximate default, which is the right tradeoff there
     # (explicitly named: FID processing).
+    #
+    # Compare joined the Spectrum tab on 2026-09-28 (explicit user
+    # request: "we should always see the full, true data (as in
+    # 'Spectrum') when in the Compare window viewer").
     window = MainWindow()
     assert window.canvas._full_resolution is True
+    assert window.compare_canvas._full_resolution is True
     assert window.processing_preview_canvas._full_resolution is False
     assert window.fid_canvas._full_resolution is False
-    assert window.compare_canvas._full_resolution is False
     assert window.fit_canvas._full_resolution is False
     assert window.spectral_fit_canvas._full_resolution is False
 

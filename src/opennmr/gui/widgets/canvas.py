@@ -1723,8 +1723,7 @@ class MplCanvas(QWidget):
                 else self._compare_axes
             )
             for row_ax in target_axes:
-                row_ymin, row_ymax = row_ax.get_ylim()
-                row_ax.set_ylim(row_ymin, row_ymin + (row_ymax - row_ymin) * factor)
+                self._zoom_intensity_about_baseline(row_ax, factor)
             self.canvas.draw_idle()
             return
 
@@ -1743,9 +1742,69 @@ class MplCanvas(QWidget):
             self.canvas.draw_idle()
             return
 
-        ymin, ymax = ax.get_ylim()
-        ax.set_ylim(ymin, ymin + (ymax - ymin) * factor)
+        if self._plot_kind in self._BASELINE_ZOOM_KINDS:
+            self._zoom_intensity_about_baseline(ax, factor)
+        else:
+            ymin, ymax = ax.get_ylim()
+            ax.set_ylim(ymin, ymin + (ymax - ymin) * factor)
         self.canvas.draw_idle()
+
+    #: Plot kinds whose body scroll scales intensity about the spectrum's
+    #: own baseline (see _zoom_intensity_about_baseline) -- spectra. A
+    #: curve (relaxation, DNP profile) keeps the pinned-bottom zoom.
+    _BASELINE_ZOOM_KINDS = ("1d", "compare", "pseudo2d")
+
+    #: Fraction of the visible points averaged at each end of the x-range
+    #: to read the baseline there (at least a few points): one point
+    #: would put the anchor wherever that point's noise happened to be.
+    _BASELINE_END_FRACTION = 0.01
+
+    @classmethod
+    def baseline_anchor(cls, ax):
+        """The y value a spectrum's intensity zoom keeps still: the
+        midpoint of the spectrum's level at the two ends of the visible
+        x-range -- explicit user request (2026-09-28): "find y at max x,
+        find y at min x, then find the midpoint of these two y values and
+        scroll relative to this". Each end is the median of the last 1 %
+        of visible points there (at least 5), so noise does not move it.
+        Averaged over every data line on ``ax`` (an overlay). ``None`` if
+        the Axes has no line to read."""
+        xlo, xhi = sorted(ax.get_xlim())
+        anchors = []
+        for line in ax.get_lines():
+            if line.get_gid() in (cls._BASELINE_PREVIEW_GID, cls._BASELINE_GHOST_GID):
+                continue
+            label = line.get_label() or ""
+            if label.startswith("_baseline"):
+                continue
+            x = np.asarray(line.get_xdata(), dtype=float)
+            y = np.asarray(line.get_ydata(), dtype=float)
+            if x.ndim != 1 or x.shape != y.shape or x.size < 10:
+                continue
+            visible = (x >= xlo) & (x <= xhi) & np.isfinite(y)
+            if np.count_nonzero(visible) < 10:
+                continue
+            xv, yv = x[visible], y[visible]
+            order = np.argsort(xv)
+            yv = yv[order]
+            n = max(5, int(round(yv.size * cls._BASELINE_END_FRACTION)))
+            anchors.append(0.5 * (float(np.median(yv[:n])) + float(np.median(yv[-n:]))))
+        return float(np.mean(anchors)) if anchors else None
+
+    def _zoom_intensity_about_baseline(self, ax, factor: float) -> None:
+        """Scale ``ax``'s intensity by ``factor`` keeping the spectrum's
+        baseline where it is on screen, so zooming makes peaks taller or
+        shorter without the baseline creeping up or down. Pinning the
+        bottom of the view (what this replaced) only kept the baseline
+        still when it sat exactly on that edge -- a baseline at 1 with the
+        view starting at 0 rose on every scroll (user report). Falls back
+        to the pinned bottom if no line can be read."""
+        ymin, ymax = ax.get_ylim()
+        anchor = self.baseline_anchor(ax)
+        if anchor is None or not np.isfinite(anchor):
+            ax.set_ylim(ymin, ymin + (ymax - ymin) * factor)
+            return
+        ax.set_ylim(anchor - (anchor - ymin) * factor, anchor + (ymax - anchor) * factor)
 
     #: Cursor shown over each kind of scroll-zoomable tick strip -- a
     #: double-headed arrow along the axis the scroll would move.
@@ -3621,6 +3680,11 @@ class MplCanvas(QWidget):
             if self._font_family:
                 for text in legend.get_texts():
                     text.set_fontfamily(self._font_family)
+            if self._external_plot:
+                # A notebook figure's own legend follows Show Legend like
+                # any other: it could not be switched off (user report on
+                # the DNP field profile's "line not found" key).
+                legend.set_visible(self._legend_visible)
 
     def _chemical_shift_label(self, spectrum, x_unit: str = "ppm") -> str:
         """This canvas's own axis-label style/template, applied to
@@ -6148,6 +6212,9 @@ class MplCanvas(QWidget):
         self._clear_figure()
         draw(self.figure)
         self._external_plot = True
+        for ax in self.figure.axes:
+            if ax.get_legend() is not None:
+                ax.get_legend().set_visible(self._legend_visible)
         self.ax = self.figure.axes[0] if self.figure.axes else self.figure.add_subplot(111)
         self._apply_current_axis_style()
         if self._grid_visible:
@@ -6327,6 +6394,15 @@ class MplCanvas(QWidget):
         (see :meth:`set_full_resolution`'s own docstring) -- a full
         rebuild instead, with the current pan/zoom saved and restored
         around it so an export doesn't silently reset the view."""
+        # The crosshair is a view aid, never part of a figure: hide its
+        # lines for the save, whatever they are drawn as (explicit user
+        # report: an export made after hovering the plot contained it).
+        crosshair_lines = []
+        if self._crosshair is not None:
+            crosshair_lines = [ln for ln in (*self._crosshair._vlines, *self._crosshair._hlines)
+                               if ln.get_visible()]
+            for ln in crosshair_lines:
+                ln.set_visible(False)
         swapped = []
         for line in self._lines_for_export():
             full_data = getattr(line, "_opennmr_full_res", None)
