@@ -31,7 +31,8 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QAbstractSpinBox, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
-    QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
+    QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
+    QVBoxLayout, QWidget,
 )
 from PySide6.QtWidgets import QColorDialog
 from .widgets.notes_editor import ExperimentNotesEditor
@@ -41,6 +42,7 @@ from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
 from .compare_2d import Compare2DControls
 from ..notebook import notes as nb_notes
+from ..notebook import periodic_table as nb_periodic_table
 from PySide6.QtGui import QColor
 
 
@@ -106,6 +108,7 @@ from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
 from .dnp_panel import DnpPanel
 from .tensor_view_panel import TensorViewControls
+from .periodic_table_panel import LarmorCalculatorPanel, PeriodicTableView
 from .loader import background_load_enabled
 
 #: Where the launcher-tile icons (Open, Processing, Advanced
@@ -787,6 +790,15 @@ class MainWindow(QMainWindow):
         # Before any tab is current, so _style_target_canvases falls
         # back to every canvas and the saved defaults land everywhere.
         self._apply_saved_style_defaults()
+        # NMR Periodic Table, just before Settings (explicit user request,
+        # 2026-09-28): the Larmor calculator is this tile's panel, and the
+        # table itself replaces the plot while it is open (see
+        # _on_side_tab_changed). The table is built on first use.
+        self.larmor_panel = LarmorCalculatorPanel(spectrum_field=self._selected_spectrum_field)
+        self.periodic_table_view = None
+        self._periodic_table_tab_index = tabs.addTab(
+            self._scrollable(self.larmor_panel), "Periodic Table",
+            icon=_launcher_icon("launcher_periodictable.png"))
         # Settings, last: it is not a step in working up a spectrum.
         # Explicit user request -- "a new settings tab, where users can
         # define their default plot styles for 1-d, 2-d (etc) plots", and
@@ -823,7 +835,11 @@ class MainWindow(QMainWindow):
         notes_layout = QVBoxLayout(notes_panel)
         notes_layout.setContentsMargins(6, 0, 4, 0)
         notes_layout.addWidget(self.notes_editor)
-        self.notes_drawer = SideDrawer(self.canvas_tabs, notes_panel, "Title / notes")
+        # The plot views, or -- while the Periodic Table tile is open --
+        # the periodic table in their place.
+        self.plot_stack = QStackedWidget()
+        self.plot_stack.addWidget(self.canvas_tabs)
+        self.notes_drawer = SideDrawer(self.plot_stack, notes_panel, "Title / notes")
         self.notes_drawer.toggled.connect(self._on_notes_drawer_toggled)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -7494,6 +7510,7 @@ class MainWindow(QMainWindow):
         self._sync_region_shading()
         self._refresh_peak_markers()
         self._sync_open_experiments_visibility(index)
+        self._sync_periodic_table_view(index)
         if index != self._simulations_tab_index:
             # The Simulation plot shows nothing about the data; don't
             # leave it up (or in the tab bar) once Simulations is left.
@@ -11159,7 +11176,7 @@ class MainWindow(QMainWindow):
 
     #: Tiles that hide the shared Open experiments list: Simulate works
     #: without any open data. Every other tile shows it.
-    _TILES_WITHOUT_OPEN_EXPERIMENTS = ("Simulate",)
+    _TILES_WITHOUT_OPEN_EXPERIMENTS = ("Simulate", "Periodic Table")
 
     def _sync_open_experiments_visibility(self, index: int) -> None:
         self.open_experiments_box.setVisible(
@@ -11176,7 +11193,54 @@ class MainWindow(QMainWindow):
         ("Relaxation", "Dynamics"),
         ("Advanced Processing", "Adv. Proc."),
         ("Applications", "Apply"),
+        ("NMR Periodic Table", "Periodic Table"),
     )
+
+    # ------------------------------------------------------------------
+    # NMR Periodic Table (see gui/periodic_table_panel.py)
+    # ------------------------------------------------------------------
+
+    def _ensure_periodic_table_view(self) -> PeriodicTableView:
+        """Build the table the first time it is shown, and wire it to the
+        Larmor calculator: a clicked element or isotope goes to the
+        calculator; the calculator's field and nucleus go to the table."""
+        if self.periodic_table_view is None:
+            view = PeriodicTableView()
+            view.elementClicked.connect(self.larmor_panel.set_element)
+            view.nuclideChosen.connect(self.larmor_panel.set_nucleus)
+            self.larmor_panel.fieldChanged.connect(view.set_field)
+            self.larmor_panel.nucleusChanged.connect(
+                lambda nuc: view.select_element(nb_periodic_table.isotope(nuc).symbol))
+            view.set_field(self.larmor_panel.field())
+            view.select_element(nb_periodic_table.isotope(self.larmor_panel.nuclide()).symbol)
+            self.plot_stack.addWidget(view)
+            self.periodic_table_view = view
+        return self.periodic_table_view
+
+    def _sync_periodic_table_view(self, index: int) -> None:
+        """The table in place of the plot on its own tile only."""
+        if index == getattr(self, "_periodic_table_tab_index", -1):
+            self.larmor_panel.refresh_spectrum_button()
+            self.plot_stack.setCurrentWidget(self._ensure_periodic_table_view())
+        elif hasattr(self, "plot_stack"):
+            self.plot_stack.setCurrentWidget(self.canvas_tabs)
+
+    def _selected_spectrum_field(self):
+        """(B0 in tesla, description) of the selected spectrum, from its
+        BF1 (else SFO1) and its own nucleus, or None."""
+        index = self._selected_index()
+        if index is None:
+            return None
+        meta = self.session.spectra[index].metadata
+        freq = getattr(meta, "bf1", None) or getattr(meta, "sfo1", None)
+        nucleus = getattr(meta, "nucleus", None)
+        if not freq or not nucleus:
+            return None
+        try:
+            iso = nb_periodic_table.isotope(str(nucleus))
+        except KeyError:
+            return None
+        return float(freq) / abs(iso.gamma_MHz_per_T), f"{iso.nuclide} at {float(freq):.4f} MHz"
 
     def _show_side_tab(self, name: str) -> None:
         """Raise the left-panel tab called ``name``. A no-op if there is

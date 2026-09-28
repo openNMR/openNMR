@@ -223,7 +223,10 @@ def test_notes_open_from_the_right_edge_not_under_open_experiments(qapp):
     assert widget is None                                   # not in the list's box
     drawer = window.notes_drawer
     assert drawer.panel.isAncestorOf(window.notes_editor)
-    assert drawer.splitter.indexOf(window.canvas_tabs) == 0  # the plot, then the notes
+    # The plot (in plot_stack, which swaps in the periodic table on its
+    # own tile), then the notes.
+    assert drawer.splitter.indexOf(window.plot_stack) == 0
+    assert window.plot_stack.currentWidget() is window.canvas_tabs
     assert not drawer.isOpen()
     assert drawer.panel.isHidden()
 

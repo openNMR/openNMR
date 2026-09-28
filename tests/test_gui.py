@@ -16239,7 +16239,9 @@ def test_open_experiments_list_shows_on_every_tile_but_simulate(qapp):
             window.side_tabs.setCurrentIndex(index)
             qapp.processEvents()
             name = window.side_tabs.tabText(index)
-            assert window.open_experiments_box.isVisible() == (name != "Simulate"), name
+            # Simulate and the Periodic Table work without open data.
+            assert window.open_experiments_box.isVisible() == (
+                name not in ("Simulate", "Periodic Table")), name
     finally:
         window.close()
 

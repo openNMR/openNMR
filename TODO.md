@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-28 (NMR Periodic Table round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9 / Py 3.x: 2932 passed, 164 skipped, 0 failed (61 new tests in `test_periodic_table.py`, `test_gui_periodic_table.py`).*
+
 *2026-09-27 (wheel guard + field input round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2952 passed, 162 skipped, 0 failed (13 new tests in `test_gui_field_and_wheel.py`).*
 
 *2026-09-27 (adiabatic pulses + tensor pictures round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2939 passed, 162 skipped, 0 failed (39 new tests in `test_bloch_adiabatic.py`, `test_tensor_views.py`, `test_gui_adiabatic_tensors.py`).*
@@ -105,6 +107,18 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## NMR Periodic Table + Larmor calculator (2026-09-28)
+
+- **Asked**: a launcher button (artwork `gui/resources/launcher_periodictable.png`), just before Settings, opening an "NMR Periodic Table" like https://euannbassey.github.io/periodic_table.html -- search to highlight, click an element for its nuclides -- with a Larmor-frequency calculator in the left panel and the table in place of the spectrum view.
+- **Built**:
+  - `notebook/periodic_table.py` (notebook + GUI): `element`, `isotope`, `isotopes`, `search`, `grid_position`, `larmor_frequency(nuclide, B0_T | proton_MHz=, signed=)`, `larmor_working` (the calculation as text), `larmor_table` (every nucleus at a field, filter by element/spin/abundance, sort by frequency/Z/receptivity), `nearest_nuclides` ("what else resonates here?"), receptivity rel. 1H and 13C, `plot_periodic_table(show="mass"|"larmor"|"receptivity"|"isotope", ...)` for a publication figure.
+  - **No second copy of nuclear data.** Isotopes (I, gamma, Q, abundance) are read from `notebook.utils._GAMMA_DF` -- the table `find_gamma`/`compute_BF1_SFO1` reference every spectrum with -- so the calculator cannot disagree with the rest of openNMR (pinned by a test against `compute_BF1_SFO1`). Only element data (Z, name, weight, electron configuration, position) is new, taken from the website's table. The website's isotope values were checked against `_GAMMA_DF`: identical for every shared nuclide.
+  - `gui/periodic_table_panel.py`: `PeriodicTableView` (painted tiles with spin bar and isotope count; search by symbol/name/Z/nuclide, Enter opens the best match and a nuclide goes to the calculator; spin legend doubles as a filter -- *any* isotope of that spin, e.g. N lights up for I = 1/2 via 15N; "Tiles show" atomic weight / Larmor frequency at the calculator's field / receptivity / principal isotope; click -> card over the table with electron configuration and an isotope table including nu0 at the current field; a row click sends that isotope to the calculator; Esc/x/backdrop closes). `LarmorCalculatorPanel` (spectrometer presets, B0 in T <-> 1H MHz linked, "From selected spectrum" = BF1 (else SFO1) / gamma of the spectrum's own nucleus, nucleus combo accepting 27Al / Al-27 / ²⁷Al / an element name, result with the working written out and Copy, collapsed "All nuclei at this field" table sorted by frequency).
+  - MainWindow: tile "Periodic Table" before Settings (`_periodic_table_tab_index`), Window ▸ NMR Periodic Table (Ctrl+9); the plot area is now `self.plot_stack` (QStackedWidget: `canvas_tabs`, then the table, built on first use); Open experiments hidden on this tile, as on Simulate.
+- **Decisions**: the Larmor frequency is |gamma/2pi| x B0 for the bare nucleus from the tabulated gamma, stated in the UI; a sample's 0 ppm reference differs by the reference compound's shielding (ppm for 1H/13C, up to ~1 % for heavy nuclei) -- IUPAC Xi ratios were *not* added. Radioactive dagger only for 3H, 99Tc, 235U (not the primordial long-lived nuclides such as 40K, 115In, 187Re, which behave as stable for NMR). Field box has 6 decimals: at 4, a "400 MHz" preset read back as 399.998 MHz.
+- **Not done / open**: `_GAMMA_DF` lacks 180mTa (I = 9) and 231Pa, which the website table has -- adding them is a change to the shared table (it also feeds the quadrupolar nuclide lists), so left for a decision. IUPAC Xi (reference-compound) frequencies would be a useful second column.
+- **Tests**: `tests/test_periodic_table.py` (42), `tests/test_gui_periodic_table.py` (19); `test_gui_usability.py`'s TOOLBAR updated for the new tile.
 
 ## The wheel never changes a value box; Simulate takes nucleus + field (2026-09-27)
 

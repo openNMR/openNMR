@@ -25,8 +25,9 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
+# "Periodic Table" just before Settings: explicit user request, 2026-09-28.
 TOOLBAR = ["Open", "Process", "Compare", "Fit", "Simulate", "Dynamics", "Adv. Proc.", "Apply",
-           "Settings"]
+           "Periodic Table", "Settings"]
 
 
 def test_toolbar_order(qapp):
@@ -35,6 +36,7 @@ def test_toolbar_order(qapp):
     # The stored indices follow the new order.
     for attr, name in (("_processing_tab_index", "Process"), ("_compare_tab_index", "Compare"),
                        ("_fitting_tab_index", "Fit"), ("_simulations_tab_index", "Simulate"),
+                       ("_periodic_table_tab_index", "Periodic Table"),
                        ("_settings_tab_index", "Settings")):
         assert window.side_tabs.tabText(getattr(window, attr)) == name
 

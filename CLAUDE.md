@@ -63,9 +63,14 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 - **Toolbar**: one row of launcher tiles (`self.tile_bar`, taken from
   `side_tabs`, a `WrappingTabWidget`), in the user's order: Open,
   Process, Compare, Fit, Simulate, Dynamics, Adv. Proc., Apply,
-  Settings. Panels are *built* in an older order (builders read each
-  other's widgets) and *added* in this one -- see `__init__`. Ctrl+1..8
+  Periodic Table, Settings. Panels are *built* in an older order (builders read each
+  other's widgets) and *added* in this one -- see `__init__`. Ctrl+1..9
   (`_WINDOW_MENU_PANELS`) follow the toolbar order.
+- **Periodic Table** (`gui/periodic_table_panel.py`, maths in
+  `notebook/periodic_table.py`): its tile's panel is the Larmor
+  calculator; the table replaces the plot through `self.plot_stack`
+  (a QStackedWidget holding `canvas_tabs`), built on first use. Nuclear
+  data come only from `notebook.utils._GAMMA_DF` -- do not add a copy.
 - **Collapsible sections** (`widgets/collapsible_section.py`) start
   collapsed. Code that sends the user to one opens it with
   `setExpanded(True)`.
