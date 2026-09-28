@@ -27,6 +27,9 @@ from .plotting import (
 # Colour-blind-/print-friendly palette checks -- the same functions the
 # GUI's Plot Style panel uses, so a notebook figure can be checked (and
 # a palette chosen) exactly as the GUI does it.
+# Legend/series names with LaTeX: check one, or make one safe to draw --
+# the same checks the GUI's Rename… and Plot Style name boxes use.
+from ..plotting.labels import label_problem, safe_label
 from ..plotting.accessibility import (
     friendly_palettes, max_safe_series, describe_accessibility, palette_distinctness,
     is_colourblind_safe, is_print_safe, trace_colour_presets, series_colours,

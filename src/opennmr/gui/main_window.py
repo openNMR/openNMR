@@ -641,6 +641,13 @@ class MainWindow(QMainWindow):
         self.fid_canvas.measurementCompleted.connect(self._on_measurement_completed)
         self.compare_canvas = MplCanvas()
         self.compare_canvas.measurementCompleted.connect(self._on_measurement_completed)
+        # A legend by default: saying which trace is which is the point
+        # of a comparison (explicit user request, 2026-09-28). Still
+        # right-click > Show Legend to turn it off.
+        self.compare_canvas._legend_visible = True
+        #: Compare series key -> its Compare-list entry (session index,
+        #: slice), so a name typed in Plot Style can reach the spectrum.
+        self._compare_series_entries: dict = {}
         self.fit_canvas = MplCanvas()
         self.fit_canvas.fitPointExcludeRequested.connect(self._on_fit_point_exclude_requested)
         self.fit_canvas.fitPointsResetRequested.connect(self._on_fit_points_reset_requested)
@@ -3365,24 +3372,42 @@ class MainWindow(QMainWindow):
         An empty string clears it, going back to the derived name."""
         spectrum = self.session.spectra[index]
         current = spectrum.metadata.raw.get("display_label", "")
-        text, ok = QInputDialog.getText(
-            self, "Rename spectrum",
-            "Name for lists, legends and reports (blank to restore the default):",
-            text=current or self.session.label(index),
-        )
-        if not ok:
-            return
-        text = text.strip()
+        text = current or self.session.label(index)
+        while True:
+            text, ok = QInputDialog.getText(
+                self, "Rename spectrum",
+                "Name for lists, legends and reports (blank to restore the default).\n"
+                "LaTeX goes between dollar signs, e.g.  $^{7}$Li  or  LiCoO$_2$",
+                text=text,
+            )
+            if not ok:
+                return
+            problem = plotting.label_problem(text.strip())
+            if problem is None:
+                break
+            QMessageBox.warning(self, "Name not accepted", problem)
+        self._set_display_label(index, text.strip())
+
+    def _set_display_label(self, index: int, text: str) -> None:
+        """Give spectrum ``index`` the name ``text`` (blank: back to its
+        derived name) and update everywhere it is shown -- the Open
+        experiments list, the Compare list and its legend, the Spectrum
+        view's legend and the Plot Style name boxes."""
+        spectrum = self.session.spectra[index]
+        text = (text or "").strip()
         if text:
             spectrum.metadata.raw["display_label"] = text
         else:
             spectrum.metadata.raw.pop("display_label", None)
         self.spectrum_list.item(index).setText(self.session.label(index))
+        if self.canvas._current_1d_spectrum is spectrum:
+            self.canvas.relabel_current_spectrum()
         self._rebuild_compare_list([
             self.compare_list.item(i).data(Qt.ItemDataRole.UserRole)
             for i in range(self.compare_list.count())
         ])
         self._refresh_compare_view_if_active(switch_tab=False)
+        self._refresh_slice_colour_rows()
         self._schedule_sidecar_save(index)
 
     def _on_override_nucleus_action(self, index: int) -> None:
@@ -4356,7 +4381,10 @@ class MainWindow(QMainWindow):
             name = QLineEdit(entry.label)
             name.setEnabled(entry.can_rename)
             name.setToolTip(
-                "The name this series goes by in this plot's legend."
+                "The name this series goes by in this plot's legend. LaTeX goes "
+                "between dollar signs, e.g. $^{7}$Li or LiCoO$_2$. For an open "
+                "experiment this renames the experiment itself, so the list and "
+                "every legend agree."
                 if entry.can_rename else
                 "Named by its spectrum -- use the Open experiments list's "
                 "right-click Rename… to change it everywhere at once.")
@@ -4388,10 +4416,42 @@ class MainWindow(QMainWindow):
         canvas = self._series_target_canvas()
         if canvas is None or not label.strip():
             return
-        if any(e.key == key and e.label == label.strip() for e in canvas.series()):
+        label = label.strip()
+        if any(e.key == key and e.label == label for e in canvas.series()):
             return          # editingFinished fires on focus-out too
-        canvas.set_series_style(key, label=label.strip())
+        problem = plotting.label_problem(label)
+        if problem is not None:
+            QMessageBox.warning(self, "Name not accepted", problem)
+            self._refresh_slice_colour_rows()       # put the old name back in the box
+            return
+        # A trace that *is* an open experiment is renamed as that
+        # experiment, so the list, every legend and the report agree --
+        # one name per spectrum, whichever box it was typed into.
+        index = self._series_session_index(canvas, key)
+        if index is not None:
+            self._set_display_label(index, label)
+            return
+        canvas.set_series_style(key, label=label)
         self._refresh_slice_colour_rows()
+
+    def _series_session_index(self, canvas, key: str):
+        """The open experiment a series on ``canvas`` draws, or None if
+        it is not one (a pseudo-2D slice, a SCORE component, a DOSY map:
+        those keep their name on the plot)."""
+        view = canvas._active_series_view()
+        if canvas is self.canvas and view == "spectrum":
+            shown = canvas._current_1d_spectrum
+        elif canvas is self.compare_canvas and view == "compare":
+            entry = self._compare_series_entries.get(key)
+            if entry is None or entry[1] is not None:
+                return None
+            return entry[0] if 0 <= entry[0] < len(self.session) else None
+        else:
+            return None
+        for i, spectrum in enumerate(self.session.spectra):
+            if spectrum is shown:
+                return i
+        return None
 
     def _on_reset_series_colours_clicked(self) -> None:
         canvas = self._series_target_canvas()
@@ -5698,7 +5758,18 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.compare_canvas.show_compare(plot_spectra, mode=mode, normalize=(norm_mode == "max"))
+            # Each trace named as the Compare list names it -- which is
+            # the experiment's own name (Rename…) -- so the legend and
+            # the list always agree; a name typed in Plot Style goes
+            # back to the experiment (see _on_series_renamed).
+            entries = [self.compare_list.item(row).data(Qt.ItemDataRole.UserRole)
+                       for row in plot_rows]
+            keys = [repr(tuple(entry)) for entry in entries]
+            self._compare_series_entries = dict(zip(keys, (tuple(e) for e in entries)))
+            self.compare_canvas.show_compare(
+                plot_spectra, mode=mode, normalize=(norm_mode == "max"),
+                legend_labels=[self.compare_list.item(row).text() for row in plot_rows],
+                series_keys=keys, series_renameable=True)
             if switch_tab:
                 self.canvas_tabs.setCurrentWidget(self.compare_canvas)
             # show_compare always resets the canvas's own selection

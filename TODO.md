@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-28 (legend names + LaTeX round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2956 passed, 164 skipped, 0 failed (24 new tests in `test_gui_legend_names.py`).*
+
 *2026-09-28 (NMR Periodic Table round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9 / Py 3.x: 2932 passed, 164 skipped, 0 failed (61 new tests in `test_periodic_table.py`, `test_gui_periodic_table.py`).*
 
 *2026-09-27 (wheel guard + field input round): full suite without `test_data/` or pymatgen, matplotlib 3.11.2 / Py 3.12: 2952 passed, 162 skipped, 0 failed (13 new tests in `test_gui_field_and_wheel.py`).*
@@ -107,6 +109,18 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Legend names: renames reach the legend, Plot Style names, LaTeX, Compare legend on (2026-09-28)
+
+- **Asked**: renaming an experiment (Open experiments > Rename…) did not change the legend from right-click > Show Legend; names should also be editable in Plot Style; LaTeX allowed; Compare should show a legend by default with those names.
+- **What was wrong**: the Spectrum view's legend name came from `canvas._spectrum_label`, which ignored `display_label` (only `Session.label` honoured it), and a rename never redrew that view. Compare was drawn without names ("Trace 1", …), its names were locked in Plot Style, and a stacked Compare's legend only ever listed the bottom row (a bare `ax.legend()` looks at one Axes); `_restyle_existing_legends` re-collected the same way, so any restyle would have dropped the other rows. The overlay mode also ignored colours set in Plot Style.
+- **Built**:
+  - One name per experiment: `display_label`. Rename…, the Plot Style name box on the Spectrum view, and the Plot Style name box on a Compare trace that is a whole experiment all go through `MainWindow._set_display_label`, which updates the Open experiments list, the Compare list, the Compare legend, the Spectrum legend (`MplCanvas.relabel_current_spectrum`, no redraw of data) and the Plot Style boxes. Traces that are not experiments (pseudo-2D slices, SCORE components, DOSY maps) keep plot-local names as before.
+  - A lone 1D spectrum now has one series (`"spectrum"` view) so Plot Style can name it; its colour follows the trace colour unless set there.
+  - Compare: legend on by default (`compare_canvas._legend_visible = True`, still toggled by right-click); names = the Compare list's names; stable series keys per Compare entry (`series_keys`), so a colour stays with its trace after reordering; one legend on the top row of a stack (`_legend_entries` collects every row); restyling keeps every entry.
+  - LaTeX: matplotlib mathtext between `$…$` (no TeX install needed). `plotting/labels.py`: `label_problem(text)` explains a name that will not draw; `safe_label(text)` escapes it so a bad name draws literally instead of blanking the figure. Rename… re-prompts and Plot Style refuses such a name with the reason; every GUI legend and `notebook.plotting.plot_spectrum_dict` labels go through `safe_label`. Both exported from `opennmr.notebook`.
+- **Decisions**: a Plot Style rename of an experiment renames the experiment (not a plot-local override), so the list, the legends and the processing report can never disagree. Mathtext, not full `usetex` LaTeX (would need a TeX install and is slow).
+- **Tests**: `tests/test_gui_legend_names.py` (24); `test_gui_canvas.py::test_series_is_empty_where_there_is_no_notion_of_several` updated -- a lone 1D spectrum now has exactly one series.
 
 ## NMR Periodic Table + Larmor calculator (2026-09-28)
 

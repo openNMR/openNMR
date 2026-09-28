@@ -3213,10 +3213,14 @@ def _two_1d():
 
 
 def test_series_is_empty_where_there_is_no_notion_of_several(qapp):
-    """So a caller can offer per-series controls unconditionally."""
+    """So a caller can offer per-series controls unconditionally. A bare
+    2D contour has no series; a lone 1D spectrum has exactly one -- its
+    legend name, which Plot Style can edit (user request, 2026-09-28)."""
     canvas = MplCanvas()
-    canvas.show_spectrum(_make_1d())
+    canvas.show_spectrum(_make_2d(n_f1=16, n_f2=128))
     assert canvas.series() == []
+    canvas.show_spectrum(_make_1d())
+    assert len(canvas.series()) == 1 and canvas.series()[0].can_rename
 
 
 def test_every_multi_series_view_answers_the_same_interface(qapp):

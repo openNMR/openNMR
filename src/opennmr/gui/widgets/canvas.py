@@ -3443,6 +3443,30 @@ class MplCanvas(QWidget):
                 kwargs["facecolor"] = self._legend_facecolor
         return kwargs
 
+    def _legend_entries(self) -> tuple[list, list]:
+        """(handles, labels) for this plot's legend: every named line of
+        the plot -- of every row, for a stacked Compare -- with each name
+        made safe to draw (see :func:`opennmr.plotting.safe_label`).
+
+        Collected here rather than by ``ax.legend()``'s own search, which
+        only looks at one Axes (so a stack's legend listed only its
+        bottom trace) and silently skips any name starting with "_"
+        (a folder called "_run2" never appeared)."""
+        axes = self._compare_axes if self._compare_axes else [self.ax]
+        view = self._active_series_view()
+        series_names = {e.label for e in self._series.get(view, [])} if view else set()
+        handles, labels = [], []
+        for ax in axes:
+            h, l = ax.get_legend_handles_labels()
+            handles += h
+            labels += l
+            for line in ax.lines:
+                name = line.get_label()
+                if name.startswith("_") and name in series_names and line not in handles:
+                    handles.append(line)
+                    labels.append(name)
+        return handles, [plotting.safe_label(name) for name in labels]
+
     def _restyle_existing_legends(self) -> None:
         """Re-issue every legend already on the figure with this
         canvas's own :meth:`_legend_kwargs`.
@@ -3460,9 +3484,15 @@ class MplCanvas(QWidget):
         are all fixed when a Legend is constructed."""
         kwargs = self._legend_kwargs()
         for ax in self.figure.get_axes():
-            if ax.get_legend() is None:
+            old = ax.get_legend()
+            if old is None:
                 continue
-            legend = ax.legend(**kwargs)
+            # The same entries, restyled: re-collecting with a bare
+            # ax.legend() would drop the entries gathered from other
+            # rows of a stacked Compare (see _legend_entries).
+            handles = list(getattr(old, "legend_handles", None) or old.legendHandles)
+            labels = [t.get_text() for t in old.get_texts()]
+            legend = ax.legend(handles, labels, **kwargs)
             # **After the rebuild, not before.** The font family is a
             # property of the Text artists inside the Legend, and
             # re-issuing the legend builds new ones -- applying it in
@@ -3590,6 +3620,8 @@ class MplCanvas(QWidget):
             return "slices"
         if self._compare_spectra:
             return "compare"
+        if self._current_1d_spectrum is not None and self._series.get("spectrum"):
+            return "spectrum"
         return None
 
     def series(self) -> list[SeriesStyle]:
@@ -3638,6 +3670,17 @@ class MplCanvas(QWidget):
             self._redraw_active_series_view()
             return
 
+    def relabel_current_spectrum(self) -> None:
+        """The spectrum on show was renamed: take its new name into the
+        series and the legend, without redrawing the data."""
+        spectrum = self._current_1d_spectrum
+        entries = self._series.get("spectrum")
+        if spectrum is None or not entries:
+            return
+        entries[0].label = _spectrum_label(spectrum)
+        entries[0].label_overridden = False
+        self._redraw_active_series_view()
+
     def _redraw_active_series_view(self) -> None:
         """Redraw whichever multi-series view is showing, preserving
         the view where that makes sense."""
@@ -3650,6 +3693,15 @@ class MplCanvas(QWidget):
             self._redraw_contour(preserve_view=True)
         elif view == "compare":
             self.show_compare(self._compare_spectra, **(self._compare_kwargs or {}))
+        elif view == "spectrum":
+            # In place: a full show_spectrum would throw away the zoom
+            # just to change a name or a colour.
+            entry = self._series["spectrum"][0]
+            if self.ax.lines:
+                self.ax.lines[0].set_label(entry.label)
+                self.ax.lines[0].set_color(entry.colour)
+            self._apply_view_options()
+            self.canvas.draw_idle()
 
     def _assign_series(self, view: str, entries) -> list[SeriesStyle]:
         """Build (or reuse) the series list for ``view``.
@@ -4462,10 +4514,18 @@ class MplCanvas(QWidget):
         self._pivot_line = None
         self._pivot_marker_ax = None
         self._peak_marker_lines = []
-        if self._legend_visible and self.ax.get_legend_handles_labels()[0]:
-            self.ax.legend(**self._legend_kwargs())
+        handles, labels = self._legend_entries()
+        # A stacked Compare has one Axes per trace; its legend (one entry
+        # per trace) goes on the top row, and nowhere else.
+        host = self._compare_axes[0] if self._compare_axes else self.ax
+        for ax in self.figure.get_axes():
+            if ax is not host and ax.get_legend() is not None and self._compare_axes \
+                    and ax in self._compare_axes:
+                ax.get_legend().remove()
+        if self._legend_visible and handles:
+            host.legend(handles, labels, **self._legend_kwargs())
         else:
-            existing = self.ax.get_legend()
+            existing = host.get_legend()
             if existing is not None:
                 existing.remove()
         # A 2D/pseudo-2D contour panel's own default square box (real
@@ -4685,15 +4745,25 @@ class MplCanvas(QWidget):
             self._current_1d_spectrum = spectrum
             self._axis_unit = "ppm"  # a fresh spectrum always starts in ppm
             self.ax = self.figure.add_subplot(111)
+            # One series, so the Plot Style dialog can name it (and
+            # recolour it) like any other plot's series. Its colour is
+            # the trace colour unless set here deliberately.
+            # Keyed by the spectrum object (a reprocess redraws the same
+            # one), so a colour set for one experiment does not follow
+            # the view to the next.
+            entry = self._assign_series(
+                "spectrum", [(f"spectrum-{id(spectrum)}", _spectrum_label(spectrum), True)])[0]
+            if not entry.colour_overridden:
+                entry.colour = self._trace_color
             xmin, xmax, labeltext = plotting.plot_1d(
                 self.ax, spectrum, full_resolution=self._full_resolution,
-                color=self._trace_color)
+                color=entry.colour)
             # This canvas's own axis-label style/template, not
             # plot_1d's own (always-'brackets') default -- see
             # _chemical_shift_label.
             labeltext = self._chemical_shift_label(spectrum, x_unit="ppm")
             self._ppm_label = labeltext
-            self.ax.lines[0].set_label(_spectrum_label(spectrum))
+            self.ax.lines[0].set_label(entry.label)
             self.ax.set_xlim(xmin, xmax)
             self.ax.invert_xaxis()
             self.ax.set_xlabel(labeltext, fontsize=self._AXIS_LABELSIZE)
@@ -5020,7 +5090,9 @@ class MplCanvas(QWidget):
 
     def show_compare(self, spectra: list[NMRSpectrum], mode: str = "stack", normalize: bool = False,
                       row_labels: list[str] | None = None, shared_scale: bool = False,
-                      series_renameable: bool = False, plot_kind: str = "compare") -> None:
+                      series_renameable: bool = False, plot_kind: str = "compare",
+                      legend_labels: list[str] | None = None,
+                      series_keys: list[str] | None = None) -> None:
         """Plot several 1D spectra together for comparison.
 
         ``mode="overlay"`` : every spectrum on one shared axes at y=0
@@ -5072,6 +5144,12 @@ class MplCanvas(QWidget):
         control with no real effect, matching the explicit ask that
         stacked-spectrum spacing "should be automatic".
 
+        ``legend_labels`` -- each trace's name in the legend (without
+        writing it onto the row, which is what ``row_labels`` does).
+        ``series_keys`` -- a stable key per trace (default: its
+        position), so a name or colour set on one trace stays with that
+        trace when the list is reordered.
+
         ``plot_kind`` -- what :attr:`plotKindChanged` reports this as:
         ``"compare"``, or ``"pseudo2d"`` when the rows are the slices of
         one pseudo-2D spectrum, so each gets its own saved default
@@ -5092,7 +5170,8 @@ class MplCanvas(QWidget):
         self._compare_kwargs = {"mode": mode, "normalize": normalize,
                                  "row_labels": row_labels, "shared_scale": shared_scale,
                                  "series_renameable": series_renameable,
-                                 "plot_kind": plot_kind}
+                                 "plot_kind": plot_kind, "legend_labels": legend_labels,
+                                 "series_keys": series_keys}
         # Both modes, not just "stack" -- the stack branch below set
         # this for its own unit-conversion needs, which left an overlay
         # Compare invisible to _active_series_view and so unstyleable.
@@ -5105,8 +5184,10 @@ class MplCanvas(QWidget):
         # components are drawn through the same renderer but are not
         # session spectra at all -- their labels are generated
         # annotations, plot-local, and theirs to rename.
+        names = row_labels if row_labels else legend_labels
         entries = self._assign_series("compare", [
-            (str(i), (row_labels[i] if row_labels and i < len(row_labels) else f"Trace {i + 1}"),
+            ((series_keys[i] if series_keys and i < len(series_keys) else str(i)),
+             (names[i] if names and i < len(names) else f"Trace {i + 1}"),
              series_renameable)
             for i in range(len(spectra))
         ])
@@ -5140,6 +5221,7 @@ class MplCanvas(QWidget):
                 # paint over the bleed with its own opaque background,
                 # hiding it again.
                 row_ax.lines[-1].set_clip_on(False)
+                row_ax.lines[-1].set_label(entries[i].label)
                 row_ax.patch.set_alpha(0.0)
                 xmin = this_xmin if xmin is None else min(xmin, this_xmin)
                 xmax = this_xmax if xmax is None else max(xmax, this_xmax)
@@ -5191,6 +5273,13 @@ class MplCanvas(QWidget):
             offset = -1.0 if mode == "overlay" else 0.2
             plotting.plot_1d_stack(spectra, ax=self.ax, fig=self.figure, y_offset=offset, normalize=normalize,
                                     color=self._compare_colormap, full_resolution=self._full_resolution)
+            # Each trace's name and colour from its series entry, as in
+            # the stack -- the overlay used to take the colour map's
+            # colours directly, so a colour set in Plot Style did not
+            # reach it, and its lines had no names for a legend at all.
+            for line, entry in zip(self.ax.lines, entries):
+                line.set_label(entry.label)
+                line.set_color(entry.colour)
             self.ax.set_yticks([])
             plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
                                         linewidth=self._AXIS_LINEWIDTH)
@@ -6416,6 +6505,14 @@ class MplCanvas(QWidget):
 
 def _spectrum_label(spectrum: NMRSpectrum) -> str:
     meta = spectrum.metadata
+    # A name the user gave the experiment (Open experiments > Rename…, or
+    # the Plot Style name box) wins -- the same override Session.label
+    # honours, so the legend says what the list says. This was missing:
+    # a renamed spectrum still went into "Show Legend" under its folder
+    # name (user report, 2026-09-28).
+    override = (meta.raw or {}).get("display_label")
+    if isinstance(override, str) and override.strip():
+        return override.strip()
     if meta.vendor == "derived" and meta.source_path:
         # A derived spectrum's source_path is a *label*, not a path --
         # basename()ing it truncates at any "/" it contains (a unit

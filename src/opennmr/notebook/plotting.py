@@ -48,6 +48,7 @@ from .utils import NUC_label
 # One implementation of the too-light-colour rule, in the live
 # plotting package; this legacy copy delegates rather than repeating it.
 from ..plotting.style import readable_cmap
+from ..plotting.labels import safe_label
 from ..plotting.accessibility import is_qualitative, ordered_qualitative_colours
 
 # Output formats every save-capable plotting function in nmrtools
@@ -475,7 +476,9 @@ def plot_spectrum_dict(spectrum_dict, ax=None, axis="ppm", channel="real",
     else:
         fig = ax.figure
 
-    ax.plot(x, y, label=label, **plot_kwargs)
+    # LaTeX in a name is welcome ("$^{7}$Li"); a name whose LaTeX does
+    # not parse is drawn literally instead of breaking the figure.
+    ax.plot(x, y, label=safe_label(label) if label is not None else None, **plot_kwargs)
 
     _apply_axis_style(ax, tick_dir, tick_length, tick_width, tick_pad,
                        tick_number, fontsize, show_yaxis)
