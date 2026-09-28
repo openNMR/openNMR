@@ -29,7 +29,7 @@ from .plotting import (
 # a palette chosen) exactly as the GUI does it.
 # Legend/series names with LaTeX: check one, or make one safe to draw --
 # the same checks the GUI's Rename… and Plot Style name boxes use.
-from ..plotting.labels import label_problem, safe_label
+from ..plotting.labels import label_problem, safe_label, label_traces, set_legend_linewidth
 from ..plotting.accessibility import (
     friendly_palettes, max_safe_series, describe_accessibility, palette_distinctness,
     is_colourblind_safe, is_print_safe, trace_colour_presets, series_colours,

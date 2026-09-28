@@ -94,11 +94,39 @@ class _ContourCrosshair:
         self.axes = tuple(dict.fromkeys(a for a in (ax, f1_ax, f2_ax) if a is not None))
         self._background = None
         self._vline_axes = [a for a in (ax, f2_ax) if a is not None]
-        self._vlines = [a.axvline(0, visible=False, animated=True, **lineprops) for a in self._vline_axes]
+        self._vlines = [self._guide(a, "v", lineprops) for a in self._vline_axes]
         self._hline_axes = [a for a in (ax, f1_ax) if a is not None]
-        self._hlines = [a.axhline(0, visible=False, animated=True, **lineprops) for a in self._hline_axes]
+        self._hlines = [self._guide(a, "h", lineprops) for a in self._hline_axes]
         self._cid_motion = canvas.mpl_connect("motion_notify_event", self._onmove)
         self._cid_draw = canvas.mpl_connect("draw_event", self._on_draw)
+
+    @staticmethod
+    def _guide(ax, orientation: str, lineprops):
+        """One crosshair line, spanning ``ax`` -- **not** ``axvline``/
+        ``axhline``. Those are data: created at 0 they put 0 into the
+        Axes' data limits, so the first redraw after the crosshair was
+        switched on autoscaled the plot out to include x = 0 and y = 0,
+        and Home (which re-autoscales) could not undo it. Reported on
+        the DNP field profile (fields near 9396 mT): "as soon as I cross
+        into the axes it zooms out so I see (0,0) ... and I cannot reset
+        the view". Any spectrum whose range excludes 0 ppm did the same.
+        Drawn in axes-fraction coordinates along its length and never
+        added to the Axes' children, it is not part of ``ax.lines``, the
+        data limits or a relim; it is only ever drawn by blitting."""
+        from matplotlib.lines import Line2D
+        if orientation == "v":
+            line = Line2D([0, 0], [0, 1], transform=ax.get_xaxis_transform(), **lineprops)
+        else:
+            line = Line2D([0, 1], [0, 0], transform=ax.get_yaxis_transform(), **lineprops)
+        line.set_visible(False)
+        line.set_animated(True)
+        # Attached to the Axes (for its transforms and draw_artist) but
+        # not added as a child: a child Line2D is in ax.lines, and relim
+        # counts its data coordinate -- which along the line's length is
+        # the Axes fraction 0..1 here, and across it the cursor's value.
+        line.axes = ax
+        line.set_figure(ax.figure)
+        return line
 
     def disconnect(self) -> None:
         """Stop reacting to this canvas entirely. Must run before the
@@ -966,6 +994,18 @@ class MplCanvas(QWidget):
         self._legend_fontsize: float | None = None
         self._legend_framealpha = 0.8
         self._legend_facecolor: str | None = None
+        # Width of the sample lines inside the legend, in points; None
+        # draws them as wide as the traces (explicit user request,
+        # 2026-09-28: thin spectra made the legend key hard to read).
+        self._legend_linewidth: float | None = None
+        # How traces are named when names are shown: "legend", or
+        # "labels" -- each name written just above its own trace's noise,
+        # at _trace_label_position (0 = plot's left edge, 1 = right).
+        self._legend_style = "legend"
+        self._trace_label_position = 0.02
+        self._trace_label_artists: list = []
+        #: True while the figure is one drawn by show_external_plot.
+        self._external_plot = False
         # --- Title -------------------------------------------------
         # Off by default, on request. Several views set a title as
         # they draw (a slice number, a DOSY's own caption); this hides
@@ -2684,6 +2724,8 @@ class MplCanvas(QWidget):
         # teardown above.
         self._last_cursor_shape = None
         self._home_limits = None
+        self._trace_label_artists = []
+        self._external_plot = False
         self._cancel_navigation_drag()
         self.figure.clear()
 
@@ -3443,6 +3485,83 @@ class MplCanvas(QWidget):
                 kwargs["facecolor"] = self._legend_facecolor
         return kwargs
 
+    def _refresh_trace_names(self, restyle: bool = True) -> None:
+        """Name the traces the way the style says -- a legend, names
+        written on the traces (``_legend_style == "labels"``), or
+        neither when names are hidden. Only this part of the view: safe
+        to call on a plot already drawn (a style change), unlike
+        :meth:`_apply_view_options`, which is for a fresh rebuild."""
+        self._remove_trace_labels()
+        if self._external_plot:
+            # A notebook figure (Compare > DNP) names its own traces;
+            # only its legend's style is this canvas's business.
+            if restyle:
+                self._restyle_existing_legends()
+            return
+        handles, labels = self._legend_entries()
+        # A stacked Compare has one Axes per trace; its legend (one entry
+        # per trace) goes on the top row, and nowhere else.
+        host = self._compare_axes[0] if self._compare_axes else self.ax
+        if host is None:
+            return
+        for ax in self.figure.get_axes():
+            if ax is not host and ax.get_legend() is not None and self._compare_axes \
+                    and ax in self._compare_axes:
+                ax.get_legend().remove()
+        as_labels = self._legend_style == "labels"
+        if self._legend_visible and handles and not as_labels:
+            host.legend(handles, labels, **self._legend_kwargs())
+        else:
+            existing = host.get_legend()
+            if existing is not None:
+                existing.remove()
+        if self._legend_visible and handles and as_labels:
+            self._draw_trace_labels(handles, labels)
+        if restyle:
+            self._restyle_existing_legends()
+            self.canvas.draw_idle()
+
+    def _draw_trace_labels(self, handles, labels) -> None:
+        """Each named trace's name just above its noise -- see
+        :func:`opennmr.plotting.label_traces`. Re-placed whenever that
+        Axes' x-range changes, since the noise is read where the name
+        sits."""
+        from matplotlib.lines import Line2D
+        by_axes: dict = {}
+        for handle, label in zip(handles, labels):
+            if isinstance(handle, Line2D) and handle.axes is not None:
+                by_axes.setdefault(handle.axes, []).append((handle, label))
+        fontsize = self._legend_fontsize or self._AXIS_LABELSIZE
+        for ax, pairs in by_axes.items():
+            texts = plotting.label_traces(
+                ax, [h for h, _l in pairs], [l for _h, l in pairs],
+                position=self._trace_label_position, fontsize=fontsize,
+                fontfamily=self._font_family or None)
+            self._trace_label_artists.extend(texts)
+            if not getattr(ax, "_opennmr_label_cid", None):
+                ax._opennmr_label_cid = ax.callbacks.connect(
+                    "xlim_changed", lambda _ax: self._on_trace_label_xlim_changed())
+
+    def _on_trace_label_xlim_changed(self) -> None:
+        if self._trace_label_artists and not getattr(self, "_placing_labels", False):
+            self._placing_labels = True
+            try:
+                self._refresh_trace_names(restyle=False)
+            finally:
+                self._placing_labels = False
+
+    def _remove_trace_labels(self) -> None:
+        for text in self._trace_label_artists:
+            try:
+                text.remove()
+            except (ValueError, NotImplementedError, AttributeError):
+                pass            # its Axes already went with a figure rebuild
+        self._trace_label_artists = []
+
+    def trace_labels(self) -> list:
+        """The names currently written on the traces (Text artists)."""
+        return list(self._trace_label_artists)
+
     def _legend_entries(self) -> tuple[list, list]:
         """(handles, labels) for this plot's legend: every named line of
         the plot -- of every row, for a stacked Compare -- with each name
@@ -3493,6 +3612,7 @@ class MplCanvas(QWidget):
             handles = list(getattr(old, "legend_handles", None) or old.legendHandles)
             labels = [t.get_text() for t in old.get_texts()]
             legend = ax.legend(handles, labels, **kwargs)
+            plotting.set_legend_linewidth(legend, self._legend_linewidth)
             # **After the rebuild, not before.** The font family is a
             # property of the Text artists inside the Legend, and
             # re-issuing the legend builds new ones -- applying it in
@@ -3627,10 +3747,11 @@ class MplCanvas(QWidget):
     def series(self) -> list[SeriesStyle]:
         """Every addressable series on the current plot.
 
-        Empty for a view that has no notion of several series (a lone
-        1D trace has its own trace-colour control, and a bare contour
-        has none) -- a caller can offer per-series controls
-        unconditionally and get nothing where there is nothing."""
+        Empty for a view with no named series (a bare contour) -- a
+        caller can offer per-series controls unconditionally and get
+        nothing where there is nothing. A lone 1D spectrum has one: its
+        legend name (and colour, which follows the trace colour until
+        set here), so Plot Style can name it."""
         view = self._active_series_view()
         return list(self._series.get(view, [])) if view else []
 
@@ -3797,6 +3918,9 @@ class MplCanvas(QWidget):
             "legend_fontsize": self._legend_fontsize,
             "legend_framealpha": self._legend_framealpha,
             "legend_facecolor": self._legend_facecolor,
+            "legend_linewidth": self._legend_linewidth,
+            "legend_style": self._legend_style,
+            "trace_label_position": self._trace_label_position,
         }
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
@@ -3805,7 +3929,9 @@ class MplCanvas(QWidget):
                   contour_level_mode=None, contour_power=None,
                   title_visible=None, font_family=None, axis_label_style=None,
                   axis_label_template=None, legend_frameon=None,
-                  legend_fontsize=None, legend_framealpha=None, legend_facecolor=None) -> None:
+                  legend_fontsize=None, legend_framealpha=None, legend_facecolor=None,
+                  legend_linewidth=None, legend_style=None,
+                  trace_label_position=None) -> None:
         """The Output tab's live style panel -- updates whichever of
         these aren't ``None``, both as the new per-instance default
         (every ``show_*`` method reads ``self._AXIS_LINEWIDTH`` etc.,
@@ -3864,6 +3990,13 @@ class MplCanvas(QWidget):
             self._legend_framealpha = float(legend_framealpha)
         if legend_facecolor is not None:
             self._legend_facecolor = legend_facecolor or None
+        if legend_linewidth is not None:
+            # 0 is the panel's "match the traces" sentinel.
+            self._legend_linewidth = float(legend_linewidth) or None
+        if legend_style is not None:
+            self._legend_style = "labels" if legend_style == "labels" else "legend"
+        if trace_label_position is not None:
+            self._trace_label_position = min(max(float(trace_label_position), 0.0), 1.0)
         if contour_clevels is not None:
             # **The same number the right-click "Set Contour Levels…"
             # dialog and the DOSY display panel set**, not a parallel
@@ -3921,6 +4054,12 @@ class MplCanvas(QWidget):
         # font pass after it) threw away the font family the first had
         # just applied to its Text artists.
         self._apply_current_axis_style()
+        if (legend_style is not None or trace_label_position is not None
+                or labelsize is not None or legend_fontsize is not None
+                or font_family is not None):
+            # Legend <-> names on the traces, or where/how big the names
+            # are: the names are placed from the font size, so redo them.
+            self._refresh_trace_names()
         if axis_label_style is not None or axis_label_template is not None:
             self._refresh_axis_labels()
         for ax in self.figure.get_axes():
@@ -3956,6 +4095,7 @@ class MplCanvas(QWidget):
         "contour_clevels", "contour_level_mode", "contour_power", "title_visible",
         "font_family", "axis_label_style", "axis_label_template", "legend_frameon",
         "legend_fontsize", "legend_framealpha", "legend_facecolor",
+        "legend_linewidth", "legend_style", "trace_label_position",
     )
 
     def apply_style_defaults(self, style: dict) -> None:
@@ -4514,20 +4654,7 @@ class MplCanvas(QWidget):
         self._pivot_line = None
         self._pivot_marker_ax = None
         self._peak_marker_lines = []
-        handles, labels = self._legend_entries()
-        # A stacked Compare has one Axes per trace; its legend (one entry
-        # per trace) goes on the top row, and nowhere else.
-        host = self._compare_axes[0] if self._compare_axes else self.ax
-        for ax in self.figure.get_axes():
-            if ax is not host and ax.get_legend() is not None and self._compare_axes \
-                    and ax in self._compare_axes:
-                ax.get_legend().remove()
-        if self._legend_visible and handles:
-            host.legend(handles, labels, **self._legend_kwargs())
-        else:
-            existing = host.get_legend()
-            if existing is not None:
-                existing.remove()
+        self._refresh_trace_names(restyle=False)
         # A 2D/pseudo-2D contour panel's own default square box (real
         # roadmap ask: "the contour panel itself should be square...
         # automatic/default for 2D") is applied by plot_2d_contour's own
@@ -6020,12 +6147,15 @@ class MplCanvas(QWidget):
             self._enter_plot_kind(kind)
         self._clear_figure()
         draw(self.figure)
+        self._external_plot = True
         self.ax = self.figure.axes[0] if self.figure.axes else self.figure.add_subplot(111)
         self._apply_current_axis_style()
         if self._grid_visible:
             for ax in self.figure.axes:
                 ax.grid(True, alpha=0.3)
-        self._legend_visible = False
+        # _legend_visible is left alone: the figure names its own traces
+        # (see _external_plot), and switching it off here turned the
+        # Compare legend off for good after one look at a DNP plot.
         self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()

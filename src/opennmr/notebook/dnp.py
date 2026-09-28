@@ -1071,15 +1071,31 @@ def plot_sweep_spectra(spectra, result: dict | None = None, aligned: bool = Fals
             ax.axvline(st["peak_Hz"] / 1e3, color="0.4", linewidth=0.8, linestyle="--", zorder=0)
     ax.set_xlabel("Offset from carrier (kHz)" + (" , aligned on the line" if aligned else ""),
                   fontsize=fontsize)
-    ax.set_ylabel("Intensity (a.u.)", fontsize=fontsize)
     ax.invert_xaxis()
     if xlim_khz is not None:
         ax.set_xlim(max(xlim_khz), min(xlim_khz))
         _fit_y_to_visible(ax)
-    apply_spine_style(ax, top=False, right=False, bottom=True, left=True)
-    apply_tick_style(ax, labelsize=fontsize * 0.9)
+    _spectrum_axes(ax, fontsize)
     figure.tight_layout()
     return figure
+
+
+def _spectrum_axes(ax, fontsize: float) -> None:
+    """Style ``ax`` as every 1D spectrum in openNMR is drawn: the
+    frequency axis along the bottom and nothing else -- no top, left or
+    right border, no intensity ticks or label (explicit user request,
+    2026-09-28: DNP spectra "are normal spectra -- format them the same
+    way as any 1-d plot"). The tick settings persist through a later
+    ``minorticks_on`` (the GUI's style pass), so no y ticks come back."""
+    from ..plotting.style import apply_spine_style, apply_tick_style
+
+    apply_spine_style(ax, top=False, right=False, bottom=True, left=False)
+    apply_tick_style(ax, axis="x", labelsize=fontsize * 0.9)
+    ax.set_yticks([])
+    ax.set_ylabel("")
+    ax.tick_params(axis="y", which="both", left=False, right=False,
+                   labelleft=False, labelright=False)
+    ax.tick_params(axis="x", which="both", top=False, labeltop=False)
 
 
 def _fit_y_to_visible(ax, margin: float = 0.06) -> None:
@@ -1162,12 +1178,10 @@ def plot_enhancement_spectra(spectrum_1: NMRSpectrum, spectrum_2: NMRSpectrum,
     ax.legend(handles[::-1], names[::-1], frameon=False, fontsize=fontsize * 0.8)
     ax.set_xlabel({"ppm": "δ (ppm)", "hz": "Frequency (Hz)",
                    "offset": "Offset from carrier (kHz)"}[unit], fontsize=fontsize)
-    ax.set_ylabel("Intensity (a.u.)", fontsize=fontsize)
     ax.invert_xaxis()
     if xlim is not None:
         ax.set_xlim(max(xlim), min(xlim))
         _fit_y_to_visible(ax)
-    apply_spine_style(ax, top=False, right=False, bottom=True, left=True)
-    apply_tick_style(ax, labelsize=fontsize * 0.9)
+    _spectrum_axes(ax, fontsize)
     figure.tight_layout()
     return figure

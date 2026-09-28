@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-28 (legend style, trace labels, DNP spectra, crosshair round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2974 passed, 164 skipped, 0 failed (18 new tests in `test_gui_legend_style.py`).*
+
 *2026-09-28 (legend names + LaTeX round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2956 passed, 164 skipped, 0 failed (24 new tests in `test_gui_legend_names.py`).*
 
 *2026-09-28 (NMR Periodic Table round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9 / Py 3.x: 2932 passed, 164 skipped, 0 failed (61 new tests in `test_periodic_table.py`, `test_gui_periodic_table.py`).*
@@ -109,6 +111,15 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## Legend key width, names on the traces, DNP spectra as 1D, crosshair zoom-out (2026-09-28)
+
+- **Asked**: (1) DNP spectra in Compare showed extra borders -- draw them like any 1D spectrum; (2) Home did nothing on the DNP field profile after zooming; (3) a legend *line* width independent of the traces (`legend.get_lines()[i].set_linewidth(w)`); (4) optionally, instead of a legend, each spectrum's name just above its own noise, positionable from far left to far right.
+- **(2) What was wrong**: not Home -- the **crosshair**. `_ContourCrosshair` made its lines with `axvline(0)`/`axhline(0)`, which are *data*: 0 went into the Axes' data limits, so the first redraw after the cursor entered the plot autoscaled out to include (0, 0) (the profile sits near 9396 mT), and Home's re-autoscale kept counting them. Any spectrum whose range excluded 0 ppm had the same latent bug. Now `_ContourCrosshair._guide` builds plain Line2Ds in axes-fraction coordinates attached to the Axes but not added as children -- never in `ax.lines`, data limits or relim; drawn only by blitting. Regression test reproduces the report (x jumped to -470..9867 mT with the old lines).
+- **(1)**: `notebook.dnp._spectrum_axes` -- bottom axis only, no y ticks/label, no top/left/right -- used by `plot_sweep_spectra` and `plot_enhancement_spectra`. The field profile (a plot of numbers) keeps its y-axis. Also: `show_external_plot` no longer sets `_legend_visible = False`, which had switched the Compare legend off for good after one DNP view.
+- **(3)**: canvas style `legend_linewidth` (None = match traces), applied in `_restyle_existing_legends` via `plotting.set_legend_linewidth`; Plot Style "Legend line width" (0 = "Match traces").
+- **(4)**: canvas style `legend_style` ("legend" | "labels") and `trace_label_position` (0 = plot's left edge .. 1 = right edge); Plot Style "Name traces with" and a Left-Right slider. `plotting.label_traces(ax, ...)` (also in `opennmr.notebook`) writes each name in its trace's colour at baseline + 3 sigma (median near the name; sigma from the MAD of point-to-point differences over the visible range) + 2 pt, sliding smoothly so it starts at the left edge at 0 and ends at the right edge at 1; overlaid names that would collide are stacked upward. Re-placed on every x-limit change (noise is read where the name sits). Stacked Compare: each name in its own row. Show Legend on/off governs both forms. All three keys are in `_STYLE_KEYS`, so saved per-plot defaults keep them. `MplCanvas._refresh_trace_names` is the legend/labels part of `_apply_view_options`, callable on a drawn plot; `_external_plot` stops it touching a notebook figure's own legend.
+- **Not done**: a name placed on a peak stays on it (moving the slider is the remedy); an automatic "find a quiet spot" was considered and left out, as it would move names unpredictably between spectra.
 
 ## Legend names: renames reach the legend, Plot Style names, LaTeX, Compare legend on (2026-09-28)
 

@@ -3922,11 +3922,12 @@ class MainWindow(QMainWindow):
         self.output_minor_ticks_checkbox.toggled.connect(self._on_output_style_changed)
         style_form.addRow(self.output_minor_ticks_checkbox)
 
-        self.output_legend_checkbox = QCheckBox("Show legend (Spectrum tab)")
+        self.output_legend_checkbox = QCheckBox("Show legend / trace names")
         self.output_legend_checkbox.setToolTip(
-            "Same on/off state as the Spectrum canvas's own right-click "
-            "\"Show Legend\" -- a second, always-visible control for it, "
-            "not a separate setting."
+            "Same on/off state as the plot's own right-click \"Show Legend\" -- "
+            "a second, always-visible control for it, not a separate setting. "
+            "Whether the names appear as a legend or written on the traces is "
+            "\"Name traces with\" below."
         )
         self.output_legend_checkbox.toggled.connect(self._on_output_legend_changed)
         style_form.addRow(self.output_legend_checkbox)
@@ -3986,6 +3987,56 @@ class MainWindow(QMainWindow):
         )
         self.legend_color_button.clicked.connect(self._on_legend_color_clicked)
         style_form.addRow("Legend background:", self.legend_color_button)
+
+        # Legend key line width: explicit user request (2026-09-28) --
+        # the matplotlib way is legend.get_lines()[i].set_linewidth(w);
+        # this is that, kept through every restyle.
+        self.output_legend_linewidth_spin = QDoubleSpinBox()
+        self.output_legend_linewidth_spin.setRange(0.0, 12.0)
+        self.output_legend_linewidth_spin.setSingleStep(0.5)
+        self.output_legend_linewidth_spin.setDecimals(1)
+        self.output_legend_linewidth_spin.setValue(0.0)
+        self.output_legend_linewidth_spin.setSpecialValueText("Match traces")
+        self.output_legend_linewidth_spin.setSuffix(" pt")
+        self.output_legend_linewidth_spin.setToolTip(
+            "Thickness of the coloured lines inside the legend, independent of the "
+            "spectra's own line width. \"Match traces\" draws them as the traces are.")
+        self.output_legend_linewidth_spin.valueChanged.connect(self._on_legend_appearance_changed)
+        style_form.addRow("Legend line width:", self.output_legend_linewidth_spin)
+
+        # Names written on the traces instead of a legend: explicit user
+        # request (2026-09-28) -- "the titles of the spectra appear just
+        # above the noise level of each corresponding spectrum, with the
+        # option of positioning these labels far left, far right, or
+        # somewhere in between".
+        self.output_legend_style_combo = QComboBox()
+        self.output_legend_style_combo.addItem("Legend", "legend")
+        self.output_legend_style_combo.addItem("Labels on the traces", "labels")
+        self.output_legend_style_combo.setToolTip(
+            "Legend: the usual key.\nLabels on the traces: each spectrum's name written "
+            "just above its own noise, in its colour, at the position below -- no "
+            "key to cross-reference, which suits stacked spectra.")
+        self._narrow_combo(self.output_legend_style_combo)
+        self.output_legend_style_combo.currentIndexChanged.connect(
+            self._on_legend_appearance_changed)
+        style_form.addRow("Name traces with:", self.output_legend_style_combo)
+
+        position_row = QWidget()
+        position_layout = QHBoxLayout(position_row)
+        position_layout.setContentsMargins(0, 0, 0, 0)
+        position_layout.addWidget(QLabel("Left"))
+        self.output_trace_label_slider = QSlider(Qt.Orientation.Horizontal)
+        self.output_trace_label_slider.setRange(0, 100)
+        self.output_trace_label_slider.setValue(2)
+        self.output_trace_label_slider.setAccessibleName("Trace label position")
+        self.output_trace_label_slider.setToolTip(
+            "Where along the plot the names sit: far left, far right or anywhere "
+            "between. Each is placed just above its spectrum's noise at that point, "
+            "so move it off a peak if a name lands on one.")
+        self.output_trace_label_slider.valueChanged.connect(self._on_legend_appearance_changed)
+        position_layout.addWidget(self.output_trace_label_slider, 1)
+        position_layout.addWidget(QLabel("Right"))
+        style_form.addRow("Label position:", position_row)
         self._sync_legend_frame_controls()
 
         # --- Accessible palettes -----------------------------------
@@ -4200,6 +4251,9 @@ class MainWindow(QMainWindow):
             "legend_fontsize": self.output_legend_fontsize_spin.value(),
             "legend_framealpha": self.output_legend_alpha_spin.value(),
             "legend_facecolor": self._legend_facecolor,
+            "legend_linewidth": self.output_legend_linewidth_spin.value(),
+            "legend_style": self.output_legend_style_combo.currentData(),
+            "trace_label_position": self.output_trace_label_slider.value() / 100.0,
             # Not here: the series palette is app-wide and has its own
             # handler (_on_series_colormap_changed), so a per-plot style
             # edit must not quietly push it onto one canvas alone.
@@ -4549,9 +4603,16 @@ class MainWindow(QMainWindow):
         """The frame's colour and alpha do nothing without a frame, so
         they follow its checkbox rather than sitting there live-looking
         and inert."""
-        on = self.output_legend_frame_checkbox.isChecked()
+        labels = (hasattr(self, "output_legend_style_combo")
+                  and self.output_legend_style_combo.currentData() == "labels")
+        on = self.output_legend_frame_checkbox.isChecked() and not labels
         self.output_legend_alpha_spin.setEnabled(on)
         self.legend_color_button.setEnabled(on)
+        if hasattr(self, "output_trace_label_slider"):
+            # Each control is live only where it does something.
+            self.output_trace_label_slider.setEnabled(labels)
+            self.output_legend_linewidth_spin.setEnabled(not labels)
+            self.output_legend_frame_checkbox.setEnabled(not labels)
 
     def _on_legend_appearance_changed(self, *_args) -> None:
         self._sync_legend_frame_controls()
@@ -4561,6 +4622,9 @@ class MainWindow(QMainWindow):
                 legend_fontsize=self.output_legend_fontsize_spin.value(),
                 legend_framealpha=self.output_legend_alpha_spin.value(),
                 legend_facecolor=self._legend_facecolor or "",
+                legend_linewidth=self.output_legend_linewidth_spin.value(),
+                legend_style=self.output_legend_style_combo.currentData(),
+                trace_label_position=self.output_trace_label_slider.value() / 100.0,
             )
 
     def _on_legend_color_clicked(self) -> None:
@@ -4612,6 +4676,8 @@ class MainWindow(QMainWindow):
             (self.output_contour_power_spin, settings["contour_power"]),
             (self.output_legend_fontsize_spin, settings["legend_fontsize"] or 0),
             (self.output_legend_alpha_spin, settings["legend_framealpha"]),
+            (self.output_legend_linewidth_spin, settings["legend_linewidth"] or 0.0),
+            (self.output_trace_label_slider, int(round(settings["trace_label_position"] * 100))),
         ):
             widget.blockSignals(True)
             widget.setValue(value)
@@ -4651,6 +4717,10 @@ class MainWindow(QMainWindow):
         self.output_axis_label_template_edit.blockSignals(True)
         self.output_axis_label_template_edit.setText(settings["axis_label_template"] or "")
         self.output_axis_label_template_edit.blockSignals(False)
+        self.output_legend_style_combo.blockSignals(True)
+        self.output_legend_style_combo.setCurrentIndex(
+            max(0, self.output_legend_style_combo.findData(settings["legend_style"])))
+        self.output_legend_style_combo.blockSignals(False)
         self._legend_facecolor = settings["legend_facecolor"]
         self._refresh_legend_color_button()
         self._sync_legend_frame_controls()
