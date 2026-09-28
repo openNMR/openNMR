@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-28 (CSA/quad/combined models across pseudo-2D series round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2991 passed, 164 skipped, 0 failed (9 new tests in `test_series_fitting.py`).*
+
 *2026-09-28 (export crosshair, baseline-pinned scroll, DNP legend, full-res Compare round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2982 passed, 164 skipped, 0 failed (new: `test_gui_export_scroll.py`).*
 
 *2026-09-28 (legend style, trace labels, DNP spectra, crosshair round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2974 passed, 164 skipped, 0 failed (18 new tests in `test_gui_legend_style.py`).*
@@ -113,6 +115,18 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+
+## T1/T2 with CSA, quadrupolar and Combined-Hamiltonian lineshapes: fit every slice (2026-09-28)
+
+- **Asked**: fitting a slice of a pseudo-2D T1/T2 series with a CSA/quad (or mixed) model left "Export to pseudo-2D" greyed out, so T1/T2 could not be fitted with those models.
+- **What was wrong**: nothing was broken -- the feature did not exist. Those three fits only ever covered one slice; the CSA export button was deliberately disabled for good ("until CSA fitting gains its own multi-slice workflow"), and quadrupolar/combined had none. Fit Curve only reads `slice_fit_results`, which only Fit Spectrum/Integrate Regions wrote.
+- **Built**:
+  - `notebook/series_fitting.py` (exported from `opennmr.notebook`): `model_components(kind, fit)` -- per-site fitted curves from a CSA/quadrupolar/combined fit; `fit_series_with_lineshapes(pseudo2d, x, components, labels, rows, fit_regions, baseline)` -- each slice fitted as a *linear* combination of those fixed site shapes + a linear baseline (lstsq; errors from s^2 (A^T A)^-1; amplitudes signed, so inversion recovery works); `series_fit_report`. Results use the `slice_fit_results` shape (`index`, `slice`, `x`, `y`, `y_fit`) plus `integrals` (signed site areas) / `amplitudes` (relative to the reference slice) with errors, `site_labels`, `model`, `model_fit=True`.
+  - `processing.relaxation.NMR2D_fit_relaxation` reads model series: `value_source="area"` -> `integrals`, `"amplitude"` -> `amplitudes`; curves labelled by site.
+  - GUI: a "Pseudo-2D series (T1, T2, …)" box under Fit ▸ CSA/Dipolar, Quadrupolar and Combined Hamiltonian -- "Fit Every Slice with this … Model" (live once that section has fitted a slice of the selected pseudo-2D; each fit now records its `row`, and combined its `fit_regions`), and "Export … Fit to Pseudo-2D…" (live once the staged series is that model's). Stages for Dynamics ▸ Fit Curve (Value source steered off "region"), records `fits["series_<kind>"]` with the report (logged, saved), flags R² < 0.9 slices. `export_csa_pseudo2d_button` is kept as the CSA box's export button. The fit-report CSV lists model series per slice per site (and no longer assumes every staged result has `popt` -- an integration series would have raised there).
+- **Checked**: two CSA sites, inversion recovery, T1 0.15/0.9 s on a sloping baseline with noise -> both T1s within 3% through the real CSA fit and the real Fit Curve button; quadrupolar CT T2 within 3%; Monte Carlo (300 realisations) -- reported amplitude errors match the scatter within 15%.
+- **Existing work reused / not**: `notebook/csa_relaxation.NMR2D_fit_csa_slices` already had the same frozen-shape linear method, CSA only, from notebook dicts, fitting its own reference slice, and amplitudes >= 0 by default (wrong for inversion recovery unless `allow_negative_intensity=True`). Left as is; `series_fitting` generalises the method to all three models from a fit already made, and says so.
+- **Not done**: refitting shape parameters per slice (a tensor that changes along the series) -- deliberately; model as separate sites instead.
 
 ## Exports without crosshair, baseline-pinned intensity scroll, DNP legend off, full-resolution Compare (2026-09-28)
 

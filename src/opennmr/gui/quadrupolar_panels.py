@@ -531,9 +531,13 @@ class QuadrupolarFitPanel(QWidget):
         order = np.argsort(results["x_ppm"])
         y = np.asarray(results["real_spectrum"], dtype=float)[order]
         pcov = notebook_fitting.expand_pcov(pcov_free, is_free, len(popt))
+        _target, row, _index = self._get_target()
         self.result = {"popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
                        "x": x, "y": y, "y_fit": y_fit, "components": components,
                        "regions": regions, "spectrum": spectrum, "index": index,
+                       # Which slice of a pseudo-2D this was fitted to -- the
+                       # reference for applying the model to every slice.
+                       "row": row,
                        "settings": settings, "elapsed": elapsed,
                        "nucleus": self.nucleus_combo.currentText().strip()}
         self._draw_fit(self.result)

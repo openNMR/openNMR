@@ -11439,9 +11439,9 @@ def test_main_window_export_integration_pseudo2d_masks_outside_regions(qapp):
 
 
 def test_main_window_export_csa_pseudo2d_stays_disabled(qapp, monkeypatch):
-    # CSA fitting only ever fits one slice at a time (see
-    # _on_csa_fit_clicked) -- there is no per-series result to stack,
-    # so the button never turns on, whatever else has been fitted.
+    # The CSA export turns on only for a CSA series (Fit Every Slice with
+    # the CSA model -- tests/test_series_fitting.py), not because some
+    # other kind of fit (here an isotropic peak fit) was run.
     delays = np.geomspace(0.001, 0.3, 5)
     spectrum = _make_pseudo2d_relaxation_spectrum(delays, x0=5.0, fwhm=0.05, T2=0.05)
     window = MainWindow()

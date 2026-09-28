@@ -43,6 +43,7 @@ from .cpmg_panel import CpmgProcessingPanel
 from .compare_2d import Compare2DControls
 from ..notebook import notes as nb_notes
 from ..notebook import periodic_table as nb_periodic_table
+from ..notebook import series_fitting as nb_series_fitting
 from PySide6.QtGui import QColor
 
 
@@ -11481,8 +11482,10 @@ class MainWindow(QMainWindow):
             draw_fit=self._draw_quadrupolar_fit,
             format_value_error=self._format_value_error,
             send_to_simulation=self._send_quadrupolar_to_simulation,
-            on_fitted=lambda: self._store_fit("quadrupolar"))
-        layout.addWidget(CollapsibleSection("Quadrupolar", content=self.quad_fit_panel))
+            on_fitted=lambda: (self._store_fit("quadrupolar"),
+                               self._refresh_model_series_buttons()))
+        layout.addWidget(CollapsibleSection(
+            "Quadrupolar", content=self._with_model_series_box(self.quad_fit_panel, "quadrupolar")))
         # Any mix of CSA, quadrupolar and J per site (explicit user
         # request); the fitter is notebook.combined_fitting, the model
         # Simulate > Combined Hamiltonian's.
@@ -11492,9 +11495,11 @@ class MainWindow(QMainWindow):
             draw_fit=self._draw_combined_fit,
             format_value_error=self._format_value_error,
             send_to_simulation=self._send_combined_to_simulation,
-            on_fitted=lambda: self._store_fit("combined"))
+            on_fitted=lambda: (self._store_fit("combined"),
+                               self._refresh_model_series_buttons()))
         self._combined_fit_section = CollapsibleSection(
-            "Combined Hamiltonian", content=self.combined_fit_panel)
+            "Combined Hamiltonian",
+            content=self._with_model_series_box(self.combined_fit_panel, "combined"))
         layout.addWidget(self._combined_fit_section)
         # One set of sites across several spectra: a series, isotopes,
         # fields (explicit user request); notebook.multi_fitting.
@@ -13298,24 +13303,10 @@ class MainWindow(QMainWindow):
         self.csa_results_table.setVisible(False)
         layout.addWidget(self.csa_results_table)
 
-        # Permanently disabled for now, not just until a fit runs --
-        # Fit CSA Lineshape only ever fits one slice at a time (see
-        # _on_csa_fit_clicked's own row= handling), so there is no
-        # multi-slice series here to stack into a pseudo-2D dataset.
-        # Present anyway (rather than omitted) so Isotropic/
-        # Integration/CSA-Dipolar offer the same action consistently,
-        # and so it's ready the moment CSA fitting gains its own
-        # multi-slice workflow.
-        self.export_csa_pseudo2d_button = QPushButton("Export CSA Fit to Pseudo-2D…")
-        self.export_csa_pseudo2d_button.setToolTip(
-            "Fit CSA Lineshape only ever fits one slice at a time, so "
-            "there is no series yet to stack into a pseudo-2D dataset "
-            "-- this stays disabled until CSA fitting gains its own "
-            "multi-slice workflow."
-        )
-        self.export_csa_pseudo2d_button.setEnabled(False)
-        self.export_csa_pseudo2d_button.clicked.connect(self._on_export_csa_pseudo2d_clicked)
-        layout.addWidget(self.export_csa_pseudo2d_button)
+        # Apply the fitted model to every slice of a pseudo-2D series, for
+        # T1/T2 with CSA lineshapes (explicit user request, 2026-09-28) --
+        # see _build_model_series_box.
+        layout.addWidget(self._build_model_series_box("csa"))
 
         layout.addStretch(1)
 
@@ -18881,7 +18872,7 @@ class MainWindow(QMainWindow):
         self._csa_fit_result = {
             "popt": popt, "pcov": pcov, "is_free": is_free, "info": info,
             "x": x_sorted, "y_fit": fitted, "components": components, "results": results,
-            "convention": common["convention"], "spectrum_index": index,
+            "convention": common["convention"], "spectrum_index": index, "row": row,
             # How the fit was set up -- what the report says it did.
             "sites": sites, "fit_regions": fit_regions, "static": static,
             "mas_Hz": common.get("mas_Hz"), "scheme": scheme, "fit_n": fitting_n,
@@ -18890,6 +18881,7 @@ class MainWindow(QMainWindow):
         self._draw_csa_fit()
         self._report_csa_fit()
         self._store_fit("csa", index)
+        self._refresh_model_series_buttons()
 
     @staticmethod
     def _csa_grid_kwargs(scheme: str, orientations: int) -> dict:
@@ -20139,6 +20131,8 @@ class MainWindow(QMainWindow):
         first = slice_results[0]
         if "peak_defs" in first:
             return len(first["peak_defs"])
+        if first.get("model_fit"):
+            return len(first.get("site_labels") or first.get("integrals", []))
         return len(first.get("integrals", []))
 
     def _describe_staged_measurement(self) -> str:
@@ -20161,6 +20155,13 @@ class MainWindow(QMainWindow):
                 "results; it never re-fits peaks itself."
             )
         n_peaks = self._peak_count_in(results)
+        if results[0].get("model_fit"):
+            model = self._MODEL_SERIES_LABELS.get(results[0].get("model"), "lineshape")
+            return (
+                f"Will fit: {n_peaks} site{'s' if n_peaks != 1 else ''} × {len(results)} "
+                f"slice{'s' if len(results) != 1 else ''}, from the {model} model applied "
+                f"to every slice on the Fitting tab."
+            )
         kind = "peak fit" if "peak_defs" in results[0] else "region integration"
         noun = "peak" if kind == "peak fit" else "region"
         return (
@@ -20194,6 +20195,7 @@ class MainWindow(QMainWindow):
         is_integration = is_series and "regions" in results[0]
         self.export_isotropic_pseudo2d_button.setEnabled(bool(is_peak_fit))
         self.export_integration_pseudo2d_button.setEnabled(bool(is_integration))
+        self._refresh_model_series_buttons()
 
     def _slices_to_pseudo2d_traces(self, results: list[dict], values) -> list[NMRSpectrum]:
         """One :class:`NMRSpectrum` trace per slice, sharing that
@@ -20260,17 +20262,207 @@ class MainWindow(QMainWindow):
         self._add_derived_spectrum(pseudo2d, f"Integration({self.session.label(index)})")
 
     def _on_export_csa_pseudo2d_clicked(self) -> None:
-        """The button this is wired to stays disabled (see
-        :meth:`_build_csa_subtab`) -- CSA fitting only ever fits one
-        slice at a time, so there is no series yet to stack into a
-        pseudo-2D dataset. A real, documented response rather than a
-        silent no-op, in case this is ever triggered outside the UI
-        (e.g. a test driving the action directly)."""
-        QMessageBox.information(
-            self, "Export CSA Fit to Pseudo-2D",
-            "CSA fitting only fits one slice at a time, so there is no "
-            "series yet to export as a pseudo-2D dataset.",
-        )
+        self._on_export_model_pseudo2d_clicked("csa")
+
+    # ------------------------------------------------------------------
+    # A lineshape model (CSA, quadrupolar, combined) applied to every
+    # slice of a pseudo-2D series -- explicit user request (2026-09-28):
+    # T1/T2 fitting with CSA/quad models was impossible because those
+    # fits only ever covered one slice. Engine: notebook.series_fitting.
+    # ------------------------------------------------------------------
+
+    _MODEL_SERIES_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar",
+                            "combined": "Combined-Hamiltonian"}
+
+    def _with_model_series_box(self, panel, kind: str) -> QWidget:
+        holder = QWidget()
+        v = QVBoxLayout(holder)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(panel)
+        v.addWidget(self._build_model_series_box(kind))
+        return holder
+
+    def _build_model_series_box(self, kind: str) -> QGroupBox:
+        """"Pseudo-2D series" controls under a model fit: apply the fit
+        just made on one slice to every slice, and export the result."""
+        label = self._MODEL_SERIES_LABELS[kind]
+        box = QGroupBox("Pseudo-2D series (T1, T2, …)")
+        v = QVBoxLayout(box)
+        note = QLabel(
+            "Fit one slice above first. Every slice is then fitted with those site "
+            "lineshapes held fixed — only each site's intensity (and a linear baseline) "
+            "changes — which is what a relaxation series does. The per-site areas go to "
+            "Dynamics ▸ Fit Curve.")
+        note.setWordWrap(True)
+        v.addWidget(note)
+        fit_button = QPushButton(f"Fit Every Slice with this {label} Model")
+        fit_button.setToolTip(
+            "Linear least squares of the fitted site lineshapes to each slice, within the "
+            "same fit window: exact, fast, and well behaved on slices whose signal has "
+            "decayed into the noise. Amplitudes may be negative (inversion recovery). "
+            "Uses the slices the Slices setting allows.")
+        fit_button.setEnabled(False)
+        fit_button.clicked.connect(lambda _c=False, k=kind: self._on_model_series_clicked(k))
+        v.addWidget(fit_button)
+        export_button = QPushButton(f"Export {label} Fit to Pseudo-2D…")
+        export_button.setToolTip(
+            "Stack every slice's fitted lineshape into a new pseudo-2D spectrum, to view or "
+            "compare with the data. Available once every slice has been fitted.")
+        export_button.setEnabled(False)
+        export_button.clicked.connect(
+            lambda _c=False, k=kind: self._on_export_model_pseudo2d_clicked(k))
+        v.addWidget(export_button)
+        status = QLabel("")
+        status.setWordWrap(True)
+        status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(status)
+        if not hasattr(self, "_model_series_widgets"):
+            self._model_series_widgets = {}
+        self._model_series_widgets[kind] = (fit_button, export_button, status)
+        if kind == "csa":
+            # Kept under its old name: other code and tests refer to it.
+            self.export_csa_pseudo2d_button = export_button
+        return box
+
+    def _model_fit_reference(self, kind: str):
+        """The fit panel ``kind``'s last result as ``(spectrum index,
+        row (0-based) or None, labels, x, components, fit_regions)``, or
+        None when there is none."""
+        if kind == "csa":
+            fit = getattr(self, "_csa_fit_result", None)
+            if not fit:
+                return None
+            index = fit.get("spectrum_index")
+            regions = fit.get("fit_regions")
+        elif kind == "quadrupolar":
+            fit = self.quad_fit_panel.result
+            if not fit:
+                return None
+            index = fit.get("index")
+            regions = fit.get("regions")
+        else:
+            fit = self.combined_fit_panel.result
+            if not fit:
+                return None
+            index = fit.get("spectrum_index")
+            regions = fit.get("fit_regions")
+        if kind == "quadrupolar" and fit.get("components") is not None:
+            info = fit["info"]
+            n = info["n_sites"]
+            labels = list(info.get("labels") or [f"Site {k + 1}" for k in range(n)])
+            x = np.asarray(fit["x"], dtype=float)
+            comps = [np.asarray(c, dtype=float) for c in fit["components"][:n]]
+        else:
+            labels, x, comps = nb_series_fitting.model_components(kind, fit)
+        return index, fit.get("row"), labels, x, comps, regions
+
+    def _refresh_model_series_buttons(self) -> None:
+        """"Fit Every Slice" is live when the section's last fit was made
+        on a slice of the selected pseudo-2D spectrum; "Export" when the
+        staged series came from that section's model."""
+        widgets = getattr(self, "_model_series_widgets", None)
+        if not widgets:
+            return
+        index = self._selected_index()
+        spectrum = self.session.spectra[index] if index is not None else None
+        is_pseudo = spectrum is not None and spectrum.ndim == 2 and spectrum.is_pseudo_2d
+        staged = spectrum.metadata.raw.get("slice_fit_results") if spectrum is not None else None
+        staged_kind = (staged[0].get("model") if staged and staged[0].get("model_fit")
+                       and len(staged) > 1 else None)
+        for kind, (fit_button, export_button, status) in widgets.items():
+            try:
+                reference = self._model_fit_reference(kind)
+            except Exception:  # noqa: BLE001 -- a result that cannot be read is no reference
+                reference = None
+            ready = bool(is_pseudo and reference is not None and reference[0] == index)
+            fit_button.setEnabled(ready)
+            if not is_pseudo:
+                fit_button.setToolTip("Select a pseudo-2D spectrum (a T1/T2 series) first.")
+            elif reference is None or reference[0] != index:
+                fit_button.setToolTip("Fit one slice of this spectrum with the model above first.")
+            else:
+                fit_button.setToolTip(
+                    f"Apply the fit made on slice {(reference[1] or 0) + 1} to every slice.")
+            export_button.setEnabled(staged_kind == kind)
+            if staged_kind != kind:
+                status.setText("")
+
+    def _on_model_series_clicked(self, kind: str):
+        """Fit every slice with ``kind``'s fitted site lineshapes and
+        stage the result for Fit Curve, like Fit Spectrum does."""
+        index = self._selected_index()
+        reference = self._model_fit_reference(kind)
+        if index is None or reference is None or reference[0] != index:
+            QMessageBox.information(self, "Fit every slice",
+                                    "Fit one slice of the selected pseudo-2D spectrum first.")
+            return None
+        spectrum = self.session.spectra[index]
+        if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
+            QMessageBox.information(self, "Fit every slice", "Select a pseudo-2D spectrum.")
+            return None
+        _index, row, labels, x, comps, regions = reference
+        rows = self._fit_slice_rows(spectrum)
+        try:
+            results = nb_series_fitting.fit_series_with_lineshapes(
+                spectrum, x, comps, labels, rows=rows, fit_regions=regions, kind=kind,
+                reference_row=(row + 1) if row is not None else None)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user
+            QMessageBox.critical(self, "Fit every slice", str(exc))
+            return None
+        self._store_slice_results(spectrum, results)
+        # Areas are what these carry; never leave Fit Curve on "region".
+        if self.value_source_combo.currentData() == "region":
+            area = self.value_source_combo.findData("area")
+            if area >= 0:
+                self.value_source_combo.setCurrentIndex(area)
+        report = nb_series_fitting.series_fit_report(results)
+        fits = dict(spectrum.metadata.raw.get("fits") or {})
+        fits[f"series_{kind}"] = {
+            "label": f"{self._MODEL_SERIES_LABELS[kind]} model, every slice",
+            "target": self.session.label(index), "time": io_history._stamp(None),
+            "inputs": {"reference_slice": (row + 1) if row is not None else None,
+                       "slices": len(results), "fit_regions": regions, "baseline": "linear"},
+            "inputs_text": (f"Reference slice {(row or 0) + 1}; {len(results)} slices; "
+                            f"window {regions or 'whole spectrum'}; linear baseline"),
+            "result": None, "report": report}
+        spectrum.metadata.raw["fits"] = fits
+        self._schedule_sidecar_save(index)
+        self._record_history(index)
+        low = [r["index"] for r in results if np.isfinite(r["r_squared"]) and r["r_squared"] < 0.9]
+        widgets = self._model_series_widgets[kind]
+        widgets[2].setText(
+            f"Fitted {len(results)} slices with {len(labels)} site(s) "
+            f"({', '.join(labels)}), shapes from slice {(row or 0) + 1}. "
+            "Ready for Dynamics ▸ Fit Curve (Value source: Area, or Amplitude for the "
+            "intensity relative to that slice)."
+            + (f" R² < 0.9 in slice(s) {', '.join(map(str, low[:12]))}"
+               f"{'…' if len(low) > 12 else ''} — expected once the signal has decayed; "
+               "otherwise the lineshape may be changing." if low else ""))
+        self._refresh_model_series_buttons()
+        self.statusBar().showMessage(
+            f"{self._MODEL_SERIES_LABELS[kind]} model applied to {len(results)} slices.", 6000)
+        return results
+
+    def _on_export_model_pseudo2d_clicked(self, kind: str) -> None:
+        """Every slice's fitted lineshape (sites + baseline), stacked into
+        a new pseudo-2D spectrum -- as Fit Spectrum's export does."""
+        index = self._selected_index()
+        if index is None:
+            return
+        results = self.session.spectra[index].metadata.raw.get("slice_fit_results")
+        if not results or len(results) < 2 or results[0].get("model") != kind:
+            QMessageBox.information(
+                self, "Export fit to pseudo-2D",
+                "Fit every slice with this model first (Fit Every Slice).")
+            return
+        traces = self._slices_to_pseudo2d_traces(results, [r["y_fit"] for r in results])
+        try:
+            pseudo2d = processing_slicing.build_pseudo2d(traces)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self._add_derived_spectrum(
+            pseudo2d, f"{self._MODEL_SERIES_LABELS[kind]} fit({self.session.label(index)})")
 
     def _on_view_relaxation_peak_changed(self, value: int) -> None:
         self._display_relaxation_peak(value - 1)
@@ -20726,9 +20918,25 @@ class MainWindow(QMainWindow):
         buffer = StringIO()
         writer = csv.writer(buffer)
 
-        writer.writerow(["Spectral fit -- one row per slice per peak"])
-        writer.writerow(["Slice", "Peak", "Type", "Shift", "Shift err", "FWHM", "FWHM err",
-                          "Amplitude", "Amplitude err", "Eta", "Eta err"])
+        if slice_results and slice_results[0].get("model_fit"):
+            writer.writerow([f"{slice_results[0].get('model', 'model')} lineshapes applied to "
+                             f"every slice -- one row per slice per site"])
+            writer.writerow(["Slice", "Site", "Area", "Area err", "Relative amplitude",
+                             "Relative amplitude err", "R2"])
+            for result in slice_results:
+                for k, label in enumerate(result["site_labels"]):
+                    writer.writerow([result["index"], label, f"{result['integrals'][k]:.6g}",
+                                     f"{result['integral_errors'][k]:.4g}",
+                                     f"{result['amplitudes'][k]:.6g}",
+                                     f"{result['amplitude_errors'][k]:.4g}",
+                                     f"{result['r_squared']:.6g}"])
+            slice_results = []
+        elif slice_results and "popt" in slice_results[0]:
+            writer.writerow(["Spectral fit -- one row per slice per peak"])
+            writer.writerow(["Slice", "Peak", "Type", "Shift", "Shift err", "FWHM", "FWHM err",
+                              "Amplitude", "Amplitude err", "Eta", "Eta err"])
+        else:
+            slice_results = []      # region integrals: no fitted peaks to list
         for slice_idx, result in enumerate(slice_results, start=1):
             per_peak = processing_fitting.extract_params_and_errors(
                 result["popt"], result["pcov"], result["peak_defs"], result["is_free"],

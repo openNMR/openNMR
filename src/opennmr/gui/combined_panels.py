@@ -998,6 +998,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         fit["spectrum"] = spectrum
         fit["spectrum_index"] = index
         fit["site_labels"] = [s.label for s in args["sites"]]
+        # The slice of a pseudo-2D this was fitted to, and the window --
+        # what applying the model to every slice starts from.
+        fit["row"] = row
+        fit["fit_regions"] = args["fit_regions"]
         self.result = fit
         self._report()
         self._draw_fit(fit)

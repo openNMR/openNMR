@@ -2026,6 +2026,10 @@ def _default_peak_label(fits, peak_index: int, value_source: str) -> str:
             return f"Region {number} ({min(low, high):.4g}-{max(low, high):.4g} ppm)"
         return f"Region {number}"
 
+    if first.get("model_fit"):
+        labels = first.get("site_labels") or []
+        return str(labels[peak_index]) if peak_index < len(labels) else f"Site {number}"
+
     try:
         per_peak = extract_params_and_errors(
             first["popt"], first["pcov"], first["peak_defs"], first["is_free"])
@@ -2194,7 +2198,11 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
     if not fits:
         raise ValueError("No fitted slices available.")
 
-    fitted_slices = "popt" in fits[0]
+    # A lineshape-model series (notebook.series_fitting: CSA, quadrupolar
+    # or Combined-Hamiltonian sites applied to every slice) carries fitted
+    # areas and amplitudes like a peak fit, under its own keys.
+    model_fit = bool(fits[0].get("model_fit"))
+    fitted_slices = "popt" in fits[0] or model_fit
     if value_source in ("area", "amplitude") and not fitted_slices:
         raise ValueError(
             f"value_source={value_source!r} needs peaks fitted with NMR2D_fit_slices -- "
@@ -2217,7 +2225,12 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
     t = _get_delays(fits, vdlist)
     order = np.argsort(t)
 
-    if value_source == "amplitude":
+    if value_source == "amplitude" and model_fit:
+        per_fit_amplitudes = [list(fit["amplitudes"]) for fit in fits]
+        per_fit_amplitude_errors = [list(fit.get("amplitude_errors") or [None] * len(fit["amplitudes"]))
+                                    for fit in fits]
+        n_peaks = max(len(v) for v in per_fit_amplitudes)
+    elif value_source == "amplitude":
         per_fit_amplitudes = []
         per_fit_amplitude_errors = []
         for fit in fits:
@@ -2230,7 +2243,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
         # Both "area" and "region" read the same key; which one it holds
         # is decided by the function that produced the slices, and the
         # checks above have already established they agree.
-        source = "integrals_norm" if normalised else "integrals"
+        source = "integrals_norm" if (normalised and not model_fit) else "integrals"
         n_peaks = max(len(fit.get(source, [])) for fit in fits)
 
     results = []

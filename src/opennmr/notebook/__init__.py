@@ -137,6 +137,12 @@ from .csa_fitting import (
     print_csa_fit_report, NMR1dplot_with_csa_fit, NMRCSAFitWorkflow
 )
 
+# A CSA / quadrupolar / Combined-Hamiltonian fit of one slice, applied to
+# every slice of a pseudo-2D series (T1, T2...) -- see series_fitting.
+from .series_fitting import (
+    model_components, fit_series_with_lineshapes, series_fit_report,
+)
+
 from .csa_relaxation import (
     compute_csa_integrals, compute_csa_integral_errors,
     NMR2D_fit_csa_slices, NMR2D_csa_relaxation_workflow,
