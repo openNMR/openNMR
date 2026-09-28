@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox
 
 from opennmr.gui.main_window import MainWindow
 from opennmr.plotting import label_problem, safe_label
-from tests.test_gui import _make_1d_dataset
+from test_gui import _make_1d_dataset
 
 
 @pytest.fixture(scope="module")

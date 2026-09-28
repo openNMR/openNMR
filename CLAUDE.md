@@ -53,6 +53,12 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   Tests that need it skip when it is absent, so a fresh clone runs the
   suite with those skipped. A new real-data test must do the same
   (`pytest.mark.skipif(not os.path.isdir(...))`).
+- Share helpers between test files as `from test_gui import …`, never
+  `from tests.test_gui import …`: CI runs plain `pytest`, where only
+  `tests/` is on the import path, so the `tests.` form is a collection
+  error that stops the whole run in about a minute. It still works under
+  `python -m pytest` (which adds the repo root), so run plain `pytest`
+  before pushing.
 - `.github/workflows/tests.yml` runs the suite on every push and pull
   request to `main`, without `test_data/`. Check the Actions tab after
   pushing; still run the tests locally first, since CI cannot run the
