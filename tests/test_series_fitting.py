@@ -186,9 +186,9 @@ def window(qapp, monkeypatch):
 
 def _load_ir(window):
     _x, spectrum = _ir_csa_series()
-    window._add_derived_spectrum(spectrum, "13C T1 series")
-    window._select_single_row(len(window.session) - 1)
-    return spectrum
+    index = window._add_derived_spectrum(spectrum, "13C T1 series")
+    window._select_single_row(index)
+    return window.session.spectra[index]          # the session's own object, as the GUI uses
 
 
 def test_gui_csa_series_from_one_slice_to_fit_curve_and_export(window):
@@ -251,3 +251,83 @@ def test_gui_series_buttons_need_a_fit_on_this_pseudo2d(window):
 def test_gui_quadrupolar_and_combined_sections_have_the_series_controls(window):
     assert set(window._model_series_widgets) == {"csa", "quadrupolar", "combined"}
     assert window.quad_fit_panel.parentWidget() is not None
+
+
+# -- the route from the user report: extract a slice, keep it, fit it ------------------
+
+def _extract_and_keep(window, spectrum, row):
+    """What Extract Slice ▸ Keep does: the parent is the session's own
+    spectrum object (the one the canvas was showing)."""
+    from opennmr.processing import slicing
+    trace = slicing.get_trace(spectrum, axis="f1", index=row)
+    window._on_slice_keep_requested((trace, f"F1 slice {row}", spectrum, "f1", row))
+    return len(window.session) - 1
+
+
+def _fit_csa_on_selected(window):
+    window.csa_static_combo.setCurrentIndex(window.csa_static_combo.findData(True))
+    window.csa_powder_combo.setCurrentIndex(window.csa_powder_combo.findData("zcw"))
+    window.csa_orientations_spin.setValue(2000)
+    window.csa_render_orientations_spin.setValue(2000)
+    window._add_csa_site(("A", "-35", "-110", "0.45", "3.5"))
+    window._add_csa_site(("B", "55", "85", "0.45", "3.5"))
+    window.csa_window_combo.setCurrentIndex(window.csa_window_combo.findData("all"))
+    window._on_csa_fit_clicked()
+
+
+def test_gui_fit_on_an_extracted_slice_fits_every_slice_of_its_parent(window):
+    spectrum = _load_ir(window)
+    parent_index = window._selected_index()
+    child = _extract_and_keep(window, spectrum, len(DELAYS))
+    assert window._selected_index() == child
+    fit_button, export_button, status = window._model_series_widgets["csa"]
+    assert not fit_button.isEnabled()                 # nothing fitted on it yet
+    _fit_csa_on_selected(window)
+    assert fit_button.isEnabled()                     # the user's report: this stayed off
+    assert "every slice of" in fit_button.toolTip()
+
+    fit_button.click()
+    # The parent is selected, carries the series, and Fit Curve/Export apply.
+    assert window._selected_index() == parent_index
+    staged = spectrum.metadata.raw["slice_fit_results"]
+    assert len(staged) == len(DELAYS) and staged[0]["reference_row"] == len(DELAYS)
+    assert export_button.isEnabled()
+    assert "shapes from slice 9" in status.text() and "⚠" not in status.text()
+    fits = NMR2D_fit_relaxation(staged, model="inversion_recovery", vdlist=DELAYS,
+                                value_source="area", show_report=False)
+    assert fits[0]["params"]["T1"] == pytest.approx(T1_A, rel=0.03)
+    assert fits[1]["params"]["T1"] == pytest.approx(T1_B, rel=0.03)
+
+
+def test_gui_parent_selected_uses_the_fit_saved_on_its_extracted_slice(window):
+    spectrum = _load_ir(window)
+    parent_index = window._selected_index()
+    _extract_and_keep(window, spectrum, len(DELAYS))
+    _fit_csa_on_selected(window)
+    window._select_single_row(parent_index)           # back to the 2D: its own panels are empty
+    fit_button, export_button, _status = window._model_series_widgets["csa"]
+    assert window._csa_fit_result is None
+    assert fit_button.isEnabled() and not export_button.isEnabled()
+    fit_button.click()
+    assert len(spectrum.metadata.raw["slice_fit_results"]) == len(DELAYS)
+    assert export_button.isEnabled()
+
+
+def test_gui_warns_when_the_extracted_slice_was_changed_on_its_own(window):
+    spectrum = _load_ir(window)
+    child = _extract_and_keep(window, spectrum, len(DELAYS))
+    kept = window.session.spectra[child]
+    kept.data = kept.data * 1.5                        # e.g. phased/scaled but not applied back
+    _fit_csa_on_selected(window)
+    fit_button, _export, status = window._model_series_widgets["csa"]
+    fit_button.click()
+    assert "⚠" in status.text() and "Apply Phase to Source 2D" in status.text()
+
+
+def test_gui_slice_reopened_without_its_link_finds_its_parent_by_content(window):
+    spectrum = _load_ir(window)
+    parent_index = window._selected_index()
+    child = _extract_and_keep(window, spectrum, 4)
+    for key in ("slice_parent", "slice_axis", "slice_index"):   # as after reopening a session
+        window.session.spectra[child].metadata.raw.pop(key, None)
+    assert window._slice_parent_of(child) == (parent_index, 4)

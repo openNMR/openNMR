@@ -20324,27 +20324,22 @@ class MainWindow(QMainWindow):
             self.export_csa_pseudo2d_button = export_button
         return box
 
-    def _model_fit_reference(self, kind: str):
-        """The fit panel ``kind``'s last result as ``(spectrum index,
-        row (0-based) or None, labels, x, components, fit_regions)``, or
-        None when there is none."""
+    def _panel_fit(self, kind: str):
+        """The result ``kind``'s panel is showing -- always the selected
+        spectrum's (panels are swapped on selection, see
+        _restore_fit_panels) -- or None."""
         if kind == "csa":
-            fit = getattr(self, "_csa_fit_result", None)
-            if not fit:
-                return None
-            index = fit.get("spectrum_index")
-            regions = fit.get("fit_regions")
-        elif kind == "quadrupolar":
-            fit = self.quad_fit_panel.result
-            if not fit:
-                return None
-            index = fit.get("index")
+            return getattr(self, "_csa_fit_result", None) or None
+        panel = self.quad_fit_panel if kind == "quadrupolar" else self.combined_fit_panel
+        return panel.result or None
+
+    @staticmethod
+    def _fit_reference_from(kind: str, fit: dict):
+        """``(row (0-based) or None, labels, x, components, fit_regions)``
+        from a fit result -- live, or decoded from a saved record."""
+        if kind == "quadrupolar":
             regions = fit.get("regions")
         else:
-            fit = self.combined_fit_panel.result
-            if not fit:
-                return None
-            index = fit.get("spectrum_index")
             regions = fit.get("fit_regions")
         if kind == "quadrupolar" and fit.get("components") is not None:
             info = fit["info"]
@@ -20354,91 +20349,207 @@ class MainWindow(QMainWindow):
             comps = [np.asarray(c, dtype=float) for c in fit["components"][:n]]
         else:
             labels, x, comps = nb_series_fitting.model_components(kind, fit)
-        return index, fit.get("row"), labels, x, comps, regions
+        return fit.get("row"), labels, x, comps, regions
+
+    def _slice_parent_of(self, index: int):
+        """``(parent index, 1-based row)`` when spectrum ``index`` is a
+        row extracted from a pseudo-2D still in the session (Extract
+        Slice ▸ Keep), else None."""
+        spectrum = self.session.spectra[index]
+        raw = spectrum.metadata.raw or {}
+        parent, axis, row = raw.get("slice_parent"), raw.get("slice_axis"), raw.get("slice_index")
+        if parent is None or axis != "f1" or row is None:
+            # The live link is not saved with a session (see
+            # _on_slice_keep_requested), so a slice reopened later has
+            # lost it: find the parent by content instead -- a pseudo-2D
+            # in the session with a row identical to this spectrum.
+            return self._find_parent_row_by_content(index)
+        if not (parent.ndim == 2 and parent.is_pseudo_2d):
+            return None
+        for i, candidate in enumerate(self.session.spectra):
+            if candidate is parent:           # identity: see _slice_phase_target
+                return i, int(row)
+        return None
+
+    def _find_parent_row_by_content(self, index: int):
+        """``(parent index, 1-based row)`` of the pseudo-2D in the session
+        one of whose rows is exactly spectrum ``index``'s data, or None."""
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim != 1:
+            return None
+        mine = np.real(np.asarray(spectrum.data))
+        scale = float(np.max(np.abs(mine))) if mine.size else 0.0
+        if not scale:
+            return None
+        for i, other in enumerate(self.session.spectra):
+            if i == index or not (other.ndim == 2 and other.is_pseudo_2d):
+                continue
+            rows = np.real(np.asarray(other.data))
+            if rows.shape[-1] != mine.size:
+                continue
+            diff = np.max(np.abs(rows - mine[None, :]), axis=1)
+            hit = np.flatnonzero(diff <= 1e-9 * scale)
+            if hit.size:
+                return i, int(hit[0]) + 1
+        return None
+
+    def _model_series_plan(self, kind: str):
+        """What "Fit Every Slice" would do for ``kind`` with the current
+        selection, as ``dict(parent=index, row=1-based, fit=result,
+        source=index the fit was made on)``, or ``(None, reason)``.
+
+        Three ways in, all the same series (explicit user report,
+        2026-09-28: the fit was made on an *extracted* slice, and the
+        button stayed off):
+        * the pseudo-2D itself is selected and was fitted on a slice;
+        * an extracted row of it is selected and has just been fitted;
+        * the pseudo-2D is selected and one of its extracted rows carries
+          a saved fit of this kind (the newest is used)."""
+        index = self._selected_index()
+        if index is None:
+            return None, "Select a pseudo-2D spectrum, or a slice extracted from one."
+        spectrum = self.session.spectra[index]
+        live = self._panel_fit(kind)
+        is_pseudo = spectrum.ndim == 2 and spectrum.is_pseudo_2d
+        if is_pseudo and live is not None:
+            row = live.get("row")
+            return {"parent": index, "row": (row + 1) if row is not None else None,
+                    "fit": live, "source": index}, None
+        parent = self._slice_parent_of(index) if not is_pseudo else None
+        if parent is not None:
+            if live is None:
+                return None, (f"Fit this extracted slice with the model above first; every "
+                              f"slice of its parent is then fitted with that result.")
+            return {"parent": parent[0], "row": parent[1], "fit": live, "source": index}, None
+        if is_pseudo:
+            best = None
+            for i, other in enumerate(self.session.spectra):
+                link = self._slice_parent_of(i) if i != index else None
+                if link is None or link[0] != index:
+                    continue
+                saved = (other.metadata.raw.get("fits") or {}).get(kind)
+                if isinstance(saved, dict) and saved.get("result") is not None:
+                    if best is None or str(saved.get("time", "")) >= str(best[2].get("time", "")):
+                        best = (i, link[1], saved)
+            if best is not None:
+                try:
+                    fit = io_serialize.decode(best[2]["result"])
+                except Exception:  # noqa: BLE001 -- an unreadable record is no reference
+                    fit = None
+                if fit is not None:
+                    return {"parent": index, "row": best[1], "fit": fit, "source": best[0]}, None
+            return None, ("Fit one slice first: either this spectrum's displayed slice, or a "
+                          "slice extracted from it (Extract Slice ▸ Keep), with the model above.")
+        return None, "Select a pseudo-2D spectrum, or a slice extracted from one."
 
     def _refresh_model_series_buttons(self) -> None:
-        """"Fit Every Slice" is live when the section's last fit was made
-        on a slice of the selected pseudo-2D spectrum; "Export" when the
-        staged series came from that section's model."""
+        """"Fit Every Slice" is live when there is a fit of a slice of a
+        pseudo-2D to apply (see _model_series_plan); "Export" when the
+        selected spectrum's staged series came from that section's model."""
         widgets = getattr(self, "_model_series_widgets", None)
-        if not widgets:
+        if not widgets or not hasattr(self, "combined_fit_panel"):
             return
         index = self._selected_index()
         spectrum = self.session.spectra[index] if index is not None else None
-        is_pseudo = spectrum is not None and spectrum.ndim == 2 and spectrum.is_pseudo_2d
         staged = spectrum.metadata.raw.get("slice_fit_results") if spectrum is not None else None
         staged_kind = (staged[0].get("model") if staged and staged[0].get("model_fit")
                        and len(staged) > 1 else None)
         for kind, (fit_button, export_button, status) in widgets.items():
             try:
-                reference = self._model_fit_reference(kind)
-            except Exception:  # noqa: BLE001 -- a result that cannot be read is no reference
-                reference = None
-            ready = bool(is_pseudo and reference is not None and reference[0] == index)
-            fit_button.setEnabled(ready)
-            if not is_pseudo:
-                fit_button.setToolTip("Select a pseudo-2D spectrum (a T1/T2 series) first.")
-            elif reference is None or reference[0] != index:
-                fit_button.setToolTip("Fit one slice of this spectrum with the model above first.")
+                plan, reason = self._model_series_plan(kind)
+            except Exception as exc:  # noqa: BLE001 -- never let a refresh raise
+                plan, reason = None, str(exc)
+            fit_button.setEnabled(plan is not None)
+            if plan is None:
+                fit_button.setToolTip(reason)
             else:
-                fit_button.setToolTip(
-                    f"Apply the fit made on slice {(reference[1] or 0) + 1} to every slice.")
+                where = (f"slice {plan['row']}" if plan["row"] else "the fitted slice")
+                target = self.session.label(plan["parent"])
+                fit_button.setToolTip(f"Apply the fit made on {where} to every slice of {target}.")
             export_button.setEnabled(staged_kind == kind)
             if staged_kind != kind:
                 status.setText("")
 
-    def _on_model_series_clicked(self, kind: str):
-        """Fit every slice with ``kind``'s fitted site lineshapes and
-        stage the result for Fit Curve, like Fit Spectrum does."""
-        index = self._selected_index()
-        reference = self._model_fit_reference(kind)
-        if index is None or reference is None or reference[0] != index:
-            QMessageBox.information(self, "Fit every slice",
-                                    "Fit one slice of the selected pseudo-2D spectrum first.")
-            return None
-        spectrum = self.session.spectra[index]
-        if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
-            QMessageBox.information(self, "Fit every slice", "Select a pseudo-2D spectrum.")
-            return None
-        _index, row, labels, x, comps, regions = reference
-        rows = self._fit_slice_rows(spectrum)
+    def _slice_matches_parent_row(self, source: int, parent: int, row: int) -> bool:
+        """Whether an extracted slice still holds exactly its parent's row
+        -- not so if it was phased (or otherwise processed) on its own
+        and that was never applied back, in which case shapes fitted to
+        it do not describe the parent's rows."""
         try:
+            child = np.real(np.asarray(self.session.spectra[source].data, dtype=complex))
+            trace = processing_slicing.get_trace(self.session.spectra[parent], axis="f1",
+                                                 index=row)
+            mine = np.real(np.asarray(trace.data, dtype=complex))
+        except Exception:  # noqa: BLE001 -- cannot compare: do not warn on a guess
+            return True
+        if child.shape != mine.shape:
+            return False
+        scale = float(np.max(np.abs(mine))) or 1.0
+        return bool(np.max(np.abs(child - mine)) <= 1e-6 * scale)
+
+    def _on_model_series_clicked(self, kind: str):
+        """Fit every slice of the pseudo-2D with ``kind``'s fitted site
+        lineshapes and stage the result on it for Fit Curve, like Fit
+        Spectrum does. Selects the pseudo-2D afterwards when the fit was
+        made on an extracted slice, so Fit Curve and Export apply."""
+        plan, reason = self._model_series_plan(kind)
+        if plan is None:
+            QMessageBox.information(self, "Fit every slice", reason)
+            return None
+        parent_index, row = plan["parent"], plan["row"]
+        spectrum = self.session.spectra[parent_index]
+        try:
+            _fit_row, labels, x, comps, regions = self._fit_reference_from(kind, plan["fit"])
+            rows = self._fit_slice_rows(spectrum)
             results = nb_series_fitting.fit_series_with_lineshapes(
                 spectrum, x, comps, labels, rows=rows, fit_regions=regions, kind=kind,
-                reference_row=(row + 1) if row is not None else None)
+                reference_row=row)
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user
             QMessageBox.critical(self, "Fit every slice", str(exc))
             return None
+        mismatch = (plan["source"] != parent_index and row is not None
+                    and not self._slice_matches_parent_row(plan["source"], parent_index, row))
         self._store_slice_results(spectrum, results)
+        report = nb_series_fitting.series_fit_report(results)
+        source_label = self.session.label(plan["source"])
+        fits = dict(spectrum.metadata.raw.get("fits") or {})
+        fits[f"series_{kind}"] = {
+            "label": f"{self._MODEL_SERIES_LABELS[kind]} model, every slice",
+            "target": self.session.label(parent_index), "time": io_history._stamp(None),
+            "inputs": {"reference_slice": row, "reference_spectrum": source_label,
+                       "slices": len(results), "fit_regions": regions, "baseline": "linear"},
+            "inputs_text": (f"Shapes from {source_label}"
+                            + (f" (slice {row})" if row else "") + f"; {len(results)} slices; "
+                            f"window {regions or 'whole spectrum'}; linear baseline"),
+            "result": None, "report": report}
+        spectrum.metadata.raw["fits"] = fits
+        self._schedule_sidecar_save(parent_index)
+        self._record_history(parent_index)
+        if self._selected_index() != parent_index:
+            # Fit Curve and Export act on the selected pseudo-2D.
+            self._select_single_row(parent_index)
         # Areas are what these carry; never leave Fit Curve on "region".
         if self.value_source_combo.currentData() == "region":
             area = self.value_source_combo.findData("area")
             if area >= 0:
                 self.value_source_combo.setCurrentIndex(area)
-        report = nb_series_fitting.series_fit_report(results)
-        fits = dict(spectrum.metadata.raw.get("fits") or {})
-        fits[f"series_{kind}"] = {
-            "label": f"{self._MODEL_SERIES_LABELS[kind]} model, every slice",
-            "target": self.session.label(index), "time": io_history._stamp(None),
-            "inputs": {"reference_slice": (row + 1) if row is not None else None,
-                       "slices": len(results), "fit_regions": regions, "baseline": "linear"},
-            "inputs_text": (f"Reference slice {(row or 0) + 1}; {len(results)} slices; "
-                            f"window {regions or 'whole spectrum'}; linear baseline"),
-            "result": None, "report": report}
-        spectrum.metadata.raw["fits"] = fits
-        self._schedule_sidecar_save(index)
-        self._record_history(index)
         low = [r["index"] for r in results if np.isfinite(r["r_squared"]) and r["r_squared"] < 0.9]
-        widgets = self._model_series_widgets[kind]
-        widgets[2].setText(
-            f"Fitted {len(results)} slices with {len(labels)} site(s) "
-            f"({', '.join(labels)}), shapes from slice {(row or 0) + 1}. "
-            "Ready for Dynamics ▸ Fit Curve (Value source: Area, or Amplitude for the "
-            "intensity relative to that slice)."
-            + (f" R² < 0.9 in slice(s) {', '.join(map(str, low[:12]))}"
-               f"{'…' if len(low) > 12 else ''} — expected once the signal has decayed; "
-               "otherwise the lineshape may be changing." if low else ""))
+        text = (f"Fitted {len(results)} slices of {self.session.label(parent_index)} with "
+                f"{len(labels)} site(s) ({', '.join(labels)}), shapes from "
+                + (f"slice {row}" if row else "the fitted slice")
+                + (f" ({source_label})" if plan["source"] != parent_index else "") + ". "
+                "Ready for Dynamics ▸ Fit Curve (Value source: Area, or Amplitude for the "
+                "intensity relative to that slice).")
+        if low:
+            text += (f" R² < 0.9 in slice(s) {', '.join(map(str, low[:12]))}"
+                     f"{'…' if len(low) > 12 else ''} — expected once the signal has decayed; "
+                     "otherwise the lineshape may be changing.")
+        if mismatch:
+            text += (f" ⚠ The extracted slice no longer matches row {row} of the 2D (phased or "
+                     "processed on its own?) — use “Apply Phase to Source 2D” first, or the "
+                     "fitted shapes will not describe the 2D's rows.")
         self._refresh_model_series_buttons()
+        self._model_series_widgets[kind][2].setText(text)
         self.statusBar().showMessage(
             f"{self._MODEL_SERIES_LABELS[kind]} model applied to {len(results)} slices.", 6000)
         return results
