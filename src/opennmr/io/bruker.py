@@ -2079,6 +2079,22 @@ def _detect(path: str) -> bool:
     )
 
 
+def _accepted(func, kwargs: dict) -> dict:
+    """``kwargs`` narrowed to the parameters ``func`` takes.
+
+    The processed-data readers have none of the raw-FID processing
+    parameters (phase, window, zero-fill...). The GUI folds a reopened
+    experiment's saved processing into its read kwargs (see
+    ``MainWindow._saved_processing_read_kwargs``), so an experiment with
+    no fid/ser on disk used to fail to open at all once it had been
+    phased ("read_1d_processed() got an unexpected keyword argument
+    'phase0'"). The saved settings the reader cannot take are applied
+    after the read, from the sidecar, as for any processed spectrum."""
+    import inspect
+    params = inspect.signature(func).parameters
+    return {k: v for k, v in kwargs.items() if k in params}
+
+
 def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     """Vendor-registry entry point: prefer the raw-FID path, falling
     back to already-processed data when no raw ``fid``/``ser`` is
@@ -2147,7 +2163,7 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
                 if k in ("procno", "homonuclear", "pseudo_2d", "magnitude")
             })
         else:
-            spectrum = read_1d_processed(path, **one_d)
+            spectrum = read_1d_processed(path, **_accepted(read_1d_processed, one_d))
         spectrum.metadata.raw["loaded_from_processed"] = "requested (use TopSpin's processed data)"
         return spectrum
     has_ser = os.path.exists(os.path.join(path, "ser"))
@@ -2184,10 +2200,10 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     if has_fid:
         return read_1d(path, **one_d_kwargs)
     if has_2rr:
-        spectrum = read_2d_processed(path, **kwargs)
+        spectrum = read_2d_processed(path, **_accepted(read_2d_processed, kwargs))
         spectrum.metadata.raw["loaded_from_processed"] = "No raw ser file found for this experiment."
         return spectrum
-    spectrum = read_1d_processed(path, **one_d_kwargs)
+    spectrum = read_1d_processed(path, **_accepted(read_1d_processed, one_d_kwargs))
     spectrum.metadata.raw["loaded_from_processed"] = "No raw fid file found for this experiment."
     return spectrum
 

@@ -93,6 +93,10 @@ from .czjzek import (
     czjzek_fit_report, plot_czjzek_distribution, plot_czjzek_fit, CzjzekLibrary,
 )
 from .fit_display import draw_fit_components, component_style
+from .fit_models import (
+    make_fit_model, fit_statistics, compare_fit_models, format_comparison, plot_fit_comparison,
+)
+from .state import save_state, load_state, describe_state, saved_fit_models
 
 from .combined_hamiltonian import (
     Site, simulate_combined, combined_axis_limits, combined_to_python,
@@ -243,6 +247,9 @@ __all__ = [
     "CzjzekLibrary",
     # fit display
     "draw_fit_components", "component_style",
+    # kept fit models and openNMR states
+    "make_fit_model", "fit_statistics", "compare_fit_models", "format_comparison",
+    "plot_fit_comparison", "save_state", "load_state", "describe_state", "saved_fit_models",
     # simulations
     "haeberlen_csa_tensor", "herzfeld_berger_csa_tensor", "csa_definition",
     "csa_frequency", "powder_orientations", "powder_orientations_octant", 

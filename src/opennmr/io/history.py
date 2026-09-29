@@ -176,6 +176,9 @@ _HIDDEN_KEYS = frozenset({
     "gradient_relative", "recorded_phase0", "recorded_phase1", "recorded_phase0_f1",
     "recorded_phase1_f1", "window_unsupported_f1", "xdim_f1", "xdim_f2",
     "f1_quadrature_sign_flip", "origin", "origin_vendor", "dataset_label",
+    # Kept fit models: logged by their own events (kept / renamed /
+    # deleted, with the fit's report), not as a diff of encoded curves.
+    "fit_models",
 })
 
 

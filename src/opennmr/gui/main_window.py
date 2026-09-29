@@ -75,9 +75,11 @@ from ..io import lists as io_lists
 from ..io import persistence as io_persistence
 from ..io import history as io_history
 from ..io import serialize as io_serialize
+from ..io import state as io_state
 from . import panel_state
 from .. import _version
 from . import progress as progress_dialogs
+from . import state_dialog as state_dialogs
 from ..processing import diffusion as processing_diffusion
 from ..processing import fitting as processing_fitting
 from ..processing import ilt as processing_ilt
@@ -108,6 +110,9 @@ from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
 from .arithmetic_panel import ArithmeticPanel
 from .fit_display_panel import FitDisplayPanel
+from .fit_models_panel import FitModelsPanel
+from ..notebook import fit_models as nb_fit_models
+from ..notebook.fitting import build_region_mask as nb_build_region_mask
 from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
 from .dnp_panel import DnpPanel
 from .tensor_view_panel import TensorViewControls
@@ -1029,6 +1034,22 @@ class MainWindow(QMainWindow):
             "was first loaded. The current state is kept as a save point first.")
         self.load_progress_action.triggered.connect(self._on_load_progress_clicked)
         file_menu.addAction(self.load_progress_action)
+        # A named group of spectra saved together -- experiments with
+        # their processing, slices, derived spectra, simulations, fits and
+        # kept fit models -- and reopened together (explicit user request:
+        # "File ▸ Save openNMR state", choosing which spectra and slices).
+        self.save_state_action = QAction("Save openNMR &State…", self)
+        self.save_state_action.setShortcut(QKeySequence("Ctrl+Alt+S"))
+        self.save_state_action.setToolTip(
+            "Save a chosen group of open spectra (and slices of any 2D) under a name, with "
+            "their processing, fits and kept fit models, to reopen together later.")
+        self.save_state_action.triggered.connect(self._on_save_state_clicked)
+        file_menu.addAction(self.save_state_action)
+        self.open_state_action = QAction("Open openNMR S&tate…", self)
+        self.open_state_action.setShortcut(QKeySequence("Ctrl+Alt+O"))
+        self.open_state_action.setToolTip("Reopen every spectrum of a saved openNMR state.")
+        self.open_state_action.triggered.connect(self._on_open_state_clicked)
+        file_menu.addAction(self.open_state_action)
         self.show_log_action = QAction("Processing &Log…", self)
         self.show_log_action.setToolTip(
             "What has been done to the selected spectrum, when, and every save "
@@ -2317,6 +2338,10 @@ class MainWindow(QMainWindow):
         """Scan ``directory`` for spectra and load them -- shared by
         the Open… dialog and drag-and-drop (see ``dropEvent``), so a
         dropped folder behaves exactly like one picked via the dialog."""
+        if io_state.is_state_folder(directory):
+            # An openNMR state opens as the whole group it was saved as.
+            self._on_open_state_clicked(directory)
+            return
         matches = self._scan_for_spectra(directory)
         if not matches:
             QMessageBox.critical(
@@ -3072,6 +3097,41 @@ class MainWindow(QMainWindow):
             spectrum.data, freq_ppm, spectrum,
         )
 
+    def _apply_saved_phase_to_processed(self, spectrum, index: int) -> None:
+        """Re-apply a saved F2 phase (and baseline correction) to a 1D
+        read from already-processed data, which has no FID to recompute
+        from.
+
+        Before this, such a spectrum reopened -- or went back to a save
+        point -- with its phase *setting* restored but its data as read,
+        unphased: the plot and the Phase controls disagreed (found
+        2026-09-29 while building openNMR states). The rotation is the
+        one the raw-FID reader applies for the same saved values
+        (``apply_phase``, pivot at the centre), then the baseline, as a
+        live phase drag does. 2D processed-only data are not covered
+        here; an openNMR state keeps a copy of them instead."""
+        raw = spectrum.metadata.raw
+        if spectrum.ndim != 1 or spectrum.data_imag is None:
+            return
+        if spectrum.metadata.vendor in ("opennmr", "derived", "simulated"):
+            # Saved by openNMR already processed: its phase is in the
+            # data, and applying it again would rotate it twice.
+            return
+        phase0 = float(raw.get("phase0") or 0.0)
+        phase1 = float(raw.get("phase1") or 0.0)
+        if not phase0 and not phase1 and not raw.get("baseline_correct"):
+            return
+        ppm = spectrum.axis_values(0, "ppm")
+        data = np.asarray(spectrum.data, dtype=float) + 1j * np.asarray(spectrum.data_imag, dtype=float)
+        if phase0 or phase1:
+            data = processing_ft.apply_phase(data, ppm, phase0, phase1, pivot_frac=0.5)
+        data = self._baseline_correct_if_enabled(data, ppm, spectrum)
+        spectrum.data = np.real(data)
+        spectrum.data_imag = np.imag(data)
+        if self._selected_index() == index:
+            self._capture_phase_reference()
+            self._draw_selected_spectrum(spectrum, row=index)
+
     def _apply_loaded_processing_sidecar(self, spectrum, index: int) -> None:
         """Actually apply a just-restored processing-parameters
         sidecar to ``spectrum.data`` itself -- called once, right
@@ -3094,6 +3154,7 @@ class MainWindow(QMainWindow):
         vendor-default one) doesn't have to guess when a debounced
         recompute will actually finish."""
         if not self._fid_reprocessable(spectrum):
+            self._apply_saved_phase_to_processed(spectrum, index)
             return
         if spectrum.ndim == 1:
             self._commit_processing_preview_as_spectrum(spectrum)
@@ -8275,6 +8336,9 @@ class MainWindow(QMainWindow):
         run on: inputs, exact result, readable report. Logged and saved
         through the usual sidecar save."""
         panel = self._fit_panels()[key]
+        # The fit panel whose curve the Fit view now shows -- what
+        # "Keep This Fit…" keeps.
+        self._last_fit_key = key
         if index is None:
             result = getattr(panel, "result", None) or {}
             index = result.get("spectrum_index", result.get("index"))
@@ -8695,6 +8759,204 @@ class MainWindow(QMainWindow):
         self._write_history(index, raise_errors=True)
         return entry
 
+    # ---- openNMR states (File ▸ Save / Open openNMR State) ---------------
+
+    def _state_kind(self, index: int) -> str:
+        spectrum = self.session.spectra[index]
+        raw = spectrum.metadata.raw or {}
+        if spectrum.metadata.vendor == "derived":
+            if raw.get("simulation"):
+                return "simulation"
+            if raw.get("slice_index") is not None or raw.get("slice_parent") is not None:
+                return "slice"
+            return "derived"
+        if spectrum.metadata.vendor in ("opennmr", "simulated"):
+            return "simulation" if raw.get("simulation") else "derived"
+        return "experiment"
+
+    def _state_items(self) -> list[dict]:
+        """What the Save openNMR State dialog lists: every open spectrum."""
+        items = []
+        for index, spectrum in enumerate(self.session.spectra):
+            raw = spectrum.metadata.raw or {}
+            bits = [f"{spectrum.ndim}D, " + " × ".join(str(n) for n in np.shape(spectrum.data))]
+            n_fits = len(raw.get("fits") or {})
+            n_models = len(raw.get("fit_models") or [])
+            if n_fits:
+                bits.append(f"{n_fits} fit{'s' if n_fits != 1 else ''}")
+            if n_models:
+                bits.append(f"{n_models} kept fit{'s' if n_models != 1 else ''}")
+            items.append({"index": index, "label": self.session.label(index),
+                          "kind": io_state.KIND_NAMES[self._state_kind(index)],
+                          "detail": " · ".join(bits),
+                          "rows": int(spectrum.data.shape[0]) if spectrum.ndim == 2 else 0})
+        return items
+
+    def _save_state(self, folder: str, name: str, indices, slices=None, notes: str = "",
+                    copy_2d: bool = False, overwrite: bool = False) -> str:
+        """Save spectra ``indices`` and, for ``slices`` = ``{index: [rows]}``
+        (1-based), those slices of each 2D as spectra of their own, as an
+        openNMR state. Nothing open is changed; each saved spectrum's log
+        records where it went. Returns the folder."""
+        entries = []
+        for index in indices:
+            self._flush_pending_state(index)
+            spectrum = self.session.spectra[index]
+            kind = self._state_kind(index)
+            info = self.session.info(index)
+            source = None
+            if kind == "experiment" and spectrum.metadata.source_path:
+                kwargs = dict(self._original_load_kwargs.get(index,
+                                                             self.session.get_load_kwargs(index)))
+                source = {"path": spectrum.metadata.source_path, "vendor": spectrum.metadata.vendor,
+                          "load_kwargs": {k: v for k, v in kwargs.items()
+                                          if isinstance(v, (bool, int, float, str, type(None)))}}
+            # A 2D read from already-processed data has no FID to
+            # recompute its saved processing from: keep a copy and open
+            # from it, exactly as it is now.
+            prefer_copy = (kind == "experiment" and spectrum.ndim == 2
+                           and not self._fid_reprocessable(spectrum))
+            entries.append({"label": self.session.label(index), "kind": kind, "spectrum": spectrum,
+                            "state": self._history_state(index), "source": source,
+                            "origin": info.get("origin"), "prefer_copy": prefer_copy,
+                            "copy": (kind != "experiment" or spectrum.ndim == 1 or copy_2d
+                                     or prefer_copy)})
+        for index, rows in (slices or {}).items():
+            parent = self.session.spectra[index]
+            traces = processing_slicing.get_slices(parent, rows=list(rows))["rows"]
+            for row, trace in zip(sorted(set(rows)), traces):
+                state = {k: v for k, v in io_history.tracked_state(trace).items()
+                         if k.startswith("meta.")}
+                entries.append({"label": f"{self.session.label(index)} ▸ slice {row}",
+                                "kind": "slice", "spectrum": trace, "state": state,
+                                "source": None, "copy": True,
+                                "origin": parent.metadata.source_path})
+        folder = io_state.save_state(folder, name, entries, notes=notes,
+                                     app_version=_version.__version__, overwrite=overwrite)
+        for index in indices:
+            history = self._ensure_history(index)
+            if history is not None:
+                io_history.add_event(history, f"Saved in openNMR state “{name}”: {folder}",
+                                     kind="saved")
+                self._write_history(index)
+        return folder
+
+    def _on_save_state_clicked(self) -> None:
+        if not len(self.session):
+            QMessageBox.information(self, "Save openNMR State", "Open some spectra first.")
+            return
+        selected = self._selected_rows() or list(range(len(self.session)))
+        default = self.session.label(selected[0]).split(" · ")[0] if selected else "state"
+        dialog = state_dialogs.SaveStateDialog(self, self._state_items(), checked=selected,
+                                               default_name=default)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name, folder, notes, indices, slices, copy_2d = dialog.values()
+        overwrite = False
+        if os.path.exists(folder) and os.listdir(folder):
+            if not io_state.is_state_folder(folder):
+                QMessageBox.warning(self, "Save openNMR State",
+                                    f"{folder} already exists and is not an openNMR state.")
+                return
+            answer = QMessageBox.question(self, "Replace saved state?",
+                                          f"{folder} already holds an openNMR state. Replace it?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            overwrite = True
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            folder = self._save_state(folder, name, indices, slices, notes, copy_2d,
+                                      overwrite=overwrite)
+        except (OSError, ValueError) as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Couldn't save the state", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        self.statusBar().showMessage(
+            f"Saved openNMR state “{name}” ({len(indices)} spectra"
+            + (f", {sum(len(r) for r in slices.values())} slices" if slices else "")
+            + f") in {folder} -- contents: {io_state.STATE_LOG_FILE}", 10000)
+
+    def _open_state(self, folder: str) -> tuple[list[int], list[str]]:
+        """Open every spectrum of a saved state. Experiments are re-read
+        from their own data and given the saved processing (the Load
+        Progress restore path); anything else, or an experiment whose data
+        have moved, comes from its saved copy. Returns ``(indices opened,
+        messages)`` -- the messages say what came from where."""
+        info = io_state.load_state(folder)
+        opened, messages = [], []
+        for entry in info["entries"]:
+            label = entry["label"]
+            processing, metadata = io_history.split_state(entry.get("state") or {})
+            source = entry.get("source") or {}
+            index = None
+            if (entry["kind"] == "experiment" and entry["source_available"]
+                    and not (entry.get("prefer_copy") and entry["spectrum"] is not None)):
+                before = len(self.session)
+                self._load(source["path"], source.get("vendor") or io.detect_vendor(source["path"]))
+                if len(self.session) > before:
+                    index = len(self.session) - 1
+                    kwargs = dict(self.session.get_load_kwargs(index))
+                    kwargs.update(source.get("load_kwargs") or {})
+                    self._original_load_kwargs[index] = kwargs
+                    self._apply_restored_state(index, processing, metadata, reread=True)
+                    messages.append(f"{label}: reopened from {source['path']} and reprocessed "
+                                    "as saved.")
+            if index is None:
+                spectrum = entry["spectrum"]
+                if spectrum is None:
+                    messages.append(f"{label}: NOT opened -- its data are no longer at "
+                                    f"{source.get('path')} and the state holds no copy.")
+                    continue
+                index = self._add_derived_spectrum(spectrum, label)
+                self._apply_restored_state(
+                    index, processing, metadata,
+                    snapshot=(spectrum.data, spectrum.data_imag, spectrum.axes), reread=False)
+                if entry["kind"] == "experiment" and entry.get("prefer_copy"):
+                    messages.append(f"{label}: opened from the saved copy (processed data with "
+                                    "no FID, so its processing cannot be re-applied by "
+                                    f"re-reading); its data folder: {source.get('path')}.")
+                elif entry["kind"] == "experiment":
+                    messages.append(f"{label}: its data are no longer at {source.get('path')}; "
+                                    "opened the saved processed copy (not reprocessable).")
+                else:
+                    messages.append(f"{label}: opened from the saved copy.")
+            history = self._ensure_history(index)
+            if history is not None:
+                io_history.add_event(history, f"Opened from openNMR state “{info['name']}” "
+                                              f"({info['folder']})", kind="opened")
+            opened.append(index)
+        if opened:
+            self._select_single_row(opened[0])
+        return opened, messages
+
+    def _on_open_state_clicked(self, folder: str | None = None) -> None:
+        if not folder:
+            folder = QFileDialog.getExistingDirectory(
+                self, "Open an openNMR state (a .opennmr folder)", io_state.default_state_root(),
+                options=QFileDialog.Option.DontUseNativeDialog)
+            if not folder:
+                return
+        if not io_state.is_state_folder(folder):
+            QMessageBox.warning(self, "Open openNMR State",
+                                f"{folder} is not an openNMR state (no {io_state.STATE_FILE}).")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            info = io_state.read_state_info(folder)
+            opened, messages = self._open_state(folder)
+        except (OSError, ValueError, KeyError) as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Couldn't open the state", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        text = (f"Opened {len(opened)} spectra from “{info['name']}” (saved "
+                f"{str(info.get('created', '')).replace('T', ' ')}).")
+        if info.get("notes"):
+            text += f"\n\nNotes: {info['notes']}"
+        text += "\n\n" + "\n".join("• " + m for m in messages)
+        QMessageBox.information(self, "openNMR state opened", text)
+
     def _on_save_progress_clicked(self) -> None:
         index = self._selected_index()
         if index is None:
@@ -8841,6 +9103,8 @@ class MainWindow(QMainWindow):
                 self._defer_spectrum_draw = False
             if recompute:
                 self._apply_loaded_processing_sidecar(spectrum, index)
+            elif reread and processing:
+                self._apply_saved_phase_to_processed(spectrum, index)
             elif not reread:
                 self._draw_selected_spectrum(spectrum, row=index)
         finally:
@@ -11679,6 +11943,23 @@ class MainWindow(QMainWindow):
             on_fitted=self._store_multi_fit)
         self._multi_fit_section = CollapsibleSection("Multi-spectrum", content=self.multi_fit_panel)
         layout.addWidget(self._multi_fit_section)
+        # Several fits of one spectrum, kept with it and compared
+        # (explicit user request: keep a 2-, 3-, 4-site model, reload them
+        # later against the spectrum, compare them on one plot).
+        self.fit_models_panel = FitModelsPanel(
+            models=lambda: self._fit_models(self._selected_index()),
+            keep=lambda: self._keep_shown_fit(),
+            show=lambda model_id: self._show_fit_model(self._selected_index(), model_id),
+            compare=lambda ids, residuals, components: self._compare_fit_models(
+                self._selected_index(), ids, residuals, components),
+            restore=lambda model_id: self._restore_fit_model(self._selected_index(), model_id),
+            rename=lambda model_id, name: self._rename_fit_model(
+                self._selected_index(), model_id, name),
+            delete=lambda model_id: self._delete_fit_model(self._selected_index(), model_id),
+            can_restore=self._fit_model_restorable)
+        self._fit_models_section = CollapsibleSection("Kept fit models",
+                                                      content=self.fit_models_panel)
+        layout.addWidget(self._fit_models_section)
         # How fitted components are drawn (explicit user request: show,
         # hide or highlight components, fill or not, their colours).
         self.fit_display_panel = FitDisplayPanel([self.fit_canvas, self.spectral_fit_canvas])
@@ -11687,6 +11968,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._fit_display_section)
         for canvas in (self.fit_canvas, self.spectral_fit_canvas):
             canvas.fitDisplayOptionsRequested.connect(self._open_fit_display_options)
+            canvas.keepFitRequested.connect(lambda c=canvas: self._keep_shown_fit(canvas=c))
         layout.addStretch(1)
         return tab
 
@@ -12104,6 +12386,234 @@ class MainWindow(QMainWindow):
     # Simulations launcher tile rather than sub-tabs of a separate
     # Simulate mode. Backed by opennmr.simulate.
     # ------------------------------------------------------------------
+
+    # ---- Kept fit models (Fit ▸ Kept fit models) ------------------------
+
+    @staticmethod
+    def _find_key(result, key):
+        """``result[key]``, looking one level into ``result["result"]``
+        (the combined panel nests its fit there)."""
+        if not isinstance(result, dict):
+            return None
+        if key in result:
+            return result[key]
+        inner = result.get("result")
+        return inner.get(key) if isinstance(inner, dict) else None
+
+    def _free_parameter_count(self, result) -> int | None:
+        is_free = self._find_key(result, "is_free")
+        if is_free is not None:
+            return int(np.sum(np.asarray(is_free, dtype=bool)))
+        for key in ("free_names", "popt"):
+            value = self._find_key(result, key)
+            if value is not None:
+                return len(value)
+        return None
+
+    @staticmethod
+    def _panel_fit_regions(kind, result):
+        if not isinstance(result, dict):
+            return None
+        if kind == "combined":
+            return (result.get("settings") or {}).get("fit_regions")
+        return result.get("regions") or result.get("fit_regions")
+
+    def _fit_models(self, index) -> list[dict]:
+        """Spectrum ``index``'s kept fits, decoded, each with its ``id``."""
+        if index is None or not (0 <= index < len(self.session)):
+            return []
+        out = []
+        for entry in self.session.spectra[index].metadata.raw.get("fit_models") or []:
+            try:
+                model = nb_fit_models.decode_fit_model(entry)
+            except Exception:  # noqa: BLE001 -- one unreadable record must not hide the rest
+                continue
+            out.append(model)
+        return out
+
+    def _set_fit_models(self, index, models, event: str | None = None) -> None:
+        raw = self.session.spectra[index].metadata.raw
+        raw["fit_models"] = [nb_fit_models.encode_fit_model(m) for m in models]
+        if event:
+            history = self._ensure_history(index)
+            if history is not None:
+                io_history.add_event(history, event, kind="fit_model")
+        self._schedule_sidecar_save(index)
+        if hasattr(self, "fit_models_panel"):
+            self.fit_models_panel.refresh()
+
+    def _keep_shown_fit(self, name: str | None = None, canvas=None) -> dict | None:
+        """Keep the fit on show (the current fit view, else the Fit view,
+        else the Spectral Fit view) with the spectrum it was fitted to.
+        ``name`` skips the dialog. Returns the kept model."""
+        candidates = [canvas] if canvas is not None else []
+        current = self.canvas_tabs.currentWidget()
+        if isinstance(current, MplCanvas):
+            candidates.append(current)
+        candidates += [self.fit_canvas, self.spectral_fit_canvas]
+        canvas, shown = next(((c, c.shown_fit()) for c in candidates if c.shown_fit() is not None),
+                             (None, None))
+        if shown is None:
+            QMessageBox.information(self, "Keep fit", "There is no fit on the plot to keep -- run "
+                                    "a fit (or show one) first.")
+            return None
+        index = self._selected_index()
+        panel_key, panel, result = None, None, None
+        if shown["kind"] == "curve":
+            kind = "curve"
+            result = shown.get("result")
+            report = (self.relaxation_fit_params_label.text()
+                      if getattr(self, "_fit_canvas_owner", None) == "relaxation" else "")
+        elif canvas is self.spectral_fit_canvas:
+            kind = "isotropic"
+            result = getattr(self, "_last_spectral_fit", None)
+            report = self.spectral_fit_params_label.text()
+        else:
+            panel_key = getattr(self, "_last_fit_key", None)
+            panel = self._fit_panels().get(panel_key) if panel_key else None
+            result = (self._csa_fit_result if panel_key == "csa"
+                      else getattr(panel, "result", None))
+            kind = panel_key if result else "spectrum"
+            report = panel.report_text() if (panel is not None and result) else ""
+            if result:
+                spectrum = result.get("spectrum")
+                row = self._row_of_spectrum(spectrum) if spectrum is not None else -1
+                if row < 0 and result.get("spectrum_index") is not None:
+                    row = result["spectrum_index"]
+                index = row if row is not None and row >= 0 else index
+        if index is None:
+            QMessageBox.information(self, "Keep fit", "Select the spectrum the fit belongs to.")
+            return None
+        x = np.asarray(shown["x"], dtype=float)
+        components = shown.get("components")
+        mask = None
+        if kind == "curve":
+            x_label, y_label = shown.get("xlabel") or "", shown.get("ylabel") or ""
+            labels = []
+        else:
+            x_label, y_label = canvas.ax.get_xlabel() if canvas.ax else "", ""
+            labels = shown.get("labels") or []
+            regions = self._panel_fit_regions(kind, result)
+            if regions:
+                mask = nb_build_region_mask(x, [tuple(r) for r in regions])
+        n_free = self._free_parameter_count(result)
+        label = self.session.label(index)
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim == 2 and hasattr(self, "slice_spin"):
+            label += f", slice {self.slice_spin.value()}"
+        n_comp = max(len(components) - 1, 0) if components else 0
+        default = nb_fit_models.KIND_LABELS.get(kind, kind)
+        if kind == "curve":
+            default += f": {shown.get('label') or 'curve'}"
+        elif n_comp:
+            default += f", {n_comp} component{'s' if n_comp != 1 else ''}"
+        if name is None:
+            name, ok = QInputDialog.getText(self, "Keep this fit",
+                                            f"Name for this fit of {label}:", text=default)
+            if not ok:
+                return None
+            name = name.strip() or default
+        panel_inputs = panel_result = None
+        if panel_key and result:
+            section = self._fit_panels()[panel_key]
+            try:
+                panel_inputs, panel_result = section.get_state(), section.result_state()
+            except Exception:  # noqa: BLE001 -- the curves are kept even if the panel can't be
+                panel_inputs = panel_result = None
+        model = nb_fit_models.make_fit_model(
+            name, kind, x, shown["y"] if kind == "curve" else shown["y_data"], shown["y_fit"],
+            components=components, labels=labels, n_free=n_free, mask=mask, report=report,
+            target=label, x_label=x_label, y_label=y_label, title=shown.get("title") or name,
+            panel_inputs=panel_inputs, panel_result=panel_result)
+        models = self._fit_models(index)
+        model["id"] = max([m.get("id", 0) for m in models] + [0]) + 1
+        models.append(model)
+        stats = nb_fit_models.fit_statistics(model)
+        self._set_fit_models(index, models, event=(
+            f"Kept fit model “{name}” ({model['kind_label']}; R² {stats['r2']:.5f}"
+            + (f", {stats['k']} free parameters" if stats["k"] is not None else "") + ")"
+            + (f"\n{report}" if report else "")))
+        self.statusBar().showMessage(f"Kept “{name}” with {label} -- Fit ▸ Kept fit models.", 8000)
+        return model
+
+    def _fit_model_by_id(self, index, model_id):
+        for model in self._fit_models(index):
+            if model.get("id") == model_id:
+                return model
+        raise KeyError(f"No kept fit {model_id} for this spectrum.")
+
+    def _show_fit_model(self, index, model_id) -> None:
+        model = self._fit_model_by_id(index, model_id)
+        self._draw_fit_model(model)
+
+    def _draw_fit_model(self, model) -> None:
+        if model["kind"] == "curve":
+            self.fit_canvas.show_relaxation_fit(
+                {"t": model["x"], "y": model["y"], "y_fit": model["y_fit"],
+                 "peak_label": model["name"]},
+                xlabel=model.get("x_label") or "x", ylabel=model.get("y_label") or "")
+        else:
+            spectrum = self.session.spectra[self._selected_index()] \
+                if self._selected_index() is not None else None
+            self.fit_canvas.show_slice_fit(
+                model["x"], model["y"], model["y_fit"],
+                components=model["components"] or None, peak_labels=model.get("labels"),
+                title=model["name"], auto_hide_single=True,
+                spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _compare_fit_models(self, index, ids, residuals=True, components_of=None) -> None:
+        models = [self._fit_model_by_id(index, i) for i in ids]
+        kinds = {m["kind"] == "curve" for m in models}
+        if len(kinds) > 1:
+            QMessageBox.information(self, "Compare", "Curve fits and spectrum fits cannot share "
+                                    "one plot -- tick fits of one kind.")
+            return
+        curve = kinds == {True}
+
+        def draw(figure):
+            nb_fit_models.plot_fit_comparison(
+                models, figure=figure, residuals=residuals, show_components=components_of,
+                fontsize=self.fit_canvas.style_settings()["labelsize"])
+        self.fit_canvas.show_external_plot(draw, kind="curve" if curve else None)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _fit_model_restorable(self, model) -> bool:
+        return bool(model.get("panel_result")) and model.get("kind") in self._fit_panels()
+
+    def _restore_fit_model(self, index, model_id) -> None:
+        """Put a kept fit back in the panel that made it (settings and
+        result), make it the spectrum's current fit of that kind, and
+        show it."""
+        model = self._fit_model_by_id(index, model_id)
+        if not self._fit_model_restorable(model):
+            raise ValueError(f"“{model['name']}” cannot be put back into a panel.")
+        panel = self._fit_panels()[model["kind"]]
+        panel.set_state(model.get("panel_inputs") or {})
+        panel.restore_result(model["panel_result"], self.session.spectra[index])
+        self._store_fit(model["kind"], index)
+        history = self._ensure_history(index)
+        if history is not None:
+            io_history.add_event(history, f"Put kept fit “{model['name']}” back into the "
+                                          f"{model['kind_label']} panel", kind="fit_model")
+        self._draw_fit_model(model)
+
+    def _rename_fit_model(self, index, model_id, name) -> None:
+        models = self._fit_models(index)
+        for m in models:
+            if m.get("id") == model_id:
+                old, m["name"] = m["name"], name
+                self._set_fit_models(index, models, event=f"Kept fit “{old}” renamed “{name}”")
+                return
+
+    def _delete_fit_model(self, index, model_id) -> None:
+        models = self._fit_models(index)
+        gone = [m for m in models if m.get("id") == model_id]
+        rest = [m for m in models if m.get("id") != model_id]
+        if gone:
+            self._set_fit_models(index, rest, event=f"Kept fit “{gone[0]['name']}” deleted")
 
     def _open_fit_display_options(self) -> None:
         """Right-click ▸ Components ▸ Colours and highlighting…: the Fit
@@ -21425,6 +21935,7 @@ class MainWindow(QMainWindow):
         ``_silo_other_canvas_tabs`` restoring a reselected
         spectrum's already-computed fit."""
         title = self._slice_label_from_fit_result(result)
+        self._last_spectral_fit = result
         per_peak = processing_fitting.extract_params_and_errors(
             result["popt"], result["pcov"], result["peak_defs"], result["is_free"],
         )
@@ -22311,6 +22822,8 @@ class MainWindow(QMainWindow):
             self.quad_fit_panel.seed_from_spectrum(spectrum)
         if hasattr(self, "czjzek_fit_panel"):
             self.czjzek_fit_panel.seed_from_spectrum(spectrum)
+        if hasattr(self, "fit_models_panel"):
+            self.fit_models_panel.refresh()
         if hasattr(self, "combined_sim_panel"):
             self.combined_sim_panel.seed_from_spectrum(spectrum)
         if hasattr(self, "combined_fit_panel"):

@@ -1074,6 +1074,7 @@ class MplCanvas(QWidget):
         self._slice_fit_args: dict | None = None
         self._slice_fit_active = False
         self._slice_fit_labels: list = []
+        self._curve_fit_shown: dict | None = None
         #: The palette every multi-series plot takes its default
         #: colours from -- Compare, extracted slices, the DOSY overlay
         #: and the 2D overlay. One setting rather than one per view, so
@@ -2783,8 +2784,10 @@ class MplCanvas(QWidget):
         # Likewise the curve Axes whose top/right spines Plot Style
         # controls: only the next curve view re-declares them.
         self._curve_axes = []
-        # And the fit view a component-style change would redraw.
+        # And the fit view a component-style change would redraw, and the
+        # curve fit a "Keep This Fit…" would keep.
         self._slice_fit_active = False
+        self._curve_fit_shown = None
         # The Axes these were drawn on are about to go; the Python-side
         # list would otherwise keep handing out artists belonging to a
         # figure that no longer contains them.
@@ -3253,6 +3256,9 @@ class MplCanvas(QWidget):
     #: The right-click "Components ▸ Colours and highlighting…" entry.
     fitDisplayOptionsRequested = Signal()
 
+    #: The right-click "Keep This Fit…" entry, on any fit or curve fit.
+    keepFitRequested = Signal()
+
     #: Emitted after a style setting was changed from this canvas's own
     #: right-click menu (e.g. a curve plot's Top/Right Spine), so the
     #: Plot Style controls can re-read it.
@@ -3300,6 +3306,11 @@ class MplCanvas(QWidget):
         legend_action.setCheckable(True)
         legend_action.setChecked(self._legend_visible)
 
+        if self.shown_fit() is not None:
+            keep_action = menu.addAction("Keep This Fit…")
+            keep_action.setToolTip("Save this fit with the spectrum, to reopen and compare "
+                                   "with other fits later (Fit ▸ Kept fit models).")
+            keep_action.triggered.connect(self.keepFitRequested.emit)
         # Fit views: quick component display, on the plot itself. The
         # full controls (highlight, colours) are Fit ▸ Fit plot.
         if self._slice_fit_active and self._slice_fit_labels:
@@ -5910,6 +5921,17 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
         self.fitComponentsShown.emit(list(self._slice_fit_labels))
 
+    def shown_fit(self) -> dict | None:
+        """The fit on show, as ``{"kind": "spectrum" | "curve", ...}`` --
+        a spectral fit (``show_slice_fit``'s arguments) or a curve fit
+        (data, fit and axis labels) -- or None."""
+        if self._slice_fit_active and self._slice_fit_args is not None:
+            return {"kind": "spectrum", "labels": list(self._slice_fit_labels),
+                    **self._slice_fit_args}
+        if self._curve_fit_shown is not None:
+            return {"kind": "curve", **self._curve_fit_shown}
+        return None
+
     def fit_component_style(self) -> dict:
         """This canvas's component style (a copy)."""
         return fit_display.component_style(self._fit_component_style)
@@ -6258,6 +6280,11 @@ class MplCanvas(QWidget):
         plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
         self._curve_axes = [self.ax]
+        # What "Keep This Fit…" keeps: the curve as drawn (display units).
+        self._curve_fit_shown = {
+            "x": np.asarray(t, dtype=float), "y": np.asarray(y, dtype=float),
+            "y_fit": np.asarray(y_fit, dtype=float), "xlabel": xlabel, "ylabel": ylabel,
+            "label": result.get("peak_label", result.get("model", "")), "result": result}
         self._legend_visible = True
         self._apply_current_axis_style()
         self._apply_view_options()

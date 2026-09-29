@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from ..core import registry as core_registry
 from ..io import serialize
 from . import panel_state
+from .widgets.field_input import link_field
 from ..notebook import bridge as notebook_bridge
 from ..notebook import fitting as notebook_fitting
 from ..notebook import quadrupolar_fitting as qfit
@@ -210,6 +211,14 @@ class QuadrupolarFitPanel(QWidget):
         self.render_orientations_spin.setToolTip("Orientations for the drawn curve, once fitted.")
         form.addRow("Orientations (final):", self.render_orientations_spin)
         v.addLayout(form)
+        # The magnet's field in front of the Larmor box, as in Simulate ▸
+        # Quadrupolar (explicit user request for the Czjzek panel, which
+        # shares this code): the Larmor frequency follows from the field
+        # and the nucleus, and a selected spectrum's SFO1 moves the field.
+        self.field_link = link_field(form, self.larmor_spin,
+                                     lambda: self.nucleus_combo.currentText(),
+                                     self.nucleus_combo.currentTextChanged)
+        self.field_spin = self.field_link.field_spin
 
         self.fit_button = QPushButton(self.FIT_TEXT)
         self.fit_button.clicked.connect(self.fit)
@@ -477,7 +486,7 @@ class QuadrupolarFitPanel(QWidget):
                              "quadrupole moment.")
         larmor = self.larmor_spin.value()
         if larmor <= 0:
-            raise ValueError("Set the Larmor frequency (the spectrum's SFO1).")
+            raise ValueError("Set the field B₀ (or select the spectrum, whose SFO1 sets it).")
         mas = self.mas_spin.value() if self.regime_combo.currentData() == "mas" else 0.0
         if self.regime_combo.currentData() == "mas" and mas <= 0:
             raise ValueError("The MAS lineshape needs a spinning rate: set MAS rate, or "

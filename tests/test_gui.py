@@ -11260,7 +11260,7 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # (test_gui_czjzek_display.py).
     assert titles == ["Isotropic (Gauss/Lor)", "Integration", "J-coupling", "CSA/Dipolar",
                       "Quadrupolar", "Quadrupolar (Czjzek distribution)", "Combined Hamiltonian",
-                      "Multi-spectrum", "Fit plot: components and colours"]
+                      "Multi-spectrum", "Kept fit models", "Fit plot: components and colours"]
 
     # eNMR/Imaging moved off this tab entirely, to their own
     # "Applications" button (see

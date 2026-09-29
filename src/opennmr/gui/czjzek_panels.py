@@ -30,6 +30,7 @@ from ..notebook import fitting as notebook_fitting
 from ..notebook import quadrupolar_fitting as qfit
 from . import panel_state
 from .quadrupolar_panels import QuadrupolarFitPanel
+from .widgets.field_input import link_field
 
 #: Rough seconds per grid point when every lineshape is simulated.
 _SIMULATED_SECONDS = {"static": 0.005, "mas": 0.15}
@@ -420,6 +421,12 @@ class CzjzekSimPanel(QWidget):
         form.addRow("Nucleus:", self.nucleus_combo)
         self.larmor_spin = self._spin(0.0, 5000.0, 130.3, 4, " MHz", "ν0 (the spectrometer's SFO1).")
         form.addRow("Larmor frequency:", self.larmor_spin)
+        # Enter the magnet's field; ν0 follows from it and the nucleus
+        # (explicit user request, as in Simulate ▸ Quadrupolar).
+        self.field_link = link_field(form, self.larmor_spin,
+                                     lambda: self.nucleus_combo.currentText(),
+                                     self.nucleus_combo.currentTextChanged)
+        self.field_spin = self.field_link.field_spin
         self.regime_combo = QComboBox()
         self.regime_combo.addItem("Static powder", "static")
         self.regime_combo.addItem("MAS", "mas")
