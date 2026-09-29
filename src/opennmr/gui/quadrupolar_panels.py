@@ -48,6 +48,8 @@ class QuadrupolarFitPanel(QWidget):
     COLUMNS = COLUMNS
     COLUMN_PARAMS = COLUMN_PARAMS
     PARAM_LABELS = PARAM_LABELS
+    #: ``popt``'s per-site parameter order.
+    PARAM_NAMES = tuple(qfit.QUAD_PARAM_NAMES)
     BLURB = ("Fit quadrupolar powder lineshapes (static or MAS) to the selected 1D spectrum "
              "(or the displayed slice of a 2D). One row per site; Estimate reads a starting "
              "C_Q and δiso off the data. The fitted model is the Simulate > Quadrupolar one.")
@@ -244,11 +246,22 @@ class QuadrupolarFitPanel(QWidget):
         self.results_table.setVisible(False)
         v.addWidget(self.results_table)
 
+        transfer = QHBoxLayout()
+        self.use_fitted_button = QPushButton("Use Fitted Values as Start")
+        self.use_fitted_button.setToolTip(
+            "Copy every fitted site's values into the sites table, so the next fit starts from "
+            "this best fit (fixes and bounds are kept).")
+        self.use_fitted_button.setEnabled(False)
+        self.use_fitted_button.clicked.connect(self.use_fitted_as_start)
         self.send_button = QPushButton(self.SEND_TEXT)
-        self.send_button.setToolTip("Open the first fitted site in the quadrupolar simulator.")
+        self.send_button.setToolTip("Open a fitted site -- the one selected in the results "
+                                    "table, else the first -- in the simulator, with the fit's "
+                                    "field, spinning, transitions and level of theory.")
         self.send_button.setEnabled(False)
         self.send_button.clicked.connect(self._on_send)
-        v.addWidget(self.send_button)
+        transfer.addWidget(self.use_fitted_button)
+        transfer.addWidget(self.send_button)
+        v.addLayout(transfer)
         v.addStretch(1)
 
         self.add_site()
@@ -283,6 +296,7 @@ class QuadrupolarFitPanel(QWidget):
         self.result = result
         self._report()
         self.send_button.setEnabled(self._send_to_simulation is not None)
+        self.use_fitted_button.setEnabled(True)
 
     def clear_result(self) -> None:
         self.result = None
@@ -291,6 +305,7 @@ class QuadrupolarFitPanel(QWidget):
         self.results_table.setRowCount(0)
         self.results_table.setVisible(False)
         self.send_button.setEnabled(False)
+        self.use_fitted_button.setEnabled(False)
 
     def report_text(self) -> str:
         """What the log records of the fit: the summary line(s) and table."""
@@ -563,6 +578,7 @@ class QuadrupolarFitPanel(QWidget):
         self._draw_fit(self.result)
         self._report()
         self.send_button.setEnabled(self._send_to_simulation is not None)
+        self.use_fitted_button.setEnabled(True)
         self._on_fitted()
 
     # ---- report --------------------------------------------------------------
@@ -657,11 +673,102 @@ class QuadrupolarFitPanel(QWidget):
         elif chosen is copy_report:
             QGuiApplication.clipboard().setText(self.text_report())
 
+    # ---- moving values between fits and simulations -------------------------
+
+    def send_site_index(self) -> int:
+        """The site Send to Simulate sends: the one selected in the results
+        table, else the first."""
+        n = int((self.result or {}).get("info", {}).get("n_sites", 1) or 1)
+        row = self.results_table.currentRow()
+        return row if 0 <= row < n else 0
+
+    def fitted_site_values(self) -> list[dict]:
+        """Each fitted site's parameters, ``{name: value}`` by
+        :attr:`PARAM_NAMES`."""
+        r = self.result
+        if not r:
+            return []
+        popt = np.asarray(r["popt"], dtype=float)
+        n, k = int(r["info"]["n_sites"]), len(self.PARAM_NAMES)
+        if popt.size < n * k:                  # an older record, fewer per-site values
+            k = (popt.size - 2) // n
+        return [{name: float(popt[s * k + i]) for i, name in enumerate(self.PARAM_NAMES[:k])}
+                for s in range(n)]
+
+    def _write_site(self, row: int, values: dict) -> None:
+        for column, name in self.COLUMN_PARAMS.items():
+            if name not in values or values[name] is None:
+                continue
+            value = float(values[name])
+            if name == "C_Q":
+                value = abs(value)
+            item = self.sites_table.item(row, column)
+            if item is None:
+                item = QTableWidgetItem("")
+                self.sites_table.setItem(row, column, item)
+            item.setText(f"{value:.6g}")
+
+    def use_fitted_as_start(self) -> None:
+        """The last fit's values become the starting values (explicit
+        user request: start again from the old best fit). Rows are added
+        if the fit had more sites than the table now has; labels, fixes
+        and bounds stay."""
+        r = self.result
+        if not r:
+            return
+        labels = list(r["info"].get("labels") or [])
+        for s, values in enumerate(self.fitted_site_values()):
+            if s >= self.sites_table.rowCount():
+                self.add_site()
+                if s < len(labels):
+                    self.sites_table.item(s, 0).setText(labels[s])
+            self._write_site(s, values)
+
+    def set_start_from_simulation(self, values: dict, settings: dict | None = None) -> str:
+        """A simulated site as the starting values of the selected row
+        (else the first; one is added if the table is empty), with the
+        simulation's spinning, transitions and level of theory. The
+        nucleus and field stay the spectrum's: a simulation at another
+        field would give the wrong start for these data, so a mismatch is
+        reported (returned) rather than copied."""
+        if self.sites_table.rowCount() == 0:
+            self.add_site()
+        row = self.sites_table.currentRow()
+        row = row if 0 <= row < self.sites_table.rowCount() else 0
+        self._write_site(row, values)
+        notes = []
+        settings = settings or {}
+        if settings.get("regime") in ("static", "mas"):
+            self.regime_combo.setCurrentIndex(self.regime_combo.findData(settings["regime"]))
+            if settings["regime"] == "mas" and settings.get("mas_Hz"):
+                self.mas_spin.setValue(float(settings["mas_Hz"]))
+        for combo, key in ((self.transitions_combo, "transitions"), (self.order_combo, "order"),
+                           (self.broadening_combo, "lineshape")):
+            index = combo.findData(settings.get(key))
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        nucleus = str(settings.get("nucleus") or "").strip()
+        mine = self.nucleus_combo.currentText().strip()
+        if nucleus and mine and nucleus != mine:
+            notes.append(f"the simulation is of {nucleus}, the fit of {mine}")
+        larmor = settings.get("larmor_MHz")
+        if larmor and self.larmor_spin.value() > 0 and \
+                abs(float(larmor) - self.larmor_spin.value()) > 1e-3 * self.larmor_spin.value():
+            notes.append(f"the simulation used ν0 = {float(larmor):.6g} MHz, the fit uses "
+                         f"{self.larmor_spin.value():.6g} MHz (the spectrum's)")
+        elif larmor and self.larmor_spin.value() <= 0:
+            self.larmor_spin.setValue(float(larmor))
+        if nucleus and not mine:
+            self.nucleus_combo.setCurrentText(nucleus)
+        self._sync_controls()
+        return "; ".join(notes)
+
     def _on_send(self) -> None:
         r = self.result
         if not r or self._send_to_simulation is None:
             return
-        p = r["popt"]
+        k = self.send_site_index()
+        p = np.asarray(r["popt"], dtype=float)[k * len(self.PARAM_NAMES):]
         s = r["settings"]
         self._send_to_simulation({
             "nucleus": r["nucleus"], "C_Q_MHz": float(abs(p[1])), "eta_Q": float(p[2]),

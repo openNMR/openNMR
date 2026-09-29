@@ -2788,6 +2788,7 @@ class MplCanvas(QWidget):
         # curve fit a "Keep This Fit…" would keep.
         self._slice_fit_active = False
         self._curve_fit_shown = None
+        self.simulation_spectrum = None
         # The Axes these were drawn on are about to go; the Python-side
         # list would otherwise keep handing out artists belonging to a
         # figure that no longer contains them.
@@ -3259,6 +3260,16 @@ class MplCanvas(QWidget):
     #: The right-click "Keep This Fit…" entry, on any fit or curve fit.
     keepFitRequested = Signal()
 
+    #: The right-click "Keep This Simulation in Open Experiments" entry,
+    #: with the simulated spectrum on show (see :attr:`simulation_spectrum`).
+    keepSimulationRequested = Signal(object)
+
+    #: The simulated spectrum this plot shows, set by whoever drew it, so
+    #: the right-click menu can keep it (explicit user request: simulations
+    #: kept as Open experiments, to compare with data). Cleared by every
+    #: rebuild.
+    simulation_spectrum = None
+
     #: Emitted after a style setting was changed from this canvas's own
     #: right-click menu (e.g. a curve plot's Top/Right Spine), so the
     #: Plot Style controls can re-read it.
@@ -3306,6 +3317,12 @@ class MplCanvas(QWidget):
         legend_action.setCheckable(True)
         legend_action.setChecked(self._legend_visible)
 
+        if self.simulation_spectrum is not None:
+            keep_sim = menu.addAction("Keep This Simulation in Open Experiments")
+            keep_sim.setToolTip("List the simulated spectrum under Open experiments, to compare "
+                                "it with data or other simulations (Compare), process or save it.")
+            keep_sim.triggered.connect(
+                lambda _c=False: self.keepSimulationRequested.emit(self.simulation_spectrum))
         if self.shown_fit() is not None:
             keep_action = menu.addAction("Keep This Fit…")
             keep_action.setToolTip("Save this fit with the spectrum, to reopen and compare "
@@ -3758,7 +3775,31 @@ class MplCanvas(QWidget):
                 if name.startswith("_") and name in series_names and line not in handles:
                     handles.append(line)
                     labels.append(name)
+        if self._compare_axes or (self._compare_spectra and self._active_series_view() == "compare"):
+            # Kept fits in Compare repeat "Data", "Baseline" and each
+            # component (every row of a stack, or every fit superimposed):
+            # one legend entry per name and colour is enough.
+            seen, kept_h, kept_l = set(), [], []
+            for handle, name in zip(handles, labels):
+                key = (name, self._handle_colour(handle))
+                if name not in series_names and key in seen:
+                    continue
+                seen.add(key)
+                kept_h.append(handle)
+                kept_l.append(name)
+            handles, labels = kept_h, kept_l
         return handles, [plotting.safe_label(name) for name in labels]
+
+    @staticmethod
+    def _handle_colour(handle):
+        from matplotlib.colors import to_hex
+        try:
+            if hasattr(handle, "get_color"):
+                return to_hex(handle.get_color())
+            colours = handle.get_facecolor()
+            return to_hex(colours[0], keep_alpha=True) if len(colours) else None
+        except (ValueError, TypeError, AttributeError):
+            return None
 
     def _restyle_existing_legends(self) -> None:
         """Re-issue every legend already on the figure with this
@@ -5567,6 +5608,8 @@ class MplCanvas(QWidget):
                 # of components resolved from one dataset, which do
                 # share a scale by construction.
                 self._apply_shared_row_scale(axes, spectra, normalize)
+            self._draw_compare_fit_overlays(spectra, axes, [ax.lines[0] for ax in axes],
+                                            colors, [e.label for e in entries], normalize)
             if row_labels:
                 self._annotate_compare_rows(axes, row_labels, colors)
             axes[0].set_xlim(xmin, xmax)
@@ -5597,9 +5640,12 @@ class MplCanvas(QWidget):
             # the stack -- the overlay used to take the colour map's
             # colours directly, so a colour set in Plot Style did not
             # reach it, and its lines had no names for a legend at all.
-            for line, entry in zip(self.ax.lines, entries):
+            data_lines = list(self.ax.lines[:len(spectra)])
+            for line, entry in zip(data_lines, entries):
                 line.set_label(entry.label)
                 line.set_color(entry.colour)
+            self._draw_compare_fit_overlays(spectra, [self.ax] * len(spectra), data_lines,
+                                            colors, [e.label for e in entries], normalize)
             self.ax.set_yticks([])
             plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
                                         linewidth=self._AXIS_LINEWIDTH)
@@ -5613,6 +5659,89 @@ class MplCanvas(QWidget):
         self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
+
+    # ---- kept fits in Compare --------------------------------------------
+
+    _fit_model_cache: dict = {}
+
+    @classmethod
+    def compare_fit_model(cls, spectrum):
+        """The kept fit a Compare entry was made from (decoded, cached),
+        or None -- an Open experiment made by "Keep in Open Experiments"
+        on a kept fit carries it as ``metadata.raw["fit_model"]``."""
+        raw = getattr(getattr(spectrum, "metadata", None), "raw", None) or {}
+        encoded = raw.get("fit_model")
+        if not encoded:
+            return None
+        key = id(encoded)
+        hit = cls._fit_model_cache.get(key)
+        if hit is None or hit[0] is not encoded:
+            from ...notebook.fit_models import decode_fit_model
+            try:
+                hit = (encoded, decode_fit_model(encoded))
+            except Exception:  # noqa: BLE001 -- a damaged record draws as plain data
+                return None
+            if len(cls._fit_model_cache) > 64:
+                cls._fit_model_cache.clear()
+            cls._fit_model_cache[key] = hit
+        return hit[1]
+
+    def _draw_compare_fit_overlays(self, spectra, axes, data_lines, colors, names,
+                                   normalize: bool) -> None:
+        """Each Compare entry made from a kept fit gets its fit drawn over
+        its data: the total fit (in the trace's colour), its components
+        and, if asked, its residual just below -- stacked (a row each, the
+        data repeated) or superimposed (the data drawn once). How is the
+        entry's own ``metadata.raw["fit_model_view"]``
+        (:func:`opennmr.notebook.fit_models.fit_view`)."""
+        from ...notebook.fit_models import draw_fit_model, fit_view
+        items = []
+        for i, spectrum in enumerate(spectra):
+            model = self.compare_fit_model(spectrum)
+            if model is None:
+                continue
+            y = np.asarray(model["y"], dtype=float)
+            data = np.real(np.asarray(spectrum.data, dtype=float))
+            if data.shape != y.shape or not np.any(y):
+                continue
+            k = int(np.argmax(np.abs(y)))
+            scale = float(data[k] / y[k]) if y[k] else 1.0
+            if normalize:
+                peak = float(np.max(np.abs(data))) or 1.0
+                scale /= peak
+            try:
+                view = fit_view(spectrum.metadata.raw.get("fit_model_view"))
+            except (KeyError, ValueError, TypeError):
+                view = fit_view()
+            items.append((i, model, view, scale))
+        if not items:
+            return
+        shared = len(set(map(id, axes))) == 1
+        step = None
+        if shared:
+            spans = [float(np.ptp((np.asarray(m["y"]) - np.asarray(m["y_fit"]))
+                                  [np.asarray(m["mask"], dtype=bool)])) * abs(sc)
+                     for _i, m, v, sc in items if v["show_residual"]]
+            step = 1.15 * max(spans) if spans else None
+        drawn_data: set = set()
+        residual_index = 0
+        for i, model, view, scale in items:
+            ax, line = axes[i], data_lines[i]
+            data_colour = view["style"]["data_colour"]
+            key = (np.asarray(model["y"], dtype=float).tobytes(), round(scale, 12))
+            if not view["show_data"] or (shared and key in drawn_data):
+                line.set_visible(False)
+                line.set_label("_hidden data")
+            else:
+                drawn_data.add(key)
+                line.set_color(data_colour)
+                line.set_linewidth(view["style"]["data_width"])
+                line.set_label("Data" if not shared or len(drawn_data) == 1 else "_data")
+            draw_fit_model(ax, model, view, scale=scale, fit_colour=colors[i], name=names[i],
+                           draw_data=False, residual_index=residual_index if shared else 0,
+                           residual_step=step)
+            if shared and view["show_residual"]:
+                residual_index += 1
 
     @staticmethod
     def _apply_shared_row_scale(axes, spectra, normalize: bool) -> None:

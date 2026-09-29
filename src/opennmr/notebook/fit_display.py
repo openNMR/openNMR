@@ -109,13 +109,15 @@ def visible_components(labels, style: dict, auto_hide_single: bool = False) -> l
 
 def draw_fit_components(ax, x, y_data, y_fit, components=None, labels=None, style=None,
                         auto_hide_single: bool = False, data_label: str = "Data",
-                        fit_label: str = "Fit (total)") -> dict:
+                        fit_label: str = "Fit (total)", draw_data: bool = True) -> dict:
     """Data, each component (per ``style``) and the total fit on ``ax``.
 
     ``components`` : per-component curves with the baseline **last**
     (``None`` to draw only data and fit). ``labels`` : one per
     component (the baseline excluded). ``auto_hide_single`` : under
     ``show="auto"``, skip a single component (it only repeats the fit).
+    ``draw_data`` : False when the data are already drawn (``"data"`` is
+    then None).
 
     Returns ``{"data", "fit", "components": {label: artist},
     "dimmed": {label: artist}, "baseline"}`` for further styling.
@@ -123,8 +125,8 @@ def draw_fit_components(ax, x, y_data, y_fit, components=None, labels=None, styl
     style = component_style(style)
     x = np.asarray(x, dtype=float)
     out = {"components": {}, "dimmed": {}, "baseline": None}
-    out["data"] = ax.plot(x, y_data, color=style["data_colour"], linewidth=style["data_width"],
-                          label=data_label, zorder=0)[0]
+    out["data"] = (ax.plot(x, y_data, color=style["data_colour"], linewidth=style["data_width"],
+                           label=data_label, zorder=0)[0] if draw_data else None)
     if components:
         curves = [np.asarray(c, dtype=float) for c in components[:-1]]
         baseline = np.asarray(components[-1], dtype=float)

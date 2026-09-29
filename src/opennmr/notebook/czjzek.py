@@ -17,6 +17,15 @@ C_Q (MHz here). ``N`` is exact for any d:
 ``J(d) = int_0^1 eta (1 - eta^2/9) (1 + eta^2/3)^(-d/2) d eta`` (J(5) = 1/3,
 which gives the published 2 / (sqrt(2 pi) sigma^5) for d = 5).
 
+This distribution is centred on a *zero* EFG: it has no "central" C_Q.
+Its ⟨C_Q⟩ (≈ 1.995 σ for d = 5), mode and ⟨η_Q⟩ = 0.61 all follow from σ
+alone. For a site with a well-defined local structure spread by disorder,
+use the extended Czjzek model (Le Caër & Brand 1998): the EFG is a mean
+tensor (C_Q0, eta_Q0) plus a random Czjzek part of width σ -- give a site
+``CQ0`` (and ``eta0``) and it is fitted; ``CQ0 = 0`` is plain Czjzek. The
+extended model has no closed form, so it is sampled (fixed quasi-random
+samples, deposited on the grid; see :func:`czjzek_samples`).
+
 The spectrum is sum over a (C_Q, eta_Q) grid of P x cell area x the
 powder lineshape of that (C_Q, eta_Q), then broadened (the isotropic
 chemical-shift distribution; a Gaussian ``fwhm`` in ppm) and shifted to
@@ -65,10 +74,14 @@ from .simulations import (
 )
 from .utils import find_isotope_info
 
-CZJZEK_PARAM_NAMES = ["d_iso", "sigma", "d", "fwhm", "amplitude", "eta"]
+#: Per-site parameters, in ``popt`` order. ``CQ0`` and ``eta0`` (the mean
+#: EFG of the extended model) come last so the first six keep their
+#: places; both are 0 -- and held -- for a plain Czjzek site.
+CZJZEK_PARAM_NAMES = ["d_iso", "sigma", "d", "fwhm", "amplitude", "eta", "CQ0", "eta0"]
 _N = len(CZJZEK_PARAM_NAMES)
 CZJZEK_PARAM_LABELS = {"d_iso": "δiso (ppm)", "sigma": "σ (MHz)", "d": "d",
-                       "fwhm": "FWHM (ppm)", "amplitude": "Amplitude", "eta": "L fraction"}
+                       "fwhm": "FWHM (ppm)", "amplitude": "Amplitude", "eta": "L fraction",
+                       "CQ0": "C_Q0 (MHz)", "eta0": "η_Q0"}
 
 
 # ============================================================
@@ -107,8 +120,13 @@ def czjzek_pdf(C_Q, eta_Q, sigma, d=5.0):
     return np.where(inside, p, 0.0)
 
 
-def czjzek_cq_quantile(q: float, sigma: float, d: float = 5.0) -> float:
-    """The C_Q below which a fraction ``q`` of the distribution lies."""
+def czjzek_cq_quantile(q: float, sigma: float, d: float = 5.0, cq0: float = 0.0,
+                       eta0: float = 0.0) -> float:
+    """The C_Q below which a fraction ``q`` of the distribution lies
+    (sampled for the extended model, ``cq0 > 0``)."""
+    if cq0 and cq0 > 0:
+        cq, _eta = czjzek_samples(sigma, cq0, eta0)
+        return float(np.quantile(cq, q))
     c = np.linspace(0, 12 * sigma * max(1.0, math.sqrt(d / 5)), 6001)
     e = np.linspace(0, 1, 201)
     integrate = getattr(np, "trapezoid", None) or np.trapz
@@ -142,11 +160,15 @@ def czjzek_weights(sigma, d, cq_edges, eta_edges, subdivide: int = 4):
     return p * de[:, None] * dc[None, :]
 
 
-def czjzek_statistics(sigma, d=5.0, I=None, larmor_Hz=None, n_cq=600, n_eta=200):
+def czjzek_statistics(sigma, d=5.0, I=None, larmor_Hz=None, n_cq=600, n_eta=200, cq0=0.0,
+                      eta0=0.0, extended=None):
     """Averages over the distribution, on a fine grid: mean and most
     probable C_Q (MHz), mean eta_Q, mean P_Q = C_Q sqrt(1 + eta^2/3) (MHz),
     and -- given ``I`` and ``larmor_Hz`` -- the mean second-order
-    isotropic quadrupolar shift of the CT (ppm)."""
+    isotropic quadrupolar shift of the CT (ppm). With a mean EFG
+    (``cq0 > 0``: the extended model, d = 5) they are sample averages."""
+    if _is_extended(cq0, extended):
+        return _stats_from_samples(sigma, cq0, eta0, I=I, larmor_Hz=larmor_Hz)
     cq_max = czjzek_cq_quantile(0.99999, sigma, d)
     cq_edges, cq, eta_edges, eta = czjzek_grid(cq_max, n_cq, n_eta)
     w = czjzek_weights(sigma, d, cq_edges, eta_edges, subdivide=2)
@@ -161,6 +183,129 @@ def czjzek_statistics(sigma, d=5.0, I=None, larmor_Hz=None, n_cq=600, n_eta=200)
         shift = quadrupolar_ct_isotropic_shift_Hz(float(I), C * 1e6, E, float(larmor_Hz))
         out["mean_shift_ppm"] = float(np.sum(w * shift) / float(larmor_Hz) * 1e6)
     return out
+
+
+# ============================================================
+# The extended Czjzek model: a mean EFG plus a random one
+# ============================================================
+#
+# Le Caer & Brand (J. Phys.: Condens. Matter 10, 10715 (1998)); in NMR,
+# d'Espinose de Lacaillerie et al. (2008) and Vasconcelos et al.
+# (J. Chem. Phys. 139, 084506 (2013)). The EFG tensor is
+#
+#     V = V0 + sum_i U_i S_i,   U_i ~ N(0, 3 sigma^2 / 2), i = 1..5,
+#
+# with V0 = diag(-C_Q0 (1 - eta0)/2, -C_Q0 (1 + eta0)/2, C_Q0) (the local,
+# ordered part) and S_i an orthonormal basis of traceless symmetric
+# matrices; the variance makes <C_Q^2 (1 + eta^2/3)> = 5 sigma^2 + that of
+# V0, so V0 = 0 is exactly Czjzek's d = 5 distribution with the same sigma.
+# The distribution has no closed form in (C_Q, eta_Q), so it is sampled:
+# fixed, scrambled Sobol normal deviates (common to every call, so a fit
+# sees a smooth, deterministic model), eigenvalues sorted by magnitude,
+# deposited bilinearly onto the grid.
+
+_EFG_BASIS = np.array([
+    np.diag([-1.0, -1.0, 2.0]) / math.sqrt(6.0),
+    np.diag([1.0, -1.0, 0.0]) / math.sqrt(2.0),
+    np.array([[0, 1, 0], [1, 0, 0], [0, 0, 0]], dtype=float) / math.sqrt(2.0),
+    np.array([[0, 0, 1], [0, 0, 0], [1, 0, 0]], dtype=float) / math.sqrt(2.0),
+    np.array([[0, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=float) / math.sqrt(2.0),
+])
+
+#: Samples of the extended distribution (2^16: a spectrum's weights).
+N_SAMPLES = 2 ** 16
+_NORMAL_CACHE: dict = {}
+_SAMPLE_CACHE: dict = {}
+
+
+def _gaussian_samples(n: int = N_SAMPLES) -> np.ndarray:
+    """``(n, 5)`` standard normal deviates, quasi-random and fixed."""
+    n = int(n)
+    if n not in _NORMAL_CACHE:
+        from scipy.stats import norm, qmc
+        u = qmc.Sobol(5, scramble=True, seed=20260929).random(n)
+        _NORMAL_CACHE[n] = norm.ppf(np.clip(u, 1e-12, 1 - 1e-12))
+    return _NORMAL_CACHE[n]
+
+
+def czjzek_samples(sigma, cq0=0.0, eta0=0.0, n: int = N_SAMPLES):
+    """``(C_Q, eta_Q)`` samples (MHz, -) of the extended Czjzek
+    distribution: a mean EFG (``cq0``, ``eta0``) plus a random, Czjzek
+    (d = 5) EFG of width ``sigma``. ``cq0 = 0`` samples plain Czjzek."""
+    sigma, cq0, eta0 = float(sigma), float(cq0), float(eta0)
+    if sigma <= 0:
+        raise ValueError("sigma must be > 0.")
+    if cq0 < 0 or not 0.0 <= eta0 <= 1.0:
+        raise ValueError("C_Q0 must be >= 0 and eta_Q0 in [0, 1].")
+    key = (round(sigma, 12), round(cq0, 12), round(eta0, 12), int(n))
+    hit = _SAMPLE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    u = _gaussian_samples(n) * (math.sqrt(1.5) * sigma)
+    v = np.einsum("ni,ijk->njk", u, _EFG_BASIS)
+    v += np.diag([-cq0 * (1 - eta0) / 2, -cq0 * (1 + eta0) / 2, cq0])
+    lam = np.linalg.eigvalsh(v)
+    lam = np.take_along_axis(lam, np.argsort(np.abs(lam), axis=1), axis=1)
+    vxx, vyy, vzz = lam[:, 0], lam[:, 1], lam[:, 2]
+    cq = np.abs(vzz)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eta = np.where(cq > 0, np.abs((vxx - vyy) / np.where(cq > 0, vzz, 1.0)), 0.0)
+    out = (cq, np.clip(eta, 0.0, 1.0))
+    if len(_SAMPLE_CACHE) > 64:
+        _SAMPLE_CACHE.clear()
+    _SAMPLE_CACHE[key] = out
+    return out
+
+
+def _deposit(cq, eta, cq_edges, eta_edges):
+    """Samples shared bilinearly among the four nearest cell centres
+    (continuous in the parameters, unlike a histogram); samples beyond
+    the last C_Q centre are dropped (they are the uncaptured tail).
+    Returns counts / n, shape (n_eta, n_cq)."""
+    n_cq, n_eta = len(cq_edges) - 1, len(eta_edges) - 1
+    dc = float(cq_edges[1] - cq_edges[0])
+    de = float(eta_edges[1] - eta_edges[0])
+    fc = (cq - cq_edges[0]) / dc - 0.5          # in units of cells, from the first centre
+    fe = (eta - eta_edges[0]) / de - 0.5
+    keep = fc <= n_cq - 0.5                     # inside the last cell's edge
+    fc, fe = np.clip(fc[keep], 0.0, n_cq - 1), np.clip(fe[keep], 0.0, n_eta - 1)
+    i0 = np.minimum(np.floor(fc).astype(int), max(n_cq - 2, 0))
+    j0 = np.minimum(np.floor(fe).astype(int), max(n_eta - 2, 0))
+    tc, te = fc - i0, fe - j0
+    i1, j1 = np.minimum(i0 + 1, n_cq - 1), np.minimum(j0 + 1, n_eta - 1)
+    w = np.zeros(n_eta * n_cq)
+    for jj, ii, ww in ((j0, i0, (1 - te) * (1 - tc)), (j0, i1, (1 - te) * tc),
+                       (j1, i0, te * (1 - tc)), (j1, i1, te * tc)):
+        w += np.bincount(jj * n_cq + ii, weights=ww, minlength=n_eta * n_cq)
+    return w.reshape(n_eta, n_cq) / float(len(cq))
+
+
+def extended_czjzek_weights(sigma, cq0, eta0, cq_edges, eta_edges, n: int = N_SAMPLES):
+    """As :func:`czjzek_weights`, for the extended model (sampled): the
+    probability at each grid cell, shape ``(n_eta, n_cq)``, summing to the
+    fraction the grid captures."""
+    cq, eta = czjzek_samples(sigma, cq0, eta0, n)
+    return _deposit(cq, eta, cq_edges, eta_edges)
+
+
+def _stats_from_samples(sigma, cq0, eta0, I=None, larmor_Hz=None):
+    cq, eta = czjzek_samples(sigma, cq0, eta0)
+    pq = cq * np.sqrt(1 + eta * eta / 3)
+    hist, edges = np.histogram(cq, bins=200, range=(0.0, float(np.quantile(cq, 0.999))))
+    kernel = np.array([1, 2, 3, 2, 1], dtype=float)
+    smooth = np.convolve(hist, kernel / kernel.sum(), mode="same")
+    k = int(np.argmax(smooth))
+    out = {"mean_CQ": float(cq.mean()), "mode_CQ": float(0.5 * (edges[k] + edges[k + 1])),
+           "mean_eta": float(eta.mean()), "mean_PQ": float(pq.mean()),
+           "rms_PQ": float(np.sqrt(np.mean(pq * pq)))}
+    if I is not None and larmor_Hz and not float(I).is_integer():
+        shift = quadrupolar_ct_isotropic_shift_Hz(float(I), cq * 1e6, eta, float(larmor_Hz))
+        out["mean_shift_ppm"] = float(np.mean(shift) / float(larmor_Hz) * 1e6)
+    return out
+
+
+def _is_extended(cq0, extended=None) -> bool:
+    return bool(extended) if extended is not None else bool(cq0 and cq0 > 0)
 
 
 # ============================================================
@@ -288,22 +433,32 @@ class CzjzekLibrary:
         self.n_zcw = int(n_zcw)
         self.build_seconds = time.perf_counter() - started
 
-    def weights(self, sigma, d):
+    def weights(self, sigma, d=5.0, cq0=0.0, eta0=0.0, extended=None):
+        """Grid-cell probabilities: the analytic Czjzek density, or -- with
+        a mean EFG (``cq0 > 0``, or ``extended``) -- the sampled extended
+        model (d = 5 only)."""
+        if _is_extended(cq0, extended):
+            if abs(float(d) - 5.0) > 1e-9:
+                raise ValueError("The extended Czjzek model is defined for d = 5 only.")
+            return extended_czjzek_weights(sigma, max(float(cq0), 0.0),
+                                           float(np.clip(eta0, 0.0, 1.0)),
+                                           self.cq_edges, self.eta_edges)
         return czjzek_weights(sigma, d, self.cq_edges, self.eta_edges)
 
-    def spectrum(self, sigma, d=5.0, fwhm=0.0, lineshape="gaussian", eta=0.0):
+    def spectrum(self, sigma, d=5.0, fwhm=0.0, lineshape="gaussian", eta=0.0, cq0=0.0,
+                 eta0=0.0, extended=None):
         """The distribution's lineshape on ``x`` (delta_iso = 0): unit area
         for a distribution the grid and axis capture whole."""
-        w = self.weights(sigma, d).ravel()
+        w = self.weights(sigma, d, cq0, eta0, extended).ravel()
         s = w @ self.L
         if fwhm and fwhm > 0:
             s = _apply_broadening(s, self.x, fwhm=float(fwhm), lineshape=lineshape,
                                   eta=float(eta))
         return s
 
-    def captured_fraction(self, sigma, d=5.0) -> float:
+    def captured_fraction(self, sigma, d=5.0, cq0=0.0, eta0=0.0, extended=None) -> float:
         """Of the whole distribution, the fraction this grid and axis draw."""
-        return float(np.sum(self.weights(sigma, d) * self.captured))
+        return float(np.sum(self.weights(sigma, d, cq0, eta0, extended) * self.captured))
 
     def describe(self) -> str:
         regime = "static" if not self.mas_Hz else f"MAS {self.mas_Hz / 1e3:g} kHz"
@@ -331,9 +486,15 @@ def _resolve_spin(I, nucleus):
 def czjzek_spectrum(I, sigma_MHz, larmor_Hz, ppm_axis, d=5.0, delta_iso=0.0, fwhm=1.0,
                     lineshape="gaussian", eta=0.0, mas_Hz=0.0, order="second", transitions=None,
                     n_cq=64, n_eta=20, cq_max_MHz=None, n_zcw=4181, rotor_angle="magic",
-                    method="auto", nucleus=None):
+                    method="auto", nucleus=None, cq0_MHz=0.0, eta0=0.0):
     """
     The powder spectrum of a Czjzek-distributed site.
+
+    ``cq0_MHz``, ``eta0`` : the mean EFG of the extended Czjzek model
+    (a local, ordered coupling C_Q0, eta_Q0, plus a random Czjzek part of
+    width ``sigma``; d must be 5). The plain Czjzek model (``cq0_MHz = 0``)
+    is centred on a zero EFG: it has no central C_Q, and its ⟨C_Q⟩ ≈ 2σ
+    comes from the width alone.
 
     Parameters
     ----------
@@ -359,25 +520,33 @@ def czjzek_spectrum(I, sigma_MHz, larmor_Hz, ppm_axis, d=5.0, delta_iso=0.0, fwh
     x = np.asarray(ppm_axis, dtype=float)
     order_idx = np.argsort(x)
     xs = x[order_idx]
+    cq0, eta0 = float(cq0_MHz or 0.0), float(eta0 or 0.0)
+    extended = cq0 > 0
+    if extended and abs(float(d) - 5.0) > 1e-9:
+        raise ValueError("The extended Czjzek model (C_Q0 > 0) is defined for d = 5 only.")
     if cq_max_MHz is None:
-        cq_max_MHz = czjzek_cq_quantile(0.9999, sigma_MHz, d)
+        cq_max_MHz = czjzek_cq_quantile(0.9999, sigma_MHz, d, cq0, eta0)
     lib = CzjzekLibrary(I, larmor_Hz, xs - float(delta_iso), cq_max_MHz, n_cq=n_cq, n_eta=n_eta,
                         mas_Hz=mas_Hz, order=order, transitions=transitions, n_zcw=n_zcw,
                         rotor_angle=rotor_angle, method=method,
-                        cq_check_MHz=czjzek_cq_quantile(0.99, sigma_MHz, d))
-    spec_sorted = lib.spectrum(sigma_MHz, d, fwhm, lineshape, eta)
+                        cq_check_MHz=czjzek_cq_quantile(0.99, sigma_MHz, d, cq0, eta0))
+    spec_sorted = lib.spectrum(sigma_MHz, d, fwhm, lineshape, eta, cq0, eta0)
     spec = np.empty_like(spec_sorted)
     spec[order_idx] = spec_sorted
-    w = lib.weights(sigma_MHz, d)
-    captured = lib.captured_fraction(sigma_MHz, d)
+    w = lib.weights(sigma_MHz, d, cq0, eta0)
+    captured = lib.captured_fraction(sigma_MHz, d, cq0, eta0)
     peak = float(np.max(spec)) if spec.size else 0.0
-    stats = czjzek_statistics(sigma_MHz, d, I=I, larmor_Hz=larmor_Hz)
-    log = (f"Czjzek simulation: I = {I:g}, ν0 = {larmor_Hz / 1e6:.6g} MHz, σ = {sigma_MHz:g} MHz, "
-           f"d = {d:g}, δiso = {delta_iso:g} ppm, FWHM {fwhm:g} ppm ({lineshape}); "
+    stats = czjzek_statistics(sigma_MHz, d, I=I, larmor_Hz=larmor_Hz, cq0=cq0, eta0=eta0)
+    model = (f"extended Czjzek (mean EFG C_Q0 = {cq0:g} MHz, η_Q0 = {eta0:g}, plus a random part "
+             f"of σ = {sigma_MHz:g} MHz; {N_SAMPLES} samples)" if extended else
+             f"Czjzek (random EFG centred on zero), σ = {sigma_MHz:g} MHz, d = {d:g}")
+    log = (f"Czjzek simulation: I = {I:g}, ν0 = {larmor_Hz / 1e6:.6g} MHz, {model}, "
+           f"δiso = {delta_iso:g} ppm, FWHM {fwhm:g} ppm ({lineshape}); "
            f"⟨C_Q⟩ = {stats['mean_CQ']:.3g} MHz, ⟨η_Q⟩ = {stats['mean_eta']:.3f}; "
            + lib.describe() + f"; {100 * captured:.2f} % of the distribution drawn.")
     return {"x_ppm": x, "real_spec": spec, "normalised_real_spec": spec / peak if peak else spec,
             "sigma": float(sigma_MHz), "d": float(d), "delta_iso": float(delta_iso),
+            "cq0": cq0, "eta0": eta0, "extended": extended,
             "cq": lib.cq, "eta": lib.eta, "cq_edges": lib.cq_edges, "eta_edges": lib.eta_edges,
             "weights": w / w.sum() if w.sum() else w, "captured": captured, "stats": stats,
             "method": lib.method, "log": log}
@@ -386,6 +555,38 @@ def czjzek_spectrum(I, sigma_MHz, larmor_Hz, ppm_axis, d=5.0, delta_iso=0.0, fwh
 # ============================================================
 # Fitting
 # ============================================================
+
+_STAT_KEYS = ("mean_CQ", "mode_CQ", "mean_eta", "mean_PQ", "rms_PQ", "mean_shift_ppm")
+
+
+def _extended_stats_with_errors(sigma, cq0, eta0, pcov, idx, I, larmor_Hz):
+    """Sample averages of the extended model, with 1σ errors propagated
+    from (σ, C_Q0, η_Q0)'s covariance by a central-difference Jacobian
+    (on the same fixed samples, so the differences are not noise)."""
+    st = _stats_from_samples(sigma, cq0, eta0, I=I, larmor_Hz=larmor_Hz)
+    keys = [k for k in _STAT_KEYS if k in st and k != "mode_CQ"]
+    point = np.array([sigma, cq0, eta0], dtype=float)
+    lo = np.array([1e-6, 0.0, 0.0])
+    hi = np.array([np.inf, np.inf, 1.0])
+    J = np.zeros((len(keys), 3))
+    for j in range(3):
+        h = 1e-3 * max(abs(point[j]), 1e-2 * max(sigma, cq0, 1e-3))
+        up, down = point.copy(), point.copy()
+        up[j] = min(point[j] + h, hi[j])
+        down[j] = max(point[j] - h, lo[j])
+        if up[j] == down[j]:
+            continue
+        a = _stats_from_samples(*up, I=I, larmor_Hz=larmor_Hz)
+        b = _stats_from_samples(*down, I=I, larmor_Hz=larmor_Hz)
+        J[:, j] = [(a[k] - b[k]) / (up[j] - down[j]) for k in keys]
+    sub = np.asarray(pcov)[np.ix_(idx, idx)]
+    var = np.einsum("ki,ij,kj->k", J, sub, J)
+    for k, v in zip(keys, var):
+        st[k + "_err"] = float(np.sqrt(max(v, 0.0)))
+    # The mode is a histogram peak: scale its error as the mean's.
+    st["mode_CQ_err"] = (st["mean_CQ_err"] * st["mode_CQ"] / st["mean_CQ"]
+                         if st["mean_CQ"] else float("nan"))
+    return st
 
 def _normalise_sites(p0):
     sites = [dict(p0)] if isinstance(p0, dict) else [dict(s) for s in p0]
@@ -417,16 +618,31 @@ def _site_fixed(site, fixed, index, label):
     return out
 
 
-def czjzek_model(x_sorted, params, n_sites, library, x_ref, lineshape="gaussian"):
+def _legacy_params(params, n_sites):
+    """A six-per-site ``popt`` (before C_Q0, eta_Q0) as eight-per-site."""
+    params = np.asarray(params, dtype=float)
+    if params.size == 6 * n_sites + 2:
+        sites = np.concatenate([params[:6 * n_sites].reshape(n_sites, 6),
+                                np.zeros((n_sites, 2))], axis=1).ravel()
+        params = np.concatenate([sites, params[6 * n_sites:]])
+    return params
+
+
+def czjzek_model(x_sorted, params, n_sites, library, x_ref, lineshape="gaussian",
+                 extended=None):
     """``sum_i amplitude_i * S_i(x - d_iso_i) / max(S_i) + b0 + b1 (x - x_ref)``,
     and the per-site curves. ``params`` as :data:`CZJZEK_PARAM_NAMES` per
-    site, then (b0, b1)."""
-    params = np.asarray(params, dtype=float)
+    site, then (b0, b1). ``extended`` : per site, whether it is the
+    extended model (default: where C_Q0 > 0)."""
+    params = _legacy_params(params, n_sites)
     total = params[_N * n_sites] + params[_N * n_sites + 1] * (x_sorted - x_ref)
     sites = []
-    for d_iso, sigma, d, fwhm, amp, eta in params[:_N * n_sites].reshape(n_sites, _N):
+    ext = list(extended) if extended is not None else [None] * n_sites
+    for k, (d_iso, sigma, d, fwhm, amp, eta, cq0, eta0) in enumerate(
+            params[:_N * n_sites].reshape(n_sites, _N)):
         s = library.spectrum(max(sigma, 1e-6), max(d, 0.5), max(fwhm, 0.0), lineshape,
-                             float(np.clip(eta, 0, 1)))
+                             float(np.clip(eta, 0, 1)), max(cq0, 0.0), float(np.clip(eta0, 0, 1)),
+                             ext[k])
         peak = float(np.max(s)) or 1.0
         curve = amp * np.interp(x_sorted - d_iso, library.x, s, left=0.0, right=0.0) / peak
         sites.append(curve)
@@ -444,8 +660,13 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
 
     ``p0`` : dict or list of dicts ``{"d_iso": ppm, "sigma": MHz, "fwhm": ppm,
     ["d"]: 5, ["amplitude"], ["eta"] (L fraction), ["label"], ["fixed"],
-    ["bounds"]}``. ``d`` is held at its start (5, Czjzek's value) unless a
-    site's ``fixed`` says ``{"d": False}``. ``fixed``/``bounds`` may also be
+    ["bounds"], ["CQ0"], ["eta0"], ["model"]}``. ``d`` is held at its start
+    (5, Czjzek's value) unless a site's ``fixed`` says ``{"d": False}``.
+
+    A site with ``CQ0`` > 0 (MHz), or ``"model": "extended"``, is the
+    extended Czjzek model: a mean EFG (C_Q0, eta_Q0, both fitted) plus a
+    random Czjzek part of width sigma; d is then 5. Without it, C_Q0 and
+    eta_Q0 are 0 and held: plain Czjzek, a random EFG centred on zero. ``fixed``/``bounds`` may also be
     global: a list of names, or ``{site index or label: ...}`` /
     ``{name: (lo, hi)}``.
 
@@ -494,20 +715,32 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
     values, is_free, lower, upper = [], [], [], []
     global_bounds = bounds if isinstance(bounds, dict) and all(
         k in CZJZEK_PARAM_NAMES for k in bounds) else {}
+    extended = []
     for k, (site, label) in enumerate(zip(sites, labels)):
         sigma0 = float(site["sigma"])
+        cq00 = float(site.get("CQ0", 0.0) or 0.0)
+        ext = str(site.get("model", "")).lower() == "extended" or cq00 > 0
+        extended.append(ext)
         amp = (float(site["amplitude"]) / scale if "amplitude" in site
                else max(float(np.max(y_fit) - b0), 1e-3) / n_sites)
         start = {"d_iso": float(site["d_iso"]), "sigma": sigma0, "d": float(site.get("d", 5.0)),
                  "fwhm": float(site["fwhm"]), "amplitude": amp,
-                 "eta": float(site.get("eta", default_eta))}
+                 "eta": float(site.get("eta", default_eta)), "CQ0": cq00 if ext else 0.0,
+                 "eta0": float(site.get("eta0", 0.0) or 0.0) if ext else 0.0}
         default_bounds = {"d_iso": (start["d_iso"] - span, start["d_iso"] + span),
                           "sigma": (1e-3, max(3.0 * sigma0, 0.5)), "d": (1.0, 20.0),
-                          "fwhm": (0.0, span), "amplitude": (0.0, np.inf), "eta": (0.0, 1.0)}
+                          "fwhm": (0.0, span), "amplitude": (0.0, np.inf), "eta": (0.0, 1.0),
+                          "CQ0": (0.0, max(3.0 * cq00, 5.0 * sigma0, 1.0)), "eta0": (0.0, 1.0)}
         per_site = {}
         if isinstance(bounds, dict):
             per_site = bounds.get(k) or bounds.get(label) or {}
         fixed_names = _site_fixed(site, fixed, k, label)
+        if ext:
+            if "d" not in fixed_names or abs(start["d"] - 5.0) > 1e-9:
+                raise ValueError(f"{label}: the extended Czjzek model (a mean EFG C_Q0 plus a "
+                                 "random part) is defined for d = 5 only; hold d at 5.")
+        else:
+            fixed_names |= {"CQ0", "eta0"}
         if lineshape != "pseudo_voigt":
             fixed_names.add("eta")
             start["eta"] = default_eta
@@ -540,10 +773,15 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
     diso_idx = np.arange(n_sites) * _N
     sigma_idx = diso_idx + 1
     d_idx = diso_idx + 2
+    cq0_idx = diso_idx + 6
+    eta0_idx = diso_idx + 7
 
-    def library_for(sigmas, ds, check_sigmas):
-        cq_max = cq_max_MHz or max(czjzek_cq_quantile(0.9999, s, dd) for s, dd in zip(sigmas, ds))
-        cq_check = max(czjzek_cq_quantile(0.99, s, dd) for s, dd in zip(check_sigmas, ds))
+    def library_for(sigmas, ds, check_sigmas, cq0s, eta0s):
+        cq_max = cq_max_MHz or max(
+            czjzek_cq_quantile(0.9999, s, dd, c0, e0) * (1.1 if c0 > 0 else 1.0)
+            for s, dd, c0, e0 in zip(sigmas, ds, cq0s, eta0s))
+        cq_check = max(czjzek_cq_quantile(0.99, s, dd, c0, e0)
+                       for s, dd, c0, e0 in zip(check_sigmas, ds, cq0s, eta0s))
         lo_d = float(np.min(np.where(is_free[diso_idx], lower[diso_idx], p0_arr[diso_idx])))
         hi_d = float(np.max(np.where(is_free[diso_idx], upper[diso_idx], p0_arr[diso_idx])))
         pad = 0.1 * span + 5 * dx
@@ -560,7 +798,8 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
         def model(_x, *free):
             full = start.copy()
             full[is_free] = free
-            return czjzek_model(x_sorted, full, n_sites, library, x_ref, lineshape)[0][mask]
+            return czjzek_model(x_sorted, full, n_sites, library, x_ref, lineshape,
+                                extended)[0][mask]
         popt_free, pcov_free = curve_fit(model, x_fit, y_fit, p0=start[is_free],
                                          bounds=(lower[is_free], upper[is_free]),
                                          diff_step=1e-4, maxfev=5000)
@@ -571,12 +810,15 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
     # Stage 1: a grid wide enough for every sigma the bounds allow.
     sig_hi = np.where(is_free[sigma_idx], upper[sigma_idx], p0_arr[sigma_idx])
     d_hi = np.where(is_free[d_idx], upper[d_idx], p0_arr[d_idx])
-    library = library_for(sig_hi, np.maximum(d_hi, p0_arr[d_idx]), 1.5 * p0_arr[sigma_idx])
+    cq0_hi = np.where(is_free[cq0_idx], upper[cq0_idx], p0_arr[cq0_idx])
+    library = library_for(sig_hi, np.maximum(d_hi, p0_arr[d_idx]), 1.5 * p0_arr[sigma_idx],
+                          cq0_hi, p0_arr[eta0_idx])
     params, pcov_free = run(library, p0_arr)
     grid_log = library.describe()
     if refine_grid and cq_max_MHz is None:
         # Stage 2: a grid sized to the answer, started from it.
-        library = library_for(1.5 * params[sigma_idx], params[d_idx], params[sigma_idx])
+        library = library_for(1.5 * params[sigma_idx], params[d_idx], params[sigma_idx],
+                              params[cq0_idx], params[eta0_idx])
         params, pcov_free = run(library, params)
         grid_log = library.describe() + " (refined to the fitted σ)"
 
@@ -592,17 +834,24 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
     stats = []
     for s, label in enumerate(labels):
         sigma, d = float(popt[sigma_idx[s]]), float(popt[d_idx[s]])
-        st = czjzek_statistics(sigma, d, I=I, larmor_Hz=larmor_Hz)
-        # Every average scales with sigma at fixed d: propagate exactly.
-        err_sigma = float(np.sqrt(max(pcov[sigma_idx[s], sigma_idx[s]], 0.0)))
-        for key in ("mean_CQ", "mode_CQ", "mean_PQ", "rms_PQ"):
-            st[key + "_err"] = st[key] / sigma * err_sigma if sigma else float("nan")
-        st["mean_eta_err"] = 0.0 if not is_free[d_idx[s]] else float("nan")
+        cq0, eta0 = float(popt[cq0_idx[s]]), float(popt[eta0_idx[s]])
+        if extended[s]:
+            st = _extended_stats_with_errors(sigma, cq0, eta0, pcov,
+                                             (sigma_idx[s], cq0_idx[s], eta0_idx[s]), I, larmor_Hz)
+        else:
+            st = czjzek_statistics(sigma, d, I=I, larmor_Hz=larmor_Hz)
+            # Every average scales with sigma at fixed d: propagate exactly.
+            err_sigma = float(np.sqrt(max(pcov[sigma_idx[s], sigma_idx[s]], 0.0)))
+            for key in ("mean_CQ", "mode_CQ", "mean_PQ", "rms_PQ"):
+                st[key + "_err"] = st[key] / sigma * err_sigma if sigma else float("nan")
+            st["mean_eta_err"] = 0.0 if not is_free[d_idx[s]] else float("nan")
+        st["extended"] = bool(extended[s])
         stats.append(st)
         # Of the site's whole (unit-area) lineshape, what lies inside the
         # spectrum's own range once shifted to its d_iso.
         shape = library.spectrum(sigma, d, float(popt[diso_idx[s] + 3]), lineshape,
-                                 float(np.clip(popt[diso_idx[s] + 5], 0, 1)))
+                                 float(np.clip(popt[diso_idx[s] + 5], 0, 1)), cq0, eta0,
+                                 extended[s])
         shift = float(popt[diso_idx[s]])
         inside = (library.x + shift >= x_sorted[0]) & (library.x + shift <= x_sorted[-1])
         captured = float(shape[inside].sum() * library.dx)
@@ -614,7 +863,19 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
             if is_free[i] and (np.isclose(popt[i] / (unit[i]), lower[i], rtol=1e-3, atol=1e-9)
                                or np.isclose(popt[i] / unit[i], upper[i], rtol=1e-3, atol=1e-9)):
                 warnings.append(f"{label}: {name} ended on a bound -- not a free minimum.")
-        n_cells = int(np.sum(library.cq_edges[1:] <= czjzek_cq_quantile(0.99, sigma, d)))
+        if extended[s] and is_free[cq0_idx[s]]:
+            if cq0 <= 1e-3 * max(sigma, 1e-9):
+                warnings.append(f"{label}: C_Q0 went to 0 -- the data need no mean EFG, and "
+                                "plain Czjzek (fewer parameters) describes them as well.")
+            elif np.isclose(cq0, upper[cq0_idx[s]], rtol=1e-3):
+                warnings.append(f"{label}: C_Q0 ended on its upper bound -- not a free minimum.")
+            if sigma < 0.1 * cq0:
+                warnings.append(f"{label}: σ is under a tenth of C_Q0 -- the site is nearly "
+                                "ordered; a single (C_Q, η_Q) site with a C_Q spread may be the "
+                                "simpler description.")
+        lo_q = czjzek_cq_quantile(0.01, sigma, d, cq0, eta0) if extended[s] else 0.0
+        hi_q = czjzek_cq_quantile(0.99, sigma, d, cq0, eta0)
+        n_cells = int(np.sum((library.cq_edges[1:] <= hi_q) & (library.cq_edges[:-1] >= lo_q)))
         if n_cells < 15:
             warnings.append(f"{label}: only {n_cells} C_Q cells cover the distribution; "
                             "raise n_cq for a smoother model.")
@@ -624,7 +885,12 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
            + ("whole spectrum" if fit_regions is None else
               ", ".join(f"{max(a, b):g} to {min(a, b):g} ppm" for a, b in fit_regions))
            + f"; {grid_log}.")
+    if any(extended):
+        log += (f" Extended Czjzek for {', '.join(l for l, e in zip(labels, extended) if e)}: "
+                f"mean EFG (C_Q0, η_Q0) plus a random part of width σ, sampled "
+                f"({N_SAMPLES} fixed quasi-random samples).")
     fit_info = {"labels": labels, "n_sites": n_sites, "x_ref": x_ref, "library": library,
+                "extended": [bool(e) for e in extended],
                 "lineshape": lineshape, "stats": stats, "warnings": warnings, "log": log,
                 "fit_regions": (None if fit_regions is None else
                                 [(float(min(a, b)), float(max(a, b))) for a, b in fit_regions]),
@@ -646,8 +912,9 @@ def evaluate_czjzek_fit(x_ppm, popt, fit_info):
     xs = x[order]
     n = fit_info["n_sites"]
     params = np.asarray(popt, dtype=float).copy()
+    params = _legacy_params(params, n)
     total, sites = czjzek_model(xs, params, n, fit_info["library"], fit_info["x_ref"],
-                                fit_info["lineshape"])
+                                fit_info["lineshape"], fit_info.get("extended"))
     baseline = params[_N * n] + params[_N * n + 1] * (xs - fit_info["x_ref"])
     back = np.empty_like(order)
     back[order] = np.arange(order.size)
@@ -657,10 +924,19 @@ def evaluate_czjzek_fit(x_ppm, popt, fit_info):
 def czjzek_fit_report(popt, pcov, is_free, fit_info) -> list[dict]:
     """One dict per site: every parameter with its 1σ error and whether it
     was fixed, plus the distribution's averages (⟨C_Q⟩ etc.)."""
+    n = fit_info["n_sites"]
+    popt = _legacy_params(popt, n)
+    if np.asarray(pcov).shape[0] == 6 * n + 2:
+        keep = [i for i in range(_N * n + 2) if i >= _N * n or i % _N < 6]
+        full = np.zeros((_N * n + 2, _N * n + 2))
+        full[np.ix_(keep, keep)] = pcov
+        pcov = full
+        is_free = np.array([bool(is_free[keep.index(i)]) if i in keep else False
+                            for i in range(_N * n + 2)])
     errors = np.sqrt(np.clip(np.diag(pcov), 0.0, None))
     rows = []
     for s, label in enumerate(fit_info["labels"]):
-        row = {"label": label}
+        row = {"label": label, "extended": bool((fit_info.get("extended") or [False] * n)[s])}
         for k, name in enumerate(CZJZEK_PARAM_NAMES):
             i = s * _N + k
             row[name] = float(popt[i])
@@ -677,9 +953,35 @@ def czjzek_fit_report(popt, pcov, is_free, fit_info) -> list[dict]:
 # The distribution map
 # ============================================================
 
+#: Samples behind an extended site's map (a finer grid than a spectrum's).
+N_MAP_SAMPLES = 2 ** 19
+
+
+def _site_cq0(site):
+    return float(site.get("CQ0", site.get("cq0", 0.0)) or 0.0)
+
+
+def _site_density(site, cq_edges, eta_edges):
+    """One site's density on the grid's cell centres, shape (n_eta, n_cq),
+    per unit C_Q per unit eta_Q: analytic for plain Czjzek; for the
+    extended model, sampled, deposited and lightly smoothed (one cell)."""
+    cq = 0.5 * (cq_edges[1:] + cq_edges[:-1])
+    eta = 0.5 * (eta_edges[1:] + eta_edges[:-1])
+    cq0 = _site_cq0(site)
+    if cq0 <= 0:
+        return czjzek_pdf(cq[None, :], eta[:, None], float(site["sigma"]), float(site.get("d", 5)))
+    from scipy.ndimage import gaussian_filter
+    c, e = czjzek_samples(float(site["sigma"]), cq0,
+                          float(site.get("eta0", site.get("eta_Q0", 0.0)) or 0.0),
+                          N_MAP_SAMPLES)
+    w = gaussian_filter(_deposit(c, e, cq_edges, eta_edges), 1.0, mode="nearest")
+    return w / (np.diff(cq_edges)[None, :] * np.diff(eta_edges)[:, None])
+
+
 def czjzek_mixture_map(sites, cq_max_MHz=None, n_cq=200, n_eta=100):
     """The (C_Q, eta_Q) density of one or several Czjzek sites, each
-    ``{"sigma", ["d"], ["weight"], ["label"]}`` (weights: e.g. site areas;
+    ``{"sigma", ["d"], ["CQ0"], ["eta0"], ["weight"], ["label"]}``
+    (``CQ0`` > 0: the extended model, sampled; weights: e.g. site areas,
     normalised here). Returns ``(cq_edges, eta_edges, density)`` with
     ``density`` shape (n_eta, n_cq), per unit C_Q per unit eta_Q."""
     sites = [sites] if isinstance(sites, dict) else list(sites)
@@ -690,13 +992,13 @@ def czjzek_mixture_map(sites, cq_max_MHz=None, n_cq=200, n_eta=100):
         raise ValueError("Site weights must be non-negative and not all zero.")
     weights = weights / weights.sum()
     if cq_max_MHz is None:
-        cq_max_MHz = max(czjzek_cq_quantile(0.999, float(s["sigma"]), float(s.get("d", 5)))
-                         for s in sites)
+        cq_max_MHz = max(czjzek_cq_quantile(0.999, float(s["sigma"]), float(s.get("d", 5)),
+                                            _site_cq0(s), float(s.get("eta0", 0.0) or 0.0))
+                         * (1.05 if _site_cq0(s) > 0 else 1.0) for s in sites)
     cq_edges, cq, eta_edges, eta = czjzek_grid(cq_max_MHz, n_cq, n_eta)
     density = np.zeros((len(eta), len(cq)))
     for w, s in zip(weights, sites):
-        density += w * czjzek_pdf(cq[None, :], eta[:, None], float(s["sigma"]),
-                                  float(s.get("d", 5)))
+        density += w * _site_density(s, cq_edges, eta_edges)
     return cq_edges, eta_edges, density
 
 
@@ -779,8 +1081,7 @@ def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, 
         from ..plotting import qualitative_colors
         fallback = qualitative_colors(len(site_list))
         for k, site in enumerate(site_list):
-            own = czjzek_pdf(cq_c[None, :], eta_c[:, None], float(site["sigma"]),
-                             float(site.get("d", 5)))
+            own = _site_density(site, cq_edges, eta_edges)
             colour = site.get("colour") or fallback[k]
             ax_map.contour(cq_c, eta_c, own, levels=[0.5 * float(own.max())], colors=[colour],
                            linewidths=1.6)
@@ -799,6 +1100,22 @@ def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, 
         ax_map.plot([mean_cq], [mean_eta], marker="+", color="white", markersize=12,
                     markeredgewidth=2.0, label=r"$\langle C_\mathrm{Q}\rangle$, "
                                                r"$\langle\eta_\mathrm{Q}\rangle$")
+    for site in site_list:
+        if _site_cq0(site) > 0:
+            # The extended model's mean EFG (C_Q0, eta_Q0): the centre the
+            # random part spreads around (not the distribution's mean).
+            ax_map.plot([_site_cq0(site)], [float(site.get("eta0", 0.0) or 0.0)], marker="x",
+                        color="white", markersize=9, markeredgewidth=1.8, clip_on=False,
+                        label=r"$C_\mathrm{Q0}$, $\eta_\mathrm{Q0}$")
+    if any(_site_cq0(site) > 0 for site in site_list) and ax_map.get_legend() is None:
+        # With a mean EFG there are two marks -- the centre the disorder
+        # spreads around, and the mean it produces: say which is which.
+        marks = [l for l in ax_map.get_lines() if l.get_marker() in ("+", "x")]
+        if marks:
+            legend = ax_map.legend(handles=marks, fontsize=fontsize * 0.65, loc="upper right",
+                                   frameon=True, facecolor="0.25", labelcolor="white",
+                                   edgecolor="none", framealpha=0.7)
+            legend.set_zorder(10)
 
     if has_spec:
         x = np.asarray(spectrum["x"], dtype=float)
@@ -841,7 +1158,9 @@ def plot_czjzek_fit(results, popt, pcov, fit_info, layout="right", site=None, fi
     from .fit_display import component_style as _style, default_component_colours
     style = _style(component_style)
     defaults = default_component_colours([c[mask] for c in comps[:n]], list(fit_info["labels"]))
-    sites = [{"sigma": popt[s * _N + 1], "d": popt[s * _N + 2], "weight": areas[s],
+    popt = _legacy_params(popt, n)
+    sites = [{"sigma": popt[s * _N + 1], "d": popt[s * _N + 2], "CQ0": popt[s * _N + 6],
+              "eta0": popt[s * _N + 7], "weight": areas[s],
               "label": fit_info["labels"][s],
               "colour": style["line_colours"].get(fit_info["labels"][s],
                                                   defaults[fit_info["labels"][s]])}

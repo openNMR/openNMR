@@ -1028,10 +1028,12 @@ class JCouplingSimulationPanel(QWidget):
     """
 
     def __init__(self, plot_spectrum: Callable[[NMRSpectrum], None],
-                 add_to_open: Callable[[NMRSpectrum, str], None], parent=None) -> None:
+                 add_to_open: Callable[[NMRSpectrum, str], None], parent=None,
+                 send_to_fit=None) -> None:
         super().__init__(parent)
         self._plot_spectrum = plot_spectrum
         self._add_to_open = add_to_open
+        self._send_to_fit = send_to_fit
         self.spectrum: NMRSpectrum | None = None
         self._last_args: dict | None = None
 
@@ -1117,11 +1119,17 @@ class JCouplingSimulationPanel(QWidget):
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)
         row = QHBoxLayout()
-        self.export_button = QPushButton("Export to Open Experiments…")
+        self.export_button = QPushButton("Keep in Open Experiments")
         self.export_button.setToolTip("Add the simulated spectrum to Open experiments, to "
                                       "overlay it on measured data on the Compare tile.")
         self.export_button.clicked.connect(self.export)
         row.addWidget(self.export_button)
+        self.to_fit_button = QPushButton("Send to Fit as Starting Values")
+        self.to_fit_button.setToolTip("Put these sites (or this spin system) into Fit ▸ "
+                                      "J-coupling as the starting model.")
+        self.to_fit_button.setEnabled(send_to_fit is not None)
+        self.to_fit_button.clicked.connect(self.send_to_fit)
+        row.addWidget(self.to_fit_button)
         self.copy_code_button = QPushButton("Copy notebook code")
         self.copy_code_button.setToolTip("The multi_site_jcoupled_spectrum call for the last "
                                          "simulation, to rerun it in a notebook.")
@@ -1355,6 +1363,16 @@ class JCouplingSimulationPanel(QWidget):
         names = ", ".join(x["label"] for x in items)
         kind = "spin system" if a["model"] == "spin_system" else "J-coupling"
         self._add_to_open(self.spectrum, f"Simulated {kind} {a['nucleus']} ({names})")
+
+    def send_to_fit(self) -> None:
+        if self._send_to_fit is None:
+            return
+        try:
+            arguments = self.arguments()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Send to Fit", str(exc))
+            return
+        self._send_to_fit(arguments)
 
     def notebook_code(self) -> str:
         a = self._last_args or self.arguments()
@@ -1997,6 +2015,25 @@ class JCouplingFitPanel(QWidget):
         for s in sites:
             s.pop("relative_intensity", None)
         self.editor.set_sites(sites, self.result["larmor_Hz"])
+
+    def set_start_from_simulation(self, a: dict) -> str:
+        """A simulation's sites (or spin system) as the starting model,
+        with its lineshape. Returns notes on anything to check."""
+        index = self.lineshape_combo.findData(a.get("lineshape"))
+        if index >= 0:
+            self.lineshape_combo.setCurrentIndex(index)
+        self.eta_spin.setValue(float(a.get("eta", self.eta_spin.value())))
+        if a.get("model") == "spin_system":
+            self.spin_editor.set_system(a["spins"], a["couplings"])
+            self.spin_fwhm_spin.setValue(float(a["fwhm_Hz"]))
+            self.model_combo.setCurrentIndex(self.model_combo.findData("spin_system"))
+        else:
+            sites = [dict(s) for s in a["sites"]]
+            for s in sites:
+                s.pop("relative_intensity", None)
+            self.editor.set_sites(sites, float(a["larmor_Hz"]))
+            self.model_combo.setCurrentIndex(self.model_combo.findData("first_order"))
+        return ""
 
     def send_to_simulation(self) -> None:
         if self.result is None:

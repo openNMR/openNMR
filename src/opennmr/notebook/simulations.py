@@ -161,6 +161,33 @@ def csa_definition(d_iso, span_or_Delta, skew_or_eta, convention='Haeberlen'):
         raise ValueError("Please define convention as either 'Haeberlen' or 'Herzfeld-Berger'")
 
 
+def convert_csa_parameters(d_iso, span_or_Delta, skew_or_eta, from_convention="Haeberlen",
+                           to_convention="Herzfeld-Berger"):
+    """The same tensor's parameters in another convention:
+    ``(d_iso, span_or_Delta, skew_or_eta)``, as :func:`csa_definition`
+    reads them (so a round trip through it gives the same principal
+    values). Haeberlen: Delta = d_zz - d_iso, eta = (d_yy - d_xx)/Delta,
+    |d_zz - d_iso| >= |d_xx - d_iso| >= |d_yy - d_iso|. Herzfeld-Berger:
+    span = d_11 - d_33 and skew as :func:`herzfeld_berger_csa_tensor`
+    defines it."""
+    principal = np.diag(csa_definition(d_iso, span_or_Delta, skew_or_eta, from_convention))
+    iso = float(np.mean(principal))
+    if to_convention == from_convention:
+        return float(d_iso), float(span_or_Delta), float(skew_or_eta)
+    if to_convention == "Haeberlen":
+        order = np.argsort(-np.abs(principal - iso), kind="stable")
+        d_zz, d_xx, d_yy = principal[order]
+        delta = d_zz - iso
+        eta = (d_yy - d_xx) / delta if delta else 0.0
+        return iso, float(delta), float(eta)
+    if to_convention == "Herzfeld-Berger":
+        d11, d22, d33 = np.sort(principal)[::-1]
+        span = d11 - d33
+        skew = 3.0 * (iso - d22) / span if span else 0.0
+        return iso, float(span), float(skew)
+    raise ValueError("Please define convention as either 'Haeberlen' or 'Herzfeld-Berger'")
+
+
 def csa_frequency(csa, theta, phi):
     """
     Resonance chemical shift for crystallite orientations.

@@ -3416,6 +3416,11 @@ class MainWindow(QMainWindow):
         if spectrum.ndim == 2 and spectrum.is_pseudo_2d:
             menu.addSeparator()
             fit_curve_action = menu.addAction("Fit Curve (relaxation/diffusion)…")
+        show_kept_fit_action = kept_fit_view_action = None
+        if MplCanvas.compare_fit_model(spectrum) is not None:
+            menu.addSeparator()
+            show_kept_fit_action = menu.addAction("Show the Fit")
+            kept_fit_view_action = menu.addAction("Fit Display (in Compare)…")
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
 
@@ -3436,6 +3441,10 @@ class MainWindow(QMainWindow):
             self._on_vocs_sum_selection_action()
         elif fit_curve_action is not None and chosen is fit_curve_action:
             self._on_fit_curve_pseudo2d_action(index)
+        elif show_kept_fit_action is not None and chosen is show_kept_fit_action:
+            self._draw_fit_model(MplCanvas.compare_fit_model(spectrum))
+        elif kept_fit_view_action is not None and chosen is kept_fit_view_action:
+            self._open_fit_view_dialog(index)
         elif chosen is remove_action:
             self.session.remove(index)
             self.spectrum_list.takeItem(index)
@@ -5840,7 +5849,15 @@ class MainWindow(QMainWindow):
         if clicked is None and not has_checked:
             return
         menu = QMenu(self)
-        plot_action = fit_curve_action = remove_action = None
+        plot_action = fit_curve_action = remove_action = fit_view_action = None
+        clicked_entry = clicked.data(Qt.ItemDataRole.UserRole) if clicked is not None else None
+        if clicked_entry is not None and clicked_entry[1] is None \
+                and 0 <= clicked_entry[0] < len(self.session) and MplCanvas.compare_fit_model(
+                    self.session.spectra[clicked_entry[0]]) is not None:
+            # A kept fit (explicit user request): its components,
+            # colours and residual, set by right-clicking it.
+            fit_view_action = menu.addAction("Fit Display…")
+            menu.addSeparator()
         if has_checked:
             plot_action = menu.addAction("Plot")
             fit_curve_action = menu.addAction("Fit Curve (relaxation/diffusion)…")
@@ -5855,6 +5872,8 @@ class MainWindow(QMainWindow):
             return
         if chosen is plot_action:
             self._refresh_compare_view()
+        elif fit_view_action is not None and chosen is fit_view_action:
+            self._open_fit_view_dialog(clicked_entry[0])
         elif chosen is fit_curve_action:
             self._on_fit_curve_compare_stack_action()
         elif chosen is remove_action:
@@ -8282,6 +8301,8 @@ class MainWindow(QMainWindow):
 
     def _csa_fit_clear_result(self) -> None:
         self._csa_fit_result = None
+        for button in (self.csa_use_fitted_button, self.csa_send_button):
+            button.setEnabled(False)
         self.csa_results_label.setText("")
         self.csa_results_table.setRowCount(0)
         self.csa_results_table.setVisible(False)
@@ -11950,13 +11971,17 @@ class MainWindow(QMainWindow):
             models=lambda: self._fit_models(self._selected_index()),
             keep=lambda: self._keep_shown_fit(),
             show=lambda model_id: self._show_fit_model(self._selected_index(), model_id),
-            compare=lambda ids, residuals, components: self._compare_fit_models(
-                self._selected_index(), ids, residuals, components),
+            compare=lambda ids, residuals, components, layout="summary": self._compare_fit_models(
+                self._selected_index(), ids, residuals, components, layout),
             restore=lambda model_id: self._restore_fit_model(self._selected_index(), model_id),
             rename=lambda model_id, name: self._rename_fit_model(
                 self._selected_index(), model_id, name),
             delete=lambda model_id: self._delete_fit_model(self._selected_index(), model_id),
-            can_restore=self._fit_model_restorable)
+            can_restore=self._fit_model_restorable,
+            to_open=lambda model_id: self._fit_model_experiment(self._selected_index(), model_id,
+                                                               select=True),
+            recolour=lambda model_id, colour: self._recolour_fit_model(
+                self._selected_index(), model_id, colour))
         self._fit_models_section = CollapsibleSection("Kept fit models",
                                                       content=self.fit_models_panel)
         layout.addWidget(self._fit_models_section)
@@ -11969,6 +11994,10 @@ class MainWindow(QMainWindow):
         for canvas in (self.fit_canvas, self.spectral_fit_canvas):
             canvas.fitDisplayOptionsRequested.connect(self._open_fit_display_options)
             canvas.keepFitRequested.connect(lambda c=canvas: self._keep_shown_fit(canvas=c))
+        # Any plot showing a simulation offers to keep it (explicit user
+        # request: simulations in Open experiments, to compare).
+        for canvas in (self.fit_canvas, self.simulation_canvas):
+            canvas.keepSimulationRequested.connect(lambda spectrum: self._keep_simulation(spectrum))
         layout.addStretch(1)
         return tab
 
@@ -12014,7 +12043,8 @@ class MainWindow(QMainWindow):
         # request). The simulator is notebook.simulations.
         self.jcoupling_sim_panel = JCouplingSimulationPanel(
             plot_spectrum=lambda spectrum: self._on_panel_simulated("jcoupling", spectrum),
-            add_to_open=self._add_derived_spectrum)
+            add_to_open=self._add_derived_spectrum,
+            send_to_fit=self._send_jcoupling_simulation_to_fit)
         self._jcoupling_sim_section = CollapsibleSection(
             "J-coupling", content=self.jcoupling_sim_panel)
         layout.addWidget(self._jcoupling_sim_section)
@@ -12027,8 +12057,11 @@ class MainWindow(QMainWindow):
         # spectrum (explicit user request); notebook.czjzek.
         self.czjzek_sim_panel = CzjzekSimPanel(
             draw=lambda draw: (self._draw_tensor_picture(draw),
-                               self._journal_simulation("czjzek")),
-            add_to_open=self._add_derived_spectrum)
+                               self._journal_simulation("czjzek"),
+                               setattr(self.simulation_canvas, "simulation_spectrum",
+                                       self.czjzek_sim_panel.make_spectrum())),
+            add_to_open=self._add_derived_spectrum,
+            send_to_fit=self._send_czjzek_simulation_to_fit)
         self._czjzek_sim_section = CollapsibleSection(
             "Czjzek distribution", content=self.czjzek_sim_panel)
         layout.addWidget(self._czjzek_sim_section)
@@ -12038,6 +12071,7 @@ class MainWindow(QMainWindow):
         self.combined_sim_panel = CombinedHamiltonianPanel(
             plot_spectrum=lambda spectrum: self._on_panel_simulated("combined", spectrum),
             add_to_open=self._add_derived_spectrum,
+            send_to_fit=self._send_combined_simulation_to_fit,
             draw_sites=self._draw_combined_sites)
         # CSA and quadrupolar together, in their relative orientation.
         self.combined_tensor_controls = TensorViewControls(self._combined_tensor_site,
@@ -12275,6 +12309,7 @@ class MainWindow(QMainWindow):
         """Show a notebook tensor picture on the Simulation plot."""
         figure = self.simulation_canvas.figure
         figure.clear()
+        self.simulation_canvas.simulation_spectrum = None
         draw(figure)
         self._show_simulation_view()
         self.simulation_canvas.draw()
@@ -12348,6 +12383,171 @@ class MainWindow(QMainWindow):
         self._quad_sim_section.setExpanded(True)
         self._show_side_tab("Simulate")
 
+    # ---- Fit <-> Simulate (explicit user request) -------------------------
+
+    def _open_fit_section_of(self, widget) -> None:
+        """Expand the Fit section holding ``widget`` and raise the Fit tile."""
+        parent = widget
+        while parent is not None and not isinstance(parent, CollapsibleSection):
+            parent = parent.parentWidget()
+        if parent is not None:
+            parent.setExpanded(True)
+        self._show_side_tab("Fit")
+
+    def _csa_use_fitted_as_start(self) -> None:
+        """The CSA fit's values become the sites table's starting values."""
+        r = self._csa_fit_result
+        if not r:
+            return
+        popt = np.asarray(r["popt"], dtype=float)
+        n = int(r["info"]["n_sites"])
+        index = self.csa_convention_combo.findData(r.get("convention"))
+        if index >= 0:
+            self.csa_convention_combo.setCurrentIndex(index)
+        for k in range(n):
+            if k >= self.csa_sites_table.rowCount():
+                label = (r.get("sites") or [{}] * n)[k].get("label") if k < len(
+                    r.get("sites") or []) else None
+                self._add_csa_site(((label or f"Site {k + 1}"), "0", "0", "0", "0", "0.5"))
+            d_iso, aniso, skew, fwhm, _amp, eta = popt[6 * k: 6 * k + 6]
+            for column, value in ((1, d_iso), (2, aniso), (3, skew), (4, fwhm), (5, eta)):
+                item = self.csa_sites_table.item(k, column)
+                if item is None:
+                    item = QTableWidgetItem("")
+                    self.csa_sites_table.setItem(k, column, item)
+                item.setText(f"{float(value):.6g}")
+
+    def _send_csa_fit_to_simulation(self) -> None:
+        r = self._csa_fit_result
+        if not r:
+            return
+        n = int(r["info"]["n_sites"])
+        k = self.csa_results_table.currentRow()
+        k = k if 0 <= k < n else 0
+        d_iso, aniso, skew, fwhm, _amp, eta = np.asarray(r["popt"], dtype=float)[6 * k: 6 * k + 6]
+        spectrum = (self.session.spectra[r["spectrum_index"]]
+                    if r.get("spectrum_index") is not None
+                    and 0 <= r["spectrum_index"] < len(self.session) else None)
+        nucleus = getattr(getattr(spectrum, "metadata", None), "nucleus", None)
+        sfo1 = getattr(getattr(spectrum, "metadata", None), "sfo1", None)
+        if nucleus:
+            self.sim_csa_nucleus_edit.setText(str(nucleus))
+        if sfo1:
+            self.sim_csa_larmor_spin.setValue(float(sfo1))
+        self.sim_csa_convention_combo.setCurrentIndex(
+            self.sim_csa_convention_combo.findData(r.get("convention")))
+        self.sim_csa_diso_spin.setValue(float(d_iso))
+        self.sim_csa_aniso_spin.setValue(float(aniso))
+        self.sim_csa_skeweta_spin.setValue(float(skew))
+        self.sim_csa_fwhm_spin.setValue(float(fwhm))
+        lineshape = self.csa_broadening_combo.currentData()
+        index = self.sim_csa_lineshape_combo.findData(lineshape)
+        if index >= 0:
+            self.sim_csa_lineshape_combo.setCurrentIndex(index)
+        self.sim_csa_eta_spin.setValue(float(np.clip(eta, 0, 1)))
+        self.sim_csa_regime_combo.setCurrentIndex(
+            self.sim_csa_regime_combo.findData(bool(r.get("static", True))))
+        if not r.get("static", True) and r.get("mas_Hz"):
+            self.sim_csa_mas_spin.setValue(float(r["mas_Hz"]))
+        x = np.asarray(r["x"], dtype=float)
+        self.sim_csa_auto_axis_check.setChecked(False)
+        for spin, value in ((self.sim_csa_ppm_min_spin, float(x.min())),
+                            (self.sim_csa_ppm_max_spin, float(x.max()))):
+            blocked = spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(blocked)
+        self._refresh_simulate_csa_controls()
+        section = self.sim_csa_diso_spin
+        while section is not None and not isinstance(section, CollapsibleSection):
+            section = section.parentWidget()
+        if section is not None:
+            section.setExpanded(True)
+        self._show_side_tab("Simulate")
+
+    def _send_csa_simulation_to_fit(self) -> None:
+        """Simulate ▸ CSA's values as the starting values of the selected
+        (else first) CSA fit site, in the fit's own convention."""
+        sim_conv = self.sim_csa_convention_combo.currentData()
+        values = (self.sim_csa_diso_spin.value(), self.sim_csa_aniso_spin.value(),
+                  self.sim_csa_skeweta_spin.value())
+        if self.csa_sites_table.rowCount() == 0:
+            self._add_csa_site()
+        row = self.csa_sites_table.currentRow()
+        row = row if 0 <= row < self.csa_sites_table.rowCount() else 0
+        fit_conv = self.csa_convention_combo.currentData()
+        if fit_conv != sim_conv:
+            if self.csa_sites_table.rowCount() == 1:
+                # The only site: take the simulation's convention as well.
+                self.csa_convention_combo.setCurrentIndex(
+                    self.csa_convention_combo.findData(sim_conv))
+            else:
+                values = notebook_simulations.convert_csa_parameters(
+                    *values, from_convention=sim_conv, to_convention=fit_conv)
+        cells = {1: values[0], 2: values[1], 3: values[2], 4: self.sim_csa_fwhm_spin.value(),
+                 5: self.sim_csa_eta_spin.value()}
+        for column, value in cells.items():
+            item = self.csa_sites_table.item(row, column)
+            if item is None:
+                item = QTableWidgetItem("")
+                self.csa_sites_table.setItem(row, column, item)
+            item.setText(f"{float(value):.6g}")
+        index = self.csa_broadening_combo.findData(self.sim_csa_lineshape_combo.currentData())
+        if index >= 0:
+            self.csa_broadening_combo.setCurrentIndex(index)
+        static = bool(self.sim_csa_regime_combo.currentData())
+        self.csa_static_combo.setCurrentIndex(self.csa_static_combo.findData(static))
+        if not static:
+            self.csa_mas_spin.setValue(self.sim_csa_mas_spin.value())
+        self._open_fit_section_of(self.csa_sites_table)
+        self.statusBar().showMessage(f"Simulated CSA values set as the start of site row "
+                                     f"{row + 1} of Fit ▸ CSA/Dipolar.", 8000)
+
+    def _report_transfer(self, what: str, notes: str) -> None:
+        text = f"{what}."
+        if notes:
+            text += f" Check: {notes}."
+        self.statusBar().showMessage(text, 12000)
+
+    def _send_quadrupolar_simulation_to_fit(self) -> None:
+        panel = self.quad_fit_panel
+        order = {"first_order": "first", "second_order": "second"}.get(
+            self.sim_quad_method_combo.currentData(), "exact")
+        notes = panel.set_start_from_simulation(
+            {"d_iso": self.sim_quad_diso_spin.value(), "C_Q": self.sim_quad_cq_spin.value(),
+             "eta_Q": self.sim_quad_eta_spin.value(), "fwhm": self.sim_quad_fwhm_spin.value()},
+            {"regime": self.sim_quad_regime_combo.currentData(),
+             "mas_Hz": self.sim_quad_mas_spin.value(),
+             "transitions": self.sim_quad_transitions_combo.currentData(), "order": order,
+             "nucleus": self.sim_quad_nucleus_combo.currentText().strip(),
+             "larmor_MHz": self.sim_quad_larmor_spin.value()})
+        self._open_fit_section_of(panel)
+        self._report_transfer("Simulated quadrupolar values set as a Fit ▸ Quadrupolar start",
+                              notes)
+
+    def _send_czjzek_simulation_to_fit(self, values: dict, settings: dict) -> None:
+        panel = self.czjzek_fit_panel
+        notes = panel.set_start_from_simulation(values, settings)
+        panel.grid_cq_spin.setValue(int(settings.get("n_cq", panel.grid_cq_spin.value())))
+        panel.grid_eta_spin.setValue(int(settings.get("n_eta", panel.grid_eta_spin.value())))
+        self._czjzek_fit_section.setExpanded(True)
+        self._show_side_tab("Fit")
+        self._report_transfer("Simulated Czjzek values set as a Fit ▸ Quadrupolar (Czjzek) "
+                              "start", notes)
+
+    def _send_jcoupling_simulation_to_fit(self, arguments: dict) -> None:
+        notes = self.jcoupling_fit_panel.set_start_from_simulation(arguments)
+        self._open_fit_section_of(self.jcoupling_fit_panel)
+        self._report_transfer("Simulated J-coupling values set as the Fit ▸ J-coupling start",
+                              notes)
+
+    def _send_combined_simulation_to_fit(self, site_dicts: list, settings: dict,
+                                         nucleus: str) -> None:
+        notes = self.combined_fit_panel.set_start_from_simulation(site_dicts, settings, nucleus)
+        self._combined_fit_section.setExpanded(True)
+        self._show_side_tab("Fit")
+        self._report_transfer("Simulated sites set as the Fit ▸ Combined Hamiltonian start",
+                              notes)
+
     def _send_czjzek_to_simulation(self, fitted: dict) -> None:
         self.czjzek_sim_panel.set_from_fit(fitted)
         self._czjzek_sim_section.setExpanded(True)
@@ -12376,7 +12576,40 @@ class MainWindow(QMainWindow):
         """Draw a simulated spectrum where the CSA and quadrupolar
         simulations draw theirs."""
         self.fit_canvas.show_spectrum(spectrum)
+        self.fit_canvas.simulation_spectrum = spectrum
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _keep_simulation(self, spectrum, label: str | None = None) -> int | None:
+        """A simulated spectrum into Open experiments (once: keeping the
+        same one again selects it), named from its simulation record."""
+        if spectrum is None:
+            return None
+        kept = getattr(self, "_kept_simulations", None)
+        if kept is None:
+            kept = self._kept_simulations = {}
+        hit = kept.get(id(spectrum))
+        if hit is not None and hit[0] is spectrum:
+            index = next((i for i, s in enumerate(self.session.spectra) if s is hit[1]), None)
+            if index is not None:
+                self._select_single_row(index)
+                return index
+        simulation = (spectrum.metadata.raw or {}).get("simulation") or {}
+        if label is None:
+            model = (simulation.get("model") or {"csa": "CSA", "quadrupolar": "quadrupolar"}.get(
+                simulation.get("kind"), simulation.get("kind"))) if isinstance(simulation, dict) \
+                else None
+            label = f"Simulated {model}" if model else "Simulated spectrum"
+            if spectrum.metadata.nucleus:
+                label += f" ({spectrum.metadata.nucleus})"
+        index = self._add_derived_spectrum(spectrum, label)
+        kept[id(spectrum)] = (spectrum, self.session.spectra[index])
+        history = self._ensure_history(index)
+        if history is not None and isinstance(simulation, dict) and simulation:
+            io_history.add_event(history, "Kept a simulation in Open experiments:\n" + "\n".join(
+                io_history._param_lines({k: v for k, v in simulation.items() if k != "sites"})),
+                kind="simulation")
+        self.statusBar().showMessage(f"“{label}” kept in Open experiments.", 6000)
+        return index
 
     # ------------------------------------------------------------------
     # Simulations: Diffusion (PFG) and Shaped pulse (Bloch) sections.
@@ -12563,7 +12796,11 @@ class MainWindow(QMainWindow):
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
-    def _compare_fit_models(self, index, ids, residuals=True, components_of=None) -> None:
+    def _compare_fit_models(self, index, ids, residuals=True, components_of=None,
+                            layout="summary") -> None:
+        """Compare kept fits: ``layout`` "stack" / "overlay" puts each in
+        Open experiments and shows them on the Compare view (stacked or
+        superimposed); "summary" is one figure on the Fit view."""
         models = [self._fit_model_by_id(index, i) for i in ids]
         kinds = {m["kind"] == "curve" for m in models}
         if len(kinds) > 1:
@@ -12571,14 +12808,154 @@ class MainWindow(QMainWindow):
                                     "one plot -- tick fits of one kind.")
             return
         curve = kinds == {True}
+        if layout in ("stack", "overlay") and not curve:
+            self._compare_fit_models_in_compare(index, models, residuals, components_of, layout)
+            return
+        if layout in ("stack", "overlay"):
+            self.statusBar().showMessage("Curve fits have no spectrum to put in Compare: shown "
+                                         "as a summary figure on the Fit view.", 8000)
+        palette = plotting.qualitative_colors(len(models))
+        colours = [m.get("colour") or palette[i] for i, m in enumerate(models)]
 
         def draw(figure):
             nb_fit_models.plot_fit_comparison(
                 models, figure=figure, residuals=residuals, show_components=components_of,
-                fontsize=self.fit_canvas.style_settings()["labelsize"])
+                colours=colours, fontsize=self.fit_canvas.style_settings()["labelsize"])
         self.fit_canvas.show_external_plot(draw, kind="curve" if curve else None)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    # ---- kept fits as Open experiments (explicit user request) ------------
+
+    def _find_fit_model_experiment(self, source_label, model) -> int | None:
+        for i, spectrum in enumerate(self.session.spectra):
+            src = (spectrum.metadata.raw or {}).get("fit_model_source") or {}
+            if (src.get("spectrum") == source_label and src.get("id") == model.get("id")
+                    and src.get("time") == model.get("time")):
+                return i
+        return None
+
+    def _fit_model_experiment(self, index, model_id, select: bool = False,
+                              view: dict | None = None) -> int | None:
+        """Spectrum ``index``'s kept fit ``model_id`` as an Open
+        experiment -- its data, carrying the fit (``metadata.raw
+        ["fit_model"]``) that Compare draws over it -- made once and
+        reused after. ``view`` updates how Compare draws it. Returns its
+        session index (None for a curve fit, which has no spectrum)."""
+        model = self._fit_model_by_id(index, model_id)
+        if model["kind"] == "curve":
+            QMessageBox.information(self, "Open experiments", f"“{model['name']}” is a curve "
+                                    "fit: it has no spectrum to list. Compare it with the summary "
+                                    "figure instead.")
+            return None
+        source = self.session.spectra[index]
+        source_label = self.session.label(index)
+        found = self._find_fit_model_experiment(source_label, model)
+        if found is None:
+            x = np.asarray(model["x"], dtype=float)
+            sfo1 = float(source.metadata.sfo1 or 0.0)
+            spectrum = NMRSpectrum(
+                np.asarray(model["y"], dtype=float),
+                [NMRAxis(kind="frequency", ppm=x, hz=x * sfo1 if sfo1 else None)],
+                NMRMetadata(vendor="derived", nucleus=source.metadata.nucleus,
+                            sfo1=source.metadata.sfo1, mass=source.metadata.mass,
+                            raw={"fit_model": nb_fit_models.encode_fit_model(model),
+                                 "fit_model_view": nb_fit_models.fit_view(view or {
+                                     "fit_colour": model.get("colour")}),
+                                 "fit_model_source": {"spectrum": source_label,
+                                                      "id": model.get("id"),
+                                                      "time": model.get("time")}}))
+            meta = source.metadata
+            base = ((meta.raw or {}).get("display_label") or
+                     (meta.source_path if meta.vendor == "derived" else
+                      os.path.basename(str(meta.source_path or "").rstrip("/"))) or source_label)
+            # Named as the legend should read: the fit, then its data.
+            spectrum.metadata.raw["display_label"] = f"{model['name']} — {base}"
+            found = self.session.add_derived(spectrum, f"{source_label} — fit “{model['name']}”")
+            self.spectrum_list.addItem(self.session.label(found))
+            history = self._ensure_history(found)
+            if history is not None:
+                io_history.add_event(
+                    history, f"Kept fit “{model['name']}” ({model.get('kind_label', '')}) of "
+                    f"{source_label}, listed as an experiment: its data, with the fit drawn over "
+                    "it in Compare.\n" + (model.get("report") or ""), kind="fit_model")
+        elif view is not None:
+            raw = self.session.spectra[found].metadata.raw
+            raw["fit_model_view"] = nb_fit_models.fit_view({**raw.get("fit_model_view", {}),
+                                                            **view})
+        if select:
+            self._select_single_row(found)
+        return found
+
+    def _compare_fit_models_in_compare(self, index, models, residuals, components_of,
+                                       layout) -> None:
+        rows = []
+        for m in models:
+            view = {"show_residual": bool(residuals)}
+            if components_of:
+                view["style"] = {"show": "auto" if m["name"] == components_of else "none"}
+            existing = self._find_fit_model_experiment(self.session.label(index), m)
+            if existing is not None and "style" in view:
+                old = self.session.spectra[existing].metadata.raw.get("fit_model_view") or {}
+                view["style"] = {**(old.get("style") or {}), **view["style"]}
+            row = self._fit_model_experiment(index, m["id"], view=view)
+            if row is not None:
+                rows.append(row)
+        if not rows:
+            return
+        entries = [(r, None) for r in rows]
+        self._compare_pinned_entries = list(entries)
+        self._rebuild_compare_list(entries, preserve_previous=False)
+        for i in range(self.compare_list.count()):
+            self.compare_list.item(i).setCheckState(Qt.CheckState.Checked)
+        blocked = self.layout_mode_combo.blockSignals(True)
+        self.layout_mode_combo.setCurrentIndex(0 if layout == "stack" else 1)
+        self.layout_mode_combo.blockSignals(blocked)
+        self._update_compare_tab_visibility()
+        self._show_side_tab("Compare")
+        self._refresh_compare_view(switch_tab=True, force_render=True)
+        self.statusBar().showMessage(
+            f"{len(rows)} kept fits in Compare ({'stacked' if layout == 'stack' else 'superimposed'})"
+            " -- right-click an entry ▸ Fit Display… for its components, colours and residual.",
+            10000)
+
+    def _recolour_fit_model(self, index, model_id, colour) -> None:
+        """A kept fit's colour: in the summary figure, and for its Open
+        experiment's fit in Compare."""
+        models = self._fit_models(index)
+        for m in models:
+            if m.get("id") == model_id:
+                m["colour"] = colour
+                self._set_fit_models(index, models)
+                found = self._find_fit_model_experiment(self.session.label(index), m)
+                if found is not None:
+                    raw = self.session.spectra[found].metadata.raw
+                    raw["fit_model_view"] = nb_fit_models.fit_view(
+                        {**raw.get("fit_model_view", {}), "fit_colour": colour})
+                    self._refresh_compare_view_if_active(switch_tab=False)
+                return
+
+    def _set_fit_experiment_view(self, row: int, view: dict) -> None:
+        """How Compare draws the kept fit that Open experiment ``row``
+        carries; redrawn at once."""
+        raw = self.session.spectra[row].metadata.raw
+        raw["fit_model_view"] = nb_fit_models.fit_view(view)
+        self._schedule_sidecar_save(row)
+        if self.compare_list.count():
+            self._refresh_compare_view(switch_tab=False, force_render=True)
+
+    def _open_fit_view_dialog(self, row: int, exec_dialog: bool = True):
+        from .fit_view_dialog import FitViewDialog
+        spectrum = self.session.spectra[row]
+        model = MplCanvas.compare_fit_model(spectrum)
+        if model is None:
+            return None
+        dialog = FitViewDialog(model, spectrum.metadata.raw.get("fit_model_view"),
+                               on_change=lambda view: self._set_fit_experiment_view(row, view),
+                               title=f"Fit display -- {self.session.label(row)}", parent=self)
+        if exec_dialog:
+            dialog.exec()
+        return dialog
 
     def _fit_model_restorable(self, model) -> bool:
         return bool(model.get("panel_result")) and model.get("kind") in self._fit_panels()
@@ -13236,13 +13613,21 @@ class MainWindow(QMainWindow):
                                                           self._draw_tensor_picture)
         layout.addWidget(self.sim_csa_tensor_controls)
 
-        self.sim_csa_export_button = QPushButton("Export to Open Experiments…")
+        self.sim_csa_export_button = QPushButton("Keep in Open Experiments")
         self.sim_csa_export_button.setEnabled(False)
         self.sim_csa_export_button.setToolTip(
             "Add the simulated pattern as a spectrum in Open experiments, "
             "for side-by-side comparison against real data on the Compare tile.")
         self.sim_csa_export_button.clicked.connect(self._on_export_simulated_csa_clicked)
-        layout.addWidget(self.sim_csa_export_button)
+        self.sim_csa_to_fit_button = QPushButton("Send to Fit as Starting Values")
+        self.sim_csa_to_fit_button.setToolTip(
+            "Put these values into Fit ▸ CSA/Dipolar as the starting values of the selected "
+            "site row (else the first), with this regime, spinning rate and broadening.")
+        self.sim_csa_to_fit_button.clicked.connect(self._send_csa_simulation_to_fit)
+        csa_sim_row = QHBoxLayout()
+        csa_sim_row.addWidget(self.sim_csa_export_button)
+        csa_sim_row.addWidget(self.sim_csa_to_fit_button)
+        layout.addLayout(csa_sim_row)
 
         layout.addStretch(1)
         self._refresh_simulate_csa_controls()
@@ -13488,13 +13873,22 @@ class MainWindow(QMainWindow):
                                                            self._draw_tensor_picture)
         layout.addWidget(self.sim_quad_tensor_controls)
 
-        self.sim_quad_export_button = QPushButton("Export to Open Experiments…")
+        self.sim_quad_export_button = QPushButton("Keep in Open Experiments")
         self.sim_quad_export_button.setEnabled(False)
         self.sim_quad_export_button.setToolTip(
             "Add the simulated pattern as a spectrum in Open experiments, "
             "for side-by-side comparison against real data on the Compare tile.")
         self.sim_quad_export_button.clicked.connect(self._on_export_simulated_quadrupolar_clicked)
-        layout.addWidget(self.sim_quad_export_button)
+        self.sim_quad_to_fit_button = QPushButton("Send to Fit as Starting Values")
+        self.sim_quad_to_fit_button.setToolTip(
+            "Put these values into Fit ▸ Quadrupolar as the starting values of the selected "
+            "site row (else the first), with this regime, transitions and level of theory. The "
+            "fit keeps the spectrum's nucleus and field.")
+        self.sim_quad_to_fit_button.clicked.connect(self._send_quadrupolar_simulation_to_fit)
+        quad_sim_row = QHBoxLayout()
+        quad_sim_row.addWidget(self.sim_quad_export_button)
+        quad_sim_row.addWidget(self.sim_quad_to_fit_button)
+        layout.addLayout(quad_sim_row)
 
         layout.addStretch(1)
         self._refresh_simulate_quad_controls()
@@ -13639,8 +14033,7 @@ class MainWindow(QMainWindow):
         )
         self._simulated_csa_spectrum = NMRSpectrum(data=spectrum_data, axes=[axis], metadata=metadata)
 
-        self.fit_canvas.show_spectrum(self._simulated_csa_spectrum)
-        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+        self._show_simulated_spectrum(self._simulated_csa_spectrum)
 
         warning = self._simulated_spectrum_axis_warning(ppm_axis, spectrum_data)
         self.sim_csa_results_label.setText(
@@ -13754,8 +14147,7 @@ class MainWindow(QMainWindow):
         )
         self._simulated_quadrupolar_spectrum = NMRSpectrum(data=spectrum_data, axes=[axis], metadata=metadata)
 
-        self.fit_canvas.show_spectrum(self._simulated_quadrupolar_spectrum)
-        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+        self._show_simulated_spectrum(self._simulated_quadrupolar_spectrum)
         if comparison is not None:
             self._draw_quadrupolar_order_comparison(comparison, nucleus)
 
@@ -14010,6 +14402,23 @@ class MainWindow(QMainWindow):
         self.csa_results_table.customContextMenuRequested.connect(self._on_csa_results_menu)
         self.csa_results_table.setVisible(False)
         layout.addWidget(self.csa_results_table)
+        # Start again from the best fit, or explore it in the simulator
+        # (explicit user request, as the other fits offer).
+        csa_transfer = QHBoxLayout()
+        self.csa_use_fitted_button = QPushButton("Use Fitted Values as Start")
+        self.csa_use_fitted_button.setToolTip(
+            "Copy every fitted site's values into the sites table, so the next fit starts from "
+            "this best fit (fixes and bounds are kept).")
+        self.csa_use_fitted_button.clicked.connect(self._csa_use_fitted_as_start)
+        self.csa_send_button = QPushButton("Send to Simulate ▸ CSA")
+        self.csa_send_button.setToolTip(
+            "Open a fitted site -- the one selected in the results table, else the first -- in "
+            "Simulate ▸ CSA, with the fit's convention, regime, spinning rate and broadening.")
+        self.csa_send_button.clicked.connect(self._send_csa_fit_to_simulation)
+        for button in (self.csa_use_fitted_button, self.csa_send_button):
+            button.setEnabled(False)
+            csa_transfer.addWidget(button)
+        layout.addLayout(csa_transfer)
 
         # Apply the fitted model to every slice of a pseudo-2D series, for
         # T1/T2 with CSA lineshapes (explicit user request, 2026-09-28) --
@@ -19733,6 +20142,8 @@ class MainWindow(QMainWindow):
         amplitude errors were too small by the normalisation factor) --
         rounded by :meth:`_format_value_error` to the digits they
         support."""
+        for button in (self.csa_use_fitted_button, self.csa_send_button):
+            button.setEnabled(self._csa_fit_result is not None)
         result = self._csa_fit_result
         if not result:
             return

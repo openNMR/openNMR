@@ -37,12 +37,36 @@ _SIMULATED_SECONDS = {"static": 0.005, "mas": 0.15}
 
 _LAYOUTS = (("Spectrum to the right", "right"), ("Spectrum above", "top"))
 
+#: The two distribution models (explicit user request: a central C_Q).
+_MODELS = (("Czjzek -- random EFG centred on zero", "czjzek"),
+           ("Extended Czjzek -- mean EFG (C_Q0, η_Q0) + random part", "extended"))
+_MODEL_TIP = (
+    "Czjzek's model is a fully random EFG centred on zero: it has no 'central' C_Q. Its "
+    "⟨C_Q⟩ ≈ 2σ, its most probable C_Q and ⟨η_Q⟩ = 0.61 all follow from σ alone -- shown "
+    "beside the sites.\n\n"
+    "The extended Czjzek model (Le Caër & Brand 1998) adds a mean EFG: a site with a "
+    "definite local structure (C_Q0, η_Q0) spread by disorder of width σ. As σ → 0 it becomes "
+    "a single (C_Q0, η_Q0) site; at C_Q0 = 0 it is Czjzek's model. d is 5 in this model.")
 
-def _slow_warning(parent, settings, sigma, d, n_cq, n_eta, stages=2) -> bool:
+
+def describe_distribution(sigma, d=5.0, cq0=0.0, eta0=0.0) -> str:
+    """One line on where a distribution sits: its mean and most probable
+    C_Q and its mean η_Q (what σ, or σ with C_Q0, imply)."""
+    st = cz.czjzek_statistics(sigma, d, cq0=cq0, eta0=eta0, n_cq=300, n_eta=100)
+    text = (f"⟨C_Q⟩ = {st['mean_CQ']:.3g} MHz, most probable C_Q {st['mode_CQ']:.3g} MHz, "
+            f"⟨η_Q⟩ = {st['mean_eta']:.2f}")
+    if cq0 > 0:
+        text += f" (centred on C_Q0 = {cq0:g} MHz, η_Q0 = {eta0:g})"
+    else:
+        text += " (random EFG centred on zero: set by σ alone)"
+    return text
+
+
+def _slow_warning(parent, settings, sigma, d, n_cq, n_eta, stages=2, cq0=0.0, eta0=0.0) -> bool:
     """True to go ahead. Asks first when every grid lineshape would have
     to be simulated (satellites, 'exact', or slow MAS) and that would take
     more than a few seconds."""
-    cq_check = cz.czjzek_cq_quantile(0.99, sigma, d)
+    cq_check = cz.czjzek_cq_quantile(0.99, sigma, d, cq0, eta0)
     method, reason = cz.choose_library_method(settings["I"], settings["order"],
                                               settings["transitions"], settings["mas_Hz"],
                                               settings["larmor_Hz"], cq_check)
@@ -64,17 +88,21 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
     """As :class:`QuadrupolarFitPanel`, plus ``draw_map(figure_draw)``:
     show a ``draw(figure)`` on the Fit view (the distribution map)."""
 
-    COLUMNS = ("Label", "δiso / ppm", "σ / MHz", "d", "FWHM / ppm", "L fraction")
-    COLUMN_PARAMS = {1: "d_iso", 2: "sigma", 3: "d", 4: "fwhm", 5: "eta"}
+    COLUMNS = ("Label", "δiso / ppm", "σ / MHz", "d", "FWHM / ppm", "L fraction",
+               "C_Q0 / MHz", "η_Q0")
+    COLUMN_PARAMS = {1: "d_iso", 2: "sigma", 3: "d", 4: "fwhm", 5: "eta", 6: "CQ0", 7: "eta0"}
     PARAM_LABELS = dict(cz.CZJZEK_PARAM_LABELS)
+    PARAM_NAMES = tuple(cz.CZJZEK_PARAM_NAMES)
     BLURB = ("Fit Czjzek distributions of quadrupolar couplings -- the disordered sites of "
              "glasses and amorphous solids -- to the selected 1D spectrum. Each site is δiso, "
              "the width σ of its C_Q distribution, and d (5 for Czjzek's model, held unless "
              "you unfix it; right-click it). FWHM is the isotropic chemical-shift "
-             "distribution. The model is Simulate ▸ Czjzek's.")
+             "distribution. Czjzek's model is centred on a zero EFG (no central C_Q; ⟨C_Q⟩ ≈ 2σ); "
+             "the extended model adds a mean EFG, C_Q0 and η_Q0. The model is Simulate ▸ "
+             "Czjzek's.")
     FIT_TEXT = "Fit Czjzek Distribution"
     SEND_TEXT = "Send to Simulate ▸ Czjzek"
-    DEFAULT_SITE = ("0", "2", "5", "3", "0.5")
+    DEFAULT_SITE = ("0", "2", "5", "3", "0.5", "0", "0")
 
     def __init__(self, get_target, get_regions, draw_fit, draw_map, format_value_error,
                  send_to_simulation=None, on_fitted=None, parent=None) -> None:
@@ -83,6 +111,27 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
                          parent=parent)
         self._draw_map = draw_map
         self._library = None
+        # Which distribution (explicit user request: give the central C_Q).
+        self.model_combo = QComboBox()
+        for text, data in _MODELS:
+            self.model_combo.addItem(text, data)
+        self.model_combo.setToolTip(_MODEL_TIP)
+        self.model_combo.currentIndexChanged.connect(lambda _i: self._on_model_changed())
+        self._form.insertRow(0, "Distribution:", self.model_combo)
+        # What the typed σ (and C_Q0) imply, live: plain Czjzek's C_Q is
+        # set by σ alone, which is not obvious from σ.
+        self.distribution_label = QLabel("")
+        self.distribution_label.setWordWrap(True)
+        self.distribution_label.setToolTip(
+            "Mean and most probable C_Q, and mean η_Q, of each site's starting distribution.")
+        layout0 = self.layout()
+        layout0.insertWidget(layout0.indexOf(self.sites_table) + 1, self.distribution_label)
+        from PySide6.QtCore import QTimer
+        self._describe_timer = QTimer(self)
+        self._describe_timer.setSingleShot(True)
+        self._describe_timer.setInterval(0)
+        self._describe_timer.timeout.connect(self._describe_sites)
+        self.sites_table.itemChanged.connect(lambda _i: self._describe_timer.start())
         self.sites_table.setToolTip(
             "Starting values, one row per Czjzek site. σ is the width of the C_Q distribution "
             "(MHz); ⟨C_Q⟩ ≈ 2σ for d = 5. d is fixed at 5 unless you unfix it.\n\n"
@@ -113,6 +162,7 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
             "repeated, so the answer does not depend on the starting value. The report warns "
             "if too few cells cover the distribution.")
         self._form.addRow("Grid:", grid)
+        self._on_model_changed()
 
         # The distribution map (explicit user request: C_Q across, η_Q
         # up, heat map, with the fit beside it above or to the right).
@@ -146,11 +196,68 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
     # ---- sites ------------------------------------------------------------
 
     def add_site(self, values=None) -> None:
+        if values is not None and len(values) < len(self.COLUMNS):
+            values = tuple(values) + tuple(self.DEFAULT_SITE[len(values) - 1:])
         super().add_site(values)
         row = self.sites_table.rowCount() - 1
         bounds, fixed = self._constraints(row)
         if not fixed and not bounds:
             self.set_constraints(row, {}, {"d": True})
+
+    def model(self) -> str:
+        combo = getattr(self, "model_combo", None)
+        return combo.currentData() if combo is not None else "czjzek"
+
+    def _sync_controls(self) -> None:
+        super()._sync_controls()
+        extended = self.model() == "extended"
+        for column in (6, 7):
+            self.sites_table.setColumnHidden(column, not extended)
+
+    def _on_model_changed(self) -> None:
+        self._sync_controls()
+        if self.model() == "extended":
+            # d is 5 in the extended model: put it back and hold it.
+            for row in range(self.sites_table.rowCount()):
+                item = self.sites_table.item(row, 3)
+                if item is not None:
+                    item.setText("5")
+                bounds, fixed = self._constraints(row)
+                if not fixed.get("d"):
+                    self.set_constraints(row, bounds, {**fixed, "d": True})
+        self._describe_sites()
+
+    def set_state(self, state: dict) -> None:
+        super().set_state(state)
+        self._on_model_changed()
+
+    def _describe_sites(self) -> None:
+        if not hasattr(self, "distribution_label"):
+            return
+        lines = []
+        extended = self.model() == "extended"
+        for row in range(self.sites_table.rowCount()):
+            def value(column, default=0.0):
+                item = self.sites_table.item(row, column)
+                try:
+                    return float(item.text()) if item is not None and item.text().strip() \
+                        else default
+                except ValueError:
+                    return None
+            sigma, d = value(2), value(3, 5.0)
+            cq0, eta0 = (value(6), value(7)) if extended else (0.0, 0.0)
+            label_item = self.sites_table.item(row, 0)
+            label = (label_item.text().strip() if label_item else "") or f"Site {row + 1}"
+            if None in (sigma, d, cq0, eta0) or sigma <= 0 or d <= 0 or cq0 < 0 \
+                    or not 0 <= eta0 <= 1:
+                lines.append(f"{label}: —")
+                continue
+            try:
+                lines.append(f"{label}: " + describe_distribution(
+                    sigma, 5.0 if extended else d, cq0, eta0))
+            except Exception:  # noqa: BLE001 -- a hint must never block typing
+                lines.append(f"{label}: —")
+        self.distribution_label.setText("\n".join(lines))
 
     def read_sites(self) -> list[dict]:
         sites = []
@@ -169,17 +276,30 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
                     "fwhm": cell(4, "FWHM")}
             if site["sigma"] <= 0:
                 raise ValueError(f"Site row {row + 1}: σ must be > 0.")
+            if self.model() == "extended":
+                site["model"] = "extended"
+                site["CQ0"] = cell(6, "C_Q0") if self._has_text(row, 6) else 0.0
+                site["eta0"] = cell(7, "η_Q0") if self._has_text(row, 7) else 0.0
+                if site["CQ0"] < 0 or not 0 <= site["eta0"] <= 1:
+                    raise ValueError(f"Site row {row + 1}: C_Q0 must be ≥ 0 and η_Q0 in [0, 1].")
             item = self.sites_table.item(row, 5)
             if item is not None and item.text().strip():
                 site["eta"] = cell(5, "L fraction")
             bounds, fixed = self._constraints(row)
             site["fixed"] = {name: bool(fixed.get(name)) for name in cz.CZJZEK_PARAM_NAMES}
+            if self.model() == "extended" and (not site["fixed"]["d"] or site["d"] != 5):
+                raise ValueError(f"Site row {row + 1}: the extended Czjzek model is defined for "
+                                 "d = 5 -- set d to 5 and keep it fixed.")
             if bounds:
                 site["bounds"] = {n: tuple(b) for n, b in bounds.items()}
             sites.append(site)
         if not sites:
             raise ValueError("Add at least one site before fitting.")
         return sites
+
+    def _has_text(self, row, column) -> bool:
+        item = self.sites_table.item(row, column)
+        return item is not None and bool(item.text().strip())
 
     def _grid(self):
         return self.grid_cq_spin.value(), self.grid_eta_spin.value()
@@ -196,10 +316,20 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
         start = qfit.estimate_quadrupolar_start(
             results, settings["I"], larmor_Hz=settings["larmor_Hz"], mas_Hz=settings["mas_Hz"],
             eta_Q=0.61, transitions=settings["transitions"], fit_regions=self.fit_regions())
-        # ⟨C_Q⟩ = 1.995 σ for d = 5.
-        ratio = cz.czjzek_statistics(1.0, 5.0)["mean_CQ"]
-        for column, value in ((1, start["d_iso"]), (2, start["C_Q"] / ratio), (4, start["fwhm"])):
-            self.sites_table.item(0, column).setText(f"{value:.4g}")
+        if self.model() == "extended":
+            # A mean EFG near the pattern's C_Q, spread by a quarter of it.
+            values = ((1, start["d_iso"]), (2, 0.25 * start["C_Q"]), (4, start["fwhm"]),
+                      (6, 0.9 * start["C_Q"]), (7, start.get("eta_Q", 0.5)))
+        else:
+            # ⟨C_Q⟩ = 1.995 σ for d = 5.
+            ratio = cz.czjzek_statistics(1.0, 5.0)["mean_CQ"]
+            values = ((1, start["d_iso"]), (2, start["C_Q"] / ratio), (4, start["fwhm"]))
+        for column, value in values:
+            item = self.sites_table.item(0, column)
+            if item is None:
+                self.sites_table.setItem(0, column, QTableWidgetItem(""))
+                item = self.sites_table.item(0, column)
+            item.setText(f"{float(value):.4g}")
 
     def fit(self) -> None:
         try:
@@ -210,8 +340,9 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
             QMessageBox.warning(self, "Czjzek fit", str(exc))
             return
         n_cq, n_eta = self._grid()
-        widest = max(sites, key=lambda s: s["sigma"])
-        if not _slow_warning(self, settings, 1.5 * widest["sigma"], widest["d"], n_cq, n_eta):
+        widest = max(sites, key=lambda s: s["sigma"] + s.get("CQ0", 0.0))
+        if not _slow_warning(self, settings, 1.5 * widest["sigma"], widest["d"], n_cq, n_eta,
+                             cq0=widest.get("CQ0", 0.0), eta0=widest.get("eta0", 0.0)):
             return
         regions = self.fit_regions()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -245,6 +376,7 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
         self._draw_fit(self.result)
         self._report()
         self.send_button.setEnabled(self._send_to_simulation is not None)
+        self.use_fitted_button.setEnabled(True)
         self._on_fitted()
 
     def _map_sites(self):
@@ -254,6 +386,7 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
         areas = [abs(float(integrate(c, r["x"]))) for c in r["components"][:n]]
         rows = r["report"]
         sites = [{"sigma": rows[s]["sigma"], "d": rows[s]["d"], "weight": areas[s],
+                  "CQ0": rows[s].get("CQ0", 0.0), "eta0": rows[s].get("eta0", 0.0),
                   "label": rows[s]["label"]} for s in range(n)]
         choice = self.map_site_combo.currentData()
         return sites if choice is None else [sites[int(choice)]]
@@ -305,8 +438,11 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
         n = info["n_sites"]
         pv = r["settings"]["lineshape"] == "pseudo_voigt"
         half_integer = not float(r["settings"]["I"]).is_integer()
-        cols = [("δiso\n(ppm)", "d_iso", True), ("σ\n(MHz)", "sigma", True), ("d", "d", True),
-                ("⟨C_Q⟩\n(MHz)", "mean_CQ", False), ("C_Q mode\n(MHz)", "mode_CQ", False),
+        any_ext = any(row.get("extended") for row in rows)
+        cols = [("δiso\n(ppm)", "d_iso", True), ("σ\n(MHz)", "sigma", True)]
+        cols += ([("C_Q0\n(MHz)", "CQ0", True), ("η_Q0", "eta0", True)] if any_ext
+                 else [("d", "d", True)])
+        cols += [("⟨C_Q⟩\n(MHz)", "mean_CQ", False), ("C_Q mode\n(MHz)", "mode_CQ", False),
                 ("⟨η_Q⟩", "mean_eta", False), ("⟨P_Q⟩\n(MHz)", "mean_PQ", False)]
         if half_integer and "delta_cg" in rows[0]:
             cols.append(("CT c.o.g.\n(ppm)", "delta_cg", False))
@@ -330,8 +466,10 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
                     text = self._fmt(row[key], row[key + "_err"], row[key + "_fixed"])
                 elif key == "delta_cg":
                     text = self._fmt(row[key], row["d_iso_err"])
-                elif key == "mean_eta":
+                elif key == "mean_eta" and not row.get("mean_eta_err"):
                     text = f"{row[key]:.3f}"
+                elif key in ("CQ0", "eta0") and not row.get("extended"):
+                    text = "—"
                 else:
                     text = self._fmt(row[key], row.get(key + "_err", float("nan")))
                 item = QTableWidgetItem(text.replace(" ± ", "\n± ").replace(" (fixed)", "\n(fixed)"))
@@ -352,8 +490,12 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
         lines = [info["log"].replace("Czjzek fit: ", "Czjzek fit — "),
                  f"R² {r2:.4f}  ·  RMSE {quality['rmse']:.3g}  ·  reduced χ² "
                  f"{quality['reduced_chi2']:.3g}  ·  {r['elapsed']:.1f} s. ⟨C_Q⟩, the C_Q mode, "
-                 "⟨η_Q⟩ and ⟨P_Q⟩ are averages over each fitted distribution (their errors follow "
-                 "from σ's; ⟨η_Q⟩ depends on d only)."]
+                 "⟨η_Q⟩ and ⟨P_Q⟩ are averages over each fitted distribution"
+                 + (" (for the extended model, sample averages; errors propagated from σ, C_Q0 "
+                    "and η_Q0). C_Q0 and η_Q0 are the mean EFG the disorder spreads around -- not "
+                    "⟨C_Q⟩, which the random part raises." if any_ext else
+                    " (their errors follow from σ's; ⟨η_Q⟩ depends on d only). Czjzek's model is "
+                    "centred on a zero EFG: there is no central C_Q, and ⟨C_Q⟩ comes from σ.")]
         lines += [f"⚠ {w}" for w in info.get("warnings", [])]
         self.results_label.setText("\n".join(lines))
 
@@ -382,14 +524,31 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
         lines = [self.results_label.text(), "", self.table_tsv()]
         return "\n".join(lines)
 
+    def use_fitted_as_start(self) -> None:
+        r = self.result
+        if r and any(row.get("extended") for row in r.get("report") or []):
+            self.model_combo.setCurrentIndex(self.model_combo.findData("extended"))
+        super().use_fitted_as_start()
+        self._describe_sites()
+
+    def set_start_from_simulation(self, values: dict, settings: dict | None = None) -> str:
+        extended = (values.get("CQ0") or 0) > 0 or (settings or {}).get("model") == "extended"
+        self.model_combo.setCurrentIndex(self.model_combo.findData(
+            "extended" if extended else "czjzek"))
+        notes = super().set_start_from_simulation(values, settings)
+        self._describe_sites()
+        return notes
+
     def _on_send(self) -> None:
         r = self.result
         if not r or self._send_to_simulation is None:
             return
-        row = r["report"][0]
+        row = r["report"][self.send_site_index()]
         s = r["settings"]
         self._send_to_simulation({
             "nucleus": r["nucleus"], "sigma": row["sigma"], "d": row["d"],
+            "CQ0": row.get("CQ0", 0.0), "eta0": row.get("eta0", 0.0),
+            "model": "extended" if row.get("extended") else "czjzek",
             "delta_iso": row["d_iso"], "fwhm": row["fwhm"], "larmor_MHz": s["larmor_Hz"] / 1e6,
             "mas_Hz": s["mas_Hz"], "transitions": s["transitions"], "order": s["order"],
             "ppm_range": (float(np.min(r["x"])), float(np.max(r["x"]))),
@@ -401,10 +560,11 @@ class CzjzekSimPanel(QWidget):
     shows a ``draw(figure)`` on the Simulation plot; ``add_to_open(spectrum,
     label)`` adds the simulated spectrum to Open experiments."""
 
-    def __init__(self, draw, add_to_open=None, parent=None) -> None:
+    def __init__(self, draw, add_to_open=None, parent=None, send_to_fit=None) -> None:
         super().__init__(parent)
         self._draw = draw
         self._add_to_open = add_to_open
+        self._send_to_fit = send_to_fit
         self.result: dict | None = None
         v = QVBoxLayout(self)
         blurb = QLabel(
@@ -442,13 +602,36 @@ class CzjzekSimPanel(QWidget):
         self.order_combo.addItem("Second-order perturbation", "second")
         self.order_combo.addItem("Exact (diagonalization)", "exact")
         form.addRow("Model:", self.order_combo)
+        self.model_combo = QComboBox()
+        for text, data in _MODELS:
+            self.model_combo.addItem(text, data)
+        self.model_combo.setToolTip(_MODEL_TIP)
+        self.model_combo.currentIndexChanged.connect(lambda _i: self._sync())
+        form.addRow("Distribution:", self.model_combo)
+        self.cq0_spin = self._spin(0.0, 100.0, 3.0, 3, " MHz",
+                                   "C_Q0: the mean EFG's coupling -- the local, ordered structure "
+                                   "the disorder spreads around.")
+        form.addRow("C_Q0 (mean EFG):", self.cq0_spin)
+        self.eta0_spin = self._spin(0.0, 1.0, 0.0, 3, "", "η_Q0: the mean EFG's asymmetry.")
+        self.eta0_spin.setSingleStep(0.05)
+        form.addRow("η_Q0 (mean EFG):", self.eta0_spin)
         self.sigma_spin = self._spin(0.001, 100.0, 2.0, 3, " MHz",
-                                     "Width of the C_Q distribution; ⟨C_Q⟩ ≈ 2σ for d = 5.")
+                                     "Width of the random part of the EFG. In Czjzek's model "
+                                     "this alone sets the C_Q distribution: ⟨C_Q⟩ ≈ 2σ for d = 5.")
         form.addRow("σ:", self.sigma_spin)
         self.d_spin = self._spin(1.0, 20.0, 5.0, 2, "",
                                  "5 is Czjzek's model (a fully random EFG); other values give "
-                                 "the Gaussian isotropic model's other members.")
+                                 "the Gaussian isotropic model's other members. The extended "
+                                 "model is defined for d = 5.")
         form.addRow("d:", self.d_spin)
+        # What the inputs imply, live (explicit user request: where the
+        # distribution sits was not visible).
+        self.distribution_label = QLabel("")
+        self.distribution_label.setWordWrap(True)
+        form.addRow("Implies:", self.distribution_label)
+        self._form = form
+        for spin in (self.cq0_spin, self.eta0_spin, self.sigma_spin, self.d_spin):
+            spin.valueChanged.connect(lambda _v: self._describe())
         self.diso_spin = self._spin(-1e5, 1e5, 60.0, 2, " ppm", "Mean isotropic chemical shift.")
         form.addRow("δiso:", self.diso_spin)
         self.fwhm_spin = self._spin(0.0, 1e4, 4.0, 2, " ppm",
@@ -483,11 +666,19 @@ class CzjzekSimPanel(QWidget):
         buttons = QHBoxLayout()
         self.simulate_button = QPushButton("Simulate")
         self.simulate_button.clicked.connect(self.simulate)
-        self.export_button = QPushButton("Add to Open Experiments")
+        self.export_button = QPushButton("Keep in Open Experiments")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export)
+        self.to_fit_button = QPushButton("Send to Fit as Starting Values")
+        self.to_fit_button.setToolTip(
+            "Put these values into Fit ▸ Quadrupolar (Czjzek) as the starting values of the "
+            "selected site row (else the first), with this model, regime, transitions, level "
+            "of theory and grid. The fit keeps the spectrum's nucleus and field.")
+        self.to_fit_button.setEnabled(send_to_fit is not None)
+        self.to_fit_button.clicked.connect(self.send_to_fit)
         buttons.addWidget(self.simulate_button)
         buttons.addWidget(self.export_button)
+        buttons.addWidget(self.to_fit_button)
         v.addLayout(buttons)
         self.results_label = QLabel("")
         self.results_label.setWordWrap(True)
@@ -508,6 +699,31 @@ class CzjzekSimPanel(QWidget):
 
     def _sync(self) -> None:
         self.mas_spin.setEnabled(self.regime_combo.currentData() == "mas")
+        extended = self.model_combo.currentData() == "extended"
+        for spin in (self.cq0_spin, self.eta0_spin):
+            spin.setVisible(extended)
+            label = self._form.labelForField(spin)
+            if label is not None:
+                label.setVisible(extended)
+        if extended:
+            self.d_spin.setValue(5.0)
+        self.d_spin.setEnabled(not extended)
+        self._describe()
+
+    def _mean_efg(self):
+        if self.model_combo.currentData() == "extended":
+            return self.cq0_spin.value(), self.eta0_spin.value()
+        return 0.0, 0.0
+
+    def _describe(self) -> None:
+        if not hasattr(self, "d_spin"):
+            return
+        cq0, eta0 = self._mean_efg()
+        try:
+            text = describe_distribution(self.sigma_spin.value(), self.d_spin.value(), cq0, eta0)
+        except Exception:  # noqa: BLE001 -- a hint must never block input
+            text = "—"
+        self.distribution_label.setText(text)
 
     def get_state(self) -> dict:
         return panel_state.default_state(self)
@@ -519,6 +735,12 @@ class CzjzekSimPanel(QWidget):
     def set_from_fit(self, fitted: dict) -> None:
         """A fitted site from Fit ▸ Quadrupolar (Czjzek)."""
         self.nucleus_combo.setCurrentText(fitted["nucleus"])
+        extended = fitted.get("model") == "extended" or float(fitted.get("CQ0", 0) or 0) > 0
+        self.model_combo.setCurrentIndex(self.model_combo.findData(
+            "extended" if extended else "czjzek"))
+        if extended:
+            self.cq0_spin.setValue(float(fitted.get("CQ0", 0.0)))
+            self.eta0_spin.setValue(float(fitted.get("eta0", 0.0)))
         self.sigma_spin.setValue(fitted["sigma"])
         self.d_spin.setValue(fitted["d"])
         self.diso_spin.setValue(fitted["delta_iso"])
@@ -547,6 +769,8 @@ class CzjzekSimPanel(QWidget):
         return dict(I=float(spin), nucleus=nucleus, larmor_Hz=self.larmor_spin.value() * 1e6,
                     mas_Hz=mas, order=self.order_combo.currentData(), transitions=transitions,
                     sigma=self.sigma_spin.value(), d=self.d_spin.value(),
+                    model=self.model_combo.currentData(), cq0=self._mean_efg()[0],
+                    eta0=self._mean_efg()[1],
                     delta_iso=self.diso_spin.value(), fwhm=self.fwhm_spin.value(),
                     ppm=(self.ppm_min_spin.value(), self.ppm_max_spin.value()),
                     n_cq=self.grid_cq_spin.value(), n_eta=self.grid_eta_spin.value())
@@ -561,7 +785,8 @@ class CzjzekSimPanel(QWidget):
         if hi - lo <= 0:
             QMessageBox.warning(self, "Czjzek simulation", "The axis range is empty.")
             return None
-        if not _slow_warning(self, s, s["sigma"], s["d"], s["n_cq"], s["n_eta"], stages=1):
+        if not _slow_warning(self, s, s["sigma"], s["d"], s["n_cq"], s["n_eta"], stages=1,
+                             cq0=s["cq0"], eta0=s["eta0"]):
             return None
         x = np.linspace(hi, lo, 8192)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -569,7 +794,8 @@ class CzjzekSimPanel(QWidget):
             sim = cz.czjzek_spectrum(s["I"], s["sigma"], s["larmor_Hz"], x, d=s["d"],
                                      delta_iso=s["delta_iso"], fwhm=s["fwhm"], mas_Hz=s["mas_Hz"],
                                      order=s["order"], transitions=s["transitions"],
-                                     n_cq=s["n_cq"], n_eta=s["n_eta"])
+                                     n_cq=s["n_cq"], n_eta=s["n_eta"], cq0_MHz=s["cq0"],
+                                     eta0=s["eta0"])
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user
             QMessageBox.warning(self, "Czjzek simulation", str(exc))
             return None
@@ -591,15 +817,42 @@ class CzjzekSimPanel(QWidget):
             xlabel = None
         layout = self.layout_combo.currentData()
         self._draw(lambda figure: cz.plot_czjzek_distribution(
-            {"sigma": s["sigma"], "d": s["d"]},
+            {"sigma": s["sigma"], "d": s["d"], "CQ0": s["cq0"], "eta0": s["eta0"]},
             spectrum={"x": sim["x_ppm"], "y": sim["normalised_real_spec"], "xlabel": xlabel},
             layout=layout, figure=figure))
         return sim
 
     def export(self) -> None:
-        sim = self.result
-        if sim is None or self._add_to_open is None:
+        spectrum = self.make_spectrum()
+        if spectrum is None or self._add_to_open is None:
             return
+        s = self.result["settings"]
+        name = (f"Czjzek C_Q0={s['cq0']:g}, σ={s['sigma']:g} MHz ({s['nucleus']})"
+                if s["cq0"] > 0 else f"Czjzek σ={s['sigma']:g} MHz ({s['nucleus']})")
+        self._add_to_open(spectrum, name)
+
+    def send_to_fit(self) -> None:
+        if self._send_to_fit is None:
+            return
+        cq0, eta0 = self._mean_efg()
+        extended = self.model_combo.currentData() == "extended"
+        values = {"d_iso": self.diso_spin.value(), "sigma": self.sigma_spin.value(),
+                  "d": 5.0 if extended else self.d_spin.value(), "fwhm": self.fwhm_spin.value(),
+                  "CQ0": cq0, "eta0": eta0}
+        settings = {"model": self.model_combo.currentData(),
+                    "regime": self.regime_combo.currentData(), "mas_Hz": self.mas_spin.value(),
+                    "transitions": self.transitions_combo.currentData(),
+                    "order": self.order_combo.currentData(),
+                    "nucleus": self.nucleus_combo.currentText().strip(),
+                    "larmor_MHz": self.larmor_spin.value(),
+                    "n_cq": self.grid_cq_spin.value(), "n_eta": self.grid_eta_spin.value()}
+        self._send_to_fit(values, settings)
+
+    def make_spectrum(self):
+        """The last simulation as an NMRSpectrum (None before one)."""
+        sim = self.result
+        if sim is None:
+            return None
         s = sim["settings"]
         x = sim["x_ppm"]
         nu0 = s["larmor_Hz"]
@@ -608,10 +861,12 @@ class CzjzekSimPanel(QWidget):
             axes=[NMRAxis(kind="frequency", ppm=x, hz=x * nu0 / 1e6)],
             metadata=NMRMetadata(vendor="simulated", nucleus=s["nucleus"], sfo1=nu0 / 1e6,
                                  raw={"simulation": {
-                                     "model": "Czjzek", "sigma_MHz": s["sigma"], "d": s["d"],
+                                     "model": ("Extended Czjzek" if s["cq0"] > 0 else "Czjzek"),
+                                     "sigma_MHz": s["sigma"], "d": s["d"],
+                                     "CQ0_MHz": s["cq0"], "eta0": s["eta0"],
                                      "delta_iso_ppm": s["delta_iso"], "fwhm_ppm": s["fwhm"],
                                      "larmor_MHz": nu0 / 1e6, "mas_Hz": s["mas_Hz"],
                                      "transitions": s["transitions"], "order": s["order"],
                                      "grid": f"{s['n_cq']} x {s['n_eta']}",
                                      "method": sim["method"]}}))
-        self._add_to_open(spectrum, f"Czjzek σ={s['sigma']:g} MHz ({s['nucleus']})")
+        return spectrum

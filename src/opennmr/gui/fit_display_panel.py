@@ -35,15 +35,20 @@ def _swatch(colour) -> QIcon:
 
 
 class FitDisplayPanel(QWidget):
-    """``canvases``: the MplCanvas instances whose fit views this styles."""
+    """``canvases``: the MplCanvas instances whose fit views this styles.
+    Or, with no canvases, a style of its own (``style``) reported to
+    ``on_change(style)`` -- one kept fit's display in Compare; its
+    components come from :meth:`set_components`."""
 
-    def __init__(self, canvases, parent=None) -> None:
+    def __init__(self, canvases, parent=None, style=None, on_change=None, intro=None) -> None:
         super().__init__(parent)
         self._canvases = list(canvases)
+        self._on_change = on_change
         self._labels: list[str] = []
         self._defaults: dict = {}
-        self._style = self._canvases[0].fit_component_style() if self._canvases else \
-            fit_display.component_style()
+        self._style = (fit_display.component_style(style) if style is not None else
+                       self._canvases[0].fit_component_style() if self._canvases else
+                       fit_display.component_style())
         for canvas in self._canvases:
             canvas.fitComponentsShown.connect(
                 lambda labels, c=canvas: self._on_components_shown(c, labels))
@@ -51,7 +56,8 @@ class FitDisplayPanel(QWidget):
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        intro = QLabel("How fitted components are drawn on the Fit and Spectral Fit views, and "
+        intro = QLabel(intro or
+                       "How fitted components are drawn on the Fit and Spectral Fit views, and "
                        "in exported figures. Also on the plot's right-click menu ▸ Components.")
         intro.setWordWrap(True)
         v.addWidget(intro)
@@ -159,6 +165,17 @@ class FitDisplayPanel(QWidget):
         self.alpha_spin.setEnabled(bool(self._style["fill"]))
         for canvas in self._canvases:
             canvas.set_fit_component_style(self._style)
+        if self._on_change is not None:
+            self._on_change(fit_display.component_style(self._style))
+        self._rebuild_rows()
+
+    def set_components(self, labels, curves=None) -> None:
+        """The components to list (and their default colours) when this
+        panel styles something other than a canvas's fit view."""
+        self._labels = [str(label) for label in labels]
+        curves = list(curves or [])
+        self._defaults = (fit_display.default_component_colours(curves, self._labels)
+                          if len(curves) == len(self._labels) else {})
         self._rebuild_rows()
 
     def _adopt_from(self, canvas) -> None:

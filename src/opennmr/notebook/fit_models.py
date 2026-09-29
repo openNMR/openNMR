@@ -191,14 +191,101 @@ def format_comparison(comparison: dict) -> str:
     return "\n".join(lines)
 
 
+#: How one kept fit is drawn beside others (the GUI keeps one per Open
+#: experiment made from a kept fit; see :func:`draw_fit_model`).
+DEFAULT_FIT_VIEW = {
+    "show_data": True,        # the measured spectrum
+    "show_fit": True,         # the total fit
+    "show_residual": False,   # data - fit, offset below the spectrum
+    "residual_gap": 0.08,     # gap above the residual, as a fraction of the data's range
+    "fit_colour": None,       # None: the trace's own colour (Plot Style / ``colours``)
+    # Component display (notebook.fit_display.component_style keys). No
+    # baseline by default: beside other traces, a flat line at zero is
+    # clutter (and one more legend entry per fit).
+    "style": {"show_baseline": False},
+}
+
+
+def fit_view(view: dict | None = None, **overrides) -> dict:
+    """A complete, checked fit view (see :data:`DEFAULT_FIT_VIEW`)."""
+    from .fit_display import component_style
+    out = copy.deepcopy(DEFAULT_FIT_VIEW)
+    for source in (view or {}), overrides:
+        for key, value in source.items():
+            if key not in out:
+                raise KeyError(f"Unknown fit-view key {key!r}; known: {', '.join(sorted(out))}.")
+            out[key] = copy.deepcopy(value)
+    for key in ("show_data", "show_fit", "show_residual"):
+        out[key] = bool(out[key])
+    out["residual_gap"] = float(max(0.0, out["residual_gap"]))
+    out["style"] = component_style(out["style"])
+    return out
+
+
+def draw_fit_model(ax, model, view=None, scale: float = 1.0, fit_colour=None, name=None,
+                   draw_data: bool = True, residual_index: int = 0, residual_step=None) -> dict:
+    """One kept fit on ``ax``: its data, total fit and components (per
+    ``view["style"]``), and optionally its residual, offset just below the
+    spectrum. ``scale`` multiplies every curve (a normalised or per-mass
+    plot). ``fit_colour`` : the total fit's colour unless the view sets
+    one. ``residual_index`` / ``residual_step`` put several models'
+    residuals one below another on a shared axes.
+
+    Returns ``{"data", "fit", "components", "dimmed", "baseline",
+    "residual", "residual_zero"}``."""
+    from .fit_display import draw_fit_components
+    view = fit_view(view)
+    style = dict(view["style"])
+    colour = view["fit_colour"] or fit_colour
+    if colour is not None:
+        style["fit_colour"] = colour
+    x = np.asarray(model["x"], dtype=float)
+    order = np.argsort(x)
+    x = x[order]
+    y = np.asarray(model["y"], dtype=float)[order] * scale
+    y_fit = np.asarray(model["y_fit"], dtype=float)[order] * scale
+    mask = np.asarray(model.get("mask", np.ones(x.size, dtype=bool)), dtype=bool)[order]
+    comps = [np.asarray(c, dtype=float)[order] * scale for c in (model.get("components") or [])]
+    name = str(name or model.get("name") or "Fit")
+    out = draw_fit_components(ax, x, y, y_fit, components=comps or None,
+                              labels=model.get("labels") or None, style=style,
+                              auto_hide_single=True, data_label="Data", fit_label=name,
+                              draw_data=draw_data and view["show_data"])
+    if not view["show_fit"]:
+        out["fit"].set_visible(False)
+        out["fit"].set_label("_" + name)
+    out["residual"] = out["residual_zero"] = None
+    if view["show_residual"]:
+        res = np.where(mask, y - y_fit, np.nan)
+        span = float(np.nanmax(y) - np.nanmin(y)) if y.size else 1.0
+        rspan = float(np.nanmax(res) - np.nanmin(res)) if np.any(mask) else 0.0
+        step = float(residual_step) if residual_step is not None else 1.15 * rspan
+        low = min(float(np.nanmin(y)), float(np.nanmin(y_fit)), 0.0)
+        base = low - view["residual_gap"] * span - float(np.nanmax(res)) - residual_index * step
+        out["residual_zero"] = ax.plot(x, np.full(x.size, base), color="0.75", linewidth=0.6,
+                                       label="_residual zero", zorder=0)[0]
+        out["residual"] = ax.plot(x, res + base, color=style["fit_colour"], linewidth=0.9,
+                                  label=f"_{name} residual", zorder=3)[0]
+    return out
+
+
 def plot_fit_comparison(models, figure=None, residuals=True, show_components=None,
                         colours=None, fontsize=12.0, x_label=None, data_colour="black",
-                        reverse_x=None):
-    """The data once, each model's total fit in its own colour, and (with
-    ``residuals``) each model's residual in a strip below, offset so they
-    do not overlap. ``show_components`` : the name of one model whose
-    components to shade as well. ``reverse_x``: default True for a ppm
-    spectrum (any kind but "curve"). Returns the figure."""
+                        reverse_x=None, layout="superimposed", views=None):
+    """Several fits of one spectrum.
+
+    ``layout="superimposed"`` : the data once, each model's total fit in
+    its own colour, and (with ``residuals``) each model's residual in a
+    strip below, offset so they do not overlap. ``show_components`` : the
+    name of one model whose components to shade as well.
+
+    ``layout="stacked"`` : one row per model, each with the data, that
+    model's fit and components (``views``: one :func:`fit_view` per model,
+    or one for all) and, with ``residuals``, its residual just below --
+    the data repeated in every row, which some prefer.
+
+    ``colours`` : each model's fit colour. ``reverse_x``: default True
+    for a ppm spectrum (any kind but "curve"). Returns the figure."""
     import matplotlib.pyplot as plt
     from ..plotting import qualitative_colors
     from ..plotting.style import apply_spine_style, apply_tick_style
@@ -206,6 +293,11 @@ def plot_fit_comparison(models, figure=None, residuals=True, show_components=Non
     models = list(models)
     if not models:
         raise ValueError("No models to plot.")
+    if layout not in ("superimposed", "stacked"):
+        raise ValueError("layout must be 'superimposed' or 'stacked'.")
+    if layout == "stacked":
+        return _plot_fit_stack(models, figure, residuals, colours, fontsize, x_label,
+                               data_colour, reverse_x, views)
     if figure is None:
         figure = plt.figure(figsize=(6.0, 4.8 if residuals else 3.8))
     else:
@@ -268,6 +360,11 @@ def plot_fit_comparison(models, figure=None, residuals=True, show_components=Non
         lo, hi = float(np.min(x0)), float(np.max(x0))
         ax.set_xlim(hi, lo)
     figure.fit_comparison_axes = {"fit": ax, "residuals": rax}
+    _tight(figure)
+    return figure
+
+
+def _tight(figure) -> None:
     import warnings
     try:
         with warnings.catch_warnings():
@@ -275,4 +372,46 @@ def plot_fit_comparison(models, figure=None, residuals=True, show_components=Non
             figure.tight_layout()
     except Exception:  # noqa: BLE001 -- layout is cosmetic
         pass
+
+
+def _plot_fit_stack(models, figure, residuals, colours, fontsize, x_label, data_colour,
+                    reverse_x, views):
+    import matplotlib.pyplot as plt
+    from ..plotting import qualitative_colors
+    from ..plotting.style import apply_spine_style, apply_tick_style
+
+    n = len(models)
+    if figure is None:
+        figure = plt.figure(figsize=(6.0, 1.9 * n + 0.8))
+    else:
+        figure.clear()
+    colours = list(colours or qualitative_colors(n))
+    if views is None or isinstance(views, dict):
+        views = [views] * n
+    curve = all(m.get("kind") == "curve" for m in models)
+    reverse_x = (not curve) if reverse_x is None else bool(reverse_x)
+    axes = list(np.atleast_1d(figure.subplots(n, 1, sharex=True)))
+    for i, (ax, m) in enumerate(zip(axes, models)):
+        view = fit_view(views[i] if i < len(views) else None)
+        if not views[i]:
+            view["style"] = {**view["style"], "data_colour": data_colour}
+            view["show_residual"] = bool(residuals)
+        draw_fit_model(ax, m, view, fit_colour=colours[i % len(colours)])
+        ax.text(0.995, 0.92, m["name"], transform=ax.transAxes, ha="right", va="top",
+                color=view["fit_colour"] or colours[i % len(colours)], fontsize=fontsize * 0.8)
+        ax.set_yticks([])
+        apply_spine_style(ax, top=False, right=False, bottom=ax is axes[-1], left=False)
+        if ax is axes[-1]:
+            apply_tick_style(ax, axis="x", labelsize=fontsize * 0.9)
+        else:
+            ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+    first = models[0]
+    axes[-1].set_xlabel(x_label or first.get("x_label") or ("Shift (ppm)" if not curve else "x"),
+                        fontsize=fontsize)
+    if reverse_x:
+        x0 = np.asarray(first["x"], dtype=float)
+        axes[0].set_xlim(float(np.max(x0)), float(np.min(x0)))
+    figure.subplots_adjust(hspace=0.05)
+    figure.fit_comparison_axes = {"rows": axes}
+    _tight(figure)
     return figure

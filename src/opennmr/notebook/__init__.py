@@ -91,10 +91,12 @@ from .quadrupolar_fitting import (
 from .czjzek import (
     czjzek_pdf, czjzek_statistics, czjzek_spectrum, fit_czjzek_spectrum, evaluate_czjzek_fit,
     czjzek_fit_report, plot_czjzek_distribution, plot_czjzek_fit, CzjzekLibrary,
+    czjzek_samples, extended_czjzek_weights,
 )
 from .fit_display import draw_fit_components, component_style
 from .fit_models import (
     make_fit_model, fit_statistics, compare_fit_models, format_comparison, plot_fit_comparison,
+    draw_fit_model, fit_view,
 )
 from .state import save_state, load_state, describe_state, saved_fit_models
 
@@ -244,12 +246,12 @@ __all__ = [
     # Czjzek distributions
     "czjzek_pdf", "czjzek_statistics", "czjzek_spectrum", "fit_czjzek_spectrum",
     "evaluate_czjzek_fit", "czjzek_fit_report", "plot_czjzek_distribution", "plot_czjzek_fit",
-    "CzjzekLibrary",
+    "CzjzekLibrary", "czjzek_samples", "extended_czjzek_weights",
     # fit display
     "draw_fit_components", "component_style",
     # kept fit models and openNMR states
     "make_fit_model", "fit_statistics", "compare_fit_models", "format_comparison",
-    "plot_fit_comparison", "save_state", "load_state", "describe_state", "saved_fit_models",
+    "plot_fit_comparison", "draw_fit_model", "fit_view", "save_state", "load_state", "describe_state", "saved_fit_models",
     # simulations
     "haeberlen_csa_tensor", "herzfeld_berger_csa_tensor", "csa_definition",
     "csa_frequency", "powder_orientations", "powder_orientations_octant", 

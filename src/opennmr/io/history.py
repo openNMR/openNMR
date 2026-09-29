@@ -179,6 +179,9 @@ _HIDDEN_KEYS = frozenset({
     # Kept fit models: logged by their own events (kept / renamed /
     # deleted, with the fit's report), not as a diff of encoded curves.
     "fit_models",
+    # An Open experiment made from a kept fit: the fit it carries, and
+    # how Compare draws it (logged by their own events).
+    "fit_model", "fit_model_view", "fit_model_source",
 })
 
 

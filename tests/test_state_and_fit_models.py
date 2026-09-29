@@ -208,6 +208,7 @@ def test_keep_compare_restore_rename_delete(window, monkeypatch):
     fp.set_ticked([m1["id"], m2["id"]])
     assert "Lowest BIC: 2 sites" in fp.note_label.text()
     assert fp.table.item(0, 7).text() not in ("—", "0.0")
+    fp.layout_combo.setCurrentIndex(fp.layout_combo.findData("summary"))
     fp.compare()
     assert window.fit_canvas.figure.fit_comparison_axes["residuals"] is not None
     # Put back: the panel holds the 1-site fit again, and it is current.

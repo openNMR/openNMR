@@ -4,8 +4,16 @@ Keep the fit on the plot (button here, or right-click the plot ▸ Keep
 This Fit…) under a name; it is saved with the spectrum (its processing
 state, so its sidecar, save points and openNMR states) and listed here
 whenever the spectrum is selected. From the list: show one, put one back
-into the panel that made it, or tick several and compare them on one
-plot -- data, each fit, residuals -- with R², reduced χ², ΔAIC and ΔBIC.
+into the panel that made it, or tick several and compare them -- with
+R², reduced χ², ΔAIC and ΔBIC in the table.
+
+Compare Ticked puts each ticked fit in Open experiments (once; the same
+entry is reused) and shows them in Compare, stacked (a row per fit: its
+data, fit, components and residual) or superimposed, where Compare's own
+tools apply: Plot Style colours, reordering, export, and each entry's
+right-click ▸ Fit Display… for its components, colours and residual. The
+older one-figure summary (data once, every fit, residual strips) is kept
+as the third choice. Curve fits can only use the summary.
 
 The records and statistics are :mod:`opennmr.notebook.fit_models`, so a
 notebook reads and compares the same models.
@@ -36,12 +44,20 @@ def _fmt(value, spec):
 class FitModelsPanel(QWidget):
     """Callbacks (MainWindow): ``models()`` -> decoded models of the
     selected spectrum, each with an ``id``; ``keep()``; ``show(id)``;
-    ``compare(ids, residuals, components_of)``; ``restore(id)``;
-    ``rename(id, name)``; ``delete(id)``; ``can_restore(model)``."""
+    ``compare(ids, residuals, components_of, layout)``; ``restore(id)``;
+    ``rename(id, name)``; ``delete(id)``; ``can_restore(model)``;
+    ``to_open(id)`` (optional): list it in Open experiments; ``recolour(id,
+    colour)`` (optional)."""
+
+    #: Compare Ticked's choices (explicit user request: stacked or
+    #: superimposed, as Compare offers).
+    LAYOUTS = (("Stacked in Compare", "stack"), ("Superimposed in Compare", "overlay"),
+               ("Summary figure (Fit view)", "summary"))
 
     def __init__(self, models, keep, show, compare, restore, rename, delete, can_restore,
-                 parent=None) -> None:
+                 parent=None, to_open=None, recolour=None) -> None:
         super().__init__(parent)
+        self._to_open, self._recolour = to_open, recolour
         self._models, self._keep, self._show = models, keep, show
         self._compare, self._restore, self._rename, self._delete = compare, restore, rename, delete
         self._can_restore = can_restore
@@ -96,14 +112,24 @@ class FitModelsPanel(QWidget):
 
         compare_row = QHBoxLayout()
         self.compare_button = QPushButton("Compare Ticked")
-        self.compare_button.setToolTip("The data, each ticked fit and their residuals on the Fit "
-                                       "view, and ΔAIC/ΔBIC in the table.")
+        self.compare_button.setToolTip(
+            "Each ticked fit into Open experiments (reused if already there) and onto the "
+            "Compare view -- stacked, a row per fit, or superimposed -- with ΔAIC/ΔBIC in the "
+            "table. Right-click an entry in Compare ▸ Fit Display… for its components, colours "
+            "and residual; Plot Style recolours each fit.")
         self.compare_button.clicked.connect(self.compare)
+        self.layout_combo = QComboBox()
+        for text, data in self.LAYOUTS:
+            self.layout_combo.addItem(text, data)
+        self.layout_combo.setToolTip("Stacked: every row the data with one fit (the data "
+                                     "repeated). Superimposed: the data once, every fit over it. "
+                                     "Summary: one figure on the Fit view (curve fits too).")
         self.residuals_check = QCheckBox("Residuals")
         self.residuals_check.setChecked(True)
         self.components_combo = QComboBox()
         self.components_combo.setToolTip("Shade the components of one of the compared fits.")
         compare_row.addWidget(self.compare_button)
+        compare_row.addWidget(self.layout_combo)
         compare_row.addWidget(self.residuals_check)
         compare_row.addWidget(QLabel("Components of:"))
         compare_row.addWidget(self.components_combo, 1)
@@ -217,15 +243,20 @@ class FitModelsPanel(QWidget):
         if len(ids) < 2:
             QMessageBox.information(self, "Compare", "Tick at least two kept fits.")
             return
-        self._compare(ids, self.residuals_check.isChecked(), self.components_combo.currentData())
+        self._compare(ids, self.residuals_check.isChecked(), self.components_combo.currentData(),
+                      self.layout_combo.currentData())
 
     def _on_menu(self, pos) -> None:
         row = self.table.rowAt(pos.y())
         model = self._model_at(row)
         menu = QMenu(self)
-        show = restore = rename = delete = copy_report = None
+        show = restore = rename = delete = copy_report = to_open = recolour = None
         if model is not None:
             show = menu.addAction("Show")
+            if self._to_open is not None and model.get("kind") != "curve":
+                to_open = menu.addAction("Show in Open Experiments")
+            if self._recolour is not None:
+                recolour = menu.addAction("Colour…")
             restore = menu.addAction("Put Back in Its Panel")
             restore.setEnabled(bool(self._can_restore(model)))
             rename = menu.addAction("Rename…")
@@ -238,6 +269,15 @@ class FitModelsPanel(QWidget):
             return
         if chosen is show:
             self._show(model["id"])
+        elif chosen is to_open:
+            self._to_open(model["id"])
+        elif chosen is recolour:
+            from PySide6.QtGui import QColor
+            from PySide6.QtWidgets import QColorDialog
+            colour = QColorDialog.getColor(QColor(model.get("colour") or "#d62728"), self,
+                                           f"Colour of {model['name']}")
+            if colour.isValid():
+                self._recolour(model["id"], colour.name())
         elif chosen is restore:
             self._on_restore(row)
         elif chosen is rename:

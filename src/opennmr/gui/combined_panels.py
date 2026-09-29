@@ -163,10 +163,12 @@ class CombinedHamiltonianPanel(QWidget):
         "jcoupling": {"type": "jcoupling", "nuclide": "1H", "n": 1, "J_Hz": 100.0},
     }
 
-    def __init__(self, plot_spectrum, add_to_open, draw_sites=None, parent=None) -> None:
+    def __init__(self, plot_spectrum, add_to_open, draw_sites=None, parent=None,
+                 send_to_fit=None) -> None:
         super().__init__(parent)
         self._plot_spectrum = plot_spectrum
         self._add_to_open = add_to_open
+        self._send_to_fit = send_to_fit
         self._draw_sites = draw_sites
         self._seeded_for = None
         self.site_dicts: list[dict] = []
@@ -335,13 +337,20 @@ class CombinedHamiltonianPanel(QWidget):
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)
         row = QHBoxLayout()
-        self.export_button = QPushButton("Export to Open Experiments…")
+        self.export_button = QPushButton("Keep in Open Experiments")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._on_export)
         self.python_button = QPushButton("Copy as Python")
         self.python_button.setToolTip("Copy notebook code that reproduces this simulation.")
         self.python_button.clicked.connect(self.copy_python)
+        self.to_fit_button = QPushButton("Send to Fit as Starting Values")
+        self.to_fit_button.setToolTip("Put these sites into Fit ▸ Combined Hamiltonian as the "
+                                      "starting model, with this regime, transitions and level "
+                                      "of theory.")
+        self.to_fit_button.setEnabled(self._send_to_fit is not None)
+        self.to_fit_button.clicked.connect(self.send_to_fit)
         row.addWidget(self.export_button)
+        row.addWidget(self.to_fit_button)
         row.addWidget(self.python_button)
         v.addLayout(row)
 
@@ -630,6 +639,20 @@ class CombinedHamiltonianPanel(QWidget):
         self.results_label.setText(f"Simulated in {elapsed:.2f} s.\n{result['log']}{warn}")
         self.export_button.setEnabled(True)
         return True
+
+    def transfer_settings(self) -> dict:
+        """Regime, spinning, level of theory, transitions and field, as
+        another Combined panel takes them (no validation)."""
+        return {"regime": self.regime_combo.currentData(), "mas_Hz": self.mas_spin.value(),
+                "order": self.order_combo.currentData(),
+                "transitions": self.transitions_combo.currentData(),
+                "larmor_MHz": self.larmor_spin.value()}
+
+    def send_to_fit(self) -> None:
+        if self._send_to_fit is None or not self.site_dicts:
+            return
+        self._send_to_fit(copy.deepcopy(self.site_dicts), self.transfer_settings(),
+                          self.nucleus_combo.currentText().strip())
 
     def _on_export(self):
         if self.spectrum is not None:
@@ -1095,6 +1118,42 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             CombinedHamiltonianPanel.add_site(self, site)
         self.site_list.setCurrentRow(min(current, len(self.site_dicts) - 1))
         self.refresh_parameter_table()
+
+    def set_start_from_simulation(self, site_dicts, settings: dict, nucleus: str) -> str:
+        """Simulated sites as the starting model, with the simulation's
+        regime, spinning, level of theory and transitions. The nucleus and
+        field stay the spectrum's; a mismatch is returned as a note."""
+        notes = []
+        self.site_list.blockSignals(True)
+        self.site_list.clear()
+        self.site_list.blockSignals(False)
+        self.site_dicts = []
+        self._current = -1
+        for site in copy.deepcopy(list(site_dicts)):
+            CombinedHamiltonianPanel.add_site(self, site)
+        if self.site_dicts:
+            self.site_list.setCurrentRow(0)
+        for combo, key in ((self.regime_combo, "regime"), (self.order_combo, "order"),
+                           (self.transitions_combo, "transitions")):
+            index = combo.findData(settings.get(key))
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        if settings.get("regime") == "mas" and settings.get("mas_Hz"):
+            self.mas_spin.setValue(float(settings["mas_Hz"]))
+        mine = self.nucleus_combo.currentText().strip()
+        if nucleus and mine and nucleus != mine:
+            notes.append(f"the simulation is of {nucleus}, the fit of {mine}")
+        elif nucleus and not mine:
+            self.nucleus_combo.setCurrentText(nucleus)
+        larmor = float(settings.get("larmor_MHz") or 0)
+        if larmor and self.larmor_spin.value() > 0 and \
+                abs(larmor - self.larmor_spin.value()) > 1e-3 * self.larmor_spin.value():
+            notes.append(f"the simulation used ν0 = {larmor:.6g} MHz, the fit uses "
+                         f"{self.larmor_spin.value():.6g} MHz")
+        elif larmor and self.larmor_spin.value() <= 0:
+            self.larmor_spin.setValue(larmor)
+        self.refresh_parameter_table()
+        return "; ".join(notes)
 
     def _on_send(self) -> None:
         if self.result and self._send_to_simulation is not None:
