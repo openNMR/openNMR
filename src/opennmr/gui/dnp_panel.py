@@ -118,15 +118,30 @@ class DnpPanel(QWidget):
         self.sweep_result: dict | None = None
         self._sweep_entries: list[dict] = []
 
+        # Two independent pages, one per measurement, so MainWindow can
+        # give each its own collapsible section ("DNP Enhancement",
+        # "DNP Field Sweep Profile" -- explicit user request). Until
+        # something takes them, they sit in this panel as before, so
+        # the panel still works standalone.
         v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        self.enhancement_page = self._page(self._build_enhancement())
+        self.sweep_page = self._page(self._build_sweep())
+        v.addWidget(self.enhancement_page)
+        v.addWidget(self.sweep_page)
+        self.refresh()
+
+    @staticmethod
+    def _page(box: QWidget) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
         blurb = QLabel("Uses the spectra checked in the Compare list above. Picks and regions "
                        "are made on the Compare view.")
         blurb.setWordWrap(True)
         v.addWidget(blurb)
-        v.addWidget(self._build_enhancement())
-        v.addWidget(self._build_sweep())
-        self.refresh()
+        v.addWidget(box)
+        return page
 
     # ------------------------------------------------------------------
     # construction
@@ -723,7 +738,9 @@ class DnpPanel(QWidget):
             dnp.plot_field_profile(result, quantity=quantity, normalise=normalise,
                                    field_unit=field_unit, relative=relative, figure=figure,
                                    color=style.get("trace_color") or "black",
-                                   fontsize=style.get("labelsize") or 12.0)
+                                   fontsize=style.get("labelsize") or 12.0,
+                                   show_top_spine=bool(style.get("top_spine")),
+                                   show_right_spine=bool(style.get("right_spine")))
         self._draw_profile(draw)
 
     def export_csv(self) -> None:

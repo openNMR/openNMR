@@ -974,11 +974,14 @@ def _value_label(result, quantity, normalise) -> str:
 
 def plot_field_profile(result: dict, quantity: str = "intensity", normalise=None,
                        field_unit: str = "mT", relative: bool = False, figure=None,
-                       color: str = "black", fontsize: float = 12.0, zero_line: bool = True):
+                       color: str = "black", fontsize: float = 12.0, zero_line: bool = True,
+                       show_top_spine: bool = False, show_right_spine: bool = False):
     """The DNP field profile: signal against B0, 1σ error bars, points
     where no line was found drawn open (their field is from SFO1).
     ``quantity`` 'intensity', 'area' or 'both' (two panels sharing the
-    field axis). Returns the figure."""
+    field axis). ``show_top_spine``/``show_right_spine`` close the frame
+    (off by default, as in the other notebook curve plots). Returns the
+    figure."""
     import matplotlib.pyplot as plt
     from ..plotting.style import apply_spine_style, apply_tick_style
 
@@ -1014,8 +1017,9 @@ def plot_field_profile(result: dict, quantity: str = "intensity", normalise=None
         if exponent:
             label = label.replace("(a.u.)", f"(10$^{{{exponent}}}$ a.u.)")
         ax.set_ylabel(label, fontsize=fontsize)
-        apply_spine_style(ax, top=False, right=False, bottom=True, left=True)
+        apply_spine_style(ax, top=show_top_spine, right=show_right_spine, bottom=True, left=True)
         apply_tick_style(ax, labelsize=fontsize * 0.9)
+        ax.tick_params(which="both", top=show_top_spine, right=show_right_spine)
     axes[-1].set_xlabel(_field_label(field_unit, relative), fontsize=fontsize)
     figure.tight_layout()
     return figure

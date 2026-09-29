@@ -78,7 +78,6 @@ from ..io import serialize as io_serialize
 from . import panel_state
 from .. import _version
 from . import progress as progress_dialogs
-from ..processing import arithmetic as processing_arithmetic
 from ..processing import diffusion as processing_diffusion
 from ..processing import fitting as processing_fitting
 from ..processing import ilt as processing_ilt
@@ -107,6 +106,7 @@ from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
+from .arithmetic_panel import ArithmeticPanel
 from .dnp_panel import DnpPanel
 from .tensor_view_panel import TensorViewControls
 from .periodic_table_panel import LarmorCalculatorPanel, PeriodicTableView
@@ -2095,39 +2095,63 @@ class MainWindow(QMainWindow):
         compare_action_row.addWidget(compare_fit_curve_button)
         layout.addLayout(compare_action_row)
 
-        combine_row = QHBoxLayout()
-        combine_row.addWidget(QLabel("Operation:"))
-        self.combine_op_combo = QComboBox()
-        self.combine_op_combo.addItem("Sum", "sum")
-        self.combine_op_combo.addItem("Average", "average")
-        self.combine_op_combo.addItem("Subtract from first", "subtract")
+        # Spectrum arithmetic: the notebook's arithmetic.combine_spectra
+        # with every option it takes -- a sign and factor per spectrum,
+        # the common range, axis, points and interpolation (explicit
+        # user request: "add the arithmetic functions ... in the Compare
+        # section, before the DNP section"). Replaces the one-line
+        # Sum/Average/Subtract row; its presets are still the first
+        # control (combine_op_combo, kept under its old name).
+        self.arithmetic_panel = ArithmeticPanel(
+            entries=self._dnp_entries, add_result=self._add_arithmetic_result)
+        self.combine_op_combo = self.arithmetic_panel.op_combo
         self._narrow_combo(self.combine_op_combo)
-        combine_row.addWidget(self.combine_op_combo)
-        combine_button = QPushButton("Combine (Compare stack)")
-        combine_button.setToolTip(
-            "Add/subtract/average whatever's checked above (needs at "
-            "least two 1D spectra), interpolated onto a common ppm "
-            "axis over their overlapping range -- added back into the "
-            "session as a new spectrum."
-        )
-        combine_button.clicked.connect(self._on_combine_spectra_clicked)
-        combine_row.addWidget(combine_button)
-        layout.addLayout(combine_row)
+        self._arithmetic_section = CollapsibleSection(
+            "Spectrum Arithmetic", content=self.arithmetic_panel, expanded=False)
+        self._arithmetic_section.toggled.connect(
+            lambda expanded: expanded and self.arithmetic_panel.refresh())
+        layout.addWidget(self._arithmetic_section)
 
         # DNP: enhancement factors and field-sweep profiles over the
         # spectra checked above (explicit user request);
-        # notebook.dnp. Collapsed until wanted -- most comparisons are
-        # not DNP.
+        # notebook.dnp. Two sections, one per measurement (explicit
+        # user request: "DNP Enhancement" and, separately, "DNP Field
+        # Sweep Profile"); one DnpPanel still holds the state and logic
+        # of both, its two pages placed in the two sections. Collapsed
+        # until wanted -- most comparisons are not DNP.
         self.dnp_panel = DnpPanel(
             entries=self._dnp_entries, draw_spectra=self._dnp_draw_spectra,
             draw_profile=self._dnp_draw_profile, arm=self._dnp_arm, store=self._store_dnp,
-            style=self._dnp_style)
-        self._dnp_section = CollapsibleSection("DNP", content=self.dnp_panel, expanded=False)
-        self._dnp_section.toggled.connect(lambda expanded: expanded and self.dnp_panel.refresh())
-        layout.addWidget(self._dnp_section)
-        self.compare_list.itemChanged.connect(lambda _item: self.dnp_panel.refresh())
-        self.compare_list.model().rowsInserted.connect(lambda *_a: self.dnp_panel.refresh())
-        self.compare_list.model().rowsRemoved.connect(lambda *_a: self.dnp_panel.refresh())
+            style=self._dnp_style, parent=tab)
+        self.dnp_panel.hide()
+        self._dnp_enhancement_section = CollapsibleSection(
+            "DNP Enhancement", content=self.dnp_panel.enhancement_page, expanded=False)
+        self._dnp_sweep_section = CollapsibleSection(
+            "DNP Field Sweep Profile", content=self.dnp_panel.sweep_page, expanded=False)
+        #: The first DNP section, under the name code and tests used
+        #: when there was one.
+        self._dnp_section = self._dnp_enhancement_section
+        for section in (self._dnp_enhancement_section, self._dnp_sweep_section):
+            section.toggled.connect(lambda expanded: expanded and self.dnp_panel.refresh())
+            layout.addWidget(section)
+
+        # The arithmetic table holds a widget per row, so it is rebuilt
+        # only while its section is open, and once per burst of list
+        # changes: a pseudo-2D fills the Compare list one row at a time,
+        # and rebuilding on each row was quadratic in the slice count.
+        self._arithmetic_refresh_timer = QTimer(self)
+        self._arithmetic_refresh_timer.setSingleShot(True)
+        self._arithmetic_refresh_timer.setInterval(0)
+        self._arithmetic_refresh_timer.timeout.connect(
+            lambda: self._arithmetic_section.isExpanded() and self.arithmetic_panel.refresh())
+
+        def _refresh_compare_tools(*_args):
+            self.dnp_panel.refresh()
+            if self._arithmetic_section.isExpanded():
+                self._arithmetic_refresh_timer.start()
+        self.compare_list.itemChanged.connect(_refresh_compare_tools)
+        self.compare_list.model().rowsInserted.connect(_refresh_compare_tools)
+        self.compare_list.model().rowsRemoved.connect(_refresh_compare_tools)
         self.compare_canvas.peakPicked.connect(self.dnp_panel.on_canvas_pick)
         self.compare_canvas.regionSelected.connect(self.dnp_panel.on_canvas_region)
         self.compare_canvas.pickModeChanged.connect(self._on_dnp_canvas_mode_changed)
@@ -3927,6 +3951,29 @@ class MainWindow(QMainWindow):
         self.output_minor_ticks_checkbox.toggled.connect(self._on_output_style_changed)
         style_form.addRow(self.output_minor_ticks_checkbox)
 
+        # Top/right spines on "Curves & profiles" plots -- relaxation
+        # and diffusion fits, integral and parameter trends, DNP field
+        # profiles. The notebook functions behind them take
+        # show_top_spine/show_right_spine; explicit user request to
+        # switch them here too. Spectra keep their open frame.
+        spine_row = QWidget()
+        spine_layout = QHBoxLayout(spine_row)
+        spine_layout.setContentsMargins(0, 0, 0, 0)
+        self.output_top_spine_checkbox = QCheckBox("Top")
+        self.output_right_spine_checkbox = QCheckBox("Right")
+        for check, side in ((self.output_top_spine_checkbox, "top"),
+                            (self.output_right_spine_checkbox, "right")):
+            check.setChecked(False)
+            check.setToolTip(
+                f"Draw the {side} axis line (with ticks) on curve plots: relaxation and "
+                "diffusion fits, integral and parameter trends, DNP field sweep profiles.\n\n"
+                "Off by default, as in the notebook plot functions "
+                f"(show_{side}_spine=False). Spectra are not affected.")
+            check.toggled.connect(self._on_output_style_changed)
+            spine_layout.addWidget(check)
+        spine_layout.addStretch(1)
+        style_form.addRow("Curve spines:", spine_row)
+
         self.output_legend_checkbox = QCheckBox("Show legend / trace names")
         self.output_legend_checkbox.setToolTip(
             "Same on/off state as the plot's own right-click \"Show Legend\" -- "
@@ -4246,6 +4293,8 @@ class MainWindow(QMainWindow):
             "tick_length": self.output_tick_length_spin.value(),
             "tick_width": self.output_tick_width_spin.value(),
             "minor_ticks": self.output_minor_ticks_checkbox.isChecked(),
+            "top_spine": self.output_top_spine_checkbox.isChecked(),
+            "right_spine": self.output_right_spine_checkbox.isChecked(),
             "grid": self.output_grid_checkbox.isChecked(),
             "contour_linewidth": self.output_contour_linewidth_spin.value(),
             "title_visible": self.output_title_checkbox.isChecked(),
@@ -4694,6 +4743,8 @@ class MainWindow(QMainWindow):
             self.output_contour_mode_combo.blockSignals(False)
         self.output_contour_power_spin.setEnabled(settings["contour_level_mode"] == "power")
         for check, value in ((self.output_minor_ticks_checkbox, settings["minor_ticks"]),
+                              (self.output_top_spine_checkbox, settings["top_spine"]),
+                              (self.output_right_spine_checkbox, settings["right_spine"]),
                               (self.output_grid_checkbox, settings["grid"]),
                               (self.output_title_checkbox, settings["title_visible"]),
                               (self.output_legend_frame_checkbox, settings["legend_frameon"])):
@@ -4791,6 +4842,8 @@ class MainWindow(QMainWindow):
                 widget.setValue(saved[key])
                 widget.blockSignals(False)
         for check, key in ((self.output_minor_ticks_checkbox, "minor_ticks"),
+                            (self.output_top_spine_checkbox, "top_spine"),
+                            (self.output_right_spine_checkbox, "right_spine"),
                             (self.output_grid_checkbox, "grid")):
             if isinstance(saved.get(key), bool):
                 check.blockSignals(True)
@@ -5709,6 +5762,9 @@ class MainWindow(QMainWindow):
         self._run_curve_fit(slice_results, len(stack), stack[0], persist_to=None)
 
     def _on_combine_spectra_clicked(self) -> None:
+        """Compare > Spectrum Arithmetic's Combine, with a message box
+        (rather than only the panel's status line) when there is
+        nothing to combine."""
         stack = self._compare_checked_1d_stack()
         if len(stack) < 2:
             QMessageBox.information(
@@ -5716,19 +5772,17 @@ class MainWindow(QMainWindow):
                 "Combine needs at least two 1D spectra checked in the Compare list.",
             )
             return
-        op = self.combine_op_combo.currentData()
-        if op == "subtract":
-            ops, scaling_factors, label_op = ["+"] + ["-"] * (len(stack) - 1), None, "diff"
-        elif op == "average":
-            ops, scaling_factors, label_op = ["+"] * len(stack), [1.0 / len(stack)] * len(stack), "avg"
-        else:
-            ops, scaling_factors, label_op = ["+"] * len(stack), None, "sum"
-        try:
-            combined = processing_arithmetic.combine_spectra(stack, ops=ops, scaling_factors=scaling_factors)
-        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-            QMessageBox.critical(self, "Combine failed", str(exc))
-            return
-        self._add_derived_spectrum(combined, f"{label_op}({len(stack)} spectra)")
+        self.arithmetic_panel.combine()
+
+    def _add_arithmetic_result(self, spectrum, label: str, description: str) -> int:
+        """A Spectrum Arithmetic result into the session, with the
+        formula and options written into its history -- the log says
+        exactly how it was made."""
+        index = self._add_derived_spectrum(spectrum, label)
+        history = self._ensure_history(index)
+        if history is not None:
+            io_history.add_event(history, description, kind="arithmetic")
+        return index
 
     def _on_compare_controls_changed(self) -> None:
         self._refresh_compare_view_if_active()
@@ -9458,6 +9512,19 @@ class MainWindow(QMainWindow):
         self.revert_autophase_button.clicked.connect(self._on_revert_autophase_clicked)
         form.addRow(self.revert_autophase_button)
 
+        # Baseline: its own section (explicit user request -- it was the
+        # tail of the Phase section). It still acts on whatever the
+        # Phase section's target controls select (dimension, slice, or
+        # every slice of a pseudo-2D), which the note at its top says.
+        self.baseline_box = QWidget()
+        baseline_form = QFormLayout(self.baseline_box)
+        self.baseline_target_note = QLabel(
+            "Acts on the same target as Phase: a 1D spectrum, the pseudo-2D slice "
+            "chosen at the top of the Phase section, or every slice when “Apply to "
+            "every slice” is ticked there.")
+        self.baseline_target_note.setWordWrap(True)
+        baseline_form.addRow(self.baseline_target_note)
+
         self.baseline_correct_button = QPushButton("Baseline Correct")
         self.baseline_correct_button.setCheckable(True)
         self.baseline_correct_button.setToolTip(
@@ -9470,7 +9537,7 @@ class MainWindow(QMainWindow):
             "one-shot action -- uncheck to remove the correction again."
         )
         self.baseline_correct_button.toggled.connect(self._on_baseline_correct_toggled)
-        form.addRow(self.baseline_correct_button)
+        baseline_form.addRow(self.baseline_correct_button)
 
         baseline_options_row = QHBoxLayout()
         self.baseline_method_combo = QComboBox()
@@ -9604,7 +9671,7 @@ class MainWindow(QMainWindow):
         )
         self.baseline_period_spin.valueChanged.connect(self._on_baseline_correct_options_changed)
         baseline_options_row.addWidget(self.baseline_period_spin)
-        form.addRow("Baseline method:", baseline_options_row)
+        baseline_form.addRow("Baseline method:", baseline_options_row)
 
         # --- The overlay --------------------------------------------
         self.baseline_preview_checkbox = QCheckBox("Show baseline on the plot")
@@ -9622,7 +9689,7 @@ class MainWindow(QMainWindow):
         )
         self.baseline_preview_checkbox.stateChanged.connect(
             lambda _s: self._refresh_baseline_preview())
-        form.addRow(self.baseline_preview_checkbox)
+        baseline_form.addRow(self.baseline_preview_checkbox)
         self._refresh_baseline_options_visibility()
 
         # "Phase" dropdown: the Dimension/slice-target controls built
@@ -9635,6 +9702,8 @@ class MainWindow(QMainWindow):
         phase_section_layout.addWidget(self.dimension_box)
         phase_section_layout.addWidget(phase_box)
         layout.addWidget(CollapsibleSection("Phase", content=phase_section_content))
+        self.baseline_section = CollapsibleSection("Baseline", content=self.baseline_box)
+        layout.addWidget(self.baseline_section)
 
         layout.addWidget(CollapsibleSection("Reference", content=self._build_reference_box()))
         layout.addStretch(1)
@@ -11443,6 +11512,9 @@ class MainWindow(QMainWindow):
         spectrum directly."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
+
+        self.fit_workflow_guide = self._build_t1t2_workflow_guide("fit")
+        layout.addWidget(self.fit_workflow_guide)
 
         self.fitting_status_label = QLabel(
             "Measure an intensity per spectrum, or per slice of a "
@@ -13981,9 +14053,69 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return tab
 
+    #: The T1/T2-from-a-pseudo-2D route, step by step. Shown on both
+    #: tiles it crosses (Fit and Dynamics), with the step each one is
+    #: marked -- explicit user request: the pseudo-2D T1/T2 workflow
+    #: "should be more obvious", described "in the Relaxation section
+    #: and Fitting section".
+    _T1T2_STEPS = (
+        ("select", "<b>Select the pseudo-2D</b> in Open experiments and phase it on "
+                   "<i>Process</i>. To phase or fit one slice on its own: right-click the "
+                   "contour ▸ Extract Slice, then <i>Keep for Phasing/Fitting</i>."),
+        ("fit", "<b>Measure every slice on Fit</b>, one way:"
+                "<ul style='margin-left:-20px'>"
+                "<li>Isotropic ▸ <i>Fit Spectrum</i>, or Integration ▸ <i>Integrate "
+                "Regions</i> — every slice in one go;</li>"
+                "<li>CSA/Dipolar, Quadrupolar or Combined Hamiltonian — fit one slice (the "
+                "strongest), then <i>Fit Every Slice with this Model</i> in its Pseudo-2D "
+                "series box.</li></ul>"),
+        ("curve", "<b>Fit the recovery/decay on Dynamics ▸ Fit Curve</b>: "
+                  "choose the model, check the delays (Values), then Fit Curve. It fits "
+                  "whichever measurement you ran last — the line under "
+                  "“Fit Curve settings” names it."),
+    )
+
+    def _build_t1t2_workflow_guide(self, here: str) -> QWidget:
+        """A framed "how to" for T1/T2 from a pseudo-2D series, with the
+        step ``here`` ("fit" or "curve") marked, and a button to the
+        tile the next (or previous) step is on."""
+        box = QGroupBox("T1 / T2 from a pseudo-2D series")
+        box.setObjectName("t1t2WorkflowGuide")
+        v = QVBoxLayout(box)
+        items = []
+        for key, text in self._T1T2_STEPS:
+            if key == here:
+                # Beside the step's own heading, not after its sub-list.
+                head, rest = text.split("</b>", 1)
+                text = f"{head}</b> <b>◀ you are here</b>{rest}"
+            items.append(f"<li>{text}</li>")
+        label = QLabel("<ol style='margin-left:-20px'>" + "".join(items) + "</ol>")
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(label)
+        if here == "fit":
+            button = QPushButton("Next: Dynamics ▸ Fit Curve →")
+            button.setToolTip("Step 3: fit T1/T2 to the per-slice values measured here.")
+            button.clicked.connect(lambda: self._show_side_tab("Dynamics"))
+        else:
+            button = QPushButton("← Back to Fit (measure every slice)")
+            button.setToolTip("Step 2: produce the per-slice values Fit Curve fits.")
+            button.clicked.connect(lambda: self._show_side_tab("Fit"))
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(button)
+        v.addLayout(row)
+        box.guide_label = label
+        box.guide_button = button
+        return box
+
     def _build_curve_fitting_subtab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+
+        self.relaxation_workflow_guide = self._build_t1t2_workflow_guide("curve")
+        layout.addWidget(self.relaxation_workflow_guide)
 
         self.analysis_status_label = QLabel(
             "Fit a curve to the per-spectrum intensities from the "
@@ -20289,10 +20421,15 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Pseudo-2D series (T1, T2, …)")
         v = QVBoxLayout(box)
         note = QLabel(
-            "Fit one slice above first. Every slice is then fitted with those site "
+            "<ol style='margin-left:-20px'>"
+            "<li>Fit one slice above (the strongest: the last of an inversion recovery, "
+            "the first of a T2 decay).</li>"
+            "<li>Click <i>Fit Every Slice</i> below: each slice is fitted with those site "
             "lineshapes held fixed — only each site's intensity (and a linear baseline) "
-            "changes — which is what a relaxation series does. The per-site areas go to "
-            "Dynamics ▸ Fit Curve.")
+            "changes, which is what a relaxation series does.</li>"
+            "<li>Go to <i>Dynamics</i> ▸ <i>Fit Curve</i>: the per-site areas are "
+            "waiting there.</li></ol>")
+        note.setTextFormat(Qt.TextFormat.RichText)
         note.setWordWrap(True)
         v.addWidget(note)
         fit_button = QPushButton(f"Fit Every Slice with this {label} Model")

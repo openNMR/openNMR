@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-29 (curve spines, Spectrum Arithmetic, DNP split, Baseline section, T1/T2 guide round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9 / Py 3.10: 3017 passed, 162 skipped, 0 failed (22 new tests in `test_gui_compare_tools.py`).*
+
 *2026-09-28 (CSA/quad/combined models across pseudo-2D series round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2991 passed, 164 skipped, 0 failed (9 new tests in `test_series_fitting.py`).*
 
 *2026-09-28 (export crosshair, baseline-pinned scroll, DNP legend, full-res Compare round): full suite without `test_data/` or pymatgen, matplotlib 3.10.9: 2982 passed, 164 skipped, 0 failed (new: `test_gui_export_scroll.py`).*
@@ -114,6 +116,20 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Curve spines, Compare ▸ Spectrum Arithmetic, DNP split, Baseline section, T1/T2 guide, slice warning (2026-09-29)
+
+- **Asked**: (1) switch the right/top spines on "Curves & profiles" plots (integral trends, DNP sweep profiles), as the notebook functions can; (2) put `notebook/arithmetic.py` into Compare, before DNP, and split DNP into "DNP Enhancement" and "DNP Field Sweep Profile"; (3) Baseline in Processing as its own collapsible section; (4) make the pseudo-2D T1/T2 route obvious on the Relaxation (Dynamics) and Fit tiles; (5) make "not yet saved" beside "Keep for Phasing/Fitting" hard to miss.
+- **Built**:
+  - Plot Style ▸ "Curve spines: Top / Right" (off by default). `MplCanvas` style keys `top_spine`/`right_spine` (in `style_settings`, `set_style`, `_STYLE_KEYS`, so saved per-type defaults carry them). Applied by `_apply_curve_spines` only to `_curve_axes` -- the Axes `show_relaxation_fit`, `show_parameter_trend` and `show_external_plot(kind="curve")` drew; cleared by `_clear_figure` -- so spectra are never affected, even on a canvas that showed a curve first. Spine on ⇒ ticks on that side too. `notebook.dnp.plot_field_profile` gained `show_top_spine`/`show_right_spine`, and the DNP panel passes the canvas style through, so notebook and GUI give the same figure.
+  - Compare ▸ **Spectrum Arithmetic** (`gui/arithmetic_panel.py`, `ArithmeticPanel`): a sign and factor per checked spectrum, presets (Sum / Average / Subtract from first / Custom), range (overlap or union), align on ppm/Hz, points, interpolation; the formula is written out live. Calls `notebook.arithmetic.combine_spectra` on `bridge.results_from_spectrum` dicts (`combine_to_spectrum`); identical to `processing.arithmetic` numerically (tested). The formula and options go into the new spectrum's history (`kind="arithmetic"`). Replaces the one-line Combine row; `combine_op_combo` and `_on_combine_spectra_clicked` kept under their names. `main_window` no longer imports `processing.arithmetic`.
+  - DNP: one `DnpPanel` still holds state/logic; it now exposes `enhancement_page` and `sweep_page`, placed in two `CollapsibleSection`s. `_dnp_section` is kept as an alias of the enhancement section.
+  - Processing ▸ **Baseline** section between Phase and Reference (`self.baseline_section`, `self.baseline_box`), with a note that it acts on the Phase section's target (slice / every slice).
+  - T1/T2 guide (`_T1T2_STEPS`, `_build_t1t2_workflow_guide`): a framed 3-step guide at the top of Fit and Dynamics, the current step marked "◀ you are here", with a button to the other tile. The model-series box's note is now numbered steps too.
+  - Slice bar: warning icon, 1.25× text, "**<u>not yet saved</u>**", wraps on a narrow plot.
+- **Found on the way**: rebuilding the arithmetic table on every Compare-list row insert was quadratic -- selecting a 128-slice pseudo-2D stalled (`test_external_projection` hung). Now rebuilt only while its section is open, coalesced through a 0 ms single-shot timer.
+- Tests: `tests/test_gui_compare_tools.py` (22). Full suite without `test_data/` or pymatgen, Py 3.10, matplotlib 3.10.9 (Linux, offscreen): 3017 passed, 162 skipped, 0 failed.
+- **Not done**: arithmetic on pseudo-2D slices is via the Compare list only (as before); no per-row reorder inside the arithmetic table (it follows the Compare list's order).
 
 
 ## T1/T2 with CSA, quadrupolar and Combined-Hamiltonian lineshapes: fit every slice (2026-09-28)

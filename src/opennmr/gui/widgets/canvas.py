@@ -23,7 +23,7 @@ from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSpinBox,
-    QToolButton, QVBoxLayout, QWidget,
+    QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
 from ...core.registry import find_gamma, NUC_label
@@ -927,9 +927,25 @@ class MplCanvas(QWidget):
         self._slice_bar = QWidget(self)
         slice_bar_layout = QHBoxLayout(self._slice_bar)
         slice_bar_layout.setContentsMargins(4, 0, 4, 0)
+        # **Say loudly that the slice is only being viewed.** Explicit
+        # user request: make "not yet saved" more obvious -- a warning
+        # icon, larger bold text, the key words underlined. Phasing or
+        # fitting what is on screen here acts on the 2D, not the slice,
+        # until it is kept.
+        self._slice_warning_icon = QLabel()
+        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
+        self._slice_warning_icon.setPixmap(icon.pixmap(22, 22))
+        self._slice_warning_icon.setAccessibleName("Warning")
+        slice_bar_layout.addWidget(self._slice_warning_icon)
         self._slice_label = QLabel("")
-        slice_bar_layout.addWidget(self._slice_label)
-        slice_bar_layout.addStretch(1)
+        self._slice_label.setTextFormat(Qt.TextFormat.RichText)
+        slice_font = self._slice_label.font()
+        if slice_font.pointSizeF() > 0:
+            slice_font.setPointSizeF(slice_font.pointSizeF() * 1.25)
+        self._slice_label.setFont(slice_font)
+        # Wraps rather than being cut off on a narrow plot.
+        self._slice_label.setWordWrap(True)
+        slice_bar_layout.addWidget(self._slice_label, 1)
 
         self._keep_slice_button = QPushButton("Keep for Phasing/Fitting")
         self._keep_slice_button.setToolTip(
@@ -1039,6 +1055,16 @@ class MplCanvas(QWidget):
         self._TICK_WIDTH = type(self)._TICK_WIDTH
         self._grid_visible = False
         self._minor_ticks_visible = True
+        #: Top/right spines on a "curve" plot (relaxation/diffusion
+        #: fits, integral and parameter trends, DNP field profiles).
+        #: Off by default -- the notebook plot functions' own
+        #: ``show_top_spine=False, show_right_spine=False`` -- and
+        #: switchable from Plot Style (explicit user request). Applied
+        #: only to the Axes a curve view drew (``_curve_axes``), never
+        #: to a spectrum, whose open-frame look is deliberate.
+        self._top_spine_visible = False
+        self._right_spine_visible = False
+        self._curve_axes: list = []
         #: The palette every multi-series plot takes its default
         #: colours from -- Compare, extracted slices, the DOSY overlay
         #: and the 2D overlay. One setting rather than one per view, so
@@ -2745,6 +2771,9 @@ class MplCanvas(QWidget):
         # Opt-in per view: a rebuild starts from "no crosshair" and the
         # next show_* says whether it wants one.
         self._crosshair_ready = False
+        # Likewise the curve Axes whose top/right spines Plot Style
+        # controls: only the next curve view re-declares them.
+        self._curve_axes = []
         # The Axes these were drawn on are about to go; the Python-side
         # list would otherwise keep handing out artists belonging to a
         # figure that no longer contains them.
@@ -3515,7 +3544,20 @@ class MplCanvas(QWidget):
             if ax.get_title():
                 ax.title.set_fontsize(self._AXIS_LABELSIZE)
             self._apply_title_and_font(ax)
+        self._apply_curve_spines()
         self._restyle_existing_legends()
+
+    def _apply_curve_spines(self) -> None:
+        """Top/right spines on the curve Axes, as Plot Style says. With
+        a spine shown, its ticks are drawn on it too (copies of the
+        bottom/left ones), which is how a closed frame reads in a
+        manuscript; hidden, they go with it."""
+        axes = [ax for ax in self._curve_axes if ax in self.figure.axes]
+        for ax in axes:
+            ax.spines["top"].set_visible(self._top_spine_visible)
+            ax.spines["right"].set_visible(self._right_spine_visible)
+            ax.tick_params(which="both", top=self._top_spine_visible,
+                           right=self._right_spine_visible)
 
     def _legend_kwargs(self) -> dict:
         """The keyword arguments every ``ax.legend()`` on this canvas is
@@ -3965,6 +4007,8 @@ class MplCanvas(QWidget):
             "tick_length": self._TICK_LENGTH,
             "tick_width": self._TICK_WIDTH,
             "minor_ticks": self._minor_ticks_visible,
+            "top_spine": self._top_spine_visible,
+            "right_spine": self._right_spine_visible,
             "grid": self._grid_visible,
             "legend_loc": self._legend_loc,
             "compare_colormap": self._compare_colormap,
@@ -3995,7 +4039,7 @@ class MplCanvas(QWidget):
                   axis_label_template=None, legend_frameon=None,
                   legend_fontsize=None, legend_framealpha=None, legend_facecolor=None,
                   legend_linewidth=None, legend_style=None,
-                  trace_label_position=None) -> None:
+                  trace_label_position=None, top_spine=None, right_spine=None) -> None:
         """The Output tab's live style panel -- updates whichever of
         these aren't ``None``, both as the new per-instance default
         (every ``show_*`` method reads ``self._AXIS_LINEWIDTH`` etc.,
@@ -4022,6 +4066,12 @@ class MplCanvas(QWidget):
             self._TICK_WIDTH = tick_width
         if minor_ticks is not None:
             self._minor_ticks_visible = minor_ticks
+        # Curve plots only (see _curve_axes); applied below by
+        # _apply_current_axis_style like the rest of the axis furniture.
+        if top_spine is not None:
+            self._top_spine_visible = bool(top_spine)
+        if right_spine is not None:
+            self._right_spine_visible = bool(right_spine)
         if grid is not None:
             self._grid_visible = grid
         if legend_loc is not None:
@@ -4160,6 +4210,7 @@ class MplCanvas(QWidget):
         "font_family", "axis_label_style", "axis_label_template", "legend_frameon",
         "legend_fontsize", "legend_framealpha", "legend_facecolor",
         "legend_linewidth", "legend_style", "trace_label_position",
+        "top_spine", "right_spine",
     )
 
     def apply_style_defaults(self, style: dict) -> None:
@@ -4423,7 +4474,12 @@ class MplCanvas(QWidget):
         showing = self._extracted_trace is not None
         self._slice_bar.setVisible(showing)
         if showing:
-            self._slice_label.setText(f"Viewing {self._extracted_label} \u2014 not yet in the spectrum list")
+            self._slice_label.setText(
+                f"Viewing {self._extracted_label} \u2014 <b><u>not yet saved</u></b>. "
+                f"Keep it to phase or fit it on its own \u2192")
+            self._slice_label.setToolTip(
+                "This slice is only being displayed. Until it is kept, the Phase controls "
+                "and the fits act on the 2D it came from, and leaving this view discards it.")
 
     def extract_slice(self, axis: str, index: int) -> None:
         """Pull a single row (``axis="f1"``) or column (``"f2"``) out
@@ -6116,6 +6172,7 @@ class MplCanvas(QWidget):
                                     linewidth=self._AXIS_LINEWIDTH)
         plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH, minor=self._minor_ticks_visible,
                                    labelsize=self._AXIS_LABELSIZE)
+        self._curve_axes = [self.ax]
         self._legend_visible = True
         self._apply_current_axis_style()
         self._apply_view_options()
@@ -6170,6 +6227,7 @@ class MplCanvas(QWidget):
                                     linewidth=self._AXIS_LINEWIDTH)
         plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
                                    minor=self._minor_ticks_visible, labelsize=self._AXIS_LABELSIZE)
+        self._curve_axes = [self.ax]
         self._legend_visible = False
         self._apply_current_axis_style()
         self._apply_view_options()
@@ -6216,6 +6274,8 @@ class MplCanvas(QWidget):
             if ax.get_legend() is not None:
                 ax.get_legend().set_visible(self._legend_visible)
         self.ax = self.figure.axes[0] if self.figure.axes else self.figure.add_subplot(111)
+        if kind == "curve":
+            self._curve_axes = list(self.figure.axes)
         self._apply_current_axis_style()
         if self._grid_visible:
             for ax in self.figure.axes:
