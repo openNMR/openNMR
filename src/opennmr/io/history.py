@@ -160,6 +160,7 @@ from ..processing.report import WINDOW_NAMES  # noqa: E402 -- after the helpers 
 _BASELINE_METHODS = {
     "linear": "linear", "polynomial": "polynomial", "sinusoidal": "sinusoidal",
     "spline": "smoothing spline", "whittaker": "Whittaker (arPLS)",
+    "manual_polynomial": "manual Ax⁴+Bx³+Cx²+Dx+E", "manual_sine": "manual A·sin(Bx+C)+D",
 }
 
 #: Keys never shown in the log: bookkeeping that follows from a logged
@@ -278,6 +279,17 @@ KEY_INFO: dict[str, tuple[str, object]] = {
     "baseline_smoothing": ("Baseline smoothing", lambda v: _num(v, 4)),
     "baseline_period": ("Baseline period", lambda v: _num(v, 4)),
     "baseline_harmonics": ("Baseline harmonics", lambda v: str(v)),
+    "baseline_manual_regions": ("Baseline regions", lambda v: "; ".join(
+        f"{_num(min(r), 4)} – {_num(max(r), 4)} ppm" for r in v or [])),
+    "baseline_manual_polynomial_params": ("Baseline A, B, C, D, E", lambda v: ", ".join(
+        f"{float(x):.6g}" for x in v or [])),
+    "baseline_manual_sine_params": ("Baseline A, B, C, D", lambda v: ", ".join(
+        f"{float(x):.6g}" for x in v or [])),
+    "baseline_manual_polynomial_fixed": ("Baseline fixed coefficients", lambda v: ", ".join(
+        n for n, f in zip("ABCDE", v or []) if f) or "none"),
+    "baseline_manual_sine_fixed": ("Baseline fixed coefficients", lambda v: ", ".join(
+        n for n, f in zip("ABCD", v or []) if f) or "none"),
+    "baseline_manual_refit": ("Baseline refitted per trace", _onoff),
     "sr_shift_hz": ("Referencing (SR shift)", _hz),
     "sr_shift_hz_f1": ("Referencing F1 (SR shift)", _hz),
     "meta.nucleus": ("Nucleus", str),
@@ -578,7 +590,13 @@ def _relevant(key: str, flat: dict, source: dict | None) -> bool:
         method = flat.get("baseline_method", "linear")
         needs = {"baseline_degree": "polynomial", "baseline_lam": "whittaker",
                  "baseline_smoothing": "spline", "baseline_period": "sinusoidal",
-                 "baseline_harmonics": "sinusoidal"}
+                 "baseline_harmonics": "sinusoidal",
+                 "baseline_manual_polynomial_params": "manual_polynomial",
+                 "baseline_manual_sine_params": "manual_sine",
+                 "baseline_manual_polynomial_fixed": "manual_polynomial",
+                 "baseline_manual_sine_fixed": "manual_sine"}
+        if key in ("baseline_manual_regions", "baseline_manual_refit"):
+            return bool(flat.get("baseline_correct")) and str(method).startswith("manual_")
         return bool(flat.get("baseline_correct")) and (key == "baseline_method" or needs.get(key) == method)
     if key == "live_truncate":
         full = flat.get("fid_original_length")

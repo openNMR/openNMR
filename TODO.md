@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-09-29 (round 4: Herzfeld-Berger skew sign, manual quartic/sine baselines): full suite without `test_data/` or pymatgen, matplotlib 3.10.9 / Py 3.10: 3144 passed, 164 skipped, 1 failed (48 new tests in `test_manual_baseline.py`, `test_gui_manual_baseline.py`). The failure, `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`, is pre-existing: it fails identically on the unmodified round-3 code.*
+
 *2026-09-29 (round 3: kept fit models, openNMR states, processed-only reopen fix): full suite without `test_data/` or pymatgen, matplotlib 3.10.9 / Py 3.10: 3063 passed, 162 skipped, 0 failed (17 new tests in `test_state_and_fit_models.py`).*
 
 *2026-09-29 (round 2: Czjzek, fit-component display, curve spines in Settings): full suite without `test_data/` or pymatgen, matplotlib 3.10.9 / Py 3.10: 3047 passed, 162 skipped, 0 failed (30 new tests in `test_czjzek.py`, `test_gui_czjzek_display.py`).*
@@ -120,6 +122,18 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Herzfeld-Berger skew = 3(δ22 − δiso)/Ω; manual baselines (quartic / sine) in notebook and GUI (2026-09-29, round 4)
+
+- **Asked**: (1) make the Herzfeld-Berger skew the standard definition, κ = 3(δ22 − δiso)/Ω; (2) "make a baseline manually" by fitting A x⁴ + B x³ + C x² + D x + E or A sin(B x + C) + D, correctable in the GUI.
+- **What was wrong**: `herzfeld_berger_csa_tensor` and `convert_csa_parameters` used κ = 3(δiso − δ22)/Ω -- the *opposite* sign to Herzfeld-Berger/Mason. The old changelog item 3 in `notebook/simulations.py` called that sign a "fix"; it was the bug. Every HB skew entered, fitted or converted had its sign flipped (κ = +1 gave δ22 = δ33 instead of δ22 = δ11). Now δ22 = δiso + Ωκ/3. **Saved states, sidecars and notebooks holding HB skew values from before this change describe the mirror-image tensor: negate κ to keep the old tensor.** Haeberlen was unaffected. `tests/test_gui_round4_transfers.py` pinned the old sign (−0.529412) and now uses +0.529412 (worked by hand: principal 66, 34, −70 ppm).
+- **Built**:
+  - `notebook/manual_baseline.py` (exported from `opennmr.notebook`): `fit_manual_baseline(x, y, model, regions, fixed, initial)` (polynomial: exact column-scaled linear least squares; sine: FFT/trial-frequency linear solve for the start, then `curve_fit`, reported with A, B ≥ 0, C in (−π, π]); 1σ errors; `evaluate_manual_baseline`, `manual_baseline_correct` (on notebook result dicts), `plot_manual_baseline`, `describe_manual_baseline`. x is ppm; no sigma-clipping (the regions are the user's statement of where the baseline is); with no regions, the first/last 5 %.
+  - `processing.ft.compute_baseline`/`baseline_correct` methods `"manual_polynomial"`/`"manual_sine"` with `manual_params` (evaluated as given), `manual_refit` (fit to `baseline_regions` on every trace), `manual_fixed`.
+  - GUI: two entries in Process ▸ Baseline ▸ method; `gui/manual_baseline_box.py` (`ManualBaselineBox`, `parse_regions`) under it: regions line + "Pick on plot" (drag on the Processing preview; uses the canvas's existing region-select mode, released like any other mode), coefficient boxes with ± and Fix, "Fit to regions" (fits the trace *before* correction -- the pipeline's stash, else the spectrum/selected slice), "Refit on every trace". Hand edits switch Refit off (a plain focus change does not). State in `metadata.raw`: `baseline_manual_regions`, `baseline_manual_{polynomial,sine}_{params,fixed}` (per model, so switching keeps both), `baseline_manual_refit` -- so the toggle, overlay, every-slice path, sidecar and restore-on-reselect all work as for the automatic methods. Regions shaded green on the preview (`MplCanvas.set_baseline_regions`). Warnings: no regions, a region with signal, a region with no points, too few points. Methods report (`processing/report.py`) and history log state the equation, coefficients and regions.
+  - CSA tooltips (`CSA_ANISOTROPY_TIP`, `CSA_ASYMMETRY_TIP` in `notebook/simulations.py`) state both conventions' definitions on the Simulate/Fit CSA and Combined panels.
+- **Not done**: a manual baseline is not offered for the F1 dimension of a genuine 2D, beyond what the existing baseline targeting already does; no drag-to-edit of the curve itself (coefficients are typed).
+- Tests: `tests/test_manual_baseline.py` (26, incl. HB skew), `tests/test_gui_manual_baseline.py` (22). Full suite: 3144 passed, 164 skipped, 1 pre-existing Czjzek failure (see top).
 
 ## Field for Czjzek; kept fit models; openNMR states; processed-only reopen fixed (2026-09-29, round 3)
 

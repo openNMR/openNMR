@@ -153,7 +153,7 @@ def test_csa_use_fitted_send_and_back(window):
         window.sim_csa_convention_combo.findData("Herzfeld-Berger"))
     window.sim_csa_diso_spin.setValue(10.0)
     window.sim_csa_aniso_spin.setValue(136.0)
-    window.sim_csa_skeweta_spin.setValue(-0.529412)
+    window.sim_csa_skeweta_spin.setValue(0.529412)
     t.setCurrentCell(0, 1)
     window._send_csa_simulation_to_fit()
     assert window.csa_convention_combo.currentData() == "Haeberlen"

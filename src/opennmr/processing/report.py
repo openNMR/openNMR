@@ -50,6 +50,8 @@ _BASELINE_NAMES = {
     "sinusoidal": "a sinusoidal fit",
     "spline": "a cubic smoothing spline",
     "whittaker": "an asymmetrically reweighted Whittaker smoother",
+    "manual_polynomial": "a manual polynomial baseline",
+    "manual_sine": "a manual sinusoidal baseline",
 }
 
 
@@ -119,7 +121,25 @@ def _baseline_phrase(raw: dict) -> str | None:
     if method == "polynomial":
         degree = int(raw.get("baseline_degree", 2) or 2)
         described = f"a degree-{degree} polynomial fit"
+    if method in ("manual_polynomial", "manual_sine"):
+        described = _manual_baseline_description(raw, method.split("_", 1)[1])
     return f"the baseline was corrected using {described}"
+
+
+def _manual_baseline_description(raw: dict, model: str) -> str:
+    """The model, its coefficients (or that it was refitted per trace)
+    and the regions, as a methods section would state them."""
+    from ..notebook import manual_baseline as nb_manual
+
+    equation = nb_manual.MANUAL_BASELINE_EQUATIONS[model]
+    regions = raw.get("baseline_manual_regions") or []
+    where = ("the regions " + ", ".join(f"{_number(min(r))} to {_number(max(r))} ppm" for r in regions)
+             if regions else "the first and last 5 % of the spectrum")
+    params = raw.get(f"baseline_manual_{model}_params")
+    names = nb_manual.MANUAL_BASELINE_PARAMS[model]
+    if raw.get("baseline_manual_refit") or params is None or len(params) != len(names):
+        return f"{equation} (x in ppm) least-squares fitted to {where} of each trace"
+    return f"{nb_manual.describe_manual_baseline(model, params, 4)}, chosen against {where}"
 
 
 def processing_summary(spectrum) -> list[tuple[str, str]]:

@@ -69,6 +69,11 @@ from .relaxation import (
 )
 
 from .arithmetic import combine_spectra, combine_spectra_as_results
+from .manual_baseline import (
+    fit_manual_baseline, evaluate_manual_baseline, manual_baseline_correct,
+    plot_manual_baseline, describe_manual_baseline, polynomial_baseline, sine_baseline,
+    MANUAL_BASELINE_PARAMS, MANUAL_BASELINE_EQUATIONS,
+)
 
 from .simulations import (
     haeberlen_csa_tensor, herzfeld_berger_csa_tensor, csa_definition, csa_axis_limits,
@@ -243,6 +248,10 @@ __all__ = [
     "NMR2D_relaxation_workflow",
     # arithmetic
     "combine_spectra", "combine_spectra_as_results",
+    # manual baseline
+    "fit_manual_baseline", "evaluate_manual_baseline", "manual_baseline_correct",
+    "plot_manual_baseline", "describe_manual_baseline", "polynomial_baseline", "sine_baseline",
+    "MANUAL_BASELINE_PARAMS", "MANUAL_BASELINE_EQUATIONS",
     # Czjzek distributions
     "czjzek_pdf", "czjzek_statistics", "czjzek_spectrum", "fit_czjzek_spectrum",
     "evaluate_czjzek_fit", "czjzek_fit_report", "plot_czjzek_distribution", "plot_czjzek_fit",

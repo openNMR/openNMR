@@ -64,6 +64,9 @@ from ..plotting import accessibility as plot_accessibility
 from ..notebook import bridge as notebook_bridge
 from ..notebook import csa_fitting as notebook_csa
 from ..notebook import simulations as notebook_simulations
+from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
+from ..notebook import manual_baseline as nb_manual_baseline
+from .manual_baseline_box import ManualBaselineBox
 from ..notebook import diffusion as notebook_diffusion
 from ..notebook import fitting as notebook_fitting
 from ..notebook import two_d as notebook_two_d
@@ -9909,7 +9912,12 @@ class MainWindow(QMainWindow):
         self.baseline_method_combo.addItem("Sinusoidal", "sinusoidal")
         self.baseline_method_combo.addItem("Spline", "spline")
         self.baseline_method_combo.addItem("Whittaker", "whittaker")
+        self.baseline_method_combo.addItem("Manual: Ax⁴+Bx³+Cx²+Dx+E", "manual_polynomial")
+        self.baseline_method_combo.addItem("Manual: A·sin(Bx+C)+D", "manual_sine")
         self.baseline_method_combo.setToolTip(
+            "Manual: your own model -- a quartic polynomial or a sine -- fitted "
+            "to baseline regions you choose, with every coefficient shown, "
+            "fixable and editable by hand (the controls appear below).\n\n"
             "Whittaker: a penalised smooth curve fitted to the whole "
             "spectrum, with everything above it iteratively pushed "
             "down until the curve settles onto the baseline. Unlike "
@@ -10035,6 +10043,26 @@ class MainWindow(QMainWindow):
         self.baseline_period_spin.valueChanged.connect(self._on_baseline_correct_options_changed)
         baseline_options_row.addWidget(self.baseline_period_spin)
         baseline_form.addRow("Baseline method:", baseline_options_row)
+
+        # --- Manual baseline: the user's own model -------------------
+        # Explicit user request: "make a baseline manually" by fitting
+        # A x^4 + B x^3 + C x^2 + D x + E or A sin(B x + C) + D, and
+        # correcting the baseline in the GUI. The state lives in
+        # metadata.raw (baseline_manual_*), read by _baseline_kwargs,
+        # so the toggle, the overlay and "every slice" all work as for
+        # the automatic methods.
+        self.baseline_manual_box = ManualBaselineBox()
+        self.baseline_manual_box.regionsEdited.connect(self._on_manual_baseline_regions_edited)
+        self.baseline_manual_box.paramsEdited.connect(self._on_manual_baseline_params_edited)
+        self.baseline_manual_box.fixedChanged.connect(self._on_manual_baseline_fixed_changed)
+        self.baseline_manual_box.refitToggled.connect(self._on_manual_baseline_refit_toggled)
+        self.baseline_manual_box.fitRequested.connect(self._on_manual_baseline_fit_clicked)
+        self.baseline_manual_box.pickToggled.connect(self._on_manual_baseline_pick_toggled)
+        self.baseline_manual_box.clearRequested.connect(self._on_manual_baseline_clear_regions)
+        self.processing_preview_canvas.regionSelected.connect(self._on_manual_baseline_region_picked)
+        self.processing_preview_canvas.regionSelectModeChanged.connect(
+            self._on_preview_region_mode_changed)
+        baseline_form.addRow(self.baseline_manual_box)
 
         # --- The overlay --------------------------------------------
         self.baseline_preview_checkbox = QCheckBox("Show baseline on the plot")
@@ -10657,7 +10685,7 @@ class MainWindow(QMainWindow):
         which would make the preview a lie in exactly the situation it
         exists to catch."""
         raw = spectrum.metadata.raw
-        return {
+        kwargs = {
             "method": raw.get("baseline_method", "linear"),
             "smoothing": raw.get("baseline_smoothing"),
             "degree": raw.get("baseline_degree", 2),
@@ -10665,6 +10693,245 @@ class MainWindow(QMainWindow):
             "n_harmonics": raw.get("baseline_harmonics", 1),
             "period": raw.get("baseline_period"),
         }
+        model = MainWindow._manual_baseline_model_of(kwargs["method"])
+        if model is not None:
+            kwargs.update(MainWindow._manual_baseline_kwargs(raw, model))
+        return kwargs
+
+    # ---- Manual baseline (Process ▸ Baseline ▸ "Manual: ...") -----------
+
+    @staticmethod
+    def _manual_baseline_model_of(method) -> str | None:
+        """``"polynomial"``/``"sine"`` for a manual method, else ``None``."""
+        return {"manual_polynomial": "polynomial", "manual_sine": "sine"}.get(method)
+
+    @staticmethod
+    def _manual_key(model: str, what: str) -> str:
+        """Per-model keys, so switching model keeps each one's numbers:
+        ``baseline_manual_polynomial_params``, ``..._sine_fixed``, ..."""
+        return f"baseline_manual_{model}_{what}"
+
+    @staticmethod
+    def _manual_baseline_kwargs(raw: dict, model: str) -> dict:
+        names = nb_manual_baseline.MANUAL_BASELINE_PARAMS[model]
+        params = raw.get(MainWindow._manual_key(model, "params"))
+        if params is not None and len(params) != len(names):
+            params = None
+        fixed = raw.get(MainWindow._manual_key(model, "fixed"))
+        if fixed is not None and len(fixed) != len(names):
+            fixed = None
+        regions = raw.get("baseline_manual_regions") or None
+        return {
+            "baseline_regions": [tuple(r) for r in regions] if regions else None,
+            "manual_params": params,
+            "manual_fixed": fixed,
+            "manual_refit": bool(raw.get("baseline_manual_refit", False)),
+        }
+
+    def _manual_baseline_context(self):
+        """``(index, spectrum, model)`` when a spectrum is selected and a
+        manual method is chosen, else ``None``."""
+        index = self._selected_index()
+        model = self._manual_baseline_model_of(self.baseline_method_combo.currentData())
+        if index is None or model is None:
+            return None
+        return index, self.session.spectra[index], model
+
+    def _after_manual_baseline_change(self, index, spectrum) -> None:
+        self._schedule_sidecar_save(index)
+        if self.baseline_correct_button.isChecked():
+            self._apply_phase_preview()
+        self._warn_about_baseline_choice(spectrum)
+        self._refresh_baseline_preview()
+
+    def _on_manual_baseline_regions_edited(self, regions) -> None:
+        context = self._manual_baseline_context()
+        if context is None:
+            return
+        index, spectrum, _model = context
+        spectrum.metadata.raw["baseline_manual_regions"] = [list(map(float, r)) for r in regions]
+        self.baseline_manual_box.status_label.setText(
+            f"{len(regions)} baseline region(s). Press “Fit to regions” to fit them."
+            if regions else "No regions: a fit uses the first and last 5 % of the spectrum.")
+        self._after_manual_baseline_change(index, spectrum)
+
+    def _on_manual_baseline_region_picked(self, lo: float, hi: float) -> None:
+        """A drag on the Processing preview while "Pick on plot" is on."""
+        if not self.baseline_manual_box.pick_button.isChecked():
+            return
+        try:
+            regions = self.baseline_manual_box.regions()
+        except ValueError:
+            regions = []
+        regions.append((float(lo), float(hi)))
+        self.baseline_manual_box.set_regions(regions)
+        self._on_manual_baseline_regions_edited(regions)
+
+    def _on_manual_baseline_clear_regions(self) -> None:
+        self.baseline_manual_box.set_regions([])
+        self._on_manual_baseline_regions_edited([])
+
+    def _on_manual_baseline_pick_toggled(self, checked: bool) -> None:
+        if checked:
+            # The regions are dragged on the Processing preview -- the
+            # canvas the overlay and the shading are on.
+            if self.canvas_tabs.indexOf(self.processing_preview_canvas) >= 0:
+                self.canvas_tabs.setCurrentWidget(self.processing_preview_canvas)
+                self._refresh_processing_preview_if_active()
+        self.processing_preview_canvas.set_region_select_mode(checked)
+
+    def _on_preview_region_mode_changed(self, enabled: bool) -> None:
+        # Another mode (pan, Measure...) took over the preview: the
+        # button follows, so it never claims a mode that is off.
+        button = self.baseline_manual_box.pick_button
+        if button.isChecked() != enabled:
+            button.blockSignals(True)
+            button.setChecked(enabled)
+            button.blockSignals(False)
+
+    def _on_manual_baseline_params_edited(self, values) -> None:
+        context = self._manual_baseline_context()
+        if context is None:
+            return
+        index, spectrum, model = context
+        raw = spectrum.metadata.raw
+        raw[self._manual_key(model, "params")] = [float(v) for v in values]
+        # A hand-set coefficient has to be what is subtracted, not
+        # overwritten by the next automatic refit.
+        raw["baseline_manual_refit"] = False
+        box = self.baseline_manual_box
+        box.refit_check.blockSignals(True)
+        box.refit_check.setChecked(False)
+        box.refit_check.blockSignals(False)
+        box.status_label.setText("Coefficients set by hand.")
+        self._after_manual_baseline_change(index, spectrum)
+
+    def _on_manual_baseline_fixed_changed(self, flags) -> None:
+        context = self._manual_baseline_context()
+        if context is None:
+            return
+        index, spectrum, model = context
+        raw = spectrum.metadata.raw
+        raw[self._manual_key(model, "fixed")] = [bool(f) for f in flags]
+        # The fixed values are whatever the boxes hold now.
+        raw[self._manual_key(model, "params")] = self.baseline_manual_box.params()
+        self._after_manual_baseline_change(index, spectrum)
+
+    def _on_manual_baseline_refit_toggled(self, checked: bool) -> None:
+        context = self._manual_baseline_context()
+        if context is None:
+            return
+        index, spectrum, _model = context
+        spectrum.metadata.raw["baseline_manual_refit"] = bool(checked)
+        self._after_manual_baseline_change(index, spectrum)
+
+    def _manual_baseline_source(self, spectrum):
+        """``(ppm, real trace before baseline correction)`` of the trace
+        the user is looking at, or ``None``.
+
+        Before correction is the point: fitting the already-corrected
+        trace would fit a flat line. In order of trust: the trace the
+        pipeline stashed as it applied the correction; with no
+        correction applied, the spectrum itself (the selected slice of a
+        series), then the Processing preview's own trace; with a
+        fixed manual baseline applied, the displayed trace plus that
+        baseline (exact, since it is a fixed curve)."""
+        raw = spectrum.metadata.raw
+        axes = []
+        try:
+            ppm = np.asarray(spectrum.axis_values(-1, "ppm"), dtype=float)
+        except Exception:  # noqa: BLE001 -- no ppm axis: nothing to fit against
+            ppm = None
+        own = None
+        if ppm is not None:
+            data = np.real(spectrum.data)
+            if data.ndim == 2:
+                row = self._phase_target_row if isinstance(self._phase_target_row, int) else 0
+                data = data[min(max(row, 0), data.shape[0] - 1)]
+            if data.ndim == 1 and data.size == ppm.size:
+                own = (ppm, np.asarray(data, dtype=float))
+                axes.append(own)
+        # The preview's trace after the spectrum's own: it can be left
+        # over from another spectrum, but it is the only copy of a
+        # trace with unapplied processing, which the stash may hold.
+        preview = self.processing_preview_canvas.baseline_preview_source()
+        if preview is not None:
+            axes.append(preview)
+        if raw.get("baseline_correct"):
+            applied = raw.get(self._BASELINE_APPLIED_KEY)
+            if isinstance(applied, dict) and applied.get("uncorrected") is not None:
+                y = np.asarray(applied["uncorrected"], dtype=float)
+                for x, _data in axes:
+                    if np.size(x) == y.size:
+                        return np.asarray(x, dtype=float), y
+            kwargs = self._baseline_kwargs(spectrum)
+            if kwargs.get("manual_params") is not None and not kwargs.get("manual_refit"):
+                x, shown = axes[0] if axes else (None, None)
+                if x is not None:
+                    model = self._manual_baseline_model_of(kwargs["method"])
+                    return x, shown + nb_manual_baseline.evaluate_manual_baseline(
+                        x, model, kwargs["manual_params"])
+            return None
+        return axes[0] if axes else None
+
+    def _on_manual_baseline_fit_clicked(self) -> None:
+        context = self._manual_baseline_context()
+        box = self.baseline_manual_box
+        if context is None:
+            box.status_label.setText("Select a spectrum first.")
+            return
+        index, spectrum, model = context
+        try:
+            regions = box.regions()
+        except ValueError as exc:
+            box.status_label.setText(f"Regions: {exc}.")
+            return
+        source = self._manual_baseline_source(spectrum)
+        if source is None:
+            box.status_label.setText(
+                "Could not find the uncorrected trace to fit -- untick Baseline Correct, "
+                "fit, then tick it again.")
+            return
+        x, y = source
+        names = nb_manual_baseline.MANUAL_BASELINE_PARAMS[model]
+        flags = box.fixed()
+        current = box.params()
+        fixed = {n: v for n, v, f in zip(names, current, flags) if f}
+        try:
+            fit = nb_manual_baseline.fit_manual_baseline(x, y, model, regions=regions, fixed=fixed)
+        except Exception as exc:  # noqa: BLE001 -- reported to the user, not raised
+            box.status_label.setText(f"Fit failed: {exc}")
+            return
+        values = [fit["params"][n] for n in names]
+        box.set_params(values, fit["errors"])
+        raw = spectrum.metadata.raw
+        raw[self._manual_key(model, "params")] = values
+        raw[self._manual_key(model, "fixed")] = flags
+        raw["baseline_manual_regions"] = [list(map(float, r)) for r in regions]
+        where = (f"{len(regions)} region(s)" if regions else "the first and last 5 % of the spectrum")
+        box.status_label.setText(
+            f"Fitted to {fit['n_points']} points in {where}; residual RMS {fit['rms']:.3g} "
+            f"(the noise level, if the regions hold only baseline).")
+        self.processing_status_label.setText(
+            "Manual baseline: " + nb_manual_baseline.describe_manual_baseline(model, values, 4))
+        self._after_manual_baseline_change(index, spectrum)
+
+    def _restore_manual_baseline_controls(self, spectrum) -> None:
+        """Put this spectrum's manual-baseline state into the box (on
+        selection change), like every other baseline control."""
+        box = self.baseline_manual_box
+        raw = spectrum.metadata.raw
+        model = self._manual_baseline_model_of(raw.get("baseline_method")) or "polynomial"
+        box.set_model(model)
+        box.set_regions([tuple(r) for r in raw.get("baseline_manual_regions") or []])
+        kwargs = self._manual_baseline_kwargs(raw, model)
+        box.set_params(kwargs["manual_params"] or [0.0] * len(
+            nb_manual_baseline.MANUAL_BASELINE_PARAMS[model]))
+        box.set_fixed(kwargs["manual_fixed"])
+        box.refit_check.blockSignals(True)
+        box.refit_check.setChecked(kwargs["manual_refit"])
+        box.refit_check.blockSignals(False)
+        box.status_label.setText("")
 
     #: Canvases the baseline overlay is drawn on. Both, because the
     #: Spectrum tab is where a 1D is looked at and the Processing
@@ -10734,7 +11001,13 @@ class MainWindow(QMainWindow):
         # answered in one place.
         if index is not None and self.session.spectra[index].metadata.vendor == "derived":
             show = False
+        manual_regions = None
+        if (index is not None and self._manual_baseline_model_of(
+                self.session.spectra[index].metadata.raw.get("baseline_method")) is not None
+                and self.session.spectra[index].metadata.vendor != "derived"):
+            manual_regions = self.session.spectra[index].metadata.raw.get("baseline_manual_regions")
         for canvas in self._baseline_preview_canvases():
+            canvas.set_baseline_regions(manual_regions)
             source = canvas.baseline_preview_source() if show else None
             if source is None or index is None:
                 canvas.set_baseline_preview()
@@ -10835,6 +11108,11 @@ class MainWindow(QMainWindow):
                     f"is {spectrum.data.shape[0]} x {spectrum.data.shape[-1]} — expect it to "
                     f"take a while each time a control changes"
                 )
+        elif self._manual_baseline_model_of(method) is not None:
+            # The user chose the regions; check the claim that they hold
+            # only baseline, which is the one thing that decides whether
+            # a manual fit is right.
+            notes += self._manual_baseline_region_warnings(spectrum)
         elif spectrum.ndim >= 1:
             # Every other method assumes the spectrum's own edges are
             # baseline. That is a checkable claim, not a caveat.
@@ -10850,6 +11128,50 @@ class MainWindow(QMainWindow):
         self.processing_status_label.setText(message)
         if message:
             self.statusBar().showMessage(message, 15000)
+
+    @staticmethod
+    def _manual_baseline_region_warnings(spectrum, threshold: float = 0.25) -> list[str]:
+        """What is wrong with a manual baseline's regions, measured on
+        the spectrum: none at all, a region outside the spectrum, or a
+        region holding real signal (above ``threshold`` of the maximum,
+        after removing the region's own straight-line trend)."""
+        raw = spectrum.metadata.raw
+        model = MainWindow._manual_baseline_model_of(raw.get("baseline_method"))
+        regions = raw.get("baseline_manual_regions") or []
+        notes: list[str] = []
+        if not regions:
+            notes.append("no baseline regions are set, so a fit uses the first and last 5 % "
+                         "of the spectrum — choose regions that hold only baseline")
+            return notes
+        try:
+            ppm = np.asarray(spectrum.axis_values(-1, "ppm"), dtype=float)
+        except Exception:  # noqa: BLE001 -- no ppm axis to check against
+            return notes
+        data = np.real(spectrum.data)
+        if data.ndim == 2:
+            data = data[0]
+        if data.size != ppm.size:
+            return notes
+        peak = float(np.max(np.abs(data))) or 1.0
+        n_params = len(nb_manual_baseline.MANUAL_BASELINE_PARAMS[model]) if model else 0
+        total = 0
+        for lo, hi in regions:
+            lo, hi = sorted((float(lo), float(hi)))
+            mask = (ppm >= lo) & (ppm <= hi)
+            total += int(mask.sum())
+            if not mask.any():
+                notes.append(f"the region {lo:.4g} – {hi:.4g} ppm holds no points of this spectrum")
+                continue
+            if mask.sum() >= 3:
+                x, y = ppm[mask], data[mask]
+                trend = np.polyval(np.polyfit(x, y, 1), x)
+                if float(np.max(np.abs(y - trend))) > threshold * peak:
+                    notes.append(f"the region {lo:.4g} – {hi:.4g} ppm contains signal, which the "
+                                 f"baseline will be fitted through")
+        if 0 < total < 3 * n_params:
+            notes.append(f"only {total} points in the regions for {n_params} coefficients — "
+                         f"widen them or fix some coefficients")
+        return notes
 
     @staticmethod
     def _peak_near_spectrum_edge(spectrum, frac: float = 0.05, threshold: float = 0.25):
@@ -10888,6 +11210,21 @@ class MainWindow(QMainWindow):
         self.baseline_lam_spin.setVisible(method == "whittaker")
         self.baseline_harmonics_spin.setVisible(method == "sinusoidal")
         self.baseline_period_spin.setVisible(method == "sinusoidal")
+        if hasattr(self, "baseline_manual_box"):
+            model = self._manual_baseline_model_of(method)
+            self.baseline_manual_box.setVisible(model is not None)
+            if model is not None and model != self.baseline_manual_box.model:
+                self.baseline_manual_box.set_model(model)
+                index = self._selected_index()
+                if index is not None:
+                    raw = self.session.spectra[index].metadata.raw
+                    kwargs = self._manual_baseline_kwargs(raw, model)
+                    self.baseline_manual_box.set_params(
+                        kwargs["manual_params"]
+                        or [0.0] * len(nb_manual_baseline.MANUAL_BASELINE_PARAMS[model]))
+                    self.baseline_manual_box.set_fixed(kwargs["manual_fixed"])
+            if model is None and self.baseline_manual_box.pick_button.isChecked():
+                self.baseline_manual_box.pick_button.setChecked(False)
 
     def _on_baseline_correct_options_changed(self, *_args) -> None:
         """Method/smoothing changed -- re-anchor to whatever's
@@ -11654,6 +11991,7 @@ class MainWindow(QMainWindow):
         self.baseline_period_spin.blockSignals(True)
         self.baseline_period_spin.setValue(spectrum.metadata.raw.get("baseline_period") or 0.0)
         self.baseline_period_spin.blockSignals(False)
+        self._restore_manual_baseline_controls(spectrum)
         self._refresh_baseline_options_visibility()
 
         if spectrum.data_imag is None:
@@ -11834,6 +12172,7 @@ class MainWindow(QMainWindow):
             self.phase1_handle, self.phase1_spin, self.phase1_current_display,
             self.pivot_spin, self.pivot_slider, self.autophase_joint_checkbox,
             self.baseline_correct_button, self.baseline_method_combo, self.baseline_smoothing_spin,
+            self.baseline_manual_box,
         ):
             widget.setEnabled(enabled)
         if status is not None:
@@ -13478,7 +13817,7 @@ class MainWindow(QMainWindow):
         self.sim_csa_convention_combo.addItem("Herzfeld-Berger (span, skew)", "Herzfeld-Berger")
         self.sim_csa_convention_combo.setToolTip(
             "Which pair of anisotropy parameters the two rows below mean. "
-            "Both describe the same tensor.")
+            "Both describe the same tensor.\n\n" + CSA_ANISOTROPY_TIP + "\n" + CSA_ASYMMETRY_TIP)
         form.addRow("Convention:", self.sim_csa_convention_combo)
 
         self.sim_csa_aniso_spin = QDoubleSpinBox()
@@ -13492,6 +13831,8 @@ class MainWindow(QMainWindow):
         self.sim_csa_skeweta_spin.setRange(-1.0, 1.0)
         self.sim_csa_skeweta_spin.setDecimals(3)
         self.sim_csa_skeweta_spin.setSingleStep(0.1)
+        self.sim_csa_skeweta_spin.setToolTip(CSA_ASYMMETRY_TIP)
+        self.sim_csa_aniso_spin.setToolTip(CSA_ANISOTROPY_TIP)
         form.addRow("Skew or η:", self.sim_csa_skeweta_spin)
 
         self.sim_csa_regime_combo = QComboBox()
@@ -14265,7 +14606,8 @@ class MainWindow(QMainWindow):
         self.csa_convention_combo.setToolTip(
             "Which pair of anisotropy parameters the table's two middle "
             "columns mean. Both describe the same tensor; the fitted values "
-            "and the report follow whichever is chosen here."
+            "and the report follow whichever is chosen here.\n\n"
+            + CSA_ANISOTROPY_TIP + "\n" + CSA_ASYMMETRY_TIP
         )
         form.addRow("Convention:", self.csa_convention_combo)
 

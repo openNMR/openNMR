@@ -5018,6 +5018,29 @@ class MplCanvas(QWidget):
         line.set_gid(self._BASELINE_PREVIEW_GID)
         self.canvas.draw_idle()
 
+    #: gid of the manual-baseline region shading (see
+    #: :meth:`set_baseline_regions`).
+    _BASELINE_REGION_GID = "baseline_manual_region"
+
+    def set_baseline_regions(self, regions=None) -> None:
+        """Shade the ppm ranges a manual baseline is fitted to, on the
+        same Axes the baseline overlay is drawn on; no argument clears
+        them. Green-grey and behind everything, so they read as "these
+        points are baseline" and not as integration regions (orange).
+        Found by gid, like the overlay, so a figure rebuild cannot
+        leave stale patches behind."""
+        for ax in self.figure.get_axes():
+            for patch in list(ax.patches):
+                if patch.get_gid() == self._BASELINE_REGION_GID:
+                    patch.remove()
+        target = self._pivot_marker_ax
+        if target is not None:
+            for lo, hi in regions or []:
+                span = target.axvspan(min(lo, hi), max(lo, hi), color="tab:green",
+                                      alpha=0.12, lw=0, zorder=0)
+                span.set_gid(self._BASELINE_REGION_GID)
+        self.canvas.draw_idle()
+
     def set_peak_markers(self, shifts: list[float] | None) -> None:
         """Show or clear a small downward-pointing triangle just above
         the trace at each ppm in ``shifts`` -- visual confirmation of

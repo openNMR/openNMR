@@ -611,7 +611,8 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
                      method: str = "linear", smoothing: float | None = None,
                      degree: int = 2, n_harmonics: int = 1, period: float | None = None,
                      lam: float | None = None, asymmetry: float | None = None,
-                     diff_order: int = 2) -> np.ndarray:
+                     diff_order: int = 2, manual_params=None, manual_fixed=None,
+                     manual_refit: bool = False) -> np.ndarray:
     """The baseline :func:`baseline_correct` would subtract, returned
     instead of subtracted.
 
@@ -634,6 +635,23 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
         evaluate_baseline_sinusoidal,
     )
     freq = np.asarray(freq, dtype=float)
+    if method in ("manual_polynomial", "manual_sine"):
+        # The user's own model (see notebook.manual_baseline):
+        # evaluated from the recorded coefficients as they stand, or --
+        # with manual_refit, or before any coefficients exist -- fitted
+        # afresh to baseline_regions on this very trace (so every slice
+        # of a series, and a re-phased trace, gets its own fit).
+        from ..notebook import manual_baseline as nb_manual
+        model = method.split("_", 1)[1]
+        names = nb_manual.MANUAL_BASELINE_PARAMS[model]
+        if manual_params is not None and not manual_refit:
+            return nb_manual.evaluate_manual_baseline(freq, model, manual_params)
+        fixed = None
+        if manual_fixed and manual_params is not None:
+            values = nb_manual._as_param_list(model, manual_params)
+            fixed = {n: v for n, v, f in zip(names, values, manual_fixed) if f}
+        return nb_manual.fit_manual_baseline(
+            freq, np.real(spectrum), model, regions=baseline_regions, fixed=fixed)["baseline"]
     if method == "whittaker":
         # Before the candidate-region setup below, which this method
         # has no use for -- see its own docstring.
@@ -670,8 +688,8 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
         )
         return evaluate_baseline_sinusoidal(coeffs, fitted_period, freq)
     raise ValueError(
-        "method must be 'linear', 'polynomial', 'sinusoidal', 'spline' or "
-        f"'whittaker', got {method!r}"
+        "method must be 'linear', 'polynomial', 'sinusoidal', 'spline', "
+        f"'whittaker', 'manual_polynomial' or 'manual_sine', got {method!r}"
     )
 
 
@@ -681,7 +699,8 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
                       method: str = "linear", smoothing: float | None = None,
                       degree: int = 2, n_harmonics: int = 1, period: float | None = None,
                       lam: float | None = None, asymmetry: float | None = None,
-                      diff_order: int = 2) -> np.ndarray:
+                      diff_order: int = 2, manual_params=None, manual_fixed=None,
+                      manual_refit: bool = False) -> np.ndarray:
     """Subtract a robust baseline fit to the real part, via
     :mod:`opennmr.processing.fitting`'s baseline estimators -- the same
     ones ``fit_spectrum`` already uses to hold a baseline fixed under a
@@ -762,12 +781,23 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
     peak-free -- e.g. from the Analysis tab's own peak table, expanded
     a little past each peak's FWHM -- for a spectrum where the default
     edge-only assumption doesn't hold (a peak near either end, or a
-    baseline that isn't well represented by just the two edges)."""
+    baseline that isn't well represented by just the two edges).
+
+    ``method="manual_polynomial"`` / ``"manual_sine"`` : the user's own
+    model, ``A x^4 + B x^3 + C x^2 + D x + E`` or ``A sin(B x + C) + D``
+    (x in ppm; see :mod:`opennmr.notebook.manual_baseline`).
+    ``manual_params`` (ordered A, B, ...) are evaluated as given; with
+    ``manual_refit`` (or no ``manual_params``) the model is instead
+    fitted to ``baseline_regions`` on this trace, holding the
+    parameters flagged in ``manual_fixed`` (booleans, same order) at
+    their ``manual_params`` values. No sigma-clipping: the regions are
+    the user's statement of where the baseline is."""
     return spectrum - compute_baseline(
         freq, spectrum, baseline_regions=baseline_regions, frac=frac, sigma=sigma,
         max_iter=max_iter, method=method, smoothing=smoothing, degree=degree,
         n_harmonics=n_harmonics, period=period, lam=lam, asymmetry=asymmetry,
-        diff_order=diff_order,
+        diff_order=diff_order, manual_params=manual_params, manual_fixed=manual_fixed,
+        manual_refit=manual_refit,
     )
 
 

@@ -46,9 +46,12 @@ from .utils import find_isotope_info
 #      != 'magic' this term is not just numerical hygiene -- off-MAS
 #      spinning leaves a genuine residual CSA shift, and subtracting
 #      it will erase real physics. Left as an explicit toggle.
-#   3. herzfeld_berger_csa_tensor: skew term had the opposite sign to
-#      the standard Herzfeld-Berger definition
-#      kappa = 3*(d_iso - d_22)/Omega. Fixed.
+#   3. herzfeld_berger_csa_tensor: skew now follows the standard
+#      Herzfeld-Berger / Mason (1993) definition
+#      kappa = 3*(d_22 - d_iso)/Omega, d_11 >= d_22 >= d_33,
+#      Omega = d_11 - d_33, so kappa = +1 when d_22 = d_11 and -1 when
+#      d_22 = d_33. (An earlier "fix" here had inverted it to
+#      3*(d_iso - d_22)/Omega; corrected back 2026-09-29.)
 #   4. haeberlen_csa_tensor: eta was implemented as (d_xx-d_yy)/Delta,
 #      i.e. the negative of the standard eta = (d_yy-d_xx)/Delta. This
 #      does not change any spectrum computed by full powder averaging
@@ -106,6 +109,15 @@ from .utils import find_isotope_info
 # CSA NMR
 # ============================================================
 
+#: Tooltip / docs text for the two CSA conventions, shared by the GUI
+#: panels so every place states the same definitions.
+CSA_ANISOTROPY_TIP = ("Haeberlen: Δ = δzz − δiso (|δzz − δiso| ≥ |δxx − δiso| ≥ |δyy − δiso|).\n"
+                      "Herzfeld-Berger: span Ω = δ11 − δ33 ≥ 0 (δ11 ≥ δ22 ≥ δ33).")
+CSA_ASYMMETRY_TIP = ("Haeberlen: η = (δyy − δxx)/Δ, 0..1.\n"
+                     "Herzfeld-Berger: skew κ = 3(δ22 − δiso)/Ω, −1..+1 "
+                     "(+1: δ22 = δ11; −1: δ22 = δ33).")
+
+
 def haeberlen_csa_tensor(d_iso, Delta, eta):
     """
     Principal values of the CSA tensor in the Haeberlen convention.
@@ -124,15 +136,21 @@ def haeberlen_csa_tensor(d_iso, Delta, eta):
 
 def herzfeld_berger_csa_tensor(d_iso, span, skew):
     """
-    Principal values of the CSA tensor in the Herzfeld-Berger convention.
+    Principal values of the CSA tensor in the Herzfeld-Berger (Mason)
+    convention, d_11 >= d_22 >= d_33:
 
-    span (Omega) = d_zz - d_yy      (d_zz >= d_xx >= d_yy)
-    skew (kappa) = 3*(d_iso - d_xx) / span
+    span (Omega) = d_11 - d_33                 (>= 0)
+    skew (kappa) = 3*(d_22 - d_iso) / Omega    (-1 <= kappa <= +1)
+
+    kappa = +1 is axially symmetric with d_22 = d_11 (the unique
+    component d_33 at low shift); kappa = -1 has d_22 = d_33.
+
+    Returned as ``diag(d_xx, d_yy, d_zz) = diag(d_22, d_33, d_11)``.
     """
-    # d_xx (the "middle" element, d_22) from kappa:
-    d_xx = d_iso - (span * skew) / 3.0
-    # d_zz + d_yy = 3*d_iso - d_xx ; d_zz - d_yy = span
-    d_zz = ((2.0 * d_iso) + ((span * skew) / 3.0) + span) / 2.0
+    # d_22 (the "middle" element, stored as d_xx) from kappa:
+    d_xx = d_iso + (span * skew) / 3.0
+    # d_11 + d_33 = 3*d_iso - d_22 ; d_11 - d_33 = span
+    d_zz = ((3.0 * d_iso - d_xx) + span) / 2.0
     d_yy = d_zz - span
     csa_principal = np.array([d_xx, d_yy, d_zz])
     return np.diag(csa_principal)
@@ -168,8 +186,8 @@ def convert_csa_parameters(d_iso, span_or_Delta, skew_or_eta, from_convention="H
     reads them (so a round trip through it gives the same principal
     values). Haeberlen: Delta = d_zz - d_iso, eta = (d_yy - d_xx)/Delta,
     |d_zz - d_iso| >= |d_xx - d_iso| >= |d_yy - d_iso|. Herzfeld-Berger:
-    span = d_11 - d_33 and skew as :func:`herzfeld_berger_csa_tensor`
-    defines it."""
+    span = d_11 - d_33 and skew = 3(d_22 - d_iso)/span, as
+    :func:`herzfeld_berger_csa_tensor` defines it."""
     principal = np.diag(csa_definition(d_iso, span_or_Delta, skew_or_eta, from_convention))
     iso = float(np.mean(principal))
     if to_convention == from_convention:
@@ -183,7 +201,7 @@ def convert_csa_parameters(d_iso, span_or_Delta, skew_or_eta, from_convention="H
     if to_convention == "Herzfeld-Berger":
         d11, d22, d33 = np.sort(principal)[::-1]
         span = d11 - d33
-        skew = 3.0 * (iso - d22) / span if span else 0.0
+        skew = 3.0 * (d22 - iso) / span if span else 0.0
         return iso, float(span), float(skew)
     raise ValueError("Please define convention as either 'Haeberlen' or 'Herzfeld-Berger'")
 

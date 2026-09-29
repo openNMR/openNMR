@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import panel_state
+from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
 from ..io import serialize
 from ..notebook import combined_fitting as cfit
 from ..notebook import combined_hamiltonian as ch
@@ -86,9 +87,9 @@ class InteractionEditor(QGroupBox):
             self.convention.currentIndexChanged.connect(self._write_csa)
             form.addRow("Convention:", self.convention)
             self.aniso = _spin_box(-1e5, 1e5, data["aniso"], 3, " ppm",
-                                   tip="Δ (Haeberlen) or span Ω (Herzfeld-Berger).")
+                                   tip=CSA_ANISOTROPY_TIP)
             self.asym = _spin_box(-1.0, 1.0, data["asym"], 3, step=0.1,
-                                  tip="η (0..1, Haeberlen) or skew κ (−1..1, Herzfeld-Berger).")
+                                  tip=CSA_ASYMMETRY_TIP)
             form.addRow("Δ or span:", self.aniso)
             form.addRow("η or skew:", self.asym)
             euler_box = QWidget()
