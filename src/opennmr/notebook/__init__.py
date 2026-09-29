@@ -88,6 +88,12 @@ from .quadrupolar_fitting import (
     NMRQuadFitWorkflow,
 )
 
+from .czjzek import (
+    czjzek_pdf, czjzek_statistics, czjzek_spectrum, fit_czjzek_spectrum, evaluate_czjzek_fit,
+    czjzek_fit_report, plot_czjzek_distribution, plot_czjzek_fit, CzjzekLibrary,
+)
+from .fit_display import draw_fit_components, component_style
+
 from .combined_hamiltonian import (
     Site, simulate_combined, combined_axis_limits, combined_to_python,
     site_transition_frequencies, plot_combined, sites_to_json, sites_from_json,
@@ -231,6 +237,12 @@ __all__ = [
     "NMR2D_relaxation_workflow",
     # arithmetic
     "combine_spectra", "combine_spectra_as_results",
+    # Czjzek distributions
+    "czjzek_pdf", "czjzek_statistics", "czjzek_spectrum", "fit_czjzek_spectrum",
+    "evaluate_czjzek_fit", "czjzek_fit_report", "plot_czjzek_distribution", "plot_czjzek_fit",
+    "CzjzekLibrary",
+    # fit display
+    "draw_fit_components", "component_style",
     # simulations
     "haeberlen_csa_tensor", "herzfeld_berger_csa_tensor", "csa_definition",
     "csa_frequency", "powder_orientations", "powder_orientations_octant", 

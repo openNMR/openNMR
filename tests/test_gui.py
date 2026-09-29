@@ -11255,9 +11255,12 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # J-coupling between Integration and CSA/Dipolar (test_gui_jcoupling.py);
     # Quadrupolar (test_gui_quadrupolar_fit.py), then Combined
     # Hamiltonian (test_gui_combined_fit.py), Multi-spectrum last
-    # (test_gui_multi_fit.py).
+    # (test_gui_multi_fit.py). Quadrupolar (Czjzek distribution) right
+    # after Quadrupolar, and Fit plot display options at the very end
+    # (test_gui_czjzek_display.py).
     assert titles == ["Isotropic (Gauss/Lor)", "Integration", "J-coupling", "CSA/Dipolar",
-                      "Quadrupolar", "Combined Hamiltonian", "Multi-spectrum"]
+                      "Quadrupolar", "Quadrupolar (Czjzek distribution)", "Combined Hamiltonian",
+                      "Multi-spectrum", "Fit plot: components and colours"]
 
     # eNMR/Imaging moved off this tab entirely, to their own
     # "Applications" button (see
@@ -15465,8 +15468,10 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     sections = simulations_tab.findChildren(CollapsibleSection)
     # Diffusion (PFG) and Shaped pulse (Bloch): ported from upstream;
     # pNMR (CIF): the notebook's CIF shift simulation (test_gui_pnmr.py).
-    # J-coupling first (test_gui_jcoupling.py).
+    # J-coupling first (test_gui_jcoupling.py); Czjzek distribution after
+    # Quadrupolar (test_gui_czjzek_display.py).
     assert [s.title() for s in sections] == ["J-coupling", "CSA", "Quadrupolar",
+                                             "Czjzek distribution",
                                              "Combined Hamiltonian", "Diffusion (PFG)",
                                              "Shaped pulse (Bloch)", "pNMR (CIF)"]
 
@@ -16092,8 +16097,9 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     window = MainWindow()
     page = window.side_tabs.widget(window._simulations_tab_index)
     titles = [s.title() for s in page.findChildren(CollapsibleSection)]
-    assert titles == ["J-coupling", "CSA", "Quadrupolar", "Combined Hamiltonian",
-                      "Diffusion (PFG)", "Shaped pulse (Bloch)", "pNMR (CIF)"]
+    assert titles == ["J-coupling", "CSA", "Quadrupolar", "Czjzek distribution",
+                      "Combined Hamiltonian", "Diffusion (PFG)", "Shaped pulse (Bloch)",
+                      "pNMR (CIF)"]
 
 
 def test_simulation_plot_shows_on_run_and_hides_on_leaving_the_tile(qapp):

@@ -41,6 +41,19 @@ class QuadrupolarFitPanel(QWidget):
     ``format_value_error(value, error, fixed)``; ``send_to_simulation(settings)``
     with a dict of the first site's values and the fit's setup."""
 
+    #: The sites table: its columns, which fit parameter each holds, and
+    #: readable parameter names. Class attributes so a panel for another
+    #: model of the same experiment (Czjzek) can reuse everything else.
+    COLUMNS = COLUMNS
+    COLUMN_PARAMS = COLUMN_PARAMS
+    PARAM_LABELS = PARAM_LABELS
+    BLURB = ("Fit quadrupolar powder lineshapes (static or MAS) to the selected 1D spectrum "
+             "(or the displayed slice of a 2D). One row per site; Estimate reads a starting "
+             "C_Q and δiso off the data. The fitted model is the Simulate > Quadrupolar one.")
+    FIT_TEXT = "Fit Quadrupolar Lineshape"
+    SEND_TEXT = "Send to Simulate > Quadrupolar"
+    DEFAULT_SITE = ("0", "3", "0.5", "1", "0.5")
+
     def __init__(self, get_target, get_regions, draw_fit, format_value_error,
                  send_to_simulation=None, on_fitted=None, parent=None) -> None:
         super().__init__(parent)
@@ -56,15 +69,13 @@ class QuadrupolarFitPanel(QWidget):
         self.result: dict | None = None
 
         v = QVBoxLayout(self)
-        blurb = QLabel(
-            "Fit quadrupolar powder lineshapes (static or MAS) to the selected 1D spectrum "
-            "(or the displayed slice of a 2D). One row per site; Estimate reads a starting "
-            "C_Q and δiso off the data. The fitted model is the Simulate > Quadrupolar one.")
+        blurb = QLabel(self.BLURB)
         blurb.setWordWrap(True)
+        self.blurb_label = blurb
         v.addWidget(blurb)
 
-        self.sites_table = QTableWidget(0, len(COLUMNS))
-        self.sites_table.setHorizontalHeaderLabels(list(COLUMNS))
+        self.sites_table = QTableWidget(0, len(self.COLUMNS))
+        self.sites_table.setHorizontalHeaderLabels(list(self.COLUMNS))
         self.sites_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.sites_table.setMaximumHeight(150)
         self.sites_table.setToolTip(
@@ -200,7 +211,7 @@ class QuadrupolarFitPanel(QWidget):
         form.addRow("Orientations (final):", self.render_orientations_spin)
         v.addLayout(form)
 
-        self.fit_button = QPushButton("Fit Quadrupolar Lineshape")
+        self.fit_button = QPushButton(self.FIT_TEXT)
         self.fit_button.clicked.connect(self.fit)
         v.addWidget(self.fit_button)
 
@@ -224,7 +235,7 @@ class QuadrupolarFitPanel(QWidget):
         self.results_table.setVisible(False)
         v.addWidget(self.results_table)
 
-        self.send_button = QPushButton("Send to Simulate > Quadrupolar")
+        self.send_button = QPushButton(self.SEND_TEXT)
         self.send_button.setToolTip("Open the first fitted site in the quadrupolar simulator.")
         self.send_button.setEnabled(False)
         self.send_button.clicked.connect(self._on_send)
@@ -324,7 +335,7 @@ class QuadrupolarFitPanel(QWidget):
 
     def add_site(self, values=None) -> None:
         row = self.sites_table.rowCount()
-        values = values or (f"Site {row + 1}", "0", "3", "0.5", "1", "0.5")
+        values = values or (f"Site {row + 1}",) + tuple(self.DEFAULT_SITE)
         self.sites_table.insertRow(row)
         for column, value in enumerate(values):
             self.sites_table.setItem(row, column, QTableWidgetItem(str(value)))
@@ -345,15 +356,15 @@ class QuadrupolarFitPanel(QWidget):
         item = self.sites_table.item(row, 0)
         item.setData(_BOUNDS_ROLE, bounds or None)
         item.setData(_FIXED_ROLE, fixed or None)
-        for column, name in COLUMN_PARAMS.items():
+        for column, name in self.COLUMN_PARAMS.items():
             cell = self.sites_table.item(row, column)
             if cell is None:
                 continue
             font = cell.font()
             font.setItalic(bool(fixed.get(name)))
             cell.setFont(font)
-        notes = [f"{PARAM_LABELS[n]} fixed" for n, on in fixed.items() if on]
-        notes += [f"{PARAM_LABELS[n]} in [{lo:g}, {hi:g}]" for n, (lo, hi) in bounds.items()]
+        notes = [f"{self.PARAM_LABELS[n]} fixed" for n, on in fixed.items() if on]
+        notes += [f"{self.PARAM_LABELS[n]} in [{lo:g}, {hi:g}]" for n, (lo, hi) in bounds.items()]
         item.setToolTip("\n".join(notes))
 
     def _on_sites_menu(self, pos) -> None:
@@ -363,8 +374,8 @@ class QuadrupolarFitPanel(QWidget):
             return
         bounds, fixed = self._constraints(row)
         menu = QMenu(self)
-        name = COLUMN_PARAMS.get(index.column()) if index.isValid() else None
-        toggle = (menu.addAction(("Unfix " if fixed.get(name) else "Fix ") + PARAM_LABELS[name])
+        name = self.COLUMN_PARAMS.get(index.column()) if index.isValid() else None
+        toggle = (menu.addAction(("Unfix " if fixed.get(name) else "Fix ") + self.PARAM_LABELS[name])
                   if name else None)
         dialog = menu.addAction("Set Bounds / Fixed Parameters…")
         clear = menu.addAction("Clear Bounds and Fixed") if (bounds or fixed) else None
@@ -385,7 +396,7 @@ class QuadrupolarFitPanel(QWidget):
         dialog.setWindowTitle(f"Bounds / fixed parameters -- site {row + 1}")
         form = QFormLayout(dialog)
         edits, checks = {}, {}
-        for name, label in PARAM_LABELS.items():
+        for name, label in self.PARAM_LABELS.items():
             edit = QLineEdit(f"{bounds[name][0]:g}, {bounds[name][1]:g}" if name in bounds else "")
             edit.setPlaceholderText("optional, 'low, high'")
             check = QCheckBox("Fixed")
@@ -412,7 +423,7 @@ class QuadrupolarFitPanel(QWidget):
                 lo, hi = (float(t) for t in text.split(","))
             except ValueError:
                 QMessageBox.critical(self, "Invalid bounds",
-                                     f"{PARAM_LABELS[name]}: expected 'low, high', got {text!r}.")
+                                     f"{self.PARAM_LABELS[name]}: expected 'low, high', got {text!r}.")
                 return
             new_bounds[name] = (min(lo, hi), max(lo, hi))
         self.set_constraints(row, new_bounds,

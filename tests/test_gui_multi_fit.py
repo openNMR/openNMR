@@ -86,7 +86,8 @@ def test_section_placement(qapp):
     window = MainWindow()
     tab = window.side_tabs.widget(window._fitting_tab_index)
     titles = [s.title() for s in tab.findChildren(CollapsibleSection)]
-    assert titles[-1] == "Multi-spectrum"
+    # The last fitting method; only the Fit plot display options follow it.
+    assert titles[-2:] == ["Multi-spectrum", "Fit plot: components and colours"]
     assert isinstance(window.multi_fit_panel, MultiFitPanel)
 
 

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.registry import find_gamma, NUC_label
+from ...notebook import fit_display
 from ...core.spectrum import NMRAxis, NMRSpectrum
 from ... import plotting
 from ...processing import slicing as processing_slicing
@@ -1065,6 +1066,14 @@ class MplCanvas(QWidget):
         self._top_spine_visible = False
         self._right_spine_visible = False
         self._curve_axes: list = []
+        #: How a fit view draws its components -- shown, hidden or
+        #: highlighted, filled or not, colours (notebook.fit_display).
+        #: Kept per canvas and across refits, so a colour set for a
+        #: site stays with it.
+        self._fit_component_style = fit_display.component_style()
+        self._slice_fit_args: dict | None = None
+        self._slice_fit_active = False
+        self._slice_fit_labels: list = []
         #: The palette every multi-series plot takes its default
         #: colours from -- Compare, extracted slices, the DOSY overlay
         #: and the 2D overlay. One setting rather than one per view, so
@@ -2774,6 +2783,8 @@ class MplCanvas(QWidget):
         # Likewise the curve Axes whose top/right spines Plot Style
         # controls: only the next curve view re-declares them.
         self._curve_axes = []
+        # And the fit view a component-style change would redraw.
+        self._slice_fit_active = False
         # The Axes these were drawn on are about to go; the Python-side
         # list would otherwise keep handing out artists belonging to a
         # figure that no longer contains them.
@@ -3234,6 +3245,19 @@ class MplCanvas(QWidget):
     #: owns the dialog and the controls in it.
     plotStyleRequested = Signal()
 
+    #: Emitted with the component labels after a fit view is drawn
+    #: (:meth:`show_slice_fit`), so the component-display controls can
+    #: list them.
+    fitComponentsShown = Signal(list)
+
+    #: The right-click "Components ▸ Colours and highlighting…" entry.
+    fitDisplayOptionsRequested = Signal()
+
+    #: Emitted after a style setting was changed from this canvas's own
+    #: right-click menu (e.g. a curve plot's Top/Right Spine), so the
+    #: Plot Style controls can re-read it.
+    styleEditedFromMenu = Signal()
+
     #: Emitted with ``"1d"``, ``"2d"``, ``"pseudo2d"`` or ``"compare"``
     #: when this canvas is about to draw a *different kind* of plot
     #: from the last one -- before drawing it, so a listener can hand
@@ -3275,6 +3299,44 @@ class MplCanvas(QWidget):
         legend_action = menu.addAction("Show Legend")
         legend_action.setCheckable(True)
         legend_action.setChecked(self._legend_visible)
+
+        # Fit views: quick component display, on the plot itself. The
+        # full controls (highlight, colours) are Fit ▸ Fit plot.
+        if self._slice_fit_active and self._slice_fit_labels:
+            comp_menu = menu.addMenu("Components")
+            style = self._fit_component_style
+            for text, mode in (("Show automatically", "auto"), ("Show all", "all"),
+                               ("Hide all", "none"), ("Highlight selected only", "highlight")):
+                action = comp_menu.addAction(text)
+                action.setCheckable(True)
+                action.setChecked(style["show"] == mode)
+                action.triggered.connect(
+                    lambda _c=False, m=mode: (self.set_fit_component_style(show=m),
+                                              self.styleEditedFromMenu.emit()))
+            comp_menu.addSeparator()
+            fill_action = comp_menu.addAction("Fill components")
+            fill_action.setCheckable(True)
+            fill_action.setChecked(bool(style["fill"]))
+            fill_action.triggered.connect(
+                lambda checked: (self.set_fit_component_style(fill=bool(checked)),
+                                 self.styleEditedFromMenu.emit()))
+            comp_menu.addSeparator()
+            options_action = comp_menu.addAction("Colours and highlighting…")
+            options_action.triggered.connect(self.fitDisplayOptionsRequested.emit)
+
+        # Curves & profiles: top/right spines straight from the plot
+        # (explicit user request -- the Plot Style checkboxes alone were
+        # too far from the plot to be found).
+        if [ax for ax in self._curve_axes if ax in self.figure.axes]:
+            for text, key, value in (("Top Spine", "top_spine", self._top_spine_visible),
+                                     ("Right Spine", "right_spine", self._right_spine_visible)):
+                action = menu.addAction(text)
+                action.setCheckable(True)
+                action.setChecked(value)
+                action.setToolTip("Draw this axis line (with ticks) on the curve plot.")
+                action.triggered.connect(
+                    lambda checked, k=key: (self.set_style(**{k: bool(checked)}),
+                                            self.styleEditedFromMenu.emit()))
 
         lock_action = menu.addAction("Lock Aspect Ratio")
         lock_action.setCheckable(True)
@@ -5756,7 +5818,8 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def show_slice_fit(self, x, y_data, y_fit, components=None, peak_labels=None, title: str = "",
-                        spectrum: NMRSpectrum | None = None) -> None:
+                        spectrum: NMRSpectrum | None = None, auto_hide_single: bool = False,
+                        _keep_view: bool = False) -> None:
         """Plot one pseudo-2D slice's spectrum alongside its fitted
         (pseudo-Voigt) curve -- the intermediate per-slice spectral
         fit that feeds a relaxation/diffusion parameter fit
@@ -5777,6 +5840,14 @@ class MplCanvas(QWidget):
         top rather than being buried under a larger neighbour's fill;
         the total fit is a dashed line drawn above every peak.
 
+        How the components are drawn -- all, none, only highlighted
+        ones, filled or as lines, and their colours -- is this canvas's
+        component style (:meth:`set_fit_component_style`), drawn by
+        :func:`opennmr.notebook.fit_display.draw_fit_components`, the
+        same function a notebook figure uses. ``auto_hide_single``: a
+        lone component only repeats the fit, so the default ("auto")
+        leaves it out; "all" still shows it.
+
         ``spectrum`` : the slice's own 1D trace (``fit_result["slice"]``
         from :func:`opennmr.processing.fitting.NMR2D_fit_slices`), used
         only for its nucleus/SFO1 -- to label and orient the x-axis
@@ -5795,29 +5866,22 @@ class MplCanvas(QWidget):
         self._processing_preview_spec_ax = None
         self._current_1d_spectrum = None
         self._preview_1d_spectrum = None
+        view = (self.ax.get_xlim(), self.ax.get_ylim()) if _keep_view and self.ax is not None else None
         self._clear_figure()
         self.ax = self.figure.add_subplot(111)
-        self.ax.plot(x, y_data, color="black", linewidth=1.5, label="Data", zorder=0)
-        if components:
-            n_peaks = len(components) - 1  # evaluate_fit appends the baseline last
-            peak_curves = components[:n_peaks]
-            if peak_curves:
-                order = sorted(range(len(peak_curves)), key=lambda i: float(np.max(peak_curves[i])), reverse=True)
-                # A qualitative palette, not a diverging one -- BrBG/RdBu-style
-                # colormaps wash out to near-white at their midpoint, which made
-                # a peak of middling rank nearly invisible once shaded. Taken
-                # from plotting.qualitative_colors so it also gets the shared
-                # luminance cap: two of tab10's own ten entries only reach
-                # 2.0:1 against white on their own.
-                edge_colors = plotting.qualitative_colors(len(peak_curves))
-                for rank, i in enumerate(order):
-                    label = peak_labels[i] if peak_labels else f"Peak {i + 1}"
-                    edge = edge_colors[rank]
-                    face = (edge[0], edge[1], edge[2], 0.4)
-                    self.ax.fill_between(x, peak_curves[i], color=face, edgecolor=edge,
-                                          linewidth=1.0, label=label, zorder=1)
-            self.ax.plot(x, components[-1], color="gray", linestyle=":", linewidth=1.0, label="Baseline", zorder=1)
-        self.ax.plot(x, y_fit, color="red", linestyle="--", linewidth=2.0, label="Fit (total)", zorder=100)
+        self._slice_fit_args = dict(x=x, y_data=y_data, y_fit=y_fit, components=components,
+                                    peak_labels=peak_labels, title=title, spectrum=spectrum,
+                                    auto_hide_single=auto_hide_single)
+        self._slice_fit_active = True
+        n_peaks = len(components) - 1 if components else 0
+        # One name per component: extra names are dropped and missing
+        # ones numbered, as this view always tolerated.
+        given = [str(v) for v in (peak_labels or [])][:n_peaks]
+        self._slice_fit_labels = given + [f"Peak {i + 1}" for i in range(len(given), n_peaks)]
+        fit_display.draw_fit_components(
+            self.ax, x, y_data, y_fit, components=components,
+            labels=self._slice_fit_labels or None, style=self._fit_component_style,
+            auto_hide_single=auto_hide_single)
 
         if spectrum is not None:
             xlabel = self._chemical_shift_label(spectrum, x_unit="ppm")
@@ -5836,11 +5900,32 @@ class MplCanvas(QWidget):
                                    labelsize=self._AXIS_LABELSIZE)
         self._legend_visible = True
         self._apply_view_options()
+        if view is not None:
+            self.ax.set_xlim(view[0])
+            self.ax.set_ylim(view[1])
         # Crosshairs here too: reading a value off this plot is
         # exactly what it is for (spectral fit).
         self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
+        self.fitComponentsShown.emit(list(self._slice_fit_labels))
+
+    def fit_component_style(self) -> dict:
+        """This canvas's component style (a copy)."""
+        return fit_display.component_style(self._fit_component_style)
+
+    def fit_component_labels(self) -> list:
+        """The components of the fit on show ([] when none is)."""
+        return list(self._slice_fit_labels) if self._slice_fit_active else []
+
+    def set_fit_component_style(self, style: dict | None = None, **changes) -> None:
+        """Change how fit components are drawn (keys as
+        :data:`opennmr.notebook.fit_display.DEFAULT_COMPONENT_STYLE`) and
+        redraw the fit on show, keeping the zoom."""
+        self._fit_component_style = fit_display.component_style(
+            style if style is not None else self._fit_component_style, **changes)
+        if self._slice_fit_active and self._slice_fit_args is not None:
+            self.show_slice_fit(**self._slice_fit_args, _keep_view=True)
 
     def show_dosy(self, dosy: dict, title: str = "", factor: float | None = None,
                    clevels: int | None = None, d_lims=None) -> None:

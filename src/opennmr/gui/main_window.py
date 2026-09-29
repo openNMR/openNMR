@@ -107,6 +107,8 @@ from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
 from .arithmetic_panel import ArithmeticPanel
+from .fit_display_panel import FitDisplayPanel
+from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
 from .dnp_panel import DnpPanel
 from .tensor_view_panel import TensorViewControls
 from .periodic_table_panel import LarmorCalculatorPanel, PeriodicTableView
@@ -799,6 +801,8 @@ class MainWindow(QMainWindow):
             canvas.plotStyleRequested.connect(self._on_plot_style_clicked)
             canvas.plotKindChanged.connect(
                 lambda kind, c=canvas: self._on_canvas_plot_kind_changed(c, kind))
+            canvas.styleEditedFromMenu.connect(
+                lambda c=canvas: self._on_canvas_style_edited_from_menu(c))
         # Before any tab is current, so _style_target_canvases falls
         # back to every canvas and the saved defaults land everywhere.
         self._apply_saved_style_defaults()
@@ -3972,7 +3976,7 @@ class MainWindow(QMainWindow):
             check.toggled.connect(self._on_output_style_changed)
             spine_layout.addWidget(check)
         spine_layout.addStretch(1)
-        style_form.addRow("Curve spines:", spine_row)
+        style_form.addRow("Spines (curves && profiles):", spine_row)
 
         self.output_legend_checkbox = QCheckBox("Show legend / trace names")
         self.output_legend_checkbox.setToolTip(
@@ -5035,7 +5039,7 @@ class MainWindow(QMainWindow):
         """Apply plot type ``key``'s saved default to the plot(s) the
         style panel acts on, now."""
         key = key or self.output_type_combo.currentData()
-        style = self._load_figure_styles().get(key)
+        style = self._resolved_type_style(key)
         if not isinstance(style, dict):
             QMessageBox.information(
                 self, "No saved default",
@@ -5064,12 +5068,49 @@ class MainWindow(QMainWindow):
         spectrum never undoes what was just set on the 1D plot."""
         if not getattr(self, "_ui_settings", {}).get("auto_apply_type_styles", True):
             return
-        styles = self._load_figure_styles()
-        style = styles.get(kind)
-        if not isinstance(style, dict) and kind in self._FIGURE_STYLE_FALLBACK:
-            style = styles.get(self._FIGURE_STYLE_FALLBACK[kind])
+        style = self._resolved_type_style(kind)
         if isinstance(style, dict):
             self._apply_type_style_to(canvas, style, redraw=False)
+
+    def _resolved_type_style(self, kind: str) -> dict | None:
+        """Plot kind ``kind``'s saved default, laid over its fallback
+        kind's (a "curve" default over the "1d" one): a kind whose saved
+        entry holds only a few settings -- e.g. the Curves & profiles
+        spines, set from Settings -- still takes the rest from the
+        fallback, as it did before it had an entry at all."""
+        styles = self._load_figure_styles()
+        own = styles.get(kind)
+        own = own if isinstance(own, dict) else None
+        fallback = styles.get(self._FIGURE_STYLE_FALLBACK.get(kind, ""))
+        fallback = fallback if isinstance(fallback, dict) else None
+        if own is None and fallback is None:
+            return None
+        return {**(fallback or {}), **(own or {})}
+
+    def _on_canvas_style_edited_from_menu(self, canvas) -> None:
+        """A style setting changed from a plot's right-click menu: the
+        Plot Style controls (and the Settings spine boxes) follow."""
+        targets = self._style_target_canvases()
+        if len(targets) == 1 and targets[0] is canvas:
+            self._load_style_controls_from(canvas)
+
+    def _on_curve_spine_default_toggled(self, *_args) -> None:
+        """Settings ▸ Default plot styles ▸ Curves & profiles: Top/Right
+        spine. Saved into the "curve" default (merged, so any other saved
+        curve settings stay) and applied at once to every plot showing a
+        curve."""
+        values = {"top_spine": self.settings_curve_top_spine_checkbox.isChecked(),
+                  "right_spine": self.settings_curve_right_spine_checkbox.isChecked()}
+        styles = self._load_figure_styles()
+        entry = styles.get("curve") if isinstance(styles.get("curve"), dict) else {}
+        entry.update(values)
+        self._save_figure_style("curve", entry)
+        for canvas in self._all_canvases():
+            if canvas.plot_kind() == "curve":
+                canvas.set_style(**values)
+        current = self.canvas_tabs.currentWidget() if hasattr(self, "canvas_tabs") else None
+        if isinstance(current, MplCanvas) and current.plot_kind() == "curve":
+            self._load_style_controls_from(current)
 
     # ------------------------------------------------------------
     # Settings tab
@@ -5199,6 +5240,28 @@ class MainWindow(QMainWindow):
             button_row.addStretch(1)
             defaults_layout.addLayout(title_row)
             defaults_layout.addLayout(button_row)
+            if key == "curve":
+                # The spines of curve plots, right here (explicit user
+                # request). The same setting as Plot Style's "Curve
+                # spines" and the curve plot's right-click menu.
+                saved_curve = self._load_figure_styles().get("curve")
+                saved_curve = saved_curve if isinstance(saved_curve, dict) else {}
+                spine_row = QHBoxLayout()
+                spine_row.addWidget(QLabel("Spines:"))
+                self.settings_curve_top_spine_checkbox = QCheckBox("Top")
+                self.settings_curve_right_spine_checkbox = QCheckBox("Right")
+                for check, name in ((self.settings_curve_top_spine_checkbox, "top_spine"),
+                                    (self.settings_curve_right_spine_checkbox, "right_spine")):
+                    check.setChecked(bool(saved_curve.get(name, False)))
+                    check.setToolTip(
+                        f"Draw the {name.split('_')[0]} axis line (with ticks) on every curve "
+                        "plot: relaxation and diffusion fits, integral and parameter trends, "
+                        "DNP field sweep profiles. Saved as part of the Curves & profiles "
+                        "default and applied now.")
+                    check.toggled.connect(self._on_curve_spine_default_toggled)
+                    spine_row.addWidget(check)
+                spine_row.addStretch(1)
+                defaults_layout.addLayout(spine_row)
             self.settings_type_status_labels[key] = status
             self.settings_type_save_buttons[key] = save
             self.settings_type_apply_buttons[key] = apply_button
@@ -5222,6 +5285,13 @@ class MainWindow(QMainWindow):
             status.setStyleSheet("" if saved else "color: gray;")
             self.settings_type_apply_buttons[key].setEnabled(saved)
             self.settings_type_clear_buttons[key].setEnabled(saved)
+        curve = styles.get("curve") if isinstance(styles.get("curve"), dict) else {}
+        for name in ("top", "right"):
+            check = getattr(self, f"settings_curve_{name}_spine_checkbox", None)
+            if check is not None:
+                blocked = check.blockSignals(True)
+                check.setChecked(bool(curve.get(f"{name}_spine", False)))
+                check.blockSignals(blocked)
 
     def _default_ui_point_size(self) -> int:
         size = self._system_ui_font.pointSizeF()
@@ -8109,8 +8179,10 @@ class MainWindow(QMainWindow):
 
     #: Readable names, for the log and the dialogs.
     _FIT_LABELS = {"csa": "CSA", "jcoupling": "J-coupling", "quadrupolar": "Quadrupolar",
+                   "czjzek": "Czjzek",
                    "combined": "Combined-Hamiltonian", "multi": "Multi-spectrum"}
     _SIMULATION_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "jcoupling": "J-coupling",
+                          "czjzek": "Czjzek distribution",
                           "combined": "Combined Hamiltonian", "diffusion": "Diffusion (PFG)",
                           "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)"}
 
@@ -8118,6 +8190,7 @@ class MainWindow(QMainWindow):
         """Each fit, as an object with get_state/set_state/result_state/
         restore_result/clear_result/report_text."""
         panels = {"jcoupling": self.jcoupling_fit_panel, "quadrupolar": self.quad_fit_panel,
+                  "czjzek": self.czjzek_fit_panel,
                   "combined": self.combined_fit_panel, "multi": self.multi_fit_panel}
         panels["csa"] = _Section(
             get_state=lambda: {"widgets": panel_state.capture_widgets(self, prefixes=["csa_"])},
@@ -8186,6 +8259,11 @@ class MainWindow(QMainWindow):
                                  rerun=self.combined_sim_panel.simulate,
                                  summary=panel_summary(self.combined_sim_panel),
                                  anchor=lambda: self.combined_sim_panel),
+            "czjzek": _Section(get_state=self.czjzek_sim_panel.get_state,
+                               set_state=self.czjzek_sim_panel.set_state,
+                               rerun=self.czjzek_sim_panel.simulate,
+                               summary=panel_summary(self.czjzek_sim_panel),
+                               anchor=lambda: self.czjzek_sim_panel),
             # Not re-run on restore: an enumeration can take minutes, and
             # Load settings leaves it one click away.
             "pnmr": _Section(get_state=self.pnmr_panel.get_state, set_state=self.pnmr_panel.set_state,
@@ -11558,6 +11636,20 @@ class MainWindow(QMainWindow):
                                self._refresh_model_series_buttons()))
         layout.addWidget(CollapsibleSection(
             "Quadrupolar", content=self._with_model_series_box(self.quad_fit_panel, "quadrupolar")))
+        # Czjzek distributions of C_Q (explicit user request): the same
+        # setup controls as Quadrupolar, sites as (δiso, σ, d);
+        # notebook.czjzek. Its distribution map shows on the Fit view.
+        self.czjzek_fit_panel = CzjzekFitPanel(
+            get_target=self._jcoupling_fit_target,
+            get_regions=self._integration_regions,
+            draw_fit=self._draw_quadrupolar_fit,
+            draw_map=self._draw_czjzek_map,
+            format_value_error=self._format_value_error,
+            send_to_simulation=self._send_czjzek_to_simulation,
+            on_fitted=lambda: self._store_fit("czjzek"))
+        self._czjzek_fit_section = CollapsibleSection(
+            "Quadrupolar (Czjzek distribution)", content=self.czjzek_fit_panel)
+        layout.addWidget(self._czjzek_fit_section)
         # Any mix of CSA, quadrupolar and J per site (explicit user
         # request); the fitter is notebook.combined_fitting, the model
         # Simulate > Combined Hamiltonian's.
@@ -11587,6 +11679,14 @@ class MainWindow(QMainWindow):
             on_fitted=self._store_multi_fit)
         self._multi_fit_section = CollapsibleSection("Multi-spectrum", content=self.multi_fit_panel)
         layout.addWidget(self._multi_fit_section)
+        # How fitted components are drawn (explicit user request: show,
+        # hide or highlight components, fill or not, their colours).
+        self.fit_display_panel = FitDisplayPanel([self.fit_canvas, self.spectral_fit_canvas])
+        self._fit_display_section = CollapsibleSection(
+            "Fit plot: components and colours", content=self.fit_display_panel)
+        layout.addWidget(self._fit_display_section)
+        for canvas in (self.fit_canvas, self.spectral_fit_canvas):
+            canvas.fitDisplayOptionsRequested.connect(self._open_fit_display_options)
         layout.addStretch(1)
         return tab
 
@@ -11641,6 +11741,15 @@ class MainWindow(QMainWindow):
         self._quad_sim_section = CollapsibleSection(
             "Quadrupolar", content=self._build_simulate_quadrupolar_subtab())
         layout.addWidget(self._quad_sim_section)
+        # A Czjzek-distributed site, with its (C_Q, η_Q) map beside the
+        # spectrum (explicit user request); notebook.czjzek.
+        self.czjzek_sim_panel = CzjzekSimPanel(
+            draw=lambda draw: (self._draw_tensor_picture(draw),
+                               self._journal_simulation("czjzek")),
+            add_to_open=self._add_derived_spectrum)
+        self._czjzek_sim_section = CollapsibleSection(
+            "Czjzek distribution", content=self.czjzek_sim_panel)
+        layout.addWidget(self._czjzek_sim_section)
         # Any mix of CSA, quadrupolar and J on the same site (explicit
         # user request: add interactions to a site rather than one
         # simulator per combination). notebook.combined_hamiltonian.
@@ -11731,14 +11840,14 @@ class MainWindow(QMainWindow):
         regions = result.get("regions")
         keep = ((x >= min(r[0] for r in regions)) & (x <= max(r[1] for r in regions))
                 if regions else np.ones(x.size, dtype=bool))
-        n_sites = result["info"]["n_sites"]
-        components = ([np.asarray(c)[keep] for c in result["components"]]
-                      if n_sites > 1 else None)
+        # Always handed over; on "Automatic" a single site is not drawn
+        # (it only repeats the fit), but "All" can show it.
+        components = [np.asarray(c)[keep] for c in result["components"]]
         spectrum = result.get("spectrum")
         self.fit_canvas.show_slice_fit(
             x[keep], result["y"][keep], result["y_fit"][keep], components=components,
-            peak_labels=list(result["info"]["labels"]) if components else None,
-            title="Quadrupolar fit",
+            peak_labels=list(result["info"]["labels"]),
+            title=result.get("title", "Quadrupolar fit"), auto_hide_single=True,
             spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
@@ -11751,13 +11860,12 @@ class MainWindow(QMainWindow):
         keep = ((x >= min(min(r) for r in regions)) & (x <= max(max(r) for r in regions))
                 if regions else np.ones(x.size, dtype=bool))
         curves = list(result["site_spectra"].values())
-        components = ([np.asarray(c)[keep] for c in curves] + [np.asarray(result["baseline"])[keep]]
-                      if len(curves) > 1 else None)
+        components = [np.asarray(c)[keep] for c in curves] + [np.asarray(result["baseline"])[keep]]
         spectrum = result.get("spectrum")
         self.fit_canvas.show_slice_fit(
             x[keep], np.asarray(result["y"])[keep], np.asarray(result["y_fit"])[keep],
-            components=components,
-            peak_labels=list(result["site_spectra"]) if components else None,
+            components=components, auto_hide_single=True,
+            peak_labels=list(result["site_spectra"]),
             title="Combined-Hamiltonian fit",
             spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
@@ -11958,6 +12066,18 @@ class MainWindow(QMainWindow):
         self._quad_sim_section.setExpanded(True)
         self._show_side_tab("Simulate")
 
+    def _send_czjzek_to_simulation(self, fitted: dict) -> None:
+        self.czjzek_sim_panel.set_from_fit(fitted)
+        self._czjzek_sim_section.setExpanded(True)
+        self._show_side_tab("Simulate")
+
+    def _draw_czjzek_map(self, draw) -> None:
+        """A Czjzek fit's distribution map (with the fit beside it) on the
+        Fit view, styled like every other plot there and exportable."""
+        self.fit_canvas.show_external_plot(draw)
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
     def _send_jcoupling_to_simulation(self, nucleus, larmor_Hz, sites, lineshape, eta) -> None:
         self.jcoupling_sim_panel.set_from_fit(nucleus, larmor_Hz, sites, lineshape, eta)
         self._jcoupling_sim_section.setExpanded(True)
@@ -11984,6 +12104,12 @@ class MainWindow(QMainWindow):
     # Simulations launcher tile rather than sub-tabs of a separate
     # Simulate mode. Backed by opennmr.simulate.
     # ------------------------------------------------------------------
+
+    def _open_fit_display_options(self) -> None:
+        """Right-click ▸ Components ▸ Colours and highlighting…: the Fit
+        tile's Fit plot section, opened."""
+        self._show_side_tab("Fit")
+        self._fit_display_section.setExpanded(True)
 
     def _show_simulation_view(self) -> None:
         """Attenuation curves and pulse profiles are not spectra, so
@@ -22183,6 +22309,8 @@ class MainWindow(QMainWindow):
         self._refresh_simulation_controls(spectrum)
         if hasattr(self, "quad_fit_panel"):
             self.quad_fit_panel.seed_from_spectrum(spectrum)
+        if hasattr(self, "czjzek_fit_panel"):
+            self.czjzek_fit_panel.seed_from_spectrum(spectrum)
         if hasattr(self, "combined_sim_panel"):
             self.combined_sim_panel.seed_from_spectrum(spectrum)
         if hasattr(self, "combined_fit_panel"):

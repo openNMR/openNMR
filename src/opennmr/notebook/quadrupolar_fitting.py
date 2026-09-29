@@ -624,9 +624,16 @@ def NMR1dplot_with_quad_fit(results, popt, fit_info, fit_regions=None, show_comp
                             output_format='', colour_data='black', colour_fit='#D55E00',
                             colour_components=None, tick_dir='in', tick_length=4.0,
                             tick_width=1.0, tick_pad=4.0, tick_number=None, n_zcw_final=None,
-                            save_fig=False, fig_name='nmr_quad_fit_plot', save_format='png'):
+                            save_fig=False, fig_name='nmr_quad_fit_plot', save_format='png',
+                            component_style=None):
     """Data, fit, each site (dashed) and, below, the residual -- on the
-    spectrum's own descending ppm axis, normalised to the data maximum."""
+    spectrum's own descending ppm axis, normalised to the data maximum.
+
+    ``component_style`` : a :func:`opennmr.notebook.fit_display.component_style`
+    dict (or keyword dict) -- show/hide/highlight the sites, fill them or
+    not, their colours -- drawn exactly as the GUI's Fit view draws it
+    (``canvas.fit_component_style()`` gives the GUI's current one). When
+    given it replaces ``show_components``/``colour_*``."""
     style = setup_plotting(font=font, fontsize=fontsize, pl_width=pl_width,
                            pl_height=pl_height, output_format=output_format)
     x = np.asarray(results["x_ppm"], dtype=float)
@@ -642,9 +649,16 @@ def NMR1dplot_with_quad_fit(results, popt, fit_info, fit_regions=None, show_comp
     else:
         fig, ax = plt.subplots()
         rax = None
-    ax.plot(x[mask], y[mask] / scale, color=colour_data, lw=1.2, label="Data")
-    ax.plot(x[mask], y_fit[mask] / scale, color=colour_fit, lw=1.5, label="Fit")
-    if show_components and fit_info["n_sites"] > 1:
+    if component_style is not None:
+        from .fit_display import draw_fit_components
+        draw_fit_components(ax, x[mask], y[mask] / scale, y_fit[mask] / scale,
+                            components=[np.asarray(c)[mask] / scale for c in comps],
+                            labels=list(fit_info["labels"]), style=component_style,
+                            auto_hide_single=True, fit_label="Fit")
+    else:
+        ax.plot(x[mask], y[mask] / scale, color=colour_data, lw=1.2, label="Data")
+        ax.plot(x[mask], y_fit[mask] / scale, color=colour_fit, lw=1.5, label="Fit")
+    if component_style is None and show_components and fit_info["n_sites"] > 1:
         from ..plotting.accessibility import ordered_qualitative_colours
         colours = colour_components or ordered_qualitative_colours("okabe_ito")[2:]
         for i, (c, label) in enumerate(zip(comps[:-1], fit_info["labels"])):
