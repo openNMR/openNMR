@@ -2014,13 +2014,12 @@ class MainWindow(QMainWindow):
 
         compare_intro_label = QLabel(
             "Ctrl/Cmd-click (or Shift-click) several 1D spectra in the "
-            "Open experiments list to start a comparison -- or just select a "
-            "single pseudo-2D spectrum there, which fills this in "
-            "with its own slices automatically, in order. Fine-tune "
-            "either here: check/uncheck to include or exclude, Move Up/"
+            "'Open experiments' list (bottom left) to start a comparison."
+            "For pseudo-2D spectra, the slices are filled in automatically, in order."
+            "You can select/deselect spectra to include/exclude spectra. Move Up/"
             "Down to reorder the plot. Right-click for Plot (jump to "
             "the Compare canvas tab) or Fit Curve (relaxation/"
-            "diffusion) across whatever's checked here."
+            "diffusion) across whichever experiments are checked here."
         )
         compare_intro_label.setWordWrap(True)
         layout.addWidget(compare_intro_label)
@@ -2067,11 +2066,11 @@ class MainWindow(QMainWindow):
         # series: "make it easier to select all ... instead of one at
         # a time".
         check_row = QHBoxLayout()
-        check_all_button = QPushButton("Check All")
+        check_all_button = QPushButton("Select All")
         check_all_button.setToolTip("Include every spectrum listed here in the comparison.")
         check_all_button.clicked.connect(lambda: self._set_all_compare_checked(True))
-        uncheck_all_button = QPushButton("Uncheck All")
-        uncheck_all_button.setToolTip("Exclude every spectrum listed here from the comparison.")
+        uncheck_all_button = QPushButton("Deselect All")
+        uncheck_all_button.setToolTip("Omit every spectrum listed here from the comparison.")
         uncheck_all_button.clicked.connect(lambda: self._set_all_compare_checked(False))
         check_row.addWidget(check_all_button)
         check_row.addWidget(uncheck_all_button)
@@ -9732,7 +9731,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         self.processing_status_label = QLabel(
-            "Select a spectrum with retained imaginary data to adjust its phase."
+            "Select a spectrum to adjust its phase, baseline and referencing."
         )
         self.processing_status_label.setWordWrap(True)
         layout.addWidget(self.processing_status_label)
@@ -12279,13 +12278,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.fit_workflow_guide)
 
         self.fitting_status_label = QLabel(
-            "Measure an intensity per spectrum, or per slice of a "
-            "pseudo-2D series: fit peak shapes (Isotropic), integrate "
-            "a region (Integration), or fit a CSA, quadrupolar or combined "
+            "Fit peak shapes (Isotropic), integrate "
+            "a region (Integration), or fit a chemical shft anisotropy (CSA), quadrupolar or combined "
             "powder lineshape (CSA/Dipolar, Quadrupolar, Combined Hamiltonian). "
-            "Whichever you run last is what "
-            "Relaxation's Fit Curve then fits a relaxation/diffusion "
-            "curve to."
+            "To retain a fit for later use, click 'Keep This Fit'. You can see all"
+            "your current fits in the 'Kept fit models' menu."
         )
         self.fitting_status_label.setWordWrap(True)
         layout.addWidget(self.fitting_status_label)
@@ -15901,7 +15898,7 @@ class MainWindow(QMainWindow):
         """A framed "how to" for T1/T2 from a pseudo-2D series, with the
         step ``here`` ("fit" or "curve") marked, and a button to the
         tile the next (or previous) step is on."""
-        box = QGroupBox("T1 / T2 from a pseudo-2D series")
+        box = QGroupBox("Relaxation fitting from a pseudo-2D series")
         box.setObjectName("t1t2WorkflowGuide")
         v = QVBoxLayout(box)
         items = []

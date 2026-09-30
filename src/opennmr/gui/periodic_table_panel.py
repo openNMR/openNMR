@@ -514,10 +514,9 @@ class PeriodicTableView(QWidget):
         self.footnote = QLabel(
             "<small>Bar colour: spin of the most abundant NMR isotope; number top-right: how "
             "many NMR isotopes. † radioactive (³H and ⁹⁹Tc are not naturally present; tabulated "
-            "at 0 %). Q is not defined for I = 1/2. Nuclear data are openNMR's own table — the "
-            "one every spectrum is referenced with. Larmor frequencies are |γ/2π| × B₀ for the "
-            "bare nucleus; a reference compound's 0 ppm differs by its shielding (ppm for ¹H, "
-            "up to ~1 % for heavy nuclei).</small>")
+            "at 0 %). Q is not defined for I = 1/2. Nuclear data are openNMR's own table, as used "
+            "for referencing all spectra in openNMR. Larmor frequencies are |γ/2π| × B₀ for the "
+            "'bare' nucleus.</small>")
         self.footnote.setWordWrap(True)
         outer.addWidget(self.footnote)
 
