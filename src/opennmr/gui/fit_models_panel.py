@@ -65,7 +65,7 @@ class FitModelsPanel(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         intro = QLabel(
-            "Keep several fits of the selected spectrum -- a 2-, 3- and 4-site model, say -- "
+            "Keep several fits of the selected spectrum (e.g., 2-, 3- and 4-site models) "
             "and compare them. Kept fits are saved with the spectrum. (Or right-click any fit "
             "plot ▸ Keep This Fit…)")
         intro.setWordWrap(True)

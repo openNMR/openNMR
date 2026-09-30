@@ -2432,10 +2432,6 @@ class MainWindow(QMainWindow):
         return [int(chunk) if chunk.isdigit() else chunk.lower()
                 for chunk in cls._NATURAL_SORT_SPLIT_RE.split(name)]
 
-    #: Most experiments one folder scan returns. Was 500, which a single
-    #: busy data folder can exceed (explicit user request: "account for,
-    #: say, 2000"); a scan that stops here says so rather than silently
-    #: showing a partial list (see _scan_was_truncated).
     SCAN_LIMIT = 10_000
 
     @classmethod
@@ -12281,7 +12277,7 @@ class MainWindow(QMainWindow):
             "Fit peak shapes (Isotropic), integrate "
             "a region (Integration), or fit a chemical shft anisotropy (CSA), quadrupolar or combined "
             "powder lineshape (CSA/Dipolar, Quadrupolar, Combined Hamiltonian). "
-            "To retain a fit for later use, click 'Keep This Fit'. You can see all"
+            "To retain a fit for later use, click 'Keep This Fit'. You can see all "
             "your current fits in the 'Kept fit models' menu."
         )
         self.fitting_status_label.setWordWrap(True)
@@ -14055,7 +14051,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         blurb = QLabel(
-            "Simulate chemical-shift-anisotropy powder patterns -- one site or several, "
+            "Simulate chemical-shift-anisotropy (CSA) powder patterns -- one site or several, "
             "summed -- then keep the result as a spectrum to compare against real data "
             "(it is added to Open experiments), or send every site to Fit as starting values."
         )
@@ -14997,7 +14993,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         blurb = QLabel(
-            "Fit a chemical-shift-anisotropy powder lineshape to the selected "
+            "Fit a chemical-shift-anisotropy (CSA) powder lineshape to the selected "
             "1D spectrum (or the displayed slice of a 2D). Add one row per "
             "site; every site is simulated independently and summed."
         )
@@ -15090,7 +15086,7 @@ class MainWindow(QMainWindow):
         self.csa_orientations_spin = QSpinBox()
         self.csa_orientations_spin.setRange(50, 200000)
         self.csa_orientations_spin.setSingleStep(500)
-        self.csa_orientations_spin.setValue(2000)
+        self.csa_orientations_spin.setValue(320)
         self.csa_orientations_spin.setToolTip(
             "Orientations in the powder average while fitting.\n\n"
             "Keep this coarse: the fit calls the simulator once per site per "
@@ -15101,7 +15097,7 @@ class MainWindow(QMainWindow):
 
         self.csa_render_orientations_spin = QSpinBox()
         self.csa_render_orientations_spin.setRange(50, 500000)
-        self.csa_render_orientations_spin.setSingleStep(2000)
+        self.csa_render_orientations_spin.setSingleStep(320)
         self.csa_render_orientations_spin.setValue(20000)
         self.csa_render_orientations_spin.setToolTip(
             "Orientations for the final curve, once the fit has converged. "

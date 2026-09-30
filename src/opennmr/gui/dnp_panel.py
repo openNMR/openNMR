@@ -256,7 +256,7 @@ class DnpPanel(QWidget):
         self.sweep_field_combo.setToolTip(
             "Both are always in the table. SFO1 is set by hand and misses the line; the line's "
             "own frequency is the direct measurement of B0.")
-        form.addRow("B0 from:", self.sweep_field_combo)
+        form.addRow("B₀ from:", self.sweep_field_combo)
         shift_row = QHBoxLayout()
         self.sweep_shift_auto = QCheckBox("from reference")
         self.sweep_shift_auto.setChecked(True)

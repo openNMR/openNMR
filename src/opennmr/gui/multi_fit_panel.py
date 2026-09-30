@@ -46,7 +46,7 @@ from .combined_panels import CombinedHamiltonianPanel, _param_label
 
 #: Experiment table columns.
 _E_NAME, _E_NUC, _E_NU0, _E_MAS, _E_TRANS, _E_WINDOW, _E_X = range(7)
-_E_HEADERS = ("Experiment", "Nucleus", "ν0 (MHz)", "MAS (Hz)", "Transitions", "Window (ppm)",
+_E_HEADERS = ("Experiment", "Nucleus", "ν₀ (MHz)", "MAS (Hz)", "Transitions", "Window (ppm)",
               "x value")
 #: Parameter table columns.
 _Q_SITE, _Q_NAME, _Q_NUCLEI, _Q_SCOPE, _Q_FREE, _Q_MIN, _Q_MAX = range(7)

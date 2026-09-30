@@ -1467,8 +1467,8 @@ class JCouplingFitPanel(QWidget):
         v = QVBoxLayout(self)
         blurb = QLabel("Fit J-coupled multiplets to the selected 1D spectrum (or the displayed "
                        "slice of a 2D). First order: for each site give the partners it couples "
-                       "to and starting Js read off the line spacings. Spin system: give every "
-                       "spin's shift and the Js between them -- solved exactly, for strongly "
+                       "to and starting J values (e.g., as read off the line spacings). Spin system: give every "
+                       "spin's shift and the J values between them. The matrix will then be solved exactly, for strongly "
                        "coupled spectra. The observe frequency comes from the spectrum.")
         blurb.setWordWrap(True)
         v.addWidget(blurb)
