@@ -209,7 +209,7 @@ class QuadrupolarFitPanel(QWidget):
         self.render_orientations_spin = QSpinBox()
         self.render_orientations_spin.setRange(100, 500000)
         self.render_orientations_spin.setSingleStep(5000)
-        self.render_orientations_spin.setValue(28657)
+        self.render_orientations_spin.setValue(4181)
         self.render_orientations_spin.setToolTip("Orientations for the drawn curve, once fitted.")
         form.addRow("Orientations (final):", self.render_orientations_spin)
         v.addLayout(form)

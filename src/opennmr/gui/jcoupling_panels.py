@@ -1040,9 +1040,9 @@ class JCouplingSimulationPanel(QWidget):
         v = QVBoxLayout(self)
         blurb = QLabel("Build a J-coupled spectrum. First order: one row per chemical site and "
                        "the groups of nuclei it couples to (quick; valid when shift differences "
-                       "are much larger than J). Spin system: every spin's shift and every J, "
-                       "solved exactly -- roofing, AB/ABX patterns and other strong-coupling "
-                       "effects included.")
+                       "are much larger than J). Spin system: every spin's shift and every J value, "
+                       "solved exactly (leading to roofing, AB/ABX patterns and other strong-coupling "
+                       "effects).")
         blurb.setWordWrap(True)
         v.addWidget(blurb)
 

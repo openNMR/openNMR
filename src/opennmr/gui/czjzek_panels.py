@@ -38,8 +38,8 @@ _SIMULATED_SECONDS = {"static": 0.005, "mas": 0.15}
 _LAYOUTS = (("Spectrum to the right", "right"), ("Spectrum above", "top"))
 
 #: The two distribution models (explicit user request: a central C_Q).
-_MODELS = (("Czjzek -- random EFG centred on zero", "czjzek"),
-           ("Extended Czjzek -- mean EFG (C_Q0, η_Q0) + random part", "extended"))
+_MODELS = (("Czjzek (random EFG centred on zero)", "czjzek"),
+           ("Extended Czjzek (mean EFG (C_Q0, η_Q0) + random part)", "extended"))
 _MODEL_TIP = (
     "Czjzek's model is a fully random EFG centred on zero: it has no 'central' C_Q. Its "
     "⟨C_Q⟩ ≈ 2σ, its most probable C_Q and ⟨η_Q⟩ = 0.61 all follow from σ alone -- shown "
@@ -93,13 +93,12 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
     COLUMN_PARAMS = {1: "d_iso", 2: "sigma", 3: "d", 4: "fwhm", 5: "eta", 6: "CQ0", 7: "eta0"}
     PARAM_LABELS = dict(cz.CZJZEK_PARAM_LABELS)
     PARAM_NAMES = tuple(cz.CZJZEK_PARAM_NAMES)
-    BLURB = ("Fit Czjzek distributions of quadrupolar couplings -- the disordered sites of "
-             "glasses and amorphous solids -- to the selected 1D spectrum. Each site is δiso, "
-             "the width σ of its C_Q distribution, and d (5 for Czjzek's model, held unless "
-             "you unfix it; right-click it). FWHM is the isotropic chemical-shift "
-             "distribution. Czjzek's model is centred on a zero EFG (no central C_Q; ⟨C_Q⟩ ≈ 2σ); "
-             "the extended model adds a mean EFG, C_Q0 and η_Q0. The model is Simulate ▸ "
-             "Czjzek's.")
+    BLURB = ("Fit Czjzek distributions of quadrupolar couplingsto the selected 1D spectrum. Valid for disordered sites of "
+             "glasses and amorphous solids. Each site has a shift of δiso, "
+             "a width, σ, of its C_Q distribution, and critical exponent, d, (5 for the Gaussian Isotropic Model, held unless "
+             "you unfix it; right-click it). FWHM is the full width at half-maximum for the isotropic chemical shift. "
+             "Czjzek's model is centred on a zero EFG (no central C_Q; ⟨C_Q⟩ ≈ 2σ); "
+             "the extended model adds a mean EFG, C_Q0 and η_Q0. Switch between the original and extended in the 'Distribution' dropdown.")
     FIT_TEXT = "Fit Czjzek Distribution"
     SEND_TEXT = "Send to Simulate ▸ Czjzek"
     DEFAULT_SITE = ("0", "2", "5", "3", "0.5", "0", "0")
@@ -570,7 +569,7 @@ class CzjzekSimPanel(QWidget):
         blurb = QLabel(
             "The powder spectrum of a site whose quadrupolar coupling is spread over a Czjzek "
             "distribution (glasses, disordered solids), with the distribution of environments "
-            "-- C_Q across, η_Q up -- drawn as a heat map beside it.")
+            "(C_Q along x, η_Q along y) drawn as a heat map beside it.")
         blurb.setWordWrap(True)
         v.addWidget(blurb)
         form = QFormLayout()

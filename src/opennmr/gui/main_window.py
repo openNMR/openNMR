@@ -14051,9 +14051,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         blurb = QLabel(
-            "Simulate chemical-shift-anisotropy (CSA) powder patterns -- one site or several, "
-            "summed -- then keep the result as a spectrum to compare against real data "
-            "(it is added to Open experiments), or send every site to Fit as starting values."
+            "Simulate chemical-shift-anisotropy (CSA) powder patterns, one site or several, "
+            "then keep the result as a spectrum to compare against real data "
+            "(it is added to 'Open experiments'), or send every site to Fit as starting values."
         )
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
@@ -14337,10 +14337,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         blurb = QLabel(
-            "Simulate static or MAS quadrupolar powder patterns -- one site or "
-            "several, summed -- then keep the result as a spectrum to compare "
+            "Simulate static or MAS quadrupolar powder patterns, one site or "
+            "several, then keep the result as a spectrum to compare "
             "against real data in Open experiments, or send every site to Fit. "
-            "Tick \u201cCompare orders\u201d to see what second order (and beyond) "
+            "Tick 'Compare orders' to see what second order (and beyond) "
             "adds to the first-order pattern."
         )
         blurb.setWordWrap(True)
@@ -15096,9 +15096,9 @@ class MainWindow(QMainWindow):
         form.addRow("Orientations (fitting):", self.csa_orientations_spin)
 
         self.csa_render_orientations_spin = QSpinBox()
-        self.csa_render_orientations_spin.setRange(50, 500000)
-        self.csa_render_orientations_spin.setSingleStep(320)
-        self.csa_render_orientations_spin.setValue(20000)
+        self.csa_render_orientations_spin.setRange(20, 500000)
+        self.csa_render_orientations_spin.setSingleStep(20)
+        self.csa_render_orientations_spin.setValue(320)
         self.csa_render_orientations_spin.setToolTip(
             "Orientations for the final curve, once the fit has converged. "
             "Paid once, so it can afford to be much finer than the fitting "
@@ -16323,7 +16323,7 @@ class MainWindow(QMainWindow):
                  "Which gradient coil this experiment used. Each axis of a "
                  "triple-axis probe carries its own saved maximum, since they "
                  "are rarely the same strength.\n\n"
-                 "The same setting the Imaging tab shows -- one experiment, one "
+                 "The same setting the Imaging tab shows one experiment, one "
                  "axis, one maximum.")
 
         _pfg_row("Max gradient:", self.pfg_max_gradient_spin,
@@ -17525,7 +17525,7 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.vocs_section = CollapsibleSection("VOCS", content=self._build_vocs_subtab())
+        self.vocs_section = CollapsibleSection("Variable Offset Cumulative Spectroscopy (VOCS)", content=self._build_vocs_subtab())
         layout.addWidget(self.vocs_section)
         self.cpmg_panel = CpmgProcessingPanel()
         self.cpmg_panel.spectrum_ready.connect(self._add_derived_spectrum)
@@ -23057,7 +23057,7 @@ class MainWindow(QMainWindow):
 
         if slice_results and slice_results[0].get("model_fit"):
             writer.writerow([f"{slice_results[0].get('model', 'model')} lineshapes applied to "
-                             f"every slice -- one row per slice per site"])
+                             f"every slice: one row per slice per site"])
             writer.writerow(["Slice", "Site", "Area", "Area err", "Relative amplitude",
                              "Relative amplitude err", "R2"])
             for result in slice_results:
@@ -23069,7 +23069,7 @@ class MainWindow(QMainWindow):
                                      f"{result['r_squared']:.6g}"])
             slice_results = []
         elif slice_results and "popt" in slice_results[0]:
-            writer.writerow(["Spectral fit -- one row per slice per peak"])
+            writer.writerow(["Spectral fit: row per slice per peak"])
             writer.writerow(["Slice", "Peak", "Type", "Shift", "Shift err", "FWHM", "FWHM err",
                               "Amplitude", "Amplitude err", "Eta", "Eta err"])
         else:
@@ -23092,7 +23092,7 @@ class MainWindow(QMainWindow):
 
         if relaxation_results:
             writer.writerow([])
-            writer.writerow(["Curve fit -- one row per peak"])
+            writer.writerow(["Curve fit: row per peak"])
             # The uncertainty's own kind is stated here, once, above the
             # table -- a column of "err" numbers whose meaning depends
             # on whether per-point errors were supplied is exactly the
