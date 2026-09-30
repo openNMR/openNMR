@@ -120,9 +120,9 @@ class ArithmeticPanel(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         intro = QLabel(
-            "Add, subtract, average or scale the spectra checked in the Compare list. They "
-            "are first interpolated onto one common axis (different experiments never share "
-            "an identical one). The result is added to Open experiments as a new spectrum.")
+            "Add, subtract, average or scale the spectra checked in the 'Compare' list. The "
+            "experiments are first interpolated onto one common axis (different experiments never share "
+            "an identical axis). The result is added to 'Open experiments' (bottom left) as a new spectrum.")
         intro.setWordWrap(True)
         v.addWidget(intro)
 
@@ -264,7 +264,7 @@ class ArithmeticPanel(QWidget):
         n = len(self._labels)
         if n < 2:
             self.formula_label.setText(
-                "<i>Check at least two 1D spectra in the Compare list.</i>")
+                "<i>Select at least two 1D spectra in the Compare list.</i>")
             self.combine_button.setEnabled(False)
             return
         ops, factors = self.terms()

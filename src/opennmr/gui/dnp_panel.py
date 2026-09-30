@@ -40,7 +40,7 @@ from ..notebook import dnp
 #: What an armed canvas gesture is for.
 ENH_PEAK, ENH_REGION, SWEEP_PEAK, SWEEP_REGION = "enh_peak", "enh_region", "sweep_peak", "sweep_region"
 
-_TABLE = (("label", "Spectrum"), ("field_T", "B0 (T)"), ("delta_B_mT", "ΔB0 (mT)"),
+_TABLE = (("label", "Spectrum"), ("field_T", "B₀ (T)"), ("delta_B_mT", "ΔB₀ (mT)"),
           ("field_source", "Field from"), ("found", "Line found"), ("snr", "S/N"),
           ("sfo1_error_mT", "SFO1 − line (mT)"), ("intensity", "Intensity"), ("area", "Area"))
 
@@ -136,8 +136,8 @@ class DnpPanel(QWidget):
         page = QWidget()
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
-        blurb = QLabel("Uses the spectra checked in the Compare list above. Picks and regions "
-                       "are made on the Compare view.")
+        blurb = QLabel("Uses the spectra selected in the 'Compare' list above. Peak picking and region selection/integration "
+                       "are made on the 'Compare' view.")
         blurb.setWordWrap(True)
         v.addWidget(blurb)
         v.addWidget(box)
@@ -213,12 +213,12 @@ class DnpPanel(QWidget):
         return box
 
     def _build_sweep(self) -> QGroupBox:
-        box = QGroupBox("Field sweep: signal against B0")
+        box = QGroupBox("Field sweep: signal against B₀")
         v = QVBoxLayout(box)
         intro = QLabel(
             "Each spectrum is shown against its offset from its own carrier (SFO1), where the "
             "line stays near zero as the field and SFO1 change. Pick the line or drag a region "
-            "once: the line is found in every spectrum, and B0 is taken from its frequency and "
+            "once: the line is found in every spectrum, and B₀ is taken from its frequency and "
             "the nucleus's gyromagnetic ratio.")
         intro.setWordWrap(True)
         v.addWidget(intro)
@@ -321,9 +321,9 @@ class DnpPanel(QWidget):
             "the largest value.")
         plot_form.addRow("Divide by:", self.sweep_normalise_combo)
         self.sweep_axis_combo = QComboBox()
-        self.sweep_axis_combo.addItem("B0 (mT)", ("mT", False))
-        self.sweep_axis_combo.addItem("B0 (T)", ("T", False))
-        self.sweep_axis_combo.addItem("ΔB0 from reference (mT)", ("mT", True))
+        self.sweep_axis_combo.addItem("B₀ (mT)", ("mT", False))
+        self.sweep_axis_combo.addItem("B₀ (T)", ("T", False))
+        self.sweep_axis_combo.addItem("ΔB₀ from reference (mT)", ("mT", True))
         plot_form.addRow("Field axis:", self.sweep_axis_combo)
         for combo in (self.sweep_quantity_combo, self.sweep_normalise_combo, self.sweep_axis_combo):
             combo.currentIndexChanged.connect(lambda _i: self.draw_profile())
