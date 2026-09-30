@@ -69,10 +69,11 @@ def default_transitions(I):
 
 def quad_model_full(x_ppm_sorted, d_iso, C_Q_MHz, eta_Q, fwhm, eta=0.0, *, I, larmor_Hz,
                     mas_Hz=0.0, order="second", transitions=None, rotor_angle="magic",
-                    n_zcw=4181, lineshape="gaussian"):
+                    n_zcw=4181, lineshape="gaussian", normalised=True):
     """
     One site's lineshape on ``x_ppm_sorted`` (ascending, evenly spaced),
-    normalised to a maximum of 1.
+    normalised to a maximum of 1 (``normalised=False``: the simulator's
+    absolutely scaled ``real_spec`` instead -- see quad_site_amounts).
 
     ``C_Q_MHz`` in MHz; its sign is irrelevant (see the module notes).
     ``mas_Hz`` = 0 gives the static pattern.
@@ -84,7 +85,7 @@ def quad_model_full(x_ppm_sorted, d_iso, C_Q_MHz, eta_Q, fwhm, eta=0.0, *, I, la
         mas_Hz=mas_Hz, order=order, transitions=transitions, delta_iso=d_iso,
         fwhm=max(float(fwhm), 1e-9), lineshape=lineshape, eta=float(np.clip(eta, 0.0, 1.0)),
         n_zcw=n_zcw, rotor_angle=rotor_angle)
-    return spec["normalised_real_spec"]
+    return spec["normalised_real_spec"] if normalised else spec["real_spec"]
 
 
 def build_quad_model(x_ppm_sorted, params, n_sites, x_ref=None, **sim_kwargs):
@@ -498,6 +499,22 @@ def _physics_warnings(popt, pcov_free, is_free, labels, I, larmor_Hz, mas_Hz, tr
                 warnings.append(f"{label}: d_iso and C_Q are {abs(r):.0%} correlated -- quote "
                                 "the CT centre of gravity and P_Q, or add a second field.")
     return warnings
+
+
+def quad_site_amounts(x_ppm, popt, fit_info, normalise=True):
+    """Each fitted site's ``amount`` (relative number of nuclei, as
+    quadrupolar_multisite_spectrum weights it) from the fit's
+    amplitudes: amplitude / the site's un-normalised peak height on the
+    fit's own axis (see csa_fitting.csa_site_amounts). Largest = 1 with
+    ``normalise``."""
+    from .simulations import site_amounts_from_amplitudes
+    xs = np.sort(np.asarray(x_ppm, dtype=float))
+    n = fit_info["n_sites"]
+    params = np.asarray(popt[:_N * n], dtype=float).reshape(n, _N)
+    heights = [float(np.max(quad_model_full(xs, p[0], p[1], p[2], p[3], p[5], normalised=False,
+                                            **fit_info["sim_kwargs"])))
+               for p in params]
+    return site_amounts_from_amplitudes(params[:, 4], heights, normalise=normalise)
 
 
 def evaluate_quad_fit(x_ppm, popt, fit_info, return_components=False, n_zcw=None):

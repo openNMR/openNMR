@@ -85,11 +85,37 @@ def test_shape_parameters_reach_the_simulation(window, monkeypatch):
     assert seen["adiabatic_params"] == {"xi": 8.0, "tan_kappa": 15.0}
 
 
-def test_the_sweep_box_cannot_ask_for_an_impossible_sweep(window):
-    # One point per us: the RF must stay within +/-500 kHz of the carrier.
-    # The box's range keeps it there (the simulator's own guard is tested
-    # in test_bloch_adiabatic.py).
-    assert window.bloch_sweep_spin.maximum() * 1e3 / 2 < 500e3
+def test_a_several_mhz_sweep_is_simulated_at_a_finer_time_step(window):
+    # Explicit user request (2026-09-30): adiabatic sweeps of several MHz.
+    # The box used to stop below 1 MHz, the most a 1 us step can carry at
+    # all; now the time step follows the sweep (auto), so the box allows it.
+    assert window.bloch_sweep_spin.maximum() >= 20000.0            # kHz: 20 MHz
+    _choose(window.bloch_shape_combo, "WURST")
+    window.bloch_duration_spin.setValue(200)
+    window.bloch_sweep_spin.setValue(4000.0)                       # 4 MHz
+    window.bloch_q_spin.setValue(5.0)
+    window.bloch_n_offsets_spin.setValue(101)
+    window.bloch_power_scales_edit.setText("1")
+    window._run_bloch_simulation()
+    text = window.bloch_summary_label.text()
+    assert "Cannot simulate" not in text
+    assert "Time step 0.025 µs (auto" in text                      # 0.05 turn at 2 MHz
+    assert "MHz wide" in text and "⚠" not in text
+    labels = [ax.get_ylabel() for ax in window.simulation_canvas.figure.axes]
+    assert any("MHz" in label for label in labels)
+    assert "MHz" in window.simulation_canvas.figure.axes[1].get_xlabel()
+
+
+def test_a_coarse_time_step_by_hand_is_warned_about(window):
+    _choose(window.bloch_shape_combo, "WURST")
+    window.bloch_duration_spin.setValue(200)
+    window.bloch_sweep_spin.setValue(800.0)                        # 0.4 turn per 1 us step
+    window.bloch_time_step_spin.setValue(1.0)
+    window.bloch_n_offsets_spin.setValue(51)
+    window._run_bloch_simulation()
+    text = window.bloch_summary_label.text()
+    assert "Time step 1 µs (as set" in text
+    assert "too coarse" in text
 
 
 # -- tensor pictures ------------------------------------------------------------

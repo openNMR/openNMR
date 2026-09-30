@@ -1075,6 +1075,8 @@ class MplCanvas(QWidget):
         self._slice_fit_active = False
         self._slice_fit_labels: list = []
         self._curve_fit_shown: dict | None = None
+        #: Every peak's curve fit, when they are shown together.
+        self._curve_fits_shown: list = []
         #: The palette every multi-series plot takes its default
         #: colours from -- Compare, extracted slices, the DOSY overlay
         #: and the 2D overlay. One setting rather than one per view, so
@@ -2788,6 +2790,7 @@ class MplCanvas(QWidget):
         # curve fit a "Keep This Fit…" would keep.
         self._slice_fit_active = False
         self._curve_fit_shown = None
+        self._curve_fits_shown = []
         self.simulation_spectrum = None
         # The Axes these were drawn on are about to go; the Python-side
         # list would otherwise keep handing out artists belonging to a
@@ -6082,6 +6085,8 @@ class MplCanvas(QWidget):
                     **self._slice_fit_args}
         if self._curve_fit_shown is not None:
             return {"kind": "curve", **self._curve_fit_shown}
+        if self._curve_fits_shown:
+            return {"kind": "curves", "fits": list(self._curve_fits_shown)}
         return None
 
     def fit_component_style(self) -> dict:
@@ -6315,10 +6320,84 @@ class MplCanvas(QWidget):
         # anyone scrolls.
         self.dosyLevelFloorChanged.emit(self._dosy_factor)
 
+    #: The curve-fit line unless the user sets another (Dynamics ▸ Fit
+    #: Curve ▸ Fit line).
+    DEFAULT_FIT_LINE = {"color": "red", "linestyle": "--", "linewidth": 2.0}
+
+    def show_relaxation_fits(self, results: list, xlabel: str = "Delay (s)",
+                             x_scale: float = 1.0, ylabel: str = "Intensity",
+                             fit_curves: list | None = None, fit_style: dict | None = None,
+                             normalise: bool = False) -> None:
+        """Every peak's series and fit on one plot (explicit user request,
+        2026-09-30: see all fits together), each peak in its own
+        colour-blind-safe colour -- its points and its fit line, drawn in
+        the fit line style. ``fit_curves``: per peak ``(t_fine, y_fine)``
+        or None (then ``y_fit`` point to point). ``normalise`` scales each
+        peak by its own fitted maximum, so curves of very different
+        intensity can be compared by shape (the y label says so)."""
+        from ...plotting.accessibility import ordered_qualitative_colours
+        style = {**self.DEFAULT_FIT_LINE, **(fit_style or {})}
+        self._enter_plot_kind("curve")
+        self._contour_spectrum = None
+        self._contour_factor = None
+        self._proj_axes = {"f1": None, "f2": None}
+        self._compare_axes = None
+        self._fit_mode = False
+        self._selected_compare_index = None
+        self._freeform_zoom_axes = set()
+        self._processing_preview_fid_ax = None
+        self._processing_preview_spec_ax = None
+        self._current_1d_spectrum = None
+        self._preview_1d_spectrum = None
+        self._clear_figure()
+        self.ax = self.figure.add_subplot(111)
+        x_scale = float(x_scale) or 1.0
+        colours = ordered_qualitative_colours("okabe_ito")
+        shown = []
+        for k, result in enumerate(results):
+            colour = colours[k % len(colours)]
+            t = np.asarray(result["t"], dtype=float) / x_scale
+            y = np.asarray(result["y"], dtype=float)
+            curve = (fit_curves or [None] * len(results))[k]
+            if curve is not None:
+                cx, cy = np.asarray(curve[0], dtype=float) / x_scale, np.asarray(curve[1], float)
+            else:
+                order = np.argsort(t)
+                cx, cy = t[order], np.asarray(result["y_fit"], dtype=float)[order]
+            scale = 1.0
+            if normalise:
+                scale = float(np.max(np.abs(cy))) or 1.0
+            label = result.get("peak_label") or f"Peak {k + 1}"
+            self.ax.plot(t, y / scale, "o", color=colour, markersize=6.0, label=label, zorder=2)
+            self.ax.plot(cx, cy / scale, linestyle=style["linestyle"], color=colour,
+                         linewidth=style["linewidth"], zorder=3, label="_nolegend_")
+            shown.append({"label": label, "x": t, "y": np.asarray(result["y"], dtype=float),
+                          "y_fit": np.asarray(result["y_fit"], dtype=float),
+                          "curve_x": cx, "curve_y": cy, "xlabel": xlabel, "ylabel": ylabel,
+                          "result": result})
+        self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
+        self.ax.set_ylabel(ylabel + (" (normalised)" if normalise else ""),
+                           fontsize=self._AXIS_LABELSIZE)
+        plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=True,
+                                   linewidth=self._AXIS_LINEWIDTH)
+        plotting.apply_tick_style(self.ax, length=self._TICK_LENGTH, width=self._TICK_WIDTH,
+                                  minor=self._minor_ticks_visible,
+                                  labelsize=self._AXIS_LABELSIZE)
+        self._curve_axes = [self.ax]
+        self._curve_fit_shown = None
+        self._curve_fits_shown = shown          # (after _clear_figure reset it)
+        self._legend_visible = True
+        self._apply_current_axis_style()
+        self._apply_view_options()
+        self._crosshair_ready = True
+        self._apply_layout()
+        self.canvas.draw_idle()
+
     def show_relaxation_fit(self, result: dict, uncertainty: tuple | None = None,
                              xlabel: str = "Delay (s)", excluded_points: tuple | None = None,
                              x_scale: float = 1.0, ylabel: str = "Intensity",
-                             extra_series: list | None = None) -> None:
+                             extra_series: list | None = None, fit_curve: tuple | None = None,
+                             fit_style: dict | None = None) -> None:
         """Plot ONE peak's relaxation/diffusion series (data points)
         and fitted curve, from a single ``relaxation.fit_relaxation``-
         shaped dict (one entry of
@@ -6376,9 +6455,21 @@ class MplCanvas(QWidget):
         right-click "Exclude Nearest Point") has to multiply by the
         same factor.
 
+        ``fit_curve`` : ``(t_fine, y_fine)`` (x in seconds), the fitted
+        function on a fine grid (``processing.relaxation.fit_curve``) --
+        what is drawn as the fit when there is no uncertainty band.
+        Without it the fit is ``y_fit`` joined point to point, which is
+        not the fitted function (explicit user request, 2026-09-30: the
+        fit only looked right with the band on).
+
+        ``fit_style`` : the fit line's ``color``, ``linestyle`` and
+        ``linewidth`` (user-set in Dynamics ▸ Fit Curve; default a red
+        dashed line, 2 pt).
+
         A ``"curve"`` plot (see :meth:`_enter_plot_kind`): announced
         before drawing, so a saved default style for curves is in place
         when it is drawn. The data points take the trace colour."""
+        style = {**self.DEFAULT_FIT_LINE, **(fit_style or {})}
         self._enter_plot_kind("curve")
         self._contour_spectrum = None
         self._contour_factor = None
@@ -6412,11 +6503,15 @@ class MplCanvas(QWidget):
                 t_fine, y_fine - y_band, y_fine + y_band,
                 color="grey", alpha=0.4, label="Uncertainty", zorder=1,
             )
-            self.ax.plot(t_fine, y_fine, "--", color="red", linewidth=2.0, label="Fit", zorder=3)
+            curve_x, curve_y = t_fine, np.asarray(y_fine, dtype=float)
+        elif fit_curve is not None:
+            curve_x = np.asarray(fit_curve[0], dtype=float) / x_scale
+            curve_y = np.asarray(fit_curve[1], dtype=float)
         else:
             order = np.argsort(t)
-            self.ax.plot(t[order], np.asarray(y_fit)[order], "--", color="red",
-                          linewidth=2.0, label="Fit", zorder=3)
+            curve_x, curve_y = t[order], np.asarray(y_fit, dtype=float)[order]
+        self.ax.plot(curve_x, curve_y, linestyle=style["linestyle"], color=style["color"],
+                     linewidth=style["linewidth"], label="Fit", zorder=3)
         self.ax.plot(t, y, "o", color=self._trace_color, markersize=8.0,
                       label=result.get("peak_label", result.get("model", "Data")), zorder=2)
         if excluded_points is not None and len(excluded_points[0]):
@@ -6436,7 +6531,8 @@ class MplCanvas(QWidget):
         self._curve_fit_shown = {
             "x": np.asarray(t, dtype=float), "y": np.asarray(y, dtype=float),
             "y_fit": np.asarray(y_fit, dtype=float), "xlabel": xlabel, "ylabel": ylabel,
-            "label": result.get("peak_label", result.get("model", "")), "result": result}
+            "label": result.get("peak_label", result.get("model", "")), "result": result,
+            "curve_x": np.asarray(curve_x, dtype=float), "curve_y": np.asarray(curve_y, dtype=float)}
         self._legend_visible = True
         self._apply_current_axis_style()
         self._apply_view_options()

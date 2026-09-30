@@ -326,8 +326,20 @@ def plot_fit_comparison(models, figure=None, residuals=True, show_components=Non
         x = np.asarray(m["x"])
         order = np.argsort(x)
         colour = colours[i % len(colours)]
-        ax.plot(x[order], np.asarray(m["y_fit"])[order], "--" if not curve else "-",
-                color=colour, linewidth=1.8, label=m["name"], zorder=10 + i)
+        if curve and m.get("curve_x") is not None:
+            # The fitted function itself (kept with the model since
+            # 2026-09-30), not its values at the points joined up.
+            ax.plot(np.asarray(m["curve_x"]), np.asarray(m["curve_y"]), "-", color=colour,
+                    linewidth=1.8, label=m["name"], zorder=10 + i)
+        else:
+            ax.plot(x[order], np.asarray(m["y_fit"])[order], "--" if not curve else "-",
+                    color=colour, linewidth=1.8, label=m["name"], zorder=10 + i)
+        if curve and i and (np.shape(m["y"]) != np.shape(first["y"])
+                            or not np.allclose(np.asarray(m["y"]), np.asarray(first["y"]))):
+            # A curve fit of other data (another peak): its own points too.
+            mask = np.asarray(m["mask"])
+            ax.plot(x[mask], np.asarray(m["y"])[mask], "o", color=colour, markersize=5,
+                    markerfacecolor="none", zorder=5 + i)
         if show_components and m["name"] == show_components and m.get("components"):
             for c, label in zip(m["components"][:-1], m.get("labels") or []):
                 ax.fill_between(x[order], np.asarray(c)[order], color=colour, alpha=0.18,

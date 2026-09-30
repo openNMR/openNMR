@@ -96,7 +96,7 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm, eta=0.
                     n_theta=60, n_phi=120, use_octant_symmetry=True,
                     n_time=1024, n_sidebands=15, subtract_residual_mean=True,
                     powder_scheme='rectangular', n_zcw=None,
-                    lineshape="gaussian"):
+                    lineshape="gaussian", normalised=True):
     """
     Simulate a unit-amplitude, normalised CSA lineshape for a SINGLE
     site on ``x_ppm_sorted`` (must be ascending and evenly spaced --
@@ -148,6 +148,11 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm, eta=0.
         Minimum ZCW orientation count; only used when
         ``powder_scheme='zcw'``. Defaults to ``n_theta * n_phi``.
 
+    normalised : bool, optional
+        True (default): the lineshape scaled to a maximum of 1, which is
+        what the fit's amplitudes multiply. False: the simulator's own
+        absolutely scaled ``real_spec`` (see csa_site_amounts).
+
     Returns
     -------
     ndarray
@@ -175,7 +180,7 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm, eta=0.
             lineshape=lineshape, eta=eta,
         )
 
-    return spec["normalised_real_spec"]
+    return spec["normalised_real_spec"] if normalised else spec["real_spec"]
 
 
 def build_csa_model(x_ppm_sorted, params, n_sites, x_ref=None, **sim_kwargs):
@@ -881,6 +886,24 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
     }
 
     return popt, pcov_free, is_free, scale, fit_info
+
+
+def csa_site_amounts(x_ppm, popt, fit_info, normalise=True):
+    """Each fitted site's ``amount`` -- its relative number of nuclei,
+    the weight Simulate > CSA (csa_multisite_spectrum) uses -- from the
+    fit's amplitudes. A fitted amplitude scales a peak-normalised shape,
+    so a narrow site and a broad one of equal amplitude hold very
+    different numbers of nuclei; dividing by each shape's un-normalised
+    peak height on the fit's own axis undoes that. With ``normalise``
+    the largest amount is 1."""
+    from .simulations import site_amounts_from_amplitudes
+    n_sites = fit_info["n_sites"]
+    x_sorted = np.sort(np.asarray(x_ppm, dtype=float))
+    params = np.asarray(popt[: 6 * n_sites], dtype=float).reshape(n_sites, 6)
+    heights = [float(np.max(csa_model_full(x_sorted, d, a, s, w, eta=e, normalised=False,
+                                           **fit_info["sim_kwargs"])))
+               for d, a, s, w, _amp, e in params]
+    return site_amounts_from_amplitudes(params[:, 4], heights, normalise=normalise)
 
 
 def evaluate_csa_fit(x_ppm, popt, fit_info, return_components=False):

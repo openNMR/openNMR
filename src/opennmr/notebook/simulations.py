@@ -1388,6 +1388,236 @@ def quadrupolar_axis_limits(I, C_Q, eta_Q, larmor_Hz, transitions="all", delta_i
 
 
 # ============================================================
+# SEVERAL SITES IN ONE SPECTRUM (CSA and quadrupolar)
+# ============================================================
+#
+# A measured powder spectrum usually holds more than one site, and the
+# CSA and quadrupolar fits already model it as a sum of sites. These
+# two functions are the forward counterpart: every site simulated with
+# the shared settings (nucleus, field, spinning, broadening kernel,
+# powder average) and summed, weighted by its ``amount``.
+#
+# ``amount`` is the relative number of nuclei in the site -- the same
+# meaning as ``Site.amount`` in combined_hamiltonian. It multiplies each
+# site's ``real_spec``, which is absolutely scaled: summed over the
+# axis points it is the fraction of that site's intensity that falls
+# on the axis (1 for a CSA pattern that fits on it; for a quadrupolar
+# site, the selected transitions' share, e.g. 9/35 for the CT of
+# I = 5/2). So a site whose satellites run off the axis is not
+# inflated to make up for them, and two sites of equal amount have
+# equal integrated intensity wherever their patterns lie.
+#
+# The fits instead scale each site's *peak-normalised* shape by an
+# ``amplitude``; site_amounts_from_amplitudes converts those back.
+
+def _site_label(site, index):
+    label = site.get("label") if isinstance(site, dict) else None
+    return str(label) if label else f"Site {index + 1}"
+
+
+def _multisite_result(ppm_axis, labels, amounts, spectra, extra):
+    ppm_axis = np.asarray(ppm_axis, dtype=float)
+    components = [float(a) * np.asarray(s, dtype=float) for a, s in zip(amounts, spectra)]
+    total = np.sum(components, axis=0) if components else np.zeros(ppm_axis.size)
+    maximum = float(np.max(total)) if total.size else 0.0
+    amounts = np.asarray(amounts, dtype=float)
+    shares = amounts / amounts.sum() if amounts.sum() > 0 else np.full(amounts.size, np.nan)
+    return {
+        "x_ppm": ppm_axis,
+        "real_spec": total,
+        "normalised_real_spec": total / maximum if maximum > 0 else total,
+        "labels": list(labels),
+        "amounts": amounts,
+        "shares": shares,
+        "components": components,
+        # {label: spectrum}, the shape combined_hamiltonian.plot_combined draws.
+        "sites": dict(zip(_unique_labels(labels), components)),
+        **extra,
+    }
+
+
+def _unique_labels(labels):
+    seen, out = {}, []
+    for label in labels:
+        seen[label] = seen.get(label, 0) + 1
+        out.append(label if seen[label] == 1 else f"{label} ({seen[label]})")
+    return out
+
+
+def csa_multisite_spectrum(sites, ppm_axis, convention="Haeberlen", static=True,
+                           larmor_Hz=None, mas_Hz=None, lineshape="gaussian", **kwargs):
+    """
+    Several CSA sites in one static or finite-MAS powder spectrum.
+
+    Parameters
+    ----------
+    sites : list of dict
+        One per site: ``d_iso`` (ppm), ``span_or_Delta`` (ppm),
+        ``skew_or_eta``, and optionally ``fwhm`` (ppm, default 2),
+        ``eta`` (the pseudo-Voigt Lorentzian fraction, default 0.5 --
+        used only when ``lineshape='pseudo_voigt'``), ``amount``
+        (relative number of nuclei, default 1) and ``label``.
+    ppm_axis : ndarray
+        Evenly spaced ppm axis.
+    convention : 'Haeberlen' or 'Herzfeld-Berger', shared by every site.
+    static : True for the static powder pattern, False for finite MAS
+        (then ``larmor_Hz`` and ``mas_Hz`` are required).
+    lineshape : broadening kernel shared by every site.
+    **kwargs : powder-average options (``powder_scheme``, ``n_zcw``,
+        ``n_theta``, ``n_phi``, ...), forwarded to
+        make_static_csa_spectrum / finite_mas_csa_spectrum.
+
+    Returns
+    -------
+    dict with ``x_ppm``, ``real_spec`` (the sum), ``normalised_real_spec``,
+    ``labels``, ``amounts``, ``shares`` (each site's fraction of the
+    nuclei), ``components`` (each site's contribution, in site order),
+    ``sites`` ({label: contribution}) and ``log``.
+
+    One site with ``amount`` 1 gives exactly the ``real_spec`` of
+    make_static_csa_spectrum / finite_mas_csa_spectrum.
+    """
+    sites = list(sites)
+    if not sites:
+        raise ValueError("Give at least one site.")
+    if not static and (not larmor_Hz or not mas_Hz):
+        raise ValueError("The finite-MAS lineshape needs larmor_Hz and mas_Hz.")
+    labels, amounts, spectra, lines = [], [], [], []
+    for index, site in enumerate(sites):
+        csa = csa_definition(site["d_iso"], site["span_or_Delta"], site["skew_or_eta"],
+                             convention=convention)
+        fwhm = float(site.get("fwhm", 2.0))
+        eta = float(site.get("eta", 0.5))
+        if static:
+            result = make_static_csa_spectrum(csa, ppm_axis, fwhm=fwhm, lineshape=lineshape,
+                                              eta=eta, **kwargs)
+        else:
+            result = finite_mas_csa_spectrum(csa, ppm_axis, larmor_Hz=larmor_Hz, mas_Hz=mas_Hz,
+                                             fwhm=fwhm, lineshape=lineshape, eta=eta, **kwargs)
+        label = _site_label(site, index)
+        amount = float(site.get("amount", 1.0))
+        if amount < 0:
+            raise ValueError(f"{label}: the amount must not be negative.")
+        labels.append(label)
+        amounts.append(amount)
+        spectra.append(result["real_spec"])
+        lines.append(f"{label}: d_iso {float(site['d_iso']):g} ppm, "
+                     f"{'span' if convention == 'Herzfeld-Berger' else 'Delta'} "
+                     f"{float(site['span_or_Delta']):g} ppm, "
+                     f"{'skew' if convention == 'Herzfeld-Berger' else 'eta'} "
+                     f"{float(site['skew_or_eta']):g}, FWHM {fwhm:g} ppm, amount {amount:g}")
+    regime = "static" if static else f"finite MAS {float(mas_Hz):g} Hz"
+    log = (f"CSA, {regime}, {convention} convention, {lineshape} broadening, "
+           f"{len(sites)} site(s): " + "; ".join(lines) + ".")
+    return _multisite_result(ppm_axis, labels, amounts, spectra,
+                             {"convention": convention, "static": bool(static), "log": log})
+
+
+def quadrupolar_multisite_spectrum(sites, I, larmor_Hz, ppm_axis, mas_Hz=0.0, order="second",
+                                   transitions="all", lineshape="gaussian", **kwargs):
+    """
+    Several quadrupolar sites (one nucleus, one field) in one static or
+    MAS powder spectrum.
+
+    Parameters
+    ----------
+    sites : list of dict
+        One per site: ``C_Q_MHz`` (signed; only exact diagonalisation
+        can depend on the sign), ``eta_Q``, ``d_iso`` (ppm), and
+        optionally ``fwhm`` (ppm, default 1), ``eta`` (pseudo-Voigt
+        Lorentzian fraction, default 0.5, used only for
+        ``lineshape='pseudo_voigt'``), ``amount`` (relative number of
+        nuclei, default 1) and ``label``.
+    I, larmor_Hz, mas_Hz, order, transitions, lineshape
+        Shared by every site; as quadrupolar_spectrum.
+    **kwargs : powder-average options, forwarded to quadrupolar_spectrum.
+
+    Returns
+    -------
+    As csa_multisite_spectrum, plus ``transition_components`` ({group:
+    summed spectrum over the sites}) so quadrupolar_multisite_order_comparison
+    can be drawn by transition like a single site.
+    """
+    sites = list(sites)
+    if not sites:
+        raise ValueError("Give at least one site.")
+    labels, amounts, spectra, lines, logs = [], [], [], [], []
+    groups = {}
+    for index, site in enumerate(sites):
+        fwhm = float(site.get("fwhm", 1.0))
+        c_q = float(site["C_Q_MHz"]) * 1e6        # sign kept: exact theory can see it
+        result = quadrupolar_spectrum(
+            I, c_q, float(site["eta_Q"]), larmor_Hz, ppm_axis, mas_Hz=mas_Hz, order=order,
+            transitions=transitions, delta_iso=float(site["d_iso"]), fwhm=fwhm,
+            lineshape=lineshape, eta=float(site.get("eta", 0.5)), **kwargs)
+        label = _site_label(site, index)
+        amount = float(site.get("amount", 1.0))
+        if amount < 0:
+            raise ValueError(f"{label}: the amount must not be negative.")
+        labels.append(label)
+        amounts.append(amount)
+        spectra.append(result["real_spec"])
+        for group, spectrum in result["components"].items():
+            groups[group] = groups.get(group, 0.0) + amount * np.asarray(spectrum)
+        logs.append(result["log"])
+        lines.append(f"{label}: C_Q {c_q / 1e6:g} MHz, eta_Q {float(site['eta_Q']):g}, "
+                     f"d_iso {float(site['d_iso']):g} ppm, FWHM {fwhm:g} ppm, "
+                     f"amount {amount:g}")
+    regime = f"MAS {float(mas_Hz):g} Hz" if mas_Hz else "static"
+    log = (f"Quadrupolar, I = {float(I):g}, nu0 = {larmor_Hz / 1e6:.6g} MHz, {regime}, "
+           f"{order} order, transitions {transitions}, {lineshape} broadening, "
+           f"{len(sites)} site(s): " + "; ".join(lines) + ".")
+    out = _multisite_result(ppm_axis, labels, amounts, spectra,
+                            {"order": order, "log": log, "site_logs": logs})
+    out["transition_components"] = groups
+    return out
+
+
+def quadrupolar_multisite_order_comparison(sites, I, larmor_Hz, ppm_axis, mas_Hz=0.0,
+                                           orders=QUADRUPOLAR_ORDERS, **kwargs):
+    """quadrupolar_order_comparison for several sites: ``{order:
+    result}`` (as quadrupolar_multisite_spectrum, with ``components``
+    re-keyed by transition group so plot_quadrupolar_orders can pick one)
+    plus the ``'second_minus_first'`` and ``'exact_minus_second'``
+    differences of the totals."""
+    out = {}
+    for order in orders:
+        result = quadrupolar_multisite_spectrum(sites, I, larmor_Hz, ppm_axis, mas_Hz=mas_Hz,
+                                                order=order, **kwargs)
+        result["components"] = result["transition_components"]
+        out[order] = result
+    if "first" in out and "second" in out:
+        out["second_minus_first"] = out["second"]["real_spec"] - out["first"]["real_spec"]
+    if "second" in out and "exact" in out:
+        out["exact_minus_second"] = out["exact"]["real_spec"] - out["second"]["real_spec"]
+    return out
+
+
+def multisite_axis_limits(limits):
+    """The union of several ``(low, high)`` axis limits (one per site)."""
+    limits = list(limits)
+    if not limits:
+        raise ValueError("No limits given.")
+    return min(lo for lo, _hi in limits), max(hi for _lo, hi in limits)
+
+
+def site_amounts_from_amplitudes(amplitudes, peak_heights, normalise=True):
+    """A fit's per-site ``amplitude`` (the height its peak-normalised
+    shape was scaled to) -> each site's ``amount`` (relative number of
+    nuclei): ``amplitude / peak_height``, where ``peak_height`` is the
+    maximum of that site's un-normalised ``real_spec`` on the fit's own
+    axis (see csa_site_peak_heights / quad_site_peak_heights in the
+    fitting modules). With ``normalise`` the largest amount is 1."""
+    amplitudes = np.abs(np.asarray(amplitudes, dtype=float))
+    heights = np.asarray(peak_heights, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        amounts = np.where(heights > 0, amplitudes / heights, 0.0)
+    if normalise and amounts.size and np.max(amounts) > 0:
+        amounts = amounts / np.max(amounts)
+    return amounts
+
+
+# ============================================================
 # J-COUPLING (SCALAR-COUPLED) MULTIPLETS
 # ============================================================
 #

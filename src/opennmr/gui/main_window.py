@@ -105,6 +105,8 @@ from .widgets.relative_spinbox import RelativeDoubleSpinBox
 from .widgets.data_browser import DataBrowser
 from .widgets.wrapping_tabs import WrappingTabWidget
 from .widgets.collapsible_section import CollapsibleSection
+from .widgets.sim_sites import SimSiteList
+from .widgets.reflow import make_reflowable
 from .widgets.simulation_canvas import SimulationCanvas
 from .pnmr_panel import PnmrSimulationPanel
 from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
@@ -114,6 +116,7 @@ from .multi_fit_panel import MultiFitPanel
 from .arithmetic_panel import ArithmeticPanel
 from .fit_display_panel import FitDisplayPanel
 from .fit_models_panel import FitModelsPanel
+from .curve_fit_plot_box import CurveFitPlotBox
 from ..notebook import fit_models as nb_fit_models
 from ..notebook.fitting import build_region_mask as nb_build_region_mask
 from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
@@ -920,6 +923,10 @@ class MainWindow(QMainWindow):
 
         self._build_menu_bar()
         self._build_status_bar()
+        # Every side panel reflows to the column's width (explicit user
+        # request, 2026-09-30) -- see widgets/reflow.py. Last, once every
+        # panel is built.
+        self._make_side_panels_reflow()
 
     def _build_status_bar(self) -> None:
         """Permanent context on the right of the status bar.
@@ -1719,6 +1726,21 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         return scroll
+
+    def _make_side_panels_reflow(self) -> None:
+        """Let every side panel's contents reflow to the left column's
+        width (explicit user request: dragging the column narrower or
+        wider must re-wrap the text, which on Fit and Simulate it did
+        not). Their rows of buttons, wide combos and form rows set a
+        minimum width of up to ~590 px, which the scroll area (horizontal
+        scrolling off, see _scrollable) could only clip below;
+        widgets.reflow.make_reflowable brings it under the column's own
+        280 px minimum."""
+        for index in range(self.side_tabs.count()):
+            page = self.side_tabs.widget(index)
+            content = page.widget() if isinstance(page, QScrollArea) else page
+            if content is not None:
+                make_reflowable(content)
 
     @staticmethod
     def _narrow_combo(combo: QComboBox, chars: int = 14) -> None:
@@ -5428,6 +5450,10 @@ class MainWindow(QMainWindow):
             self.ui_font_size_spin.blockSignals(blocked)
             self._apply_ui_font_size(size)
 
+        # The curve-fit line the user last chose (Dynamics ▸ Fit plot).
+        if isinstance(self._ui_settings.get("curve_fit_line"), dict):
+            self.curve_fit_plot_box.apply_settings(self._ui_settings["curve_fit_line"])
+
     def _on_ui_font_size_changed(self, value: int) -> None:
         self._apply_ui_font_size(value)
         self._ui_settings["ui_font_size"] = int(value)
@@ -8323,12 +8349,46 @@ class MainWindow(QMainWindow):
                 set_state=lambda state: panel_state.restore_widgets(
                     self, (state or {}).get("widgets") or {}),
                 rerun=rerun, summary=summary, anchor=lambda: getattr(self, names()[0], None))
+        def sites_section(prefix, sites, names_units, rerun, summary):
+            """A one-interaction simulator with several sites (explicit
+            user request): its shared widgets, plus every site whole. The
+            per-site spin boxes only show the selected site, so they are
+            not kept as widgets -- restoring them would write into
+            whichever site is selected."""
+            editors = {id(w) for w in sites.editor_widgets()}
+
+            def names():
+                return [n for n in vars(self) if n.startswith(prefix)
+                        and panel_state._is_input_name(n) and id(getattr(self, n)) not in editors]
+
+            def get_state():
+                return {"widgets": panel_state.capture_widgets(self, names=names()),
+                        **sites.get_state(),
+                        "extra": {f"Site {k + 1} ({s.get('label')})": ", ".join(
+                                      f"{name} {float(s[key]):g}{unit}"
+                                      for key, name, unit in names_units() if key in s)
+                                  for k, s in enumerate(sites.site_dicts)}}
+
+            def set_state(state):
+                state = state or {}
+                with sites.loading():
+                    panel_state.restore_widgets(self, state.get("widgets") or {})
+                if state.get("sites"):
+                    sites.set_state(state)
+                else:               # saved before sites: its spin boxes are the one site
+                    sites.reset_from_editors()
+
+            return _Section(get_state=get_state, set_state=set_state, rerun=rerun,
+                            summary=summary, anchor=lambda: sites)
         panel_summary = lambda panel: lambda: getattr(panel, "results_label", QLabel()).text()  # noqa: E731
         return {
-            "csa": section(["sim_csa_"], self._on_simulate_csa_clicked,
-                           lambda: self.sim_csa_results_label.text()),
-            "quadrupolar": section(["sim_quad_"], self._on_simulate_quadrupolar_clicked,
-                                   lambda: self.sim_quad_results_label.text()),
+            "csa": sites_section("sim_csa_", self.sim_csa_sites, self._sim_csa_site_fields,
+                                 self._on_simulate_csa_clicked,
+                                 lambda: self.sim_csa_results_label.text()),
+            "quadrupolar": sites_section("sim_quad_", self.sim_quad_sites,
+                                         lambda: self._SIM_QUAD_SITE_FIELDS,
+                                         self._on_simulate_quadrupolar_clicked,
+                                         lambda: self.sim_quad_results_label.text()),
             "diffusion": section(["sim_"], self._run_diffusion_simulation,
                                  lambda: self.sim_diffusion_summary_label.text(),
                                  exclude_prefixes=("sim_csa_", "sim_quad_")),
@@ -12333,6 +12393,17 @@ class MainWindow(QMainWindow):
         for canvas in (self.fit_canvas, self.spectral_fit_canvas):
             canvas.fitDisplayOptionsRequested.connect(self._open_fit_display_options)
             canvas.keepFitRequested.connect(lambda c=canvas: self._keep_shown_fit(canvas=c))
+        # A "Keep This Fit…" in every fit section, beside its results
+        # (explicit user request, 2026-09-30: keeping a fit should not
+        # depend on knowing to scroll down to Kept fit models).
+        self.keep_fit_buttons = {}
+        for key, anchor in (("jcoupling", self.jcoupling_fit_panel.use_fitted_button),
+                            ("csa", self.csa_use_fitted_button),
+                            ("quadrupolar", self.quad_fit_panel.use_fitted_button),
+                            ("czjzek", self.czjzek_fit_panel.use_fitted_button),
+                            ("combined", self.combined_fit_panel.use_fitted_button),
+                            ("isotropic", self.spectral_fit_params_label)):
+            self.keep_fit_buttons[key] = self._add_keep_fit_button(anchor, key)
         # Any plot showing a simulation offers to keep it (explicit user
         # request: simulations in Open experiments, to compare).
         for canvas in (self.fit_canvas, self.simulation_canvas):
@@ -12697,13 +12768,11 @@ class MainWindow(QMainWindow):
         self._show_simulation_view()
 
     def _send_quadrupolar_to_simulation(self, fitted: dict) -> None:
-        """A fitted site into Simulate > Quadrupolar, ready to re-simulate
-        (or to compare orders) -- the same settings the fit used."""
+        """Fitted sites into Simulate > Quadrupolar, ready to re-simulate
+        (or to compare orders) -- the same settings the fit used. Every
+        site when ``fitted`` carries ``sites`` (explicit user request),
+        else the one site its own keys describe."""
         self.sim_quad_nucleus_combo.setCurrentText(fitted["nucleus"])
-        self.sim_quad_cq_spin.setValue(fitted["C_Q_MHz"])
-        self.sim_quad_eta_spin.setValue(fitted["eta_Q"])
-        self.sim_quad_diso_spin.setValue(fitted["delta_iso"])
-        self.sim_quad_fwhm_spin.setValue(fitted["fwhm"])
         self.sim_quad_larmor_spin.setValue(fitted["larmor_MHz"])
         regime = "mas" if fitted["mas_Hz"] else "static"
         self.sim_quad_regime_combo.setCurrentIndex(self.sim_quad_regime_combo.findData(regime))
@@ -12713,12 +12782,20 @@ class MainWindow(QMainWindow):
             self.sim_quad_transitions_combo.findData(fitted["transitions"]))
         self.sim_quad_method_combo.setCurrentIndex(self.sim_quad_method_combo.findData(
             {"first": "first_order", "second": "second_order"}.get(fitted["order"], "exact")))
+        index = self.sim_quad_lineshape_combo.findData(fitted.get("lineshape", "gaussian"))
+        if index >= 0:
+            self.sim_quad_lineshape_combo.setCurrentIndex(index)
+        sites = fitted.get("sites") or [{
+            "label": "Site 1", "C_Q_MHz": fitted["C_Q_MHz"], "eta_Q": fitted["eta_Q"],
+            "d_iso": fitted["delta_iso"], "fwhm": fitted["fwhm"], "amount": 1.0}]
+        self.sim_quad_sites.set_sites(sites, current=int(fitted.get("current", 0)))
         self.sim_quad_auto_axis_check.setChecked(False)
         lo, hi = fitted["ppm_range"]
         for spin, value in ((self.sim_quad_ppm_min_spin, lo), (self.sim_quad_ppm_max_spin, hi)):
             spin.blockSignals(True)
             spin.setValue(value)
             spin.blockSignals(False)
+        self._refresh_simulate_quad_controls()
         self._quad_sim_section.setExpanded(True)
         self._show_side_tab("Simulate")
 
@@ -12757,13 +12834,29 @@ class MainWindow(QMainWindow):
                 item.setText(f"{float(value):.6g}")
 
     def _send_csa_fit_to_simulation(self) -> None:
+        """Every fitted site into Simulate ▸ CSA (explicit user request:
+        the whole fitted spectrum, not one site), with the fit's regime,
+        broadening and axis. Each site's amount is its fitted share of
+        the nuclei (notebook_csa.csa_site_amounts, largest = 1); the site
+        selected in the results table (else the first) is selected."""
         r = self._csa_fit_result
         if not r:
             return
         n = int(r["info"]["n_sites"])
         k = self.csa_results_table.currentRow()
         k = k if 0 <= k < n else 0
-        d_iso, aniso, skew, fwhm, _amp, eta = np.asarray(r["popt"], dtype=float)[6 * k: 6 * k + 6]
+        params = np.asarray(r["popt"], dtype=float)[: 6 * n].reshape(n, 6)
+        try:
+            amounts = notebook_csa.csa_site_amounts(r["x"], r["popt"], r["info"])
+        except Exception:  # noqa: BLE001 -- an old record: equal amounts, still every site
+            amounts = np.ones(n)
+        labels = list(r["info"].get("labels") or
+                      [(site or {}).get("label") for site in r.get("sites") or []])
+        sites = [{"label": (labels[s] if s < len(labels) else None) or f"Site {s + 1}",
+                  "d_iso": float(d_iso), "span_or_Delta": float(aniso),
+                  "skew_or_eta": float(skew), "fwhm": float(fwhm),
+                  "eta": float(np.clip(eta, 0, 1)), "amount": float(amounts[s])}
+                 for s, (d_iso, aniso, skew, fwhm, _amp, eta) in enumerate(params)]
         spectrum = (self.session.spectra[r["spectrum_index"]]
                     if r.get("spectrum_index") is not None
                     and 0 <= r["spectrum_index"] < len(self.session) else None)
@@ -12775,21 +12868,17 @@ class MainWindow(QMainWindow):
             self.sim_csa_larmor_spin.setValue(float(sfo1))
         self.sim_csa_convention_combo.setCurrentIndex(
             self.sim_csa_convention_combo.findData(r.get("convention")))
-        self.sim_csa_diso_spin.setValue(float(d_iso))
-        self.sim_csa_aniso_spin.setValue(float(aniso))
-        self.sim_csa_skeweta_spin.setValue(float(skew))
-        self.sim_csa_fwhm_spin.setValue(float(fwhm))
         lineshape = self.csa_broadening_combo.currentData()
         index = self.sim_csa_lineshape_combo.findData(lineshape)
         if index >= 0:
             self.sim_csa_lineshape_combo.setCurrentIndex(index)
-        self.sim_csa_eta_spin.setValue(float(np.clip(eta, 0, 1)))
         self.sim_csa_regime_combo.setCurrentIndex(
             self.sim_csa_regime_combo.findData(bool(r.get("static", True))))
         if not r.get("static", True) and r.get("mas_Hz"):
             self.sim_csa_mas_spin.setValue(float(r["mas_Hz"]))
         x = np.asarray(r["x"], dtype=float)
         self.sim_csa_auto_axis_check.setChecked(False)
+        self.sim_csa_sites.set_sites(sites, current=k)
         for spin, value in ((self.sim_csa_ppm_min_spin, float(x.min())),
                             (self.sim_csa_ppm_max_spin, float(x.max()))):
             blocked = spin.blockSignals(True)
@@ -12803,33 +12892,63 @@ class MainWindow(QMainWindow):
             section.setExpanded(True)
         self._show_side_tab("Simulate")
 
-    def _send_csa_simulation_to_fit(self) -> None:
-        """Simulate ▸ CSA's values as the starting values of the selected
-        (else first) CSA fit site, in the fit's own convention."""
-        sim_conv = self.sim_csa_convention_combo.currentData()
-        values = (self.sim_csa_diso_spin.value(), self.sim_csa_aniso_spin.value(),
-                  self.sim_csa_skeweta_spin.value())
-        if self.csa_sites_table.rowCount() == 0:
-            self._add_csa_site()
-        row = self.csa_sites_table.currentRow()
-        row = row if 0 <= row < self.csa_sites_table.rowCount() else 0
-        fit_conv = self.csa_convention_combo.currentData()
-        if fit_conv != sim_conv:
-            if self.csa_sites_table.rowCount() == 1:
-                # The only site: take the simulation's convention as well.
-                self.csa_convention_combo.setCurrentIndex(
-                    self.csa_convention_combo.findData(sim_conv))
-            else:
-                values = notebook_simulations.convert_csa_parameters(
-                    *values, from_convention=sim_conv, to_convention=fit_conv)
-        cells = {1: values[0], 2: values[1], 3: values[2], 4: self.sim_csa_fwhm_spin.value(),
-                 5: self.sim_csa_eta_spin.value()}
+    def _write_csa_fit_row(self, row: int, values, fwhm: float, eta: float) -> None:
+        cells = {1: values[0], 2: values[1], 3: values[2], 4: fwhm, 5: eta}
         for column, value in cells.items():
             item = self.csa_sites_table.item(row, column)
             if item is None:
                 item = QTableWidgetItem("")
                 self.csa_sites_table.setItem(row, column, item)
             item.setText(f"{float(value):.6g}")
+
+    def _send_csa_simulation_to_fit(self) -> None:
+        """Simulate ▸ CSA's values as Fit ▸ CSA/Dipolar's starting values,
+        in the fit's own convention.
+
+        One site: the selected (else first) fit row, as before -- for
+        nudging one site of a fit. Several (explicit user request): the
+        fit gets one row per simulated site, labels included; rows that
+        remain keep their bounds and fixed flags, extra rows go. Amounts
+        are not starting values -- the fit's amplitudes start from the
+        data's own height."""
+        sim_conv = self.sim_csa_convention_combo.currentData()
+        sites = self.sim_csa_sites.sites()
+        fit_conv = self.csa_convention_combo.currentData()
+        whole = len(sites) > 1 or self.csa_sites_table.rowCount() <= 1
+        if fit_conv != sim_conv and whole:
+            # Every row is being written: take the simulation's convention.
+            self.csa_convention_combo.setCurrentIndex(self.csa_convention_combo.findData(sim_conv))
+            fit_conv = sim_conv
+
+        def in_fit_convention(site):
+            values = (site["d_iso"], site["span_or_Delta"], site["skew_or_eta"])
+            if fit_conv != sim_conv:
+                values = notebook_simulations.convert_csa_parameters(
+                    *values, from_convention=sim_conv, to_convention=fit_conv)
+            return values
+
+        if len(sites) == 1:
+            if self.csa_sites_table.rowCount() == 0:
+                self._add_csa_site()
+            row = self.csa_sites_table.currentRow()
+            row = row if 0 <= row < self.csa_sites_table.rowCount() else 0
+            site = sites[0]
+            self._write_csa_fit_row(row, in_fit_convention(site), site["fwhm"], site["eta"])
+            where = f"site row {row + 1}"
+        else:
+            table = self.csa_sites_table
+            while table.rowCount() > len(sites):
+                table.removeRow(table.rowCount() - 1)
+            for row, site in enumerate(sites):
+                if row >= table.rowCount():
+                    self._add_csa_site()
+                label = table.item(row, 0)
+                if label is None:
+                    label = QTableWidgetItem("")
+                    table.setItem(row, 0, label)
+                label.setText(str(site.get("label") or f"Site {row + 1}"))
+                self._write_csa_fit_row(row, in_fit_convention(site), site["fwhm"], site["eta"])
+            where = f"all {len(sites)} site rows"
         index = self.csa_broadening_combo.findData(self.sim_csa_lineshape_combo.currentData())
         if index >= 0:
             self.csa_broadening_combo.setCurrentIndex(index)
@@ -12838,8 +12957,8 @@ class MainWindow(QMainWindow):
         if not static:
             self.csa_mas_spin.setValue(self.sim_csa_mas_spin.value())
         self._open_fit_section_of(self.csa_sites_table)
-        self.statusBar().showMessage(f"Simulated CSA values set as the start of site row "
-                                     f"{row + 1} of Fit ▸ CSA/Dipolar.", 8000)
+        self.statusBar().showMessage(f"Simulated CSA values set as the start of {where} of "
+                                     f"Fit ▸ CSA/Dipolar.", 8000)
 
     def _report_transfer(self, what: str, notes: str) -> None:
         text = f"{what}."
@@ -12848,20 +12967,30 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(text, 12000)
 
     def _send_quadrupolar_simulation_to_fit(self) -> None:
+        """One simulated site: the selected (else first) fit row. Several
+        (explicit user request): one fit row per site."""
         panel = self.quad_fit_panel
         order = {"first_order": "first", "second_order": "second"}.get(
             self.sim_quad_method_combo.currentData(), "exact")
-        notes = panel.set_start_from_simulation(
-            {"d_iso": self.sim_quad_diso_spin.value(), "C_Q": self.sim_quad_cq_spin.value(),
-             "eta_Q": self.sim_quad_eta_spin.value(), "fwhm": self.sim_quad_fwhm_spin.value()},
-            {"regime": self.sim_quad_regime_combo.currentData(),
-             "mas_Hz": self.sim_quad_mas_spin.value(),
-             "transitions": self.sim_quad_transitions_combo.currentData(), "order": order,
-             "nucleus": self.sim_quad_nucleus_combo.currentText().strip(),
-             "larmor_MHz": self.sim_quad_larmor_spin.value()})
+        settings = {"regime": self.sim_quad_regime_combo.currentData(),
+                    "mas_Hz": self.sim_quad_mas_spin.value(),
+                    "transitions": self.sim_quad_transitions_combo.currentData(), "order": order,
+                    "lineshape": self.sim_quad_lineshape_combo.currentData(),
+                    "nucleus": self.sim_quad_nucleus_combo.currentText().strip(),
+                    "larmor_MHz": self.sim_quad_larmor_spin.value()}
+        sites = self.sim_quad_sites.sites()
+        if len(sites) == 1:
+            site = sites[0]
+            notes = panel.set_start_from_simulation(
+                {"d_iso": site["d_iso"], "C_Q": site["C_Q_MHz"], "eta_Q": site["eta_Q"],
+                 "fwhm": site["fwhm"], "eta": site.get("eta")}, settings)
+            what = "Simulated quadrupolar values set as a Fit ▸ Quadrupolar start"
+        else:
+            notes = panel.set_sites_from_simulation(sites, settings)
+            what = (f"All {len(sites)} simulated quadrupolar sites set as the Fit ▸ "
+                    "Quadrupolar start")
         self._open_fit_section_of(panel)
-        self._report_transfer("Simulated quadrupolar values set as a Fit ▸ Quadrupolar start",
-                              notes)
+        self._report_transfer(what, notes)
 
     def _send_czjzek_simulation_to_fit(self, values: dict, settings: dict) -> None:
         panel = self.czjzek_fit_panel
@@ -13011,20 +13140,116 @@ class MainWindow(QMainWindow):
             if history is not None:
                 io_history.add_event(history, event, kind="fit_model")
         self._schedule_sidecar_save(index)
-        if hasattr(self, "fit_models_panel"):
-            self.fit_models_panel.refresh()
+        self._refresh_fit_model_panels()
 
-    def _keep_shown_fit(self, name: str | None = None, canvas=None) -> dict | None:
+    def _add_keep_fit_button(self, anchor: QWidget, key: str) -> QPushButton | None:
+        """A "Keep This Fit…" button placed right after ``anchor`` in
+        whatever layout holds it (beside a row's buttons, or under a
+        column's widget)."""
+        def holder(layout):
+            if layout is None:
+                return None
+            if layout.indexOf(anchor) >= 0:
+                return layout
+            for i in range(layout.count()):
+                found = holder(layout.itemAt(i).layout()) if layout.itemAt(i) else None
+                if found is not None:
+                    return found
+            return None
+        layout = holder(anchor.parentWidget().layout() if anchor.parentWidget() else None)
+        if layout is None or not hasattr(layout, "insertWidget"):
+            return None
+        button = QPushButton("Keep This Fit…")
+        button.setToolTip(
+            "Keep this panel's fit with the spectrum, under a name: the fitted curve and "
+            "components, the report, and the settings and result, so it can be shown, compared "
+            "and put back later (Fit ▸ Kept fit models lists them).")
+        button.clicked.connect(lambda: self._keep_panel_fit(key))
+        layout.insertWidget(layout.indexOf(anchor) + 1, button)
+        return button
+
+    def _keep_panel_fit(self, key: str, name: str | None = None) -> dict | None:
+        """Keep panel ``key``'s last fit. If another panel's fit is on the
+        plot, this one's is drawn again first, so what is kept is what
+        the button's panel fitted."""
+        if key == "isotropic":
+            if getattr(self, "_last_spectral_fit", None) is None or \
+                    self.spectral_fit_canvas.shown_fit() is None:
+                QMessageBox.information(self, "Keep fit", "Run the fit first -- there is no "
+                                        "isotropic fit to keep.")
+                return None
+            return self._keep_shown_fit(name, canvas=self.spectral_fit_canvas)
+        if key == "csa":
+            result, redraw = self._csa_fit_result, self._draw_csa_fit
+        else:
+            panel = self._fit_panels()[key]
+            result = getattr(panel, "result", None)
+            redraw = lambda: panel._draw_fit(panel.result)  # noqa: E731
+        if not result:
+            QMessageBox.information(self, "Keep fit", "Run the fit first -- this panel has no "
+                                    "fit to keep yet.")
+            return None
+        shown = self.fit_canvas.shown_fit()
+        if getattr(self, "_last_fit_key", None) != key or shown is None \
+                or shown["kind"] != "spectrum":
+            try:
+                redraw()
+            except Exception as exc:  # noqa: BLE001 -- e.g. a result restored without its data
+                QMessageBox.information(self, "Keep fit", f"This fit cannot be drawn again to "
+                                        f"keep it ({exc}). Run it again, then keep it.")
+                return None
+            self._last_fit_key = key
+        return self._keep_shown_fit(name, canvas=self.fit_canvas)
+
+    def _refresh_fit_model_panels(self) -> None:
+        for name in ("fit_models_panel", "curve_fit_models_panel"):
+            panel = getattr(self, name, None)
+            if panel is not None:
+                panel.refresh()
+
+    def _keep_curve_fits(self, name: str | None = None) -> list:
+        """Dynamics ▸ Keep This Curve Fit… (explicit user request): the
+        curve fit on the Fit view, or -- with all peaks shown -- every
+        peak's, one kept fit each, named "<name>: <peak>"."""
+        shown = self.fit_canvas.shown_fit()
+        if shown is None or shown["kind"] not in ("curve", "curves"):
+            QMessageBox.information(self, "Keep curve fit", "Run Fit Curve first -- there is no "
+                                    "curve fit on the Fit plot to keep.")
+            return []
+        if shown["kind"] == "curve":
+            model = self._keep_shown_fit(name, canvas=self.fit_canvas)
+            return [model] if model else []
+        if name is None:
+            name, ok = QInputDialog.getText(
+                self, "Keep curve fits", f"Name for these {len(shown['fits'])} fits (each is "
+                "kept as “name: peak”):", text="Curve fit")
+            if not ok:
+                return []
+        kept = []
+        for fit in shown["fits"]:
+            model = self._keep_shown_fit(f"{(name or 'Curve fit').strip()}: {fit['label']}",
+                                         canvas=self.fit_canvas, shown={"kind": "curve", **fit})
+            if model:
+                kept.append(model)
+        return kept
+
+    def _keep_shown_fit(self, name: str | None = None, canvas=None,
+                        shown: dict | None = None) -> dict | None:
         """Keep the fit on show (the current fit view, else the Fit view,
         else the Spectral Fit view) with the spectrum it was fitted to.
-        ``name`` skips the dialog. Returns the kept model."""
-        candidates = [canvas] if canvas is not None else []
-        current = self.canvas_tabs.currentWidget()
-        if isinstance(current, MplCanvas):
-            candidates.append(current)
-        candidates += [self.fit_canvas, self.spectral_fit_canvas]
-        canvas, shown = next(((c, c.shown_fit()) for c in candidates if c.shown_fit() is not None),
-                             (None, None))
+        ``name`` skips the dialog; ``shown`` (with ``canvas``) keeps that
+        curve fit rather than asking the canvas. Returns the kept model."""
+        if shown is None:
+            candidates = [canvas] if canvas is not None else []
+            current = self.canvas_tabs.currentWidget()
+            if isinstance(current, MplCanvas):
+                candidates.append(current)
+            candidates += [self.fit_canvas, self.spectral_fit_canvas]
+            canvas, shown = next(((c, c.shown_fit()) for c in candidates
+                                  if c.shown_fit() is not None), (None, None))
+            if shown is not None and shown["kind"] == "curves":
+                kept = self._keep_curve_fits(name)
+                return kept[0] if kept else None
         if shown is None:
             QMessageBox.information(self, "Keep fit", "There is no fit on the plot to keep -- run "
                                     "a fit (or show one) first.")
@@ -13034,8 +13259,13 @@ class MainWindow(QMainWindow):
         if shown["kind"] == "curve":
             kind = "curve"
             result = shown.get("result")
-            report = (self.relaxation_fit_params_label.text()
-                      if getattr(self, "_fit_canvas_owner", None) == "relaxation" else "")
+            report = ""
+            if getattr(self, "_fit_canvas_owner", None) == "relaxation":
+                try:
+                    report = processing_relaxation.format_relaxation_report(
+                        result, title=result.get("peak_label") or None, width=58)
+                except Exception:  # noqa: BLE001 -- the panel's text, as before
+                    report = self.relaxation_fit_params_label.text()
         elif canvas is self.spectral_fit_canvas:
             kind = "isotropic"
             result = getattr(self, "_last_spectral_fit", None)
@@ -13097,6 +13327,11 @@ class MainWindow(QMainWindow):
             components=components, labels=labels, n_free=n_free, mask=mask, report=report,
             target=label, x_label=x_label, y_label=y_label, title=shown.get("title") or name,
             panel_inputs=panel_inputs, panel_result=panel_result)
+        if kind == "curve" and shown.get("curve_x") is not None:
+            # The fitted function as drawn, so a kept curve fit is shown
+            # as the smooth curve and not its values joined point to point.
+            model["curve_x"] = np.asarray(shown["curve_x"], dtype=float)
+            model["curve_y"] = np.asarray(shown["curve_y"], dtype=float)
         models = self._fit_models(index)
         model["id"] = max([m.get("id", 0) for m in models] + [0]) + 1
         models.append(model)
@@ -13120,10 +13355,15 @@ class MainWindow(QMainWindow):
 
     def _draw_fit_model(self, model) -> None:
         if model["kind"] == "curve":
+            curve = ((model["curve_x"], model["curve_y"])
+                     if model.get("curve_x") is not None else None)
             self.fit_canvas.show_relaxation_fit(
                 {"t": model["x"], "y": model["y"], "y_fit": model["y_fit"],
                  "peak_label": model["name"]},
-                xlabel=model.get("x_label") or "x", ylabel=model.get("y_label") or "")
+                xlabel=model.get("x_label") or "x", ylabel=model.get("y_label") or "",
+                fit_curve=curve, fit_style={**self.curve_fit_plot_box.fit_style(),
+                                            **({"color": model["colour"]}
+                                               if model.get("colour") else {})})
         else:
             spectrum = self.session.spectra[self._selected_index()] \
                 if self._selected_index() is not None else None
@@ -13555,10 +13795,14 @@ class MainWindow(QMainWindow):
             "opennmr.simulate.bloch rather than here.")
         form.addRow("Shape:", self.bloch_shape_combo)
         # Adiabatic shapes: the frequency sweep and each shape's parameters.
+        # Up to tens of MHz (explicit user request: adiabatic pulses are
+        # used for several-MHz sweeps). The time step follows the sweep
+        # (Time step: auto), so a wide sweep is sampled finely enough.
         self.bloch_sweep_spin = self._sim_spin(
-            0.1, 999.0, 100.0, 1, " kHz",
+            0.1, 50000.0, 100.0, 1, " kHz",
             "Total frequency sweep: the RF runs from −half to +half of this about the carrier. "
-            "At one point per µs it must stay within ±500 kHz.")
+            "Several MHz is fine: with Time step on auto the pulse is sampled finely enough "
+            "for the sweep (1 µs up to 100 kHz, finer beyond).")
         form.addRow("Sweep width:", self.bloch_sweep_spin)
         self.bloch_hs_beta_spin = self._sim_spin(
             0.1, 50.0, 5.3, 2, "", "Truncation: the amplitude is sech(β) at the ends (β = 5.3: 1%).")
@@ -13580,6 +13824,16 @@ class MainWindow(QMainWindow):
             "Pulse duration. Also the time resolution: one point per µs, as the "
             "hardware synthesises it.")
         form.addRow("Duration:", self.bloch_duration_spin)
+        self.bloch_time_step_spin = self._sim_spin(
+            0.0, 10.0, 0.0, 4, " µs",
+            "Time resolution of the simulated pulse. Auto: 1 µs (the X-Pulse hardware's own "
+            "synthesis) unless a frequency sweep needs finer -- then the largest of 0.5, 0.25, "
+            "0.2, 0.1, … µs that keeps the phase ramp to ≤ 0.05 turn per step at the sweep's "
+            "edges (coarser ramps give wrong profiles). Set a value to match a spectrometer's "
+            "own shape resolution.")
+        self.bloch_time_step_spin.setSpecialValueText("auto")
+        self.bloch_time_step_spin.setSingleStep(0.05)
+        form.addRow("Time step:", self.bloch_time_step_spin)
 
         self.bloch_power_mode_combo = QComboBox()
         self.bloch_power_mode_combo.addItem("Flip angle", "flip")
@@ -13621,7 +13875,7 @@ class MainWindow(QMainWindow):
         sweep_box = QGroupBox("Sweep")
         sweep_form = QFormLayout(sweep_box)
         self.bloch_offset_spin = self._sim_spin(
-            0.0, 1.0e7, 0.0, 0, " Hz",
+            0.0, 1.0e8, 0.0, 0, " Hz",
             "Offsets simulated run from minus to plus this. 0: about twice the "
             "shape's naive bandwidth (4/duration), the original's default.")
         self.bloch_offset_spin.setSpecialValueText("auto")
@@ -13708,6 +13962,7 @@ class MainWindow(QMainWindow):
             q = self.bloch_q_spin.value()
             return (simulate_bloch.peak_b1_for_adiabaticity(
                         shape, duration_us, self.bloch_sweep_spin.value() * 1e3, q=q,
+                        time_step_us=self.bloch_time_step_spin.value() or None,
                         **self._bloch_adiabatic_params(shape)),
                     f"for Q₀ = {q:g} at the centre of the sweep")
         if mode == "flip":
@@ -13739,7 +13994,8 @@ class MainWindow(QMainWindow):
                 sim = simulate_bloch.simulate_pulse(
                     shape, duration, peak_b1, offsets, power_scales=scales,
                     sweep_width_hz=sweep_hz,
-                    adiabatic_params=self._bloch_adiabatic_params(shape) if adiabatic else None)
+                    adiabatic_params=self._bloch_adiabatic_params(shape) if adiabatic else None,
+                    time_step_us=self.bloch_time_step_spin.value() or None)
             finally:
                 QApplication.restoreOverrideCursor()
         except ValueError as exc:
@@ -13748,50 +14004,63 @@ class MainWindow(QMainWindow):
         label = dict(self._BLOCH_SHAPES)[shape]
         title = f"{label}, {duration:g} µs, peak B1 {peak_b1:.1f} Hz"
         if "sweep_width_hz" in sim:
-            title += f", sweep {sim['sweep_width_hz'] / 1e3:g} kHz"
+            scale, unit = (1e6, "MHz") if sim["sweep_width_hz"] >= 1e6 else (1e3, "kHz")
+            title += f", sweep {sim['sweep_width_hz'] / scale:g} {unit}"
         self._show_simulation_view()
         simulate_bloch.plot_pulse_simulation(sim, self.simulation_canvas.figure, title=title)
         self.simulation_canvas.draw()
         centre = int(np.argmin(np.abs(sim["offsets_hz"])))
         nominal = int(np.argmin(np.abs(sim["power_scales"] - 1.0)))
-        lines = [f"Peak B1 = {peak_b1:.1f} Hz ({source}).",
+        step_note = ("auto" if not self.bloch_time_step_spin.value() else "as set")
+        lines = [f"Peak B1 = {peak_b1:.1f} Hz ({source}). Time step {sim['time_step_us']:g} µs "
+                 f"({step_note}, {len(sim['time_us']):,} steps).",
                  f"On resonance: Mz = {sim['Mz'][nominal, centre]:.3f}, "
                  f"|Mxy| = {np.hypot(sim['Mx'][nominal, centre], sim['My'][nominal, centre]):.3f}."]
+        if sim.get("max_turns_per_step", 0.0) > 0.1:
+            lines.append(f"⚠ The phase ramp advances up to {sim['max_turns_per_step']:.2f} turn "
+                         "per step at the sweep's edges -- too coarse to trust the profile. Use "
+                         "a finer time step (or auto).")
         if "adiabaticity" in sim:
             q = sim["adiabaticity"]
             lines.append(f"Adiabaticity: Q₀ = {q['q0']:.3g} at the centre, {q['q_band']:.3g} at "
                          f"worst over the central {q['band']:.0%} of the sweep.")
             for index, scale in enumerate(sim["power_scales"]):
                 band = simulate_bloch.inverted_band_hz(sim, power_index=index)
-                where = (f"{band[0] / 1e3:.1f} to {band[1] / 1e3:.1f} kHz "
-                         f"({(band[1] - band[0]) / 1e3:.1f} kHz wide)" if band else "nowhere")
+                hz, unit = ((1e6, "MHz") if band and max(abs(band[0]), abs(band[1])) >= 1e6
+                            else (1e3, "kHz"))
+                digits = 3 if unit == "MHz" else 1
+                where = (f"{band[0] / hz:.{digits}f} to {band[1] / hz:.{digits}f} {unit} "
+                         f"({(band[1] - band[0]) / hz:.{digits}f} {unit} wide)"
+                         if band else "nowhere")
                 prefix = f"At {scale:g}× power: " if len(sim["power_scales"]) > 1 else ""
                 lines.append(f"{prefix}inverted (Mz < −0.9) from {where}.")
         self.bloch_summary_label.setText("\n".join(lines))
         self._journal_simulation("bloch")
 
     def _build_simulate_csa_subtab(self) -> QWidget:
-        """Forward-simulate a single CSA powder pattern (static or
-        finite-MAS sidebands) from user-entered tensor parameters --
-        the reverse of the Fitting tab's CSA/Dipolar section, which
-        goes from a measured spectrum to a tensor. Single site: the
-        Fitting tab's multi-site table exists to sum sites against
-        real overlapping data, which a from-scratch simulation has no
-        counterpart need for yet.
+        """Forward-simulate CSA powder patterns (static or finite-MAS
+        sidebands) from tensor parameters -- the reverse of Fit ▸
+        CSA/Dipolar, which goes from a measured spectrum to tensors.
 
-        :func:`opennmr.notebook.simulations.make_static_csa_spectrum` /
-        ``finite_mas_csa_spectrum`` already are the simulators, with
-        their own powder-averaging and broadening options -- this
-        wraps them the way the CSA/Dipolar fitting section wraps
-        ``fit_csa_spectrum``: controls, an action, a preview on the
-        shared Fit canvas, and a button to keep the result."""
+        **Several sites** (explicit user request, 2026-09-30): a spectrum
+        fitted with several sites in Fit is simulated whole here, adjusted
+        and sent back as starting values with every site in place. The
+        settings a real spectrum shares (nucleus, convention, spinning,
+        broadening kernel, powder average) are set once; each site has
+        its own δiso, span/Δ, skew/η, FWHM, L fraction and amount
+        (:class:`~.widgets.sim_sites.SimSiteList`). The δiso/span/...
+        spin boxes are the editor of the selected site.
+
+        :func:`opennmr.notebook.simulations.csa_multisite_spectrum` is
+        the simulator: one site of amount 1 is exactly
+        ``make_static_csa_spectrum`` / ``finite_mas_csa_spectrum``."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         blurb = QLabel(
-            "Simulate a chemical-shift-anisotropy powder pattern from "
-            "tensor parameters, then export it as a spectrum to compare "
-            "against real data (it is added to Open experiments)."
+            "Simulate chemical-shift-anisotropy powder patterns -- one site or several, "
+            "summed -- then keep the result as a spectrum to compare against real data "
+            "(it is added to Open experiments), or send every site to Fit as starting values."
         )
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
@@ -13806,34 +14075,15 @@ class MainWindow(QMainWindow):
             "spectrum's own nucleus where one is selected.")
         form.addRow("Nucleus:", self.sim_csa_nucleus_edit)
 
-        self.sim_csa_diso_spin = QDoubleSpinBox()
-        self.sim_csa_diso_spin.setRange(-1.0e5, 1.0e5)
-        self.sim_csa_diso_spin.setDecimals(3)
-        self.sim_csa_diso_spin.setSuffix(" ppm")
-        form.addRow("δiso:", self.sim_csa_diso_spin)
-
         self.sim_csa_convention_combo = QComboBox()
         self.sim_csa_convention_combo.addItem("Haeberlen (Δ, η)", "Haeberlen")
         self.sim_csa_convention_combo.addItem("Herzfeld-Berger (span, skew)", "Herzfeld-Berger")
         self.sim_csa_convention_combo.setToolTip(
-            "Which pair of anisotropy parameters the two rows below mean. "
-            "Both describe the same tensor.\n\n" + CSA_ANISOTROPY_TIP + "\n" + CSA_ASYMMETRY_TIP)
+            "Which pair of anisotropy parameters the sites are given in (every site "
+            "shares it). Both describe the same tensor: switching converts every "
+            "site's values, so the tensors stay as they were.\n\n"
+            + CSA_ANISOTROPY_TIP + "\n" + CSA_ASYMMETRY_TIP)
         form.addRow("Convention:", self.sim_csa_convention_combo)
-
-        self.sim_csa_aniso_spin = QDoubleSpinBox()
-        self.sim_csa_aniso_spin.setRange(-1.0e5, 1.0e5)
-        self.sim_csa_aniso_spin.setDecimals(3)
-        self.sim_csa_aniso_spin.setValue(100.0)
-        self.sim_csa_aniso_spin.setSuffix(" ppm")
-        form.addRow("Span or Δ:", self.sim_csa_aniso_spin)
-
-        self.sim_csa_skeweta_spin = QDoubleSpinBox()
-        self.sim_csa_skeweta_spin.setRange(-1.0, 1.0)
-        self.sim_csa_skeweta_spin.setDecimals(3)
-        self.sim_csa_skeweta_spin.setSingleStep(0.1)
-        self.sim_csa_skeweta_spin.setToolTip(CSA_ASYMMETRY_TIP)
-        self.sim_csa_aniso_spin.setToolTip(CSA_ANISOTROPY_TIP)
-        form.addRow("Skew or η:", self.sim_csa_skeweta_spin)
 
         self.sim_csa_regime_combo = QComboBox()
         self.sim_csa_regime_combo.addItem("Static powder", True)
@@ -13870,26 +14120,12 @@ class MainWindow(QMainWindow):
         self.sim_csa_lineshape_combo.addItem("Gaussian", "gaussian")
         self.sim_csa_lineshape_combo.addItem("Lorentzian", "lorentzian")
         self.sim_csa_lineshape_combo.addItem("Pseudo-Voigt", "pseudo_voigt")
+        self.sim_csa_lineshape_combo.setToolTip(
+            "Broadening kernel, shared by every site (as in Fit ▸ CSA/Dipolar). Each "
+            "site has its own FWHM and, for pseudo-Voigt, its own L fraction.")
         self.sim_csa_lineshape_combo.currentIndexChanged.connect(
             lambda _i: self._refresh_simulate_csa_controls())
         form.addRow("Broadening:", self.sim_csa_lineshape_combo)
-
-        self.sim_csa_fwhm_spin = QDoubleSpinBox()
-        self.sim_csa_fwhm_spin.setRange(0.0, 1.0e4)
-        self.sim_csa_fwhm_spin.setDecimals(3)
-        self.sim_csa_fwhm_spin.setValue(2.0)
-        self.sim_csa_fwhm_spin.setSuffix(" ppm")
-        form.addRow("Broadening FWHM:", self.sim_csa_fwhm_spin)
-
-        self.sim_csa_eta_spin = QDoubleSpinBox()
-        self.sim_csa_eta_spin.setRange(0.0, 1.0)
-        self.sim_csa_eta_spin.setDecimals(2)
-        self.sim_csa_eta_spin.setValue(0.5)
-        self.sim_csa_eta_spin.setToolTip(
-            "Gaussian/Lorentzian mixing fraction for the pseudo-Voigt "
-            "broadening kernel (0 = Gaussian, 1 = Lorentzian) -- unrelated "
-            "to the CSA tensor's own η above.")
-        form.addRow("Broadening η:", self.sim_csa_eta_spin)
 
         self.sim_csa_powder_combo = QComboBox()
         self.sim_csa_powder_combo.addItem("ZCW", "zcw")
@@ -13901,46 +14137,108 @@ class MainWindow(QMainWindow):
         self.sim_csa_orientations_spin.setSingleStep(500)
         self.sim_csa_orientations_spin.setValue(4000)
         form.addRow("Orientations:", self.sim_csa_orientations_spin)
+        layout.addLayout(form)
 
-        # Axis follows the tensor (explicit user request): δiso ±
-        # 1.5 × |span or Δ|, re-applied whenever either changes, until
-        # the user sets an axis limit by hand.
+        # ---- the sites, and the selected one's parameters ----
+        self.sim_csa_sites = SimSiteList(
+            {"d_iso": 0.0, "span_or_Delta": 100.0, "skew_or_eta": 0.0, "fwhm": 2.0,
+             "eta": 0.5}, describe=self._describe_sim_csa_site)
+        site_form = self.sim_csa_sites.site_form
+
+        self.sim_csa_diso_spin = QDoubleSpinBox()
+        self.sim_csa_diso_spin.setRange(-1.0e5, 1.0e5)
+        self.sim_csa_diso_spin.setDecimals(3)
+        self.sim_csa_diso_spin.setSuffix(" ppm")
+        site_form.addRow("δiso:", self.sim_csa_diso_spin)
+
+        self.sim_csa_aniso_spin = QDoubleSpinBox()
+        self.sim_csa_aniso_spin.setRange(-1.0e5, 1.0e5)
+        self.sim_csa_aniso_spin.setDecimals(3)
+        self.sim_csa_aniso_spin.setValue(100.0)
+        self.sim_csa_aniso_spin.setSuffix(" ppm")
+        self.sim_csa_aniso_spin.setToolTip(CSA_ANISOTROPY_TIP)
+        site_form.addRow("Span or Δ:", self.sim_csa_aniso_spin)
+
+        self.sim_csa_skeweta_spin = QDoubleSpinBox()
+        self.sim_csa_skeweta_spin.setRange(-1.0, 1.0)
+        self.sim_csa_skeweta_spin.setDecimals(3)
+        self.sim_csa_skeweta_spin.setSingleStep(0.1)
+        self.sim_csa_skeweta_spin.setToolTip(CSA_ASYMMETRY_TIP)
+        site_form.addRow("Skew or η:", self.sim_csa_skeweta_spin)
+
+        self.sim_csa_fwhm_spin = QDoubleSpinBox()
+        self.sim_csa_fwhm_spin.setRange(0.0, 1.0e4)
+        self.sim_csa_fwhm_spin.setDecimals(3)
+        self.sim_csa_fwhm_spin.setValue(2.0)
+        self.sim_csa_fwhm_spin.setSuffix(" ppm")
+        site_form.addRow("Broadening FWHM:", self.sim_csa_fwhm_spin)
+
+        self.sim_csa_eta_spin = QDoubleSpinBox()
+        self.sim_csa_eta_spin.setRange(0.0, 1.0)
+        self.sim_csa_eta_spin.setDecimals(2)
+        self.sim_csa_eta_spin.setValue(0.5)
+        self.sim_csa_eta_spin.setToolTip(
+            "Gaussian/Lorentzian mixing fraction for the pseudo-Voigt "
+            "broadening kernel (0 = Gaussian, 1 = Lorentzian) -- unrelated "
+            "to the CSA tensor's own η above.")
+        site_form.addRow("Broadening η:", self.sim_csa_eta_spin)
+        for key, spin in (("d_iso", self.sim_csa_diso_spin),
+                          ("span_or_Delta", self.sim_csa_aniso_spin),
+                          ("skew_or_eta", self.sim_csa_skeweta_spin),
+                          ("fwhm", self.sim_csa_fwhm_spin), ("eta", self.sim_csa_eta_spin)):
+            self.sim_csa_sites.bind(key, spin)
+        self._sim_csa_convention = self.sim_csa_convention_combo.currentData()
+        self.sim_csa_convention_combo.currentIndexChanged.connect(
+            lambda _i: self._on_sim_csa_convention_changed())
+        layout.addWidget(self.sim_csa_sites)
+
+        axis_form = QFormLayout()
+        # Axis follows the tensors (explicit user request): δiso ±
+        # 1.5 × |span or Δ| for every site, re-applied whenever one
+        # changes, until the user sets an axis limit by hand.
         self.sim_csa_auto_axis_check = QCheckBox("Auto: δiso ± 1.5 × |span or Δ|")
         self.sim_csa_auto_axis_check.setChecked(True)
         self.sim_csa_auto_axis_check.setToolTip(
             "Keep the ppm axis framed on the pattern: δiso ± 1.5 × |span or Δ| "
-            "(never narrower than ± 5 × the broadening FWHM). Typing an axis "
-            "limit turns this off; tick it again to snap back.")
+            "(never narrower than ± 5 × the broadening FWHM), spanning every site. "
+            "Typing an axis limit turns this off; tick it again to snap back.")
         self.sim_csa_auto_axis_check.toggled.connect(
             lambda on: self._sync_sim_csa_axis() if on else None)
-        form.addRow("Axis:", self.sim_csa_auto_axis_check)
+        axis_form.addRow("Axis:", self.sim_csa_auto_axis_check)
 
         self.sim_csa_ppm_min_spin = QDoubleSpinBox()
         self.sim_csa_ppm_min_spin.setRange(-1.0e6, 1.0e6)
         self.sim_csa_ppm_min_spin.setDecimals(2)
         self.sim_csa_ppm_min_spin.setValue(-100.0)
         self.sim_csa_ppm_min_spin.setSuffix(" ppm")
-        form.addRow("Axis min:", self.sim_csa_ppm_min_spin)
+        axis_form.addRow("Axis min:", self.sim_csa_ppm_min_spin)
 
         self.sim_csa_ppm_max_spin = QDoubleSpinBox()
         self.sim_csa_ppm_max_spin.setRange(-1.0e6, 1.0e6)
         self.sim_csa_ppm_max_spin.setDecimals(2)
         self.sim_csa_ppm_max_spin.setValue(100.0)
         self.sim_csa_ppm_max_spin.setSuffix(" ppm")
-        form.addRow("Axis max:", self.sim_csa_ppm_max_spin)
+        axis_form.addRow("Axis max:", self.sim_csa_ppm_max_spin)
         # A hand edit means "this axis, please": stop following the tensor.
         for spin in (self.sim_csa_ppm_min_spin, self.sim_csa_ppm_max_spin):
             spin.valueChanged.connect(lambda _v: self.sim_csa_auto_axis_check.setChecked(False))
         for spin in (self.sim_csa_diso_spin, self.sim_csa_aniso_spin, self.sim_csa_fwhm_spin):
             spin.valueChanged.connect(lambda _v: self._sync_sim_csa_axis())
+        self.sim_csa_sites.changed.connect(self._sync_sim_csa_axis)
         self._sync_sim_csa_axis()
 
         self.sim_csa_points_spin = QSpinBox()
         self.sim_csa_points_spin.setRange(64, 1 << 20)
         self.sim_csa_points_spin.setValue(4096)
-        form.addRow("Axis points:", self.sim_csa_points_spin)
+        axis_form.addRow("Axis points:", self.sim_csa_points_spin)
 
-        layout.addLayout(form)
+        self.sim_csa_show_sites_check = QCheckBox("Also plot each site (Simulation plot)")
+        self.sim_csa_show_sites_check.setChecked(True)
+        self.sim_csa_show_sites_check.setToolTip(
+            "With more than one site, also draw the total and every site's own "
+            "contribution on the Simulation plot.")
+        axis_form.addRow("", self.sim_csa_show_sites_check)
+        layout.addLayout(axis_form)
 
         self.sim_csa_simulate_button = QPushButton("Simulate")
         self.sim_csa_simulate_button.clicked.connect(self._on_simulate_csa_clicked)
@@ -13949,7 +14247,8 @@ class MainWindow(QMainWindow):
         self.sim_csa_results_label = QLabel("")
         self.sim_csa_results_label.setWordWrap(True)
         layout.addWidget(self.sim_csa_results_label)
-        # The tensor being simulated, in 3D (explicit user request).
+        # The tensor being simulated, in 3D (explicit user request): the
+        # selected site's.
         self.sim_csa_tensor_controls = TensorViewControls(self._csa_tensor_site,
                                                           self._draw_tensor_picture)
         layout.addWidget(self.sim_csa_tensor_controls)
@@ -13962,8 +14261,10 @@ class MainWindow(QMainWindow):
         self.sim_csa_export_button.clicked.connect(self._on_export_simulated_csa_clicked)
         self.sim_csa_to_fit_button = QPushButton("Send to Fit as Starting Values")
         self.sim_csa_to_fit_button.setToolTip(
-            "Put these values into Fit ▸ CSA/Dipolar as the starting values of the selected "
-            "site row (else the first), with this regime, spinning rate and broadening.")
+            "Put these values into Fit ▸ CSA/Dipolar as starting values, with this regime, "
+            "spinning rate and broadening. Several sites replace the fit's site rows, one "
+            "row per site (bounds and fixed flags of rows that remain are kept); a single "
+            "site sets the selected row (else the first).")
         self.sim_csa_to_fit_button.clicked.connect(self._send_csa_simulation_to_fit)
         csa_sim_row = QHBoxLayout()
         csa_sim_row.addWidget(self.sim_csa_export_button)
@@ -13973,6 +14274,47 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         self._refresh_simulate_csa_controls()
         return tab
+
+    def _on_sim_csa_convention_changed(self) -> None:
+        """Every site's anisotropy and asymmetry into the new convention,
+        so each keeps describing the same tensor (with several sites, a
+        silent re-reading of all of them would change every tensor at
+        once). Not while a saved state is being restored: its sites are
+        already in its own convention."""
+        new = self.sim_csa_convention_combo.currentData()
+        old, self._sim_csa_convention = self._sim_csa_convention, new
+        sites = self.sim_csa_sites
+        if old != new and not sites._loading:
+            converted = []
+            for site in sites.site_dicts:
+                d_iso, aniso, asym = notebook_simulations.convert_csa_parameters(
+                    site["d_iso"], site["span_or_Delta"], site["skew_or_eta"],
+                    from_convention=old, to_convention=new)
+                converted.append({**site, "d_iso": d_iso, "span_or_Delta": aniso,
+                                  "skew_or_eta": asym})
+            sites.set_sites(converted, current=sites.current())
+        sites.refresh()
+
+    def _sim_csa_site_fields(self) -> tuple:
+        """(key, name, unit) of a CSA site's values, for the logs."""
+        hb = self.sim_csa_convention_combo.currentData() == "Herzfeld-Berger"
+        return (("d_iso", "δiso", " ppm"), ("span_or_Delta", "span" if hb else "Δ", " ppm"),
+                ("skew_or_eta", "skew" if hb else "η", ""), ("fwhm", "FWHM", " ppm"),
+                ("eta", "L fraction", ""), ("amount", "amount", ""))
+
+    #: (key, name, unit) of a quadrupolar site's values, for the logs.
+    _SIM_QUAD_SITE_FIELDS = (("C_Q_MHz", "C_Q", " MHz"), ("eta_Q", "η_Q", ""),
+                             ("d_iso", "δiso", " ppm"), ("fwhm", "FWHM", " ppm"),
+                             ("eta", "L fraction", ""), ("amount", "amount", ""))
+
+    def _describe_sim_csa_site(self, site: dict) -> str:
+        convention = (self.sim_csa_convention_combo.currentData()
+                      if hasattr(self, "sim_csa_convention_combo") else "Haeberlen")
+        aniso, asym = (("span", "skew") if convention == "Herzfeld-Berger" else ("Δ", "η"))
+        return (f"{site.get('label', '')}: δiso {float(site.get('d_iso', 0)):g}, "
+                f"{aniso} {float(site.get('span_or_Delta', 0)):g} ppm, "
+                f"{asym} {float(site.get('skew_or_eta', 0)):g}, "
+                f"× {float(site.get('amount', 1)):g}")
 
     def _refresh_simulate_csa_controls(self) -> None:
         """MAS rate and Larmor frequency only mean anything for the
@@ -13987,18 +14329,26 @@ class MainWindow(QMainWindow):
             self.sim_csa_lineshape_combo.currentData() == "pseudo_voigt")
 
     def _build_simulate_quadrupolar_subtab(self) -> QWidget:
-        """Forward-simulate a static or MAS quadrupolar powder pattern
+        """Forward-simulate static or MAS quadrupolar powder patterns
         from spin/coupling parameters, at first order, second order or
-        exactly, for the central transition, the satellites or both
-        (``notebook.simulations.quadrupolar_spectrum``)."""
+        exactly, for the central transition, the satellites or both.
+
+        **Several sites** (explicit user request, 2026-09-30), as
+        Simulate ▸ CSA: nucleus, field, spinning, transitions, level of
+        theory, broadening kernel and powder average are shared; C_Q,
+        η_Q, δiso, FWHM, L fraction and amount are per site, and the
+        C_Q/η_Q/δiso/FWHM spin boxes edit the selected site
+        (``notebook.simulations.quadrupolar_multisite_spectrum``; one site
+        of amount 1 is exactly ``quadrupolar_spectrum``)."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         blurb = QLabel(
-            "Simulate a static or MAS quadrupolar powder pattern, then "
-            "export it as a spectrum to compare against real data in "
-            "Open experiments. Tick \u201cCompare orders\u201d to see what "
-            "second order (and beyond) adds to the first-order pattern."
+            "Simulate static or MAS quadrupolar powder patterns -- one site or "
+            "several, summed -- then keep the result as a spectrum to compare "
+            "against real data in Open experiments, or send every site to Fit. "
+            "Tick \u201cCompare orders\u201d to see what second order (and beyond) "
+            "adds to the first-order pattern."
         )
         blurb.setWordWrap(True)
         layout.addWidget(blurb)
@@ -14064,13 +14414,13 @@ class MainWindow(QMainWindow):
         self.sim_quad_cq_spin.setValue(1.0)
         self.sim_quad_cq_spin.setSuffix(" MHz")
         self.sim_quad_cq_spin.setToolTip("Quadrupolar coupling constant, C_Q.")
-        form.addRow("C_Q:", self.sim_quad_cq_spin)
+        site_rows = [("C_Q:", self.sim_quad_cq_spin)]
 
         self.sim_quad_eta_spin = QDoubleSpinBox()
         self.sim_quad_eta_spin.setRange(0.0, 1.0)
         self.sim_quad_eta_spin.setDecimals(3)
         self.sim_quad_eta_spin.setSingleStep(0.1)
-        form.addRow("η_Q:", self.sim_quad_eta_spin)
+        site_rows.append(("η_Q:", self.sim_quad_eta_spin))
 
         self.sim_quad_diso_spin = QDoubleSpinBox()
         self.sim_quad_diso_spin.setRange(-1.0e5, 1.0e5)
@@ -14079,7 +14429,7 @@ class MainWindow(QMainWindow):
         self.sim_quad_diso_spin.setToolTip(
             "Isotropic chemical shift. The quadrupolar-induced shift of the "
             "central transition comes on top of this, from second order.")
-        form.addRow("δiso:", self.sim_quad_diso_spin)
+        site_rows.append(("δiso:", self.sim_quad_diso_spin))
 
         self.sim_quad_larmor_spin = QDoubleSpinBox()
         self.sim_quad_larmor_spin.setRange(0.0, 5000.0)
@@ -14151,7 +14501,27 @@ class MainWindow(QMainWindow):
         self.sim_quad_fwhm_spin.setDecimals(3)
         self.sim_quad_fwhm_spin.setValue(2.0)
         self.sim_quad_fwhm_spin.setSuffix(" ppm")
-        form.addRow("Broadening FWHM:", self.sim_quad_fwhm_spin)
+        site_rows.append(("Broadening FWHM:", self.sim_quad_fwhm_spin))
+        self.sim_quad_pv_eta_spin = QDoubleSpinBox()
+        self.sim_quad_pv_eta_spin.setRange(0.0, 1.0)
+        self.sim_quad_pv_eta_spin.setDecimals(2)
+        self.sim_quad_pv_eta_spin.setSingleStep(0.1)
+        self.sim_quad_pv_eta_spin.setValue(0.5)
+        self.sim_quad_pv_eta_spin.setToolTip(
+            "Lorentzian fraction of the pseudo-Voigt broadening (0 = Gaussian, "
+            "1 = Lorentzian) -- unrelated to η_Q.")
+        site_rows.append(("L fraction:", self.sim_quad_pv_eta_spin))
+
+        self.sim_quad_lineshape_combo = QComboBox()
+        self.sim_quad_lineshape_combo.addItem("Gaussian", "gaussian")
+        self.sim_quad_lineshape_combo.addItem("Lorentzian", "lorentzian")
+        self.sim_quad_lineshape_combo.addItem("Pseudo-Voigt", "pseudo_voigt")
+        self.sim_quad_lineshape_combo.setToolTip(
+            "Broadening kernel, shared by every site (as in Fit ▸ Quadrupolar). Each site "
+            "has its own FWHM and, for pseudo-Voigt, its own L fraction.")
+        self.sim_quad_lineshape_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_simulate_quad_controls())
+        form.addRow("Broadening:", self.sim_quad_lineshape_combo)
 
         self.sim_quad_powder_combo = QComboBox()
         self.sim_quad_powder_combo.addItem("ZCW", "zcw")
@@ -14168,6 +14538,20 @@ class MainWindow(QMainWindow):
             "diagonalization per orientation (and per rotor phase under "
             "MAS). Static patterns want more (≈20,000) than MAS (≈4,000).")
         form.addRow("Orientations:", self.sim_quad_orientations_spin)
+        layout.addLayout(form)
+
+        # ---- the sites, and the selected one's parameters ----
+        self.sim_quad_sites = SimSiteList(
+            {"C_Q_MHz": 1.0, "eta_Q": 0.0, "d_iso": 0.0, "fwhm": 2.0, "eta": 0.5},
+            describe=self._describe_sim_quad_site)
+        for label, widget in site_rows:
+            self.sim_quad_sites.site_form.addRow(label, widget)
+        for key, spin in (("C_Q_MHz", self.sim_quad_cq_spin), ("eta_Q", self.sim_quad_eta_spin),
+                          ("d_iso", self.sim_quad_diso_spin), ("fwhm", self.sim_quad_fwhm_spin),
+                          ("eta", self.sim_quad_pv_eta_spin)):
+            self.sim_quad_sites.bind(key, spin)
+        layout.addWidget(self.sim_quad_sites)
+        form = QFormLayout()
 
         # Same "follows the parameters until edited by hand" pattern as
         # the CSA section's Auto axis. Applied when Simulate is pressed,
@@ -14176,8 +14560,8 @@ class MainWindow(QMainWindow):
         self.sim_quad_auto_axis_check.setChecked(True)
         self.sim_quad_auto_axis_check.setToolTip(
             "Set the ppm axis from the full second-order range of the "
-            "selected transitions (plus a margin) each time Simulate is "
-            "pressed. Typing an axis limit turns this off.")
+            "selected transitions of every site (plus a margin) each time "
+            "Simulate is pressed. Typing an axis limit turns this off.")
         form.addRow("Axis:", self.sim_quad_auto_axis_check)
 
         self.sim_quad_ppm_min_spin = QDoubleSpinBox()
@@ -14200,6 +14584,12 @@ class MainWindow(QMainWindow):
         self.sim_quad_points_spin.setRange(64, 1 << 20)
         self.sim_quad_points_spin.setValue(4096)
         form.addRow("Axis points:", self.sim_quad_points_spin)
+        self.sim_quad_show_sites_check = QCheckBox("Also plot each site (Simulation plot)")
+        self.sim_quad_show_sites_check.setChecked(True)
+        self.sim_quad_show_sites_check.setToolTip(
+            "With more than one site, also draw the total and every site's own "
+            "contribution on the Simulation plot (Compare orders takes precedence).")
+        form.addRow("", self.sim_quad_show_sites_check)
 
         layout.addLayout(form)
 
@@ -14222,9 +14612,11 @@ class MainWindow(QMainWindow):
         self.sim_quad_export_button.clicked.connect(self._on_export_simulated_quadrupolar_clicked)
         self.sim_quad_to_fit_button = QPushButton("Send to Fit as Starting Values")
         self.sim_quad_to_fit_button.setToolTip(
-            "Put these values into Fit ▸ Quadrupolar as the starting values of the selected "
-            "site row (else the first), with this regime, transitions and level of theory. The "
-            "fit keeps the spectrum's nucleus and field.")
+            "Put these values into Fit ▸ Quadrupolar as starting values, with this regime, "
+            "transitions, broadening and level of theory. Several sites replace the fit's "
+            "site rows, one row per site (bounds and fixed flags of rows that remain are "
+            "kept); a single site sets the selected row (else the first). The fit keeps the "
+            "spectrum's nucleus and field.")
         self.sim_quad_to_fit_button.clicked.connect(self._send_quadrupolar_simulation_to_fit)
         quad_sim_row = QHBoxLayout()
         quad_sim_row.addWidget(self.sim_quad_export_button)
@@ -14235,11 +14627,20 @@ class MainWindow(QMainWindow):
         self._refresh_simulate_quad_controls()
         return tab
 
+    def _describe_sim_quad_site(self, site: dict) -> str:
+        return (f"{site.get('label', '')}: C_Q {float(site.get('C_Q_MHz', 0)):g} MHz, "
+                f"η_Q {float(site.get('eta_Q', 0)):g}, δiso {float(site.get('d_iso', 0)):g}, "
+                f"× {float(site.get('amount', 1)):g}")
+
     def _refresh_simulate_quad_controls(self) -> None:
-        """MAS rate only means something in the MAS regime."""
+        """MAS rate only means something in the MAS regime, L fraction
+        only for pseudo-Voigt broadening."""
         if hasattr(self, "sim_quad_mas_spin"):
             self.sim_quad_mas_spin.setEnabled(
                 self.sim_quad_regime_combo.currentData() == "mas")
+        if hasattr(self, "sim_quad_pv_eta_spin"):
+            self.sim_quad_pv_eta_spin.setEnabled(
+                self.sim_quad_lineshape_combo.currentData() == "pseudo_voigt")
 
     def _refresh_simulation_controls(self, spectrum) -> None:
         """Seed the Simulations tab's Larmor-frequency and nucleus
@@ -14294,13 +14695,15 @@ class MainWindow(QMainWindow):
         return ""
 
     def _sync_sim_csa_axis(self) -> None:
-        """Set Axis min/max from δiso and span/Δ while Auto is ticked --
-        without the change counting as a hand edit (signals blocked)."""
-        if not self.sim_csa_auto_axis_check.isChecked():
+        """Set Axis min/max from every site's δiso and span/Δ while Auto
+        is ticked -- without the change counting as a hand edit (signals
+        blocked)."""
+        if not self.sim_csa_auto_axis_check.isChecked() or not hasattr(self, "sim_csa_sites"):
             return
-        low, high = notebook_simulations.csa_axis_limits(
-            self.sim_csa_diso_spin.value(), self.sim_csa_aniso_spin.value(),
-            fwhm=self.sim_csa_fwhm_spin.value())
+        low, high = notebook_simulations.multisite_axis_limits(
+            notebook_simulations.csa_axis_limits(site["d_iso"], site["span_or_Delta"],
+                                                 fwhm=site.get("fwhm", 0.0))
+            for site in self.sim_csa_sites.site_dicts)
         for spin, value in ((self.sim_csa_ppm_min_spin, low), (self.sim_csa_ppm_max_spin, high)):
             spin.blockSignals(True)
             spin.setValue(value)
@@ -14322,24 +14725,14 @@ class MainWindow(QMainWindow):
         ppm_axis = np.linspace(ppm_min, ppm_max, self.sim_csa_points_spin.value())
 
         convention = self.sim_csa_convention_combo.currentData()
-        csa = notebook_simulations.csa_definition(
-            self.sim_csa_diso_spin.value(), self.sim_csa_aniso_spin.value(),
-            self.sim_csa_skeweta_spin.value(), convention=convention)
-
+        sites = self.sim_csa_sites.sites()
         is_static = bool(self.sim_csa_regime_combo.currentData())
         scheme = self.sim_csa_powder_combo.currentData()
         grid_kwargs = self._csa_grid_kwargs(scheme, self.sim_csa_orientations_spin.value())
         lineshape = self.sim_csa_lineshape_combo.currentData()
-        eta = self.sim_csa_eta_spin.value()
-
-        if is_static:
-            result = notebook_simulations.make_static_csa_spectrum(
-                csa, ppm_axis, fwhm=self.sim_csa_fwhm_spin.value(),
-                powder_scheme=scheme, lineshape=lineshape, eta=eta, **grid_kwargs)
-            regime_label = "static"
-        else:
-            mas_hz = self.sim_csa_mas_spin.value()
-            larmor_mhz = self.sim_csa_larmor_spin.value()
+        mas_hz = self.sim_csa_mas_spin.value()
+        larmor_mhz = self.sim_csa_larmor_spin.value()
+        if not is_static:
             if mas_hz <= 0:
                 QMessageBox.warning(
                     self, "Simulate CSA",
@@ -14353,33 +14746,49 @@ class MainWindow(QMainWindow):
                     "(for the Larmor frequency), to convert sideband spacing from "
                     "Hz to ppm.")
                 return
-            result = notebook_simulations.finite_mas_csa_spectrum(
-                csa, ppm_axis, larmor_Hz=larmor_mhz * 1.0e6, mas_Hz=mas_hz,
-                fwhm=self.sim_csa_fwhm_spin.value(), powder_scheme=scheme,
-                lineshape=lineshape, eta=eta, **grid_kwargs)
-            regime_label = f"finite MAS, {mas_hz:g} Hz"
+        if sum(float(s.get("amount", 1.0)) for s in sites) <= 0:
+            QMessageBox.warning(self, "Simulate CSA", "Give at least one site a non-zero amount.")
+            return
+        result = notebook_simulations.csa_multisite_spectrum(
+            sites, ppm_axis, convention=convention, static=is_static,
+            larmor_Hz=larmor_mhz * 1.0e6 if not is_static else None,
+            mas_Hz=mas_hz if not is_static else None, lineshape=lineshape,
+            powder_scheme=scheme, **grid_kwargs)
+        regime_label = "static" if is_static else f"finite MAS, {mas_hz:g} Hz"
 
         spectrum_data = np.asarray(result["real_spec"], dtype=float)
         axis = NMRAxis(kind="frequency", ppm=ppm_axis)
+        record = {"kind": "csa", "convention": convention, "regime": regime_label}
+        if len(sites) == 1:
+            record.update(d_iso=sites[0]["d_iso"], aniso=sites[0]["span_or_Delta"],
+                          skew_eta=sites[0]["skew_or_eta"])
+        else:
+            record["n_sites"] = len(sites)
+        record["sites"] = sites
+        record["log"] = result["log"]
         metadata = NMRMetadata(
             vendor="simulated", nucleus=nucleus,
-            sfo1=(self.sim_csa_larmor_spin.value() or None) if not is_static else None,
-            raw={"simulation": {
-                "kind": "csa", "convention": convention,
-                "d_iso": self.sim_csa_diso_spin.value(),
-                "aniso": self.sim_csa_aniso_spin.value(),
-                "skew_eta": self.sim_csa_skeweta_spin.value(),
-                "regime": regime_label,
-            }},
+            sfo1=(larmor_mhz or None) if not is_static else None,
+            raw={"simulation": record},
         )
         self._simulated_csa_spectrum = NMRSpectrum(data=spectrum_data, axes=[axis], metadata=metadata)
 
         self._show_simulated_spectrum(self._simulated_csa_spectrum)
+        if len(sites) > 1 and self.sim_csa_show_sites_check.isChecked():
+            self._draw_combined_sites(result, nucleus)
 
         warning = self._simulated_spectrum_axis_warning(ppm_axis, spectrum_data)
-        self.sim_csa_results_label.setText(
-            f"Simulated {regime_label} CSA pattern, {convention} convention, "
-            f"δiso = {self.sim_csa_diso_spin.value():g} ppm.{warning}")
+        if len(sites) == 1:
+            text = (f"Simulated {regime_label} CSA pattern, {convention} convention, "
+                    f"δiso = {sites[0]['d_iso']:g} ppm.{warning}")
+        else:
+            parts = [f"{label} (δiso = {site['d_iso']:g} ppm, {share:.0%})"
+                     for label, site, share in zip(result["labels"], sites, result["shares"])]
+            text = (f"Simulated {regime_label} CSA pattern, {len(sites)} sites, {convention} "
+                    f"convention: " + "; ".join(parts) + f". Shares are of the nuclei "
+                    f"(amounts).{warning}")
+        self.sim_csa_results_label.setText(text)
+        self.sim_csa_results_label.setToolTip(result["log"])
         self.sim_csa_export_button.setEnabled(True)
         self._journal_simulation("csa")
 
@@ -14426,10 +14835,8 @@ class MainWindow(QMainWindow):
                 "for the Larmor frequency.")
             return
         spin_i = self.sim_quad_spin_spin.value()
-        c_q_hz = self.sim_quad_cq_spin.value() * 1.0e6
-        eta_q = self.sim_quad_eta_spin.value()
+        sites = self.sim_quad_sites.sites()
         larmor_hz = larmor_mhz * 1.0e6
-        delta_iso = self.sim_quad_diso_spin.value()
         transitions = self.sim_quad_transitions_combo.currentData()
         method = self.sim_quad_method_combo.currentData()
         order = {"first_order": "first", "second_order": "second", "exact": "exact"}[method]
@@ -14441,12 +14848,18 @@ class MainWindow(QMainWindow):
                 "The MAS lineshape needs a spinning rate. Set MAS rate, or "
                 "switch Regime to Static powder.")
             return
-        fwhm = self.sim_quad_fwhm_spin.value()
+        if sum(float(s.get("amount", 1.0)) for s in sites) <= 0:
+            QMessageBox.warning(self, "Simulate quadrupolar",
+                                "Give at least one site a non-zero amount.")
+            return
+        lineshape = self.sim_quad_lineshape_combo.currentData()
         try:
             if self.sim_quad_auto_axis_check.isChecked():
-                low, high = notebook_simulations.quadrupolar_axis_limits(
-                    spin_i, c_q_hz, eta_q, larmor_hz, transitions=transitions,
-                    delta_iso=delta_iso, fwhm=fwhm)
+                low, high = notebook_simulations.multisite_axis_limits(
+                    notebook_simulations.quadrupolar_axis_limits(
+                        spin_i, site["C_Q_MHz"] * 1e6, site["eta_Q"], larmor_hz,
+                        transitions=transitions, delta_iso=site["d_iso"], fwhm=site["fwhm"])
+                    for site in sites)
                 for spin, value in ((self.sim_quad_ppm_min_spin, low),
                                     (self.sim_quad_ppm_max_spin, high)):
                     spin.blockSignals(True)
@@ -14456,19 +14869,17 @@ class MainWindow(QMainWindow):
                                    self.sim_quad_ppm_max_spin.value(),
                                    self.sim_quad_points_spin.value())
             scheme = self.sim_quad_powder_combo.currentData()
-            kwargs = dict(transitions=transitions, delta_iso=delta_iso, fwhm=fwhm,
-                          powder_scheme=scheme,
+            kwargs = dict(transitions=transitions, lineshape=lineshape, powder_scheme=scheme,
                           **self._csa_grid_kwargs(scheme, self.sim_quad_orientations_spin.value()))
             started = time.perf_counter()
             if self.sim_quad_compare_check.isChecked():
-                comparison = notebook_simulations.quadrupolar_order_comparison(
-                    spin_i, c_q_hz, eta_q, larmor_hz, ppm_axis, mas_Hz=mas_hz, **kwargs)
+                comparison = notebook_simulations.quadrupolar_multisite_order_comparison(
+                    sites, spin_i, larmor_hz, ppm_axis, mas_Hz=mas_hz, **kwargs)
                 result = comparison[order]
             else:
                 comparison = None
-                result = notebook_simulations.quadrupolar_spectrum(
-                    spin_i, c_q_hz, eta_q, larmor_hz, ppm_axis, mas_Hz=mas_hz,
-                    order=order, **kwargs)
+                result = notebook_simulations.quadrupolar_multisite_spectrum(
+                    sites, spin_i, larmor_hz, ppm_axis, mas_Hz=mas_hz, order=order, **kwargs)
             elapsed = time.perf_counter() - started
         except ValueError as exc:
             QMessageBox.warning(self, "Simulate quadrupolar", str(exc))
@@ -14477,36 +14888,60 @@ class MainWindow(QMainWindow):
         spectrum_data = np.asarray(result["real_spec"], dtype=float)
         axis = NMRAxis(kind="frequency", ppm=ppm_axis)
         regime_label = f"MAS {mas_hz / 1e3:g} kHz" if is_mas else "static"
-        metadata = NMRMetadata(
-            vendor="simulated", nucleus=nucleus, sfo1=larmor_mhz,
-            raw={"simulation": {
-                "kind": "quadrupolar", "method": method, "order": order, "I": spin_i,
-                "C_Q_Hz": c_q_hz, "eta_Q": eta_q, "delta_iso_ppm": delta_iso,
-                "regime": "mas" if is_mas else "static", "mas_Hz": mas_hz,
-                "transitions": transitions, "log": result["log"],
-            }},
-        )
+        record = {"kind": "quadrupolar", "method": method, "order": order, "I": spin_i,
+                  "regime": "mas" if is_mas else "static", "mas_Hz": mas_hz,
+                  "transitions": transitions, "lineshape": lineshape}
+        if len(sites) == 1:
+            record.update(C_Q_Hz=sites[0]["C_Q_MHz"] * 1e6, eta_Q=sites[0]["eta_Q"],
+                          delta_iso_ppm=sites[0]["d_iso"])
+        else:
+            record["n_sites"] = len(sites)
+        record["sites"] = sites
+        record["log"] = (result["site_logs"][0] if len(sites) == 1 else result["log"])
+        metadata = NMRMetadata(vendor="simulated", nucleus=nucleus, sfo1=larmor_mhz,
+                               raw={"simulation": record})
         self._simulated_quadrupolar_spectrum = NMRSpectrum(data=spectrum_data, axes=[axis], metadata=metadata)
 
         self._show_simulated_spectrum(self._simulated_quadrupolar_spectrum)
         if comparison is not None:
             self._draw_quadrupolar_order_comparison(comparison, nucleus)
+        elif len(sites) > 1 and self.sim_quad_show_sites_check.isChecked():
+            self._draw_combined_sites(result, nucleus)
 
         warning = self._simulated_spectrum_axis_warning(ppm_axis, spectrum_data)
         method_label = {"first": "first-order", "second": "second-order", "exact": "exact"}[order]
-        ct_note = ""
-        if transitions in ("all", "ct") and not float(spin_i).is_integer():
-            shift = notebook_simulations.quadrupolar_ct_isotropic_shift_Hz(
-                spin_i, c_q_hz, eta_q, larmor_hz) / larmor_hz * 1e6
-            ct_note = (f" CT isotropic quadrupolar shift: {shift:.3g} ppm "
-                       f"(CT centre of gravity at {delta_iso + shift:.4g} ppm"
-                       + (", from second order on)." if order != "first" else
-                          "; not shown at first order)."))
-        self.sim_quad_results_label.setText(
-            f"Simulated {regime_label} quadrupolar pattern ({method_label}), I = {spin_i:g}, "
-            f"C_Q = {self.sim_quad_cq_spin.value():g} MHz, η_Q = {eta_q:g}, "
-            f"ν_Q = {notebook_simulations.quadrupolar_nu_Q(spin_i, c_q_hz) / 1e3:.4g} kHz, "
-            f"in {elapsed:.2f} s.{ct_note}{warning}")
+        half_integer_ct = transitions in ("all", "ct") and not float(spin_i).is_integer()
+
+        def ct_shift(site):
+            c_q_hz = site["C_Q_MHz"] * 1e6
+            return notebook_simulations.quadrupolar_ct_isotropic_shift_Hz(
+                spin_i, c_q_hz, site["eta_Q"], larmor_hz) / larmor_hz * 1e6
+
+        if len(sites) == 1:
+            site = sites[0]
+            c_q_hz = site["C_Q_MHz"] * 1e6
+            ct_note = ""
+            if half_integer_ct:
+                shift = ct_shift(site)
+                ct_note = (f" CT isotropic quadrupolar shift: {shift:.3g} ppm "
+                           f"(CT centre of gravity at {site['d_iso'] + shift:.4g} ppm"
+                           + (", from second order on)." if order != "first" else
+                              "; not shown at first order)."))
+            text = (f"Simulated {regime_label} quadrupolar pattern ({method_label}), "
+                    f"I = {spin_i:g}, C_Q = {site['C_Q_MHz']:g} MHz, η_Q = {site['eta_Q']:g}, "
+                    f"ν_Q = {notebook_simulations.quadrupolar_nu_Q(spin_i, c_q_hz) / 1e3:.4g} kHz, "
+                    f"in {elapsed:.2f} s.{ct_note}{warning}")
+        else:
+            parts = []
+            for label, site, share in zip(result["labels"], sites, result["shares"]):
+                bit = f"{label} (C_Q = {site['C_Q_MHz']:g} MHz, {share:.0%}"
+                if half_integer_ct and order != "first":
+                    bit += f", CT c.o.g. {site['d_iso'] + ct_shift(site):.4g} ppm"
+                parts.append(bit + ")")
+            text = (f"Simulated {regime_label} quadrupolar pattern ({method_label}), "
+                    f"I = {spin_i:g}, {len(sites)} sites: " + "; ".join(parts)
+                    + f". Shares are of the nuclei (amounts). {elapsed:.2f} s.{warning}")
+        self.sim_quad_results_label.setText(text)
         self.sim_quad_results_label.setToolTip(result["log"])
         self.sim_quad_export_button.setEnabled(True)
         self._journal_simulation("quadrupolar")
@@ -16348,6 +16783,13 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.relaxation_uncertainty_checkbox)
 
+        # How the fit is drawn, all peaks together, and keeping it
+        # (explicit user request, 2026-09-30) -- gui/curve_fit_plot_box.py.
+        self.curve_fit_plot_box = CurveFitPlotBox()
+        self.curve_fit_plot_box.changed.connect(self._on_curve_fit_plot_changed)
+        self.curve_fit_plot_box.keepRequested.connect(lambda: self._keep_curve_fits())
+        layout.addWidget(self.curve_fit_plot_box)
+
         # The data behind the plot, not just the fitted parameters --
         # the report already gives those. Explicit user request: "I
         # need the curve fit results to be exportable as integral/peak
@@ -16370,6 +16812,28 @@ class MainWindow(QMainWindow):
         )
         self.export_curve_fit_button.clicked.connect(self._on_export_curve_fit_clicked)
         layout.addWidget(self.export_curve_fit_button)
+
+        # The spectrum's kept curve fits, here where they are made (the
+        # same records as Fit ▸ Kept fit models, curve fits only).
+        self.curve_fit_models_panel = FitModelsPanel(
+            models=lambda: [m for m in self._fit_models(self._selected_index())
+                            if m.get("kind") == "curve"],
+            keep=lambda: self._keep_curve_fits(),
+            show=lambda model_id: self._show_fit_model(self._selected_index(), model_id),
+            compare=lambda ids, residuals, components, layout="summary": self._compare_fit_models(
+                self._selected_index(), ids, residuals, components, "summary"),
+            restore=lambda model_id: self._restore_fit_model(self._selected_index(), model_id),
+            rename=lambda model_id, name: self._rename_fit_model(
+                self._selected_index(), model_id, name),
+            delete=lambda model_id: self._delete_fit_model(self._selected_index(), model_id),
+            can_restore=self._fit_model_restorable,
+            recolour=lambda model_id, colour: self._recolour_fit_model(
+                self._selected_index(), model_id, colour))
+        # Kept from the Fit plot box above, right under the plot controls.
+        self.curve_fit_models_panel.keep_button.setVisible(False)
+        self.curve_fit_models_group = QGroupBox("Kept curve fits")
+        QVBoxLayout(self.curve_fit_models_group).addWidget(self.curve_fit_models_panel)
+        layout.addWidget(self.curve_fit_models_group)
 
         # --- DOSY map display --------------------------------------
         # Explicit user report: "ILT axes have tiny text and no way to
@@ -22131,6 +22595,11 @@ class MainWindow(QMainWindow):
         if not (0 <= index < len(self._relaxation_fit_results)):
             return
         result = self._relaxation_fit_results[index]
+        box = self.curve_fit_plot_box
+        box.keep_button.setEnabled(True)
+        if box.view() == "all":
+            self._display_all_relaxation_peaks()
+            return
         uncertainty = None
         if self.relaxation_uncertainty_checkbox.isChecked():
             try:
@@ -22148,7 +22617,8 @@ class MainWindow(QMainWindow):
         xlabel, x_scale = self._fit_plot_axis()
         self.fit_canvas.show_relaxation_fit(
             result, uncertainty=uncertainty, xlabel=xlabel, excluded_points=excluded_points,  # noqa: E501
-            x_scale=x_scale,
+            x_scale=x_scale, fit_curve=self._relaxation_fit_curve(result),
+            fit_style=box.fit_style(),
         )
         # Claim the canvas, so a later right-click reaches this fit and
         # not whichever eNMR series was last plotted here. Both
@@ -22165,6 +22635,43 @@ class MainWindow(QMainWindow):
             processing_relaxation.format_relaxation_report(
                 result, title=result.get("peak_label") or None, width=58)
         )
+
+    @staticmethod
+    def _relaxation_fit_curve(result):
+        """The fitted function on a fine grid (processing.relaxation.
+        fit_curve), or None where the result cannot be re-evaluated (then
+        the plot joins the fitted values at the points, as before)."""
+        try:
+            return processing_relaxation.fit_curve(result)
+        except Exception:  # noqa: BLE001 -- a record without a model to evaluate
+            return None
+
+    def _display_all_relaxation_peaks(self) -> None:
+        """Every peak's series and fit on one plot (Fit plot ▸ Show: All
+        peaks together), with every report under it."""
+        results = list(self._relaxation_fit_results or [])
+        if not results:
+            return
+        xlabel, x_scale = self._fit_plot_axis()
+        box = self.curve_fit_plot_box
+        self.fit_canvas.show_relaxation_fits(
+            results, xlabel=xlabel, x_scale=x_scale,
+            fit_curves=[self._relaxation_fit_curve(r) for r in results],
+            fit_style=box.fit_style(), normalise=box.normalise())
+        self._fit_canvas_owner = "relaxation"
+        self.relaxation_fit_params_label.setText("\n\n".join(
+            processing_relaxation.format_relaxation_report(
+                r, title=r.get("peak_label") or f"Peak {k + 1}", width=58)
+            for k, r in enumerate(results)))
+
+    def _on_curve_fit_plot_changed(self) -> None:
+        """Redraw with the new fit-plot settings, and remember them."""
+        settings = getattr(self, "_ui_settings", None)
+        if isinstance(settings, dict):
+            settings["curve_fit_line"] = self.curve_fit_plot_box.settings()
+            self._save_ui_settings()
+        if self._relaxation_fit_results and getattr(self, "_fit_canvas_owner", None) == "relaxation":
+            self._display_relaxation_peak(self.view_relaxation_peak_spin.value() - 1)
 
     def _adopt_relaxation_fit_state(self, spectrum) -> None:
         """Re-point the point-exclusion machinery at the fit
@@ -23575,8 +24082,7 @@ class MainWindow(QMainWindow):
             self.quad_fit_panel.seed_from_spectrum(spectrum)
         if hasattr(self, "czjzek_fit_panel"):
             self.czjzek_fit_panel.seed_from_spectrum(spectrum)
-        if hasattr(self, "fit_models_panel"):
-            self.fit_models_panel.refresh()
+        self._refresh_fit_model_panels()
         if hasattr(self, "combined_sim_panel"):
             self.combined_sim_panel.seed_from_spectrum(spectrum)
         if hasattr(self, "combined_fit_panel"):

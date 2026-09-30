@@ -239,10 +239,11 @@ def test_a_csa_simulation_is_journalled_and_restored(qapp):
     journal = io_history.load_simulation_journal()
     entry = journal["entries"][-1]
     assert entry["panel"] == "csa" and entry["runs"] == 1
-    assert "δiso: 42.000 ppm" in entry["inputs_text"]
+    # Sites are logged whole (2026-09-30: several sites), one line each.
+    assert "Site 1 (Site 1): δiso 42 ppm, Δ -80 ppm" in "\n".join(entry["inputs_text"])
     assert "δiso = 42 ppm" in entry["summary"]
     text = open(io_history.simulation_journal_paths()[1], encoding="utf-8").read()
-    assert "#1 CSA" in text and "δiso: 42.000 ppm" in text
+    assert "#1 CSA" in text and "δiso 42 ppm" in text
 
     # A quick re-run is folded into the same entry.
     window.sim_csa_diso_spin.setValue(43.0)

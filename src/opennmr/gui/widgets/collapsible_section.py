@@ -87,6 +87,11 @@ class CollapsibleSection(QWidget):
         # sheet: a style-sheet font size is fixed in points and would
         # stop following the interface font-size setting.
         self._header.setStyleSheet("QToolButton { text-align: left; }")
+        # A long title must not set the side panel's minimum width (the
+        # panel then cannot reflow when the column is narrowed -- explicit
+        # user request, 2026-09-30): it wraps onto a second line instead
+        # (_sync_header_text), so the header can be narrower than it.
+        self._header.setMinimumWidth(60)
         self._apply_header_font()
         self._header.clicked.connect(self._on_header_clicked)
         self._sync_header_text()
@@ -171,6 +176,30 @@ class CollapsibleSection(QWidget):
         self._sync_header_text()
         self.toggled.emit(expanded)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        super().resizeEvent(event)
+        self._sync_header_text()
+
+    def showEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        super().showEvent(event)
+        self._sync_header_text()
+
     def _sync_header_text(self) -> None:
         glyph = _EXPANDED_GLYPH if self._header.isChecked() else _COLLAPSED_GLYPH
-        self._header.setText(f"{glyph} {self._title}")
+        text = f"{glyph} {self._title}"
+        width = self.width() if self.isVisible() else 0
+        metrics = self._header.fontMetrics()
+        room = width - 16
+        if width > 0 and metrics.horizontalAdvance(text) > room:
+            lines, line = [], ""
+            for word in text.split(" "):
+                trial = f"{line} {word}" if line else word
+                if line and metrics.horizontalAdvance(trial) > room:
+                    lines.append(line)
+                    line = "    " + word           # under the title, past the glyph
+                else:
+                    line = trial
+            lines.append(line)
+            text = "\n".join(lines)
+        if self._header.text() != text:
+            self._header.setText(text)

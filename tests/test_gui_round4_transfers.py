@@ -145,10 +145,22 @@ def test_csa_use_fitted_send_and_back(window):
     window.csa_results_table.setColumnCount(1)
     window.csa_results_table.setCurrentCell(1, 0)
     window._send_csa_fit_to_simulation()
+    # Every fitted site goes (2026-09-30), the one selected in the results
+    # table selected in Simulate.
+    sites = window.sim_csa_sites
+    assert [s["label"] for s in sites.site_dicts] == ["C1", "C2"]
+    assert sites.current() == 1
     assert window.sim_csa_diso_spin.value() == 40.0 and window.sim_csa_aniso_spin.value() == 60.0
     assert window.sim_csa_ppm_max_spin.value() == 250.0
-    # Back, into site 1, with the simulation in the other convention:
-    # converted, since site 2 stays in the fit's.
+    # Straight back: every row as it was.
+    window._send_csa_simulation_to_fit()
+    assert t.rowCount() == 2
+    assert _cells(t, 0, (1, 2, 3, 4)) == [12.0, -90.0, 0.3, 4.0]
+    assert _cells(t, 1, (1, 2, 3, 4)) == [40.0, 60.0, 0.7, 3.0]
+    # One site back, into fit row 1, with the simulation in the other
+    # convention: converted, since site 2 stays in the fit's.
+    sites.select(0)
+    sites.remove_site()
     window.sim_csa_convention_combo.setCurrentIndex(
         window.sim_csa_convention_combo.findData("Herzfeld-Berger"))
     window.sim_csa_diso_spin.setValue(10.0)
@@ -157,6 +169,7 @@ def test_csa_use_fitted_send_and_back(window):
     t.setCurrentCell(0, 1)
     window._send_csa_simulation_to_fit()
     assert window.csa_convention_combo.currentData() == "Haeberlen"
+    assert t.rowCount() == 2
     d_iso, delta, eta = _cells(t, 0, (1, 2, 3))
     # (the skew spin box holds three decimals)
     assert (d_iso, delta, eta) == pytest.approx((10.0, -80.0, 0.4), abs=2e-2)

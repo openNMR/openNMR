@@ -1207,6 +1207,24 @@ def format_global_report(result: dict, width: int = 66) -> str:
     return "\n".join(lines)
 
 
+def fit_curve(fit_result: dict, n_points: int = 400):
+    """The fitted model as a smooth curve over ``fit_result``'s own
+    x range: ``(t_fine, y_fine)``, ``n_points`` evenly spaced.
+
+    What the Fit plot draws as the fit (explicit user request,
+    2026-09-30): drawing ``y_fit`` point to point instead joins the model's
+    values at the measured delays with straight segments -- a jagged line
+    that is not the fitted function, most visibly between the few,
+    widely spaced points of a T1 or T2 series."""
+    spec = fit_result.get("spec") or RELAXATION_MODELS[fit_result["model"]]
+    func, param_names = spec["func"], spec["params"]
+    params = dict(fit_result["params"])
+    t = np.asarray(fit_result["t"], dtype=float)
+    t_fine = np.linspace(float(np.min(t)), float(np.max(t)), int(n_points))
+    y_fine = np.asarray(func(t_fine, *[params[p] for p in param_names]), dtype=float)
+    return t_fine, y_fine
+
+
 def fit_curve_uncertainty(fit_result: dict, n_points: int = 200, sigma: float = 3.0):
     """A smooth model curve over ``fit_result``'s own delay range, plus
     a linearized (delta-method) uncertainty band at ``sigma`` standard

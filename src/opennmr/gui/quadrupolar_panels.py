@@ -724,6 +724,27 @@ class QuadrupolarFitPanel(QWidget):
                     self.sites_table.item(s, 0).setText(labels[s])
             self._write_site(s, values)
 
+    def set_sites_from_simulation(self, sites: list[dict], settings: dict | None = None) -> str:
+        """Several simulated sites as the starting values (explicit user
+        request): one row per site, labels included. Rows that remain
+        keep their bounds and fixed flags; extra rows go. Settings (and
+        the nucleus/field checks) as :meth:`set_start_from_simulation`."""
+        table = self.sites_table
+        while table.rowCount() > len(sites):
+            table.removeRow(table.rowCount() - 1)
+        for row, site in enumerate(sites):
+            if row >= table.rowCount():
+                self.add_site()
+            label = table.item(row, 0)
+            if label is None:
+                label = QTableWidgetItem("")
+                table.setItem(row, 0, label)
+            label.setText(str(site.get("label") or f"Site {row + 1}"))
+            self._write_site(row, {"d_iso": site["d_iso"], "C_Q": site["C_Q_MHz"],
+                                   "eta_Q": site["eta_Q"], "fwhm": site["fwhm"],
+                                   "eta": site.get("eta")})
+        return self._apply_simulation_settings(settings or {})
+
     def set_start_from_simulation(self, values: dict, settings: dict | None = None) -> str:
         """A simulated site as the starting values of the selected row
         (else the first; one is added if the table is empty), with the
@@ -736,8 +757,10 @@ class QuadrupolarFitPanel(QWidget):
         row = self.sites_table.currentRow()
         row = row if 0 <= row < self.sites_table.rowCount() else 0
         self._write_site(row, values)
+        return self._apply_simulation_settings(settings or {})
+
+    def _apply_simulation_settings(self, settings: dict) -> str:
         notes = []
-        settings = settings or {}
         if settings.get("regime") in ("static", "mas"):
             self.regime_combo.setCurrentIndex(self.regime_combo.findData(settings["regime"]))
             if settings["regime"] == "mas" and settings.get("mas_Hz"):
@@ -764,15 +787,36 @@ class QuadrupolarFitPanel(QWidget):
         return "; ".join(notes)
 
     def _on_send(self) -> None:
+        """Every fitted site to Simulate ▸ Quadrupolar (explicit user
+        request: the whole fitted spectrum), each with its fitted share
+        of the nuclei as its amount (qfit.quad_site_amounts, largest =
+        1); the site selected in the results table (else the first) is
+        the one selected there. The single-site keys are that site's, for
+        callers that take one."""
         r = self.result
         if not r or self._send_to_simulation is None:
             return
         k = self.send_site_index()
-        p = np.asarray(r["popt"], dtype=float)[k * len(self.PARAM_NAMES):]
+        n, m = int(r["info"]["n_sites"]), len(self.PARAM_NAMES)
+        popt = np.asarray(r["popt"], dtype=float)
+        p = popt[k * m:]
         s = r["settings"]
+        try:
+            amounts = qfit.quad_site_amounts(r["x"], popt, r["info"])
+        except Exception:  # noqa: BLE001 -- an old record: equal amounts, still every site
+            amounts = np.ones(n)
+        labels = list(r["info"].get("labels") or [])
+        sites = [{"label": labels[i] if i < len(labels) else f"Site {i + 1}",
+                  "C_Q_MHz": float(abs(v["C_Q"])), "eta_Q": float(v["eta_Q"]),
+                  "d_iso": float(v["d_iso"]), "fwhm": float(v["fwhm"]),
+                  "eta": float(np.clip(v.get("eta", 0.5), 0, 1)),
+                  "amount": float(amounts[i]) if i < len(amounts) else 1.0}
+                 for i, v in enumerate(self.fitted_site_values())]
         self._send_to_simulation({
             "nucleus": r["nucleus"], "C_Q_MHz": float(abs(p[1])), "eta_Q": float(p[2]),
             "delta_iso": float(p[0]), "fwhm": float(p[3]), "larmor_MHz": s["larmor_Hz"] / 1e6,
             "mas_Hz": s["mas_Hz"], "transitions": s["transitions"], "order": s["order"],
+            "lineshape": s.get("lineshape", "gaussian"),
             "ppm_range": (float(np.min(r["x"])), float(np.max(r["x"]))),
+            "sites": sites, "current": k,
         })

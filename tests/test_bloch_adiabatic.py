@@ -156,3 +156,75 @@ def test_plot_shows_the_frequency_sweep_not_the_phase():
     ax_shape, _prof = bloch.plot_pulse_simulation(sim, fig)
     twin = [ax for ax in fig.axes if ax is not ax_shape and ax is not _prof][0]
     assert "kHz" in twin.get_ylabel()
+
+
+# -- time step (2026-09-30: sweeps of several MHz) --------------------------------
+
+def test_auto_time_step_is_the_hardware_microsecond_until_a_sweep_needs_finer():
+    assert bloch.auto_time_step_us(None) == 1.0
+    assert bloch.auto_time_step_us(100e3) == 1.0          # 0.05 turn per step exactly
+    assert bloch.auto_time_step_us(200e3) == 0.5
+    assert bloch.auto_time_step_us(2e6) == 0.05
+    assert bloch.auto_time_step_us(5e6) == 0.02
+    for sw in (150e3, 1e6, 3.3e6, 20e6):
+        step = bloch.auto_time_step_us(sw)
+        assert 0.5 * sw * step * 1e-6 <= bloch.MAX_TURNS_PER_STEP + 1e-12
+
+
+def test_unchanged_below_100_khz():
+    # Every sweep the old 1 us simulator handled well gives the same answer.
+    old = _sim("WURST", 2e3)
+    assert old["time_step_us"] == 1.0
+    assert len(old["time_us"]) == int(T_US)
+    np.testing.assert_allclose(old["time_us"][:2], [0.5, 1.5])
+
+
+@pytest.mark.parametrize("shape", ["WURST", "HS", "TANH_TAN"])
+def test_a_several_mhz_sweep_is_converged(shape):
+    # 2 MHz in 200 us, power from Q0 = 5: auto against a 4x finer step.
+    sw, t_us = 2e6, 200.0
+    offsets = np.linspace(-sw, sw, 81)
+    b1 = bloch.peak_b1_for_adiabaticity(shape, t_us, sw, q=5.0)
+    auto = bloch.simulate_pulse(shape, t_us, b1, offsets, sweep_width_hz=sw)
+    fine = bloch.simulate_pulse(shape, t_us, b1, offsets, sweep_width_hz=sw,
+                                time_step_us=auto["time_step_us"] / 4)
+    assert auto["time_step_us"] == pytest.approx(0.05)
+    assert auto["max_turns_per_step"] <= bloch.MAX_TURNS_PER_STEP + 1e-9
+    assert np.max(np.abs(auto["Mz"] - fine["Mz"])) < 0.02
+    # ... and WURST and HS invert most of the sweep, as they should (tanh/tan
+    # at Q0 = 5 does not: its Q falls far below Q0 away from the centre --
+    # see bloch.adiabaticity).
+    if shape != "TANH_TAN":
+        band = bloch.inverted_band_hz(auto)
+        assert band is not None and band[1] - band[0] > 0.6 * sw
+
+
+def test_the_old_one_microsecond_limit_was_wrong_near_it():
+    # A 900 kHz sweep at 1 us per step (allowed by the old GUI) is 0.45
+    # turn per step: its profile is far from the converged one.
+    sw, t_us = 900e3, 500.0
+    offsets = np.linspace(-sw, sw, 61)
+    b1 = bloch.peak_b1_for_adiabaticity("WURST", t_us, sw, q=5.0)
+    coarse = bloch.simulate_pulse("WURST", t_us, b1, offsets, sweep_width_hz=sw,
+                                  time_step_us=1.0)
+    auto = bloch.simulate_pulse("WURST", t_us, b1, offsets, sweep_width_hz=sw)
+    assert coarse["max_turns_per_step"] > 0.4
+    assert np.max(np.abs(coarse["Mz"] - auto["Mz"])) > 0.3
+
+
+def test_too_many_steps_is_refused():
+    with pytest.raises(ValueError, match="steps"):
+        bloch.simulate_pulse("WURST", 1e5, 1e4, [0.0], sweep_width_hz=2e7)
+
+
+def test_offsets_axis_switches_to_mhz():
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib.figure import Figure
+    sim = bloch.simulate_pulse("HS", 100.0, 1e5, np.linspace(-3e7, 3e7, 11),
+                               sweep_width_hz=4e6)
+    fig = Figure()
+    _shape, prof = bloch.plot_pulse_simulation(sim, fig)
+    assert prof.get_xlabel() == "Offset / MHz"
+    assert bloch.frequency_unit(5e3) == (1.0, "Hz")
+    assert bloch.frequency_unit(5e5) == (1e3, "kHz")
