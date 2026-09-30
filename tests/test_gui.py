@@ -751,10 +751,15 @@ def test_main_window_remove_button(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path, name="b"), vendor="bruker")
     assert window.spectrum_list.count() == 2
 
-    window.spectrum_list.setCurrentRow(0)
+    window._select_single_row(0)
     window._on_remove_clicked()
     assert window.spectrum_list.count() == 1
     assert len(window.session) == 1
+    # Several selected: Remove removes them all (2026-09-30).
+    window._load(_make_1d_dataset(tmp_path, name="c"), vendor="bruker")
+    window.spectrum_list.selectAll()
+    window._on_remove_clicked()
+    assert window.spectrum_list.count() == 0 and len(window.session) == 0
 
 
 def test_main_window_clear_button(qapp, tmp_path):
@@ -4816,14 +4821,10 @@ def test_main_window_removing_spectrum_rebuilds_compare_list(qapp, tmp_path):
     window._load(_make_1d_dataset(tmp_path, name="c"), vendor="bruker")
     _select_rows(window, [1, 2])  # b, c
 
-    # Ctrl-click "a" too (add to selection, not replace it) so it
-    # becomes current -- a plain setCurrentRow() would itself perturb
-    # the ExtendedSelection state (the same Qt quirk _select_single_row
-    # works around elsewhere), which isn't what this test is about.
-    window.spectrum_list.item(0).setSelected(True)
-    window.spectrum_list.setCurrentItem(window.spectrum_list.item(0))
-
-    window._on_remove_clicked()
+    # Remove "a" alone (the right-click ▸ Remove path), leaving b and c
+    # selected and in the Compare list. (Remove removes every *selected*
+    # spectrum since 2026-09-30, so it cannot be used for this.)
+    window._remove_rows([0])
 
     # b/c shifted down to indices 0/1 -- the compare list must reflect
     # that, not stale indices 1/2 (now out of range or wrong spectra).
@@ -6737,7 +6738,7 @@ def test_main_window_build_fit_report_csv_spectral_fit_only(qapp):
     report = window._build_fit_report_csv(spectrum.metadata.raw["slice_fit_results"])
 
     rows = list(csv.reader(io.StringIO(report)))
-    assert rows[0] == ["Spectral fit -- one row per slice per peak"]
+    assert rows[0] == ["Spectral fit: row per slice per peak"]   # (reworded 2026-09-30)
     assert rows[1] == ["Slice", "Peak", "Type", "Shift", "Shift err", "FWHM", "FWHM err",
                         "Amplitude", "Amplitude err", "Eta", "Eta err"]
     assert rows[2][0:3] == ["1", "1", "pseudo_voigt"]
@@ -6765,7 +6766,7 @@ def test_main_window_build_fit_report_csv_includes_curve_fit_section(qapp):
     )
     rows = list(csv.reader(io.StringIO(report)))
     assert sum(1 for r in rows[2:] if len(r) > 2 and r[2] == "pseudo_voigt") == len(delays)  # one row per slice
-    curve_header_idx = rows.index(["Curve fit -- one row per peak"])
+    curve_header_idx = rows.index(["Curve fit: row per peak"])   # (reworded 2026-09-30)
     # A stated uncertainty kind precedes the table: a column of "err"
     # numbers whose meaning depends on whether per-point errors were
     # supplied is what gets misread once the CSV leaves this program.
@@ -11267,7 +11268,8 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # test_main_window_applications_is_its_own_top_level_button).
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     analysis = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
-    assert analysis == ["eNMR", "Imaging"]
+    # ... and DNP joined them (2026-09-30), with its two sub-sections.
+    assert analysis == ["eNMR", "Imaging", "DNP", "Enhancement", "Field Sweep Profile"]
 
 
 def test_main_window_advanced_processing_is_its_own_top_level_button(qapp):
@@ -11349,7 +11351,8 @@ def test_main_window_applications_is_its_own_top_level_button(qapp):
 
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     sections = applications_tab.findChildren(CollapsibleSection)
-    assert [s.title() for s in sections] == ["eNMR", "Imaging"]
+    assert [s.title() for s in sections] == ["eNMR", "Imaging", "DNP", "Enhancement",
+                                             "Field Sweep Profile"]
 
     enmr_section = _enclosing_collapsible_section(window.enmr_voltage_label)
     imaging_section = _enclosing_collapsible_section(window.imaging_max_gradient_spin)

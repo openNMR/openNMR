@@ -1,8 +1,10 @@
 """
 DNP: enhancement factors and field-sweep profiles.
 
-Two measurements, each available from a notebook and from the GUI's
-Compare > DNP box (which calls these functions as they are):
+Two measurements, each available from a notebook. (The GUI's Apply ▸
+DNP sections use the step-by-step :mod:`opennmr.notebook.dnp_workflow`
+since 2026-09-30 -- align, confirm, then measure -- which builds on the
+measuring functions here.)
 
 **Enhancement factor** (:func:`enhancement`). Spectrum 1 over spectrum 2
 -- normally microwaves on over microwaves off -- measured two

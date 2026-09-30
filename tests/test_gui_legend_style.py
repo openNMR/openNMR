@@ -194,10 +194,26 @@ def test_plot_style_controls_reach_the_canvas_and_read_back(window):
 # -- DNP --------------------------------------------------------------------------
 
 def _dnp(window):
-    window.spectrum_list.selectAll()
-    window._show_side_tab("Compare")
+    """Apply ▸ DNP ▸ Field Sweep Profile (2026-09-30), every spectrum ticked."""
+    window._show_side_tab("Apply")
     window._dnp_section.setExpanded(True)
-    return window.dnp_panel
+    window._dnp_sweep_section.setExpanded(True)
+    panel = window.dnp_sweep_panel
+    panel.refresh()
+    panel._tick_all(True)
+    return panel
+
+
+def _dnp_profile(window):
+    """Through the whole workflow to a drawn profile."""
+    panel = _dnp(window)
+    ref = panel._spectra_list()[0]
+    panel.set_line(float(ref.axes[0].ppm[np.argmax(np.abs(ref.data))]))
+    panel.align()
+    panel.confirm()
+    pk = panel.alignment["peak_ppm"]
+    panel.set_region(pk - 20, pk + 20)
+    return panel
 
 
 def _is_1d_style(ax):
@@ -210,11 +226,17 @@ def _is_1d_style(ax):
 
 def test_dnp_spectra_are_drawn_as_1d_spectra(window):
     panel = _dnp(window)
-    panel.sweep_pick_button.setChecked(True)          # sweep spectra view
+    panel.pick_line_button.setChecked(True)           # the reference, to pick on
     ax = window.compare_canvas.figure.axes[0]
     window.compare_canvas.canvas.draw()
     assert _is_1d_style(ax)
-    panel.sweep_pick_button.setChecked(False)
+    assert window.compare_canvas.plot_kind() == "1d"
+    panel.pick_line_button.setChecked(False)
+    _dnp_profile(window)
+    panel.show_aligned()                               # the aligned set
+    ax = window.compare_canvas.figure.axes[0]
+    window.compare_canvas.canvas.draw()
+    assert _is_1d_style(ax)
 
 
 def test_notebook_dnp_spectrum_plots_are_1d_style():
@@ -232,16 +254,14 @@ def test_notebook_dnp_spectrum_plots_are_1d_style():
 
 def test_a_dnp_view_does_not_switch_the_compare_legend_off(window):
     panel = _dnp(window)
-    panel.sweep_pick_button.setChecked(True)
-    panel.sweep_pick_button.setChecked(False)
+    panel.pick_line_button.setChecked(True)
+    panel.pick_line_button.setChecked(False)
     canvas = _compare(window, 1)
     assert len(_legends(canvas)) == 1
 
 
 def test_home_restores_the_dnp_field_profile(window):
-    panel = _dnp(window)
-    panel.sweep_peak, panel.sweep_region = 0.0, (-3000.0, 3000.0)
-    panel.run_sweep()
+    _dnp_profile(window)
     canvas = window.fit_canvas
     canvas.canvas.draw()
     ax = canvas.figure.axes[0]
@@ -261,9 +281,7 @@ def test_crosshair_does_not_pull_the_view_out_to_zero(window):
     undo it. The crosshair's lines were data at x = 0 and y = 0."""
     from PySide6.QtCore import QPoint
     from PySide6.QtTest import QTest
-    panel = _dnp(window)
-    panel.sweep_peak, panel.sweep_region = 0.0, (-3000.0, 3000.0)
-    panel.run_sweep()
+    _dnp_profile(window)
     canvas = window.fit_canvas
     canvas.set_crosshair_enabled(True)
     canvas._ensure_crosshair()
@@ -279,7 +297,7 @@ def test_crosshair_does_not_pull_the_view_out_to_zero(window):
     canvas.canvas.draw()
     assert ax.get_xlim() == pytest.approx(start[0])
     assert ax.get_ylim() == pytest.approx(start[1])
-    assert min(ax.get_xlim()) > 1000                       # nowhere near 0
+    assert min(ax.get_xlim()) > 9.0                        # B0 in T: nowhere near 0
     canvas.toolbar.home()
     assert ax.get_xlim() == pytest.approx(start[0]) and ax.get_ylim() == pytest.approx(start[1])
     # The crosshair lines are not data.

@@ -173,7 +173,8 @@ def test_result_as_a_spectrum_keeps_acqus(tmp_path):
 # --- GUI -----------------------------------------------------------------
 def test_advanced_processing_has_vocs_and_cpmg_sections(qapp):  # noqa: F811
     window = MainWindow()
-    assert window.vocs_section.title() == "VOCS"
+    # Spelled out since the 2026-09-30 re-wording.
+    assert window.vocs_section.title() == "Variable Offset Cumulative Spectroscopy (VOCS)"
     assert window.cpmg_section.title() == "CPMG"
     assert window.vocs_pulse_edit.window() is window
     assert window.cpmg_panel.parent() is not None

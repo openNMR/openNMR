@@ -134,25 +134,21 @@ def window(qapp):
     return w
 
 
-def test_dnp_profile_legend_is_off_by_default_and_follows_show_legend(window):
-    window.spectrum_list.selectAll()
-    window._show_side_tab("Compare")
-    window._dnp_section.setExpanded(True)
-    panel = window.dnp_panel
-    panel.sweep_peak, panel.sweep_region = 0.0, (-3000.0, 3000.0)
-    result = panel.run_sweep()
-    # Force a point with no line found, so the profile has a key to show.
-    result["rows"][1]["found"] = False
-    panel.draw_profile()
-    canvas = window.fit_canvas
-    legends = [ax.get_legend() for ax in canvas.figure.axes if ax.get_legend()]
-    assert legends and not any(lg.get_visible() for lg in legends)
-    canvas.set_legend_visible(True)
-    legends = [ax.get_legend() for ax in canvas.figure.axes if ax.get_legend()]
-    assert all(lg.get_visible() for lg in legends)
-    assert "no line found" in legends[0].get_texts()[0].get_text()
-    canvas.set_legend_visible(False)
-    assert not any(ax.get_legend().get_visible() for ax in canvas.figure.axes if ax.get_legend())
+def test_dnp_profile_draws_as_a_curve_plot(window):
+    # Apply ▸ DNP (2026-09-30): the profile is a "curve" plot on the Fit view.
+    panel = window.dnp_sweep_panel
+    panel.refresh()
+    panel._tick_all(True)
+    import numpy as np
+    ref = panel._spectra_list()[0]
+    panel.set_line(float(ref.axes[0].ppm[np.argmax(ref.data)]))
+    panel.align()
+    panel.confirm()
+    pk = panel.alignment["peak_ppm"]
+    panel.set_region(pk - 20, pk + 20)
+    assert panel.profile is not None
+    assert window.fit_canvas.plot_kind() == "curve"
+    assert window.canvas_tabs.currentWidget() is window.fit_canvas
 
 
 def test_compare_draws_every_point(window):

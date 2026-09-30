@@ -149,7 +149,8 @@ def _compare(window, spectra, labels):
 def test_compare_sections_in_order(window):
     page = window.side_tabs.widget(window._compare_tab_index)
     titles = [s.title() for s in page.findChildren(CollapsibleSection)]
-    assert titles == ["Spectrum Arithmetic", "DNP Enhancement", "DNP Field Sweep Profile"]
+    # DNP moved to Apply ▸ DNP (2026-09-30).
+    assert titles == ["Spectrum Arithmetic"]
     assert all(not s.isExpanded() for s in page.findChildren(CollapsibleSection))
 
 
@@ -234,28 +235,28 @@ def test_arithmetic_with_one_spectrum_says_why(window):
 
 
 # ----------------------------------------------------------------------
-# DNP in two sections
+# DNP: Apply ▸ DNP, two sub-sections (2026-09-30)
 # ----------------------------------------------------------------------
 
-def test_dnp_pages_sit_in_their_own_sections(window):
-    enh, sweep = window._dnp_enhancement_section, window._dnp_sweep_section
-    assert enh.contentWidget() is window.dnp_panel.enhancement_page
-    assert sweep.contentWidget() is window.dnp_panel.sweep_page
-    assert enh.contentWidget().isAncestorOf(window.dnp_panel.enh_combo_1)
-    assert sweep.contentWidget().isAncestorOf(window.dnp_panel.sweep_run_button)
-    assert not enh.isAncestorOf(window.dnp_panel.sweep_run_button)
-    compare_page = window.compare_list.parentWidget()
-    assert enh.parentWidget() is compare_page and sweep.parentWidget() is compare_page
+def test_dnp_is_in_apply_with_two_sub_sections(window):
+    page = window.side_tabs.widget(
+        [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())].index("Apply"))
+    dnp = window._dnp_section
+    assert dnp.title() == "DNP" and page.isAncestorOf(dnp) and not dnp.isExpanded()
+    inner = [s.title() for s in dnp.findChildren(CollapsibleSection)]
+    assert inner == ["Enhancement", "Field Sweep Profile"]
+    assert window._dnp_enhancement_section.contentWidget() is window.dnp_enhancement_panel
+    assert window._dnp_sweep_section.contentWidget() is window.dnp_sweep_panel
+    compare_page = window.side_tabs.widget(window._compare_tab_index)
+    assert not compare_page.isAncestorOf(dnp)
 
 
-def test_opening_either_dnp_section_refreshes_the_panel(window):
+def test_opening_a_dnp_section_lists_the_open_spectra(window):
     for k in range(3):
         window._add_derived_spectrum(_peak(5.0 + 0.1 * k), f"s{k}")
-    window.spectrum_list.selectAll()
-    window._show_side_tab("Compare")
     window._dnp_sweep_section.setExpanded(True)
-    combo = window.dnp_panel.sweep_reference_combo
-    labels = [combo.itemText(i) for i in range(combo.count())]
+    table = window.dnp_sweep_panel.spectra_table
+    labels = [table.item(r, 0).text() for r in range(table.rowCount())]
     assert len(labels) == 3 and [t.split(" ")[0] for t in labels] == ["s0", "s1", "s2"]
 
 

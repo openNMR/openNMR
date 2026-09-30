@@ -120,7 +120,7 @@ from .curve_fit_plot_box import CurveFitPlotBox
 from ..notebook import fit_models as nb_fit_models
 from ..notebook.fitting import build_region_mask as nb_build_region_mask
 from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
-from .dnp_panel import DnpPanel
+from .dnp_panel import DnpWorkflowPanel
 from .tensor_view_panel import TensorViewControls
 from .periodic_table_panel import LarmorCalculatorPanel, PeriodicTableView
 from .loader import background_load_enabled
@@ -2161,28 +2161,8 @@ class MainWindow(QMainWindow):
             lambda expanded: expanded and self.arithmetic_panel.refresh())
         layout.addWidget(self._arithmetic_section)
 
-        # DNP: enhancement factors and field-sweep profiles over the
-        # spectra checked above (explicit user request);
-        # notebook.dnp. Two sections, one per measurement (explicit
-        # user request: "DNP Enhancement" and, separately, "DNP Field
-        # Sweep Profile"); one DnpPanel still holds the state and logic
-        # of both, its two pages placed in the two sections. Collapsed
-        # until wanted -- most comparisons are not DNP.
-        self.dnp_panel = DnpPanel(
-            entries=self._dnp_entries, draw_spectra=self._dnp_draw_spectra,
-            draw_profile=self._dnp_draw_profile, arm=self._dnp_arm, store=self._store_dnp,
-            style=self._dnp_style, parent=tab)
-        self.dnp_panel.hide()
-        self._dnp_enhancement_section = CollapsibleSection(
-            "DNP Enhancement", content=self.dnp_panel.enhancement_page, expanded=False)
-        self._dnp_sweep_section = CollapsibleSection(
-            "DNP Field Sweep Profile", content=self.dnp_panel.sweep_page, expanded=False)
-        #: The first DNP section, under the name code and tests used
-        #: when there was one.
-        self._dnp_section = self._dnp_enhancement_section
-        for section in (self._dnp_enhancement_section, self._dnp_sweep_section):
-            section.toggled.connect(lambda expanded: expanded and self.dnp_panel.refresh())
-            layout.addWidget(section)
+        # DNP moved to Apply ▸ DNP (explicit user request, 2026-09-30) --
+        # see _build_dnp_section.
 
         # The arithmetic table holds a widget per row, so it is rebuilt
         # only while its section is open, and once per burst of list
@@ -2195,20 +2175,14 @@ class MainWindow(QMainWindow):
             lambda: self._arithmetic_section.isExpanded() and self.arithmetic_panel.refresh())
 
         def _refresh_compare_tools(*_args):
-            self.dnp_panel.refresh()
             if self._arithmetic_section.isExpanded():
                 self._arithmetic_refresh_timer.start()
         self.compare_list.itemChanged.connect(_refresh_compare_tools)
         self.compare_list.model().rowsInserted.connect(_refresh_compare_tools)
         self.compare_list.model().rowsRemoved.connect(_refresh_compare_tools)
-        self.compare_canvas.peakPicked.connect(self.dnp_panel.on_canvas_pick)
-        self.compare_canvas.regionSelected.connect(self.dnp_panel.on_canvas_region)
-        self.compare_canvas.pickModeChanged.connect(self._on_dnp_canvas_mode_changed)
-        self.compare_canvas.regionSelectModeChanged.connect(self._on_dnp_canvas_mode_changed)
-
         return tab
 
-    # -- Compare > DNP -------------------------------------------------
+    # -- Apply ▸ DNP (and the Compare list's entries for Arithmetic) -----
 
     def _dnp_entries(self) -> list[dict]:
         """The 1D spectra checked in the Compare list, in list order, as
@@ -2231,34 +2205,95 @@ class MainWindow(QMainWindow):
         # the ordinary comparison, which would replace the DNP plot.
         self.canvas_tabs.setCurrentWidget(canvas)
 
-    def _dnp_draw_spectra(self, draw) -> None:
-        self._dnp_show_canvas(self.compare_canvas)
-        self.compare_canvas.show_external_plot(draw, kind="compare")
+    def _dnp_panels(self) -> list:
+        return [p for p in (getattr(self, "dnp_sweep_panel", None),
+                            getattr(self, "dnp_enhancement_panel", None)) if p is not None]
 
-    def _dnp_draw_profile(self, draw) -> None:
-        self._dnp_show_canvas(self.fit_canvas)
-        self.fit_canvas.show_external_plot(draw, kind="curve")
+    def _dnp_spectra(self) -> list[dict]:
+        """Every 1D spectrum in Open experiments, for Apply ▸ DNP."""
+        return [{"label": self.session.label(i), "spectrum": s, "index": i}
+                for i, s in enumerate(self.session.spectra) if s.ndim == 1]
+
+    def _dnp_selected_rows(self) -> list[int]:
+        return sorted({self.spectrum_list.row(item) for item in self.spectrum_list.selectedItems()})
+
+    def _dnp_draw(self, draw, view: str) -> None:
+        """A DNP plot: one spectrum ("spectrum", a 1D plot) or several
+        ("spectra", a comparison) on the Compare view, the profile on the
+        Fit view (a curve) -- each announced as its kind, so it takes that
+        kind's plot style."""
+        if view == "profile":
+            self._dnp_show_canvas(self.fit_canvas)
+            self.fit_canvas.show_external_plot(draw, kind="curve")
+        else:
+            self._dnp_show_canvas(self.compare_canvas)
+            self.compare_canvas.show_external_plot(
+                draw, kind="1d" if view == "spectrum" else "compare")
 
     def _dnp_style(self, which: str) -> dict:
-        """The style the DNP plots draw with: ``which`` "spectra" (the
-        Compare view) or "profile" (the Fit view)."""
-        canvas = self.compare_canvas if which == "spectra" else self.fit_canvas
+        """The style the DNP plots draw with: the Compare view's for
+        spectra, the Fit view's for the profile."""
+        canvas = self.fit_canvas if which == "profile" else self.compare_canvas
         return canvas.style_settings()
 
     def _dnp_arm(self, mode) -> None:
         if mode == "peak":
             self.compare_canvas.set_pick_mode(True)
-            self.statusBar().showMessage("DNP: click the peak on the Compare view.", 8000)
+            self.statusBar().showMessage("DNP: click on the Compare view.", 8000)
         elif mode == "region":
             self.compare_canvas.set_region_select_mode(True)
-            self.statusBar().showMessage("DNP: drag across the peak on the Compare view.", 8000)
+            self.statusBar().showMessage("DNP: drag across the region on the Compare view.", 8000)
         else:
             self.compare_canvas.set_pick_mode(False)
             self.compare_canvas.set_region_select_mode(False)
 
     def _on_dnp_canvas_mode_changed(self, _enabled: bool) -> None:
         if not (self.compare_canvas._pick_mode or self.compare_canvas._region_select_mode):
-            self.dnp_panel.canvas_mode_released()
+            for panel in self._dnp_panels():
+                panel.canvas_mode_released()
+
+    def _on_dnp_pick(self, x: float) -> None:
+        for panel in self._dnp_panels():
+            if panel.armed:
+                panel.on_canvas_pick(x)
+
+    def _on_dnp_region(self, lo: float, hi: float) -> None:
+        for panel in self._dnp_panels():
+            if panel.armed:
+                panel.on_canvas_region(lo, hi)
+
+    def _build_dnp_section(self) -> QWidget:
+        """Apply ▸ DNP: "Enhancement" and "Field Sweep Profile", each a
+        step-by-step DnpWorkflowPanel (explicit user request, 2026-09-30:
+        moved here from Compare, and rebuilt around aligning the spectra
+        before measuring them)."""
+        common = dict(spectra=self._dnp_spectra, selected=self._dnp_selected_rows,
+                      draw=self._dnp_draw, arm=self._dnp_arm, store=self._store_dnp,
+                      style=self._dnp_style)
+        self.dnp_enhancement_panel = DnpWorkflowPanel("enhancement", **common)
+        self.dnp_sweep_panel = DnpWorkflowPanel("sweep", **common)
+        self._dnp_enhancement_section = CollapsibleSection(
+            "Enhancement", content=self.dnp_enhancement_panel)
+        self._dnp_sweep_section = CollapsibleSection(
+            "Field Sweep Profile", content=self.dnp_sweep_panel)
+        for section, panel in ((self._dnp_enhancement_section, self.dnp_enhancement_panel),
+                               (self._dnp_sweep_section, self.dnp_sweep_panel)):
+            section.toggled.connect(lambda expanded, p=panel: expanded and p.refresh())
+        body = QWidget()
+        v = QVBoxLayout(body)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self._dnp_enhancement_section)
+        v.addWidget(self._dnp_sweep_section)
+        self.compare_canvas.peakPicked.connect(self._on_dnp_pick)
+        self.compare_canvas.regionSelected.connect(self._on_dnp_region)
+        self.compare_canvas.pickModeChanged.connect(self._on_dnp_canvas_mode_changed)
+        self.compare_canvas.regionSelectModeChanged.connect(self._on_dnp_canvas_mode_changed)
+        model = self.spectrum_list.model()
+        for signal in (model.rowsInserted, model.rowsRemoved, model.modelReset):
+            signal.connect(lambda *_a: [p.refresh() for p in self._dnp_panels()])
+        #: The DNP section of the Apply tile.
+        self._dnp_section = CollapsibleSection("DNP", content=body)
+        return self._dnp_section
 
     def _store_dnp(self, kind: str, record: dict, indices: list[int]) -> None:
         """Keep a DNP result with every spectrum it used, like a fit: in
@@ -3293,17 +3328,31 @@ class MainWindow(QMainWindow):
         self._open_one(path, vendor)
 
     def _on_remove_clicked(self) -> None:
-        row = self.spectrum_list.currentRow()
-        if row < 0:
-            return
-        self.session.remove(row)
-        self.spectrum_list.takeItem(row)
-        # Removing a spectrum shifts every later row's index, which
-        # would otherwise leave the Compare list's stored indices
-        # silently pointing at the wrong spectrum (removing one
-        # spectrum doesn't necessarily fire itemSelectionChanged, if
-        # the set of *selected* items didn't itself change).
-        self._after_session_row_removed(row)
+        """Remove every selected spectrum (explicit user request,
+        2026-09-30: Ctrl/Shift-select several, Remove removes them all);
+        with nothing selected, the current row."""
+        rows = sorted({self.spectrum_list.row(item) for item in self.spectrum_list.selectedItems()})
+        if not rows:
+            current = self.spectrum_list.currentRow()
+            rows = [current] if current >= 0 else []
+        self._remove_rows(rows)
+
+    def _remove_rows(self, rows) -> None:
+        """Remove the spectra at session rows ``rows``."""
+        rows = sorted({int(r) for r in rows if 0 <= int(r) < len(self.session)})
+        # Last first, so each removal leaves the rows still to go where
+        # they were.
+        for row in reversed(rows):
+            self.session.remove(row)
+            self.spectrum_list.takeItem(row)
+            # Removing a spectrum shifts every later row's index, which
+            # would otherwise leave the Compare list's stored indices
+            # silently pointing at the wrong spectrum (removing one
+            # spectrum doesn't necessarily fire itemSelectionChanged, if
+            # the set of *selected* items didn't itself change).
+            self._after_session_row_removed(row)
+        if len(rows) > 1:
+            self.statusBar().showMessage(f"Removed {len(rows)} spectra.", 6000)
 
     def _on_clear_clicked(self) -> None:
         self.session.clear()
@@ -3442,7 +3491,10 @@ class MainWindow(QMainWindow):
             show_kept_fit_action = menu.addAction("Show the Fit")
             kept_fit_view_action = menu.addAction("Fit Display (in Compare)…")
         menu.addSeparator()
-        remove_action = menu.addAction("Remove")
+        n_selected = len(self.spectrum_list.selectedItems())
+        # The clicked row is part of a multi-selection: remove them all.
+        remove_all = n_selected > 1 and item.isSelected()
+        remove_action = menu.addAction(f"Remove {n_selected} Selected" if remove_all else "Remove")
 
         chosen = menu.exec(self.spectrum_list.viewport().mapToGlobal(pos))
         if chosen is rename_action:
@@ -3466,9 +3518,10 @@ class MainWindow(QMainWindow):
         elif kept_fit_view_action is not None and chosen is kept_fit_view_action:
             self._open_fit_view_dialog(index)
         elif chosen is remove_action:
-            self.session.remove(index)
-            self.spectrum_list.takeItem(index)
-            self._after_session_row_removed(index)
+            if remove_all:
+                self._on_remove_clicked()
+            else:
+                self._remove_rows([index])
 
     def _set_nucleus(self, index: int, nucleus: str) -> None:
         """Apply a nucleus override and refresh the UI to match --
@@ -4804,11 +4857,30 @@ class MainWindow(QMainWindow):
         if len(targets) == 1 and hasattr(self, "canvas_tabs"):
             index = self.canvas_tabs.indexOf(targets[0])
             name = self.canvas_tabs.tabText(index) if index >= 0 else "this plot"
+            kind = targets[0].plot_kind()
+            kind_text = (f" (a {self._figure_style_label(kind)} plot)"
+                         if kind in dict((k, v) for v, k in self._FIGURE_STYLE_TYPES) else "")
             self.style_scope_label.setText(
-                f"These settings apply to the <b>{name}</b> plot. "
+                f"These settings apply to the <b>{name}</b> plot{kind_text}. "
                 f"Use “Apply to all plots” to push them everywhere.")
+            self._follow_plot_kind(kind)
         else:
             self.style_scope_label.setText("These settings apply to every plot.")
+
+    def _follow_plot_kind(self, kind) -> None:
+        """Per-type defaults follow the plot on show (explicit user
+        request, 2026-09-30): a 1D spectrum, fit or simulation is "1D
+        spectrum", a contour "2D contour", a relaxation curve or DNP
+        profile "Curves & profiles" -- so Save/Load default acts on the
+        right type without choosing it."""
+        combo = getattr(self, "output_type_combo", None)
+        if combo is None or kind is None:
+            return
+        index = combo.findData(kind)
+        if index >= 0 and index != combo.currentIndex():
+            blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(blocked)
 
     def _load_style_controls_from(self, canvas) -> None:
         """Point the style controls at ``canvas``'s own current
@@ -5156,6 +5228,9 @@ class MainWindow(QMainWindow):
         Settings tab says to. Only on a *change* of kind (see
         :attr:`MplCanvas.plotKindChanged`), so selecting another 1D
         spectrum never undoes what was just set on the 1D plot."""
+        targets = self._style_target_canvases() if hasattr(self, "canvas_tabs") else []
+        if len(targets) == 1 and targets[0] is canvas:
+            self._refresh_style_scope_label()
         if not getattr(self, "_ui_settings", {}).get("auto_apply_type_styles", True):
             return
         style = self._resolved_type_style(kind)
@@ -12421,6 +12496,7 @@ class MainWindow(QMainWindow):
             "eNMR", content=self._build_enmr_subtab()))
         layout.addWidget(CollapsibleSection(
             "Imaging", content=self._build_imaging_subtab()))
+        layout.addWidget(self._build_dnp_section())
         layout.addStretch(1)
         return tab
 
@@ -13017,7 +13093,7 @@ class MainWindow(QMainWindow):
     def _draw_czjzek_map(self, draw) -> None:
         """A Czjzek fit's distribution map (with the fit beside it) on the
         Fit view, styled like every other plot there and exportable."""
-        self.fit_canvas.show_external_plot(draw)
+        self.fit_canvas.show_external_plot(draw, kind="2d")   # a map: the 2D default style
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
@@ -13393,7 +13469,7 @@ class MainWindow(QMainWindow):
             nb_fit_models.plot_fit_comparison(
                 models, figure=figure, residuals=residuals, show_components=components_of,
                 colours=colours, fontsize=self.fit_canvas.style_settings()["labelsize"])
-        self.fit_canvas.show_external_plot(draw, kind="curve" if curve else None)
+        self.fit_canvas.show_external_plot(draw, kind="curve" if curve else "1d")
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 

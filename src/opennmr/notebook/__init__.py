@@ -143,6 +143,9 @@ from .dnp import (
     field_sweep, field_sweep_table, field_sweep_to_csv, field_sweep_report,
     print_field_sweep_report, plot_field_profile, plot_sweep_spectra, plot_enhancement_spectra,
 )
+# The step-by-step DNP workflow (align, measure, profile / enhancement):
+# used as a module, dnp_workflow.align_spectra(...) etc.
+from . import dnp_workflow
 from .progress import (
     processing_log, processing_history, list_save_points, save_point_state,
     save_progress, load_progress, log_event, load_saved_spectrum,

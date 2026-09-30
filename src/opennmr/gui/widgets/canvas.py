@@ -3687,7 +3687,7 @@ class MplCanvas(QWidget):
         :meth:`_apply_view_options`, which is for a fresh rebuild."""
         self._remove_trace_labels()
         if self._external_plot:
-            # A notebook figure (Compare > DNP) names its own traces;
+            # A notebook figure (Apply ▸ DNP) names its own traces;
             # only its legend's style is this canvas's business.
             if restyle:
                 self._restyle_existing_legends()
@@ -5840,6 +5840,7 @@ class MplCanvas(QWidget):
         threshold, Set Contour Levels…, and Extract Slice… all assume
         one specific spectrum's own data, which an overlay of several
         doesn't have."""
+        self._enter_plot_kind("2d")   # its saved default style (Plot Style ▸ Per-type)
         self.clear()  # already leaves self.ax as a fresh, single subplot
         self._overlay_spectra = list(spectra)
         self._overlay_labels = list(labels) if labels is not None else None
@@ -5882,6 +5883,7 @@ class MplCanvas(QWidget):
         matplotlib's ``sharex``: each panel inverts its own axes, and
         inverting a shared axis once per panel flips it back and forth.
         """
+        self._enter_plot_kind("2d")   # its saved default style (Plot Style ▸ Per-type)
         self.clear()
         self._clear_figure()
         n = len(spectra)
@@ -5966,6 +5968,7 @@ class MplCanvas(QWidget):
         ``colorbar_label`` (a colour bar is drawn whenever one is given:
         a heatmap without a scale cannot be read quantitatively) and
         ``first_row_on_top`` (so rows read in the list's own order)."""
+        self._enter_plot_kind("pseudo2d")   # its saved default style (Plot Style ▸ Per-type)
         self.clear()  # already leaves self.ax as a fresh, single subplot
         tick_mode = "none"
         if row_labels:
@@ -6021,6 +6024,7 @@ class MplCanvas(QWidget):
         ppm, with a nucleus-based label) rather than the plain
         unlabelled, un-inverted axis this used to have. ``x`` itself is
         always ppm (:func:`NMR2D_fit_slices`'s own default)."""
+        self._enter_plot_kind("1d")   # its saved default style (Plot Style ▸ Per-type)
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
@@ -6124,6 +6128,7 @@ class MplCanvas(QWidget):
         not an ``NMRSpectrum``, and its redraw goes through
         ``plot_dosy`` rather than ``plot_2d_contour``, so sharing that
         state would send every contour path down the wrong branch."""
+        self._enter_plot_kind("2d")   # its saved default style (Plot Style ▸ Per-type)
         self._dosy_result = dosy
         self._dosy_overlay = None
         self._dosy_overlay_labels = None
@@ -6150,6 +6155,7 @@ class MplCanvas(QWidget):
         still be pinned. ``_dosy_result`` is left pointing at the first
         map so the right-click trace extraction still has one
         unambiguous map to extract from."""
+        self._enter_plot_kind("2d")   # its saved default style (Plot Style ▸ Per-type)
         maps = list(maps)
         if len(maps) < 2:
             raise ValueError(f"show_dosy_overlay needs at least 2 maps, got {len(maps)}.")
@@ -6600,7 +6606,7 @@ class MplCanvas(QWidget):
         receives this canvas's own (cleared) figure -- so the GUI shows
         exactly the figure a notebook call produces, rather than a second
         drawing of the same thing that could drift from it. Used by
-        Compare > DNP (``opennmr.notebook.dnp``'s plots).
+        Apply ▸ DNP (``opennmr.notebook.dnp_workflow``'s plots).
 
         ``kind`` : the plot kind to announce first (``"curve"`` for a
         profile, ``"compare"`` for overlaid spectra), so its saved default

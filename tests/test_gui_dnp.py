@@ -1,21 +1,32 @@
-"""Compare > DNP (gui/dnp_panel.py): the panel calls opennmr.notebook.dnp
-as a notebook would, picks and drags arrive from the Compare view, and
-the results are drawn, tabulated and kept with the spectra they used.
+"""Apply ▸ DNP (gui/dnp_panel.py): the step-by-step field-sweep and
+enhancement workflows -- tick spectra, pick the line on the reference,
+align, check/drag/confirm, measure (height and integral), then the profile
+against B0 or the enhancement table (explicit user request, 2026-09-30).
 
-Spectra are the synthetic ones of tests/test_dnp.py, added to the
-session as derived spectra, so no instrument data is needed.
+Spectra are tests/test_dnp.py's synthetic 23Na ones, added to the session
+as derived spectra, so no instrument data is needed.
 """
 import numpy as np
 import pytest
+from PySide6.QtWidgets import QMessageBox
 
-from opennmr.notebook import dnp
-from test_dnp import DELTA, ERRORS, FIELDS, GAMMA_NA, _pair, _rolled, _sweep
+from opennmr.notebook import dnp_workflow as dw
+from test_dnp import DELTA, ERRORS, FIELDS, FWHM, GAMMA_NA, _sweep
 
 
 @pytest.fixture(scope="module")
 def qapp():
     from PySide6.QtWidgets import QApplication
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _dialogs(monkeypatch):
+    shown = []
+    for name in ("warning", "information", "critical"):
+        monkeypatch.setattr(QMessageBox, name,
+                            lambda *a, _n=name, **k: shown.append((_n, a[2] if len(a) > 2 else "")))
+    return shown
 
 
 @pytest.fixture
@@ -26,171 +37,190 @@ def window(qapp):
     return w
 
 
-def _load(window, spectra, labels):
-    for s, label in zip(spectra, labels):
-        window._add_derived_spectrum(s, label)
-    window.spectrum_list.selectAll()
-    window._show_side_tab("Compare")
+def _load(window, heights=None, panel="sweep"):
+    spectra = _sweep(FIELDS, ERRORS, heights=heights)
+    for k, s in enumerate(spectra):
+        window._add_derived_spectrum(s, f"s{k}")
+    window._show_side_tab("Apply")
     window._dnp_section.setExpanded(True)
-    return window.dnp_panel
+    section = window._dnp_sweep_section if panel == "sweep" else window._dnp_enhancement_section
+    section.setExpanded(True)
+    p = window.dnp_sweep_panel if panel == "sweep" else window.dnp_enhancement_panel
+    p.refresh()
+    return p, spectra
 
 
-def test_dnp_box_lives_in_compare_and_starts_collapsed(window):
-    assert not window._dnp_section.isExpanded()
-    assert window._dnp_section.parent() is not None
-    # Inside the Compare panel's own page.
-    compare_page = window.compare_list.parentWidget()
-    assert window._dnp_section.parentWidget() is compare_page
+def _named(p, *prefixes):
+    """The panel's labels for the spectra added as ``prefixes``."""
+    return [e["label"] for e in p._rows if e["label"].split(" ")[0] in prefixes]
 
 
-def test_panel_lists_the_checked_compare_spectra(window):
-    panel = _load(window, _sweep(FIELDS, ERRORS), [f"s{k}" for k in range(5)])
-    labels = [e["label"] for e in window._dnp_entries()]
-    assert len(labels) == 5
-    assert [panel.enh_combo_1.itemText(i) for i in range(panel.enh_combo_1.count())] == labels
-    assert "5 spectra checked, 23Na" in panel.sweep_status_label.text()
-    # Unchecking one drops it from the panel.
-    window.compare_list.item(0).setCheckState(window.compare_list.item(0).checkState().Unchecked)
-    assert panel.enh_combo_1.count() == 4
+def _ref_line_ppm(spectrum):
+    return float(spectrum.axes[0].ppm[np.argmax(np.abs(spectrum.data))])
 
 
-def test_enhancement_from_a_click_and_a_drag(window):
-    on, off, pk = _pair(h_on=12500.0, h_off=1000.0)
-    panel = _load(window, [on, off], ["on", "off"])
-    panel.enh_combo_1.setCurrentIndex(0)
-    panel.enh_combo_2.setCurrentIndex(1)
+def _through_alignment(p, spectra):
+    p._tick_all(True)
+    p.set_line(_ref_line_ppm(spectra[0]))
+    p.align()
+    p.confirm()
 
-    panel.enh_pick_button.setChecked(True)
-    assert window.compare_canvas._pick_mode                 # armed on the Compare view
+
+def test_step_one_lists_spectra_with_their_sfo1_field(window):
+    p, spectra = _load(window)
+    t = p.spectra_table
+    assert t.rowCount() == 5
+    assert [t.horizontalHeaderItem(c).text() for c in range(3)] == [
+        "Spectrum", "SFO1 (MHz)", "B₀ from SFO1 (T)"]
+    for r, (b, err) in enumerate(zip(FIELDS, ERRORS)):
+        sfo1 = (GAMMA_NA * b * (1 + DELTA * 1e-6) - err) / 1e6
+        assert float(t.item(r, 1).text()) == pytest.approx(sfo1, abs=1e-6)
+        assert float(t.item(r, 2).text()) == pytest.approx(sfo1 * 1e6 / GAMMA_NA, abs=1e-6)
+    assert not p.align_button.isEnabled()
+    # Use the Open experiments selection.
+    window.spectrum_list.clearSelection()
+    for row in (1, 3):
+        window.spectrum_list.item(row).setSelected(True)
+    p.use_selected()
+    assert p._labels() == [window.session.label(1), window.session.label(3)]
+
+
+def test_pick_on_the_reference_then_align(window):
+    p, spectra = _load(window)
+    p._tick_all(True)
+    p.pick_line_button.setChecked(True)
+    assert window.compare_canvas._pick_mode
     assert window.canvas_tabs.currentWidget() is window.compare_canvas
-    window.compare_canvas.peakPicked.emit(float(pk + 1.0))
-    assert not window.compare_canvas._pick_mode             # one gesture, then released
-    assert not panel.enh_pick_button.isChecked()
-    assert panel.enh_result["intensity"]["ratio"] == pytest.approx(12.5, rel=0.01)
-    # Encouraged, not forced: the other measurement is asked for.
-    assert "integrate a region too" in panel.enh_result_label.text()
-
-    panel.enh_region_button.setChecked(True)
-    assert window.compare_canvas._region_select_mode
-    window.compare_canvas.regionSelected.emit(float(pk - 60), float(pk + 60))
-    r = panel.enh_result
-    assert r["area"]["ratio"] == pytest.approx(12.5, rel=0.01)
-    assert "agree" in panel.enh_result_label.text()
-
-
-def test_enhancement_baseline_choice_reaches_the_calculation(window):
-    on, off, pk = _pair(h_on=3000.0, h_off=1000.0)
-    _rolled(on, 4000.0)
-    panel = _load(window, [on, off], ["on", "off"])
-    panel.enh_combo_1.setCurrentIndex(0)
-    panel.enh_combo_2.setCurrentIndex(1)
-    panel.enh_peak = float(pk)
-    panel.compute_enhancement()
-    assert panel.enh_result["intensity"]["ratio"] == pytest.approx(3.0, rel=0.02)
-    panel.enh_baseline_combo.setCurrentIndex(panel.enh_baseline_combo.findData("global"))
-    assert panel.enh_result["settings"]["baseline"] == "global"
-    assert abs(panel.enh_result["intensity"]["ratio"] - 3.0) > 0.3
+    window._on_dnp_pick(_ref_line_ppm(spectra[0]) + 0.5)       # a click near the line
+    assert not window.compare_canvas._pick_mode and p.line_ppm is not None
+    assert p.align_button.isEnabled()
+    al = p.align()
+    for e, err in zip(al["entries"], ERRORS):
+        assert e["found"] and e["shift_hz"] == pytest.approx(err - ERRORS[0], abs=3.0)
+    assert p.align_table.rowCount() == 5
+    # Not measurable until confirmed.
+    assert not p.pick_shift_button.isEnabled()
+    p.confirm()
+    assert p.pick_shift_button.isEnabled() and "✓" in p.confirm_button.text()
+    for s in p.aligned:
+        assert _ref_line_ppm(s) == pytest.approx(al["peak_ppm"], abs=0.3)
 
 
-def test_enhancement_is_kept_with_both_spectra(window):
-    on, off, pk = _pair()
-    panel = _load(window, [on, off], ["on", "off"])
-    panel.enh_combo_1.setCurrentIndex(0)
-    panel.enh_combo_2.setCurrentIndex(1)
-    panel.enh_peak = float(pk)
-    panel.enh_region = (float(pk - 60), float(pk + 60))
-    panel.compute_enhancement()
-    for s in window.session.spectra:
-        record = s.metadata.raw["fits"]["dnp_enhancement"]
-        labels = [e["label"] for e in window._dnp_entries()]
-        assert record["target"] == f"{labels[0]} / {labels[1]}"
-        assert "By peak height" in record["report"] and "By area" in record["report"]
+def test_a_hand_shift_in_the_table_unconfirms(window):
+    p, spectra = _load(window)
+    _through_alignment(p, spectra)
+    item = p.align_table.item(2, 2)
+    item.setText("150")
+    assert p.alignment["entries"][2]["manual_shift_hz"] == 150.0
+    assert not p.alignment["confirmed"] and p.aligned is None
+    assert not p.pick_shift_button.isEnabled()
 
 
-def test_field_sweep_from_a_pick_on_the_carrier_offset_view(window):
-    spectra = _sweep(FIELDS, ERRORS)
-    panel = _load(window, spectra, [f"s{k}" for k in range(5)])
-    assert not panel.sweep_run_button.isEnabled()           # nothing picked yet
-
-    panel.sweep_pick_button.setChecked(True)
-    ax = window.compare_canvas.figure.axes[0]
-    assert "carrier" in ax.get_xlabel()                     # picking on the right axis
-    window.compare_canvas.peakPicked.emit(0.0)              # kHz on that view
-    assert panel.sweep_peak == 0.0
-    panel.sweep_region_button.setChecked(True)
-    window.compare_canvas.regionSelected.emit(-3.0, 3.0)
-    assert panel.sweep_region == (-3000.0, 3000.0)
-    assert panel.sweep_run_button.isEnabled()
-
-    panel.sweep_shift_auto.setChecked(False)
-    panel.sweep_shift_spin.setValue(DELTA)
-    result = panel.run_sweep()
-    for row, b in zip(result["rows"], FIELDS):
-        assert row["field_T"] == pytest.approx(b, abs=2e-6)
-    # Profile on the Fit view, table filled, report shown.
-    assert window.canvas_tabs.currentWidget() is window.fit_canvas
-    assert "B$_0$" in window.fit_canvas.figure.axes[-1].get_xlabel()
-    assert panel.sweep_table.rowCount() == 5
-    assert "SFO1 did not follow the line" in panel.sweep_report_label.text()
-    # Kept with every spectrum of the sweep.
-    assert all("dnp_sweep" in s.metadata.raw["fits"] for s in window.session.spectra)
+def test_dragging_a_trace_in_the_alignment_window(window):
+    p, spectra = _load(window)
+    _through_alignment(p, spectra)
+    p.open_align_dialog()
+    dialog = p._align_dialog
+    assert len(dialog.lines) == 5
+    line = dialog.lines[3]
+    xs, ys = np.asarray(line.get_xdata()), np.asarray(line.get_ydata())
+    k = int(np.argmax(ys))
+    dialog.press(xs[k], ys[k])                     # on trace 3's peak
+    dialog.motion(xs[k] + 4.0)
+    dialog.release(xs[k] + 4.0)                    # dragged by +4 ppm
+    e = p.alignment["entries"][3]
+    assert e["manual_shift_hz"] == pytest.approx(
+        -4.0e-6 * (e["line_frequency_hz"] - e["manual_shift_hz"]), rel=1e-3)
+    moved = dw.aligned_spectrum(spectra[3], p.alignment, 3)
+    assert _ref_line_ppm(moved) == pytest.approx(p.alignment["peak_ppm"] + 4.0, abs=0.3)
+    assert not p.alignment["confirmed"]
+    dialog.view_combo.setCurrentIndex(dialog.view_combo.findData("overlay"))
+    p.reset_manual()
+    assert p.alignment["entries"][3]["manual_shift_hz"] == 0.0
 
 
-def test_sweep_plot_choices_redraw_the_profile(window):
-    spectra = _sweep(FIELDS, ERRORS)
-    panel = _load(window, spectra, [f"s{k}" for k in range(5)])
-    panel.sweep_peak, panel.sweep_region = 0.0, (-3000.0, 3000.0)
-    panel.run_sweep()
-    panel.sweep_quantity_combo.setCurrentIndex(panel.sweep_quantity_combo.findData("both"))
-    assert len(window.fit_canvas.figure.axes) == 2
-    panel.sweep_axis_combo.setCurrentIndex(2)               # ΔB0 from reference
-    assert "ΔB" in window.fit_canvas.figure.axes[-1].get_xlabel()
-    s1 = next(i for i in range(panel.sweep_normalise_combo.count())
-              if panel.sweep_normalise_combo.itemText(i).startswith("s1"))
-    panel.sweep_normalise_combo.setCurrentIndex(s1)
-    assert "/ s1" in window.fit_canvas.figure.axes[0].get_ylabel()
+def test_measure_and_profile_against_b0(window):
+    heights = [1000.0, 2000.0, -500.0, 4000.0, 3000.0]
+    p, spectra = _load(window, heights=heights)
+    _through_alignment(p, spectra)
+    pk = p.alignment["peak_ppm"]
+    width = FWHM / spectra[0].metadata.sfo1
+    p.pick_shift_button.setChecked(True)
+    window._on_dnp_pick(pk)
+    assert p.measurement["height"] is not None and p.measurement["area"] is None
+    assert "Do both" in p.measure_label.text()
+    p.region_button.setChecked(True)
+    window._on_dnp_region(pk - 8 * width, pk + 8 * width)
+    m = p.measurement
+    h = m["height"]["value"]
+    np.testing.assert_allclose(h / h[0], np.array(heights) / heights[0], rtol=0.01, atol=0.01)
+    # The profile is drawn as a curve plot, sorted by field.
+    prof = p.profile
+    assert prof is not None and np.all(np.diff(prof["field_T"]) > 0)
+    assert window.fit_canvas.plot_kind() == "curve"
+    assert len(window.fit_canvas.figure.axes) == 2          # height and integral
+    # Field at the line vs from SFO1.
+    at_line = prof["field_T"].copy()
+    p.field_source_combo.setCurrentIndex(p.field_source_combo.findData("sfo1"))
+    assert not np.allclose(p.profile["field_T"], at_line)
+    assert "mT apart" in p.result_label.text() or "SFO1" in p.result_label.text()
+    # Enhancement against an OFF spectrum.
+    p.profile_mode_combo.setCurrentIndex(p.profile_mode_combo.findData("ratio"))
+    p.off_combo.setCurrentIndex(0)
+    assert p.profile["mode"] == "ratio" and len(p.profile["labels"]) == 4   # OFF left out
+    p.exclude_off_check.setChecked(False)
+    assert len(p.profile["labels"]) == 5
+    p.profile_mode_combo.setCurrentIndex(p.profile_mode_combo.findData("one_minus"))
+    assert "1 − ON / OFF" in p.result_label.text()
+    # Kept with the spectra it used.
+    record = window.session.spectra[0].metadata.raw["fits"]["dnp_sweep"]
+    assert "Field profile" in record["report"]
 
 
-def test_sweep_field_from_sfo1_option(window):
-    spectra = _sweep(FIELDS, ERRORS)
-    panel = _load(window, spectra, [f"s{k}" for k in range(5)])
-    panel.sweep_peak = 0.0
-    panel.sweep_field_combo.setCurrentIndex(panel.sweep_field_combo.findData("sfo1"))
-    result = panel.run_sweep()
-    assert {row["field_source"] for row in result["rows"]} == {"SFO1"}
+def test_enhancement_workflow(window):
+    heights = [1000.0, 12500.0, 8000.0, 1000.0, 1000.0]
+    p, spectra = _load(window, heights=heights, panel="enhancement")
+    assert p.spectra_table.columnCount() == 2
+    p.set_checked(_named(p, "s0", "s1", "s2"))
+    p.set_line(_ref_line_ppm(spectra[0]))
+    p.align()
+    p.confirm()
+    pk = p.alignment["peak_ppm"]
+    width = FWHM / spectra[0].metadata.sfo1
+    p.set_peak(pk)
+    p.set_region(pk - 8 * width, pk + 8 * width)
+    p.off_combo.setCurrentIndex(0)                        # s0 is OFF
+    rows = p.enhancement_rows
+    assert [r["label"].split(" ")[0] for r in rows] == ["s1", "s2"]
+    assert rows[0]["height"]["ratio"] == pytest.approx(12.5, rel=0.02)
+    assert rows[1]["area"]["ratio"] == pytest.approx(8.0, rel=0.03)
+    assert p.enh_table.rowCount() == 2 and p.enh_table.item(0, 3).text() == "yes"
+    p.definition_combo.setCurrentIndex(p.definition_combo.findData("one_minus"))
+    assert p.enh_table.item(0, 1).text().startswith("-11.")
+    assert "1 − ON/OFF" in p.result_label.text()
+    assert "dnp_enhancement" in window.session.spectra[1].metadata.raw["fits"]
 
 
-def test_tracked_lines_view_and_csv_export(window, tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QFileDialog
-    spectra = _sweep(FIELDS, ERRORS)
-    panel = _load(window, spectra, [f"s{k}" for k in range(5)])
-    panel.sweep_peak = 0.0
-    panel.run_sweep()
-    panel.sweep_aligned_check.setChecked(True)
-    panel.sweep_tracked_button.click()
-    assert "aligned" in window.compare_canvas.figure.axes[0].get_xlabel()
-    path = tmp_path / "sweep.csv"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(path), ""))
-    panel.sweep_csv_button.click()
-    assert path.read_text(encoding="utf-8").startswith("# DNP field sweep")
+def test_changing_the_spectra_resets_later_steps(window):
+    p, spectra = _load(window)
+    _through_alignment(p, spectra)
+    p.set_checked(_named(p, "s0", "s1"))
+    assert p.alignment is None and p.line_ppm is None and not p.align_button.isEnabled()
 
 
-def test_another_canvas_mode_releases_the_dnp_buttons(window):
-    spectra = _sweep(FIELDS, ERRORS)
-    panel = _load(window, spectra, [f"s{k}" for k in range(5)])
-    panel.sweep_pick_button.setChecked(True)
-    window.compare_canvas.set_measurement_mode(True)        # takes over the canvas
-    assert not panel.sweep_pick_button.isChecked()
-    window.compare_canvas.peakPicked.emit(1.0)              # a stray pick is ignored
-    assert panel.sweep_peak is None
+def test_messages_not_errors_when_steps_are_skipped(window, _dialogs):
+    p, _spectra = _load(window)
+    assert p.align() is None
+    assert _dialogs and "Tick at least two" in _dialogs[-1][1]
+    assert p.plot_profile(explicit=True) is None
+    assert "Measure first" in _dialogs[-1][1]
 
 
-def test_messages_instead_of_errors_with_nothing_checked(window, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-    shown = []
-    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[2]))
-    window._dnp_section.setExpanded(True)
-    panel = window.dnp_panel
-    assert panel.run_sweep() is None
-    assert not panel.show_enhancement_spectra()
-    assert shown
+def test_another_canvas_mode_releases_the_buttons(window):
+    p, spectra = _load(window)
+    p._tick_all(True)
+    p.pick_line_button.setChecked(True)
+    window.compare_canvas.set_region_select_mode(True)     # something else takes the canvas
+    window.compare_canvas.set_region_select_mode(False)
+    window.compare_canvas.set_pick_mode(False)
+    assert not p.pick_line_button.isChecked() and p.armed is None

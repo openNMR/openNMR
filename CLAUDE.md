@@ -96,6 +96,10 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 - **Simulate** draws on its own `simulation_canvas` (plain matplotlib),
   shown only while that panel is open; the maths is in
   `opennmr.simulate` (ports of `leonmr` code).
+- **DNP** is Apply ▸ DNP (`_build_dnp_section`): "Enhancement" and
+  "Field Sweep Profile", each a step-by-step `gui/dnp_panel.py`
+  `DnpWorkflowPanel` over `notebook/dnp_workflow.py` (align on the
+  reference line's shape, confirm, then measure). Not in Compare any more.
 - **Quantify** is one page: Peaks, Integration Regions, then the
   Spectral Fitting section (`_build_spectral_fit_section`). Whether the
   fit uses the regions is two explicit checkboxes there.

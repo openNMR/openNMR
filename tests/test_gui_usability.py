@@ -139,11 +139,10 @@ def test_dnp_profile_follows_the_curve_style(qapp, tmp_path, monkeypatch):
     qapp.processEvents()
     for k, s in enumerate(_sweep(FIELDS, ERRORS)):
         window._add_derived_spectrum(s, f"s{k}")
-    window.spectrum_list.selectAll()
-    panel = window.dnp_panel
-    panel.sweep_peak, panel.sweep_region = 0.0, (-3000.0, 3000.0)
-    panel.sweep_quantity_combo.setCurrentIndex(panel.sweep_quantity_combo.findData("both"))
-    panel.run_sweep()
+    # Apply ▸ DNP ▸ Field Sweep Profile (2026-09-30), through to the profile.
+    from test_gui_legend_style import _dnp_profile
+    panel = _dnp_profile(window)
+    panel.quantity_combo.setCurrentIndex(panel.quantity_combo.findData("both"))
     canvas = window.fit_canvas
     assert canvas.plot_kind() == "curve"
     for ax in canvas.figure.axes:
@@ -165,8 +164,9 @@ def test_dnp_sweep_spectra_use_the_compare_palette(qapp, tmp_path, monkeypatch):
     # by their SFO1 field, which carrier errors would reorder.
     for k, s in enumerate(_sweep(FIELDS, [0.0] * len(FIELDS))):
         window._add_derived_spectrum(s, f"s{k}")
-    window.spectrum_list.selectAll()
-    window.dnp_panel.show_sweep_spectra()
+    # The aligned set in Apply ▸ DNP (2026-09-30), coloured along B0.
+    from test_gui_legend_style import _dnp_profile
+    _dnp_profile(window).show_aligned()
     lines = [line for line in window.compare_canvas.figure.axes[0].lines
              if len(line.get_xdata()) > 100]
     # FIELDS ascend, so the spectra take the palette in order.
