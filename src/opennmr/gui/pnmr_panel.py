@@ -55,7 +55,7 @@ from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import panel_state
 from ..notebook import pnmr_simulator as pnmr
 from ..notebook.utils import compute_BF1_SFO1
-from ..plotting.accessibility import series_colours
+from ..plotting.accessibility import default_series_colours
 from .loader import background_load_enabled
 
 _SIGMA_TO_FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
@@ -735,7 +735,7 @@ class PnmrSimulationPanel(QWidget):
         edges = np.arange(0.0, max_r + _HIST_BIN, _HIST_BIN)
         species = [s for s in pnmr.structure_species(self._site_data, include_vacancies=True)
                    if any(s in occ for occ in table["Occupancy"])]
-        colours = series_colours(max(len(species), 1), "okabe_ito")
+        colours = default_series_colours(max(len(species), 1))
         dist = table["Distance"].to_numpy(dtype=float)
         data, weights = [], []
         for sp in species:

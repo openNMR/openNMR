@@ -359,6 +359,35 @@ def friendly_palettes(criterion: str = "colourblind", min_series: int = 3) -> li
     return sorted(kept, key=lambda item: (-item[1], item[0].lower()))
 
 
+#: Default palettes for *n* series, tried in order until one is
+#: colour-blind friendly (measured, see :func:`max_safe_series`) for *n*:
+#: categories (sites, species, fit components) and ordered series (a
+#: sweep of D, of power) differently. Past what any of them separates,
+#: the last one (the most separating) is used.
+DEFAULT_CATEGORY_PALETTES = ("tol_muted", "Paired", "PRGn")
+DEFAULT_ORDERED_PALETTES = ("cividis", "PRGn")
+
+
+def default_palette(n: int, ordered: bool = False) -> str:
+    """The palette a plot of ``n`` series uses unless told otherwise:
+    the first of :data:`DEFAULT_CATEGORY_PALETTES` (or, for an ordered
+    sweep, :data:`DEFAULT_ORDERED_PALETTES`) that is colour-blind
+    friendly for ``n``. Explicit user request (2026-10-01): every default
+    plot colour colour-blind friendly."""
+    names = DEFAULT_ORDERED_PALETTES if ordered else DEFAULT_CATEGORY_PALETTES
+    register_palettes()
+    for name in names:
+        if max_safe_series(name, "colourblind") >= int(n):
+            return name
+    return names[-1]
+
+
+def default_series_colours(n: int, ordered: bool = False, max_luminance: float = None) -> list:
+    """The ``n`` colours of :func:`default_palette` -- as
+    :func:`series_colours` draws them (dark enough to read on white)."""
+    return series_colours(int(n), default_palette(n, ordered), max_luminance)
+
+
 # ------------------------------------------------------------------
 # Single-trace colours
 # ------------------------------------------------------------------

@@ -172,6 +172,41 @@ def _j_offsets_ppm(site, larmor):
     return np.asarray(f, dtype=float) / larmor * 1e6, np.asarray(w, dtype=float)
 
 
+#: How a tensor picture is drawn, unless told otherwise -- the keys
+#: ``tensor_style`` takes (the GUI's Tensor Plot Style dialog edits them;
+#: a notebook passes a dict with any of them). Every default colour is
+#: colour-blind friendly: viridis, the diverging RdBu (ColorBrewer's
+#: colour-blind-safe red-blue) and its two ends.
+TENSOR_STYLE_DEFAULTS = {
+    "colormap": None,          # None: RdBu_r for a surface of both signs, viridis otherwise
+    "reverse": False,          # run the colour scale the other way
+    "colorbar": True,          # the colour bar beside a frequency surface
+    "show_axes": True,         # principal axes through the origin
+    "surface_alpha": 1.0,      # opacity of the frequency surface
+    "elev": 22.0,              # viewing elevation (degrees)
+    "azim": 35.0,              # viewing azimuth (degrees)
+    "positive_colour": "#b2182b",
+    "negative_colour": "#2166ac",
+    "ellipsoid_colour": "#8c8c8c",
+    "ellipsoid_alpha": 0.35,
+}
+
+
+def tensor_style(overrides=None) -> dict:
+    """:data:`TENSOR_STYLE_DEFAULTS` with ``overrides`` (unknown keys and
+    ``None`` values ignored) laid over it."""
+    style = dict(TENSOR_STYLE_DEFAULTS)
+    for key, value in (overrides or {}).items():
+        if key in style and (value is not None or key == "colormap"):
+            style[key] = value
+    return style
+
+
+#: The merge behind :func:`tensor_style`, under a name the plotting
+#: functions' own ``tensor_style`` argument does not shadow.
+_merge_style = tensor_style
+
+
 def _new_3d_axes(figure):
     import matplotlib.pyplot as plt
     if figure is None:
@@ -181,9 +216,10 @@ def _new_3d_axes(figure):
     return figure, figure.add_subplot(111, projection="3d")
 
 
-def _finish_3d(ax, extent, fontsize, unit_label):
+def _finish_3d(ax, extent, fontsize, unit_label, style=None):
     """Equal axes and room for the labels. Not tight_layout: it does not
     account for a 3D axes' labels and clipped the z label."""
+    style = _merge_style(style)
     extent = float(extent) or 1.0
     ax.figure.subplots_adjust(left=0.08, right=0.86, bottom=0.04, top=0.92)
     for setter in (ax.set_xlim, ax.set_ylim, ax.set_zlim):
@@ -195,7 +231,7 @@ def _finish_3d(ax, extent, fontsize, unit_label):
     ax.tick_params(labelsize=fontsize * 0.7, pad=0)
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
         axis.pane.set_alpha(0.05)
-    ax.view_init(elev=22, azim=35)
+    ax.view_init(elev=float(style["elev"]), azim=float(style["azim"]))
 
 
 def _draw_axes_lines(ax, axes, lengths, names, colours, linestyle="-", fontsize=10):
@@ -208,7 +244,7 @@ def _draw_axes_lines(ax, axes, lengths, names, colours, linestyle="-", fontsize=
 
 def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
                         relative_to="zero", figure=None, fontsize=12.0, n_theta=73, n_phi=145,
-                        show_axes=True, show_j=True, cmap=None):
+                        show_axes=None, show_j=True, cmap=None, tensor_style=None):
     """The frequency surface of one transition (see the module
     docstring): radius |frequency| in each direction of B0, coloured by
     the signed frequency (ppm) with a colour bar. Principal axes of the
@@ -217,12 +253,18 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
     ``cmap`` : the colour scale (any matplotlib name); default a
     diverging ``RdBu_r`` centred on zero for a surface of both signs,
     ``viridis`` otherwise.
+    ``tensor_style`` : see :data:`TENSOR_STYLE_DEFAULTS` (colour map,
+    reversed, colour bar, axes, opacity, view); ``cmap``/``show_axes``
+    given explicitly win over it.
 
     Returns ``(figure, notes)`` -- ``notes`` a list of plain-language
     remarks (what is drawn, J, signs)."""
     import matplotlib.pyplot as plt
     from matplotlib import cm, colors
 
+    look = _merge_style(tensor_style)
+    cmap = cmap or look["colormap"]
+    show_axes = look["show_axes"] if show_axes is None else show_axes
     site = ch.as_sites(site)[0]
     surf = frequency_surface(site, larmor_Hz, transition, order, relative_to, n_theta, n_phi)
     theta, phi, value = surf["theta"], surf["phi"], surf["value"]
@@ -235,6 +277,8 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
     if signed:
         lim = max(abs(vmin), abs(vmax)) or 1.0
         norm, cmap = colors.TwoSlopeNorm(0.0, -lim, lim), plt.get_cmap(cmap or "RdBu_r")
+        if look["reverse"]:
+            cmap = cmap.reversed()
     else:
         if vmax - vmin <= 1e-6 * max(abs(vmax), 1.0):
             # One value everywhere (isotropic): a readable colour bar
@@ -243,9 +287,11 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
             vmin, vmax = vmin - pad, vmax + pad
         norm = colors.Normalize(vmin, vmax)
         cmap = plt.get_cmap(cmap or "viridis")
+        if look["reverse"]:
+            cmap = cmap.reversed()
     figure, ax = _new_3d_axes(figure)
     ax.plot_surface(x, y, z, facecolors=cmap(norm(value)), rstride=1, cstride=1, linewidth=0,
-                    antialiased=True, shade=False)
+                    antialiased=True, shade=False, alpha=float(look["surface_alpha"]))
     extent = 1.2 * float(np.max(r))
     notes = []
     comps = tensor_components(site)
@@ -286,12 +332,17 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
 
     mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
     mappable.set_array(value)
-    bar = figure.colorbar(mappable, ax=ax, shrink=0.65, pad=0.08)
-    bar.set_label("δ − δ$_{iso}$ (ppm)" if relative_to == "iso" else "δ (ppm)", fontsize=fontsize * 0.85)
-    bar.ax.tick_params(labelsize=fontsize * 0.7)
-    bar.formatter.set_useOffset(False)
-    bar.update_ticks()
-    _finish_3d(ax, extent, fontsize, "ppm")
+    # Kept on the figure even when the bar is not drawn: it is what says
+    # which colour scale the surface uses.
+    figure.tensor_mappable = mappable
+    if look["colorbar"]:
+        bar = figure.colorbar(mappable, ax=ax, shrink=0.65, pad=0.08)
+        bar.set_label("δ − δ$_{iso}$ (ppm)" if relative_to == "iso" else "δ (ppm)",
+                      fontsize=fontsize * 0.85)
+        bar.ax.tick_params(labelsize=fontsize * 0.7)
+        bar.formatter.set_useOffset(False)
+        bar.update_ticks()
+    _finish_3d(ax, extent, fontsize, "ppm", look)
     what = [f"{site.label}, {surf['transition']}"]
     if site.get("quadrupolar"):
         what.append(f"{larmor / 1e6:.4g} MHz, {order} order")
@@ -316,13 +367,18 @@ def _ellipsoid(ax, centre, semi_axes, axes, colour, alpha):
                     linewidth=0, shade=True)
 
 
-def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0):
+def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0, tensor_style=None):
     """The tensors as glyphs in one frame (see the module docstring): the
     CSA ellipsoid (semi-axes |delta_ii|), the EFG's principal axes (length
     proportional to |V_ii|, red positive, blue negative), and the sphere of
-    radius |delta_iso| for a site with neither. Returns ``(figure, notes)``."""
+    radius |delta_iso| for a site with neither. Returns ``(figure, notes)``.
+    ``tensor_style`` : see :data:`TENSOR_STYLE_DEFAULTS` (the positive,
+    negative and ellipsoid colours, the axes, the view)."""
     from matplotlib.lines import Line2D
 
+    look = _merge_style(tensor_style)
+    positive, negative = look["positive_colour"], look["negative_colour"]
+    shell, shell_alpha = look["ellipsoid_colour"], float(look["ellipsoid_alpha"])
     site = ch.as_sites(site)[0]
     comps = tensor_components(site)
     figure, ax = _new_3d_axes(figure)
@@ -332,16 +388,17 @@ def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0):
         principal = np.array(comps["csa"]["principal"])
         axes = comps["csa"]["axes"]
         semi = np.maximum(np.abs(principal), 1e-9)
-        _ellipsoid(ax, np.zeros(3), semi, axes, "#8c8c8c", 0.35)
+        _ellipsoid(ax, np.zeros(3), semi, axes, shell, shell_alpha)
         names = ["δ$_{xx}$", "δ$_{yy}$", "δ$_{zz}$"]
         for k in range(3):
-            colour = _POSITIVE if principal[k] >= 0 else _NEGATIVE
+            colour = positive if principal[k] >= 0 else negative
             v = axes[:, k] * semi[k]
-            ax.plot([-v[0], v[0]], [-v[1], v[1]], [-v[2], v[2]], color=colour, linewidth=2.0)
+            if look["show_axes"]:
+                ax.plot([-v[0], v[0]], [-v[1], v[1]], [-v[2], v[2]], color=colour, linewidth=2.0)
             ax.text(*(1.1 * v), f"{names[k]} = {principal[k]:.4g}", color=colour,
                     fontsize=fontsize * 0.75)
         extent = 1.25 * float(semi.max())
-        handles.append(Line2D([], [], color="#8c8c8c", linewidth=6, alpha=0.5,
+        handles.append(Line2D([], [], color=shell, linewidth=6, alpha=0.5,
                               label="CSA ellipsoid (ppm)"))
         notes.append("CSA ellipsoid: semi-axes along the principal axes, δxx, δyy, δzz = "
                      + ", ".join(f"{v:.4g}" for v in principal) + " ppm.")
@@ -354,10 +411,10 @@ def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0):
                          "frequency surface with 'δ − δiso' shows the anisotropy itself.")
     elif comps["efg"] is None:
         r = abs(site.delta_iso) or 1.0
-        _ellipsoid(ax, np.zeros(3), np.array([r, r, r]), np.eye(3), "#8c8c8c", 0.35)
+        _ellipsoid(ax, np.zeros(3), np.array([r, r, r]), np.eye(3), shell, shell_alpha)
         extent = 1.25 * r
         notes.append(f"Isotropic shift only: a sphere of radius |δiso| = {abs(site.delta_iso):g} ppm.")
-        handles.append(Line2D([], [], color="#8c8c8c", linewidth=6, alpha=0.5,
+        handles.append(Line2D([], [], color=shell, linewidth=6, alpha=0.5,
                               label="isotropic shift (ppm)"))
     if comps["efg"] is not None:
         principal = np.array(comps["efg"]["principal"])
@@ -366,7 +423,7 @@ def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0):
             scale, extent = 1.0 / (np.max(np.abs(principal)) or 1.0), 1.3
         names = ["V$_{xx}$", "V$_{yy}$", "V$_{zz}$"]
         for k in range(3):
-            colour = _POSITIVE if principal[k] >= 0 else _NEGATIVE
+            colour = positive if principal[k] >= 0 else negative
             v = comps["efg"]["axes"][:, k] * abs(principal[k]) * scale
             ax.plot([-v[0], v[0]], [-v[1], v[1]], [-v[2], v[2]], "--", color=colour, linewidth=2.2)
             if abs(principal[k]) > 0:
@@ -388,7 +445,7 @@ def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0):
     if handles:
         ax.legend(handles=handles, loc="upper left", fontsize=fontsize * 0.7, frameon=False)
     _finish_3d(ax, extent, fontsize, "ppm" if comps["csa"] is not None or comps["efg"] is None
-               else "rel.")
+               else "rel.", look)
     figure.suptitle(f"{site.label}: tensors in the "
                     f"{'EFG' if comps['efg'] is not None else 'CSA'} frame", fontsize=fontsize * 0.9)
     return figure, notes
@@ -400,6 +457,6 @@ def plot_tensors(site, larmor_Hz=None, style="surface", **kwargs):
     if style == "surface":
         return plot_tensor_surface(site, larmor_Hz, **kwargs)
     if style == "ellipsoid":
-        kwargs = {k: v for k, v in kwargs.items() if k in ("figure", "fontsize")}
+        kwargs = {k: v for k, v in kwargs.items() if k in ("figure", "fontsize", "tensor_style")}
         return plot_tensor_ellipsoids(site, **kwargs)
     raise ValueError("style must be 'surface' or 'ellipsoid'.")

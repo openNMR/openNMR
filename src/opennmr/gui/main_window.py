@@ -703,6 +703,7 @@ class MainWindow(QMainWindow):
         # Its figures name their traces (sites, Mx/My/Mz, species): a
         # legend by default, as on the plain canvas it replaces.
         self.simulation_canvas._legend_visible = True
+        self.simulation_canvas.tensorStyleRequested.connect(self._open_tensor_style)
 
         # Each canvas carries its own Crosshair/Measure toolbar buttons.
         # Toggling one there drives the matching menu item, which is
@@ -3863,7 +3864,7 @@ class MainWindow(QMainWindow):
     _FIGURE_STYLES_PATH = os.path.expanduser("~/.opennmr/figure_styles.json")
     _FIGURE_STYLE_TYPES = (
         ("1D spectrum", "1d"), ("2D contour", "2d"), ("Pseudo-2D stack", "pseudo2d"), ("Compare", "compare"),
-        ("Curves & profiles", "curve"),
+        ("Curves & profiles", "curve"), ("Tensor pictures", "tensor"),
     )
     #: A plot kind with no saved default of its own uses this kind's
     #: instead. Curves (relaxation/diffusion fits, integral and parameter
@@ -3872,7 +3873,7 @@ class MainWindow(QMainWindow):
     #: they expect those plots to follow (explicit user request: "the
     #: default plot style should apply to the DNP profile plots,
     #: relaxation curves"). Saving a "Curves & profiles" default overrides it.
-    _FIGURE_STYLE_FALLBACK = {"curve": "1d"}
+    _FIGURE_STYLE_FALLBACK = {"curve": "1d", "tensor": "2d"}
     #: Same "user-level dotfile, survives an update/reinstall" reasoning
     #: as _FIGURE_STYLES_PATH -- a plain JSON dict of
     #: {probe_string: {config_key: value}}, explicit user request:
@@ -4310,9 +4311,9 @@ class MainWindow(QMainWindow):
         for text, key in self._MAP_COLORMAPS:
             self.output_map_colormap_combo.addItem(text, key)
         self.output_map_colormap_combo.setToolTip(
-            "The colour scale of maps and 3D surfaces: Simulate's tensor pictures and "
-            "Czjzek (C_Q, η_Q) distributions. \"Plot's own\" keeps each one's default "
-            "(a diverging scale centred on zero for a tensor surface of both signs).")
+            "The colour scale of maps: Czjzek (C_Q, η_Q) distributions, and tensor pictures "
+            "unless right-click ▸ Tensor Plot Style… sets one of their own. \"Plot's own\" "
+            "keeps each one's (colour-blind-friendly) default.")
         self.output_map_colormap_combo.currentIndexChanged.connect(self._on_output_style_changed)
         style_form.addRow("Map colour scale:", self.output_map_colormap_combo)
 
@@ -5202,6 +5203,8 @@ class MainWindow(QMainWindow):
         payload["contour_level_mode"] = self.output_contour_mode_combo.currentData()
         payload["contour_power"] = self.output_contour_power_spin.value()
         payload["legend_loc"] = self.output_legend_loc_combo.currentText()
+        if targets and targets[0].style_settings().get("tensor_style"):
+            payload["tensor_style"] = targets[0].style_settings()["tensor_style"]
         payload.update(self._current_output_export_kwargs())
         return payload
 
@@ -12800,7 +12803,7 @@ class MainWindow(QMainWindow):
         # spectrum (explicit user request); notebook.czjzek.
         self.czjzek_sim_panel = CzjzekSimPanel(
             draw=lambda draw: (self._draw_tensor_picture(
-                                   draw, hz_per_ppm=self.czjzek_sim_panel.larmor_mhz()),
+                                   draw, hz_per_ppm=self.czjzek_sim_panel.larmor_mhz(), kind="2d"),
                                self._journal_simulation("czjzek"),
                                setattr(self.simulation_canvas, "simulation_spectrum",
                                        self.czjzek_sim_panel.make_spectrum())),
@@ -13074,10 +13077,35 @@ class MainWindow(QMainWindow):
         self._show_simulation_view()
         self.simulation_canvas.show_external_plot(draw, kind=kind, hz_per_ppm=hz_per_ppm)
 
-    def _draw_tensor_picture(self, draw, hz_per_ppm: float | None = None) -> None:
-        """Show a notebook tensor picture (or a Czjzek map) on the
-        Simulation plot -- a map, so the 2D plot style applies."""
-        self._show_on_simulation_plot(draw, "2d", hz_per_ppm=hz_per_ppm)
+    def _draw_tensor_picture(self, draw, hz_per_ppm: float | None = None, kind: str = "tensor") -> None:
+        """Show a notebook tensor picture on the Simulation plot, as a
+        "tensor" plot (its own per-type default, falling back to the 2D
+        one; right-click ▸ Tensor Plot Style…). The Czjzek map comes
+        here too, as a "2d" map."""
+        self._show_on_simulation_plot(draw, kind, hz_per_ppm=hz_per_ppm)
+
+    def _open_tensor_style(self) -> None:
+        """Right-click ▸ Tensor Plot Style… (explicit user request,
+        2026-10-01): the colour map, colour bar, axes, colours, opacity
+        and view of the tensor picture on show."""
+        from .tensor_style_dialog import TensorStyleDialog
+        dialog = getattr(self, "_tensor_style_dialog", None)
+        if dialog is None:
+            dialog = self._tensor_style_dialog = TensorStyleDialog(
+                self.simulation_canvas, save_default=self._save_tensor_style_default, parent=self)
+        else:
+            dialog.load(self.simulation_canvas.style_settings().get("tensor_style") or {})
+        dialog.show()
+        dialog.raise_()
+
+    def _save_tensor_style_default(self, style: dict) -> None:
+        """Keep ``style`` as the default for tensor pictures (Plot Style's
+        per-type defaults, under "Tensor pictures"); every other setting
+        of that entry is left as it was."""
+        entry = dict(self._load_figure_styles().get("tensor") or {})
+        entry["tensor_style"] = dict(style)
+        if self._save_figure_style("tensor", entry):
+            self.statusBar().showMessage("Saved as the default style for tensor pictures.", 6000)
 
     def _csa_tensor_site(self):
         from ..notebook import combined_hamiltonian as ch
@@ -13121,8 +13149,10 @@ class MainWindow(QMainWindow):
 
         def draw(figure):
             style = self._simulation_style()
+            # font: the canvas applies its own; plot_combined's would set
+            # matplotlib's global font family.
             plot_combined(result, nuclide=nucleus, figure=figure, fontsize=style["labelsize"],
-                          font=style.get("font_family"), linewidth=max(style["linewidth"] * 0.7, 0.5))
+                          font=None, linewidth=max(style["linewidth"] * 0.7, 0.5))
         self._show_on_simulation_plot(draw, "compare", hz_per_ppm=larmor_mhz)
 
     def _send_quadrupolar_to_simulation(self, fitted: dict) -> None:
@@ -15308,7 +15338,7 @@ class MainWindow(QMainWindow):
         def draw(figure):
             style = self._simulation_style()
             plot_quadrupolar_orders(comparison, nuclide=nucleus, figure=figure,
-                                    font=style.get("font_family"), fontsize=style["labelsize"],
+                                    font=None, fontsize=style["labelsize"],
                                     tick_dir=style["tick_direction"])
         self._show_on_simulation_plot(draw, "compare", hz_per_ppm=larmor_mhz)
 

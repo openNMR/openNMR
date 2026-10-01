@@ -483,7 +483,9 @@ def test_qualitative_colors_are_distinct_and_dark_enough():
 
 
 def test_qualitative_colors_cycle_past_the_palette_length():
-    colors = style.qualitative_colors(12)
+    # A named palette cycles; the default (None) picks a palette that is
+    # colour-blind friendly for n instead (2026-10-01).
+    colors = style.qualitative_colors(12, "tab10")
     assert len(colors) == 12
     np.testing.assert_allclose(colors[10], colors[0])
 
@@ -613,3 +615,13 @@ def test_setup_plotting_still_sets_its_own_tick_and_axis_rcparams():
         assert plt.rcParams["font.sans-serif"][0] == "Arial"
     finally:
         plt.rcdefaults()
+
+
+def test_default_qualitative_colors_are_colourblind_friendly():
+    from opennmr.plotting import accessibility
+    for n in range(2, 10):
+        colors = style.qualitative_colors(n)
+        assert len(colors) == n
+        assert accessibility.is_colourblind_safe([c[:3] for c in colors]), n
+        for color in colors:
+            assert style.relative_luminance(color[:3]) <= style.MAX_LINE_LUMINANCE + 1e-9

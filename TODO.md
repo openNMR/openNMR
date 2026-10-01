@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-01 (round 3: tensor plot style, axis-label style on Simulate figures, colour-blind-friendly defaults): full suite without `test_data/` or pymatgen, matplotlib 3.10 / Py 3.11: 3277 passed, 164 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`). 8 new tests in `test_gui_tensor_style.py`, 1 in `test_plotting_style.py`.*
+
 *2026-10-01 (round 2: Simulate's plots on a full canvas, tick direction, Measure without an Hz axis, Czjzek citations and measured estimate): full suite without `test_data/` or pymatgen, matplotlib 3.10 / Py 3.11: 3268 passed, 164 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`). 19 new tests in `test_gui_simulation_plots.py`; `test_gui_round4_keep_sim.py`'s Czjzek keep test reads the MplCanvas menu.*
 
 *2026-10-01 (SR from another nucleus, field drift correction after Najbauer & Andreas 2019): full suite without `test_data/` or pymatgen, matplotlib 3.10 / Py 3.11: 3249 passed, 162 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`, re-confirmed failing on the unmodified tree). 44 new tests in `test_drift_correction.py`, `test_referencing.py`, `test_gui_drift_and_sr_transfer.py`; `test_gui_compare_tools.py::test_baseline_is_its_own_processing_section` updated for the two new Process sections.*
@@ -130,6 +132,16 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## A tensor plot style; axis-label style on Simulate's figures; colour-blind-friendly defaults (2026-10-01, round 3)
+
+- **Asked**: tensor plots: no way to change the colour map; "quantity (unit)" ↔ "quantity / unit" did not reach them; "a specific tensor plot style". Every default colour/colour map colour-blind friendly -- Simulate's were not.
+- **What was wrong**: the colour map *did* follow Plot Style ▸ Map colour scale in an offscreen test of the dialog flow (round 2), but that control was one line in a long panel and shared with the Czjzek map -- not findable as a tensor setting. External (notebook-drawn) figures write their own axis labels, which Plot Style's axis-label style never touched. Defaults: diffusion used tab10 (fails the measured colour-blind check at 8 curves), Bloch tab:red/viridis, fit components and kept fits `qualitative_colors(name="tab10")`; Okabe–Ito itself passes only up to 4 after the line-darkening cap.
+- **Built**:
+  - Plot kind **"tensor"** (tensor pictures; the Czjzek map stays "2d"), with a "Tensor pictures" per-type default falling back to the 2D one. Right-click ▸ **Tensor Plot Style…** (`gui/tensor_style_dialog.py`, live): colour map (✓ marks the measured colour-blind-friendly ones), reversed, colour bar, principal axes, surface opacity, positive/negative axis and ellipsoid colours, ellipsoid opacity, view (elevation/azimuth, or "Use the current view"), Reset, Save as Default for Tensor Pictures. Stored as the canvas style key `tensor_style`; `notebook.tensor_views.TENSOR_STYLE_DEFAULTS` / `tensor_style()` define the keys, and `plot_tensor_surface`/`plot_tensor_ellipsoids`/`plot_tensors` take `tensor_style=` (notebook and GUI identical). Its colour map wins over Plot Style's map colour scale. A redraw keeps a hand-turned 3D view unless the style set one. `figure.tensor_mappable` records the surface's scale even without a colour bar.
+  - External figures: `_restyle_external_axis_labels` rewrites every axis label (x, y, a 3D z, colour bars) to the axis-label style: "Q (unit)" ↔ "Q / unit", leaving qualifiers such as "(normalised)" or "(per 0.1 Å)" alone. With the default (brackets) Simulate's "Time / μs" now reads "Time (μs)".
+  - `accessibility.default_palette(n, ordered)` / `default_series_colours`: the first of tol_muted → Paired → PRGn (categories) or cividis → PRGn (ordered sweeps) that passes the *measured* check for n. Used by `style.qualitative_colors` (default `name=None`; a named palette still cycles), the diffusion curves, Bloch power sweeps (one power: Okabe–Ito blue; phase trace vermilion), Simulate's per-site plot (total black) and pNMR species. Tensor defaults (viridis, RdBu_r, RdBu ends) were already safe and are kept.
+- **Not changed**: the Series colour map default (viridis) is safe up to 5 series by the same check; the Plot Style accessibility line already says when a plot exceeds it. UI highlight colours (region spans, the measurement arrow) are not data colours.
 
 ## Simulate's plots get Plot Style, zoom and Measure; tick direction; Measure fixes; Czjzek citations and a measured time estimate (2026-10-01, round 2)
 

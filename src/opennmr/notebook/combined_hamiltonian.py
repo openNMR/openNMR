@@ -575,7 +575,7 @@ def plot_combined(result, nuclide="", show_sites=True, ax=None, pl_width=3.375,
     import matplotlib.pyplot as plt
     from .plotting import _apply_axis_style
     from .utils import NUC_label
-    from ..plotting.accessibility import ordered_qualitative_colours
+    from ..plotting.accessibility import default_series_colours
     if font:
         plt.rcParams["font.family"] = font
     if ax is None:
@@ -585,12 +585,14 @@ def plot_combined(result, nuclide="", show_sites=True, ax=None, pl_width=3.375,
         fig = ax.figure
     x = result["x_ppm"]
     scale = float(np.max(result["real_spec"])) or 1.0
-    colours = ordered_qualitative_colours("okabe_ito")
-    ax.plot(x, result["real_spec"] / scale, color=colours[0], lw=linewidth, label="Total")
+    # The total in black; the sites in a palette that is colour-blind
+    # friendly for that many (measured -- accessibility.default_palette).
+    ax.plot(x, result["real_spec"] / scale, color="#000000", lw=linewidth, label="Total")
     if show_sites and len(result["sites"]) > 1:
+        colours = default_series_colours(len(result["sites"]))
         for i, (label, spec) in enumerate(result["sites"].items()):
             ax.plot(x, spec / scale, lw=linewidth * 0.9, ls=(0, (4, 2)),
-                    color=colours[1 + i % (len(colours) - 1)], label=label)
+                    color=colours[i], label=label)
         ax.legend(frameon=False, fontsize=fontsize * 0.8)
     _apply_axis_style(ax, "in", 4.0, 1.0, 4.0, None, fontsize, False)
     lo, hi = (min(xlims), max(xlims)) if xlims else (min(x), max(x))

@@ -1043,6 +1043,14 @@ class MplCanvas(QWidget):
         #: The colour scale for maps and surfaces (tensor pictures, a
         #: Czjzek distribution); None = each plot's own default.
         self._map_colormap: str | None = None
+        #: How tensor pictures are drawn (Simulate ▸ ... ▸ Tensor
+        #: picture): notebook.tensor_views.TENSOR_STYLE_DEFAULTS' keys,
+        #: edited by right-click ▸ Tensor Plot Style… (explicit user
+        #: request, 2026-10-01: "a specific tensor plot style").
+        self._tensor_style: dict = {}
+        #: True once the tensor style set the view, so a redraw takes the
+        #: view from there instead of keeping the one dragged to.
+        self._tensor_view_set = False
         # --- Title -------------------------------------------------
         # Off by default, on request. Several views set a title as
         # they draw (a slice number, a DOSY's own caption); this hides
@@ -3321,7 +3329,10 @@ class MplCanvas(QWidget):
     plotKindChanged = Signal(str)
 
     #: The plot kinds :attr:`plotKindChanged` reports.
-    PLOT_KINDS = ("1d", "2d", "pseudo2d", "compare")
+    PLOT_KINDS = ("1d", "2d", "pseudo2d", "compare", "curve", "tensor")
+
+    #: Right-click ▸ Tensor Plot Style… on a tensor picture.
+    tensorStyleRequested = Signal()
 
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -3347,6 +3358,11 @@ class MplCanvas(QWidget):
         style_action = menu.addAction("Plot Style…")
         style_action.setToolTip("Line width, fonts, ticks, colours and export settings for this plot.")
         style_action.triggered.connect(self.plotStyleRequested.emit)
+        if self._external_plot and self._plot_kind == "tensor":
+            tensor_action = menu.addAction("Tensor Plot Style…")
+            tensor_action.setToolTip("Colour map, colour bar, principal axes, colours, opacity "
+                                     "and view of this tensor picture.")
+            tensor_action.triggered.connect(self.tensorStyleRequested.emit)
         menu.addSeparator()
 
         legend_action = menu.addAction("Show Legend")
@@ -3681,6 +3697,8 @@ class MplCanvas(QWidget):
             if ax.get_title():
                 ax.title.set_fontsize(self._AXIS_LABELSIZE)
             self._apply_title_and_font(ax)
+        if self._external_plot:
+            self._restyle_external_axis_labels()
         # A figure-level title (Simulate's Bloch and tensor pictures)
         # follows the text size like an Axes title.
         suptitle = getattr(self.figure, "_suptitle", None)
@@ -3691,6 +3709,42 @@ class MplCanvas(QWidget):
                 suptitle.set_fontfamily(self._font_family)
         self._apply_curve_spines()
         self._restyle_existing_legends()
+
+    #: "quantity (unit)" at the end of a label, and "quantity / unit".
+    _BRACKET_LABEL = re.compile(r"^(?P<q>.*\S)\s*\((?P<u>[^()]+)\)\s*$")
+    _SLASH_LABEL = re.compile(r"^(?P<q>.*\S)\s+/\s+(?P<u>\S.*)$")
+    #: Parenthesised words that qualify a quantity rather than name its
+    #: unit -- "Amplitude (normalised)" stays as it is.
+    _NOT_A_UNIT = re.compile(r"^\s*(normali[sz]ed|relative|rel\.?|per\b.*|arb\.?)\s*$", re.I)
+
+    def _relabel_for_style(self, text: str) -> str:
+        """``text`` in this canvas's axis-label style: ``"Q (unit)"``
+        (brackets) or ``"Q / unit"`` (slash)."""
+        if not text:
+            return text
+        if self._axis_label_style == "slash":
+            match = self._BRACKET_LABEL.match(text)
+            if match and not self._NOT_A_UNIT.match(match.group("u")):
+                return f"{match.group('q')} / {match.group('u')}"
+            return text
+        match = self._SLASH_LABEL.match(text)
+        if match and not self._NOT_A_UNIT.match(match.group("u")):
+            return f"{match.group('q')} ({match.group('u')})"
+        return text
+
+    def _restyle_external_axis_labels(self) -> None:
+        """A figure drawn elsewhere writes its own axis labels; Plot
+        Style's "Axis label" choice (quantity (unit) or quantity / unit)
+        is applied to them here, every axis including a 3D one's z and a
+        colour bar's (user report, 2026-10-01: the setting did not reach
+        Simulate's tensor plots)."""
+        for ax in self.figure.get_axes():
+            axes = [ax.xaxis, ax.yaxis] + ([ax.zaxis] if getattr(ax, "name", "") == "3d" else [])
+            for axis in axes:
+                old = axis.label.get_text()
+                new = self._relabel_for_style(old)
+                if new != old:
+                    axis.label.set_text(new)
 
     def _apply_curve_spines(self) -> None:
         """Top/right spines on the curve Axes, as Plot Style says. With
@@ -4192,6 +4246,7 @@ class MplCanvas(QWidget):
             "tick_width": self._TICK_WIDTH,
             "tick_direction": self._TICK_DIRECTION,
             "map_colormap": self._map_colormap,
+            "tensor_style": dict(self._tensor_style),
             "minor_ticks": self._minor_ticks_visible,
             "top_spine": self._top_spine_visible,
             "right_spine": self._right_spine_visible,
@@ -4218,7 +4273,7 @@ class MplCanvas(QWidget):
         }
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
-                  tick_direction=None, map_colormap=None, minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
+                  tick_direction=None, map_colormap=None, tensor_style=None, minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
                   trace_color=None, contour_linewidth=None, contour_clevels=None,
                   contour_level_mode=None, contour_power=None,
                   title_visible=None, font_family=None, axis_label_style=None,
@@ -4257,6 +4312,13 @@ class MplCanvas(QWidget):
         if map_colormap is not None:
             # "" from the combo is "each plot's own default".
             self._map_colormap = map_colormap or None
+        if tensor_style is not None:
+            if not isinstance(tensor_style, dict):
+                raise ValueError("tensor_style must be a dict of tensor-picture settings.")
+            changed_view = any(k in tensor_style and tensor_style[k] != self._tensor_style.get(k)
+                               for k in ("elev", "azim"))
+            self._tensor_style = {**self._tensor_style, **tensor_style}
+            self._tensor_view_set = self._tensor_view_set or changed_view
         if minor_ticks is not None:
             self._minor_ticks_visible = minor_ticks
         # Curve plots only (see _curve_axes); applied below by
@@ -4353,7 +4415,8 @@ class MplCanvas(QWidget):
         # those live on artists only the draw makes, so it is redrawn.
         if self._external_plot and self._external_draw is not None and any(
                 value is not None for value in (labelsize, font_family, compare_colormap,
-                                                map_colormap, trace_color, linewidth)):
+                                                map_colormap, tensor_style, trace_color,
+                                                linewidth)):
             self._redraw_external()
 
         # Everything except grid/legend is the same "apply the current
@@ -4406,7 +4469,7 @@ class MplCanvas(QWidget):
     #: (which also carries export and bookkeeping keys) down to them.
     _STYLE_KEYS = (
         "linewidth", "labelsize", "tick_length", "tick_width", "tick_direction", "map_colormap",
-        "minor_ticks", "grid",
+        "tensor_style", "minor_ticks", "grid",
         "legend_loc", "compare_colormap", "trace_color", "contour_linewidth",
         "contour_clevels", "contour_level_mode", "contour_power", "title_visible",
         "font_family", "axis_label_style", "axis_label_template", "legend_frameon",
@@ -6775,10 +6838,20 @@ class MplCanvas(QWidget):
     def _redraw_external_now(self, info: dict) -> None:
         flat = [ax for ax in self.figure.axes if getattr(ax, "name", "") != "3d"]
         limits = [(ax.get_xlim(), ax.get_ylim()) for ax in flat]
+        # A 3D picture keeps the view it was turned to -- unless the
+        # tensor style has just set one.
+        views = [(ax.elev, ax.azim) for ax in self.figure.axes if getattr(ax, "name", "") == "3d"]
+        if self._tensor_view_set:
+            views, self._tensor_view_set = [], False
         keep = self.simulation_spectrum
         self.show_external_plot(info["draw"], kind=info["kind"], hz_per_ppm=info["hz_per_ppm"],
                                 _keep_series=True)
         self.simulation_spectrum = keep
+        threes = [ax for ax in self.figure.axes if getattr(ax, "name", "") == "3d"]
+        if views and len(threes) == len(views):
+            for ax, (elev, azim) in zip(threes, views):
+                ax.view_init(elev=elev, azim=azim)
+            self.canvas.draw_idle()
         flat_now = [ax for ax in self.figure.axes if getattr(ax, "name", "") != "3d"]
         if len(flat_now) == len(limits):
             for ax, (xlim, ylim) in zip(flat_now, limits):

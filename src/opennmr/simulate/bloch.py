@@ -762,6 +762,11 @@ def frequency_unit(max_abs_hz):
     return 1.0, "Hz"
 
 
+#: The pulse's phase/frequency trace: Okabe–Ito vermilion, apart from
+#: the black amplitude for every kind of colour vision.
+_PHASE_COLOUR = "#D55E00"
+
+
 def plot_pulse_simulation(sim, fig, title=None):
     """Draw a :func:`simulate_pulse` result onto ``fig``: pulse amplitude
     and phase against time on top, Mx/My/Mz against offset below (one
@@ -784,17 +789,21 @@ def plot_pulse_simulation(sim, fig, title=None):
         # little; its frequency sweep is what defines it.
         freq = np.asarray(sim["freq_profile_hz"])
         f_scale, f_unit = (1e6, "MHz") if np.max(np.abs(freq)) >= 1e6 else (1e3, "kHz")
-        ax_phase.plot(sim["time_us"], freq / f_scale, color='tab:red',
+        ax_phase.plot(sim["time_us"], freq / f_scale, color=_PHASE_COLOUR,
                       linestyle='--', label=f'Frequency [{f_unit}]')
-        ax_phase.set_ylabel(f"RF offset / {f_unit}", color='tab:red')
+        ax_phase.set_ylabel(f"RF offset / {f_unit}", color=_PHASE_COLOUR)
     else:
-        ax_phase.plot(sim["time_us"], sim["phase_profile_deg"], color='tab:red',
+        ax_phase.plot(sim["time_us"], sim["phase_profile_deg"], color=_PHASE_COLOUR,
                       linestyle='--', label='Phase [deg]')
-        ax_phase.set_ylabel("Phase / deg", color='tab:red')
-    ax_phase.tick_params(axis='y', labelcolor='tab:red')
+        ax_phase.set_ylabel("Phase / deg", color=_PHASE_COLOUR)
+    ax_phase.tick_params(axis='y', labelcolor=_PHASE_COLOUR)
     ax_shape.set_title("Pulse shape")
 
-    colors = cm.viridis(np.linspace(0, 1, len(sim["power_scales"])))
+    # Colour-blind friendly for the number of power levels (an ordered
+    # sweep); Mz/Mx/My are told apart by line style.
+    from ..plotting.accessibility import default_series_colours
+    colors = (default_series_colours(len(sim["power_scales"]), ordered=True)
+              if has_power_sweep else ["#0072B2"])     # Okabe–Ito blue
     o_scale, o_unit = frequency_unit(np.max(np.abs(sim["offsets_hz"])) if len(sim["offsets_hz"])
                                      else 0.0)
     offsets = np.asarray(sim["offsets_hz"], dtype=float) / o_scale

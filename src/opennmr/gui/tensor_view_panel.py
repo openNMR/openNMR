@@ -59,7 +59,9 @@ class TensorViewControls(QGroupBox):
         self._form = form
         v.addLayout(form)
         self.show_button = QPushButton("Show Tensors")
-        self.show_button.setToolTip("Draw on the Simulation plot; drag it to turn the view.")
+        self.show_button.setToolTip("Draw on the Simulation plot; drag it to turn the view. "
+                                    "Right-click the picture ▸ Tensor Plot Style… for its colour "
+                                    "map, colour bar, axes, colours and view.")
         self.show_button.clicked.connect(self.show_tensors)
         v.addWidget(self.show_button)
         self.notes_label = QLabel("")
@@ -97,7 +99,11 @@ class TensorViewControls(QGroupBox):
             def draw(figure):
                 look = self._style() or {}
                 extra = dict(kwargs)
-                if style == "surface" and look.get("map_colormap"):
+                # Right-click ▸ Tensor Plot Style… -- its colour map wins
+                # over Plot Style's map colour scale.
+                extra["tensor_style"] = dict(look.get("tensor_style") or {})
+                if (style == "surface" and look.get("map_colormap")
+                        and not extra["tensor_style"].get("colormap")):
                     extra["cmap"] = look["map_colormap"]
                 holder["notes"] = tv.plot_tensors(site, larmor_hz, style=style, figure=figure,
                                                   fontsize=float(look.get("labelsize") or 11.0),

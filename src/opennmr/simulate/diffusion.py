@@ -113,10 +113,12 @@ def plot_attenuation(curves: list[dict], ax, labels: list[str] | None = None) ->
     # against the background. Distinct palette colours instead, and
     # alternating line styles so curves that coincide -- a trapezoid
     # with a short ramp is almost the rectangle -- both stay visible.
-    if len(lines) <= 10:
-        colours = [cm.tab10(i) for i in range(len(lines))]
-    else:
-        colours = cm.viridis(np.linspace(0, 0.9, len(lines)))
+    # Colour-blind friendly for the number of curves (measured; see
+    # accessibility.default_palette) -- tab10 here failed for 8 curves.
+    # One experiment's D values are an ordered sweep; a comparison of
+    # shapes or sequences is a set of categories.
+    from ..plotting.accessibility import default_series_colours
+    colours = default_series_colours(max(len(lines), 1), ordered=len(curves) == 1)
     styles = ["-", "--", "-.", ":"]
     for (curve, row, D), colour, i in zip(lines, colours, range(len(lines))):
         if labels is not None:

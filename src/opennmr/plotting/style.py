@@ -647,7 +647,7 @@ def readable_cmap(cmap, max_luminance: float = None):
     return cl.LinearSegmentedColormap.from_list(f"{cmap.name}_readable", colors)
 
 
-def qualitative_colors(n, name: str = "tab10", max_luminance: float = None):
+def qualitative_colors(n, name: str | None = None, max_luminance: float = None):
     """``n`` visually distinct colours for things that are *categories*
     rather than points on a scale -- the components of a SCORE
     resolution, the individual peaks under a fitted lineshape.
@@ -662,7 +662,15 @@ def qualitative_colors(n, name: str = "tab10", max_luminance: float = None):
 
     Cycles once past the palette's own length, as its callers already
     did.
+
+    ``name`` None (the default since 2026-10-01; it was ``tab10``): a
+    palette that is colour-blind friendly for ``n``, measured --
+    :func:`opennmr.plotting.accessibility.default_palette`.
     """
+    if name is None:
+        from .accessibility import default_series_colours
+        return [tuple(float(v) for v in c) for c in default_series_colours(int(n), False,
+                                                                            max_luminance)]
     palette = plt.get_cmap(name)
     count = getattr(palette, "N", 10)
     return [_darkened(palette(i % count), max_luminance) for i in range(int(n))]
