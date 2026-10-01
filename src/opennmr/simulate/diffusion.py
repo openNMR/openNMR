@@ -124,7 +124,7 @@ def plot_attenuation(curves: list[dict], ax, labels: list[str] | None = None) ->
         elif "label" in curve:
             label = curve["label"]
         else:
-            label = f"{D:.0e} m² s⁻¹"
+            label = f"{D:.0e} m$^2$ s$^{{-1}}$"
         ax.plot(curve["gradient"], curve["intensity"][row], color=colour, linewidth=2,
                 linestyle=styles[i % len(styles)], label=label)
     if lines:
@@ -132,5 +132,5 @@ def plot_attenuation(curves: list[dict], ax, labels: list[str] | None = None) ->
         ax.set_xlim(0, max_gradient * 1.25)
     ax.set_ylim(-0.02, 1.02)
     ax.legend(loc="upper right", frameon=False, fontsize=8)
-    ax.set_xlabel("Gradient strength, g / T m⁻¹")
-    ax.set_ylabel("Intensity, I/I₀")
+    ax.set_xlabel("Gradient strength, $g$ / T m$^{-1}$")
+    ax.set_ylabel("Intensity, $I/I_0$")

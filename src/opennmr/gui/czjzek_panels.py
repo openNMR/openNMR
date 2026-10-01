@@ -19,7 +19,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QMessageBox,
-    QPushButton, QSpinBox, QTableWidgetItem, QVBoxLayout, QWidget,
+    QProgressDialog, QPushButton, QSpinBox, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core import registry as core_registry
@@ -32,8 +32,12 @@ from . import panel_state
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .widgets.field_input import link_field
 
-#: Rough seconds per grid point when every lineshape is simulated.
-_SIMULATED_SECONDS = {"static": 0.005, "mas": 0.15}
+#: Ask before a library build expected to take longer than this (s).
+_ASK_ABOVE_SECONDS = 8.0
+
+#: Simulate's starting grid (explicit user request, 2026-10-01: a 12 x 4
+#: grid takes seconds where a finite-MAS 32 x 10 took many minutes).
+SIM_GRID_DEFAULT = (12, 4)
 
 _LAYOUTS = (("Spectrum to the right", "right"), ("Spectrum above", "top"))
 
@@ -62,26 +66,114 @@ def describe_distribution(sigma, d=5.0, cq0=0.0, eta0=0.0) -> str:
     return text
 
 
-def _slow_warning(parent, settings, sigma, d, n_cq, n_eta, stages=2, cq0=0.0, eta0=0.0) -> bool:
-    """True to go ahead. Asks first when every grid lineshape would have
-    to be simulated (satellites, 'exact', or slow MAS) and that would take
-    more than a few seconds."""
+def _format_duration(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.0f} s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
+
+
+def library_estimate(settings, sigma, d, n_cq, n_eta, cq0=0.0, eta0=0.0, ppm_axis=None) -> dict:
+    """:func:`opennmr.notebook.czjzek.estimate_library_seconds` for these
+    settings -- one lineshape timed on this computer, times the grid."""
+    cq_max = cz.czjzek_cq_quantile(0.9999, sigma, d, cq0, eta0) * (1.1 if cq0 > 0 else 1.0)
     cq_check = cz.czjzek_cq_quantile(0.99, sigma, d, cq0, eta0)
-    method, reason = cz.choose_library_method(settings["I"], settings["order"],
-                                              settings["transitions"], settings["mas_Hz"],
-                                              settings["larmor_Hz"], cq_check)
-    if method == "scaling":
+    if ppm_axis is None:
+        lo, hi = sorted(settings.get("ppm", (-150.0, 150.0)))
+        ppm_axis = np.linspace(lo, hi, 8192)
+    return cz.estimate_library_seconds(
+        settings["I"], settings["larmor_Hz"], ppm_axis, cq_max, cq_check, n_cq=n_cq, n_eta=n_eta,
+        mas_Hz=settings["mas_Hz"], order=settings["order"], transitions=settings["transitions"],
+        n_zcw=settings.get("n_zcw") or 4181)
+
+
+def _slow_warning(parent, settings, sigma, d, n_cq, n_eta, stages=2, cq0=0.0, eta0=0.0,
+                  ppm_axis=None) -> bool:
+    """True to go ahead. When every grid lineshape has to be simulated
+    (satellites, 'exact', or slow MAS), times one of them on this
+    computer and asks first if the whole grid would take more than a few
+    seconds -- an estimate that is measured, not assumed (the fixed table
+    it replaces said "1 minute" for a build that took ten)."""
+    try:
+        est = library_estimate(settings, sigma, d, n_cq, n_eta, cq0, eta0, ppm_axis)
+    except Exception:  # noqa: BLE001 -- an estimate must never stop a simulation
         return True
-    per = _SIMULATED_SECONDS["mas" if settings["mas_Hz"] else "static"]
-    seconds = per * n_cq * n_eta * stages
-    if seconds < 10:
+    seconds = est["seconds"] * stages
+    if est["method"] == "scaling" or seconds < _ASK_ABOVE_SECONDS:
         return True
+    faster = max(1, int(round(est["cells"] * _ASK_ABOVE_SECONDS / max(seconds, 1e-9))))
     answer = QMessageBox.question(
         parent, "This will be slow",
-        f"Every lineshape of the {n_cq} × {n_eta} grid has to be simulated: {reason}.\n\n"
-        f"Expect roughly {seconds / 60:.0f} minute(s). Go ahead? (A coarser grid, or the "
-        "central transition alone, is faster.)")
+        f"Every lineshape of the {n_cq} × {n_eta} grid has to be simulated: {est['reason']}.\n\n"
+        f"One lineshape takes {est['per_cell']:.2f} s on this computer, so the {est['cells']} "
+        f"lineshapes{' (twice: the fit refines its grid)' if stages > 1 else ''} take about "
+        f"{_format_duration(seconds)}. You can stop it part-way.\n\n"
+        f"Go ahead? (A grid of about {faster} cells, or a static/central-transition "
+        f"simulation, is quicker.)")
     return answer == QMessageBox.StandardButton.Yes
+
+
+class LibraryProgress:
+    """A Stop-able progress dialog for a lineshape-library build, as the
+    ``progress(done, total)`` callback the notebook functions take. Keeps
+    the window responsive while the lineshapes are simulated (the build
+    runs on the GUI thread; a frozen window is what Windows reports as
+    "not responding" and offers to close)."""
+
+    def __init__(self, parent, title: str) -> None:
+        self._parent, self._title = parent, title
+        self._dialog = None
+        self._started = time.perf_counter()
+        self.cancelled = False
+
+    def __call__(self, done: int, total: int) -> bool:
+        if self._dialog is None:
+            if time.perf_counter() - self._started < 0.4 or done >= total:
+                return True
+            self._dialog = QProgressDialog(f"{self._title}: simulating lineshapes…", "Stop", 0,
+                                           int(total), self._parent)
+            self._dialog.setWindowTitle(self._title)
+            self._dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self._dialog.setMinimumDuration(0)
+        self._dialog.setMaximum(int(total))
+        self._dialog.setValue(int(done))
+        elapsed = time.perf_counter() - self._started
+        if done:
+            left = elapsed / done * (total - done)
+            self._dialog.setLabelText(f"{self._title}: lineshape {done} of {total}, about "
+                                      f"{_format_duration(left)} left")
+        QApplication.processEvents()
+        if self._dialog.wasCanceled():
+            self.cancelled = True
+            return False
+        return True
+
+    def close(self) -> None:
+        if self._dialog is not None:
+            self._dialog.reset()
+            self._dialog.close()
+            self._dialog.deleteLater()
+            self._dialog = None
+
+
+def citation_html(extended: bool) -> str:
+    """The models' references, as a small linked paragraph."""
+    refs = []
+    for text in cz.citations(extended):
+        doi = text.rsplit("doi:", 1)[-1]
+        refs.append(text.replace(f"doi:{doi}", f'<a href="https://doi.org/{doi}">doi:{doi}</a>'))
+    lead = "Extended Czjzek model" if extended else "Czjzek model"
+    return f"<small>{lead}: " + "; ".join(refs) + ".</small>"
+
+
+def _citation_label() -> QLabel:
+    label = QLabel("")
+    label.setWordWrap(True)
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setOpenExternalLinks(True)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+    return label
 
 
 class CzjzekFitPanel(QuadrupolarFitPanel):
@@ -215,6 +307,10 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
 
     def _on_model_changed(self) -> None:
         self._sync_controls()
+        if not hasattr(self, "citation_label"):
+            self.citation_label = _citation_label()
+            self.layout().addWidget(self.citation_label)
+        self.citation_label.setText(citation_html(self.model() == "extended"))
         if self.model() == "extended":
             # d is 5 in the extended model: put it back and hold it.
             for row in range(self.sites_table.rowCount()):
@@ -344,6 +440,7 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
                              cq0=widest.get("CQ0", 0.0), eta0=widest.get("eta0", 0.0)):
             return
         regions = self.fit_regions()
+        progress = LibraryProgress(self, "Czjzek fit")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         started = time.perf_counter()
         try:
@@ -352,13 +449,18 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
                 larmor_Hz=settings["larmor_Hz"], mas_Hz=settings["mas_Hz"],
                 order=settings["order"], transitions=settings["transitions"],
                 lineshape=settings["lineshape"], n_zcw=settings["n_zcw"] or 4181,
-                fit_baseline=settings["fit_baseline"], n_cq=n_cq, n_eta=n_eta)
+                fit_baseline=settings["fit_baseline"], n_cq=n_cq, n_eta=n_eta,
+                progress=progress)
             x = np.sort(np.asarray(results["x_ppm"], dtype=float))
             y_fit, components = cz.evaluate_czjzek_fit(x, popt, info)
+        except cz.SimulationCancelled:
+            QMessageBox.information(self, "Czjzek fit", "Fit stopped. A coarser grid is quicker.")
+            return
         except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
             QMessageBox.warning(self, "Czjzek fit", f"The fit did not succeed:\n\n{exc}")
             return
         finally:
+            progress.close()
             QApplication.restoreOverrideCursor()
         elapsed = time.perf_counter() - started
         self._library = info.pop("library")
@@ -559,9 +661,12 @@ class CzjzekSimPanel(QWidget):
     shows a ``draw(figure)`` on the Simulation plot; ``add_to_open(spectrum,
     label)`` adds the simulated spectrum to Open experiments."""
 
-    def __init__(self, draw, add_to_open=None, parent=None, send_to_fit=None) -> None:
+    def __init__(self, draw, add_to_open=None, parent=None, send_to_fit=None, style=None) -> None:
         super().__init__(parent)
         self._draw = draw
+        #: The Simulation plot's Plot Style, read as the map is drawn
+        #: (text size, the map colour scale).
+        self._style = style or (lambda: {})
         self._add_to_open = add_to_open
         self._send_to_fit = send_to_fit
         self.result: dict | None = None
@@ -650,12 +755,16 @@ class CzjzekSimPanel(QWidget):
         g = QHBoxLayout(grid)
         g.setContentsMargins(0, 0, 0, 0)
         self.grid_cq_spin, self.grid_eta_spin = QSpinBox(), QSpinBox()
-        for spin, lo, hi, value, text in ((self.grid_cq_spin, 8, 400, 64, "CQ cells"),
-                                          (self.grid_eta_spin, 4, 100, 20, "ηQ cells")):
+        for spin, lo, hi, value, text in ((self.grid_cq_spin, 4, 400, SIM_GRID_DEFAULT[0], "CQ cells"),
+                                          (self.grid_eta_spin, 2, 100, SIM_GRID_DEFAULT[1], "ηQ cells")):
             spin.setRange(lo, hi)
             spin.setValue(value)
             spin.setSuffix(f" {text}")
             g.addWidget(spin)
+        grid.setToolTip(
+            "The (C_Q, η_Q) grid the distribution is summed over. Coarse is quick; raise it for "
+            "a smoother spectrum. A static (or fast-MAS) central transition is fast at any size; "
+            "otherwise every cell is a full simulation, timed before it starts.")
         form.addRow("Grid:", grid)
         self.layout_combo = QComboBox()
         for text, data in _LAYOUTS:
@@ -683,6 +792,8 @@ class CzjzekSimPanel(QWidget):
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)
+        self.citation_label = _citation_label()
+        v.addWidget(self.citation_label)
         v.addStretch(1)
         self._sync()
 
@@ -707,6 +818,8 @@ class CzjzekSimPanel(QWidget):
         if extended:
             self.d_spin.setValue(5.0)
         self.d_spin.setEnabled(not extended)
+        if hasattr(self, "citation_label"):
+            self.citation_label.setText(citation_html(extended))
         self._describe()
 
     def _mean_efg(self):
@@ -784,21 +897,26 @@ class CzjzekSimPanel(QWidget):
         if hi - lo <= 0:
             QMessageBox.warning(self, "Czjzek simulation", "The axis range is empty.")
             return None
-        if not _slow_warning(self, s, s["sigma"], s["d"], s["n_cq"], s["n_eta"], stages=1,
-                             cq0=s["cq0"], eta0=s["eta0"]):
-            return None
         x = np.linspace(hi, lo, 8192)
+        if not _slow_warning(self, s, s["sigma"], s["d"], s["n_cq"], s["n_eta"], stages=1,
+                             cq0=s["cq0"], eta0=s["eta0"], ppm_axis=x - s["delta_iso"]):
+            return None
+        progress = LibraryProgress(self, "Czjzek simulation")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             sim = cz.czjzek_spectrum(s["I"], s["sigma"], s["larmor_Hz"], x, d=s["d"],
                                      delta_iso=s["delta_iso"], fwhm=s["fwhm"], mas_Hz=s["mas_Hz"],
                                      order=s["order"], transitions=s["transitions"],
                                      n_cq=s["n_cq"], n_eta=s["n_eta"], cq0_MHz=s["cq0"],
-                                     eta0=s["eta0"])
+                                     eta0=s["eta0"], progress=progress)
+        except cz.SimulationCancelled:
+            self.results_label.setText("Simulation stopped. A coarser grid is quicker.")
+            return None
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user
             QMessageBox.warning(self, "Czjzek simulation", str(exc))
             return None
         finally:
+            progress.close()
             QApplication.restoreOverrideCursor()
         sim["settings"] = s
         self.result = sim
@@ -815,11 +933,22 @@ class CzjzekSimPanel(QWidget):
         except Exception:  # noqa: BLE001 -- a label must not sink a plot
             xlabel = None
         layout = self.layout_combo.currentData()
-        self._draw(lambda figure: cz.plot_czjzek_distribution(
-            {"sigma": s["sigma"], "d": s["d"], "CQ0": s["cq0"], "eta0": s["eta0"]},
-            spectrum={"x": sim["x_ppm"], "y": sim["normalised_real_spec"], "xlabel": xlabel},
-            layout=layout, figure=figure))
+
+        def draw(figure):
+            look = self._style() or {}
+            cz.plot_czjzek_distribution(
+                {"sigma": s["sigma"], "d": s["d"], "CQ0": s["cq0"], "eta0": s["eta0"]},
+                spectrum={"x": sim["x_ppm"], "y": sim["normalised_real_spec"], "xlabel": xlabel},
+                layout=layout, figure=figure, cmap=look.get("map_colormap") or "viridis",
+                fontsize=float(look.get("labelsize") or 12.0))
+        self._draw(draw)
         return sim
+
+    def larmor_mhz(self) -> float | None:
+        """The spectrometer frequency the simulation uses (MHz), for
+        Measure's Hz on the spectrum panel."""
+        value = self.larmor_spin.value()
+        return value if value > 0 else None
 
     def export(self) -> None:
         spectrum = self.make_spectrum()

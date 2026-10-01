@@ -714,8 +714,20 @@ class PnmrSimulationPanel(QWidget):
         if self._distances is None:
             return
         self._show_simulation_view()
-        fig = self._canvas.figure
+        # Shown as an external plot on the Simulation canvas: Plot Style,
+        # right-click, zoom and Measure, and each species a series whose
+        # name and colour Plot Style can change (explicit user request,
+        # 2026-10-01 -- only the final spectrum had them).
+        if hasattr(self._canvas, "show_external_plot"):
+            self._canvas.show_external_plot(self._draw_histogram_into, kind="curve")
+        else:
+            self._draw_histogram_into(self._canvas.figure)
+            self._canvas.draw()
+
+    def _draw_histogram_into(self, fig) -> None:
         fig.clear()
+        style = self._canvas.style_settings() if hasattr(self._canvas, "style_settings") else {}
+        fontsize = float(style.get("labelsize") or 10.0)
         ax = fig.add_subplot(111)
         table = self._distances
         n_sites = max(self._n_interest_sites, 1)
@@ -741,18 +753,17 @@ class PnmrSimulationPanel(QWidget):
         for k, (name, lo, hi) in enumerate(bins):
             ax.axvspan(lo, hi, color="0.5", alpha=0.10 if k % 2 == 0 else 0.18, lw=0)
             ax.text(0.5 * (lo + min(hi, max_r)), top * 0.97, name, ha="center", va="top",
-                    fontsize=9)
+                    fontsize=fontsize * 0.8)
         ax.set_xlim(0.0, max_r)
         ax.set_xlabel(f"Distance from {self.atom_of_interest()} (Å)")
         ax.set_ylabel(f"Neighbours per site (per {_HIST_BIN:g} Å)")
         ax.set_title(f"{os.path.basename(self.cif_path or '')}: neighbours of "
-                     f"{self.atom_of_interest()}", fontsize=10)
+                     f"{self.atom_of_interest()}", fontsize=fontsize)
         if species:
-            ax.legend(frameon=False, fontsize=9)
+            ax.legend(frameon=False, fontsize=fontsize * 0.9)
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
         fig.tight_layout()
-        self._canvas.draw()
 
     # ------------------------------------------------------------------
     # 4. Spectrum

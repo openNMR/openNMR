@@ -285,7 +285,7 @@ class Session:
         sfo1 = meta.sfo1_indirect if indirect else meta.sfo1
         if not nucleus or not sfo1:
             return None
-        result = find_gamma(nucleus, field="100", SFO1=sfo1)
+        result = find_gamma(nucleus, field="100", SFO1=sfo1, quiet=True)
         return result["Nuclide"] if result else None
 
     def label(self, index: int) -> str:

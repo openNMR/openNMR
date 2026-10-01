@@ -22,12 +22,15 @@ class TensorViewControls(QGroupBox):
     """``site(): (Site, larmor_Hz or None, order)`` -- the site the panel
     would simulate now (raises ValueError with a message if its inputs
     are incomplete); ``draw(draw_fn)`` -- show ``draw_fn(figure)`` on the
-    Simulation plot."""
+    Simulation plot; ``style()`` -- that plot's Plot Style settings, read
+    as the picture is drawn (text size; ``map_colormap``, the surface's
+    colour scale), so a style change redraws it in the new style."""
 
-    def __init__(self, site, draw, parent=None) -> None:
+    def __init__(self, site, draw, parent=None, style=None) -> None:
         super().__init__("Tensor picture (3D)", parent)
         self._site = site
         self._draw = draw
+        self._style = style or (lambda: {})
         self.notes = []
 
         v = QVBoxLayout(self)
@@ -92,8 +95,13 @@ class TensorViewControls(QGroupBox):
             holder = {}
 
             def draw(figure):
+                look = self._style() or {}
+                extra = dict(kwargs)
+                if style == "surface" and look.get("map_colormap"):
+                    extra["cmap"] = look["map_colormap"]
                 holder["notes"] = tv.plot_tensors(site, larmor_hz, style=style, figure=figure,
-                                                  fontsize=11.0, **kwargs)[1]
+                                                  fontsize=float(look.get("labelsize") or 11.0),
+                                                  **extra)[1]
             self._draw(draw)
         except (ValueError, KeyError) as exc:
             self.notes_label.setText(f"Cannot draw: {exc}")

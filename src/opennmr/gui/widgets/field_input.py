@@ -43,7 +43,7 @@ def gamma_hz_per_t(nucleus: str) -> float | None:
     if not text:
         return None
     try:
-        gamma = find_gamma(text).get("gamma")
+        gamma = (find_gamma(text, quiet=True) or {}).get("gamma")
     except Exception:  # noqa: BLE001 -- an unrecognised name is simply unknown
         return None
     return abs(float(gamma)) if gamma else None

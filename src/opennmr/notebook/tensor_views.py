@@ -208,11 +208,15 @@ def _draw_axes_lines(ax, axes, lengths, names, colours, linestyle="-", fontsize=
 
 def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
                         relative_to="zero", figure=None, fontsize=12.0, n_theta=73, n_phi=145,
-                        show_axes=True, show_j=True):
+                        show_axes=True, show_j=True, cmap=None):
     """The frequency surface of one transition (see the module
     docstring): radius |frequency| in each direction of B0, coloured by
     the signed frequency (ppm) with a colour bar. Principal axes of the
     CSA (solid) and EFG (dashed) are drawn through the origin.
+
+    ``cmap`` : the colour scale (any matplotlib name); default a
+    diverging ``RdBu_r`` centred on zero for a surface of both signs,
+    ``viridis`` otherwise.
 
     Returns ``(figure, notes)`` -- ``notes`` a list of plain-language
     remarks (what is drawn, J, signs)."""
@@ -230,7 +234,7 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
     signed = vmin < 0 < vmax or relative_to == "iso"
     if signed:
         lim = max(abs(vmin), abs(vmax)) or 1.0
-        norm, cmap = colors.TwoSlopeNorm(0.0, -lim, lim), plt.get_cmap("RdBu_r")
+        norm, cmap = colors.TwoSlopeNorm(0.0, -lim, lim), plt.get_cmap(cmap or "RdBu_r")
     else:
         if vmax - vmin <= 1e-6 * max(abs(vmax), 1.0):
             # One value everywhere (isotropic): a readable colour bar
@@ -238,7 +242,7 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
             pad = max(1.0, 0.01 * abs(vmax))
             vmin, vmax = vmin - pad, vmax + pad
         norm = colors.Normalize(vmin, vmax)
-        cmap = plt.get_cmap("viridis")
+        cmap = plt.get_cmap(cmap or "viridis")
     figure, ax = _new_3d_axes(figure)
     ax.plot_surface(x, y, z, facecolors=cmap(norm(value)), rstride=1, cstride=1, linewidth=0,
                     antialiased=True, shade=False)

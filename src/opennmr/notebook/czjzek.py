@@ -191,7 +191,8 @@ def czjzek_statistics(sigma, d=5.0, I=None, larmor_Hz=None, n_cq=600, n_eta=200,
 #
 # Le Caer & Brand (J. Phys.: Condens. Matter 10, 10715 (1998)); in NMR,
 # d'Espinose de Lacaillerie et al. (2008) and Vasconcelos et al.
-# (J. Chem. Phys. 139, 084506 (2013)). The EFG tensor is
+# (J. Phys.: Condens. Matter 25, 255402 (2013) -- not J. Chem. Phys., as
+# this note said until 2026-10-01). The EFG tensor is
 #
 #     V = V0 + sum_i U_i S_i,   U_i ~ N(0, 3 sigma^2 / 2), i = 1..5,
 #
@@ -214,6 +215,31 @@ _EFG_BASIS = np.array([
 
 #: Samples of the extended distribution (2^16: a spectrum's weights).
 N_SAMPLES = 2 ** 16
+
+#: The papers behind the two models, as the GUI and every log cite them
+#: (explicit user request, 2026-10-01: cite the original papers).
+CITATIONS = {
+    "czjzek": ("G. Czjzek, J. Fink, F. Götz, H. Schmidt, J. M. D. Coey, J.-P. Rebouillat and "
+               "A. Liénard, Phys. Rev. B 23, 2513 (1981), doi:10.1103/PhysRevB.23.2513"),
+    "czjzek_nmr": ("J.-B. d'Espinose de Lacaillerie, C. Fretigny and D. Massiot, J. Magn. Reson. "
+                   "192, 244 (2008), doi:10.1016/j.jmr.2008.03.001"),
+    "extended": ("G. Le Caër and R. A. Brand, J. Phys.: Condens. Matter 10, 10715 (1998), "
+                 "doi:10.1088/0953-8984/10/47/020"),
+    "extended_nmr": ("F. Vasconcelos, S. Cristol, J.-F. Paul, L. Delevoye, F. Mauri, T. Charpentier "
+                     "and G. Le Caër, J. Phys.: Condens. Matter 25, 255402 (2013), "
+                     "doi:10.1088/0953-8984/25/25/255402"),
+}
+
+
+def citations(extended: bool = False) -> list[str]:
+    """The references for a Czjzek (``extended=False``) or extended
+    Czjzek simulation or fit: the model's origin, then its NMR form."""
+    keys = ("czjzek", "czjzek_nmr") + (("extended", "extended_nmr") if extended else ())
+    return [CITATIONS[k] for k in keys]
+
+
+class SimulationCancelled(RuntimeError):
+    """Raised when a ``progress`` callback asks to stop building a library."""
 _NORMAL_CACHE: dict = {}
 _SAMPLE_CACHE: dict = {}
 
@@ -388,7 +414,10 @@ class CzjzekLibrary:
 
     def __init__(self, I, larmor_Hz, x_lib, cq_max_MHz, n_cq=64, n_eta=20, mas_Hz=0.0,
                  order="second", transitions="ct", n_zcw=4181, rotor_angle="magic",
-                 method="auto", cq_check_MHz=None):
+                 method="auto", cq_check_MHz=None, progress=None):
+        """``progress(done, total)`` : called after every simulated
+        lineshape (or every η_Q row when scaling); returning False stops
+        the build with :class:`SimulationCancelled`."""
         started = time.perf_counter()
         self.I, self.larmor_Hz = float(I), float(larmor_Hz)
         self.x = np.asarray(x_lib, dtype=float)
@@ -409,6 +438,10 @@ class CzjzekLibrary:
             raise ValueError("method must be 'auto', 'scaling' or 'simulated'.")
         self.method = method
         L = np.zeros((len(self.eta), len(self.cq), self.x.size))
+        def report(done, total):
+            if progress is not None and progress(done, total) is False:
+                raise SimulationCancelled("Stopped before every lineshape was simulated.")
+
         if method == "scaling":
             for i, eta in enumerate(self.eta):
                 nu, wts = _ct_unit_positions(self.I, eta, self.larmor_Hz, self.mas_Hz, n_zcw,
@@ -417,6 +450,7 @@ class CzjzekLibrary:
                 norm = float(wts.sum()) * self.dx
                 for j, cq in enumerate(self.cq):
                     L[i, j] = _bin_sticks(self.x, ppm_unit * cq * cq, wts) / norm
+                report((i + 1) * len(self.cq), len(self.eta) * len(self.cq))
         else:
             rows = _select_transitions(self.I, transitions)
             table = quadrupolar_transition_table(self.I)
@@ -428,6 +462,7 @@ class CzjzekLibrary:
                         mas_Hz=self.mas_Hz, order=order, transitions=transitions,
                         delta_iso=0.0, fwhm=0.0, n_zcw=int(n_zcw), rotor_angle=rotor_angle)
                     L[i, j] = spec["real_spec"] / (expected * self.dx)
+                    report(i * len(self.cq) + j + 1, len(self.eta) * len(self.cq))
         self.L = L.reshape(len(self.eta) * len(self.cq), self.x.size)
         self.captured = self.L.sum(axis=1).reshape(len(self.eta), len(self.cq)) * self.dx
         self.n_zcw = int(n_zcw)
@@ -468,6 +503,38 @@ class CzjzekLibrary:
                 f"({self.reason}); built in {self.build_seconds:.2f} s")
 
 
+def estimate_library_seconds(I, larmor_Hz, ppm_axis, cq_max_MHz, cq_check_MHz, n_cq=64,
+                             n_eta=20, mas_Hz=0.0, order="second", transitions="ct",
+                             n_zcw=4181, rotor_angle="magic", method="auto"):
+    """How long building a :class:`CzjzekLibrary` will take, *measured
+    on this computer*: one lineshape is simulated at a representative
+    C_Q and timed, then multiplied by the grid. Replaces a fixed
+    seconds-per-cell table that was out by 10x and more (user report,
+    2026-10-01: "told 1 minute ... crashed after about 10 mins").
+
+    Returns ``{"method", "reason", "per_cell", "seconds", "cells"}``;
+    ``seconds`` is ~0 for the "scaling" method, which simulates nothing
+    per cell."""
+    I = float(I)
+    cells = int(n_cq) * int(n_eta)
+    if method == "auto":
+        method, reason = choose_library_method(I, order, transitions, mas_Hz, larmor_Hz,
+                                               float(cq_check_MHz or cq_max_MHz))
+    else:
+        reason = "chosen explicitly"
+    if method == "scaling":
+        return {"method": method, "reason": reason, "per_cell": 0.0, "seconds": 0.0,
+                "cells": cells}
+    x = np.sort(np.asarray(ppm_axis, dtype=float))
+    started = time.perf_counter()
+    quadrupolar_spectrum(I, 0.6 * float(cq_max_MHz) * 1e6, 0.5, float(larmor_Hz), x,
+                         mas_Hz=float(mas_Hz or 0.0), order=order, transitions=transitions,
+                         delta_iso=0.0, fwhm=0.0, n_zcw=int(n_zcw), rotor_angle=rotor_angle)
+    per = time.perf_counter() - started
+    return {"method": method, "reason": reason, "per_cell": per, "seconds": per * cells,
+            "cells": cells}
+
+
 # ============================================================
 # Simulation
 # ============================================================
@@ -486,7 +553,7 @@ def _resolve_spin(I, nucleus):
 def czjzek_spectrum(I, sigma_MHz, larmor_Hz, ppm_axis, d=5.0, delta_iso=0.0, fwhm=1.0,
                     lineshape="gaussian", eta=0.0, mas_Hz=0.0, order="second", transitions=None,
                     n_cq=64, n_eta=20, cq_max_MHz=None, n_zcw=4181, rotor_angle="magic",
-                    method="auto", nucleus=None, cq0_MHz=0.0, eta0=0.0):
+                    method="auto", nucleus=None, cq0_MHz=0.0, eta0=0.0, progress=None):
     """
     The powder spectrum of a Czjzek-distributed site.
 
@@ -500,6 +567,8 @@ def czjzek_spectrum(I, sigma_MHz, larmor_Hz, ppm_axis, d=5.0, delta_iso=0.0, fwh
     ----------
     I : spin (or None with ``nucleus``). sigma_MHz : the distribution width
     (C_Q units). larmor_Hz : nu0. ppm_axis : evenly spaced, either direction.
+    progress : ``progress(done, total)`` while lineshapes are built
+    (see :class:`CzjzekLibrary`); return False to stop.
     d : 5 for Czjzek. delta_iso, fwhm (ppm) : isotropic shift and its
     distribution (broadening; Gaussian unless ``lineshape`` says otherwise).
     mas_Hz : 0 for static. order, transitions : as quadrupolar_spectrum
@@ -529,7 +598,8 @@ def czjzek_spectrum(I, sigma_MHz, larmor_Hz, ppm_axis, d=5.0, delta_iso=0.0, fwh
     lib = CzjzekLibrary(I, larmor_Hz, xs - float(delta_iso), cq_max_MHz, n_cq=n_cq, n_eta=n_eta,
                         mas_Hz=mas_Hz, order=order, transitions=transitions, n_zcw=n_zcw,
                         rotor_angle=rotor_angle, method=method,
-                        cq_check_MHz=czjzek_cq_quantile(0.99, sigma_MHz, d, cq0, eta0))
+                        cq_check_MHz=czjzek_cq_quantile(0.99, sigma_MHz, d, cq0, eta0),
+                        progress=progress)
     spec_sorted = lib.spectrum(sigma_MHz, d, fwhm, lineshape, eta, cq0, eta0)
     spec = np.empty_like(spec_sorted)
     spec[order_idx] = spec_sorted
@@ -543,13 +613,14 @@ def czjzek_spectrum(I, sigma_MHz, larmor_Hz, ppm_axis, d=5.0, delta_iso=0.0, fwh
     log = (f"Czjzek simulation: I = {I:g}, ν0 = {larmor_Hz / 1e6:.6g} MHz, {model}, "
            f"δiso = {delta_iso:g} ppm, FWHM {fwhm:g} ppm ({lineshape}); "
            f"⟨C_Q⟩ = {stats['mean_CQ']:.3g} MHz, ⟨η_Q⟩ = {stats['mean_eta']:.3f}; "
-           + lib.describe() + f"; {100 * captured:.2f} % of the distribution drawn.")
+           + lib.describe() + f"; {100 * captured:.2f} % of the distribution drawn. "
+           + "Model: " + "; ".join(citations(extended)) + ".")
     return {"x_ppm": x, "real_spec": spec, "normalised_real_spec": spec / peak if peak else spec,
             "sigma": float(sigma_MHz), "d": float(d), "delta_iso": float(delta_iso),
             "cq0": cq0, "eta0": eta0, "extended": extended,
             "cq": lib.cq, "eta": lib.eta, "cq_edges": lib.cq_edges, "eta_edges": lib.eta_edges,
             "weights": w / w.sum() if w.sum() else w, "captured": captured, "stats": stats,
-            "method": lib.method, "log": log}
+            "method": lib.method, "log": log, "citations": citations(extended)}
 
 
 # ============================================================
@@ -654,9 +725,11 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
                         order="second", transitions=None, rotor_angle="magic", n_zcw=4181,
                         lineshape="gaussian", fit_regions=None, baseline_regions=None,
                         bounds=None, fixed=None, fit_baseline=False, n_cq=64, n_eta=20,
-                        cq_max_MHz=None, method="auto", refine_grid=True):
+                        cq_max_MHz=None, method="auto", refine_grid=True, progress=None):
     """
     Fit one or more Czjzek-distributed quadrupolar sites to a 1D spectrum.
+    ``progress(done, total)`` is called while each lineshape library is
+    built (see :class:`CzjzekLibrary`); returning False stops the fit.
 
     ``p0`` : dict or list of dicts ``{"d_iso": ppm, "sigma": MHz, "fwhm": ppm,
     ["d"]: 5, ["amplitude"], ["eta"] (L fraction), ["label"], ["fixed"],
@@ -792,7 +865,8 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
         x_lib = np.linspace(lo, hi, n)
         return CzjzekLibrary(I, larmor_Hz, x_lib, cq_max, n_cq=n_cq, n_eta=n_eta, mas_Hz=mas_Hz,
                              order=order, transitions=transitions, n_zcw=n_zcw,
-                             rotor_angle=rotor_angle, method=method, cq_check_MHz=cq_check)
+                             rotor_angle=rotor_angle, method=method, cq_check_MHz=cq_check,
+                             progress=progress)
 
     def run(library, start):
         def model(_x, *free):
@@ -889,8 +963,10 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
         log += (f" Extended Czjzek for {', '.join(l for l, e in zip(labels, extended) if e)}: "
                 f"mean EFG (C_Q0, η_Q0) plus a random part of width σ, sampled "
                 f"({N_SAMPLES} fixed quasi-random samples).")
+    log += " Model: " + "; ".join(citations(any(extended))) + "."
     fit_info = {"labels": labels, "n_sites": n_sites, "x_ref": x_ref, "library": library,
                 "extended": [bool(e) for e in extended],
+                "citations": citations(any(extended)),
                 "lineshape": lineshape, "stats": stats, "warnings": warnings, "log": log,
                 "fit_regions": (None if fit_regions is None else
                                 [(float(min(a, b)), float(max(a, b))) for a, b in fit_regions]),

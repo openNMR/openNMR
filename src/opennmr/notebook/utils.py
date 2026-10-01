@@ -158,7 +158,7 @@ _GAMMA_TABLE = [
 _GAMMA_DF = pd.DataFrame(_GAMMA_TABLE[1:], columns=_GAMMA_TABLE[0])
 
 
-def find_gamma(isotope, field='', SFO1=''):
+def find_gamma(isotope, field='', SFO1='', quiet=False):
     """
     results = find_gamma(isotope, field='', SFO1='')
 
@@ -176,9 +176,15 @@ def find_gamma(isotope, field='', SFO1=''):
         Transmitter frequency. Read from Bruker input as
         SFO1 = results['SFO1'].
 
+    quiet : bool
+        Return None for an unrecognised isotope without saying so -- for
+        a caller that is only asking whether a string is a nucleus (the
+        GUI's input checks), which reports the problem itself.
+
     Returns
     -------
-    dict with keys 'Nuclide' and 'gamma' (in Hz/T).
+    dict with keys 'Nuclide' and 'gamma' (in Hz/T), or None for an
+    unrecognised isotope.
     """
 
     df = _GAMMA_DF
@@ -187,11 +193,16 @@ def find_gamma(isotope, field='', SFO1=''):
         gamma = df.loc[df['Nuclide'] == isotope, "Gyromagnetic Ratio (MHz/T)"]
         gamma = float(gamma.iloc[0]) * 1e6
     else:
-        print(
-            "Isotope string not recognised, please input a string of "
-            "format e.g., '1H' or '27Al' and ensure it is an NMR active "
-            "nuclide."
-        )
+        # A warning naming the string (once per string and caller, by
+        # Python's own warning filter), not a bare print on every call:
+        # the GUI checks typed text with this, and printed the same
+        # anonymous line into the console on every simulation.
+        if not quiet:
+            import warnings
+            warnings.warn(
+                f"Isotope string {isotope!r} not recognised, please input a string of "
+                "format e.g., '1H' or '27Al' and ensure it is an NMR active nuclide.",
+                stacklevel=2)
         return
 
     if field == '100':

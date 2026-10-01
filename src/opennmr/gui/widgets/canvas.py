@@ -12,11 +12,16 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 
 import numpy as np
 import dataclasses
 
+import matplotlib.collections
 import matplotlib.colors
+import matplotlib.container
+import matplotlib.lines
+import matplotlib.patches
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
@@ -663,6 +668,11 @@ class MplCanvas(QWidget):
     _AXIS_LABELSIZE = 16
     _TICK_LENGTH = 5.5
     _TICK_WIDTH = 1.75
+    #: Which side of the axis line the ticks are drawn on: "in", "out"
+    #: or "inout" (across it) -- matplotlib's own names. Global Plot
+    #: Style option (explicit user request, 2026-10-01).
+    _TICK_DIRECTION = "in"
+    TICK_DIRECTIONS = (("In", "in"), ("Out", "out"), ("In and out", "inout"))
 
     #: Default **export** figure size, inches. Not applied to the live
     #: embedded figure at any point -- see :meth:`set_export_settings`
@@ -1023,6 +1033,16 @@ class MplCanvas(QWidget):
         self._trace_label_artists: list = []
         #: True while the figure is one drawn by show_external_plot.
         self._external_plot = False
+        #: What show_external_plot was last given -- ``{"draw", "kind",
+        #: "hz_per_ppm"}`` -- so a style change can redraw it (a colour
+        #: map or a font size lives on artists only the draw makes).
+        self._external_draw: dict | None = None
+        #: Series colours on an external plot come from the figure's own
+        #: draw until the series colour map is changed (or a colour set).
+        self._external_palette = False
+        #: The colour scale for maps and surfaces (tensor pictures, a
+        #: Czjzek distribution); None = each plot's own default.
+        self._map_colormap: str | None = None
         # --- Title -------------------------------------------------
         # Off by default, on request. Several views set a title as
         # they draw (a slice number, a DOSY's own caption); this hides
@@ -1054,6 +1074,7 @@ class MplCanvas(QWidget):
         self._AXIS_LABELSIZE = type(self)._AXIS_LABELSIZE
         self._TICK_LENGTH = type(self)._TICK_LENGTH
         self._TICK_WIDTH = type(self)._TICK_WIDTH
+        self._TICK_DIRECTION = type(self)._TICK_DIRECTION
         self._grid_visible = False
         self._minor_ticks_visible = True
         #: Top/right spines on a "curve" plot (relaxation/diffusion
@@ -1648,6 +1669,10 @@ class MplCanvas(QWidget):
         of its F1/F2 projection panels adjusts that panel's own
         intensity scale independently, rather than any of the above."""
         if event.x is None or event.y is None:
+            return
+        # A 3D picture (Simulate's tensor views) rotates on drag and has
+        # no axis strips; a scroll there means nothing here.
+        if event.inaxes is not None and getattr(event.inaxes, "name", "") == "3d":
             return
 
         # The extracted-slice panel is in _proj_axes too, but it is not
@@ -2499,7 +2524,7 @@ class MplCanvas(QWidget):
             raw = meta.nucleus_indirect or (meta.nucleus if meta.homonuclear else None)
             sfo1 = meta.sfo1_indirect if meta.nucleus_indirect else meta.sfo1
         try:
-            return find_gamma(raw, SFO1=sfo1)["Nuclide"]
+            return find_gamma(raw, SFO1=sfo1, quiet=True)["Nuclide"]
         except Exception:
             return raw
 
@@ -2725,6 +2750,13 @@ class MplCanvas(QWidget):
         whether that was enough. When it wasn't, :attr:`labelsClipped`
         tells the owner so a person can be told, rather than the
         figure silently rendering with its labels off the edge."""
+        # Tick direction is global (Plot Style), and every view ends
+        # here -- including those that set their own tick_params, such
+        # as the contour's projection strips -- so it is applied here,
+        # before the label fitting measures the figure.
+        for ax in self.figure.get_axes():
+            if getattr(ax, "name", "") != "3d":
+                ax.tick_params(which="both", direction=self._TICK_DIRECTION)
         result = plotting.fit_labels_within_figure(self.figure)
         clipped = result["clipped"] if not result["fitted"] else []
         # Only on a change: a phase drag relayouts continuously, and
@@ -2832,6 +2864,7 @@ class MplCanvas(QWidget):
         self._home_limits = None
         self._trace_label_artists = []
         self._external_plot = False
+        self._external_draw = None
         self._cancel_navigation_drag()
         self.figure.clear()
 
@@ -3611,6 +3644,7 @@ class MplCanvas(QWidget):
             "fontsize": self._AXIS_LABELSIZE,
             "tick_length": self._TICK_LENGTH,
             "tick_width": self._TICK_WIDTH,
+            "tick_dir": self._TICK_DIRECTION,
             "contour_linewidth": self._contour_linewidth,
         }
 
@@ -3622,10 +3656,20 @@ class MplCanvas(QWidget):
         ``_contour_style_kwargs`` covers what that function accepts,
         this covers the rest, spine linewidth and minor ticks)."""
         for ax in self.figure.get_axes():
+            if getattr(ax, "name", "") == "3d":
+                # A 3D picture (Simulate's tensor views) has no spines or
+                # minor ticks in the 2D sense; its text follows the style.
+                ax.tick_params(labelsize=self._AXIS_LABELSIZE * 0.8)
+                for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+                    axis.label.set_fontsize(self._AXIS_LABELSIZE)
+                    if self._font_family:
+                        axis.label.set_fontfamily(self._font_family)
+                continue
             for spine in ax.spines.values():
                 spine.set_linewidth(self._AXIS_LINEWIDTH)
             ax.tick_params(which="major", length=self._TICK_LENGTH,
                            width=self._TICK_WIDTH, labelsize=self._AXIS_LABELSIZE)
+            ax.tick_params(which="both", direction=self._TICK_DIRECTION)
             if self._minor_ticks_visible:
                 ax.minorticks_on()
                 ax.tick_params(which="minor", length=self._TICK_LENGTH * 0.5,
@@ -3637,6 +3681,14 @@ class MplCanvas(QWidget):
             if ax.get_title():
                 ax.title.set_fontsize(self._AXIS_LABELSIZE)
             self._apply_title_and_font(ax)
+        # A figure-level title (Simulate's Bloch and tensor pictures)
+        # follows the text size like an Axes title.
+        suptitle = getattr(self.figure, "_suptitle", None)
+        if suptitle is not None and suptitle.get_text():
+            suptitle.set_fontsize(self._AXIS_LABELSIZE)
+            suptitle.set_visible(self._title_visible)
+            if self._font_family:
+                suptitle.set_fontfamily(self._font_family)
         self._apply_curve_spines()
         self._restyle_existing_legends()
 
@@ -3647,6 +3699,13 @@ class MplCanvas(QWidget):
         manuscript; hidden, they go with it."""
         axes = [ax for ax in self._curve_axes if ax in self.figure.axes]
         for ax in axes:
+            if ax.yaxis.get_label_position() == "right":
+                # A twin y axis (the Bloch pulse's phase/frequency): its
+                # own axis *is* the right spine -- hiding it would leave
+                # its ticks floating. Only the top follows the setting.
+                ax.spines["top"].set_visible(self._top_spine_visible)
+                ax.tick_params(which="both", top=self._top_spine_visible)
+                continue
             ax.spines["top"].set_visible(self._top_spine_visible)
             ax.spines["right"].set_visible(self._right_spine_visible)
             ax.tick_params(which="both", top=self._top_spine_visible,
@@ -3862,7 +3921,7 @@ class MplCanvas(QWidget):
         best-effort label beats no plot at all.
         """
         try:
-            nuclide = find_gamma(spectrum.metadata.nucleus, SFO1=spectrum.metadata.sfo1)["Nuclide"]
+            nuclide = find_gamma(spectrum.metadata.nucleus, SFO1=spectrum.metadata.sfo1, quiet=True)["Nuclide"]
         except Exception:
             nuclide = spectrum.metadata.nucleus or "?"
         return NUC_label(nuclide, x_unit=x_unit, style=self._axis_label_style,
@@ -3955,6 +4014,8 @@ class MplCanvas(QWidget):
     #: One place deciding this, so `series()` and every draw path agree
     #: about what is on screen.
     def _active_series_view(self) -> str | None:
+        if self._external_plot and self._series.get("external"):
+            return "external"
         if self._dosy_overlay:
             return "dosy_overlay"
         if self._overlay_spectra:
@@ -4029,7 +4090,9 @@ class MplCanvas(QWidget):
         """Redraw whichever multi-series view is showing, preserving
         the view where that makes sense."""
         view = self._active_series_view()
-        if view == "dosy_overlay":
+        if view == "external":
+            self._redraw_external()
+        elif view == "dosy_overlay":
             self._draw_dosy(preserve_view=True)
         elif view == "overlay_2d":
             self.show_2d_overlay(self._overlay_spectra, self._overlay_labels, **self._overlay_kwargs)
@@ -4091,6 +4154,8 @@ class MplCanvas(QWidget):
             return
         for entry in self._series.get(view, []):
             entry.colour_overridden = False
+        if view == "external":
+            self._external_palette = False
         if view == "slices":
             for spec in self._contour_slices:
                 spec.pop("color", None)
@@ -4105,6 +4170,8 @@ class MplCanvas(QWidget):
         What a colour-map change calls: the palette supplies defaults,
         so changing it has to actually reach the plot rather than
         waiting for the next redraw to happen for some other reason."""
+        if self._active_series_view() == "external":
+            self._external_palette = True
         if self._active_series_view() is not None:
             self._redraw_active_series_view()
 
@@ -4123,6 +4190,8 @@ class MplCanvas(QWidget):
             "labelsize": self._AXIS_LABELSIZE,
             "tick_length": self._TICK_LENGTH,
             "tick_width": self._TICK_WIDTH,
+            "tick_direction": self._TICK_DIRECTION,
+            "map_colormap": self._map_colormap,
             "minor_ticks": self._minor_ticks_visible,
             "top_spine": self._top_spine_visible,
             "right_spine": self._right_spine_visible,
@@ -4149,7 +4218,7 @@ class MplCanvas(QWidget):
         }
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
-                  minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
+                  tick_direction=None, map_colormap=None, minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
                   trace_color=None, contour_linewidth=None, contour_clevels=None,
                   contour_level_mode=None, contour_power=None,
                   title_visible=None, font_family=None, axis_label_style=None,
@@ -4181,6 +4250,13 @@ class MplCanvas(QWidget):
             self._TICK_LENGTH = tick_length
         if tick_width is not None:
             self._TICK_WIDTH = tick_width
+        if tick_direction is not None:
+            if tick_direction not in ("in", "out", "inout"):
+                raise ValueError(f"tick_direction must be 'in', 'out' or 'inout', not {tick_direction!r}")
+            self._TICK_DIRECTION = tick_direction
+        if map_colormap is not None:
+            # "" from the combo is "each plot's own default".
+            self._map_colormap = map_colormap or None
         if minor_ticks is not None:
             self._minor_ticks_visible = minor_ticks
         # Curve plots only (see _curve_axes); applied below by
@@ -4272,6 +4348,14 @@ class MplCanvas(QWidget):
                                                self._BASELINE_GHOST_GID):
                         line.set_color(trace_color)
 
+        # A figure drawn by someone else (Simulate, Apply ▸ DNP) reads
+        # its colours and text sizes from style_settings() as it draws:
+        # those live on artists only the draw makes, so it is redrawn.
+        if self._external_plot and self._external_draw is not None and any(
+                value is not None for value in (labelsize, font_family, compare_colormap,
+                                                map_colormap, trace_color, linewidth)):
+            self._redraw_external()
+
         # Everything except grid/legend is the same "apply the current
         # style to every axes" the contour rebuild needs, so it lives in
         # one place rather than being written twice. Applying all of it
@@ -4321,7 +4405,8 @@ class MplCanvas(QWidget):
     #: set_style's keyword arguments, for filtering a saved style dict
     #: (which also carries export and bookkeeping keys) down to them.
     _STYLE_KEYS = (
-        "linewidth", "labelsize", "tick_length", "tick_width", "minor_ticks", "grid",
+        "linewidth", "labelsize", "tick_length", "tick_width", "tick_direction", "map_colormap",
+        "minor_ticks", "grid",
         "legend_loc", "compare_colormap", "trace_color", "contour_linewidth",
         "contour_clevels", "contour_level_mode", "contour_power", "title_visible",
         "font_family", "axis_label_style", "axis_label_template", "legend_frameon",
@@ -6601,7 +6686,8 @@ class MplCanvas(QWidget):
         self._apply_layout()
         self.canvas.draw_idle()
 
-    def show_external_plot(self, draw, kind: str | None = None) -> None:
+    def show_external_plot(self, draw, kind: str | None = None, hz_per_ppm: float | None = None,
+                           _keep_series: bool = False) -> None:
         """A figure drawn by a notebook plotting function -- ``draw(figure)``
         receives this canvas's own (cleared) figure -- so the GUI shows
         exactly the figure a notebook call produces, rather than a second
@@ -6619,7 +6705,22 @@ class MplCanvas(QWidget):
         View state is reset as for :meth:`show_parameter_trend`, so
         nothing from a previous spectrum/contour view survives; pick and
         region-select modes work on whatever Axes the click lands in, so
-        they work on these plots too."""
+        they work on these plots too.
+
+        ``hz_per_ppm`` : the spectrometer frequency (MHz) behind any ppm
+        axis on the figure, so Measure can quote Hz as well as ppm (an
+        axis is taken to be ppm, Hz or kHz from its label).
+
+        Every named trace becomes a series (Plot Style ▸ names and
+        colours): renamed or recoloured there, and coloured from the
+        series colour map once that is changed. A style change that only
+        the draw can apply (colours, text size, the map colour scale)
+        redraws the figure, keeping the zoom."""
+        # Not an external plot any more until this one is drawn: the
+        # plot-kind defaults applied just below call set_style, which
+        # would otherwise redraw the *previous* figure.
+        self._external_plot = False
+        self._external_draw = None
         self._contour_spectrum = None
         self._contour_factor = None
         self._proj_axes = {"f1": None, "f2": None}
@@ -6634,8 +6735,13 @@ class MplCanvas(QWidget):
         if kind is not None:
             self._enter_plot_kind(kind)
         self._clear_figure()
+        if not _keep_series:
+            self._series.pop("external", None)
+            self._external_palette = False
         draw(self.figure)
         self._external_plot = True
+        self._external_draw = {"draw": draw, "kind": kind, "hz_per_ppm": hz_per_ppm}
+        self._apply_external_series()
         for ax in self.figure.axes:
             if ax.get_legend() is not None:
                 ax.get_legend().set_visible(self._legend_visible)
@@ -6652,6 +6758,152 @@ class MplCanvas(QWidget):
         self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
+
+    def _redraw_external(self) -> None:
+        """Redraw the external plot on show with the current style,
+        keeping each 2D Axes' limits (the zoom) when the layout is the
+        same, and what it offers to keep."""
+        info = self._external_draw
+        if info is None or getattr(self, "_external_redrawing", False):
+            return
+        self._external_redrawing = True
+        try:
+            self._redraw_external_now(info)
+        finally:
+            self._external_redrawing = False
+
+    def _redraw_external_now(self, info: dict) -> None:
+        flat = [ax for ax in self.figure.axes if getattr(ax, "name", "") != "3d"]
+        limits = [(ax.get_xlim(), ax.get_ylim()) for ax in flat]
+        keep = self.simulation_spectrum
+        self.show_external_plot(info["draw"], kind=info["kind"], hz_per_ppm=info["hz_per_ppm"],
+                                _keep_series=True)
+        self.simulation_spectrum = keep
+        flat_now = [ax for ax in self.figure.axes if getattr(ax, "name", "") != "3d"]
+        if len(flat_now) == len(limits):
+            for ax, (xlim, ylim) in zip(flat_now, limits):
+                ax.set_xlim(xlim)
+                ax.set_ylim(ylim)
+            self.canvas.draw_idle()
+
+    @staticmethod
+    def _handle_colour(handle):
+        """The colour a legend handle is drawn in, as hex, or None."""
+        try:
+            if isinstance(handle, matplotlib.lines.Line2D):
+                return matplotlib.colors.to_hex(handle.get_color())
+            if isinstance(handle, matplotlib.container.Container):
+                patches = list(getattr(handle, "patches", None) or [])
+                if not patches:
+                    return None
+                handle = patches[0]
+            if isinstance(handle, matplotlib.patches.Patch):
+                return matplotlib.colors.to_hex(handle.get_facecolor())
+            if isinstance(handle, matplotlib.collections.Collection):
+                colours = handle.get_facecolor()
+                if len(colours) == 0:
+                    colours = handle.get_edgecolor()
+                return matplotlib.colors.to_hex(colours[0]) if len(colours) else None
+        except (ValueError, TypeError, IndexError):
+            return None
+        return None
+
+    @staticmethod
+    def _recolour_handle(ax, handle, colour) -> None:
+        """Recolour what ``handle`` stands for. A histogram labels only
+        the first bar of each data set, so a patch takes every patch in
+        its Axes drawn in the same colour with it."""
+        if isinstance(handle, matplotlib.lines.Line2D):
+            handle.set_color(colour)
+            return
+        patches = None
+        if isinstance(handle, matplotlib.container.Container):
+            patches = list(getattr(handle, "patches", None) or [])
+        elif isinstance(handle, matplotlib.patches.Patch):
+            old = tuple(handle.get_facecolor())
+            patches = [p for p in ax.patches if tuple(p.get_facecolor()) == old] or [handle]
+        if patches is not None:
+            for patch in patches:
+                alpha = patch.get_alpha()
+                patch.set_facecolor(colour)
+                if alpha is not None:
+                    patch.set_alpha(alpha)
+            return
+        if isinstance(handle, matplotlib.collections.Collection):
+            alpha = handle.get_alpha()
+            handle.set_facecolor(colour)
+            if len(handle.get_edgecolor()):
+                handle.set_edgecolor(colour)
+            if alpha is not None:
+                handle.set_alpha(alpha)
+
+    def _apply_external_series(self) -> None:
+        """Make every named trace of an external figure a series, and
+        apply any name or colour set for it (see show_external_plot)."""
+        per_axes = []
+        order: list[str] = []
+        first_colour: dict = {}
+        for ax in self.figure.get_axes():
+            if getattr(ax, "name", "") == "3d":
+                continue
+            handles, labels = ax.get_legend_handles_labels()
+            per_axes.append((ax, list(zip(handles, labels)), ax.get_legend() is not None))
+            for handle, label in zip(handles, labels):
+                if label not in first_colour:
+                    order.append(label)
+                    first_colour[label] = self._handle_colour(handle)
+        if not order:
+            self._series.pop("external", None)
+            return
+        entries = self._assign_series("external", [(label, label, True) for label in order])
+        by_key = {entry.key: entry for entry in entries}
+        for entry in entries:
+            if not entry.colour_overridden and not self._external_palette and first_colour.get(entry.key):
+                entry.colour = first_colour[entry.key]
+        for ax, pairs, had_legend in per_axes:
+            for handle, label in pairs:
+                entry = by_key.get(label)
+                if entry is None:
+                    continue
+                if entry.colour_overridden or self._external_palette:
+                    self._recolour_handle(ax, handle, entry.colour)
+                if entry.label != label:
+                    handle.set_label(entry.label)
+            if had_legend and pairs:
+                ax.legend([h for h, _l in pairs],
+                          [by_key[l].label if l in by_key else l for _h, l in pairs],
+                          **self._legend_kwargs())
+
+    def _external_axis_unit(self, axis) -> str | None:
+        """``"ppm"``, ``"hz"`` or ``"khz"`` when an external figure's
+        axis label says that is what it is in, else None."""
+        text = axis.label.get_text() if axis is not None else ""
+        if re.search(r"ppm", text):
+            return "ppm"
+        if re.search(r"\bkHz\b", text):
+            return "khz"
+        if re.search(r"\bHz\b", text):
+            return "hz"
+        return None
+
+    def _external_delta(self, axis, delta: float) -> dict:
+        """A measured separation on an external figure, in every unit
+        its axis label and the plot's frequency allow."""
+        unit = self._external_axis_unit(axis)
+        if unit is None:
+            return {}
+        mhz = (self._external_draw or {}).get("hz_per_ppm")
+        delta = abs(float(delta))
+        hz = {"ppm": delta * mhz if mhz else None, "hz": delta, "khz": delta * 1000.0}[unit]
+        out = {}
+        if hz is not None:
+            out["hz"] = hz
+            out["khz"] = hz / 1000.0
+        if unit == "ppm":
+            out["ppm"] = delta
+        elif mhz:
+            out["ppm"] = hz / mhz
+        return out
 
     def update_data(self, spectrum: NMRSpectrum) -> None:
         """Refresh the currently-displayed 1D spectrum's y-data in
@@ -6979,15 +7231,16 @@ class MplCanvas(QWidget):
         out: dict = {}
         if axis is None or getattr(axis, "kind", None) != "frequency":
             return out
-        ppm = np.asarray(axis.values("ppm"), dtype=float)
-        hz = np.asarray(axis.values("hz"), dtype=float)
-        if ppm.size < 2 or hz.size < 2:
+        hz_per_ppm = self._axis_hz_per_ppm(axis)
+        if hz_per_ppm is None:
+            # No Hz behind this axis (a simulation with no field): the
+            # separation is still worth a unit in what is displayed.
+            if self._axis_unit == "ppm":
+                out["ppm"] = abs(float(delta))
+            elif self._axis_unit in ("hz", "khz"):
+                out["hz"] = abs(float(delta)) * (1000.0 if self._axis_unit == "khz" else 1.0)
+                out["khz"] = out["hz"] / 1000.0
             return out
-        span_ppm = float(ppm[-1] - ppm[0])
-        span_hz = float(hz[-1] - hz[0])
-        if not span_ppm or not span_hz:
-            return out
-        hz_per_ppm = abs(span_hz / span_ppm)
         hz_per_mm = self._imaging_hz_per_mm()
         hz_per_display = {
             "ppm": hz_per_ppm, "hz": 1.0, "khz": 1000.0, "mm": hz_per_mm,
@@ -7013,6 +7266,32 @@ class MplCanvas(QWidget):
             out["mm"] = delta_hz / hz_per_mm
         return out
 
+    def _axis_hz_per_ppm(self, axis) -> float | None:
+        """Hz per ppm on ``axis``: from its own ppm and Hz arrays when it
+        has both, else from the SFO1 of the spectrum it belongs to (a
+        simulated spectrum carries ppm only -- the crash reported on
+        2026-10-01, "This axis has no 'hz' values"). None when neither
+        is known."""
+        if axis.ppm is not None and axis.hz is not None:
+            ppm = np.asarray(axis.ppm, dtype=float)
+            hz = np.asarray(axis.hz, dtype=float)
+            if ppm.size >= 2 and hz.size >= 2:
+                span_ppm = float(ppm[-1] - ppm[0])
+                span_hz = float(hz[-1] - hz[0])
+                if span_ppm and span_hz:
+                    return abs(span_hz / span_ppm)
+        candidates = [self._current_1d_spectrum, self._contour_spectrum, *(self._compare_spectra or [])]
+        for spectrum in candidates:
+            if spectrum is None:
+                continue
+            for position, own in enumerate(spectrum.axes):
+                if own is axis:
+                    meta = spectrum.metadata
+                    indirect = spectrum.ndim == 2 and position == 0
+                    mhz = meta.sfo1_indirect if indirect else meta.sfo1
+                    return float(mhz) if mhz else None
+        return None
+
     def _format_delta(self, label: str, deltas: dict, raw: float) -> str:
         """One axis's separation, every applicable unit in one string --
         never a bare number, and never a number carrying a unit it was
@@ -7030,7 +7309,7 @@ class MplCanvas(QWidget):
         same Axes completes it; a second click somewhere else starts
         over from there, since a separation across two different
         coordinate systems is not a measurement of anything."""
-        if not self._measurement_mode or ax is None:
+        if not self._measurement_mode or ax is None or getattr(ax, "name", "") == "3d":
             return
         if self._measurement_points and self._measurement_points[0][0] is not ax:
             self._measurement_points = []
@@ -7071,8 +7350,14 @@ class MplCanvas(QWidget):
 
         x_axis, y_axis = self._measurement_axes_for(ax)
         dx_raw, dy_raw = abs(x2 - x1), abs(y2 - y1)
-        dx_units = self._delta_in_units(x_axis, dx_raw)
-        dy_units = self._delta_in_units(y_axis, dy_raw)
+        if self._external_plot and x_axis is None and y_axis is None:
+            # A figure drawn elsewhere (Simulate): its axis labels say
+            # what the axes are in.
+            dx_units = self._external_delta(ax.xaxis, dx_raw)
+            dy_units = self._external_delta(ax.yaxis, dy_raw)
+        else:
+            dx_units = self._delta_in_units(x_axis, dx_raw)
+            dy_units = self._delta_in_units(y_axis, dy_raw)
 
         parts = [self._format_delta("x", dx_units, dx_raw)]
         # A y separation is only worth reporting when there is one: on

@@ -59,20 +59,29 @@ def test_right_click_keeps_a_shown_simulation_once(window, monkeypatch):
     assert window.fit_canvas.simulation_spectrum is None
 
 
-def test_czjzek_simulation_plot_offers_keep(window):
+def _menu_actions(canvas, monkeypatch):
+    """The Simulation plot is a full MplCanvas since 2026-10-01 (Plot
+    Style, zoom, Measure): its right-click menu, captured."""
+    menus = []
+    monkeypatch.setattr(MplCanvas, "_exec_context_menu", lambda self, m, p: menus.append(m))
+    canvas._on_context_menu(canvas.rect().center())
+    return {a.text(): a for a in menus[-1].actions()}
+
+
+def test_czjzek_simulation_plot_offers_keep(window, monkeypatch):
     sim = window.czjzek_sim_panel
     sim.grid_cq_spin.setValue(16)
     sim.grid_eta_spin.setValue(6)
     sim.simulate()
     canvas = window.simulation_canvas
     assert canvas.simulation_spectrum is not None
-    menu = canvas.context_menu()
-    action = menu.actions()[0]
-    assert action.text() == "Keep This Simulation in Open Experiments"
+    actions = _menu_actions(canvas, monkeypatch)
+    assert "Plot Style…" in actions
+    action = actions["Keep This Simulation in Open Experiments"]
     n = len(window.session)
     action.trigger()
     assert len(window.session) == n + 1
     assert window.session.spectra[-1].metadata.raw["simulation"]["model"] == "Czjzek"
     # A different picture drawn there: nothing to keep.
     window._draw_tensor_picture(lambda figure: figure.add_subplot(111))
-    assert canvas.context_menu() is None
+    assert "Keep This Simulation in Open Experiments" not in _menu_actions(canvas, monkeypatch)

@@ -109,7 +109,6 @@ from .widgets.wrapping_tabs import WrappingTabWidget
 from .widgets.collapsible_section import CollapsibleSection
 from .widgets.sim_sites import SimSiteList
 from .widgets.reflow import make_reflowable
-from .widgets.simulation_canvas import SimulationCanvas
 from .pnmr_panel import PnmrSimulationPanel
 from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
@@ -693,6 +692,17 @@ class MainWindow(QMainWindow):
         # FID-processing choice.
         self.processing_preview_canvas = MplCanvas()
         self.processing_preview_canvas.measurementCompleted.connect(self._on_measurement_completed)
+        # Simulate's own plots (per-site spectra, tensor pictures, the
+        # Czjzek map, Bloch profiles, diffusion curves, pNMR distances):
+        # a full plot canvas like every other since 2026-10-01 -- Plot
+        # Style, right-click, scroll zoom and Measure (explicit user
+        # request; the plain matplotlib canvas it replaced had none).
+        # Each figure is a notebook drawing shown with show_external_plot.
+        self.simulation_canvas = MplCanvas(full_resolution=True)
+        self.simulation_canvas.measurementCompleted.connect(self._on_measurement_completed)
+        # Its figures name their traces (sites, Mx/My/Mz, species): a
+        # legend by default, as on the plain canvas it replaces.
+        self.simulation_canvas._legend_visible = True
 
         # Each canvas carries its own Crosshair/Measure toolbar buttons.
         # Toggling one there drives the matching menu item, which is
@@ -716,6 +726,7 @@ class MainWindow(QMainWindow):
             ("Compare", self.compare_canvas), ("Fit", self.fit_canvas),
             ("Spectral Fit", self.spectral_fit_canvas),
             ("Processing Preview", self.processing_preview_canvas),
+            ("Simulation", self.simulation_canvas),
         ):
             canvas.labelsClipped.connect(
                 lambda labels, tab=name: self._on_labels_clipped(tab, labels)
@@ -728,10 +739,7 @@ class MainWindow(QMainWindow):
         self.canvas_tabs.addTab(self.spectral_fit_canvas, "Spectral Fit")
         self.canvas_tabs.addTab(self.fit_canvas, "Fit")
         self.canvas_tabs.addTab(self.compare_canvas, "Compare")
-        # Simulations' Diffusion/Bloch plots: attenuation curves and
-        # pulse profiles, not spectra -- see SimulationCanvas. Hidden
-        # until one of them runs (see _show_simulation_view).
-        self.simulation_canvas = SimulationCanvas()
+        # Hidden until a simulation draws on it (see _show_simulation_view).
         self.canvas_tabs.addTab(self.simulation_canvas, "Simulation")
         # No more "Preview as FID" checkbox -- clicking the FID tab
         # itself is what shows/refreshes the current spectrum's FID.
@@ -3892,6 +3900,7 @@ class MainWindow(QMainWindow):
         return [
             self.fid_canvas, self.processing_preview_canvas, self.canvas,
             self.spectral_fit_canvas, self.fit_canvas, self.compare_canvas,
+            self.simulation_canvas,
         ]
 
     def _build_style_panel(self) -> QWidget:
@@ -4064,6 +4073,16 @@ class MainWindow(QMainWindow):
         self.output_tick_width_spin.setValue(MplCanvas._TICK_WIDTH)
         self.output_tick_width_spin.valueChanged.connect(self._on_output_style_changed)
         style_form.addRow("Tick width:", self.output_tick_width_spin)
+
+        # Explicit user request (2026-10-01): ticks in, out, or across
+        # the axis line, for every plot.
+        self.output_tick_direction_combo = QComboBox()
+        for text, key in MplCanvas.TICK_DIRECTIONS:
+            self.output_tick_direction_combo.addItem(text, key)
+        self.output_tick_direction_combo.setToolTip(
+            "Draw the tick marks inside the axes, outside them, or across the axis line.")
+        self.output_tick_direction_combo.currentIndexChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Tick direction:", self.output_tick_direction_combo)
 
         self.output_contour_fraction_spin = QSpinBox()
         self.output_contour_fraction_spin.setRange(1, 100)
@@ -4284,6 +4303,19 @@ class MainWindow(QMainWindow):
         self.output_colormap_combo.currentIndexChanged.connect(self._on_series_colormap_changed)
         style_form.addRow("Series colour map:", self.output_colormap_combo)
 
+        # The colour scale of maps and surfaces -- Simulate's tensor
+        # pictures and Czjzek distributions (explicit user request,
+        # 2026-10-01: "control the colours of the colourmap").
+        self.output_map_colormap_combo = QComboBox()
+        for text, key in self._MAP_COLORMAPS:
+            self.output_map_colormap_combo.addItem(text, key)
+        self.output_map_colormap_combo.setToolTip(
+            "The colour scale of maps and 3D surfaces: Simulate's tensor pictures and "
+            "Czjzek (C_Q, η_Q) distributions. \"Plot's own\" keeps each one's default "
+            "(a diverging scale centred on zero for a tensor surface of both signs).")
+        self.output_map_colormap_combo.currentIndexChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Map colour scale:", self.output_map_colormap_combo)
+
         self.series_accessibility_label = QLabel("")
         self.series_accessibility_label.setWordWrap(True)
         self.series_accessibility_label.setToolTip(
@@ -4447,6 +4479,8 @@ class MainWindow(QMainWindow):
             "labelsize": self.output_fontsize_spin.value(),
             "tick_length": self.output_tick_length_spin.value(),
             "tick_width": self.output_tick_width_spin.value(),
+            "tick_direction": self.output_tick_direction_combo.currentData(),
+            "map_colormap": self.output_map_colormap_combo.currentData(),
             "minor_ticks": self.output_minor_ticks_checkbox.isChecked(),
             "top_spine": self.output_top_spine_checkbox.isChecked(),
             "right_spine": self.output_right_spine_checkbox.isChecked(),
@@ -4474,6 +4508,16 @@ class MainWindow(QMainWindow):
             "fig_width": self.output_fig_width_spin.value(),
             "fig_height": self.output_fig_height_spin.value(),
         }
+
+    #: The map colour scales offered (label, matplotlib name; "" = the
+    #: plot's own default).
+    _MAP_COLORMAPS = (
+        ("Plot's own", ""), ("Viridis", "viridis"), ("Cividis", "cividis"),
+        ("Plasma", "plasma"), ("Inferno", "inferno"), ("Magma", "magma"),
+        ("Blue–red (diverging)", "RdBu_r"), ("Cool–warm (diverging)", "coolwarm"),
+        ("Purple–orange (diverging)", "PuOr_r"), ("Spectral", "Spectral_r"),
+        ("Greys", "Greys"),
+    )
 
     def _on_series_colormap_changed(self, *_args) -> None:
         """The series palette is one setting for the whole app.
@@ -4910,6 +4954,16 @@ class MainWindow(QMainWindow):
             widget.blockSignals(True)
             widget.setValue(value)
             widget.blockSignals(False)
+        direction_index = self.output_tick_direction_combo.findData(settings.get("tick_direction", "in"))
+        if direction_index >= 0:
+            self.output_tick_direction_combo.blockSignals(True)
+            self.output_tick_direction_combo.setCurrentIndex(direction_index)
+            self.output_tick_direction_combo.blockSignals(False)
+        map_index = self.output_map_colormap_combo.findData(settings.get("map_colormap") or "")
+        if map_index >= 0:
+            self.output_map_colormap_combo.blockSignals(True)
+            self.output_map_colormap_combo.setCurrentIndex(map_index)
+            self.output_map_colormap_combo.blockSignals(False)
         mode_index = self.output_contour_mode_combo.findData(settings["contour_level_mode"])
         if mode_index >= 0:
             self.output_contour_mode_combo.blockSignals(True)
@@ -5025,6 +5079,11 @@ class MainWindow(QMainWindow):
                 check.blockSignals(False)
         if isinstance(saved.get("compare_colormap"), str):
             self._select_series_colormap(saved["compare_colormap"])
+        direction_index = self.output_tick_direction_combo.findData(saved.get("tick_direction"))
+        if direction_index >= 0:
+            self.output_tick_direction_combo.blockSignals(True)
+            self.output_tick_direction_combo.setCurrentIndex(direction_index)
+            self.output_tick_direction_combo.blockSignals(False)
         for combo, key in ((self.output_legend_loc_combo, "legend_loc"),):
             index = combo.findText(str(saved.get(key, "")))
             if index >= 0:
@@ -12740,10 +12799,12 @@ class MainWindow(QMainWindow):
         # A Czjzek-distributed site, with its (C_Q, η_Q) map beside the
         # spectrum (explicit user request); notebook.czjzek.
         self.czjzek_sim_panel = CzjzekSimPanel(
-            draw=lambda draw: (self._draw_tensor_picture(draw),
+            draw=lambda draw: (self._draw_tensor_picture(
+                                   draw, hz_per_ppm=self.czjzek_sim_panel.larmor_mhz()),
                                self._journal_simulation("czjzek"),
                                setattr(self.simulation_canvas, "simulation_spectrum",
                                        self.czjzek_sim_panel.make_spectrum())),
+            style=self._simulation_style,
             add_to_open=self._add_derived_spectrum,
             send_to_fit=self._send_czjzek_simulation_to_fit)
         self._czjzek_sim_section = CollapsibleSection(
@@ -12756,10 +12817,12 @@ class MainWindow(QMainWindow):
             plot_spectrum=lambda spectrum: self._on_panel_simulated("combined", spectrum),
             add_to_open=self._add_derived_spectrum,
             send_to_fit=self._send_combined_simulation_to_fit,
-            draw_sites=self._draw_combined_sites)
+            draw_sites=lambda result, nucleus: self._draw_combined_sites(
+                result, nucleus, self._combined_larmor_mhz()))
         # CSA and quadrupolar together, in their relative orientation.
         self.combined_tensor_controls = TensorViewControls(self._combined_tensor_site,
-                                                           self._draw_tensor_picture)
+                                                           self._draw_tensor_picture,
+                                                           style=self._simulation_style)
         self.combined_sim_panel.layout().addWidget(self.combined_tensor_controls)
         self.combined_sim_field_link = self._link_panel_field(self.combined_sim_panel)
         self._combined_sim_section = CollapsibleSection(
@@ -12989,19 +13052,37 @@ class MainWindow(QMainWindow):
 
     # ---- tensor pictures (Simulate > CSA / Quadrupolar / Combined) ------
 
-    def _draw_tensor_picture(self, draw) -> None:
-        """Show a notebook tensor picture on the Simulation plot."""
-        figure = self.simulation_canvas.figure
-        figure.clear()
-        self.simulation_canvas.simulation_spectrum = None
-        draw(figure)
+    def _combined_larmor_mhz(self) -> float | None:
+        try:
+            larmor = self.combined_sim_panel.settings().get("larmor_Hz")
+        except Exception:  # noqa: BLE001 -- only for Measure's Hz; never fatal
+            return None
+        return larmor / 1e6 if larmor else None
+
+    def _simulation_style(self) -> dict:
+        """The Simulation plot's own style (Plot Style), which its
+        figures read as they draw: text size, font, the map colour
+        scale, the series colour map."""
+        return self.simulation_canvas.style_settings()
+
+    def _show_on_simulation_plot(self, draw, kind: str, hz_per_ppm: float | None = None) -> None:
+        """Show ``draw(figure)`` on the Simulation plot, announced as
+        ``kind`` (its saved default style applies), with Plot Style,
+        right-click, scroll zoom and Measure like every other plot.
+        ``hz_per_ppm`` : the spectrometer frequency (MHz) behind a ppm
+        axis, so Measure quotes Hz too."""
         self._show_simulation_view()
-        self.simulation_canvas.draw()
+        self.simulation_canvas.show_external_plot(draw, kind=kind, hz_per_ppm=hz_per_ppm)
+
+    def _draw_tensor_picture(self, draw, hz_per_ppm: float | None = None) -> None:
+        """Show a notebook tensor picture (or a Czjzek map) on the
+        Simulation plot -- a map, so the 2D plot style applies."""
+        self._show_on_simulation_plot(draw, "2d", hz_per_ppm=hz_per_ppm)
 
     def _csa_tensor_site(self):
         from ..notebook import combined_hamiltonian as ch
         nucleus = self.sim_csa_nucleus_edit.text().strip()
-        if not nucleus or not core_registry.find_gamma(nucleus):
+        if not nucleus or not core_registry.find_gamma(nucleus, quiet=True):
             raise ValueError("enter a recognised nucleus (e.g. '13C').")
         site = ch.Site(nucleus, delta_iso=self.sim_csa_diso_spin.value(), label=f"{nucleus} site")
         site.add_csa(aniso=self.sim_csa_aniso_spin.value(), asym=self.sim_csa_skeweta_spin.value(),
@@ -13012,7 +13093,7 @@ class MainWindow(QMainWindow):
     def _quad_tensor_site(self):
         from ..notebook import combined_hamiltonian as ch
         nucleus = self.sim_quad_nucleus_combo.currentText().strip()
-        if not nucleus or not core_registry.find_gamma(nucleus):
+        if not nucleus or not core_registry.find_gamma(nucleus, quiet=True):
             raise ValueError("enter a recognised nucleus (e.g. '27Al').")
         larmor = self.sim_quad_larmor_spin.value()
         if larmor <= 0:
@@ -13031,15 +13112,18 @@ class MainWindow(QMainWindow):
         settings = panel.settings()
         return sites[index], settings["larmor_Hz"], settings["order"]
 
-    def _draw_combined_sites(self, result: dict, nucleus: str) -> None:
+    def _draw_combined_sites(self, result: dict, nucleus: str, larmor_mhz: float | None = None) -> None:
         """Total and each site of a combined simulation on the Simulation
-        plot (the total alone is on the spectrum plot, for export)."""
+        plot (the total alone is on the spectrum plot, for export) --
+        overlaid spectra, so the Compare plot style applies, and every
+        site is a series Plot Style can rename and recolour."""
         from ..notebook.combined_hamiltonian import plot_combined
-        figure = self.simulation_canvas.figure
-        figure.clear()
-        plot_combined(result, nuclide=nucleus, figure=figure, fontsize=10)
-        self.simulation_canvas.draw()
-        self._show_simulation_view()
+
+        def draw(figure):
+            style = self._simulation_style()
+            plot_combined(result, nuclide=nucleus, figure=figure, fontsize=style["labelsize"],
+                          font=style.get("font_family"), linewidth=max(style["linewidth"] * 0.7, 0.5))
+        self._show_on_simulation_plot(draw, "compare", hz_per_ppm=larmor_mhz)
 
     def _send_quadrupolar_to_simulation(self, fitted: dict) -> None:
         """Fitted sites into Simulate > Quadrupolar, ready to re-simulate
@@ -13852,8 +13936,7 @@ class MainWindow(QMainWindow):
         self._fit_display_section.setExpanded(True)
 
     def _show_simulation_view(self) -> None:
-        """Attenuation curves and pulse profiles are not spectra, so
-        they draw on their own Simulation plot (SimulationCanvas), shown
+        """Simulate's own figures draw on their own Simulation plot, shown
         only once one of these simulations has run and hidden again on
         leaving the Simulations tile (see _on_side_tab_changed)."""
         tab = self.canvas_tabs.indexOf(self.simulation_canvas)
@@ -13991,10 +14074,6 @@ class MainWindow(QMainWindow):
 
     def _run_diffusion_simulation(self) -> None:
         self._sync_diffusion_sim_rows()
-        self._show_simulation_view()
-        figure = self.simulation_canvas.figure
-        figure.clear()
-        ax = figure.add_subplot(111)
         common = dict(
             delta_ms=self.sim_delta_spin.value(), DELTA_ms=self.sim_DELTA_spin.value(),
             max_gradient=self.sim_max_gradient_spin.value(),
@@ -14026,12 +14105,13 @@ class MainWindow(QMainWindow):
                 title = f"{nucleus}, D = {D:.2g} m²/s: {what} compared"
         except (ValueError, KeyError, TypeError) as exc:
             self.sim_diffusion_summary_label.setText(f"Cannot simulate: {exc}")
-            self.simulation_canvas.draw()
             return
-        simulate_diffusion.plot_attenuation(curves, ax)
-        ax.set_title(title, fontsize=10)
-        figure.tight_layout()
-        self.simulation_canvas.draw()
+
+        def draw(figure):
+            ax = figure.add_subplot(111)
+            simulate_diffusion.plot_attenuation(curves, ax)
+            ax.set_title(title, fontsize=self._simulation_style()["labelsize"])
+        self._show_on_simulation_plot(draw, "curve")
         self.sim_diffusion_summary_label.setText("\n".join(lines))
         self._journal_simulation("diffusion")
 
@@ -14280,9 +14360,8 @@ class MainWindow(QMainWindow):
         if "sweep_width_hz" in sim:
             scale, unit = (1e6, "MHz") if sim["sweep_width_hz"] >= 1e6 else (1e3, "kHz")
             title += f", sweep {sim['sweep_width_hz'] / scale:g} {unit}"
-        self._show_simulation_view()
-        simulate_bloch.plot_pulse_simulation(sim, self.simulation_canvas.figure, title=title)
-        self.simulation_canvas.draw()
+        self._show_on_simulation_plot(
+            lambda figure: simulate_bloch.plot_pulse_simulation(sim, figure, title=title), "curve")
         centre = int(np.argmin(np.abs(sim["offsets_hz"])))
         nominal = int(np.argmin(np.abs(sim["power_scales"] - 1.0)))
         step_note = ("auto" if not self.bloch_time_step_spin.value() else "as set")
@@ -14524,7 +14603,8 @@ class MainWindow(QMainWindow):
         # The tensor being simulated, in 3D (explicit user request): the
         # selected site's.
         self.sim_csa_tensor_controls = TensorViewControls(self._csa_tensor_site,
-                                                          self._draw_tensor_picture)
+                                                          self._draw_tensor_picture,
+                                                          style=self._simulation_style)
         layout.addWidget(self.sim_csa_tensor_controls)
 
         self.sim_csa_export_button = QPushButton("Keep in Open Experiments")
@@ -14875,7 +14955,8 @@ class MainWindow(QMainWindow):
         self.sim_quad_results_label.setWordWrap(True)
         layout.addWidget(self.sim_quad_results_label)
         self.sim_quad_tensor_controls = TensorViewControls(self._quad_tensor_site,
-                                                           self._draw_tensor_picture)
+                                                           self._draw_tensor_picture,
+                                                           style=self._simulation_style)
         layout.addWidget(self.sim_quad_tensor_controls)
 
         self.sim_quad_export_button = QPushButton("Keep in Open Experiments")
@@ -14985,7 +15066,7 @@ class MainWindow(QMainWindow):
 
     def _on_simulate_csa_clicked(self) -> None:
         nucleus = self.sim_csa_nucleus_edit.text().strip()
-        if not core_registry.find_gamma(nucleus):
+        if not core_registry.find_gamma(nucleus, quiet=True):
             QMessageBox.warning(
                 self, "Simulate CSA",
                 "Enter a recognised nucleus (e.g. '13C', '27Al') -- needed "
@@ -15049,7 +15130,7 @@ class MainWindow(QMainWindow):
 
         self._show_simulated_spectrum(self._simulated_csa_spectrum)
         if len(sites) > 1 and self.sim_csa_show_sites_check.isChecked():
-            self._draw_combined_sites(result, nucleus)
+            self._draw_combined_sites(result, nucleus, larmor_mhz or None)
 
         warning = self._simulated_spectrum_axis_warning(ppm_axis, spectrum_data)
         if len(sites) == 1:
@@ -15090,7 +15171,7 @@ class MainWindow(QMainWindow):
 
     def _on_simulate_quadrupolar_clicked(self) -> None:
         nucleus = self.sim_quad_nucleus_combo.currentText().strip()
-        if not core_registry.find_gamma(nucleus):
+        if not core_registry.find_gamma(nucleus, quiet=True):
             QMessageBox.warning(
                 self, "Simulate quadrupolar",
                 "Enter a recognised nucleus (e.g. '27Al', '17O') -- needed "
@@ -15178,9 +15259,9 @@ class MainWindow(QMainWindow):
 
         self._show_simulated_spectrum(self._simulated_quadrupolar_spectrum)
         if comparison is not None:
-            self._draw_quadrupolar_order_comparison(comparison, nucleus)
+            self._draw_quadrupolar_order_comparison(comparison, nucleus, larmor_mhz)
         elif len(sites) > 1 and self.sim_quad_show_sites_check.isChecked():
-            self._draw_combined_sites(result, nucleus)
+            self._draw_combined_sites(result, nucleus, larmor_mhz)
 
         warning = self._simulated_spectrum_axis_warning(ppm_axis, spectrum_data)
         method_label = {"first": "first-order", "second": "second-order", "exact": "exact"}[order]
@@ -15220,15 +15301,16 @@ class MainWindow(QMainWindow):
         self.sim_quad_export_button.setEnabled(True)
         self._journal_simulation("quadrupolar")
 
-    def _draw_quadrupolar_order_comparison(self, comparison, nucleus) -> None:
+    def _draw_quadrupolar_order_comparison(self, comparison, nucleus, larmor_mhz=None) -> None:
         """First vs second order vs exact on the Simulation plot."""
         from ..notebook.plotting import plot_quadrupolar_orders
-        figure = self.simulation_canvas.figure
-        figure.clear()
-        plot_quadrupolar_orders(comparison, nuclide=nucleus, figure=figure, font=None,
-                                fontsize=10)
-        self.simulation_canvas.draw()
-        self._show_simulation_view()
+
+        def draw(figure):
+            style = self._simulation_style()
+            plot_quadrupolar_orders(comparison, nuclide=nucleus, figure=figure,
+                                    font=style.get("font_family"), fontsize=style["labelsize"],
+                                    tick_dir=style["tick_direction"])
+        self._show_on_simulation_plot(draw, "compare", hz_per_ppm=larmor_mhz)
 
     def _on_export_simulated_quadrupolar_clicked(self) -> None:
         spectrum = getattr(self, "_simulated_quadrupolar_spectrum", None)
@@ -18088,7 +18170,7 @@ class MainWindow(QMainWindow):
         if index is not None and max_gradient:
             spectrum = self.session.spectra[index]
             if spectrum.metadata.nucleus:
-                result = core_registry.find_gamma(spectrum.metadata.nucleus)
+                result = core_registry.find_gamma(spectrum.metadata.nucleus, quiet=True)
                 gamma = result["gamma"] if result else None
         # Every canvas that can show a frequency axis, not the Spectrum
         # one alone: the mm option is offered wherever Axis Units is,
@@ -18587,7 +18669,7 @@ class MainWindow(QMainWindow):
         """Every plot canvas a mode toggle should apply to."""
         return [
             self.canvas, self.fid_canvas, self.compare_canvas, self.fit_canvas,
-            self.spectral_fit_canvas, self.processing_preview_canvas,
+            self.spectral_fit_canvas, self.processing_preview_canvas, self.simulation_canvas,
         ]
 
     def _on_measurement_completed(self, result: dict) -> None:
