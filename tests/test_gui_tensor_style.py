@@ -312,3 +312,103 @@ def test_notebook_tensor_tick_labels_match_the_axis_labels():
         labels, ticks = _text_sizes(fig)
         assert len(labels) == 1 and labels == ticks, style
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Round 6 (2026-10-01): Home after a zoom; ticks thinned so labels never overlap
+# ---------------------------------------------------------------------------
+
+def test_home_after_a_zoom_restores_the_undistorted_tensor(qapp):  # noqa: F811
+    # User report: zooming in on the tensor plot and then hitting Home left
+    # it "distorted (e.g., elongated along z)" -- Home restored x and y only.
+    window = _tensor_window()
+    canvas = window.simulation_canvas
+    ax = _ax3d(canvas)
+    limits = (ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d())
+    canvas.note_natural_view()                   # what a toolbar zoom press does
+    ax.set_xlim3d(-20, 20)
+    ax.set_ylim3d(-20, 20)
+    ax.set_zlim3d(-5, 5)
+    ax.view_init(elev=40.0, azim=60.0)
+    canvas.toolbar.home()
+    ax = _ax3d(canvas)
+    for now, then in zip((ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d()), limits):
+        assert tuple(now) == pytest.approx(tuple(then))
+    aspect = np.asarray(ax._box_aspect)
+    assert aspect == pytest.approx(np.full(3, aspect[0]))          # still a cube
+    assert (ax.elev, ax.azim) == pytest.approx((40.0, 60.0))       # rotation kept
+
+
+def _overlaps(fig, ax):
+    """Tick labels of the 3D ``ax`` whose boxes overlap, any axis with any
+    other. Measured while drawing: mplot3d places a tick label at its
+    projected position only for the draw, so a box read afterwards is
+    meaningless."""
+    import matplotlib.text as mtext
+    owner = {id(t): axis.axis_name for axis in (ax.xaxis, ax.yaxis, ax.zaxis)
+             for t in axis.get_ticklabels()}
+    boxes, draw = [], mtext.Text.draw
+
+    def record(self, renderer):
+        draw(self, renderer)
+        if id(self) in owner and self.get_text() and self.get_visible():
+            boxes.append((owner[id(self)], self.get_text(), self.get_window_extent(renderer)))
+    mtext.Text.draw = record
+    try:
+        fig.canvas.draw()
+    finally:
+        mtext.Text.draw = draw
+    assert boxes, "no tick labels drawn"
+    return [(a[:2], b[:2]) for i, a in enumerate(boxes) for b in boxes[i + 1:]
+            if a[2].overlaps(b[2])]
+
+
+@pytest.mark.parametrize("inches", [(6.4, 4.8), (10.0, 7.0)])
+def test_tensor_tick_labels_never_overlap_and_thin_with_font_size(qapp, inches):  # noqa: F811
+    # User request: "the axis tick labels can end up overlapping each other
+    # when the font is large ... decreasing the number of ticks".
+    window = _tensor_window()
+    canvas = window.simulation_canvas
+    canvas.figure.set_size_inches(*inches)
+    previous = None
+    for size in (8.0, 11.0, 16.0, 24.0, 32.0):
+        canvas.set_style(labelsize=size)
+        canvas.canvas.draw()
+        ax = _ax3d(canvas)
+        assert _overlaps(canvas.figure, ax) == [], size
+        counts = {n: len(getattr(ax, n + "axis").get_majorticklocs()) for n in "xyz"}
+        assert all(v >= 1 for v in counts.values())
+        if previous:
+            assert all(counts[n] <= previous[n] for n in "xyz"), (size, counts, previous)
+        previous = counts
+    assert sum(previous.values()) < 21          # thinned from 7 per axis at 8 pt
+
+
+def test_tensor_ticks_refit_after_rotating(qapp):  # noqa: F811
+    window = _tensor_window()
+    canvas = window.simulation_canvas
+    canvas.set_style(labelsize=14.0)
+    ax = _ax3d(canvas)
+    side = len(ax.zaxis.get_majorticklocs())
+    ax.view_init(elev=85.0, azim=35.0)           # looking down: z almost end-on
+    canvas._refit_3d_ticks_after_release(type("E", (), {"inaxes": ax})())
+    assert len(ax.zaxis.get_majorticklocs()) < side
+    canvas.canvas.draw()
+    assert _overlaps(canvas.figure, ax) == []
+
+
+def test_notebook_fit_3d_ticks():
+    import matplotlib.pyplot as plt
+    from opennmr.notebook import combined_hamiltonian as ch
+    site = ch.Site("13C", delta_iso=0.0, label="C")
+    site.add_csa(aniso=-80.0, asym=0.3)
+    counts = {}
+    for size in (8.0, 30.0):
+        fig = plt.figure()
+        tv.plot_tensors(site, None, style="surface", figure=fig, fontsize=size)
+        ax = [a for a in fig.axes if a.name == "3d"][0]
+        counts[size] = tv.fit_3d_ticks(ax, size * 0.85)
+        fig.canvas.draw()
+        assert _overlaps(fig, ax) == []
+        plt.close(fig)
+    assert sum(counts[30.0].values()) < sum(counts[8.0].values())

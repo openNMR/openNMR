@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-01 (round 5: Home on tensor pictures, tick labels that never overlap): related files only, as asked (test_gui_tensor_style, test_tensor_views, test_gui_adiabatic_tensors, test_gui_simulation_plots, test_gui_canvas, test_gui_usability, test_plotting_style): 426 + 21 passed. 5 new tests in `test_gui_tensor_style.py`; the Home one confirmed failing on the old path.*
+
 *2026-10-01 (round 4: Plot Style's colour maps and grid on tensor pictures): only the related files were run, as asked (test_gui_tensor_style, test_gui_simulation_plots, test_tensor_views, test_gui_adiabatic_tensors, test_plotting_style, test_gui_canvas, and the grid/style tests of the GUI files): all passed. 4 new tests in `test_gui_tensor_style.py`, each confirmed failing without the fix; then 4 more (tick-label size, GUI at 9/11/16 pt and notebook) -- 330 passed across the tensor, Simulate-plot and canvas files.*
 
 *2026-10-01 (round 3: tensor plot style, axis-label style on Simulate figures, colour-blind-friendly defaults): full suite without `test_data/` or pymatgen, matplotlib 3.10 / Py 3.11: 3277 passed, 164 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`). 8 new tests in `test_gui_tensor_style.py`, 1 in `test_plotting_style.py`.*
@@ -134,6 +136,30 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Tensor pictures: Home undoes a zoom without distortion; tick labels thinned so they never overlap (2026-10-01, round 5)
+
+**Asked:** "When zooming in on the tensor plot and then hitting home, the tensor ends up looking distorted (e.g., elongated along z). Also, the axis tick labels can end up overlapping each other when the font is large. Please stop this from happening by cleverly decreasing the number of ticks (and hence tick labels) on increasing font size."
+
+**Why:** Home (`MplCanvas.reset_view`) restores x and y limits only, so a zoomed z range stayed zoomed and the cube looked stretched. Tick counts on 3D axes were matplotlib's default, independent of text size.
+
+**Built:**
+- **Home on a 3D picture** redraws it at its own limits and cube (`_redraw_external_now(keep_limits=False)`). The rotation is kept.
+- **`tensor_views.fit_3d_ticks(ax, fontsize)`** (notebook and GUI). For each axis it projects the axis with the current view (`get_proj`/`proj_transform`) to get its on-screen length and angle. It measures each candidate tick set's labels as `Text` artists, so the boxes include line height, then keeps the most ticks for which:
+  - neighbouring labels clear each other in x or y, with a 0.15 em gap;
+  - the end labels clear the box corners, where the next axis's end label sits.
+
+  Steps are 1/2/2.5/4/5/10, so ±96 thins 7 → 5 → 3 ticks. When no full set fits, the order of fallbacks is:
+  1. a set with an end tick dropped;
+  2. a symmetric pair (±50);
+  3. a single middle tick.
+
+  Ticks are `FixedLocator`s, so they are refitted after every mouse release (rotate or zoom), on a redraw and on any style change. Each 3D axis label's pad comes from its measured tick labels.
+- **The canvas layout pass no longer shrinks the text of a 3D picture** (`fit_labels_within_figure` left x and y labels at 0.85× while z stayed full size). `_fit_3d_layout` shrinks the box instead (zoom steps of 0.92, down to 0.5) until the axis labels are inside the figure. Each check draws only the three axes (a few ms; a full surface draw is ~0.6 s). `_reset_3d_box` starts again from the font-based size each time, so a box shrunk for one view grows back for the next.
+
+**Found:** after a draw, mplot3d leaves tick labels at their *data* coordinates; it projects them only while drawing. A bounding box read afterwards is meaningless (x ≈ −1e5 px). The overlap test therefore records boxes inside `Text.draw`. Axis labels do keep their projected positions, which `_fit_3d_layout` relies on.
+
+**Rejected:** a pure font-size rule for the tick count. How many labels fit depends on the axis's on-screen length and angle, which change with rotation, zoom and window size.
 
 ## Tensor pictures: Plot Style's colour maps reach the surface; gridlines optional and kept (2026-10-01, round 4)
 

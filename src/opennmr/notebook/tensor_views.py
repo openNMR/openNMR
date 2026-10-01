@@ -235,6 +235,172 @@ def _finish_3d(ax, extent, fontsize, unit_label, style=None):
         axis.pane.set_alpha(0.05)
     ax.grid(bool(style["grid"]))
     ax.view_init(elev=float(style["elev"]), azim=float(style["azim"]))
+    fit_3d_ticks(ax, fontsize * 0.85)
+
+
+#: Tick steps a thinned axis may use: the usual nice ones plus 4, so
+#: thinning goes 25 -> 40 -> 50 (7, 5, 3 ticks on +-96) rather than
+#: jumping from 7 ticks straight to 3.
+_TICK_STEPS = (1, 2, 2.5, 4, 5, 10)
+
+
+def fit_3d_ticks(ax, fontsize=None, max_ticks=8, font_family=None, label_pad=True):
+    """As many ticks on each axis of the 3D ``ax`` as fit without their
+    labels overlapping, at the current view, limits and text size.
+
+    User request (2026-10-01): "the axis tick labels can end up
+    overlapping each other when the font is large ... decreasing the
+    number of ticks on increasing font size". For each axis this
+    projects the axis onto the screen (its on-screen length and
+    direction depend on the view), measures each candidate set of tick
+    labels as they would be rendered (font, size, the formatter's own
+    text), and keeps the most ticks whose neighbouring labels clear one
+    another -- along the projected direction, plus a gap of 0.15 em. So
+    the count also changes with the rotation: an axis seen end-on gets
+    fewer ticks. End ticks too close to a corner of the box (where the
+    neighbouring axis's end label sits) are left out. With ``label_pad``
+    each axis label is moved clear of its tick labels as measured.
+    Returns ``{"x": n, "y": n, "z": n}``, the number of ticks each axis
+    now shows. The ticks are fixed values, so call again after rotating
+    or zooming (the GUI does so on every mouse release).
+    """
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.ticker import FixedLocator, MaxNLocator
+    from mpl_toolkits.mplot3d import proj3d
+
+    figure = ax.figure
+    if fontsize is None:
+        labels = ax.xaxis.get_ticklabels()
+        fontsize = labels[0].get_fontsize() if labels else 10.0
+    fontsize = float(fontsize)
+    prop = FontProperties(size=fontsize, family=font_family) if font_family else FontProperties(size=fontsize)
+    renderer = figure.canvas.get_renderer() if hasattr(figure.canvas, "get_renderer") else None
+    to_px = fontsize * figure.dpi / 72.0
+
+    from matplotlib.text import Text
+
+    def text_size(text):
+        # Measured as a Text artist, the way a tick label is drawn: its
+        # box includes the font's full line height, not only the glyphs.
+        if renderer is not None:
+            artist = Text(0, 0, text, fontproperties=prop)
+            artist.set_figure(figure)
+            box = artist.get_window_extent(renderer)
+            return box.width, box.height
+        return 0.62 * to_px * len(text), 1.4 * to_px    # no renderer: an em-based estimate
+
+    M = ax.get_proj()
+    limits = (ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d())
+
+    def screen(point):
+        x, y, _ = proj3d.proj_transform(*point, M)
+        return ax.transData.transform((x, y))
+
+    counts = {}
+    for k, (name, axis) in enumerate(zip("xyz", (ax.xaxis, ax.yaxis, ax.zaxis))):
+        lo, hi = sorted(float(v) for v in limits[k])
+        if not hi > lo:
+            continue
+        # The four parallel box edges project to slightly different
+        # lengths and angles (perspective, a few per cent); their mean
+        # stands for the one the ticks are drawn on.
+        others = [limits[j] for j in range(3) if j != k]
+        vecs = []
+        for a in others[0]:
+            for b in others[1]:
+                start, end = [0.0] * 3, [0.0] * 3
+                start[k], end[k] = lo, hi
+                rest = [j for j in range(3) if j != k]
+                start[rest[0]] = end[rest[0]] = a
+                start[rest[1]] = end[rest[1]] = b
+                vecs.append(screen(end) - screen(start))
+        lengths = [float(np.hypot(*v)) for v in vecs]
+        length = float(np.mean(lengths))
+        vec = np.mean([v / n for v, n in zip(vecs, lengths) if n > 0] or [np.zeros(2)], axis=0) * length
+        if length <= 0:
+            continue
+        cos, sin = abs(vec[0]) / length, abs(vec[1]) / length
+        gap = 0.15 * to_px
+        formatter = axis.get_major_formatter()
+
+        def clearance(w, h):
+            """How far a label must move along the axis to clear an
+            identical one: past it in x or in y, whichever comes first."""
+            return min((w + gap) / cos if cos > 1e-6 else np.inf,
+                       (h + gap) / sin if sin > 1e-6 else np.inf)
+
+        fallback = partial = chosen = single = None
+        for nbins in range(int(max_ticks), 0, -1):
+            locator = MaxNLocator(nbins=nbins, steps=list(_TICK_STEPS))
+            span = hi - lo
+            ticks = [t for t in locator.tick_values(lo, hi) if lo - 1e-9 * span <= t <= hi + 1e-9 * span]
+            if not ticks:
+                continue
+            if len(ticks) == 1:
+                # One label (the middle one) when nothing else fits --
+                # never two that collide.
+                single = single or (ticks, [text_size(formatter.format_ticks(ticks)[0]
+                                                      if hasattr(formatter, "format_ticks")
+                                                      else f"{ticks[0]:g}")])
+                continue
+            try:
+                texts = formatter.format_ticks(ticks)
+            except Exception:  # a formatter not bound to this axis
+                texts = [f"{t:g}" for t in ticks]
+            sizes = [text_size(s) for s in texts]
+            spacing = length * (ticks[1] - ticks[0]) / span
+            # Neighbouring labels clear each other ...
+            if any(spacing < clearance(0.5 * (w1 + w2), 0.5 * (h1 + h2))
+                   for (w1, h1), (w2, h2) in zip(sizes, sizes[1:])):
+                continue
+            if fallback is None:
+                fallback = (ticks, sizes)
+            # ... and the end ones keep clear of the box corners, where
+            # the next axis's end label sits.
+            # A set that clears them whole is preferred to one with an
+            # end tick dropped, which leaves the axis lopsided.
+            kept = [(t, s) for t, s in zip(ticks, sizes)
+                    if min(t - lo, hi - t) * length / span >= 0.5 * clearance(*s)]
+            if len(kept) == len(ticks):
+                chosen = (ticks, sizes)
+                break
+            if partial is None and len(kept) >= 2:
+                partial = ([t for t, _s in kept], [s for _t, s in kept])
+        if chosen is None and partial is None and fallback is None and lo < 0 < hi:
+            # Before one lone label: a symmetric nice pair (+-50 on +-96),
+            # which still shows the scale -- if it fits.
+            edge = min(-lo, hi)
+            for a in sorted({m * 10.0 ** e for m in _TICK_STEPS
+                             for e in range(int(np.floor(np.log10(edge))) - 1,
+                                            int(np.floor(np.log10(edge))) + 1)}, reverse=True):
+                if not (0.3 * edge <= a <= edge):
+                    continue
+                pair = [-a, a]
+                try:
+                    texts = formatter.format_ticks(pair)
+                except Exception:
+                    texts = [f"{v:g}" for v in pair]
+                sizes = [text_size(s) for s in texts]
+                if (2 * a * length / span >= clearance(*np.max(sizes, axis=0))
+                        and all((edge - a) * length / span >= 0.5 * clearance(*s) for s in sizes)):
+                    chosen = (pair, sizes)
+                    break
+        chosen = chosen or partial or fallback or single
+        if chosen is None:          # not even one nice value in range
+            mid = 0.5 * (lo + hi)
+            chosen = ([mid], [text_size(f"{mid:.3g}")])
+        ticks, sizes = chosen
+        axis.set_major_locator(FixedLocator(ticks))
+        counts[name] = len(ticks)
+        if label_pad:
+            # The axis label clears its tick labels: their extent across
+            # the axis on screen (a box w x h seen across a line at
+            # angle (cos, sin) spans w*sin + h*cos), in points.
+            # Half of it: mplot3d already offsets the label outward from
+            # the tick-label row (found by rendering at 8-32 pt).
+            across = max(w * sin + h * cos for w, h in sizes)
+            axis.labelpad = 0.5 * across * 72.0 / figure.dpi + 0.2 * fontsize
+    return counts
 
 
 def _draw_axes_lines(ax, axes, lengths, names, colours, linestyle="-", fontsize=10):

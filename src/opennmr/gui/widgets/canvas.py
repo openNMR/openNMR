@@ -2765,8 +2765,16 @@ class MplCanvas(QWidget):
         for ax in self.figure.get_axes():
             if getattr(ax, "name", "") != "3d":
                 ax.tick_params(which="both", direction=self._TICK_DIRECTION)
-        result = plotting.fit_labels_within_figure(self.figure)
-        clipped = result["clipped"] if not result["fitted"] else []
+        threes = [ax for ax in self.figure.get_axes() if getattr(ax, "name", "") == "3d"]
+        if threes:
+            # A 3D picture keeps the text at the size asked for (tick
+            # labels the same size as axis labels, user request) and
+            # makes room by shrinking the box instead -- shrinking the
+            # text left some labels smaller than others.
+            clipped = self._fit_3d_layout(threes)
+        else:
+            result = plotting.fit_labels_within_figure(self.figure)
+            clipped = result["clipped"] if not result["fitted"] else []
         # Only on a change: a phase drag relayouts continuously, and
         # re-announcing the same thing every frame is noise.
         if clipped != self._last_clipped_labels:
@@ -3027,6 +3035,15 @@ class MplCanvas(QWidget):
         if self._contour_spectrum is not None:
             self._redraw_contour(preserve_view=False)
             return
+        if (self._external_plot and self._external_draw is not None
+                and any(getattr(ax, "name", "") == "3d" for ax in self.figure.axes)):
+            # A 3D picture (Simulate's tensors): redrawn at its own
+            # limits and box. The navigation stack restores x and y but
+            # not z, so after a zoom Home left the box stretched along z
+            # (user report, 2026-10-01). The rotation is kept.
+            self._redraw_external_now(self._external_draw, keep_limits=False)
+            self._home_limits = None
+            return
         live = set(self.figure.axes)
         if self._home_limits and any(ax in live for ax in self._home_limits):
             for ax, (xlim, ylim, auto_x, auto_y) in self._home_limits.items():
@@ -3157,7 +3174,80 @@ class MplCanvas(QWidget):
         ax.set_ylim(ylim[0] - dy, ylim[1] - dy)
         self.canvas.draw_idle()
 
+    #: How far the 3D box may shrink to keep its labels in the figure,
+    #: and the step it shrinks by.
+    _3D_MIN_ZOOM = 0.5
+    _3D_ZOOM_STEP = 0.92
+
+    def _fit_3d_layout(self, threes) -> list:
+        """Shrink each 3D box until its axis labels lie inside the
+        figure (down to :attr:`_3D_MIN_ZOOM`), refitting the ticks at
+        every step. Returns the labels still outside.
+
+        mplot3d places its axis labels only while drawing, so each
+        check draws the three axes alone (ticks and labels: a few ms)
+        rather than the whole picture (a frequency surface takes ~0.6 s)."""
+        try:
+            renderer = self.figure.canvas.get_renderer()
+        except AttributeError:
+            return []
+        bounds, tol = self.figure.bbox, 2.0
+        scale = 1.8294640721620434 * 25 / 24         # mplot3d's own box scale at zoom 1
+        outside = []
+        for _step in range(12):
+            outside = []
+            for ax in threes:
+                try:
+                    ax.M = ax.get_proj()
+                    ax.invM = np.linalg.inv(ax.M)
+                    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+                        axis.draw(renderer)
+                except Exception:  # never let a layout check break a redraw
+                    return []
+                for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+                    label = axis.label
+                    if not (label.get_text() and label.get_visible()):
+                        continue
+                    box = label.get_window_extent(renderer)
+                    if (box.x0 < bounds.x0 - tol or box.y0 < bounds.y0 - tol
+                            or box.x1 > bounds.x1 + tol or box.y1 > bounds.y1 + tol):
+                        outside.append((ax, label.get_text()))
+            if not outside:
+                break
+            shrunk = False
+            for ax in {a for a, _t in outside}:
+                aspect = np.asarray(ax._box_aspect, dtype=float)
+                zoom = float(np.linalg.norm(aspect)) / scale
+                if zoom * self._3D_ZOOM_STEP < self._3D_MIN_ZOOM:
+                    continue
+                ax.set_box_aspect(tuple(aspect), zoom=zoom * self._3D_ZOOM_STEP)
+                self._fit_3d_ticks(ax)
+                shrunk = True
+            if not shrunk:
+                break
+        return sorted({text for _a, text in outside})
+
+    def _fit_3d_ticks(self, ax) -> dict:
+        """As many ticks on the 3D ``ax`` as fit at the current text size,
+        view and limits (see tensor_views.fit_3d_ticks)."""
+        from ...notebook.tensor_views import fit_3d_ticks
+        try:
+            return fit_3d_ticks(ax, self._AXIS_LABELSIZE, font_family=self._font_family)
+        except Exception:  # never let tick fitting break a draw
+            return {}
+
+    def _refit_3d_ticks_after_release(self, event) -> None:
+        """A rotation or toolbar zoom of a 3D picture changes how long
+        each axis looks on screen, so how many tick labels fit."""
+        threes = [ax for ax in self.figure.axes if getattr(ax, "name", "") == "3d"]
+        if threes and getattr(event, "inaxes", None) in threes:
+            for ax in threes:
+                self._reset_3d_box(ax)
+            self._fit_3d_layout(threes)
+            self.canvas.draw_idle()
+
     def _on_release(self, event) -> None:
+        self._refit_3d_ticks_after_release(event)
         if self._region_select_start is not None:
             end = self._region_select_start
             if event.xdata is not None:
@@ -3687,11 +3777,7 @@ class MplCanvas(QWidget):
                     axis.labelpad = 0.5 * self._AXIS_LABELSIZE
                     if self._font_family:
                         axis.label.set_fontfamily(self._font_family)
-                # Larger text needs room inside the figure: shrink the box
-                # a little rather than clip the labels at its edge.
-                zoom = min(1.0, max(0.75, 1.0 - 0.02 * (self._AXIS_LABELSIZE - 11.0)))
-                aspect = getattr(ax, "_box_aspect", None)
-                ax.set_box_aspect((1, 1, 1) if aspect is None else tuple(aspect), zoom=zoom)
+                self._reset_3d_box(ax)
                 continue
             for spine in ax.spines.values():
                 spine.set_linewidth(self._AXIS_LINEWIDTH)
@@ -3721,6 +3807,21 @@ class MplCanvas(QWidget):
                 suptitle.set_fontfamily(self._font_family)
         self._apply_curve_spines()
         self._restyle_existing_legends()
+        threes = [ax for ax in self.figure.get_axes() if getattr(ax, "name", "") == "3d"]
+        if threes:
+            # After the relabelling above: a label's text sets its width.
+            self._fit_3d_layout(threes)
+
+    def _reset_3d_box(self, ax) -> None:
+        """The 3D box at the size the text asks for -- a little smaller
+        as the text grows -- with its ticks fitted to it; then
+        :meth:`_fit_3d_layout` shrinks it further only if a label would
+        still fall outside the figure. Always from this base, so a box
+        shrunk for one view grows back for the next."""
+        zoom = min(1.0, max(0.75, 1.0 - 0.02 * (self._AXIS_LABELSIZE - 11.0)))
+        aspect = getattr(ax, "_box_aspect", None)
+        ax.set_box_aspect((1, 1, 1) if aspect is None else tuple(aspect), zoom=zoom)
+        self._fit_3d_ticks(ax)
 
     #: "quantity (unit)" at the end of a label, and "quantity / unit".
     _BRACKET_LABEL = re.compile(r"^(?P<q>.*\S)\s*\((?P<u>[^()]+)\)\s*$")
@@ -6881,9 +6982,9 @@ class MplCanvas(QWidget):
         finally:
             self._external_redrawing = False
 
-    def _redraw_external_now(self, info: dict) -> None:
+    def _redraw_external_now(self, info: dict, keep_limits: bool = True) -> None:
         flat = [ax for ax in self.figure.axes if getattr(ax, "name", "") != "3d"]
-        limits = [(ax.get_xlim(), ax.get_ylim()) for ax in flat]
+        limits = [(ax.get_xlim(), ax.get_ylim()) for ax in flat] if keep_limits else []
         # A 3D picture keeps the view it was turned to -- unless the
         # tensor style has just set one.
         views = [(ax.elev, ax.azim) for ax in self.figure.axes if getattr(ax, "name", "") == "3d"]
@@ -6897,9 +6998,11 @@ class MplCanvas(QWidget):
         if views and len(threes) == len(views):
             for ax, (elev, azim) in zip(threes, views):
                 ax.view_init(elev=elev, azim=azim)
+                self._reset_3d_box(ax)          # fitted for this view, not the default one
+            self._fit_3d_layout(threes)
             self.canvas.draw_idle()
         flat_now = [ax for ax in self.figure.axes if getattr(ax, "name", "") != "3d"]
-        if len(flat_now) == len(limits):
+        if limits and len(flat_now) == len(limits):
             for ax, (xlim, ylim) in zip(flat_now, limits):
                 ax.set_xlim(xlim)
                 ax.set_ylim(ylim)
