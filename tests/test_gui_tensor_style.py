@@ -177,3 +177,95 @@ def test_default_palette_choice_is_measured():
         name = accessibility.default_palette(n)
         assert accessibility.max_safe_series(name) >= n
     assert accessibility.max_safe_series(accessibility.default_palette(5, ordered=True)) >= 5
+
+
+# ---------------------------------------------------------------------------
+# Round 4 (2026-10-01): Plot Style's colour maps and grid on tensor pictures
+# ---------------------------------------------------------------------------
+
+def _ax3d(canvas):
+    return [ax for ax in canvas.figure.axes if ax.name == "3d"][0]
+
+
+def _plot_style_on_tensor(window):
+    window.canvas_tabs.setCurrentWidget(window.simulation_canvas)
+    return window.simulation_canvas
+
+
+def test_label_style_change_keeps_the_tensor_gridlines(qapp):  # noqa: F811
+    # User report: switching "value (units)" to "value / units" switched
+    # the 3D gridlines off (the panel re-sent grid=False with every edit).
+    window = _tensor_window()
+    canvas = _plot_style_on_tensor(window)
+    assert canvas._tensor_style.get("grid", True) is True
+    assert _ax3d(canvas)._draw_grid
+    combo = window.output_axis_label_style_combo
+    combo.setCurrentIndex(combo.findData("slash"))
+    ax = _ax3d(canvas)
+    assert ax._draw_grid
+    assert ax.get_xlabel() == "x / ppm"
+
+
+def test_tensor_gridlines_are_optional(qapp):  # noqa: F811
+    window = _tensor_window()
+    canvas = _plot_style_on_tensor(window)
+    window._open_tensor_style()
+    dialog = window._tensor_style_dialog
+    dialog.grid_check.setChecked(False)
+    assert not _ax3d(canvas)._draw_grid
+    dialog.grid_check.setChecked(True)
+    assert _ax3d(canvas)._draw_grid
+    # Plot Style's "Show grid" box drives it too, and the dialog follows.
+    window.output_grid_checkbox.setChecked(not window.output_grid_checkbox.isChecked())
+    expected = window.output_grid_checkbox.isChecked()
+    assert _ax3d(canvas)._draw_grid is expected
+    assert dialog.grid_check.isChecked() is expected
+    # Notebook: the same key.
+    import matplotlib.pyplot as plt
+    fig = plt.figure()
+    tv.plot_tensor_ellipsoids(window._csa_tensor_site()[0], figure=fig, tensor_style={"grid": False})
+    assert not [a for a in fig.axes if a.name == "3d"][0]._draw_grid
+    plt.close(fig)
+
+
+def test_series_colour_map_reaches_the_tensor_surface(qapp):  # noqa: F811
+    # User report: 'Changing "series colour map" did nothing for the tensor.'
+    window = _tensor_window()
+    canvas = _plot_style_on_tensor(window)
+    window._open_tensor_style()
+    dialog = window._tensor_style_dialog
+    window._select_series_colormap("magma")
+    window._on_series_colormap_changed()
+    assert _surface_cmap(canvas) == "magma"
+    assert dialog.colormap_combo.currentData() == "magma"
+    # A scale the dialog's list lacks is added to it, not dropped on the next edit.
+    window._select_series_colormap("YlGnBu")
+    window._on_series_colormap_changed()
+    assert _surface_cmap(canvas) == "YlGnBu"
+    assert dialog.colormap_combo.currentData() == "YlGnBu"
+    dialog.reverse_check.setChecked(True)
+    assert _surface_cmap(canvas) == "YlGnBu_r"
+    dialog.reverse_check.setChecked(False)
+    # A qualitative palette is categories, not a scale: the surface keeps its map.
+    window._select_series_colormap("okabe_ito")
+    window._on_series_colormap_changed()
+    assert _surface_cmap(canvas) == "YlGnBu"
+    # The dialog's own choice is the last change, so it wins.
+    dialog.colormap_combo.setCurrentIndex(dialog.colormap_combo.findData("cividis"))
+    assert _surface_cmap(canvas) == "cividis"
+    # Map colour scale changed while the tensor is shown: the last change wins again.
+    combo = window.output_map_colormap_combo
+    combo.setCurrentIndex(combo.findData("plasma"))
+    assert _surface_cmap(canvas) == "plasma"
+
+
+def test_unchanged_plot_style_settings_leave_the_tensor_style_alone(qapp):  # noqa: F811
+    window = _tensor_window()
+    canvas = _plot_style_on_tensor(window)
+    canvas.set_style(tensor_style={"colormap": "cividis", "grid": False})
+    style = canvas.style_settings()
+    # The panel re-sends everything on any edit: nothing changes.
+    canvas.set_style(compare_colormap=style["compare_colormap"], map_colormap=style["map_colormap"] or "",
+                     grid=style["grid"], axis_label_style="slash")
+    assert _surface_cmap(canvas) == "cividis"
+    assert not _ax3d(canvas)._draw_grid

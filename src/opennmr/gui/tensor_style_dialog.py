@@ -60,7 +60,8 @@ class TensorStyleDialog(QDialog):
         self._loading = False
         v = QVBoxLayout(self)
         intro = QLabel("How tensor pictures are drawn. Text size, font, ticks and axis labels "
-                       "follow Plot Style, as for every plot.")
+                       "follow Plot Style, as for every plot. Changing Plot Style's series or map "
+                       "colour scale, or its grid, sets the ones here too: the last change wins.")
         intro.setWordWrap(True)
         v.addWidget(intro)
         form = QFormLayout()
@@ -81,6 +82,10 @@ class TensorStyleDialog(QDialog):
         form.addRow(self.colorbar_check)
         self.axes_check = QCheckBox("Principal axes")
         form.addRow(self.axes_check)
+        self.grid_check = QCheckBox("Gridlines")
+        self.grid_check.setToolTip("The 3D box's gridlines. Plot Style's \"Show grid\" box sets "
+                                   "this too while a tensor picture is on show.")
+        form.addRow(self.grid_check)
         self.alpha_spin = QDoubleSpinBox()
         self.alpha_spin.setRange(0.05, 1.0)
         self.alpha_spin.setSingleStep(0.05)
@@ -132,8 +137,12 @@ class TensorStyleDialog(QDialog):
         v.addLayout(buttons)
 
         self.load(canvas.style_settings().get("tensor_style") or {})
+        # Plot Style's colour maps / grid reach the picture through the
+        # canvas; show them here rather than overwrite them on the next edit.
+        if hasattr(canvas, "tensorStyleChanged"):
+            canvas.tensorStyleChanged.connect(self._reload_from_canvas)
         self.colormap_combo.currentIndexChanged.connect(self._changed)
-        for check in (self.reverse_check, self.colorbar_check, self.axes_check):
+        for check in (self.reverse_check, self.colorbar_check, self.axes_check, self.grid_check):
             check.toggled.connect(self._changed)
         for spin in (self.alpha_spin, self.ellipsoid_alpha_spin, self.elev_spin, self.azim_spin):
             spin.valueChanged.connect(self._changed)
@@ -143,11 +152,18 @@ class TensorStyleDialog(QDialog):
         look = tv.tensor_style(overrides)
         self._loading = True
         try:
-            index = self.colormap_combo.findData(look["colormap"] or "")
-            self.colormap_combo.setCurrentIndex(max(index, 0))
+            name = look["colormap"] or ""
+            index = self.colormap_combo.findData(name)
+            if index < 0:
+                # A scale chosen in Plot Style that this list does not
+                # offer: listed, so the next edit here does not drop it.
+                self.colormap_combo.addItem(name, name)
+                index = self.colormap_combo.count() - 1
+            self.colormap_combo.setCurrentIndex(index)
             self.reverse_check.setChecked(bool(look["reverse"]))
             self.colorbar_check.setChecked(bool(look["colorbar"]))
             self.axes_check.setChecked(bool(look["show_axes"]))
+            self.grid_check.setChecked(bool(look["grid"]))
             self.alpha_spin.setValue(float(look["surface_alpha"]))
             self.ellipsoid_alpha_spin.setValue(float(look["ellipsoid_alpha"]))
             self.elev_spin.setValue(float(look["elev"]))
@@ -163,12 +179,17 @@ class TensorStyleDialog(QDialog):
             "reverse": self.reverse_check.isChecked(),
             "colorbar": self.colorbar_check.isChecked(),
             "show_axes": self.axes_check.isChecked(),
+            "grid": self.grid_check.isChecked(),
             "surface_alpha": self.alpha_spin.value(),
             "ellipsoid_alpha": self.ellipsoid_alpha_spin.value(),
             "elev": self.elev_spin.value(),
             "azim": self.azim_spin.value(),
             **self._colours,
         }
+
+    def _reload_from_canvas(self) -> None:
+        if not self._loading:
+            self.load(self._canvas.style_settings().get("tensor_style") or {})
 
     def _paint_buttons(self) -> None:
         for key, button in self._colour_buttons.items():

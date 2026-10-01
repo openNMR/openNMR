@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-01 (round 4: Plot Style's colour maps and grid on tensor pictures): only the related files were run, as asked (test_gui_tensor_style, test_gui_simulation_plots, test_tensor_views, test_gui_adiabatic_tensors, test_plotting_style, test_gui_canvas, and the grid/style tests of the GUI files): all passed. 4 new tests in `test_gui_tensor_style.py`, each confirmed failing without the fix.*
+
 *2026-10-01 (round 3: tensor plot style, axis-label style on Simulate figures, colour-blind-friendly defaults): full suite without `test_data/` or pymatgen, matplotlib 3.10 / Py 3.11: 3277 passed, 164 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`). 8 new tests in `test_gui_tensor_style.py`, 1 in `test_plotting_style.py`.*
 
 *2026-10-01 (round 2: Simulate's plots on a full canvas, tick direction, Measure without an Hz axis, Czjzek citations and measured estimate): full suite without `test_data/` or pymatgen, matplotlib 3.10 / Py 3.11: 3268 passed, 164 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`). 19 new tests in `test_gui_simulation_plots.py`; `test_gui_round4_keep_sim.py`'s Czjzek keep test reads the MplCanvas menu.*
@@ -132,6 +134,20 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Tensor pictures: Plot Style's colour maps reach the surface; gridlines optional and kept (2026-10-01, round 4)
+
+**Asked:** "Changing 'series colour map' did nothing for the tensor. Also, on changing the label style (value (units) to value / units) the gridlines (which should also be optionally on or off) get switched off."
+
+**Why:** the tensor surface took its map only from Tensor Plot Style, then Plot Style's map colour scale -- never the series map. Gridlines: Plot Style's panel re-sends *every* setting on any edit, so a label-style edit also sent `grid=False` (the 2D default), and `set_style`'s grid loop applied it to the 3D axes too, switching matplotlib's 3D grid off.
+
+**Built:**
+- `tensor_style["grid"]` (default on), applied in `tensor_views._finish_3d`. Notebook: `tensor_style={"grid": False}`. A "Gridlines" box in Tensor Plot Style.
+- The canvas no longer applies Plot Style's grid to 3D axes directly. Instead `MplCanvas._tensor_style_carried_over` turns a *change* of the series colour map, the map colour scale or the "Show grid" box, while a tensor picture is on show, into a tensor-style change. Values merely re-sent unchanged do nothing. The last change wins, whichever control it came from.
+- Qualitative series palettes (okabe_ito, tab10, ...) are not put on a surface: they are categories, not a scale.
+- `MplCanvas.tensorStyleChanged`: Tensor Plot Style reloads from it, so it shows a map chosen in Plot Style. A map its own list lacks is added to the list rather than dropped on the next edit.
+
+**Rejected:** using the series map as the tensor surface's standing fallback. The series map defaults to viridis, which would replace the diverging RdBu default and hide the frequency's sign on a surface of both signs, without the user having asked.
 
 ## A tensor plot style; axis-label style on Simulate's figures; colour-blind-friendly defaults (2026-10-01, round 3)
 

@@ -3333,6 +3333,9 @@ class MplCanvas(QWidget):
 
     #: Right-click ▸ Tensor Plot Style… on a tensor picture.
     tensorStyleRequested = Signal()
+    #: The tensor-picture style changed (Tensor Plot Style, or Plot
+    #: Style's colour maps / grid carried over to a tensor on show).
+    tensorStyleChanged = Signal()
 
     def _on_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -3716,6 +3719,26 @@ class MplCanvas(QWidget):
     #: Parenthesised words that qualify a quantity rather than name its
     #: unit -- "Amplitude (normalised)" stays as it is.
     _NOT_A_UNIT = re.compile(r"^\s*(normali[sz]ed|relative|rel\.?|per\b.*|arb\.?)\s*$", re.I)
+
+    def _tensor_style_carried_over(self, map_colormap, compare_colormap, grid) -> dict:
+        """The tensor-style keys that a *change* of Plot Style's map or
+        series colour map, or of its Grid box, sets while a tensor
+        picture is on show (see set_style). A qualitative series palette
+        (okabe_ito, tab10 ...) is a set of categories, not a scale, so
+        it is not put on a surface."""
+        if not (self._external_plot and self._plot_kind == "tensor"):
+            return {}
+        carried = {}
+        if grid is not None and bool(grid) != bool(self._grid_visible):
+            carried["grid"] = bool(grid)
+        if compare_colormap is not None and compare_colormap != self._compare_colormap:
+            from ...plotting.style import is_qualitative
+            import matplotlib
+            if compare_colormap in matplotlib.colormaps and not is_qualitative(compare_colormap):
+                carried["colormap"] = compare_colormap
+        if map_colormap is not None and (map_colormap or None) != self._map_colormap:
+            carried["colormap"] = map_colormap or None
+        return carried
 
     def _relabel_for_style(self, text: str) -> str:
         """``text`` in this canvas's axis-label style: ``"Q (unit)"``
@@ -4309,6 +4332,15 @@ class MplCanvas(QWidget):
             if tick_direction not in ("in", "out", "inout"):
                 raise ValueError(f"tick_direction must be 'in', 'out' or 'inout', not {tick_direction!r}")
             self._TICK_DIRECTION = tick_direction
+        # A tensor picture on show takes Plot Style's colour maps and
+        # grid when the user *changes* them (user report: "Changing
+        # 'series colour map' did nothing for the tensor"). Only a
+        # change counts: the panel re-sends every setting on any edit,
+        # and a label-style edit re-sending grid=False switched the 3D
+        # gridlines off. Last change wins; Tensor Plot Style shows it.
+        carried = self._tensor_style_carried_over(map_colormap, compare_colormap, grid)
+        if carried:
+            tensor_style = {**carried, **(tensor_style or {})}
         if map_colormap is not None:
             # "" from the combo is "each plot's own default".
             self._map_colormap = map_colormap or None
@@ -4319,6 +4351,7 @@ class MplCanvas(QWidget):
                                for k in ("elev", "azim"))
             self._tensor_style = {**self._tensor_style, **tensor_style}
             self._tensor_view_set = self._tensor_view_set or changed_view
+            self.tensorStyleChanged.emit()
         if minor_ticks is not None:
             self._minor_ticks_visible = minor_ticks
         # Curve plots only (see _curve_axes); applied below by
@@ -4441,7 +4474,9 @@ class MplCanvas(QWidget):
         if axis_label_style is not None or axis_label_template is not None:
             self._refresh_axis_labels()
         for ax in self.figure.get_axes():
-            if grid is not None:
+            # A 3D axes' grid is the tensor style's "grid" (carried over
+            # above when the Grid box is changed), redrawn with it.
+            if grid is not None and getattr(ax, "name", "") != "3d":
                 ax.grid(grid, **({"alpha": 0.3} if grid else {}))
 
         # compare_colormap only takes effect on the next full
@@ -5055,7 +5090,8 @@ class MplCanvas(QWidget):
         # any style kwarg (even alongside visible=False) is treated as
         # an implicit "turn it on" and warns -- only pass alpha when
         # actually enabling it.
-        self.ax.grid(self._grid_visible, **({"alpha": 0.3} if self._grid_visible else {}))
+        if getattr(self.ax, "name", "") != "3d":
+            self.ax.grid(self._grid_visible, **({"alpha": 0.3} if self._grid_visible else {}))
         # Every rebuild, so a legend drawn by the plotting layer (which
         # knows nothing about these settings) still comes out matching
         # the ones drawn here -- see _restyle_existing_legends.
@@ -6814,7 +6850,8 @@ class MplCanvas(QWidget):
         self._apply_current_axis_style()
         if self._grid_visible:
             for ax in self.figure.axes:
-                ax.grid(True, alpha=0.3)
+                if getattr(ax, "name", "") != "3d":  # 3D: the tensor style's own
+                    ax.grid(True, alpha=0.3)
         # _legend_visible is left alone: the figure names its own traces
         # (see _external_plot), and switching it off here turned the
         # Compare legend off for good after one look at a DNP plot.

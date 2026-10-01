@@ -182,6 +182,7 @@ TENSOR_STYLE_DEFAULTS = {
     "reverse": False,          # run the colour scale the other way
     "colorbar": True,          # the colour bar beside a frequency surface
     "show_axes": True,         # principal axes through the origin
+    "grid": True,              # the 3D box's gridlines
     "surface_alpha": 1.0,      # opacity of the frequency surface
     "elev": 22.0,              # viewing elevation (degrees)
     "azim": 35.0,              # viewing azimuth (degrees)
@@ -231,6 +232,7 @@ def _finish_3d(ax, extent, fontsize, unit_label, style=None):
     ax.tick_params(labelsize=fontsize * 0.7, pad=0)
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
         axis.pane.set_alpha(0.05)
+    ax.grid(bool(style["grid"]))
     ax.view_init(elev=float(style["elev"]), azim=float(style["azim"]))
 
 
