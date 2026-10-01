@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-21)
 
-*2026-10-01 (round 4: Plot Style's colour maps and grid on tensor pictures): only the related files were run, as asked (test_gui_tensor_style, test_gui_simulation_plots, test_tensor_views, test_gui_adiabatic_tensors, test_plotting_style, test_gui_canvas, and the grid/style tests of the GUI files): all passed. 4 new tests in `test_gui_tensor_style.py`, each confirmed failing without the fix.*
+*2026-10-01 (round 4: Plot Style's colour maps and grid on tensor pictures): only the related files were run, as asked (test_gui_tensor_style, test_gui_simulation_plots, test_tensor_views, test_gui_adiabatic_tensors, test_plotting_style, test_gui_canvas, and the grid/style tests of the GUI files): all passed. 4 new tests in `test_gui_tensor_style.py`, each confirmed failing without the fix; then 4 more (tick-label size, GUI at 9/11/16 pt and notebook) -- 330 passed across the tensor, Simulate-plot and canvas files.*
 
 *2026-10-01 (round 3: tensor plot style, axis-label style on Simulate figures, colour-blind-friendly defaults): full suite without `test_data/` or pymatgen, matplotlib 3.10 / Py 3.11: 3277 passed, 164 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`). 8 new tests in `test_gui_tensor_style.py`, 1 in `test_plotting_style.py`.*
 
@@ -146,6 +146,8 @@ Newest first. Each entry is one round of work: what the user asked, what was act
 - The canvas no longer applies Plot Style's grid to 3D axes directly. Instead `MplCanvas._tensor_style_carried_over` turns a *change* of the series colour map, the map colour scale or the "Show grid" box, while a tensor picture is on show, into a tensor-style change. Values merely re-sent unchanged do nothing. The last change wins, whichever control it came from.
 - Qualitative series palettes (okabe_ito, tab10, ...) are not put on a surface: they are categories, not a scale.
 - `MplCanvas.tensorStyleChanged`: Tensor Plot Style reloads from it, so it shows a map chosen in Plot Style. A map its own list lacks is added to the list rather than dropped on the next edit.
+
+**Then asked:** "The axis ticklabels and the axis labels need to have the same size for the tensor plot". Ticks were 0.8× the label size in the GUI (0.7 vs 0.85 of `fontsize` in the notebook, colour bar included); now equal in both. At full size the ticks crowded the labels and clipped "y (ppm)" at 16 pt, so the canvas also sets the 3D label pad to half the text size and shrinks the 3D box (`set_box_aspect(zoom=…)`, 1.0 at ≤ 11 pt down to 0.75) as the text grows. Checked by rendering at 11 and 16 pt.
 
 **Rejected:** using the series map as the tensor surface's standing fallback. The series map defaults to viridis, which would replace the diverging RdBu default and hide the frequency's sign on a surface of both signs, without the user having asked.
 

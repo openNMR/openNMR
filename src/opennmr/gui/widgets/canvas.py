@@ -3678,11 +3678,20 @@ class MplCanvas(QWidget):
             if getattr(ax, "name", "") == "3d":
                 # A 3D picture (Simulate's tensor views) has no spines or
                 # minor ticks in the 2D sense; its text follows the style.
-                ax.tick_params(labelsize=self._AXIS_LABELSIZE * 0.8)
+                # Tick labels the same size as the axis labels (user
+                # request, 2026-10-01), as on every other plot.
+                ax.tick_params(labelsize=self._AXIS_LABELSIZE)
                 for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
                     axis.label.set_fontsize(self._AXIS_LABELSIZE)
+                    # Clear of the (now full-size) tick labels at any size.
+                    axis.labelpad = 0.5 * self._AXIS_LABELSIZE
                     if self._font_family:
                         axis.label.set_fontfamily(self._font_family)
+                # Larger text needs room inside the figure: shrink the box
+                # a little rather than clip the labels at its edge.
+                zoom = min(1.0, max(0.75, 1.0 - 0.02 * (self._AXIS_LABELSIZE - 11.0)))
+                aspect = getattr(ax, "_box_aspect", None)
+                ax.set_box_aspect((1, 1, 1) if aspect is None else tuple(aspect), zoom=zoom)
                 continue
             for spine in ax.spines.values():
                 spine.set_linewidth(self._AXIS_LINEWIDTH)

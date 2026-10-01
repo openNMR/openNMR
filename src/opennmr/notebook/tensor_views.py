@@ -229,7 +229,8 @@ def _finish_3d(ax, extent, fontsize, unit_label, style=None):
     ax.set_xlabel(f"x ({unit_label})", fontsize=fontsize * 0.85, labelpad=2)
     ax.set_ylabel(f"y ({unit_label})", fontsize=fontsize * 0.85, labelpad=2)
     ax.set_zlabel(f"z ({unit_label})", fontsize=fontsize * 0.85, labelpad=2)
-    ax.tick_params(labelsize=fontsize * 0.7, pad=0)
+    # Tick labels the same size as the axis labels (user request, 2026-10-01).
+    ax.tick_params(labelsize=fontsize * 0.85, pad=0)
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
         axis.pane.set_alpha(0.05)
     ax.grid(bool(style["grid"]))
@@ -341,7 +342,7 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
         bar = figure.colorbar(mappable, ax=ax, shrink=0.65, pad=0.08)
         bar.set_label("δ − δ$_{iso}$ (ppm)" if relative_to == "iso" else "δ (ppm)",
                       fontsize=fontsize * 0.85)
-        bar.ax.tick_params(labelsize=fontsize * 0.7)
+        bar.ax.tick_params(labelsize=fontsize * 0.85)
         bar.formatter.set_useOffset(False)
         bar.update_ticks()
     _finish_3d(ax, extent, fontsize, "ppm", look)

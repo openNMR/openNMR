@@ -269,3 +269,46 @@ def test_unchanged_plot_style_settings_leave_the_tensor_style_alone(qapp):  # no
                      grid=style["grid"], axis_label_style="slash")
     assert _surface_cmap(canvas) == "cividis"
     assert not _ax3d(canvas)._draw_grid
+
+
+def _text_sizes(fig):
+    """(label sizes, tick-label sizes) over every axis of ``fig``."""
+    labels, ticks = set(), set()
+    for ax in fig.axes:
+        axes = [ax.xaxis, ax.yaxis] + ([ax.zaxis] if ax.name == "3d" else [])
+        for axis in axes:
+            shown = axis.get_ticklabels()
+            if axis.label.get_text():
+                labels.add(round(axis.label.get_fontsize(), 3))
+                ticks.update(round(t.get_fontsize(), 3) for t in shown)
+    return labels, ticks
+
+
+@pytest.mark.parametrize("size", [9.0, 11.0, 16.0])
+def test_tensor_tick_labels_match_the_axis_labels(qapp, size):  # noqa: F811
+    # User request: "The axis ticklabels and the axis labels need to have
+    # the same size for the tensor plot".
+    window = _tensor_window()
+    canvas = window.simulation_canvas
+    canvas.set_style(labelsize=size)
+    for picture in ("surface", "ellipsoid"):
+        if picture == "ellipsoid":
+            window.sim_csa_tensor_controls.style_combo.setCurrentIndex(
+                window.sim_csa_tensor_controls.style_combo.findData("ellipsoid"))
+            assert window.sim_csa_tensor_controls.show_tensors()
+        labels, ticks = _text_sizes(canvas.figure)
+        assert labels == {size} and ticks == {size}, picture
+    canvas.figure.canvas.draw()          # and it still draws
+
+
+def test_notebook_tensor_tick_labels_match_the_axis_labels():
+    import matplotlib.pyplot as plt
+    from opennmr.notebook import combined_hamiltonian as ch
+    site = ch.Site("13C", delta_iso=0.0, label="C")
+    site.add_csa(aniso=-80.0, asym=0.3)
+    for style in ("surface", "ellipsoid"):
+        fig = plt.figure()
+        tv.plot_tensors(site, None, style=style, figure=fig, fontsize=12.0)
+        labels, ticks = _text_sizes(fig)
+        assert len(labels) == 1 and labels == ticks, style
+        plt.close(fig)
