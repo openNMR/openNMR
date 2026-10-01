@@ -930,6 +930,32 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
 # Raw FID -- 2D
 # ============================================================
 
+def _apply_drift_correction(dic: dict, data: np.ndarray, request: dict, pseudo_2d: bool,
+                            sw_fallback: float, proc2s: dict) -> tuple[np.ndarray, dict]:
+    """:func:`read_2d`'s ``drift_correction`` step -- see there."""
+    from ..notebook import drift_correction as dc
+
+    params = {name: dict(values) for name, values in dic.items()}
+    params["acqus"].setdefault("SW_h", sw_fallback)
+    if "acqu2s" in params:
+        params["acqu2s"].setdefault("SW_h", proc2s.get("SW_p"))
+    setup = dc.bruker_drift_setup("", pseudo=True if pseudo_2d else None, params=params,
+                                  n_fids=data.shape[0])
+    if setup.acquired_points(data.shape[0]) == 0:
+        raise ValueError("Drift correction: the acquisition parameters describe no complete "
+                         "point in this data.")
+    start = float(request.get("start_hz", 0.0))
+    end = float(request.get("end_hz", start))
+    endpoint = bool(request.get("endpoint", True))
+    shifts = request.get("shifts_hz")
+    corrected = dc.correct_spectrum_fids(data, setup, start, end, shifts_hz=shifts, endpoint=endpoint)
+    record = {"start_hz": start, "end_hz": end, "endpoint": endpoint,
+              "n_points": setup.acquired_points(data.shape[0]),
+              "custom_shifts": shifts is not None, "description": setup.describe(),
+              "notes": list(setup.notes), "citation": dc.CITATION}
+    return corrected, record
+
+
 def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bool | None = None,
             autophase: bool = True, phase_mode: str = "recorded", phase0_inc: float = 0.1,
             phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5,
@@ -942,9 +968,22 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             linear_predict_direction: str = "forward",
             magnitude: bool | None = None,
             linear_predict_f1: bool | None = None,
+            drift_correction: dict | None = None,
             _raw_fid_cache: np.ndarray | None = None) -> NMRSpectrum:
     """Read the raw ``ser`` and reprocess it (F2 then F1) using the
     parameters TopSpin recorded in ``procs``/``proc2s``.
+
+    ``drift_correction`` : a linear field-drift correction applied to
+    the raw FIDs before anything else (Najbauer & Andreas, J. Magn.
+    Reson. 2019 -- see :mod:`opennmr.notebook.drift_correction`):
+    ``{"start_hz": ..., "end_hz": ...}`` (Hz of the detected nucleus,
+    positive = move left), optionally ``"shifts_hz"`` (one per acquired
+    point, overriding the ramp) and ``"endpoint"``. ``metadata.raw``
+    then holds the corrected FIDs as ``fid_raw`` (what every later
+    in-memory reprocess starts from) and the file's own as
+    ``fid_raw_uncorrected`` (what :class:`~opennmr.gui.session.Session`
+    hands back as ``_raw_fid_cache``, so a reprocess never corrects
+    twice), with ``drift_correction`` recording what was applied.
 
     ``_raw_fid_cache`` : internal fast path, not a GUI-facing
     reprocessing option (leading underscore). The digital-filter-
@@ -1076,6 +1115,13 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     nuc2 = acqus.get("NUC1") if homonuclear else dic.get("acqu2s", {}).get("NUC1")
     if pseudo_2d is None:
         pseudo_2d = (nuc2 == "off")
+
+    fid_raw_uncorrected = None
+    drift_record = None
+    if drift_correction:
+        fid_raw_uncorrected = data
+        data, drift_record = _apply_drift_correction(dic, data, drift_correction, pseudo_2d, sw, proc2s)
+        fid_raw = data
 
     if homonuclear:
         obs_1, o1_1, sf_1, sw_1 = obs, o1, sf, sw
@@ -1406,6 +1452,8 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # committed choice from, without double-applying the one
             # already baked into "fid").
             "fid_raw": fid_raw,
+            **({"fid_raw_uncorrected": fid_raw_uncorrected, "drift_correction": drift_record}
+               if drift_record is not None else {}),
             **({"window_unsupported": window_unsupported_note} if window_unsupported_note else {}),
             **({"window_unsupported_f1": window_unsupported_note_f1} if window_unsupported_note_f1 else {}),
         },
@@ -2156,7 +2204,7 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     # notebook reads processed data and was the reference the user was
     # comparing against.
     if kwargs.pop("use_processed", False):
-        one_d = {k: v for k, v in kwargs.items() if k != "pseudo_2d"}
+        one_d = {k: v for k, v in kwargs.items() if k not in ("pseudo_2d", "drift_correction")}
         if os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr")):
             spectrum = read_2d_processed(path, **{
                 k: v for k, v in kwargs.items()
@@ -2178,7 +2226,9 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     # then reading it a second time with the right flag (which cost a
     # discarded 5.19s genuine-2D reconstruction per load on the real
     # EXSY benchmark -- see TODO.md's duplication-trace entry).
-    one_d_kwargs = {k: v for k, v in kwargs.items() if k != "pseudo_2d"}
+    # drift_correction likewise only means something for a ser (see
+    # read_2d): a 1D's scans are summed before they are stored.
+    one_d_kwargs = {k: v for k, v in kwargs.items() if k not in ("pseudo_2d", "drift_correction")}
     if has_ser:
         try:
             return read_2d(path, **kwargs, _raw_fid_cache=raw_fid_cache)

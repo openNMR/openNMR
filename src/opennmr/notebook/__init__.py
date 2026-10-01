@@ -69,6 +69,13 @@ from .relaxation import (
 )
 
 from .arithmetic import combine_spectra, combine_spectra_as_results
+# Referencing across nuclei, and linear field-drift correction
+# (Najbauer & Andreas, J. Magn. Reson. 305 (2019) 1-4) -- Process ▸
+# Reference and Process ▸ Field Drift Correction in the GUI.
+from .referencing import transfer_sr, transfer_sr_between
+from .drift_correction import (
+    correct_bruker_dataset, concatenate_nus_datasets, measure_drift_hz, drift_profile,
+)
 from .manual_baseline import (
     fit_manual_baseline, evaluate_manual_baseline, manual_baseline_correct,
     plot_manual_baseline, describe_manual_baseline, polynomial_baseline, sine_baseline,

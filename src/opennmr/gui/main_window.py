@@ -42,6 +42,8 @@ from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
 from .compare_2d import Compare2DControls
 from ..notebook import notes as nb_notes
+from ..notebook import referencing as nb_referencing
+from .drift_panel import DriftCorrectionPanel
 from ..notebook import periodic_table as nb_periodic_table
 from ..notebook import series_fitting as nb_series_fitting
 from PySide6.QtGui import QColor
@@ -2774,6 +2776,12 @@ class MainWindow(QMainWindow):
         elif key_f1 not in (None, "none", "__recorded__"):
             kwargs["window_f1"], kwargs["window_kwargs_f1"] = key_f1, {}
 
+        # A drift correction is applied by the reader, to the raw FIDs,
+        # so a reopened spectrum has to be *read* corrected.
+        drift = saved.get("drift_correction")
+        if isinstance(drift, dict) and "start_hz" in drift:
+            kwargs["drift_correction"] = {k: drift[k] for k in ("start_hz", "end_hz", "endpoint", "shifts_hz")
+                                          if drift.get(k) is not None}
         # phase0/phase1 are only meaningful with autophase off -- with
         # it on the reader recomputes its own and ignores them.
         if "phase0" in kwargs or "phase1" in kwargs:
@@ -10227,6 +10235,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.baseline_section)
 
         layout.addWidget(CollapsibleSection("Reference", content=self._build_reference_box()))
+        # Explicit user request (2026-10-01): field drift correction in
+        # Process, after Najbauer & Andreas (J. Magn. Reson. 2019).
+        self.drift_panel = DriftCorrectionPanel(
+            spectra=self._drift_spectra, selected=self._selected_index,
+            apply=self._apply_drift_correction_to_selected, log=self._drift_log)
+        self.drift_section = CollapsibleSection("Field Drift Correction", content=self.drift_panel)
+        self.drift_section.toggled.connect(lambda expanded: expanded and self.drift_panel.refresh())
+        model = self.spectrum_list.model()
+        for signal in (model.rowsInserted, model.rowsRemoved, model.modelReset):
+            signal.connect(lambda *_a: self.drift_panel.refresh())
+        layout.addWidget(self.drift_section)
         layout.addStretch(1)
         return tab
 
@@ -10259,7 +10278,12 @@ class MainWindow(QMainWindow):
             "a one-shot delta) -- editing it recomputes the axis from "
             "scratch, so re-entering the same number twice is a no-op."
         )
-        form = QFormLayout(box)
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(0, 0, 0, 0)
+        fields = QWidget()
+        form = QFormLayout(fields)
+        form.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(fields)
 
         self.sr_shift_spin = QDoubleSpinBox()
         self.sr_shift_spin.setRange(-1.0e6, 1.0e6)
@@ -10285,7 +10309,188 @@ class MainWindow(QMainWindow):
         apply_button.clicked.connect(self._on_apply_sr_clicked)
         form.addRow(apply_button)
 
+        self.sr_transfer_section = CollapsibleSection(
+            "SR from Another Nucleus", content=self._build_sr_transfer_box())
+        self.sr_transfer_section.toggled.connect(
+            lambda expanded: expanded and self._refresh_sr_transfer(fill=True))
+        outer.addWidget(self.sr_transfer_section)
+
         return box
+
+    def _build_sr_transfer_box(self) -> QWidget:
+        """SR_new = (SR_cal / SFO1_cal) x SFO1_new -- the SR calibrated on
+        one nucleus carried to another through the ratio of their
+        frequencies (explicit user request, 2026-10-01). The maths, and
+        when it is valid, are in :mod:`opennmr.notebook.referencing`."""
+        box = QWidget()
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(0, 0, 0, 0)
+        intro = QLabel(
+            "A field offset moves every nucleus by the same ppm, so an SR calibrated on one "
+            "nucleus gives the SR of another: SR_new = (SR_cal / SFO1_cal) × SFO1_new.")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        fields = QWidget()
+        form = QFormLayout(fields)
+        form.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(fields)
+
+        self.sr_cal_source_combo = QComboBox()
+        self.sr_cal_source_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.sr_cal_source_combo.setMinimumContentsLength(8)
+        self.sr_cal_source_combo.setToolTip(
+            "Fill SR_cal and SFO1_cal from an open experiment (its current SR), or type them.")
+        self.sr_cal_source_combo.activated.connect(self._on_sr_cal_source_chosen)
+        form.addRow("Calibrated on:", self.sr_cal_source_combo)
+
+        self.sr_cal_spin = QDoubleSpinBox()
+        self.sr_cal_spin.setRange(-1.0e6, 1.0e6)
+        self.sr_cal_spin.setDecimals(4)
+        self.sr_cal_spin.setSuffix(" Hz")
+        form.addRow("SR_cal:", self.sr_cal_spin)
+        self.sfo1_cal_spin = QDoubleSpinBox()
+        self.sfo1_cal_spin.setRange(0.0, 1.0e5)
+        self.sfo1_cal_spin.setDecimals(7)
+        self.sfo1_cal_spin.setSuffix(" MHz")
+        form.addRow("SFO1_cal:", self.sfo1_cal_spin)
+
+        self.sr_new_dim_combo = QComboBox()
+        self.sr_new_dim_combo.addItem("Direct (F2)", "f2")
+        self.sr_new_dim_combo.addItem("Indirect (F1)", "f1")
+        self.sr_new_dim_combo.activated.connect(lambda _i: self._refresh_sr_transfer(fill=True))
+        form.addRow("For this spectrum's:", self.sr_new_dim_combo)
+        self.sfo1_new_spin = QDoubleSpinBox()
+        self.sfo1_new_spin.setRange(0.0, 1.0e5)
+        self.sfo1_new_spin.setDecimals(7)
+        self.sfo1_new_spin.setSuffix(" MHz")
+        self.sfo1_new_spin.setToolTip("The selected spectrum's SFO1 for that dimension; editable.")
+        form.addRow("SFO1_new:", self.sfo1_new_spin)
+        for spin in (self.sr_cal_spin, self.sfo1_cal_spin, self.sfo1_new_spin):
+            spin.valueChanged.connect(lambda _v: self._refresh_sr_transfer())
+
+        self.sr_transfer_result_label = QLabel("")
+        self.sr_transfer_result_label.setWordWrap(True)
+        self.sr_transfer_result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        outer.addWidget(self.sr_transfer_result_label)
+
+        copy_button = QPushButton("Copy SR_new")
+        copy_button.setToolTip("Copy SR_new (Hz) to the clipboard.")
+        copy_button.clicked.connect(self._on_copy_sr_transfer)
+        use_button = QPushButton("Apply to This Spectrum")
+        use_button.setToolTip("Set this spectrum's SR for the chosen dimension to SR_new and apply it.")
+        use_button.clicked.connect(self._on_apply_sr_transfer)
+        self.sr_transfer_copy_button, self.sr_transfer_apply_button = copy_button, use_button
+        row = QHBoxLayout()
+        row.addWidget(copy_button)
+        row.addWidget(use_button)
+        outer.addLayout(row)
+
+        self.sr_transfer_warning_label = QLabel("⚠ " + nb_referencing.VALIDITY_WARNING)
+        self.sr_transfer_warning_label.setWordWrap(True)
+        self.sr_transfer_warning_label.setStyleSheet("color: #b35900;")
+        outer.addWidget(self.sr_transfer_warning_label)
+        self._sr_transfer_result = None
+        return box
+
+    def _refresh_sr_transfer(self, fill: bool = False) -> None:
+        """Recompute the SR transfer. ``fill``: also re-read the open
+        experiments and the selected spectrum's SFO1 (on opening the
+        section, on a new selection, or a change of dimension)."""
+        if not hasattr(self, "sr_cal_source_combo"):
+            return
+        index = self._selected_index()
+        spectrum = self.session.spectra[index] if index is not None else None
+        if fill:
+            keep = self.sr_cal_source_combo.currentData()
+            self.sr_cal_source_combo.blockSignals(True)
+            self.sr_cal_source_combo.clear()
+            self.sr_cal_source_combo.addItem("(enter by hand)", None)
+            for i, other in enumerate(self.session.spectra):
+                if other.metadata.sfo1:
+                    self.sr_cal_source_combo.addItem(self.session.label(i), i)
+            position = self.sr_cal_source_combo.findData(keep) if keep is not None else 0
+            self.sr_cal_source_combo.setCurrentIndex(max(position, 0))
+            self.sr_cal_source_combo.blockSignals(False)
+            has_f1 = spectrum is not None and self._sr_axis(spectrum, "f1") is not None
+            model_item = self.sr_new_dim_combo.model().item(1)
+            if model_item is not None:
+                model_item.setEnabled(has_f1)
+            if not has_f1 and self.sr_new_dim_combo.currentData() == "f1":
+                self.sr_new_dim_combo.setCurrentIndex(0)
+            if spectrum is not None:
+                dim = self.sr_new_dim_combo.currentData()
+                sfo1 = spectrum.metadata.sfo1 if dim == "f2" else spectrum.metadata.sfo1_indirect
+                self.sfo1_new_spin.blockSignals(True)
+                self.sfo1_new_spin.setValue(float(sfo1 or 0.0))
+                self.sfo1_new_spin.blockSignals(False)
+        try:
+            result = nb_referencing.transfer_sr(
+                self.sr_cal_spin.value(), self.sfo1_cal_spin.value(), self.sfo1_new_spin.value(),
+                nucleus_cal=getattr(self, "_sr_cal_nucleus", None),
+                nucleus_new=self._sr_transfer_target_nucleus(spectrum))
+        except ValueError as exc:
+            self._sr_transfer_result = None
+            self.sr_transfer_result_label.setText(str(exc))
+            self.sr_transfer_copy_button.setEnabled(False)
+            self.sr_transfer_apply_button.setEnabled(False)
+            return
+        self._sr_transfer_result = result
+        lines = [f"Correction: {result.correction_ppm:.6f} ppm",
+                 f"<b>SR_new = {result.sr_new_hz:.4f} Hz</b>"]
+        lines += [f"⚠ {w}" for w in result.warnings]
+        self.sr_transfer_result_label.setText("<br>".join(lines))
+        self.sr_transfer_copy_button.setEnabled(True)
+        self.sr_transfer_apply_button.setEnabled(spectrum is not None)
+
+    def _sr_transfer_target_nucleus(self, spectrum):
+        if spectrum is None:
+            return None
+        dim = self.sr_new_dim_combo.currentData()
+        return spectrum.metadata.nucleus if dim == "f2" else spectrum.metadata.nucleus_indirect
+
+    def _on_sr_cal_source_chosen(self, _position: int) -> None:
+        index = self.sr_cal_source_combo.currentData()
+        if index is None or not (0 <= index < len(self.session)):
+            self._sr_cal_nucleus = None
+            self._refresh_sr_transfer()
+            return
+        source = self.session.spectra[index]
+        self._sr_cal_nucleus = source.metadata.nucleus
+        for spin, value in ((self.sr_cal_spin, self._current_sr(source, "f2")),
+                            (self.sfo1_cal_spin, source.metadata.sfo1 or 0.0)):
+            spin.blockSignals(True)
+            spin.setValue(float(value))
+            spin.blockSignals(False)
+        self._refresh_sr_transfer()
+
+    def _on_copy_sr_transfer(self) -> None:
+        if self._sr_transfer_result is None:
+            return
+        QApplication.clipboard().setText(f"{self._sr_transfer_result.sr_new_hz:.4f}")
+        self.statusBar().showMessage(
+            f"Copied SR_new = {self._sr_transfer_result.sr_new_hz:.4f} Hz. "
+            "Valid only for the same magnet at a similar time.", 8000)
+
+    def _on_apply_sr_transfer(self) -> None:
+        result = self._sr_transfer_result
+        index = self._selected_index()
+        if result is None or index is None:
+            return
+        dim = self.sr_new_dim_combo.currentData()
+        self._apply_reference_shift_hz(result.sr_new_hz, dim)
+        history = self._ensure_history(index)
+        if history is not None:
+            source = self.sr_cal_source_combo.currentText() if self.sr_cal_source_combo.currentData() \
+                is not None else "values entered by hand"
+            io_history.add_event(
+                history,
+                f"SR {'F1' if dim == 'f1' else ''} set from another nucleus ({source}): "
+                f"({result.sr_cal_hz:.4f} Hz / {result.sfo1_cal_mhz:.7f} MHz) × "
+                f"{result.sfo1_new_mhz:.7f} MHz = {result.sr_new_hz:.4f} Hz", kind="event")
+            self._write_history(index)
+        self.statusBar().showMessage(
+            f"SR set to {result.sr_new_hz:.4f} Hz from the calibrated nucleus.", 8000)
 
     def _make_phase_control(self, sensitivity: float = 0.2, step: float = 1.0) -> tuple[DragHandle, QDoubleSpinBox, QLabel]:
         handle = DragHandle(sensitivity=sensitivity, step=step)
@@ -18576,6 +18781,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message, 15000)
 
     def _restore_sr_control(self, spectrum) -> None:
+        if getattr(self, "sr_transfer_section", None) is not None and self.sr_transfer_section.isExpanded():
+            self._refresh_sr_transfer(fill=True)
+        if getattr(self, "drift_panel", None) is not None:
+            self.drift_panel._sync_target()
         for dim, spin in (("f2", self.sr_shift_spin), ("f1", self.sr_shift_indirect_spin)):
             spin.blockSignals(True)
             spin.setValue(self._current_sr(spectrum, dim))
@@ -18585,6 +18794,60 @@ class MainWindow(QMainWindow):
         has_indirect = self._sr_axis(spectrum, "f1") is not None
         self.sr_indirect_label.setVisible(has_indirect)
         self.sr_shift_indirect_spin.setVisible(has_indirect)
+
+    # ----- Field drift correction (Process ▸ Field Drift Correction) -----
+
+    def _drift_spectra(self) -> list[dict]:
+        return [{"label": self.session.label(i), "spectrum": s, "index": i}
+                for i, s in enumerate(self.session.spectra)]
+
+    def _drift_log(self, index: int, text: str) -> None:
+        history = self._ensure_history(index)
+        if history is not None:
+            io_history.add_event(history, text, kind="event")
+            self._write_history(index)
+
+    #: Keys a reload must not carry over from the spectrum it replaces:
+    #: what the reader itself records about this read.
+    _DRIFT_RELOAD_FRESH_KEYS = frozenset({"drift_correction"})
+
+    def _apply_drift_correction_to_selected(self, request: dict | None) -> str | None:
+        """Re-read the selected Bruker 2D with ``request`` as its
+        ``drift_correction`` (``None`` removes it), keeping every other
+        processing choice. Returns an error message, or ``None``.
+
+        A reload, not an in-memory step: the correction acts on the raw
+        FIDs before the reader's own processing, and keeping the reader
+        the single implementation is this project's rule (see
+        :meth:`_on_magnitude_toggled`). What the reload would otherwise
+        drop -- the user's SR, baseline, F1 phase, notes -- is carried
+        over and re-applied the way a reopened spectrum's saved state is
+        (:meth:`_apply_loaded_processing_sidecar`)."""
+        index = self._selected_index()
+        if index is None:
+            return "Select a spectrum first."
+        spectrum = self.session.spectra[index]
+        if spectrum.metadata.vendor != "bruker" or spectrum.ndim != 2 \
+                or spectrum.metadata.raw.get("fid_raw") is None:
+            return ("Drift correction here needs a Bruker 2D or pseudo-2D read from its raw ser. "
+                    "Use Write Corrected Bruker Dataset… for other data.")
+        if request is None and not spectrum.metadata.raw.get("drift_correction"):
+            return None
+        self._commit_pending_phase_to_metadata()
+        carried = {k: v for k, v in io_persistence.processing_state(spectrum).items()
+                   if k not in self._DRIFT_RELOAD_FRESH_KEYS}
+        phase_kwargs = self._current_phase_kwargs(spectrum)
+        try:
+            self.session.reload(index, drift_correction=request, **phase_kwargs)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user
+            return f"Drift correction failed: {exc}"
+        new_spectrum = self.session.spectra[index]
+        for key, value in carried.items():
+            new_spectrum.metadata.raw.setdefault(key, value)
+        self._on_selection_changed(index)
+        self._apply_loaded_processing_sidecar(new_spectrum, index)
+        self._schedule_sidecar_save(index)
+        return None
 
     def _on_apply_sr_clicked(self) -> None:
         # Both dimensions from the one button. Each is idempotent

@@ -290,6 +290,10 @@ KEY_INFO: dict[str, tuple[str, object]] = {
     "baseline_manual_sine_fixed": ("Baseline fixed coefficients", lambda v: ", ".join(
         n for n, f in zip("ABCD", v or []) if f) or "none"),
     "baseline_manual_refit": ("Baseline refitted per trace", _onoff),
+    "drift_correction": ("Field drift correction", lambda v: (
+        "off" if not v else
+        f"{float(v.get('start_hz', 0)):+.4f} → {float(v.get('end_hz', 0)):+.4f} Hz over "
+        f"{v.get('n_points', '?')} points (linear; Najbauer & Andreas, J. Magn. Reson. 305 (2019) 1–4)")),
     "sr_shift_hz": ("Referencing (SR shift)", _hz),
     "sr_shift_hz_f1": ("Referencing F1 (SR shift)", _hz),
     "meta.nucleus": ("Nucleus", str),

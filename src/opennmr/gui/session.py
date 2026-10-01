@@ -145,8 +145,15 @@ class Session:
         # filter removal on every single reprocess action. Gated on
         # vendor: no other reader declares (or needs) this kwarg, and
         # an unexpected one would raise a TypeError if it leaked through.
-        if old_meta.vendor == "bruker" and old_meta.raw.get("fid_raw") is not None:
-            reload_kwargs["_raw_fid_cache"] = old_meta.raw["fid_raw"]
+        # A drift-corrected load keeps the corrected FIDs as fid_raw (what
+        # in-memory previews reprocess from) and the file's own as
+        # fid_raw_uncorrected: the cache must be the latter, or read_2d
+        # would correct the already-corrected FIDs a second time.
+        cached = old_meta.raw.get("fid_raw_uncorrected")
+        if cached is None:
+            cached = old_meta.raw.get("fid_raw")
+        if old_meta.vendor == "bruker" and cached is not None:
+            reload_kwargs["_raw_fid_cache"] = cached
         spectrum = io.load(info["path"], vendor=info["vendor"], **reload_kwargs)
         spectrum.metadata = dataclasses.replace(
             spectrum.metadata, nucleus=old_meta.nucleus, nucleus_indirect=old_meta.nucleus_indirect,

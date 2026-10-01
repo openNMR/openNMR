@@ -267,7 +267,11 @@ def test_opening_a_dnp_section_lists_the_open_spectra(window):
 def test_baseline_is_its_own_processing_section(window):
     page = window.side_tabs.widget(window._processing_tab_index)
     sections = {s.title(): s for s in page.findChildren(CollapsibleSection)}
-    assert list(sections) == ["FID Processing", "Phase", "Baseline", "Reference"]
+    # "SR from Another Nucleus" sits inside Reference; Field Drift
+    # Correction joined Process on 2026-10-01.
+    assert list(sections) == ["FID Processing", "Phase", "Baseline", "Reference",
+                              "SR from Another Nucleus", "Field Drift Correction"]
+    assert sections["Reference"].isAncestorOf(sections["SR from Another Nucleus"])
     for widget in (window.baseline_correct_button, window.baseline_method_combo,
                    window.baseline_preview_checkbox, window.baseline_target_note):
         assert sections["Baseline"].isAncestorOf(widget)
