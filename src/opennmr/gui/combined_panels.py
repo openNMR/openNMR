@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .fit_progress_dialog import FitProgress
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import panel_state
 from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
@@ -1006,16 +1007,19 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                       **args["settings"])
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         started = time.perf_counter()
-        try:
-            if args["starts"]:
-                fit = cfit.fit_combined_multistart(
-                    results, args["sites"], args["starts"], verbose=False,
-                    screen_n_zcw=self.screen_orientations_spin.value() or None, **kwargs)
-            else:
-                fit = cfit.fit_combined(results, args["sites"], **kwargs)
-        except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
-            QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, "Combined Hamiltonian fit", f"The fit did not succeed:\n\n{exc}")
+        with FitProgress(self, "Combined Hamiltonian fit") as fit_progress_box:
+            try:
+                if args["starts"]:
+                    fit = cfit.fit_combined_multistart(
+                        results, args["sites"], args["starts"], verbose=False,
+                        screen_n_zcw=self.screen_orientations_spin.value() or None, **kwargs)
+                else:
+                    fit = cfit.fit_combined(results, args["sites"], **kwargs)
+            except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
+                QApplication.restoreOverrideCursor()
+                QMessageBox.warning(self, "Combined Hamiltonian fit", f"The fit did not succeed:\n\n{exc}")
+                return False
+        if fit_progress_box.stopped:
             return False
         QApplication.restoreOverrideCursor()
         fit["elapsed"] = time.perf_counter() - started

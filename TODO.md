@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-01 (round 7: live progress and Stop for every spectrum fit): related files only (every fitter's own tests, the GUI fit panels, and test_gui/test_gui_usability -k fit): 376 passed, 5 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`). 20 new tests in `test_fit_progress.py`.*
+
 *2026-10-01 (round 6: italic Czjzek symbols, colour-bar gap): related files only (test_colorbar_gap_and_czjzek_labels, test_czjzek, the Czjzek/tensor/Simulate GUI files, test_gui_canvas, test_plotting_style, test_gui_usability, test_tensor_views): 459 + 27 passed. 5 new tests in `test_colorbar_gap_and_czjzek_labels.py`; `test_czjzek.py`'s label check updated for the italic form. The pre-existing `test_fit_warns_when_the_mean_efg_is_not_needed` failure is unchanged.*
 
 *2026-10-01 (round 5: Home on tensor pictures, tick labels that never overlap): related files only, as asked (test_gui_tensor_style, test_tensor_views, test_gui_adiabatic_tensors, test_gui_simulation_plots, test_gui_canvas, test_gui_usability, test_plotting_style): 426 + 21 passed. 5 new tests in `test_gui_tensor_style.py`; the Home one confirmed failing on the old path.*
@@ -138,6 +140,29 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Every spectrum fit shows a live, Stop-able progress pop-up (2026-10-01, round 7)
+
+**Asked:** "I really like the little update-as-you-go pop-up when computing the Czjzek distribution. Is there a good way to do something similar when fitting spectra, too? Not just for the Czjzek, but also for quadrupole, CSA, J etc".
+
+**Built:**
+- **`core/fit_progress.py`** (notebook and GUI).
+  - `watch(callback)` reports every fit run inside it.
+  - Each fitter passes its model through `tracked(model, y)` (`curve_fit`) or `tracked_residuals(fun)` (`least_squares`). Outside a `watch` these return the function unchanged, so an unwatched fit is untouched; a watched fit gives bit-identical parameters (tested).
+  - `FitStatus` reports: evaluations, elapsed time, the misfit (the start value, the best so far, and best as a fraction of the start), its fall over the last second ("still improving" / "no longer improving"), and a stage. Stages are set by `set_stage`: "start k of n" (combined multi-start), "row k of n" (spectral slices), and the Czjzek grid.
+  - `print_progress` is a ready-made notebook callback.
+- **Wired into:** CSA, quadrupolar, J multiplet, spin system, Czjzek, combined Hamiltonian (single and multi-start), Quantify's spectral fit (`processing.fitting.fit_spectrum`, every slice), the notebook `fitting.fit_spectrum`, the pNMR fits, and multi-spectrum `least_squares`.
+- **`gui/fit_progress_dialog.FitProgress`**, a context manager around each GUI fit call: CSA, quadrupolar, J, spin system, combined, Czjzek, and the three spectral-fit entry points.
+  - The pop-up appears after 0.4 s, so quick fits show nothing.
+  - It is window-modal and keeps the window responsive (`processEvents`, as the Czjzek library build does).
+  - Stop ends the fit and says in the status bar that nothing was changed. A stopped fit returns nothing; best-so-far parameters are never kept, because a partial fit has no valid uncertainties.
+- **The Czjzek library dialog closes when the library is complete**, so the fit's pop-up takes over instead of a finished bar staying on screen.
+
+**Decisions:**
+- **`FitCancelled` is a `BaseException`, like `KeyboardInterrupt`.** The fitters catch `RuntimeError`/`Exception` to skip a start that does not converge. A Stop caught that way would have carried on with the next start and ended "No starting point converged" (tested for every fitter).
+- **No percentage bar.** A least-squares fit has no known number of steps; a busy bar plus the misfit and its rate of fall is the honest equivalent.
+- **Multi-spectrum fitting keeps its own existing progress dialog** (seeds/steps with Stop) rather than stacking a second one.
+- **Relaxation, diffusion and series curve fits are not wired in:** they take well under a second.
 
 ## Czjzek maps: italic C, η, P; a colour-bar gap for maps and tensor surfaces (2026-10-01, round 6)
 

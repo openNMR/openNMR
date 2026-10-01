@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .fit_progress_dialog import FitProgress
 from ..core import registry as core_registry
 from ..io import serialize
 from . import panel_state
@@ -548,12 +549,15 @@ class QuadrupolarFitPanel(QWidget):
         regions = self.fit_regions()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         started = time.perf_counter()
-        try:
-            popt, pcov_free, is_free, _scale, info = qfit.fit_quadrupolar_spectrum(
-                results, sites, fit_regions=regions, **settings)
-        except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
-            QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, "Quadrupolar fit", f"The fit did not succeed:\n\n{exc}")
+        with FitProgress(self, "Quadrupolar fit") as fit_progress_box:
+            try:
+                popt, pcov_free, is_free, _scale, info = qfit.fit_quadrupolar_spectrum(
+                    results, sites, fit_regions=regions, **settings)
+            except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
+                QApplication.restoreOverrideCursor()
+                QMessageBox.warning(self, "Quadrupolar fit", f"The fit did not succeed:\n\n{exc}")
+                return
+        if fit_progress_box.stopped:
             return
         elapsed = time.perf_counter() - started
         x = np.sort(np.asarray(results["x_ppm"], dtype=float))

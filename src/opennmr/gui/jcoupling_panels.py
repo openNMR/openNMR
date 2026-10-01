@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .fit_progress_dialog import FitProgress
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from ..io import serialize
 from . import panel_state
@@ -1774,14 +1775,17 @@ class JCouplingFitPanel(QWidget):
 
         lineshape, eta = self.lineshape_combo.currentData(), self.eta_spin.value()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            with contextlib.redirect_stdout(StringIO()):
-                popt, pcov_free, is_free, scale, info = jfit.fit_jcoupling_spectrum(
-                    results, sites, larmor_Hz=larmor, lineshape=lineshape, eta=eta,
-                    fit_regions=regions)
-        except Exception as exc:  # noqa: BLE001 -- a fit that will not converge is an outcome
-            QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, "J-coupling fit", f"The fit did not succeed:\n\n{exc}")
+        with FitProgress(self, "J-coupling fit") as fit_progress_box:
+            try:
+                with contextlib.redirect_stdout(StringIO()):
+                    popt, pcov_free, is_free, scale, info = jfit.fit_jcoupling_spectrum(
+                        results, sites, larmor_Hz=larmor, lineshape=lineshape, eta=eta,
+                        fit_regions=regions)
+            except Exception as exc:  # noqa: BLE001 -- a fit that will not converge is an outcome
+                QApplication.restoreOverrideCursor()
+                QMessageBox.warning(self, "J-coupling fit", f"The fit did not succeed:\n\n{exc}")
+                return False
+        if fit_progress_box.stopped:
             return False
         QApplication.restoreOverrideCursor()
 
@@ -1869,20 +1873,23 @@ class JCouplingFitPanel(QWidget):
 
         lineshape, eta = self.lineshape_combo.currentData(), self.eta_spin.value()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            popt, pcov, is_free, info = nss.fit_spin_system_spectrum(
-                results, spins, couplings, B0_tesla=B0, fwhm_Hz=self.spin_fwhm_spin.value(),
-                lineshape=lineshape, eta=eta, fit_regions=regions, fixed=fixed, bounds=bounds,
-                observe=observe)
-            if self.ambiguity_check.isChecked():
-                solutions = nss.equivalent_solutions(results, popt, info, fixed=fixed,
-                                                     bounds=bounds, pcov=pcov, is_free=is_free)
-            else:
-                solutions = [{"popt": popt, "pcov": pcov, "is_free": is_free, "rmse": None,
-                              "differences": []}]
-        except Exception as exc:  # noqa: BLE001 -- a fit that will not converge is an outcome
-            QApplication.restoreOverrideCursor()
-            QMessageBox.warning(self, title, f"The fit did not succeed:\n\n{exc}")
+        with FitProgress(self, "Spin-system fit") as fit_progress_box:
+            try:
+                popt, pcov, is_free, info = nss.fit_spin_system_spectrum(
+                    results, spins, couplings, B0_tesla=B0, fwhm_Hz=self.spin_fwhm_spin.value(),
+                    lineshape=lineshape, eta=eta, fit_regions=regions, fixed=fixed, bounds=bounds,
+                    observe=observe)
+                if self.ambiguity_check.isChecked():
+                    solutions = nss.equivalent_solutions(results, popt, info, fixed=fixed,
+                                                         bounds=bounds, pcov=pcov, is_free=is_free)
+                else:
+                    solutions = [{"popt": popt, "pcov": pcov, "is_free": is_free, "rmse": None,
+                                  "differences": []}]
+            except Exception as exc:  # noqa: BLE001 -- a fit that will not converge is an outcome
+                QApplication.restoreOverrideCursor()
+                QMessageBox.warning(self, title, f"The fit did not succeed:\n\n{exc}")
+                return False
+        if fit_progress_box.stopped:
             return False
         QApplication.restoreOverrideCursor()
 

@@ -68,6 +68,7 @@ from .plotting import setup_plotting, apply_tick_style, apply_spine_style, save_
 from .one_d import NMR1dimport
 from .fitting import build_region_mask, estimate_baseline_robust, fit_quality, expand_pcov
 from .simulations import csa_definition, make_static_csa_spectrum, finite_mas_csa_spectrum
+from ..core import fit_progress as _fit_progress
 
 _CSA_PARAM_NAMES = ["d_iso", "span_or_Delta", "skew_or_eta", "fwhm", "amplitude", "eta"]
 
@@ -847,7 +848,8 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
         return y_model_full[mask]
 
     popt_free, pcov_free = curve_fit(
-        model_wrapper, x_fit, y_fit, p0=p0_arr[is_free],
+        _fit_progress.tracked(model_wrapper, y_fit, n_free=int(is_free.sum())), x_fit, y_fit,
+        p0=p0_arr[is_free],
         bounds=(lower[is_free], upper[is_free]), maxfev=20000,
     )
 

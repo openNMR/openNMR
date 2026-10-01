@@ -73,6 +73,7 @@ from .simulations import (
     quadrupolar_spectrum, quadrupolar_transition_table,
 )
 from .utils import find_isotope_info
+from ..core import fit_progress as _fit_progress
 
 #: Per-site parameters, in ``popt`` order. ``CQ0`` and ``eta0`` (the mean
 #: EFG of the extended model) come last so the first six keep their
@@ -874,7 +875,8 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
             full[is_free] = free
             return czjzek_model(x_sorted, full, n_sites, library, x_ref, lineshape,
                                 extended)[0][mask]
-        popt_free, pcov_free = curve_fit(model, x_fit, y_fit, p0=start[is_free],
+        popt_free, pcov_free = curve_fit(_fit_progress.tracked(model, y_fit, n_free=int(is_free.sum())),
+                                         x_fit, y_fit, p0=start[is_free],
                                          bounds=(lower[is_free], upper[is_free]),
                                          diff_step=1e-4, maxfev=5000)
         full = start.copy()
@@ -887,12 +889,14 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
     cq0_hi = np.where(is_free[cq0_idx], upper[cq0_idx], p0_arr[cq0_idx])
     library = library_for(sig_hi, np.maximum(d_hi, p0_arr[d_idx]), 1.5 * p0_arr[sigma_idx],
                           cq0_hi, p0_arr[eta0_idx])
+    _fit_progress.set_stage("fitting on the first grid")
     params, pcov_free = run(library, p0_arr)
     grid_log = library.describe()
     if refine_grid and cq_max_MHz is None:
         # Stage 2: a grid sized to the answer, started from it.
         library = library_for(1.5 * params[sigma_idx], params[d_idx], params[sigma_idx],
                               params[cq0_idx], params[eta0_idx])
+        _fit_progress.set_stage("fitting on a grid refined to the fitted σ")
         params, pcov_free = run(library, params)
         grid_log = library.describe() + " (refined to the fitted σ)"
 

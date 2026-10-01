@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QProgressDialog, QPushButton, QSpinBox, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .fit_progress_dialog import FitProgress
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from ..io import serialize
@@ -128,8 +129,12 @@ class LibraryProgress:
         self.cancelled = False
 
     def __call__(self, done: int, total: int) -> bool:
+        if done >= total:
+            # Library complete: make way for the fit's own pop-up.
+            self.close()
+            return True
         if self._dialog is None:
-            if time.perf_counter() - self._started < 0.4 or done >= total:
+            if time.perf_counter() - self._started < 0.4:
                 return True
             self._dialog = QProgressDialog(f"{self._title}: simulating lineshapes…", "Stop", 0,
                                            int(total), self._parent)
@@ -443,25 +448,28 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
         progress = LibraryProgress(self, "Czjzek fit")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         started = time.perf_counter()
-        try:
-            popt, pcov_free, is_free, _scale, info = cz.fit_czjzek_spectrum(
-                results, sites, fit_regions=regions, I=settings["I"],
-                larmor_Hz=settings["larmor_Hz"], mas_Hz=settings["mas_Hz"],
-                order=settings["order"], transitions=settings["transitions"],
-                lineshape=settings["lineshape"], n_zcw=settings["n_zcw"] or 4181,
-                fit_baseline=settings["fit_baseline"], n_cq=n_cq, n_eta=n_eta,
-                progress=progress)
-            x = np.sort(np.asarray(results["x_ppm"], dtype=float))
-            y_fit, components = cz.evaluate_czjzek_fit(x, popt, info)
-        except cz.SimulationCancelled:
-            QMessageBox.information(self, "Czjzek fit", "Fit stopped. A coarser grid is quicker.")
+        with FitProgress(self, "Czjzek fit") as fit_progress_box:
+            try:
+                popt, pcov_free, is_free, _scale, info = cz.fit_czjzek_spectrum(
+                    results, sites, fit_regions=regions, I=settings["I"],
+                    larmor_Hz=settings["larmor_Hz"], mas_Hz=settings["mas_Hz"],
+                    order=settings["order"], transitions=settings["transitions"],
+                    lineshape=settings["lineshape"], n_zcw=settings["n_zcw"] or 4181,
+                    fit_baseline=settings["fit_baseline"], n_cq=n_cq, n_eta=n_eta,
+                    progress=progress)
+                x = np.sort(np.asarray(results["x_ppm"], dtype=float))
+                y_fit, components = cz.evaluate_czjzek_fit(x, popt, info)
+            except cz.SimulationCancelled:
+                QMessageBox.information(self, "Czjzek fit", "Fit stopped. A coarser grid is quicker.")
+                return
+            except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
+                QMessageBox.warning(self, "Czjzek fit", f"The fit did not succeed:\n\n{exc}")
+                return
+            finally:
+                progress.close()
+                QApplication.restoreOverrideCursor()
+        if fit_progress_box.stopped:
             return
-        except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
-            QMessageBox.warning(self, "Czjzek fit", f"The fit did not succeed:\n\n{exc}")
-            return
-        finally:
-            progress.close()
-            QApplication.restoreOverrideCursor()
         elapsed = time.perf_counter() - started
         self._library = info.pop("library")
         order = np.argsort(results["x_ppm"])

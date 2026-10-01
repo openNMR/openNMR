@@ -41,6 +41,7 @@ from scipy.interpolate import UnivariateSpline
 from scipy.optimize import curve_fit
 
 from ..core.spectrum import NMRSpectrum
+from ..core import fit_progress as _fit_progress
 
 # numpy >= 2.0 renamed trapz -> trapezoid
 _trapz = getattr(np, "trapezoid", None) or np.trapz
@@ -1058,7 +1059,7 @@ def fit_spectrum(spectrum: NMRSpectrum, peak_defs, fit_regions=None, use_normali
         return build_model(x, full, peak_defs, x_ref)
 
     popt_free, pcov_free = curve_fit(
-        model_wrapper, x, y, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
+        _fit_progress.tracked(model_wrapper, y, n_free=int(is_free.sum())), x, y, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
         maxfev=20000,
     )
 
@@ -1646,7 +1647,9 @@ def NMR2D_fit_slices(slices: dict[str, list[NMRSpectrum]], peak_defs, mode: str 
     previous_converged = None
     first_converged = None
 
-    for slice_type, trace in selected:
+    for k_slice, (slice_type, trace) in enumerate(selected):
+        if len(selected) > 1:
+            _fit_progress.set_stage(f"{slice_type} {k_slice + 1} of {len(selected)}")
 
         x = trace.axis_values(0, unit=x_unit.lower())
         y = trace.normalized() if normalize else trace.data

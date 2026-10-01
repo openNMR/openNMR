@@ -35,6 +35,7 @@ from .two_d import (
     NMR2dimport, NMR2d_get_trace, NMR2D_get_slices, prepare_trace_for_fit,
     NMR2D_plot_slices,
 )
+from ..core import fit_progress as _fit_progress
 
 # numpy >= 2.0 renamed trapz -> trapezoid
 _trapz = getattr(np, "trapezoid", None) or np.trapz
@@ -523,7 +524,7 @@ def fit_spectrum(results, peak_defs, fit_regions=None, use_normalised=True, x_un
             print("BAD INITIAL PARAMETER", i, "value=", val, "bounds=", lo, hi)
 
     popt_free, pcov_free = curve_fit(
-        model_wrapper, x, y, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
+        _fit_progress.tracked(model_wrapper, y, n_free=int(is_free.sum())), x, y, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
         maxfev=20000,
     )
 

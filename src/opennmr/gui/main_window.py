@@ -118,6 +118,7 @@ from .arithmetic_panel import ArithmeticPanel
 from .fit_display_panel import FitDisplayPanel
 from .fit_models_panel import FitModelsPanel
 from .curve_fit_plot_box import CurveFitPlotBox
+from .fit_progress_dialog import FitProgress
 from ..notebook import fit_models as nb_fit_models
 from ..notebook.fitting import build_region_mask as nb_build_region_mask
 from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
@@ -6087,10 +6088,13 @@ class MainWindow(QMainWindow):
                 "Fit Curve needs at least two 1D spectra checked in the Compare list.",
             )
             return
-        try:
-            slice_results = self._fit_peaks(stack)
-        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-            QMessageBox.critical(self, "Fit failed", str(exc))
+        with FitProgress(self, "Spectral fit") as fit_progress_box:
+            try:
+                slice_results = self._fit_peaks(stack)
+            except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+                QMessageBox.critical(self, "Fit failed", str(exc))
+                return
+        if fit_progress_box.stopped:
             return
         self._warn_if_fit_near_region_edge(slice_results)
         # No single spectrum "owns" a Compare-stack fit the way a
@@ -20889,15 +20893,18 @@ class MainWindow(QMainWindow):
             )
             return
 
-        try:
-            if spectrum.ndim == 1:
-                entries = [spectrum]
-            else:
-                entries = processing_slicing.get_slices(
-                    spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
-            results = self._fit_peaks(entries)
-        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-            QMessageBox.critical(self, "Fit failed", str(exc))
+        with FitProgress(self, "Spectral fit") as fit_progress_box:
+            try:
+                if spectrum.ndim == 1:
+                    entries = [spectrum]
+                else:
+                    entries = processing_slicing.get_slices(
+                        spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
+                results = self._fit_peaks(entries)
+            except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+                QMessageBox.critical(self, "Fit failed", str(exc))
+                return
+        if fit_progress_box.stopped:
             return
         self._warn_if_fit_near_region_edge(results)
 
@@ -21286,14 +21293,17 @@ class MainWindow(QMainWindow):
 
         fit_regions = self._csa_fit_regions()
         self.statusBar().showMessage("Fitting CSA lineshape…")
-        try:
-            popt, pcov, is_free, scale, info = notebook_csa.fit_csa_spectrum(
-                results, sites, fit_regions=fit_regions,
-                **self._csa_grid_kwargs(scheme, fitting_n), **common)
-        except Exception as exc:  # noqa: BLE001 -- a fit that will not converge
-            # is a normal outcome here, not a bug to crash on.
-            self.statusBar().clearMessage()
-            QMessageBox.warning(self, "CSA fit", f"The CSA fit did not succeed:\n\n{exc}")
+        with FitProgress(self, "CSA fit") as fit_progress_box:
+            try:
+                popt, pcov, is_free, scale, info = notebook_csa.fit_csa_spectrum(
+                    results, sites, fit_regions=fit_regions,
+                    **self._csa_grid_kwargs(scheme, fitting_n), **common)
+            except Exception as exc:  # noqa: BLE001 -- a fit that will not converge
+                # is a normal outcome here, not a bug to crash on.
+                self.statusBar().clearMessage()
+                QMessageBox.warning(self, "CSA fit", f"The CSA fit did not succeed:\n\n{exc}")
+                return
+        if fit_progress_box.stopped:
             return
         self.statusBar().clearMessage()
 
@@ -23383,16 +23393,19 @@ class MainWindow(QMainWindow):
         now with the peak_defs just brought into view."""
         self._select_single_row(index)
         spectrum = self.session.spectra[index]
-        try:
-            slice_results = spectrum.metadata.raw.get("slice_fit_results")
-            if not slice_results:
-                entries = processing_slicing.get_slices(
-                    spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
-                slice_results = self._fit_peaks(entries)
-                self._warn_if_fit_near_region_edge(slice_results)
-                self._show_spectral_fit_results(spectrum, slice_results)
-        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-            QMessageBox.critical(self, "Fit failed", str(exc))
+        with FitProgress(self, "Spectral fit") as fit_progress_box:
+            try:
+                slice_results = spectrum.metadata.raw.get("slice_fit_results")
+                if not slice_results:
+                    entries = processing_slicing.get_slices(
+                        spectrum, rows=self._fit_slice_rows(spectrum))["rows"]
+                    slice_results = self._fit_peaks(entries)
+                    self._warn_if_fit_near_region_edge(slice_results)
+                    self._show_spectral_fit_results(spectrum, slice_results)
+            except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+                QMessageBox.critical(self, "Fit failed", str(exc))
+                return
+        if fit_progress_box.stopped:
             return
         self._run_curve_fit(slice_results, len(slice_results), spectrum, persist_to=spectrum)
 

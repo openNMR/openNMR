@@ -128,6 +128,7 @@ from .fitting import (
     print_fit_report, NMR1dplot_with_fit,
 )
 from .one_d import NMR1dimport
+from ..core import fit_progress as _fit_progress
 
 
 # ===========================================================================
@@ -1588,7 +1589,7 @@ def fit_cif_envelope(
     lower = [shift_scale_bounds[0], x_offset_bounds[0], sigma_bounds[0], 0.0]
     upper = [shift_scale_bounds[1], x_offset_bounds[1], sigma_bounds[1], np.inf]
 
-    popt, pcov = curve_fit(wrapper, x_fit, y_fit, p0=p0, bounds=(lower, upper), maxfev=20000)
+    popt, pcov = curve_fit(_fit_progress.tracked(wrapper, y_fit, n_free=len(p0)), x_fit, y_fit, p0=p0, bounds=(lower, upper), maxfev=20000)
 
     y_model = wrapper(x_fit, *popt)
     rmse = float(np.sqrt(np.mean((y_fit - y_model) ** 2)))

@@ -68,6 +68,7 @@ import numpy as np
 
 from .utils import find_isotope_info
 from .simulations import multiplet_lineshape
+from ..core import fit_progress as _fit_progress
 
 #: Largest Hamiltonian block diagonalised before refusing (dense eigh on
 #: an N x N block costs ~N^3; 3500 is a few seconds).
@@ -527,7 +528,8 @@ def fit_spin_system_spectrum(results, spins, couplings, B0_tesla=None, fwhm_Hz=1
     # budget is in iterations' worth of work; tolerances are tight so a
     # converged fit is converged to far below any linewidth.
     n_free = int(is_free.sum())
-    popt_free, pcov_free = curve_fit(model, x_fit, y_fit, p0=p0[is_free],
+    popt_free, pcov_free = curve_fit(_fit_progress.tracked(model, y_fit, n_free=n_free),
+                                     x_fit, y_fit, p0=p0[is_free],
                                      bounds=(lower[is_free], upper[is_free]),
                                      diff_step=steps[is_free], max_nfev=max_iterations,
                                      ftol=1e-12, xtol=1e-12, gtol=1e-12)

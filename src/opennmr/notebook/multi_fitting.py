@@ -58,6 +58,7 @@ from .combined_fitting import (_default_bounds, _derived, _fmt, _get, _set, fit_
 from .combined_hamiltonian import Site, _broaden_site, _site_sticks
 from .fitting import build_region_mask, fit_quality
 from .utils import _GAMMA_DF
+from ..core import fit_progress as _fit_progress
 
 SCOPES = ("experiment", "nucleus", "global")
 PRESETS = ("series", "isotopes", "fields")
@@ -667,7 +668,8 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
         return np.concatenate(out)
 
     if free.any():
-        solution = least_squares(residuals, p0[free], bounds=(lo, hi), x_scale="jac",
+        solution = least_squares(_fit_progress.tracked_residuals(residuals, n_free=int(free.sum())),
+                                 p0[free], bounds=(lo, hi), x_scale="jac",
                                  diff_step=1e-4, max_nfev=max_nfev)
         theta = solution.x
         J = solution.jac

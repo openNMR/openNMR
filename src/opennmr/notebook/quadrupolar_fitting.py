@@ -49,6 +49,7 @@ from .one_d import NMR1dimport
 from .fitting import build_region_mask, estimate_baseline_robust, fit_quality, expand_pcov
 from .simulations import (quadrupolar_spectrum, quadrupolar_ct_isotropic_shift_Hz,
                           quadrupolar_transition_table, QUADRUPOLAR_ORDERS)
+from ..core import fit_progress as _fit_progress
 
 QUAD_PARAM_NAMES = ["d_iso", "C_Q", "eta_Q", "fwhm", "amplitude", "eta"]
 _N = len(QUAD_PARAM_NAMES)
@@ -387,7 +388,8 @@ def fit_quadrupolar_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, 
 
     # Relative steps sized to the physics: the default (~1.5e-8 of the
     # value) is below the powder pattern's own bin-to-bin roughness.
-    popt_free, pcov_free = curve_fit(model, x_fit, y_fit, p0=p0_arr[is_free],
+    popt_free, pcov_free = curve_fit(_fit_progress.tracked(model, y_fit, n_free=int(is_free.sum())),
+                                     x_fit, y_fit, p0=p0_arr[is_free],
                                      bounds=(lower[is_free], upper[is_free]),
                                      diff_step=1e-4, maxfev=5000)
     popt = p0_arr.copy()

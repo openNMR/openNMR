@@ -50,6 +50,7 @@ from .fitting import build_region_mask, estimate_baseline_robust, fit_quality
 from .combined_hamiltonian import (Site, as_sites, _site_sticks, _broaden_site,
                                    simulate_combined)
 from .simulations import quadrupolar_ct_isotropic_shift_Hz, QUADRUPOLAR_ORDERS
+from ..core import fit_progress as _fit_progress
 
 _BROADENING = ("amount", "fwhm", "eta")
 
@@ -309,7 +310,8 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
     if free.any():
         lo = np.array([r["lower"] for r in table])[free]
         hi = np.array([r["upper"] for r in table])[free]
-        popt, pcov = curve_fit(model, x[mask], y[mask], p0=p_all[free], bounds=(lo, hi),
+        popt, pcov = curve_fit(_fit_progress.tracked(model, y[mask], n_free=int(free.sum())),
+                               x[mask], y[mask], p0=p_all[free], bounds=(lo, hi),
                                diff_step=1e-4, max_nfev=max_nfev)
         p_all[free] = popt
     else:
@@ -398,7 +400,8 @@ def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_start
     screen = dict(fit_kwargs)
     if screen_n_zcw:
         screen["n_zcw"] = screen_n_zcw
-    for combo in combos:
+    for k, combo in enumerate(combos):
+        _fit_progress.set_stage(f"start {k + 1} of {len(combos)}")
         dicts = [s.to_dict() for s in sites]
         for (lab, name, _v), value in zip(axes, combo):
             _set(dicts[labels.index(lab)], name, value)
@@ -418,6 +421,7 @@ def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_start
     if best is None:
         raise RuntimeError("No starting point converged.")
     if screen_n_zcw:
+        _fit_progress.set_stage("refining the best start")
         best = fit_combined(results, best["sites"], **fit_kwargs)
     best["starts"] = sorted(rows, key=lambda r: r["chi2"])
     n_good = sum(1 for r in rows if np.isfinite(r["chi2"])
