@@ -156,7 +156,7 @@ def test_mixture_map_and_plots():
     for layout in ("right", "top"):
         fig = cz.plot_czjzek_fit(res, popt, pcov, info, layout=layout)
         axes = fig.czjzek_axes
-        assert axes["map"].get_xlabel().startswith("$C")
+        assert axes["map"].get_xlabel().startswith(r"$\mathit{C}_\mathrm{Q}")
         assert axes["spectrum"] is not None and axes["colorbar"] is not None
         box_map, box_spec = axes["map"].get_position(), axes["spectrum"].get_position()
         if layout == "right":

@@ -330,6 +330,71 @@ def apply_spine_style(ax, top=False, right=False, bottom=True, left=True, linewi
     return ax
 
 
+def set_colorbar_gap(fig, gap_pt) -> list:
+    """Set the gap between each vertical colour bar in ``fig`` and the
+    plot it belongs to, to ``gap_pt`` points (1/72 inch at print size).
+    User request (2026-10-01): "a way to control the spacing between the
+    colourbar and the heatmap ... or the surface plots of the tensors".
+
+    * A 2D plot (a Czjzek map) has its right edge moved to ``gap_pt``
+      from the bar. The bar stays where it is, so nothing to its right
+      (a spectrum panel) is disturbed and nothing is pushed off the
+      figure.
+    * A 3D picture (a tensor surface) keeps its place and the bar moves,
+      measured from the drawn box's right-hand corner at the current
+      view. It stops at the figure's edge, labels included.
+
+    ``gap_pt`` None or negative leaves the figure as drawn. Call after
+    any ``tight_layout``, which re-spaces the plots and undoes it.
+    Returns the colour-bar Axes it moved a gap for.
+    """
+    if gap_pt is None or float(gap_pt) < 0:
+        return []
+    gap = float(gap_pt) / 72.0 / fig.get_figwidth()     # figure fraction
+    try:
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:
+        renderer = None
+    done = []
+    for cax in fig.axes:
+        bar = getattr(cax, "_colorbar", None)
+        if bar is None or getattr(bar, "orientation", "vertical") != "vertical":
+            continue
+        cpos = cax.get_position()
+        owners = [ax for ax in fig.axes
+                  if ax is not cax and getattr(ax, "_colorbar", None) is None
+                  and ax.get_position().x0 < cpos.x0
+                  and min(ax.get_position().y1, cpos.y1) > max(ax.get_position().y0, cpos.y0)]
+        if not owners:
+            continue
+        owner = max(owners, key=lambda ax: ax.get_position().x1 if ax.get_position().x1 <= cpos.x0 + 1e-6
+                    else -1.0)
+        if getattr(owner, "name", "") == "3d":
+            from mpl_toolkits.mplot3d import proj3d
+            M = owner.get_proj()
+            xs = []
+            for x in owner.get_xlim3d():
+                for y in owner.get_ylim3d():
+                    for z in owner.get_zlim3d():
+                        px, py, _ = proj3d.proj_transform(x, y, z, M)
+                        xs.append(owner.transData.transform((px, py))[0])
+            right = max(xs) / fig.bbox.width
+            x0 = right + gap
+            if renderer is not None:
+                tight = cax.get_tightbbox(renderer)
+                overhang = (tight.x1 - cax.get_window_extent(renderer).x1) / fig.bbox.width
+                x0 = min(x0, 1.0 - cpos.width - overhang - 2.0 / fig.bbox.width)
+            cax.set_position([x0, cpos.y0, cpos.width, cpos.height])
+        else:
+            pos = owner.get_position(original=True)
+            x1 = cpos.x0 - gap
+            if x1 - pos.x0 < 0.25 * pos.width:
+                continue           # would squash the plot: leave it
+            owner.set_position([pos.x0, pos.y0, x1 - pos.x0, pos.height], which="both")
+        done.append(cax)
+    return done
+
+
 def apply_default_font(font='Arial'):
     """Set the process-wide matplotlib default typeface -- both for
     ordinary text (``font.family``/``font.sans-serif``, falling back

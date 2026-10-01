@@ -1078,6 +1078,14 @@ def czjzek_mixture_map(sites, cq_max_MHz=None, n_cq=200, n_eta=100):
     return cq_edges, eta_edges, density
 
 
+#: Axis-label symbols for the Czjzek map: C_Q, eta_Q and P italic, the
+#: "Q" subscript upright (IUPAC: symbols for quantities in italic, a
+#: descriptive subscript in roman). User request, 2026-10-01.
+CQ_LABEL = r"$\mathit{C}_\mathrm{Q}$"
+ETAQ_LABEL = r"$\mathit{\eta}_\mathrm{Q}$"
+P_LABEL = r"$\mathit{P}(\mathit{C}_\mathrm{Q},\,\mathit{\eta}_\mathrm{Q})$"
+
+
 def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, cmap="viridis",
                              cq_max_MHz=None, n_cq=200, n_eta=100, colorbar=True,
                              fontsize=12.0, component_style=None, xlabel=None,
@@ -1141,14 +1149,16 @@ def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, 
 
     mesh = ax_map.pcolormesh(cq_edges, eta_edges, density, cmap=cmap, shading="flat",
                              rasterized=True)
-    ax_map.set_xlabel(r"$C_\mathrm{Q}$ (MHz)", fontsize=fontsize)
-    ax_map.set_ylabel(r"$\eta_\mathrm{Q}$", fontsize=fontsize)
+    # Symbols italic, subscripts upright (IUPAC). \mathit is needed: the
+    # package's mathtext.default is "regular", which sets letters upright.
+    ax_map.set_xlabel(CQ_LABEL + " (MHz)", fontsize=fontsize)
+    ax_map.set_ylabel(ETAQ_LABEL, fontsize=fontsize)
     ax_map.set_xlim(cq_edges[0], cq_edges[-1])
     ax_map.set_ylim(0, 1)
     apply_tick_style(ax_map, labelsize=fontsize * 0.9)
     if colorbar:
         cbar = figure.colorbar(mesh, cax=cbar_ax)
-        cbar.set_label(r"$P(C_\mathrm{Q}, \eta_\mathrm{Q})$ (MHz$^{-1}$)", fontsize=fontsize * 0.9)
+        cbar.set_label(P_LABEL + r" (MHz$^{-1}$)", fontsize=fontsize * 0.9)
         cbar.ax.tick_params(labelsize=fontsize * 0.8)
     site_list = [sites] if isinstance(sites, dict) else list(sites)
     if site_contours and len(site_list) > 1:
@@ -1174,15 +1184,15 @@ def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, 
         mean_cq = float(np.sum(w * cq_c[None, :]))
         mean_eta = float(np.sum(w * eta_c[:, None]))
         ax_map.plot([mean_cq], [mean_eta], marker="+", color="white", markersize=12,
-                    markeredgewidth=2.0, label=r"$\langle C_\mathrm{Q}\rangle$, "
-                                               r"$\langle\eta_\mathrm{Q}\rangle$")
+                    markeredgewidth=2.0, label=r"$\langle\mathit{C}_\mathrm{Q}\rangle$, "
+                                               r"$\langle\mathit{\eta}_\mathrm{Q}\rangle$")
     for site in site_list:
         if _site_cq0(site) > 0:
             # The extended model's mean EFG (C_Q0, eta_Q0): the centre the
             # random part spreads around (not the distribution's mean).
             ax_map.plot([_site_cq0(site)], [float(site.get("eta0", 0.0) or 0.0)], marker="x",
                         color="white", markersize=9, markeredgewidth=1.8, clip_on=False,
-                        label=r"$C_\mathrm{Q0}$, $\eta_\mathrm{Q0}$")
+                        label=r"$\mathit{C}_\mathrm{Q0}$, $\mathit{\eta}_\mathrm{Q0}$")
     if any(_site_cq0(site) > 0 for site in site_list) and ax_map.get_legend() is None:
         # With a mean EFG there are two marks -- the centre the disorder
         # spreads around, and the mean it produces: say which is which.

@@ -4316,6 +4316,23 @@ class MainWindow(QMainWindow):
             "keeps each one's (colour-blind-friendly) default.")
         self.output_map_colormap_combo.currentIndexChanged.connect(self._on_output_style_changed)
         style_form.addRow("Map colour scale:", self.output_map_colormap_combo)
+        # Explicit user request (2026-10-01): "a way to control the
+        # spacing between the colourbar and the heatmap (or ... the
+        # surface plots of the tensors)".
+        self.output_colorbar_gap_spin = QDoubleSpinBox()
+        self.output_colorbar_gap_spin.setRange(-1.0, 144.0)
+        self.output_colorbar_gap_spin.setSingleStep(2.0)
+        self.output_colorbar_gap_spin.setDecimals(0)
+        self.output_colorbar_gap_spin.setSuffix(" pt")
+        self.output_colorbar_gap_spin.setSpecialValueText("Auto")
+        self.output_colorbar_gap_spin.setValue(-1.0)
+        self.output_colorbar_gap_spin.setToolTip(
+            "The space between a colour bar and its plot, in points (1/72 inch at print "
+            "size): a Czjzek map's right edge to the bar, or a tensor surface's box to its "
+            "bar. \"Auto\" keeps each picture's own spacing. Notebook: "
+            "opennmr.plotting.set_colorbar_gap(fig, points).")
+        self.output_colorbar_gap_spin.valueChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Colour bar gap:", self.output_colorbar_gap_spin)
 
         self.series_accessibility_label = QLabel("")
         self.series_accessibility_label.setWordWrap(True)
@@ -4482,6 +4499,7 @@ class MainWindow(QMainWindow):
             "tick_width": self.output_tick_width_spin.value(),
             "tick_direction": self.output_tick_direction_combo.currentData(),
             "map_colormap": self.output_map_colormap_combo.currentData(),
+            "colorbar_gap": self.output_colorbar_gap_spin.value(),
             "minor_ticks": self.output_minor_ticks_checkbox.isChecked(),
             "top_spine": self.output_top_spine_checkbox.isChecked(),
             "right_spine": self.output_right_spine_checkbox.isChecked(),
@@ -4960,6 +4978,9 @@ class MainWindow(QMainWindow):
             self.output_tick_direction_combo.blockSignals(True)
             self.output_tick_direction_combo.setCurrentIndex(direction_index)
             self.output_tick_direction_combo.blockSignals(False)
+        self.output_colorbar_gap_spin.blockSignals(True)
+        self.output_colorbar_gap_spin.setValue(float(settings.get("colorbar_gap", -1.0)))
+        self.output_colorbar_gap_spin.blockSignals(False)
         map_index = self.output_map_colormap_combo.findData(settings.get("map_colormap") or "")
         if map_index >= 0:
             self.output_map_colormap_combo.blockSignals(True)
@@ -5063,6 +5084,7 @@ class MainWindow(QMainWindow):
                              (self.output_tick_length_spin, "tick_length"),
                              (self.output_tick_width_spin, "tick_width"),
                              (self.output_contour_linewidth_spin, "contour_linewidth"),
+                             (self.output_colorbar_gap_spin, "colorbar_gap"),
                              (self.output_dpi_spin, "dpi"),
                              (self.output_fig_width_spin, "fig_width"),
                              (self.output_fig_height_spin, "fig_height")):

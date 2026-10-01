@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-01 (round 6: italic Czjzek symbols, colour-bar gap): related files only (test_colorbar_gap_and_czjzek_labels, test_czjzek, the Czjzek/tensor/Simulate GUI files, test_gui_canvas, test_plotting_style, test_gui_usability, test_tensor_views): 459 + 27 passed. 5 new tests in `test_colorbar_gap_and_czjzek_labels.py`; `test_czjzek.py`'s label check updated for the italic form. The pre-existing `test_fit_warns_when_the_mean_efg_is_not_needed` failure is unchanged.*
+
 *2026-10-01 (round 5: Home on tensor pictures, tick labels that never overlap): related files only, as asked (test_gui_tensor_style, test_tensor_views, test_gui_adiabatic_tensors, test_gui_simulation_plots, test_gui_canvas, test_gui_usability, test_plotting_style): 426 + 21 passed. 5 new tests in `test_gui_tensor_style.py`; the Home one confirmed failing on the old path.*
 
 *2026-10-01 (round 4: Plot Style's colour maps and grid on tensor pictures): only the related files were run, as asked (test_gui_tensor_style, test_gui_simulation_plots, test_tensor_views, test_gui_adiabatic_tensors, test_plotting_style, test_gui_canvas, and the grid/style tests of the GUI files): all passed. 4 new tests in `test_gui_tensor_style.py`, each confirmed failing without the fix; then 4 more (tick-label size, GUI at 9/11/16 pt and notebook) -- 330 passed across the tensor, Simulate-plot and canvas files.*
@@ -136,6 +138,19 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Czjzek maps: italic C, η, P; a colour-bar gap for maps and tensor surfaces (2026-10-01, round 6)
+
+**Asked:** "For the Czjzek distribution simulations and fits, the C of C_Q should be italicised, as should the eta of eta_Q, and the P of P(C_Q, eta_Q). Is there also a way to control the spacing between the colourbar and the heatmap? (Or between the colourbar and the surface plots of the tensors)".
+
+**Why:** the labels were already mathtext (`$C_\mathrm{Q}$`), but `plotting.apply_default_font` sets `mathtext.default = "regular"`, which draws letters upright. There was no colour-bar spacing control. The automatic gap on a Czjzek map is about 66 pt at 9 in wide.
+
+**Built:**
+- **Italic symbols:** `czjzek.CQ_LABEL` / `ETAQ_LABEL` / `P_LABEL` use `\mathit{}` for C, η and P, with the "Q" subscript upright (IUPAC), and a thin space after the comma, which mathtext otherwise drops. The ⟨C_Q⟩/⟨η_Q⟩ and C_Q0/η_Q0 legend entries match. A test checks the glyphs are drawn from the italic face.
+- **`plotting.set_colorbar_gap(fig, points)`** (notebook and GUI):
+  - On a 2D plot it moves the plot's right edge, so the bar and a spectrum panel beside it stay put.
+  - On a 3D picture it moves the bar, measured from the drawn box's right corner at the current view and stopped at the figure edge (labels included).
+- **Plot Style ▸ "Colour bar gap"** (pt; "Auto" = the picture's own). It is a canvas style key `colorbar_gap` (negative = auto), saved with per-type defaults. It is applied to Simulate's pictures after every layout pass, style pass and rotation.
 
 ## Tensor pictures: Home undoes a zoom without distortion; tick labels thinned so they never overlap (2026-10-01, round 5)
 

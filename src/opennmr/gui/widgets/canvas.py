@@ -1043,6 +1043,9 @@ class MplCanvas(QWidget):
         #: The colour scale for maps and surfaces (tensor pictures, a
         #: Czjzek distribution); None = each plot's own default.
         self._map_colormap: str | None = None
+        #: Points between a colour bar and its map or tensor surface
+        #: (plotting.set_colorbar_gap); negative = each picture's own.
+        self._colorbar_gap: float = -1.0
         #: How tensor pictures are drawn (Simulate ▸ ... ▸ Tensor
         #: picture): notebook.tensor_views.TENSOR_STYLE_DEFAULTS' keys,
         #: edited by right-click ▸ Tensor Plot Style… (explicit user
@@ -2775,6 +2778,7 @@ class MplCanvas(QWidget):
         else:
             result = plotting.fit_labels_within_figure(self.figure)
             clipped = result["clipped"] if not result["fitted"] else []
+        self._apply_colorbar_gap()
         # Only on a change: a phase drag relayouts continuously, and
         # re-announcing the same thing every frame is noise.
         if clipped != self._last_clipped_labels:
@@ -3244,6 +3248,7 @@ class MplCanvas(QWidget):
             for ax in threes:
                 self._reset_3d_box(ax)
             self._fit_3d_layout(threes)
+            self._apply_colorbar_gap()
             self.canvas.draw_idle()
 
     def _on_release(self, event) -> None:
@@ -3811,6 +3816,17 @@ class MplCanvas(QWidget):
         if threes:
             # After the relabelling above: a label's text sets its width.
             self._fit_3d_layout(threes)
+        self._apply_colorbar_gap()
+
+    def _apply_colorbar_gap(self) -> None:
+        """Plot Style's colour-bar gap, on Simulate's pictures (a Czjzek
+        map, a tensor surface). After every layout pass, which re-spaces
+        the plots, and every rotation, which moves a 3D box's corner."""
+        if self._external_plot and self._colorbar_gap >= 0:
+            try:
+                plotting.set_colorbar_gap(self.figure, self._colorbar_gap)
+            except Exception:  # a spacing nicety must never break a redraw
+                pass
 
     def _reset_3d_box(self, ax) -> None:
         """The 3D box at the size the text asks for -- a little smaller
@@ -4379,6 +4395,7 @@ class MplCanvas(QWidget):
             "tick_width": self._TICK_WIDTH,
             "tick_direction": self._TICK_DIRECTION,
             "map_colormap": self._map_colormap,
+            "colorbar_gap": self._colorbar_gap,
             "tensor_style": dict(self._tensor_style),
             "minor_ticks": self._minor_ticks_visible,
             "top_spine": self._top_spine_visible,
@@ -4406,7 +4423,7 @@ class MplCanvas(QWidget):
         }
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
-                  tick_direction=None, map_colormap=None, tensor_style=None, minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
+                  tick_direction=None, map_colormap=None, tensor_style=None, colorbar_gap=None, minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
                   trace_color=None, contour_linewidth=None, contour_clevels=None,
                   contour_level_mode=None, contour_power=None,
                   title_visible=None, font_family=None, axis_label_style=None,
@@ -4451,6 +4468,8 @@ class MplCanvas(QWidget):
         carried = self._tensor_style_carried_over(map_colormap, compare_colormap, grid)
         if carried:
             tensor_style = {**carried, **(tensor_style or {})}
+        if colorbar_gap is not None:
+            self._colorbar_gap = float(colorbar_gap)
         if map_colormap is not None:
             # "" from the combo is "each plot's own default".
             self._map_colormap = map_colormap or None
@@ -4557,7 +4576,7 @@ class MplCanvas(QWidget):
         # its colours and text sizes from style_settings() as it draws:
         # those live on artists only the draw makes, so it is redrawn.
         if self._external_plot and self._external_draw is not None and any(
-                value is not None for value in (labelsize, font_family, compare_colormap,
+                value is not None for value in (labelsize, font_family, compare_colormap, colorbar_gap,
                                                 map_colormap, tensor_style, trace_color,
                                                 linewidth)):
             self._redraw_external()
@@ -4614,7 +4633,7 @@ class MplCanvas(QWidget):
     #: (which also carries export and bookkeeping keys) down to them.
     _STYLE_KEYS = (
         "linewidth", "labelsize", "tick_length", "tick_width", "tick_direction", "map_colormap",
-        "tensor_style", "minor_ticks", "grid",
+        "tensor_style", "colorbar_gap", "minor_ticks", "grid",
         "legend_loc", "compare_colormap", "trace_color", "contour_linewidth",
         "contour_clevels", "contour_level_mode", "contour_power", "title_visible",
         "font_family", "axis_label_style", "axis_label_template", "legend_frameon",

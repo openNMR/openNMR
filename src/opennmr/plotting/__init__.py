@@ -3,7 +3,7 @@ from .style import (
     stack_colors, get_contour_cmap, downsample_2d, downsample_indices, downsample_1d, save_figure,
     relative_luminance, contrast_against_white, is_too_light, readable_cmap,
     qualitative_colors, usable_cmap_positions, MAX_LINE_LUMINANCE,
-    fit_labels_within_figure, clipped_labels,
+    fit_labels_within_figure, clipped_labels, set_colorbar_gap,
     CONTOUR_CMAP_NAMES, VALID_SAVE_FORMATS,
 )
 from .accessibility import (
@@ -24,7 +24,7 @@ __all__ = [
     "stack_colors", "get_contour_cmap", "downsample_2d", "downsample_indices", "downsample_1d", "save_figure",
     "relative_luminance", "contrast_against_white", "is_too_light", "readable_cmap",
     "qualitative_colors", "usable_cmap_positions", "MAX_LINE_LUMINANCE",
-    "fit_labels_within_figure", "clipped_labels",
+    "fit_labels_within_figure", "clipped_labels", "set_colorbar_gap",
     "CONTOUR_CMAP_NAMES", "VALID_SAVE_FORMATS",
     "simulate_cvd", "to_lab", "palette_distinctness", "is_colourblind_safe", "is_print_safe",
     "describe_accessibility", "max_safe_series", "friendly_palettes", "series_palette_names",
