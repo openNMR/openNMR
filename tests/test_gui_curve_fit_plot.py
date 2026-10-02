@@ -126,7 +126,7 @@ def test_keeping_a_curve_fit_and_all_of_them(qapp):  # noqa: F811
 def test_every_fit_section_has_a_keep_button(qapp, _dialogs):  # noqa: F811
     window = MainWindow()
     assert set(window.keep_fit_buttons) == {"jcoupling", "csa", "quadrupolar", "czjzek",
-                                            "combined", "isotropic"}
+                                            "combined", "isotropic", "pnmr"}
     assert all(b is not None for b in window.keep_fit_buttons.values())
     # Next to the section's own "Use fitted values as start".
     csa = window.keep_fit_buttons["csa"]

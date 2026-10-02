@@ -100,6 +100,12 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   "Field Sweep Profile", each a step-by-step `gui/dnp_panel.py`
   `DnpWorkflowPanel` over `notebook/dnp_workflow.py` (align on the
   reference line's shape, confirm, then measure). Not in Compare any more.
+- **pNMR fit** is Fit ▸ pNMR (CIF bond pathways) (`gui/pnmr_fit_panel.py` over
+  `notebook/pnmr_fit.py`). Its structural model is Simulate ▸ pNMR (CIF)'s
+  (`PnmrSimulationPanel.fit_model_kwargs()`) -- never add a second copy.
+  Hover/click read-outs are `pnmr_fit.environments_at_shift`; plot extras go
+  through `MplCanvas.show_slice_fit(..., overlay=)`, which redraws them on a
+  restyle.
 - **Quantify** is one page: Peaks, Integration Regions, then the
   Spectral Fitting section (`_build_spectral_fit_section`). Whether the
   fit uses the regions is two explicit checkboxes there.

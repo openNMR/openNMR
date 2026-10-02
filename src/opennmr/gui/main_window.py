@@ -110,6 +110,7 @@ from .widgets.collapsible_section import CollapsibleSection
 from .widgets.sim_sites import SimSiteList
 from .widgets.reflow import make_reflowable
 from .pnmr_panel import PnmrSimulationPanel
+from .pnmr_fit_panel import PnmrFitPanel
 from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
@@ -8455,7 +8456,8 @@ class MainWindow(QMainWindow):
     #: Readable names, for the log and the dialogs.
     _FIT_LABELS = {"csa": "CSA", "jcoupling": "J-coupling", "quadrupolar": "Quadrupolar",
                    "czjzek": "Czjzek",
-                   "combined": "Combined-Hamiltonian", "multi": "Multi-spectrum"}
+                   "combined": "Combined-Hamiltonian", "multi": "Multi-spectrum",
+                   "pnmr": "pNMR (CIF)"}
     _SIMULATION_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "jcoupling": "J-coupling",
                           "czjzek": "Czjzek distribution",
                           "combined": "Combined Hamiltonian", "diffusion": "Diffusion (PFG)",
@@ -8466,7 +8468,8 @@ class MainWindow(QMainWindow):
         restore_result/clear_result/report_text."""
         panels = {"jcoupling": self.jcoupling_fit_panel, "quadrupolar": self.quad_fit_panel,
                   "czjzek": self.czjzek_fit_panel,
-                  "combined": self.combined_fit_panel, "multi": self.multi_fit_panel}
+                  "combined": self.combined_fit_panel, "multi": self.multi_fit_panel,
+                  "pnmr": self.pnmr_fit_panel}
         panels["csa"] = _Section(
             get_state=lambda: {"widgets": panel_state.capture_widgets(self, prefixes=["csa_"])},
             set_state=self._csa_fit_set_state,
@@ -12710,6 +12713,24 @@ class MainWindow(QMainWindow):
             "Combined Hamiltonian",
             content=self._with_model_series_box(self.combined_fit_panel, "combined"))
         layout.addWidget(self._combined_fit_section)
+        # A spectrum against the environments a CIF and its bond-pathway
+        # shifts predict (explicit user request): the model is Simulate ▸
+        # pNMR (CIF)'s, the fit notebook.pnmr_fit; hover/click the plot
+        # for the environments behind each peak.
+        self.pnmr_fit_panel = PnmrFitPanel(
+            model=lambda: self.pnmr_panel.fit_model_kwargs(),
+            describe_model=lambda: self.pnmr_panel.model_summary(),
+            open_model_setup=self._open_pnmr_model_setup,
+            load_model_settings=lambda: self.pnmr_panel._on_load_settings(),
+            get_target=self._jcoupling_fit_target,
+            get_regions=self._integration_regions,
+            canvas=self.fit_canvas,
+            show_view=self._raise_fit_canvas,
+            open_fit_display=self._open_fit_display_options,
+            on_fitted=lambda: self._store_fit("pnmr"))
+        self._pnmr_fit_section = CollapsibleSection("pNMR (CIF bond pathways)",
+                                                    content=self.pnmr_fit_panel)
+        layout.addWidget(self._pnmr_fit_section)
         # One set of sites across several spectra: a series, isotopes,
         # fields (explicit user request); notebook.multi_fitting.
         self.multi_fit_panel = MultiFitPanel(
@@ -12763,6 +12784,7 @@ class MainWindow(QMainWindow):
                             ("quadrupolar", self.quad_fit_panel.use_fitted_button),
                             ("czjzek", self.czjzek_fit_panel.use_fitted_button),
                             ("combined", self.combined_fit_panel.use_fitted_button),
+                            ("pnmr", self.pnmr_fit_panel.keep_anchor),
                             ("isotropic", self.spectral_fit_params_label)):
             self.keep_fit_buttons[key] = self._add_keep_fit_button(anchor, key)
         # Any plot showing a simulation offers to keep it (explicit user
@@ -12870,7 +12892,8 @@ class MainWindow(QMainWindow):
             self.simulation_canvas, self._show_simulation_view,
             plot_spectrum=lambda spectrum: self._on_panel_simulated("pnmr", spectrum),
             add_to_open=self._add_derived_spectrum)
-        layout.addWidget(CollapsibleSection("pNMR (CIF)", content=self.pnmr_panel))
+        self._pnmr_sim_section = CollapsibleSection("pNMR (CIF)", content=self.pnmr_panel)
+        layout.addWidget(self._pnmr_sim_section)
         layout.addStretch(1)
         return tab
 
@@ -13434,6 +13457,16 @@ class MainWindow(QMainWindow):
         self.czjzek_sim_panel.set_from_fit(fitted)
         self._czjzek_sim_section.setExpanded(True)
         self._show_side_tab("Simulate")
+
+    def _raise_fit_canvas(self) -> None:
+        self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
+        self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    def _open_pnmr_model_setup(self) -> None:
+        """Fit ▸ pNMR ▸ Set up…: the structural model lives in Simulate ▸
+        pNMR (CIF); go there, opened."""
+        self._show_side_tab("Simulate")
+        self._pnmr_sim_section.setExpanded(True)
 
     def _draw_czjzek_map(self, draw) -> None:
         """A Czjzek fit's distribution map (with the fit beside it) on the

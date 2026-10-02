@@ -194,6 +194,8 @@ from .pnmr_fit import (
     add_dominant_environment_labels, fit_predicted_spectrum, 
     merge_low_integral_peaks, merge_groups_to_picks, print_shift_drift_report, 
     refit_merged_groups, fit_cif_envelope,
+    collapse_members, peak_weights_at_shift, peak_index_at_shift,
+    environments_at_shift, format_environments, summarise_peaks, add_predicted_sticks,
 )
 
 from .simpson import (
@@ -321,6 +323,8 @@ __all__ = [
     "fit_predicted_spectrum", "merge_low_integral_peaks", 
     "merge_groups_to_picks", "print_shift_drift_report", 
     "refit_merged_groups", "fit_cif_envelope",
+    "collapse_members", "peak_weights_at_shift", "peak_index_at_shift",
+    "environments_at_shift", "format_environments", "summarise_peaks", "add_predicted_sticks",
     # simpson
     "SIMPSONimport", "CSDMimport", "SIMPSONread_shape", "SIMPSONapodization_window", "SIMPSONread_fid",
     "SIMPSONplot_fid", "SIMPSONread_single_point_fid", "SIMPSONread_fid_series", "SIMPSONplot_1d_stack", "SIMPSONplot_shape",

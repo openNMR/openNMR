@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-02 (Fit ▸ pNMR (CIF bond pathways), environments on hover/click): only the files touching changed code, as asked -- test_pnmr_fit, test_gui_pnmr_fit (new), test_pnmr_simulator, test_gui_pnmr, test_gui_canvas, test_gui_czjzek_display, test_gui_curve_fit_plot, test_state_and_fit_models, test_gui_fit_sim_state, test_fit_progress, test_accessibility, test_collapsible_section, test_gui_compare_tools, test_gui_jcoupling, test_gui_multi_fit, test_gui_reflow, test_gui_remove_and_plot_kinds, test_gui_round4_keep_sim, test_gui_usability, test_series_fitting, and test_gui.py -k "slice_fit or fit_canvas or keep or component or spectral_fit or fit_view"; with pymatgen, matplotlib 3.10 / Py 3.13: 667 passed, 6 skipped, 0 failed. 45 new tests (18 + 27); `test_gui_curve_fit_plot.py::test_every_fit_section_has_a_keep_button` updated for the new section's Keep button. Not run: the rest of test_gui.py and the files not touching these modules. **Run the full suite locally before committing.***
+
 *2026-10-02 (tutorial round: quadrupolar/mixed/Czjzek on real 23Na, Czjzek series, Czjzek library sized to the fit window, baseline warning): the 19 test files that touch the changed modules except test_gui.py (too slow on the session's 2-CPU machine), matplotlib 3.11.2 / Py 3.13: 268 passed, 16 skipped, 2 failed -- the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`, and `test_colorbar_gap_and_czjzek_labels.py::test_czjzek_symbols_are_italic`, whose glyph unpacking expects 5 fields where matplotlib 3.11 gives 6 (test-side, not this round). 9 new tests in `test_tutorial_round_czjzek_series.py`. **Run the full suite locally before committing.***
 
 *2026-10-01 (round 7: live progress and Stop for every spectrum fit): related files only (every fitter's own tests, the GUI fit panels, and test_gui/test_gui_usability -k fit): 376 passed, 5 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`). 20 new tests in `test_fit_progress.py`.*
@@ -142,6 +144,36 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Fit ▸ pNMR (CIF bond pathways): the CIF-predicted fit in the GUI, with environments on hover/click (2026-10-02)
+
+**Asked:** "implement the pNMR bond pathway fitting in the GUI ... users should be able to customise their fit plots and, by hovering over peaks or selecting them in the plot, be able to see the most likely sets of environments corresponding to that peak. Only run the tests that modify or add to existing code."
+
+**What existed:** the simulation (Simulate ▸ pNMR (CIF), `gui/pnmr_panel.py`) was wired in 2026-09-24; Euan's fit, `notebook/pnmr_fit.py` (predict -> group -> S/N select -> fit with shifts fixed -> split areas per environment; merge low-area peaks or onto picks -> refit with shifts free), had **no GUI and no tests**.
+
+**Wrong in `pnmr_fit.py`, fixed:**
+- `fit_predicted_spectrum` / `refit_merged_groups` printed their fit report (RMSE, chi^2) against the *normalised* data while `fit_spectrum` returns `popt` -- so the model -- in *raw* units (its 2026-09 rescale fix). Every spectrum whose maximum is not 1 (every real one) got a wrong report; the simulator's own output is normalised to 1, which hid it. Both now compare raw data (`_fit_peak_defs` returns it as `y_data`). Test: `test_data_is_compared_raw_whatever_the_spectrum_maximum`.
+- `fit_predicted_spectrum` and `fit_cif_envelope` did not pass `sites_of_interest` / `ignore_sites` / `weight_by_occupancy` to `predict_environments`, so a fit could not describe the sites a simulation of the same inputs did. Now keyword arguments (defaults unchanged).
+
+**Built (notebook, all exported from `opennmr.notebook`):**
+- `predict_environments` adds a `Site_label` column; group/merge members carry `site`.
+- The fit drivers also return `x_fit`, `y_data`, `y_model`, `components`, `mask` (and `tolerance` for the maximal fit) -- what a plot or read-out needs without re-evaluating.
+- `collapse_members` (symmetry copies of one site are one environment: the rock-salt cell's 4 Na copies listed 4 identical rows), `summarise_peaks` (JSON-able per-peak dicts), `peak_weights_at_shift`, `peak_index_at_shift`, **`environments_at_shift`** -- probability(e | x) = sum_k w_k(x) f_ek, w_k the peak's share of the fitted signal at x, f_ek the environment's share of peak k -- so overlapping peaks both contribute; nothing is named on baseline (< 1% of the tallest peak) -- `format_environments`, `add_predicted_sticks`.
+
+**Built (GUI):** `gui/pnmr_fit_panel.py`, `PnmrFitPanel` (`MainWindow.pnmr_fit_panel`), section "pNMR (CIF bond pathways)" of the Fit tile, after Combined Hamiltonian.
+- The structural model is **Simulate ▸ pNMR's** (`PnmrSimulationPanel.fit_model_kwargs()` / `model_summary()`), not a copy: the section summarises it and says what is missing ("press Initialise structure..."); Set up… goes there, Load settings… loads a parameters JSON there.
+- Maximal fit (grouping method, tolerance auto = smallest pathway shift, S/N, lineshape, FWHM start/max, shift fixed or ± window, optionally only the Integration regions); Simplify && refit (merge below x% within a distance, or onto shifts typed or **picked on the plot** via the canvas's pick mode); a FitProgress pop-up with Stop for each.
+- Results: peak table (fitted/predicted shift, FWHM, area %, number of environments, most likely environment), the selected peak's environments (site ×copies, label with full composition as tooltip, % of peak, % of total), "Under the cursor" line, CSV export, Copy notebook code, Keep This Fit…; a nucleus/observed-species mismatch is logged.
+- Plot: drawn through `show_slice_fit`, so the Fit plot section (show/highlight/fill/colours) and Plot Style apply. New `overlay=` argument on `MplCanvas.show_slice_fit` (`slice_fit_overlay()`, `draw_slice_fit_overlay()`): drawn after the fit, redrawn on a component restyle, dropped when another plot replaces the fit, and a failing overlay only warns. The pNMR overlay: environment labels (`add_dominant_environment_labels`, largest N peaks, font size), predicted sticks, and the selected peak hatched (hatching, not a fill colour -- a fill always matched some component's palette colour). Legend names: fitted shift, most likely environment, or peak number (made unique).
+- Hover shows a tooltip + the panel line; click (not a drag, not in pick/measure/region/toolbar modes) selects the peak and its table row; table selection outlines it. Only while the Fit view shows *this* fit (`is_showing`).
+- Saved with the spectrum and keepable: `"pnmr"` in `_fit_panels()` / `_FIT_LABELS`; `result_state` is plain JSON (arrays + collapsed members). A restored fit shows its tables and hover read-out; Simplify needs the fit run again (the working DataFrames are not saved).
+
+**Not done / open:**
+- `fit_cif_envelope` (the continuous-envelope alternative) is not in the GUI.
+- Composition labels list every species of a shell, zeros included (the notebook's `format_environment_label` does so deliberately); with many species they are long.
+- Large supercells: `result_state` stores the collapsed members of every peak; not measured on a big model.
+
+**Tests:** `tests/test_pnmr_fit.py` (18: binomial areas, raw-vs-normalised, sites/occupancy pass-through, collapse, a hand-built two-peak overlap with the answer written down, baseline/outside, refit, sticks, exports) and `tests/test_gui_pnmr_fit.py` (27: model wiring and staleness, the fit and tables, hover/click/drag through real matplotlib events, overlay survives restyle and is dropped with the fit, failing overlay, refit both ways, picking, save/restore/keep, CSV, notebook code parses, nucleus warning, Integration regions). Only files touching changed code were run, as asked -- see "Where things stand".
 
 ## Tutorial updated: quadrupolar, mixed and Czjzek simulation and fitting on real 23Na data, pseudo-2D series, tensors (2026-10-02)
 

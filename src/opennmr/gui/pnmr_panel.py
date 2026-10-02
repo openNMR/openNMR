@@ -914,6 +914,42 @@ class PnmrSimulationPanel(QWidget):
             save_shift_table=self.save_check.isChecked(),
         )
 
+    #: generate_kwargs entries that define the structural model a fit uses
+    #: (Fit ▸ pNMR); the others only shape a simulated spectrum.
+    FIT_MODEL_KEYS = ("cif_filename", "atom_of_interest", "shell_bins", "shift_dict",
+                      "ignore_species", "sites_of_interest", "ignore_sites", "weight_by_occupancy")
+
+    def fit_model_kwargs(self) -> dict:
+        """The structural model for Fit ▸ pNMR (CIF bond pathways): the
+        same CIF, sites, ignores, shells and shifts Enumerate would use.
+        Raises ValueError saying what is still missing."""
+        if self._site_data is None or not self.cif_path:
+            raise ValueError("no CIF loaded -- load one in Simulate ▸ pNMR (CIF), step 1.")
+        if self._init_signature is None or self._init_signature != self._sites_signature():
+            raise ValueError("press Initialise structure in Simulate ▸ pNMR (CIF), step 2.")
+        if self.shell_table.rowCount() == 0:
+            raise ValueError("no shells yet -- add them in Simulate ▸ pNMR (CIF), step 3.")
+        kwargs = self.generate_kwargs()
+        if not any(v for shell in kwargs["shift_dict"].values() for v in shell.values()):
+            raise ValueError("every bond-pathway shift is 0 -- give the shells their shifts in "
+                             "Simulate ▸ pNMR (CIF), step 3.")
+        return {k: kwargs[k] for k in self.FIT_MODEL_KEYS}
+
+    def model_summary(self) -> str:
+        """A line or two describing fit_model_kwargs(), for Fit ▸ pNMR."""
+        m = self.fit_model_kwargs()
+        sites = ", ".join(m["sites_of_interest"]) if m["sites_of_interest"] else "all sites"
+        shells = "; ".join(
+            f"{name} {_fmt_distance(lo)}–{_fmt_distance(hi)} Å: "
+            + (", ".join(f"{sp} {v:+g}" for sp, v in m["shift_dict"].get(name, {}).items() if v)
+               or "no shift")
+            for name, lo, hi in m["shell_bins"])
+        ignored = m["ignore_species"] + m["ignore_sites"]
+        return (f"<b>{os.path.basename(m['cif_filename'])}</b>, observing "
+                f"{m['atom_of_interest']} ({sites})"
+                + (f", ignoring {', '.join(ignored)}" if ignored else "")
+                + f". Shells (ppm per neighbour): {shells}.")
+
     def _input_signature(self):
         try:
             kwargs = self.generate_kwargs()

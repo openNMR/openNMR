@@ -125,7 +125,7 @@ from .fitting import (
     fit_spectrum, evaluate_fit, compute_integrals, compute_integral_errors,
     check_bound_hits, build_bounds, build_region_mask, expand_pcov,
     enforce_positive_intensity, estimate_noise_level, estimate_baseline_robust,
-    print_fit_report, NMR1dplot_with_fit,
+    print_fit_report, NMR1dplot_with_fit, extract_params_and_errors,
 )
 from .one_d import NMR1dimport
 from ..core import fit_progress as _fit_progress
@@ -214,6 +214,13 @@ def predict_environments(cif_filename, atom_of_interest, shell_bins, shift_dict,
     shift_table = shift_table.copy()
     shift_table["label"] = shift_table.apply(_label, axis=1)
     shift_table["composition"] = shift_table.apply(_composition, axis=1)
+    # The CIF label of each row's site (e.g. "Na1"), so a peak can say
+    # which crystallographic site an environment belongs to -- two sites
+    # can share a composition label and still be different sites.
+    shift_table["Site_label"] = [
+        site_data[int(i)].get("label") if 0 <= int(i) < len(site_data) else None
+        for i in shift_table["Site"]
+    ]
     return shift_table
 
 
@@ -363,6 +370,7 @@ def group_environments(shift_table: pd.DataFrame, tolerance: Optional[float] = N
                 "p": float(r["p"]),
                 "fraction_in_group": float(r["p"] / total_p) if total_p > 0 else np.nan,
                 "composition": r.get("composition", {}),
+                "site": r.get("Site_label"),
             }
             for _, r in sub.iterrows()
         ]
@@ -825,10 +833,15 @@ def _fit_peak_defs(results: Dict, peak_defs: List[dict], kept: pd.DataFrame,
     environment_report = split_integrals_by_environment(
         kept, integrals, integrals_norm, integral_errors,
     )
+    # fit_spectrum returns popt in RAW intensity units whatever
+    # use_normalised (it rescales amplitudes and baseline back), so the
+    # model above is raw too -- compare it with the raw data, never the
+    # normalised copy (which only matches when the maximum is already 1).
+    y_data = np.asarray(results["real_spectrum"], dtype=float)[mask]
 
     return {
         "popt": popt, "pcov": pcov, "is_free": is_free, "x_ref": x_ref,
-        "bound_warnings": bound_warnings, "x_fit": x_fit, "mask": mask,
+        "bound_warnings": bound_warnings, "x_fit": x_fit, "mask": mask, "y_data": y_data,
         "y_model": y_model, "components": components, "integrals": integrals,
         "integrals_norm": integrals_norm, "integral_errors": integral_errors,
         "environment_report": environment_report,
@@ -872,6 +885,7 @@ def fit_predicted_spectrum(
     show_plot=True, show_components=True, show_report=True,
     show_composition_labels=False, composition_label_kwargs=None,
     xlims="default", xlabel=None, pl_width=None, pl_height=None,
+    sites_of_interest=None, ignore_sites=None, weight_by_occupancy=True,
 ):
     """
     End-to-end: predict environments from a CIF, group/filter them against
@@ -922,6 +936,11 @@ def fit_predicted_spectrum(
         -- see _resolve_figsize. Set these yourself for a specific
         target (e.g. a journal figure width); an explicit value here
         always overrides the auto-widen.
+    sites_of_interest, ignore_sites, weight_by_occupancy :
+        Which sites of `atom_of_interest` to describe, which to leave out
+        as neighbours, and whether to weight sites by occupancy -- as for
+        pnmr_simulator.generate_spectrum_dict, so a fit describes the
+        same environments a simulation with the same inputs does.
 
     Returns
     -------
@@ -938,6 +957,11 @@ def fit_predicted_spectrum(
                           group, one entry per fitted line)
         environment_report - split_integrals_by_environment() output,
                           one row per individual CIF environment
+        x_fit, y_data, y_model, components - the fitted window: its axis,
+                          the data and the model on it, and each peak
+                          (baseline last) -- what environments_at_shift
+                          and summarise_peaks read
+        tolerance       - the grouping tolerance actually used
         figure, axes    - if show_plot
     """
     # -- experimental spectrum --------------------------------------------
@@ -951,6 +975,8 @@ def fit_predicted_spectrum(
         cif_filename, atom_of_interest, shell_bins, shift_dict,
         ignore_species=ignore_species, vacancy_tol=vacancy_tol,
         warn_missing_shifts=warn_missing_shifts, verbose=verbose,
+        sites_of_interest=sites_of_interest, ignore_sites=ignore_sites,
+        weight_by_occupancy=weight_by_occupancy,
     )
     groups, tolerance = group_environments(
         predicted, tolerance=tolerance, shift_dict=shift_dict,
@@ -1005,8 +1031,7 @@ def fit_predicted_spectrum(
             )
 
     if show_report:
-        y_full = results["normalised_real_spectrum"] if use_normalised else results["real_spectrum"]
-        y_fit_data = np.asarray(y_full)[fitted["mask"]]
+        y_fit_data = fitted["y_data"]   # raw, like the model (see _fit_peak_defs)
         print_fit_report(x_fit, y_fit_data, popt, pcov, peak_defs, bound_warnings, is_free,
                           components=components)
         print_environment_report(environment_report, dropped)
@@ -1018,6 +1043,8 @@ def fit_predicted_spectrum(
         "bound_warnings": bound_warnings, "integrals": integrals,
         "integrals_norm": integrals_norm, "integral_errors": integral_errors,
         "environment_report": environment_report, "figure": fig, "axes": ax,
+        "x_fit": x_fit, "y_data": fitted["y_data"], "y_model": fitted["y_model"],
+        "components": components, "mask": fitted["mask"], "tolerance": tolerance,
     }
 
 
@@ -1044,6 +1071,7 @@ def _aggregate_members(rows: pd.DataFrame) -> dict:
             all_members.append({
                 "label": m["label"], "shift": m["shift"], "p": m["p"],
                 "composition": m.get("composition", {}),
+                "site": m.get("site"),
             })
 
     total_p = sum(m["p"] for m in all_members)
@@ -1464,8 +1492,7 @@ def refit_merged_groups(
             )
 
     if show_report:
-        y_full = results["normalised_real_spectrum"] if use_normalised else results["real_spectrum"]
-        y_fit_data = np.asarray(y_full)[fitted["mask"]]
+        y_fit_data = fitted["y_data"]   # raw, like the model (see _fit_peak_defs)
         print_fit_report(fitted["x_fit"], y_fit_data, fitted["popt"], fitted["pcov"],
                           peak_defs, fitted["bound_warnings"], fitted["is_free"],
                           components=fitted["components"])
@@ -1481,6 +1508,8 @@ def refit_merged_groups(
         "integral_errors": fitted["integral_errors"],
         "environment_report": fitted["environment_report"],
         "shift_report": shift_report, "figure": fig, "axes": ax,
+        "x_fit": fitted["x_fit"], "y_data": fitted["y_data"], "y_model": fitted["y_model"],
+        "components": fitted["components"], "mask": fitted["mask"],
     }
 
 
@@ -1510,6 +1539,7 @@ def fit_cif_envelope(
     x_offset_init=0.0, x_offset_bounds=(-100.0, 100.0),
     baseline_regions=None, baseline_sigma=2.5, baseline_max_iter=10,
     vacancy_tol=5, warn_missing_shifts=True, verbose=False,
+    sites_of_interest=None, ignore_sites=None, weight_by_occupancy=True,
 ):
     """
     Fit an experimental spectrum to the CIF-predicted shift distribution
@@ -1549,6 +1579,8 @@ def fit_cif_envelope(
         cif_filename, atom_of_interest, shell_bins, shift_dict,
         ignore_species=ignore_species, vacancy_tol=vacancy_tol,
         warn_missing_shifts=warn_missing_shifts, verbose=verbose,
+        sites_of_interest=sites_of_interest, ignore_sites=ignore_sites,
+        weight_by_occupancy=weight_by_occupancy,
     )
     shifts = predicted["Total_shift"].to_numpy()
     p = predicted["p"].to_numpy()
@@ -1605,3 +1637,245 @@ def fit_cif_envelope(
         "popt": popt_named, "pcov": pcov,
         "x_fit": x_fit, "y_fit": y_fit, "y_model": y_model, "rmse": rmse,
     }
+
+# ===========================================================================
+# 10. Which environments explain a given point of a fit -- the GUI's
+#     hover/click read-out, and the same numbers in a notebook.
+#
+#     Works on the dict fit_predicted_spectrum / refit_merged_groups
+#     return, or on any dict carrying the same pieces: "x_fit" (or "x"),
+#     "components" (one per peak, baseline last) and the peaks' member
+#     environments, as "kept" (a DataFrame with a "members" column) or
+#     "peaks" (a list of dicts with "members", e.g. summarise_peaks').
+# ===========================================================================
+def collapse_members(members: Sequence[dict]) -> List[dict]:
+    """One entry per distinct (site, environment) in a peak's `members`.
+
+    Symmetry-equivalent copies of a site describe the same environment
+    (same CIF label, same neighbours, same shift), so listing each copy
+    separately repeats one answer several times. Their probabilities and
+    `fraction_in_group` are summed; `n_copies` says how many were merged.
+    Safe to apply twice. Sorted most probable first."""
+    buckets: Dict[tuple, dict] = {}
+    for m in members:
+        key = (m.get("site"), m.get("label"))
+        frac = m.get("fraction_in_group")
+        frac = 0.0 if frac is None or not np.isfinite(frac) else float(frac)
+        p = float(m.get("p", 0.0) or 0.0)
+        shift = float(m.get("shift", np.nan))
+        n = int(m.get("n_copies", 1) or 1)
+        b = buckets.get(key)
+        if b is None:
+            buckets[key] = {"site": key[0], "label": key[1], "shift": shift, "p": p,
+                            "fraction_in_group": frac, "n_copies": n,
+                            "composition": m.get("composition", {}),
+                            "_w": shift * p}
+        else:
+            b["p"] += p
+            b["fraction_in_group"] += frac
+            b["n_copies"] += n
+            b["_w"] += shift * p
+    out = []
+    for b in buckets.values():
+        if b["p"] > 0:
+            b["shift"] = b["_w"] / b["p"]
+        del b["_w"]
+        out.append(b)
+    out.sort(key=lambda b: (b["fraction_in_group"], b["p"]), reverse=True)
+    return out
+
+
+def _fit_axis_components_members(fit: Dict):
+    x = fit.get("x_fit")
+    if x is None:
+        x = fit["x"]
+    x = np.asarray(x, dtype=float)
+    peaks = [np.asarray(c, dtype=float) for c in list(fit["components"])[:-1]]
+    kept = fit.get("kept")
+    if isinstance(kept, pd.DataFrame) and "members" in kept:
+        members = list(kept["members"])
+    else:
+        members = [p["members"] for p in fit["peaks"]]
+    if len(members) != len(peaks):
+        raise ValueError(f"The fit has {len(peaks)} peak component(s) but {len(members)} "
+                         f"member list(s) -- they must come from the same fit.")
+    return x, peaks, members
+
+
+def peak_weights_at_shift(fit: Dict, shift: float, floor: float = 0.01):
+    """How much of the fitted signal at `shift` each peak accounts for.
+
+    Returns ``(weights, x_used, signal)`` -- `weights` sums to 1 over the
+    peaks (baseline excluded), `x_used` is the nearest point of the fit
+    window, `signal` is the summed peak height there as a fraction of the
+    tallest peak -- or None when `shift` is outside the fit window, or no
+    peak there reaches `floor` of the tallest peak (the cursor is on
+    baseline, so no environment can honestly be named)."""
+    x, peaks, _ = _fit_axis_components_members(fit)
+    if not peaks or x.size == 0:
+        return None
+    if not (np.nanmin(x) <= shift <= np.nanmax(x)):
+        return None
+    k = int(np.argmin(np.abs(x - shift)))
+    values = np.array([abs(c[k]) for c in peaks])
+    tallest = max(float(np.max(np.abs(c))) for c in peaks)
+    total = float(values.sum())
+    if tallest <= 0 or total < floor * tallest:
+        return None
+    return values / total, float(x[k]), total / tallest
+
+
+def peak_index_at_shift(fit: Dict, shift: float, floor: float = 0.01) -> Optional[int]:
+    """The (zero-based) peak contributing most of the fit at `shift`, or
+    None (see peak_weights_at_shift)."""
+    found = peak_weights_at_shift(fit, shift, floor=floor)
+    return None if found is None else int(np.argmax(found[0]))
+
+
+_ENV_COLUMNS = ["site", "environment", "shift", "probability", "peak", "fraction_of_peak",
+                "composition"]
+
+
+def environments_at_shift(fit: Dict, shift: float, top_n: Optional[int] = 5,
+                          floor: float = 0.01, min_weight: float = 1e-4) -> pd.DataFrame:
+    """The predicted environments most likely to give the signal at `shift`.
+
+    For each peak k, w_k is its share of the fitted (baseline-free) signal
+    at `shift`; each of its member environments e carries
+    ``fraction_in_group`` f_ek of that peak (its CIF probability relative
+    to the peak's other members). Then
+
+        probability(e) = sum_k  w_k * f_ek
+
+    i.e. the fraction of the fitted signal at that shift attributed to e.
+    Where peaks overlap, both contribute; on one isolated peak it reduces
+    to that peak's own breakdown. The within-peak split carries the same
+    assumption as split_integrals_by_environment (members of one peak
+    share its lineshape -- see the module docstring).
+
+    Returns a DataFrame (most probable first, at most `top_n` rows; None
+    for all) with columns site, environment, shift (the environment's
+    predicted shift), probability, peak (zero-based index of the peak it
+    contributes most through), fraction_of_peak (its share of that peak)
+    and composition. ``df.attrs`` holds "x" (the point of the fit
+    window used), "peak_weights" and "signal" (see
+    peak_weights_at_shift). Empty when no peak is there. Peaks with
+    less than `min_weight` of the signal there are not listed (a
+    Gaussian's far tail is never zero, and would otherwise bring every
+    environment of the spectrum along at 1e-100)."""
+    found = peak_weights_at_shift(fit, shift, floor=floor)
+    if found is None:
+        df = pd.DataFrame(columns=_ENV_COLUMNS)
+        df.attrs.update({"x": None, "peak_weights": [], "signal": 0.0})
+        return df
+    weights, x_used, signal = found
+    _, _, members = _fit_axis_components_members(fit)
+    combined: Dict[tuple, dict] = {}
+    for k, (w, peak_members) in enumerate(zip(weights, members)):
+        if w < min_weight:
+            continue
+        for m in collapse_members(peak_members):
+            key = (m["site"], m["label"])
+            contribution = w * m["fraction_in_group"]
+            entry = combined.get(key)
+            if entry is None:
+                combined[key] = entry = {
+                    "site": m["site"], "environment": m["label"], "shift": m["shift"],
+                    "probability": 0.0, "peak": k, "fraction_of_peak": m["fraction_in_group"],
+                    "composition": m["composition"], "_best": -1.0}
+            entry["probability"] += contribution
+            if contribution > entry["_best"]:
+                entry.update(peak=k, fraction_of_peak=m["fraction_in_group"], _best=contribution)
+    rows = sorted(combined.values(), key=lambda e: e["probability"], reverse=True)
+    for e in rows:
+        del e["_best"]
+    if top_n is not None:
+        rows = rows[:top_n]
+    df = pd.DataFrame(rows, columns=_ENV_COLUMNS)
+    df.attrs.update({"x": x_used, "peak_weights": [float(w) for w in weights],
+                     "signal": signal})
+    return df
+
+
+def format_environments(env_df: pd.DataFrame, decimals: int = 1,
+                        total: Optional[int] = None) -> str:
+    """environments_at_shift's table as a few lines of text, e.g.::
+
+        δ = -40.0 ppm
+         100.0%  Na1  NN:5Br-+1Cl- NNN:12Na+   (-40.0 ppm, peak 2)
+
+    `total`: how many environments there were before top_n, to say how
+    many are not shown."""
+    x = env_df.attrs.get("x")
+    if env_df.empty or x is None:
+        return "No fitted peak here."
+    lines = [f"δ = {x:.{decimals}f} ppm"]
+    for _, r in env_df.iterrows():
+        site = f"{r['site']}  " if r["site"] else ""
+        lines.append(f"{100 * r['probability']:5.1f}%  {site}{r['environment']}   "
+                     f"({r['shift']:.{decimals}f} ppm, peak {int(r['peak']) + 1})")
+    if total is not None and total > len(env_df):
+        lines.append(f"… and {total - len(env_df)} less likely environment(s)")
+    return "\n".join(lines)
+
+
+def summarise_peaks(fit: Dict) -> List[dict]:
+    """One plain dict per fitted peak (JSON-able, no DataFrames): predicted
+    and fitted shift, whether the shift was held fixed, FWHM, eta,
+    amplitude, integral (raw, % of total, error), S/N, and `members` --
+    its environments collapsed by collapse_members, most probable first.
+    Works on fit_predicted_spectrum's and refit_merged_groups' output."""
+    per_peak = extract_params_and_errors(
+        np.asarray(fit["popt"]), np.asarray(fit["pcov"]), fit["peak_defs"],
+        np.asarray(fit["is_free"]))
+    kept = fit["kept"].reset_index(drop=True)
+    errors = fit.get("integral_errors")
+    out = []
+    for i, peak in enumerate(per_peak):
+        values = dict(zip(peak["names"], peak["params"]))
+        errs = dict(zip(peak["names"], peak["errors"]))
+        fixed = dict(zip(peak["names"], peak["fixed"]))
+        row = kept.loc[i]
+        err_i = float(errors[i]) if errors is not None and np.isfinite(errors[i]) else None
+        snr = row.get("snr", np.nan)
+        out.append({
+            "index": i, "type": peak["type"],
+            "predicted_shift": float(row["group_shift"]),
+            "fitted_shift": float(values["shift"]),
+            "shift_err": None if fixed["shift"] else float(errs["shift"]),
+            "shift_fixed": bool(fixed["shift"]),
+            "fwhm": float(values["fwhm"]), "fwhm_err": float(errs["fwhm"]),
+            "amplitude": float(values["amplitude"]),
+            "eta": float(values["eta"]) if "eta" in values else None,
+            "integral": float(fit["integrals"][i]),
+            "integral_pct": float(fit["integrals_norm"][i]),
+            "integral_err": err_i,
+            "snr": float(snr) if snr is not None and np.isfinite(snr) else None,
+            "group_p": float(row["group_p"]),
+            "n_members": int(row["n_members"]),
+            "members": collapse_members(row["members"]),
+        })
+    return out
+
+
+def add_predicted_sticks(ax, fit: Dict, height: float = 0.08, colour="0.35",
+                         linewidth: float = 1.0, **kwargs):
+    """Mark every predicted environment of the fitted peaks as a stick
+    along the bottom of `ax`, its height proportional to its CIF
+    probability (the tallest is `height` of the axes). The x position
+    is the predicted shift, so sticks under a peak show which
+    environments the fit merged into it. Returns the LineCollection."""
+    from matplotlib.transforms import blended_transform_factory
+    _, _, members = _fit_axis_components_members(fit)
+    shifts, probs = [], []
+    for peak_members in members:
+        for m in collapse_members(peak_members):
+            shifts.append(m["shift"])
+            probs.append(m["p"])
+    if not shifts:
+        return None
+    probs = np.asarray(probs, dtype=float)
+    top = probs.max() if probs.max() > 0 else 1.0
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    return ax.vlines(shifts, 0.0, height * probs / top, colors=colour, linewidth=linewidth,
+                     transform=trans, **kwargs)

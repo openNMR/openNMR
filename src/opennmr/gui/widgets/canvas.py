@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import os
 import re
+import warnings
 
 import numpy as np
 import dataclasses
@@ -1106,6 +1107,9 @@ class MplCanvas(QWidget):
         self._slice_fit_args: dict | None = None
         self._slice_fit_active = False
         self._slice_fit_labels: list = []
+        #: ``overlay(ax)`` drawn over the fit on show after every redraw
+        #: of it (see show_slice_fit), or None.
+        self._slice_fit_overlay = None
         self._curve_fit_shown: dict | None = None
         #: Every peak's curve fit, when they are shown together.
         self._curve_fits_shown: list = []
@@ -2841,6 +2845,7 @@ class MplCanvas(QWidget):
         # And the fit view a component-style change would redraw, and the
         # curve fit a "Keep This Fit…" would keep.
         self._slice_fit_active = False
+        self._slice_fit_overlay = None
         self._curve_fit_shown = None
         self._curve_fits_shown = []
         self.simulation_spectrum = None
@@ -6301,7 +6306,7 @@ class MplCanvas(QWidget):
 
     def show_slice_fit(self, x, y_data, y_fit, components=None, peak_labels=None, title: str = "",
                         spectrum: NMRSpectrum | None = None, auto_hide_single: bool = False,
-                        _keep_view: bool = False) -> None:
+                        overlay=None, _keep_view: bool = False) -> None:
         """Plot one pseudo-2D slice's spectrum alongside its fitted
         (pseudo-Voigt) curve -- the intermediate per-slice spectral
         fit that feeds a relaxation/diffusion parameter fit
@@ -6336,7 +6341,14 @@ class MplCanvas(QWidget):
         exactly like :meth:`show_spectrum` does (inverted, high-to-low
         ppm, with a nucleus-based label) rather than the plain
         unlabelled, un-inverted axis this used to have. ``x`` itself is
-        always ppm (:func:`NMR2D_fit_slices`'s own default)."""
+        always ppm (:func:`NMR2D_fit_slices`'s own default).
+
+        ``overlay`` : optional ``overlay(ax)``, drawn on top once the fit
+        is (annotations, markers -- e.g. pNMR environment labels). It is
+        kept with the fit and drawn again whenever the fit is redrawn (a
+        component-style or Plot Style change), and dropped when another
+        plot replaces the fit. It never stops the fit itself being shown."""
+        previous_overlay = self._slice_fit_overlay
         self._enter_plot_kind("1d")   # its saved default style (Plot Style ▸ Per-type)
         self._contour_spectrum = None
         self._contour_factor = None
@@ -6390,8 +6402,28 @@ class MplCanvas(QWidget):
         # exactly what it is for (spectral fit).
         self._crosshair_ready = True
         self._apply_layout()
+        self._slice_fit_overlay = overlay if overlay is not None else (
+            previous_overlay if _keep_view else None)
+        self.draw_slice_fit_overlay()
         self.canvas.draw_idle()
         self.fitComponentsShown.emit(list(self._slice_fit_labels))
+
+    def slice_fit_overlay(self):
+        """The overlay drawn over the fit on show (see show_slice_fit), or None."""
+        return self._slice_fit_overlay if self._slice_fit_active else None
+
+    def draw_slice_fit_overlay(self) -> bool:
+        """Draw the fit's overlay on its Axes (once more). False if there is
+        none, or it failed -- a broken overlay must not take the fit with it."""
+        overlay = self.slice_fit_overlay()
+        if overlay is None or self.ax is None:
+            return False
+        try:
+            overlay(self.ax)
+        except Exception as exc:  # noqa: BLE001 -- annotations only; the fit stays up
+            warnings.warn(f"Fit overlay not drawn: {exc}", RuntimeWarning, stacklevel=2)
+            return False
+        return True
 
     def shown_fit(self) -> dict | None:
         """The fit on show, as ``{"kind": "spectrum" | "curve", ...}`` --
