@@ -1,7 +1,7 @@
 """
 Fit every slice of a pseudo-2D series with a lineshape model fitted to
-one slice -- T1/T2/T1rho (or any series) with CSA, quadrupolar or
-Combined-Hamiltonian (mixed) sites.
+one slice -- T1/T2/T1rho (or any series) with CSA, quadrupolar,
+Czjzek (distributed quadrupolar) or Combined-Hamiltonian (mixed) sites.
 
 Explicit user request (2026-09-28): "When I try to fit T1/T2 pseudo-2d
 data using CSA or quad models (or mixed), I extract a slice, then fit
@@ -71,9 +71,10 @@ import numpy as np
 _trapezoid = getattr(np, "trapezoid", None) or np.trapz
 
 #: The model kinds :func:`model_components` understands.
-MODEL_KINDS = ("csa", "quadrupolar", "combined")
+MODEL_KINDS = ("csa", "quadrupolar", "czjzek", "combined")
 
-_KIND_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "combined": "Combined Hamiltonian"}
+_KIND_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "czjzek": "Czjzek",
+                "combined": "Combined Hamiltonian"}
 
 
 def model_components(kind: str, fit: dict, x=None):
@@ -85,7 +86,9 @@ def model_components(kind: str, fit: dict, x=None):
     the ppm axis, unless given); "quadrupolar" -- ``popt``/``info``
     from :func:`opennmr.notebook.quadrupolar_fitting.
     fit_quadrupolar_spectrum` (or precomputed ``components``);
-    "combined" -- the dict :func:`opennmr.notebook.combined_fitting.
+    "czjzek" -- ``popt``/``info`` from :func:`opennmr.notebook.czjzek.
+    fit_czjzek_spectrum` (its ``info`` keeps the lineshape library, so
+    the curves are exactly the fitted ones); "combined" -- the dict :func:`opennmr.notebook.combined_fitting.
     fit_combined` returns (its ``site_spectra`` on its ``x``).
 
     The baseline is not a component: each slice gets its own."""
@@ -111,6 +114,9 @@ def model_components(kind: str, fit: dict, x=None):
     if kind == "csa":
         from .csa_fitting import evaluate_csa_fit
         _total, comps = evaluate_csa_fit(xs, fit["popt"], info, return_components=True)
+    elif kind == "czjzek":
+        from .czjzek import evaluate_czjzek_fit
+        _total, comps = evaluate_czjzek_fit(xs, fit["popt"], info)
     else:
         from .quadrupolar_fitting import evaluate_quad_fit
         _total, comps = evaluate_quad_fit(xs, fit["popt"], info, return_components=True)

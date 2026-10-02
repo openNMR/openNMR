@@ -585,9 +585,16 @@ def check_quad_bound_hits(popt, pcov_full, is_free, fit_info):
                 continue
             err = np.sqrt(max(pcov_full[i, i], 0.0))
             err += 1e-9 * max(1.0, abs(popt[i]))
-            if np.isfinite(upper[i]) and popt[i] + err >= upper[i]:
+            at_upper = np.isfinite(upper[i]) and popt[i] + err >= upper[i]
+            at_lower = np.isfinite(lower[i]) and popt[i] - err <= lower[i]
+            if at_upper and at_lower:
+                # +/- 1 sigma covers the whole range: undetermined, not "on a bound".
+                warnings.append(f"{label}: {name} is not determined by the data -- its 1σ "
+                                f"uncertainty spans its whole range ({lower[i]:g} to "
+                                f"{upper[i]:g}); fix it, or add data that constrain it")
+            elif at_upper:
                 warnings.append(f"{label}: {name} at its upper bound {upper[i]:g}")
-            if np.isfinite(lower[i]) and popt[i] - err <= lower[i]:
+            elif at_lower:
                 warnings.append(f"{label}: {name} at its lower bound {lower[i]:g}")
     return warnings
 

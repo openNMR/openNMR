@@ -900,9 +900,14 @@ def print_multi_fit_report(result, save_txt=None):
     return text
 
 
-def plot_multi_fit(result, figure=None, show_sites=True):
+def plot_multi_fit(result, figure=None, show_sites=True, xlims="window"):
     """Every experiment's data and fit, one panel each, top to bottom in
-    fitting order. Returns the figure."""
+    fitting order. Returns the figure.
+
+    ``xlims`` : ``"window"`` (default) -- each panel shows its fit
+    window (plus 5 % either side), not the whole spectrum, so a narrow
+    line on a wide spectral width is not drawn as a spike; ``None`` --
+    the whole axis; or ``(left, right)`` in ppm for every panel."""
     import matplotlib.pyplot as plt
     fits = result["experiments"]
     if figure is None:
@@ -910,16 +915,30 @@ def plot_multi_fit(result, figure=None, show_sites=True):
     figure.clear()
     axes = figure.subplots(len(fits), 1, squeeze=False)[:, 0]
     for ax, fit in zip(axes, fits):
-        x, m = fit["x"], fit["mask"]
-        ax.plot(x, fit["y"], color="black", lw=0.8, label="data")
+        x, m = np.asarray(fit["x"], dtype=float), np.asarray(fit["mask"], dtype=bool)
+        if isinstance(xlims, str) and xlims == "window" and m.any():
+            lo, hi = float(x[m].min()), float(x[m].max())
+            pad = 0.05 * (hi - lo)
+            left, right = hi + pad, lo - pad
+        elif xlims is None or isinstance(xlims, str):
+            left, right = float(x.max()), float(x.min())
+        else:
+            left, right = max(xlims), min(xlims)
+        shown = (x >= right) & (x <= left)
+        ax.plot(x[shown], fit["y"][shown], color="black", lw=0.8, label="data")
         if show_sites and len(fit["site_spectra"]) > 1:
             for label, c in fit["site_spectra"].items():
-                ax.fill_between(x, c + fit["baseline"], fit["baseline"], alpha=0.35, label=label)
-        ax.plot(x[m], fit["y_fit"][m], "--", color="red", lw=1.2, label="fit")
-        ax.set_xlim(x.max(), x.min())
+                ax.fill_between(x[shown], (c + fit["baseline"])[shown], fit["baseline"][shown],
+                                alpha=0.35, label=label)
+        ax.plot(x[m & shown], fit["y_fit"][m & shown], "--", color="red", lw=1.2, label="fit")
+        ax.set_xlim(left, right)
         ax.set_yticks([])
         ax.set_title(f"{fit['label']} ({fit['nucleus']})", fontsize=9, loc="left")
-    axes[-1].set_xlabel("δ (ppm)")
+    try:
+        from .utils import NUC_label
+        axes[-1].set_xlabel(NUC_label(fits[-1]["nucleus"]))
+    except Exception:  # noqa: BLE001 -- a label must not sink a plot
+        axes[-1].set_xlabel("δ (ppm)")
     axes[0].legend(fontsize=7, loc="upper right")
     figure.tight_layout()
     return figure

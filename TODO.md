@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-02 (tutorial round: quadrupolar/mixed/Czjzek on real 23Na, Czjzek series, Czjzek library sized to the fit window, baseline warning): the 19 test files that touch the changed modules except test_gui.py (too slow on the session's 2-CPU machine), matplotlib 3.11.2 / Py 3.13: 268 passed, 16 skipped, 2 failed -- the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`, and `test_colorbar_gap_and_czjzek_labels.py::test_czjzek_symbols_are_italic`, whose glyph unpacking expects 5 fields where matplotlib 3.11 gives 6 (test-side, not this round). 9 new tests in `test_tutorial_round_czjzek_series.py`. **Run the full suite locally before committing.***
+
 *2026-10-01 (round 7: live progress and Stop for every spectrum fit): related files only (every fitter's own tests, the GUI fit panels, and test_gui/test_gui_usability -k fit): 376 passed, 5 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`). 20 new tests in `test_fit_progress.py`.*
 
 *2026-10-01 (round 6: italic Czjzek symbols, colour-bar gap): related files only (test_colorbar_gap_and_czjzek_labels, test_czjzek, the Czjzek/tensor/Simulate GUI files, test_gui_canvas, test_plotting_style, test_gui_usability, test_tensor_views): 459 + 27 passed. 5 new tests in `test_colorbar_gap_and_czjzek_labels.py`; `test_czjzek.py`'s label check updated for the italic form. The pre-existing `test_fit_warns_when_the_mean_efg_is_not_needed` failure is unchanged.*
@@ -140,6 +142,29 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Tutorial updated: quadrupolar, mixed and Czjzek simulation and fitting on real 23Na data, pseudo-2D series, tensors (2026-10-02)
+
+**Asked:** "fully update the tutorial notebook with the new functions added -- especially simulating and fitting quadrupoles (example data from the 800 MHz folder, e.g. .../23001), adding mixed interactions (quadrupoles + CSA) and running simulations and fits of Czjzek distributions. Also add the fits to pseudo-2D datasets with those models, and examples of plotting tensors."
+
+**Built:** `SCRIPT_openNMR_Tutorial_20261002.ipynb` (the 2026-09-17 notebook plus new sections; the old one is kept). New: 3.5 Czjzek simulation (plain and extended, distribution maps), 3.6 tensor pictures, 4.3.4 quadrupolar fit of 23Na (`.../2p5mm_HX_2H_23Na_113Cd_Na2CdFeCN6_D2O_150126A_VT_20260223/23001`, 20 kHz MAS, 18.8 T), 4.4.6 quadrupolar + CSA on the same data, 4.5 Czjzek fitting (synthetic + real) with `compare_fit_models`, 11 pseudo-2D series with quadrupolar / combined / Czjzek lineshapes (23002 sat-rec T1, 23003 Hahn-echo T2) and `fit_multi` over the 250-320 K VT series, 13 short examples of the other new tools (manual baseline, SR transfer, periodic table, accessible colours, adiabatic Bloch pulses, openNMR states; DNP and drift correction as code only). BMS renumbered 10 -> 12 (its stale "9.x" cross-references fixed); title/contents cell rewritten; ids given to the six CPMG cells that had none. Only the new cells were executed (the rest need data not available to the session); outputs are stored.
+
+**Findings on the real data** (written into the notebook):
+- 23Na: one ordered site, C_Q 1.401 MHz, eta_Q 0.452 at 250 K. Plain Czjzek: dBIC ~1000 worse; extended Czjzek collapses to sigma ~0.01 MHz (below one grid cell). A second discrete site is undetermined.
+- The +-1 CT spinning sidebands (0.80 / 0.37 % of the centreband) are 40-90x what the quadrupolar coupling alone gives; ST sidebands (a few ppm away) are absent. A CT quad + CSA fit gives |Delta| ~12 ppm (axes along the EFG) or ~29 ppm (beta free) -- the sign, eta and orientation are not determined and **no CT quad + CSA model reproduces the 2:1 sideband asymmetry**. Left as an open question in the text. (An earlier draft blamed ST sidebands; a plot showed they are at different positions -- the "ST floor" was a baseline offset integrated over a wide window.)
+- Sat-rec 23002: saturation incomplete (~4 % at 10 us) -- `inversion_recovery` with free C (C ~0.96) is the model; T1 2.38 s. The lineshape changes along the recovery (the -1.9 ppm horn recovers more slowly), so the frozen-shape fit is approximate (R^2 < 0.9 at short delays despite S/N ~60). A plain-Czjzek reference shape gives T1 2.14 s -- 10 %, outside the errors, from the shape model alone.
+- 23003: the echo time is 2 x vd (tau - pi - tau in hahnecho2D.enb); T2 78.6 ms.
+- VT: C_Q 1.40 -> 1.16 MHz and eta_Q 0.45 -> 0.60 from 250 to 320 K.
+
+**Fixed along the way (each with a test in `tests/test_tutorial_round_czjzek_series.py`, 9 tests):**
+- `fit_czjzek_spectrum` built its lineshape library over the *whole spectrum* plus d_iso bounds of +-(whole spectral width), even with `fit_regions`: on the 3730 ppm-wide 23Na spectrum that was 2^19 points x 1280 lineshapes (~5 GB) and the process was killed. The library, the default d_iso/FWHM bounds and the model evaluation now follow the fit window (unchanged without `fit_regions`).
+- `fit_czjzek_spectrum` now warns when the held baseline was estimated where the fitted pattern still has > 1 % of its height (as the quadrupolar and combined fitters already did). Found because a synthetic static Czjzek site with 1.5 % of its height at the axis end came out with sigma 3 % low and FWHM 12 % high, tens of sigma off, with no warning.
+- `series_fitting.model_components` accepts `"czjzek"` (a Czjzek fit frozen across a pseudo-2D). **Notebook only: the GUI's Czjzek panel has no "Fit Every Slice" button yet** -- next step for GUI parity.
+- Quadrupolar and combined fit reports said "X at its upper bound" *and* "at its lower bound" when +-1 sigma spans the whole range; they now say the parameter is not determined by the data.
+- `combined_fitting._fmt` printed a single site's share as `100.00000000000000000 +- 0.00000000000000014`; round-off-sized errors now print as no error.
+- `plot_multi_fit` drew each spectrum's whole axis (a 3 ppm line on 3700 ppm = a spike); it now shows each fit window by default (`xlims=None` for the old behaviour).
+
+**Not done / noted:** extended-Czjzek fits are slow (~4 min) when C_Q0 is left at its default bound (3 x start) and the distribution is narrower than a grid cell (piecewise-constant objective); a tight C_Q0 bound brings it to ~10 s, and the tutorial says so. The grid spans [0, C_Q max] even for an extended site; a grid around C_Q0 would fix it. The pre-existing failure `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed` is unchanged.
 
 ## Every spectrum fit shows a live, Stop-able progress pop-up (2026-10-01, round 7)
 

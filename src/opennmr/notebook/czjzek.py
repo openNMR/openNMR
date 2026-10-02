@@ -781,7 +781,12 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
     if x_fit.size < 8:
         raise ValueError("The fit window holds fewer than 8 points.")
     x_ref = float(np.mean(x_fit))
-    span = float(x_sorted[-1] - x_sorted[0])
+    # Everything the fit needs lies inside the fit window: the default
+    # d_iso/FWHM bounds and the lineshape library are sized to it, not to
+    # the whole spectrum. (Sized to the whole spectrum, a 9 ppm window on a
+    # 3700 ppm-wide 23Na spectrum built a 2^19-point x 1280-lineshape
+    # library -- ~5 GB -- and was killed.)
+    span = float(x_fit[-1] - x_fit[0])
     b0, b1, _ = estimate_baseline_robust(x_sorted, y_sorted, baseline_regions=baseline_regions,
                                          x_ref=x_ref)
 
@@ -859,7 +864,7 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
         lo_d = float(np.min(np.where(is_free[diso_idx], lower[diso_idx], p0_arr[diso_idx])))
         hi_d = float(np.max(np.where(is_free[diso_idx], upper[diso_idx], p0_arr[diso_idx])))
         pad = 0.1 * span + 5 * dx
-        lo, hi = x_sorted[0] - hi_d - pad, x_sorted[-1] - lo_d + pad
+        lo, hi = x_fit[0] - hi_d - pad, x_fit[-1] - lo_d + pad
         n = int(round((hi - lo) / dx)) + 1
         if n > 2 ** 19:
             n = 2 ** 19
@@ -873,8 +878,8 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
         def model(_x, *free):
             full = start.copy()
             full[is_free] = free
-            return czjzek_model(x_sorted, full, n_sites, library, x_ref, lineshape,
-                                extended)[0][mask]
+            return czjzek_model(x_fit, full, n_sites, library, x_ref, lineshape,
+                                extended)[0]
         popt_free, pcov_free = curve_fit(_fit_progress.tracked(model, y_fit, n_free=int(is_free.sum())),
                                          x_fit, y_fit, p0=start[is_free],
                                          bounds=(lower[is_free], upper[is_free]),
@@ -931,12 +936,13 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
                                  float(np.clip(popt[diso_idx[s] + 5], 0, 1)), cq0, eta0,
                                  extended[s])
         shift = float(popt[diso_idx[s]])
-        inside = (library.x + shift >= x_sorted[0]) & (library.x + shift <= x_sorted[-1])
+        inside = (library.x + shift >= x_fit[0]) & (library.x + shift <= x_fit[-1])
         captured = float(shape[inside].sum() * library.dx)
         if captured < 0.99:
+            where = "spectrum" if fit_regions is None else "fit window"
             warnings.append(f"{label}: only {100 * captured:.1f} % of the distribution falls "
-                            "inside the spectrum -- its large-C_Q tail runs off the axis, so the "
-                            "wings are not fitted; widen the spectrum or check σ.")
+                            f"inside the {where} -- its large-C_Q tail runs off it, so the "
+                            f"wings are not fitted; widen the {where} or check σ.")
         for i, name in ((sigma_idx[s], "σ"), (diso_idx[s], "δiso"), (d_idx[s], "d")):
             if is_free[i] and (np.isclose(popt[i] / (unit[i]), lower[i], rtol=1e-3, atol=1e-9)
                                or np.isclose(popt[i] / unit[i], upper[i], rtol=1e-3, atol=1e-9)):
@@ -957,6 +963,35 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
         if n_cells < 15:
             warnings.append(f"{label}: only {n_cells} C_Q cells cover the distribution; "
                             "raise n_cq for a smoother model.")
+    if not fit_baseline:
+        # The held baseline came from the spectrum's outer 5 % at each end (or
+        # baseline_regions). If the fitted pattern still has intensity there,
+        # part of its tail was taken as baseline, and sigma, FWHM and the
+        # amplitude absorb the error -- silently, with small error bars (a
+        # static 27Al site with 1.5 % of its height at one end of the axis gave
+        # sigma 3 % low and FWHM 12 % high, each tens of sigma off). The
+        # quadrupolar and combined fitters already warn about this.
+        if baseline_regions is not None:
+            regions = ([baseline_regions] if np.isscalar(baseline_regions[0])
+                       else baseline_regions)
+            zone = build_region_mask(x_sorted, regions)
+        else:
+            k = max(1, int(x_sorted.size * 0.05))
+            zone = np.zeros(x_sorted.size, dtype=bool)
+            zone[:k] = zone[-k:] = True
+        _total, site_curves = czjzek_model(x_sorted, params, n_sites, library, x_ref, lineshape,
+                                           extended)
+        pattern = np.sum(site_curves, axis=0)
+        peak = float(np.max(np.abs(pattern[mask]))) if mask.any() else 0.0
+        if peak > 0 and zone.any():
+            inside = float(np.max(np.abs(pattern[zone]))) / peak
+            if inside > 0.01:
+                warnings.append(
+                    f"The baseline was estimated where the fitted pattern still has {inside:.1%} "
+                    "of its height (the spectrum's outer 5% at each end, or baseline_regions): "
+                    "it is partly the pattern's tail, which biases σ, FWHM and the amplitude. "
+                    "Give baseline_regions clear of the pattern, widen the spectrum, or fit the "
+                    "baseline (fit_baseline=True).")
     regime = "static" if not mas_Hz else f"MAS {mas_Hz / 1e3:g} kHz"
     log = (f"Czjzek fit: I = {I:g}, ν0 = {larmor_Hz / 1e6:.6g} MHz, {regime}, {n_sites} site(s), "
            f"{lineshape} CS-distribution broadening, window "

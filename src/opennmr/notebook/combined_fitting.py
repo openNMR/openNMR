@@ -484,9 +484,19 @@ def _warnings(parameters, pcov, free_names, curves, x, mask, baseline_regions, f
         if not p["free"]:
             continue
         e = (p["error"] or 0.0) + 1e-9 * max(1.0, abs(p["value"]))
-        if np.isfinite(p["upper"]) and p["value"] + e >= p["upper"] and p["name"] != "amount":
+        at_upper = (np.isfinite(p["upper"]) and p["value"] + e >= p["upper"]
+                    and p["name"] != "amount")
+        at_lower = (np.isfinite(p["lower"]) and p["value"] - e <= p["lower"]
+                    and p["name"] not in ("C_Q",))
+        if at_upper and at_lower:
+            # +/- 1 sigma covers the whole allowed range: the data do not
+            # determine it at all, which is not the same as "on a bound".
+            out.append(f"{p['label']}: {p['name']} is not determined by the data -- its 1σ "
+                       f"uncertainty spans its whole range ({p['lower']:g} to {p['upper']:g}); "
+                       "fix it, or add data that constrain it")
+        elif at_upper:
             out.append(f"{p['label']}: {p['name']} at its upper bound {p['upper']:g}")
-        if np.isfinite(p["lower"]) and p["value"] - e <= p["lower"] and p["name"] not in ("C_Q",):
+        elif at_lower:
             out.append(f"{p['label']}: {p['name']} at its lower bound {p['lower']:g}")
         if p["name"] == "C_Q" and p["value"] < 0.02:
             out.append(f"{p['label']}: C_Q fitted to ~0 -- no quadrupolar splitting is resolved")
@@ -536,7 +546,9 @@ def _warnings(parameters, pcov, free_names, curves, x, mask, baseline_regions, f
 def _fmt(value, error):
     if error is None:
         return f"{value:.6g} (fixed)"
-    if not np.isfinite(error) or error <= 0:
+    # An error at round-off level (a single site's share: 100 % with an
+    # error of ~1e-16 from the covariance) is no error, not 17 decimals.
+    if not np.isfinite(error) or error <= 1e-12 * max(abs(value), 1.0):
         return f"{value:.6g}"
     decimals = max(0, 1 - int(np.floor(np.log10(error))))
     return f"{value:.{decimals}f} ± {error:.{decimals}f}"
