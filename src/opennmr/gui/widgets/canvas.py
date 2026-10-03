@@ -861,6 +861,13 @@ class MplCanvas(QWidget):
         super().__init__(parent)
 
         self.figure = Figure()
+        # Plot Style ▸ Lines: every line's width and style, applied as
+        # the figure draws (and so on export too), whatever drew it --
+        # see plotting.lines. Set before anything can draw.
+        self._line_width_scale = 1.0
+        self._line_overrides: dict[str, dict] = {}
+        self._line_keys_seen: tuple = ()
+        self.figure.draw = self._draw_with_line_styles
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.toolbar = _Toolbar(self.canvas, self)
@@ -3427,6 +3434,9 @@ class MplCanvas(QWidget):
     #: time. Not emitted for another plot of the same kind: that would
     #: undo whatever the user has changed on this plot since.
     plotKindChanged = Signal(str)
+    #: The set of lines on the plot changed (a redraw added or removed
+    #: one), so a Lines list showing them should be rebuilt.
+    linesChanged = Signal()
 
     #: The plot kinds :attr:`plotKindChanged` reports.
     PLOT_KINDS = ("1d", "2d", "pseudo2d", "compare", "curve", "tensor")
@@ -4400,6 +4410,81 @@ class MplCanvas(QWidget):
         if self._active_series_view() is not None:
             self._redraw_active_series_view()
 
+    # -- Lines: widths and styles of every line on the plot -------------
+
+    def _draw_with_line_styles(self, renderer) -> None:
+        """The figure's own draw, with Plot Style's line widths and
+        styles applied first. A draw-time pass rather than a setting
+        each plot's code reads, so it reaches every plot this canvas can
+        show -- spectra, fits and their components, curve fits, Compare
+        stacks, projection strips, notebook figures -- and every one
+        added later, with nothing to wire per view."""
+        try:
+            plotting.lines.apply_line_styles(
+                self.figure, self._line_width_scale, self._line_overrides,
+                legend_widths=self._legend_linewidth is None)
+            keys = tuple(info["key"] for info in plotting.lines.data_lines(self.figure))
+        except Exception:  # noqa: BLE001 -- styling must never stop a plot drawing
+            keys = self._line_keys_seen
+        Figure.draw(self.figure, renderer)
+        if keys != self._line_keys_seen:
+            self._line_keys_seen = keys
+            # After this paint, not inside it: a listener rebuilds widgets.
+            QTimer.singleShot(0, self.linesChanged.emit)
+
+    @staticmethod
+    def _clean_line_overrides(overrides) -> dict:
+        """``{key: {"linewidth", "linestyle"}}`` checked and normalised
+        (a JSON list dash pattern back to a tuple); empty entries dropped."""
+        out = {}
+        for key, entry in dict(overrides or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            clean = {}
+            if entry.get("linewidth") is not None:
+                width = float(entry["linewidth"])
+                if width <= 0:
+                    raise ValueError(f"Line width for {key!r} must be positive.")
+                clean["linewidth"] = width
+            if entry.get("linestyle") is not None:
+                clean["linestyle"] = plotting.lines.normalise_linestyle(entry["linestyle"])
+            if clean:
+                out[str(key)] = clean
+        return out
+
+    def data_lines(self) -> list[dict]:
+        """Every line on the current plot that Plot Style ▸ Lines can
+        set, as :func:`opennmr.plotting.lines.data_lines` describes them,
+        with their current (styled) width and style."""
+        plotting.lines.apply_line_styles(self.figure, self._line_width_scale,
+                                         self._line_overrides,
+                                         legend_widths=self._legend_linewidth is None)
+        lines = plotting.lines.data_lines(self.figure)
+        for info in lines:
+            info["overridden"] = info["key"] in self._line_overrides
+        return lines
+
+    def set_line_style(self, key: str, *, linewidth=None, linestyle=None,
+                       clear: bool = False) -> None:
+        """Width and/or style of one line (``key`` from :meth:`data_lines`),
+        kept across redraws. ``clear`` drops its override."""
+        if clear:
+            self._line_overrides.pop(key, None)
+        else:
+            entry = dict(self._line_overrides.get(key, {}))
+            if linewidth is not None:
+                entry["linewidth"] = linewidth
+            if linestyle is not None:
+                entry["linestyle"] = linestyle
+            self._line_overrides.update(self._clean_line_overrides({key: entry}))
+        self.canvas.draw_idle()
+
+    def reset_line_styles(self) -> None:
+        """Every line back to its plot's own width and style."""
+        self._line_overrides = {}
+        self._line_width_scale = 1.0
+        self.canvas.draw_idle()
+
     def style_settings(self) -> dict:
         """This canvas's own current style, in the form
         :meth:`set_style` takes it back.
@@ -4442,6 +4527,8 @@ class MplCanvas(QWidget):
             "legend_linewidth": self._legend_linewidth,
             "legend_style": self._legend_style,
             "trace_label_position": self._trace_label_position,
+            "line_width_scale": self._line_width_scale,
+            "line_overrides": copy.deepcopy(self._line_overrides),
         }
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
@@ -4452,7 +4539,8 @@ class MplCanvas(QWidget):
                   axis_label_template=None, legend_frameon=None,
                   legend_fontsize=None, legend_framealpha=None, legend_facecolor=None,
                   legend_linewidth=None, legend_style=None,
-                  trace_label_position=None, top_spine=None, right_spine=None) -> None:
+                  trace_label_position=None, top_spine=None, right_spine=None,
+                  line_width_scale=None, line_overrides=None) -> None:
         """The Output tab's live style panel -- updates whichever of
         these aren't ``None``, both as the new per-instance default
         (every ``show_*`` method reads ``self._AXIS_LINEWIDTH`` etc.,
@@ -4550,6 +4638,12 @@ class MplCanvas(QWidget):
             self._legend_style = "labels" if legend_style == "labels" else "legend"
         if trace_label_position is not None:
             self._trace_label_position = min(max(float(trace_label_position), 0.0), 1.0)
+        if line_width_scale is not None:
+            if float(line_width_scale) <= 0:
+                raise ValueError("line_width_scale must be positive.")
+            self._line_width_scale = float(line_width_scale)
+        if line_overrides is not None:
+            self._line_overrides = self._clean_line_overrides(line_overrides)
         if contour_clevels is not None:
             # **The same number the right-click "Set Contour Levels…"
             # dialog and the DOSY display panel set**, not a parallel
@@ -4661,7 +4755,7 @@ class MplCanvas(QWidget):
         "font_family", "axis_label_style", "axis_label_template", "legend_frameon",
         "legend_fontsize", "legend_framealpha", "legend_facecolor",
         "legend_linewidth", "legend_style", "trace_label_position",
-        "top_spine", "right_spine",
+        "top_spine", "right_spine", "line_width_scale", "line_overrides",
     )
 
     def apply_style_defaults(self, style: dict) -> None:

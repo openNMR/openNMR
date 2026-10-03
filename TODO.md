@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-03 round 2 (Plot Style ▸ Lines): only the files touching the canvas, Plot Style, legends, exports and external plots, as asked -- test_line_styles (new), test_gui_canvas, test_plotting_style, test_gui_legend_style, test_gui_legend_names, test_gui_tensor_style, test_gui_simulation_plots, test_gui_export_scroll, test_gui_remove_and_plot_kinds, test_projection_style_and_labels, test_gui_czjzek_display, test_gui_curve_fit_plot, test_gui_dnp, test_gui_dynamics, test_colorbar_gap_and_czjzek_labels, test_accessibility, test_gui_usability, test_external_projection, test_plotting_fit, test_plotting_oned, test_plotting_twod; matplotlib 3.11.2 / Py 3.13: 730 passed, 4 skipped, 1 failed -- the pre-existing `test_colorbar_gap_and_czjzek_labels.py::test_czjzek_symbols_are_italic` (glyph tuple has 6 fields on matplotlib 3.11; fails identically on the unmodified tree). 14 new tests. **Run the full suite locally before committing.***
+
 *2026-10-03 (Dynamics ▸ Relaxation vs Temperature, Dynamics ▸ Exchange Lineshape): only the files touching new or changed code, as asked -- test_exchange, test_vt_relaxation, test_gui_dynamics (new), test_gui_compare_tools, test_gui_usability, test_gui_canvas, test_gui_curve_fit_plot, test_gui_reflow, test_relaxation, test_relaxation_reporting, test_gui_legend_style, test_gui_legend_names, test_gui_simulation_plots, test_gui_dnp, test_gui_tensor_style, test_plotting_style, test_collapsible_section, test_gui_remove_and_plot_kinds, test_gui_export_scroll, test_accessibility, test_gui_fit_sim_state, test_notebook_bridge, and test_gui.py -k "curve or relaxation or dynamics or toolbar or tile or side_tab or external or legend"; matplotlib 3.11.2 / Py 3.13: 896 passed, 4 skipped, 0 failed. 88 new tests (24 + 44 + 20). **Run the full suite locally before committing.***
 
 *2026-10-02 (Fit ▸ pNMR (CIF bond pathways), environments on hover/click): only the files touching changed code, as asked -- test_pnmr_fit, test_gui_pnmr_fit (new), test_pnmr_simulator, test_gui_pnmr, test_gui_canvas, test_gui_czjzek_display, test_gui_curve_fit_plot, test_state_and_fit_models, test_gui_fit_sim_state, test_fit_progress, test_accessibility, test_collapsible_section, test_gui_compare_tools, test_gui_jcoupling, test_gui_multi_fit, test_gui_reflow, test_gui_remove_and_plot_kinds, test_gui_round4_keep_sim, test_gui_usability, test_series_fitting, and test_gui.py -k "slice_fit or fit_canvas or keep or component or spectral_fit or fit_view"; with pymatgen, matplotlib 3.10 / Py 3.13: 667 passed, 6 skipped, 0 failed. 45 new tests (18 + 27); `test_gui_curve_fit_plot.py::test_every_fit_section_has_a_keep_button` updated for the new section's Keep button. Not run: the rest of test_gui.py and the files not touching these modules. **Run the full suite locally before committing.***
@@ -146,6 +148,30 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Plot Style ▸ Lines: width and style of every line, on every kind of plot (2026-10-03, round 2)
+
+**Asked:** "for all plot styles, options to control the linewidth and styles of different lines (e.g., solid, dashed, dotted, dot-dash...). Only run relevant tests."
+
+**Built:**
+- `plotting/lines.py`, the core of the feature, usable from a notebook too.
+  - `data_lines(fig)` lists every user-facing Line2D with a stable key: `label:<legend name>`, or `line:<axes>.<n>` for unlabelled lines.
+  - `apply_line_styles(fig, scale, overrides)` sets each line's width (its own width × scale, or an absolute width) and its style. Each line's original width and style are recorded on it first, so removing a setting restores it exactly and applying twice does not compound. Legend entries follow their line.
+  - Animated lines (the blitted crosshair), invisible lines, and lines with gid `opennmr-ui*` are left alone.
+  - `LINESTYLES`: Solid, Dashed, Dotted, Dash-dot, Long dash, Dash-dot-dot, Dense dots, Loose dots, None (markers only).
+- `MplCanvas`:
+  - The figure's `draw` is wrapped to apply `_line_width_scale` and `_line_overrides` before every render. That includes `savefig`, so exports match the screen.
+  - It is a draw-time pass rather than a setting each `show_*` reads, which is why it reaches every plot (spectra, fits, curve fits, Compare, projections, notebook figures, and future ones) with nothing wired per view.
+  - New methods: `data_lines()`, `set_line_style(key, linewidth=, linestyle=, clear=)`, `reset_line_styles()`, and a `linesChanged` signal.
+  - `line_width_scale` and `line_overrides` are in `style_settings` / `set_style` / `_STYLE_KEYS`, so they are saved with a plot type's default and applied by Apply to all. Dash tuples round-trip through JSON as lists.
+- Plot Style dialog, new "Lines on this plot" group:
+  - "Scale all line widths" (×).
+  - One row per line: colour swatch, name, width (pt), style, and ↺ to put the line back. Capped at 40 rows; the scale still reaches every line beyond that.
+  - "Reset lines".
+
+**Not covered:** filled fit components (`fill_between` polygons) and contour rings. Those are not lines; contours keep their own "Contour line width".
+
+**Tests:** new `test_line_styles.py` (14).
 
 ## Dynamics: relaxation against temperature (BPP / Arrhenius, Hendrickson-Bray) and exchange lineshapes (XReSpecs successor) (2026-10-03)
 

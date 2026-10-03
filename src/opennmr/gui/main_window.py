@@ -28,7 +28,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
+    QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QAbstractSpinBox, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
     QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
@@ -828,6 +828,7 @@ class MainWindow(QMainWindow):
                 lambda kind, c=canvas: self._on_canvas_plot_kind_changed(c, kind))
             canvas.styleEditedFromMenu.connect(
                 lambda c=canvas: self._on_canvas_style_edited_from_menu(c))
+            canvas.linesChanged.connect(lambda c=canvas: self._on_canvas_lines_changed(c))
         # Before any tab is current, so _style_target_canvases falls
         # back to every canvas and the saved defaults land everywhere.
         self._apply_saved_style_defaults()
@@ -4426,6 +4427,53 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.slice_colour_group)
         self._slice_colour_buttons = []
 
+        # --- Lines: width and style of every line ------------------
+        # Explicit user request (2026-10-03): "for all plot styles,
+        # options to control the linewidth and styles of different
+        # lines (e.g., solid, dashed, dotted, dot-dash...)". Applied by
+        # the canvas as the figure draws (plotting.lines), so every kind
+        # of plot gets it -- spectra, fits, curves, stacks, projections,
+        # notebook figures -- including on export.
+        self.lines_group = QGroupBox("Lines on this plot")
+        lines_layout = QVBoxLayout(self.lines_group)
+        lines_hint = QLabel(
+            "Every line's width and style. The scale multiplies each line's own "
+            "width (so a fit stays heavier than its data); a width typed for one "
+            "line is used as it is. Settings follow a named line across redraws "
+            "and are saved with the plot type's default.")
+        lines_hint.setWordWrap(True)
+        lines_layout.addWidget(lines_hint)
+        scale_row = QHBoxLayout()
+        self.output_line_scale_spin = QDoubleSpinBox()
+        self.output_line_scale_spin.setRange(0.1, 5.0)
+        self.output_line_scale_spin.setSingleStep(0.1)
+        self.output_line_scale_spin.setDecimals(2)
+        self.output_line_scale_spin.setValue(1.0)
+        self.output_line_scale_spin.setSuffix(" ×")
+        self.output_line_scale_spin.setToolTip(
+            "Scale every line's width on this plot (1 × = as drawn). For a "
+            "presentation, 1.5–2 × reads better from the back of a room.")
+        self.output_line_scale_spin.valueChanged.connect(self._on_output_style_changed)
+        self.output_line_scale_spin.valueChanged.connect(
+            lambda _v: QTimer.singleShot(0, self._refresh_line_rows))
+        scale_row.addWidget(QLabel("Scale all line widths:"))
+        scale_row.addWidget(self.output_line_scale_spin)
+        scale_row.addStretch(1)
+        lines_layout.addLayout(scale_row)
+        self.lines_rows_widget = QWidget()
+        self.lines_rows_layout = QGridLayout(self.lines_rows_widget)
+        self.lines_rows_layout.setContentsMargins(0, 0, 0, 0)
+        lines_layout.addWidget(self.lines_rows_widget)
+        self.lines_more_label = QLabel("")
+        self.lines_more_label.setWordWrap(True)
+        lines_layout.addWidget(self.lines_more_label)
+        self.reset_lines_button = QPushButton("Reset lines")
+        self.reset_lines_button.setToolTip(
+            "Every line on this plot back to the width and style it was drawn with.")
+        self.reset_lines_button.clicked.connect(self._on_reset_lines_clicked)
+        lines_layout.addWidget(self.reset_lines_button)
+        layout.addWidget(self.lines_group)
+
         layout.addWidget(style_box)
 
         export_box = QGroupBox("Export settings")
@@ -4519,6 +4567,7 @@ class MainWindow(QMainWindow):
             "legend_linewidth": self.output_legend_linewidth_spin.value(),
             "legend_style": self.output_legend_style_combo.currentData(),
             "trace_label_position": self.output_trace_label_slider.value() / 100.0,
+            "line_width_scale": self.output_line_scale_spin.value(),
             # Not here: the series palette is app-wide and has its own
             # handler (_on_series_colormap_changed), so a per-plot style
             # edit must not quietly push it onto one canvas alone.
@@ -4972,6 +5021,7 @@ class MainWindow(QMainWindow):
             (self.output_legend_alpha_spin, settings["legend_framealpha"]),
             (self.output_legend_linewidth_spin, settings["legend_linewidth"] or 0.0),
             (self.output_trace_label_slider, int(round(settings["trace_label_position"] * 100))),
+            (self.output_line_scale_spin, settings.get("line_width_scale", 1.0)),
         ):
             widget.blockSignals(True)
             widget.setValue(value)
@@ -5035,12 +5085,112 @@ class MainWindow(QMainWindow):
         self._sync_legend_frame_controls()
         self._refresh_trace_color_button()
         self._refresh_slice_colour_rows()
+        self._refresh_line_rows()
         self._refresh_style_scope_label()
+
+    #: Most lines listed one by one in Plot Style ▸ Lines; past this the
+    #: scale still reaches all of them.
+    _MAX_LINE_ROWS = 40
+
+    def _refresh_line_rows(self) -> None:
+        """One row per line on the plot the style panel acts on: its
+        colour, name, width and style. Rebuilt whenever the lines on
+        that plot change (``MplCanvas.linesChanged``)."""
+        if not hasattr(self, "lines_rows_layout"):
+            return
+        layout = self.lines_rows_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        canvas = self._series_target_canvas()
+        lines = canvas.data_lines() if canvas is not None else []
+        self._line_row_widgets = {}
+        for r, info in enumerate(lines[: self._MAX_LINE_ROWS]):
+            swatch = QLabel()
+            swatch.setFixedSize(14, 14)
+            swatch.setStyleSheet(f"background-color: {info['colour']}; border: 1px solid #888;")
+            name = QLabel(info["name"])
+            name.setToolTip(f"{info['name']} (key {info['key']})")
+            if info["overridden"]:
+                name.setText(f"<b>{info['name']}</b>")
+            width = QDoubleSpinBox()
+            width.setRange(0.1, 20.0)
+            width.setSingleStep(0.25)
+            width.setDecimals(2)
+            width.setSuffix(" pt")
+            width.setValue(info["linewidth"])
+            width.setToolTip("This line's width, in points.")
+            style = QComboBox()
+            for text, value in plotting.lines.LINESTYLES:
+                style.addItem(text, value)
+            current = canvas._line_overrides.get(info["key"], {}).get(
+                "linestyle", info["base_linestyle"])
+            index = style.findText(plotting.lines.linestyle_name(current))
+            if index < 0:
+                style.addItem("Custom (as drawn)", None)
+                index = style.count() - 1
+            style.setCurrentIndex(index)
+            style.setToolTip("This line's style.")
+            reset = QPushButton("↺")
+            reset.setFixedWidth(28)
+            reset.setToolTip("Back to how this line was drawn.")
+            reset.setEnabled(info["overridden"])
+            key = info["key"]
+            width.valueChanged.connect(
+                lambda value, k=key: self._on_line_style_edited(k, linewidth=value))
+            style.currentIndexChanged.connect(
+                lambda _i, k=key, box=style: self._on_line_style_edited(
+                    k, linestyle=box.currentData()))
+            reset.clicked.connect(lambda _c=False, k=key: self._on_line_style_edited(k, clear=True))
+            for c, widget in enumerate((swatch, name, width, style, reset)):
+                layout.addWidget(widget, r, c)
+            self._line_row_widgets[key] = (width, style, reset)
+        extra = len(lines) - self._MAX_LINE_ROWS
+        self.lines_more_label.setText(
+            f"…and {extra} more line(s); the scale above reaches all of them." if extra > 0 else "")
+        self.lines_more_label.setVisible(extra > 0)
+        self.lines_group.setVisible(bool(lines))
+
+    def _on_line_style_edited(self, key: str, *, linewidth=None, linestyle=None,
+                              clear: bool = False) -> None:
+        canvas = self._series_target_canvas()
+        if canvas is None:
+            return
+        if not clear and linewidth is None and linestyle is None:
+            return          # "Custom (as drawn)" chosen: nothing to set
+        canvas.set_line_style(key, linewidth=linewidth, linestyle=linestyle, clear=clear)
+        widgets = getattr(self, "_line_row_widgets", {}).get(key)
+        if clear:
+            QTimer.singleShot(0, self._refresh_line_rows)
+        elif widgets is not None:
+            widgets[2].setEnabled(True)
+
+    def _on_reset_lines_clicked(self) -> None:
+        canvas = self._series_target_canvas()
+        if canvas is None:
+            return
+        canvas.reset_line_styles()
+        blocked = self.output_line_scale_spin.blockSignals(True)
+        self.output_line_scale_spin.setValue(1.0)
+        self.output_line_scale_spin.blockSignals(blocked)
+        self._refresh_line_rows()
+
+    def _on_canvas_lines_changed(self, canvas) -> None:
+        """The lines on ``canvas`` changed; rebuild the Lines rows if it is
+        the plot the style panel acts on and the panel is open."""
+        if self._series_target_canvas() is canvas and getattr(self, "_style_dialog", None) is not None \
+                and self._style_dialog.isVisible():
+            self._refresh_line_rows()
 
     def _on_apply_style_to_all_clicked(self) -> None:
         """Push the panel's current settings to every canvas."""
         kwargs = self._current_output_style_kwargs()
         export = self._current_output_export_kwargs()
+        source = self._series_target_canvas()
+        if source is not None:
+            # Keyed by line name, so they land on the same-named lines.
+            kwargs["line_overrides"] = source.style_settings()["line_overrides"]
         for canvas in self._all_canvases():
             canvas.set_style(**kwargs)
             canvas.set_export_settings(**export)
@@ -5230,8 +5380,26 @@ class MainWindow(QMainWindow):
         payload["legend_loc"] = self.output_legend_loc_combo.currentText()
         if targets and targets[0].style_settings().get("tensor_style"):
             payload["tensor_style"] = targets[0].style_settings()["tensor_style"]
+        if len(targets) == 1:
+            # Per-line widths/styles go with the plot type's default:
+            # they are keyed by line name, so they reach the same lines
+            # ("Fit", a component's name) on every plot of that type.
+            payload["line_overrides"] = self._json_line_overrides(
+                targets[0].style_settings()["line_overrides"])
         payload.update(self._current_output_export_kwargs())
         return payload
+
+    @staticmethod
+    def _json_line_overrides(overrides: dict) -> dict:
+        """Line overrides as JSON can hold them (a dash tuple as a list)."""
+        out = {}
+        for key, entry in overrides.items():
+            entry = dict(entry)
+            if isinstance(entry.get("linestyle"), tuple):
+                offset, dashes = entry["linestyle"]
+                entry["linestyle"] = [offset, list(dashes)]
+            out[key] = entry
+        return out
 
     def _figure_style_label(self, key: str) -> str:
         return next((label for label, k in self._FIGURE_STYLE_TYPES if k == key), key)
