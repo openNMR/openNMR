@@ -100,6 +100,11 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   "Field Sweep Profile", each a step-by-step `gui/dnp_panel.py`
   `DnpWorkflowPanel` over `notebook/dnp_workflow.py` (align on the
   reference line's shape, confirm, then measure). Not in Compare any more.
+- **Dynamics** is Fit Curve, then two collapsible sections from
+  `gui/dynamics_panels.py`: Relaxation vs Temperature (BPP / Arrhenius /
+  Hendrickson-Bray; maths `notebook/vt_relaxation.py`) and Exchange
+  Lineshape (ion hopping, Bloch-McConnell; `notebook/exchange.py`, the
+  successor to Euan's XReSpecs script). Both draw on the Fit view.
 - **pNMR fit** is Fit ▸ pNMR (CIF bond pathways) (`gui/pnmr_fit_panel.py` over
   `notebook/pnmr_fit.py`). Its structural model is Simulate ▸ pNMR (CIF)'s
   (`PnmrSimulationPanel.fit_model_kwargs()`) -- never add a second copy.

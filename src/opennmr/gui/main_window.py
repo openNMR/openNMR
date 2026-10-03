@@ -111,6 +111,7 @@ from .widgets.sim_sites import SimSiteList
 from .widgets.reflow import make_reflowable
 from .pnmr_panel import PnmrSimulationPanel
 from .pnmr_fit_panel import PnmrFitPanel
+from .dynamics_panels import ExchangeLineshapePanel, VTRelaxationPanel
 from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
@@ -15414,8 +15415,95 @@ class MainWindow(QMainWindow):
         the current 'Analysis' tab) should go". The sole section for
         now, so it's used directly rather than wrapped in a redundant
         single CollapsibleSection -- same call as Advanced
-        Processing's own VOCS-only panel."""
-        return self._build_curve_fitting_subtab()
+        Processing's own VOCS-only panel.
+
+        Below it (explicit user request, 2026-10-03), two collapsible
+        sections: relaxation against temperature (BPP / Arrhenius plots
+        and fits, Hendrickson-Bray for linewidths) and exchange
+        lineshapes (ion hopping, the XReSpecs successor). Both draw on
+        the Fit view; the maths is notebook.vt_relaxation and
+        notebook.exchange (gui/dynamics_panels.py)."""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._build_curve_fitting_subtab())
+        self.vt_relaxation_panel = VTRelaxationPanel(
+            canvas=self.fit_canvas, show_view=self._raise_fit_canvas,
+            curve_fit_rows=self._vt_rows_from_curve_fit)
+        self._vt_relaxation_section = CollapsibleSection(
+            "Relaxation vs Temperature (BPP / Arrhenius)", content=self.vt_relaxation_panel)
+        layout.addWidget(self._vt_relaxation_section)
+        self.exchange_panel = ExchangeLineshapePanel(
+            canvas=self.fit_canvas, show_view=self._raise_fit_canvas,
+            get_spectra=self._exchange_fit_spectra)
+        self._exchange_section = CollapsibleSection(
+            "Exchange Lineshape (Ion Hopping)", content=self.exchange_panel)
+        layout.addWidget(self._exchange_section)
+        layout.addStretch(1)
+        return container
+
+    @staticmethod
+    def _spectrum_temperature_K(spectrum) -> float | None:
+        """The sample temperature a spectrum records (Bruker acqus TE,
+        in K), or None."""
+        raw = getattr(spectrum.metadata, "raw", None) or {}
+        acqus = raw.get("acqus") or {}
+        for key in ("TE", "te"):
+            value = acqus.get(key)
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
+    def _vt_rows_from_curve_fit(self) -> list[dict]:
+        """Each peak's fitted T1/T2 from the current Fit Curve result,
+        with its spectrum's temperature and Larmor frequency, for
+        Dynamics > Relaxation vs Temperature."""
+        results = getattr(self, "_relaxation_fit_results", None) or []
+        if not results or self._is_diffusion_fit():
+            return []
+        index = self._selected_index()
+        spectrum = self.session.spectra[index] if index is not None else None
+        T = self._spectrum_temperature_K(spectrum) if spectrum is not None else None
+        larmor = float(spectrum.metadata.sfo1) if spectrum is not None and \
+            spectrum.metadata.sfo1 else None
+        rows = []
+        for i, result in enumerate(results):
+            rate_param = result.get("rate_param")
+            if not rate_param or rate_param not in result.get("params", {}):
+                continue
+            quantity = "T1" if rate_param.upper().startswith("T1") and "rho" not in \
+                rate_param.lower() else ("T2" if rate_param.upper().startswith("T2") else None)
+            if quantity is None:
+                continue
+            label = result.get("peak_label") or result.get("label") or f"peak {i + 1}"
+            rows.append({"series": str(label), "T_K": T, "value": float(result["params"][rate_param]),
+                         "error": float(result.get("errors", {}).get(rate_param, float("nan"))),
+                         "larmor_MHz": larmor, "quantity": quantity})
+        return rows
+
+    def _exchange_fit_spectra(self) -> list[dict]:
+        """The 1D spectra selected in Open experiments, for Dynamics >
+        Exchange Lineshape's fit (with their TE and Larmor frequency)."""
+        from ..notebook.bridge import results_from_spectrum
+
+        out = []
+        for row in self._selected_rows():
+            spectrum = self.session.spectra[row]
+            if spectrum.ndim != 1:
+                continue
+            try:
+                res = results_from_spectrum(spectrum)
+            except (ValueError, IndexError):
+                continue
+            out.append({"label": self.session.label(row), "ppm": res["x_ppm"],
+                        "y": res["real_spectrum"], "T_K": self._spectrum_temperature_K(spectrum),
+                        "larmor_MHz": float(spectrum.metadata.sfo1) if spectrum.metadata.sfo1
+                        else None, "nucleus": spectrum.metadata.nucleus})
+        return out
 
     #: Columns of the CSA sites table.
     _CSA_COLUMNS = ("Label", "δiso / ppm", "Span or Δ / ppm", "Skew or η", "FWHM / ppm",

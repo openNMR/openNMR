@@ -69,6 +69,18 @@ from .relaxation import (
 )
 
 from .arithmetic import combine_spectra, combine_spectra_as_results
+# Dynamics: relaxation against temperature (BPP / Arrhenius / Hendrickson-
+# Bray) and exchange (ion-hopping) lineshapes -- Dynamics ▸ Relaxation vs
+# Temperature and Dynamics ▸ Exchange Lineshape in the GUI.
+from .vt_relaxation import (
+    vt_dataset, load_vt_csv, fit_vt_relaxation, compare_vt_models, fit_arrhenius,
+    hendrickson_bray, fit_hendrickson_bray, waugh_fedin_Ea, plot_arrhenius,
+    plot_vs_temperature, plot_hendrickson_bray,
+)
+from .exchange import (
+    exchange_spectrum, exchange_spectra_vs_temperature, fit_exchange_spectra,
+    plot_exchange_stack, plot_exchange_fit, coalescence_temperature,
+)
 # Referencing across nuclei, and linear field-drift correction
 # (Najbauer & Andreas, J. Magn. Reson. 305 (2019) 1-4) -- Process ▸
 # Reference and Process ▸ Field Drift Correction in the GUI.
@@ -355,4 +367,10 @@ __all__ = [
     # Bloch simulator (opennmr.simulate.bloch)
     "simulate_pulse", "adiabatic_shape", "adiabaticity", "peak_b1_for_adiabaticity",
     "peak_b1_for_flip_angle", "inverted_band_hz", "plot_pulse_simulation", "ADIABATIC_SHAPES",
+    # dynamics: relaxation vs temperature and exchange lineshapes
+    "vt_dataset", "load_vt_csv", "fit_vt_relaxation", "compare_vt_models", "fit_arrhenius",
+    "hendrickson_bray", "fit_hendrickson_bray", "waugh_fedin_Ea", "plot_arrhenius",
+    "plot_vs_temperature", "plot_hendrickson_bray",
+    "exchange_spectrum", "exchange_spectra_vs_temperature", "fit_exchange_spectra",
+    "plot_exchange_stack", "plot_exchange_fit", "coalescence_temperature",
 ]

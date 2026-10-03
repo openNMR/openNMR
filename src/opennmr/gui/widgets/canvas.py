@@ -3805,6 +3805,23 @@ class MplCanvas(QWidget):
             if ax.get_title():
                 ax.title.set_fontsize(self._AXIS_LABELSIZE)
             self._apply_title_and_font(ax)
+            # Secondary axes (e.g. the temperature axis on top of a
+            # 1000/T plot) are children of their Axes, not in
+            # figure.get_axes(); give them the same text and ticks.
+            for child in getattr(ax, "child_axes", []):
+                if type(child).__name__ != "SecondaryAxis":
+                    continue
+                child.tick_params(which="major", length=self._TICK_LENGTH,
+                                  width=self._TICK_WIDTH, labelsize=self._AXIS_LABELSIZE)
+                child.tick_params(which="both", direction=self._TICK_DIRECTION)
+                for axis in (child.xaxis, child.yaxis):
+                    axis.label.set_fontsize(self._AXIS_LABELSIZE)
+                    if self._font_family:
+                        axis.label.set_fontfamily(self._font_family)
+                        for label in axis.get_ticklabels():
+                            label.set_fontfamily(self._font_family)
+                for spine in child.spines.values():
+                    spine.set_linewidth(self._AXIS_LINEWIDTH)
         if self._external_plot:
             self._restyle_external_axis_labels()
         # A figure-level title (Simulate's Bloch and tensor pictures)
