@@ -6417,7 +6417,8 @@ class MplCanvas(QWidget):
 
     def show_slice_fit(self, x, y_data, y_fit, components=None, peak_labels=None, title: str = "",
                         spectrum: NMRSpectrum | None = None, auto_hide_single: bool = False,
-                        overlay=None, _keep_view: bool = False) -> None:
+                        overlay=None, _keep_view: bool = False,
+                        fit_label: str = "Fit (total)") -> None:
         """Plot one pseudo-2D slice's spectrum alongside its fitted
         (pseudo-Voigt) curve -- the intermediate per-slice spectral
         fit that feeds a relaxation/diffusion parameter fit
@@ -6477,7 +6478,7 @@ class MplCanvas(QWidget):
         self.ax = self.figure.add_subplot(111)
         self._slice_fit_args = dict(x=x, y_data=y_data, y_fit=y_fit, components=components,
                                     peak_labels=peak_labels, title=title, spectrum=spectrum,
-                                    auto_hide_single=auto_hide_single)
+                                    auto_hide_single=auto_hide_single, fit_label=fit_label)
         self._slice_fit_active = True
         n_peaks = len(components) - 1 if components else 0
         # One name per component: extra names are dropped and missing
@@ -6487,7 +6488,7 @@ class MplCanvas(QWidget):
         fit_display.draw_fit_components(
             self.ax, x, y_data, y_fit, components=components,
             labels=self._slice_fit_labels or None, style=self._fit_component_style,
-            auto_hide_single=auto_hide_single)
+            auto_hide_single=auto_hide_single, fit_label=fit_label)
 
         if spectrum is not None:
             xlabel = self._chemical_shift_label(spectrum, x_unit="ppm")

@@ -112,7 +112,9 @@ from .widgets.reflow import make_reflowable
 from .pnmr_panel import PnmrSimulationPanel
 from .pnmr_fit_panel import PnmrFitPanel
 from .dynamics_panels import ExchangeLineshapePanel, VTRelaxationPanel
-from .jcoupling_panels import JCouplingFitPanel, JCouplingSimulationPanel
+from .jcoupling_panels import (JCouplingFitPanel, JCouplingSimulationPanel, lock_to_spin_system,
+                               seed_spins_from_peaks)
+from .combined_section import CombinedModelSection
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
@@ -8869,6 +8871,8 @@ class MainWindow(QMainWindow):
             raise ValueError(f"No simulation panel called {key!r}.")
         section = sections[key]
         section.set_state(entry.get("inputs") or {})
+        if key in ("jcoupling", "combined"):
+            self.combined_sim_model.show_model("spin_system" if key == "jcoupling" else "peaks")
         self._show_side_tab("Simulate")
         anchor = section.anchor()
         parent = anchor
@@ -12814,9 +12818,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.fit_workflow_guide)
 
         self.fitting_status_label = QLabel(
-            "Fit peak shapes (Isotropic), integrate "
-            "a region (Integration), or fit a chemical shft anisotropy (CSA), quadrupolar or combined "
-            "powder lineshape (CSA/Dipolar, Quadrupolar, Combined Hamiltonian). "
+            "Fit peak shapes (Isotropic), integrate a region (Integration), or build a model "
+            "in Combined Hamiltonian: add peaks, then add interactions to each -- chemical-shift "
+            "anisotropy, quadrupolar (first order, second order or exact) or J-coupling (first "
+            "order, or strongly coupled peaks solved exactly). "
             "To retain a fit for later use, click 'Keep This Fit'. You can see all "
             "your current fits in the 'Kept fit models' menu."
         )
@@ -12827,9 +12832,18 @@ class MainWindow(QMainWindow):
             "Isotropic (Gauss/Lor)", content=self._build_peak_picking_subtab()))
         layout.addWidget(CollapsibleSection(
             "Integration", content=self._build_integration_subtab()))
-        # First-order multiplets (explicit user request: "between
-        # Integration and CSA/Dipolar"). Its own module; the fitter is
-        # notebook.jcoupling_fitting.
+        # One entry point for every interaction (explicit user request,
+        # 2026-10-06): Combined Hamiltonian, where peaks are added and
+        # interactions added to each. The single-interaction panels below
+        # (J-coupling's first-order mode, CSA/Dipolar, Quadrupolar) are no
+        # longer in the menu -- Combined does each of them, at every level
+        # of theory -- but are still built, in a hidden host: kept fits,
+        # saved states and the processing log restore through them. The J
+        # panel's exact spin-system mode is Combined's "Strongly coupled
+        # peaks" model (it cannot be a per-peak interaction).
+        self._retired_fit_host = QWidget(tab)
+        retired = QVBoxLayout(self._retired_fit_host)
+        self._retired_fit_host.hide()
         self.jcoupling_fit_panel = JCouplingFitPanel(
             get_target=self._jcoupling_fit_target,
             get_regions=self._integration_regions,
@@ -12838,9 +12852,8 @@ class MainWindow(QMainWindow):
             send_to_simulation=self._send_jcoupling_to_simulation,
             send_spin_system=self._send_spin_system_to_simulation,
             on_fitted=lambda: self._store_fit("jcoupling"))
-        layout.addWidget(CollapsibleSection("J-coupling", content=self.jcoupling_fit_panel))
-        layout.addWidget(CollapsibleSection(
-            "CSA/Dipolar", content=self._build_csa_subtab()))
+        lock_to_spin_system(self.jcoupling_fit_panel)
+        retired.addWidget(self._build_csa_subtab())
         # Static and MAS quadrupolar lineshapes; the fitter is
         # notebook.quadrupolar_fitting, the model Simulate > Quadrupolar's.
         self.quad_fit_panel = QuadrupolarFitPanel(
@@ -12851,8 +12864,7 @@ class MainWindow(QMainWindow):
             send_to_simulation=self._send_quadrupolar_to_simulation,
             on_fitted=lambda: (self._store_fit("quadrupolar"),
                                self._refresh_model_series_buttons()))
-        layout.addWidget(CollapsibleSection(
-            "Quadrupolar", content=self._with_model_series_box(self.quad_fit_panel, "quadrupolar")))
+        retired.addWidget(self._with_model_series_box(self.quad_fit_panel, "quadrupolar"))
         # Czjzek distributions of C_Q (explicit user request): the same
         # setup controls as Quadrupolar, sites as (δiso, σ, d);
         # notebook.czjzek. Its distribution map shows on the Fit view.
@@ -12866,7 +12878,6 @@ class MainWindow(QMainWindow):
             on_fitted=lambda: self._store_fit("czjzek"))
         self._czjzek_fit_section = CollapsibleSection(
             "Quadrupolar (Czjzek distribution)", content=self.czjzek_fit_panel)
-        layout.addWidget(self._czjzek_fit_section)
         # Any mix of CSA, quadrupolar and J per site (explicit user
         # request); the fitter is notebook.combined_fitting, the model
         # Simulate > Combined Hamiltonian's.
@@ -12877,11 +12888,16 @@ class MainWindow(QMainWindow):
             format_value_error=self._format_value_error,
             send_to_simulation=self._send_combined_to_simulation,
             on_fitted=lambda: (self._store_fit("combined"),
-                               self._refresh_model_series_buttons()))
+                               self._refresh_model_series_buttons()),
+            strong_coupling=lambda sites, nucleus, _mhz: self._open_strong_coupling(
+                "fit", sites, nucleus))
+        self.combined_fit_model = CombinedModelSection(
+            self._with_model_series_box(self.combined_fit_panel, "combined"),
+            self.jcoupling_fit_panel)
         self._combined_fit_section = CollapsibleSection(
-            "Combined Hamiltonian",
-            content=self._with_model_series_box(self.combined_fit_panel, "combined"))
+            "Combined Hamiltonian", content=self.combined_fit_model)
         layout.addWidget(self._combined_fit_section)
+        layout.addWidget(self._czjzek_fit_section)
         # A spectrum against the environments a CIF and its bond-pathway
         # shifts predict (explicit user request): the model is Simulate ▸
         # pNMR (CIF)'s, the fit notebook.pnmr_fit; hover/click the plot
@@ -12911,7 +12927,9 @@ class MainWindow(QMainWindow):
             draw_fit=self._draw_combined_fit,
             draw_trend=self._draw_parameter_trend,
             format_value_error=self._format_value_error,
-            on_fitted=self._store_multi_fit)
+            on_fitted=self._store_multi_fit,
+            draw_quantities=lambda draw: (self.fit_canvas.show_external_plot(draw, kind="curve"),
+                                          self._raise_fit_canvas()))
         self._multi_fit_section = CollapsibleSection("Multi-spectrum", content=self.multi_fit_panel)
         layout.addWidget(self._multi_fit_section)
         # Several fits of one spectrum, kept with it and compared
@@ -13002,20 +13020,21 @@ class MainWindow(QMainWindow):
         both -- ``quadrupolar_spectrum``)."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        # First-order J-coupled multiplets, at the top (explicit user
-        # request). The simulator is notebook.simulations.
+        # Combined Hamiltonian is the one entry point for every interaction
+        # (explicit user request, 2026-10-06; see _build_fitting_panel). The
+        # CSA and Quadrupolar simulators are kept, hidden, for saved states
+        # and the simulation history; J-coupling's spin-system mode is
+        # Combined's "Strongly coupled peaks" model.
+        self._retired_sim_host = QWidget(tab)
+        retired = QVBoxLayout(self._retired_sim_host)
+        self._retired_sim_host.hide()
         self.jcoupling_sim_panel = JCouplingSimulationPanel(
             plot_spectrum=lambda spectrum: self._on_panel_simulated("jcoupling", spectrum),
             add_to_open=self._add_derived_spectrum,
             send_to_fit=self._send_jcoupling_simulation_to_fit)
-        self._jcoupling_sim_section = CollapsibleSection(
-            "J-coupling", content=self.jcoupling_sim_panel)
-        layout.addWidget(self._jcoupling_sim_section)
-        layout.addWidget(CollapsibleSection(
-            "CSA", content=self._build_simulate_csa_subtab()))
-        self._quad_sim_section = CollapsibleSection(
-            "Quadrupolar", content=self._build_simulate_quadrupolar_subtab())
-        layout.addWidget(self._quad_sim_section)
+        lock_to_spin_system(self.jcoupling_sim_panel)
+        retired.addWidget(self._build_simulate_csa_subtab())
+        retired.addWidget(self._build_simulate_quadrupolar_subtab())
         # A Czjzek-distributed site, with its (C_Q, η_Q) map beside the
         # spectrum (explicit user request); notebook.czjzek.
         self.czjzek_sim_panel = CzjzekSimPanel(
@@ -13029,7 +13048,6 @@ class MainWindow(QMainWindow):
             send_to_fit=self._send_czjzek_simulation_to_fit)
         self._czjzek_sim_section = CollapsibleSection(
             "Czjzek distribution", content=self.czjzek_sim_panel)
-        layout.addWidget(self._czjzek_sim_section)
         # Any mix of CSA, quadrupolar and J on the same site (explicit
         # user request: add interactions to a site rather than one
         # simulator per combination). notebook.combined_hamiltonian.
@@ -13038,16 +13056,24 @@ class MainWindow(QMainWindow):
             add_to_open=self._add_derived_spectrum,
             send_to_fit=self._send_combined_simulation_to_fit,
             draw_sites=lambda result, nucleus: self._draw_combined_sites(
-                result, nucleus, self._combined_larmor_mhz()))
+                result, nucleus, self._combined_larmor_mhz()),
+            strong_coupling=lambda sites, nucleus, mhz: self._open_strong_coupling(
+                "simulate", sites, nucleus, mhz),
+            draw_orders=self._draw_quadrupolar_order_comparison)
         # CSA and quadrupolar together, in their relative orientation.
         self.combined_tensor_controls = TensorViewControls(self._combined_tensor_site,
                                                            self._draw_tensor_picture,
                                                            style=self._simulation_style)
         self.combined_sim_panel.layout().addWidget(self.combined_tensor_controls)
         self.combined_sim_field_link = self._link_panel_field(self.combined_sim_panel)
+        self.combined_sim_model = CombinedModelSection(self.combined_sim_panel,
+                                                       self.jcoupling_sim_panel)
         self._combined_sim_section = CollapsibleSection(
-            "Combined Hamiltonian", content=self.combined_sim_panel)
+            "Combined Hamiltonian", content=self.combined_sim_model)
         layout.addWidget(self._combined_sim_section)
+        layout.addWidget(self._czjzek_sim_section)
+        # Code that used to open these sections opens Combined's instead.
+        self._jcoupling_sim_section = self._quad_sim_section = self._combined_sim_section
         # Ported from upstream (Leo, 1c5613e) -- experiment planning
         # rather than lineshapes; drawn on the Simulation plot.
         layout.addWidget(CollapsibleSection(
@@ -13150,7 +13176,8 @@ class MainWindow(QMainWindow):
             x[keep], np.asarray(result["y"])[keep], np.asarray(result["y_fit"])[keep],
             components=components, auto_hide_single=True,
             peak_labels=list(result["site_spectra"]),
-            title="Combined-Hamiltonian fit",
+            title=result.get("title", "Combined-Hamiltonian fit"),
+            fit_label=result.get("fit_label", "Fit (total)"),
             spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
@@ -13256,6 +13283,7 @@ class MainWindow(QMainWindow):
             panel.transitions_combo.setCurrentIndex(index)
         panel.set_state({"widgets": {}, "sites": site_dicts, "current": 0})
         panel.auto_axis_check.setChecked(True)
+        self.combined_sim_model.show_model("peaks")
         self._combined_sim_section.setExpanded(True)
         self._show_side_tab("Simulate")
         panel.simulate()
@@ -13608,15 +13636,38 @@ class MainWindow(QMainWindow):
         self._report_transfer("Simulated Czjzek values set as a Fit ▸ Quadrupolar (Czjzek) "
                               "start", notes)
 
+    def _open_strong_coupling(self, where: str, site_dicts, nucleus: str,
+                              larmor_mhz: float | None = None) -> None:
+        """Combined Hamiltonian ▸ a J interaction's "Strong coupling", or
+        Add interaction ▸ J-coupling between peaks: the exact spin-system
+        model, its spins seeded from the peaks when it has none yet."""
+        panel = self.jcoupling_fit_panel if where == "fit" else self.jcoupling_sim_panel
+        model = self.combined_fit_model if where == "fit" else self.combined_sim_model
+        seeded = seed_spins_from_peaks(panel, site_dicts, nucleus)
+        if seeded and where == "simulate":
+            try:
+                panel.nucleus_combo.setCurrentText(nucleus)
+                from ..notebook.utils import find_isotope_info
+                gamma = float(find_isotope_info(nucleus)["gamma"]) / 1e6  # MHz/T
+                if larmor_mhz and gamma:
+                    panel.field_spin.setValue(abs(float(larmor_mhz) / gamma))
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                pass
+        model.show_model("spin_system", note=(
+            "Your peaks are the spins below: type the J values between them in the J table."
+            if seeded else ""))
+
     def _send_jcoupling_simulation_to_fit(self, arguments: dict) -> None:
         notes = self.jcoupling_fit_panel.set_start_from_simulation(arguments)
+        self.combined_fit_model.show_model("spin_system")
         self._open_fit_section_of(self.jcoupling_fit_panel)
-        self._report_transfer("Simulated J-coupling values set as the Fit ▸ J-coupling start",
+        self._report_transfer("Simulated spin system set as the Fit ▸ Combined Hamiltonian (strongly coupled peaks) start",
                               notes)
 
     def _send_combined_simulation_to_fit(self, site_dicts: list, settings: dict,
                                          nucleus: str) -> None:
         notes = self.combined_fit_panel.set_start_from_simulation(site_dicts, settings, nucleus)
+        self.combined_fit_model.show_model("peaks")
         self._combined_fit_section.setExpanded(True)
         self._show_side_tab("Fit")
         self._report_transfer("Simulated sites set as the Fit ▸ Combined Hamiltonian start",
@@ -13646,6 +13697,7 @@ class MainWindow(QMainWindow):
 
     def _send_jcoupling_to_simulation(self, nucleus, larmor_Hz, sites, lineshape, eta) -> None:
         self.jcoupling_sim_panel.set_from_fit(nucleus, larmor_Hz, sites, lineshape, eta)
+        self.combined_sim_model.show_model("spin_system")
         self._jcoupling_sim_section.setExpanded(True)
         self._show_side_tab("Simulate")
 
@@ -13653,6 +13705,7 @@ class MainWindow(QMainWindow):
                                         lineshape, eta) -> None:
         self.jcoupling_sim_panel.set_spin_system_from_fit(nucleus, larmor_Hz, spins, couplings,
                                                           fwhm_Hz, lineshape, eta)
+        self.combined_sim_model.show_model("spin_system")
         self._jcoupling_sim_section.setExpanded(True)
         self._show_side_tab("Simulate")
 
@@ -14164,6 +14217,9 @@ class MainWindow(QMainWindow):
             raise ValueError(f"“{model['name']}” cannot be put back into a panel.")
         panel = self._fit_panels()[model["kind"]]
         panel.set_state(model.get("panel_inputs") or {})
+        if model["kind"] in ("jcoupling", "combined"):
+            self.combined_fit_model.show_model(
+                "spin_system" if model["kind"] == "jcoupling" else "peaks")
         panel.restore_result(model["panel_result"], self.session.spectra[index])
         self._store_fit(model["kind"], index)
         history = self._ensure_history(index)
@@ -16589,7 +16645,7 @@ class MainWindow(QMainWindow):
                 "<ul style='margin-left:-20px'>"
                 "<li>Isotropic ▸ <i>Fit Spectrum</i>, or Integration ▸ <i>Integrate "
                 "Regions</i> — every slice in one go;</li>"
-                "<li>CSA/Dipolar, Quadrupolar or Combined Hamiltonian — fit one slice (the "
+                "<li>Combined Hamiltonian (any CSA, quadrupolar or J model) — fit one slice (the "
                 "strongest), then <i>Fit Every Slice with this Model</i> in its Pseudo-2D "
                 "series box.</li></ul>"),
         ("curve", "<b>Fit the recovery/decay on Dynamics ▸ Fit Curve</b>: "
@@ -23009,7 +23065,41 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Export failed", str(exc))
             return
+        # The export is selected as soon as it is added, so it has to
+        # arrive ready to use (user report, 2026-10-06: Fit Curve on it
+        # said "Add at least one peak to fit" -- it had neither the
+        # regions nor the integrals, so Fit Curve fell through to a
+        # peak fit). It takes the source's analysis settings, with the
+        # regions, and the source's x values written out as a list
+        # (a derived spectrum has no folder to read a vdlist from);
+        # then its own slices are integrated over the same regions.
+        pseudo2d.metadata.raw["analysis_state"] = self._carried_analysis_state(
+            self.session.spectra[index], n_rows=len(results))
         self._add_derived_spectrum(pseudo2d, f"Integration({self.session.label(index)})")
+        self._on_integrate_regions_clicked()
+
+    def _carried_analysis_state(self, source, n_rows: int) -> dict:
+        """``source``'s analysis state (peaks, regions, model, Values
+        settings) for a spectrum derived from its first ``n_rows``
+        slices. The Values source is replaced by the resolved values,
+        typed out in seconds, when they can be resolved now -- a list
+        file or Auto lookup needs the source's own folder, which the
+        derived spectrum does not have."""
+        self._save_current_analysis_state()
+        state = copy.deepcopy(source.metadata.raw.get("analysis_state")
+                              or self._capture_analysis_state())
+        state["slice_limit"] = 0
+        if not self._is_diffusion_fit():
+            try:
+                values = self._resolve_independent_values(source, False,
+                                                          n_slices=source.data.shape[0])
+            except Exception:  # noqa: BLE001 -- no values yet is fine; they can be typed
+                values = None
+            if isinstance(values, np.ndarray) and values.size >= n_rows:
+                state["delay_source"] = self._MANUAL_LIST_SOURCE
+                state["manual_text"] = ", ".join(f"{v:.10g}" for v in values[:n_rows])
+                state["delay_scale"] = 1.0
+        return state
 
     def _on_export_csa_pseudo2d_clicked(self) -> None:
         self._on_export_model_pseudo2d_clicked("csa")
@@ -23682,6 +23772,20 @@ class MainWindow(QMainWindow):
         now with the peak_defs just brought into view."""
         self._select_single_row(index)
         spectrum = self.session.spectra[index]
+        if not spectrum.metadata.raw.get("slice_fit_results") and self.peak_table.rowCount() == 0:
+            # Nothing measured and no peaks: integrate the regions if
+            # there are any, rather than demanding a peak (user report,
+            # 2026-10-06 -- "no peaks were added" with regions drawn).
+            if self._read_region_defs():
+                self._on_integrate_regions_clicked()
+            if not spectrum.metadata.raw.get("slice_fit_results"):
+                QMessageBox.information(
+                    self, "Nothing to fit yet",
+                    "Fit Curve fits a value per slice, and none has been measured for this "
+                    "spectrum. Measure every slice on Fit first, either way:\n\n"
+                    "• Integration: draw one or more regions, then Integrate Regions;\n"
+                    "• Isotropic: add peaks, then Fit Spectrum.")
+                return
         with FitProgress(self, "Spectral fit") as fit_progress_box:
             try:
                 slice_results = spectrum.metadata.raw.get("slice_fit_results")

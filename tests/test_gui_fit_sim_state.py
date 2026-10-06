@@ -136,6 +136,8 @@ def test_a_fit_is_logged_with_its_result_and_settings(qapp, _dialogs):
 def test_j_coupling_first_order_and_spin_system_fits_come_back(qapp, _dialogs):
     window = MainWindow()
     fit = window.jcoupling_fit_panel
+    # First order: the panel's restorable mode (it opens on spin systems).
+    fit.model_combo.setCurrentIndex(fit.model_combo.findData("first_order"))
     index = _j_spectrum(window)
     fit.editor.clear()
     fit.editor.add_site(label="CH3", shift=1.201, fwhm_hz=1.2,

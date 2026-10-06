@@ -15,7 +15,7 @@ import copy
 import time
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
@@ -66,9 +66,12 @@ class InteractionEditor(QGroupBox):
     """One interaction of one site. Edits write straight into ``data``
     (the interaction's dict in the site's list)."""
 
-    def __init__(self, data: dict, on_remove, has_quadrupolar: bool, parent=None) -> None:
+    def __init__(self, data: dict, on_remove, has_quadrupolar: bool, parent=None,
+                 panel=None) -> None:
         super().__init__(_TITLES[data["type"]], parent)
         self.data = data
+        self.theory_combo = None
+        self.treatment_combo = None
         outer = QVBoxLayout(self)
         head = QHBoxLayout()
         head.addStretch(1)
@@ -116,6 +119,23 @@ class InteractionEditor(QGroupBox):
             self.eta_q = _spin_box(0.0, 1.0, data["eta_Q"], 3, step=0.1)
             form.addRow("C_Q:", self.cq)
             form.addRow("η_Q:", self.eta_q)
+            if panel is not None:
+                # Every level of theory, where the interaction is (explicit
+                # user request: the full suite of each interaction reachable
+                # from Combined). One setting for the whole spectrum: it
+                # mirrors the panel's "Quadrupolar theory".
+                self.theory_combo = QComboBox()
+                for i in range(panel.order_combo.count()):
+                    self.theory_combo.addItem(panel.order_combo.itemText(i),
+                                              panel.order_combo.itemData(i))
+                self.theory_combo.setCurrentIndex(panel.order_combo.currentIndex())
+                self.theory_combo.setToolTip(
+                    "First order, second-order perturbation, or exact diagonalisation of the "
+                    "Zeeman + quadrupolar Hamiltonian. Applies to every quadrupolar peak (the "
+                    "same setting as Quadrupolar theory above).")
+                self.theory_combo.currentIndexChanged.connect(
+                    lambda i: panel.order_combo.setCurrentIndex(i))
+                form.addRow("Theory:", self.theory_combo)
             self.cq.valueChanged.connect(lambda v: data.__setitem__("C_Q", v))
             self.eta_q.valueChanged.connect(lambda v: data.__setitem__("eta_Q", v))
         else:
@@ -136,10 +156,31 @@ class InteractionEditor(QGroupBox):
             form.addRow("Partner:", self.partner)
             form.addRow("Number n:", self.n)
             form.addRow("J:", self.j)
+            if panel is not None and panel._strong_coupling is not None:
+                # First order here; strongly coupled peaks (J comparable to
+                # their shift difference) go to the exact spin-system
+                # solver, which this site model cannot express.
+                self.treatment_combo = QComboBox()
+                self.treatment_combo.addItem("First order (weak coupling)", "first")
+                self.treatment_combo.addItem("Strong coupling: exact, between peaks…", "strong")
+                self.treatment_combo.setToolTip(
+                    "First order: this peak split by n partner nuclei (any isotope, with its "
+                    "natural abundance) -- valid when J is much smaller than the shift "
+                    "difference to the partner.\n\nStrong coupling: J between observed peaks, "
+                    "solved exactly (roofing, AB, ABX, AA'BB'). Opens the spin-system model "
+                    "with these peaks as its spins.")
+                self.treatment_combo.activated.connect(
+                    lambda i: self._on_treatment(i, panel))
+                form.addRow("Treatment:", self.treatment_combo)
 
     def _write_csa(self, *_):
         self.data.update(convention=self.convention.currentData(), aniso=self.aniso.value(),
                          asym=self.asym.value(), euler=tuple(b.value() for b in self.euler))
+
+    def _on_treatment(self, index, panel):
+        if self.treatment_combo.itemData(index) == "strong":
+            self.treatment_combo.setCurrentIndex(0)   # this interaction stays first order
+            panel.request_strong_coupling()
 
     def _write_partner(self, text):
         try:
@@ -166,8 +207,14 @@ class CombinedHamiltonianPanel(QWidget):
     }
 
     def __init__(self, plot_spectrum, add_to_open, draw_sites=None, parent=None,
-                 send_to_fit=None) -> None:
+                 send_to_fit=None, strong_coupling=None, draw_orders=None) -> None:
         super().__init__(parent)
+        #: ``strong_coupling(site_dicts, nucleus, larmor_MHz)``: open the
+        #: exact spin-system model seeded with these peaks (None: not offered).
+        self._strong_coupling = strong_coupling
+        #: ``draw_orders(comparison, nucleus, larmor_MHz)``: first vs second
+        #: order vs exact, for "Compare levels of theory".
+        self._draw_orders = draw_orders
         self._plot_spectrum = plot_spectrum
         self._add_to_open = add_to_open
         self._send_to_fit = send_to_fit
@@ -219,6 +266,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.order_combo.addItem("First-order only", "first")
         self.order_combo.setToolTip("Level of theory for the quadrupolar part. CSA and J are "
                                     "first order, which is exact to ~1e-6 of their size.")
+        self.order_combo.currentIndexChanged.connect(self._sync_theory_combos)
         form.addRow("Quadrupolar theory:", self.order_combo)
         self.orientations_spin = QSpinBox()
         self.orientations_spin.setRange(0, 500000)
@@ -233,14 +281,16 @@ class CombinedHamiltonianPanel(QWidget):
         self._setup_form = form
 
         # ---- sites ----
-        sites_box = QGroupBox("Sites")
+        sites_box = QGroupBox("Peaks (sites)")
         sites_layout = QHBoxLayout(sites_box)
         self.site_list = QListWidget()
         self.site_list.setMaximumHeight(110)
         self.site_list.currentRowChanged.connect(self._on_site_selected)
         sites_layout.addWidget(self.site_list, 1)
         buttons = QVBoxLayout()
-        self.add_site_button = QPushButton("Add site")
+        self.add_site_button = QPushButton("Add peak")
+        self.add_site_button.setToolTip("Add a peak (a site): an isotropic line, to which "
+                                        "interactions are added below.")
         self.add_site_button.clicked.connect(lambda: self.add_site())
         self.duplicate_button = QPushButton("Duplicate")
         self.duplicate_button.clicked.connect(self.duplicate_site)
@@ -253,7 +303,7 @@ class CombinedHamiltonianPanel(QWidget):
         v.addWidget(sites_box)
 
         # ---- the selected site ----
-        self.site_box = QGroupBox("Selected site")
+        self.site_box = QGroupBox("Selected peak")
         site_layout = QVBoxLayout(self.site_box)
         sform = QFormLayout()
         self.label_edit = QLineEdit()
@@ -283,18 +333,26 @@ class CombinedHamiltonianPanel(QWidget):
         site_layout.addLayout(sform)
         self.interactions_layout = QVBoxLayout()
         site_layout.addLayout(self.interactions_layout)
-        self.no_interactions_label = QLabel("No interactions yet: an isotropic line. Add one below.")
+        self.no_interactions_label = QLabel("No interactions yet: an isotropic peak. Add one "
+                                            "below.")
         self.no_interactions_label.setWordWrap(True)
         site_layout.addWidget(self.no_interactions_label)
         self.add_interaction_button = QPushButton("Add interaction ▾")
-        self.add_interaction_button.setToolTip("Add a CSA, a quadrupolar coupling or a J-coupling "
-                                               "to this site.")
+        self.add_interaction_button.setToolTip(
+            "Add a CSA, a quadrupolar coupling (first order, second order or exact) or a "
+            "J-coupling (first order, or strong coupling between peaks, exact) to this peak.")
         self._interaction_menu = QMenu(self)
         self._actions = {}
         for kind in ch.INTERACTION_TYPES:
             action = self._interaction_menu.addAction(_TITLES[kind])
             action.triggered.connect(lambda _c=False, k=kind: self.add_interaction(k))
             self._actions[kind] = action
+        if self._strong_coupling is not None:
+            action = self._interaction_menu.addAction(
+                "J-coupling between peaks (strong coupling, exact)…")
+            action.setToolTip("Opens the exact spin-system model, with these peaks as its spins.")
+            action.triggered.connect(lambda _c=False: self.request_strong_coupling())
+            self._actions["strong"] = action
         self._interaction_menu.aboutToShow.connect(self._sync_menu)
         self.add_interaction_button.setMenu(self._interaction_menu)
         site_layout.addWidget(self.add_interaction_button)
@@ -329,6 +387,13 @@ class CombinedHamiltonianPanel(QWidget):
         self.show_sites_check = QCheckBox("Also plot each site (Simulation plot)")
         self.show_sites_check.setChecked(True)
         aform.addRow("", self.show_sites_check)
+        self.compare_orders_check = QCheckBox("Compare levels of theory (first, second, exact)")
+        self.compare_orders_check.setToolTip(
+            "With a quadrupolar peak: simulate first order, second order and exact together "
+            "and overlay them, with their differences, on the Simulation plot. The spectrum "
+            "kept is the one Quadrupolar theory selects.")
+        self.compare_orders_check.setEnabled(self._draw_orders is not None)
+        aform.addRow("", self.compare_orders_check)
         v.addLayout(aform)
 
         self.simulate_button = QPushButton("Simulate")
@@ -386,6 +451,26 @@ class CombinedHamiltonianPanel(QWidget):
         self._actions["quadrupolar"].setToolTip(
             "" if spin >= 1 else "The observed nucleus is spin-1/2: no quadrupole moment.")
         self._actions["jcoupling"].setEnabled(site is not None)
+        if "strong" in self._actions:
+            self._actions["strong"].setEnabled(bool(self.site_dicts))
+
+    def _sync_theory_combos(self, index=None):
+        """Every quadrupolar editor's Theory box follows the panel's."""
+        index = self.order_combo.currentIndex() if index is None else index
+        for editor in getattr(self, "interaction_editors", []):
+            combo = editor.theory_combo
+            if combo is not None and combo.currentIndex() != index:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+
+    def request_strong_coupling(self) -> None:
+        """Hand these peaks to the exact spin-system model (strongly
+        coupled J between peaks), when the panel offers it."""
+        if self._strong_coupling is None:
+            return
+        self._strong_coupling(copy.deepcopy(self.site_dicts),
+                              self.nucleus_combo.currentText().strip(), self.larmor_spin.value())
 
     # ---- saved state (simulation history) -----------------------------
 
@@ -545,7 +630,7 @@ class CombinedHamiltonianPanel(QWidget):
         order = {"quadrupolar": 0, "csa": 1, "jcoupling": 2}
         self.interaction_editors = []
         for data in sorted(interactions, key=lambda i: order[i["type"]]):
-            editor = InteractionEditor(data, self._remove_interaction, has_quad)
+            editor = InteractionEditor(data, self._remove_interaction, has_quad, panel=self)
             self.interactions_layout.addWidget(editor)
             self.interaction_editors.append(editor)
         self.no_interactions_label.setVisible(site is not None and not interactions)
@@ -618,7 +703,17 @@ class CombinedHamiltonianPanel(QWidget):
             axis = np.linspace(self.ppm_min_spin.value(), self.ppm_max_spin.value(),
                                self.points_spin.value())
             started = time.perf_counter()
-            result = ch.simulate_combined(sites, axis, **settings)
+            comparison = None
+            if self._compare_orders_wanted(sites):
+                comparison = {}
+                for order in ("first", "second", "exact"):
+                    run = ch.simulate_combined(sites, axis, **{**settings, "order": order})
+                    comparison[order] = {"x_ppm": axis, "real_spec": run["real_spec"],
+                                         "components": {}}
+                    if order == settings["order"]:
+                        result = run
+            else:
+                result = ch.simulate_combined(sites, axis, **settings)
             elapsed = time.perf_counter() - started
         except (ValueError, KeyError) as exc:
             QMessageBox.warning(self, "Combined Hamiltonian", str(exc))
@@ -633,7 +728,9 @@ class CombinedHamiltonianPanel(QWidget):
         self.spectrum = NMRSpectrum(data=data, axes=[NMRAxis(kind="frequency", ppm=axis)],
                                     metadata=metadata)
         self._plot_spectrum(self.spectrum)
-        if self._draw_sites is not None and self.show_sites_check.isChecked() and len(sites) > 1:
+        if comparison is not None:
+            self._draw_orders(comparison, nucleus, settings["larmor_Hz"] / 1e6)
+        elif self._draw_sites is not None and self.show_sites_check.isChecked() and len(sites) > 1:
             self._draw_sites(result, nucleus)
         edge = max(abs(data[0]), abs(data[-1])) / (np.max(np.abs(data)) or 1.0)
         warn = ("\n⚠ Intensity at the axis edge is {:.0%} of the peak -- the pattern is "
@@ -641,6 +738,12 @@ class CombinedHamiltonianPanel(QWidget):
         self.results_label.setText(f"Simulated in {elapsed:.2f} s.\n{result['log']}{warn}")
         self.export_button.setEnabled(True)
         return True
+
+    def _compare_orders_wanted(self, sites) -> bool:
+        check = getattr(self, "compare_orders_check", None)
+        return (check is not None and check.isChecked() and self._draw_orders is not None
+                and any(any(i.get("type") == "quadrupolar" for i in s.to_dict()["interactions"])
+                        for s in sites))
 
     def transfer_settings(self) -> dict:
         """Regime, spinning, level of theory, transitions and field, as
@@ -672,6 +775,12 @@ class CombinedHamiltonianPanel(QWidget):
             QGuiApplication.clipboard().setText(self.python_code())
         except (ValueError, KeyError) as exc:
             QMessageBox.warning(self, "Copy as Python", str(exc))
+
+
+def cfit_n_zcw(settings: dict) -> int:
+    """The orientation count a fit with these settings uses (its default
+    when "auto")."""
+    return int(settings.get("n_zcw") or (2584 if settings.get("mas_Hz") else 28657))
 
 
 def _describe_site(site: dict) -> str:
@@ -734,8 +843,26 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
              "starting model as in Simulate, then choose below which parameters are free and "
              "their bounds. Euler angles start fixed: one 1D lineshape rarely determines them.")
 
+    #: Live-preview powder orientations when "auto": static, MAS. The
+    #: shape is within a few % of the fit's (measured: 233 under MAS is
+    #: 4% of the peak off the converged pattern, in ~0.1 s per site).
+    PREVIEW_ZCW = (4181, 233)
+    #: ms of quiet before the preview recomputes (typing, spinning a box).
+    PREVIEW_DELAY_MS = 200
+
     def __init__(self, get_target, get_regions, draw_fit, format_value_error,
-                 send_to_simulation=None, on_fitted=None, parent=None) -> None:
+                 send_to_simulation=None, on_fitted=None, parent=None,
+                 strong_coupling=None) -> None:
+        #: Live preview of the starting model (explicit user request,
+        #: 2026-10-06: "add a peak and see it appear, and change with each
+        #: change in parameter"). Debounced; suspended while the panel is
+        #: filled by code (restores, transfers) so it never overdraws a fit.
+        self._preview_timer = QTimer()
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(self.PREVIEW_DELAY_MS)
+        self._preview_timer.timeout.connect(lambda: self.preview_now(quiet=True))
+        self._preview_suspended = 0
+        self.preview: dict | None = None
         self._get_target = get_target
         self._get_regions = get_regions
         self._draw_fit = draw_fit
@@ -746,8 +873,17 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.constraints: dict[str, dict[str, dict]] = {}
         self._refreshing = False
         super().__init__(plot_spectrum=lambda _s: None, add_to_open=lambda *_a: None,
-                         draw_sites=None, parent=parent)
+                         draw_sites=None, parent=parent, strong_coupling=strong_coupling)
         self.refresh_parameter_table()
+        for widget in (self.nucleus_combo, self.regime_combo, self.transitions_combo,
+                       self.order_combo, self.window_combo, self.estimate_amounts_check,
+                       self.preview_check):
+            signal = (widget.toggled if isinstance(widget, QCheckBox)
+                      else widget.currentIndexChanged)
+            signal.connect(lambda *_a: self.schedule_preview())
+        for box in (self.larmor_spin, self.mas_spin, self.orientations_spin, self.window_lo_spin,
+                    self.window_hi_spin, self.preview_orientations_spin):
+            box.valueChanged.connect(lambda *_a: self.schedule_preview())
 
     # ---- the part below the site editor ----------------------------------
 
@@ -787,6 +923,30 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.fit_baseline_check.setToolTip("Otherwise a linear baseline is estimated from the "
                                            "outer 5% of the spectrum and held.")
         form.addRow("", self.fit_baseline_check)
+        self.estimate_amounts_check = QCheckBox("Estimate starting amounts from the data")
+        self.estimate_amounts_check.setChecked(True)
+        self.estimate_amounts_check.setToolTip(
+            "Start every peak's amount from a non-negative least-squares fit of the starting "
+            "shapes to the data (recommended): the amounts typed above are then not used as "
+            "starts. Untick to start from the typed amounts (1 = the spectrum's tallest point).")
+        form.addRow("", self.estimate_amounts_check)
+        self.preview_check = QCheckBox("Live preview of the starting model (Fit view)")
+        self.preview_check.setChecked(True)
+        self.preview_check.setToolTip(
+            "Draw the model the fit will start from over the data, redrawn as peaks, "
+            "interactions and settings change -- the fit's own first step: same window, "
+            "held baseline and amounts.")
+        form.addRow("", self.preview_check)
+        self.preview_orientations_spin = QSpinBox()
+        self.preview_orientations_spin.setRange(0, 500000)
+        self.preview_orientations_spin.setSingleStep(500)
+        self.preview_orientations_spin.setSpecialValueText("auto")
+        self.preview_orientations_spin.setValue(0)
+        self.preview_orientations_spin.setToolTip(
+            "Powder orientations for the preview (auto: 4,181 static, 233 MAS -- a few % of "
+            "the converged shape, fast enough to follow each change). The fit itself uses "
+            "Orientations above.")
+        form.addRow("Preview orientations:", self.preview_orientations_spin)
         self.screen_orientations_spin = QSpinBox()
         self.screen_orientations_spin.setRange(0, 500000)
         self.screen_orientations_spin.setSingleStep(500)
@@ -798,9 +958,18 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         form.addRow("Screen starts at:", self.screen_orientations_spin)
         v.addLayout(form)
 
+        preview_row = QHBoxLayout()
+        self.preview_button = QPushButton("Preview Starting Model")
+        self.preview_button.setToolTip("Draw the starting model over the data now.")
+        self.preview_button.clicked.connect(lambda: self.preview_now(quiet=False))
+        preview_row.addWidget(self.preview_button)
         self.fit_button = QPushButton("Fit Combined Hamiltonian")
         self.fit_button.clicked.connect(self.fit)
-        v.addWidget(self.fit_button)
+        preview_row.addWidget(self.fit_button, 1)
+        v.addLayout(preview_row)
+        self.preview_label = QLabel("")
+        self.preview_label.setWordWrap(True)
+        v.addWidget(self.preview_label)
         self.results_label = QLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -878,6 +1047,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         free/bounds/try choices by (site label, parameter)."""
         if not hasattr(self, "parameter_table") or self._refreshing:
             return
+        self.schedule_preview()
         self._refreshing = True
         t = self.parameter_table
         t.blockSignals(True)
@@ -938,6 +1108,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                 cfit._set(site, name, value)
                 if site is self.current_site():
                     self._on_site_selected(self._current)  # show it in the site editor
+                self.schedule_preview()
 
     # ---- fitting --------------------------------------------------------------
 
@@ -991,7 +1162,8 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         settings = self.settings()
         return {"sites": sites, "vary": vary, "bounds": bounds, "starts": starts,
                 "settings": settings, "fit_regions": self.fit_regions(),
-                "fit_baseline": self.fit_baseline_check.isChecked()}
+                "fit_baseline": self.fit_baseline_check.isChecked(),
+                "estimate_amounts": self.estimate_amounts_check.isChecked()}
 
     def fit(self) -> bool:
         try:
@@ -1002,9 +1174,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         except (ValueError, IndexError, KeyError) as exc:
             QMessageBox.warning(self, "Combined Hamiltonian fit", str(exc))
             return False
+        self._preview_timer.stop()
         kwargs = dict(vary=args["vary"], bounds=args["bounds"] or None,
                       fit_regions=args["fit_regions"], fit_baseline=args["fit_baseline"],
-                      **args["settings"])
+                      estimate_amounts=args["estimate_amounts"], **args["settings"])
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         started = time.perf_counter()
         with FitProgress(self, "Combined Hamiltonian fit") as fit_progress_box:
@@ -1036,6 +1209,70 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self._sync_result_buttons()
         self._on_fitted()
         return True
+
+    # ---- live preview of the starting model --------------------------------
+
+    def schedule_preview(self) -> None:
+        """Recompute the preview after a short quiet spell -- only while
+        the panel is on screen, previewing, and not being filled by code."""
+        if (not hasattr(self, "preview_check") or self._preview_suspended
+                or not self.preview_check.isChecked() or not self.isVisible()):
+            return
+        self._preview_timer.start()
+
+    def preview_orientations(self) -> int:
+        n = self.preview_orientations_spin.value()
+        if n:
+            return n
+        return self.PREVIEW_ZCW[1 if self.regime_combo.currentData() == "mas" else 0]
+
+    def preview_now(self, quiet: bool = True) -> bool:
+        """Compute and draw the starting model over the selected spectrum
+        (:func:`~opennmr.notebook.combined_fitting.starting_model`, the
+        fit's own first step). ``quiet``: a problem (no spectrum yet, a
+        half-typed value) goes to the preview line, not a dialog."""
+        try:
+            spectrum, row, index = self._get_target()
+            from ..notebook import bridge
+            results = bridge.results_from_spectrum(spectrum, row=row)
+            sites = self.build_sites()
+            settings = dict(self.settings())
+            settings["n_zcw"] = self.preview_orientations()
+            regions = self.fit_regions()
+            guess = cfit.starting_model(
+                results, sites, fit_regions=regions,
+                estimate_amounts=self.estimate_amounts_check.isChecked(), **settings)
+        except (ValueError, IndexError, KeyError) as exc:
+            self.preview_label.setText(f"Preview: {exc}")
+            if not quiet:
+                QMessageBox.warning(self, "Preview starting model", str(exc))
+            return False
+        guess.update(settings={"fit_regions": regions}, spectrum=spectrum,
+                     y_fit=guess["start"], title="Starting model (preview)",
+                     fit_label="Starting model")
+        self.preview = guess
+        self._draw_fit(guess)
+        amounts = ", ".join(f"{k} {v:.3g}" for k, v in guess["amounts"].items())
+        self.preview_label.setText(
+            f"Preview: the model the fit starts from ({guess['n_zcw']:,} orientations; the "
+            f"fit uses {cfit_n_zcw(self.settings()):,}). Amounts "
+            + ("estimated from the data" if self.estimate_amounts_check.isChecked()
+               else "as typed") + f": {amounts}.")
+        return True
+
+    def _suspend_preview(self):
+        """Context: changes made by code do not redraw the preview."""
+        panel = self
+
+        class _Suspend:
+            def __enter__(self_inner):
+                panel._preview_suspended += 1
+                panel._preview_timer.stop()
+
+            def __exit__(self_inner, *exc):
+                panel._preview_suspended -= 1
+                panel._preview_timer.stop()
+        return _Suspend()
 
     def _sync_result_buttons(self) -> None:
         on = self.result is not None
@@ -1112,6 +1349,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
     def use_fitted_as_start(self) -> None:
         if not self.result:
             return
+        with self._suspend_preview():
+            self._use_fitted_as_start()
+
+    def _use_fitted_as_start(self) -> None:
         current = max(self._current, 0)
         fitted = self.fitted_site_dicts()
         self.site_list.blockSignals(True)
@@ -1128,6 +1369,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         """Simulated sites as the starting model, with the simulation's
         regime, spinning, level of theory and transitions. The nucleus and
         field stay the spectrum's; a mismatch is returned as a note."""
+        with self._suspend_preview():
+            return self._set_start_from_simulation(site_dicts, settings, nucleus)
+
+    def _set_start_from_simulation(self, site_dicts, settings: dict, nucleus: str) -> str:
         notes = []
         self.site_list.blockSignals(True)
         self.site_list.clear()
@@ -1185,10 +1430,11 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         return state
 
     def set_state(self, state: dict) -> None:
-        self.constraints = copy.deepcopy((state or {}).get("constraints") or {})
-        super().set_state(state)
-        self._sync_fit_controls()
-        self.refresh_parameter_table()
+        with self._suspend_preview():
+            self.constraints = copy.deepcopy((state or {}).get("constraints") or {})
+            super().set_state(state)
+            self._sync_fit_controls()
+            self.refresh_parameter_table()
 
     def result_state(self):
         if not self.result:

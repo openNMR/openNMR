@@ -259,10 +259,14 @@ def test_czjzek_sections_are_where_expected(window):
     pages = {window.side_tabs.tabText(i): window.side_tabs.widget(i)
              for i in range(window.side_tabs.count())}
     fit_titles = [s.title() for s in pages["Fit"].findChildren(CollapsibleSection)]
-    assert fit_titles.index("Quadrupolar (Czjzek distribution)") == fit_titles.index("Quadrupolar") + 1
+    # 2026-10-06: right after Combined Hamiltonian, which replaced the
+    # single-interaction sections (Quadrupolar among them).
+    assert fit_titles.index("Quadrupolar (Czjzek distribution)") == \
+        fit_titles.index("Combined Hamiltonian") + 1
+    assert "Quadrupolar" not in fit_titles
     assert "Fit plot: components and colours" in fit_titles
     sim_titles = [s.title() for s in pages["Simulate"].findChildren(CollapsibleSection)]
-    assert sim_titles.index("Czjzek distribution") == sim_titles.index("Quadrupolar") + 1
+    assert sim_titles.index("Czjzek distribution") == sim_titles.index("Combined Hamiltonian") + 1
 
 
 def test_czjzek_fit_panel_fits_reports_maps_and_saves(window):

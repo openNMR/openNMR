@@ -989,6 +989,51 @@ def _model_combo() -> QComboBox:
     return combo
 
 
+#: The blurb of a J panel hosted in Combined Hamiltonian's strong-coupling
+#: mode, where first-order J is an interaction of a peak instead.
+STRONG_COUPLING_BLURB = (
+    "Strongly coupled peaks: every spin's shift and the J values between them, solved exactly "
+    "(roofing, AB, ABX, AA'BB', virtual coupling), up to about 12 spins. Use this when J is "
+    "comparable to the shift difference between peaks; otherwise add a first-order J-coupling "
+    "to a peak in the peaks-with-interactions model.")
+
+
+def lock_to_spin_system(panel) -> None:
+    """Show a J panel as the exact spin-system model only: its first-order
+    mode is Combined Hamiltonian's J interaction now (explicit user request,
+    2026-10-06: one Combined entry point for every interaction)."""
+    panel.model_combo.setCurrentIndex(panel.model_combo.findData("spin_system"))
+    panel.model_combo.setVisible(False)
+    # The example spins the editor opens with: replaced by the peaks on
+    # the first switch from Combined (see seed_spins_from_peaks).
+    panel._example_spin_state = panel.spin_editor.get_state()
+    panel.blurb_label.setText(STRONG_COUPLING_BLURB)
+    # A first-order fit or simulation restored from before (kept fits,
+    # the history) still opens as it was made, with the switch shown.
+    panel.model_combo.currentIndexChanged.connect(
+        lambda _i: panel.model_combo.setVisible(panel.model_combo.currentData() != "spin_system"))
+
+
+def seed_spins_from_peaks(panel, site_dicts, nucleus: str) -> bool:
+    """Start the spin system from Combined peaks (label and δiso, one spin
+    each), when it has no spins yet or only the example it opens with --
+    never over spins someone typed. Returns whether it was seeded."""
+    editor = panel.spin_editor
+    untouched = editor.get_state() == getattr(panel, "_example_spin_state", None)
+    if (editor.spins_table.rowCount() and not untouched) or not site_dicts:
+        return False
+    spins = [{"label": str(d.get("label") or f"S{k + 1}").replace(" ", ""),
+              "nuclide": nucleus or "1H", "shift_ppm": float(d.get("delta_iso", 0.0)), "n": 1}
+             for k, d in enumerate(site_dicts)]
+    seen = set()
+    for k, sp in enumerate(spins):
+        if sp["label"] in seen:
+            sp["label"] = f"{sp['label']}_{k + 1}"
+        seen.add(sp["label"])
+    editor.set_system(spins, [])
+    return True
+
+
 def _as_simulator_sites(sites: list[dict]) -> list[dict]:
     """The fitter's site format (center_ppm) as multi_site_jcoupled_spectrum
     takes it (ppm)."""
@@ -1046,6 +1091,7 @@ class JCouplingSimulationPanel(QWidget):
                        "effects).")
         blurb.setWordWrap(True)
         v.addWidget(blurb)
+        self.blurb_label = blurb
 
         form = QFormLayout()
         self.nucleus_combo = QComboBox()
@@ -1473,6 +1519,7 @@ class JCouplingFitPanel(QWidget):
                        "coupled spectra. The observe frequency comes from the spectrum.")
         blurb.setWordWrap(True)
         v.addWidget(blurb)
+        self.blurb_label = blurb
 
         self.model_combo = _model_combo()
         v.addWidget(self.model_combo)

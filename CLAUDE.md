@@ -111,6 +111,15 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   Hover/click read-outs are `pnmr_fit.environments_at_shift`; plot extras go
   through `MplCanvas.show_slice_fit(..., overlay=)`, which redraws them on a
   restyle.
+- **Interactions** (CSA, quadrupolar, J) are Fit ▸ / Simulate ▸ Combined
+  Hamiltonian only (user request, 2026-10-06): add peaks, add interactions
+  to each. Its "Strongly coupled peaks" model (`gui/combined_section.py`)
+  is the J panel locked to spin-system mode. The old J-coupling,
+  CSA/Dipolar and Quadrupolar panels are still built but sit in hidden
+  hosts (`_retired_fit_host`, `_retired_sim_host`), because kept fits and
+  saved states restore through them. Do not give them menu sections again.
+  The fit's starting model is `combined_fitting.starting_model` (the live
+  preview).
 - **Quantify** is one page: Peaks, Integration Regions, then the
   Spectral Fitting section (`_build_spectral_fit_section`). Whether the
   fit uses the regions is two explicit checkboxes there.

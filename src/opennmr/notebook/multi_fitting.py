@@ -771,6 +771,9 @@ def _decorate(fit, e):
     fit["x_value"] = e["x_value"]
     fit["larmor_Hz"] = e["larmor_Hz"]
     fit["mas_Hz"] = e["mas_Hz"]
+    # Computed while the curves are here: a saved result keeps every
+    # experiment's numbers but only its own experiment's curves.
+    fit["quantities"] = fit_quantities(fit)
     return fit
 
 
@@ -821,6 +824,255 @@ def parameter_trend(result, label, name):
             es.append(row["error"] if row["error"] is not None else np.nan)
             labs.append(row["experiment"])
     return xs, np.array(vs, dtype=float), np.array(es, dtype=float), labs
+
+
+# ============================================================
+# Fitted quantities along a series (explicit user request, 2026-10-06:
+# "plot any fitted quantities -- linewidth, integral, intensity, shift,
+# centre-of-mass, shift anisotropy -- as a function of another parameter
+# associated with the data, e.g. temperature or time")
+# ============================================================
+
+#: The whole fit window, model-free: what a series' centre of mass or
+#: total integral is usually wanted for (a VT shift, a growing signal).
+WINDOW = "All (fit window)"
+
+#: (key, title, unit), in the order offered. A peak has the ones its
+#: interactions give it; J1, J2, ... follow.
+QUANTITIES = (
+    ("delta_iso", "Shift δiso", "ppm"),
+    ("centre_of_mass", "Centre of mass", "ppm"),
+    ("fwhm", "Linewidth (FWHM)", "ppm"),
+    ("fwhm_Hz", "Linewidth (FWHM)", "Hz"),
+    ("integral", "Integral", ""),
+    ("height", "Intensity (height)", ""),
+    ("amount", "Amount (model)", ""),
+    ("share_%", "Share", "%"),
+    ("aniso", "Anisotropy (Δ or span)", "ppm"),
+    ("asym", "Asymmetry (η or skew)", ""),
+    ("C_Q", "C_Q", "MHz"),
+    ("eta_Q", "η_Q", ""),
+    ("P_Q", "P_Q", "MHz"),
+    ("delta_cg", "CT centre of gravity", "ppm"),
+    ("eta", "Lorentzian fraction", ""),
+)
+_QUANTITY_DEFINITIONS = {
+    "centre_of_mass": "Σδ·I / ΣI of the peak's fitted curve (of the data minus baseline, for "
+                      "the whole window), over the fit axis",
+    "integral": "area under the peak's fitted curve (the data minus baseline, for the whole "
+                "window) over the fit axis, in intensity × ppm; sidebands outside the axis "
+                "are not counted",
+    "height": "the curve's largest |value| (signed)",
+    "amount": "the model's amount: the peak's total intensity, every transition and sideband",
+    "fwhm_Hz": "FWHM (ppm) × ν0 (MHz)",
+}
+
+
+def quantity_title(key, with_unit=True):
+    """'Linewidth (FWHM) (Hz)' for 'fwhm_Hz'; J1 -> 'J1 (Hz)'."""
+    for k, title, unit in QUANTITIES:
+        if k == key:
+            return f"{title} ({unit})" if unit and with_unit else title
+    if key.startswith("J"):
+        return f"{key} (Hz)" if with_unit else key
+    return key
+
+
+def fit_quantities(fit):
+    """Every quantity of one experiment's fit: ``{peak label or WINDOW:
+    {key: (value, error)}}`` (error ``nan`` where none is defined).
+
+    Parameters come with their fitted 1σ; integral and height carry the
+    amount's relative error; the centre of mass has none. Computed from
+    the fitted curves, so it needs ``x``, ``site_spectra``, ``baseline``
+    and ``mask`` (a fit as :func:`fit_combined` or :func:`fit_multi`
+    returns it). The window entry uses the data, not the model."""
+    out = {}
+    nan = float("nan")
+    params = {}
+    for p in fit.get("parameters") or []:
+        if p.get("label"):
+            err = p.get("error")
+            params.setdefault(p["label"], {})[p["name"]] = (
+                float(p["value"]), float(err) if err is not None else nan)
+    larmor_MHz = float(fit.get("larmor_Hz") or (fit.get("settings") or {}).get("larmor_Hz")
+                       or 0.0) / 1e6
+    x = fit.get("x")
+    curves = fit.get("site_spectra") or {}
+    for label, values in params.items():
+        q = dict(values)
+        if "fwhm" in q and larmor_MHz:
+            v, e = q["fwhm"]
+            q["fwhm_Hz"] = (v * larmor_MHz, e * larmor_MHz)
+        for key in ("share_%", "P_Q", "delta_cg"):
+            d = (fit.get("derived") or {}).get(label) or {}
+            if key in d:
+                err = d.get(key + "_err")
+                q[key] = (float(d[key]), float(err) if err is not None else nan)
+        if x is not None and label in curves:
+            xs = np.asarray(x, dtype=float)
+            c = np.asarray(curves[label], dtype=float)
+            amount, amount_err = q.get("amount", (nan, nan))
+            rel = abs(amount_err / amount) if amount and np.isfinite(amount_err) else nan
+            area = float(np.trapezoid(c, xs)) if hasattr(np, "trapezoid") else float(np.trapz(c, xs))
+            peak = float(c[np.argmax(np.abs(c))]) if c.size else nan
+            total = float(np.sum(c))
+            q["integral"] = (area, abs(area) * rel)
+            q["height"] = (peak, abs(peak) * rel)
+            q["centre_of_mass"] = (float(np.sum(xs * c) / total) if total else nan, nan)
+        out[label] = q
+    if x is not None and fit.get("y") is not None:
+        xs = np.asarray(x, dtype=float)
+        y = np.asarray(fit["y"], dtype=float) - np.asarray(
+            fit.get("baseline") if fit.get("baseline") is not None else 0.0, dtype=float)
+        mask = np.asarray(fit["mask"], dtype=bool) if fit.get("mask") is not None \
+            else np.ones(xs.size, dtype=bool)
+        xm, ym = xs[mask], y[mask]
+        if xm.size:
+            area = float(np.trapezoid(ym, xm)) if hasattr(np, "trapezoid") else float(np.trapz(ym, xm))
+            total = float(np.sum(ym))
+            out[WINDOW] = {"integral": (area, nan),
+                           "height": (float(ym[np.argmax(np.abs(ym))]), nan),
+                           "centre_of_mass": (float(np.sum(xm * ym) / total) if total else nan,
+                                              nan)}
+    return out
+
+
+def _quantities_of(fit):
+    return fit.get("quantities") or fit_quantities(fit)
+
+
+def available_quantities(result):
+    """``(peak labels, quantity keys)`` present in at least one experiment
+    of a multi-spectrum result, in a stable order: peaks as fitted, then
+    the window; quantities as :data:`QUANTITIES`, then J1, J2, ..."""
+    labels, keys = [], set()
+    for fit in result["experiments"]:
+        for label, q in _quantities_of(fit).items():
+            if label not in labels:
+                labels.append(label)
+            keys |= set(q)
+    labels = [l for l in labels if l != WINDOW] + ([WINDOW] if WINDOW in labels else [])
+    order = [k for k, _t, _u in QUANTITIES if k in keys]
+    order += sorted(k for k in keys if k.startswith("J") and k[1:].isdigit())
+    return labels, order
+
+
+def quantity_trend(result, label, key, x_values=None):
+    """``(x, values, errors, experiment labels)`` of one quantity of one
+    peak (or :data:`WINDOW`) along the experiments, in fitting order.
+    ``x_values`` (one per experiment) replaces the fit's own x values --
+    e.g. temperatures typed after the fit. Experiments where the peak or
+    quantity is absent are left out."""
+    xs, vs, es, labs = [], [], [], []
+    for j, fit in enumerate(result["experiments"]):
+        q = _quantities_of(fit).get(label, {})
+        if key not in q:
+            continue
+        x = x_values[j] if x_values is not None else fit.get("x_value")
+        xs.append(x)
+        vs.append(q[key][0])
+        es.append(q[key][1])
+        labs.append(fit["label"])
+    return xs, np.array(vs, dtype=float), np.array(es, dtype=float), labs
+
+
+#: x and y transforms offered for a quantity plot: key -> (label format, function).
+X_TRANSFORMS = {"x": ("{}", lambda v: v), "inverse": ("1/{}", lambda v: 1.0 / v),
+                "1000_over": ("1000/{}", lambda v: 1000.0 / v),
+                "log10": ("log10({})", np.log10)}
+Y_TRANSFORMS = ("as is", "normalised to first", "normalised to max", "ln", "log10")
+
+
+def transform_series(x, y, err, x_transform="x", y_transform="as is"):
+    """Apply a plot's x and y transforms to one series, carrying the
+    errors through (``ln``: err/|y|; ``log10``: err/(|y| ln 10); a
+    normalisation divides them too). Points whose transform is undefined
+    (1/0, log of <= 0) are dropped. Returns (x, y, err) as arrays."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    err = np.asarray(err, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x = X_TRANSFORMS[x_transform][1](x)
+        if y_transform == "normalised to first":
+            ref = y[0] if y.size else np.nan
+            y, err = y / ref, err / abs(ref)
+        elif y_transform == "normalised to max":
+            ref = y[np.argmax(np.abs(y))] if y.size else np.nan
+            y, err = y / ref, err / abs(ref)
+        elif y_transform == "ln":
+            y, err = np.log(y), err / np.abs(y)
+        elif y_transform == "log10":
+            y, err = np.log10(y), err / (np.abs(y) * np.log(10.0))
+        elif y_transform != "as is":
+            raise ValueError(f"y_transform must be one of {Y_TRANSFORMS}.")
+    keep = np.isfinite(x) & np.isfinite(y)
+    return x[keep], y[keep], err[keep]
+
+
+def plot_quantity_trend(result, key, labels=None, x_values=None, xlabel="x",
+                        x_transform="x", y_transform="as is", ax=None, colours=None,
+                        fontsize=None):
+    """One fitted quantity against x for one or more peaks (default every
+    peak; :data:`WINDOW` for the whole window), with 1σ error bars,
+    points joined in x order. ``x_values`` as :func:`quantity_trend`.
+    Returns the Axes.
+
+        plot_quantity_trend(result, "fwhm_Hz", x_values=temperatures, xlabel="T (K)",
+                            x_transform="1000_over")
+    """
+    import matplotlib.pyplot as plt
+    if ax is None:
+        _fig, ax = plt.subplots()
+    peaks, _keys = available_quantities(result)
+    labels = list(labels) if labels else [p for p in peaks if p != WINDOW]
+    if colours is None:
+        from ..plotting.accessibility import ordered_qualitative_colours
+        colours = ordered_qualitative_colours("okabe_ito")
+    drawn = 0
+    for k, label in enumerate(labels):
+        xs, vs, es, _labs = quantity_trend(result, label, key, x_values=x_values)
+        if not xs or any(x is None for x in xs):
+            continue
+        x, y, e = transform_series(np.asarray(xs, dtype=float), vs, es, x_transform, y_transform)
+        order = np.argsort(x)
+        ax.errorbar(x[order], y[order], yerr=np.where(np.isfinite(e), e, 0.0)[order], fmt="o-",
+                    capsize=3, markersize=5, linewidth=1.2, label=label,
+                    color=colours[k % len(colours)])
+        drawn += 1
+    if not drawn:
+        raise ValueError("Nothing to plot: every experiment needs a numeric x value, and the "
+                         "chosen peaks must have this quantity.")
+    ax.set_xlabel(X_TRANSFORMS[x_transform][0].format(xlabel), fontsize=fontsize)
+    ylabel = quantity_title(key)
+    if y_transform != "as is":
+        ylabel = {"ln": f"ln[{ylabel}]", "log10": f"log10[{ylabel}]"}.get(
+            y_transform, f"{quantity_title(key, with_unit=False)} ({y_transform})")
+    ax.set_ylabel(ylabel, fontsize=fontsize)
+    if drawn > 1:
+        ax.legend(frameon=False)
+    return ax
+
+
+def quantity_table(result, key, labels, x_values=None, xlabel="x"):
+    """CSV text: one row per experiment -- its label, x, and each peak's
+    value and error of ``key``."""
+    import io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    title = quantity_title(key)
+    writer.writerow(["experiment", xlabel] + [h for l in labels
+                                             for h in (f"{l}: {title}", f"{l}: error")])
+    for j, fit in enumerate(result["experiments"]):
+        q = _quantities_of(fit)
+        x = x_values[j] if x_values is not None else fit.get("x_value")
+        row = [fit["label"], "" if x is None else x]
+        for l in labels:
+            v = q.get(l, {}).get(key)
+            row += ["", ""] if v is None else [f"{v[0]:.10g}",
+                                               "" if not np.isfinite(v[1]) else f"{v[1]:.4g}"]
+        writer.writerow(row)
+    return buf.getvalue()
 
 
 def multi_fit_to_csv(result, path=None):

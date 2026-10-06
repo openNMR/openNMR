@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-06 (Combined Hamiltonian as the one entry point, starting-model preview, fitted quantities against x, integration → Dynamics fix): 25 new tests (12 + 8 + 5) and 8 updated for the new menus. Only the relevant subset was run, as asked; it passes (details in that round). **Run the full suite locally before committing.***
+
 *2026-10-03 round 2 (Plot Style ▸ Lines): only the files touching the canvas, Plot Style, legends, exports and external plots, as asked -- test_line_styles (new), test_gui_canvas, test_plotting_style, test_gui_legend_style, test_gui_legend_names, test_gui_tensor_style, test_gui_simulation_plots, test_gui_export_scroll, test_gui_remove_and_plot_kinds, test_projection_style_and_labels, test_gui_czjzek_display, test_gui_curve_fit_plot, test_gui_dnp, test_gui_dynamics, test_colorbar_gap_and_czjzek_labels, test_accessibility, test_gui_usability, test_external_projection, test_plotting_fit, test_plotting_oned, test_plotting_twod; matplotlib 3.11.2 / Py 3.13: 730 passed, 4 skipped, 1 failed -- the pre-existing `test_colorbar_gap_and_czjzek_labels.py::test_czjzek_symbols_are_italic` (glyph tuple has 6 fields on matplotlib 3.11; fails identically on the unmodified tree). 14 new tests. **Run the full suite locally before committing.***
 
 *2026-10-03 (Dynamics ▸ Relaxation vs Temperature, Dynamics ▸ Exchange Lineshape): only the files touching new or changed code, as asked -- test_exchange, test_vt_relaxation, test_gui_dynamics (new), test_gui_compare_tools, test_gui_usability, test_gui_canvas, test_gui_curve_fit_plot, test_gui_reflow, test_relaxation, test_relaxation_reporting, test_gui_legend_style, test_gui_legend_names, test_gui_simulation_plots, test_gui_dnp, test_gui_tensor_style, test_plotting_style, test_collapsible_section, test_gui_remove_and_plot_kinds, test_gui_export_scroll, test_accessibility, test_gui_fit_sim_state, test_notebook_bridge, and test_gui.py -k "curve or relaxation or dynamics or toolbar or tile or side_tab or external or legend"; matplotlib 3.11.2 / Py 3.13: 896 passed, 4 skipped, 0 failed. 88 new tests (24 + 44 + 20). **Run the full suite locally before committing.***
@@ -148,6 +150,50 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Combined Hamiltonian as the one entry point; live starting-model preview; fitted quantities against x; integration → Dynamics fixed (2026-10-06)
+
+**Asked:** (1) "In fit and simulate, simplify the menus: condense the models into Combined Hamiltonian, so that people can just add peaks and then, to each peak, add an interaction ... removing the J (and other) sections. Leave the Czjzek model as is, and the pNMR fit, the multi spectrum fit, and make sure people can still access the full suite of each interaction (for J, first order and strong J; for quad, first order, second order and exact diagonalisation)." (2) "A preview of the fit starting guess -- add a peak and see it appear and change with each change in parameter." (3) "In the multi spectrum fit, plot any fitted quantities (linewidth, integral, intensity, shift, centre-of-mass, shift anisotropy, ...) as a function of another parameter of the data -- temperature, time, or anything else." (4) "Integrate, then try to fit across the pseudo-2D: Dynamics says 'no peaks were added'." Only the relevant tests, as asked.
+
+**Not pulled first:** this session could not reach GitHub (no credentials), so it worked on the local clone at `b689001`. Pull and check for conflicts in `main_window.py`, `combined_panels.py`, `jcoupling_panels.py`, `multi_fit_panel.py` and `multi_fitting.py` before pushing.
+
+**(4) What was wrong:** "Export Integration to Pseudo-2D…" adds the export and selects it, but the export carried neither the regions nor the integrals (and no x values: a derived spectrum has no folder to read a vdlist from). Fit Curve on it found nothing staged and fell through to a peak fit, which raised "Add at least one peak to fit." Reproduced exactly before fixing. **Fixed:**
+- The export now arrives ready: it carries the source's analysis state (regions, model, Values settings) with the source's x values written out as a manual list in seconds (`_carried_analysis_state`), and its own slices are integrated over the same regions straight away.
+- Fit Curve with nothing staged and no peaks now integrates the regions, if there are any. With neither, it says how to measure every slice, both ways. Peaks still take precedence when both exist.
+
+**(1) Built:**
+- Fit shows, in order: Isotropic, Integration, **Combined Hamiltonian**, Czjzek, pNMR, Multi-spectrum, Kept fit models, Fit plot. Simulate shows: **Combined Hamiltonian**, Czjzek, Diffusion, Bloch, pNMR.
+- The J-coupling, CSA/Dipolar and Quadrupolar panels (Fit and Simulate) are **still built, in hidden hosts** (`_retired_fit_host`, `_retired_sim_host`). Kept fits, saved states, the processing log and the simulation history restore through them, and ~30 test files exercise their engines. Deleting them would have deleted tested restore paths with nothing gained for the user.
+- Every variant is reachable from a peak:
+  - Quadrupolar: its editor has a **Theory** box (first order / second order / exact), two-way synced with the panel's "Quadrupolar theory". It is one setting for the spectrum: `simulate_combined` takes `order` globally.
+  - J: its editor has a **Treatment** box. "First order" is the existing per-peak J (any partner isotope, natural abundance). "Strong coupling: exact, between peaks…" switches the section to its second model.
+  - Add interaction ▾ also has "J-coupling between peaks (strong coupling, exact)…".
+- **Two models in one section** (`gui/combined_section.py`, `CombinedModelSection`): "Peaks with interactions" and "Strongly coupled peaks (exact J between them)". The second is the J panel locked to spin-system mode (`jcoupling_panels.lock_to_spin_system`).
+  - Switching seeds its spins from the peaks (label, δiso), replacing only the example spins it opens with, never typed ones. In Simulate it also sets the nucleus and field.
+  - A restored first-order J fit or simulation still opens as it was made, with the model switch shown.
+- Simulate ▸ Combined: **"Compare levels of theory (first, second, exact)"**, carried over from the old Quadrupolar simulator. It overlays the three orders with their differences (`plot_quadrupolar_orders`); the kept spectrum is the selected order.
+- "Add site" → "Add peak", "Sites" → "Peaks (sites)", "Selected site" → "Selected peak". Default labels stay "Site N", because saved states and tests use them.
+- Every route that opened a removed section now opens Combined in the right model: send-to-fit/sim, history restore, kept-fit restore.
+- **Why strong J is not a per-peak interaction:** strong coupling is J *between observed peaks*, solved by diagonalising the whole spin system. `combined_hamiltonian` models each site independently, and `spin_system` has no CSA or quadrupolar term. So the two stay separate models, reached from the J interaction.
+
+**(2) Built:** Fit ▸ Combined Hamiltonian previews the starting model live.
+- `notebook.combined_fitting.starting_model()` is **the fit's own first step**: the same window, held baseline and NNLS amounts. A test checks it equals `fit_combined(..., vary=nothing)["y_fit"]` to 1e-9, with and without amount estimation.
+- The preview is debounced (200 ms) and drawn on the Fit view as "Starting model". It runs only while the panel is on screen, and is suspended while code fills the panel (set_state, Use fitted as start, transfers), so it never overdraws a restored or just-made fit.
+- Preview orientations: auto = 4,181 static, 233 MAS (measured: 233 is within 4% of the converged MAS shape at ~0.1 s per site; exact-diagonalisation MAS at 987 took 1 s). The fit still uses its own Orientations.
+- New **"Estimate starting amounts from the data"** checkbox, passed to `fit_combined(estimate_amounts=)`. It was always on and invisible, so the typed amounts were silently ignored as starts. The preview follows the same switch, so changing an amount visibly does nothing when it is on, and the preview line says so.
+- Not done: the Isotropic (pseudo-Voigt) section has no preview; it was not asked for, and its peak table already marks peaks on the plot.
+
+**(3) Built:** Multi-spectrum ▸ "Plot a fitted quantity against x".
+- `notebook.multi_fitting`: `fit_quantities`, `available_quantities`, `quantity_trend`, `transform_series`, `plot_quantity_trend`, `quantity_table`, plus the `WINDOW` pseudo-peak.
+- Quantities per peak: δiso, centre of mass (Σδ·I/ΣI of the fitted curve), FWHM in ppm and Hz, integral and height of the fitted curve (with the amount's relative error), amount, share, CSA Δ/η, C_Q, η_Q, P_Q, CT centre of gravity, L fraction, J1…
+- "All (fit window)" gives the model-free integral, height and centre of mass of the data minus baseline.
+- The quantities are computed in `_decorate`, while the curves exist, and saved with the result. A restored result keeps only its own experiment's curves, so they could not be recomputed later.
+- x comes from the x value column *as it is now*, so x can be filled after fitting. New sources: any acquisition parameter (`core.acquisition.acquisition_constants`; the ones that differ between the experiments are listed first), the experiment number, and the order. Or type anything.
+- x transforms: x, 1/x, 1000/x, log10. y transforms: as is, normalised to first/max, ln, log10, with errors propagated. Several peaks are overlaid. Copy Data (CSV) and Copy as Python are provided.
+
+**Tests:** new `test_gui_combined_consolidation.py` (12), `test_multi_fit_quantities.py` (8), `test_gui_integration_to_dynamics.py` (5).
+- Updated for the new layout: `test_gui_jcoupling.py` (section test; `_editor` now selects first-order mode explicitly), `test_gui_fit_sim_state.py`, `test_gui_round4_transfers.py`, `test_gui_czjzek_display.py`, and three layout tests in `test_gui.py`.
+- Run: only the files touching changed code, as asked. 35 files (every Combined/J/CSA/quadrupolar/Czjzek/multi-fit/series/state/transfer GUI and notebook file, Dynamics and curve-fit, and test_gui.py -k 'curve or integrat or region or relaxation or export or section or simulat or fitting or csa or quad or jcoupl or spin or tab or slice'): 727 passed, 9 skipped, 2 failed. The failures were one more old-layout test (updated) and one test whose worker was OOM-killed: two xdist workers reached ~3 GB each, in a 7 GB container; it passed on its own. Then the canvas, legend and line-style files, after the preview's legend label: 363 passed. Then the whole-window checks (accessibility, view modes, remove/plot kinds, bridge, J notebook): 120 passed, 4 skipped. Py 3.13, PySide6 6.11.2, without pymatgen (its bibtexparser dependency would not build here), so the CIF tests skipped. **Run the full suite locally before committing.**
 
 ## Plot Style ▸ Lines: width and style of every line, on every kind of plot (2026-10-03, round 2)
 

@@ -434,6 +434,80 @@ def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_start
     return best
 
 
+def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
+                   transitions="all", rotor_angle="magic", n_zcw=None, fit_regions=None,
+                   baseline_regions=None, estimate_amounts=True):
+    """
+    The model :func:`fit_combined` starts from, on the data's own axis --
+    to see a starting guess against the spectrum before fitting (the
+    GUI's live preview), or to check one in a notebook.
+
+    It is the fit's own first step, not an approximation of it: the same
+    window, the same held linear baseline, and (with
+    ``estimate_amounts``, the fit's default) the same non-negative least
+    squares amounts. With every parameter fixed, ``fit_combined``
+    returns exactly this curve as its ``y_fit``.
+
+    ``n_zcw`` : powder orientations (default as fit_combined: 28657
+    static, 2584 MAS). A preview can use fewer -- the shape converges
+    long before the fit's default.
+
+    Returns a dict: ``x`` (ascending ppm), ``y`` (data), ``mask`` (the
+    fit window), ``start`` (total, with baseline), ``site_spectra``
+    ({label: curve}), ``baseline``, ``amounts`` ({label: amount}, raw
+    units as fit_combined reports them), ``n_zcw``.
+
+        guess = starting_model(results, sites, mas_Hz=15e3, transitions="ct")
+        plt.plot(guess["x"], guess["y"], guess["x"], guess["start"])
+    """
+    sites = as_sites(sites)
+    if order not in QUADRUPOLAR_ORDERS:
+        raise ValueError(f"order must be one of {QUADRUPOLAR_ORDERS}.")
+    if larmor_Hz is None:
+        larmor_Hz = float(results["SFO1"]) * 1e6
+    mas_Hz = float(mas_Hz or 0.0)
+    if n_zcw is None:
+        n_zcw = 2584 if mas_Hz else 28657
+    beta_r = (np.arccos(1 / np.sqrt(3)) if rotor_angle == "magic"
+              else np.deg2rad(float(rotor_angle)))
+    x_full = np.asarray(results["x_ppm"], dtype=float)
+    idx = np.argsort(x_full)
+    x = x_full[idx]
+    y_raw = np.asarray(results["real_spectrum"], dtype=float)[idx]
+    scale = float(np.max(np.abs(y_raw))) or 1.0
+    y = y_raw / scale
+    mask = build_region_mask(x, fit_regions)
+    if mask.sum() < 8:
+        raise ValueError("The fit window holds fewer than 8 points.")
+    x_ref = float(np.mean(x[mask]))
+    b0, b1, _ = estimate_baseline_robust(x, y, baseline_regions=baseline_regions, x_ref=x_ref)
+    dicts = [s.to_dict() for s in sites]
+    for d in dicts:
+        if "C_Q" in site_parameter_names(d):
+            _set(d, "C_Q", abs(_get(d, "C_Q")))
+        if estimate_amounts:
+            d["amount"] = 1.0
+    curves = []
+    for d in dicts:
+        site = Site.from_dict(d)
+        comp, _p = _site_sticks(site, x, float(larmor_Hz), mas_Hz, order, transitions, beta_r,
+                                int(n_zcw))
+        curves.append(np.sum(list(_broaden_site(site, comp, x).values()), axis=0))
+    if estimate_amounts:
+        A = np.column_stack([c[mask] for c in curves])
+        amounts, _res = nnls(A, y[mask] - (b0 + b1 * (x[mask] - x_ref)))
+        amounts = np.maximum(amounts, 1e-6)
+        curves = [c * a for c, a in zip(curves, amounts)]
+        for d, a in zip(dicts, amounts):
+            d["amount"] = float(a)
+    baseline = (b0 + b1 * (x - x_ref)) * scale
+    site_spectra = {d["label"]: c * scale for d, c in zip(dicts, curves)}
+    start = np.sum(list(site_spectra.values()), axis=0) + baseline
+    return {"x": x, "y": y_raw, "mask": mask, "start": start, "site_spectra": site_spectra,
+            "baseline": baseline, "n_zcw": int(n_zcw),
+            "amounts": {d["label"]: d["amount"] * scale for d in dicts}}
+
+
 def _cov_of(names, pcov, free_names):
     """Covariance sub-matrix for ``names`` (zeros for fixed ones)."""
     n = len(names)

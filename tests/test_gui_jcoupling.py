@@ -34,17 +34,28 @@ def _titles(window, tab_name):
 
 
 def test_sections_are_where_asked(qapp):  # noqa: F811
+    # 2026-10-06: no J-coupling section any more -- first-order J is an
+    # interaction of a Combined Hamiltonian peak, and these panels are
+    # Combined's "Strongly coupled peaks" model, in spin-system mode.
     window = MainWindow()
     fit = _titles(window, "Fit")
-    assert fit.index("Integration") + 1 == fit.index("J-coupling") == fit.index("CSA/Dipolar") - 1
-    assert _titles(window, "Simulate")[0] == "J-coupling"
+    assert "J-coupling" not in fit and "CSA/Dipolar" not in fit
+    assert fit.index("Integration") + 1 == fit.index("Combined Hamiltonian")
+    assert _titles(window, "Simulate")[0] == "Combined Hamiltonian"
+    for model, panel in ((window.combined_fit_model, window.jcoupling_fit_panel),
+                         (window.combined_sim_model, window.jcoupling_sim_panel)):
+        assert model.spin_widget is panel and panel.spin_mode()
 
 
 # --- the shared editor -------------------------------------------------------
 
 def _editor(qapp, mode="simulate"):  # noqa: F811
+    """The first-order editor. Since 2026-10-06 the panels open in
+    spin-system mode (first-order J is Combined Hamiltonian's); their
+    first-order mode remains, for kept fits and saved states."""
     window = MainWindow()
     panel = window.jcoupling_sim_panel if mode == "simulate" else window.jcoupling_fit_panel
+    panel.model_combo.setCurrentIndex(panel.model_combo.findData("first_order"))
     return window, panel, panel.editor
 
 

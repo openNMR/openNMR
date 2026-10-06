@@ -32,11 +32,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMenu,
     QMessageBox, QProgressDialog, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
+from ..core.acquisition import acquisition_constants
 from ..io import serialize
 from ..notebook import combined_fitting as cfit
 from ..notebook import combined_hamiltonian as ch
@@ -184,8 +186,11 @@ class MultiFitPanel(QWidget):
     MainWindow._multi_key)."""
 
     def __init__(self, open_items, selected_keys, resolve, open_expnos, draw_fit, draw_trend,
-                 format_value_error, on_fitted=None, parent=None) -> None:
+                 format_value_error, on_fitted=None, parent=None, draw_quantities=None) -> None:
         super().__init__(parent)
+        #: ``draw_quantities(draw)``: show ``draw(figure)`` on the Fit view
+        #: (a curve plot); None draws nothing.
+        self._draw_quantities = draw_quantities
         self._open_items = open_items
         self._selected_keys = selected_keys
         self._resolve = resolve
@@ -254,9 +259,15 @@ class MultiFitPanel(QWidget):
         self.x_source_combo.addItem("—", "none")
         self.x_source_combo.addItem("Temperature (TE, K)", "te")
         self.x_source_combo.addItem("Time since the first (min)", "time")
-        self.x_source_combo.setToolTip("Fill the x value column from each experiment's own "
-                                       "parameters (Bruker acqus). Typed values are kept "
-                                       "until you choose again.")
+        self.x_source_combo.addItem("Acquisition parameter…", "param")
+        self.x_source_combo.addItem("Experiment number", "expno")
+        self.x_source_combo.addItem("Order (1, 2, 3…)", "order")
+        self.x_source_combo.setToolTip(
+            "Fill the x value column from each experiment's own parameters: temperature (TE), "
+            "time from the acquisition dates, any acquisition parameter (d1, p1, cnst2, l4, "
+            "…; those that differ between these experiments are listed first), the "
+            "experiment number, or the fitting order. Or type any values -- a field, a "
+            "concentration, a pressure. Typed values are kept until you choose again.")
         self.x_source_combo.activated.connect(lambda _i: self.fill_x_values())
         xrow.addWidget(self.x_source_combo)
         xrow.addWidget(QLabel("x label:"))
@@ -367,6 +378,7 @@ class MultiFitPanel(QWidget):
         self.show_combo.activated.connect(lambda _i: self.show_selected())
         show.addWidget(self.show_combo, 1)
         v.addLayout(show)
+        v.addWidget(self._build_quantity_box())
         self.results_table = QTableWidget(0, 0)
         self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.results_table.setMaximumHeight(280)
@@ -513,9 +525,68 @@ class MultiFitPanel(QWidget):
             e["x"] = text
         self._fill_experiment_table()
 
-    def fill_x_values(self) -> None:
-        source = self.x_source_combo.currentData()
+    # ---- x values ---------------------------------------------------------------
+
+    def _constants_of(self, e) -> dict:
+        got = self._resolve(e["key"])
+        return acquisition_constants(got[0]) if got else {}
+
+    def acquisition_parameter_names(self) -> list[str]:
+        """Numeric acquisition parameters every experiment has: those whose
+        value differs between the experiments first, then the rest."""
+        tables = [self._constants_of(e) for e in self.experiments]
+        if not tables or not all(tables):
+            return sorted(set().union(*tables)) if tables else []
+        common = set(tables[0]).intersection(*tables[1:])
+        varying = sorted(n for n in common if len({t[n] for t in tables}) > 1)
+        return varying + sorted(common - set(varying))
+
+    @staticmethod
+    def _expno_of(key) -> str | None:
+        """The experiment number in a Bruker path (…/12 or …/12/pdata/1)."""
+        found = re.findall(r"[\\/](\d+)(?=[\\/]pdata|[\\/]?$)", str(key or ""))
+        return found[0] if found else None
+
+    def fill_x_values(self, source: str | None = None, name: str | None = None) -> None:
+        """Fill the x value column. ``source`` defaults to the combo's;
+        for ``"param"``, ``name`` is the parameter (asked for when None)."""
+        source = source or self.x_source_combo.currentData()
         if source == "none":
+            return
+        if source == "param":
+            if name is None:
+                names = self.acquisition_parameter_names()
+                if not names:
+                    QMessageBox.information(self, "x value from", "These experiments carry no "
+                                            "acquisition parameters to choose from.")
+                    return
+                name, ok = QInputDialog.getItem(
+                    self, "x value from", "Acquisition parameter (those that differ between "
+                    "the experiments are listed first):", names, 0, True)
+                if not ok or not name.strip():
+                    return
+            name = name.strip()
+            missing = []
+            for e in self.experiments:
+                table = self._constants_of(e)
+                value = table.get(name, table.get(name.lower()))
+                if value is None:
+                    missing.append(e["label"])
+                else:
+                    e["x"] = f"{value:g}"
+            self.x_label_edit.setText(name)
+            self._fill_experiment_table()
+            if missing:
+                QMessageBox.information(self, "x value from", f"No {name} in: "
+                                        + ", ".join(missing) + ". Type their x values.")
+            return
+        if source in ("expno", "order"):
+            for k, e in enumerate(self.experiments):
+                value = str(k + 1) if source == "order" else self._expno_of(e["key"])
+                if value is not None:
+                    e["x"] = value
+            self.x_label_edit.setText("Experiment" if source == "expno" else "Order")
+            self._fill_experiment_table()
             return
         dates = {}
         for e in self.experiments:
@@ -898,6 +969,7 @@ class MultiFitPanel(QWidget):
         for label, key, _cells in rows:
             self.show_combo.addItem(f"Trend: {label}", ("trend", key))
         self.show_combo.blockSignals(False)
+        self._fill_quantity_controls()
 
     def show_selected(self) -> None:
         if not self.result:
@@ -921,6 +993,186 @@ class MultiFitPanel(QWidget):
         rows = {row[1]: row for row in self._result_rows()}
         title = rows[(label, name)][0] if (label, name) in rows else f"{label}: {name}"
         self._draw_trend(xs, vs, es, labs, self.result.get("x_label", "x"), title, title)
+
+    # ---- fitted quantities against x ---------------------------------------
+
+    def _build_quantity_box(self) -> QGroupBox:
+        box = QGroupBox("Plot a fitted quantity against x")
+        box.setToolTip("Any fitted or derived quantity of any peak, along the experiments, "
+                       "against the x value column -- a temperature, a time, an acquisition "
+                       "parameter or values you type -- on the Fit view.")
+        form = QFormLayout(box)
+        self.quantity_combo = QComboBox()
+        self.quantity_combo.setToolTip(
+            "Shift and other fitted parameters with their 1σ; linewidth also in Hz; "
+            "integral and height of each peak's fitted curve; centre of mass (Σδ·I/ΣI); the "
+            "model amount and share; interaction parameters (CSA, C_Q, P_Q, J…). "
+            f"'{mf.WINDOW}' measures the data in the fit window instead, model-free.")
+        form.addRow("Quantity:", self.quantity_combo)
+        self.quantity_peaks_list = QListWidget()
+        self.quantity_peaks_list.setMaximumHeight(96)
+        self.quantity_peaks_list.setToolTip("Tick the peaks to plot; each is its own series.")
+        form.addRow("Peaks:", self.quantity_peaks_list)
+        self.quantity_x_combo = QComboBox()
+        for key, (fmt, _f) in mf.X_TRANSFORMS.items():
+            self.quantity_x_combo.addItem(fmt.format("x"), key)
+        self.quantity_x_combo.setToolTip("1000/x with temperatures in K gives an Arrhenius "
+                                         "axis; the x label above names the axis.")
+        form.addRow("x axis:", self.quantity_x_combo)
+        self.quantity_y_combo = QComboBox()
+        for text in mf.Y_TRANSFORMS:
+            self.quantity_y_combo.addItem(text, text)
+        form.addRow("y axis:", self.quantity_y_combo)
+        row = QHBoxLayout()
+        self.quantity_plot_button = QPushButton("Plot")
+        self.quantity_plot_button.clicked.connect(lambda: self.plot_quantity())
+        self.quantity_csv_button = QPushButton("Copy Data (CSV)")
+        self.quantity_csv_button.clicked.connect(self._copy_quantity_csv)
+        self.quantity_python_button = QPushButton("Copy as Python")
+        self.quantity_python_button.setToolTip("Notebook code for this plot, from the saved "
+                                               "result.")
+        self.quantity_python_button.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(self.quantity_python()))
+        for b in (self.quantity_plot_button, self.quantity_csv_button,
+                  self.quantity_python_button):
+            row.addWidget(b)
+        form.addRow(row)
+        self.quantity_note_label = QLabel("")
+        self.quantity_note_label.setWordWrap(True)
+        form.addRow(self.quantity_note_label)
+        box.setVisible(False)
+        self.quantity_box = box
+        return box
+
+    def _fill_quantity_controls(self) -> None:
+        """Offer what the result holds; keep the current choices where
+        they still exist."""
+        if not self.result:
+            self.quantity_box.setVisible(False)
+            return
+        labels, keys = mf.available_quantities(self.result)
+        current = self.quantity_combo.currentData()
+        self.quantity_combo.blockSignals(True)
+        self.quantity_combo.clear()
+        for key in keys:
+            self.quantity_combo.addItem(mf.quantity_title(key), key)
+        index = self.quantity_combo.findData(current)
+        self.quantity_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.quantity_combo.blockSignals(False)
+        ticked = set(self.quantity_labels()) if self.quantity_peaks_list.count() else None
+        self.quantity_peaks_list.clear()
+        for label in labels:
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            on = (label in ticked) if ticked is not None else label != mf.WINDOW
+            item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+            self.quantity_peaks_list.addItem(item)
+        self.quantity_box.setVisible(True)
+
+    def quantity_labels(self) -> list[str]:
+        return [self.quantity_peaks_list.item(i).text()
+                for i in range(self.quantity_peaks_list.count())
+                if self.quantity_peaks_list.item(i).checkState() == Qt.CheckState.Checked]
+
+    def set_quantity_labels(self, labels) -> None:
+        wanted = set(labels)
+        for i in range(self.quantity_peaks_list.count()):
+            item = self.quantity_peaks_list.item(i)
+            item.setCheckState(Qt.CheckState.Checked if item.text() in wanted
+                               else Qt.CheckState.Unchecked)
+
+    def plot_x_values(self) -> list:
+        """One x per fitted experiment: the x value column as it is now
+        (so x can be filled or corrected after fitting), else the value
+        the fit was made with."""
+        by_key = {e["key"]: e for e in self.experiments}
+        keys = self.result.get("keys") or [None] * len(self.result["experiments"])
+        out = []
+        for fit, key in zip(self.result["experiments"], keys):
+            e = by_key.get(key)
+            value = None
+            if e is not None and str(e.get("x", "")).strip():
+                try:
+                    value = float(e["x"])
+                except ValueError:
+                    value = None
+            if value is None and fit.get("x_value") is not None:
+                try:
+                    value = float(fit["x_value"])
+                except (TypeError, ValueError):
+                    value = None
+            out.append(value)
+        return out
+
+    def plot_quantity(self, quiet: bool = False) -> bool:
+        if not self.result:
+            return False
+        key = self.quantity_combo.currentData()
+        labels = self.quantity_labels()
+        x_values = self.plot_x_values()
+        problem = None
+        if key is None or not labels:
+            problem = "Choose a quantity and tick at least one peak."
+        elif any(x is None for x in x_values):
+            missing = [f["label"] for f, x in zip(self.result["experiments"], x_values) if x is None]
+            problem = ("Every experiment needs a numeric x value -- fill the x value column "
+                       "(type, or 'x value from'). Missing: " + ", ".join(missing) + ".")
+        if problem:
+            self.quantity_note_label.setText(problem)
+            if not quiet:
+                QMessageBox.information(self, "Plot a fitted quantity", problem)
+            return False
+        xlabel = self.x_label_edit.text().strip() or self.result.get("x_label", "x")
+        kwargs = dict(labels=labels, x_values=x_values, xlabel=xlabel,
+                      x_transform=self.quantity_x_combo.currentData(),
+                      y_transform=self.quantity_y_combo.currentData())
+
+        def draw(figure):
+            ax = figure.add_subplot(111)
+            mf.plot_quantity_trend(self.result, key, ax=ax, **kwargs)
+        try:
+            if self._draw_quantities is not None:
+                self._draw_quantities(draw)
+            else:
+                import matplotlib.figure
+                draw(matplotlib.figure.Figure())
+        except ValueError as exc:
+            self.quantity_note_label.setText(str(exc))
+            if not quiet:
+                QMessageBox.information(self, "Plot a fitted quantity", str(exc))
+            return False
+        definition = mf._QUANTITY_DEFINITIONS.get(key)
+        self.quantity_note_label.setText(
+            f"{mf.quantity_title(key)} against {xlabel}"
+            + (f" -- {definition}." if definition else "."))
+        return True
+
+    def quantity_csv(self) -> str:
+        if not self.result or self.quantity_combo.currentData() is None:
+            return ""
+        return mf.quantity_table(self.result, self.quantity_combo.currentData(),
+                                 self.quantity_labels(), x_values=self.plot_x_values(),
+                                 xlabel=self.x_label_edit.text().strip() or "x")
+
+    def _copy_quantity_csv(self) -> None:
+        QGuiApplication.clipboard().setText(self.quantity_csv())
+
+    def quantity_python(self) -> str:
+        key = self.quantity_combo.currentData()
+        if not self.result or key is None:
+            return ""
+        x_values = self.plot_x_values()
+        return (
+            "# The multi-spectrum fit's result: `result = fit_multi(...)` in a notebook.\n"
+            "from opennmr.notebook import multi_fitting as mf\n"
+            f"x_values = {[None if x is None else float(x) for x in x_values]!r}\n"
+            f"ax = mf.plot_quantity_trend(result, {key!r}, labels={self.quantity_labels()!r},\n"
+            f"                            x_values=x_values, "
+            f"xlabel={self.x_label_edit.text().strip() or 'x'!r},\n"
+            f"                            x_transform={self.quantity_x_combo.currentData()!r}, "
+            f"y_transform={self.quantity_y_combo.currentData()!r})\n"
+            f"print(mf.quantity_table(result, {key!r}, {self.quantity_labels()!r}, "
+            "x_values=x_values))\n")
 
     def text_report(self) -> str:
         if not self.result:
@@ -1038,6 +1290,7 @@ class MultiFitPanel(QWidget):
         self.results_table.setRowCount(0)
         self.results_table.setVisible(False)
         self.show_combo.clear()
+        self.quantity_box.setVisible(False)
 
     def report_text_for(self, key) -> str:
         """What one experiment's log records: the summary and its column."""

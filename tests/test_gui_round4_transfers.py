@@ -179,6 +179,8 @@ def test_csa_use_fitted_send_and_back(window):
 
 def test_jcoupling_simulation_to_fit(window):
     sim = window.jcoupling_sim_panel
+    # First order is the panel's restorable mode (it opens on spin systems).
+    sim.model_combo.setCurrentIndex(sim.model_combo.findData("first_order"))
     sim.send_to_fit()
     fit = window.jcoupling_fit_panel
     assert fit.editor.sites_table.rowCount() == sim.editor.sites_table.rowCount()
@@ -188,6 +190,7 @@ def test_jcoupling_simulation_to_fit(window):
     sim.send_to_fit()
     assert fit.model_combo.currentData() == "spin_system"
     assert fit.spin_editor.labels() == sim.spin_editor.labels()
+    assert window.combined_fit_model.model() == "spin_system"
 
 
 def test_combined_simulation_to_fit(window):
