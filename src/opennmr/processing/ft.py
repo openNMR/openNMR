@@ -612,7 +612,7 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
                      degree: int = 2, n_harmonics: int = 1, period: float | None = None,
                      lam: float | None = None, asymmetry: float | None = None,
                      diff_order: int = 2, manual_params=None, manual_fixed=None,
-                     manual_refit: bool = False) -> np.ndarray:
+                     manual_refit: bool = False, n_points: int | None = None) -> np.ndarray:
     """The baseline :func:`baseline_correct` would subtract, returned
     instead of subtracted.
 
@@ -631,7 +631,7 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
     """
     from .fitting import (
         estimate_baseline_polynomial, estimate_baseline_sinusoidal,
-        estimate_baseline_spline, estimate_baseline_whittaker,
+        estimate_baseline_spline, estimate_baseline_whittaker, auto_spline_baseline,
         evaluate_baseline_sinusoidal,
     )
     freq = np.asarray(freq, dtype=float)
@@ -652,6 +652,10 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
             fixed = {n: v for n, v, f in zip(names, values, manual_fixed) if f}
         return nb_manual.fit_manual_baseline(
             freq, np.real(spectrum), model, regions=baseline_regions, fixed=fixed)["baseline"]
+    if method == "spline_auto":
+        # Like Whittaker, it finds the baseline itself, anywhere in the
+        # spectrum -- no edge regions.
+        return auto_spline_baseline(freq, np.real(spectrum), n_points=n_points)["baseline"]
     if method == "whittaker":
         # Before the candidate-region setup below, which this method
         # has no use for -- see its own docstring.
@@ -688,7 +692,7 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
         )
         return evaluate_baseline_sinusoidal(coeffs, fitted_period, freq)
     raise ValueError(
-        "method must be 'linear', 'polynomial', 'sinusoidal', 'spline', "
+        "method must be 'linear', 'polynomial', 'sinusoidal', 'spline', 'spline_auto', "
         f"'whittaker', 'manual_polynomial' or 'manual_sine', got {method!r}"
     )
 
@@ -700,7 +704,7 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
                       degree: int = 2, n_harmonics: int = 1, period: float | None = None,
                       lam: float | None = None, asymmetry: float | None = None,
                       diff_order: int = 2, manual_params=None, manual_fixed=None,
-                      manual_refit: bool = False) -> np.ndarray:
+                      manual_refit: bool = False, n_points: int | None = None) -> np.ndarray:
     """Subtract a robust baseline fit to the real part, via
     :mod:`opennmr.processing.fitting`'s baseline estimators -- the same
     ones ``fit_spectrum`` already uses to hold a baseline fixed under a
@@ -745,6 +749,12 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
       not well-described by a low-order polynomial or a single
       sinusoid, at the cost of being the easiest to overfit to noise
       between sparse candidate points.
+    - ``"spline_auto"`` (:func:`opennmr.processing.fitting.
+      auto_spline_baseline`) -- a cubic spline through points placed
+      automatically wherever the spectrum is baseline (Golotvin-Williams
+      test), anywhere in it, ``n_points`` of them at most (None: 20).
+      Follows a roll in the middle of the spectrum that edge-based
+      methods cannot see.
     - ``"whittaker"`` (:func:`opennmr.processing.fitting.
       estimate_baseline_whittaker`) -- **the one that does not need
       candidate regions at all.** Every method above starts from "the
@@ -797,7 +807,7 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
         max_iter=max_iter, method=method, smoothing=smoothing, degree=degree,
         n_harmonics=n_harmonics, period=period, lam=lam, asymmetry=asymmetry,
         diff_order=diff_order, manual_params=manual_params, manual_fixed=manual_fixed,
-        manual_refit=manual_refit,
+        manual_refit=manual_refit, n_points=n_points,
     )
 
 

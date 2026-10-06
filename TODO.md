@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-06 round 3 (Measure across Compare rows, estimated starting values, batch pseudo-2D relaxation, automatic cubic-spline baseline): 37 new tests (4 + 12 + 10 + 11). The relevant subset passes: 751 passed, 5 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
+
 *2026-10-06 round 2 (MAS rate as a fitting parameter; plain-language fit advice): 32 new tests (16 + 10 + 6). The relevant subset passes: 491 passed, 4 skipped. **Run the full suite locally before committing.***
 
 *2026-10-06 (Combined Hamiltonian as the one entry point, starting-model preview, fitted quantities against x, integration → Dynamics fix): 25 new tests (12 + 8 + 5) and 8 updated for the new menus. Only the relevant subset was run, as asked; it passes (details in that round). **Run the full suite locally before committing.***
@@ -152,6 +154,73 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Measure across Compare rows; estimated starting values; batch pseudo-2D relaxation; automatic cubic-spline baseline (2026-10-06, round 3)
+
+**Asked:** (1) "When using Measure in Compare ... if I click on one point on one spectrum, then click again on a second point on another spectrum, I cannot measure." (2) "Estimate, given a certain model (probably only one type of interaction), what good starting values for a fit would be." (3) "'Batch' pseudo-2D fitting and processing -- e.g. T1 as a function of temperature, one pseudo-2D per temperature, all processed with the same settings and grouped by field, then the BPP fit. At the moment we are only adding one Fit Curve result at a time." (4) "A cubic-spline baseline option, with the points placed automatically."
+
+**1. Measure across Compare rows (`widgets/canvas.py`):**
+- What was wrong: a second click in another Axes restarted the measurement.
+- Now a second click in another row of the same Compare stack completes it (`_compare_rows_pair`, `_complete_cross_measurement`).
+- It reports Δx only, in ppm and Hz. Δy is not reported because each row has its own intensity scale.
+- Hz uses the first spectrum's field. When the two fields differ, the summary says so.
+- An arrow (`ConnectionPatch` on the figure) joins the two points and is removed with the other measurement artists.
+- The log line names both spectra.
+- A click outside the stack still restarts, as before.
+
+**2. Estimated starting values (new `notebook/start_estimates.py`; GUI: "Estimate Starting Values" at the top of Fit ▸ Combined Hamiltonian's actions):**
+- `estimate_start(results, kind, ...)` covers one kind at a time: `isotropic`, `jcoupling`, `csa` or `quadrupolar`. It returns site dicts, plain-language notes on how each value was found, and the starting model's R².
+- Isotropic: picked peaks with parabolic sub-sample tops. J: the median line spacing, with n = lines − 1.
+- CSA/quadrupolar use the moments, not edge or horn rules:
+  - the first moment is δiso (plus the second-order shift);
+  - the second moment sets the size, because it is conserved under MAS;
+  - the size is solved by a bracketed secant against low-orientation simulations at the trial δiso;
+  - η and the sign of Δ are chosen by χ².
+- Validated:
+  - static and 8 kHz MAS ¹³C CSA (Δ −150 and +120, η 0.4): within 0.3 ppm;
+  - ²⁷Al CT C_Q 5 MHz, static and MAS: within 1%;
+  - all transitions: estimated from the CT segment, with a note saying so;
+  - J quartet: 6.99 Hz (truth 7);
+  - S/N 50: still correct;
+  - 0.2–1.9 s each.
+- GUI: isotropic replaces every peak; the other kinds replace the selected peak and keep its label. "Undo estimate" restores the peaks as they were.
+- **Tried and rejected:**
+  - Shifting one δ = 0 simulation: sidebands that fall off the axis are lost, giving the wrong δiso and sign. Each trial is simulated at its own δiso.
+  - A point-wise > kσ support for the moments: on noisy data it is biased toward the noise. Whole segments are used instead.
+  - Iterating δiso for CSA: 30–48 s for no gain. Only the quadrupolar case iterates, because of its second-order shift.
+  - Unbracketed secant for all-transition quadrupolar: it ran away to 7 MHz.
+
+**3. Batch pseudo-2D relaxation (notebook `notebook/batch_relaxation.py`; GUI Dynamics ▸ "Batch: many pseudo-2D series", `gui/batch_relaxation_panel.py`):**
+- Notebook functions:
+  - `NMR2D_relaxation_batch(paths, **workflow_kwargs)` runs `NMR2D_relaxation_workflow` on every path with the same settings. T comes from `acqus` TE and the field from SFO1, unless given.
+  - A failing series is listed in `failed`, never dropped silently.
+  - `group_rows` groups by (peak, field). Fields within 0.01 MHz count as one, because SFO1 moves with O1.
+  - `batch_vt_datasets` builds ready-made `vt_dataset`s for `fit_vt_relaxation`; `batch_table` gives CSV.
+- GUI:
+  - The series selected in Open experiments is the **reference**, set up by hand: its processing, peaks or regions, model, and Values/delays.
+  - Add series with "Add selected" or "Add by number…". T and field are read from each series and can be edited in the table.
+  - "Process and Fit Every Series" applies the reference's processing (`_apply_restored_state(..., reread=True)`, minus analysis/fit/notes keys) and analysis state to each series. Delays are each series' own or the reference's.
+  - Each series is then measured with Fit Spectrum or Integrate Regions, as the reference was, and Fit Curve is run. Dialogs are collected (`_collect_dialogs`) rather than stopping the batch.
+  - The rows go to Relaxation vs Temperature in one go (`VTRelaxationPanel.add_rows`), which groups them by peak and field for BPP.
+- Smoke test: T₂ of 0.02/0.05/0.1 s recovered within 2%.
+
+**4. Automatic cubic-spline baseline (`processing/fitting.py`: `find_baseline_points`, `auto_spline_baseline`; `compute_baseline/baseline_correct(method="spline_auto", n_points=)`; Process ▸ Baseline "Cubic spline (automatic points)" with a "points" box, 0 = Auto = 20):**
+- Baseline points are found anywhere, not just at the edges, with the Golotvin–Williams test: the window spread is at most the noise spread plus 3σ, with short runs dropped and a margin around signal.
+- One median node goes in each of n stretches, plus an end node from the outermost baseline points.
+- A natural cubic spline goes through the nodes and continues past them as a straight line with the end slope. Holding the end value flat was measured 18σ off where a peak sits at an edge.
+- The nodes are drawn as open circles on the baseline preview.
+- Warnings are given when under 15% of the spectrum is baseline, when no node falls across > ⅓ of the spectrum, or when the ends are extrapolated. The edge-peak warning does not apply to this method.
+- Validated on a rolling baseline (amplitude 150, σ 2) under five peaks, one at an edge: rms 0.4–0.7, against 124 for the edge spline.
+- **Known limit, pinned by a test:** a feature much broader than the test window (a broad hump, or heavily overlapped peaks) looks like baseline roll. Use Whittaker or manual regions for those. Lorentzian tails far from a peak are signal; no baseline method separates them, and the test uses Gaussians for that reason.
+
+**Not done:**
+- Starting estimates for more than one interaction at once (e.g. CSA + quadrupolar). This was deliberately limited, as the request suggested.
+- Batch Czjzek/Combined fits of every slice.
+- A batch "Process" for non-relaxation series.
+
+**Tests:** new `test_compare_cross_measure.py` (4), `test_start_estimates.py` (12), `test_batch_relaxation.py` (10), `test_auto_spline_baseline.py` (11).
+- Run, relevant files only: the four new files, test_gui_canvas, test_gui_manual_baseline, test_manual_baseline, test_history, test_report, test_ft, test_gui.py -k baseline, Combined/consolidation/advice, Dynamics/VT/curve fit/integration, relaxation, MAS rate, accessibility and usability.
+- Results: 751 passed, 5 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.**
 
 ## MAS rate as a fitting parameter; plain-language "what the fit tells you / what to try next" (2026-10-06, round 2)
 

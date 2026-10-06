@@ -580,6 +580,126 @@ def estimate_baseline_whittaker(x, y, lam: float | None = None, p: float = 0.001
     return z * scale
 
 
+def find_baseline_points(x, y, half_window=None, threshold=3.0, min_run=None,
+                         margin=None):
+    """Which points of a spectrum are baseline (no signal), anywhere in it --
+    not just at its edges. Golotvin & Williams' test (J. Magn. Reson. 146,
+    122, 2000): a point is baseline when the spread (max - min) of the
+    spectrum in a window around it stays within ``threshold`` × the
+    noise -- signal makes the spread grow, a slowly varying baseline does
+    not. The noise is measured from point-to-point differences (robust
+    MAD), so a baseline offset or roll does not change it.
+
+    ``half_window`` : points either side (default 0.4% of the spectrum,
+    at least 5). ``min_run`` : runs shorter than this are dropped as
+    accidents of the noise (default 2 × half_window). ``margin`` : points
+    removed beside every signal region, so a peak's wings are never taken
+    for baseline (default half_window).
+
+    Returns a boolean array, True for baseline."""
+    y = np.real(np.asarray(y, dtype=float))
+    n = y.size
+    if n < 16:
+        return np.ones(n, dtype=bool)
+    h = int(half_window) if half_window else max(5, int(round(0.004 * n)))
+    d = np.diff(y)
+    noise = 1.4826 * float(np.median(np.abs(d - np.median(d)))) / np.sqrt(2.0)
+    if not noise > 0:
+        return np.ones(n, dtype=bool)
+    # Spread (max - min) over a sliding window, by a strided view.
+    pad = np.pad(y, h, mode="edge")
+    windows = np.lib.stride_tricks.sliding_window_view(pad, 2 * h + 1)
+    spread = windows.max(axis=1) - windows.min(axis=1)
+    # The spread of pure noise over 2h+1 points is about 2 sqrt(2 ln N) σ;
+    # ``threshold`` is on top of that.
+    expected = 2.0 * np.sqrt(2.0 * np.log(2 * h + 1)) * noise
+    base = spread <= expected + threshold * noise
+    # Drop short runs, then keep away from signal by ``margin``.
+    min_run = int(min_run) if min_run else 2 * h
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], base.astype(int), [0]])))
+    for a, b in zip(edges[0::2], edges[1::2]):
+        if b - a < min_run:
+            base[a:b] = False
+    m = int(margin) if margin is not None else h
+    if m:
+        signal = ~base
+        grown = np.convolve(signal.astype(float), np.ones(2 * m + 1), mode="same") > 0
+        base &= ~grown
+    return base
+
+
+def auto_spline_baseline(x, y, n_points=None, half_window=None, threshold=3.0):
+    """A cubic-spline baseline through points placed automatically on the
+    signal-free parts of the spectrum (explicit user request, 2026-10-06).
+
+    1. :func:`find_baseline_points` finds the baseline anywhere in the
+       spectrum (not only at its edges).
+    2. The axis is cut into ``n_points`` equal stretches (default 20, one
+       per 5% of the spectrum); in each stretch with
+       baseline in it, one node is placed at the median position of its
+       baseline points, at their median height (robust to noise and to a
+       stray spike) -- plus one at each end of the spectrum, from its
+       outermost baseline points.
+    3. A natural cubic spline goes through the nodes; past the outermost
+       node it continues as a straight line with the spline's end slope
+       (the natural spline's own extension: its curvature is zero there).
+       A cubic extrapolated past its data swings wildly, and holding the
+       end value flat was measured 18 σ off on a sloping baseline whose
+       edge held a peak.
+
+    Returns a dict: ``baseline`` (on ``x``), ``nodes_x``, ``nodes_y`` (the
+    automatic points, ascending x), ``baseline_points`` (the mask from
+    step 1)."""
+    from scipy.interpolate import CubicSpline
+    x = np.asarray(x, dtype=float)
+    y = np.real(np.asarray(y, dtype=float))
+    order = np.argsort(x)
+    xs, ys = x[order], y[order]
+    base = find_baseline_points(xs, ys, half_window=half_window, threshold=threshold)
+    if base.sum() < 4:
+        raise ValueError("Too little of the spectrum is baseline to place spline points on: "
+                         "use Whittaker, or draw baseline regions.")
+    n = int(n_points) if n_points else 20
+    cuts = np.linspace(0, xs.size, n + 1).astype(int)
+    nx, ny = [], []
+    for a, b in zip(cuts[:-1], cuts[1:]):
+        sel = base[a:b]
+        if sel.sum() < 3:
+            continue
+        px, py = xs[a:b][sel], ys[a:b][sel]
+        nx.append(float(np.median(px)))
+        ny.append(float(np.median(py)))
+    # A node at each end of the spectrum too, from its outermost baseline
+    # points: otherwise the curve is held flat from the first stretch's
+    # middle outwards (measured: 10 σ off at the edge of a sloping baseline).
+    idx = np.flatnonzero(base)
+    k = max(3, min(idx.size // 20, int(round(0.01 * xs.size))))
+    stretch = (xs[-1] - xs[0]) / n if n else 0.0
+    for ends in (idx[:k], idx[-k:]):
+        ex, ey = float(np.median(xs[ends])), float(np.median(ys[ends]))
+        if all(abs(ex - v) > 0.3 * stretch for v in nx):
+            nx.append(ex)
+            ny.append(ey)
+    if len(nx) < 2:
+        raise ValueError("Fewer than two stretches of the spectrum hold baseline: use fewer "
+                         "points, Whittaker, or draw baseline regions.")
+    order_n = np.argsort(nx)
+    nx, ny = np.asarray(nx)[order_n], np.asarray(ny)[order_n]
+    if len(nx) == 2:
+        curve = np.interp(xs, nx, ny)
+    else:
+        spline = CubicSpline(nx, ny, bc_type="natural")
+        slope = spline.derivative()
+        left = ny[0] + float(slope(nx[0])) * (xs - nx[0])
+        right = ny[-1] + float(slope(nx[-1])) * (xs - nx[-1])
+        curve = np.where(xs < nx[0], left, np.where(xs > nx[-1], right, spline(xs)))
+    out = np.empty_like(curve)
+    out[order] = curve
+    mask = np.empty_like(base)
+    mask[order] = base
+    return {"baseline": out, "nodes_x": nx, "nodes_y": ny, "baseline_points": mask}
+
+
 def estimate_baseline_spline(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
                               max_iter=10, smoothing=None) -> UnivariateSpline:
     """Robustly estimate a smooth (not necessarily linear) baseline as

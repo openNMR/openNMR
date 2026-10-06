@@ -534,6 +534,15 @@ class VTRelaxationPanel(QWidget):
                 "Fit a relaxation curve first (Dynamics ▸ Fit Curve); each peak's T₁/T₂ "
                 "is then added here with its spectrum's temperature.")
             return 0
+        return self.add_rows(rows, source="the Fit Curve result")
+
+    def add_rows(self, rows, source="the batch fit") -> int:
+        """Rows ``{"series", "T_K", "value", "error", "larmor_MHz",
+        "quantity"}`` into the table (values in s); the table groups them
+        by (series, Larmor) when fitting -- one dataset per peak per field."""
+        rows = list(rows or [])
+        if not rows:
+            return 0
         q = rows[0].get("quantity")
         if q in ("T1", "T2") and q != self.quantity:
             self.quantity_combo.setCurrentIndex(self.quantity_combo.findData(q))
@@ -550,7 +559,7 @@ class VTRelaxationPanel(QWidget):
                           "" if r.get("error") is None or not np.isfinite(r["error"])
                           else f"{r['error'] * scale:.3g}",
                           "" if not r.get("larmor_MHz") else f"{r['larmor_MHz']:.6g}"])
-        self._log(f"Added {len(rows)} value(s) from the Fit Curve result"
+        self._log(f"Added {len(rows)} value(s) from {source}"
                   + (f"; {missing} without a recorded temperature -- type it in." if missing else "."))
         return len(rows)
 

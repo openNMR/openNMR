@@ -160,6 +160,7 @@ from ..processing.report import WINDOW_NAMES  # noqa: E402 -- after the helpers 
 _BASELINE_METHODS = {
     "linear": "linear", "polynomial": "polynomial", "sinusoidal": "sinusoidal",
     "spline": "smoothing spline", "whittaker": "Whittaker (arPLS)",
+    "spline_auto": "cubic spline (automatic points)",
     "manual_polynomial": "manual Ax⁴+Bx³+Cx²+Dx+E", "manual_sine": "manual A·sin(Bx+C)+D",
 }
 
@@ -279,6 +280,7 @@ KEY_INFO: dict[str, tuple[str, object]] = {
     "baseline_smoothing": ("Baseline smoothing", lambda v: _num(v, 4)),
     "baseline_period": ("Baseline period", lambda v: _num(v, 4)),
     "baseline_harmonics": ("Baseline harmonics", lambda v: str(v)),
+    "baseline_points": ("Baseline spline points", lambda v: "auto" if not v else str(int(v))),
     "baseline_manual_regions": ("Baseline regions", lambda v: "; ".join(
         f"{_num(min(r), 4)} – {_num(max(r), 4)} ppm" for r in v or [])),
     "baseline_manual_polynomial_params": ("Baseline A, B, C, D, E", lambda v: ", ".join(
@@ -595,6 +597,7 @@ def _relevant(key: str, flat: dict, source: dict | None) -> bool:
         needs = {"baseline_degree": "polynomial", "baseline_lam": "whittaker",
                  "baseline_smoothing": "spline", "baseline_period": "sinusoidal",
                  "baseline_harmonics": "sinusoidal",
+                 "baseline_points": "spline_auto",
                  "baseline_manual_polynomial_params": "manual_polynomial",
                  "baseline_manual_sine_params": "manual_sine",
                  "baseline_manual_polynomial_fixed": "manual_polynomial",

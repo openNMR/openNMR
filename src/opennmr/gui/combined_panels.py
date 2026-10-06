@@ -31,6 +31,7 @@ from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
 from ..io import serialize
 from ..notebook import combined_fitting as cfit
 from ..notebook import fit_advice
+from ..notebook import start_estimates
 from ..notebook import combined_hamiltonian as ch
 from ..notebook.utils import _GAMMA_DF, find_isotope_info
 
@@ -902,6 +903,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
     # ---- the part below the site editor ----------------------------------
 
     def _build_actions(self, v) -> None:
+        v.addWidget(self._build_estimate_box())
         box = QGroupBox("Parameters")
         box_layout = QVBoxLayout(box)
         note = QLabel("Start values come from the sites above (and can be typed here). Untick "
@@ -1290,6 +1292,129 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self._sync_result_buttons()
         self._on_fitted()
         return True
+
+    # ---- starting values estimated from the spectrum -------------------------
+
+    _ESTIMATE_KINDS = (("isotropic", "Isotropic peaks (replaces every peak)"),
+                       ("csa", "CSA (the selected peak)"),
+                       ("quadrupolar", "Quadrupolar (the selected peak)"),
+                       ("jcoupling", "J-coupling multiplet (the selected peak)"))
+
+    def _build_estimate_box(self) -> QGroupBox:
+        """Explicit user request, 2026-10-06: estimate good starting values
+        for one type of interaction. notebook.start_estimates."""
+        box = QGroupBox("Estimate starting values from the spectrum")
+        form = QFormLayout(box)
+        note = QLabel("Reads the starting values off the data in the fit window: peaks by "
+                      "peak picking; a CSA or quadrupolar site from the pattern's centre of "
+                      "mass and spread (matched by quick simulations); a multiplet from its "
+                      "line spacing. For one anisotropic site among several, set the fit "
+                      "window around it first.")
+        note.setWordWrap(True)
+        form.addRow(note)
+        self.estimate_kind_combo = QComboBox()
+        for key, text in self._ESTIMATE_KINDS:
+            self.estimate_kind_combo.addItem(text, key)
+        self.estimate_kind_combo.currentIndexChanged.connect(lambda _i: self._sync_estimate())
+        form.addRow("Model:", self.estimate_kind_combo)
+        self.estimate_peaks_spin = QSpinBox()
+        self.estimate_peaks_spin.setRange(1, 50)
+        self.estimate_peaks_spin.setValue(8)
+        self.estimate_peaks_spin.setToolTip("At most this many peaks, tallest first.")
+        form.addRow("Up to peaks:", self.estimate_peaks_spin)
+        self.estimate_partner_combo = QComboBox()
+        self.estimate_partner_combo.setEditable(True)
+        self.estimate_partner_combo.addItems(_nuclides())
+        self.estimate_partner_combo.setCurrentText("1H")
+        form.addRow("Coupled to:", self.estimate_partner_combo)
+        self._estimate_form = form
+        row = QHBoxLayout()
+        self.estimate_button = QPushButton("Estimate Starting Values")
+        self.estimate_button.clicked.connect(lambda: self.estimate_starting_values())
+        self.undo_estimate_button = QPushButton("Undo")
+        self.undo_estimate_button.setToolTip("Put back the peaks as they were before the "
+                                             "estimate.")
+        self.undo_estimate_button.setEnabled(False)
+        self.undo_estimate_button.clicked.connect(self.undo_estimate)
+        row.addWidget(self.estimate_button, 1)
+        row.addWidget(self.undo_estimate_button)
+        form.addRow(row)
+        self.estimate_label = QLabel("")
+        self.estimate_label.setWordWrap(True)
+        self.estimate_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow(self.estimate_label)
+        self._before_estimate = None
+        self._sync_estimate()
+        return box
+
+    def _sync_estimate(self) -> None:
+        kind = self.estimate_kind_combo.currentData()
+        self._estimate_form.setRowVisible(self.estimate_peaks_spin, kind == "isotropic")
+        self._estimate_form.setRowVisible(self.estimate_partner_combo, kind == "jcoupling")
+
+    def estimate_starting_values(self, quiet: bool = False) -> dict | None:
+        """Estimate the chosen model's starting values from the selected
+        spectrum, inside the fit window, and put them into the peaks: every
+        peak for isotropic peaks, otherwise the selected peak (keeping its
+        label). Returns the estimate (notes included), or None."""
+        kind = self.estimate_kind_combo.currentData()
+        try:
+            spectrum, row, _index = self._get_target()
+            from ..notebook import bridge
+            results = bridge.results_from_spectrum(spectrum, row=row)
+            settings = self.settings()
+            est = start_estimates.estimate_start(
+                results, kind, nucleus=self.nucleus_combo.currentText().strip(),
+                larmor_Hz=settings["larmor_Hz"], mas_Hz=settings["mas_Hz"],
+                order=settings["order"], transitions=settings["transitions"],
+                fit_regions=self.fit_regions(), max_peaks=self.estimate_peaks_spin.value(),
+                partner=self.estimate_partner_combo.currentText().strip() or "1H",
+                lineshape=(self.current_site() or {}).get("lineshape", "gaussian"))
+        except (ValueError, KeyError, IndexError) as exc:
+            self.estimate_label.setText(f"Could not estimate: {exc}")
+            if not quiet:
+                QMessageBox.information(self, "Estimate starting values", str(exc))
+            return None
+        self._before_estimate = (copy.deepcopy(self.site_dicts), max(self._current, 0))
+        with self._suspend_preview():
+            if kind == "isotropic" or not self.site_dicts:
+                self._replace_sites(est["sites"])
+            else:
+                current = self._current if self._current >= 0 else 0
+                new = dict(est["sites"][0])
+                new["label"] = self.site_dicts[current]["label"]
+                self.site_dicts[current] = new
+                self.site_list.setCurrentRow(current)
+                self._on_site_selected(current)
+        self.refresh_parameter_table()
+        self.undo_estimate_button.setEnabled(True)
+        self.estimate_label.setText("\n".join(f"• {n}" for n in est["notes"]))
+        self.schedule_preview()
+        return est
+
+    def _replace_sites(self, dicts) -> None:
+        self.site_list.blockSignals(True)
+        self.site_list.clear()
+        self.site_list.blockSignals(False)
+        self.site_dicts = []
+        self._current = -1
+        for site in dicts:
+            CombinedHamiltonianPanel.add_site(self, site)
+        if self.site_dicts:
+            self.site_list.setCurrentRow(0)
+
+    def undo_estimate(self) -> None:
+        if self._before_estimate is None:
+            return
+        dicts, current = self._before_estimate
+        self._before_estimate = None
+        with self._suspend_preview():
+            self._replace_sites(dicts)
+            if self.site_dicts:
+                self.site_list.setCurrentRow(min(current, len(self.site_dicts) - 1))
+        self.refresh_parameter_table()
+        self.undo_estimate_button.setEnabled(False)
+        self.estimate_label.setText("Estimate undone: the peaks are as they were.")
 
     # ---- live preview of the starting model --------------------------------
 

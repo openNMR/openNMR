@@ -126,6 +126,18 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   and Fit Curve. A new fit should get an `advise_*` function there and
   an `AdviceBox`, not hand-written warnings. The MAS rate is a fittable
   parameter (`fit_combined(fit_mas=...)`), fixed by default.
+- **Starting estimates** (one interaction kind at a time) are
+  `notebook/start_estimates.py`, behind Combined's "Estimate Starting
+  Values". CSA/quadrupolar use powder-pattern moments (M2 is kept under
+  MAS); do not replace them with edge/horn rules (see TODO 2026-10-06 r3).
+- **Batch relaxation** (Dynamics ▸ Batch, `gui/batch_relaxation_panel.py`;
+  notebook `notebook/batch_relaxation.py`) replays the selected reference
+  series' processing and analysis on each series through the ordinary
+  handlers (`MainWindow._batch_run_one`), then sends rows to Relaxation
+  vs Temperature. Add new per-series steps there, not in a parallel path.
+- **Baselines**: `"spline_auto"` (`processing.fitting.auto_spline_baseline`)
+  finds baseline anywhere by the Golotvin–Williams test; it shares
+  `_baseline_kwargs` with every other method (`baseline_points` raw key).
 - **Quantify** is one page: Peaks, Integration Regions, then the
   Spectral Fitting section (`_build_spectral_fit_section`). Whether the
   fit uses the regions is two explicit checkboxes there.

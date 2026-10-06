@@ -1,0 +1,2560 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 1efb733..3223f3b 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -126,6 +126,18 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
+   and Fit Curve. A new fit should get an `advise_*` function there and
+   an `AdviceBox`, not hand-written warnings. The MAS rate is a fittable
+   parameter (`fit_combined(fit_mas=...)`), fixed by default.
++- **Starting estimates** (one interaction kind at a time) are
++  `notebook/start_estimates.py`, behind Combined's "Estimate Starting
++  Values". CSA/quadrupolar use powder-pattern moments (M2 is kept under
++  MAS); do not replace them with edge/horn rules (see TODO 2026-10-06 r3).
++- **Batch relaxation** (Dynamics ▸ Batch, `gui/batch_relaxation_panel.py`;
++  notebook `notebook/batch_relaxation.py`) replays the selected reference
++  series' processing and analysis on each series through the ordinary
++  handlers (`MainWindow._batch_run_one`), then sends rows to Relaxation
++  vs Temperature. Add new per-series steps there, not in a parallel path.
++- **Baselines**: `"spline_auto"` (`processing.fitting.auto_spline_baseline`)
++  finds baseline anywhere by the Golotvin–Williams test; it shares
++  `_baseline_kwargs` with every other method (`baseline_points` raw key).
+ - **Quantify** is one page: Peaks, Integration Regions, then the
+   Spectral Fitting section (`_build_spectral_fit_section`). Whether the
+   fit uses the regions is two explicit checkboxes there.
+diff --git a/TODO.md b/TODO.md
+index e3ce93f..0fd2d3d 100644
+--- a/TODO.md
++++ b/TODO.md
+@@ -2,6 +2,8 @@
+ 
+ ## Where things stand (2026-09-21)
+ 
++*2026-10-06 round 3 (Measure across Compare rows, estimated starting values, batch pseudo-2D relaxation, automatic cubic-spline baseline): 37 new tests (4 + 12 + 10 + 11). The relevant subset passes: 751 passed, 5 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
++
+ *2026-10-06 round 2 (MAS rate as a fitting parameter; plain-language fit advice): 32 new tests (16 + 10 + 6). The relevant subset passes: 491 passed, 4 skipped. **Run the full suite locally before committing.***
+ 
+ *2026-10-06 (Combined Hamiltonian as the one entry point, starting-model preview, fitted quantities against x, integration → Dynamics fix): 25 new tests (12 + 8 + 5) and 8 updated for the new menus. Only the relevant subset was run, as asked; it passes (details in that round). **Run the full suite locally before committing.***
+@@ -153,6 +155,73 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
+ 
+ Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+ 
++## Measure across Compare rows; estimated starting values; batch pseudo-2D relaxation; automatic cubic-spline baseline (2026-10-06, round 3)
++
++**Asked:** (1) "When using Measure in Compare ... if I click on one point on one spectrum, then click again on a second point on another spectrum, I cannot measure." (2) "Estimate, given a certain model (probably only one type of interaction), what good starting values for a fit would be." (3) "'Batch' pseudo-2D fitting and processing -- e.g. T1 as a function of temperature, one pseudo-2D per temperature, all processed with the same settings and grouped by field, then the BPP fit. At the moment we are only adding one Fit Curve result at a time." (4) "A cubic-spline baseline option, with the points placed automatically."
++
++**1. Measure across Compare rows (`widgets/canvas.py`):**
++- What was wrong: a second click in another Axes restarted the measurement.
++- Now a second click in another row of the same Compare stack completes it (`_compare_rows_pair`, `_complete_cross_measurement`).
++- It reports Δx only, in ppm and Hz. Δy is not reported because each row has its own intensity scale.
++- Hz uses the first spectrum's field. When the two fields differ, the summary says so.
++- An arrow (`ConnectionPatch` on the figure) joins the two points and is removed with the other measurement artists.
++- The log line names both spectra.
++- A click outside the stack still restarts, as before.
++
++**2. Estimated starting values (new `notebook/start_estimates.py`; GUI: "Estimate Starting Values" at the top of Fit ▸ Combined Hamiltonian's actions):**
++- `estimate_start(results, kind, ...)` covers one kind at a time: `isotropic`, `jcoupling`, `csa` or `quadrupolar`. It returns site dicts, plain-language notes on how each value was found, and the starting model's R².
++- Isotropic: picked peaks with parabolic sub-sample tops. J: the median line spacing, with n = lines − 1.
++- CSA/quadrupolar use the moments, not edge or horn rules:
++  - the first moment is δiso (plus the second-order shift);
++  - the second moment sets the size, because it is conserved under MAS;
++  - the size is solved by a bracketed secant against low-orientation simulations at the trial δiso;
++  - η and the sign of Δ are chosen by χ².
++- Validated:
++  - static and 8 kHz MAS ¹³C CSA (Δ −150 and +120, η 0.4): within 0.3 ppm;
++  - ²⁷Al CT C_Q 5 MHz, static and MAS: within 1%;
++  - all transitions: estimated from the CT segment, with a note saying so;
++  - J quartet: 6.99 Hz (truth 7);
++  - S/N 50: still correct;
++  - 0.2–1.9 s each.
++- GUI: isotropic replaces every peak; the other kinds replace the selected peak and keep its label. "Undo estimate" restores the peaks as they were.
++- **Tried and rejected:**
++  - Shifting one δ = 0 simulation: sidebands that fall off the axis are lost, giving the wrong δiso and sign. Each trial is simulated at its own δiso.
++  - A point-wise > kσ support for the moments: on noisy data it is biased toward the noise. Whole segments are used instead.
++  - Iterating δiso for CSA: 30–48 s for no gain. Only the quadrupolar case iterates, because of its second-order shift.
++  - Unbracketed secant for all-transition quadrupolar: it ran away to 7 MHz.
++
++**3. Batch pseudo-2D relaxation (notebook `notebook/batch_relaxation.py`; GUI Dynamics ▸ "Batch: many pseudo-2D series", `gui/batch_relaxation_panel.py`):**
++- Notebook functions:
++  - `NMR2D_relaxation_batch(paths, **workflow_kwargs)` runs `NMR2D_relaxation_workflow` on every path with the same settings. T comes from `acqus` TE and the field from SFO1, unless given.
++  - A failing series is listed in `failed`, never dropped silently.
++  - `group_rows` groups by (peak, field). Fields within 0.01 MHz count as one, because SFO1 moves with O1.
++  - `batch_vt_datasets` builds ready-made `vt_dataset`s for `fit_vt_relaxation`; `batch_table` gives CSV.
++- GUI:
++  - The series selected in Open experiments is the **reference**, set up by hand: its processing, peaks or regions, model, and Values/delays.
++  - Add series with "Add selected" or "Add by number…". T and field are read from each series and can be edited in the table.
++  - "Process and Fit Every Series" applies the reference's processing (`_apply_restored_state(..., reread=True)`, minus analysis/fit/notes keys) and analysis state to each series. Delays are each series' own or the reference's.
++  - Each series is then measured with Fit Spectrum or Integrate Regions, as the reference was, and Fit Curve is run. Dialogs are collected (`_collect_dialogs`) rather than stopping the batch.
++  - The rows go to Relaxation vs Temperature in one go (`VTRelaxationPanel.add_rows`), which groups them by peak and field for BPP.
++- Smoke test: T₂ of 0.02/0.05/0.1 s recovered within 2%.
++
++**4. Automatic cubic-spline baseline (`processing/fitting.py`: `find_baseline_points`, `auto_spline_baseline`; `compute_baseline/baseline_correct(method="spline_auto", n_points=)`; Process ▸ Baseline "Cubic spline (automatic points)" with a "points" box, 0 = Auto = 20):**
++- Baseline points are found anywhere, not just at the edges, with the Golotvin–Williams test: the window spread is at most the noise spread plus 3σ, with short runs dropped and a margin around signal.
++- One median node goes in each of n stretches, plus an end node from the outermost baseline points.
++- A natural cubic spline goes through the nodes and continues past them as a straight line with the end slope. Holding the end value flat was measured 18σ off where a peak sits at an edge.
++- The nodes are drawn as open circles on the baseline preview.
++- Warnings are given when under 15% of the spectrum is baseline, when no node falls across > ⅓ of the spectrum, or when the ends are extrapolated. The edge-peak warning does not apply to this method.
++- Validated on a rolling baseline (amplitude 150, σ 2) under five peaks, one at an edge: rms 0.4–0.7, against 124 for the edge spline.
++- **Known limit, pinned by a test:** a feature much broader than the test window (a broad hump, or heavily overlapped peaks) looks like baseline roll. Use Whittaker or manual regions for those. Lorentzian tails far from a peak are signal; no baseline method separates them, and the test uses Gaussians for that reason.
++
++**Not done:**
++- Starting estimates for more than one interaction at once (e.g. CSA + quadrupolar). This was deliberately limited, as the request suggested.
++- Batch Czjzek/Combined fits of every slice.
++- A batch "Process" for non-relaxation series.
++
++**Tests:** new `test_compare_cross_measure.py` (4), `test_start_estimates.py` (12), `test_batch_relaxation.py` (10), `test_auto_spline_baseline.py` (11).
++- Run, relevant files only: the four new files, test_gui_canvas, test_gui_manual_baseline, test_manual_baseline, test_history, test_report, test_ft, test_gui.py -k baseline, Combined/consolidation/advice, Dynamics/VT/curve fit/integration, relaxation, MAS rate, accessibility and usability.
++- Results: 751 passed, 5 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.**
++
+ ## MAS rate as a fitting parameter; plain-language "what the fit tells you / what to try next" (2026-10-06, round 2)
+ 
+ **Asked:** "allow the MAS rate to vary (by no more than, say, 500 Hz of a specified value) when fitting ... by default it should be fixed." And: "comments about 'what to try next' when doing fits -- a parameter hits a limit: try changing limits; a quadrupole: try adding CSA to the quad, or quad to the CSA; even 'try adding an extra peak' ... and comments to clearly highlight what the fits (to individual spectra and to any pseudo-2D data) can and cannot say -- e.g. 'clearly a two-site model is better/worse', or 'this fit is good, but the sidebands aren't quite matched yet, so anisotropy is under/overestimated' ... in plain language." Relevant tests only.
+diff --git a/src/opennmr/gui/batch_relaxation_panel.py b/src/opennmr/gui/batch_relaxation_panel.py
+new file mode 100644
+index 0000000..5455a21
+--- /dev/null
++++ b/src/opennmr/gui/batch_relaxation_panel.py
+@@ -0,0 +1,312 @@
++"""Dynamics ▸ Batch: many pseudo-2D series -- every series processed,
++measured and fitted the same way as one you have set up, then each
++peak's T1/T2 with its temperature and field sent to Relaxation vs
++Temperature for the BPP/Arrhenius fit (explicit user request, 2026-10-06).
++
++The panel holds the list and the options; the main window does each
++series (``run_one``), since processing, measuring and Fit Curve are its
++own. Notebook equivalent: :func:`opennmr.notebook.batch_relaxation.NMR2D_relaxation_batch`.
++"""
++
++from __future__ import annotations
++
++import numpy as np
++from PySide6.QtCore import Qt
++from PySide6.QtGui import QGuiApplication
++from PySide6.QtWidgets import (
++    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
++    QHeaderView, QLabel, QMessageBox, QProgressDialog, QPushButton, QTableWidget,
++    QTableWidgetItem, QVBoxLayout, QWidget,
++)
++
++from ..notebook import batch_relaxation as nb_batch
++
++_C_NAME, _C_T, _C_FIELD, _C_STATUS, _C_RESULT = range(5)
++_HEADERS = ("Experiment", "T (K)", "Field (MHz)", "Status", "Result")
++
++
++class BatchRelaxationPanel(QWidget):
++    """Callbacks (all from the main window):
++
++    ``open_items()`` -> [(key, label)] of open experiments;
++    ``selected_keys()`` -> keys selected in Open experiments;
++    ``open_expnos(folder, expnos)`` -> (keys, problems);
++    ``describe(key)`` -> {"label", "T_K", "larmor_MHz", "pseudo_2d"} or None;
++    ``reference()`` -> (key, label) of the series set up by hand, or None;
++    ``run_one(key, options)`` -> {"rows": [...], "status": str, "error": str|None};
++    ``send_rows(rows)`` -> number sent (to Relaxation vs Temperature).
++    """
++
++    def __init__(self, open_items, selected_keys, open_expnos, describe, reference, run_one,
++                 send_rows, parent=None) -> None:
++        super().__init__(parent)
++        self._open_items = open_items
++        self._selected_keys = selected_keys
++        self._open_expnos = open_expnos
++        self._describe = describe
++        self._reference = reference
++        self._run_one = run_one
++        self._send_rows = send_rows
++        self.entries: list[dict] = []
++        self.rows: list[dict] = []
++        self._filling = False
++
++        v = QVBoxLayout(self)
++        blurb = QLabel(
++            "Fit a whole set of pseudo-2D series in one go -- e.g. one T₁ measurement per "
++            "temperature, at one field or several. Set up one series by hand first (process it, "
++            "add its peaks or regions, choose the model and its delays), select it, then add "
++            "the others here: each is processed and measured the same way and fitted, and "
++            "every peak's T₁/T₂ goes to Relaxation vs Temperature with its temperature and "
++            "field, grouped by field.")
++        blurb.setWordWrap(True)
++        v.addWidget(blurb)
++        self.reference_label = QLabel("")
++        self.reference_label.setWordWrap(True)
++        v.addWidget(self.reference_label)
++
++        self.table = QTableWidget(0, len(_HEADERS))
++        self.table.setHorizontalHeaderLabels(list(_HEADERS))
++        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
++        self.table.horizontalHeader().setStretchLastSection(True)
++        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
++        self.table.setMinimumHeight(140)
++        self.table.setToolTip("T and field come from each experiment's own parameters (TE, "
++                              "SFO1); type over them where they are missing or wrong.")
++        self.table.itemChanged.connect(self._on_edited)
++        v.addWidget(self.table)
++        row = QHBoxLayout()
++        self.add_selected_button = QPushButton("Add selected")
++        self.add_selected_button.setToolTip("Add the pseudo-2D series selected in Open "
++                                            "experiments.")
++        self.add_selected_button.clicked.connect(self.add_selected)
++        self.add_expnos_button = QPushButton("Add by number…")
++        self.add_expnos_button.setToolTip("Open experiments of one dataset folder by number "
++                                          "(e.g. 10-25).")
++        self.add_expnos_button.clicked.connect(self._on_add_expnos)
++        self.remove_button = QPushButton("Remove")
++        self.remove_button.clicked.connect(self.remove_selected)
++        for b in (self.add_selected_button, self.add_expnos_button, self.remove_button):
++            row.addWidget(b)
++        v.addLayout(row)
++
++        form = QFormLayout()
++        self.processing_check = QCheckBox("Process every series as the reference is "
++                                          "(phase, apodisation, zero filling, baseline…)")
++        self.processing_check.setChecked(True)
++        form.addRow("", self.processing_check)
++        self.delays_combo = QComboBox()
++        self.delays_combo.addItem("Each series reads its own (as the reference's Values "
++                                  "setting does)", "own")
++        self.delays_combo.addItem("The reference's values, for every series", "reference")
++        self.delays_combo.setToolTip(
++            "Own: with Values on Auto or a list file, each series' delays come from its own "
++            "folder (vdlist/vclist) -- right when the series differ. The reference's: every "
++            "series gets the reference's delays, written out.")
++        form.addRow("Delays:", self.delays_combo)
++        self.send_check = QCheckBox("Send the results to Relaxation vs Temperature when done")
++        self.send_check.setChecked(True)
++        form.addRow("", self.send_check)
++        v.addLayout(form)
++
++        run_row = QHBoxLayout()
++        self.run_button = QPushButton("Process and Fit Every Series")
++        self.run_button.clicked.connect(lambda: self.run())
++        self.send_button = QPushButton("Send to Relaxation vs Temperature")
++        self.send_button.setEnabled(False)
++        self.send_button.clicked.connect(lambda: self.send())
++        self.csv_button = QPushButton("Copy Results (CSV)")
++        self.csv_button.setEnabled(False)
++        self.csv_button.clicked.connect(
++            lambda: QGuiApplication.clipboard().setText(nb_batch.batch_table(self.rows)))
++        run_row.addWidget(self.run_button, 1)
++        run_row.addWidget(self.send_button)
++        run_row.addWidget(self.csv_button)
++        v.addLayout(run_row)
++        self.summary_label = QLabel("")
++        self.summary_label.setWordWrap(True)
++        self.summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
++        v.addWidget(self.summary_label)
++        self.refresh_reference()
++
++    # ---- the list ------------------------------------------------------------
++
++    def refresh_reference(self) -> None:
++        ref = self._reference()
++        self.reference_label.setText(
++            f"Reference (set up by hand): <b>{ref[1]}</b> -- the series selected in Open "
++            "experiments." if ref else
++            "Reference: select the pseudo-2D series you have set up in Open experiments.")
++
++    def add_keys(self, keys) -> list[str]:
++        problems = []
++        have = {e["key"] for e in self.entries}
++        for key in keys:
++            if key in have:
++                continue
++            info = self._describe(key)
++            if info is None:
++                problems.append(f"{key}: not open")
++                continue
++            if not info.get("pseudo_2d"):
++                problems.append(f"{info['label']}: not a pseudo-2D series")
++                continue
++            self.entries.append({"key": key, "label": info["label"], "T_K": info.get("T_K"),
++                                 "larmor_MHz": info.get("larmor_MHz"), "status": "",
++                                 "result": "", "rows": []})
++            have.add(key)
++        self._fill()
++        return problems
++
++    def add_selected(self) -> None:
++        problems = self.add_keys(self._selected_keys())
++        if problems:
++            QMessageBox.information(self, "Batch", "Not added:\n" + "\n".join(problems))
++
++    def _on_add_expnos(self) -> None:
++        from .multi_fit_panel import ExpnoDialog
++        dialog = ExpnoDialog(self)
++        if dialog.exec() != dialog.DialogCode.Accepted:
++            return
++        try:
++            folder, expnos = dialog.values()
++        except ValueError as exc:
++            QMessageBox.warning(self, "Batch", str(exc))
++            return
++        keys, problems = self._open_expnos(folder, expnos)
++        problems += self.add_keys(keys)
++        if problems:
++            QMessageBox.information(self, "Batch", "Not added:\n" + "\n".join(problems))
++
++    def remove_selected(self) -> None:
++        rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
++        for r in rows:
++            del self.entries[r]
++        self._fill()
++
++    def _fill(self) -> None:
++        self._filling = True
++        t = self.table
++        t.setRowCount(len(self.entries))
++        for r, e in enumerate(self.entries):
++            cells = [e["label"], "" if e["T_K"] is None else f"{e['T_K']:g}",
++                     "" if e["larmor_MHz"] is None else f"{e['larmor_MHz']:.6g}",
++                     e["status"], e["result"]]
++            for c, text in enumerate(cells):
++                item = QTableWidgetItem(text)
++                if c not in (_C_T, _C_FIELD):
++                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
++                t.setItem(r, c, item)
++        self._filling = False
++
++    def _on_edited(self, item) -> None:
++        if self._filling:
++            return
++        e = self.entries[item.row()]
++        text = item.text().strip()
++        key = "T_K" if item.column() == _C_T else "larmor_MHz" if item.column() == _C_FIELD \
++            else None
++        if key is None:
++            return
++        try:
++            e[key] = float(text) if text else None
++        except ValueError:
++            self._fill()
++
++    # ---- running ---------------------------------------------------------------
++
++    def options(self) -> dict:
++        return {"apply_processing": self.processing_check.isChecked(),
++                "delays": self.delays_combo.currentData()}
++
++    def run(self, show_progress: bool = True) -> bool:
++        self.refresh_reference()
++        if self._reference() is None:
++            QMessageBox.information(self, "Batch", "Select the series you have set up by hand "
++                                    "(its processing, peaks or regions, model and delays) in "
++                                    "Open experiments first: it is the reference the others "
++                                    "follow.")
++            return False
++        if not self.entries:
++            QMessageBox.information(self, "Batch", "Add the series to fit first.")
++            return False
++        options = self.options()
++        # The reference as it is now: running the batch selects each series
++        # in turn, so "the selected series" changes under it.
++        options["reference"] = self._reference()[0]
++        dialog = None
++        if show_progress:
++            dialog = QProgressDialog("Fitting…", "Stop", 0, len(self.entries), self)
++            dialog.setWindowTitle("Batch fit")
++            dialog.setWindowModality(Qt.WindowModality.WindowModal)
++            dialog.setMinimumDuration(0)
++        self.rows = []
++        done = failed = 0
++        for k, e in enumerate(self.entries):
++            if dialog is not None:
++                dialog.setLabelText(f"{e['label']} ({k + 1} of {len(self.entries)})")
++                dialog.setValue(k)
++                QApplication.processEvents()
++                if dialog.wasCanceled():
++                    e["status"] = "not run (stopped)"
++                    continue
++            out = self._run_one(e["key"], options)
++            rows = out.get("rows") or []
++            for r in rows:
++                r["experiment"] = e["label"]
++                if e["T_K"] is not None:
++                    r["T_K"] = e["T_K"]          # a typed temperature wins
++                if e["larmor_MHz"] is not None:
++                    r["larmor_MHz"] = e["larmor_MHz"]
++            e["rows"] = rows
++            e["status"] = out.get("status") or ("fitted" if rows else "failed")
++            e["result"] = "; ".join(
++                f"{r['series']}: {r['quantity']} {r['value']:.4g} s"
++                + ("" if not np.isfinite(r["error"]) else f" ± {r['error']:.2g}")
++                for r in rows) or (out.get("error") or "")
++            if rows:
++                done += 1
++                self.rows += rows
++            else:
++                failed += 1
++            self._fill()
++        if dialog is not None:
++            dialog.setValue(len(self.entries))
++        groups = nb_batch.group_rows(self.rows)
++        fields = sorted({f for (_s, f) in groups if f is not None})
++        missing_T = sum(1 for r in self.rows if r["T_K"] is None)
++        lines = [f"Fitted {done} of {len(self.entries)} series"
++                 + (f"; {failed} failed (see Status)" if failed else "") + "."]
++        if self.rows:
++            lines.append(f"{len(self.rows)} value(s) in {len(groups)} group(s) -- each peak at "
++                         "each field: " + (", ".join(f"{f:g} MHz" for f in fields) or
++                                           "field unknown") + ".")
++        if missing_T:
++            lines.append(f"{missing_T} value(s) have no temperature: type it in the T column, "
++                         "then send again.")
++        self.summary_label.setText(" ".join(lines))
++        self.send_button.setEnabled(bool(self.rows))
++        self.csv_button.setEnabled(bool(self.rows))
++        if self.rows and self.send_check.isChecked():
++            self.send()
++        return done > 0
++
++    def send(self) -> int:
++        if not self.rows:
++            return 0
++        # Typed temperatures/fields edited after the run still count.
++        by_label = {e["label"]: e for e in self.entries}
++        for r in self.rows:
++            e = by_label.get(r.get("experiment"))
++            if e is not None:
++                if e["T_K"] is not None:
++                    r["T_K"] = e["T_K"]
++                if e["larmor_MHz"] is not None:
++                    r["larmor_MHz"] = e["larmor_MHz"]
++        return self._send_rows(list(self.rows))
++
++    # ---- saved state ----------------------------------------------------------
++
++    def get_state(self) -> dict:
++        return {"entries": [{k: e[k] for k in ("key", "label", "T_K", "larmor_MHz")}
++                            for e in self.entries], "options": self.options()}
+diff --git a/src/opennmr/gui/combined_panels.py b/src/opennmr/gui/combined_panels.py
+index 72f41ca..fbf690f 100644
+--- a/src/opennmr/gui/combined_panels.py
++++ b/src/opennmr/gui/combined_panels.py
+@@ -31,6 +31,7 @@ from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
+ from ..io import serialize
+ from ..notebook import combined_fitting as cfit
+ from ..notebook import fit_advice
++from ..notebook import start_estimates
+ from ..notebook import combined_hamiltonian as ch
+ from ..notebook.utils import _GAMMA_DF, find_isotope_info
+ 
+@@ -902,6 +903,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
+     # ---- the part below the site editor ----------------------------------
+ 
+     def _build_actions(self, v) -> None:
++        v.addWidget(self._build_estimate_box())
+         box = QGroupBox("Parameters")
+         box_layout = QVBoxLayout(box)
+         note = QLabel("Start values come from the sites above (and can be typed here). Untick "
+@@ -1291,6 +1293,129 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
+         self._on_fitted()
+         return True
+ 
++    # ---- starting values estimated from the spectrum -------------------------
++
++    _ESTIMATE_KINDS = (("isotropic", "Isotropic peaks (replaces every peak)"),
++                       ("csa", "CSA (the selected peak)"),
++                       ("quadrupolar", "Quadrupolar (the selected peak)"),
++                       ("jcoupling", "J-coupling multiplet (the selected peak)"))
++
++    def _build_estimate_box(self) -> QGroupBox:
++        """Explicit user request, 2026-10-06: estimate good starting values
++        for one type of interaction. notebook.start_estimates."""
++        box = QGroupBox("Estimate starting values from the spectrum")
++        form = QFormLayout(box)
++        note = QLabel("Reads the starting values off the data in the fit window: peaks by "
++                      "peak picking; a CSA or quadrupolar site from the pattern's centre of "
++                      "mass and spread (matched by quick simulations); a multiplet from its "
++                      "line spacing. For one anisotropic site among several, set the fit "
++                      "window around it first.")
++        note.setWordWrap(True)
++        form.addRow(note)
++        self.estimate_kind_combo = QComboBox()
++        for key, text in self._ESTIMATE_KINDS:
++            self.estimate_kind_combo.addItem(text, key)
++        self.estimate_kind_combo.currentIndexChanged.connect(lambda _i: self._sync_estimate())
++        form.addRow("Model:", self.estimate_kind_combo)
++        self.estimate_peaks_spin = QSpinBox()
++        self.estimate_peaks_spin.setRange(1, 50)
++        self.estimate_peaks_spin.setValue(8)
++        self.estimate_peaks_spin.setToolTip("At most this many peaks, tallest first.")
++        form.addRow("Up to peaks:", self.estimate_peaks_spin)
++        self.estimate_partner_combo = QComboBox()
++        self.estimate_partner_combo.setEditable(True)
++        self.estimate_partner_combo.addItems(_nuclides())
++        self.estimate_partner_combo.setCurrentText("1H")
++        form.addRow("Coupled to:", self.estimate_partner_combo)
++        self._estimate_form = form
++        row = QHBoxLayout()
++        self.estimate_button = QPushButton("Estimate Starting Values")
++        self.estimate_button.clicked.connect(lambda: self.estimate_starting_values())
++        self.undo_estimate_button = QPushButton("Undo")
++        self.undo_estimate_button.setToolTip("Put back the peaks as they were before the "
++                                             "estimate.")
++        self.undo_estimate_button.setEnabled(False)
++        self.undo_estimate_button.clicked.connect(self.undo_estimate)
++        row.addWidget(self.estimate_button, 1)
++        row.addWidget(self.undo_estimate_button)
++        form.addRow(row)
++        self.estimate_label = QLabel("")
++        self.estimate_label.setWordWrap(True)
++        self.estimate_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
++        form.addRow(self.estimate_label)
++        self._before_estimate = None
++        self._sync_estimate()
++        return box
++
++    def _sync_estimate(self) -> None:
++        kind = self.estimate_kind_combo.currentData()
++        self._estimate_form.setRowVisible(self.estimate_peaks_spin, kind == "isotropic")
++        self._estimate_form.setRowVisible(self.estimate_partner_combo, kind == "jcoupling")
++
++    def estimate_starting_values(self, quiet: bool = False) -> dict | None:
++        """Estimate the chosen model's starting values from the selected
++        spectrum, inside the fit window, and put them into the peaks: every
++        peak for isotropic peaks, otherwise the selected peak (keeping its
++        label). Returns the estimate (notes included), or None."""
++        kind = self.estimate_kind_combo.currentData()
++        try:
++            spectrum, row, _index = self._get_target()
++            from ..notebook import bridge
++            results = bridge.results_from_spectrum(spectrum, row=row)
++            settings = self.settings()
++            est = start_estimates.estimate_start(
++                results, kind, nucleus=self.nucleus_combo.currentText().strip(),
++                larmor_Hz=settings["larmor_Hz"], mas_Hz=settings["mas_Hz"],
++                order=settings["order"], transitions=settings["transitions"],
++                fit_regions=self.fit_regions(), max_peaks=self.estimate_peaks_spin.value(),
++                partner=self.estimate_partner_combo.currentText().strip() or "1H",
++                lineshape=(self.current_site() or {}).get("lineshape", "gaussian"))
++        except (ValueError, KeyError, IndexError) as exc:
++            self.estimate_label.setText(f"Could not estimate: {exc}")
++            if not quiet:
++                QMessageBox.information(self, "Estimate starting values", str(exc))
++            return None
++        self._before_estimate = (copy.deepcopy(self.site_dicts), max(self._current, 0))
++        with self._suspend_preview():
++            if kind == "isotropic" or not self.site_dicts:
++                self._replace_sites(est["sites"])
++            else:
++                current = self._current if self._current >= 0 else 0
++                new = dict(est["sites"][0])
++                new["label"] = self.site_dicts[current]["label"]
++                self.site_dicts[current] = new
++                self.site_list.setCurrentRow(current)
++                self._on_site_selected(current)
++        self.refresh_parameter_table()
++        self.undo_estimate_button.setEnabled(True)
++        self.estimate_label.setText("\n".join(f"• {n}" for n in est["notes"]))
++        self.schedule_preview()
++        return est
++
++    def _replace_sites(self, dicts) -> None:
++        self.site_list.blockSignals(True)
++        self.site_list.clear()
++        self.site_list.blockSignals(False)
++        self.site_dicts = []
++        self._current = -1
++        for site in dicts:
++            CombinedHamiltonianPanel.add_site(self, site)
++        if self.site_dicts:
++            self.site_list.setCurrentRow(0)
++
++    def undo_estimate(self) -> None:
++        if self._before_estimate is None:
++            return
++        dicts, current = self._before_estimate
++        self._before_estimate = None
++        with self._suspend_preview():
++            self._replace_sites(dicts)
++            if self.site_dicts:
++                self.site_list.setCurrentRow(min(current, len(self.site_dicts) - 1))
++        self.refresh_parameter_table()
++        self.undo_estimate_button.setEnabled(False)
++        self.estimate_label.setText("Estimate undone: the peaks are as they were.")
++
+     # ---- live preview of the starting model --------------------------------
+ 
+     def schedule_preview(self) -> None:
+diff --git a/src/opennmr/gui/dynamics_panels.py b/src/opennmr/gui/dynamics_panels.py
+index 2db63b8..ae79615 100644
+--- a/src/opennmr/gui/dynamics_panels.py
++++ b/src/opennmr/gui/dynamics_panels.py
+@@ -534,6 +534,15 @@ class VTRelaxationPanel(QWidget):
+                 "Fit a relaxation curve first (Dynamics ▸ Fit Curve); each peak's T₁/T₂ "
+                 "is then added here with its spectrum's temperature.")
+             return 0
++        return self.add_rows(rows, source="the Fit Curve result")
++
++    def add_rows(self, rows, source="the batch fit") -> int:
++        """Rows ``{"series", "T_K", "value", "error", "larmor_MHz",
++        "quantity"}`` into the table (values in s); the table groups them
++        by (series, Larmor) when fitting -- one dataset per peak per field."""
++        rows = list(rows or [])
++        if not rows:
++            return 0
+         q = rows[0].get("quantity")
+         if q in ("T1", "T2") and q != self.quantity:
+             self.quantity_combo.setCurrentIndex(self.quantity_combo.findData(q))
+@@ -550,7 +559,7 @@ class VTRelaxationPanel(QWidget):
+                           "" if r.get("error") is None or not np.isfinite(r["error"])
+                           else f"{r['error'] * scale:.3g}",
+                           "" if not r.get("larmor_MHz") else f"{r['larmor_MHz']:.6g}"])
+-        self._log(f"Added {len(rows)} value(s) from the Fit Curve result"
++        self._log(f"Added {len(rows)} value(s) from {source}"
+                   + (f"; {missing} without a recorded temperature -- type it in." if missing else "."))
+         return len(rows)
+ 
+diff --git a/src/opennmr/gui/main_window.py b/src/opennmr/gui/main_window.py
+index cb1ee46..d46cc5c 100644
+--- a/src/opennmr/gui/main_window.py
++++ b/src/opennmr/gui/main_window.py
+@@ -117,6 +117,7 @@ from .dynamics_panels import ExchangeLineshapePanel, VTRelaxationPanel
+ from .jcoupling_panels import (JCouplingFitPanel, JCouplingSimulationPanel, lock_to_spin_system,
+                                seed_spins_from_peaks)
+ from .combined_section import CombinedModelSection
++from .batch_relaxation_panel import BatchRelaxationPanel
+ from .quadrupolar_panels import QuadrupolarFitPanel
+ from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
+ from .multi_fit_panel import MultiFitPanel
+@@ -10317,10 +10318,20 @@ class MainWindow(QMainWindow):
+         self.baseline_method_combo.addItem("Polynomial", "polynomial")
+         self.baseline_method_combo.addItem("Sinusoidal", "sinusoidal")
+         self.baseline_method_combo.addItem("Spline", "spline")
++        self.baseline_method_combo.addItem("Cubic spline (automatic points)", "spline_auto")
+         self.baseline_method_combo.addItem("Whittaker", "whittaker")
+         self.baseline_method_combo.addItem("Manual: Ax⁴+Bx³+Cx²+Dx+E", "manual_polynomial")
+         self.baseline_method_combo.addItem("Manual: A·sin(Bx+C)+D", "manual_sine")
+         self.baseline_method_combo.setToolTip(
++            "Cubic spline (automatic points): finds the baseline itself, "
++            "anywhere in the spectrum (a stretch counts as baseline when it "
++            "is no rougher than the noise), puts a node at the median of "
++            "each stretch, and draws a natural cubic spline through them. "
++            "Like Whittaker it does not assume the edges are peak-free; "
++            "unlike Whittaker it passes exactly through points you can "
++            "see. The nodes are drawn on the preview. A broad peak with no "
++            "baseline either side cannot be told from a roll -- check the "
++            "nodes sit under, not on, your signal.\n\n"
+             "Manual: your own model -- a quartic polynomial or a sine -- fitted "
+             "to baseline regions you choose, with every coefficient shown, "
+             "fixable and editable by hand (the controls appear below).\n\n"
+@@ -10448,6 +10459,22 @@ class MainWindow(QMainWindow):
+         )
+         self.baseline_period_spin.valueChanged.connect(self._on_baseline_correct_options_changed)
+         baseline_options_row.addWidget(self.baseline_period_spin)
++
++        # Automatic cubic spline (user request, 2026-10-06): how many
++        # stretches the baseline is split into, one node per stretch.
++        self.baseline_points_spin = QSpinBox()
++        self.baseline_points_spin.setRange(0, 200)
++        self.baseline_points_spin.setValue(0)
++        self.baseline_points_spin.setPrefix("points ")
++        self.baseline_points_spin.setSpecialValueText("points Auto")
++        self.baseline_points_spin.setToolTip(
++            "How many nodes the spline may use: the spectrum is cut into this many "
++            "equal stretches and each stretch with baseline in it gets one node, at "
++            "the median of its baseline points (plus one at each end). \"Auto\" is "
++            "20. More follows a faster roll; too many starts following the feet of "
++            "broad peaks.")
++        self.baseline_points_spin.valueChanged.connect(self._on_baseline_correct_options_changed)
++        baseline_options_row.addWidget(self.baseline_points_spin)
+         baseline_form.addRow("Baseline method:", baseline_options_row)
+ 
+         # --- Manual baseline: the user's own model -------------------
+@@ -11296,6 +11323,8 @@ class MainWindow(QMainWindow):
+             "n_harmonics": raw.get("baseline_harmonics", 1),
+             "period": raw.get("baseline_period"),
+         }
++        if kwargs["method"] == "spline_auto":
++            kwargs["n_points"] = raw.get("baseline_points")
+         model = MainWindow._manual_baseline_model_of(kwargs["method"])
+         if model is not None:
+             kwargs.update(MainWindow._manual_baseline_kwargs(raw, model))
+@@ -11650,10 +11679,22 @@ class MainWindow(QMainWindow):
+             # to share that divisor to land on it.
+             scale = float(np.max(np.abs(data))) or 1.0
+             show_ghost = canvas in self._baseline_ghost_canvases()
++            nodes = None
++            kwargs = self._baseline_kwargs(spectrum)
++            if kwargs["method"] == "spline_auto":
++                # Where the automatic spline put its nodes, on the trace
++                # it was fitted to -- the thing to judge it by.
++                try:
++                    fitted_to = uncorrected if uncorrected is not None else np.real(data)
++                    auto = processing_fitting.auto_spline_baseline(ppm, fitted_to, n_points=kwargs.get("n_points"))
++                    nodes = (auto["nodes_x"], np.asarray(auto["nodes_y"]) / scale)
++                except Exception:  # noqa: BLE001 -- best-effort overlay
++                    nodes = None
+             canvas.set_baseline_preview(
+                 ppm, baseline / scale,
+                 uncorrected=(None if uncorrected is None or not show_ghost
+-                             else uncorrected / scale))
++                             else uncorrected / scale),
++                nodes=nodes)
+ 
+     #: Polynomial degree above which a fit starts oscillating between
+     #: its own candidate points rather than following the baseline --
+@@ -11716,6 +11757,11 @@ class MainWindow(QMainWindow):
+             # only baseline, which is the one thing that decides whether
+             # a manual fit is right.
+             notes += self._manual_baseline_region_warnings(spectrum)
++        elif method == "spline_auto":
++            # It does not use the edges; what it can get wrong is
++            # finding too little baseline to place nodes across the
++            # spectrum (a crowded spectrum, or one broad hump).
++            notes += self._auto_spline_warnings(spectrum)
+         elif spectrum.ndim >= 1:
+             # Every other method assumes the spectrum's own edges are
+             # baseline. That is a checkable claim, not a caveat.
+@@ -11732,6 +11778,47 @@ class MainWindow(QMainWindow):
+         if message:
+             self.statusBar().showMessage(message, 15000)
+ 
++    @staticmethod
++    def _auto_spline_warnings(spectrum) -> list[str]:
++        """What the automatic spline found on this spectrum (first row
++        of a series), said when it is too little to trust: under 15 %
++        of the points recognised as baseline, or nodes that leave a gap
++        wider than a third of the spectrum (the spline is guessing
++        across it)."""
++        try:
++            ppm = np.asarray(spectrum.axis_values(-1, "ppm"), dtype=float)
++            data = np.real(spectrum.data)
++            if data.ndim == 2:
++                data = data[0]
++            if data.size != ppm.size or data.size < 20:
++                return []
++            raw = spectrum.metadata.raw
++            auto = processing_fitting.auto_spline_baseline(
++                ppm, data, n_points=raw.get("baseline_points"))
++        except ValueError as exc:
++            # Too little baseline to place nodes at all: say why.
++            return [str(exc).rstrip(".")]
++        except Exception:  # noqa: BLE001 -- a warning is best-effort
++            return []
++        notes = []
++        fraction = float(np.mean(auto["baseline_points"]))
++        if fraction < 0.15:
++            notes.append(f"only {100 * fraction:.0f} % of the spectrum was recognised as baseline, "
++                         f"so the automatic spline has little to go on — check its nodes, or use "
++                         f"Whittaker or a manual baseline")
++        nodes = np.sort(np.asarray(auto["nodes_x"], dtype=float))
++        span = float(np.ptp(ppm)) or 1.0
++        if nodes.size >= 2:
++            gaps = np.diff(np.concatenate([[ppm.min()], nodes, [ppm.max()]]))
++            widest = float(np.max(gaps))
++            if widest > span / 3:
++                notes.append(f"the spline has no node across {widest:.3g} ppm of the spectrum "
++                             f"(a wide region with signal), so its shape there is a guess")
++            elif max(gaps[0], gaps[-1]) > 0.1 * span:
++                notes.append("there is signal at an end of the spectrum, so the baseline "
++                             "beyond the outermost node is a straight-line extrapolation")
++        return notes
++
+     @staticmethod
+     def _manual_baseline_region_warnings(spectrum, threshold: float = 0.25) -> list[str]:
+         """What is wrong with a manual baseline's regions, measured on
+@@ -11813,6 +11900,7 @@ class MainWindow(QMainWindow):
+         self.baseline_lam_spin.setVisible(method == "whittaker")
+         self.baseline_harmonics_spin.setVisible(method == "sinusoidal")
+         self.baseline_period_spin.setVisible(method == "sinusoidal")
++        self.baseline_points_spin.setVisible(method == "spline_auto")
+         if hasattr(self, "baseline_manual_box"):
+             model = self._manual_baseline_model_of(method)
+             self.baseline_manual_box.setVisible(model is not None)
+@@ -11854,6 +11942,8 @@ class MainWindow(QMainWindow):
+         spectrum.metadata.raw["baseline_harmonics"] = self.baseline_harmonics_spin.value()
+         period = self.baseline_period_spin.value()
+         spectrum.metadata.raw["baseline_period"] = period if period > 0.0 else None
++        points = self.baseline_points_spin.value()
++        spectrum.metadata.raw["baseline_points"] = points if points > 0 else None
+         self._schedule_sidecar_save(index)
+         if self.baseline_correct_button.isChecked():
+             self._apply_phase_preview()
+@@ -12594,6 +12684,9 @@ class MainWindow(QMainWindow):
+         self.baseline_period_spin.blockSignals(True)
+         self.baseline_period_spin.setValue(spectrum.metadata.raw.get("baseline_period") or 0.0)
+         self.baseline_period_spin.blockSignals(False)
++        self.baseline_points_spin.blockSignals(True)
++        self.baseline_points_spin.setValue(int(spectrum.metadata.raw.get("baseline_points") or 0))
++        self.baseline_points_spin.blockSignals(False)
+         self._restore_manual_baseline_controls(spectrum)
+         self._refresh_baseline_options_visibility()
+ 
+@@ -12775,7 +12868,7 @@ class MainWindow(QMainWindow):
+             self.phase1_handle, self.phase1_spin, self.phase1_current_display,
+             self.pivot_spin, self.pivot_slider, self.autophase_joint_checkbox,
+             self.baseline_correct_button, self.baseline_method_combo, self.baseline_smoothing_spin,
+-            self.baseline_manual_box,
++            self.baseline_points_spin, self.baseline_manual_box,
+         ):
+             widget.setEnabled(enabled)
+         if status is not None:
+@@ -15665,6 +15758,22 @@ class MainWindow(QMainWindow):
+         layout = QVBoxLayout(container)
+         layout.setContentsMargins(0, 0, 0, 0)
+         layout.addWidget(self._build_curve_fitting_subtab())
++        # Many pseudo-2D series, processed, measured and fitted like one set
++        # up by hand, into Relaxation vs Temperature (explicit user request,
++        # 2026-10-06). notebook.batch_relaxation is the notebook route.
++        self.batch_relaxation_panel = BatchRelaxationPanel(
++            open_items=lambda: [(self._multi_key(i), self.session.label(i))
++                                for i in range(len(self.session))],
++            selected_keys=lambda: [self._multi_key(i) for i in self._selected_rows()],
++            open_expnos=self._multi_open_expnos,
++            describe=self._batch_describe,
++            reference=self._batch_reference,
++            run_one=self._batch_run_one,
++            send_rows=self._batch_send_rows)
++        self._batch_relaxation_section = CollapsibleSection(
++            "Batch: many pseudo-2D series (e.g. T₁ at every temperature)",
++            content=self.batch_relaxation_panel)
++        layout.addWidget(self._batch_relaxation_section)
+         self.vt_relaxation_panel = VTRelaxationPanel(
+             canvas=self.fit_canvas, show_view=self._raise_fit_canvas,
+             curve_fit_rows=self._vt_rows_from_curve_fit)
+@@ -15696,6 +15805,115 @@ class MainWindow(QMainWindow):
+                 return value
+         return None
+ 
++    # ---- Dynamics ▸ Batch: many pseudo-2D series ----------------------------
++
++    def _batch_describe(self, key):
++        index = self._multi_index(key)
++        if index is None:
++            return None
++        spectrum = self.session.spectra[index]
++        return {"label": self.session.label(index),
++                "T_K": self._spectrum_temperature_K(spectrum),
++                "larmor_MHz": float(spectrum.metadata.sfo1) if spectrum.metadata.sfo1 else None,
++                "pseudo_2d": spectrum.ndim == 2 and spectrum.is_pseudo_2d}
++
++    def _batch_reference(self):
++        index = self._selected_index()
++        if index is None:
++            return None
++        spectrum = self.session.spectra[index]
++        if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
++            return None
++        return self._multi_key(index), self.session.label(index)
++
++    @contextlib.contextmanager
++    def _collect_dialogs(self):
++        """Message boxes raised inside, collected instead of shown -- a batch
++        of twenty series must not stop on twenty dialogs. Yields the list
++        of (kind, title, text)."""
++        seen = []
++        saved = {name: getattr(QMessageBox, name) for name in ("critical", "warning",
++                                                                "information")}
++        for name in saved:
++            setattr(QMessageBox, name, staticmethod(
++                lambda *a, _n=name, **k: (seen.append((_n, a[1] if len(a) > 1 else "",
++                                                       a[2] if len(a) > 2 else "")),
++                                          QMessageBox.StandardButton.Ok)[1]))
++        try:
++            yield seen
++        finally:
++            for name, fn in saved.items():
++                setattr(QMessageBox, name, fn)
++
++    def _batch_run_one(self, key, options) -> dict:
++        """One series of a batch: the reference's processing (if asked)
++        and analysis settings (its peaks or regions, model, Values; the
++        delays its own or the reference's), then every slice measured and
++        Fit Curve run -- the steps a user would take by hand."""
++        index = self._multi_index(key)
++        ref_index = self._multi_index(options.get("reference"))
++        if index is None:
++            return {"rows": [], "status": "failed", "error": "not open any more"}
++        if ref_index is None:
++            return {"rows": [], "status": "failed", "error": "the reference is not open"}
++        reference = self.session.spectra[ref_index]
++        if self._current_analysis_index == ref_index:
++            self._save_current_analysis_state()
++        ref_state = copy.deepcopy(reference.metadata.raw.get("analysis_state")
++                                  or self._capture_analysis_state())
++        with self._collect_dialogs() as seen:
++            try:
++                if index != ref_index:
++                    if options.get("apply_processing"):
++                        processing = {k: v for k, v in
++                                      io_persistence.processing_state(reference).items()
++                                      if k not in ("analysis_state", "slice_fit_results",
++                                                   "fits", "fit_models", "display_label",
++                                                   "notes", "history")}
++                        self._apply_restored_state(index, copy.deepcopy(processing),
++                                                   {"pseudo_2d": True}, reread=True)
++                    target = self.session.spectra[index]
++                    if options.get("delays") == "reference":
++                        state = self._carried_analysis_state(
++                            reference, n_rows=self._fit_slice_count(target))
++                    else:
++                        state = copy.deepcopy(ref_state)
++                    target.metadata.raw["analysis_state"] = state
++                    target.metadata.raw.pop("slice_fit_results", None)
++                    if self._current_analysis_index == index:
++                        self._current_analysis_index = None
++                self._select_single_row(index)
++                spectrum = self.session.spectra[index]
++                spectrum.metadata.raw.pop("slice_fit_results", None)
++                self._relaxation_fit_results = None
++                if self.peak_table.rowCount():
++                    self._on_fit_spectrum_clicked()
++                elif self._read_region_defs():
++                    self._on_integrate_regions_clicked()
++                else:
++                    return {"rows": [], "status": "failed",
++                            "error": "the reference has neither peaks nor regions to measure"}
++                if not spectrum.metadata.raw.get("slice_fit_results") and \
++                        not self.session.spectra[index].metadata.raw.get("slice_fit_results"):
++                    raise ValueError("measuring the slices failed")
++                self._on_fit_curve_button_clicked()
++                rows = self._vt_rows_from_curve_fit() if self._relaxation_fit_results else []
++            except Exception as exc:  # noqa: BLE001 -- one bad series must not sink the batch
++                seen.append(("critical", "", str(exc)))
++                rows = []
++        problems = [text for kind, _t, text in seen if kind in ("critical", "warning")]
++        if not rows:
++            return {"rows": [], "status": "failed",
++                    "error": problems[-1] if problems else "Fit Curve gave no result"}
++        status = "fitted" + (f" ({len(problems)} warning{'s' if len(problems) != 1 else ''})"
++                             if problems else "")
++        return {"rows": rows, "status": status, "error": None}
++
++    def _batch_send_rows(self, rows) -> int:
++        n = self.vt_relaxation_panel.add_rows(rows, source="the batch fit")
++        self._vt_relaxation_section.setExpanded(True)
++        return n
++
+     def _vt_rows_from_curve_fit(self) -> list[dict]:
+         """Each peak's fitted T1/T2 from the current Fit Curve result,
+         with its spectrum's temperature and Larmor frequency, for
+@@ -19103,7 +19321,9 @@ class MainWindow(QMainWindow):
+         the number on the plot and the number in the status bar cannot
+         disagree about which unit they are in. This just surfaces the
+         same string somewhere it persists after the next click."""
+-        self.statusBar().showMessage(f"Measurement:  {result['summary']}")
++        between = (f" ({result['spectra'][0]} → {result['spectra'][1]})"
++                   if result.get("spectra") else "")
++        self.statusBar().showMessage(f"Measurement{between}:  {result['summary']}")
+ 
+     def _peak_pick_slice_index(self) -> int:
+         return int(self.peak_slice_spin.value())
+diff --git a/src/opennmr/gui/widgets/canvas.py b/src/opennmr/gui/widgets/canvas.py
+index 8fcf718..21f80d1 100644
+--- a/src/opennmr/gui/widgets/canvas.py
++++ b/src/opennmr/gui/widgets/canvas.py
+@@ -5387,7 +5387,8 @@ class MplCanvas(QWidget):
+             return None
+         return spectrum.axis_values(0, "ppm"), np.real(spectrum.data)
+ 
+-    def set_baseline_preview(self, x=None, baseline=None, uncorrected=None) -> None:
++    def set_baseline_preview(self, x=None, baseline=None, uncorrected=None,
++                             nodes=None) -> None:
+         """Draw the baseline that *would* be subtracted over the trace
+         it would be subtracted from, or clear it with no arguments.
+ 
+@@ -5408,7 +5409,7 @@ class MplCanvas(QWidget):
+         Found by gid rather than a stored reference, so a figure
+         rebuild between calls cannot leave a stale Line2D behind.
+         """
+-        stale = {self._BASELINE_PREVIEW_GID, self._BASELINE_GHOST_GID}
++        stale = {self._BASELINE_PREVIEW_GID, self._BASELINE_GHOST_GID, self._BASELINE_NODES_GID}
+         for ax in self.figure.get_axes():
+             for line in list(ax.lines):
+                 if line.get_gid() in stale:
+@@ -5448,8 +5449,21 @@ class MplCanvas(QWidget):
+             zorder=5, label="_baseline_preview",
+         )[0]
+         line.set_gid(self._BASELINE_PREVIEW_GID)
++        if nodes is not None:
++            # The automatic spline's own nodes: the one thing to check
++            # is that they sit on baseline, not on the foot of a peak.
++            nx, ny = (np.asarray(v, dtype=float) for v in nodes)
++            if nx.size and nx.size == ny.size:
++                marks = target.plot(nx, ny, linestyle="none", marker="o", markersize=5,
++                                    markerfacecolor="white", markeredgecolor="tab:blue",
++                                    markeredgewidth=1.2, zorder=6,
++                                    label="_baseline_nodes")[0]
++                marks.set_gid(self._BASELINE_NODES_GID)
+         self.canvas.draw_idle()
+ 
++    #: gid of the automatic spline's node markers.
++    _BASELINE_NODES_GID = "baseline_spline_nodes"
++
+     #: gid of the manual-baseline region shading (see
+     #: :meth:`set_baseline_regions`).
+     _BASELINE_REGION_GID = "baseline_manual_region"
+@@ -7696,7 +7710,8 @@ class MplCanvas(QWidget):
+         coordinate systems is not a measurement of anything."""
+         if not self._measurement_mode or ax is None or getattr(ax, "name", "") == "3d":
+             return
+-        if self._measurement_points and self._measurement_points[0][0] is not ax:
++        if self._measurement_points and self._measurement_points[0][0] is not ax \
++                and not self._compare_rows_pair(self._measurement_points[0][0], ax):
+             self._measurement_points = []
+             self._clear_pending_marker()
+         self._measurement_points.append((ax, x, y))
+@@ -7705,6 +7720,15 @@ class MplCanvas(QWidget):
+         else:
+             self._draw_pending_marker(ax, x, y)
+ 
++    def _compare_rows_pair(self, ax1, ax2) -> bool:
++        """Both Axes are rows of the current Compare stack: they share one
++        chemical-shift axis, so a horizontal distance between a point on
++        one spectrum and a point on another is a real measurement (user
++        request, 2026-10-06: "measure the horizontal distance between two
++        different spectra")."""
++        rows = self._compare_axes or []
++        return ax1 is not ax2 and ax1 in rows and ax2 in rows
++
+     def _draw_pending_marker(self, ax, x: float, y: float) -> None:
+         """A marker on the first click, so it is visible that the
+         measurement has started and where from -- without it, the first
+@@ -7729,9 +7753,12 @@ class MplCanvas(QWidget):
+     def _complete_measurement(self) -> None:
+         """Draw and report the finished measurement, then clear the
+         pending pair so the next two clicks start a new one."""
+-        (ax, x1, y1), (_ax2, x2, y2) = self._measurement_points
++        (ax, x1, y1), (ax2, x2, y2) = self._measurement_points
+         self._measurement_points = []
+         self._clear_pending_marker()
++        if ax2 is not ax:
++            self._complete_cross_measurement(ax, x1, y1, ax2, x2, y2)
++            return
+ 
+         x_axis, y_axis = self._measurement_axes_for(ax)
+         dx_raw, dy_raw = abs(x2 - x1), abs(y2 - y1)
+@@ -7765,6 +7792,54 @@ class MplCanvas(QWidget):
+         }
+         self.measurementCompleted.emit(result)
+ 
++    def _complete_cross_measurement(self, ax1, x1, y1, ax2, x2, y2) -> None:
++        """A measurement from a point on one Compare row to a point on
++        another: the horizontal separation only (each row has its own
++        intensity scale, so a vertical one means nothing), in every unit
++        of the first row's axis -- with a note when the two spectra were
++        recorded at different fields, whose Hz per ppm then differ."""
++        rows = self._compare_axes
++        i1, i2 = rows.index(ax1), rows.index(ax2)
++        axis1 = self._compare_spectra[i1].axes[0] if i1 < len(self._compare_spectra) else None
++        axis2 = self._compare_spectra[i2].axes[0] if i2 < len(self._compare_spectra) else None
++        dx_raw = abs(x2 - x1)
++        dx_units = self._delta_in_units(axis1, dx_raw)
++        summary = self._format_delta("x", dx_units, dx_raw)
++        note = ""
++        h1 = self._axis_hz_per_ppm(axis1) if axis1 is not None else None
++        h2 = self._axis_hz_per_ppm(axis2) if axis2 is not None else None
++        if h1 and h2 and abs(h1 - h2) > 1e-3 * max(h1, h2) and "hz" in dx_units:
++            note = " (Hz at the first spectrum's field; the two differ)"
++            summary += note
++        labels = [entry.label for entry in self._series.get("compare", [])]
++        names = [labels[i] if i < len(labels) else f"row {i + 1}" for i in (i1, i2)]
++        self._draw_cross_annotation(ax1, x1, y1, ax2, x2, y2, summary)
++        self.measurementCompleted.emit({
++            "display_unit": self._axis_unit, "x1": float(x1), "x2": float(x2),
++            "y1": float(y1), "y2": float(y2), "dx_display": float(dx_raw), "dy_display": 0.0,
++            "dx": dx_units, "dy": {}, "summary": summary, "across": (i1, i2),
++            "spectra": names})
++
++    def _draw_cross_annotation(self, ax1, x1, y1, ax2, x2, y2, summary: str) -> None:
++        """A double-headed arrow from a point in one row to a point in
++        another, labelled at its midpoint (in figure coordinates, since it
++        belongs to neither row)."""
++        from matplotlib.patches import ConnectionPatch
++        arrow = ConnectionPatch(
++            xyA=(x1, y1), coordsA=ax1.transData, xyB=(x2, y2), coordsB=ax2.transData,
++            arrowstyle="<|-|>", color=self._MEASUREMENT_COLOR, linewidth=1.4,
++            shrinkA=0, shrinkB=0, zorder=60)
++        self.figure.add_artist(arrow)
++        p1 = self.figure.transFigure.inverted().transform(ax1.transData.transform((x1, y1)))
++        p2 = self.figure.transFigure.inverted().transform(ax2.transData.transform((x2, y2)))
++        label = self.figure.text(
++            (p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0, summary,
++            color=self._MEASUREMENT_COLOR, fontsize=10, ha="center", va="center", zorder=61,
++            bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
++                      edgecolor=self._MEASUREMENT_COLOR, alpha=0.9))
++        self._measurement_artists.extend((arrow, label))
++        self.canvas.draw_idle()
++
+     def _draw_measurement_annotation(self, ax, x1, y1, x2, y2, summary: str) -> None:
+         """A double-headed arrow between the two points, labelled with
+         the summary at its midpoint. Left on the plot until measurement
+diff --git a/src/opennmr/io/history.py b/src/opennmr/io/history.py
+index 28d9dee..a602f5d 100644
+--- a/src/opennmr/io/history.py
++++ b/src/opennmr/io/history.py
+@@ -160,6 +160,7 @@ from ..processing.report import WINDOW_NAMES  # noqa: E402 -- after the helpers
+ _BASELINE_METHODS = {
+     "linear": "linear", "polynomial": "polynomial", "sinusoidal": "sinusoidal",
+     "spline": "smoothing spline", "whittaker": "Whittaker (arPLS)",
++    "spline_auto": "cubic spline (automatic points)",
+     "manual_polynomial": "manual Ax⁴+Bx³+Cx²+Dx+E", "manual_sine": "manual A·sin(Bx+C)+D",
+ }
+ 
+@@ -279,6 +280,7 @@ KEY_INFO: dict[str, tuple[str, object]] = {
+     "baseline_smoothing": ("Baseline smoothing", lambda v: _num(v, 4)),
+     "baseline_period": ("Baseline period", lambda v: _num(v, 4)),
+     "baseline_harmonics": ("Baseline harmonics", lambda v: str(v)),
++    "baseline_points": ("Baseline spline points", lambda v: "auto" if not v else str(int(v))),
+     "baseline_manual_regions": ("Baseline regions", lambda v: "; ".join(
+         f"{_num(min(r), 4)} – {_num(max(r), 4)} ppm" for r in v or [])),
+     "baseline_manual_polynomial_params": ("Baseline A, B, C, D, E", lambda v: ", ".join(
+@@ -595,6 +597,7 @@ def _relevant(key: str, flat: dict, source: dict | None) -> bool:
+         needs = {"baseline_degree": "polynomial", "baseline_lam": "whittaker",
+                  "baseline_smoothing": "spline", "baseline_period": "sinusoidal",
+                  "baseline_harmonics": "sinusoidal",
++                 "baseline_points": "spline_auto",
+                  "baseline_manual_polynomial_params": "manual_polynomial",
+                  "baseline_manual_sine_params": "manual_sine",
+                  "baseline_manual_polynomial_fixed": "manual_polynomial",
+diff --git a/src/opennmr/notebook/batch_relaxation.py b/src/opennmr/notebook/batch_relaxation.py
+new file mode 100644
+index 0000000..6683fec
+--- /dev/null
++++ b/src/opennmr/notebook/batch_relaxation.py
+@@ -0,0 +1,190 @@
++"""
++Batch relaxation: one pseudo-2D per temperature (and per field), every
++one measured and fitted the same way, then T1/T2 against temperature for a
++BPP/Arrhenius fit (explicit user request, 2026-10-06: "T1 measurements as
++a function of temperature, one pseudo-2D per temperature, all processed
++with the same settings and grouped by field, then the BPP fit").
++
++    from opennmr.notebook import batch_relaxation as br, vt_relaxation as vt
++    batch = br.NMR2D_relaxation_batch(
++        ["/data/vt/10", "/data/vt/11", "/data/vt/12"], integration="regions",
++        regions=[(4.5, 5.5)], model="inversion_recovery",
++        rows=list(range(1, 9)))
++    print(br.batch_table(batch))
++    datasets = br.batch_vt_datasets(batch)           # grouped by peak and field
++    fit = vt.fit_vt_relaxation(datasets)
++
++Each series is read as TopSpin processed it (``NMR2dimport``), measured by
++:func:`opennmr.notebook.relaxation.NMR2D_relaxation_workflow` with the same
++settings, its delays from its own ``vdlist`` unless given, its
++temperature from its own ``acqus`` (``TE``, K) and its field from ``SFO1``.
++A series that fails is reported and skipped, never silently dropped.
++"""
++
++from __future__ import annotations
++
++import csv
++import io
++import os
++
++import numpy as np
++
++from .relaxation import NMR2D_relaxation_workflow
++
++
++def read_temperature_and_field(datapath):
++    """``(TE in K, SFO1 in MHz)`` from a Bruker experiment's ``acqus``;
++    None for either it does not record."""
++    te = sfo1 = None
++    path = os.path.join(str(datapath), "acqus")
++    try:
++        with open(path, "r", errors="ignore") as f:
++            for line in f:
++                if line.startswith("##$TE="):
++                    te = float(line.split("=", 1)[1])
++                elif line.startswith("##$SFO1="):
++                    sfo1 = float(line.split("=", 1)[1])
++    except (OSError, ValueError):
++        pass
++    return te, sfo1
++
++
++def _quantity(rate_param):
++    if not rate_param:
++        return None
++    r = str(rate_param)
++    if r.upper().startswith("T1") and "rho" not in r.lower():
++        return "T1"
++    if r.upper().startswith("T2"):
++        return "T2"
++    if "rho" in r.lower():
++        return "T1rho"
++    return None
++
++
++def rows_from_fits(fits, label, T_K, larmor_MHz):
++    """One row per fitted peak/region of one series:
++    {"experiment", "series", "T_K", "value", "error", "larmor_MHz",
++    "quantity"} -- the shape Dynamics ▸ Relaxation vs Temperature takes."""
++    rows = []
++    for k, fit in enumerate(fits or []):
++        rate = fit.get("rate_param")
++        quantity = _quantity(rate)
++        if quantity is None or rate not in (fit.get("params") or {}):
++            continue
++        err = (fit.get("errors") or {}).get(rate)
++        rows.append({"experiment": str(label),
++                     "series": str(fit.get("peak_label") or f"peak {k + 1}"),
++                     "T_K": None if T_K is None else float(T_K),
++                     "value": float(fit["params"][rate]),
++                     "error": float(err) if err is not None else float("nan"),
++                     "larmor_MHz": None if larmor_MHz is None else float(larmor_MHz),
++                     "quantity": quantity})
++    return rows
++
++
++def NMR2D_relaxation_batch(datapaths, procno=1, temperatures=None, larmor_MHz=None,
++                           labels=None, vdlists=None, **workflow_kwargs):
++    """
++    Run :func:`NMR2D_relaxation_workflow` on every pseudo-2D in
++    ``datapaths`` with the same ``workflow_kwargs`` (integration, peaks or
++    regions, model, rows, ...), and collect every series' fitted T1/T2
++    with its temperature and field.
++
++    ``temperatures`` (K) / ``larmor_MHz`` / ``vdlists`` / ``labels`` : one
++    per path, overriding what each experiment's own files say (None in
++    the list: read it). Plots and reports are off unless asked for.
++
++    Returns a dict: ``rows`` (as :func:`rows_from_fits`, every series),
++    ``runs`` (per path: label, T_K, larmor_MHz, fits or error), and
++    ``failed`` (labels whose fit failed, with the reason).
++    """
++    paths = list(datapaths)
++    n = len(paths)
++
++    def per(values, name):
++        if values is None:
++            return [None] * n
++        values = list(values)
++        if len(values) != n:
++            raise ValueError(f"{name}: {len(values)} values for {n} datasets.")
++        return values
++
++    temps, fields, vds = per(temperatures, "temperatures"), per(larmor_MHz, "larmor_MHz"), \
++        per(vdlists, "vdlists")
++    names = per(labels, "labels")
++    kwargs = dict(workflow_kwargs)
++    kwargs.setdefault("show_fit", False)
++    kwargs.setdefault("show_report", False)
++    kwargs.setdefault("show_warnings", False)
++    rows, runs, failed = [], [], []
++    for path, T, f, vd, name in zip(paths, temps, fields, vds, names):
++        te, sfo1 = read_temperature_and_field(path)
++        T = te if T is None else T
++        f = sfo1 if f is None else f
++        label = name or os.path.basename(os.path.normpath(str(path)))
++        try:
++            out = NMR2D_relaxation_workflow(path, procno=procno,
++                                            **({**kwargs, "vdlist": vd} if vd is not None
++                                               else kwargs))
++        except Exception as exc:  # noqa: BLE001 -- one bad series must not sink the batch
++            failed.append((label, str(exc)))
++            runs.append({"label": label, "path": str(path), "T_K": T, "larmor_MHz": f,
++                         "fits": None, "error": str(exc)})
++            continue
++        fits = out["relaxation_fits"]
++        runs.append({"label": label, "path": str(path), "T_K": T, "larmor_MHz": f,
++                     "fits": fits, "error": None})
++        rows += rows_from_fits(fits, label, T, f)
++    return {"rows": rows, "runs": runs, "failed": failed}
++
++
++def group_rows(rows, field_tolerance_MHz=0.01):
++    """``{(series, field MHz or None): [rows]}`` -- fields within
++    ``field_tolerance_MHz`` count as one (SFO1 moves slightly with O1)."""
++    groups: dict = {}
++    for r in rows:
++        f = r.get("larmor_MHz")
++        key_f = None
++        if f is not None:
++            for (s, g) in groups:
++                if s == r["series"] and g is not None and abs(g - f) <= field_tolerance_MHz:
++                    key_f = g
++                    break
++            else:
++                key_f = round(float(f), 4)
++        groups.setdefault((r["series"], key_f), []).append(r)
++    return groups
++
++
++def batch_vt_datasets(batch_or_rows, field_tolerance_MHz=0.01):
++    """The batch as :func:`opennmr.notebook.vt_relaxation.vt_dataset`
++    datasets, one per (peak, field), ready for ``fit_vt_relaxation``."""
++    from .vt_relaxation import vt_dataset
++    rows = batch_or_rows["rows"] if isinstance(batch_or_rows, dict) else batch_or_rows
++    out = []
++    for (series, field), group in group_rows(rows, field_tolerance_MHz).items():
++        group = [r for r in group if r["T_K"] is not None]
++        if not group:
++            continue
++        out.append(vt_dataset([r["T_K"] for r in group], [r["value"] for r in group],
++                              error=[r["error"] for r in group], larmor_MHz=field,
++                              quantity=group[0]["quantity"],
++                              label=f"{series}" + (f", {field:g} MHz" if field else "")))
++    return out
++
++
++def batch_table(batch_or_rows) -> str:
++    """CSV text: experiment, series, T (K), field (MHz), quantity, value
++    (s), error (s) -- one line per fitted series."""
++    rows = batch_or_rows["rows"] if isinstance(batch_or_rows, dict) else batch_or_rows
++    buf = io.StringIO()
++    w = csv.writer(buf)
++    w.writerow(["experiment", "series", "T_K", "larmor_MHz", "quantity", "value_s", "error_s"])
++    for r in rows:
++        w.writerow([r.get("experiment", ""), r["series"],
++                    "" if r["T_K"] is None else f"{r['T_K']:g}",
++                    "" if r["larmor_MHz"] is None else f"{r['larmor_MHz']:.6g}",
++                    r["quantity"], f"{r['value']:.6g}",
++                    "" if not np.isfinite(r["error"]) else f"{r['error']:.3g}"])
++    return buf.getvalue()
+diff --git a/src/opennmr/notebook/start_estimates.py b/src/opennmr/notebook/start_estimates.py
+new file mode 100644
+index 0000000..767b31f
+--- /dev/null
++++ b/src/opennmr/notebook/start_estimates.py
+@@ -0,0 +1,441 @@
++"""
++Good starting values for a fit, estimated from the spectrum (explicit user
++request, 2026-10-06: "given a certain model -- one type of interaction --
++estimate what good starting values for a fit would be").
++
++One interaction type at a time:
++
++* ``"isotropic"`` -- peaks picked from the smoothed spectrum: shift, width
++  (FWHM at half height) and amount (height × width) of each.
++* ``"jcoupling"`` -- one first-order multiplet: its centre, J from the
++  median line spacing, the number of equivalent partners from the number
++  of lines (n + 1 for spin-1/2 partners), its linewidth.
++* ``"csa"`` and ``"quadrupolar"`` -- one site, static or MAS, from two
++  properties a powder pattern provably keeps:
++
++  - its **first moment** (centre of mass) is δiso, plus, for a
++    quadrupolar nucleus, the second-order quadrupolar shift -- so δiso
++    is read off once the coupling is known;
++  - its **second moment** (spread) grows with the size of the
++    interaction, and MAS does not change it: the sideband manifold keeps
++    the static second moment. So the size -- Δ, or C_Q -- is whatever
++    makes a simulation's spread match the data's, found in a few quick
++    low-resolution simulations, for each asymmetry η (and, for a CSA,
++    each sign of Δ).
++
++  The (η, sign) whose shape then matches the data best is chosen. This
++  needs no rule of thumb about edges or horns, which broadening,
++  sidebands and second-order shapes all defeat; the simulations use the
++  fit's own model, regime and transitions.
++
++Moments are taken only over the stretches where there is signal (above 3σ
++of the noise, widened a little), so noise elsewhere in the window does not
++inflate the spread. The data's baseline is removed first (robust linear).
++
++    from opennmr.notebook import start_estimates as se
++    est = se.estimate_start(results, "csa", nucleus="13C", mas_Hz=12e3)
++    print("\\n".join(est["notes"]))
++    fit = fit_combined(results, est["sites"], mas_Hz=12e3)
++"""
++
++from __future__ import annotations
++
++import numpy as np
++from scipy.signal import find_peaks, peak_widths
++
++from .combined_hamiltonian import Site, simulate_combined
++from .fitting import build_region_mask, estimate_baseline_robust
++
++KINDS = ("isotropic", "csa", "quadrupolar", "jcoupling")
++#: Asymmetries tried for each anisotropic interaction; the best is then
++#: refined on a finer step around it.
++ETA_GRID = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
++
++
++def _prepare(results, fit_regions):
++    x = np.asarray(results["x_ppm"], dtype=float)
++    order = np.argsort(x)
++    x = x[order]
++    y = np.asarray(results["real_spectrum"], dtype=float)[order]
++    b0, b1, _ = estimate_baseline_robust(x, y, x_ref=float(np.mean(x)))
++    y = y - (b0 + b1 * (x - float(np.mean(x))))
++    mask = build_region_mask(x, fit_regions)
++    return x, y, mask
++
++
++def _noise(y):
++    d = np.diff(y)
++    return max(1.4826 * float(np.median(np.abs(d - np.median(d)))) / np.sqrt(2.0), 1e-300)
++
++
++def _support(x, y, mask, widen=5):
++    """Where there is signal: whole stretches whose smoothed intensity
++    rises clearly out of the noise (a top above 6σ), each widened by
++    ``widen`` points, inside ``mask``. Whole stretches, not single points
++    above a threshold: picking points one by one keeps only the noise that
++    happens to push upwards at a faint edge, which inflates the spread
++    (measured: 73 ppm rms against the truth's 64 at S/N 50)."""
++    sigma = _noise(y)
++    k = np.ones(5) / 5
++    ys = np.convolve(y, k, mode="same")
++    s_noise = sigma / np.sqrt(5)
++    hot = (ys > 2 * s_noise) & mask
++    keep = np.zeros(y.size, dtype=bool)
++    edges = np.flatnonzero(np.diff(np.concatenate([[0], hot.astype(int), [0]])))
++    for a, b in zip(edges[0::2], edges[1::2]):
++        if float(np.max(ys[a:b])) > 6 * s_noise:
++            keep[max(a - widen, 0):min(b + widen, y.size)] = True
++    keep &= mask
++    return keep if keep.sum() >= 8 else mask.copy()
++
++
++def _moments(x, y, where):
++    w = y[where]
++    s = float(np.sum(w))
++    if s <= 0:
++        raise ValueError("No positive signal in the window to estimate from.")
++    m1 = float(np.sum(x[where] * w) / s)
++    m2 = float(np.sum((x[where] - m1) ** 2 * w) / s)
++    return m1, max(m2, 0.0)
++
++
++def _nucleus_of(results, nucleus):
++    nucleus = nucleus or results.get("nuclide")
++    if not nucleus:
++        raise ValueError("Give the nucleus (e.g. '13C').")
++    return nucleus
++
++
++def _site_dict(label, delta, fwhm, interactions, lineshape="gaussian", amount=1.0):
++    return {"label": label, "delta_iso": float(delta), "amount": float(amount),
++            "fwhm": float(fwhm), "lineshape": lineshape, "eta": 0.5,
++            "interactions": interactions}
++
++
++# ============================================================
++# Isotropic peaks and J multiplets: peak picking
++# ============================================================
++
++def _peaks(x, y, mask, max_peaks, min_prominence=0.05):
++    dx = float(np.median(np.diff(x)))
++    k = np.ones(3) / 3
++    ys = np.convolve(np.where(mask, y, 0.0), k, mode="same")
++    top = float(np.max(ys[mask])) if mask.any() else 0.0
++    if top <= 0:
++        raise ValueError("No positive signal in the window to estimate from.")
++    sigma = _noise(y)
++    idx, props = find_peaks(ys, prominence=max(min_prominence * top, 5 * sigma), height=0)
++    idx = idx[mask[idx]]
++    if not idx.size:
++        raise ValueError("No peaks stand out of the noise in the window.")
++    widths = peak_widths(ys, idx, rel_height=0.5)[0] * dx
++    order = np.argsort(-ys[idx])[:max_peaks]
++    idx, widths = idx[order], widths[order]
++    # Each top between grid points: a parabola through the three highest.
++    centres = x[idx].astype(float)
++    inner = (idx > 0) & (idx < ys.size - 1)
++    a, b, c = ys[idx[inner] - 1], ys[idx[inner]], ys[idx[inner] + 1]
++    denom = a - 2 * b + c
++    offset = np.where(denom != 0, 0.5 * (a - c) / np.where(denom != 0, denom, 1), 0.0)
++    centres[inner] += np.clip(offset, -0.5, 0.5) * dx
++    keep = np.argsort(centres)
++    return centres[keep], ys[idx][keep], np.maximum(widths[keep], 2 * dx)
++
++
++def _estimate_isotropic(x, y, mask, max_peaks, lineshape):
++    centres, heights, widths = _peaks(x, y, mask, max_peaks)
++    sites = [_site_dict(f"Site {k + 1}", c, w, [], lineshape=lineshape, amount=h * w)
++             for k, (c, h, w) in enumerate(zip(centres, heights, widths))]
++    notes = [f"Found {len(sites)} peak{'s' if len(sites) != 1 else ''} standing out of the "
++             "noise (at least 5% of the tallest): "
++             + ", ".join(f"{c:.4g} ppm (FWHM {w:.3g} ppm)" for c, w in zip(centres, widths))
++             + ". Each peak's shift is its top, its width the full width at half height."]
++    if len(centres) == max_peaks:
++        notes.append(f"Only the {max_peaks} tallest were kept; raise the number of peaks to "
++                     "keep more.")
++    return sites, notes
++
++
++def _estimate_jcoupling(x, y, mask, larmor_Hz, partner, lineshape):
++    centres, heights, widths = _peaks(x, y, mask, 40)
++    if centres.size < 2:
++        raise ValueError("Only one line in the window: no splitting to measure a J from. "
++                         "Narrow the window to one multiplet with its lines resolved.")
++    spacings_Hz = np.diff(centres) * larmor_Hz / 1e6
++    J = float(np.median(spacings_Hz))
++    n = int(centres.size - 1)
++    centre = float(np.sum(centres * heights) / np.sum(heights))
++    from math import comb
++    expected = np.array([comb(n, k) for k in range(n + 1)], float)
++    expected /= expected.max()
++    seen = heights / heights.max()
++    binomial = bool(np.all(np.abs(seen - expected) < 0.25))
++    uneven = float(np.std(spacings_Hz) / J) if J else 0.0
++    site = _site_dict("Site 1", centre, float(np.median(widths)),
++                      [{"type": "jcoupling", "nuclide": partner, "n": n, "J_Hz": J}],
++                      lineshape=lineshape, amount=float(np.sum(heights) * np.median(widths)))
++    notes = [f"{centres.size} lines, {J:.3g} Hz apart (median spacing): J ≈ {J:.3g} Hz to "
++             f"{n} equivalent {partner} partner{'s' if n != 1 else ''} (n + 1 lines for n "
++             "spin-½ partners), centred at {:.4g} ppm.".format(centre)]
++    if not binomial:
++        notes.append("The line heights are not in the binomial ratio n partners give "
++                     f"({', '.join(f'{v:.2f}' for v in expected)}): it may be several "
++                     "couplings, or overlapping multiplets -- check the J groups.")
++    if uneven > 0.1:
++        notes.append(f"The spacings vary by {uneven:.0%}: more than one J, or strong "
++                     "coupling (then use the strongly coupled peaks model).")
++    return [site], notes
++
++
++# ============================================================
++# CSA and quadrupolar: moments matched by simulation
++# ============================================================
++
++def _sim(kind, eta, size, x, settings, fwhm, nucleus, transitions, n_zcw, delta=0.0):
++    site = Site(nucleus, float(delta), label="S", fwhm=fwhm)
++    if kind == "csa":
++        site.add_csa(size, eta)
++    else:
++        site.add_quadrupolar(size, eta)
++    return np.asarray(simulate_combined([site], x, settings["larmor_Hz"],
++                                        mas_Hz=settings["mas_Hz"], order=settings["order"],
++                                        transitions=transitions, n_zcw=n_zcw)["real_spec"],
++                      float)
++
++
++def _size_for_m2(kind, eta, sign, target_m2, delta, x, where, settings, fwhm, nucleus,
++                 transitions, n_zcw):
++    """The interaction size (|Δ| ppm, or C_Q MHz) whose simulation, made at
++    δiso = ``delta`` and measured over the same stretch ``where`` as the
++    data, has the data's second moment. Secant steps on log size against
++    log m2, kept inside a bracket and falling back to bisection, so a
++    spread that saturates (a pattern running off the axis) or a simulation
++    that cannot be made (sidebands too many for the spinning rate) cannot
++    send it off to absurd sizes."""
++    def m2_of(p):
++        # Simulated at δiso = delta itself: a pattern simulated at 0 and
++        # shifted loses whatever ran off the axis before the shift (the
++        # outer sidebands -- measured: m1 off by 10 ppm).
++        try:
++            curve = _sim(kind, eta, sign * p, x, settings, fwhm, nucleus, transitions, n_zcw,
++                         delta)
++        except ValueError:
++            return np.inf                      # too large to simulate: treat as too wide
++        if float(np.sum(curve[where])) <= 0:
++            return np.inf
++        return _moments(x, curve, where)[1]
++    span = float(x[where].max() - x[where].min()) if where.any() else float(np.ptp(x))
++    if kind == "csa":
++        p = np.sqrt(max(5.0 * target_m2 / (1 + eta ** 2 / 3), 1e-12))
++        lo_lim, hi_lim, exponent = 1e-4, 3.0 * span, 2.0
++    else:
++        p, exponent = 2.0, 4.0 if transitions == "ct" else 2.0
++        lo_lim, hi_lim = 1e-3, 200.0
++    p = float(np.clip(p, lo_lim, hi_lim))
++    lo = hi = None                             # sizes known to give too little / too much
++    prev = None
++    for _ in range(14):
++        m2 = m2_of(p)
++        if np.isfinite(m2) and abs(m2 - target_m2) <= 0.005 * target_m2:
++            return p
++        if m2 < target_m2:
++            lo = p if lo is None else max(lo, p)
++        else:
++            hi = p if hi is None else min(hi, p)
++        if prev is not None and np.isfinite(m2) and np.isfinite(prev[1]) and m2 > 0 \
++                and prev[1] > 0 and abs(np.log(p / prev[0])) > 1e-9:
++            exponent = float(np.clip(np.log(m2 / prev[1]) / np.log(p / prev[0]), 0.5, 6.0))
++        prev = (p, m2)
++        if np.isfinite(m2) and m2 > 0:
++            step = p * (target_m2 / m2) ** (1.0 / exponent)
++        else:
++            step = p / 2.0
++        if lo is not None and hi is not None and not lo < step < hi:
++            step = float(np.sqrt(lo * hi))     # bisect (in log) inside the bracket
++        p = float(np.clip(step, lo_lim, hi_lim))
++        if (lo is not None and hi is not None and hi / lo < 1.002) or \
++                (p in (lo_lim, hi_lim) and prev[0] == p):
++            break
++    return p
++
++
++def _estimate_anisotropic(kind, x, y, mask, nucleus, settings, transitions, n_zcw,
++                          ct_only=False):
++    where = _support(x, y, mask)
++    if ct_only:
++        # The central transition only: the stretch holding the tallest
++        # point (its centreband). Satellites usually run far past the
++        # axis, where their spread says little about C_Q.
++        top = int(np.argmax(np.where(where, y, -np.inf)))
++        edges = np.flatnonzero(np.diff(np.concatenate([[0], where.astype(int), [0]])))
++        for a, b in zip(edges[0::2], edges[1::2]):
++            if a <= top < b:
++                where = np.zeros_like(where)
++                where[a:b] = True
++                break
++    m1, m2 = _moments(x, y, where)
++    dx = float(np.median(np.diff(x)))
++    mas = settings["mas_Hz"]
++    # Starting linewidth: the narrowest line under MAS (a sideband), else a
++    # small fraction of the pattern's spread.
++    try:
++        _c, _h, widths = _peaks(x, y, where, 5)
++        fwhm = float(np.min(widths)) if mas else max(2 * dx, 0.02 * np.sqrt(m2))
++    except ValueError:
++        fwhm = max(2 * dx, 0.02 * np.sqrt(m2))
++    signs = (1.0, -1.0) if kind == "csa" else (1.0,)
++    target = y[where]
++    # Under MAS a CSA's centreband sits exactly at δiso: the data peak
++    # nearest the centre of mass (which a pattern cut off at the window's
++    # edge pulls away from it).
++    snap = None
++    if mas and kind == "csa":
++        try:
++            tops, _h, _w = _peaks(x, y, where, 64)
++            snap = tops
++        except ValueError:
++            snap = None
++
++    def trial(eta, sign):
++        delta = m1
++        if snap is not None and snap.size:
++            delta = float(snap[np.argmin(np.abs(snap - m1))])
++        size = 0.0
++        # A CSA's δiso is its centre of mass (or its centreband): nothing to
++        # iterate. A quadrupolar CT is shifted by an amount that depends on
++        # C_Q, so δiso and C_Q are refined together.
++        for _ in range(1 if kind == "csa" else 3):
++            size = _size_for_m2(kind, eta, sign, m2, delta, x, where, settings, fwhm, nucleus,
++                                transitions, n_zcw)
++            curve = _sim(kind, eta, sign * size, x, settings, fwhm, nucleus, transitions,
++                         n_zcw, delta)
++            if kind != "csa" and float(np.sum(curve[where])) > 0:
++                delta += m1 - _moments(x, curve, where)[0]
++        return _score(kind, eta, sign * size, delta, x, where, target, settings, fwhm,
++                      nucleus, transitions, n_zcw)
++
++    trials = [trial(eta, sign) for eta in ETA_GRID for sign in signs]
++    best = min(trials, key=lambda t: t["chi2"])
++    # A finer look around the best asymmetry.
++    for eta in (best["eta"] - 0.1, best["eta"] - 0.05, best["eta"] + 0.05, best["eta"] + 0.1):
++        if 0.0 <= eta <= 1.0:
++            trials.append(trial(eta, np.sign(best["size"]) or 1.0))
++    best = min(trials, key=lambda t: t["chi2"])
++    ranked = sorted(trials, key=lambda t: t["chi2"])
++    rival = next((t for t in ranked[1:] if np.sign(t["size"]) != np.sign(best["size"])), None)
++    if kind == "csa":
++        inter = {"type": "csa", "aniso": round(best["size"], 3), "asym": round(best["eta"], 3),
++                 "convention": "Haeberlen", "euler": (0.0, 0.0, 0.0)}
++        size_text = f"Δ ≈ {best['size']:.4g} ppm"
++    else:
++        inter = {"type": "quadrupolar", "C_Q": round(abs(best["size"]), 4),
++                 "eta_Q": round(best["eta"], 3)}
++        size_text = f"C_Q ≈ {abs(best['size']):.3g} MHz"
++    site = _site_dict("Site 1", best["delta_iso"], fwhm, [inter])
++    notes = [
++        f"Centre of mass of the pattern: {m1:.4g} ppm"
++        + (f"; with the quadrupolar shift taken off, δiso ≈ {best['delta_iso']:.4g} ppm."
++           if kind == "quadrupolar" else
++           f"; the centreband nearest it puts δiso at {best['delta_iso']:.4g} ppm."
++           if snap is not None else f", which is δiso for a CSA: δiso ≈ "
++           f"{best['delta_iso']:.4g} ppm."),
++        f"Spread of the pattern (second moment, which spinning does not change): "
++        f"{np.sqrt(m2):.3g} ppm rms, which needs {size_text}.",
++        f"Of the asymmetries tried ({', '.join(f'{e:g}' for e in ETA_GRID)}, then ±0.05 and "
++        f"±0.1 around the best){' and both signs of Δ' if kind == 'csa' else ''}, "
++        f"{'η' if kind == 'csa' else 'η_Q'} ≈ {best['eta']:.2f} matches the shape best.",
++        f"Starting linewidth: {fwhm:.3g} ppm "
++        + ("(the narrowest line)." if mas else "(the fit will refine it)."),
++    ]
++    if rival is not None and rival["chi2"] < 1.1 * best["chi2"]:
++        notes.append("The opposite sign of Δ fits almost as well (Δ ≈ "
++                     f"{rival['size']:.4g} ppm, η ≈ {rival['eta']:.2f}): try both as starts "
++                     "(Try starts) if the fit looks wrong.")
++    if kind == "csa" and abs(best["size"]) * settings["larmor_Hz"] / 1e6 < 0.5 * mas and mas:
++        notes.append("The anisotropy is small next to the spinning rate: few sidebands, so "
++                     "these values are rough.")
++    return [site], notes, best
++
++
++def _score(kind, eta, size, delta, x, where, target, settings, fwhm, nucleus, transitions,
++           n_zcw):
++    curve = _sim(kind, eta, size, x, settings, fwhm, nucleus, transitions, n_zcw, delta)
++    s = curve[where]
++    a = float(np.dot(s, target) / (np.dot(s, s) or 1.0))
++    chi2 = float(np.sum((target - a * s) ** 2))
++    return {"eta": float(eta), "size": float(size), "delta_iso": float(delta), "chi2": chi2,
++            "curve": a * curve}
++
++
++# ============================================================
++# Entry point
++# ============================================================
++
++def estimate_start(results, kind, nucleus=None, larmor_Hz=None, mas_Hz=0.0, order="second",
++                   transitions="all", fit_regions=None, max_peaks=8, partner="1H",
++                   lineshape="gaussian", n_zcw=None):
++    """
++    Starting values for a fit of ``results`` (``x_ppm``, ``real_spectrum``,
++    ``SFO1``) with one interaction type, ``kind``: ``"isotropic"``,
++    ``"jcoupling"``, ``"csa"`` or ``"quadrupolar"`` (one site; give a
++    ``fit_regions`` window around it when the spectrum holds several).
++
++    Returns a dict:
++        ``sites`` -- site dicts, ready for :func:`fit_combined` (or
++        Fit ▸ Combined Hamiltonian);
++        ``notes`` -- how each value was arrived at, in plain words;
++        ``start_r2`` -- R² of the starting model (amounts by least
++        squares), a check that the start is near the data;
++        ``kind``, ``nucleus``.
++    """
++    if kind not in KINDS:
++        raise ValueError(f"kind must be one of {KINDS}.")
++    nucleus = _nucleus_of(results, nucleus)
++    larmor_Hz = float(larmor_Hz) if larmor_Hz else float(results["SFO1"]) * 1e6
++    x, y, mask = _prepare(results, fit_regions)
++    settings = {"larmor_Hz": larmor_Hz, "mas_Hz": float(mas_Hz or 0.0),
++                "order": "second" if order == "exact" else order}
++    if kind == "isotropic":
++        sites, notes = _estimate_isotropic(x, y, mask, int(max_peaks), lineshape)
++    elif kind == "jcoupling":
++        sites, notes = _estimate_jcoupling(x, y, mask, larmor_Hz, partner, lineshape)
++    else:
++        if kind == "quadrupolar":
++            from .utils import find_isotope_info
++            if float(find_isotope_info(nucleus)["spin"]) < 1:
++                raise ValueError(f"{nucleus} is spin-1/2: it has no quadrupolar coupling.")
++        n = int(n_zcw) if n_zcw else (233 if settings["mas_Hz"] else 987)
++        ct_only = False
++        est_transitions = transitions
++        if kind == "quadrupolar" and transitions != "ct":
++            from .utils import find_isotope_info
++            spin = float(find_isotope_info(nucleus)["spin"])
++            if not spin.is_integer():
++                ct_only, est_transitions = True, "ct"
++        sites, notes, _best = _estimate_anisotropic(kind, x, y, mask, nucleus, settings,
++                                                    est_transitions, n, ct_only=ct_only)
++        if ct_only:
++            notes.append("Estimated from the central transition alone (its centreband), "
++                         "which C_Q shapes most clearly; the fit then uses every transition "
++                         "you chose.")
++        if order == "exact":
++            notes.append("Estimated with second-order theory (fast); the fit uses exact.")
++    from .combined_fitting import starting_model
++    try:
++        guess = starting_model(results, [Site.from_dict({**s, "nucleus": nucleus}) for s in sites],
++                               larmor_Hz=larmor_Hz, mas_Hz=mas_Hz, order=order,
++                               transitions=transitions, fit_regions=fit_regions,
++                               n_zcw=(233 if mas_Hz else 4181))
++        m = guess["mask"]
++        res = guess["y"][m] - guess["start"][m]
++        tot = float(np.sum((guess["y"][m] - guess["y"][m].mean()) ** 2))
++        start_r2 = 1 - float(np.sum(res ** 2)) / tot if tot else float("nan")
++        for s in sites:
++            s["amount"] = float(guess["amounts"].get(s["label"], s["amount"]))
++    except (ValueError, KeyError):
++        start_r2 = float("nan")
++    if np.isfinite(start_r2):
++        notes.append(f"The starting model already matches the data with R² {start_r2:.3f}; "
++                     "the fit takes it from there.")
++    return {"sites": sites, "notes": notes, "start_r2": start_r2, "kind": kind,
++            "nucleus": nucleus}
+diff --git a/src/opennmr/processing/fitting.py b/src/opennmr/processing/fitting.py
+index 34e061e..7b550ac 100644
+--- a/src/opennmr/processing/fitting.py
++++ b/src/opennmr/processing/fitting.py
+@@ -580,6 +580,126 @@ def estimate_baseline_whittaker(x, y, lam: float | None = None, p: float = 0.001
+     return z * scale
+ 
+ 
++def find_baseline_points(x, y, half_window=None, threshold=3.0, min_run=None,
++                         margin=None):
++    """Which points of a spectrum are baseline (no signal), anywhere in it --
++    not just at its edges. Golotvin & Williams' test (J. Magn. Reson. 146,
++    122, 2000): a point is baseline when the spread (max - min) of the
++    spectrum in a window around it stays within ``threshold`` × the
++    noise -- signal makes the spread grow, a slowly varying baseline does
++    not. The noise is measured from point-to-point differences (robust
++    MAD), so a baseline offset or roll does not change it.
++
++    ``half_window`` : points either side (default 0.4% of the spectrum,
++    at least 5). ``min_run`` : runs shorter than this are dropped as
++    accidents of the noise (default 2 × half_window). ``margin`` : points
++    removed beside every signal region, so a peak's wings are never taken
++    for baseline (default half_window).
++
++    Returns a boolean array, True for baseline."""
++    y = np.real(np.asarray(y, dtype=float))
++    n = y.size
++    if n < 16:
++        return np.ones(n, dtype=bool)
++    h = int(half_window) if half_window else max(5, int(round(0.004 * n)))
++    d = np.diff(y)
++    noise = 1.4826 * float(np.median(np.abs(d - np.median(d)))) / np.sqrt(2.0)
++    if not noise > 0:
++        return np.ones(n, dtype=bool)
++    # Spread (max - min) over a sliding window, by a strided view.
++    pad = np.pad(y, h, mode="edge")
++    windows = np.lib.stride_tricks.sliding_window_view(pad, 2 * h + 1)
++    spread = windows.max(axis=1) - windows.min(axis=1)
++    # The spread of pure noise over 2h+1 points is about 2 sqrt(2 ln N) σ;
++    # ``threshold`` is on top of that.
++    expected = 2.0 * np.sqrt(2.0 * np.log(2 * h + 1)) * noise
++    base = spread <= expected + threshold * noise
++    # Drop short runs, then keep away from signal by ``margin``.
++    min_run = int(min_run) if min_run else 2 * h
++    edges = np.flatnonzero(np.diff(np.concatenate([[0], base.astype(int), [0]])))
++    for a, b in zip(edges[0::2], edges[1::2]):
++        if b - a < min_run:
++            base[a:b] = False
++    m = int(margin) if margin is not None else h
++    if m:
++        signal = ~base
++        grown = np.convolve(signal.astype(float), np.ones(2 * m + 1), mode="same") > 0
++        base &= ~grown
++    return base
++
++
++def auto_spline_baseline(x, y, n_points=None, half_window=None, threshold=3.0):
++    """A cubic-spline baseline through points placed automatically on the
++    signal-free parts of the spectrum (explicit user request, 2026-10-06).
++
++    1. :func:`find_baseline_points` finds the baseline anywhere in the
++       spectrum (not only at its edges).
++    2. The axis is cut into ``n_points`` equal stretches (default 20, one
++       per 5% of the spectrum); in each stretch with
++       baseline in it, one node is placed at the median position of its
++       baseline points, at their median height (robust to noise and to a
++       stray spike) -- plus one at each end of the spectrum, from its
++       outermost baseline points.
++    3. A natural cubic spline goes through the nodes; past the outermost
++       node it continues as a straight line with the spline's end slope
++       (the natural spline's own extension: its curvature is zero there).
++       A cubic extrapolated past its data swings wildly, and holding the
++       end value flat was measured 18 σ off on a sloping baseline whose
++       edge held a peak.
++
++    Returns a dict: ``baseline`` (on ``x``), ``nodes_x``, ``nodes_y`` (the
++    automatic points, ascending x), ``baseline_points`` (the mask from
++    step 1)."""
++    from scipy.interpolate import CubicSpline
++    x = np.asarray(x, dtype=float)
++    y = np.real(np.asarray(y, dtype=float))
++    order = np.argsort(x)
++    xs, ys = x[order], y[order]
++    base = find_baseline_points(xs, ys, half_window=half_window, threshold=threshold)
++    if base.sum() < 4:
++        raise ValueError("Too little of the spectrum is baseline to place spline points on: "
++                         "use Whittaker, or draw baseline regions.")
++    n = int(n_points) if n_points else 20
++    cuts = np.linspace(0, xs.size, n + 1).astype(int)
++    nx, ny = [], []
++    for a, b in zip(cuts[:-1], cuts[1:]):
++        sel = base[a:b]
++        if sel.sum() < 3:
++            continue
++        px, py = xs[a:b][sel], ys[a:b][sel]
++        nx.append(float(np.median(px)))
++        ny.append(float(np.median(py)))
++    # A node at each end of the spectrum too, from its outermost baseline
++    # points: otherwise the curve is held flat from the first stretch's
++    # middle outwards (measured: 10 σ off at the edge of a sloping baseline).
++    idx = np.flatnonzero(base)
++    k = max(3, min(idx.size // 20, int(round(0.01 * xs.size))))
++    stretch = (xs[-1] - xs[0]) / n if n else 0.0
++    for ends in (idx[:k], idx[-k:]):
++        ex, ey = float(np.median(xs[ends])), float(np.median(ys[ends]))
++        if all(abs(ex - v) > 0.3 * stretch for v in nx):
++            nx.append(ex)
++            ny.append(ey)
++    if len(nx) < 2:
++        raise ValueError("Fewer than two stretches of the spectrum hold baseline: use fewer "
++                         "points, Whittaker, or draw baseline regions.")
++    order_n = np.argsort(nx)
++    nx, ny = np.asarray(nx)[order_n], np.asarray(ny)[order_n]
++    if len(nx) == 2:
++        curve = np.interp(xs, nx, ny)
++    else:
++        spline = CubicSpline(nx, ny, bc_type="natural")
++        slope = spline.derivative()
++        left = ny[0] + float(slope(nx[0])) * (xs - nx[0])
++        right = ny[-1] + float(slope(nx[-1])) * (xs - nx[-1])
++        curve = np.where(xs < nx[0], left, np.where(xs > nx[-1], right, spline(xs)))
++    out = np.empty_like(curve)
++    out[order] = curve
++    mask = np.empty_like(base)
++    mask[order] = base
++    return {"baseline": out, "nodes_x": nx, "nodes_y": ny, "baseline_points": mask}
++
++
+ def estimate_baseline_spline(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
+                               max_iter=10, smoothing=None) -> UnivariateSpline:
+     """Robustly estimate a smooth (not necessarily linear) baseline as
+diff --git a/src/opennmr/processing/ft.py b/src/opennmr/processing/ft.py
+index 8cebb92..30f5036 100644
+--- a/src/opennmr/processing/ft.py
++++ b/src/opennmr/processing/ft.py
+@@ -612,7 +612,7 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
+                      degree: int = 2, n_harmonics: int = 1, period: float | None = None,
+                      lam: float | None = None, asymmetry: float | None = None,
+                      diff_order: int = 2, manual_params=None, manual_fixed=None,
+-                     manual_refit: bool = False) -> np.ndarray:
++                     manual_refit: bool = False, n_points: int | None = None) -> np.ndarray:
+     """The baseline :func:`baseline_correct` would subtract, returned
+     instead of subtracted.
+ 
+@@ -631,7 +631,7 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
+     """
+     from .fitting import (
+         estimate_baseline_polynomial, estimate_baseline_sinusoidal,
+-        estimate_baseline_spline, estimate_baseline_whittaker,
++        estimate_baseline_spline, estimate_baseline_whittaker, auto_spline_baseline,
+         evaluate_baseline_sinusoidal,
+     )
+     freq = np.asarray(freq, dtype=float)
+@@ -652,6 +652,10 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
+             fixed = {n: v for n, v, f in zip(names, values, manual_fixed) if f}
+         return nb_manual.fit_manual_baseline(
+             freq, np.real(spectrum), model, regions=baseline_regions, fixed=fixed)["baseline"]
++    if method == "spline_auto":
++        # Like Whittaker, it finds the baseline itself, anywhere in the
++        # spectrum -- no edge regions.
++        return auto_spline_baseline(freq, np.real(spectrum), n_points=n_points)["baseline"]
+     if method == "whittaker":
+         # Before the candidate-region setup below, which this method
+         # has no use for -- see its own docstring.
+@@ -688,7 +692,7 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
+         )
+         return evaluate_baseline_sinusoidal(coeffs, fitted_period, freq)
+     raise ValueError(
+-        "method must be 'linear', 'polynomial', 'sinusoidal', 'spline', "
++        "method must be 'linear', 'polynomial', 'sinusoidal', 'spline', 'spline_auto', "
+         f"'whittaker', 'manual_polynomial' or 'manual_sine', got {method!r}"
+     )
+ 
+@@ -700,7 +704,7 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
+                       degree: int = 2, n_harmonics: int = 1, period: float | None = None,
+                       lam: float | None = None, asymmetry: float | None = None,
+                       diff_order: int = 2, manual_params=None, manual_fixed=None,
+-                      manual_refit: bool = False) -> np.ndarray:
++                      manual_refit: bool = False, n_points: int | None = None) -> np.ndarray:
+     """Subtract a robust baseline fit to the real part, via
+     :mod:`opennmr.processing.fitting`'s baseline estimators -- the same
+     ones ``fit_spectrum`` already uses to hold a baseline fixed under a
+@@ -745,6 +749,12 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
+       not well-described by a low-order polynomial or a single
+       sinusoid, at the cost of being the easiest to overfit to noise
+       between sparse candidate points.
++    - ``"spline_auto"`` (:func:`opennmr.processing.fitting.
++      auto_spline_baseline`) -- a cubic spline through points placed
++      automatically wherever the spectrum is baseline (Golotvin-Williams
++      test), anywhere in it, ``n_points`` of them at most (None: 20).
++      Follows a roll in the middle of the spectrum that edge-based
++      methods cannot see.
+     - ``"whittaker"`` (:func:`opennmr.processing.fitting.
+       estimate_baseline_whittaker`) -- **the one that does not need
+       candidate regions at all.** Every method above starts from "the
+@@ -797,7 +807,7 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
+         max_iter=max_iter, method=method, smoothing=smoothing, degree=degree,
+         n_harmonics=n_harmonics, period=period, lam=lam, asymmetry=asymmetry,
+         diff_order=diff_order, manual_params=manual_params, manual_fixed=manual_fixed,
+-        manual_refit=manual_refit,
++        manual_refit=manual_refit, n_points=n_points,
+     )
+ 
+ 
+diff --git a/src/opennmr/processing/report.py b/src/opennmr/processing/report.py
+index ec43a21..2f8306c 100644
+--- a/src/opennmr/processing/report.py
++++ b/src/opennmr/processing/report.py
+@@ -50,6 +50,8 @@ _BASELINE_NAMES = {
+     "sinusoidal": "a sinusoidal fit",
+     "spline": "a cubic smoothing spline",
+     "whittaker": "an asymmetrically reweighted Whittaker smoother",
++    "spline_auto": ("a natural cubic spline through automatically placed nodes "
++                    "(baseline recognised by the Golotvin–Williams noise test)"),
+     "manual_polynomial": "a manual polynomial baseline",
+     "manual_sine": "a manual sinusoidal baseline",
+ }
+diff --git a/tests/test_auto_spline_baseline.py b/tests/test_auto_spline_baseline.py
+new file mode 100644
+index 0000000..5f389c4
+--- /dev/null
++++ b/tests/test_auto_spline_baseline.py
+@@ -0,0 +1,164 @@
++"""Cubic-spline baseline with automatically placed points (user request,
++2026-10-06: "a cubic-spline baseline option, with the points placed
++automatically")."""
++
++import numpy as np
++import pytest
++
++from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
++from opennmr.gui.main_window import MainWindow
++from opennmr.processing import ft
++from opennmr.processing.fitting import auto_spline_baseline, find_baseline_points
++
++from test_gui import qapp, _load_spectrum_directly, _settle_live_reprocess  # noqa: F401
++
++
++def _rolling(n=4096, sigma=2.0, seed=0):
++    """A rolling baseline (amplitude ~150) under five peaks, one of them
++    near an edge -- which breaks the edge-based estimators."""
++    rng = np.random.default_rng(seed)
++    x = np.linspace(-20.0, 220.0, n)
++    baseline = 150 * np.sin(2 * np.pi * x / 300.0) + 0.4 * x + 30
++    # Gaussian peaks: a Lorentzian's long tails are signal spread under the
++    # whole spectrum, which no baseline method can (or should) tell apart.
++    peaks = sum(a * np.exp(-0.5 * ((x - c) / w) ** 2)
++                for c, w, a in ((-15, 0.8, 800), (40, 1.5, 3000), (95, 0.6, 1500),
++                                (130, 3.0, 600), (180, 1.0, 2000)))
++    return x, baseline, peaks + baseline + rng.normal(0, sigma, n)
++
++
++def test_baseline_points_are_found_away_from_peaks():
++    x, _b, y = _rolling()
++    mask = find_baseline_points(x, y)
++    assert 0.3 < mask.mean() < 0.98
++    for centre in (-15, 40, 95, 130, 180):
++        assert not mask[np.argmin(np.abs(x - centre))]
++
++
++def test_auto_spline_recovers_a_rolling_baseline_to_noise_level():
++    x, true, y = _rolling()
++    out = auto_spline_baseline(x, y)
++    rms = float(np.sqrt(np.mean((out["baseline"] - true) ** 2)))
++    assert rms < 1.0                          # noise sigma is 2
++    assert float(np.max(np.abs(out["baseline"] - true))) < 6.0
++    # Nodes lie on the true baseline, ascending, and cover both ends.
++    nx, ny = np.asarray(out["nodes_x"]), np.asarray(out["nodes_y"])
++    assert np.all(np.diff(nx) > 0)
++    assert np.max(np.abs(ny - np.interp(nx, x, true))) < 3.0
++    assert nx[0] < x.min() + 0.05 * np.ptp(x) and nx[-1] > x.max() - 0.05 * np.ptp(x)
++
++
++def test_it_beats_the_edge_spline_and_works_on_descending_axes():
++    x, true, y = _rolling()
++    auto = y - np.real(ft.baseline_correct(x, y, method="spline_auto"))
++    edge = y - np.real(ft.baseline_correct(x, y, method="spline"))
++    rms = lambda b: float(np.sqrt(np.mean((b - true) ** 2)))   # noqa: E731
++    assert rms(auto) < 0.05 * rms(edge)
++    # ppm axes run high to low; the answer must not depend on it.
++    flipped = ft.compute_baseline(x[::-1], y[::-1], method="spline_auto")
++    np.testing.assert_allclose(flipped[::-1], auto, atol=1e-6)
++
++
++def test_n_points_is_passed_through_and_changes_the_node_count():
++    x, _t, y = _rolling()
++    few = auto_spline_baseline(x, y, n_points=6)
++    many = auto_spline_baseline(x, y, n_points=40)
++    assert len(few["nodes_x"]) < len(many["nodes_x"])
++    np.testing.assert_allclose(ft.compute_baseline(x, y, method="spline_auto", n_points=6),
++                               few["baseline"])
++
++
++def test_a_flat_noisy_spectrum_gives_a_flat_baseline():
++    rng = np.random.default_rng(3)
++    x = np.linspace(0, 100, 2000)
++    y = 5.0 + rng.normal(0, 1.0, x.size)
++    base = auto_spline_baseline(x, y)["baseline"]
++    assert np.max(np.abs(base - 5.0)) < 0.6
++
++
++def _spectrum():
++    x, true, y = _rolling(n=2048)
++    ppm = x / 10.0
++    return true, NMRSpectrum(
++        data=y, axes=[NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 400.0)],
++        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0),
++        data_imag=np.zeros_like(y))
++
++
++def test_gui_method_points_box_and_overlay_nodes(qapp):
++    true, spectrum = _spectrum()
++    window = MainWindow()
++    _load_spectrum_directly(window, spectrum)
++    combo = window.baseline_method_combo
++    combo.setCurrentIndex(combo.findData("spline_auto"))
++    assert not window.baseline_points_spin.isHidden()
++    assert window.baseline_degree_spin.isHidden()
++    window.baseline_points_spin.setValue(12)
++    raw = window.session.spectra[0].metadata.raw
++    assert raw["baseline_method"] == "spline_auto" and raw["baseline_points"] == 12
++    assert window._baseline_kwargs(window.session.spectra[0])["n_points"] == 12
++    # The edge-peak warning is for edge-based methods only.
++    assert "edge region" not in window.processing_status_label.text()
++
++    original = window.session.spectra[0].data.copy()
++    window.baseline_correct_button.setChecked(True)
++    _settle_live_reprocess(window)
++    removed = original - window.session.spectra[0].data
++    assert float(np.sqrt(np.mean((removed - true) ** 2))) < 1.5
++
++    # Auto (0) is stored as None; other methods hide the box.
++    window.baseline_points_spin.setValue(0)
++    assert raw["baseline_points"] is None
++    combo.setCurrentIndex(combo.findData("linear"))
++    assert window.baseline_points_spin.isHidden()
++
++
++def test_canvas_draws_and_clears_the_node_markers(qapp):
++    from opennmr.gui.widgets.canvas import MplCanvas
++    _true, spectrum = _spectrum()
++    canvas = MplCanvas()
++    canvas.show_spectrum(spectrum)
++    ppm = spectrum.axes[0].ppm
++    canvas.set_baseline_preview(ppm, np.zeros_like(ppm), nodes=([1.0, 2.0], [0.0, 0.1]))
++    gids = [ln.get_gid() for ax in canvas.figure.get_axes() for ln in ax.lines]
++    assert canvas._BASELINE_NODES_GID in gids
++    canvas.set_baseline_preview()
++    gids = [ln.get_gid() for ax in canvas.figure.get_axes() for ln in ax.lines]
++    assert canvas._BASELINE_NODES_GID not in gids
++
++
++def _as_spectrum(x, y):
++    return NMRSpectrum(data=y, axes=[NMRAxis(kind="frequency", ppm=x, hz=x * 400.0)],
++                       metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=400.0))
++
++
++def test_warns_when_little_baseline_is_found():
++    # A crowded spectrum: peaks almost everywhere.
++    x = np.linspace(0, 10, 4000)
++    rng = np.random.default_rng(0)
++    y = sum(50 * np.exp(-0.5 * ((x - c) / 0.08) ** 2) for c in np.arange(0.2, 10, 0.25))
++    notes = MainWindow._auto_spline_warnings(_as_spectrum(x, y + rng.normal(0, 0.5, x.size)))
++    assert any("recognised as baseline" in n or "Too little" in n for n in notes)
++
++
++def test_warns_when_a_wide_region_has_no_node():
++    x = np.linspace(0, 10, 4000)
++    rng = np.random.default_rng(1)
++    y = sum(50 * np.exp(-0.5 * ((x - c) / 0.08) ** 2) for c in np.arange(2.0, 7.0, 0.25))
++    notes = MainWindow._auto_spline_warnings(_as_spectrum(x, y + rng.normal(0, 0.5, x.size)))
++    assert any("guess" in n for n in notes)
++
++
++def test_a_broad_hump_is_taken_for_baseline():
++    """The method's known limit, pinned so it is not mistaken for a bug:
++    a feature much broader than the test window looks like baseline roll."""
++    x = np.linspace(0, 10, 2000)
++    y = 100 * np.exp(-((x - 5) / 3.5) ** 2) + np.random.default_rng(0).normal(0, 0.5, x.size)
++    assert find_baseline_points(x, y).mean() > 0.8
++
++
++def test_history_and_report_name_the_method():
++    from opennmr.io import history
++    from opennmr.processing import report
++    assert "automatic" in history._BASELINE_METHODS["spline_auto"]
++    assert "automatic" in report._BASELINE_NAMES["spline_auto"]
+diff --git a/tests/test_batch_relaxation.py b/tests/test_batch_relaxation.py
+new file mode 100644
+index 0000000..c7afb02
+--- /dev/null
++++ b/tests/test_batch_relaxation.py
+@@ -0,0 +1,180 @@
++"""Batch pseudo-2D relaxation: many series processed and fitted like one
++set up by hand, grouped by field, into Relaxation vs Temperature (user
++request, 2026-10-06) -- notebook.batch_relaxation and Dynamics ▸ Batch."""
++
++import numpy as np
++import pytest
++
++from opennmr.gui.main_window import MainWindow
++from opennmr.notebook import batch_relaxation as br
++
++from test_gui import (qapp, _load_spectrum_directly, _make_pseudo2d_relaxation_spectrum,  # noqa: F401
++                      _set_delay_unit, _write_params)
++
++DELAYS = np.geomspace(0.001, 0.3, 8)
++
++
++# ---- notebook ----------------------------------------------------------------------
++
++def test_temperature_and_field_from_acqus(tmp_path):
++    _write_params(tmp_path / "acqus", {"TE": 298.15, "SFO1": 400.1324, "NUC1": "1H"})
++    assert br.read_temperature_and_field(tmp_path) == (pytest.approx(298.15),
++                                                       pytest.approx(400.1324))
++    assert br.read_temperature_and_field(tmp_path / "missing") == (None, None)
++
++
++def _row(series, T, value, field, quantity="T1"):
++    return {"experiment": f"e{T}", "series": series, "T_K": T, "value": value,
++            "error": 0.01 * value, "larmor_MHz": field, "quantity": quantity}
++
++
++def test_rows_group_by_peak_and_field_within_a_tolerance():
++    rows = [_row("a", 250, 0.1, 400.1301), _row("a", 300, 0.2, 400.1324),   # same field
++            _row("a", 250, 0.3, 600.13), _row("b", 250, 0.4, 400.13)]
++    groups = br.group_rows(rows)
++    assert sorted((s, round(f)) for s, f in groups) == [("a", 400), ("a", 600), ("b", 400)]
++    assert len(next(v for (s, f), v in groups.items() if s == "a" and round(f) == 400)) == 2
++    # Tighter than the O1 spread: split.
++    assert len(br.group_rows(rows, field_tolerance_MHz=1e-4)) == 4
++
++
++def test_vt_datasets_and_csv():
++    rows = [_row("a", T, 0.1 * k, 400.13) for k, T in enumerate((250, 275, 300), 1)]
++    rows.append(_row("a", None, 1.0, 400.13))          # no temperature: left out
++    (ds,) = br.batch_vt_datasets(rows)
++    assert list(ds["T_K"]) == [250, 275, 300]
++    assert list(ds["value"]) == pytest.approx([0.1, 0.2, 0.3])
++    text = br.batch_table({"rows": rows})
++    lines = text.strip().splitlines()
++    assert lines[0].startswith("experiment,series,T_K") and len(lines) == 5
++    assert ",T1," in lines[1]
++
++
++def test_rows_from_fits_reads_the_rate_parameter():
++    fits = [{"rate_param": "T1", "params": {"T1": 0.5, "M0": 1}, "errors": {"T1": 0.01},
++             "peak_label": "CH3"},
++            {"rate_param": "D", "params": {"D": 1e-9}}]                 # not relaxation
++    rows = br.rows_from_fits(fits, "e1", 300.0, 400.13)
++    assert rows == [{"experiment": "e1", "series": "CH3", "T_K": 300.0, "value": 0.5,
++                     "error": 0.01, "larmor_MHz": 400.13, "quantity": "T1"}]
++
++
++def test_a_failing_path_is_reported_not_dropped(tmp_path):
++    out = br.NMR2D_relaxation_batch([str(tmp_path / "nothing")], integration="regions",
++                                    regions=[(4.5, 5.5)], model="T2")
++    assert out["rows"] == [] and len(out["failed"]) == 1
++    assert out["runs"][0]["error"]
++    with pytest.raises(ValueError, match="1 datasets"):
++        br.NMR2D_relaxation_batch([str(tmp_path)], temperatures=[1, 2])
++
++
++# ---- GUI -----------------------------------------------------------------------------
++
++def _series(T2, T_K, sfo1, seed):
++    sp = _make_pseudo2d_relaxation_spectrum(DELAYS, T2=T2, seed=seed)
++    sp.metadata.sfo1 = sfo1
++    sp.metadata.raw = {**(sp.metadata.raw or {}), "acqus": {"TE": T_K}}
++    return sp
++
++
++def _set_up(qapp, n=3):
++    window = MainWindow()
++    truth = [(0.02, 250.0, 400.13), (0.05, 300.0, 400.1302), (0.1, 350.0, 600.2)][:n]
++    for k, (T2, T, f) in enumerate(truth):
++        _load_spectrum_directly(window, _series(T2, T, f, seed=k))
++    # The reference, set up by hand: the first series.
++    window._select_single_row(0)
++    window._add_region_row(4.5, 5.5)
++    window.delay_source_combo.setCurrentIndex(1)
++    _set_delay_unit(window, "s")
++    window.manual_delays_edit.setText(", ".join(f"{d:.6g}" for d in DELAYS))
++    window.relaxation_model_combo.setCurrentIndex(2)
++    window._save_current_analysis_state()
++    panel = window.batch_relaxation_panel
++    panel.processing_check.setChecked(False)        # in-memory series: nothing to re-read
++    return window, panel, truth
++
++
++def test_gui_batch_fits_every_series_and_sends_grouped_rows(qapp):
++    window, panel, truth = _set_up(qapp)
++    keys = [window._multi_key(i) for i in range(len(window.session))]
++    assert panel.add_keys(keys) == []
++    assert [e["T_K"] for e in panel.entries] == [250.0, 300.0, 350.0]
++    assert panel.run(show_progress=False)
++    assert [e["status"] for e in panel.entries] == ["fitted"] * 3, \
++        [e["result"] for e in panel.entries]
++    values = [r["value"] for r in panel.rows]
++    assert values == pytest.approx([t[0] for t in truth], rel=0.05)
++    assert "2 group(s)" in panel.summary_label.text()          # 400.13 and 600.2 MHz
++    vt = window.vt_relaxation_panel
++    assert vt.table.rowCount() == 3
++    assert window._vt_relaxation_section.isExpanded()
++    assert panel.csv_button.isEnabled()
++
++
++def test_gui_reference_delays_and_a_typed_temperature(qapp):
++    window, panel, truth = _set_up(qapp, n=2)
++    panel.add_keys([window._multi_key(i) for i in range(2)])
++    panel.delays_combo.setCurrentIndex(panel.delays_combo.findData("reference"))
++    panel.send_check.setChecked(False)
++    panel.table.item(1, 1).setText("310")               # T column
++    assert panel.entries[1]["T_K"] == 310.0
++    assert panel.run(show_progress=False)
++    assert panel.rows[1]["T_K"] == 310.0
++    assert panel.rows[1]["value"] == pytest.approx(truth[1][0], rel=0.05)
++
++
++def test_gui_a_series_that_cannot_be_measured_fails_alone(qapp):
++    window, panel, _truth = _set_up(qapp, n=2)
++    panel.add_keys([window._multi_key(i) for i in range(2)])
++    real = window._batch_run_one
++
++    def flaky(key, options):
++        if key == window._multi_key(1):
++            return {"rows": [], "status": "failed", "error": "no signal"}
++        return real(key, options)
++    panel._run_one = flaky
++    panel.send_check.setChecked(False)
++    assert panel.run(show_progress=False)
++    assert panel.entries[1]["status"] == "failed" and "no signal" in panel.entries[1]["result"]
++    assert "1 failed" in panel.summary_label.text()
++
++
++def test_gui_needs_a_pseudo2d_reference(qapp, monkeypatch):
++    from PySide6.QtWidgets import QMessageBox
++    said = []
++    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: said.append(a[2]))
++    window = MainWindow()
++    panel = window.batch_relaxation_panel
++    assert panel.run(show_progress=False) is False      # nothing selected: says so
++    assert "reference" in said[0]
++
++
++def test_gui_batch_applies_the_reference_processing_to_a_read_series(qapp, tmp_path,
++                                                                      monkeypatch):
++    """Processing on: a series read from disk is re-processed with the
++    reference's settings (here a zero-order phase and a baseline method)
++    before it is measured -- even when its measurement then fails."""
++    from test_gui import _isolate_sidecars, _make_2d_dataset
++    (tmp_path / "sidecars").mkdir()
++    _isolate_sidecars(monkeypatch, tmp_path / "sidecars")
++    window = MainWindow()
++    for name in ("vt250", "vt300"):
++        window._load(_make_2d_dataset(tmp_path, n_f1=4, n_f2=64, name=name), vendor="bruker")
++    for i in range(2):
++        window.session.reload(i, pseudo_2d=True)
++    ref = window.session.spectra[0]
++    ref.metadata.raw.update({"phase0": 37.0, "baseline_method": "spline_auto",
++                             "baseline_points": 7})
++    window._select_single_row(0)
++    window._add_region_row(window.session.spectra[0].axes[-1].ppm.min(),
++                           window.session.spectra[0].axes[-1].ppm.max())
++    window._save_current_analysis_state()
++    out = window._batch_run_one(window._multi_key(1),
++                                {"reference": window._multi_key(0), "apply_processing": True,
++                                 "delays": "own"})
++    target = window.session.spectra[1].metadata.raw
++    assert target.get("phase0") == 37.0
++    assert target.get("baseline_method") == "spline_auto" and target.get("baseline_points") == 7
++    assert target["analysis_state"]["regions"]               # the reference's regions
++    assert out["status"] in ("fitted", "failed") and "rows" in out
+diff --git a/tests/test_compare_cross_measure.py b/tests/test_compare_cross_measure.py
+new file mode 100644
+index 0000000..ac8947e
+--- /dev/null
++++ b/tests/test_compare_cross_measure.py
+@@ -0,0 +1,72 @@
++"""Measure in Compare: from a point on one spectrum to a point on another
++(user report, 2026-10-06: "if I click on one point on one spectrum, then
++click again on a second point on another spectrum, I cannot measure")."""
++
++import numpy as np
++import pytest
++from matplotlib.patches import ConnectionPatch
++
++from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
++from opennmr.gui.widgets.canvas import MplCanvas
++
++from test_gui_canvas import qapp, _make_1d, _make_1d_at, _press_at  # noqa: F401 -- fixture
++
++
++def _stack(*spectra):
++    canvas = MplCanvas()
++    canvas.figure.set_size_inches(8, 6)
++    canvas.show_compare(list(spectra), mode="stack")
++    canvas.canvas.draw()
++    canvas.set_measurement_mode(True)
++    got = []
++    canvas.measurementCompleted.connect(got.append)
++    return canvas, got
++
++
++def test_a_point_on_one_row_to_a_point_on_another(qapp):
++    canvas, got = _stack(_make_1d_at(4.0), _make_1d_at(6.0))
++    top, bottom = canvas._compare_axes
++    canvas._on_press(_press_at(canvas, top, xfrac=0.3, yfrac=0.5))
++    canvas._on_press(_press_at(canvas, bottom, xfrac=0.7, yfrac=0.2))
++    assert len(got) == 1
++    result = got[0]
++    assert result["across"] == (0, 1)
++    assert result["dx"]["ppm"] == pytest.approx(4.0, rel=1e-3)
++    assert result["dx"]["hz"] == pytest.approx(1600.0, rel=1e-3)
++    assert "ppm" in result["summary"] and "Hz" in result["summary"]
++    assert "Δy" not in result["summary"]       # rows have their own intensity scales
++    assert len(result["spectra"]) == 2
++    arrows = [a for a in canvas._measurement_artists if isinstance(a, ConnectionPatch)]
++    assert len(arrows) == 1 and arrows[0] in canvas.figure.artists
++    # Switching Measure off takes it all away.
++    canvas.set_measurement_mode(False)
++    assert arrows[0] not in canvas.figure.artists
++
++
++def test_the_same_row_still_measures_as_before(qapp):
++    canvas, got = _stack(_make_1d(), _make_1d())
++    row = canvas._compare_axes[1]
++    canvas._on_press(_press_at(canvas, row, xfrac=0.3, yfrac=0.5))
++    canvas._on_press(_press_at(canvas, row, xfrac=0.7, yfrac=0.5))
++    assert "across" not in got[0] and got[0]["dx"]["ppm"] == pytest.approx(4.0, rel=1e-3)
++
++
++def test_different_fields_are_said(qapp):
++    ppm = np.linspace(0, 10, 100)
++    other = NMRSpectrum(data=np.exp(-((ppm - 5) ** 2)),
++                        axes=[NMRAxis(kind="frequency", ppm=ppm, hz=ppm * 600.0)],
++                        metadata=NMRMetadata(vendor="bruker", nucleus="1H", sfo1=600.0))
++    canvas, got = _stack(_make_1d(), other)
++    top, bottom = canvas._compare_axes
++    canvas._on_press(_press_at(canvas, top, xfrac=0.3))
++    canvas._on_press(_press_at(canvas, bottom, xfrac=0.7))
++    assert got[0]["dx"]["hz"] == pytest.approx(1600.0, rel=1e-3)      # the first spectrum's
++    assert "the two differ" in got[0]["summary"]
++
++
++def test_a_click_off_the_stack_still_restarts(qapp):
++    canvas, got = _stack(_make_1d(), _make_1d())
++    other_ax = canvas.figure.add_axes([0.0, 0.0, 0.05, 0.05])
++    canvas._record_measurement_point(canvas._compare_axes[0], 2.0, 0.5)
++    canvas._record_measurement_point(other_ax, 3.0, 0.5)
++    assert got == [] and len(canvas._measurement_points) == 1
+diff --git a/tests/test_start_estimates.py b/tests/test_start_estimates.py
+new file mode 100644
+index 0000000..e068a45
+--- /dev/null
++++ b/tests/test_start_estimates.py
+@@ -0,0 +1,150 @@
++"""Starting values for a fit, estimated from the spectrum for one kind of
++interaction (user request, 2026-10-06) -- notebook.start_estimates and
++Fit ▸ Combined Hamiltonian's "Estimate Starting Values"."""
++
++import numpy as np
++import pytest
++
++from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
++from opennmr.gui.main_window import MainWindow
++from opennmr.notebook import start_estimates as se
++from opennmr.notebook.combined_hamiltonian import Site, simulate_combined
++
++from test_gui import qapp  # noqa: F401 -- fixture
++
++
++def _data(truth, x, nu0, mas=0, transitions="all", noise=1.0, seed=0, n=2584):
++    y = simulate_combined(truth, x, nu0, mas_Hz=mas, n_zcw=n, transitions=transitions)["real_spec"]
++    y = y / y.max() * 1000 + np.random.default_rng(seed).normal(0, noise, x.size)
++    # Descending ppm, as spectra are stored.
++    return {"x_ppm": x[::-1], "real_spectrum": y[::-1], "SFO1": nu0 / 1e6}
++
++
++def _interaction(est, kind):
++    (site,) = est["sites"]
++    return site, next(i for i in site["interactions"] if i["type"] == kind)
++
++
++X13 = np.linspace(-150, 350, 8192)
++
++
++@pytest.mark.parametrize("aniso", [-150.0, 120.0])
++def test_static_csa_size_sign_and_asymmetry(aniso):
++    data = _data([Site("13C", 120, fwhm=1.0).add_csa(aniso, 0.4)], X13, 100.6e6, n=6765)
++    est = se.estimate_start(data, "csa", nucleus="13C")
++    site, csa = _interaction(est, "csa")
++    assert csa["aniso"] == pytest.approx(aniso, abs=3)
++    assert csa["asym"] == pytest.approx(0.4, abs=0.1)
++    assert site["delta_iso"] == pytest.approx(120, abs=1)
++    assert est["start_r2"] > 0.98 and est["notes"]
++
++
++def test_mas_csa_from_the_sideband_manifold():
++    data = _data([Site("13C", 120, fwhm=0.6).add_csa(-150, 0.4)], X13, 100.6e6, mas=8000)
++    est = se.estimate_start(data, "csa", nucleus="13C", mas_Hz=8000)
++    site, csa = _interaction(est, "csa")
++    assert csa["aniso"] == pytest.approx(-150, abs=3)
++    assert csa["asym"] == pytest.approx(0.4, abs=0.1)
++    assert site["delta_iso"] == pytest.approx(120, abs=0.2)     # the centreband
++
++
++def test_noisy_csa_still_lands_near_the_truth():
++    data = _data([Site("13C", 120, fwhm=1.0).add_csa(-150, 0.4)], X13, 100.6e6, noise=20.0,
++                 n=6765)
++    _site, csa = _interaction(se.estimate_start(data, "csa", nucleus="13C"), "csa")
++    assert csa["aniso"] == pytest.approx(-150, rel=0.08)
++
++
++XQ = np.linspace(-150, 100, 8192)
++
++
++@pytest.mark.parametrize("mas", [0, 15000])
++def test_quadrupolar_central_transition(mas):
++    truth = [Site("27Al", 10, fwhm=1.0 if not mas else 0.5).add_quadrupolar(5, 0.3)]
++    data = _data(truth, XQ, 130.3e6, mas=mas, transitions="ct", n=6765 if not mas else 2584)
++    est = se.estimate_start(data, "quadrupolar", nucleus="27Al", transitions="ct", mas_Hz=mas)
++    site, quad = _interaction(est, "quadrupolar")
++    assert quad["C_Q"] == pytest.approx(5, rel=0.05)
++    assert site["delta_iso"] == pytest.approx(10, abs=1.0)
++
++
++def test_a_spin_half_has_no_quadrupolar_coupling():
++    data = _data([Site("13C", 120).add_csa(-50, 0.2)], X13, 100.6e6, n=987)
++    with pytest.raises(ValueError, match="spin-1/2"):
++        se.estimate_start(data, "quadrupolar", nucleus="13C")
++
++
++def test_isotropic_peaks():
++    x = np.linspace(0, 10, 8192)
++    truth = [Site("1H", 2, fwhm=0.05, label="a"), Site("1H", 5, fwhm=0.1, label="b", amount=2),
++             Site("1H", 7.5, fwhm=0.03, label="c", amount=0.5)]
++    est = se.estimate_start(_data(truth, x, 400e6), "isotropic", nucleus="1H")
++    shifts = sorted(s["delta_iso"] for s in est["sites"])
++    assert shifts == pytest.approx([2, 5, 7.5], abs=0.01)
++    widths = {round(s["delta_iso"]): s["fwhm"] for s in est["sites"]}
++    assert widths[2] == pytest.approx(0.05, rel=0.2) and widths[5] == pytest.approx(0.1, rel=0.2)
++    assert est["start_r2"] > 0.99
++
++
++def test_j_multiplet_spacing_and_partner_count():
++    x = np.linspace(0, 10, 8192)
++    truth = [Site("1H", 1.2, fwhm=0.003, lineshape="lorentzian").add_jcoupling("1H", 3, 7.0)]
++    est = se.estimate_start(_data(truth, x, 400e6), "jcoupling", nucleus="1H",
++                            fit_regions=[(1.0, 1.4)])
++    site, j = _interaction(est, "jcoupling")
++    assert j["J_Hz"] == pytest.approx(7.0, abs=0.1) and j["n"] == 3
++    assert site["delta_iso"] == pytest.approx(1.2, abs=0.002)
++
++
++def test_unknown_kind_and_missing_nucleus():
++    data = {"x_ppm": np.linspace(0, 1, 50), "real_spectrum": np.zeros(50), "SFO1": 400.0}
++    with pytest.raises(ValueError, match="kind must be"):
++        se.estimate_start(data, "dipolar", nucleus="1H")
++    with pytest.raises(ValueError, match="nucleus"):
++        se.estimate_start(data, "csa")
++
++
++# ---- GUI -----------------------------------------------------------------------------
++
++def _window(qapp):
++    window = MainWindow()
++    r = _data([Site("13C", 120, fwhm=1.0).add_csa(-150, 0.4)], X13, 100.6e6, n=6765)
++    spectrum = NMRSpectrum(data=np.asarray(r["real_spectrum"]),
++                           axes=[NMRAxis(kind="frequency", ppm=np.asarray(r["x_ppm"]))],
++                           metadata=NMRMetadata(vendor="simulated", nucleus="13C",
++                                                sfo1=100.6))
++    window._add_derived_spectrum(spectrum, "C")
++    panel = window.combined_fit_panel
++    panel.seed_from_spectrum(spectrum)
++    panel.regime_combo.setCurrentIndex(panel.regime_combo.findData("static"))
++    panel.diso_spin.setValue(100.0)
++    panel.add_interaction("csa", aniso=-60.0, asym=0.9)
++    return window, panel
++
++
++def test_gui_estimate_replaces_the_selected_site_and_undo_restores_it(qapp):
++    window, panel = _window(qapp)
++    label = panel.site_dicts[0]["label"]
++    before = [dict(s) for s in panel.site_dicts]
++    panel.estimate_kind_combo.setCurrentIndex(panel.estimate_kind_combo.findData("csa"))
++    est = panel.estimate_starting_values(quiet=True)
++    assert est is not None
++    site = panel.site_dicts[0]
++    assert site["label"] == label                   # kept
++    csa = next(i for i in site["interactions"] if i["type"] == "csa")
++    assert csa["aniso"] == pytest.approx(-150, abs=3)
++    assert site["delta_iso"] == pytest.approx(120, abs=1)
++    assert panel.undo_estimate_button.isEnabled()
++    assert "•" in panel.estimate_label.text()
++    panel.undo_estimate()
++    assert panel.site_dicts[0]["delta_iso"] == before[0]["delta_iso"]
++    assert next(i for i in panel.site_dicts[0]["interactions"]
++                if i["type"] == "csa")["aniso"] == pytest.approx(-60)
++
++
++def test_gui_quadrupolar_on_a_spin_half_says_why(qapp):
++    window, panel = _window(qapp)
++    panel.estimate_kind_combo.setCurrentIndex(panel.estimate_kind_combo.findData("quadrupolar"))
++    assert panel.estimate_starting_values(quiet=True) is None
++    assert "spin-1/2" in panel.estimate_label.text()
++    assert not panel.undo_estimate_button.isEnabled()

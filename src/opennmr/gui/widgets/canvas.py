@@ -5387,7 +5387,8 @@ class MplCanvas(QWidget):
             return None
         return spectrum.axis_values(0, "ppm"), np.real(spectrum.data)
 
-    def set_baseline_preview(self, x=None, baseline=None, uncorrected=None) -> None:
+    def set_baseline_preview(self, x=None, baseline=None, uncorrected=None,
+                             nodes=None) -> None:
         """Draw the baseline that *would* be subtracted over the trace
         it would be subtracted from, or clear it with no arguments.
 
@@ -5408,7 +5409,7 @@ class MplCanvas(QWidget):
         Found by gid rather than a stored reference, so a figure
         rebuild between calls cannot leave a stale Line2D behind.
         """
-        stale = {self._BASELINE_PREVIEW_GID, self._BASELINE_GHOST_GID}
+        stale = {self._BASELINE_PREVIEW_GID, self._BASELINE_GHOST_GID, self._BASELINE_NODES_GID}
         for ax in self.figure.get_axes():
             for line in list(ax.lines):
                 if line.get_gid() in stale:
@@ -5448,7 +5449,20 @@ class MplCanvas(QWidget):
             zorder=5, label="_baseline_preview",
         )[0]
         line.set_gid(self._BASELINE_PREVIEW_GID)
+        if nodes is not None:
+            # The automatic spline's own nodes: the one thing to check
+            # is that they sit on baseline, not on the foot of a peak.
+            nx, ny = (np.asarray(v, dtype=float) for v in nodes)
+            if nx.size and nx.size == ny.size:
+                marks = target.plot(nx, ny, linestyle="none", marker="o", markersize=5,
+                                    markerfacecolor="white", markeredgecolor="tab:blue",
+                                    markeredgewidth=1.2, zorder=6,
+                                    label="_baseline_nodes")[0]
+                marks.set_gid(self._BASELINE_NODES_GID)
         self.canvas.draw_idle()
+
+    #: gid of the automatic spline's node markers.
+    _BASELINE_NODES_GID = "baseline_spline_nodes"
 
     #: gid of the manual-baseline region shading (see
     #: :meth:`set_baseline_regions`).
@@ -7696,7 +7710,8 @@ class MplCanvas(QWidget):
         coordinate systems is not a measurement of anything."""
         if not self._measurement_mode or ax is None or getattr(ax, "name", "") == "3d":
             return
-        if self._measurement_points and self._measurement_points[0][0] is not ax:
+        if self._measurement_points and self._measurement_points[0][0] is not ax \
+                and not self._compare_rows_pair(self._measurement_points[0][0], ax):
             self._measurement_points = []
             self._clear_pending_marker()
         self._measurement_points.append((ax, x, y))
@@ -7704,6 +7719,15 @@ class MplCanvas(QWidget):
             self._complete_measurement()
         else:
             self._draw_pending_marker(ax, x, y)
+
+    def _compare_rows_pair(self, ax1, ax2) -> bool:
+        """Both Axes are rows of the current Compare stack: they share one
+        chemical-shift axis, so a horizontal distance between a point on
+        one spectrum and a point on another is a real measurement (user
+        request, 2026-10-06: "measure the horizontal distance between two
+        different spectra")."""
+        rows = self._compare_axes or []
+        return ax1 is not ax2 and ax1 in rows and ax2 in rows
 
     def _draw_pending_marker(self, ax, x: float, y: float) -> None:
         """A marker on the first click, so it is visible that the
@@ -7729,9 +7753,12 @@ class MplCanvas(QWidget):
     def _complete_measurement(self) -> None:
         """Draw and report the finished measurement, then clear the
         pending pair so the next two clicks start a new one."""
-        (ax, x1, y1), (_ax2, x2, y2) = self._measurement_points
+        (ax, x1, y1), (ax2, x2, y2) = self._measurement_points
         self._measurement_points = []
         self._clear_pending_marker()
+        if ax2 is not ax:
+            self._complete_cross_measurement(ax, x1, y1, ax2, x2, y2)
+            return
 
         x_axis, y_axis = self._measurement_axes_for(ax)
         dx_raw, dy_raw = abs(x2 - x1), abs(y2 - y1)
@@ -7764,6 +7791,54 @@ class MplCanvas(QWidget):
             "summary": summary,
         }
         self.measurementCompleted.emit(result)
+
+    def _complete_cross_measurement(self, ax1, x1, y1, ax2, x2, y2) -> None:
+        """A measurement from a point on one Compare row to a point on
+        another: the horizontal separation only (each row has its own
+        intensity scale, so a vertical one means nothing), in every unit
+        of the first row's axis -- with a note when the two spectra were
+        recorded at different fields, whose Hz per ppm then differ."""
+        rows = self._compare_axes
+        i1, i2 = rows.index(ax1), rows.index(ax2)
+        axis1 = self._compare_spectra[i1].axes[0] if i1 < len(self._compare_spectra) else None
+        axis2 = self._compare_spectra[i2].axes[0] if i2 < len(self._compare_spectra) else None
+        dx_raw = abs(x2 - x1)
+        dx_units = self._delta_in_units(axis1, dx_raw)
+        summary = self._format_delta("x", dx_units, dx_raw)
+        note = ""
+        h1 = self._axis_hz_per_ppm(axis1) if axis1 is not None else None
+        h2 = self._axis_hz_per_ppm(axis2) if axis2 is not None else None
+        if h1 and h2 and abs(h1 - h2) > 1e-3 * max(h1, h2) and "hz" in dx_units:
+            note = " (Hz at the first spectrum's field; the two differ)"
+            summary += note
+        labels = [entry.label for entry in self._series.get("compare", [])]
+        names = [labels[i] if i < len(labels) else f"row {i + 1}" for i in (i1, i2)]
+        self._draw_cross_annotation(ax1, x1, y1, ax2, x2, y2, summary)
+        self.measurementCompleted.emit({
+            "display_unit": self._axis_unit, "x1": float(x1), "x2": float(x2),
+            "y1": float(y1), "y2": float(y2), "dx_display": float(dx_raw), "dy_display": 0.0,
+            "dx": dx_units, "dy": {}, "summary": summary, "across": (i1, i2),
+            "spectra": names})
+
+    def _draw_cross_annotation(self, ax1, x1, y1, ax2, x2, y2, summary: str) -> None:
+        """A double-headed arrow from a point in one row to a point in
+        another, labelled at its midpoint (in figure coordinates, since it
+        belongs to neither row)."""
+        from matplotlib.patches import ConnectionPatch
+        arrow = ConnectionPatch(
+            xyA=(x1, y1), coordsA=ax1.transData, xyB=(x2, y2), coordsB=ax2.transData,
+            arrowstyle="<|-|>", color=self._MEASUREMENT_COLOR, linewidth=1.4,
+            shrinkA=0, shrinkB=0, zorder=60)
+        self.figure.add_artist(arrow)
+        p1 = self.figure.transFigure.inverted().transform(ax1.transData.transform((x1, y1)))
+        p2 = self.figure.transFigure.inverted().transform(ax2.transData.transform((x2, y2)))
+        label = self.figure.text(
+            (p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0, summary,
+            color=self._MEASUREMENT_COLOR, fontsize=10, ha="center", va="center", zorder=61,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
+                      edgecolor=self._MEASUREMENT_COLOR, alpha=0.9))
+        self._measurement_artists.extend((arrow, label))
+        self.canvas.draw_idle()
 
     def _draw_measurement_annotation(self, ax, x1, y1, x2, y2, summary: str) -> None:
         """A double-headed arrow between the two points, labelled with

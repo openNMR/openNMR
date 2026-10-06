@@ -117,6 +117,7 @@ from .dynamics_panels import ExchangeLineshapePanel, VTRelaxationPanel
 from .jcoupling_panels import (JCouplingFitPanel, JCouplingSimulationPanel, lock_to_spin_system,
                                seed_spins_from_peaks)
 from .combined_section import CombinedModelSection
+from .batch_relaxation_panel import BatchRelaxationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
@@ -10317,10 +10318,20 @@ class MainWindow(QMainWindow):
         self.baseline_method_combo.addItem("Polynomial", "polynomial")
         self.baseline_method_combo.addItem("Sinusoidal", "sinusoidal")
         self.baseline_method_combo.addItem("Spline", "spline")
+        self.baseline_method_combo.addItem("Cubic spline (automatic points)", "spline_auto")
         self.baseline_method_combo.addItem("Whittaker", "whittaker")
         self.baseline_method_combo.addItem("Manual: Ax⁴+Bx³+Cx²+Dx+E", "manual_polynomial")
         self.baseline_method_combo.addItem("Manual: A·sin(Bx+C)+D", "manual_sine")
         self.baseline_method_combo.setToolTip(
+            "Cubic spline (automatic points): finds the baseline itself, "
+            "anywhere in the spectrum (a stretch counts as baseline when it "
+            "is no rougher than the noise), puts a node at the median of "
+            "each stretch, and draws a natural cubic spline through them. "
+            "Like Whittaker it does not assume the edges are peak-free; "
+            "unlike Whittaker it passes exactly through points you can "
+            "see. The nodes are drawn on the preview. A broad peak with no "
+            "baseline either side cannot be told from a roll -- check the "
+            "nodes sit under, not on, your signal.\n\n"
             "Manual: your own model -- a quartic polynomial or a sine -- fitted "
             "to baseline regions you choose, with every coefficient shown, "
             "fixable and editable by hand (the controls appear below).\n\n"
@@ -10448,6 +10459,22 @@ class MainWindow(QMainWindow):
         )
         self.baseline_period_spin.valueChanged.connect(self._on_baseline_correct_options_changed)
         baseline_options_row.addWidget(self.baseline_period_spin)
+
+        # Automatic cubic spline (user request, 2026-10-06): how many
+        # stretches the baseline is split into, one node per stretch.
+        self.baseline_points_spin = QSpinBox()
+        self.baseline_points_spin.setRange(0, 200)
+        self.baseline_points_spin.setValue(0)
+        self.baseline_points_spin.setPrefix("points ")
+        self.baseline_points_spin.setSpecialValueText("points Auto")
+        self.baseline_points_spin.setToolTip(
+            "How many nodes the spline may use: the spectrum is cut into this many "
+            "equal stretches and each stretch with baseline in it gets one node, at "
+            "the median of its baseline points (plus one at each end). \"Auto\" is "
+            "20. More follows a faster roll; too many starts following the feet of "
+            "broad peaks.")
+        self.baseline_points_spin.valueChanged.connect(self._on_baseline_correct_options_changed)
+        baseline_options_row.addWidget(self.baseline_points_spin)
         baseline_form.addRow("Baseline method:", baseline_options_row)
 
         # --- Manual baseline: the user's own model -------------------
@@ -11296,6 +11323,8 @@ class MainWindow(QMainWindow):
             "n_harmonics": raw.get("baseline_harmonics", 1),
             "period": raw.get("baseline_period"),
         }
+        if kwargs["method"] == "spline_auto":
+            kwargs["n_points"] = raw.get("baseline_points")
         model = MainWindow._manual_baseline_model_of(kwargs["method"])
         if model is not None:
             kwargs.update(MainWindow._manual_baseline_kwargs(raw, model))
@@ -11650,10 +11679,22 @@ class MainWindow(QMainWindow):
             # to share that divisor to land on it.
             scale = float(np.max(np.abs(data))) or 1.0
             show_ghost = canvas in self._baseline_ghost_canvases()
+            nodes = None
+            kwargs = self._baseline_kwargs(spectrum)
+            if kwargs["method"] == "spline_auto":
+                # Where the automatic spline put its nodes, on the trace
+                # it was fitted to -- the thing to judge it by.
+                try:
+                    fitted_to = uncorrected if uncorrected is not None else np.real(data)
+                    auto = processing_fitting.auto_spline_baseline(ppm, fitted_to, n_points=kwargs.get("n_points"))
+                    nodes = (auto["nodes_x"], np.asarray(auto["nodes_y"]) / scale)
+                except Exception:  # noqa: BLE001 -- best-effort overlay
+                    nodes = None
             canvas.set_baseline_preview(
                 ppm, baseline / scale,
                 uncorrected=(None if uncorrected is None or not show_ghost
-                             else uncorrected / scale))
+                             else uncorrected / scale),
+                nodes=nodes)
 
     #: Polynomial degree above which a fit starts oscillating between
     #: its own candidate points rather than following the baseline --
@@ -11716,6 +11757,11 @@ class MainWindow(QMainWindow):
             # only baseline, which is the one thing that decides whether
             # a manual fit is right.
             notes += self._manual_baseline_region_warnings(spectrum)
+        elif method == "spline_auto":
+            # It does not use the edges; what it can get wrong is
+            # finding too little baseline to place nodes across the
+            # spectrum (a crowded spectrum, or one broad hump).
+            notes += self._auto_spline_warnings(spectrum)
         elif spectrum.ndim >= 1:
             # Every other method assumes the spectrum's own edges are
             # baseline. That is a checkable claim, not a caveat.
@@ -11731,6 +11777,47 @@ class MainWindow(QMainWindow):
         self.processing_status_label.setText(message)
         if message:
             self.statusBar().showMessage(message, 15000)
+
+    @staticmethod
+    def _auto_spline_warnings(spectrum) -> list[str]:
+        """What the automatic spline found on this spectrum (first row
+        of a series), said when it is too little to trust: under 15 %
+        of the points recognised as baseline, or nodes that leave a gap
+        wider than a third of the spectrum (the spline is guessing
+        across it)."""
+        try:
+            ppm = np.asarray(spectrum.axis_values(-1, "ppm"), dtype=float)
+            data = np.real(spectrum.data)
+            if data.ndim == 2:
+                data = data[0]
+            if data.size != ppm.size or data.size < 20:
+                return []
+            raw = spectrum.metadata.raw
+            auto = processing_fitting.auto_spline_baseline(
+                ppm, data, n_points=raw.get("baseline_points"))
+        except ValueError as exc:
+            # Too little baseline to place nodes at all: say why.
+            return [str(exc).rstrip(".")]
+        except Exception:  # noqa: BLE001 -- a warning is best-effort
+            return []
+        notes = []
+        fraction = float(np.mean(auto["baseline_points"]))
+        if fraction < 0.15:
+            notes.append(f"only {100 * fraction:.0f} % of the spectrum was recognised as baseline, "
+                         f"so the automatic spline has little to go on — check its nodes, or use "
+                         f"Whittaker or a manual baseline")
+        nodes = np.sort(np.asarray(auto["nodes_x"], dtype=float))
+        span = float(np.ptp(ppm)) or 1.0
+        if nodes.size >= 2:
+            gaps = np.diff(np.concatenate([[ppm.min()], nodes, [ppm.max()]]))
+            widest = float(np.max(gaps))
+            if widest > span / 3:
+                notes.append(f"the spline has no node across {widest:.3g} ppm of the spectrum "
+                             f"(a wide region with signal), so its shape there is a guess")
+            elif max(gaps[0], gaps[-1]) > 0.1 * span:
+                notes.append("there is signal at an end of the spectrum, so the baseline "
+                             "beyond the outermost node is a straight-line extrapolation")
+        return notes
 
     @staticmethod
     def _manual_baseline_region_warnings(spectrum, threshold: float = 0.25) -> list[str]:
@@ -11813,6 +11900,7 @@ class MainWindow(QMainWindow):
         self.baseline_lam_spin.setVisible(method == "whittaker")
         self.baseline_harmonics_spin.setVisible(method == "sinusoidal")
         self.baseline_period_spin.setVisible(method == "sinusoidal")
+        self.baseline_points_spin.setVisible(method == "spline_auto")
         if hasattr(self, "baseline_manual_box"):
             model = self._manual_baseline_model_of(method)
             self.baseline_manual_box.setVisible(model is not None)
@@ -11854,6 +11942,8 @@ class MainWindow(QMainWindow):
         spectrum.metadata.raw["baseline_harmonics"] = self.baseline_harmonics_spin.value()
         period = self.baseline_period_spin.value()
         spectrum.metadata.raw["baseline_period"] = period if period > 0.0 else None
+        points = self.baseline_points_spin.value()
+        spectrum.metadata.raw["baseline_points"] = points if points > 0 else None
         self._schedule_sidecar_save(index)
         if self.baseline_correct_button.isChecked():
             self._apply_phase_preview()
@@ -12594,6 +12684,9 @@ class MainWindow(QMainWindow):
         self.baseline_period_spin.blockSignals(True)
         self.baseline_period_spin.setValue(spectrum.metadata.raw.get("baseline_period") or 0.0)
         self.baseline_period_spin.blockSignals(False)
+        self.baseline_points_spin.blockSignals(True)
+        self.baseline_points_spin.setValue(int(spectrum.metadata.raw.get("baseline_points") or 0))
+        self.baseline_points_spin.blockSignals(False)
         self._restore_manual_baseline_controls(spectrum)
         self._refresh_baseline_options_visibility()
 
@@ -12775,7 +12868,7 @@ class MainWindow(QMainWindow):
             self.phase1_handle, self.phase1_spin, self.phase1_current_display,
             self.pivot_spin, self.pivot_slider, self.autophase_joint_checkbox,
             self.baseline_correct_button, self.baseline_method_combo, self.baseline_smoothing_spin,
-            self.baseline_manual_box,
+            self.baseline_points_spin, self.baseline_manual_box,
         ):
             widget.setEnabled(enabled)
         if status is not None:
@@ -15665,6 +15758,22 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._build_curve_fitting_subtab())
+        # Many pseudo-2D series, processed, measured and fitted like one set
+        # up by hand, into Relaxation vs Temperature (explicit user request,
+        # 2026-10-06). notebook.batch_relaxation is the notebook route.
+        self.batch_relaxation_panel = BatchRelaxationPanel(
+            open_items=lambda: [(self._multi_key(i), self.session.label(i))
+                                for i in range(len(self.session))],
+            selected_keys=lambda: [self._multi_key(i) for i in self._selected_rows()],
+            open_expnos=self._multi_open_expnos,
+            describe=self._batch_describe,
+            reference=self._batch_reference,
+            run_one=self._batch_run_one,
+            send_rows=self._batch_send_rows)
+        self._batch_relaxation_section = CollapsibleSection(
+            "Batch: many pseudo-2D series (e.g. T₁ at every temperature)",
+            content=self.batch_relaxation_panel)
+        layout.addWidget(self._batch_relaxation_section)
         self.vt_relaxation_panel = VTRelaxationPanel(
             canvas=self.fit_canvas, show_view=self._raise_fit_canvas,
             curve_fit_rows=self._vt_rows_from_curve_fit)
@@ -15695,6 +15804,115 @@ class MainWindow(QMainWindow):
             if value > 0:
                 return value
         return None
+
+    # ---- Dynamics ▸ Batch: many pseudo-2D series ----------------------------
+
+    def _batch_describe(self, key):
+        index = self._multi_index(key)
+        if index is None:
+            return None
+        spectrum = self.session.spectra[index]
+        return {"label": self.session.label(index),
+                "T_K": self._spectrum_temperature_K(spectrum),
+                "larmor_MHz": float(spectrum.metadata.sfo1) if spectrum.metadata.sfo1 else None,
+                "pseudo_2d": spectrum.ndim == 2 and spectrum.is_pseudo_2d}
+
+    def _batch_reference(self):
+        index = self._selected_index()
+        if index is None:
+            return None
+        spectrum = self.session.spectra[index]
+        if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d):
+            return None
+        return self._multi_key(index), self.session.label(index)
+
+    @contextlib.contextmanager
+    def _collect_dialogs(self):
+        """Message boxes raised inside, collected instead of shown -- a batch
+        of twenty series must not stop on twenty dialogs. Yields the list
+        of (kind, title, text)."""
+        seen = []
+        saved = {name: getattr(QMessageBox, name) for name in ("critical", "warning",
+                                                                "information")}
+        for name in saved:
+            setattr(QMessageBox, name, staticmethod(
+                lambda *a, _n=name, **k: (seen.append((_n, a[1] if len(a) > 1 else "",
+                                                       a[2] if len(a) > 2 else "")),
+                                          QMessageBox.StandardButton.Ok)[1]))
+        try:
+            yield seen
+        finally:
+            for name, fn in saved.items():
+                setattr(QMessageBox, name, fn)
+
+    def _batch_run_one(self, key, options) -> dict:
+        """One series of a batch: the reference's processing (if asked)
+        and analysis settings (its peaks or regions, model, Values; the
+        delays its own or the reference's), then every slice measured and
+        Fit Curve run -- the steps a user would take by hand."""
+        index = self._multi_index(key)
+        ref_index = self._multi_index(options.get("reference"))
+        if index is None:
+            return {"rows": [], "status": "failed", "error": "not open any more"}
+        if ref_index is None:
+            return {"rows": [], "status": "failed", "error": "the reference is not open"}
+        reference = self.session.spectra[ref_index]
+        if self._current_analysis_index == ref_index:
+            self._save_current_analysis_state()
+        ref_state = copy.deepcopy(reference.metadata.raw.get("analysis_state")
+                                  or self._capture_analysis_state())
+        with self._collect_dialogs() as seen:
+            try:
+                if index != ref_index:
+                    if options.get("apply_processing"):
+                        processing = {k: v for k, v in
+                                      io_persistence.processing_state(reference).items()
+                                      if k not in ("analysis_state", "slice_fit_results",
+                                                   "fits", "fit_models", "display_label",
+                                                   "notes", "history")}
+                        self._apply_restored_state(index, copy.deepcopy(processing),
+                                                   {"pseudo_2d": True}, reread=True)
+                    target = self.session.spectra[index]
+                    if options.get("delays") == "reference":
+                        state = self._carried_analysis_state(
+                            reference, n_rows=self._fit_slice_count(target))
+                    else:
+                        state = copy.deepcopy(ref_state)
+                    target.metadata.raw["analysis_state"] = state
+                    target.metadata.raw.pop("slice_fit_results", None)
+                    if self._current_analysis_index == index:
+                        self._current_analysis_index = None
+                self._select_single_row(index)
+                spectrum = self.session.spectra[index]
+                spectrum.metadata.raw.pop("slice_fit_results", None)
+                self._relaxation_fit_results = None
+                if self.peak_table.rowCount():
+                    self._on_fit_spectrum_clicked()
+                elif self._read_region_defs():
+                    self._on_integrate_regions_clicked()
+                else:
+                    return {"rows": [], "status": "failed",
+                            "error": "the reference has neither peaks nor regions to measure"}
+                if not spectrum.metadata.raw.get("slice_fit_results") and \
+                        not self.session.spectra[index].metadata.raw.get("slice_fit_results"):
+                    raise ValueError("measuring the slices failed")
+                self._on_fit_curve_button_clicked()
+                rows = self._vt_rows_from_curve_fit() if self._relaxation_fit_results else []
+            except Exception as exc:  # noqa: BLE001 -- one bad series must not sink the batch
+                seen.append(("critical", "", str(exc)))
+                rows = []
+        problems = [text for kind, _t, text in seen if kind in ("critical", "warning")]
+        if not rows:
+            return {"rows": [], "status": "failed",
+                    "error": problems[-1] if problems else "Fit Curve gave no result"}
+        status = "fitted" + (f" ({len(problems)} warning{'s' if len(problems) != 1 else ''})"
+                             if problems else "")
+        return {"rows": rows, "status": status, "error": None}
+
+    def _batch_send_rows(self, rows) -> int:
+        n = self.vt_relaxation_panel.add_rows(rows, source="the batch fit")
+        self._vt_relaxation_section.setExpanded(True)
+        return n
 
     def _vt_rows_from_curve_fit(self) -> list[dict]:
         """Each peak's fitted T1/T2 from the current Fit Curve result,
@@ -19103,7 +19321,9 @@ class MainWindow(QMainWindow):
         the number on the plot and the number in the status bar cannot
         disagree about which unit they are in. This just surfaces the
         same string somewhere it persists after the next click."""
-        self.statusBar().showMessage(f"Measurement:  {result['summary']}")
+        between = (f" ({result['spectra'][0]} → {result['spectra'][1]})"
+                   if result.get("spectra") else "")
+        self.statusBar().showMessage(f"Measurement{between}:  {result['summary']}")
 
     def _peak_pick_slice_index(self) -> int:
         return int(self.peak_slice_spin.value())

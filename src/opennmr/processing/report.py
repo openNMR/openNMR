@@ -50,6 +50,8 @@ _BASELINE_NAMES = {
     "sinusoidal": "a sinusoidal fit",
     "spline": "a cubic smoothing spline",
     "whittaker": "an asymmetrically reweighted Whittaker smoother",
+    "spline_auto": ("a natural cubic spline through automatically placed nodes "
+                    "(baseline recognised by the Golotvin–Williams noise test)"),
     "manual_polynomial": "a manual polynomial baseline",
     "manual_sine": "a manual sinusoidal baseline",
 }
