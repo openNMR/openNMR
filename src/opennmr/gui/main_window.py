@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QColorDialog
 from .widgets.notes_editor import ExperimentNotesEditor
+from .widgets.advice_box import AdviceBox
 from .widgets.side_drawer import SideDrawer
 from .widgets.field_input import link_field
 from .widgets import wheel_guard
@@ -46,6 +47,7 @@ from ..notebook import referencing as nb_referencing
 from .drift_panel import DriftCorrectionPanel
 from ..notebook import periodic_table as nb_periodic_table
 from ..notebook import series_fitting as nb_series_fitting
+from ..notebook import fit_advice as nb_fit_advice
 from PySide6.QtGui import QColor
 
 
@@ -3406,6 +3408,8 @@ class MainWindow(QMainWindow):
         self.integration_results_label.setText("")
         self.score_results_label.setText("")
         self.curve_fit_summary_label.setText("")
+        self.curve_fit_advice_box.set_items([])
+        self.spectral_fit_advice_box.set_items([])
         self.dosy_results_label.setText("")
         self.gradient_calibration_label.setText("")
         self.pfg_params_source_label.setText("")
@@ -12890,7 +12894,8 @@ class MainWindow(QMainWindow):
             on_fitted=lambda: (self._store_fit("combined"),
                                self._refresh_model_series_buttons()),
             strong_coupling=lambda sites, nucleus, _mhz: self._open_strong_coupling(
-                "fit", sites, nucleus))
+                "fit", sites, nucleus),
+            get_alternatives=self._kept_fit_alternatives)
         self.combined_fit_model = CombinedModelSection(
             self._with_model_series_box(self.combined_fit_panel, "combined"),
             self.jcoupling_fit_panel)
@@ -13635,6 +13640,15 @@ class MainWindow(QMainWindow):
         self._show_side_tab("Fit")
         self._report_transfer("Simulated Czjzek values set as a Fit ▸ Quadrupolar (Czjzek) "
                               "start", notes)
+
+    def _kept_fit_alternatives(self, fit) -> list:
+        """The spectrum's kept fit models, as ``(name, model)``, for the
+        advice to compare a new fit with (only those of the same data and
+        window are compared -- fit_advice.compare_items checks)."""
+        index = fit.get("spectrum_index")
+        if index is None:
+            index = self._selected_index()
+        return [(m.get("name") or "kept fit", m) for m in self._fit_models(index)]
 
     def _open_strong_coupling(self, where: str, site_dicts, nucleus: str,
                               larmor_mhz: float | None = None) -> None:
@@ -16500,6 +16514,10 @@ class MainWindow(QMainWindow):
             Qt.TextInteractionFlag.TextSelectableByMouse)
         self.analysis_results_label.setWordWrap(True)
         layout.addWidget(self.analysis_results_label)
+        # Plain-language advice on the peak fit (explicit user request,
+        # 2026-10-06); notebook.fit_advice.advise_series.
+        self.spectral_fit_advice_box = AdviceBox(on_action=self._apply_isotropic_advice)
+        layout.addWidget(self.spectral_fit_advice_box)
 
         # "Spectrum fit"/"curve fit" (not "slice fit"/"peak fit", the
         # original names) -- explicit user feedback that the two read
@@ -17728,6 +17746,10 @@ class MainWindow(QMainWindow):
         self.curve_fit_summary_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.curve_fit_summary_label)
+        self.curve_fit_advice_box = AdviceBox(on_action=self._apply_curve_advice,
+                                              title="What the curve fit tells you, and what "
+                                                    "to try next")
+        layout.addWidget(self.curve_fit_advice_box)
 
         self.relaxation_fit_params_label = QLabel("")
         self.relaxation_fit_params_label.setWordWrap(True)
@@ -21142,8 +21164,19 @@ class MainWindow(QMainWindow):
         # honest from.
         self._refresh_staged_measurement_label()
 
+    def _apply_isotropic_advice(self, action: dict) -> str | None:
+        if action.get("type") == "add_peak":
+            self._add_peak_row(shift=float(action["delta_iso"]),
+                               fwhm=float(action.get("fwhm") or 0.1), eta=0.5)
+            return f"added a peak at {float(action['delta_iso']):g} ppm to the peak table."
+        return None
+
     def _show_spectral_fit_results(self, spectrum, results: list[dict]) -> None:
         self._store_slice_results(spectrum, results)
+        try:
+            self.spectral_fit_advice_box.set_items(nb_fit_advice.advise_series(results))
+        except Exception:  # noqa: BLE001 -- advice must never sink a fit
+            self.spectral_fit_advice_box.set_items([])
         if results:
             self._update_peak_table_from_fit(results[0])
         self.view_slice_fit_spin.blockSignals(True)
@@ -21351,6 +21384,7 @@ class MainWindow(QMainWindow):
             summary += f"\n\n{self.delays_row_label.text().rstrip(':')} from: {provenance}"
         self.curve_fit_summary_label.setText(summary)
         self._global_fit_result = global_result
+        self.curve_fit_advice_box.set_items(self._curve_fit_advice(results))
 
         self._relaxation_fit_results = results
         # A shallow copy of the list (each dict is still shared) is
@@ -21541,6 +21575,28 @@ class MainWindow(QMainWindow):
             p0=p0, bounds=bounds, fixed=fixed,
         )
         return global_result["per_dataset"], global_result
+
+    def _curve_fit_advice(self, results) -> list:
+        """Plain-language advice on every peak's curve fit (explicit user
+        request, 2026-10-06): notebook.fit_advice.advise_relaxation."""
+        items = []
+        for k, result in enumerate(results or []):
+            try:
+                items += nb_fit_advice.advise_relaxation(
+                    result, label=result.get("peak_label") or (f"peak {k + 1}"
+                                                                if len(results) > 1 else None))
+            except Exception:  # noqa: BLE001 -- advice must never sink a fit
+                continue
+        return items
+
+    def _apply_curve_advice(self, action: dict) -> str | None:
+        if action.get("type") != "set_relaxation_model":
+            return None
+        index = self.relaxation_model_combo.findData(action["model"])
+        if index < 0:
+            return None
+        self.relaxation_model_combo.setCurrentIndex(index)
+        return f"the model is now “{self.relaxation_model_combo.currentText()}”."
 
     def _format_curve_fit_summary(self, results: list[dict], global_result: dict | None) -> str:
         """The Relaxation tab's own results text: the full, unit-carrying
@@ -23161,6 +23217,11 @@ class MainWindow(QMainWindow):
         status.setWordWrap(True)
         status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(status)
+        if not hasattr(self, "_series_advice_boxes"):
+            self._series_advice_boxes = {}
+        self._series_advice_boxes[kind] = AdviceBox(
+            title="What the series fit tells you, and what to try next")
+        v.addWidget(self._series_advice_boxes[kind])
         if not hasattr(self, "_model_series_widgets"):
             self._model_series_widgets = {}
         self._model_series_widgets[kind] = (fit_button, export_button, status)
@@ -23395,6 +23456,10 @@ class MainWindow(QMainWindow):
                      "fitted shapes will not describe the 2D's rows.")
         self._refresh_model_series_buttons()
         self._model_series_widgets[kind][2].setText(text)
+        advice = nb_fit_advice.advise_series(results)
+        self._series_advice_boxes[kind].set_items(advice)
+        if advice:
+            fits[f"series_{kind}"]["report"] += "\n\n" + nb_fit_advice.advice_text(advice)
         self.statusBar().showMessage(
             f"{self._MODEL_SERIES_LABELS[kind]} model applied to {len(results)} slices.", 6000)
         return results
@@ -24234,6 +24299,8 @@ class MainWindow(QMainWindow):
         self.integration_results_label.setText("")
         self.score_results_label.setText("")
         self.curve_fit_summary_label.setText("")
+        self.curve_fit_advice_box.set_items([])
+        self.spectral_fit_advice_box.set_items([])
         self.dosy_results_label.setText("")
         self.gradient_calibration_label.setText("")
         self.pfg_params_source_label.setText("")

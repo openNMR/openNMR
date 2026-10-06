@@ -24,11 +24,13 @@ from PySide6.QtWidgets import (
 )
 
 from .fit_progress_dialog import FitProgress
+from .widgets.advice_box import AdviceBox
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import panel_state
 from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
 from ..io import serialize
 from ..notebook import combined_fitting as cfit
+from ..notebook import fit_advice
 from ..notebook import combined_hamiltonian as ch
 from ..notebook.utils import _GAMMA_DF, find_isotope_info
 
@@ -809,7 +811,14 @@ _P_HEADERS = ("Site", "Parameter", "Start", "Free", "Min", "Max", "Try starts")
 _PARAM_LABELS = {"delta_iso": "δiso (ppm)", "amount": "Amount", "fwhm": "FWHM (ppm)",
                  "eta": "L fraction", "aniso": "Δ or span (ppm)", "asym": "η or skew",
                  "alpha": "α (°)", "beta": "β (°)", "gamma": "γ (°)", "C_Q": "C_Q (MHz)",
-                 "eta_Q": "η_Q"}
+                 "eta_Q": "η_Q", "mas_Hz": "MAS rate (Hz)"}
+
+#: The parameter table's row for what belongs to the whole spectrum,
+#: not to a peak: the MAS rate (explicit user request, 2026-10-06 --
+#: "add the MAS rate as a fitting parameter; by default fixed").
+SPECTRUM_ROW = "(spectrum)"
+#: How far a freed MAS rate may move when Min/Max are blank.
+MAS_WINDOW_HZ = 500.0
 
 
 def _param_label(name: str) -> str:
@@ -852,7 +861,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
 
     def __init__(self, get_target, get_regions, draw_fit, format_value_error,
                  send_to_simulation=None, on_fitted=None, parent=None,
-                 strong_coupling=None) -> None:
+                 strong_coupling=None, get_alternatives=None) -> None:
+        #: ``get_alternatives(result) -> [(name, fit), ...]``: other fits of
+        #: the same spectrum (kept fit models) for the advice to compare with.
+        self._get_alternatives = get_alternatives
         #: Live preview of the starting model (explicit user request,
         #: 2026-10-06: "add a peak and see it appear, and change with each
         #: change in parameter"). Debounced; suspended while the panel is
@@ -881,6 +893,8 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             signal = (widget.toggled if isinstance(widget, QCheckBox)
                       else widget.currentIndexChanged)
             signal.connect(lambda *_a: self.schedule_preview())
+        self.regime_combo.currentIndexChanged.connect(lambda _i: self.refresh_parameter_table())
+        self.mas_spin.valueChanged.connect(lambda _v: self.refresh_parameter_table())
         for box in (self.larmor_spin, self.mas_spin, self.orientations_spin, self.window_lo_spin,
                     self.window_hi_spin, self.preview_orientations_spin):
             box.valueChanged.connect(lambda *_a: self.schedule_preview())
@@ -984,6 +998,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.results_table.customContextMenuRequested.connect(self._on_results_menu)
         self.results_table.setVisible(False)
         v.addWidget(self.results_table)
+        # What the fit says and what to try next, in plain words (explicit
+        # user request, 2026-10-06); notebook.fit_advice.
+        self.advice_box = AdviceBox(on_action=self.apply_advice_action)
+        v.addWidget(self.advice_box)
         row = QHBoxLayout()
         self.use_fitted_button = QPushButton("Use fitted values as start")
         self.use_fitted_button.clicked.connect(self.use_fitted_as_start)
@@ -1042,6 +1060,36 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             for name in cfit.site_parameter_names(site):
                 yield site, name
 
+    def _mas_row_shown(self) -> bool:
+        return self.regime_combo.currentData() == "mas"
+
+    def mas_constraint(self) -> dict:
+        """The MAS rate's row: fixed unless Free is ticked; Min/Max blank =
+        the start ± 500 Hz."""
+        per = self.constraints.setdefault(SPECTRUM_ROW, {})
+        if "mas_Hz" not in per:
+            per["mas_Hz"] = {"free": False, "min": "", "max": "", "try": ""}
+        return per["mas_Hz"]
+
+    def mas_fit_arguments(self) -> dict:
+        """``fit_mas`` (and ``mas_bounds_Hz``) for fit_combined, from the
+        MAS rate's row. Raises ValueError naming the cell."""
+        c = self.mas_constraint()
+        if not (self._mas_row_shown() and c["free"]):
+            return {}
+        start = self.mas_spin.value()
+        try:
+            lo, hi = _parse_float(c["min"]), _parse_float(c["max"])
+        except ValueError:
+            raise ValueError("MAS rate: Min and Max must be numbers in Hz (or blank: ±"
+                             f"{MAS_WINDOW_HZ:g} Hz).") from None
+        lo = start - MAS_WINDOW_HZ if lo is None else lo
+        hi = start + MAS_WINDOW_HZ if hi is None else hi
+        if not lo <= start <= hi or lo >= hi:
+            raise ValueError(f"MAS rate: Min ({lo:g}) and Max ({hi:g}) must enclose the start "
+                             f"({start:g} Hz).")
+        return {"fit_mas": True, "mas_bounds_Hz": (lo, hi)}
+
     def refresh_parameter_table(self) -> None:
         """Rebuild the table from the sites, keeping each parameter's
         free/bounds/try choices by (site label, parameter)."""
@@ -1053,7 +1101,29 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         t.blockSignals(True)
         try:
             rows = list(self._parameter_rows())
-            t.setRowCount(len(rows))
+            t.setRowCount(len(rows) + (1 if self._mas_row_shown() else 0))
+            if self._mas_row_shown():
+                c = self.mas_constraint()
+                start = self.mas_spin.value()
+                cells = [SPECTRUM_ROW, _param_label("mas_Hz"), f"{start:.6g}", "", c["min"],
+                         c["max"], ""]
+                for col, text in enumerate(cells):
+                    item = QTableWidgetItem(text)
+                    if col in (_P_SITE, _P_NAME, _P_FREE, _P_TRY):
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if col == _P_FREE:
+                        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                        item.setCheckState(Qt.CheckState.Checked if c["free"]
+                                           else Qt.CheckState.Unchecked)
+                        item.setToolTip("Tick to let the spinning rate vary: the recorded rate "
+                                        "is often off by a little, and the sidebands are very "
+                                        "sensitive to it. Fixed by default.")
+                    if col in (_P_MIN, _P_MAX):
+                        item.setToolTip(f"Hz. Blank: the start ± {MAS_WINDOW_HZ:g} Hz "
+                                        f"({start - MAS_WINDOW_HZ:g} to {start + MAS_WINDOW_HZ:g}).")
+                    if col == _P_NAME:
+                        item.setData(Qt.ItemDataRole.UserRole, "mas_Hz")
+                    t.setItem(len(rows), col, item)
             for r, (site, name) in enumerate(rows):
                 c = self._constraint(site["label"], name)
                 lo, hi = cfit._default_bounds(site, name)
@@ -1088,7 +1158,16 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         if label_item is None or name_item is None:
             return
         label, name = label_item.text(), name_item.data(Qt.ItemDataRole.UserRole)
-        c = self._constraint(label, name)
+        if label == SPECTRUM_ROW:
+            c = self.mas_constraint()
+            if col == _P_START:
+                try:
+                    self.mas_spin.setValue(float(item.text()))
+                except ValueError:
+                    self.refresh_parameter_table()
+                return
+        else:
+            c = self._constraint(label, name)
         if col == _P_FREE:
             c["free"] = item.checkState() == Qt.CheckState.Checked
         elif col == _P_MIN:
@@ -1160,6 +1239,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                     starts.setdefault(label, {})[name] = [cfit._get(site, name)] + [
                         v for v in values if v != cfit._get(site, name)]
         settings = self.settings()
+        settings.update(self.mas_fit_arguments())
         return {"sites": sites, "vary": vary, "bounds": bounds, "starts": starts,
                 "settings": settings, "fit_regions": self.fit_regions(),
                 "fit_baseline": self.fit_baseline_check.isChecked(),
@@ -1203,6 +1283,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         # what applying the model to every slice starts from.
         fit["row"] = row
         fit["fit_regions"] = args["fit_regions"]
+        fit["advice"] = self.make_advice(fit)
         self.result = fit
         self._report()
         self._draw_fit(fit)
@@ -1274,6 +1355,75 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                 panel._preview_timer.stop()
         return _Suspend()
 
+    # ---- advice -----------------------------------------------------------
+
+    def make_advice(self, fit) -> list:
+        alternatives = []
+        if self._get_alternatives is not None:
+            try:
+                alternatives = list(self._get_alternatives(fit) or [])
+            except Exception:  # noqa: BLE001 -- a comparison must never sink a fit
+                alternatives = []
+        return fit_advice.advise_combined_fit(fit, alternatives=alternatives,
+                                              nucleus_spin=self.spin())
+
+    def _select_site(self, label) -> bool:
+        for k, site in enumerate(self.site_dicts):
+            if site["label"] == label:
+                self.site_list.setCurrentRow(k)
+                return True
+        return False
+
+    def apply_advice_action(self, action: dict) -> str | None:
+        """Carry out one of the advice's suggestions on the model; returns
+        what was done, in words (None if it could not be)."""
+        kind = action.get("type")
+        site = action.get("site")
+        if kind == "add_peak":
+            lineshape = self.site_dicts[0]["lineshape"] if self.site_dicts else "gaussian"
+            new = self.add_site({"label": self._unique_label(f"Site {len(self.site_dicts) + 1}"),
+                                 "delta_iso": float(action["delta_iso"]), "amount": 1.0,
+                                 "fwhm": float(action.get("fwhm") or 1.0),
+                                 "lineshape": lineshape, "eta": 0.5, "interactions": []})
+            return f"added {new['label']} at {new['delta_iso']:g} ppm."
+        if kind == "free_mas":
+            if self.regime_combo.currentData() != "mas":
+                return None
+            self.mas_constraint()["free"] = True
+            self.refresh_parameter_table()
+            return "the MAS rate is free to vary (±500 Hz unless you set Min/Max)."
+        if kind == "widen_bound" and action.get("name") == "mas_Hz":
+            self.mas_constraint()["min" if action["side"] == "lower" else "max"] = \
+                f"{action['value']:.6g}"
+            self.refresh_parameter_table()
+            return f"the MAS rate's {'Min' if action['side'] == 'lower' else 'Max'} is now " \
+                f"{action['value']:.6g} Hz."
+        if site is None or not self._select_site(site):
+            return None
+        if kind == "add_interaction":
+            added = self.add_interaction(action["kind"])
+            return f"added a {_TITLES[action['kind']]} to {site}." if added else None
+        if kind == "set_lineshape":
+            self.lineshape_combo.setCurrentIndex(self.lineshape_combo.findData(action["lineshape"]))
+            return f"{site} now has a pseudo-Voigt line shape."
+        if kind == "remove_site":
+            self.remove_site()
+            return f"removed {site}."
+        name = action.get("name")
+        if kind in ("free_parameter", "fix_parameter"):
+            names = ["alpha", "beta", "gamma"] if name in ("alpha", "beta", "gamma") else [name]
+            for n in names:
+                self._constraint(site, n)["free"] = kind == "free_parameter"
+            self.refresh_parameter_table()
+            what = "the Euler angles" if len(names) > 1 else _param_label(name)
+            return f"{what} of {site} {'free' if kind == 'free_parameter' else 'fixed'}."
+        if kind == "widen_bound":
+            key = "min" if action["side"] == "lower" else "max"
+            self._constraint(site, name)[key] = f"{action['value']:.6g}"
+            self.refresh_parameter_table()
+            return f"{_param_label(name)} of {site}: {key.title()} is now {action['value']:.6g}."
+        return None
+
     def _sync_result_buttons(self) -> None:
         on = self.result is not None
         self.use_fitted_button.setEnabled(on)
@@ -1285,7 +1435,9 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         r = self.result
         rows = []
         for p in r["parameters"]:
-            if not p["label"]:
+            if p["name"] == "mas_Hz":
+                label = _param_label("mas_Hz")
+            elif not p["label"]:
                 label = f"baseline {p['name']}"
             else:
                 label = f"{p['label']}: {_param_label(p['name'])}"
@@ -1319,6 +1471,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                      "(its sign is not in a lineshape).")
         lines += [f"⚠ {w}" for w in r["warnings"]]
         self.results_label.setText("\n".join(lines))
+        self.advice_box.set_items(r.get("advice") or [])
 
     def text_report(self) -> str:
         if not self.result:
@@ -1353,6 +1506,8 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             self._use_fitted_as_start()
 
     def _use_fitted_as_start(self) -> None:
+        if (self.result.get("settings") or {}).get("fit_mas"):
+            self.mas_spin.setValue(float(self.result["settings"]["mas_Hz"]))
         current = max(self._current, 0)
         fitted = self.fitted_site_dicts()
         self.site_list.blockSignals(True)
@@ -1427,6 +1582,12 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                     bit += f", also tried from {c['try']}"
                 bits.append(bit)
             state["extra"][f"{site['label']} parameters"] = "; ".join(bits)
+        if self._mas_row_shown():
+            c = self.mas_constraint()
+            state["extra"]["MAS rate"] = (
+                f"free, {c['min'] or f'start − {MAS_WINDOW_HZ:g}'} to "
+                f"{c['max'] or f'start + {MAS_WINDOW_HZ:g}'} Hz" if c["free"]
+                else "fixed at the value given")
         return state
 
     def set_state(self, state: dict) -> None:
@@ -1457,9 +1618,12 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.results_table.clear()
         self.results_table.setRowCount(0)
         self.results_table.setVisible(False)
+        self.advice_box.set_items([])
         self._sync_result_buttons()
 
     def report_text(self) -> str:
         if not self.result:
             return ""
-        return self.results_label.text() + "\n" + panel_state.table_text(self.results_table)
+        advice = fit_advice.advice_text(self.result.get("advice") or [])
+        return (self.results_label.text() + "\n" + panel_state.table_text(self.results_table)
+                + ("\n" + advice if advice else ""))

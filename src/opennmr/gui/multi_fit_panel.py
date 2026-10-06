@@ -44,6 +44,8 @@ from ..notebook import combined_fitting as cfit
 from ..notebook import combined_hamiltonian as ch
 from ..notebook import multi_fitting as mf
 from . import panel_state
+from .widgets.advice_box import AdviceBox
+from ..notebook import fit_advice
 from .combined_panels import CombinedHamiltonianPanel, _param_label
 
 #: Experiment table columns.
@@ -316,6 +318,22 @@ class MultiFitPanel(QWidget):
         form.addRow("Orientations:", self.orientations_spin)
         self.fit_baseline_check = QCheckBox("Fit each spectrum's baseline")
         form.addRow("", self.fit_baseline_check)
+        # The MAS rate as a fitting parameter, fixed by default (explicit
+        # user request, 2026-10-06).
+        mas_row = QHBoxLayout()
+        self.fit_mas_check = QCheckBox("Let each spectrum's MAS rate vary, by up to ±")
+        self.fit_mas_check.setToolTip(
+            "Fitted in each spectrum's own fit, starting from its MAS (Hz) column; a joint "
+            "refinement then holds each at its fitted value. The recorded rate is often a "
+            "little off, and the sidebands are very sensitive to it. Off by default.")
+        self.mas_window_spin = QSpinBox()
+        self.mas_window_spin.setRange(1, 20000)
+        self.mas_window_spin.setValue(500)
+        self.mas_window_spin.setSuffix(" Hz")
+        mas_row.addWidget(self.fit_mas_check)
+        mas_row.addWidget(self.mas_window_spin)
+        mas_row.addStretch(1)
+        form.addRow("", mas_row)
         v.addLayout(form)
 
         # ---- sites per nucleus ----
@@ -388,6 +406,10 @@ class MultiFitPanel(QWidget):
                                       "Right-click to copy, export CSV or copy the report.")
         self.results_table.setVisible(False)
         v.addWidget(self.results_table)
+        # Plain-language advice on each spectrum's fit and the series
+        # (explicit user request, 2026-10-06); notebook.fit_advice.
+        self.advice_box = AdviceBox(title="What the fits tell you, and what to try next")
+        v.addWidget(self.advice_box)
         v.addStretch(1)
 
         self.apply_preset()
@@ -838,7 +860,9 @@ class MultiFitPanel(QWidget):
                 "bounds": bounds or None, "amounts": self.amounts_combo.currentData(),
                 "seed": self.seed_combo.currentData(), "order": self.order_combo.currentData(),
                 "n_zcw": self.orientations_spin.value() or None,
-                "fit_baseline": self.fit_baseline_check.isChecked()}
+                "fit_baseline": self.fit_baseline_check.isChecked(),
+                "fit_mas": self.fit_mas_check.isChecked(),
+                "mas_window_Hz": float(self.mas_window_spin.value())}
 
     def fit(self, show_progress: bool = True) -> bool:
         from ..notebook import bridge
@@ -854,7 +878,8 @@ class MultiFitPanel(QWidget):
                     results, e["label"], nucleus=e["nucleus"], larmor_Hz=e["larmor_Hz"],
                     mas_Hz=e["mas_Hz"], order=args["order"], transitions=e["transitions"],
                     n_zcw=args["n_zcw"], fit_regions=e["fit_regions"],
-                    fit_baseline=args["fit_baseline"], x_value=e["x_value"]))
+                    fit_baseline=args["fit_baseline"], x_value=e["x_value"],
+                    fit_mas=args["fit_mas"], mas_window_Hz=args["mas_window_Hz"]))
         except (ValueError, KeyError, IndexError) as exc:
             QMessageBox.warning(self, "Multi-spectrum fit", str(exc))
             return False
@@ -913,7 +938,7 @@ class MultiFitPanel(QWidget):
         for j, fit in enumerate(r["experiments"]):
             for p in fit["parameters"]:
                 scope = p.get("scope", "experiment")
-                label = f"{p['label']}: {_param_label(p['name'])}" + (
+                label = (f"{p['label']}: " if p["label"] else "") + _param_label(p["name"]) + (
                     "" if scope == "experiment" else f" [{scope}]")
                 if label not in index:
                     index[label] = len(rows)
@@ -970,6 +995,10 @@ class MultiFitPanel(QWidget):
             self.show_combo.addItem(f"Trend: {label}", ("trend", key))
         self.show_combo.blockSignals(False)
         self._fill_quantity_controls()
+        try:
+            self.advice_box.set_items(fit_advice.advise_multi_fit(r))
+        except Exception:  # noqa: BLE001 -- advice must never sink a fit
+            self.advice_box.set_items([])
 
     def show_selected(self) -> None:
         if not self.result:
@@ -1291,6 +1320,7 @@ class MultiFitPanel(QWidget):
         self.results_table.setVisible(False)
         self.show_combo.clear()
         self.quantity_box.setVisible(False)
+        self.advice_box.set_items([])
 
     def report_text_for(self, key) -> str:
         """What one experiment's log records: the summary and its column."""

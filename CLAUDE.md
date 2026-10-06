@@ -120,6 +120,12 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   saved states restore through them. Do not give them menu sections again.
   The fit's starting model is `combined_fitting.starting_model` (the live
   preview).
+- **Fit advice** ("what the fit tells you / what to try next", plain
+  language) is `notebook/fit_advice.py`, shown by `widgets/advice_box.py`
+  under Combined, Multi-spectrum, Isotropic, the Pseudo-2D series boxes
+  and Fit Curve. A new fit should get an `advise_*` function there and
+  an `AdviceBox`, not hand-written warnings. The MAS rate is a fittable
+  parameter (`fit_combined(fit_mas=...)`), fixed by default.
 - **Quantify** is one page: Peaks, Integration Regions, then the
   Spectral Fitting section (`_build_spectral_fit_section`). Whether the
   fit uses the regions is two explicit checkboxes there.

@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-06 round 2 (MAS rate as a fitting parameter; plain-language fit advice): 32 new tests (16 + 10 + 6). The relevant subset passes: 491 passed, 4 skipped. **Run the full suite locally before committing.***
+
 *2026-10-06 (Combined Hamiltonian as the one entry point, starting-model preview, fitted quantities against x, integration → Dynamics fix): 25 new tests (12 + 8 + 5) and 8 updated for the new menus. Only the relevant subset was run, as asked; it passes (details in that round). **Run the full suite locally before committing.***
 
 *2026-10-03 round 2 (Plot Style ▸ Lines): only the files touching the canvas, Plot Style, legends, exports and external plots, as asked -- test_line_styles (new), test_gui_canvas, test_plotting_style, test_gui_legend_style, test_gui_legend_names, test_gui_tensor_style, test_gui_simulation_plots, test_gui_export_scroll, test_gui_remove_and_plot_kinds, test_projection_style_and_labels, test_gui_czjzek_display, test_gui_curve_fit_plot, test_gui_dnp, test_gui_dynamics, test_colorbar_gap_and_czjzek_labels, test_accessibility, test_gui_usability, test_external_projection, test_plotting_fit, test_plotting_oned, test_plotting_twod; matplotlib 3.11.2 / Py 3.13: 730 passed, 4 skipped, 1 failed -- the pre-existing `test_colorbar_gap_and_czjzek_labels.py::test_czjzek_symbols_are_italic` (glyph tuple has 6 fields on matplotlib 3.11; fails identically on the unmodified tree). 14 new tests. **Run the full suite locally before committing.***
@@ -150,6 +152,64 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## MAS rate as a fitting parameter; plain-language "what the fit tells you / what to try next" (2026-10-06, round 2)
+
+**Asked:** "allow the MAS rate to vary (by no more than, say, 500 Hz of a specified value) when fitting ... by default it should be fixed." And: "comments about 'what to try next' when doing fits -- a parameter hits a limit: try changing limits; a quadrupole: try adding CSA to the quad, or quad to the CSA; even 'try adding an extra peak' ... and comments to clearly highlight what the fits (to individual spectra and to any pseudo-2D data) can and cannot say -- e.g. 'clearly a two-site model is better/worse', or 'this fit is good, but the sidebands aren't quite matched yet, so anisotropy is under/overestimated' ... in plain language." Relevant tests only.
+
+**MAS rate (notebook `combined_fitting.fit_combined`, `multi_fitting`; GUI Fit ▸ Combined, Multi-spectrum):**
+- `fit_combined(..., fit_mas=False, mas_window_Hz=500, mas_scan_points=41, mas_bounds_Hz=None)`. The rate is the parameter `mas_Hz` (no site label), with its 1σ; the result also carries `settings["mas_Hz_start"]` and `mas_scan`.
+- **Measured, then built:** a 13C CSA started 150 Hz off was refined together with everything else from the start. The rate came out right, but Δ ran off to −690 ppm (R² 0.84). Held at the scanned rate, the same fit was perfect. So the fit now:
+  - scans the window first (41 points, 233 orientations, NNLS amounts at each point), because a rate more than a linewidth off is a local minimum a gradient fit cannot leave;
+  - fits with the rate held at the scanned value;
+  - then refines everything with the rate free (`x_scale="jac"`).
+  - From 12000, 11700 and 12600 Hz it reaches 12150 ± 0.4 Hz (truth 12150), with Δ and η right.
+- `make_experiment(fit_mas=, mas_window_Hz=)`: each spectrum's own fit refines its rate; a joint refinement then holds it, and the log says so. The fitted rate is a plottable quantity ("MAS rate (fitted)" under "All (fit window)").
+- GUI:
+  - The Combined parameter table gets a "(spectrum) / MAS rate (Hz)" row under MAS, with Free **unticked by default**; Min/Max blank means ±500 Hz. Logged in the fit's inputs.
+  - "Use fitted values as start" carries the fitted rate.
+  - Multi-spectrum: "Let each spectrum's MAS rate vary, by up to ± [500] Hz".
+
+**Advice (new `notebook/fit_advice.py`; GUI `widgets/advice_box.py`):**
+- Each item is `{section: tells|next, tone, text, action}`, in plain words. The GUI shows "What the fit tells you" and "What to try next", with a button for each suggestion that can be done in one click: add this peak, add a CSA/quadrupolar, use pseudo-Voigt, free the MAS rate, free/fix a parameter, widen a limit, remove a peak, switch relaxation model. The advice is stored with the result (kept fits, restores) and written into the report/processing log.
+- **Measured, not guessed.**
+  - Noise comes from point-to-point scatter where the model is flat (MAD). The verdict is the leftover-to-noise ratio (≤1.3 "just noise", ≤2.5 "misses some detail", else "misses real features"), not R².
+  - Misfits are found in the residual smoothed over a linewidth, above 4σ of the smoothed noise.
+  - Leftover signal far from every peak → "try adding a peak at X ppm".
+  - Leftover signal on a peak's flank or pattern edge → that peak's shape: pseudo-Voigt for an isotropic peak; add CSA to a quadrupolar peak; add quadrupolar to a CSA peak of a spin > 1/2 nucleus; free the Euler angles when both are present; or two overlapping peaks.
+  - Leftover signal at a peak's sideband positions → its anisotropy (or "add a CSA" for an isotropic peak).
+  - Sidebands are compared data against fit per peak, with the other peaks subtracted, in windows as wide as its centreband: "too weak/strong in the fit → anisotropy (Δ or C_Q) under/overestimated".
+  - A progressive shift of the sidebands with order → MAS rate off, with its direction (in a test, an 80 Hz error was estimated as 79 Hz).
+  - Parameters: limits ("a bound, not a measurement", widen), physical limits (η = 0 or 1, said as such), undetermined (1σ spans the range → fix it), only roughly determined (> 30%), well determined (< 5%), trade-offs (> 95% correlated). A held anisotropy whose sidebands are too weak → "let it vary".
+  - Peaks under 2% or indistinguishable from zero → remove; near-duplicates → one is enough.
+  - Model comparison: against the spectrum's kept fits, on the points both fitted (same data checked), by BIC; ΔBIC < 2 "equally well, prefer the simpler", > 10 "clearly better -- by far more than its extra parameters would give by chance".
+  - When a root cause is found (MAS rate, a missing peak or interaction), the uncertainty and trade-off findings are held back with a note to fit again, because they would change; limits are still reported.
+- `advise_series` (pseudo-2D: Fit Every Slice, isotropic peak fits, region integrals):
+  - every slice within noise ("only the intensities change"), or the slices where the fixed shapes leave signal ("the shape changes along the series");
+  - per-peak slices within the noise;
+  - missing peaks in the strongest slice;
+  - limits hit.
+  - Shown under Fit ▸ Isotropic (with "Add this peak" into the peak table) and in each Pseudo-2D series box, and appended to the series' log record.
+- `advise_relaxation` (Dynamics ▸ Fit Curve, per peak):
+  - delays that stop short (< 3 × T) or start late (> T/3), or gradients too weak, each with the delays to add;
+  - a small uncertainty caveated when it rests on extrapolation;
+  - a runs test for systematic misfit → stretched or two-component model (button);
+  - two components that are not distinct;
+  - limits.
+- `advise_multi_fit`: each spectrum's verdict and top suggestions, spectra that fit worse than the rest, a series whose fit got worse ("start each from the starting model").
+- Notebook: `print_combined_fit_report(..., advice=True)` and `print_multi_fit_report(..., advice=True)` end with the same advice; `fit_advice.advice_text(items)`.
+
+**Tried and rejected:**
+- Freeing the MAS rate with everything else in one pass: Δ ran off, as above.
+- Whole-rotor-period windows for the sideband check: baseline offsets and noise over thousands of empty points gave impossible numbers (−91%).
+- Measuring the data only where the fit has sidebands: this misses sidebands the fit has squashed, and gave the wrong direction.
+- Calling leftover signal at sideband positions "missing peaks".
+- Testing an extra isotropic peak placed on a CSA sideband: a pathological, very slow fit, replaced by a 1H case.
+
+**Not done:** advice for the Czjzek, pNMR, J spin-system and hidden legacy CSA/quadrupolar fits (their results have other shapes; the generic checks would need adapting).
+
+**Tests:** new `test_fit_advice.py` (16), `test_fit_mas_rate.py` (10), `test_gui_fit_advice.py` (6).
+- Run: only the relevant files, as asked: the three new files, every Combined/multi-spectrum/series/consolidation/quantities/integration file, Dynamics and curve-fit, relaxation, state and kept fits, round-4 fits and transfers, accessibility, usability, progress, bridge, and test_gui.py -k 'fit_spectrum or curve or relaxation or integrat or spectral_fit or analysis or peak'. 491 passed, 4 skipped (real-data tests), 0 failed. Py 3.13, PySide6 6.11.2, without pymatgen. **Run the full suite locally before committing.**
 
 ## Combined Hamiltonian as the one entry point; live starting-model preview; fitted quantities against x; integration → Dynamics fixed (2026-10-06)
 

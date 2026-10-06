@@ -151,7 +151,8 @@ def _per_site(spec, labels, what):
 def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=None,
                  mas_Hz=0.0, order="second", transitions="all", rotor_angle="magic",
                  n_zcw=None, fit_regions=None, baseline_regions=None, fit_baseline=False,
-                 estimate_amounts=True, max_nfev=2000):
+                 estimate_amounts=True, max_nfev=2000, fit_mas=False, mas_window_Hz=500.0,
+                 mas_scan_points=41, mas_bounds_Hz=None):
     """
     Fit Combined-Hamiltonian sites to a 1D spectrum.
 
@@ -170,6 +171,17 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         held, unless ``fit_baseline``.
     estimate_amounts : start every site's amount from a non-negative
         least-squares fit of the starting shapes (recommended).
+    fit_mas : let the MAS rate vary, within ``mas_Hz`` ± ``mas_window_Hz``
+        (default False: held at ``mas_Hz``). The recorded spinning rate
+        is often a few Hz to a few hundred Hz off the true one, and a
+        sideband pattern is very sensitive to it. Freed, the rate is
+        first scanned over the window at ``mas_scan_points`` points with
+        a coarse powder average (each point with its own least-squares
+        amounts) -- a start more than a linewidth off puts every sideband
+        beside its data, a minimum a local fit cannot climb out of --
+        and then refined with everything else. Reported as the
+        parameter ``mas_Hz`` (no site label) with its 1σ.
+        ``mas_bounds_Hz=(lo, hi)`` replaces the symmetric window.
 
     Returns
     -------
@@ -195,6 +207,21 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         larmor_Hz = float(results["SFO1"]) * 1e6
     larmor_Hz = float(larmor_Hz)
     mas_Hz = float(mas_Hz or 0.0)
+    mas_start = mas_Hz
+    if fit_mas:
+        if mas_Hz <= 0:
+            raise ValueError("fit_mas needs a spinning rate to start from: a static fit has no "
+                             "MAS rate to vary.")
+        mas_window_Hz = abs(float(mas_window_Hz))
+        if mas_bounds_Hz is not None:
+            mas_lo, mas_hi = sorted(float(v) for v in mas_bounds_Hz)
+            if not mas_lo <= mas_Hz <= mas_hi or mas_hi <= mas_lo:
+                raise ValueError(f"mas_bounds_Hz {mas_bounds_Hz} must contain the starting "
+                                 f"rate {mas_Hz:g} Hz.")
+        elif not mas_window_Hz:
+            raise ValueError("mas_window_Hz must be > 0 to let the MAS rate vary.")
+        else:
+            mas_lo, mas_hi = mas_Hz - mas_window_Hz, mas_Hz + mas_window_Hz
     if n_zcw is None:
         n_zcw = 2584 if mas_Hz else 28657
     beta_r = (np.arccos(1 / np.sqrt(3)) if rotor_angle == "magic"
@@ -255,34 +282,64 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
                    "lower": -np.inf, "upper": np.inf},
                   {"site": None, "label": "", "name": "b1", "value": b1, "free": True,
                    "lower": -np.inf, "upper": np.inf}]
+    if fit_mas:
+        table.append({"site": None, "label": "", "name": "mas_Hz", "value": mas_Hz, "free": True,
+                      "lower": max(mas_lo, 1.0), "upper": mas_hi})
 
     sim = dict(larmor_Hz=larmor_Hz, mas_Hz=mas_Hz, order=order, transitions=transitions,
                beta_r=beta_r, n_zcw=int(n_zcw))
     cache = {}
 
-    def sticks(i, d):
-        key = (i, repr({k: v for k, v in d.items() if k not in _BROADENING}))
+    def sticks(i, d, mas=None, n=None):
+        mas = sim["mas_Hz"] if mas is None else float(mas)
+        n = sim["n_zcw"] if n is None else int(n)
+        key = (i, repr({k: v for k, v in d.items() if k not in _BROADENING}), mas, n)
         if key not in cache:
             if len(cache) > 256:
                 cache.clear()
-            comp, _p = _site_sticks(Site.from_dict(d), x, sim["larmor_Hz"], sim["mas_Hz"],
-                                    sim["order"], sim["transitions"], sim["beta_r"], sim["n_zcw"])
+            comp, _p = _site_sticks(Site.from_dict(d), x, sim["larmor_Hz"], mas,
+                                    sim["order"], sim["transitions"], sim["beta_r"], n)
             cache[key] = comp
         return cache[key]
 
-    def site_curves(ds):
-        return [np.sum(list(_broaden_site(Site.from_dict(d), sticks(i, d), x).values()), axis=0)
+    def site_curves(ds, mas=None, n=None):
+        return [np.sum(list(_broaden_site(Site.from_dict(d), sticks(i, d, mas, n), x).values()),
+                       axis=0)
                 for i, d in enumerate(ds)]
 
     def apply(values):
         ds = copy.deepcopy(dicts)
         base = (b0, b1)
+        mas = mas_Hz
         for row, v in zip(table, values):
             if row["site"] is None:
-                base = (v, base[1]) if row["name"] == "b0" else (base[0], v)
+                if row["name"] == "mas_Hz":
+                    mas = v
+                else:
+                    base = (v, base[1]) if row["name"] == "b0" else (base[0], v)
             else:
                 _set(ds[row["site"]], row["name"], v)
-        return ds, base
+        return ds, base, mas
+
+    # ---- the MAS rate: scanned over its window before the local fit ------------------------
+    mas_scan = None
+    if fit_mas and int(mas_scan_points) > 1:
+        row = next(r for r in table if r["name"] == "mas_Hz")
+        grid = np.linspace(row["lower"], row["upper"], int(mas_scan_points))
+        coarse = min(int(n_zcw), 233)
+        target = y[mask] - (b0 + b1 * (x[mask] - x_ref))
+        trial = [dict(d, amount=1.0) for d in dicts]
+        chi2 = []
+        for m in grid:
+            A = np.column_stack([c[mask] for c in site_curves(trial, mas=m, n=coarse)])
+            a, _r = nnls(A, target)
+            chi2.append(float(np.sum((A @ a - target) ** 2)))
+        best = float(grid[int(np.argmin(chi2))])
+        row["value"] = best
+        mas_Hz = best
+        sim["mas_Hz"] = best
+        mas_scan = {"grid_Hz": grid, "chi2": np.asarray(chi2), "best_Hz": best,
+                    "n_zcw": coarse}
 
     # ---- starting amounts ----------------------------------------------------------------
     if estimate_amounts:
@@ -301,19 +358,34 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
     p_all = np.array([r["value"] for r in table], dtype=float)
     start_curves = site_curves(apply(p_all)[0])
 
-    def model(_x, *free_values):
-        values = p_all.copy()
-        values[free] = free_values
-        ds, (c0, c1) = apply(values)
-        return (np.sum(site_curves(ds), axis=0) + c0 + c1 * (x - x_ref))[mask]
+    def local_fit(which, **kw):
+        def model(_x, *free_values):
+            values = p_all.copy()
+            values[which] = free_values
+            ds, (c0, c1), mas = apply(values)
+            return (np.sum(site_curves(ds, mas=mas), axis=0) + c0 + c1 * (x - x_ref))[mask]
+        lo = np.array([r["lower"] for r in table])[which]
+        hi = np.array([r["upper"] for r in table])[which]
+        popt, pcov = curve_fit(_fit_progress.tracked(model, y[mask], n_free=int(which.sum())),
+                               x[mask], y[mask], p0=p_all[which], bounds=(lo, hi),
+                               diff_step=1e-4, max_nfev=max_nfev, **kw)
+        p_all[which] = popt
+        return pcov
 
     if free.any():
-        lo = np.array([r["lower"] for r in table])[free]
-        hi = np.array([r["upper"] for r in table])[free]
-        popt, pcov = curve_fit(_fit_progress.tracked(model, y[mask], n_free=int(free.sum())),
-                               x[mask], y[mask], p0=p_all[free], bounds=(lo, hi),
-                               diff_step=1e-4, max_nfev=max_nfev)
-        p_all[free] = popt
+        if fit_mas:
+            # Two passes. Refining the rate together with everything from
+            # the start lets a shape parameter run off while the sidebands
+            # are still slightly misplaced (measured: a 13C CSA started
+            # 150 Hz off went to Δ = -690 ppm, R² 0.84, though the rate
+            # itself came out right). Hold the scanned rate first, then
+            # free it from there, steps scaled by the Jacobian.
+            held = free & np.array([r["name"] != "mas_Hz" for r in table])
+            if held.any():
+                local_fit(held)
+            pcov = local_fit(free, x_scale="jac")
+        else:
+            pcov = local_fit(free)
     else:
         pcov = np.zeros((0, 0))
 
@@ -322,8 +394,8 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
     pcov = np.asarray(pcov) * np.outer(unit[free], unit[free])
     errors = np.zeros(len(table))
     errors[free] = np.sqrt(np.clip(np.diag(pcov), 0, None))
-    ds, (c0, c1) = apply(p_all)
-    curves = site_curves(ds)
+    ds, (c0, c1), mas_Hz = apply(p_all)
+    curves = site_curves(ds, mas=mas_Hz)
     baseline = (c0 + c1 * (x - x_ref)) * scale
     y_fit = np.sum(curves, axis=0) * scale + baseline
     fitted_sites = []
@@ -350,6 +422,10 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
     warnings += _warnings(parameters, pcov, free_names, curves, x, mask, baseline_regions,
                           fit_baseline, start_curves)
     regime = "static" if not mas_Hz else f"MAS {mas_Hz / 1e3:g} kHz"
+    if fit_mas:
+        mas_row = next(p for p in parameters if p["name"] == "mas_Hz")
+        regime = (f"MAS {mas_Hz:.1f} ± {mas_row['error'] or 0.0:.1f} Hz (fitted; started at "
+                  f"{mas_start:g} Hz, allowed {mas_row['lower']:g} to {mas_row['upper']:g} Hz)")
     log = ("Combined-Hamiltonian fit: " + f"{regime}, nu0 = {larmor_Hz / 1e6:.7g} MHz, "
            f"quadrupolar {order}" + ("" if order == "exact" else "-order")
            + f", transitions {transitions}, {n_zcw} orientations, window "
@@ -364,7 +440,10 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
             "settings": {"larmor_Hz": larmor_Hz, "mas_Hz": mas_Hz, "order": order,
                          "transitions": transitions, "rotor_angle": rotor_angle,
                          "n_zcw": int(n_zcw), "fit_regions": fit_regions,
-                         "fit_baseline": fit_baseline},
+                         "fit_baseline": fit_baseline, "fit_mas": bool(fit_mas),
+                         "mas_Hz_start": mas_start,
+                         "mas_window_Hz": float(mas_window_Hz) if fit_mas else None},
+            "mas_scan": mas_scan,
             "nuclide": results.get("nuclide") or sites[0].nucleus}
 
 
@@ -632,11 +711,12 @@ _UNITS = {"delta_iso": "ppm", "fwhm": "ppm", "aniso": "ppm", "C_Q": "MHz", "alph
           "beta": "deg", "gamma": "deg"}
 
 
-def print_combined_fit_report(fit, save_txt=None):
+def print_combined_fit_report(fit, save_txt=None, advice=True):
     """Print (and optionally save to ``save_txt``) the fitted parameters
     with 1-sigma errors (rounded to the digits the error supports), the
-    derived quantities, fit quality, the setup and every warning.
-    Returns the text."""
+    derived quantities, fit quality, the setup and every warning, then
+    (``advice``) what the fit tells you and what to try next, in plain
+    words (:mod:`opennmr.notebook.fit_advice`). Returns the text."""
     lines = ["=" * 68, "COMBINED-HAMILTONIAN FIT REPORT", "=" * 68, fit["log"], ""]
     for label in dict.fromkeys(p["label"] for p in fit["parameters"] if p["label"]):
         lines.append(label)
@@ -656,8 +736,18 @@ def print_combined_fit_report(fit, save_txt=None):
     q = fit["quality"]
     lines.append(f"R^2 = {q['r2']:.5f}   RMSE = {q['rmse']:.4g}   reduced chi^2 = "
                  f"{q['reduced_chi2']:.4g}")
+    mas = next((p for p in fit["parameters"] if p["name"] == "mas_Hz"), None)
+    if mas is not None:
+        lines.append(f"MAS rate (Hz)      = {_fmt(mas['value'], mas['error'])}")
     if fit["warnings"]:
         lines += ["", "Warnings:"] + [f"  - {w}" for w in fit["warnings"]]
+    if advice:
+        from .fit_advice import advice_text, advise_combined_fit
+        items = fit.get("advice")
+        if items is None:
+            items = advise_combined_fit(fit)
+        if items:
+            lines += ["", advice_text(items)]
     lines.append("=" * 68)
     text = "\n".join(lines)
     print(text)

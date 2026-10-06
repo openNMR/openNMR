@@ -78,13 +78,17 @@ class MultiFitCancelled(Exception):
 
 def make_experiment(results, label=None, nucleus=None, larmor_Hz=None, mas_Hz=0.0,
                     order="second", transitions="all", rotor_angle="magic", n_zcw=None,
-                    fit_regions=None, fit_baseline=False, x_value=None):
+                    fit_regions=None, fit_baseline=False, x_value=None, fit_mas=False,
+                    mas_window_Hz=500.0):
     """One spectrum to fit, with its own acquisition settings.
 
     ``results`` : ``x_ppm``, ``real_spectrum``, ``SFO1`` (MHz) and
     ``nuclide`` -- NMR1dimport output or the GUI's
     ``bridge.results_from_spectrum``. ``x_value``: where it sits in a
-    series (temperature, time, ...), for the trend table and plots."""
+    series (temperature, time, ...), for the trend table and plots.
+    ``fit_mas``: let this spectrum's MAS rate vary within ``mas_Hz`` ±
+    ``mas_window_Hz`` in its own fit (see :func:`fit_combined`); a joint
+    refinement then holds it at that fitted value."""
     nucleus = nucleus or results.get("nuclide")
     if not nucleus:
         raise ValueError(f"{label or 'An experiment'} has no nucleus -- pass nucleus=.")
@@ -93,7 +97,8 @@ def make_experiment(results, label=None, nucleus=None, larmor_Hz=None, mas_Hz=0.
             "nucleus": str(nucleus), "larmor_Hz": larmor, "mas_Hz": float(mas_Hz or 0.0),
             "order": order, "transitions": transitions, "rotor_angle": rotor_angle,
             "n_zcw": n_zcw, "fit_regions": fit_regions, "fit_baseline": bool(fit_baseline),
-            "x_value": x_value}
+            "x_value": x_value, "fit_mas": bool(fit_mas) and float(mas_Hz or 0.0) > 0,
+            "mas_window_Hz": float(mas_window_Hz)}
 
 
 def _isotope(nucleus, column):
@@ -565,7 +570,9 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
                                bounds=pmap.sequential_bounds(i) or None, larmor_Hz=e["larmor_Hz"],
                                mas_Hz=e["mas_Hz"], order=e["order"], transitions=e["transitions"],
                                rotor_angle=e["rotor_angle"], n_zcw=e["n_zcw"],
-                               fit_regions=e["fit_regions"], fit_baseline=e["fit_baseline"])
+                               fit_regions=e["fit_regions"], fit_baseline=e["fit_baseline"],
+                               fit_mas=e.get("fit_mas", False),
+                               mas_window_Hz=e.get("mas_window_Hz", 500.0))
         except (RuntimeError, ValueError) as exc:
             warnings.append(f"{e['label']}: the single-spectrum fit failed ({exc}); its starting "
                             "values were kept")
@@ -573,6 +580,13 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
             seq_dicts.append(None)
             continue
         fitted = [s.to_dict() for s in fit["sites"]]
+        if e.get("fit_mas"):
+            # This spectrum's own rate from here on: the joint refinement
+            # (and the report) use it, held.
+            mas_row = next(p for p in fit["parameters"] if p["name"] == "mas_Hz")
+            experiments[i] = e = {**e, "mas_Hz": float(mas_row["value"]),
+                                  "mas_fitted": (float(mas_row["value"]),
+                                                 mas_row["error"], e["mas_Hz"])}
         sequential.append(fit)
         seq_dicts.append(fitted)
         last_by_nucleus[e["nucleus"]] = {d["label"]: d for d in fitted}
@@ -771,6 +785,7 @@ def _decorate(fit, e):
     fit["x_value"] = e["x_value"]
     fit["larmor_Hz"] = e["larmor_Hz"]
     fit["mas_Hz"] = e["mas_Hz"]
+    fit["mas_fitted"] = e.get("mas_fitted")
     # Computed while the curves are here: a saved result keeps every
     # experiment's numbers but only its own experiment's curves.
     fit["quantities"] = fit_quantities(fit)
@@ -783,6 +798,9 @@ def _finish(mode, fits, shared_rows, sequential, warnings, settings, experiments
     for e in experiments:
         lines.append(f"  {e['label']}: {e['nucleus']}, {e['larmor_Hz'] / 1e6:.4f} MHz, "
                      + ("static" if not e["mas_Hz"] else f"MAS {e['mas_Hz'] / 1e3:g} kHz")
+                     + (f" (fitted in its own fit, from {e['mas_fitted'][2]:g} Hz"
+                        + ("; held in the joint refinement)" if mode == "joint" else ")")
+                        if e.get("mas_fitted") else "")
                      + (f", x = {e['x_value']}" if e["x_value"] is not None else ""))
     lines.append(f"Seeded from "
                  f"{'the previous fit' if settings['seed'] == 'previous' else 'the starting model'}"
@@ -855,6 +873,7 @@ QUANTITIES = (
     ("P_Q", "P_Q", "MHz"),
     ("delta_cg", "CT centre of gravity", "ppm"),
     ("eta", "Lorentzian fraction", ""),
+    ("mas_Hz", "MAS rate (fitted)", "Hz"),
 )
 _QUANTITY_DEFINITIONS = {
     "centre_of_mass": "Σδ·I / ΣI of the peak's fitted curve (of the data minus baseline, for "
@@ -935,6 +954,15 @@ def fit_quantities(fit):
                            "height": (float(ym[np.argmax(np.abs(ym))]), nan),
                            "centre_of_mass": (float(np.sum(xm * ym) / total) if total else nan,
                                               nan)}
+    for p in fit.get("parameters") or []:
+        if p.get("name") == "mas_Hz" and not p.get("label"):
+            err = p.get("error")
+            out.setdefault(WINDOW, {})["mas_Hz"] = (float(p["value"]),
+                                                    float(err) if err is not None else nan)
+    if fit.get("mas_fitted") and "mas_Hz" not in out.get(WINDOW, {}):
+        value, err, _start = fit["mas_fitted"]
+        out.setdefault(WINDOW, {})["mas_Hz"] = (float(value),
+                                                float(err) if err is not None else nan)
     return out
 
 
@@ -1114,9 +1142,11 @@ def _pname(name):
     return f"{name} ({unit})" if unit else name
 
 
-def print_multi_fit_report(result, save_txt=None):
+def print_multi_fit_report(result, save_txt=None, advice=True):
     """The multi-spectrum fit written out: set-up, shared parameters,
-    each experiment's parameters and quality, warnings. Returns the text."""
+    each experiment's parameters and quality, warnings, and (``advice``)
+    what the fits tell you and what to try next, in plain words
+    (:mod:`opennmr.notebook.fit_advice`). Returns the text."""
     lines = ["=" * 72, "MULTI-SPECTRUM FIT REPORT", "=" * 72, result["log"], ""]
     if result["shared"]:
         lines.append("Shared parameters")
@@ -1141,6 +1171,11 @@ def print_multi_fit_report(result, save_txt=None):
             lines.append(f"  {label + ': share (%)':<30}= "
                          f"{_fmt(d['share_%'], d['share_%_err'] or None)}")
         lines.append("")
+    if advice:
+        from .fit_advice import advice_text, advise_multi_fit
+        items = advise_multi_fit(result)
+        if items:
+            lines += [advice_text(items), ""]
     if result["warnings"]:
         lines += ["Warnings:"] + [f"  - {w}" for w in result["warnings"]]
     lines.append("=" * 72)
