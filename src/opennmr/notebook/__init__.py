@@ -71,9 +71,11 @@ from .relaxation import (
 # Relaxometry extras (2026-10-06): threshold regions, trapezoid/Simpson,
 # correlation matrices.
 from . import relaxometry
-from .relaxometry import (
-    find_integration_regions, correlation_matrix, plot_correlation_matrix,
-)
+from .relaxometry import find_integration_regions, correlation_matrix
+# The correlation matrix of any fit -- relaxation, isotropic peaks,
+# Combined Hamiltonian, multi-spectrum (2026-10-06).
+from . import fit_correlation
+from .fit_correlation import plot_correlation_matrix, correlation_of, multi_fit_correlation
 
 from .arithmetic import combine_spectra, combine_spectra_as_results
 # Dynamics: relaxation against temperature (BPP / Arrhenius / Hendrickson-
@@ -276,7 +278,7 @@ __all__ = [
     "triexponential_decay", "triexponential_recovery",
     "stretched_decay", "stretched_recovery", "RELAXATION_MODELS",
     "relaxometry", "find_integration_regions", "correlation_matrix",
-    "plot_correlation_matrix",
+    "plot_correlation_matrix", "fit_correlation", "correlation_of", "multi_fit_correlation",
     "fit_relaxation", "print_relaxation_report",
     "NMR2D_fit_relaxation", "NMR2D_plot_relaxation",
     "NMR2D_relaxation_workflow",

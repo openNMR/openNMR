@@ -142,9 +142,12 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   trapezoid/Simpson, correlation matrices) are `processing/relaxometry.py`,
   shared by *both* relaxation fitters (`processing/relaxation.py`, the GUI's,
   and `notebook/relaxation.py`, a separate copy) -- add a new relaxation
-  model to both `RELAXATION_MODELS` or through this module. The figure is
-  `notebook/relaxometry.plot_correlation_matrix`. Fit Curve's model combo
-  is saved by key (`model_key`): append new models, never insert.
+  model to both `RELAXATION_MODELS` or through this module. Fit Curve's
+  model combo is saved by key (`model_key`): append new models, never insert.
+- **Correlation matrices** of any fit are `notebook/fit_correlation.py`
+  (`correlation_input` adapts each fit shape; add an adapter there for a
+  new kind of fit). The GUI draws them through
+  `MainWindow._show_correlation_matrix(canvas, fit)`.
 - **Quantify** is one page: Peaks, Integration Regions, then the
   Spectral Fitting section (`_build_spectral_fit_section`). Whether the
   fit uses the regions is two explicit checkboxes there.

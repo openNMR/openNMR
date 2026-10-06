@@ -188,8 +188,12 @@ class MultiFitPanel(QWidget):
     MainWindow._multi_key)."""
 
     def __init__(self, open_items, selected_keys, resolve, open_expnos, draw_fit, draw_trend,
-                 format_value_error, on_fitted=None, parent=None, draw_quantities=None) -> None:
+                 format_value_error, on_fitted=None, parent=None, draw_quantities=None,
+                 draw_correlations=None) -> None:
         super().__init__(parent)
+        #: ``draw_correlations(fit) -> bool``: a correlation matrix on the
+        #: Fit view (notebook.fit_correlation); None offers none.
+        self._draw_correlations = draw_correlations
         #: ``draw_quantities(draw)``: show ``draw(figure)`` on the Fit view
         #: (a curve plot); None draws nothing.
         self._draw_quantities = draw_quantities
@@ -993,6 +997,15 @@ class MultiFitPanel(QWidget):
             self.show_combo.addItem(f"Fit: {fit['label']}", ("fit", j))
         for label, key, _cells in rows:
             self.show_combo.addItem(f"Trend: {label}", ("trend", key))
+        # Parameter correlations (explicit user request, 2026-10-06): the
+        # joint refinement's across every spectrum, or each spectrum's own
+        # fit in sequential mode.
+        if self._draw_correlations is not None:
+            if r.get("pcov") is not None:
+                self.show_combo.addItem("Correlations: joint fit, all spectra", ("corr", None))
+            for j, fit in enumerate(r["experiments"]):
+                if fit.get("pcov") is not None:
+                    self.show_combo.addItem(f"Correlations: {fit['label']}", ("corr", j))
         self.show_combo.blockSignals(False)
         self._fill_quantity_controls()
         try:
@@ -1005,6 +1018,15 @@ class MultiFitPanel(QWidget):
             return
         what = self.show_combo.currentData()
         if what is None:
+            return
+        if what[0] == "corr":
+            from ..notebook import fit_correlation
+            try:
+                data = fit_correlation.multi_fit_correlation(self.result, what[1])
+            except (ValueError, KeyError, StopIteration) as exc:
+                QMessageBox.information(self, "Multi-spectrum fit", str(exc))
+                return
+            self._draw_correlations(data)
             return
         if what[0] == "fit":
             fit = dict(self.result["experiments"][what[1]])

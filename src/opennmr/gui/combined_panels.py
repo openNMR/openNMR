@@ -862,7 +862,11 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
 
     def __init__(self, get_target, get_regions, draw_fit, format_value_error,
                  send_to_simulation=None, on_fitted=None, parent=None,
-                 strong_coupling=None, get_alternatives=None) -> None:
+                 strong_coupling=None, get_alternatives=None,
+                 draw_correlations=None) -> None:
+        #: ``draw_correlations(fit) -> bool``: the fit's parameter
+        #: correlation matrix on the Fit view (False: it has none).
+        self._draw_correlations = draw_correlations
         #: ``get_alternatives(result) -> [(name, fit), ...]``: other fits of
         #: the same spectrum (kept fit models) for the advice to compare with.
         self._get_alternatives = get_alternatives
@@ -1014,7 +1018,33 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             b.setEnabled(False)
             row.addWidget(b)
         v.addLayout(row)
+        # The fit's parameter correlations (explicit user request,
+        # 2026-10-06), in place of the fit on the Fit view while on.
+        self.correlation_button = QPushButton("Show Parameter Correlations")
+        self.correlation_button.setCheckable(True)
+        self.correlation_button.setEnabled(False)
+        self.correlation_button.setToolTip(
+            "Show the correlation matrix of the fitted parameters instead of the fit (untick "
+            "to go back).\n\n"
+            "r near ±1: two parameters trade off -- typically Δ and η of a CSA, C_Q and "
+            "δiso of a quadrupolar site, or the amounts and widths of overlapping sites. The "
+            "data then fix a combination of them, not each one, and their ± understate how "
+            "loosely each is pinned. Fixed parameters have no row.")
+        self.correlation_button.toggled.connect(self._on_correlation_toggled)
+        v.addWidget(self.correlation_button)
         self._sync_fit_controls()
+
+    def _on_correlation_toggled(self, checked: bool) -> None:
+        if not self.result:
+            return
+        if checked:
+            if self._draw_correlations is None or not self._draw_correlations(self.result):
+                self.correlation_button.blockSignals(True)
+                self.correlation_button.setChecked(False)
+                self.correlation_button.blockSignals(False)
+            return
+        if self.result.get("x") is not None:
+            self._draw_fit(self.result)
 
     def _sync_fit_controls(self) -> None:
         manual = self.window_combo.currentData() == "range"
@@ -1553,6 +1583,14 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         on = self.result is not None
         self.use_fitted_button.setEnabled(on)
         self.send_button.setEnabled(on and self._send_to_simulation is not None)
+        if hasattr(self, "correlation_button"):
+            # A new (or no) result is drawn as its fit first.
+            self.correlation_button.blockSignals(True)
+            self.correlation_button.setChecked(False)
+            self.correlation_button.blockSignals(False)
+            self.correlation_button.setEnabled(
+                on and self._draw_correlations is not None
+                and self.result.get("pcov") is not None)
 
     # ---- results -----------------------------------------------------------
 

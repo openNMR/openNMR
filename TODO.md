@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-06 round 5 (correlation matrix for isotropic, Combined-Hamiltonian and multi-spectrum fits): 10 new tests. The relevant subset: 312 passed, 4 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
+
 *2026-10-06 round 4 (relaxometry extras: three-exponential models, automatic regions, trapezoid/Simpson, correlation matrices): 39 new tests (32 + 7). The relevant subset: 993 passed, 15 skipped (real-data tests), 0 failed after `test_relaxation.py::test_relaxation_models_registry_contains_expected_keys` was updated for the two new models; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
 
 *2026-10-06 round 3 (Measure across Compare rows, estimated starting values, batch pseudo-2D relaxation, automatic cubic-spline baseline): 37 new tests (4 + 12 + 10 + 11). The relevant subset passes: 751 passed, 5 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
@@ -156,6 +158,37 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Correlation matrix for spectral fits: isotropic peaks, Combined Hamiltonian, multi-spectrum (2026-10-06, round 5)
+
+**Asked:** "Can we add the correlation matrix for normal spectral fits, too?"
+
+**Built:**
+- **New `notebook/fit_correlation.py`.** One figure (`plot_correlation_matrix`) and the numbers (`correlation_of`) for every fit openNMR makes. `correlation_input` turns each kind of fit into its free parameters, labels, groups and covariance:
+  - relaxation/diffusion curve fits (`free_names` + `pcov`);
+  - isotropic peak fits (`popt`, `pcov` — the expanded full matrix or the free block — `is_free`, `peak_defs`). Labels are δₖ, FWHMₖ, *A*ₖ and ηₖ; a fixed parameter has no row;
+  - Combined-Hamiltonian fits (`"C1: aniso"` → δ_aniso (C1); η_CSA, *C*_Q, η_Q, *J*ₙ, Euler α/β/γ, ν_r, *b*₀/*b*₁);
+  - multi-spectrum fits via `multi_fit_correlation(result, experiment=None)`: the joint refinement's matrix across every spectrum, or one spectrum's own fit in sequential mode.
+- `notebook/relaxometry.py` now re-exports the figure from there; its names are unchanged.
+- Figure additions:
+  - a line between parameters of different peaks, sites or spectra, inside the drawn triangle only;
+  - cell values are written up to 12 parameters ("auto") and dropped beyond that; tick labels shrink and turn at more than 6 parameters;
+  - |r| < 0.005 is written "0.00", never "−0.00".
+- `multi_fitting.fit_multi` in joint mode now keeps `pcov` and `free_names` for its free keys, tagged by spectrum label or "shared". Before this, the joint covariance was used for the errors and then discarded.
+- **GUI:**
+  - Fit ▸ Isotropic: "Show Parameter Correlations" under the results table swaps the Spectral Fit view's plot for the matrix. The slice spin still chooses the slice and the table stays; it is turned off when the fit is cleared.
+  - Fit ▸ Combined Hamiltonian: the same button (callback `draw_correlations`), on the Fit view. Each new fit is drawn as its fit first.
+  - Fit ▸ Multi-spectrum: "Correlations: joint fit, all spectra" in the Show list, and "Correlations: <spectrum>" in sequential mode.
+  - One helper, `MainWindow._show_correlation_matrix(canvas, fit, title)`, serves all four places (Fit Curve too). It follows Plot Style's text size.
+- **Measured, to check the matrix says something real:**
+  - Two Lorentzians 0.06 ppm apart and 0.05 ppm wide correlate (|r| up to 0.5 between their shifts, widths and amplitudes); a third peak 0.5 ppm away has |r| < 0.05 with both.
+  - In a two-spectrum ²⁷Al joint fit, the shared C_Q correlates +0.74 with each spectrum's δiso: the second-order quadrupolar shift ties them.
+
+**Not done:** the Czjzek, pNMR, J spin-system and the hidden legacy CSA/quadrupolar fits; their results have other shapes. An adapter in `correlation_input` is all each would need.
+
+**Tests:** new `test_fit_correlation.py` (10).
+- Run, relevant files only: the new file, test_relaxometry, test_gui_relaxometry, test_gui_combined_fit, test_gui_combined_consolidation, test_fit_mas_rate, test_gui_multi_fit, test_multi_fitting, test_multi_fit_quantities, test_combined_fitting, test_gui_fit_advice, test_accessibility, test_gui_usability, test_state_and_fit_models, test_gui_round4_transfers, test_fit_progress, test_notebook_bridge, and test_gui.py -k "spectral_fit or fit_spectrum or slice_fit or peak or fit_canvas or analysis".
+- Results: 312 passed, 4 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.**
 
 ## Relaxometry extras: three-exponential models, automatic integration regions, trapezoid/Simpson, correlation matrices (2026-10-06, round 4)
 

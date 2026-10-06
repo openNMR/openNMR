@@ -49,6 +49,7 @@ from ..notebook import periodic_table as nb_periodic_table
 from ..notebook import series_fitting as nb_series_fitting
 from ..notebook import fit_advice as nb_fit_advice
 from ..notebook import relaxometry as nb_relaxometry
+from ..notebook import fit_correlation as nb_fit_correlation
 from PySide6.QtGui import QColor
 
 
@@ -12992,6 +12993,7 @@ class MainWindow(QMainWindow):
             get_target=self._jcoupling_fit_target,
             get_regions=self._integration_regions,
             draw_fit=self._draw_combined_fit,
+            draw_correlations=self._draw_fit_view_correlation,
             format_value_error=self._format_value_error,
             send_to_simulation=self._send_combined_to_simulation,
             on_fitted=lambda: (self._store_fit("combined"),
@@ -13034,6 +13036,7 @@ class MainWindow(QMainWindow):
             open_expnos=self._multi_open_expnos,
             draw_fit=self._draw_combined_fit,
             draw_trend=self._draw_parameter_trend,
+            draw_correlations=self._draw_fit_view_correlation,
             format_value_error=self._format_value_error,
             on_fitted=self._store_multi_fit,
             draw_quantities=lambda draw: (self.fit_canvas.show_external_plot(draw, kind="curve"),
@@ -16808,6 +16811,22 @@ class MainWindow(QMainWindow):
             "chi-squared), and any parameter that finished at a bound."
         )
         layout.addWidget(self.spectral_fit_params_label)
+
+        # The fit's parameter correlations (explicit user request,
+        # 2026-10-06: "the correlation matrix for normal spectral fits,
+        # too"), in place of the fit on the Spectral Fit view while on.
+        self.spectral_fit_correlation_button = QPushButton("Show Parameter Correlations")
+        self.spectral_fit_correlation_button.setCheckable(True)
+        self.spectral_fit_correlation_button.setEnabled(False)
+        self.spectral_fit_correlation_button.setToolTip(
+            "Show the correlation matrix of the shown fit's parameters (the slice number "
+            "above still chooses the slice; untick to go back to the fit).\n\n"
+            "r near ±1: two parameters trade off -- typically the amplitudes and widths of "
+            "overlapping peaks. The data then fix a combination of them rather than each "
+            "one, and the table's ± understate how loosely each is pinned. Fixed "
+            "parameters have no row.")
+        self.spectral_fit_correlation_button.toggled.connect(self._on_spectral_correlation_toggled)
+        layout.addWidget(self.spectral_fit_correlation_button)
 
         export_report_button = QPushButton("Export Fit Report…")
         export_report_button.setToolTip(
@@ -23899,22 +23918,39 @@ class MainWindow(QMainWindow):
         unit = self.delay_unit_combo.currentText()
         return f"Delay ({unit})", self.delay_unit_combo.currentData() or 1.0
 
-    def _draw_relaxation_correlation(self, result) -> bool:
-        """The correlation matrix of one curve fit on the Fit view; False
-        (with the reason in the status bar) when the fit has none."""
+    def _show_correlation_matrix(self, canvas, fit, title=None) -> bool:
+        """The correlation matrix of any fit
+        (:func:`opennmr.notebook.fit_correlation.plot_correlation_matrix`)
+        on ``canvas``; False, with the reason in the status bar, when the
+        fit has no covariance to show."""
         try:
-            processing_relaxometry.correlation_matrix(result)
-        except ValueError as exc:
+            nb_fit_correlation.correlation_of(fit)
+        except (ValueError, KeyError) as exc:
             self.statusBar().showMessage(f"No correlation matrix: {exc}", 10000)
             return False
 
         def draw(figure):
             # Read at draw time: a Plot Style change redraws through here,
             # so the cell values follow the text size with the axis labels.
-            size = float(self.fit_canvas.style_settings().get("labelsize") or 12.0)
-            nb_relaxometry.plot_correlation_matrix(result, figure=figure, fontsize=size)
+            size = float(canvas.style_settings().get("labelsize") or 12.0)
+            nb_fit_correlation.plot_correlation_matrix(fit, figure=figure, fontsize=size,
+                                                       title=title)
 
-        self.fit_canvas.show_external_plot(draw, kind="2d")
+        canvas.show_external_plot(draw, kind="2d")
+        return True
+
+    def _draw_fit_view_correlation(self, fit) -> bool:
+        """A spectral fit's correlation matrix on the Fit view (Combined
+        Hamiltonian, multi-spectrum)."""
+        if not self._show_correlation_matrix(self.fit_canvas, fit):
+            return False
+        self._raise_fit_canvas()
+        return True
+
+    def _draw_relaxation_correlation(self, result) -> bool:
+        """The correlation matrix of one curve fit on the Fit view."""
+        if not self._show_correlation_matrix(self.fit_canvas, result):
+            return False
         self._raise_fit_canvas()
         self._fit_canvas_owner = "relaxation"
         return True
@@ -24377,6 +24413,17 @@ class MainWindow(QMainWindow):
     def _clear_spectral_fit_report(self) -> None:
         self.spectral_fit_table.setRowCount(0)
         self.spectral_fit_params_label.setText("")
+        button = getattr(self, "spectral_fit_correlation_button", None)
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+            button.setEnabled(False)
+
+    def _on_spectral_correlation_toggled(self, _checked: bool) -> None:
+        result = getattr(self, "_last_spectral_fit", None)
+        if result is not None:
+            self._display_slice_fit(result, switch_tab=True)
 
     def _spectral_fit_table_as_tsv(self) -> str:
         """The table as tab-separated text, header included -- what a
@@ -24558,11 +24605,20 @@ class MainWindow(QMainWindow):
             result["popt"], result["pcov"], result["peak_defs"], result["is_free"],
         )
         peak_labels = [f"Peak {i + 1} ({p['params'][0]:.4g} ppm)" for i, p in enumerate(per_peak)]
-        self.spectral_fit_canvas.show_slice_fit(
-            result["x"], result["y"], result["y_fit"],
-            components=result.get("components"), peak_labels=peak_labels, title=title,
-            spectrum=result.get("slice"),
-        )
+        button = self.spectral_fit_correlation_button
+        button.setEnabled(True)
+        shown = button.isChecked() and self._show_correlation_matrix(
+            self.spectral_fit_canvas, result, title=title)
+        if button.isChecked() and not shown:
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+        if not shown:
+            self.spectral_fit_canvas.show_slice_fit(
+                result["x"], result["y"], result["y_fit"],
+                components=result.get("components"), peak_labels=peak_labels, title=title,
+                spectrum=result.get("slice"),
+            )
         self._fill_spectral_fit_table(result, per_peak)
         self.spectral_fit_params_label.setText(self._format_fit_summary(result))
         if switch_tab:

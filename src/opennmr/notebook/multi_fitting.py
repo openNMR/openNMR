@@ -771,6 +771,16 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
                "nuclide": e["nucleus"], "log": ""}
         out.append(_decorate(fit, e))
     result = _finish("joint", out, shared_rows, sequential, warnings, settings, experiments)
+    # The joint covariance over the free keys, for its correlation matrix
+    # (notebook.fit_correlation.multi_fit_correlation): a shared parameter
+    # and every spectrum's own ones in one matrix.
+    def _tag(grp):
+        if grp.startswith("e") and grp[1:].isdigit():
+            return experiments[int(grp[1:])]["label"]
+        return "shared" if grp == "all" else f"shared, {grp[2:]}" if grp.startswith("n:") else grp
+    result["pcov"] = np.asarray(cov, dtype=float)
+    result["free_names"] = [(f"{label}: {name}" if label else name) + f" [{_tag(grp)}]"
+                            for label, name, grp in free_keys]
     result["joint_quality"] = {"reduced_chi2": chi2_red, "evaluations": calls[0]}
     result["log"] += (f"\nJoint refinement: {int(free.sum())} free parameters across "
                       f"{len(experiments)} spectra, {calls[0]} evaluations, reduced χ² "
