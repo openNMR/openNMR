@@ -53,7 +53,8 @@ def test_czjzek_symbols_are_italic():
     from opennmr.plotting.style import apply_default_font
     apply_default_font("DejaVu Sans")
     glyphs = MathTextParser("path").parse(r"$\mathit{C}_\mathrm{Q}\mathit{\eta}\mathit{P}$").glyphs
-    styles = [font.style_name.lower() for font, _size, _char, _x, _y in glyphs]
+    # glyph tuples gained a field in newer matplotlib; the font is always first.
+    styles = [glyph[0].style_name.lower() for glyph in glyphs]
     assert ["italic" in s or "oblique" in s for s in styles] == [True, False, True, True]
     plt.close(fig)
 

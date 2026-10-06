@@ -46,8 +46,8 @@ def test_fit_and_simulate_offer_one_combined_entry_point(qapp):
         "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)", "Multi-spectrum",
         "Kept fit models", "Fit plot: components and colours"]
     assert _titles(window, window._simulations_tab_index) == [
-        "Combined Hamiltonian", "Czjzek distribution", "Diffusion (PFG)",
-        "Shaped pulse (Bloch)", "pNMR (CIF)"]
+        "Combined Hamiltonian", "Czjzek distribution", "DFT tensors (CASTEP / VASP)",
+        "Diffusion (PFG)", "Shaped pulse (Bloch)", "pNMR (CIF)"]
     # The retired panels still exist (kept fits and saved states restore
     # through them), out of sight.
     assert window._retired_fit_host.isHidden() and window._retired_sim_host.isHidden()

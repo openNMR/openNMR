@@ -74,6 +74,9 @@ from . import relaxometry
 from .relaxometry import find_integration_regions, correlation_matrix
 # The correlation matrix of any fit -- relaxation, isotropic peaks,
 # Combined Hamiltonian, multi-spectrum (2026-10-06).
+# DFT-calculated tensors (CASTEP .magres, VASP OUTCAR) -> sites (2026-10-06).
+from . import dft_nmr
+from .dft_nmr import read_calculation, dft_sites, simulate_dft, plot_dft_tensors
 from . import fit_correlation
 from .fit_correlation import plot_correlation_matrix, correlation_of, multi_fit_correlation
 
@@ -278,6 +281,7 @@ __all__ = [
     "triexponential_decay", "triexponential_recovery",
     "stretched_decay", "stretched_recovery", "RELAXATION_MODELS",
     "relaxometry", "find_integration_regions", "correlation_matrix",
+    "dft_nmr", "read_calculation", "dft_sites", "simulate_dft", "plot_dft_tensors",
     "plot_correlation_matrix", "fit_correlation", "correlation_of", "multi_fit_correlation",
     "fit_relaxation", "print_relaxation_report",
     "NMR2D_fit_relaxation", "NMR2D_plot_relaxation",

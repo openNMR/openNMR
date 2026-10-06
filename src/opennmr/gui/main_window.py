@@ -121,6 +121,7 @@ from .jcoupling_panels import (JCouplingFitPanel, JCouplingSimulationPanel, lock
                                seed_spins_from_peaks)
 from .combined_section import CombinedModelSection
 from .batch_relaxation_panel import BatchRelaxationPanel
+from .dft_panel import DftSimulationPanel
 from .quadrupolar_panels import QuadrupolarFitPanel
 from .combined_panels import CombinedFitPanel, CombinedHamiltonianPanel
 from .multi_fit_panel import MultiFitPanel
@@ -8760,6 +8761,11 @@ class MainWindow(QMainWindow):
                                  rerun=self.combined_sim_panel.simulate,
                                  summary=panel_summary(self.combined_sim_panel),
                                  anchor=lambda: self.combined_sim_panel),
+            "dft": _Section(get_state=self.dft_sim_panel.get_state,
+                            set_state=self.dft_sim_panel.set_state,
+                            rerun=self.dft_sim_panel.simulate,
+                            summary=panel_summary(self.dft_sim_panel),
+                            anchor=lambda: self.dft_sim_panel),
             "czjzek": _Section(get_state=self.czjzek_sim_panel.get_state,
                                set_state=self.czjzek_sim_panel.set_state,
                                rerun=self.czjzek_sim_panel.simulate,
@@ -13182,7 +13188,25 @@ class MainWindow(QMainWindow):
         self._combined_sim_section = CollapsibleSection(
             "Combined Hamiltonian", content=self.combined_sim_model)
         layout.addWidget(self._combined_sim_section)
+        # DFT-calculated tensors (CASTEP / VASP) -> sites -> the Combined
+        # Hamiltonian simulation (explicit user request, 2026-10-06);
+        # notebook.dft_nmr.
+        self.dft_sim_panel = DftSimulationPanel(
+            plot_spectrum=lambda spectrum: self._on_panel_simulated("dft", spectrum),
+            add_to_open=self._add_derived_spectrum,
+            draw_sites=lambda result, nucleus: self._draw_combined_sites(
+                result, nucleus, self._dft_larmor_mhz()),
+            draw_tensors=self._draw_tensor_picture,
+            style=self._simulation_style,
+            send_to_fit=self._send_combined_simulation_to_fit,
+            draw_orders=self._draw_quadrupolar_order_comparison)
+        self.dft_sim_field_link = self._link_panel_field(self.dft_sim_panel)
+        self._dft_sim_section = CollapsibleSection("DFT tensors (CASTEP / VASP)",
+                                                   content=self.dft_sim_panel)
         layout.addWidget(self._czjzek_sim_section)
+        # After Czjzek: Combined Hamiltonian and Czjzek stay together
+        # (test_gui_czjzek_display pins that order).
+        layout.addWidget(self._dft_sim_section)
         # Code that used to open these sections opens Combined's instead.
         self._jcoupling_sim_section = self._quad_sim_section = self._combined_sim_section
         # Ported from upstream (Leo, 1c5613e) -- experiment planning
@@ -13411,6 +13435,13 @@ class MainWindow(QMainWindow):
         return None
 
     # ---- tensor pictures (Simulate > CSA / Quadrupolar / Combined) ------
+
+    def _dft_larmor_mhz(self) -> float | None:
+        try:
+            larmor = self.dft_sim_panel.settings().get("larmor_Hz")
+        except Exception:  # noqa: BLE001 -- only for Measure's Hz; never fatal
+            return None
+        return larmor / 1e6 if larmor else None
 
     def _combined_larmor_mhz(self) -> float | None:
         try:

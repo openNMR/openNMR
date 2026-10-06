@@ -403,6 +403,30 @@ def fit_3d_ticks(ax, fontsize=None, max_ticks=8, font_family=None, label_pad=Tru
     return counts
 
 
+def _frame_rotation(frame):
+    """Site frame → display frame (identity without a frame)."""
+    if not frame or frame.get("rotation") is None:
+        return np.eye(3)
+    return np.asarray(frame["rotation"], dtype=float)
+
+
+def _draw_frame_axes(ax, frame, extent, fontsize):
+    """The display frame's reference axes (a, b, c of a cell), as arrows
+    from the origin, equal length (directions only), in dark grey."""
+    if not frame:
+        return
+    vectors = [(np.asarray(v, dtype=float), name) for v, name in frame.get("axes") or []]
+    if not vectors:
+        return
+    for v, name in vectors:
+        # Directions only, all the same length: the cell's lengths are in
+        # Å and the picture in ppm or MHz, so a length would mean nothing.
+        tip = v / (np.linalg.norm(v) or 1.0) * 0.95 * extent
+        ax.quiver(0, 0, 0, *tip, color="0.2", linewidth=1.4, arrow_length_ratio=0.08)
+        ax.text(*(1.07 * tip), name, color="0.2", fontsize=fontsize, fontweight="bold",
+                fontstyle="italic")
+
+
 def _draw_axes_lines(ax, axes, lengths, names, colours, linestyle="-", fontsize=10):
     for k in range(3):
         v = axes[:, k] * lengths[k]
@@ -413,7 +437,7 @@ def _draw_axes_lines(ax, axes, lengths, names, colours, linestyle="-", fontsize=
 
 def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
                         relative_to="zero", figure=None, fontsize=12.0, n_theta=73, n_phi=145,
-                        show_axes=None, show_j=True, cmap=None, tensor_style=None):
+                        show_axes=None, show_j=True, cmap=None, tensor_style=None, frame=None):
     """The frequency surface of one transition (see the module
     docstring): radius |frequency| in each direction of B0, coloured by
     the signed frequency (ppm) with a colour bar. Principal axes of the
@@ -425,6 +449,11 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
     ``tensor_style`` : see :data:`TENSOR_STYLE_DEFAULTS` (colour map,
     reversed, colour bar, axes, opacity, view); ``cmap``/``show_axes``
     given explicitly win over it.
+    ``frame`` : draw in another frame than the site's --
+    ``{"rotation": R (site → display), "axes": [(vector, label), ...],
+    "title": str}``, e.g. a crystal's cell (see
+    :func:`opennmr.notebook.dft_nmr.display_frame`). The axes are drawn as
+    arrows from the origin.
 
     Returns ``(figure, notes)`` -- ``notes`` a list of plain-language
     remarks (what is drawn, J, signs)."""
@@ -459,6 +488,9 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
         if look["reverse"]:
             cmap = cmap.reversed()
     figure, ax = _new_3d_axes(figure)
+    rot = _frame_rotation(frame)
+    if frame:
+        x, y, z = np.einsum("ij,j...->i...", rot, np.stack([x, y, z]))
     ax.plot_surface(x, y, z, facecolors=cmap(norm(value)), rstride=1, cstride=1, linewidth=0,
                     antialiased=True, shade=False, alpha=float(look["surface_alpha"]))
     extent = 1.2 * float(np.max(r))
@@ -474,8 +506,10 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
                 if abs(f) < 1e-12:
                     continue
                 rr = np.abs(value + f)
-                ax.plot_wireframe(rr * np.sin(theta) * np.cos(phi), rr * np.sin(theta) * np.sin(phi),
-                                  rr * np.cos(theta), rstride=6, cstride=6, color="0.3",
+                wx, wy, wz = np.einsum("ij,j...->i...", rot, np.stack([
+                    rr * np.sin(theta) * np.cos(phi), rr * np.sin(theta) * np.sin(phi),
+                    rr * np.cos(theta)]))
+                ax.plot_wireframe(wx, wy, wz, rstride=6, cstride=6, color="0.3",
                                   linewidth=0.3, alpha=float(0.25 + 0.5 * w / weights.max()))
             notes.append(f"J: the surface is copied at each multiplet offset (spread "
                          f"{spread:.3g} ppm), drawn as wireframes -- same shape, J does not depend "
@@ -491,13 +525,14 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
 
     if show_axes:
         if comps["efg"] is not None:
-            _draw_axes_lines(ax, comps["efg"]["axes"], [extent / 1.15] * 3,
+            _draw_axes_lines(ax, rot @ comps["efg"]["axes"], [extent / 1.15] * 3,
                              ["x$_{EFG}$", "y$_{EFG}$", "z$_{EFG}$"], ["0.35"] * 3, "--",
                              fontsize * 0.75)
         if comps["csa"] is not None:
-            _draw_axes_lines(ax, comps["csa"]["axes"], [extent / 1.1] * 3,
+            _draw_axes_lines(ax, rot @ comps["csa"]["axes"], [extent / 1.1] * 3,
                              ["δ$_{xx}$", "δ$_{yy}$", "δ$_{zz}$"], ["black"] * 3, "-",
                              fontsize * 0.75)
+    _draw_frame_axes(ax, frame, extent, fontsize * 0.85)
 
     mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
     mappable.set_array(value)
@@ -515,9 +550,12 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
     what = [f"{site.label}, {surf['transition']}"]
     if site.get("quadrupolar"):
         what.append(f"{larmor / 1e6:.4g} MHz, {order} order")
+    if frame and frame.get("title"):
+        what.append(frame["title"])
     figure.suptitle(" · ".join(what), fontsize=fontsize * 0.9)
 
-    notes.insert(0, "Radius = |frequency| for B0 along that direction (site frame); colour = the "
+    where = (frame.get("title") or "the chosen frame") if frame else "site frame"
+    notes.insert(0, f"Radius = |frequency| for B0 along that direction ({where}); colour = the "
                     "signed value. A powder pattern is the distribution of this radius over all "
                     "directions.")
     if relative_to == "zero" and not site.interactions:
@@ -536,13 +574,15 @@ def _ellipsoid(ax, centre, semi_axes, axes, colour, alpha):
                     linewidth=0, shade=True)
 
 
-def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0, tensor_style=None):
+def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0, tensor_style=None, frame=None):
     """The tensors as glyphs in one frame (see the module docstring): the
     CSA ellipsoid (semi-axes |delta_ii|), the EFG's principal axes (length
     proportional to |V_ii|, red positive, blue negative), and the sphere of
     radius |delta_iso| for a site with neither. Returns ``(figure, notes)``.
     ``tensor_style`` : see :data:`TENSOR_STYLE_DEFAULTS` (the positive,
-    negative and ellipsoid colours, the axes, the view)."""
+    negative and ellipsoid colours, the axes, the view). ``frame`` : as
+    :func:`plot_tensor_surface` -- the glyphs drawn in another frame, with
+    its axes."""
     from matplotlib.lines import Line2D
 
     look = _merge_style(tensor_style)
@@ -551,11 +591,12 @@ def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0, tensor_style=None):
     site = ch.as_sites(site)[0]
     comps = tensor_components(site)
     figure, ax = _new_3d_axes(figure)
+    rot = _frame_rotation(frame)
     notes, handles = [], []
     extent = 1.0
     if comps["csa"] is not None:
         principal = np.array(comps["csa"]["principal"])
-        axes = comps["csa"]["axes"]
+        axes = rot @ comps["csa"]["axes"]
         semi = np.maximum(np.abs(principal), 1e-9)
         _ellipsoid(ax, np.zeros(3), semi, axes, shell, shell_alpha)
         names = ["δ$_{xx}$", "δ$_{yy}$", "δ$_{zz}$"]
@@ -593,7 +634,7 @@ def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0, tensor_style=None):
         names = ["V$_{xx}$", "V$_{yy}$", "V$_{zz}$"]
         for k in range(3):
             colour = positive if principal[k] >= 0 else negative
-            v = comps["efg"]["axes"][:, k] * abs(principal[k]) * scale
+            v = (rot @ comps["efg"]["axes"])[:, k] * abs(principal[k]) * scale
             ax.plot([-v[0], v[0]], [-v[1], v[1]], [-v[2], v[2]], "--", color=colour, linewidth=2.2)
             if abs(principal[k]) > 0:
                 ax.text(*(1.1 * v), f"{names[k]} = {principal[k]:.3g} MHz", color=colour,
@@ -605,18 +646,27 @@ def plot_tensor_ellipsoids(site, figure=None, fontsize=12.0, tensor_style=None):
                      "ellipsoid. Its length scale is separate from the CSA's (MHz, not ppm).")
         if comps["csa"] is not None:
             e = site.get("csa")[0]["euler"]
-            notes.append("The CSA ellipsoid is shown in the EFG frame, rotated by the Euler angles "
+            where = "relative to the EFG" if frame else "in the EFG frame"
+            notes.append(f"The CSA ellipsoid is shown {where}, rotated by the Euler angles "
                          "(α, β, γ) = ({:g}, {:g}, {:g})°.".format(*e))
     if comps["j"]:
         text = ", ".join(f"{g['n']}×{g['nuclide']} {g['J_Hz']:g} Hz" for g in comps["j"])
         notes.append(f"J ({text}) is isotropic in this simulation: it splits lines but has no "
                      "orientation, so it has no glyph.")
+    _draw_frame_axes(ax, frame, extent, fontsize * 0.85)
+    if frame and frame.get("axes"):
+        handles.append(Line2D([], [], color="0.2", label="cell axes (direction only)"))
     if handles:
         ax.legend(handles=handles, loc="upper left", fontsize=fontsize * 0.7, frameon=False)
     _finish_3d(ax, extent, fontsize, "ppm" if comps["csa"] is not None or comps["efg"] is None
                else "rel.", look)
-    figure.suptitle(f"{site.label}: tensors in the "
-                    f"{'EFG' if comps['efg'] is not None else 'CSA'} frame", fontsize=fontsize * 0.9)
+    if frame:
+        figure.suptitle(f"{site.label}: tensors in the {frame.get('title') or 'chosen frame'}",
+                        fontsize=fontsize * 0.9)
+    else:
+        figure.suptitle(f"{site.label}: tensors in the "
+                        f"{'EFG' if comps['efg'] is not None else 'CSA'} frame",
+                        fontsize=fontsize * 0.9)
     return figure, notes
 
 
@@ -626,6 +676,7 @@ def plot_tensors(site, larmor_Hz=None, style="surface", **kwargs):
     if style == "surface":
         return plot_tensor_surface(site, larmor_Hz, **kwargs)
     if style == "ellipsoid":
-        kwargs = {k: v for k, v in kwargs.items() if k in ("figure", "fontsize", "tensor_style")}
+        kwargs = {k: v for k, v in kwargs.items()
+                  if k in ("figure", "fontsize", "tensor_style", "frame")}
         return plot_tensor_ellipsoids(site, **kwargs)
     raise ValueError("style must be 'surface' or 'ellipsoid'.")

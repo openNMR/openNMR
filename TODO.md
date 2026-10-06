@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-06 round 6 (Simulate ▸ DFT tensors, CASTEP / VASP): 28 new tests (19 + 9; 3 need test_data/dft). The relevant subset: full suite 3594 passed, 166 skipped, 1 failed (Py 3.13, PySide6 6.11.2, matplotlib 3.11.2). The one failure, `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`, fails identically on the round-5 commit without these changes, so it is not from this round. Three tests that pin Simulate's section list were updated for the new section, and `test_colorbar_gap_and_czjzek_labels.py` no longer unpacks matplotlib's glyph tuples by length (matplotlib 3.11 added a field). Seven tests crashed pytest-xdist workers in the parallel run and pass when run alone. **Run the full suite locally before committing.***
+
 *2026-10-06 round 5 (correlation matrix for isotropic, Combined-Hamiltonian and multi-spectrum fits): 10 new tests. The relevant subset: 312 passed, 4 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
 
 *2026-10-06 round 4 (relaxometry extras: three-exponential models, automatic regions, trapezoid/Simpson, correlation matrices): 39 new tests (32 + 7). The relevant subset: 993 passed, 15 skipped (real-data tests), 0 failed after `test_relaxation.py::test_relaxation_models_registry_contains_expected_keys` was updated for the two new models; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
@@ -158,6 +160,73 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Simulate ▸ DFT tensors (CASTEP / VASP): import shielding and EFG tensors, reference, simulate, view in the cell frame (2026-10-06, round 6)
+
+**Asked:** import DFT-calculated shift and EFG tensors into Simulate. Requirements:
+- The user supplies a reference and a sample file: CASTEP `.magres` or VASP `OUTCAR`.
+- Isotropic shifts relative to the reference.
+- From the CSA: span/Δ and skew/η_CSA. From the EFG: C_Q and η_Q.
+- Simulate the chosen sites: "all Na" or "Na1, Na2…".
+- View each site's tensors relative to the cell axes, or to x, y, z when there is no cell.
+- Full Simulate plot styling.
+
+**Notebook (`notebook/dft_nmr.py`):**
+- **Readers.**
+  - `read_magres`: lattice, atoms, `ms` (ppm) and `efg` (au → V/m²). CASTEP's `[magres_old]` numbers are kept as `castep_summary` for checking.
+  - `read_outcar`: species from VRHFIN, "ions per type", the last lattice and positions, and EFG (V/Å² → V/m²). σ = −(valence "Absolute Chemical Shift" tensor + G=0 + core).
+  - `read_calculation` recognises the format by content.
+- **VASP's G=0, found by measurement.** The printed G=0 tensor is k·χ_pGv (the valence susceptibility). VASP's own "valence and core, INCLUDING G=0" column also adds k·χ_core, which was a 0.8 ppm difference before it was included.
+  - With both terms, the isotropic shift, span and skew match VASP's summary to ≤2e-4 ppm on both files.
+  - `include_g0=False` reproduces the EXCLUDING column.
+- **CASTEP numbers.** Isotropic shielding, anisotropy and asymmetry match CASTEP's printout to its last digit (≤5e-5).
+  - C_Q matches exactly for Na, Fe and Cd. For H/C/N/O, CASTEP prints Q to 4 decimals, which accounts for the 0.1–1.4% differences there.
+  - C_Q = eQV_zz/h uses the signed Q from openNMR's isotope table, not VASP's QUAD_EFG (1 mb unless set) or CASTEP's own.
+- **Referencing.** δ = δ_ref + m(σ_ref − σ) on the symmetric part, where σ_ref is the mean over the reference's sites of that element (spread reported) or typed.
+  - δ_ref = 0 is flagged.
+  - Mixing codes is flagged.
+  - The antisymmetric part is reported and left out.
+- **Parameters.**
+  - Herzfeld–Berger: span and skew.
+  - Haeberlen: δ_aniso and η_CSA, plus Δδ = 1.5 δ_aniso, which is CASTEP's "Anisotropy".
+  - EFG: |V_zz| ≥ |V_yy| ≥ |V_xx|, η_Q = (V_xx − V_yy)/V_zz, P_Q. The EFG is made traceless first, because VASP's 3-decimal table leaks into η_Q otherwise.
+  - Simulation sites use the Haeberlen form, because openNMR's Herzfeld–Berger diagonal is (δ22, δ33, δ11) and is not a frame.
+- **Relative orientation.** The CSA axes in the EFG frame as combined_hamiltonian's ZYZ Euler angles, with the smallest (β, α, γ) of the 16 axis-sign choices.
+  - **Bug found and fixed while testing:** the sign choice of the EFG axes is part of the answer. Before the fix, 2 of 4 VASP Na sites had single-crystal frequencies off by up to 3 kHz; `relative_euler(..., return_frame=True)` now returns the frame used.
+  - **Check:** for random B0 directions, the simulator's exact central-transition frequency (site frame plus Euler) equals one computed independently from the two full tensors in the calculation frame. The error is ≤2e-7 Hz on both of the user's files and the synthetic ones (VASP was 0.25 Hz before the traceless fix).
+- **Sites.** `dft_sites(sample, reference, element=/labels=, nucleus=, delta_ref, sigma_ref, slope, merge, …)`.
+  - Equivalent sites merge, with their count as the amount (0.01 ppm, 0.001, 0.1 kHz, 0.1° tolerances).
+  - Default isotope is the most receptive one (abundance × |γ|³ × I(I+1)): ¹¹³Cd not ¹¹¹Cd, ¹⁴N, ³⁵Cl, ⁷Li.
+  - Each record keeps the shift tensor, both conventions, the EFG, the Euler angles and `site_axes`.
+  - Also provided: `simulate_dft`, `format_table` / `table_csv`, `dft_to_python`.
+- **Pictures.**
+  - `tensor_views.plot_tensor_surface` / `plot_tensor_ellipsoids` take `frame={"rotation", "axes", "title"}`.
+  - `dft_nmr.display_frame`: "cell" is the standard setting (a ∥ x, b in xy) with a, b, c arrows of equal length (direction only); "cartesian" is the file's own x, y, z, and is the only choice without a cell.
+  - `axis_angles` gives the δzz and V_zz axes' angles to a, b, c (or x, y, z).
+  - `plot_dft_tensors(record, calc, frame, style)`.
+
+**GUI (`gui/dft_panel.py`, Simulate ▸ "DFT tensors (CASTEP / VASP)"):**
+- `DftSimulationPanel` is a `CombinedHamiltonianPanel` with an import box on top. Its controls:
+  - sample and reference files, and the VASP G=0 option;
+  - element, observed isotope, and checkable sites (All / None);
+  - σ_ref from the reference (or "Use instead"), δ_ref and slope m;
+  - include CSA / quadrupolar, merge equivalents, FWHM.
+- "Calculate Sites and Simulate" fills its own site list, where the sites stay editable, and runs its Simulate. The field link, regime, MAS, transitions, theory, axis, per-site plot, Keep, Send to Fit and Copy as Python are all the Combined panel's own.
+- The results table holds every atom; Copy Table (CSV) and Copy Import as Python are available.
+- "Tensors of a site (3D)": any atom, the cell or Cartesian frame, ellipsoid or frequency surface. It is drawn on the Simulation plot as a tensor plot, so Plot Style and Tensor Plot Style apply.
+- State: files, options and ticked sites. Restoring re-reads the files if they still exist. The panel is registered in the simulation journal as "dft".
+
+**Noticed in the user's files:** the CASTEP and VASP sample cells are different structures (468 vs 603 Å³). VASP gives two Na environments (45.7 and −2.2 ppm), CASTEP one (≈46.6 ppm), so the two codes should not be expected to agree on these files.
+
+**Not done:**
+- Other codes (Quantum ESPRESSO GIPAW, Gaussian) and J couplings (`isc` in magres).
+- Built-in experimental reference shifts: δ_ref is always the user's, on their scale.
+- Drawing neighbouring atoms in the tensor picture.
+
+**Tests:**
+- New `test_dft_nmr.py` (19): 16 synthetic, always run; 3 on the user's files in `test_data/dft/`, gitignored and skipped without them.
+- New `test_gui_dft.py` (9).
+- Relevant subset: full suite 3594 passed, 166 skipped, 1 failed (Py 3.13, PySide6 6.11.2, matplotlib 3.11.2). The one failure, `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`, fails identically on the round-5 commit without these changes, so it is not from this round. Three tests that pin Simulate's section list were updated for the new section, and `test_colorbar_gap_and_czjzek_labels.py` no longer unpacks matplotlib's glyph tuples by length (matplotlib 3.11 added a field). Seven tests crashed pytest-xdist workers in the parallel run and pass when run alone. **Run the full suite locally before committing.**
 
 ## Correlation matrix for spectral fits: isotropic peaks, Combined Hamiltonian, multi-spectrum (2026-10-06, round 5)
 
