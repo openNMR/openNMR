@@ -138,6 +138,13 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 - **Baselines**: `"spline_auto"` (`processing.fitting.auto_spline_baseline`)
   finds baseline anywhere by the Golotvin–Williams test; it shares
   `_baseline_kwargs` with every other method (`baseline_points` raw key).
+- **Relaxometry extras** (three-exponential models, threshold regions,
+  trapezoid/Simpson, correlation matrices) are `processing/relaxometry.py`,
+  shared by *both* relaxation fitters (`processing/relaxation.py`, the GUI's,
+  and `notebook/relaxation.py`, a separate copy) -- add a new relaxation
+  model to both `RELAXATION_MODELS` or through this module. The figure is
+  `notebook/relaxometry.plot_correlation_matrix`. Fit Curve's model combo
+  is saved by key (`model_key`): append new models, never insert.
 - **Quantify** is one page: Peaks, Integration Regions, then the
   Spectral Fitting section (`_build_spectral_fit_section`). Whether the
   fit uses the regions is two explicit checkboxes there.

@@ -92,6 +92,7 @@ def test_relaxation_models_registry_contains_expected_keys():
         "saturation_recovery", "inversion_recovery", "exponential_decay",
         "biexponential_decay", "biexponential_recovery",
         "stretched_decay", "stretched_recovery",
+        "triexponential_decay", "triexponential_recovery",
         "stejskal_tanner", "stejskal_tanner_stretched", "stejskal_tanner_biexponential",
     }
 

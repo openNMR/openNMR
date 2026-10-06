@@ -61,11 +61,18 @@ from .fitting import (
 from .relaxation import (
     saturation_recovery, inversion_recovery, exponential_decay,
     biexponential_decay, biexponential_recovery,
+    triexponential_decay, triexponential_recovery,
     stretched_decay, stretched_recovery, RELAXATION_MODELS,
     fit_relaxation, format_time_value, print_relaxation_report,
     NMR2D_integrate_slices,
     NMR2D_fit_relaxation, NMR2D_plot_relaxation,
     NMR2D_relaxation_workflow,
+)
+# Relaxometry extras (2026-10-06): threshold regions, trapezoid/Simpson,
+# correlation matrices.
+from . import relaxometry
+from .relaxometry import (
+    find_integration_regions, correlation_matrix, plot_correlation_matrix,
 )
 
 from .arithmetic import combine_spectra, combine_spectra_as_results
@@ -266,7 +273,10 @@ __all__ = [
     # relaxation
     "saturation_recovery", "inversion_recovery", "exponential_decay",
     "biexponential_decay", "biexponential_recovery",
+    "triexponential_decay", "triexponential_recovery",
     "stretched_decay", "stretched_recovery", "RELAXATION_MODELS",
+    "relaxometry", "find_integration_regions", "correlation_matrix",
+    "plot_correlation_matrix",
     "fit_relaxation", "print_relaxation_report",
     "NMR2D_fit_relaxation", "NMR2D_plot_relaxation",
     "NMR2D_relaxation_workflow",

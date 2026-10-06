@@ -1158,7 +1158,7 @@ def advise_relaxation(result, label=None):
             "tells", "warn",
             f"The points{who} curve away from the fit in a systematic way instead of scattering "
             "randomly about it: one simple exponential does not describe them."))
-        if "stretched" not in model and "biexp" not in model:
+        if "stretched" not in model and "biexp" not in model and "triexp" not in model:
             target = ("stretched_recovery" if "recovery" in model else
                       "stejskal_tanner_stretched" if "stejskal" in model else "stretched_decay")
             items.append(_item(
@@ -1166,11 +1166,18 @@ def advise_relaxation(result, label=None):
                 "Try a stretched-exponential model (a spread of rates, common in solids) or a "
                 "two-component one (two distinct environments), and compare.",
                 {"type": "set_relaxation_model", "model": target}))
+        elif model in ("biexponential_decay", "biexponential_recovery"):
+            target = model.replace("biexponential", "triexponential")
+            items.append(_item(
+                "next", "note",
+                "Two components still leave a pattern: try three, then check whether the third "
+                "is supported (the advice for that fit compares it with this one).",
+                {"type": "set_relaxation_model", "model": target}))
     elif scatter and t.size >= 6:
         items.append(_item("tells", "good",
                            f"The points{who} scatter randomly about the curve: the model "
                            "describes their shape."))
-    # Two components that are not distinct.
+    # Components that are not distinct.
     rates = [n for n in names if n.startswith(("T1", "T2", "D")) and n != rate]
     if model.startswith(("biexp", "stejskal_tanner_biexp")) and len(rates) >= 2:
         a, b = (abs(float(params.get(n, np.nan))) for n in rates[:2])
@@ -1180,6 +1187,9 @@ def advise_relaxation(result, label=None):
                 f"The two components{who} have similar rates ({rates[0]} = {a:.3g}, "
                 f"{rates[1]} = {b:.3g}): the data may not support two -- compare with a "
                 "single-component or stretched fit."))
+    if model.startswith("triexp"):
+        items += _triexp_items(result, names, params, errors, who)
+    items += _correlation_items(result, who)
     # Limits.
     bounds = result.get("bounds")
     fixed = result.get("fixed") or {}
@@ -1189,8 +1199,19 @@ def advise_relaxation(result, label=None):
             if name in fixed or name not in params:
                 continue
             v = float(params[name])
-            e = abs(float(errors.get(name) or 0.0)) + 1e-9 * max(1.0, abs(v))
-            if (np.isfinite(h) and v + e >= h) or (np.isfinite(l) and v - e <= l):
+            e = abs(float(errors.get(name) or 0.0))
+            if not np.isfinite(e):
+                e = 0.0
+
+            def at(bound):
+                # Within its 1σ of the bound *and* close to it in its own
+                # terms: a poorly determined value far from a bound (a
+                # 0.1 s time constant ± 0.3 s, near the 1e-9 floor only
+                # through its error bar) is not "at a limit".
+                gap = abs(v - bound)
+                return gap <= e + 1e-9 * max(1.0, abs(v)) and \
+                    gap <= 0.01 * max(abs(v), abs(bound)) + 1e-12
+            if (np.isfinite(h) and (v >= h or at(h))) or (np.isfinite(l) and (v <= l or at(l))):
                 items.append(_item(
                     "tells", "warn",
                     f"{name}{who} stopped at a limit of its range ({v:.3g}): treat it as a "
@@ -1199,6 +1220,98 @@ def advise_relaxation(result, label=None):
                                    f"Widen {name}'s range in Starting values (Min/Max) and fit "
                                    "again."))
     return _dedupe(items)
+
+
+def _weighted_bic(y, f, k, y_err=None):
+    """BIC of a curve fit: χ² + k ln n when the points carry their own
+    errors, n ln(RSS/n) + k ln n when they do not."""
+    y, f = np.asarray(y, float), np.asarray(f, float)
+    n = y.size
+    if n <= k + 1:
+        return None
+    if y_err is not None:
+        e = np.asarray(y_err, float)
+        if e.shape == y.shape and np.all(np.isfinite(e)) and np.all(e > 0):
+            return float(np.sum(((y - f) / e) ** 2)) + k * np.log(n)
+    return _bic(y, f, k)
+
+
+def _triexp_items(result, names, params, errors, who):
+    """Whether three components are supported: distinct time constants,
+    determined amplitudes, and a lower BIC than two components on the
+    same points."""
+    items = []
+    times = [n for n in names if n[:2] in ("T1", "T2") and n[-1:] in ("a", "b", "c")]
+    amps = [n for n in names if n in ("A1", "A2", "A3")]
+    vals = [abs(float(params.get(n, np.nan))) for n in times]
+    for i in range(len(vals) - 1):
+        a, b = vals[i], vals[i + 1]
+        if np.isfinite(a) and np.isfinite(b) and max(a, b) < 2.5 * min(a, b):
+            items.append(_item(
+                "tells", "warn",
+                f"{times[i]} = {a:.3g} s and {times[i + 1]} = {b:.3g} s{who} are within a "
+                "factor of 2.5: a sum of exponentials cannot separate time constants that "
+                "close, so these two are one component split in half."))
+    for n in amps:
+        v, e = params.get(n), errors.get(n)
+        if v is not None and e is not None and np.isfinite(e) and v and abs(e / v) > 0.5:
+            items.append(_item(
+                "tells", "warn",
+                f"{n}{who} = {float(v):.3g} ± {float(e):.2g}: that component's size is not "
+                "determined by these data."))
+    # Against two components, on the same points.
+    try:
+        from ..processing.relaxation import fit_relaxation
+        two_model = str(result.get("model")).replace("triexponential", "biexponential")
+        t = np.asarray(result["t"], float)
+        y = np.asarray(result["y"], float)
+        y_err = result.get("y_err")
+        fixed = {k: v for k, v in (result.get("fixed") or {}).items() if k == "C"}
+        two = fit_relaxation(t, y, model=two_model, y_err=y_err, fixed=fixed or None)
+        k3 = len(result.get("free_names") or names)
+        k2 = len(two.get("free_names") or two["param_names"])
+        b3 = _weighted_bic(y, result["y_fit"], k3, y_err)
+        b2 = _weighted_bic(y, two["y_fit"], k2, y_err)
+    except Exception:  # noqa: BLE001 -- advice is best-effort
+        return items
+    if b3 is None or b2 is None:
+        return items
+    d = b3 - b2
+    if d > -2:
+        items.append(_item(
+            "tells", "warn",
+            f"Two components describe these points{who} as well as three once the extra "
+            f"parameters are counted (ΔBIC = {d:+.1f}): the third component is not supported. "
+            "Quote the two-component fit.",
+            {"type": "set_relaxation_model", "model": two_model}))
+    elif d > -10:
+        items.append(_item(
+            "tells", "note",
+            f"Three components fit{who} somewhat better than two (ΔBIC = {d:+.1f}), but not "
+            "decisively: more points, or less noise, would settle it."))
+    else:
+        items.append(_item(
+            "tells", "good",
+            f"Three components fit{who} clearly better than two (ΔBIC = {d:+.1f}) -- far "
+            "more than the extra parameters would give by chance."))
+    return items
+
+
+def _correlation_items(result, who, limit=0.95):
+    """Parameters the fit could not tell apart (|r| ≥ ``limit``)."""
+    try:
+        from ..processing.relaxometry import strong_correlations
+        pairs = strong_correlations(result, limit)
+    except Exception:  # noqa: BLE001 -- no covariance: nothing to say
+        return []
+    if not pairs:
+        return []
+    text = ", ".join(f"{a} and {b} (r = {r:+.3f})" for a, b, r in pairs[:3])
+    return [_item(
+        "tells", "note",
+        f"Strongly correlated parameters{who}: {text}. Each can trade off against the other "
+        "with little change in the fit, so their individual errors understate how loosely "
+        "they are pinned together; the correlation matrix shows them all.")]
 
 
 # ============================================================

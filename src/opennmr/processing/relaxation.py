@@ -25,6 +25,8 @@ Models provided
 - ``biexponential_recovery`` / ``biexponential_decay``
 - ``stretched_recovery`` / ``stretched_decay``        (stretched/KWW,
   for distributions of relaxation times)
+- ``triexponential_recovery`` / ``triexponential_decay`` (three
+  components; see :mod:`opennmr.processing.relaxometry`)
 
 Workflow
 --------
@@ -52,6 +54,8 @@ from scipy.optimize import curve_fit
 
 from .fitting import build_region_mask, estimate_baseline_robust, estimate_noise_level, extract_params_and_errors
 from ..core.spectrum import NMRSpectrum
+from . import relaxometry as _relaxometry
+from .relaxometry import triexponential_decay, triexponential_recovery  # noqa: F401 -- re-exported
 
 # numpy >= 2.0 renamed trapz -> trapezoid
 _trapz = getattr(np, "trapezoid", None) or np.trapz
@@ -301,6 +305,7 @@ RELAXATION_MODELS = {
         "func": stretched_recovery, "params": ["M0", "T1", "beta", "C"],
         "p0": _p0_stretched_C, "bounds": _bounds_stretched_C, "rate_param": "T1",
     },
+    **_relaxometry.TRIEXP_MODELS,
     "stejskal_tanner": {
         "func": stejskal_tanner_decay, "params": ["I0", "D"],
         "p0": _p0_diffusion, "bounds": _bounds_diffusion, "rate_param": "D",
@@ -774,10 +779,24 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
     # xtol "convergence" after 11 function evals, off by 30%+ from the
     # true (synthetic, known) D. Auto-scaling from the Jacobian fixes
     # that case and is a no-op for already-well-scaled models.
-    popt, pcov = curve_fit(
-        wrapper, t, y, p0=p0_free, bounds=(lo_free, hi_free),
-        sigma=sigma, absolute_sigma=sigma is not None, maxfev=maxfev, x_scale="jac",
-    )
+    fit_kwargs = {"x_scale": "jac", **(spec.get("curve_fit_kwargs") or {})}
+
+    def fit_once(start):
+        popt_, pcov_ = curve_fit(
+            wrapper, t, y, p0=start, bounds=(lo_free, hi_free),
+            sigma=sigma, absolute_sigma=sigma is not None, maxfev=maxfev, **fit_kwargs,
+        )
+        r = (y - wrapper(t, *popt_)) / (sigma if sigma is not None else 1.0)
+        return popt_, pcov_, float(np.sum(r ** 2))
+
+    # One start, unless the model offers several and none was given (the
+    # three-exponential models: see relaxometry.triexp_starts).
+    starts = [_to_log_space(v, log_free, "initial guess") for v in
+              _relaxometry.candidate_starts(spec, t, y, p0_full, p0, free_idx)]
+    if len(starts) == 1:
+        popt, pcov, _cost = fit_once(p0_free)
+    else:
+        popt, pcov = _relaxometry.fit_from_starts(fit_once, starts, lo_free, hi_free)
 
     popt, pcov = _undo_log_space(popt, pcov, log_free)
     perr = np.sqrt(np.diag(pcov))
@@ -797,7 +816,7 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
     ss_tot = float(np.sum((y - np.mean(y)) ** 2))
     r_squared = 1.0 - float(np.sum(residual ** 2)) / ss_tot if ss_tot > 0 else np.nan
 
-    return {
+    result = {
         "model": model, "param_names": param_names, "rate_param": spec["rate_param"],
         "params": params, "errors": errors,
         "popt": popt, "pcov": pcov, "free_names": free_names,
@@ -816,6 +835,9 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
                          "r_squared": r_squared, "dof": dof, "n_points": int(len(y)),
                          "decay_fraction": decay_fraction(y)},
     }
+    # Multi-exponential models: fastest component first, whatever order
+    # the optimiser left them in (see relaxometry.sort_components).
+    return _relaxometry.sort_components(result, spec.get("components"))
 
 
 def decay_fraction(y) -> float:
@@ -1556,7 +1578,8 @@ def format_diffusion_value(value, error=None, sig_figs=3):
 #: shown through :func:`format_time_value`'s automatic ms/us/ns
 #: scaling rather than as a bare float. Matched by exact name against
 #: a model's own parameter list.
-_TIME_PARAMS = frozenset({"T1", "T2", "T1rho", "T1a", "T1b", "T2a", "T2b", "tau", "tau_c"})
+_TIME_PARAMS = frozenset({"T1", "T2", "T1rho", "T1a", "T1b", "T1c", "T2a", "T2b", "T2c",
+                          "tau", "tau_c"})
 
 #: Parameters whose value is a *diffusion coefficient* in m^2/s, and
 #: so belong in scientific notation with the unit attached (see
@@ -1655,7 +1678,7 @@ def format_param_value(name: str, value, error=None, sig_figs: int = 3) -> str:
 #: ``T2a``/``T1a``, ``I0a`` with ``Da``, ``I3`` with ``D3`` -- the
 #: pairing is by the vendor of the model, not by position, because the
 #: parameter order differs between them.
-_AMPLITUDE_RATE_SUFFIX = {"A1": ("a", "1"), "A2": ("b", "2"),
+_AMPLITUDE_RATE_SUFFIX = {"A1": ("a", "1"), "A2": ("b", "2"), "A3": ("c", "3"),
                            "I0a": ("a",), "I0b": ("b",)}
 
 
@@ -1843,7 +1866,7 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
                             normalize=False, x_unit='ppm',
                             subtract_baseline=True, baseline_regions=None,
                             baseline_sigma=2.5, baseline_max_iter=10,
-                            noise_region=None) -> dict:
+                            noise_region=None, method: str = "trapezoid") -> dict:
     """
     Integrate one or more extracted 2D NMR slices (rows and/or
     columns) over user-specified x-axis regions -- a peak-fitting-free
@@ -1887,6 +1910,19 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
         propagated analytically through the trapezoidal rule (exact
         for independent per-point Gaussian noise), not just assumed
         constant across regions of different widths.
+    method : {'trapezoid', 'simpson'}, optional
+        The integration rule (see
+        :func:`opennmr.processing.relaxometry.integration_weights`).
+        Which is more accurate depends on the region's edges, not on
+        Simpson's higher order: over a whole peak whose region reaches
+        the baseline the trapezoid rule is already all but exact (its
+        error terms are the curve's derivatives at the two ends, which
+        vanish there) and Simpson's is no better -- worse on a peak only
+        ~2 points per FWHM. Where a region edge cuts through signal,
+        Simpson's is better (measured 4-30× smaller error at 3-12 points
+        per FWHM). Simpson's alternating weights carry about 5% more
+        noise. Either way the error is propagated through the rule's
+        own weights.
 
     Returns
     -------
@@ -1953,17 +1989,11 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
             # recovery slice before the null point) is genuinely
             # negative, and abs() here would destroy exactly the sign
             # information the relaxation fit needs.
-            integral = _trapz(y_r, x_r)
-
-            # Trapezoidal-rule error propagation: I = sum(y_i * w_i),
-            # so Var(I) = noise^2 * sum(w_i^2) for i.i.d. Gaussian
-            # per-point noise. Exact for the trapezoidal weights
-            # (works for non-uniform spacing too).
-            w = np.empty_like(x_r)
-            w[1:-1] = 0.5 * np.abs(x_r[2:] - x_r[:-2])
-            w[0] = 0.5 * np.abs(x_r[1] - x_r[0])
-            w[-1] = 0.5 * np.abs(x_r[-1] - x_r[-2])
-            error = noise * np.sqrt(np.sum(w ** 2))
+            # The chosen rule's own weights give the integral and,
+            # being linear, its noise exactly: I = sum(w_i y_i), so
+            # Var(I) = noise^2 sum(w_i^2) for i.i.d. Gaussian noise, for
+            # any spacing (relaxometry.integration_weights).
+            integral, error = _relaxometry.integrate(x_r, y_r, method=method, noise=noise)
 
             integrals.append(integral)
             errors.append(error)
@@ -1978,6 +2008,7 @@ def NMR2D_integrate_slices(slices: dict[str, list[NMRSpectrum]], regions, mode: 
             "x": x, "y": y_corr,
             "integrals": integrals, "integral_errors": errors, "integrals_norm": integrals_norm,
             "regions": list(regions), "region_labels": region_labels,
+            "integration_method": method,
         }
 
         integrated["rows" if slice_type == "row" else "columns"].append(integrated_result)

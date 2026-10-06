@@ -48,6 +48,7 @@ from .drift_panel import DriftCorrectionPanel
 from ..notebook import periodic_table as nb_periodic_table
 from ..notebook import series_fitting as nb_series_fitting
 from ..notebook import fit_advice as nb_fit_advice
+from ..notebook import relaxometry as nb_relaxometry
 from PySide6.QtGui import QColor
 
 
@@ -93,6 +94,7 @@ from ..processing import ilt as processing_ilt
 from ..processing import ft as processing_ft
 from ..processing import enmr as processing_enmr
 from ..processing import relaxation as processing_relaxation
+from ..processing import relaxometry as processing_relaxometry
 from ..processing import report as processing_report
 from ..processing import score as processing_score
 from ..processing import slicing as processing_slicing
@@ -311,7 +313,15 @@ _RELAXATION_MODEL_ITEMS = [
     ("Biexponential recovery (T1a/T1b)", "biexponential_recovery"),
     ("Stretched decay (T2)", "stretched_decay"),
     ("Stretched recovery (T1)", "stretched_recovery"),
+    # Appended, not inserted: saved states recorded the model as a combo
+    # index (now also as "model_key"), and an insertion would move them.
+    ("Triexponential decay (T2a/T2b/T2c)", "triexponential_decay"),
+    ("Triexponential recovery (T1a/T1b/T1c)", "triexponential_recovery"),
 ]
+#: The relaxation list's length before the triexponential models were
+#: appended (2026-10-06): a state saved then with no "model_key" and this
+#: index meant "Custom equation…".
+_LEGACY_RELAXATION_CUSTOM_INDEX = 7
 
 #: (display label, ``processing.relaxation.RELAXATION_MODELS`` key)
 #: shown in the Relaxation tab's model combo when "Diffusion (PFG)" is
@@ -17806,6 +17816,22 @@ class MainWindow(QMainWindow):
         self.export_curve_fit_button.clicked.connect(self._on_export_curve_fit_clicked)
         layout.addWidget(self.export_curve_fit_button)
 
+        # The correlation matrix of the shown peak's fit (explicit user
+        # request, 2026-10-06): notebook.relaxometry.plot_correlation_matrix,
+        # drawn on the Fit view in place of the curve while this is on.
+        self.curve_fit_correlation_button = QPushButton("Show Parameter Correlations")
+        self.curve_fit_correlation_button.setCheckable(True)
+        self.curve_fit_correlation_button.setEnabled(False)
+        self.curve_fit_correlation_button.setToolTip(
+            "Show the correlation matrix of the shown peak's fitted parameters instead of its "
+            "curve (the peak number above still chooses the peak; untick to go back).\n\n"
+            "r near ±1: the two parameters trade off -- the data fix a combination of them "
+            "rather than each one, and their separate ± understate how loosely they are "
+            "pinned. Typical of multi-exponential fits; fixed parameters have no row.")
+        self.curve_fit_correlation_button.toggled.connect(
+            lambda _on: self._display_relaxation_peak(self.view_relaxation_peak_spin.value() - 1))
+        layout.addWidget(self.curve_fit_correlation_button)
+
         # The spectrum's kept curve fits, here where they are made (the
         # same records as Fit ▸ Kept fit models, curve fits only).
         self.curve_fit_models_panel = FitModelsPanel(
@@ -18980,6 +19006,58 @@ class MainWindow(QMainWindow):
         self.select_region_button.toggled.connect(self._on_select_region_toggled)
         region_layout.addWidget(self.select_region_button)
 
+        # Regions found from a threshold (explicit user request,
+        # 2026-10-06): relaxometry.find_integration_regions over every
+        # slice, so a peak that grows in or dies away still gets one.
+        auto_row = QHBoxLayout()
+        self.auto_regions_button = QPushButton("Find Regions Automatically")
+        self.auto_regions_button.setToolTip(
+            "Replace the table with regions wherever the signal rises above the threshold "
+            "-- in any slice of a pseudo-2D series -- each widened to where its peak meets "
+            "the noise, so the region holds the wings and not just the top.\n\n"
+            "Two peaks whose wings meet above the noise come out as one region, and a "
+            "broad feature below the threshold is left out: check the shaded regions. "
+            "For a relaxation curve the regions only need to be the same on every slice, "
+            "which they are.")
+        self.auto_regions_button.clicked.connect(lambda: self._on_auto_regions_clicked())
+        auto_row.addWidget(self.auto_regions_button, 1)
+        self.auto_region_threshold_spin = QDoubleSpinBox()
+        self.auto_region_threshold_spin.setRange(0.01, 1000.0)
+        self.auto_region_threshold_spin.setDecimals(2)
+        self.auto_region_threshold_spin.setValue(5.0)
+        self.auto_region_threshold_spin.setToolTip(
+            "Signal is where |intensity| is above this: a multiple of the noise σ "
+            "(measured from point-to-point scatter, so the peaks do not inflate it), or a "
+            "percentage of the largest signal in the spectrum or series.")
+        auto_row.addWidget(self.auto_region_threshold_spin)
+        self.auto_region_mode_combo = QComboBox()
+        self.auto_region_mode_combo.addItem("× noise σ", "noise")
+        self.auto_region_mode_combo.addItem("% of maximum", "fraction")
+        self.auto_region_mode_combo.setToolTip(
+            "× noise σ: the same significance on every spectrum, whatever its size. "
+            "% of maximum: ignores peaks smaller than that share of the largest.")
+        self.auto_region_mode_combo.currentIndexChanged.connect(self._on_auto_region_mode_changed)
+        auto_row.addWidget(self.auto_region_mode_combo)
+        region_layout.addLayout(auto_row)
+
+        rule_row = QHBoxLayout()
+        rule_row.addWidget(QLabel("Integration rule:"))
+        self.integration_method_combo = QComboBox()
+        self.integration_method_combo.addItem("Trapezoid", "trapezoid")
+        self.integration_method_combo.addItem("Simpson", "simpson")
+        self.integration_method_combo.setToolTip(
+            "Trapezoid: straight lines between points. Simpson: a parabola through every "
+            "three points (any spacing).\n\n"
+            "Use Simpson when a region edge cuts through a peak. When every region holds "
+            "a whole peak and reaches the baseline at both ends, keep Trapezoid: it is "
+            "then already all but exact, and Simpson is no better (worse on a peak only "
+            "a couple of points wide) while carrying about 5% more noise. Either way the "
+            "error bar is propagated through the rule's own weights.")
+        rule_row.addWidget(self.integration_method_combo, 1)
+        region_layout.addLayout(rule_row)
+        self._auto_regions_note = ""
+        self.region_table.itemChanged.connect(self._on_region_table_hand_edited)
+
         integrate_button = QPushButton("Integrate Regions")
         integrate_button.setToolTip(
             "Step 1, alternative to Fit Spectrum: integrate each "
@@ -18992,11 +19070,78 @@ class MainWindow(QMainWindow):
 
         return region_box
 
-    def _add_region_row(self, lo: float = 0.0, hi: float = 1.0) -> None:
+    def _on_auto_region_mode_changed(self, _index: int = 0) -> None:
+        """Keep the threshold box's unit and sensible value with its mode."""
+        spin = self.auto_region_threshold_spin
+        spin.blockSignals(True)
+        if self.auto_region_mode_combo.currentData() == "fraction":
+            spin.setSuffix(" %")
+            if spin.value() > 100 or spin.value() == 5.0:
+                spin.setValue(5.0)
+        else:
+            spin.setSuffix("")
+        spin.blockSignals(False)
+
+    def _on_region_table_hand_edited(self, _item=None) -> None:
+        # The note says how the regions were found; once they are edited
+        # by hand it would no longer be true.
+        if not getattr(self, "_filling_auto_regions", False):
+            self._auto_regions_note = ""
+
+    def _on_auto_regions_clicked(self, quiet: bool = False) -> dict | None:
+        """Fill the region table from a threshold
+        (:func:`opennmr.processing.relaxometry.find_integration_regions`),
+        over the selected spectrum or every slice of the selected series."""
+        index = self._selected_index()
+        if index is None:
+            return None
+        spectrum = self.session.spectra[index]
+        if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
+            if not quiet:
+                QMessageBox.information(self, "Find regions", "Select a 1D spectrum or a "
+                                        "pseudo-2D series.")
+            return None
+        mode = self.auto_region_mode_combo.currentData()
+        threshold = self.auto_region_threshold_spin.value()
+        if mode == "fraction":
+            threshold /= 100.0
+        try:
+            x = np.asarray(spectrum.axis_values(-1, "ppm"), dtype=float)
+            data = np.real(np.asarray(spectrum.data, dtype=float))
+            if data.ndim == 2:
+                rows = [r - 1 for r in self._fit_slice_rows(spectrum)]
+                data = data[rows]
+            found = processing_relaxometry.find_integration_regions(
+                x, data, threshold=threshold, mode=mode)
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user
+            if not quiet:
+                QMessageBox.critical(self, "Find regions failed", str(exc))
+            return None
+        if not found["regions"]:
+            self.integration_results_label.setText(found["notes"][0])
+            if not quiet:
+                QMessageBox.information(self, "Find regions", found["notes"][0])
+            return found
+        self._filling_auto_regions = True
+        try:
+            self.region_table.setRowCount(0)
+            for lo, hi in found["regions"]:
+                # Six figures: the table's usual four would move an edge by
+                # up to 0.05 ppm at 100+ ppm, into a peak's wing.
+                self._add_region_row(lo, hi, digits=6)
+        finally:
+            self._filling_auto_regions = False
+        self._auto_regions_note = " ".join(found["notes"])
+        self.integration_results_label.setText(
+            "Regions found automatically: " + self._auto_regions_note
+            + " Integrate Regions to measure them.")
+        return found
+
+    def _add_region_row(self, lo: float = 0.0, hi: float = 1.0, digits: int = 4) -> None:
         row = self.region_table.rowCount()
         self.region_table.insertRow(row)
         for col, value in enumerate((lo, hi)):
-            self.region_table.setItem(row, col, QTableWidgetItem(f"{value:.4g}"))
+            self.region_table.setItem(row, col, QTableWidgetItem(f"{value:.{digits}g}"))
         self._sync_region_shading()
 
     def _on_remove_region_clicked(self) -> None:
@@ -19129,7 +19274,9 @@ class MainWindow(QMainWindow):
             # own slices; a plain 1D spectrum has no such thing yet --
             # same gap _fit_peaks already works around).
             prepared = [self._ensure_slice_info(s, i + 1) for i, s in enumerate(entries)]
-            integrated = processing_relaxation.NMR2D_integrate_slices({"rows": prepared}, regions, mode="rows")
+            integrated = processing_relaxation.NMR2D_integrate_slices(
+                {"rows": prepared}, regions, mode="rows",
+                method=self.integration_method_combo.currentData())
             results = integrated["rows"]
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Integrate failed", str(exc))
@@ -19853,6 +20000,23 @@ class MainWindow(QMainWindow):
 
     def _is_diffusion_fit(self) -> bool:
         return self.fit_type_combo.currentIndex() == 1
+
+    def _saved_model_index(self, state: dict) -> int:
+        """The model combo index a saved analysis state means: by its
+        "model_key" when it has one; otherwise by its stored index, with
+        the old position of "Custom equation…" (before the
+        triexponential models were appended) mapped to where it is now."""
+        combo = self.relaxation_model_combo
+        key = state.get("model_key")
+        if key is not None:
+            index = combo.findData(key)
+            if index >= 0:
+                return index
+        index = int(state.get("model", 0) or 0)
+        if (key is None and not self._is_diffusion_fit()
+                and index == _LEGACY_RELAXATION_CUSTOM_INDEX):
+            return combo.findData("custom")
+        return index
 
     def _populate_fit_model_combo(self) -> None:
         items = _DIFFUSION_MODEL_ITEMS if self._is_diffusion_fit() else _RELAXATION_MODEL_ITEMS
@@ -21436,9 +21600,12 @@ class MainWindow(QMainWindow):
         self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.blockSignals(False)
         self._clear_spectral_fit_report()
+        rule = self.integration_method_combo.currentText()
+        found = getattr(self, "_auto_regions_note", "")
         self.integration_results_label.setText(
-            f"Integrated {len(results)} slice(s) across {n_regions} region(s) -- "
-            f"ready for Fit Curve (Value source: Integrated region)."
+            f"Integrated {len(results)} slice(s) across {n_regions} region(s) by the "
+            f"{rule.lower()} rule -- ready for Fit Curve (Value source: Integrated region)."
+            + (f"\nRegions found automatically: {found}" if found else "")
         )
         # Integrating regions produces region integrals, so point the
         # Value source at the one that means that -- the others need a
@@ -22942,6 +23109,13 @@ class MainWindow(QMainWindow):
         clears it), so the button cannot offer to export nothing."""
         if hasattr(self, "export_curve_fit_button"):
             self.export_curve_fit_button.setEnabled(bool(self._relaxation_fit_results))
+        if hasattr(self, "curve_fit_correlation_button"):
+            have = bool(self._relaxation_fit_results)
+            self.curve_fit_correlation_button.setEnabled(have)
+            if not have and self.curve_fit_correlation_button.isChecked():
+                self.curve_fit_correlation_button.blockSignals(True)
+                self.curve_fit_correlation_button.setChecked(False)
+                self.curve_fit_correlation_button.blockSignals(False)
 
     def _on_export_curve_fit_clicked(self) -> None:
         """Write the last Fit Curve's fitted parameters, measured series
@@ -23725,6 +23899,26 @@ class MainWindow(QMainWindow):
         unit = self.delay_unit_combo.currentText()
         return f"Delay ({unit})", self.delay_unit_combo.currentData() or 1.0
 
+    def _draw_relaxation_correlation(self, result) -> bool:
+        """The correlation matrix of one curve fit on the Fit view; False
+        (with the reason in the status bar) when the fit has none."""
+        try:
+            processing_relaxometry.correlation_matrix(result)
+        except ValueError as exc:
+            self.statusBar().showMessage(f"No correlation matrix: {exc}", 10000)
+            return False
+
+        def draw(figure):
+            # Read at draw time: a Plot Style change redraws through here,
+            # so the cell values follow the text size with the axis labels.
+            size = float(self.fit_canvas.style_settings().get("labelsize") or 12.0)
+            nb_relaxometry.plot_correlation_matrix(result, figure=figure, fontsize=size)
+
+        self.fit_canvas.show_external_plot(draw, kind="2d")
+        self._raise_fit_canvas()
+        self._fit_canvas_owner = "relaxation"
+        return True
+
     def _display_relaxation_peak(self, index: int) -> None:
         """Show peak ``index`` (0-based) of :attr:`_relaxation_fit_results`
         in the Fit tab, with an uncertainty band if the checkbox for it
@@ -23737,6 +23931,13 @@ class MainWindow(QMainWindow):
         result = self._relaxation_fit_results[index]
         box = self.curve_fit_plot_box
         box.keep_button.setEnabled(True)
+        button = getattr(self, "curve_fit_correlation_button", None)
+        if button is not None and button.isChecked():
+            if self._draw_relaxation_correlation(result):
+                return
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
         if box.view() == "all":
             self._display_all_relaxation_peaks()
             return
@@ -24408,8 +24609,16 @@ class MainWindow(QMainWindow):
             "peak_bounds": peak_bounds,
             "peak_fixed_params": peak_fixed_params,
             "regions": regions,
+            "integration_method": self.integration_method_combo.currentData(),
+            "auto_region_threshold": self.auto_region_threshold_spin.value(),
+            "auto_region_mode": self.auto_region_mode_combo.currentData(),
+            "auto_regions_note": getattr(self, "_auto_regions_note", ""),
             "fit_type": self.fit_type_combo.currentIndex(),
             "model": self.relaxation_model_combo.currentIndex(),
+            # The model itself, not only its position in the list, so a
+            # model added to the list later cannot change what a saved
+            # state restores.
+            "model_key": self.relaxation_model_combo.currentData(),
             "custom_equation": self.custom_equation_edit.text(),
             "custom_p0": self.custom_p0_edit.text(),
             "value_source": self.value_source_combo.currentIndex(),
@@ -24512,6 +24721,21 @@ class MainWindow(QMainWindow):
         self.session.spectra[index].metadata.raw["analysis_state"] = self._capture_analysis_state()
         self._schedule_sidecar_save(index)
 
+    def _restore_region_options(self, state: dict) -> None:
+        """The integration rule and automatic-region settings of a saved
+        analysis state (defaults for a state saved before they existed:
+        the trapezoid rule, which is what every earlier integral used)."""
+        combo = self.integration_method_combo
+        combo.setCurrentIndex(max(0, combo.findData(state.get("integration_method",
+                                                              "trapezoid"))))
+        mode = self.auto_region_mode_combo
+        mode.blockSignals(True)
+        mode.setCurrentIndex(max(0, mode.findData(state.get("auto_region_mode", "noise"))))
+        mode.blockSignals(False)
+        self._on_auto_region_mode_changed()
+        self.auto_region_threshold_spin.setValue(float(state.get("auto_region_threshold", 5.0)))
+        self._auto_regions_note = state.get("auto_regions_note", "") or ""
+
     def _restore_analysis_state(self, spectrum) -> None:
         self.peak_table.setRowCount(0)
         self.region_table.setRowCount(0)
@@ -24551,6 +24775,7 @@ class MainWindow(QMainWindow):
             self.fit_within_regions_checkbox.setChecked(True)
             self.sn_noise_region_edit.clear()
             self.sn_threshold_spin.setValue(3.0)
+            self._restore_region_options({})
             self.diffusion_components_spin.setValue(2)
             self.diffusion_stretched_check.setChecked(False)
             self.guess_group.setChecked(False)
@@ -24579,7 +24804,7 @@ class MainWindow(QMainWindow):
                     self.region_table.setItem(row, col, QTableWidgetItem(value))
             self.fit_type_combo.setCurrentIndex(state["fit_type"])
             self._populate_fit_model_combo()
-            self.relaxation_model_combo.setCurrentIndex(state["model"])
+            self.relaxation_model_combo.setCurrentIndex(self._saved_model_index(state))
             self.custom_equation_edit.setText(state.get("custom_equation", ""))
             self.custom_p0_edit.setText(state.get("custom_p0", ""))
             self.value_source_combo.setCurrentIndex(state.get("value_source", 0))
@@ -24615,6 +24840,7 @@ class MainWindow(QMainWindow):
             self.fit_within_regions_checkbox.setChecked(state.get("fit_within_regions", True))
             self.sn_noise_region_edit.setText(state.get("sn_noise_region", ""))
             self.sn_threshold_spin.setValue(state.get("sn_threshold", 3.0))
+            self._restore_region_options(state)
             self.analysis_results_label.setText(state["results_text"])
             self.integration_results_label.setText(state.get("integration_results_text", ""))
             self.score_results_label.setText(state.get("score_results_text", ""))

@@ -14,6 +14,7 @@ Models provided
 - ``saturation_recovery`` / ``inversion_recovery``  (T1)
 - ``exponential_decay``                              (T2 / T1rho)
 - ``biexponential_recovery`` / ``biexponential_decay``
+- ``triexponential_recovery`` / ``triexponential_decay`` (three components)
 - ``stretched_recovery`` / ``stretched_decay``        (stretched/KWW,
   for distributions of relaxation times)
 
@@ -43,6 +44,8 @@ from .utils import read_vdlist
 from .plotting import setup_plotting, apply_tick_style, apply_spine_style, save_figure
 from .fitting import build_region_mask, estimate_baseline_robust, estimate_noise_level, NMR2D_fit_slices
 from .two_d import NMR2dimport, NMR2D_get_slices, NMR2D_plot_slices, prepare_trace_for_fit
+from ..processing import relaxometry as _relaxometry
+from ..processing.relaxometry import triexponential_decay, triexponential_recovery  # noqa: F401
 
 # numpy >= 2.0 renamed trapz -> trapezoid
 _trapz = getattr(np, "trapezoid", None) or np.trapz
@@ -192,6 +195,10 @@ RELAXATION_MODELS = {
         "func": stretched_recovery, "params": ["M0", "T1", "beta", "C"],
         "p0": _p0_stretched_C, "bounds": _bounds_stretched_C, "rate_param": "T1",
     },
+    # Three components (explicit user request, 2026-10-06): grid-searched
+    # starts, multi-start fit, fastest component first -- see
+    # opennmr.processing.relaxometry.
+    **_relaxometry.TRIEXP_MODELS,
 }
 
 # Convenience aliases: T1rho experiments use the same functional forms
@@ -290,10 +297,21 @@ def fit_relaxation(t, y, model="inversion_recovery", y_err=None, p0=None,
 
     sigma = y_err if (y_err is not None and np.all(np.isfinite(y_err)) and np.all(y_err > 0)) else None
 
-    popt, pcov = curve_fit(
-        wrapper, t, y, p0=p0_free, bounds=(lo_free, hi_free),
-        sigma=sigma, absolute_sigma=sigma is not None, maxfev=maxfev,
-    )
+    fit_kwargs = dict(spec.get("curve_fit_kwargs") or {})
+
+    def fit_once(start):
+        popt_, pcov_ = curve_fit(
+            wrapper, t, y, p0=start, bounds=(lo_free, hi_free),
+            sigma=sigma, absolute_sigma=sigma is not None, maxfev=maxfev, **fit_kwargs,
+        )
+        r = (y - wrapper(t, *popt_)) / (sigma if sigma is not None else 1.0)
+        return popt_, pcov_, float(np.sum(r ** 2))
+
+    starts = _relaxometry.candidate_starts(spec, t, y, p0_full, p0, free_idx)
+    if len(starts) == 1:
+        popt, pcov, _cost = fit_once(p0_free)
+    else:
+        popt, pcov = _relaxometry.fit_from_starts(fit_once, starts, lo_free, hi_free)
 
     perr = np.sqrt(np.diag(pcov))
 
@@ -309,13 +327,15 @@ def fit_relaxation(t, y, model="inversion_recovery", y_err=None, p0=None,
     chi2 = np.sum((residual / sigma) ** 2) if sigma is not None else np.sum(residual ** 2)
     red_chi2 = chi2 / max(len(y) - len(free_names), 1)
 
-    return {
+    result = {
         "model": model, "param_names": param_names, "rate_param": spec["rate_param"],
         "params": params, "errors": errors,
         "popt": popt, "pcov": pcov, "free_names": free_names,
+        "fixed": dict(fixed), "bounds": (list(lo_full), list(hi_full)),
         "t": t, "y": y, "y_err": y_err, "y_fit": y_fit,
         "fit_quality": {"rmse": rmse, "chi2": chi2, "reduced_chi2": red_chi2},
     }
+    return _relaxometry.sort_components(result, spec.get("components"))
 
 
 def format_time_value(value, error=None, sig_figs=3):
@@ -423,7 +443,7 @@ def NMR2D_integrate_slices(slices, regions, mode="rows", region_labels=None,
                             normalise=False, x_unit='ppm',
                             subtract_baseline=True, baseline_regions=None,
                             baseline_sigma=2.5, baseline_max_iter=10,
-                            noise_region=None):
+                            noise_region=None, method="trapezoid"):
     """
     Integrate one or more extracted 2D NMR slices (rows and/or
     columns) over user-specified x-axis regions -- a peak-fitting-free
@@ -466,6 +486,19 @@ def NMR2D_integrate_slices(slices, regions, mode="rows", region_labels=None,
         analytically through the trapezoidal rule (exact for
         independent per-point Gaussian noise), not just assumed
         constant across regions of different widths.
+    method : {'trapezoid', 'simpson'}, optional
+        The integration rule (see
+        :func:`opennmr.processing.relaxometry.integration_weights`).
+        Which is more accurate depends on the region's edges, not on
+        Simpson's higher order: over a whole peak whose region reaches
+        the baseline the trapezoid rule is already all but exact (its
+        error terms are the curve's derivatives at the two ends, which
+        vanish there) and Simpson's is no better -- worse on a peak only
+        ~2 points per FWHM. Where a region edge cuts through signal,
+        Simpson's is better (measured 4-30× smaller error at 3-12 points
+        per FWHM). Simpson's alternating weights carry about 5% more
+        noise. Either way the error is propagated through the rule's
+        own weights.
 
     Returns
     -------
@@ -530,17 +563,11 @@ def NMR2D_integrate_slices(slices, regions, mode="rows", region_labels=None,
             # recovery slice before the null point) is genuinely
             # negative, and abs() here would destroy exactly the sign
             # information the relaxation fit needs.
-            integral = _trapz(y_r, x_r)
-
-            # Trapezoidal-rule error propagation: I = sum(y_i * w_i),
-            # so Var(I) = noise^2 * sum(w_i^2) for i.i.d. Gaussian
-            # per-point noise. Exact for the trapezoidal weights
-            # (works for non-uniform spacing too).
-            w = np.empty_like(x_r)
-            w[1:-1] = 0.5 * np.abs(x_r[2:] - x_r[:-2])
-            w[0] = 0.5 * np.abs(x_r[1] - x_r[0])
-            w[-1] = 0.5 * np.abs(x_r[-1] - x_r[-2])
-            error = noise * np.sqrt(np.sum(w ** 2))
+            # The chosen rule's own weights give the integral and,
+            # being linear, its noise exactly: I = sum(w_i y_i), so
+            # Var(I) = noise^2 sum(w_i^2) for i.i.d. Gaussian noise, for
+            # any spacing (relaxometry.integration_weights).
+            integral, error = _relaxometry.integrate(x_r, y_r, method=method, noise=noise)
 
             integrals.append(integral)
             errors.append(error)
@@ -554,6 +581,7 @@ def NMR2D_integrate_slices(slices, regions, mode="rows", region_labels=None,
             "x": x, "y": y_corr,
             "integrals": integrals, "integral_errors": errors, "integrals_norm": integrals_norm,
             "regions": list(regions), "region_labels": region_labels,
+            "integration_method": method,
         }
 
         integrated["rows" if slice_type == "row" else "columns"].append(integrated_result)
@@ -950,7 +978,8 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
                                baseline_max_iter=10, subtract_baseline=True,
                                normalise=False, positive_intensity=True,
                                allow_negative_intensity=False, sn_threshold=3,
-                               noise_region=None,
+                               noise_region=None, integration_method="trapezoid",
+                               region_threshold=5.0, region_threshold_mode="noise",
                                model="inversion_recovery", vdlist=None, fixed=None,
                                use_errors=True, normalised_integrals=False,
                                show_series=None,
@@ -1001,9 +1030,17 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
     peak_defs : list of dict
         Required if ``integration='peaks'``. See
         :func:`nmrtools.fitting.fit_spectrum`.
-    regions : list of (float, float)
+    regions : list of (float, float), or ``"auto"``
         Required if ``integration='regions'``, e.g.
-        ``[[3.4, 4.5], [4.5, 8.0]]`` -- as many as you like.
+        ``[[3.4, 4.5], [4.5, 8.0]]`` -- as many as you like. ``"auto"``
+        finds them from a threshold over every slice
+        (:func:`opennmr.processing.relaxometry.find_integration_regions`:
+        ``region_threshold`` × the noise σ, or × each slice's maximum with
+        ``region_threshold_mode="fraction"``); what was found is returned
+        as ``"auto_regions"``.
+    integration_method : {'trapezoid', 'simpson'}, optional
+        The rule for ``integration='regions'`` (see
+        :func:`NMR2D_integrate_slices`).
     peak_labels, region_labels : list of str, optional
         Series labels; whichever matches ``integration`` is used.
     fit_regions : list of tuple, optional
@@ -1083,6 +1120,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
         raise ValueError("peak_defs is required when integration='peaks'")
     if integration == "regions" and regions is None:
         raise ValueError("regions is required when integration='regions'")
+    auto = None
 
     row_requested = rows is not None or row_shifts is not None
     col_requested = columns is not None or column_shifts is not None
@@ -1121,11 +1159,25 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
             show_report=False, show_warnings=show_warnings,
         )[mode]
     else:
+        if isinstance(regions, str):
+            if regions != "auto":
+                raise ValueError("regions must be a list of (lo, hi) or 'auto'.")
+            traces = [prepare_trace_for_fit(t, normalise=normalise) for t in slices[mode]]
+            auto = _relaxometry.find_integration_regions(
+                traces[0]["x_ppm"], np.vstack([t["real_spectrum"] for t in traces]),
+                threshold=region_threshold, mode=region_threshold_mode,
+                subtract_baseline=subtract_baseline)
+            if not auto["regions"]:
+                raise ValueError(auto["notes"][0])
+            regions = auto["regions"]
+            if show_report:
+                print("Integration regions: " + " ".join(auto["notes"]))
         series = NMR2D_integrate_slices(
             slices, regions=regions, mode=mode, region_labels=region_labels,
             normalise=normalise, subtract_baseline=subtract_baseline,
             baseline_regions=baseline_regions, baseline_sigma=baseline_sigma,
             baseline_max_iter=baseline_max_iter, noise_region=noise_region,
+            method=integration_method,
         )[mode]
 
     relaxation_fits = NMR2D_fit_relaxation(
@@ -1166,7 +1218,7 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
 
     return {
         "dataset": dataset, "slices": slices, "series": series,
-        "relaxation_fits": relaxation_fits_shown,
+        "relaxation_fits": relaxation_fits_shown, "auto_regions": auto,
         "figure": fig, "axes": ax,
         "slices_figure": fig_slices, "slices_axes": ax_slices,
     }

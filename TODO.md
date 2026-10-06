@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-06 round 4 (relaxometry extras: three-exponential models, automatic regions, trapezoid/Simpson, correlation matrices): 39 new tests (32 + 7). The relevant subset: 993 passed, 15 skipped (real-data tests), 0 failed after `test_relaxation.py::test_relaxation_models_registry_contains_expected_keys` was updated for the two new models; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
+
 *2026-10-06 round 3 (Measure across Compare rows, estimated starting values, batch pseudo-2D relaxation, automatic cubic-spline baseline): 37 new tests (4 + 12 + 10 + 11). The relevant subset passes: 751 passed, 5 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
 
 *2026-10-06 round 2 (MAS rate as a fitting parameter; plain-language fit advice): 32 new tests (16 + 10 + 6). The relevant subset passes: 491 passed, 4 skipped. **Run the full suite locally before committing.***
@@ -154,6 +156,84 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Relaxometry extras: three-exponential models, automatic integration regions, trapezoid/Simpson, correlation matrices (2026-10-06, round 4)
+
+**Asked:** "Please add some relaxometry extras: a three-exponential model, automatic integration regions set by a threshold, a choice of trapezoid or Simpson integration, and a correlation-matrix plot."
+
+**Where it lives:**
+- The maths is in the new `processing/relaxometry.py`. It is pure numpy/scipy, so both relaxation fitters use it without an import cycle: `processing/relaxation.py` (the GUI's) and `notebook/relaxation.py` (the notebook's, a separate copy of the models).
+- `notebook/relaxometry.py` re-exports it and adds the figure.
+
+**Three exponentials (`triexponential_decay`, `triexponential_recovery`; in both `RELAXATION_MODELS` and the Fit Curve model list):**
+- Same forms as the biexponential models, with a third term. Recovery shares one inversion factor C.
+- The starting point comes from a grid search (`multiexponential_start`): every combination of three time constants on a log grid spanning the delays, with the amplitudes solved exactly by linear least squares at each (variable projection).
+- The fit is multi-start (`triexp_starts`, `fit_from_starts`, spec key `starts`): the best grid combination, its five best distinct runners-up and a median-delay guess. The lowest χ² is kept.
+- Components are sorted fastest first after the fit (`sort_components`), with `popt`/`pcov` permuted to match. This is skipped when a component's parameter is fixed.
+- At least 10 delays are needed (a plain error otherwise). The registry `p0` still answers for fewer points, because the guess table and SCORE's model probe read it.
+- **Measured:**
+  - 3 components (T 2 ms / 20 ms / 0.2 s), 30 log-spaced delays: every T within 3σ in 30/30 noisy runs at ratio 10, and also at ratio 5. About 40 ms per fit.
+  - The quoted errors are honest (calibrated against the scatter over seeds).
+  - The multi-start result is never worse than a median-delay start (40 seeds).
+- **Tried and rejected:** a single grid-best start. It ended at a worse local minimum than a median-delay start in 14/40 cases at ratio 5 with 16 linear delays, hence the multi-start.
+- Advice (`fit_advice.advise_relaxation`) for a three-exponential fit:
+  - refits with two components on the same points and compares by BIC (χ² + k ln n with errors). ΔBIC > −2: "third component not supported", with a button to switch to two components. < −10: "clearly better";
+  - flags neighbouring time constants within a factor of 2.5, and amplitudes with more than 50% error;
+  - a biexponential fit with a systematic misfit now offers "try three".
+- Every relaxation fit's advice now names parameter pairs with |r| ≥ 0.95.
+- Report helpers know A3/T1c/T2c: units, amplitude shares, pairing.
+
+**Trapezoid or Simpson (`integration_weights`, `integrate`; `NMR2D_integrate_slices(method=)` in both modules; GUI "Integration rule"):**
+- Simpson's rule is written for any spacing, with Cartwright's end correction for an odd number of intervals. It matches `scipy.integrate.simpson` to 1e-14.
+- The integral and its error come from the same explicit weights. The error is σ√Σw², which is exact for white noise; it matches the Monte Carlo scatter of the integral to within 5%.
+- **Measured, and against the usual assumption:**
+  - Over a whole peak whose region reaches the baseline, the trapezoid rule is already all but exact. Its Euler–Maclaurin error terms are the end derivatives, which vanish there. Simpson's rule is no better, and is worse at ~2 points per FWHM (−3.6% against −0.05%).
+  - Where a region edge cuts through signal, Simpson's rule is 4–30× more accurate (3–12 points per FWHM).
+  - Simpson's weights carry 5.4% more noise.
+- So **Trapezoid stays the default**, and the tooltip and docstrings say when to switch.
+- The rule is recorded in each slice's result and in the integration results text. It is saved in the analysis state (old states restore as trapezoid), so the batch fit copies it.
+
+**Automatic regions (`find_integration_regions`; GUI "Find Regions Automatically" + threshold + "× noise σ / % of maximum"; notebook `NMR2D_relaxation_workflow(regions="auto", region_threshold=, region_threshold_mode=)`):**
+- Robust linear baseline, then σ from point-to-point differences (MAD).
+- Signal is a run of at least 3 points with |y| above the threshold. Negative signal counts, for inverted slices.
+- Each run is widened while the lightly smoothed signal keeps its sign and stays above 1σ, plus 2 points, then overlapping runs are merged.
+- For a series, signal in any slice counts, so a peak that grows in or dies away still gets a region. The regions are the same for every slice.
+- **A bug found while testing:** "% of maximum" was first taken per slice. On a fully decayed slice that is a share of its noise, which made noise regions. It is now the largest signal in the series.
+- **Measured:**
+  - Gaussian peaks at S/N 7–500: all found, with >99% of each peak's area inside.
+  - A Lorentzian at S/N 1000: 98.4%.
+  - Pure noise at 5σ: nothing.
+- A note says how the regions were found. It is shown with the integration results and cleared if the table is then edited by hand.
+- Auto regions are written with 6 significant figures, not the table's usual 4, which could move an edge by up to 0.05 ppm at 100+ ppm.
+- **Limits** (in the tooltip): wings that meet above the noise merge two peaks into one region, and a broad feature below the threshold is left out. For T₁/T₂, a wing cut at the noise is the same fraction of every slice, so the time constants do not change.
+
+**Correlation matrix (`correlation_matrix`, `strong_correlations`; `notebook.relaxometry.plot_correlation_matrix`; GUI Fit Curve "Show Parameter Correlations"):**
+- r_ij = cov_ij / (σ_i σ_j) over the free parameters. A parameter with no determinable variance gets nan and is hatched, never shown as 0.
+- Figure:
+  - the lower triangle by default (`triangle="full"` for all of it);
+  - blue → neutral grey → red, fixed at ±1;
+  - each value written in its cell with a real minus sign;
+  - the diagonal grey;
+  - IUPAC labels (italic symbol, upright subscript);
+  - a labelled colour bar.
+- In the GUI it is a checkable button. The peak number browses matrices; unticking it brings the curve back. It follows Plot Style's text size.
+- Axes marked `_opennmr_categorical` keep their minor ticks off through the canvas style pass.
+
+**Saved states:**
+- The model is now saved by key (`model_key`) as well as by index.
+- An old state whose index pointed at "Custom equation…" (index 7, before the two models were appended) still restores as custom.
+- `model_key` and `auto_regions_note` are hidden from the history log. The rule and threshold are logged when they apply.
+
+**Also fixed:** the relaxation advice's limit check called a loosely determined value "stopped at a limit" when only its error bar reached a bound (e.g. 0.1 s ± 0.3 s against the 1e-9 floor). A value now has to be within 1% of the bound as well.
+
+**Not done:**
+- Global (shared-parameter) fits use the grid start but not the multi-start or the component sorting.
+- The biexponential models keep their median-delay start.
+- Auto regions in a batch are the reference's regions, not re-found per series. The notebook batch with `regions="auto"` does re-find them per series.
+
+**Tests:** new `test_relaxometry.py` (32) and `test_gui_relaxometry.py` (7).
+- Run, relevant files only: the two new files, relaxation, relaxation reporting, diffusion, Bruker PFG, lists, series fitting, the Czjzek-series tutorial round, plotting fit, SCORE, history, report, fit advice (both), curve-fit plot, Dynamics/VT, integration → Dynamics, batch relaxation, state and kept fits, accessibility, usability, test_gui_canvas, test_notebook_bridge, and test_gui.py -k "relaxation or curve or integrat or region or analysis_state or score or dosy or diffusion or model or history or guess or global".
+- Results: 993 passed, 15 skipped (real-data tests), 0 failed after `test_relaxation.py::test_relaxation_models_registry_contains_expected_keys` was updated for the two new models; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.**
 
 ## Measure across Compare rows; estimated starting values; batch pseudo-2D relaxation; automatic cubic-spline baseline (2026-10-06, round 3)
 

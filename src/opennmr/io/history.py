@@ -170,6 +170,7 @@ _BASELINE_METHODS = {
 _HIDDEN_KEYS = frozenset({
     "sr_original_hz", "sr_original_ppm", "sr_original_hz_f1", "sr_original_ppm_f1",
     "fit_view", "analysis_state.option_names", "analysis_state.peak_bounds",
+    "analysis_state.model_key", "analysis_state.auto_regions_note",
     "analysis_state.peak_fixed_params", "relaxation_fit_context",
     # Facts the readers record about the file itself (re-read on every
     # load, never a user choice) -- listing them would read as if
@@ -311,6 +312,11 @@ KEY_INFO: dict[str, tuple[str, object]] = {
     # Analysis (the Fit / Curve-fit panels' per-spectrum state).
     "analysis_state.peaks": ("Peaks", None),
     "analysis_state.regions": ("Integration regions", None),
+    "analysis_state.integration_method": ("Integration rule", lambda v: {
+        "trapezoid": "trapezoid", "simpson": "Simpson"}.get(v, str(v))),
+    "analysis_state.auto_region_threshold": ("Automatic-region threshold", lambda v: _num(v, 4)),
+    "analysis_state.auto_region_mode": ("Automatic-region threshold in", lambda v: {
+        "noise": "× noise σ", "fraction": "% of maximum"}.get(v, str(v))),
     "analysis_state.fit_within_regions": ("Fit within regions", _onoff),
     "analysis_state.amplitude_bound_regions": ("Bound amplitudes to regions", _onoff),
     "analysis_state.fit_type": ("Curve-fit type", None),
@@ -588,8 +594,11 @@ def _relevant(key: str, flat: dict, source: dict | None) -> bool:
     }
     if key in rules:
         return rules[key]
-    if key in ("analysis_state.fit_within_regions", "analysis_state.amplitude_bound_regions"):
+    if key in ("analysis_state.fit_within_regions", "analysis_state.amplitude_bound_regions",
+               "analysis_state.integration_method"):
         return bool(flat.get("analysis_state.regions"))
+    if key in ("analysis_state.auto_region_threshold", "analysis_state.auto_region_mode"):
+        return bool(flat.get("analysis_state.auto_regions_note"))
     if key.startswith("analysis_state.") and key.split(".", 1)[1] in _CURVE_FIT_KEYS:
         return bool(flat.get("relaxation_fit_results") or flat.get("analysis_state.curve_fit_summary_text"))
     if key.startswith("baseline_") and key != "baseline_correct":

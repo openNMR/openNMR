@@ -3810,6 +3810,12 @@ class MplCanvas(QWidget):
                                width=self._TICK_WIDTH * 0.75)
             else:
                 ax.minorticks_off()
+            if getattr(ax, "_opennmr_categorical", False):
+                # Rows and columns that are names, not numbers (a
+                # correlation matrix): minor ticks and tick marks mean
+                # nothing there.
+                ax.minorticks_off()
+                ax.tick_params(which="both", length=0)
             ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
             ax.yaxis.label.set_fontsize(self._AXIS_LABELSIZE)
             if ax.get_title():

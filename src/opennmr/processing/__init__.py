@@ -14,13 +14,14 @@ from .fitting import (
 from .relaxation import (
     saturation_recovery, inversion_recovery, exponential_decay,
     biexponential_decay, biexponential_recovery, stretched_decay, stretched_recovery,
+    triexponential_decay, triexponential_recovery,
     RELAXATION_MODELS, UNCERTAINTY_KINDS, LOG_FITTED_PARAMS,
     fit_relaxation, fit_relaxation_global, fit_curve_uncertainty,
     format_time_value, format_diffusion_value, format_param_value,
     format_relaxation_report, format_global_report, print_relaxation_report,
     NMR2D_integrate_slices, NMR2D_fit_relaxation,
 )
-from . import diffusion, ilt, score, refdeconv, enmr, report
+from . import diffusion, ilt, score, refdeconv, enmr, report, relaxometry
 from .report import (
     processing_summary, processing_prose, format_processing_report, compare_processing,
 )
@@ -69,6 +70,7 @@ __all__ = [
     "print_fit_report",
     "saturation_recovery", "inversion_recovery", "exponential_decay",
     "biexponential_decay", "biexponential_recovery", "stretched_decay", "stretched_recovery",
+    "triexponential_decay", "triexponential_recovery", "relaxometry",
     "RELAXATION_MODELS", "UNCERTAINTY_KINDS", "LOG_FITTED_PARAMS",
     "fit_relaxation", "fit_relaxation_global", "fit_curve_uncertainty",
     "format_time_value", "format_diffusion_value", "format_param_value",
