@@ -144,12 +144,16 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   and `notebook/relaxation.py`, a separate copy) -- add a new relaxation
   model to both `RELAXATION_MODELS` or through this module. Fit Curve's
   model combo is saved by key (`model_key`): append new models, never insert.
-- **DFT tensors** (CASTEP .magres, VASP OUTCAR) are `notebook/dft_nmr.py`;
-  Simulate ▸ DFT is `gui/dft_panel.py`, a `CombinedHamiltonianPanel`
-  subclass (its sites, settings and Simulate are the Combined panel's). A
-  new code's reader returns the same calc dict (atoms with `sigma`, `efg`
-  in V/m²). Euler angles must be taken with `relative_euler(...,
-  return_frame=True)`: the EFG axis signs are part of the answer.
+- **DFT tensors** (CASTEP .magres, VASP OUTCAR, ORCA .out, Gaussian .log)
+  are `notebook/dft_nmr.py`; Simulate ▸ DFT is `gui/dft_panel.py`, a
+  `CombinedHamiltonianPanel` subclass (its sites, settings and Simulate are
+  the Combined panel's). A new code's reader returns the same calc dict
+  (atoms with `sigma`, `efg` in V/m², plus `method` and `g0`). Euler angles
+  must be taken with `relative_euler(..., return_frame=True)`: the EFG axis
+  signs are part of the answer. Shift scales are per-element calibrations
+  from reference compounds (`notebook/dft_calibration.py`, σ_calc on δ_exp);
+  pass them to `dft_sites(calibration=...)` -- do not add another
+  referencing path. The VASP G=0 switch re-reads every file at once.
 - **Correlation matrices** of any fit are `notebook/fit_correlation.py`
   (`correlation_input` adapts each fit shape; add an adapter there for a
   new kind of fit). The GUI draws them through

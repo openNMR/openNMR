@@ -15482,7 +15482,7 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     # Since 2026-10-06 Combined Hamiltonian is the one interaction
     # simulator; the CSA and Quadrupolar ones are kept out of the menu.
     assert [s.title() for s in sections] == ["Combined Hamiltonian", "Czjzek distribution",
-                                             "DFT tensors (CASTEP / VASP)",
+                                             "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                              "Diffusion (PFG)", "Shaped pulse (Bloch)",
                                              "pNMR (CIF)"]
     assert _enclosing_collapsible_section(window.sim_csa_diso_spin) is None
@@ -16106,7 +16106,7 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     titles = [s.title() for s in page.findChildren(CollapsibleSection)]
     # Combined Hamiltonian holds every interaction since 2026-10-06.
     assert titles == ["Combined Hamiltonian", "Czjzek distribution",
-                      "DFT tensors (CASTEP / VASP)", "Diffusion (PFG)",
+                      "DFT tensors (CASTEP, VASP, ORCA, Gaussian)", "Diffusion (PFG)",
                       "Shaped pulse (Bloch)", "pNMR (CIF)"]
 
 

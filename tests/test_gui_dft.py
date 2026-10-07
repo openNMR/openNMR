@@ -1,4 +1,6 @@
-"""Simulate ▸ DFT tensors (CASTEP / VASP) (user request, 2026-10-06)."""
+"""Simulate ▸ DFT tensors (user requests, 2026-10-06 and 2026-10-07):
+import, reference compounds and per-element calibrations, G=0, sites,
+simulation, tensor pictures, saved calibrations, state."""
 
 import numpy as np
 import pytest
@@ -6,9 +8,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
 from opennmr.gui.main_window import MainWindow
+from opennmr.notebook import dft_calibration as C
+from opennmr.notebook import dft_nmr as D
 
 from test_gui import qapp  # noqa: F401
-from test_dft_nmr import EFG1, SIG_NA1, _rotation, _tensor, write_magres  # noqa: F401
+from test_dft_nmr import (EFG1, SIG_NA1, _rotation, _tensor, write_magres,  # noqa: F401
+                          write_outcar)
 
 
 @pytest.fixture
@@ -29,120 +34,213 @@ def paths(tmp_path):
         ("Cd", 1, (2.5, 0, 0), _tensor((3300.0, 3400.0, 3500.0), R2), np.zeros((3, 3))),
     ])
     ref = write_magres(tmp_path / "ref.magres", [
-        ("Na", 1, (0, 0, 0), np.eye(3) * 550.0, np.zeros((3, 3)))])
-    return sample, ref
+        ("Na", 1, (0, 0, 0), np.eye(3) * 550.0, np.zeros((3, 3))),
+        ("Cl", 1, (2.8, 0, 0), np.eye(3) * 980.0, np.zeros((3, 3)))])
+    ref2 = write_magres(tmp_path / "ref2.magres", [
+        ("Na", 1, (0, 0, 0), np.eye(3) * 561.0, np.zeros((3, 3)))])
+    ref3 = write_magres(tmp_path / "ref3.magres", [
+        ("Na", 1, (0, 0, 0), np.eye(3) * 530.5, np.zeros((3, 3)))])
+    cd_ref = write_magres(tmp_path / "cdref.magres", [
+        ("Cd", 1, (0, 0, 0), np.eye(3) * 3500.0, None)])
+    return {"sample": sample, "ref": ref, "ref2": ref2, "ref3": ref3, "cd": cd_ref,
+            "lib": str(tmp_path / "lib.json")}
 
 
-def _panel(qapp, paths):
+def _panel(paths, delta=7.2):
     window = MainWindow()
     panel = window.dft_sim_panel
-    panel.dft_sample_edit.setText(paths[0])
-    panel.dft_reference_edit.setText(paths[1])
+    panel.library_path = paths["lib"]
+    panel.refresh_saved_calibrations()
+    panel.dft_sample_edit.setText(paths["sample"])
     assert panel.read_files(quiet=True), panel.dft_files_label.text()
+    if paths.get("ref"):
+        assert panel.add_reference_file(paths["ref"], element="Na") == 1
+        panel.set_experimental_shift(0, delta)
     return window, panel
 
 
 def test_the_section_is_in_simulate_and_starts_empty(qapp):
     window = MainWindow()
-    assert window._dft_sim_section.title().startswith("DFT tensors")
+    assert window._dft_sim_section.title() == "DFT tensors (CASTEP, VASP, ORCA, Gaussian)"
     panel = window.dft_sim_panel
     assert panel.site_dicts == [] and not panel.dft_calculate_button.isEnabled()
+    assert panel.ref_points == [] and panel.dft_reference_table.rowCount() == 0
     assert "dft" in window._simulation_panels()
 
 
 def test_import_calculate_and_simulate(qapp, said, paths):
-    window, panel = _panel(qapp, paths)
+    window, panel = _panel(paths)
     assert [panel.dft_element_combo.itemText(i)
             for i in range(panel.dft_element_combo.count())] == ["Na", "Cd"]
     assert panel.dft_isotope_combo.currentText() == "23Na"
     assert panel.checked_labels() == ["Na1", "Na2"]
-    assert "550.0000 ppm" in panel.dft_sigma_ref_label.text()
-    panel.dft_delta_ref_spin.setValue(7.2)
+    assert panel.dft_reference_table.item(0, 4).text() == "550.0000"
+    assert "σ_calc = 557.200" in panel.dft_calibration_label.text()
     panel.regime_combo.setCurrentIndex(panel.regime_combo.findData("mas"))
     panel.mas_spin.setValue(12500)
     assert panel.calculate(), said
     assert panel.nucleus_combo.currentText() == "23Na"
     assert len(panel.site_dicts) == 1 and panel.site_dicts[0]["amount"] == 2.0  # merged
-    assert panel.site_dicts[0]["label"] == "Na1–Na2"
     assert panel.dft_result_table.rowCount() == 2
+    iso = np.mean(SIG_NA1)
+    assert panel.model["atoms"][0]["iso"] == pytest.approx(557.2 - iso)
     assert panel.spectrum is not None and np.max(panel.spectrum.data) > 0
-    assert "Simulated" in panel.results_label.text()
-    assert any("σ_ref" in line for line in panel.dft_notes_label.text().splitlines())
-    # The sites are ordinary Combined-Hamiltonian sites: editable here.
+    assert any("Shift scale" in line for line in panel.dft_notes_label.text().splitlines())
     assert panel.diso_spin.value() == pytest.approx(panel.model["atoms"][0]["iso"], abs=1e-3)
 
 
-def test_unticked_sites_are_left_out_and_merge_can_be_off(qapp, said, paths):
-    window, panel = _panel(qapp, paths)
-    panel.dft_site_list.item(1).setCheckState(Qt.CheckState.Unchecked)
+def test_several_references_fit_the_slope_and_give_error_bars(qapp, said, paths):
+    window, panel = _panel(paths)
+    panel.add_reference_file(paths["ref2"], element="Na")
+    panel.add_reference_file(paths["ref3"], element="Na")
+    panel.set_experimental_shift(1, -3.0)
+    panel.set_experimental_shift(2, 26.1)
+    cal = panel.calibrations()["Na"]
+    expected = C.fit_calibration([C.typed_point("Na", s, d) for s, d in
+                                  ((550.0, 7.2), (561.0, -3.0), (530.5, 26.1))])
+    assert cal["n"] == 3 and cal["free_slope"]
+    assert cal["slope"] == pytest.approx(expected["slope"])
+    assert panel.dft_reference_table.item(0, 6).text() not in ("", "—")      # residual shown
     assert panel.calculate(simulate=False)
-    assert [a["label"] for a in panel.model["atoms"]] == ["Na1"]
-    panel._check_all(True)
-    panel.dft_merge_check.setChecked(False)
-    assert panel.calculate(simulate=False)
-    assert len(panel.site_dicts) == 2
-    panel._check_all(False)
-    assert not panel.calculate(simulate=False) and "Tick at least one" in said[-1][1]
+    rec = panel.model["atoms"][0]
+    assert rec["iso"] == pytest.approx((np.mean(SIG_NA1) - cal["intercept"]) / cal["slope"])
+    assert rec["iso_err"] is not None and rec["iso_err"] > 0
+    assert panel.dft_result_table.item(0, 2).text() not in ("—", "")          # ± δiso
+    # untick one row: two references, exact line, no error bars
+    panel.dft_reference_table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert panel.calibrations()["Na"]["n"] == 2
+    panel.dft_slope_mode_combo.setCurrentIndex(panel.dft_slope_mode_combo.findData("fixed"))
+    assert panel.calibrations()["Na"]["slope"] == -1.0
 
 
-def test_an_element_missing_from_the_reference_needs_a_typed_sigma_ref(qapp, said, paths):
-    window, panel = _panel(qapp, paths)
+def test_each_element_uses_its_own_references(qapp, said, paths):
+    window, panel = _panel(paths)
+    assert panel.add_reference_file(paths["cd"], element="*") == 1
     panel.dft_element_combo.setCurrentText("Cd")
     assert panel.dft_isotope_combo.currentText() == "113Cd"
-    assert "no Cd" in panel.dft_sigma_ref_label.text()
+    assert not panel.calculate(simulate=False) and "No shift scale for Cd" in said[-1][1]
+    panel.set_experimental_shift(1, 0.0)
+    assert set(panel.calibrations()) == {"Na", "Cd"}
+    assert panel.calculate(simulate=False)
+    assert panel.model["atoms"][0]["iso"] == pytest.approx(3500.0 - 3400.0)
+    panel.dft_element_combo.setCurrentText("Na")
+    assert panel.calculate(simulate=False)
+    assert panel.model["atoms"][0]["iso"] == pytest.approx(557.2 - np.mean(SIG_NA1))
+
+
+def test_a_typed_scale_replaces_the_references(qapp, said, paths):
+    window, panel = _panel(dict(paths, ref=None))
+    panel.dft_element_combo.setCurrentText("Cd")
     assert not panel.calculate(simulate=False)
-    assert "Give σ_ref" in said[-1][1]
     panel.dft_sigma_override_check.setChecked(True)
     panel.dft_sigma_ref_spin.setValue(3400.0)
+    panel.dft_delta_ref_spin.setValue(10.0)
     assert panel.calculate(simulate=False)
-    assert panel.model["atoms"][0]["iso"] == pytest.approx(0.0, abs=1e-6)
+    assert panel.model["atoms"][0]["iso"] == pytest.approx(10.0)
     assert panel.site_dicts[0]["interactions"][0]["type"] == "csa"
 
 
-def test_tensor_picture_in_cell_and_cartesian_frames(qapp, said, paths):
-    window, panel = _panel(qapp, paths)
-    panel.dft_delta_ref_spin.setValue(7.2)
+def test_rows_merge_for_a_methyl_group_and_can_be_removed(qapp, said, paths, tmp_path):
+    R = _rotation(4)
+    ala = write_magres(tmp_path / "ala.magres", [
+        ("H", 1, (0, 0, 0), _tensor((28.0, 30.0, 34.0), R), None),
+        ("H", 2, (1, 0, 0), _tensor((27.0, 30.5, 34.5), R), None),
+        ("H", 3, (0, 1, 0), _tensor((28.5, 29.5, 33.0), R), None)])
+    window, panel = _panel(paths)
+    assert panel.add_reference_file(ala, element="H") == 3
+    assert panel.dft_reference_table.rowCount() == 4
+    assert panel.merge_selected_rows([1, 2, 3])
+    assert panel.dft_reference_table.rowCount() == 2
+    merged = panel.ref_points[1]
+    assert sorted(merged["labels"]) == ["H1", "H2", "H3"]
+    assert merged["sigma"] == pytest.approx(np.mean([np.mean(v) for v in
+                                                     ((28, 30, 34), (27, 30.5, 34.5),
+                                                      (28.5, 29.5, 33))]))
+    panel.remove_selected_rows([1])
+    assert [p["element"] for p in panel.ref_points] == ["Na"]
+    assert not panel.merge_selected_rows([0]) and "at least two" in said[-1][1]
+
+
+def test_g0_applies_to_sample_and_references_at_once(qapp, said, tmp_path):
+    """The bug the user found: excluding G=0 changed the sample only. Now
+    toggling re-reads every VASP file, and the shifts follow."""
+    R = _rotation(7)
+
+    def outcar(name, valence_iso, g0_iso):
+        valence = [-_tensor((valence_iso - 5, valence_iso, valence_iso + 5), R)]
+        g0 = np.eye(3) * g0_iso
+        return write_outcar(tmp_path / name, ["Na"], [1], [(0, 0, 0)], valence,
+                            [np.diag([1.0, 2.0, -3.0])], g0, g0 / 0.08, -10.0, {"Na": -400.0})
+    sample = outcar("OUTCAR_s", 140.0, -9.0)
+    ref = outcar("OUTCAR_r", 150.0, -11.0)
+    window, panel = _panel({"sample": sample, "ref": None, "lib": str(tmp_path / "l.json")})
+    panel.add_reference_file(ref, element="Na")
+    panel.set_experimental_shift(0, 7.2)
     assert panel.calculate(simulate=False)
-    assert panel.dft_show_tensor_button.isEnabled()
-    assert panel.show_tensors(), panel.dft_tensor_notes_label.text()
-    texts = {t.get_text() for ax in window.simulation_canvas.figure.axes for t in ax.texts}
-    assert {"a", "b", "c"} <= texts
-    assert "to a" in panel.dft_tensor_notes_label.text()
-    panel.dft_frame_combo.setCurrentIndex(panel.dft_frame_combo.findData("cartesian"))
-    panel.dft_tensor_style_combo.setCurrentIndex(panel.dft_tensor_style_combo.findData("surface"))
-    assert panel.show_tensors()
-    texts = {t.get_text() for ax in window.simulation_canvas.figure.axes for t in ax.texts}
-    assert "a" not in texts
+    with_g0 = panel.model["atoms"][0]["iso"]
+    sigma_ref_in = panel.ref_points[0]["sigma"]
+    panel.dft_g0_check.setChecked(False)            # no Read Files needed
+    assert panel.calcs["sample"]["g0"] == "excluded"
+    assert panel.ref_points[0]["g0"] == "excluded"
+    sigma_ref_out = panel.ref_points[0]["sigma"]
+    k_core = -10.0 * 0.08                           # k χ_core, also in VASP's G=0 total
+    assert sigma_ref_in - sigma_ref_out == pytest.approx(-(-11.0 + k_core), abs=1e-4)
+    without = panel.model["atoms"][0]["iso"]
+    # σ = −(valence + G0 + core) and δ = δ_ref + σ_ref − σ, so the G=0
+    # terms enter δ as G0_sample − G0_ref
+    assert with_g0 - without == pytest.approx((-9.0 + k_core) - (-11.0 + k_core), abs=1e-4)
+    # a CASTEP reference cannot follow: say so
+    castep = write_magres(tmp_path / "c.magres", [("Na", 1, (0, 0, 0), np.eye(3) * 550, None)])
+    panel.add_reference_file(castep, element="Na")
+    panel.read_files(quiet=True)
+    assert "keep theirs" in panel.dft_files_label.text()
 
 
-def test_no_cell_forces_the_cartesian_frame(qapp, said, tmp_path):
-    path = write_magres(tmp_path / "mol.magres", [
-        ("C", 1, (0, 0, 0), _tensor((40.0, 60.0, 170.0), _rotation(9)), None)], lattice=None)
-    window = MainWindow()
-    panel = window.dft_sim_panel
-    panel.dft_sample_edit.setText(path)
-    assert panel.read_files(quiet=True)
-    assert panel.dft_frame_combo.currentData() == "cartesian"
-    assert not panel.dft_frame_combo.model().item(0).isEnabled()
-    panel.dft_sigma_override_check.setChecked(True)
-    panel.dft_sigma_ref_spin.setValue(170.0)
-    assert panel.calculate(simulate=False)
-    assert panel.show_tensors()
+def test_calibration_plot_save_load_delete(qapp, said, paths):
+    window, panel = _panel(paths)
+    panel.add_reference_file(paths["ref2"], element="Na")
+    panel.set_experimental_shift(1, -3.0)
+    assert panel.plot_calibration()
+    axes = window.simulation_canvas.figure.axes
+    assert axes and "sigma" in axes[0].get_ylabel()
+    assert panel.save_calibration("Na test")
+    assert panel.dft_saved_combo.count() == 1 and "Na test (Na, n = 2)" in \
+        panel.dft_saved_combo.itemText(0)
+    other = MainWindow().dft_sim_panel
+    other.library_path = paths["lib"]
+    other.refresh_saved_calibrations()
+    other.dft_sample_edit.setText(paths["sample"])
+    assert other.read_files(quiet=True)
+    assert other.load_saved_calibration()
+    assert other.calibrations()["Na"]["slope"] == pytest.approx(
+        panel.calibrations()["Na"]["slope"])
+    assert other.calculate(simulate=False)
+    assert other.delete_saved_calibration() and other.dft_saved_combo.count() == 0
 
 
-def test_state_round_trip_and_journal(qapp, said, paths):
-    window, panel = _panel(qapp, paths)
+def test_state_round_trip_and_an_old_state(qapp, said, paths):
+    window, panel = _panel(paths)
     panel.dft_site_list.item(1).setCheckState(Qt.CheckState.Unchecked)
-    panel.dft_delta_ref_spin.setValue(7.2)
     assert panel.calculate(simulate=False)
     state = panel.get_state()
     assert state["dft"]["checked"] == ["Na1"]
+    assert state["dft"]["references"][0]["delta_exp"] == 7.2
+    assert "557.200" in state["extra"]["DFT shift scale"]
     other = MainWindow().dft_sim_panel
     other.set_state(state)
-    assert other.dft_sample_edit.text() == paths[0]
+    assert other.dft_sample_edit.text() == paths["sample"]
     assert other.checked_labels() == ["Na1"]
-    assert other.dft_delta_ref_spin.value() == pytest.approx(7.2)
     assert [s["label"] for s in other.site_dicts] == ["Na1"]
+    assert other.calibrations()["Na"]["intercept"] == pytest.approx(557.2)
+    # a state saved by round 6: one reference file and δ_ref
+    old = dict(state)
+    old["dft"] = {k: v for k, v in state["dft"].items() if k != "references"}
+    old["widgets"] = dict(state["widgets"],
+                          dft_reference_edit={"kind": "line", "value": paths["ref"]},
+                          dft_delta_ref_spin={"kind": "spin", "value": 7.2})
+    third = MainWindow().dft_sim_panel
+    third.set_state(old)
+    assert third.calibrations()["Na"]["intercept"] == pytest.approx(557.2)
 
 
 def test_unreadable_file_is_reported(qapp, said, tmp_path):
@@ -152,14 +250,49 @@ def test_unreadable_file_is_reported(qapp, said, tmp_path):
     panel = window.dft_sim_panel
     panel.dft_sample_edit.setText(str(bad))
     assert not panel.read_files(quiet=True)
-    assert "neither" in panel.dft_files_label.text()
+    assert "not a calculation openNMR reads" in panel.dft_files_label.text()
+    assert panel.add_reference_file(str(bad)) == 0
+    assert "Could not add" in panel.dft_calibration_label.text()
 
 
-def test_copy_buttons(qapp, said, paths):
+def test_copy_buttons_give_code_that_reproduces_the_import(qapp, said, paths):
     from PySide6.QtGui import QGuiApplication
-    window, panel = _panel(qapp, paths)
+    window, panel = _panel(paths)
     assert panel.calculate(simulate=False)
     panel.dft_csv_button.click()
-    assert QGuiApplication.clipboard().text().startswith("Site,δiso (ppm)")
+    assert QGuiApplication.clipboard().text().startswith("Site,δiso (ppm),± δiso (ppm)")
     panel.dft_python_button.click()
-    assert "dft_nmr.dft_sites(sample, ref" in QGuiApplication.clipboard().text()
+    code = QGuiApplication.clipboard().text()
+    assert "dft_nmr.dft_sites(sample, calibration=cal" in code
+    ns = {}
+    exec(code.replace("print(", "(lambda *a: None)("), ns)
+    assert ns["model"]["atoms"][0]["iso"] == pytest.approx(panel.model["atoms"][0]["iso"])
+
+
+def test_tensor_picture_in_cell_and_cartesian_frames(qapp, said, paths):
+    window, panel = _panel(paths)
+    assert panel.calculate(simulate=False)
+    assert panel.dft_show_tensor_button.isEnabled()
+    assert panel.show_tensors(), panel.dft_tensor_notes_label.text()
+    texts = {t.get_text() for ax in window.simulation_canvas.figure.axes for t in ax.texts}
+    assert {"a", "b", "c"} <= texts
+    panel.dft_frame_combo.setCurrentIndex(panel.dft_frame_combo.findData("cartesian"))
+    panel.dft_tensor_style_combo.setCurrentIndex(panel.dft_tensor_style_combo.findData("surface"))
+    assert panel.show_tensors()
+
+
+def test_a_molecular_file_forces_the_cartesian_frame(qapp, said, tmp_path):
+    from test_dft_molecular import SIG_H, SIG_N, write_orca
+    path = write_orca(tmp_path / "nh3.out", [("N", (0, 0, 0), SIG_N), ("H", (1, 0, 0), SIG_H)])
+    window = MainWindow()
+    panel = window.dft_sim_panel
+    panel.dft_sample_edit.setText(path)
+    assert panel.read_files(quiet=True)
+    assert "ORCA" in panel.dft_files_label.text()
+    assert panel.dft_frame_combo.currentData() == "cartesian"
+    assert not panel.dft_frame_combo.model().item(0).isEnabled()
+    panel.dft_sigma_override_check.setChecked(True)
+    panel.dft_sigma_ref_spin.setValue(-130.0)
+    assert panel.calculate(simulate=False)
+    assert panel.show_tensors()
+    _ = D

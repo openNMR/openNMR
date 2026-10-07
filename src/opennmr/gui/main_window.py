@@ -13199,9 +13199,10 @@ class MainWindow(QMainWindow):
             draw_tensors=self._draw_tensor_picture,
             style=self._simulation_style,
             send_to_fit=self._send_combined_simulation_to_fit,
-            draw_orders=self._draw_quadrupolar_order_comparison)
+            draw_orders=self._draw_quadrupolar_order_comparison,
+            draw_plot=self._show_on_simulation_plot)
         self.dft_sim_field_link = self._link_panel_field(self.dft_sim_panel)
-        self._dft_sim_section = CollapsibleSection("DFT tensors (CASTEP / VASP)",
+        self._dft_sim_section = CollapsibleSection("DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                                    content=self.dft_sim_panel)
         layout.addWidget(self._czjzek_sim_section)
         # After Czjzek: Combined Hamiltonian and Czjzek stay together

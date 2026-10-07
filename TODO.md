@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-07 (DFT: G=0 fix, reference calibrations, ORCA/Gaussian): 26 new tests (12 + 10 + 4) and the 9 earlier GUI tests rewritten. Full suite: 3619 passed, 166 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`); Py 3.13, PySide6 6.11.2, matplotlib 3.11.2. Seven tests crashed pytest-xdist workers and pass when run alone. **Run the full suite locally before committing.***
+
 *2026-10-06 round 6 (Simulate ▸ DFT tensors, CASTEP / VASP): 28 new tests (19 + 9; 3 need test_data/dft). The relevant subset: full suite 3594 passed, 166 skipped, 1 failed (Py 3.13, PySide6 6.11.2, matplotlib 3.11.2). The one failure, `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`, fails identically on the round-5 commit without these changes, so it is not from this round. Three tests that pin Simulate's section list were updated for the new section, and `test_colorbar_gap_and_czjzek_labels.py` no longer unpacks matplotlib's glyph tuples by length (matplotlib 3.11 added a field). Seven tests crashed pytest-xdist workers in the parallel run and pass when run alone. **Run the full suite locally before committing.***
 
 *2026-10-06 round 5 (correlation matrix for isotropic, Combined-Hamiltonian and multi-spectrum fits): 10 new tests. The relevant subset: 312 passed, 4 skipped (real-data tests), 0 failed; Py 3.13, PySide6 6.11.2. **Run the full suite locally before committing.***
@@ -160,6 +162,92 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Simulate ▸ DFT: G=0 fix, several reference compounds and per-element calibrations, ORCA and Gaussian (2026-10-07)
+
+**Asked:**
+- "When you select 'exclude G=0', it only applies that to the sample shielding, not the reference."
+- Wording for the option: "including G=0 means the long-range contribution to electronic shielding is included, as in crystalline materials. Excluding omits this, and is useful for molecules."
+- Several references: a plot of calculated shielding (y) against experimental shift (x). Users type the experimental shifts; openNMR fits the line, works out the conversion for a nucleus, and stores the fits for use on the sample.
+- Different references per nucleus in one sample (L-alanine for ¹H, NaCl for ²³Na).
+- ORCA and Gaussian outputs, if possible.
+
+**What was wrong with G=0.** `read_outcar` honoured `include_g0` for both files; two GUI faults made it look one-sided:
+1. Ticking the box re-read nothing, so nothing changed until Read Files was pressed.
+2. A CASTEP `.magres` holds only the total σ and no susceptibility, so its G=0 term cannot be removed. With a CASTEP reference and a VASP sample, only the sample changed.
+
+Fixes:
+- Toggling now re-reads the sample and every reference file at once, and recalculates (and re-simulates, if there was a spectrum).
+- A note names any CASTEP file that keeps its G=0 term.
+- Each calc records `g0` (included / excluded / fixed / none), and calibrations report mixed states.
+- Checked on the user's VASP pair: the referenced shifts with and without G=0 equal those from VASP's own INCLUDING and EXCLUDING columns to the printed digit.
+- The help text is the user's wording, sharpened: the G=0 term is the macroscopic (bulk-susceptibility) contribution for a spherical sample; for a molecule in a vacuum box it reflects the box, not the molecule.
+
+**Calibration (`notebook/dft_calibration.py`):**
+- **Points.** `reference_point(calc, labels, delta_exp)` is the mean σ_iso over the chosen atoms: symmetry copies, or a fast-exchanging CH₃/NH₃⁺.
+  - `suggest_points` gives one row per group of equivalent sites (equal principal σ within 0.01 ppm).
+  - `merge_points` averages rows.
+  - `typed_point` is for a σ with no file.
+  - `refresh_point` re-reads a point (used for the G=0 toggle).
+- **Fit.** `fit_calibration(points, slope=None|value)` regresses σ_calc on δ_exp. That is the requested axes, and also the right direction statistically, since the error is in the calculation.
+  - One point fixes the slope at −1 and reproduces the old δ_ref + σ_ref − σ exactly.
+  - The fit gives standard errors, R², and the residuals δ_calc − δ_exp.
+  - Plain notes cover: a positive slope, a slope far from −1, a slope equal to −1 within error, outliers beyond 3 s, two points defining the line exactly, and method or G=0 differences between points.
+- **Error bars.** `shift_uncertainty` uses the inverse-prediction formula, (s/|b|)√(1 + 1/n + (δ₀ − δ̄)²/S_xx). A Monte Carlo test confirms 95% coverage (0.93–0.97 over 3000 trials).
+  - `dft_sites(..., calibration=cal or {"H": cal_H, "Na": cal_Na})` scales the whole tensor and adds `iso_err`, shown as a "± δiso" column.
+  - `sample_notes` flags a method or G=0 mismatch with the sample, and extrapolation beyond the references' range.
+- **Library and output.**
+  - Saved calibrations go to `~/.opennmr/dft_calibrations.json`, with their points, so they stand without the files.
+  - `plot_calibration` draws the line and residual panels with mathtext labels. The fit numbers go in the corner the line leaves empty, and point names are placed clear of each other, the points and the line. The first version overlapped; it was checked by eye.
+  - Also provided: `shift_table` (every calibrated element of a sample) and `calibration_to_python`.
+- **Method metadata.** Each reader records code, functional/route/keywords, cutoff and pseudopotentials (`calc["method"]`). `method_differences` reports the ones that put shieldings on different scales.
+
+**ORCA and Gaussian readers (`dft_nmr.read_orca`, `read_gaussian`):**
+- **Checked against real outputs** from cclib's test data, not committed; they go in `test_data/dft/molecular/`.
+  - ORCA 4.2/5.0: identical to cclib's parser (positions and tensors).
+  - ORCA 4.2/5.0/6.0: isotropic values match ORCA's printout to ≤7×10⁻⁴ ppm (3-decimal tensors).
+  - Gaussian 03/09/16: isotropic values and eigenvalues match Gaussian's printout to ≤10⁻⁴ ppm.
+- **ORCA principal values.** ORCA prints eigenvalues of sᵀs. openNMR uses the symmetric part, which is what a high-field spectrum sees, so they differ by ≤0.012 ppm on these files.
+- **Gaussian blocks and routes.** The correlated (e.g. MP2) block is used over SCF. The orientation is the last "Standard orientation" before the tensors (else "Input"). The route is taken from the job step that printed them: the G03 file is opt+freq, then NMR after --Link1--.
+- **ORCA EFG.** Read from "Raw EFG matrix" (atomic units), in the layout of the ORCA manual. No real file was available. Each read is checked against ORCA's own e²qQ with ORCA's Q, and a mismatch is a note.
+  - **Bug found by the synthetic test:** the first version skipped matrix rows that begin with a minus sign (mistaken for dashed separators).
+- **Gaussian EFG not read.** No example output was found and the sign convention of its table is uncertain. Files with EFG tables say so. Needs a real `Prop=EFG` log from the user.
+- **Molecular calcs.** No cell, so tensors show in the Cartesian frame; `g0` is "none".
+
+**GUI (`gui/dft_panel.py`):**
+- The section is renamed "DFT tensors (CASTEP, VASP, ORCA, Gaussian)", which updated 3 pinned tests.
+- A "Shift scale: reference compounds" box replaces the single reference file:
+  - a table (Use, name, element, atoms, σ_calc, δ_exp typed, residual);
+  - Add Reference File… (the sample's element, or every element), Merge Rows and Remove Rows;
+  - the slope fitted or fixed;
+  - one summary per element, with the current element marked ▶;
+  - Plot Calibration on the Simulation plot, as a "curve" plot so Plot Style applies;
+  - Save Calibration…, and Load or Delete for a saved one;
+  - "Type the scale instead" (σ_ref, δ_ref, m), for an element with no reference.
+- The sample's element picks its own calibration.
+- The sample site list shows only atoms with a shielding.
+- State saves the reference points. A round-6 state, with one reference file and δ_ref, is turned into a reference row on load.
+- Copy Import as Python writes the calibration and the sites, and the code is exec-tested to reproduce the GUI's shifts.
+
+**Not done:**
+- The Gaussian EFG, as above.
+- A per-file G=0 choice: one switch covers every VASP file, as asked. Per-file would allow a molecular VASP reference with a crystalline VASP sample, but invites inconsistent scales.
+- Weighted fits, using experimental shift uncertainties.
+- Calibrating the tensor principal components separately from the isotropic part.
+
+**Tests:**
+- New `test_dft_calibration.py` (12): OLS against numpy, errors, coverage, fixed slope, degenerate cases, notes, library, plot, Python.
+- New `test_dft_molecular.py` (10): synthetic ORCA/Gaussian; 2 on real outputs, skipped without `test_data/dft/molecular`.
+- Rewritten `test_gui_dft.py` (13). It includes the G=0 regression: the sample and the reference change together, without Read Files.
+- Full suite: 3619 passed, 166 skipped, 1 failed. The failure is the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`.
+- Seven tests crashed pytest-xdist workers (3 workers, 8 GB) and pass when run alone.
+- Pinned section lists were updated in `test_gui.py` (2) and `test_gui_combined_consolidation.py`.
+
+**Noticed, not fixed (pre-existing):**
+- Building a `MainWindow` takes ~3 s more for each one already built in the process: 3.4, 6.2, 9.0, 11.9 s, the same with and without this round.
+- The stack is in `widgets/reflow.py` (`make_reflowable` → `convert_row` → `_replace_in_parent`), which seems to scale with every live widget.
+- It is why the suite takes 1–2 h in a session container instead of ~9 min, and why late xdist workers reach ~3 GB and crash.
+- Worth a profile.
 
 ## Simulate ▸ DFT tensors (CASTEP / VASP): import shielding and EFG tensors, reference, simulate, view in the cell frame (2026-10-06, round 6)
 

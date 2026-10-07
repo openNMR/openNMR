@@ -313,7 +313,7 @@ def test_outcar_sites_and_orientation(tmp_path):
 def test_not_a_dft_file(tmp_path):
     p = tmp_path / "x.txt"
     p.write_text("hello\n")
-    with pytest.raises(ValueError, match="neither"):
+    with pytest.raises(ValueError, match="not a calculation openNMR reads"):
         D.read_calculation(str(p))
 
 

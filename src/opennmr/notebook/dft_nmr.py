@@ -173,6 +173,8 @@ def read_magres(path) -> dict:
                 calc["info"][parts[0]] = " ".join(parts[1:])
                 if parts[0] == "calc_code":
                     calc["code"] = parts[1]
+            elif parts[0] == "calc_pspot" and len(parts) >= 3:
+                calc["info"].setdefault("pspots", {})[parts[1]] = " ".join(parts[2:])
         elif section in ("atoms", "magres"):
             if parts[0] == "units":
                 units[parts[1]] = parts[2]
@@ -201,6 +203,15 @@ def read_magres(path) -> dict:
     if units.get("atom", "Angstrom") != "Angstrom":
         raise ValueError(f"Positions in {units['atom']}, expected Angstrom.")
     calc["castep_summary"] = _castep_summary(text)
+    info = calc["info"]
+    calc["method"] = {"code": calc["code"], "functional": info.get("calc_xcfunctional", ""),
+                      "cutoff": info.get("calc_cutoffenergy", ""),
+                      "pseudopotentials": dict(info.get("pspots") or {}),
+                      "periodic": calc["lattice"] is not None}
+    # The .magres σ is the code's total; CASTEP's GIPAW (Pickard & Mauri)
+    # includes the G=0 term for a spherical sample, and the file carries no
+    # susceptibility to take it out with.
+    calc["g0"] = "fixed" if calc["lattice"] is not None else "none"
     if "[magres]" not in text:
         calc["notes"].append("No [magres] block: this file has positions but no tensors.")
     if calc["lattice"] is None:
@@ -351,8 +362,32 @@ def read_outcar(path, include_g0: bool = True) -> dict:
         calc["info"]["g0_tensor"] = g0
         calc["info"]["core_shift"] = core
         calc["info"]["include_g0"] = bool(include_g0)
+        calc["g0"] = ("included" if include_g0 else "excluded") if g_idx else "none"
+    else:
+        calc["g0"] = "none"
     calc["vasp_summary"] = _vasp_summary(lines)
+    calc["method"] = _vasp_method(lines, species)
     return calc
+
+
+def _vasp_method(lines, species):
+    tags = {}
+    for line in lines:
+        m = re.match(r"\s*(GGA|METAGGA|LHFCALC|ENCUT|IVDW)\s*=\s*(\S+)", line)
+        if m and m.group(1) not in tags:
+            tags[m.group(1)] = m.group(2)
+    titles = [re.sub(r"\s+", " ", line.split("=", 1)[1]).strip()
+              for line in lines if re.match(r"\s*TITEL\s*=", line)]
+    pspots = dict(zip(species, titles))
+    functional = "GGA " + tags.get("GGA", "?")
+    meta = tags.get("METAGGA", "")
+    if meta and meta.upper() not in ("--", "NONE", "F", ".FALSE."):
+        functional += f", meta-GGA {meta}"
+    if tags.get("LHFCALC", "F").upper().startswith("T"):
+        functional += ", hybrid"
+    return {"code": "VASP", "functional": functional,
+            "cutoff": f"{tags['ENCUT']} eV" if "ENCUT" in tags else "",
+            "pseudopotentials": pspots, "periodic": True}
 
 
 def _susceptibility(lines, which="pGv"):
@@ -398,17 +433,263 @@ def _vasp_summary(lines):
     return out
 
 
+_FLOAT = r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[EeDd][-+]?\d+)?"
+
+
+def _floats(line):
+    return [float(v.replace("D", "E").replace("d", "e")) for v in re.findall(_FLOAT, line)]
+
+
+def _symbol(Z):
+    from . import periodic_table as pt
+    return pt.element(int(Z)).symbol
+
+
+def read_orca(path) -> dict:
+    """An ORCA output (``.out``) with NMR shieldings (``! NMR`` or
+    ``%eprnmr ... shift``) and/or EFGs (``fgrad``): atoms (Å, the last
+    "CARTESIAN COORDINATES (ANGSTROEM)" block), the "Total shielding tensor
+    (ppm)" of each nucleus and its "Raw EFG matrix" (atomic units → V/m²).
+
+    ORCA reports eigenvalues of sᵀs; the symmetric part of σ is used here
+    (the part a high-field spectrum sees), so principal values can differ
+    from ORCA's in the last digits when σ is asymmetric. Each EFG is
+    checked against ORCA's own printed e²qQ with ORCA's Q: a mismatch is a
+    note, not silence."""
+    with open(path, "r", errors="replace") as f:
+        lines = f.read().splitlines()
+    if not any("O   R   C   A" in line for line in lines[:200]):
+        raise ValueError(f"{os.path.basename(str(path))}: not an ORCA output (no ORCA banner).")
+    calc = {"code": "ORCA", "path": str(path), "lattice": None, "atoms": [], "notes": [],
+            "info": {}, "g0": "none"}
+    idx = _blocks_after(lines, "CARTESIAN COORDINATES (ANGSTROEM)")
+    if not idx:
+        raise ValueError("No 'CARTESIAN COORDINATES (ANGSTROEM)' block.")
+    seen = {}
+    for line in lines[idx[-1] + 2:]:
+        parts = line.split()
+        if len(parts) != 4:
+            break
+        sym = re.sub(r"[^A-Za-z]", "", parts[0])
+        sym = sym[:1].upper() + sym[1:].lower()
+        seen[sym] = seen.get(sym, 0) + 1
+        calc["atoms"].append(_atom(sym, seen[sym], sym, [float(v) for v in parts[1:4]]))
+    n_atoms = len(calc["atoms"])
+    current = None
+    summary = {}
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"\s*Nucleus\s+(\d+)\s*([A-Z][a-z]?)\b", line)
+        if m:
+            current = int(m.group(1))
+            if current >= n_atoms or calc["atoms"][current]["species"] != m.group(2):
+                raise ValueError(f"ORCA nucleus {m.group(1)}{m.group(2)} does not match the "
+                                 "coordinates read.")
+        elif "Total shielding tensor (ppm)" in line and current is not None:
+            rows = [_floats(lines[i + k]) for k in (1, 2, 3)]
+            calc["atoms"][current]["sigma"] = np.array(rows, dtype=float)
+            i += 3
+        elif "Raw EFG matrix" in line and current is not None:
+            rows = []
+            j = i + 1
+            while len(rows) < 3 and j < i + 8:
+                # a separator is all dashes; a row may start with a minus sign
+                vals = [] if re.fullmatch(r"-+", lines[j].strip()) else _floats(lines[j])
+                if len(vals) == 3:
+                    rows.append(vals)
+                j += 1
+            calc["atoms"][current]["efg"] = np.array(rows, dtype=float) * AU_EFG
+            entry = summary.setdefault(calc["atoms"][current]["label"], {})
+            for line2 in lines[j:j + 30]:
+                q = re.search(r"Quadrupole tensor eigenvalues.*Q\s*=\s*(" + _FLOAT + ")", line2)
+                if q:
+                    entry["Q"] = float(q.group(1))
+                e = re.search(r"e\*\*2qQ\s*=\s*(" + _FLOAT + r")\s*MHz", line2)
+                if e:
+                    entry["e2qQ"] = float(e.group(1))
+                et = re.match(r"\s*eta\s*=\s*(" + _FLOAT + ")", line2)
+                if et:
+                    entry["eta"] = float(et.group(1))
+                if "Raw EFG matrix" in line2 or re.match(r"\s*Nucleus\s+\d+", line2):
+                    break
+            i = j - 1
+        i += 1
+    calc["orca_summary"] = summary
+    # Self-check: our C_Q from the raw matrix with ORCA's Q vs ORCA's e²qQ.
+    for atom in calc["atoms"]:
+        s = summary.get(atom["label"], {})
+        if atom["efg"] is None or "Q" not in s or "e2qQ" not in s:
+            continue
+        ours = efg_parameters(atom["efg"], s["Q"])["C_Q"]
+        if abs(ours - s["e2qQ"]) > max(0.002, 0.01 * abs(s["e2qQ"])):
+            calc["notes"].append(f"{atom['label']}: C_Q from ORCA's raw EFG with ORCA's Q is "
+                                 f"{ours:.4f} MHz, but ORCA prints e²qQ = {s['e2qQ']:.4f} MHz. "
+                                 "Check this file's EFG before trusting C_Q.")
+    keywords = []
+    for line in lines:
+        m = re.match(r"\|\s*\d+>\s*!(.*)", line)
+        if m:
+            keywords.append(m.group(1).strip())
+    calc["method"] = {"code": "ORCA", "functional": " ".join(keywords), "cutoff": "",
+                      "pseudopotentials": {}, "periodic": False}
+    version = next((ln.split("Version")[1].split("-")[0].strip() for ln in lines[:200]
+                    if "Program Version" in ln), "")
+    calc["info"]["version"] = version
+    calc["notes"].append("Molecular (non-periodic) calculation: tensors are in the file's "
+                         "x, y, z frame.")
+    return calc
+
+
+_GAUSSIAN_SHIELD = re.compile(r"^\s*(\S+)\s+(GIAO|CSGT|IGAIM|Single-origin|SingleOrigin)\s+"
+                              r"Magnetic shielding tensor \(ppm\)")
+
+
+def read_gaussian(path) -> dict:
+    """A Gaussian log with an NMR calculation (``NMR`` keyword): atoms from
+    the orientation the tensors are in (the last "Standard orientation"
+    before them, or "Input orientation" with NoSymm) and each atom's
+    shielding tensor (ppm). With MP2 (or another correlated) NMR, its block
+    is used rather than the SCF one.
+
+    Gaussian's EFG tables are not read: none was available to check the
+    layout and sign against, so no C_Q is given for Gaussian files."""
+    with open(path, "r", errors="replace") as f:
+        lines = f.read().splitlines()
+    if not any("Gaussian, Inc." in line or "Entering Gaussian System" in line
+               for line in lines[:400]):
+        raise ValueError(f"{os.path.basename(str(path))}: not a Gaussian log.")
+    calc = {"code": "Gaussian", "path": str(path), "lattice": None, "atoms": [], "notes": [],
+            "info": {}, "g0": "none"}
+    blocks = [i for i, line in enumerate(lines) if _GAUSSIAN_SHIELD.match(line)]
+    if not blocks:
+        raise ValueError("No 'Magnetic shielding tensor (ppm)' block: was NMR requested?")
+    methods = [_GAUSSIAN_SHIELD.match(lines[i]).group(1) for i in blocks]
+    chosen = blocks[-1]
+    for i, meth in zip(blocks, methods):
+        if meth.upper() != "SCF":
+            chosen = i
+    method = _GAUSSIAN_SHIELD.match(lines[chosen]).group(1)
+    if method.upper() != "SCF":
+        calc["notes"].append(f"{method} shieldings used (the file also has SCF ones).")
+    orient = [i for i, line in enumerate(lines[:chosen]) if "Standard orientation:" in line]
+    which = "Standard"
+    if not orient:
+        orient = [i for i, line in enumerate(lines[:chosen]) if "Input orientation:" in line]
+        which = "Input"
+    if not orient:
+        raise ValueError("No 'Standard orientation' or 'Input orientation' block before the "
+                         "shieldings.")
+    seen = {}
+    for line in lines[orient[-1] + 5:]:
+        parts = line.split()
+        if len(parts) != 6 or not parts[0].isdigit():
+            break
+        sym = _symbol(parts[1])
+        seen[sym] = seen.get(sym, 0) + 1
+        calc["atoms"].append(_atom(sym, seen[sym], sym, [float(v) for v in parts[3:6]]))
+    calc["info"]["orientation"] = which
+    j = chosen + 1
+    pattern = re.compile(r"([XYZ])([XYZ])=\s*(" + _FLOAT + ")")
+    while j < len(lines):
+        m = re.match(r"\s*(\d+)\s+([A-Z][a-z]?)\s+Isotropic\s*=", lines[j])
+        if not m:
+            break
+        n = int(m.group(1))
+        tensor = np.zeros((3, 3))
+        found = 0
+        for line in lines[j + 1:j + 4]:
+            for a, b, v in pattern.findall(line):
+                tensor["XYZ".index(a), "XYZ".index(b)] = float(v.replace("D", "E"))
+                found += 1
+        if found != 9:
+            raise ValueError(f"Gaussian atom {n}: could not read its shielding tensor.")
+        atom = calc["atoms"][n - 1]
+        if atom["species"] != m.group(2):
+            raise ValueError(f"Gaussian atom {n}{m.group(2)} does not match the orientation "
+                             "block read.")
+        atom["sigma"] = tensor
+        j += 4
+        while j < len(lines) and lines[j].strip().startswith("Eigenvalues"):
+            j += 1
+    # The route of the job step that printed the shieldings (a log can
+    # hold several steps: opt, then NMR after --Link1--).
+    route = []
+    starts = [k for k, line in enumerate(lines[:chosen])
+              if line.strip().startswith("#") and lines[k - 1].strip().startswith("---")]
+    if starts:
+        for line2 in lines[starts[-1]:starts[-1] + 6]:
+            if line2.strip().startswith("---"):
+                break
+            route.append(line2.strip())
+    calc["method"] = {"code": "Gaussian", "functional": " ".join(route), "cutoff": "",
+                      "pseudopotentials": {}, "periodic": False}
+    if any("Electric Field Gradient" in line for line in lines):
+        calc["notes"].append("This Gaussian file has EFG tables, which openNMR does not read yet "
+                             "(no C_Q from Gaussian).")
+    calc["notes"].append("Molecular (non-periodic) calculation: tensors are in the file's "
+                         f"{which.lower()}-orientation x, y, z frame.")
+    return calc
+
+
+#: The codes :func:`read_calculation` recognises.
+SUPPORTED_CODES = ("CASTEP (.magres)", "VASP (OUTCAR)", "ORCA (.out)", "Gaussian (.log)")
+
+
 def read_calculation(path, include_g0: bool = True) -> dict:
-    """A CASTEP ``.magres`` or a VASP ``OUTCAR``, recognised by content."""
+    """A CASTEP ``.magres``, VASP ``OUTCAR``, ORCA output or Gaussian log,
+    recognised by content. ``include_g0`` applies to VASP only (the other
+    codes give a total σ that cannot be split, or have no G=0 term)."""
     with open(path, "r", errors="replace") as f:
         head = f.read(4000)
+        more = head + f.read(60000)
     if "[atoms]" in head or "#$magres" in head or "[magres]" in head or \
             "[calculation]" in head:
         return read_magres(path)
     if "vasp." in head:
         return read_outcar(path, include_g0=include_g0)
-    raise ValueError(f"{os.path.basename(str(path))}: neither a CASTEP .magres nor a VASP "
-                     "OUTCAR.")
+    if "O   R   C   A" in more:
+        return read_orca(path)
+    if "Gaussian, Inc." in more or "Entering Gaussian System" in more:
+        return read_gaussian(path)
+    raise ValueError(f"{os.path.basename(str(path))}: not a calculation openNMR reads ("
+                     + ", ".join(SUPPORTED_CODES) + ").")
+
+
+def describe_method(method) -> str:
+    """One line: code, functional/route, cutoff."""
+    if not method:
+        return "unknown method"
+    bits = [method.get("code", "")]
+    if method.get("functional"):
+        bits.append(method["functional"])
+    if method.get("cutoff"):
+        bits.append(f"cutoff {method['cutoff']}")
+    return ", ".join(b for b in bits if b)
+
+
+def _norm(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip().lower()
+
+
+def method_differences(a, b, element=None) -> list[str]:
+    """Where two calculations' methods differ in ways that put their
+    shieldings on different scales: code, functional (or route/keywords),
+    cutoff, and the pseudopotential of ``element``."""
+    if not a or not b:
+        return []
+    out = []
+    if a.get("code") != b.get("code"):
+        return [f"code ({a.get('code')} vs {b.get('code')})"]
+    for key, name in (("functional", "functional / keywords"), ("cutoff", "cutoff")):
+        if _norm(a.get(key)) and _norm(b.get(key)) and _norm(a.get(key)) != _norm(b.get(key)):
+            out.append(f"{name} ({a.get(key)} vs {b.get(key)})")
+    if element:
+        pa = (a.get("pseudopotentials") or {}).get(element)
+        pb = (b.get("pseudopotentials") or {}).get(element)
+        if pa and pb and _norm(pa) != _norm(pb):
+            out.append(f"{element} pseudopotential ({pa} vs {pb})")
+    return out
 
 
 def species_of(calc) -> list[str]:
@@ -567,7 +848,7 @@ def _merge_key(rec, tol):
 
 def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, delta_ref=0.0,
               sigma_ref=None, reference_labels=None, slope=1.0, fwhm=1.0,
-              include_csa=True, include_quadrupolar=True, merge=True) -> dict:
+              include_csa=True, include_quadrupolar=True, merge=True, calibration=None) -> dict:
     """Simulation sites from a DFT calculation.
 
     ``sample`` / ``reference`` : from :func:`read_calculation` (or paths).
@@ -579,6 +860,12 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
     reference calculation's (e.g. when it has no such element).
     ``reference_labels`` : which reference sites to average.
     ``slope`` : m in δ = δ_ref + m(σ_ref − σ).
+    ``calibration`` : a shielding scale from
+    :func:`opennmr.notebook.dft_calibration.fit_calibration` (or a dict of
+    them by element, ``{"H": cal_H, "Na": cal_Na}``), used instead of
+    ``reference`` / ``sigma_ref`` / ``delta_ref`` / ``slope``: δ = (σ − a)/b,
+    with each isotropic shift's uncertainty (``iso_err``) when the
+    references give one.
     ``merge`` : sites whose parameters all agree (to 0.01 ppm, 0.001 in η,
     0.1 kHz, 0.1°) become one site with their count as its amount -- the
     same lineshape, simulated once.
@@ -604,8 +891,25 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
     spin = float(ch.find_isotope_info(nucleus)["spin"])
     Q = quadrupole_moment_barn(nucleus) if spin > 0.5 else None
     notes = []
+    cal = None
+    if calibration is not None:
+        from . import dft_calibration as dcal
+        cal = calibration
+        if "intercept" not in cal:           # a mapping by element
+            if element not in cal:
+                raise ValueError(f"No calibration for {element} (have "
+                                 + ", ".join(sorted(cal)) + ").")
+            cal = cal[element]
+        if cal["element"] != element:
+            raise ValueError(f"That calibration is for {cal['element']}, not {element}.")
+        sigma_ref, delta_ref, slope = cal["intercept"], 0.0, -1.0 / cal["slope"]
+        notes.append("Shift scale: " + dcal.summary_text(cal))
+        notes += [f"Calibration: {n}" for n in cal.get("notes") or [] if not cal.get("manual")]
     ref_info = {"delta_ref": float(delta_ref), "slope": float(slope)}
-    if sigma_ref is None:
+    if cal is not None:
+        ref_info.update(sigma_ref=float(sigma_ref), source="calibration",
+                        calibration=cal.get("name") or "", equation=dcal.equation_text(cal))
+    elif sigma_ref is None:
         if reference is None:
             raise ValueError("Give a reference calculation, or the reference shielding σ_ref.")
         try:
@@ -626,7 +930,7 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
     else:
         ref_info.update(sigma_ref=float(sigma_ref), source="typed")
         notes.append(f"σ_ref = {float(sigma_ref):.4f} ppm, as typed.")
-    if float(delta_ref) == 0.0:
+    if float(delta_ref) == 0.0 and cal is None:
         notes.append("δ_ref is 0: shifts are relative to the reference compound itself, not "
                       "to your experimental scale. Enter the reference's measured shift.")
     records = []
@@ -655,12 +959,15 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
         if use_quad and include_csa:
             rec["euler"], rec["efg_axes"] = relative_euler(csa["axes"], rec["efg_axes"],
                                                            return_frame=True)
+        rec["iso_err"] = dcal.shift_uncertainty(cal, csa["iso"]) if cal is not None else None
         rec["uses_quadrupolar"] = bool(use_quad)
         rec["uses_csa"] = bool(include_csa)
         rec["site_axes"] = rec["efg_axes"] if use_quad else csa["axes"]
         records.append(rec)
     if spin > 0.5 and Q is None:
         notes.append(f"No quadrupole moment for {nucleus} in the isotope table.")
+    if cal is not None:
+        notes += dcal.sample_notes(cal, sample, [r["iso"] for r in records])
     # Sites, merging the equivalent ones.
     tol = {"iso": 0.01, "aniso": 0.01, "eta": 0.001, "C_Q": 1e-4, "eta_Q": 0.001, "euler": 0.1}
     groups = {}
@@ -701,7 +1008,11 @@ def dft_sites(sample, reference=None, element=None, labels=None, nucleus=None, d
 
 
 def _group_label(labels):
-    """``Na1, Na2, Na3, Na4`` → ``Na1–Na4`` when consecutive, else listed."""
+    """``Na1, Na2, Na3, Na4`` → ``Na1–Na4`` when consecutive, else listed;
+    one label is itself."""
+    labels = list(labels)
+    if len(labels) == 1:
+        return labels[0]
     nums = []
     stem = None
     for lab in labels:
@@ -720,7 +1031,7 @@ def _group_label(labels):
 # ============================================================
 
 TABLE_COLUMNS = (
-    ("label", "Site", "{}"), ("iso", "δiso (ppm)", "{:.2f}"),
+    ("label", "Site", "{}"), ("iso", "δiso (ppm)", "{:.2f}"), ("iso_err", "± δiso (ppm)", "{:.2f}"),
     ("span", "Ω (ppm)", "{:.2f}"), ("skew", "κ", "{:.3f}"),
     ("aniso", "δaniso (ppm)", "{:.2f}"), ("anisotropy", "Δδ (ppm)", "{:.2f}"),
     ("eta", "ηCSA", "{:.3f}"), ("C_Q", "C_Q (MHz)", "{:.4f}"), ("eta_Q", "ηQ", "{:.3f}"),
