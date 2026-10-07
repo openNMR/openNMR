@@ -948,9 +948,31 @@ def fit_czjzek_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, mas_H
                                or np.isclose(popt[i] / unit[i], upper[i], rtol=1e-3, atol=1e-9)):
                 warnings.append(f"{label}: {name} ended on a bound -- not a free minimum.")
         if extended[s] and is_free[cq0_idx[s]]:
-            if cq0 <= 1e-3 * max(sigma, 1e-9):
+            # "No mean EFG needed" is two different outcomes:
+            # * C_Q0 below one C_Q cell of the library -- zero, at the
+            #   resolution the model has (1e-3 sigma, the old test, is far
+            #   finer than any grid, so a C_Q0 of a few cells' worth of
+            #   nothing went unreported);
+            # * C_Q0 below sigma and traded almost one-for-one against it.
+            #   Measured on a plain-Czjzek 27Al spectrum (sigma 3.0 MHz,
+            #   64 C_Q cells): the extended fit ended at C_Q0 2.43 +/- 0.05,
+            #   sigma 2.79, correlation -0.998 -- a mean EFG smaller than
+            #   the spread only reshapes the distribution slightly, and that
+            #   reshaping absorbed the library's discretisation error (with
+            #   160 cells the same fit gave C_Q0 0.015). Its small error bar
+            #   says nothing about whether it is needed.
+            cell = float(np.max(np.diff(library.cq_edges)))
+            i_s, i_q = sigma_idx[s], cq0_idx[s]
+            var = pcov[i_s, i_s] * pcov[i_q, i_q]
+            corr = float(pcov[i_s, i_q] / np.sqrt(var)) if var > 0 else 0.0
+            if cq0 <= max(1e-3 * max(sigma, 1e-9), cell):
                 warnings.append(f"{label}: C_Q0 went to 0 -- the data need no mean EFG, and "
                                 "plain Czjzek (fewer parameters) describes them as well.")
+            elif cq0 < sigma and abs(corr) > 0.95:
+                warnings.append(f"{label}: C_Q0 ({cq0:.3g} MHz) is below σ ({sigma:.3g} MHz) "
+                                f"and traded against it (correlation {corr:+.2f}) -- the data "
+                                "need no mean EFG that a wider plain Czjzek does not give "
+                                "as well; fit plain Czjzek and compare.")
             elif np.isclose(cq0, upper[cq0_idx[s]], rtol=1e-3):
                 warnings.append(f"{label}: C_Q0 ended on its upper bound -- not a free minimum.")
             if sigma < 0.1 * cq0:

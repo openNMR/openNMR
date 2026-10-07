@@ -242,7 +242,21 @@ def test_fit_warns_when_the_mean_efg_is_not_needed():
         res, [{"d_iso": 55, "sigma": 2.5, "fwhm": 3, "model": "extended", "CQ0": 0.0},
               {"d_iso": 12, "sigma": 1.2, "fwhm": 4}])
     assert info["extended"] == [True, False]
-    assert any("C_Q0 went to 0" in w for w in info["warnings"])
+    # Either C_Q0 reaches 0 (within a grid cell), or -- on the default
+    # 64-cell grid -- it settles below sigma, traded against it, which is
+    # the same verdict (TODO 2026-10-07 round 2): both say so.
+    assert any("need no mean EFG" in w for w in info["warnings"])
+
+
+def test_a_real_mean_efg_is_not_called_unneeded():
+    x = np.linspace(200, -200, 4096)
+    a = cz.czjzek_spectrum(I, 1.0, NU0, x, delta_iso=60, fwhm=4, cq0_MHz=5.0, eta0=0.3)["real_spec"]
+    y = 1000 * a / a.max() + np.random.default_rng(3).normal(0, 2.0, x.size)
+    res = {"x_ppm": x, "real_spectrum": y, "SFO1": NU0 / 1e6, "nuclide": "27Al"}
+    popt, _c, _f, _s, info = cz.fit_czjzek_spectrum(
+        res, [{"d_iso": 55, "sigma": 1.5, "fwhm": 3, "model": "extended", "CQ0": 4.0}])
+    assert popt[6] == pytest.approx(5.0, rel=0.05)
+    assert not any("need no mean EFG" in w for w in info["warnings"])
 
 
 def test_old_six_parameter_popt_still_evaluates():

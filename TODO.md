@@ -2,7 +2,7 @@
 
 ## Where things stand (2026-09-21)
 
-*2026-10-07 round 2 (several nuclei on one spectrum: 47Ti/49Ti links, background nuclei): 33 new tests (23 + 10), `test_combined_hamiltonian.py`'s same-nucleus check rewritten. Every test file except `test_gui.py` was run file by file (Py 3.13, PySide6 6.11.2, matplotlib 3.11.2): 3629 passed, 130 skipped, 3 failed -- the known `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`, and `test_gui_export_scroll.py::test_an_export_never_contains_the_crosshair[False/True]`, which fail identically on the unmodified tree here. **`test_gui.py` was not completed** (over 50 min on the session's 2-CPU machine; stopped at the user's request) -- **run it locally before committing.***
+*2026-10-07 round 2 (several nuclei on one spectrum: 47Ti/49Ti links, background nuclei): 33 new tests (23 + 10), `test_combined_hamiltonian.py`'s same-nucleus check rewritten. Every test file except `test_gui.py` was run file by file (Py 3.13, PySide6 6.11.2, matplotlib 3.11.2): 3629 passed, 130 skipped, 3 failed -- `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed` and `test_gui_export_scroll.py::test_an_export_never_contains_the_crosshair[False/True]`, pre-existing; **all three fixed in round 3** (+1 new Czjzek test). **`test_gui.py` was not completed** (over 50 min on the session's 2-CPU machine; stopped at the user's request) -- **run it locally before committing.***
 
 *2026-10-07 (DFT: G=0 fix, reference calibrations, ORCA/Gaussian): 26 new tests (12 + 10 + 4) and the 9 earlier GUI tests rewritten. Full suite: 3619 passed, 166 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`); Py 3.13, PySide6 6.11.2, matplotlib 3.11.2. Seven tests crashed pytest-xdist workers and pass when run alone. **Run the full suite locally before committing.***
 
@@ -164,6 +164,23 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Two long-standing test failures fixed: alternating exports, Czjzek "no mean EFG" (2026-10-07, round 3)
+
+**Asked:** fix the two failures left in round 2 (`test_gui_export_scroll.py::test_an_export_never_contains_the_crosshair[False/True]`, `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`) so everything works.
+
+**Exports were not reproducible (the crosshair was never in them).** Two exports in a row, no hover, already differed by 78 anti-aliased pixels in the x label's italic δ: exports 2, 3, 4... matched each other but not the first. `export_full_resolution` re-runs `_apply_layout` at the export size starting from whatever layout came before, and `tight_layout` left float noise (~1e-13) in the margins. The label's left edge sat exactly on 344.7578125 px, a sampling boundary, so the noise flipped how the glyph was rasterised. The crosshair test counts 0.35-grey pixels and caught the one that changed.
+- Fix: `plotting/style._layout_quietly` rounds the margins `tight_layout` chose to 1e-6 of the figure (`_round_subplot_params`), so the layout depends on the figure alone. Exports are now byte-stable.
+- Tried and rejected: iterating `tight_layout` until the margins stopped moving. It changed nothing, because the noise is below its own tolerance.
+- Plain matplotlib (same label, same resize sequence) does not show the effect, so this is not a matplotlib bug to report.
+
+**Czjzek: the warning's test, not the fitter, was wrong.** On the test's plain-Czjzek data (σ 3.0 MHz), the extended fit from C_Q0 = 0 ends at C_Q0 2.43 ± 0.05 MHz, σ 2.79, with correlation −0.998. Its χ² is *lower* than the plain fit's (16,697 vs 16,861; noise floor 16,384), because the extra freedom absorbs the 64-cell library's discretisation error: with 160 cells the same fit gives C_Q0 0.015 and a better plain χ². The warning looked only for C_Q0 ≤ 1e-3·σ, which is finer than any grid, so it never fired. Changed in `fit_czjzek_spectrum`:
+- "C_Q0 went to 0" now fires at C_Q0 ≤ one library C_Q cell (the model's resolution).
+- New warning: C_Q0 < σ with |corr(σ, C_Q0)| > 0.95 means "the data need no mean EFG that a wider plain Czjzek does not give as well; fit plain Czjzek and compare". A small error bar on C_Q0 says nothing here.
+- The test now looks for the shared phrase "need no mean EFG". New guard test: a real mean EFG (C_Q0 5 MHz, σ 1) is recovered and *not* flagged.
+- Not done: raising the default `n_cq`. It would remove the spurious C_Q0 but makes every Czjzek fit ~2.5× slower; the warning now tells the user instead.
+
+**Tests run (only the impacted ones, as asked):** `test_czjzek.py` 25 passed; `test_plotting_style`, `test_gui_usability`, `test_gui_canvas`, `test_gui_export_scroll`, `test_gui_czjzek_display` and `test_colorbar_gap_and_czjzek_labels` 409 passed.
 
 ## Several nuclei on one spectrum: 47Ti/49Ti fitted as one chemistry, background nuclei (2026-10-07, round 2)
 

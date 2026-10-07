@@ -96,9 +96,25 @@ def _layout_quietly(fig) -> bool:
         warnings.simplefilter("always")
         try:
             fig.tight_layout()
+            _round_subplot_params(fig)
         except Exception:  # noqa: BLE001 -- a layout pass must never take a redraw down
             return False
     return not any("ight layout" in str(w.message) for w in caught)
+
+
+def _round_subplot_params(fig, decimals=6):
+    """Round the margins tight_layout chose to ``decimals`` (of the figure).
+
+    tight_layout's margins carry float noise (~1e-13) that depends on
+    the layout it started from, and a text artist landing exactly on a
+    pixel-sampling boundary is rasterised differently either side of it:
+    successive exports of one figure alternated by a few anti-aliased
+    pixels in the x label (export size, back to screen size, export
+    again). Rounding makes the layout a function of the figure alone;
+    1e-6 of the figure is far below a pixel."""
+    sp = fig.subplotpars
+    fig.subplots_adjust(**{k: round(float(getattr(sp, k)), decimals)
+                           for k in ("left", "right", "bottom", "top", "wspace", "hspace")})
 
 
 #: Slack (pixels) before a label counts as clipped. A tick label at
