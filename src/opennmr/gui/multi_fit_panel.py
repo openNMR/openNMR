@@ -90,6 +90,7 @@ class _SiteEditor(CombinedHamiltonianPanel):
 
     BLURB = ("Sites observed as the nucleus chosen above. Use the same label for the same "
              "chemical site in every nucleus; it is how the isotopes are linked.")
+    OTHER_NUCLEI = False      # each nucleus here is its own spectrum
 
     def _build_actions(self, v) -> None:
         pass

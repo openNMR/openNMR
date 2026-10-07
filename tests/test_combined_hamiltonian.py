@@ -202,8 +202,11 @@ def test_several_sites_amounts_and_shares():
     assert res["sites"]["A"].sum() / res["sites"]["B"].sum() == pytest.approx(2.0, rel=0.02)
     assert res["real_spec"].sum() == pytest.approx(3 * 9 / 35, rel=0.02)   # CT share of each
     assert set(res["components"]["A"]) == {"CT"}
-    with pytest.raises(ValueError, match="same nucleus"):
-        simulate_combined([s1, Site("13C")], ax, NU0_AL)
+    # Another nucleus is no longer an error (2026-10-07, several nuclei on one
+    # spectrum): it is placed by the IUPAC frequency ratios -- 13C lies far off
+    # this 27Al axis, which the log says.
+    off = simulate_combined([s1, Site("13C", label="C")], ax, NU0_AL)
+    assert off["sites"]["C"].sum() == 0 and "outside the axis" in off["log"]
     with pytest.raises(ValueError, match="unique"):
         simulate_combined([s1, s1.copy()], ax, NU0_AL)
 

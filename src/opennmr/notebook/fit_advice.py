@@ -304,8 +304,11 @@ def _join(parts):
 
 def _site_info(fit):
     """[{label, kinds (set), spin, delta_iso, fwhm, lineshape, centre (δcg
-    or δiso), aniso, C_Q}] from a fit's sites (Site objects or dicts)."""
+    or δiso), aniso, C_Q, link_to}] from a fit's sites (Site objects or
+    dicts). Shifts of a nucleus other than the spectrum's are given on the
+    spectrum's scale, as they are compared with its axis."""
     out = []
+    observe = (fit.get("settings") or {}).get("observe")
     for s in fit.get("sites") or [{"label": k} for k in fit.get("site_spectra", {})]:
         d = s.to_dict() if hasattr(s, "to_dict") else dict(s)
         inter = d.get("interactions") or []
@@ -313,13 +316,45 @@ def _site_info(fit):
         csa = next((i for i in inter if i.get("type") == "csa"), {})
         quad = next((i for i in inter if i.get("type") == "quadrupolar"), {})
         derived = (fit.get("derived") or {}).get(d.get("label"), {})
+        delta = float(d.get("delta_iso", 0.0))
+        centre = float(derived.get("delta_cg", delta))
+        nucleus = d.get("nucleus")
+        if observe and nucleus and nucleus != observe:
+            from .isotopes import to_observed_ppm
+            delta, centre = (float(v) for v in to_observed_ppm([delta, centre], nucleus, observe))
         out.append({"label": d.get("label"), "kinds": kinds, "spin": d.get("spin"),
-                    "delta_iso": float(d.get("delta_iso", 0.0)), "fwhm": float(d.get("fwhm", 0.0)),
+                    "delta_iso": delta, "fwhm": float(d.get("fwhm", 0.0)),
                     "lineshape": d.get("lineshape"), "aniso": csa.get("aniso"),
                     "convention": csa.get("convention"), "C_Q": quad.get("C_Q"),
-                    "eta_Q": quad.get("eta_Q"),
-                    "centre": float(derived.get("delta_cg", d.get("delta_iso", 0.0))),
-                    "share": derived.get("share_%"), "share_err": derived.get("share_%_err")})
+                    "eta_Q": quad.get("eta_Q"), "centre": centre,
+                    "share": derived.get("share_%"), "share_err": derived.get("share_%_err"),
+                    "link_to": (d.get("link") or {}).get("to")})
+    return out
+
+
+def _to_parents(items, sites):
+    """A linked isotope partner has no chemistry of its own to change: send
+    every suggestion about it to its parent (the change carries over), and
+    drop what that makes a repeat."""
+    parents = {s["label"]: s["link_to"] for s in sites if s.get("link_to")}
+    if not parents:
+        return items
+    out, seen = [], set()
+    for it in items:
+        action = it.get("action")
+        site = (action or {}).get("site")
+        if (it["section"] == "next" and (action or {}).get("type") == "add_peak"
+                and any(label in it["text"] for label in parents)):
+            continue        # "a second peak beside the partner": its parent's is the one
+        if it["section"] == "next" and site in parents:
+            parent = parents[site]
+            it = dict(it, action=dict(action, site=parent),
+                      text=it["text"].replace(site, parent))
+        key = (it["section"], it["text"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
     return out
 
 
@@ -747,7 +782,7 @@ def advise_combined_fit(fit, alternatives=None, nucleus_spin=None):
     # ---- other models of the same spectrum ----
     if alternatives:
         items += compare_items(fit, alternatives)
-    return _dedupe(items)
+    return _to_parents(_dedupe(items), sites)
 
 
 def _similar(a, b, rel=0.15):

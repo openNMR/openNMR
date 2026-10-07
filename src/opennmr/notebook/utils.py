@@ -157,6 +157,45 @@ _GAMMA_TABLE = [
 
 _GAMMA_DF = pd.DataFrame(_GAMMA_TABLE[1:], columns=_GAMMA_TABLE[0])
 
+# IUPAC recommended frequency ratios Xi (%): the resonance frequency of
+# each nucleus's primary reference compound relative to 1H in TMS at
+# exactly 100 MHz -- Harris, Becker, Cabral de Menezes, Goodfellow &
+# Granger, Pure Appl. Chem. 73, 1795 (2001), Tables 2 and 3 (the
+# measured values; the parenthesised, calculated ones are left out).
+# The ratio of two Xi places one nucleus's ppm scale on another's: it is
+# what puts a 49Ti line on a 47Ti spectrum (or a 63Cu line on a 23Na
+# one) where it really falls. The gyromagnetic-ratio ratio does not --
+# it omits the reference compounds' shielding (47Ti/49Ti: 30 ppm off;
+# 63Cu/23Na: ~2000 ppm off). Used by notebook.isotopes.
+_XI_PERCENT = {
+    '1H': 100.000000, '2H': 15.350609, '3H': 106.663974, '3He': 76.179437,
+    '6Li': 14.716086, '7Li': 38.863797, '9Be': 14.051813, '10B': 10.743658,
+    '11B': 32.083974, '13C': 25.145020, '14N': 7.226317, '15N': 10.136767,
+    '17O': 13.556457, '19F': 94.094011, '21Ne': 7.894296, '23Na': 26.451900,
+    '25Mg': 6.121635, '27Al': 26.056859, '29Si': 19.867187, '31P': 40.480742,
+    '33S': 7.676000, '35Cl': 9.797909, '37Cl': 8.155725, '39K': 4.666373,
+    '40K': 5.802018, '41K': 2.561305, '43Ca': 6.730029, '45Sc': 24.291747,
+    '47Ti': 5.637534, '49Ti': 5.639037, '50V': 9.970309, '51V': 26.302948,
+    '53Cr': 5.652496, '55Mn': 24.789218, '57Fe': 3.237778, '59Co': 23.727074,
+    '61Ni': 8.936051, '63Cu': 26.515473, '65Cu': 28.403693, '67Zn': 6.256803,
+    '69Ga': 24.001354, '71Ga': 30.496704, '73Ge': 3.488315, '75As': 17.122614,
+    '77Se': 19.071513, '79Br': 25.053980, '81Br': 27.006518, '83Kr': 3.847600,
+    '85Rb': 9.654943, '87Rb': 32.720454, '87Sr': 4.333822, '89Y': 4.900198,
+    '91Zr': 9.296298, '93Nb': 24.476170, '95Mo': 6.516926, '97Mo': 6.653695,
+    '99Tc': 22.508326, '99Ru': 4.605151, '101Ru': 5.161369, '103Rh': 3.186447,
+    '105Pd': 4.576100, '107Ag': 4.047819, '109Ag': 4.653533, '111Cd': 21.215480,
+    '113Cd': 22.193175, '113In': 21.865755, '115In': 21.912629, '115Sn': 32.718749,
+    '117Sn': 35.632259, '119Sn': 37.290632, '121Sb': 23.930577, '123Sb': 12.959217,
+    '123Te': 26.169742, '125Te': 31.549769, '127I': 20.007486, '129Xe': 27.810186,
+    '131Xe': 8.243921, '133Cs': 13.116142, '135Ba': 9.934457, '137Ba': 11.112928,
+    '138La': 13.194300, '139La': 14.125641, '181Ta': 11.989600, '183W': 4.166387,
+    '185Re': 22.524600, '187Re': 22.751600, '187Os': 2.282331, '189Os': 7.765400,
+    '195Pt': 21.496784, '199Hg': 17.910822, '201Hg': 6.611583, '203Tl': 57.123200,
+    '205Tl': 57.683838, '207Pb': 20.920599, '209Bi': 16.069288,
+}
+_GAMMA_DF['Frequency Ratio Xi (%)'] = [_XI_PERCENT.get(str(n), np.nan)
+                                       for n in _GAMMA_DF['Nuclide']]
+
 
 def find_gamma(isotope, field='', SFO1='', quiet=False):
     """

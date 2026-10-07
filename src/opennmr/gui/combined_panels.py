@@ -34,6 +34,7 @@ from ..notebook import fit_advice
 from ..notebook import start_estimates
 from ..notebook import combined_hamiltonian as ch
 from ..notebook.utils import _GAMMA_DF, find_isotope_info
+from ..notebook import isotopes
 
 _TITLES = {"csa": "Chemical-shift anisotropy (CSA)", "quadrupolar": "Quadrupolar",
            "jcoupling": "J-coupling"}
@@ -202,6 +203,11 @@ class CombinedHamiltonianPanel(QWidget):
              "number of J-couplings to the same site, in any combination. Static or MAS; every "
              "site is simulated with all of its interactions together and the sites summed.")
 
+    #: Sites may be of another nucleus than the panel's, and isotope
+    #: partners may be linked (the multi-spectrum editor sets False: there
+    #: the nucleus belongs to the spectrum).
+    OTHER_NUCLEI = True
+
     DEFAULT_INTERACTIONS = {
         "csa": {"type": "csa", "aniso": 100.0, "asym": 0.5, "convention": "Haeberlen",
                 "euler": (0.0, 0.0, 0.0)},
@@ -240,7 +246,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.nucleus_combo.setCurrentText("27Al")
         self.nucleus_combo.setToolTip("The observed nucleus, shared by every site (one spectrum). "
                                       "Seeded from the selected spectrum.")
-        self.nucleus_combo.currentTextChanged.connect(lambda _t: self._sync_spin())
+        self.nucleus_combo.currentTextChanged.connect(lambda _t: self._on_panel_nucleus())
         form.addRow("Nucleus:", self.nucleus_combo)
         self.spin_label = QLabel("—")
         form.addRow("Spin I:", self.spin_label)
@@ -299,7 +305,16 @@ class CombinedHamiltonianPanel(QWidget):
         self.duplicate_button.clicked.connect(self.duplicate_site)
         self.remove_site_button = QPushButton("Remove")
         self.remove_site_button.clicked.connect(self.remove_site)
-        for b in (self.add_site_button, self.duplicate_button, self.remove_site_button):
+        self.add_partner_button = QPushButton("Add isotope partner")
+        self.add_partner_button.setToolTip(
+            "Add the same site as observed through another isotope of its element (49Ti for "
+            "47Ti, 65Cu for 63Cu, ...), linked to it: same shift, CSA, η_Q and broadening; C_Q "
+            "scaled by the quadrupole moments; amount by natural abundance and receptivity. "
+            "It is placed on this spectrum by the IUPAC frequency ratios.")
+        self.add_partner_button.clicked.connect(lambda: self.add_isotope_partner())
+        self.add_partner_button.setVisible(self.OTHER_NUCLEI)
+        for b in (self.add_site_button, self.duplicate_button, self.remove_site_button,
+                  self.add_partner_button):
             buttons.addWidget(b)
         buttons.addStretch(1)
         sites_layout.addLayout(buttons)
@@ -312,6 +327,39 @@ class CombinedHamiltonianPanel(QWidget):
         self.label_edit = QLineEdit()
         self.label_edit.textEdited.connect(self._on_label_edited)
         sform.addRow("Label:", self.label_edit)
+        self.site_nucleus_combo = QComboBox()
+        self.site_nucleus_combo.setToolTip(
+            "The nucleus this peak belongs to. Normally the observed one; another nucleus (an "
+            "isotope of the same element, or a background signal such as 63Cu from the coil on "
+            "a 23Na spectrum) is simulated on its own ppm scale and placed on this spectrum by "
+            "the IUPAC frequency ratios. Its δiso is then on its own nucleus's scale.")
+        self.site_nucleus_combo.currentIndexChanged.connect(self._on_site_nucleus)
+        sform.addRow("Nucleus:", self.site_nucleus_combo)
+        self.link_combo = QComboBox()
+        self.link_combo.setToolTip(
+            "Share another isotope's site's chemistry: this peak then has no parameters of its "
+            "own (except those ticked under Not shared) -- they follow that site, so the two "
+            "isotopes are fitted as one. '(own parameters)' keeps them independent.")
+        self.link_combo.currentIndexChanged.connect(self._on_link)
+        sform.addRow("Same chemistry as:", self.link_combo)
+        own = QWidget()
+        own_row = QHBoxLayout(own)
+        own_row.setContentsMargins(0, 0, 0, 0)
+        self.own_amount_check = QCheckBox("Amount")
+        self.own_amount_check.setToolTip(
+            "Fit this isotope's amount separately -- for a selective (long or weak) pulse, which "
+            "excites the two isotopes' central transitions differently, or an isotopically "
+            "enriched sample. Otherwise it is the parent's × abundance × receptivity.")
+        self.own_fwhm_check = QCheckBox("Broadening")
+        self.own_fwhm_check.setToolTip(
+            "Fit this isotope's broadening separately -- when a distribution of quadrupolar "
+            "couplings, rather than of shifts, dominates the width.")
+        for box, name in ((self.own_amount_check, "amount"), (self.own_fwhm_check, "fwhm")):
+            box.toggled.connect(lambda on, n=name: self._on_own(n, on))
+            own_row.addWidget(box)
+        own_row.addStretch(1)
+        self.own_widget = own
+        sform.addRow("Not shared:", own)
         self.diso_spin = _spin_box(-1e5, 1e5, 0.0, 3, " ppm", tip="Isotropic chemical shift.")
         self.diso_spin.valueChanged.connect(lambda x: self._set("delta_iso", x))
         sform.addRow("δiso:", self.diso_spin)
@@ -334,6 +382,10 @@ class CombinedHamiltonianPanel(QWidget):
         sform.addRow("L fraction:", self.pv_eta_spin)
         self._sform = sform
         site_layout.addLayout(sform)
+        self.link_note = QLabel("")
+        self.link_note.setWordWrap(True)
+        self.link_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        site_layout.addWidget(self.link_note)
         self.interactions_layout = QVBoxLayout()
         site_layout.addLayout(self.interactions_layout)
         self.no_interactions_label = QLabel("No interactions yet: an isotropic peak. Add one "
@@ -443,9 +495,248 @@ class CombinedHamiltonianPanel(QWidget):
     def _sync_controls(self):
         self.mas_spin.setEnabled(self.regime_combo.currentData() == "mas")
 
+    def _on_panel_nucleus(self):
+        self._sync_spin()
+        if hasattr(self, "site_nucleus_combo"):
+            self._show_site_nucleus(self.current_site())
+
+    # ---- several nuclei --------------------------------------------------------
+
+    def observed(self) -> str:
+        return self.nucleus_combo.currentText().strip()
+
+    def site_nucleus(self, site) -> str:
+        """A site's nucleus: its own ("isotope") or the observed one."""
+        return (site or {}).get("isotope") or self.observed()
+
+    def _site_spin(self, site):
+        try:
+            return float(find_isotope_info(self.site_nucleus(site))["spin"])
+        except KeyError:
+            return None
+
+    def _resolved(self, site):
+        """The site as it is simulated: a linked partner's values derived
+        from its parent's (None if the link cannot hold right now)."""
+        if not (site or {}).get("link"):
+            return site
+        dicts = [{**s, "nucleus": self.site_nucleus(s)} for s in self.site_dicts]
+        try:
+            resolved = ch.resolve_link_dicts(dicts)
+        except (ValueError, KeyError):
+            return None
+        return resolved[self.site_dicts.index(site)]
+
+    def _link_candidates(self, site):
+        """Labels of the sites ``site`` may be linked to: unlinked sites
+        of another isotope of its element."""
+        if site is None:
+            return []
+        mine = self.site_nucleus(site)
+        try:
+            element = isotopes.element_of(mine)
+        except KeyError:
+            return []
+        out = []
+        for other in self.site_dicts:
+            if other is site or other.get("link"):
+                continue
+            theirs = self.site_nucleus(other)
+            try:
+                if theirs != mine and isotopes.element_of(theirs) == element:
+                    out.append(other["label"])
+            except KeyError:
+                continue
+        return out
+
+    def _show_site_nucleus(self, site) -> None:
+        """Fill the Nucleus / Same chemistry as / Not shared rows for ``site``."""
+        rows = (self.site_nucleus_combo, self.link_combo, self.own_widget)
+        for w in rows:
+            self._sform.setRowVisible(w, self.OTHER_NUCLEI)
+        if not self.OTHER_NUCLEI:
+            self.link_note.setVisible(False)
+            return
+        observed = self.observed()
+        combo = self.site_nucleus_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(f"Observed ({observed or '?'})", "")
+        try:
+            partners = isotopes.isotope_partners(observed)
+        except KeyError:
+            partners = []
+        for nuc in partners:
+            combo.addItem(f"{nuc} (isotope of {isotopes.element_of(nuc)})", nuc)
+        combo.insertSeparator(combo.count())
+        for nuc in _nuclides():
+            if nuc != observed and nuc not in partners:
+                combo.addItem(nuc, nuc)
+        own = (site or {}).get("isotope") or ""
+        if own == observed:
+            own = ""
+        index = combo.findData(own)
+        if index < 0 and own:
+            combo.addItem(own, own)
+            index = combo.count() - 1
+        combo.setCurrentIndex(max(index, 0))
+        combo.blockSignals(False)
+
+        link = (site or {}).get("link")
+        lcombo = self.link_combo
+        lcombo.blockSignals(True)
+        lcombo.clear()
+        lcombo.addItem("— (own parameters)", "")
+        for label in self._link_candidates(site):
+            lcombo.addItem(label, label)
+        if link and lcombo.findData(link["to"]) < 0:
+            lcombo.addItem(f"{link['to']} (cannot link)", link["to"])
+        lcombo.setCurrentIndex(max(lcombo.findData(link["to"]) if link else 0, 0))
+        lcombo.setEnabled(lcombo.count() > 1)
+        lcombo.blockSignals(False)
+        free = set((link or {}).get("free") or [])
+        for box, name in ((self.own_amount_check, "amount"), (self.own_fwhm_check, "fwhm")):
+            box.blockSignals(True)
+            box.setChecked(name in free)
+            box.blockSignals(False)
+        self._sform.setRowVisible(self.own_widget, bool(link))
+        self.link_note.setText(self.link_text(site))
+        self.link_note.setVisible(bool(self.link_note.text()))
+
+    def link_text(self, site) -> str:
+        """What a site of another nucleus is, in words: where it sits on the
+        spectrum and, when linked, what it takes from its parent."""
+        if not site:
+            return ""
+        nucleus, observed = self.site_nucleus(site), self.observed()
+        lines = []
+        try:
+            if nucleus != observed:
+                lines.append(isotopes.describe_placement(nucleus, observed))
+            link = site.get("link")
+            if link:
+                parent = next((s for s in self.site_dicts if s["label"] == link["to"]), None)
+                if parent is None:
+                    return f"Linked to {link['to']}, which is not a peak any more."
+                f = isotopes.partner_factors(self.site_nucleus(parent), nucleus)
+                own = set(link.get("free") or [])
+                shared = ["δiso", "CSA"] + ([] if "fwhm" in own else ["broadening"])
+                text = f"Follows {link['to']}: " + ", ".join(shared) + ", η_Q and Euler angles"
+                if f["C_Q"]:
+                    text += f"; C_Q × {f['C_Q']:.4g} (quadrupole moments)"
+                if any(i.get("type") == "jcoupling" for i in parent.get("interactions") or []):
+                    text += f"; J × {f['J']:.6g} (γ)"
+                if "amount" not in own and f["amount"]:
+                    text += (f"; amount × {f['amount']:.4g} (natural abundance × receptivity, "
+                             "for uniform excitation)")
+                lines.append(text + ". Edit the parent to change them.")
+                if self._resolved(site) is None:
+                    lines.append("⚠ This link cannot hold as the peaks stand -- see Simulate "
+                                 "or Fit for the reason.")
+        except KeyError:
+            return ""
+        return "\n".join(lines)
+
+    def _on_site_nucleus(self, _index) -> None:
+        site = self.current_site()
+        if site is None:
+            return
+        nucleus = self.site_nucleus_combo.currentData() or ""
+        if nucleus:
+            site["isotope"] = nucleus
+        else:
+            site.pop("isotope", None)
+        if site.get("link") and site["link"]["to"] not in self._link_candidates(site):
+            site.pop("link", None)
+        spin = self._site_spin(site) or 0.0
+        if spin < 1:
+            site["interactions"] = [i for i in site["interactions"] if i["type"] != "quadrupolar"]
+        self._on_site_selected(self._current)
+
+    def _on_link(self, _index) -> None:
+        site = self.current_site()
+        if site is None:
+            return
+        to = self.link_combo.currentData() or ""
+        if to:
+            site["link"] = {"to": to, "free": list((site.get("link") or {}).get("free") or [])}
+        else:
+            resolved = self._resolved(site)
+            if resolved is not None and site.get("link"):
+                # Keep what it showed as the start of its own parameters.
+                for key in ("delta_iso", "amount", "fwhm", "lineshape", "eta"):
+                    site[key] = resolved[key]
+                site["interactions"] = copy.deepcopy(resolved["interactions"])
+            site.pop("link", None)
+        self._on_site_selected(self._current)
+
+    def _on_own(self, name, on) -> None:
+        site = self.current_site()
+        if site is None or not site.get("link"):
+            return
+        free = [n for n in site["link"].get("free") or [] if n != name]
+        if on:
+            resolved = self._resolved(site)
+            if resolved is not None:
+                site[name] = resolved[name]      # start from the derived value
+            free.append(name)
+        site["link"]["free"] = free
+        self._on_site_selected(self._current)
+
+    def add_isotope_partner(self, nucleus=None):
+        """Add the selected peak's isotope partner, linked to it. With
+        several isotopes to choose from and no ``nucleus``, ask with a menu."""
+        site = self.current_site()
+        if site is None:
+            return None
+        if site.get("link"):
+            QMessageBox.information(self, "Add isotope partner",
+                                    f"{site['label']} is itself a partner of "
+                                    f"{site['link']['to']}: add partners to that peak.")
+            return None
+        mine = self.site_nucleus(site)
+        try:
+            options = isotopes.isotope_partners(mine)
+        except KeyError:
+            options = []
+        if nucleus is None:
+            if not options:
+                QMessageBox.information(self, "Add isotope partner",
+                                        f"{mine} has no other NMR-active isotope.")
+                return None
+            if len(options) == 1:
+                nucleus = options[0]
+            else:
+                menu = QMenu(self)
+                for nuc in options:
+                    menu.addAction(nuc).setData(nuc)
+                chosen = menu.exec(self.add_partner_button.mapToGlobal(
+                    self.add_partner_button.rect().bottomLeft()))
+                if chosen is None:
+                    return None
+                nucleus = chosen.data()
+        parent_label = site["label"]
+        new = copy.deepcopy(site)
+        new["label"] = self._unique_label(f"{parent_label} ({nucleus})")
+        new["link"] = {"to": parent_label, "free": []}
+        if nucleus == self.observed():
+            new.pop("isotope", None)
+        else:
+            new["isotope"] = nucleus
+        dicts = [{**s, "nucleus": self.site_nucleus(s)} for s in self.site_dicts + [new]]
+        try:
+            resolved = ch.resolve_link_dicts(dicts)[-1]
+        except (ValueError, KeyError) as exc:
+            QMessageBox.warning(self, "Add isotope partner", str(exc))
+            return None
+        for key in ("delta_iso", "amount", "fwhm", "lineshape", "eta"):
+            new[key] = resolved[key]
+        new["interactions"] = copy.deepcopy(resolved["interactions"])
+        return self.add_site(new)
+
     def _sync_menu(self):
         site = self.current_site()
-        spin = self.spin() or 0.0
+        spin = (self._site_spin(site) if site else self.spin()) or 0.0
         has = {k: bool(site and any(i["type"] == k for i in site["interactions"]))
                for k in ch.INTERACTION_TYPES}
         self._actions["csa"].setEnabled(site is not None and not has["csa"])
@@ -480,7 +771,8 @@ class CombinedHamiltonianPanel(QWidget):
     #: The "Selected site" fields show one site of site_dicts; the model
     #: itself is saved, not these.
     _SITE_FIELDS = ("label_edit", "diso_spin", "amount_spin", "fwhm_spin", "lineshape_combo",
-                    "pv_eta_spin")
+                    "pv_eta_spin", "site_nucleus_combo", "link_combo", "own_amount_check",
+                    "own_fwhm_check")
 
     def get_state(self) -> dict:
         state = {"widgets": panel_state.capture_widgets(self, exclude=self._SITE_FIELDS),
@@ -545,7 +837,16 @@ class CombinedHamiltonianPanel(QWidget):
         row = self._current
         if row < 0:
             return
-        del self.site_dicts[row]
+        removed = self.site_dicts.pop(row)
+        for other in self.site_dicts:
+            if (other.get("link") or {}).get("to") == removed["label"]:
+                # Its partner keeps what it showed, as its own parameters.
+                resolved = self._resolved(other)
+                if resolved is not None:
+                    for key in ("delta_iso", "amount", "fwhm", "lineshape", "eta"):
+                        other[key] = resolved[key]
+                    other["interactions"] = copy.deepcopy(resolved["interactions"])
+                other.pop("link", None)
         self.site_list.blockSignals(True)
         self.site_list.takeItem(row)
         self.site_list.blockSignals(False)
@@ -557,8 +858,12 @@ class CombinedHamiltonianPanel(QWidget):
     def _on_label_edited(self, text):
         site = self.current_site()
         if site is not None:
+            old = site["label"]
             site["label"] = text
             self.site_list.item(self._current).setText(text)
+            for other in self.site_dicts:
+                if (other.get("link") or {}).get("to") == old:
+                    other["link"]["to"] = text
 
     def _on_lineshape(self, _i):
         data = self.lineshape_combo.currentData()
@@ -579,15 +884,27 @@ class CombinedHamiltonianPanel(QWidget):
                    self.lineshape_combo, self.pv_eta_spin)
         for w in widgets:
             w.blockSignals(True)
+        shown = self._resolved(site) or site       # a linked partner shows its derived values
         self.label_edit.setText(site["label"])
-        self.diso_spin.setValue(site["delta_iso"])
-        self.amount_spin.setValue(site["amount"])
-        self.fwhm_spin.setValue(site["fwhm"])
-        self.lineshape_combo.setCurrentIndex(self.lineshape_combo.findData(site["lineshape"]))
-        self.pv_eta_spin.setValue(site.get("eta", 0.5))
+        self.diso_spin.setValue(shown["delta_iso"])
+        self.amount_spin.setValue(shown["amount"])
+        self.fwhm_spin.setValue(shown["fwhm"])
+        self.lineshape_combo.setCurrentIndex(self.lineshape_combo.findData(shown["lineshape"]))
+        self.pv_eta_spin.setValue(shown.get("eta", 0.5))
         for w in widgets:
             w.blockSignals(False)
-        self._on_lineshape(0)
+        free = set((site.get("link") or {}).get("free") or []) if site.get("link") else None
+        linked = free is not None
+        self.diso_spin.setEnabled(not linked)
+        self.amount_spin.setEnabled(not linked or "amount" in free)
+        self.fwhm_spin.setEnabled(not linked or "fwhm" in free)
+        self.lineshape_combo.setEnabled(not linked)
+        self.pv_eta_spin.setEnabled(not linked)
+        self.add_interaction_button.setEnabled(not linked)
+        self.add_partner_button.setEnabled(not linked)
+        self._show_site_nucleus(site)
+        if not linked:
+            self._on_lineshape(0)
         self._rebuild_interactions()
 
     # ---- interactions ----------------------------------------------------------------------
@@ -601,9 +918,15 @@ class CombinedHamiltonianPanel(QWidget):
                                     f"{site['label']} already has a {_TITLES[kind]} -- a site "
                                     "has one; edit it instead.")
             return None
-        if kind == "quadrupolar" and (self.spin() or 0) < 1:
+        if kind == "quadrupolar" and (self._site_spin(site) or 0) < 1:
             QMessageBox.information(self, "Add interaction",
-                                    "The observed nucleus is spin-1/2: it has no quadrupole moment.")
+                                    f"{self.site_nucleus(site)} is spin-1/2: it has no "
+                                    "quadrupole moment.")
+            return None
+        if site.get("link"):
+            QMessageBox.information(self, "Add interaction",
+                                    f"{site['label']} shares {site['link']['to']}'s chemistry: "
+                                    f"add the interaction to {site['link']['to']}.")
             return None
         data = copy.deepcopy(self.DEFAULT_INTERACTIONS[kind])
         data.update(values)
@@ -629,11 +952,16 @@ class CombinedHamiltonianPanel(QWidget):
                 widget.deleteLater()
         site = self.current_site()
         interactions = site["interactions"] if site else []
+        linked = bool(site and site.get("link"))
+        if linked:
+            # Shown, not edited: copies of the parent's, as this isotope sees them.
+            interactions = copy.deepcopy((self._resolved(site) or site)["interactions"])
         has_quad = any(i["type"] == "quadrupolar" for i in interactions)
         order = {"quadrupolar": 0, "csa": 1, "jcoupling": 2}
         self.interaction_editors = []
         for data in sorted(interactions, key=lambda i: order[i["type"]]):
             editor = InteractionEditor(data, self._remove_interaction, has_quad, panel=self)
+            editor.setEnabled(not linked)
             self.interactions_layout.addWidget(editor)
             self.interaction_editors.append(editor)
         self.no_interactions_label.setVisible(site is not None and not interactions)
@@ -672,7 +1000,10 @@ class CombinedHamiltonianPanel(QWidget):
             raise ValueError(f"Unknown nucleus {nucleus!r}; enter e.g. '27Al'.") from None
         if not self.site_dicts:
             raise ValueError("Add at least one site.")
-        return [ch.Site.from_dict({**s, "nucleus": nucleus}) for s in self.site_dicts]
+        sites = [ch.Site.from_dict({**s, "nucleus": s.get("isotope") or nucleus})
+                 for s in self.site_dicts]
+        ch.resolve_links(sites)          # a link that cannot hold is reported now, by name
+        return sites
 
     def settings(self):
         larmor = self.larmor_spin.value()
@@ -684,9 +1015,13 @@ class CombinedHamiltonianPanel(QWidget):
                              "Regime to Static powder.")
         spin = self.spin() or 0.5
         transitions = self.transitions_combo.currentData() if spin >= 1 else "all"
-        return {"larmor_Hz": larmor * 1e6, "mas_Hz": mas,
-                "order": self.order_combo.currentData(), "transitions": transitions,
-                "n_zcw": self.orientations_spin.value() or None}
+        out = {"larmor_Hz": larmor * 1e6, "mas_Hz": mas,
+               "order": self.order_combo.currentData(), "transitions": transitions,
+               "n_zcw": self.orientations_spin.value() or None}
+        observed = self.observed()
+        if any(self.site_nucleus(s) != observed for s in self.site_dicts):
+            out["observe"] = observed          # sites of other nuclei are placed on its scale
+        return out
 
     def simulate(self) -> bool:
         try:
@@ -696,7 +1031,8 @@ class CombinedHamiltonianPanel(QWidget):
                 lo, hi = ch.combined_axis_limits(sites, settings["larmor_Hz"],
                                                  transitions=settings["transitions"],
                                                  mas_Hz=settings["mas_Hz"],
-                                                 order=settings["order"])
+                                                 order=settings["order"],
+                                                 observe=self.observed())
                 for box, value in ((self.ppm_min_spin, lo), (self.ppm_max_spin, hi)):
                     box.blockSignals(True)
                     box.setValue(value)
@@ -721,7 +1057,7 @@ class CombinedHamiltonianPanel(QWidget):
         except (ValueError, KeyError) as exc:
             QMessageBox.warning(self, "Combined Hamiltonian", str(exc))
             return False
-        nucleus = sites[0].nucleus
+        nucleus = self.observed() or sites[0].nucleus
         self.result = {"result": result, "sites": sites, "settings": settings, "axis": axis}
         data = np.asarray(result["real_spec"], dtype=float)
         metadata = NMRMetadata(
@@ -790,6 +1126,12 @@ def _describe_site(site: dict) -> str:
     """A site as one readable line, for the simulation log."""
     bits = [f"δiso {site.get('delta_iso', 0):g} ppm", f"amount {site.get('amount', 1):g}",
             f"FWHM {site.get('fwhm', 0):g} ppm ({site.get('lineshape', '')})"]
+    if site.get("isotope"):
+        bits.insert(0, f"nucleus {site['isotope']}")
+    if site.get("link"):
+        own = site["link"].get("free") or []
+        bits.append(f"linked to {site['link'].get('to')}"
+                    + (f" (own {', '.join(own)})" if own else "") + " -- its other values follow")
     for i in site.get("interactions") or []:
         kind = i.get("type")
         if kind == "csa":
@@ -1089,7 +1431,11 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
 
     def _parameter_rows(self):
         for site in self.site_dicts:
+            link = site.get("link")
+            own = set((link or {}).get("free") or [])
             for name in cfit.site_parameter_names(site):
+                if link and name not in own:
+                    continue           # follows its parent: no row of its own
                 yield site, name
 
     def _mas_row_shown(self) -> bool:
@@ -1657,9 +2003,13 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
     def fitted_site_dicts(self) -> list[dict]:
         """The fitted sites in the panel's own format (no nucleus)."""
         out = []
+        observed = self.observed()
         for s in self.result["sites"]:
             d = s.to_dict() if hasattr(s, "to_dict") else dict(s)
-            out.append({k: v for k, v in d.items() if k not in ("nucleus", "spin")})
+            own = {k: v for k, v in d.items() if k not in ("nucleus", "spin")}
+            if d.get("nucleus") and d["nucleus"] != observed:
+                own["isotope"] = d["nucleus"]
+            out.append(own)
         return out
 
     def use_fitted_as_start(self) -> None:

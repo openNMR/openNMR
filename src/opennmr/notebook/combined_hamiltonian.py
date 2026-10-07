@@ -111,6 +111,13 @@ class Site:
     fwhm : float
         Broadening FWHM, ppm (0 = none).
     lineshape : 'gaussian' | 'lorentzian' | 'pseudo_voigt'; eta its mixing.
+
+    A site may observe a different nucleus from the spectrum's (a 49Ti
+    site on a 47Ti spectrum, a 63Cu coil signal on a 23Na one): it is
+    simulated on its own ppm scale and placed on the observed one
+    through the IUPAC frequency ratios (:mod:`opennmr.notebook.isotopes`).
+    ``link`` (see :meth:`link_to`, :meth:`isotope_partner`) ties an
+    isotope's site to another isotope's, sharing its chemistry.
     """
 
     def __init__(self, nucleus, delta_iso=0.0, label=None, amount=1.0, fwhm=1.0,
@@ -124,6 +131,8 @@ class Site:
         self.lineshape = lineshape
         self.eta = float(eta)
         self.interactions = []
+        #: None, or {"to": parent label, "free": [parameters it keeps its own]}
+        self.link = None
 
     # ---- adding / removing interactions --------------------------------
 
@@ -192,6 +201,48 @@ class Site:
         key = _ALIASES.get(str(kind).lower(), kind)
         return [i for i in self.interactions if i["type"] == key]
 
+    # ---- isotope partners ------------------------------------------------
+
+    def link_to(self, parent, free=()):
+        """Share ``parent``'s chemistry (``parent``: a Site or its label):
+        this site -- another isotope of the same element -- then takes
+        parent's shift, CSA, Euler angles, eta_Q, broadening and line
+        shape; C_Q scaled by the quadrupole moments, J by the
+        gyromagnetic ratios and the amount by natural abundance and
+        receptivity (:func:`opennmr.notebook.isotopes.partner_factors`).
+        ``free``: parameter names it keeps its own instead (e.g.
+        ``["amount"]`` when a selective pulse excites the two isotopes
+        differently, ``["fwhm"]`` when a distribution of EFGs dominates
+        the width). Returns the site."""
+        to = parent.label if isinstance(parent, Site) else str(parent)
+        self.link = {"to": to, "free": [str(n) for n in free]}
+        return self
+
+    def unlink(self):
+        """Give the site its own parameters again (keeps its current values)."""
+        self.link = None
+        return self
+
+    def isotope_partner(self, nucleus=None, label=None, free=()):
+        """A new site of another isotope of this site's element, linked
+        to this one (see :meth:`link_to`), with the derived values filled
+        in. ``nucleus``: default the element's other NMR-active isotope
+        (it must have exactly one, e.g. 47Ti -> 49Ti, 63Cu -> 65Cu)."""
+        from .isotopes import isotope_partners
+        if self.link:
+            raise ValueError(f"{self.label} is itself linked to {self.link['to']}; add the "
+                             "partner to that site instead.")
+        if nucleus is None:
+            others = isotope_partners(self.nucleus)
+            if len(others) != 1:
+                raise ValueError(f"{self.nucleus}: name the partner isotope -- the element has "
+                                 f"{len(others)} other NMR-active isotopes ({others}).")
+            nucleus = others[0]
+        partner = Site(nucleus, label=label or f"{self.label} ({nucleus})")
+        partner.link_to(self, free=free)
+        resolved = resolve_link_dicts([self.to_dict(), partner.to_dict()])[1]
+        return Site.from_dict(resolved)
+
     def copy(self, label=None):
         site = copy.deepcopy(self)
         if label is not None:
@@ -201,10 +252,13 @@ class Site:
     # ---- description -----------------------------------------------------
 
     def to_dict(self):
-        return {"nucleus": self.nucleus, "spin": self.spin, "delta_iso": self.delta_iso,
-                "label": self.label, "amount": self.amount, "fwhm": self.fwhm,
-                "lineshape": self.lineshape, "eta": self.eta,
-                "interactions": copy.deepcopy(self.interactions)}
+        d = {"nucleus": self.nucleus, "spin": self.spin, "delta_iso": self.delta_iso,
+             "label": self.label, "amount": self.amount, "fwhm": self.fwhm,
+             "lineshape": self.lineshape, "eta": self.eta,
+             "interactions": copy.deepcopy(self.interactions)}
+        if self.link:
+            d["link"] = copy.deepcopy(self.link)
+        return d
 
     @classmethod
     def from_dict(cls, d):
@@ -215,6 +269,9 @@ class Site:
         for inter in d.get("interactions", []):
             params = {k: v for k, v in inter.items() if k != "type"}
             site.add(inter["type"], **params)
+        link = d.get("link")
+        if link and link.get("to"):
+            site.link_to(link["to"], free=link.get("free") or ())
         return site
 
     def describe(self):
@@ -232,6 +289,10 @@ class Site:
             else:
                 bits.append(f"J to {i['n']}×{i['nuclide']} {i['J_Hz']:g} Hz")
         bits.append(f"amount {self.amount:g}, FWHM {self.fwhm:g} ppm {self.lineshape}")
+        if self.link:
+            own = self.link.get("free") or []
+            bits.append(f"linked to {self.link['to']}"
+                        + (f" (own {', '.join(own)})" if own else ""))
         return "; ".join(bits)
 
     def __repr__(self):
@@ -243,6 +304,130 @@ def as_sites(sites):
     if isinstance(sites, (Site, dict)):
         sites = [sites]
     return [s if isinstance(s, Site) else Site.from_dict(s) for s in sites]
+
+
+# ============================================================
+# Several nuclei: isotope links and placement on the observed scale
+# ============================================================
+
+def resolve_link_dicts(dicts):
+    """Site dicts with every linked site's values derived from its
+    parent's (:meth:`Site.link_to`), keeping its own values for the names
+    in its link's ``free``. Unlinked sites pass through unchanged (not
+    copied). Raises ValueError for a link that cannot hold."""
+    if not any(d.get("link") for d in dicts):
+        return list(dicts)
+    from .combined_fitting import site_parameter_names, _get, _set
+    from .isotopes import element_of, partner_factors
+    by_label = {d["label"]: d for d in dicts}
+    out = []
+    for d in dicts:
+        link = d.get("link")
+        if not link:
+            out.append(d)
+            continue
+        parent = by_label.get(link.get("to"))
+        who = f"{d['label']} ({d['nucleus']})"
+        if parent is None or parent is d:
+            raise ValueError(f"{who} is linked to {link.get('to')!r}, which is not another "
+                             f"site ({list(by_label)}).")
+        if parent.get("link"):
+            raise ValueError(f"{who} is linked to {parent['label']}, which is itself linked: "
+                             "link both isotopes to the same parent site.")
+        if parent["nucleus"] == d["nucleus"]:
+            raise ValueError(f"{who} is linked to a site of the same nucleus -- a link ties "
+                             "two isotopes; for a copy of a site, duplicate it instead.")
+        if element_of(parent["nucleus"]) != element_of(d["nucleus"]):
+            raise ValueError(f"{who} cannot share {parent['label']}'s chemistry: only isotopes of "
+                             f"one element do ({parent['nucleus']} is not "
+                             f"{element_of(d['nucleus'])}). Remove the link to give it its own "
+                             "parameters.")
+        f = partner_factors(parent["nucleus"], d["nucleus"])
+        new = copy.deepcopy(parent)
+        new.update(nucleus=d["nucleus"], spin=float(find_isotope_info(d["nucleus"])["spin"]),
+                   label=d["label"], link=copy.deepcopy(link))
+        if new["spin"] < 1:
+            new["interactions"] = [i for i in new["interactions"] if i["type"] != "quadrupolar"]
+        for inter in new["interactions"]:
+            if inter["type"] == "quadrupolar":
+                if f["C_Q"] is None:
+                    new["interactions"] = [i for i in new["interactions"]
+                                           if i["type"] != "quadrupolar"]
+                    break
+                inter["C_Q"] = abs(float(inter["C_Q"])) * f["C_Q"]
+            elif inter["type"] == "jcoupling":
+                inter["J_Hz"] = float(inter["J_Hz"]) * f["J"]
+        free = list(link.get("free") or [])
+        if f["amount"] is None and "amount" not in free:
+            raise ValueError(f"{who}: {d['nucleus']} has no natural abundance to scale the "
+                             "amount by -- give the partner its own amount (free 'amount').")
+        if f["amount"] is not None:
+            new["amount"] = float(parent.get("amount", 1.0)) * f["amount"]
+        names = site_parameter_names(new)
+        bad = [n for n in free if n not in names]
+        if bad:
+            raise ValueError(f"{who}: cannot keep its own {bad}; a linked {d['nucleus']} site "
+                             f"has {names}.")
+        for name in free:
+            try:
+                _set(new, name, _get(d, name))
+            except (KeyError, IndexError):
+                pass        # the partner has no own value yet: keep the derived one
+        out.append(new)
+    return out
+
+
+def resolve_links(sites):
+    """Sites with every link resolved (see :func:`resolve_link_dicts`)."""
+    sites = as_sites(sites)
+    if not any(s.link for s in sites):
+        return sites
+    return [Site.from_dict(d) for d in resolve_link_dicts([s.to_dict() for s in sites])]
+
+
+def observed_nucleus(sites, observe=None):
+    """The spectrum's nucleus: ``observe`` if given, else the first
+    unlinked site's."""
+    if observe:
+        find_isotope_info(str(observe))
+        return str(observe)
+    sites = as_sites(sites)
+    first = next((s for s in sites if not s.link), sites[0] if sites else None)
+    if first is None:
+        raise ValueError("Give at least one site.")
+    return first.nucleus
+
+
+def site_axes(sites, ppm_axis, larmor_Hz, observe):
+    """Per site: (its own ppm scale over the observed ``ppm_axis``, its
+    own Larmor frequency) -- the observed ones for the observed nucleus."""
+    from .isotopes import frequency_ratio, from_observed_ppm
+    out = []
+    for s in as_sites(sites):
+        if s.nucleus == observe:
+            out.append((ppm_axis, larmor_Hz))
+        else:
+            R, _src = frequency_ratio(s.nucleus, observe)
+            out.append((from_observed_ppm(ppm_axis, s.nucleus, observe), larmor_Hz * R))
+    return out
+
+
+def placement_notes(sites, observe, ppm_axis=None):
+    """Log lines for every nucleus other than ``observe``: where its 0 ppm
+    falls, and whether each of its sites lies outside ``ppm_axis``."""
+    from .isotopes import describe_placement, to_observed_ppm
+    sites = as_sites(sites)
+    notes = [describe_placement(n, observe)
+             for n in dict.fromkeys(s.nucleus for s in sites) if n != observe]
+    if ppm_axis is not None and len(ppm_axis):
+        lo, hi = float(np.min(ppm_axis)), float(np.max(ppm_axis))
+        for s in sites:
+            if s.nucleus != observe:
+                at = float(to_observed_ppm(s.delta_iso, s.nucleus, observe))
+                if not lo - 5 * s.fwhm <= at <= hi + 5 * s.fwhm:
+                    notes.append(f"{s.label} ({s.nucleus}) falls at {at:.1f} ppm on the "
+                                 f"{observe} scale, outside the axis ({lo:g} to {hi:g} ppm).")
+    return notes
 
 
 # ============================================================
@@ -395,7 +580,7 @@ def _broaden_site(site, comp, ppm_axis):
 
 def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, order="second",
                       transitions="all", rotor_angle="magic", n_zcw=None, n_gamma=None,
-                      n_time=None, max_n_time=65536, use_symmetry=True):
+                      n_time=None, max_n_time=65536, use_symmetry=True, observe=None):
     """
     Powder spectrum of one or more sites, each with any combination of
     CSA, quadrupolar and J interactions, static (``mas_Hz`` = 0) or
@@ -403,10 +588,14 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
 
     Parameters
     ----------
-    sites : Site, dict, or a list of them. All must observe the same
-        nucleus (it is one spectrum).
-    ppm_axis : uniformly spaced ppm axis (either direction).
+    sites : Site, dict, or a list of them. Sites of another nucleus (an
+        isotope partner, a background signal) are simulated on their own
+        scale and placed on the observed one by the IUPAC frequency
+        ratios; linked sites take their parent's chemistry (Site.link_to).
+    ppm_axis : uniformly spaced ppm axis (either direction), on the
+        observed nucleus's scale.
     larmor_Hz or B0_T : the observe frequency |gamma B0|, or the field.
+    observe : the spectrum's nucleus (default: the first unlinked site's).
     mas_Hz : spinning rate, Hz; 0 for static.
     order : quadrupolar level of theory, 'first' | 'second' | 'exact'.
     transitions : 'all' | 'ct' | 'st' | group names -- applied to every
@@ -432,16 +621,15 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     sites = as_sites(sites)
     if not sites:
         raise ValueError("Give at least one site.")
-    nuclei = {s.nucleus for s in sites}
-    if len(nuclei) > 1:
-        raise ValueError(f"All sites must observe the same nucleus (one spectrum); got {sorted(nuclei)}.")
     labels = [s.label for s in sites]
     if len(set(labels)) != len(labels):
         raise ValueError(f"Site labels must be unique, got {labels}.")
+    observe = observed_nucleus(sites, observe)
+    sites = resolve_links(sites)
     if larmor_Hz is None:
         if B0_T is None:
             raise ValueError("Give larmor_Hz or B0_T.")
-        larmor_Hz = abs(float(find_isotope_info(sites[0].nucleus)["gamma"])) * float(B0_T)
+        larmor_Hz = abs(float(find_isotope_info(observe)["gamma"])) * float(B0_T)
     larmor_Hz = float(larmor_Hz)
     if larmor_Hz <= 0:
         raise ValueError("larmor_Hz must be > 0.")
@@ -456,13 +644,14 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     beta_r = (np.arccos(1.0 / np.sqrt(3.0)) if rotor_angle == "magic"
               else np.deg2rad(float(rotor_angle)))
 
-    site_spectra, components, notes = {}, {}, []
+    site_spectra, components = {}, {}
+    notes = placement_notes(sites, observe, ppm_axis)
     used = {}
-    for site in sites:
-        comp, powder = _site_sticks(site, ppm_axis, larmor_Hz, mas_Hz, order, transitions,
+    for site, (axis, nu0) in zip(sites, site_axes(sites, ppm_axis, larmor_Hz, observe)):
+        comp, powder = _site_sticks(site, axis, nu0, mas_Hz, order, transitions,
                                     beta_r, n_zcw, n_gamma, n_time, max_n_time, use_symmetry)
         used[site.label] = powder
-        broadened = _broaden_site(site, comp, ppm_axis)
+        broadened = _broaden_site(site, comp, axis)
         components[site.label] = broadened
         site_spectra[site.label] = np.sum(list(broadened.values()), axis=0)
         if not powder["octant"] and use_symmetry:
@@ -473,7 +662,7 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     peak = float(np.max(total)) if total.size else 0.0
     settings = {"larmor_Hz": larmor_Hz, "mas_Hz": mas_Hz, "order": order,
                 "transitions": transitions, "rotor_angle": rotor_angle, "n_zcw": int(n_zcw),
-                "n_gamma": n_gamma, "use_symmetry": use_symmetry}
+                "n_gamma": n_gamma, "use_symmetry": use_symmetry, "observe": observe}
     regime = ("static" if not mas_Hz else
               f"MAS {mas_Hz / 1e3:g} kHz" + ("" if rotor_angle == "magic" else f" at {rotor_angle}°"))
     log_lines = [s.describe() for s in sites]
@@ -491,30 +680,36 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
 
 
 def combined_axis_limits(sites, larmor_Hz, transitions="all", margin=0.15, n=2584, mas_Hz=0.0,
-                         order="second", threshold=2e-3):
+                         order="second", threshold=2e-3, observe=None):
     """ppm limits framing every site: static -- its full second-order
     frequency range, widened by the J multiplet; MAS -- wherever a quick,
     coarse MAS simulation has more than ``threshold`` of its maximum
     (spinning sidebands of a CSA spun slower than its width lie *outside*
     the static range, so the static range alone would clip them). Either
     way padded by ``margin`` of the range and five broadening FWHMs."""
-    sites = as_sites(sites)
+    from .isotopes import frequency_ratio, to_observed_ppm
+    observe = observed_nucleus(sites, observe)
+    sites = resolve_links(sites)
     theta, phi, _ = zcw_angles(n)
     b = np.stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta)], -1)
     lows, highs, fwhm = [], [], 0.0
     for site in sites:
-        nu, _ = _site_frequencies(site, larmor_Hz, b, _rows(site, transitions), "second")
-        j_ppm, _w = _j_lines(site, larmor_Hz)
-        ppm = site.delta_iso + nu / larmor_Hz * 1e6
-        lows.append(ppm.min() + j_ppm.min())
-        highs.append(ppm.max() + j_ppm.max())
+        nu0 = larmor_Hz * frequency_ratio(site.nucleus, observe)[0]
+        nu, _ = _site_frequencies(site, nu0, b, _rows(site, transitions), "second")
+        j_ppm, _w = _j_lines(site, nu0)
+        ppm = site.delta_iso + nu / nu0 * 1e6
+        ends = to_observed_ppm([ppm.min() + j_ppm.min(), ppm.max() + j_ppm.max()],
+                               site.nucleus, observe)
+        lows.append(float(ends[0]))
+        highs.append(float(ends[1]))
         fwhm = max(fwhm, site.fwhm)
     low, high = min(lows), max(highs)
     if mas_Hz:
         spacing = float(mas_Hz) / larmor_Hz * 1e6
         wide = np.linspace(low - 20 * spacing - 10 * fwhm, high + 20 * spacing + 10 * fwhm, 16384)
         spec = simulate_combined(sites, wide, larmor_Hz, mas_Hz=mas_Hz, order=order,
-                                 transitions=transitions, n_zcw=377)["real_spec"]
+                                 transitions=transitions, n_zcw=377,
+                                 observe=observe)["real_spec"]
         keep = np.flatnonzero(spec > threshold * spec.max())
         if keep.size:
             low, high = float(wide[keep[0]]), float(wide[keep[-1]])
@@ -545,6 +740,9 @@ def combined_to_python(sites, ppm_axis=None, **settings):
                 extra = f", abundance={i['abundance']!r}" if "abundance" in i else ""
                 calls.append(f".add_jcoupling({i['nuclide']!r}, n={i['n']!r}, "
                              f"J_Hz={i['J_Hz']!r}{extra})")
+        if s.link:
+            free = f", free={list(s.link.get('free') or [])!r}" if s.link.get("free") else ""
+            calls.append(f".link_to({s.link['to']!r}{free})")
         lines.append(head + "".join(f"\n        {c}" for c in calls) + ",")
     lines.append("]")
     if ppm_axis is not None:

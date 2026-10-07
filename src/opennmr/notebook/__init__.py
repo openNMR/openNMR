@@ -141,7 +141,10 @@ from .state import save_state, load_state, describe_state, saved_fit_models
 from .combined_hamiltonian import (
     Site, simulate_combined, combined_axis_limits, combined_to_python,
     site_transition_frequencies, plot_combined, sites_to_json, sites_from_json,
+    resolve_links,
 )
+from . import isotopes
+from .isotopes import frequency_ratio, to_observed_ppm, isotope_partners, partner_factors
 
 from .combined_fitting import (
     fit_combined, fit_combined_multistart, print_combined_fit_report, plot_combined_fit,
@@ -285,6 +288,8 @@ __all__ = [
     "relaxometry", "find_integration_regions", "correlation_matrix",
     "dft_nmr", "read_calculation", "dft_sites", "simulate_dft", "plot_dft_tensors",
     "dft_calibration", "fit_calibration", "reference_point", "plot_calibration",
+    "isotopes", "resolve_links", "frequency_ratio", "to_observed_ppm", "isotope_partners",
+    "partner_factors",
     "plot_correlation_matrix", "fit_correlation", "correlation_of", "multi_fit_correlation",
     "fit_relaxation", "print_relaxation_report",
     "NMR2D_fit_relaxation", "NMR2D_plot_relaxation",

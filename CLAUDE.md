@@ -120,6 +120,14 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   saved states restore through them. Do not give them menu sections again.
   The fit's starting model is `combined_fitting.starting_model` (the live
   preview).
+- **Several nuclei on one spectrum** (47Ti + 49Ti; a 63Cu coil line on
+  23Na) are per-peak, in the Combined panels' Selected peak: Nucleus,
+  Same chemistry as (a link), Not shared; Add isotope partner. Maths:
+  `notebook/isotopes.py` (placement by IUPAC Ξ, the
+  `"Frequency Ratio Xi (%)"` column of `_GAMMA_DF` -- never γ ratios,
+  which miss reference shielding), `Site.link_to` / `isotope_partner`,
+  `resolve_link_dicts`. GUI site dicts: `"isotope"` (absent = observed),
+  `"link"`. A linked partner has fit rows only for its link's `free`.
 - **Fit advice** ("what the fit tells you / what to try next", plain
   language) is `notebook/fit_advice.py`, shown by `widgets/advice_box.py`
   under Combined, Multi-spectrum, Isotropic, the Pseudo-2D series boxes

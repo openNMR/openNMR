@@ -33,6 +33,22 @@ a single 1D lineshape rarely determines -- free them with ``vary``.
 take a list (every site) or ``{site label: [names]}``. ``bounds`` takes
 ``{name: (lo, hi)}`` (every site) and/or ``{site label: {name: (lo, hi)}}``.
 
+Several nuclei on one spectrum
+------------------------------
+A site may be of another nucleus than the spectrum's -- it is placed by
+the IUPAC frequency ratios (:mod:`opennmr.notebook.isotopes`). A site
+*linked* to another isotope's site (``Site.isotope_partner`` /
+``Site.link_to``) has no parameters of its own except those named in its
+link's ``free``: everything else follows its parent, so 47Ti and 49Ti
+are fitted as one chemistry::
+
+    ti = Site("47Ti", -800, label="Ti1").add_quadrupolar(4.0, 0.2)
+    fit = fit_combined(results, [ti, ti.isotope_partner()], transitions="ct")
+
+A site of another element with no link (a 63Cu coil signal on a 23Na
+spectrum) is fitted with its own parameters. Shares (%) are worked out
+per nucleus; a linked partner reports its parent's.
+
 Amounts are started from a non-negative least-squares fit of the
 starting shapes to the data (``estimate_amounts=True``), so they need
 not be guessed; the reported shares (%) are then numbers of nuclei --
@@ -48,7 +64,8 @@ from scipy.optimize import curve_fit, nnls
 
 from .fitting import build_region_mask, estimate_baseline_robust, fit_quality
 from .combined_hamiltonian import (Site, as_sites, _site_sticks, _broaden_site,
-                                   simulate_combined)
+                                   simulate_combined, resolve_link_dicts, observed_nucleus,
+                                   site_axes, placement_notes)
 from .simulations import quadrupolar_ct_isotropic_shift_Hz, QUADRUPOLAR_ORDERS
 from ..core import fit_progress as _fit_progress
 
@@ -144,6 +161,63 @@ def _per_site(spec, labels, what):
     return {lab: spec.get(lab) for lab in labels}
 
 
+def _amount_owners(dicts):
+    """Per site, the index of the site whose amount sets its amount:
+    itself, or the parent of a partner whose amount is linked."""
+    labels = [d["label"] for d in dicts]
+    out = []
+    for i, d in enumerate(dicts):
+        link = d.get("link")
+        if link and "amount" not in (link.get("free") or []) and link.get("to") in labels:
+            out.append(labels.index(link["to"]))
+        else:
+            out.append(i)
+    return out
+
+
+def _owner_columns(curves, owners):
+    """(owner indices, one summed curve per owner) -- each column is what
+    one independent amount multiplies."""
+    keys = list(dict.fromkeys(owners))
+    return keys, [np.sum([c for c, o in zip(curves, owners) if o == k], axis=0) for k in keys]
+
+
+def _spectrum_nucleus(results, sites, observe, warnings):
+    """The observed nucleus for a fit: ``observe``, else the spectrum's
+    own when a site is of it, else the first unlinked site's."""
+    if observe:
+        return observed_nucleus(sites, observe)
+    nuc = results.get("nuclide")
+    if nuc and any(s.nucleus == nuc for s in sites):
+        return str(nuc)
+    first = observed_nucleus(sites)
+    if nuc and str(nuc).lstrip("0123456789") != "":
+        warnings.append(f"The spectrum's nucleus ({nuc}) is not the sites' ({first}).")
+    return first
+
+
+def _linked_sources(dicts):
+    """{(label, name): (parent label, factor)} for every parameter of a
+    linked site that follows its parent -- for errors and shares."""
+    from .isotopes import partner_factors
+    out = {}
+    by_label = {d["label"]: d for d in dicts}
+    for d in dicts:
+        link = d.get("link")
+        if not link or link.get("to") not in by_label:
+            continue
+        parent = by_label[link["to"]]
+        f = partner_factors(parent["nucleus"], d["nucleus"])
+        own = set(link.get("free") or [])
+        for name in site_parameter_names(d):
+            if name in own:
+                continue
+            factor = (f["C_Q"] if name == "C_Q" else f["amount"] if name == "amount"
+                      else f["J"] if name.startswith("J") else 1.0)
+            out[(d["label"], name)] = (parent["label"], factor or 1.0)
+    return out
+
+
 # ============================================================
 # Fit
 # ============================================================
@@ -152,7 +226,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
                  mas_Hz=0.0, order="second", transitions="all", rotor_angle="magic",
                  n_zcw=None, fit_regions=None, baseline_regions=None, fit_baseline=False,
                  estimate_amounts=True, max_nfev=2000, fit_mas=False, mas_window_Hz=500.0,
-                 mas_scan_points=41, mas_bounds_Hz=None):
+                 mas_scan_points=41, mas_bounds_Hz=None, observe=None):
     """
     Fit Combined-Hamiltonian sites to a 1D spectrum.
 
@@ -182,6 +256,9 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         and then refined with everything else. Reported as the
         parameter ``mas_Hz`` (no site label) with its 1σ.
         ``mas_bounds_Hz=(lo, hi)`` replaces the symmetric window.
+    observe : the spectrum's nucleus (default: ``results['nuclide']``
+        when a site is of it, else the first unlinked site's). Sites of
+        other nuclei are placed on its scale (module docstring).
 
     Returns
     -------
@@ -226,10 +303,8 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         n_zcw = 2584 if mas_Hz else 28657
     beta_r = (np.arccos(1 / np.sqrt(3)) if rotor_angle == "magic"
               else np.deg2rad(float(rotor_angle)))
-    nuc = results.get("nuclide")
     warnings = []
-    if nuc and all(nuc != s.nucleus for s in sites) and nuc.lstrip("0123456789") != "":
-        warnings.append(f"The spectrum's nucleus ({nuc}) is not the sites' ({sites[0].nucleus}).")
+    observe = _spectrum_nucleus(results, sites, observe, warnings)
 
     # ---- data, window, baseline --------------------------------------------------
     x_full = np.asarray(results["x_ppm"], dtype=float)
@@ -246,18 +321,30 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
 
     # ---- parameter table ------------------------------------------------------------
     dicts = [s.to_dict() for s in sites]
+    resolve_link_dicts(dicts)            # a link that cannot hold fails here, by name
+    axes = site_axes(sites, x, larmor_Hz, observe)
+    owners = _amount_owners(dicts)
     vary_m, fixed_m = _per_site(vary, labels, "vary"), _per_site(fixed, labels, "fixed")
     gbounds = {k: v for k, v in (bounds or {}).items() if k not in labels}
     sbounds = {k: v for k, v in (bounds or {}).items() if k in labels}
     table = []
     for i, d in enumerate(dicts):
         names = site_parameter_names(d)
+        linked = d.get("link")
+        if linked:
+            own = list(linked.get("free") or [])
+            linked_names = [n for n in names if n not in own]
+            names = [n for n in names if n in own]
         if vary_m[d["label"]] is not None:
             free_set = set(vary_m[d["label"]])
         else:
             free_set = set(names) - {"alpha", "beta", "gamma"}
         free_set -= set(fixed_m[d["label"]] or [])
         bad = (free_set | set(fixed_m[d["label"]] or [])) - set(names)
+        if bad and linked:
+            raise ValueError(f"{d['label']}: {sorted(bad)} follow {linked['to']} (linked); "
+                             f"to fit its own, name them in the link's free list "
+                             f"(it keeps {names or 'none'} of its own; follows {linked_names}).")
         if bad:
             raise ValueError(f"{d['label']}: no parameter(s) {sorted(bad)}; it has {names}.")
         if "C_Q" in names:
@@ -297,14 +384,15 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         if key not in cache:
             if len(cache) > 256:
                 cache.clear()
-            comp, _p = _site_sticks(Site.from_dict(d), x, sim["larmor_Hz"], mas,
+            comp, _p = _site_sticks(Site.from_dict(d), axes[i][0], axes[i][1], mas,
                                     sim["order"], sim["transitions"], sim["beta_r"], n)
             cache[key] = comp
         return cache[key]
 
     def site_curves(ds, mas=None, n=None):
-        return [np.sum(list(_broaden_site(Site.from_dict(d), sticks(i, d, mas, n), x).values()),
-                       axis=0)
+        ds = resolve_link_dicts(ds)
+        return [np.sum(list(_broaden_site(Site.from_dict(d), sticks(i, d, mas, n),
+                                          axes[i][0]).values()), axis=0)
                 for i, d in enumerate(ds)]
 
     def apply(values):
@@ -331,7 +419,8 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         trial = [dict(d, amount=1.0) for d in dicts]
         chi2 = []
         for m in grid:
-            A = np.column_stack([c[mask] for c in site_curves(trial, mas=m, n=coarse)])
+            _k, cols = _owner_columns(site_curves(trial, mas=m, n=coarse), owners)
+            A = np.column_stack([c[mask] for c in cols])
             a, _r = nnls(A, target)
             chi2.append(float(np.sum((A @ a - target) ** 2)))
         best = float(grid[int(np.argmin(chi2))])
@@ -345,14 +434,15 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
     if estimate_amounts:
         for d in dicts:
             d["amount"] = 1.0
-        shapes = site_curves(dicts)
+        keys, shapes = _owner_columns(site_curves(dicts), owners)
         A = np.column_stack([s[mask] for s in shapes])
         target = y[mask] - (b0 + b1 * (x[mask] - x_ref))
         amounts, _res = nnls(A, target)
-        for d, a, row in zip(dicts, amounts, [r for r in table if r["name"] == "amount"]):
+        rows = {r["site"]: r for r in table if r["name"] == "amount"}
+        for k, a in zip(keys, amounts):
             a = max(a, 1e-6)
-            d["amount"] = a
-            row["value"] = a
+            dicts[k]["amount"] = a
+            rows[k]["value"] = a
 
     free = np.array([r["free"] for r in table])
     p_all = np.array([r["value"] for r in table], dtype=float)
@@ -399,7 +489,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
     baseline = (c0 + c1 * (x - x_ref)) * scale
     y_fit = np.sum(curves, axis=0) * scale + baseline
     fitted_sites = []
-    for d in ds:
+    for d in resolve_link_dicts(ds):
         d = copy.deepcopy(d)
         d["amount"] *= scale
         fitted_sites.append(Site.from_dict(d))
@@ -415,7 +505,9 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
     tot = float(np.sum((ym - ym.mean()) ** 2))
     q["r2"] = 1 - float(np.sum((ym - fm) ** 2)) / tot if tot else float("nan")
 
-    derived = _derived(parameters, pcov, free_names, fitted_sites, larmor_Hz)
+    derived = _derived(parameters, pcov, free_names, fitted_sites,
+                       {s.label: nu0 for s, (_a, nu0) in zip(fitted_sites, axes)},
+                       sources=_linked_sources(dicts))
     if q["r2"] < 0.9:
         warnings.append(f"Poor fit (R^2 {q['r2']:.3f}): most likely a local minimum -- try "
                         "other starting values (fit_combined_multistart), or check the model.")
@@ -432,7 +524,12 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
            + ("whole spectrum" if fit_regions is None else
               ", ".join(f"{max(a, b):g} to {min(a, b):g} ppm" for a, b in fit_regions))
            + (", baseline fitted" if fit_baseline else ", baseline estimated and held") + ".\n"
-           + "\n".join(s.describe() for s in fitted_sites))
+           + "\n".join(s.describe() for s in fitted_sites)
+           + "".join("\n" + n for n in placement_notes(fitted_sites, observe, x)))
+    if any("gyromagnetic ratios" in n for n in placement_notes(fitted_sites, observe)):
+        warnings.append("A nucleus without a tabulated IUPAC frequency ratio was placed by its "
+                        "gyromagnetic ratio, which ignores the reference compounds' shielding: "
+                        "its position may be off by up to thousands of ppm -- free its δiso.")
     return {"sites": fitted_sites, "parameters": parameters, "pcov": pcov,
             "free_names": free_names, "derived": derived, "x": x, "y": y_raw, "y_fit": y_fit,
             "site_spectra": {s.label: c * scale for s, c in zip(fitted_sites, curves)},
@@ -442,9 +539,10 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
                          "n_zcw": int(n_zcw), "fit_regions": fit_regions,
                          "fit_baseline": fit_baseline, "fit_mas": bool(fit_mas),
                          "mas_Hz_start": mas_start,
-                         "mas_window_Hz": float(mas_window_Hz) if fit_mas else None},
+                         "mas_window_Hz": float(mas_window_Hz) if fit_mas else None,
+                         "observe": observe},
             "mas_scan": mas_scan,
-            "nuclide": results.get("nuclide") or sites[0].nucleus}
+            "nuclide": results.get("nuclide") or observe}
 
 
 def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_starts=64,
@@ -515,7 +613,7 @@ def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_start
 
 def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
                    transitions="all", rotor_angle="magic", n_zcw=None, fit_regions=None,
-                   baseline_regions=None, estimate_amounts=True):
+                   baseline_regions=None, estimate_amounts=True, observe=None):
     """
     The model :func:`fit_combined` starts from, on the data's own axis --
     to see a starting guess against the spectrum before fitting (the
@@ -560,25 +658,31 @@ def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
         raise ValueError("The fit window holds fewer than 8 points.")
     x_ref = float(np.mean(x[mask]))
     b0, b1, _ = estimate_baseline_robust(x, y, baseline_regions=baseline_regions, x_ref=x_ref)
+    observe = _spectrum_nucleus(results, sites, observe, [])
+    axes = site_axes(sites, x, float(larmor_Hz), observe)
     dicts = [s.to_dict() for s in sites]
+    owners = _amount_owners(dicts)
     for d in dicts:
         if "C_Q" in site_parameter_names(d):
             _set(d, "C_Q", abs(_get(d, "C_Q")))
         if estimate_amounts:
             d["amount"] = 1.0
+    dicts = resolve_link_dicts(dicts)
     curves = []
-    for d in dicts:
+    for d, (axis, nu0) in zip(dicts, axes):
         site = Site.from_dict(d)
-        comp, _p = _site_sticks(site, x, float(larmor_Hz), mas_Hz, order, transitions, beta_r,
+        comp, _p = _site_sticks(site, axis, nu0, mas_Hz, order, transitions, beta_r,
                                 int(n_zcw))
-        curves.append(np.sum(list(_broaden_site(site, comp, x).values()), axis=0))
+        curves.append(np.sum(list(_broaden_site(site, comp, axis).values()), axis=0))
     if estimate_amounts:
-        A = np.column_stack([c[mask] for c in curves])
+        keys, cols = _owner_columns(curves, owners)
+        A = np.column_stack([c[mask] for c in cols])
         amounts, _res = nnls(A, y[mask] - (b0 + b1 * (x[mask] - x_ref)))
         amounts = np.maximum(amounts, 1e-6)
-        curves = [c * a for c, a in zip(curves, amounts)]
-        for d, a in zip(dicts, amounts):
-            d["amount"] = float(a)
+        by_owner = dict(zip(keys, amounts))
+        curves = [c * by_owner[o] for c, o in zip(curves, owners)]
+        for d, o in zip(dicts, owners):
+            d["amount"] = float(d["amount"] * by_owner[o])
     baseline = (b0 + b1 * (x - x_ref)) * scale
     site_spectra = {d["label"]: c * scale for d, c in zip(dicts, curves)}
     start = np.sum(list(site_spectra.values()), axis=0) + baseline
@@ -599,34 +703,58 @@ def _cov_of(names, pcov, free_names):
     return out
 
 
-def _derived(parameters, pcov, free_names, sites, larmor_Hz):
+def _derived(parameters, pcov, free_names, sites, larmor_Hz, sources=None):
+    """Shares (per nucleus: amounts of different nuclei are not numbers of
+    the same nuclei) and quadrupolar products. ``sources``: from
+    :func:`_linked_sources`, for a linked partner's parameters (which have
+    no rows of their own): it reports its parent's share, and its P_Q and
+    centre of gravity from its own (derived) values with the parent's
+    errors scaled."""
+    sources = sources or {}
+    nucleus = {s.label: s.nucleus for s in sites}
     amounts = {p["label"]: p for p in parameters if p["name"] == "amount"}
-    total = sum(p["value"] for p in amounts.values()) or 1.0
     out = {}
     for s in sites:
+        if s.label not in amounts:
+            continue
+        group = {lab: p for lab, p in amounts.items() if nucleus.get(lab) == s.nucleus}
+        total = sum(p["value"] for p in group.values()) or 1.0
         a = amounts[s.label]
         row = {"share_%": 100 * a["value"] / total}
         # share error from the amounts' covariance
-        names = [f"{lab}: amount" for lab in amounts]
+        names = [f"{lab}: amount" for lab in group]
         cov = _cov_of(names, pcov, free_names)
         g = np.array([(-a["value"] / total ** 2 + (1 / total if lab == s.label else 0.0))
-                      for lab in amounts]) * 100
+                      for lab in group]) * 100
         row["share_%_err"] = float(np.sqrt(max(g @ cov @ g, 0.0)))
+        out[s.label] = row
+    for s in sites:
+        row = out.get(s.label)
+        if row is None:          # a partner with a linked amount: its parent's share
+            parent = sources.get((s.label, "amount"), (None,))[0]
+            row = dict(out.get(parent, {"share_%": float("nan"), "share_%_err": 0.0}))
+            row = {"share_%": row["share_%"], "share_%_err": row["share_%_err"],
+                   "linked_to": parent}
+            out[s.label] = row
         if s.get("quadrupolar"):
-            vals = {p["name"]: p["value"] for p in parameters if p["label"] == s.label}
-            cq, eq, d = abs(vals["C_Q"]), vals["eta_Q"], vals["delta_iso"]
-            cov3 = _cov_of([f"{s.label}: {k}" for k in ("delta_iso", "C_Q", "eta_Q")], pcov,
-                           free_names)
+            q = s.get("quadrupolar")[0]
+            cq, eq, d = abs(q["C_Q"]), q["eta_Q"], s.delta_iso
+            cov_names, scale = [], []
+            for k in ("delta_iso", "C_Q", "eta_Q"):
+                src, factor = sources.get((s.label, k), (s.label, 1.0))
+                cov_names.append(f"{src}: {k}")
+                scale.append(factor)
+            cov3 = _cov_of(cov_names, pcov, free_names) * np.outer(scale, scale)
             fac = np.sqrt(1 + eq ** 2 / 3)
             gp = np.array([0.0, fac, cq * eq / (3 * fac)])
             row.update(P_Q=cq * fac, P_Q_err=float(np.sqrt(max(gp @ cov3 @ gp, 0.0))))
             if not float(s.spin).is_integer():
-                k = quadrupolar_ct_isotropic_shift_Hz(s.spin, 1e6, 0.0, larmor_Hz) / larmor_Hz * 1e6
+                nu0 = larmor_Hz.get(s.label) if isinstance(larmor_Hz, dict) else larmor_Hz
+                k = quadrupolar_ct_isotropic_shift_Hz(s.spin, 1e6, 0.0, nu0) / nu0 * 1e6
                 gc = np.array([1.0, 2 * k * cq * fac ** 2, k * cq ** 2 * 2 * eq / 3])
                 row.update(delta_cg=d + k * cq ** 2 * fac ** 2,
                            delta_cg_err=float(np.sqrt(max(gc @ cov3 @ gc, 0.0))))
-        out[s.label] = row
-    return out
+    return {s.label: out[s.label] for s in sites}
 
 
 def _warnings(parameters, pcov, free_names, curves, x, mask, baseline_regions, fit_baseline,
@@ -718,15 +846,33 @@ def print_combined_fit_report(fit, save_txt=None, advice=True):
     (``advice``) what the fit tells you and what to try next, in plain
     words (:mod:`opennmr.notebook.fit_advice`). Returns the text."""
     lines = ["=" * 68, "COMBINED-HAMILTONIAN FIT REPORT", "=" * 68, fit["log"], ""]
-    for label in dict.fromkeys(p["label"] for p in fit["parameters"] if p["label"]):
-        lines.append(label)
+    sites = {(s.label if hasattr(s, "label") else s["label"]): s for s in fit.get("sites") or []}
+    labels = list(dict.fromkeys([p["label"] for p in fit["parameters"] if p["label"]]
+                                + list(sites)))
+    labels = [lab for lab in sites if lab in labels] + [lab for lab in labels if lab not in sites]
+    for label in labels:
+        site = sites.get(label)
+        sd = site.to_dict() if hasattr(site, "to_dict") else (site or {})
+        link = sd.get("link")
+        lines.append(f"{label}" + (f"   [{sd['nucleus']}, linked to {link['to']}]" if link else ""))
         for p in fit["parameters"]:
             if p["label"] != label:
                 continue
             unit = _UNITS.get(p["name"], "Hz" if p["name"].startswith("J") else "")
             name = f"{p['name']} ({unit})" if unit else p["name"]
             lines.append(f"  {name:<18}= {_fmt(p['value'], p['error'])}")
-        d = fit["derived"][label]
+        if link:
+            own = set(link.get("free") or [])
+            for n in site_parameter_names(sd):
+                if n in own:
+                    continue
+                unit = _UNITS.get(n, "Hz" if n.startswith("J") else "")
+                name = f"{n} ({unit})" if unit else n
+                lines.append(f"  {name:<18}= {_get(sd, n):.6g} (from {link['to']})")
+        d = fit["derived"].get(label)
+        if d is None:
+            lines.append("")
+            continue
         lines.append(f"  {'share (%)':<18}= {_fmt(d['share_%'], d['share_%_err'] or None)}")
         if "P_Q" in d:
             lines.append(f"  {'P_Q (MHz)':<18}= {_fmt(d['P_Q'], d['P_Q_err'] or None)}")
