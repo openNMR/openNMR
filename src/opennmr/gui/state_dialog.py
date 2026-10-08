@@ -123,6 +123,13 @@ class SaveStateDialog(QDialog):
             "1D experiments always get a copy, so the state still opens if the raw data are moved "
             "or deleted. A 2D is reopened from its own folder unless this is ticked.")
         v.addWidget(self.copy_2d_check)
+        self.fit_values_check = QCheckBox(
+            "Save the fitted values too (fitted_values.json, readable by anyone)")
+        self.fit_values_check.setChecked(True)
+        self.fit_values_check.setToolTip(
+            "Every fit and kept fit of the ticked spectra: each value with its 1σ error, as a "
+            "table of site/peak × parameter, in a JSON file in the state's folder.")
+        v.addWidget(self.fit_values_check)
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
                                | QDialogButtonBox.StandardButton.Cancel)
         box.accepted.connect(self._accept)

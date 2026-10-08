@@ -124,10 +124,13 @@ def test_the_fit_recovers_both_sites_and_reports_them(qapp, _dialogs):
     assert v["Al1.delta_iso"]["value"] == pytest.approx(12.0, abs=0.05)
     assert v["Al2.C_Q"]["value"] == pytest.approx(6.0, abs=0.03)
     assert panel.result["derived"]["Al1"]["share_%"] == pytest.approx(200 / 3, abs=1.0)
-    headers = [panel.results_table.verticalHeaderItem(r).text()
-               for r in range(panel.results_table.rowCount())]
-    assert "Al1: C_Q (MHz)" in headers and "Al1: share (%)" in headers and "Al1: P_Q (MHz)" in headers
-    assert "Al1: CT c.o.g. (ppm)" in headers
+    # A table: a row per site, a column per parameter (2026-10-08).
+    t = panel.results_table
+    rows = [t.verticalHeaderItem(r).text() for r in range(t.rowCount())]
+    columns = [t.horizontalHeaderItem(c).text() for c in range(t.columnCount())]
+    assert rows[:2] == ["Al1", "Al2"]
+    assert {"C_Q (MHz)", "Share (%)", "P_Q (MHz)", "CT c.o.g. (ppm)"} <= set(columns)
+    assert "±" in t.item(rows.index("Al1"), columns.index("C_Q (MHz)")).text()
     text = panel.results_label.text()
     assert "Combined-Hamiltonian fit — MAS 20 kHz" in text and "R² 0.99" in text
     assert "COMBINED-HAMILTONIAN FIT REPORT" in panel.text_report()
@@ -147,9 +150,10 @@ def test_fixed_and_bounded_parameters_are_honoured(qapp, _dialogs):
     v = _values(panel)
     assert v["Al2.eta_Q"]["value"] == 0.7 and not v["Al2.eta_Q"]["free"]
     assert v["Al1.C_Q"]["value"] >= 4.25 and v["Al1.C_Q"]["lower"] == 4.25
-    assert "(fixed)" in panel.results_table.item(
-        [panel.results_table.verticalHeaderItem(r).text()
-         for r in range(panel.results_table.rowCount())].index("Al2: η_Q"), 0).text()
+    t = panel.results_table
+    assert "(fixed)" in t.item(
+        [t.verticalHeaderItem(r).text() for r in range(t.rowCount())].index("Al2"),
+        [t.horizontalHeaderItem(c).text() for c in range(t.columnCount())].index("η_Q")).text()
 
 
 def test_bad_cells_are_named_not_fitted(qapp, _dialogs):
@@ -216,7 +220,9 @@ def test_the_fit_is_kept_with_its_spectrum_and_logged(qapp, _dialogs):
     assert saved["label"] == "Combined-Hamiltonian"
     json.dumps(saved)  # all plain data
     text = io_history.render_log(window.session.info(index)["history"])
-    assert "Combined-Hamiltonian fit of 27Al MAS" in text and "Al1: C_Q (MHz)" in text
+    assert "Combined-Hamiltonian fit of 27Al MAS" in text
+    # The values table (a row per site, a column per parameter) is in the log.
+    assert "| C_Q (MHz) |" in text and "Al1 | " in text and "Al2 | " in text
     # The parameter choices are part of the settings.
     assert "η_Q free, also tried from 0.8" in text and "β (°)" not in text
 

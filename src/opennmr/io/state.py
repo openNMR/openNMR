@@ -50,14 +50,38 @@ KIND_NAMES = {"experiment": "Experiment", "slice": "Slice", "derived": "Derived 
               "simulation": "Simulation"}
 
 
-def default_state_root() -> str:
-    """``~/Documents/openNMR/states``, or ``OPENNMR_STATES_DIR``."""
+#: The folder chosen in Settings ▸ Saving (explicit user request,
+#: 2026-10-08: "allow people to define the default save location for
+#: saving openNMR states ... Sometimes it is not obvious where it got
+#: saved to"). ``None``: the built-in default.
+_USER_STATE_ROOT: list = [None]
+
+
+def set_default_state_root(folder: str | None) -> str:
+    """Make ``folder`` where new states are saved by default (``None`` or
+    ``""`` goes back to the built-in default). Returns the folder now in
+    use."""
+    _USER_STATE_ROOT[0] = os.path.expanduser(str(folder)) if folder else None
+    return default_state_root()
+
+
+def builtin_state_root() -> str:
+    """The default with no folder chosen in Settings: ``OPENNMR_STATES_DIR``
+    if set, else ``~/Documents/openNMR/states``."""
     override = os.environ.get("OPENNMR_STATES_DIR")
     if override:
         return os.path.expanduser(override)
     home = os.path.expanduser("~")
     documents = os.path.join(home, "Documents")
     return os.path.join(documents if os.path.isdir(documents) else home, "openNMR", "states")
+
+
+def default_state_root() -> str:
+    """The folder chosen with :func:`set_default_state_root` (Settings ▸
+    Saving), else :func:`builtin_state_root`."""
+    if _USER_STATE_ROOT[0]:
+        return _USER_STATE_ROOT[0]
+    return builtin_state_root()
 
 
 def default_state_folder(name: str) -> str:

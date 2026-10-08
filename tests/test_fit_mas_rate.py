@@ -168,8 +168,9 @@ def test_a_gui_fit_with_the_rate_free_finds_it_and_carries_it(qapp, _dialogs):
     assert panel.fit(), _dialogs
     assert _p(panel.result, "mas_Hz")["value"] == pytest.approx(TRUE_MAS, abs=3)
     t = panel.results_table
-    labels = [t.verticalHeaderItem(i).text() for i in range(t.rowCount())]
-    assert "MAS rate (Hz)" in labels
+    rows = [t.verticalHeaderItem(i).text() for i in range(t.rowCount())]
+    columns = [t.horizontalHeaderItem(c).text() for c in range(t.columnCount())]
+    assert rows[-1] == "(spectrum)" and "MAS rate (Hz)" in columns
     panel.use_fitted_as_start()
     assert panel.mas_spin.value() == pytest.approx(TRUE_MAS, abs=3)
 

@@ -95,14 +95,23 @@ class _ContourCrosshair:
     touching the lines' position or visibility -- see there.
     """
 
-    def __init__(self, canvas, ax, f1_ax, f2_ax, toolbar, **lineprops) -> None:
+    def __init__(self, canvas, ax, f1_ax, f2_ax, toolbar, stack_axes=None, **lineprops) -> None:
+        """``stack_axes``: the rows of a stacked Compare (one shared x
+        axis). The vertical line then runs through every row, whichever
+        one the cursor is over, and the horizontal one marks the row under
+        the cursor -- explicit user request (2026-10-08): "when hovering
+        over one spectrum, have the crosshair continue along y; at
+        present, it gets cut off and you can only see the crosshair on
+        one of the n spectra being compared"."""
         self._canvas = canvas
         self._toolbar = toolbar
-        self.axes = tuple(dict.fromkeys(a for a in (ax, f1_ax, f2_ax) if a is not None))
+        stack = [a for a in (stack_axes or []) if a is not None]
+        self._stacked = len(stack) > 1
+        self.axes = tuple(dict.fromkeys(a for a in (ax, f1_ax, f2_ax, *stack) if a is not None))
         self._background = None
-        self._vline_axes = [a for a in (ax, f2_ax) if a is not None]
+        self._vline_axes = list(dict.fromkeys(a for a in (ax, f2_ax, *stack) if a is not None))
         self._vlines = [self._guide(a, "v", lineprops) for a in self._vline_axes]
-        self._hline_axes = [a for a in (ax, f1_ax) if a is not None]
+        self._hline_axes = list(dict.fromkeys(a for a in (ax, f1_ax, *stack) if a is not None))
         self._hlines = [self._guide(a, "h", lineprops) for a in self._hline_axes]
         self._cid_motion = canvas.mpl_connect("motion_notify_event", self._onmove)
         self._cid_draw = canvas.mpl_connect("draw_event", self._on_draw)
@@ -235,14 +244,17 @@ class _ContourCrosshair:
         for line in self._vlines:
             line.set_xdata((event.xdata, event.xdata))
             line.set_visible(True)
-        for line in self._hlines:
+        for ax, line in zip(self._hline_axes, self._hlines):
+            # In a stack each row has its own intensity scale: the
+            # horizontal line belongs only to the row under the cursor.
             line.set_ydata((event.ydata, event.ydata))
-            line.set_visible(True)
+            line.set_visible(not self._stacked or ax is event.inaxes)
         self._canvas.restore_region(self._background)
         for ax, line in zip(self._vline_axes, self._vlines):
             ax.draw_artist(line)
         for ax, line in zip(self._hline_axes, self._hlines):
-            ax.draw_artist(line)
+            if line.get_visible():
+                ax.draw_artist(line)
         self._canvas.blit()
 
 
@@ -2972,7 +2984,8 @@ class MplCanvas(QWidget):
             return
         self._crosshair = _ContourCrosshair(
             self.canvas, self.ax, self._proj_axes.get("f1"), self._proj_axes.get("f2"),
-            self.toolbar, color="0.35", linewidth=0.8, linestyle="--",
+            self.toolbar, stack_axes=self._compare_axes, color="0.35", linewidth=0.8,
+            linestyle="--",
         )
 
     def _projection_intensity_limits(self) -> dict:

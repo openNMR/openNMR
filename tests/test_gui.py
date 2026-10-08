@@ -15936,7 +15936,8 @@ def test_settings_is_the_last_launcher_button(qapp):
     assert window._settings_tab_index == last
     settings_tab = window.side_tabs.widget(last)
     titles = [s.title() for s in settings_tab.findChildren(CollapsibleSection)]
-    assert titles == ["Interface", "Default plot styles"]
+    # Fitting (maximum iterations) and Saving (state folder) added 2026-10-08.
+    assert titles == ["Interface", "Fitting", "Saving", "Default plot styles"]
     assert settings_tab.isAncestorOf(window.ui_font_size_spin)
 
 

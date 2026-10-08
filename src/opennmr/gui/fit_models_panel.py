@@ -32,6 +32,10 @@ from PySide6.QtWidgets import (
 
 from ..notebook import fit_models as fm
 
+#: The kept fit's "put it back" action (explicit user request, 2026-10-08:
+#: re-labelled from "Put Back in Its Panel").
+RESTORE_TEXT = "Re-plot and Show “What's Next?”"
+
 _COLUMNS = ("Compare", "Name", "Kind", "k", "R²", "Red. χ²", "ΔAIC", "ΔBIC")
 
 
@@ -47,7 +51,9 @@ class FitModelsPanel(QWidget):
     ``compare(ids, residuals, components_of, layout)``; ``restore(id)``;
     ``rename(id, name)``; ``delete(id)``; ``can_restore(model)``;
     ``to_open(id)`` (optional): list it in Open experiments; ``recolour(id,
-    colour)`` (optional)."""
+    colour)`` (optional); ``save_values(ids)`` (optional): save their
+    fitted values; ``owner()`` (optional): the label of the spectrum whose
+    kept fits these are."""
 
     #: Compare Ticked's choices (explicit user request: stacked or
     #: superimposed, as Compare offers).
@@ -55,9 +61,15 @@ class FitModelsPanel(QWidget):
                ("Summary figure (Fit view)", "summary"))
 
     def __init__(self, models, keep, show, compare, restore, rename, delete, can_restore,
-                 parent=None, to_open=None, recolour=None) -> None:
+                 parent=None, to_open=None, recolour=None, save_values=None,
+                 owner=None) -> None:
         super().__init__(parent)
         self._to_open, self._recolour = to_open, recolour
+        self._save_values, self._owner = save_values, owner
+        #: The last Compare Ticked (ids, layout): Residuals and Components
+        #: of: redraw it at once rather than needing another compare
+        #: (explicit user request, 2026-10-08).
+        self._last_compare: tuple | None = None
         self._models, self._keep, self._show = models, keep, show
         self._compare, self._restore, self._rename, self._delete = compare, restore, rename, delete
         self._can_restore = can_restore
@@ -77,6 +89,9 @@ class FitModelsPanel(QWidget):
             "result so it can be put back.")
         self.keep_button.clicked.connect(lambda: self._keep())
         v.addWidget(self.keep_button)
+        self.owner_label = QLabel("")
+        self.owner_label.setWordWrap(True)
+        v.addWidget(self.owner_label)
 
         self.table = QTableWidget(0, len(_COLUMNS))
         self.table.setHorizontalHeaderLabels(list(_COLUMNS))
@@ -102,13 +117,33 @@ class FitModelsPanel(QWidget):
         row = QHBoxLayout()
         self.show_button = QPushButton("Show")
         self.show_button.clicked.connect(lambda: self._on_show(self.table.currentRow()))
-        self.restore_button = QPushButton("Put Back in Its Panel")
-        self.restore_button.setToolTip("Restore the fit panel's settings and result as they were "
-                                       "when this fit was kept, and make it the current fit.")
+        self.restore_button = QPushButton(RESTORE_TEXT)
+        self.restore_button.setToolTip(
+            "Re-plot this fit and put its settings and result back in the fit panel that made "
+            "it (making it the current fit), then open that panel at “What's next?” -- what "
+            "the fit tells you and what to try next.")
         self.restore_button.clicked.connect(lambda: self._on_restore(self.table.currentRow()))
         for b in (self.show_button, self.restore_button):
             row.addWidget(b)
         v.addLayout(row)
+        row2 = QHBoxLayout()
+        self.to_open_button = QPushButton("Send to Open Experiments")
+        self.to_open_button.setToolTip(
+            "List the ticked fits (or, with none ticked, the selected one) in Open experiments: "
+            "the data with the full fit drawn over it, to view, style and export like any "
+            "spectrum. Each is listed once and reused after. The kept fits stay here.")
+        self.to_open_button.clicked.connect(self.send_to_open)
+        self.to_open_button.setVisible(to_open is not None)
+        self.save_values_button = QPushButton("Save the Fitted Values…")
+        self.save_values_button.setToolTip(
+            "Write the fitted values and their 1σ errors of the ticked fits (or the selected "
+            "one) to a JSON file anyone can read: a table of site/peak × parameter, with "
+            "the fit's quality and report.")
+        self.save_values_button.clicked.connect(self.save_values)
+        self.save_values_button.setVisible(save_values is not None)
+        row2.addWidget(self.to_open_button)
+        row2.addWidget(self.save_values_button)
+        v.addLayout(row2)
 
         compare_row = QHBoxLayout()
         self.compare_button = QPushButton("Compare Ticked")
@@ -126,8 +161,13 @@ class FitModelsPanel(QWidget):
                                      "Summary: one figure on the Fit view (curve fits too).")
         self.residuals_check = QCheckBox("Residuals")
         self.residuals_check.setChecked(True)
+        self.residuals_check.setToolTip("Show each fit's residual. Switching it redraws the "
+                                        "comparison straight away.")
+        self.residuals_check.toggled.connect(lambda _on: self._redraw_comparison())
         self.components_combo = QComboBox()
-        self.components_combo.setToolTip("Shade the components of one of the compared fits.")
+        self.components_combo.setToolTip("Shade the components of one of the compared fits. "
+                                         "Changing it redraws the comparison straight away.")
+        self.components_combo.currentIndexChanged.connect(lambda _i: self._redraw_comparison())
         compare_row.addWidget(self.compare_button)
         compare_row.addWidget(self.layout_combo)
         compare_row.addWidget(self.residuals_check)
@@ -172,6 +212,9 @@ class FitModelsPanel(QWidget):
                 self.table.setItem(row, col, item)
         self.empty_label.setVisible(not self._rows)
         self.table.setVisible(bool(self._rows))
+        owner = self._owner() if self._owner is not None else ""
+        self.owner_label.setText(f"Kept fits of <b>{owner}</b>" if owner and self._rows else "")
+        self.owner_label.setVisible(bool(owner and self._rows))
         self._update_statistics()
 
     def _update_statistics(self) -> None:
@@ -232,9 +275,9 @@ class FitModelsPanel(QWidget):
             return
         if not self._can_restore(model):
             QMessageBox.information(
-                self, "Put back", f"“{model['name']}” did not come from a fit panel that can "
+                self, "Re-plot", f"“{model['name']}” did not come from a fit panel that can "
                 "take it back (an isotropic peak fit or a curve fit is kept as its curves and "
-                "report). Show it instead.")
+                "report), so it has no “What's next?”. Show it instead.")
             return
         self._restore(model["id"])
 
@@ -243,22 +286,70 @@ class FitModelsPanel(QWidget):
         if len(ids) < 2:
             QMessageBox.information(self, "Compare", "Tick at least two kept fits.")
             return
+        layout = self.layout_combo.currentData()
         self._compare(ids, self.residuals_check.isChecked(), self.components_combo.currentData(),
-                      self.layout_combo.currentData())
+                      layout)
+        self._last_compare = (list(ids), layout)
+
+    def _redraw_comparison(self) -> None:
+        """Residuals / Components of: redraw the comparison on show, if
+        its fits are all still here."""
+        if self._last_compare is None:
+            return
+        ids, layout = self._last_compare
+        present = {m["id"] for m in self._rows}
+        if len(ids) < 2 or not set(ids) <= present:
+            self._last_compare = None
+            return
+        self._compare(ids, self.residuals_check.isChecked(), self.components_combo.currentData(),
+                      layout)
+
+    def _chosen_ids(self) -> list:
+        """The ticked fits, or with none ticked the selected one."""
+        ids = self.ticked_ids()
+        if not ids:
+            model = self._model_at(self.table.currentRow())
+            ids = [model["id"]] if model is not None else []
+        return ids
+
+    def send_to_open(self) -> None:
+        if self._to_open is None:
+            return
+        ids = [i for i in self._chosen_ids()
+               if next((m for m in self._rows if m["id"] == i), {}).get("kind") != "curve"]
+        if not ids:
+            QMessageBox.information(self, "Send to Open Experiments",
+                                    "Tick (or select) a kept spectrum fit first -- a curve fit "
+                                    "has no spectrum to list.")
+            return
+        for model_id in ids:
+            self._to_open(model_id)
+
+    def save_values(self) -> None:
+        if self._save_values is None:
+            return
+        ids = self._chosen_ids()
+        if not ids:
+            QMessageBox.information(self, "Save the fitted values",
+                                    "Tick (or select) a kept fit first.")
+            return
+        self._save_values(ids)
 
     def _on_menu(self, pos) -> None:
         row = self.table.rowAt(pos.y())
         model = self._model_at(row)
         menu = QMenu(self)
-        show = restore = rename = delete = copy_report = to_open = recolour = None
+        show = restore = rename = delete = copy_report = to_open = recolour = save = None
         if model is not None:
             show = menu.addAction("Show")
             if self._to_open is not None and model.get("kind") != "curve":
-                to_open = menu.addAction("Show in Open Experiments")
+                to_open = menu.addAction("Send to Open Experiments")
             if self._recolour is not None:
                 recolour = menu.addAction("Colour…")
-            restore = menu.addAction("Put Back in Its Panel")
+            restore = menu.addAction(RESTORE_TEXT)
             restore.setEnabled(bool(self._can_restore(model)))
+            if self._save_values is not None:
+                save = menu.addAction("Save the Fitted Values…")
             rename = menu.addAction("Rename…")
             copy_report = menu.addAction("Copy Report")
             delete = menu.addAction("Delete")
@@ -271,6 +362,8 @@ class FitModelsPanel(QWidget):
             self._show(model["id"])
         elif chosen is to_open:
             self._to_open(model["id"])
+        elif chosen is save:
+            self._save_values([model["id"]])
         elif chosen is recolour:
             from PySide6.QtGui import QColor
             from PySide6.QtWidgets import QColorDialog

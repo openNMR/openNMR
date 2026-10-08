@@ -22,9 +22,9 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
-    QAction, QActionGroup, QFont, QFontDatabase, QIcon, QKeySequence, QPalette, QPixmap,
+    QAction, QActionGroup, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence, QPalette, QPixmap,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -133,6 +133,10 @@ from .fit_progress_dialog import FitProgress
 from .widgets.sideband_hint import sideband_hint_label
 from ..core import fit_progress as core_fit_progress
 from ..notebook import fit_models as nb_fit_models
+from ..notebook import fit_values as nb_fit_values
+
+#: Written into a saved openNMR state when "Save the fitted values too" is ticked.
+FIT_VALUES_FILE = "fitted_values.json"
 from ..notebook.fitting import build_region_mask as nb_build_region_mask
 from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
 from .dnp_panel import DnpWorkflowPanel
@@ -5696,6 +5700,39 @@ class MainWindow(QMainWindow):
         fitting_form.addRow("Maximum iterations:", iterations_row)
         layout.addWidget(CollapsibleSection("Fitting", content=fitting))
 
+        # --- Saving --------------------------------------------------
+        # Explicit user request (2026-10-08): choose where openNMR states
+        # are saved by default -- "sometimes it is not obvious where it
+        # got saved to".
+        saving = QWidget()
+        saving_form = QFormLayout(saving)
+        io_state.set_default_state_root(self._ui_settings.get("state_folder") or None)
+        self.state_folder_edit = QLineEdit(io_state.default_state_root())
+        self.state_folder_edit.setToolTip(
+            "Where File ▸ Save openNMR State… puts a new state (each in a folder of its own, "
+            "named after it), and where Open openNMR State… starts looking. Saved fitted values "
+            "start here too. Type a folder or press Browse….")
+        self.state_folder_edit.editingFinished.connect(
+            lambda: self._set_state_folder(self.state_folder_edit.text()))
+        folder_row = QWidget()
+        folder_layout = QHBoxLayout(folder_row)
+        folder_layout.setContentsMargins(0, 0, 0, 0)
+        folder_layout.addWidget(self.state_folder_edit, 1)
+        self.state_folder_browse_button = QPushButton("Browse…")
+        self.state_folder_browse_button.clicked.connect(self._on_browse_state_folder)
+        folder_layout.addWidget(self.state_folder_browse_button)
+        self.state_folder_reset_button = QPushButton("Reset")
+        self.state_folder_reset_button.setToolTip(
+            f"Back to the built-in default ({io_state.builtin_state_root()}).")
+        self.state_folder_reset_button.clicked.connect(lambda: self._set_state_folder(""))
+        folder_layout.addWidget(self.state_folder_reset_button)
+        saving_form.addRow("Save openNMR states in:", folder_row)
+        self.state_folder_open_button = QPushButton("Show This Folder")
+        self.state_folder_open_button.setToolTip("Open the folder in your file browser.")
+        self.state_folder_open_button.clicked.connect(self._on_show_state_folder)
+        saving_form.addRow("", self.state_folder_open_button)
+        layout.addWidget(CollapsibleSection("Saving", content=saving))
+
         # --- Default plot styles --------------------------------------
         defaults = QWidget()
         defaults_layout = QVBoxLayout(defaults)
@@ -5876,6 +5913,47 @@ class MainWindow(QMainWindow):
         self.ui_font_size_spin.setValue(self._default_ui_point_size())
         self.ui_font_size_spin.blockSignals(blocked)
         self._apply_ui_font_size(None)
+
+    def _set_state_folder(self, folder: str) -> str:
+        """Settings ▸ Saving: the default folder for openNMR states
+        (``""`` = the built-in default). Saved; returns the folder now used."""
+        folder = os.path.expanduser((folder or "").strip())
+        if folder and os.path.exists(folder) and not os.path.isdir(folder):
+            QMessageBox.warning(self, "Save openNMR states in",
+                                f"{folder} is a file, not a folder.")
+            folder = self._ui_settings.get("state_folder") or ""
+        builtin = io_state.builtin_state_root()
+        chosen = folder if folder and os.path.normpath(folder) != os.path.normpath(builtin) else ""
+        used = io_state.set_default_state_root(chosen or None)
+        if chosen:
+            self._ui_settings["state_folder"] = chosen
+        else:
+            self._ui_settings.pop("state_folder", None)
+        self._save_ui_settings()
+        if self.state_folder_edit.text() != used:
+            self.state_folder_edit.setText(used)
+        self.statusBar().showMessage(f"openNMR states will be saved in {used}", 8000)
+        return used
+
+    def _on_browse_state_folder(self) -> None:
+        start = io_state.default_state_root()
+        while start and not os.path.isdir(start):
+            parent = os.path.dirname(start)
+            start = parent if parent != start else ""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Save openNMR states in", start or os.path.expanduser("~"),
+            options=QFileDialog.Option.DontUseNativeDialog)
+        if folder:
+            self._set_state_folder(folder)
+
+    def _on_show_state_folder(self) -> None:
+        folder = io_state.default_state_root()
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Show folder", f"Could not create {folder}:\n{exc}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def _on_max_iterations_changed(self, value: int) -> None:
         """Every fit from now on stops at ``value`` iterations; saved."""
@@ -8888,6 +8966,16 @@ class MainWindow(QMainWindow):
                      "time": io_history._stamp(None), "inputs": inputs,
                      "inputs_text": panel_state.describe_state(inputs),
                      "result": encoded, "report": panel.report_text()}
+        try:            # the values as shown, for Save the Fitted Values from a state
+            record = self._fit_values_record(key)
+        except Exception:  # noqa: BLE001 -- the fit is stored without it
+            record = None
+        if record is not None:
+            shown = record.get("as shown", {})
+            fits[key]["values_table"] = {
+                "columns": record["columns"],
+                "rows": [[row, [shown[row].get(c, "") for c in record["columns"]]]
+                         for row in shown]}
         spectrum.metadata.raw["fits"] = fits
         self._schedule_sidecar_save(index)
 
@@ -9321,7 +9409,8 @@ class MainWindow(QMainWindow):
         return items
 
     def _save_state(self, folder: str, name: str, indices, slices=None, notes: str = "",
-                    copy_2d: bool = False, overwrite: bool = False) -> str:
+                    copy_2d: bool = False, overwrite: bool = False,
+                    fit_values: bool = False) -> str:
         """Save spectra ``indices`` and, for ``slices`` = ``{index: [rows]}``
         (1-based), those slices of each 2D as spectra of their own, as an
         openNMR state. Nothing open is changed; each saved spectrum's log
@@ -9361,6 +9450,17 @@ class MainWindow(QMainWindow):
                                 "origin": parent.metadata.source_path})
         folder = io_state.save_state(folder, name, entries, notes=notes,
                                      app_version=_version.__version__, overwrite=overwrite)
+        if fit_values:
+            spectra = {}
+            for index in indices:
+                values = self._spectrum_fit_values(index)
+                if values["fits"] or values["kept fits"]:
+                    spectra[self.session.label(index)] = values
+            if spectra:
+                nb_fit_values.save_fitted_values(
+                    {nb_fit_values.FORMAT_KEY: nb_fit_values.FORMAT_VERSION, "state": name,
+                     "saved": io_history._stamp(None), "spectra": spectra},
+                    os.path.join(folder, FIT_VALUES_FILE))
         for index in indices:
             history = self._ensure_history(index)
             if history is not None:
@@ -9380,6 +9480,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name, folder, notes, indices, slices, copy_2d = dialog.values()
+        fit_values = dialog.fit_values_check.isChecked()
         overwrite = False
         if os.path.exists(folder) and os.listdir(folder):
             if not io_state.is_state_folder(folder):
@@ -9394,7 +9495,7 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             folder = self._save_state(folder, name, indices, slices, notes, copy_2d,
-                                      overwrite=overwrite)
+                                      overwrite=overwrite, fit_values=fit_values)
         except (OSError, ValueError) as exc:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Couldn't save the state", str(exc))
@@ -9403,7 +9504,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Saved openNMR state “{name}” ({len(indices)} spectra"
             + (f", {sum(len(r) for r in slices.values())} slices" if slices else "")
-            + f") in {folder} -- contents: {io_state.STATE_LOG_FILE}", 10000)
+            + f") in {folder} -- contents: {io_state.STATE_LOG_FILE}"
+            + (f"; fitted values: {FIT_VALUES_FILE}"
+               if os.path.isfile(os.path.join(folder, FIT_VALUES_FILE)) else ""), 10000)
 
     def _open_state(self, folder: str) -> tuple[list[int], list[str]]:
         """Open every spectrum of a saved state. Experiments are re-read
@@ -13133,20 +13236,23 @@ class MainWindow(QMainWindow):
         # (explicit user request: keep a 2-, 3-, 4-site model, reload them
         # later against the spectrum, compare them on one plot).
         self.fit_models_panel = FitModelsPanel(
-            models=lambda: self._fit_models(self._selected_index()),
+            models=lambda: self._fit_models(self._fit_models_index()),
             keep=lambda: self._keep_shown_fit(),
-            show=lambda model_id: self._show_fit_model(self._selected_index(), model_id),
+            show=lambda model_id: self._show_fit_model(self._fit_models_index(), model_id),
             compare=lambda ids, residuals, components, layout="summary": self._compare_fit_models(
-                self._selected_index(), ids, residuals, components, layout),
-            restore=lambda model_id: self._restore_fit_model(self._selected_index(), model_id),
+                self._fit_models_index(), ids, residuals, components, layout),
+            restore=lambda model_id: self._restore_fit_model(self._fit_models_index(), model_id),
             rename=lambda model_id, name: self._rename_fit_model(
-                self._selected_index(), model_id, name),
-            delete=lambda model_id: self._delete_fit_model(self._selected_index(), model_id),
+                self._fit_models_index(), model_id, name),
+            delete=lambda model_id: self._delete_fit_model(self._fit_models_index(), model_id),
             can_restore=self._fit_model_restorable,
-            to_open=lambda model_id: self._fit_model_experiment(self._selected_index(), model_id,
+            to_open=lambda model_id: self._fit_model_experiment(self._fit_models_index(), model_id,
                                                                select=True),
             recolour=lambda model_id, colour: self._recolour_fit_model(
-                self._selected_index(), model_id, colour))
+                self._fit_models_index(), model_id, colour),
+            save_values=lambda ids: self._save_fit_model_values(self._fit_models_index(), ids),
+            owner=lambda: (self.session.label(self._fit_models_index())
+                           if self._fit_models_index() is not None else ""))
         self._fit_models_section = CollapsibleSection("Kept fit models",
                                                       content=self.fit_models_panel)
         layout.addWidget(self._fit_models_section)
@@ -13171,6 +13277,12 @@ class MainWindow(QMainWindow):
                             ("pnmr", self.pnmr_fit_panel.keep_anchor),
                             ("isotropic", self.spectral_fit_params_label)):
             self.keep_fit_buttons[key] = self._add_keep_fit_button(anchor, key)
+        # "Save the Fitted Values…" beside each Keep This Fit… (explicit
+        # user request, 2026-10-08): the values and errors as JSON.
+        self.save_fit_values_buttons = {}
+        for key, keep in self.keep_fit_buttons.items():
+            if keep is not None:
+                self.save_fit_values_buttons[key] = self._add_save_fit_values_button(keep, key)
         # Any plot showing a simulation offers to keep it (explicit user
         # request: simulations in Open experiments, to compare).
         for canvas in (self.fit_canvas, self.simulation_canvas):
@@ -14020,6 +14132,30 @@ class MainWindow(QMainWindow):
             return (result.get("settings") or {}).get("fit_regions")
         return result.get("regions") or result.get("fit_regions")
 
+    def _fit_models_index(self) -> int | None:
+        """The spectrum whose kept fits Kept fit models lists: the
+        selected one -- or, when that is a kept fit's own Open experiment
+        (Compare Ticked / Send to Open Experiments made it, and selecting
+        it in Compare selects it), the spectrum the fit belongs to.
+
+        Explicit user request (2026-10-08): after Compare Ticked "none of
+        the fits are there any more ... They should still be accessible".
+        They had not gone: the list followed the selection onto the fit's
+        Open experiment, which keeps no fits of its own."""
+        index = self._selected_index()
+        if index is None or not (0 <= index < len(self.session)):
+            return getattr(self, "_last_fit_models_index", None) \
+                if getattr(self, "_last_fit_models_index", None) is not None \
+                and self._last_fit_models_index < len(self.session) else None
+        source = (self.session.spectra[index].metadata.raw or {}).get("fit_model_source") or {}
+        if source.get("spectrum"):
+            for i in range(len(self.session)):
+                if self.session.label(i) == source["spectrum"]:
+                    index = i
+                    break
+        self._last_fit_models_index = index
+        return index
+
     def _fit_models(self, index) -> list[dict]:
         """Spectrum ``index``'s kept fits, decoded, each with its ``id``."""
         if index is None or not (0 <= index < len(self.session)):
@@ -14068,6 +14204,228 @@ class MainWindow(QMainWindow):
         button.clicked.connect(lambda: self._keep_panel_fit(key))
         layout.insertWidget(layout.indexOf(anchor) + 1, button)
         return button
+
+    def _add_save_fit_values_button(self, keep_button: QPushButton, key: str) -> QPushButton:
+        """"Save the Fitted Values…", right after ``keep_button``."""
+        button = QPushButton("Save the Fitted Values…")
+        button.setToolTip(
+            "Write this fit's values and 1σ errors to a JSON file anyone can read: a table "
+            "(row per site or peak, column per parameter), full-precision numbers where the "
+            "fit gives them, the table as shown, the fit's quality and its report.")
+        button.clicked.connect(lambda: self._save_fit_values(key))
+        layout = keep_button.parentWidget().layout() if keep_button.parentWidget() else None
+
+        def holder(lay):
+            if lay is None:
+                return None
+            if lay.indexOf(keep_button) >= 0:
+                return lay
+            for i in range(lay.count()):
+                found = holder(lay.itemAt(i).layout()) if lay.itemAt(i) else None
+                if found is not None:
+                    return found
+            return None
+        lay = holder(layout)
+        if lay is not None:
+            lay.insertWidget(lay.indexOf(keep_button) + 1, button)
+        return button
+
+    # ---- fitted values as JSON (explicit user request, 2026-10-08) --------
+
+    def _fit_value_tables(self, key: str) -> list:
+        """``[(title, QTableWidget)]`` holding fit ``key``'s values as shown."""
+        if key == "isotropic":
+            return [("", self.spectral_fit_table)]
+        if key == "csa":
+            return [("", self.csa_results_table)]
+        panel = self._fit_panels().get(key)
+        if panel is None:
+            return []
+        if key == "pnmr":
+            return [("Peaks", panel.results_peaks_table), ("Environments", panel.results_env_table)]
+        table = getattr(panel, "results_table", None)
+        return [("", table)] if table is not None else []
+
+    @staticmethod
+    def _table_columns_rows(table, prefix: str = "") -> tuple[list, list]:
+        """A results table as ``(columns, [(row heading, [cells])])``. Row
+        headings are the table's own, else its first column when that
+        holds names (a site/peak label), else the row number."""
+        columns = [(table.horizontalHeaderItem(c).text() if table.horizontalHeaderItem(c)
+                    else f"Column {c + 1}").replace("\n", " ") for c in range(table.columnCount())]
+        cell = (lambda r, c: table.item(r, c).text() if table.item(r, c) else "")
+        n = table.rowCount()
+        own = [table.verticalHeaderItem(r) for r in range(n)]
+        first_is_name = bool(n and columns) and all(
+            nb_fit_values.parse_value_error(cell(r, 0))["value"] is None and cell(r, 0).strip()
+            for r in range(n))
+        rows = []
+        for r in range(n):
+            if all(h is not None for h in own) and own:
+                head, cells = own[r].text(), [cell(r, c) for c in range(len(columns))]
+            elif first_is_name:
+                head, cells = cell(r, 0), [cell(r, c) for c in range(1, len(columns))]
+            else:
+                head, cells = str(r + 1), [cell(r, c) for c in range(len(columns))]
+            rows.append((f"{prefix}{head}", cells))
+        if first_is_name and not (own and all(h is not None for h in own)):
+            columns = columns[1:]
+        return columns, rows
+
+    def _fit_values_record(self, key: str) -> dict | None:
+        """Fit ``key``'s values as a :mod:`notebook.fit_values` record, or
+        None when the panel has no fit."""
+        if key == "isotropic":
+            result = getattr(self, "_last_spectral_fit", None)
+            summary = self.spectral_fit_params_label.text()
+        elif key == "csa":
+            result, summary = self._csa_fit_result, self.csa_results_label.text()
+        else:
+            panel = self._fit_panels().get(key)
+            result = getattr(panel, "result", None)
+            label = getattr(panel, "results_label", None)
+            summary = label.text() if label is not None else ""
+        if not result:
+            return None
+        columns, rows = [], []
+        tables = self._fit_value_tables(key)
+        for title, table in tables:
+            cols, rws = self._table_columns_rows(table, f"{title}: " if len(tables) > 1 else "")
+            for c in cols:
+                if c not in columns:
+                    columns.append(c)
+            rows += [(head, dict(zip(cols, cells))) for head, cells in rws]
+        rows = [(head, [cells.get(c, "") for c in columns]) for head, cells in rows]
+        spectrum = result.get("spectrum") if isinstance(result, dict) else None
+        index = self._row_of_spectrum(spectrum) if spectrum is not None else -1
+        if index is None or index < 0:
+            index = self._selected_index()
+        label, source = "", ""
+        if index is not None and 0 <= index < len(self.session):
+            label = self.session.label(index)
+            source = str(self.session.spectra[index].metadata.source_path or "")
+        panel = self._fit_panels().get(key)
+        report = ""
+        if panel is not None and hasattr(panel, "report_text"):
+            try:
+                report = panel.report_text()
+            except Exception:  # noqa: BLE001 -- the values are saved without it
+                report = ""
+        return nb_fit_values.fitted_values_record(
+            fit=nb_fit_models.KIND_LABELS.get(key, key), spectrum=label, source=source,
+            columns=columns, rows=rows, result=result if isinstance(result, dict) else None,
+            summary=summary, report=report)
+
+    def _fit_values_folder(self) -> str:
+        folder = self._ui_settings.get("fit_values_folder") if hasattr(self, "_ui_settings") \
+            else None
+        return folder if folder and os.path.isdir(folder) else io_state.default_state_root()
+
+    def _write_fit_values(self, record: dict, default_stem: str, path: str | None = None):
+        """Ask where (unless ``path``), write, remember the folder, log it."""
+        if path is None:
+            suggested = os.path.join(self._fit_values_folder(),
+                                     nb_fit_values.safe_file_stem(default_stem) + ".json")
+            path, _ = QFileDialog.getSaveFileName(self, "Save the fitted values", suggested,
+                                                  "JSON (*.json)")
+            if not path:
+                return None
+        try:
+            path = nb_fit_values.save_fitted_values(record, path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Save the fitted values", f"Could not write {path}:\n{exc}")
+            return None
+        if hasattr(self, "_ui_settings"):
+            self._ui_settings["fit_values_folder"] = os.path.dirname(path)
+            self._save_ui_settings()
+        self.statusBar().showMessage(f"Fitted values saved: {path}", 10000)
+        return path
+
+    def _save_fit_values(self, key: str, path: str | None = None) -> str | None:
+        """A fit panel's "Save the Fitted Values…"."""
+        record = self._fit_values_record(key)
+        if record is None:
+            QMessageBox.information(self, "Save the fitted values",
+                                    "Run the fit first -- this panel has no fitted values yet.")
+            return None
+        written = self._write_fit_values(
+            record, f"{record['spectrum'] or 'spectrum'} - {record['fit']} fitted values", path)
+        index = self._selected_index()
+        if written and index is not None:
+            history = self._ensure_history(index)
+            if history is not None:
+                io_history.add_event(history, f"{record['fit']} fitted values saved to {written}",
+                                     kind="saved")
+        return written
+
+    def _fit_model_values_record(self, index, model: dict) -> dict:
+        """A kept fit's values: its panel result's own numbers where it
+        has them, the table as it was shown when kept, and its report."""
+        result = None
+        if model.get("panel_result"):
+            try:
+                result = io_serialize.decode(copy.deepcopy(model["panel_result"]))
+            except Exception:  # noqa: BLE001 -- the table and report are saved without it
+                result = None
+        table = model.get("values_table") or {}
+        stats = nb_fit_models.fit_statistics(model)
+        record = nb_fit_values.fitted_values_record(
+            fit=f"{model.get('kind_label', model.get('kind', ''))}: {model['name']}",
+            spectrum=self.session.label(index) if index is not None else "",
+            source=str(self.session.spectra[index].metadata.source_path or "")
+            if index is not None else "",
+            columns=table.get("columns"), rows=[tuple(r) for r in table.get("rows") or []],
+            result=result if isinstance(result, dict) else None, report=model.get("report") or "")
+        record.setdefault("quality", {}).update(
+            {k: stats[k] for k in ("r2", "reduced_chi2", "aic", "bic", "k", "n")
+             if stats.get(k) is not None})
+        record["kept"] = model.get("time", "")
+        return record
+
+    def _spectrum_fit_values(self, index) -> dict:
+        """Every fit (the latest of each kind) and kept fit of spectrum
+        ``index`` as fitted-values records: ``{"fits": {...}, "kept fits":
+        {...}}``, either empty when there are none."""
+        raw = self.session.spectra[index].metadata.raw or {}
+        label = self.session.label(index)
+        source = str(self.session.spectra[index].metadata.source_path or "")
+        fits = {}
+        for key, entry in (raw.get("fits") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                result = io_serialize.decode(copy.deepcopy(entry.get("result")))
+            except Exception:  # noqa: BLE001 -- the table and report are saved without it
+                result = None
+            table = entry.get("values_table") or {}
+            record = nb_fit_values.fitted_values_record(
+                fit=entry.get("label") or key, spectrum=entry.get("target") or label,
+                source=source, columns=table.get("columns"),
+                rows=[tuple(r) for r in table.get("rows") or []],
+                result=result if isinstance(result, dict) else None,
+                report=entry.get("report") or "")
+            record["fitted"] = entry.get("time", "")
+            fits[entry.get("label") or key] = record
+        kept = {m["name"]: self._fit_model_values_record(index, m)
+                for m in self._fit_models(index)}
+        return {"fits": fits, "kept fits": kept}
+
+    def _save_fit_model_values(self, index, ids, path: str | None = None):
+        """Kept fit models ▸ Save the Fitted Values…: one file for one fit;
+        for several, one file holding each under its name."""
+        if index is None:
+            return None
+        models = [self._fit_model_by_id(index, i) for i in ids]
+        if len(models) == 1:
+            record = self._fit_model_values_record(index, models[0])
+            stem = f"{self.session.label(index)} - {models[0]['name']} fitted values"
+        else:
+            record = {nb_fit_values.FORMAT_KEY: nb_fit_values.FORMAT_VERSION,
+                      "spectrum": self.session.label(index),
+                      "fits": {m["name"]: self._fit_model_values_record(index, m)
+                               for m in models}}
+            stem = f"{self.session.label(index)} - {len(models)} kept fits fitted values"
+        return self._write_fit_values(record, stem, path)
 
     def _keep_panel_fit(self, key: str, name: str | None = None) -> dict | None:
         """Keep panel ``key``'s last fit. If another panel's fit is on the
@@ -14228,6 +14586,20 @@ class MainWindow(QMainWindow):
             components=components, labels=labels, n_free=n_free, mask=mask, report=report,
             target=label, x_label=x_label, y_label=y_label, title=shown.get("title") or name,
             panel_inputs=panel_inputs, panel_result=panel_result)
+        # The values table as shown, so the kept fit's fitted values can be
+        # saved later (Save the Fitted Values…) even if the panel moves on.
+        values_key = "isotropic" if kind == "isotropic" else panel_key
+        if values_key and result:
+            try:
+                record = self._fit_values_record(values_key)
+                if record is not None:
+                    model["values_table"] = {
+                        "columns": record["columns"],
+                        "rows": [[row, [record.get("as shown", {}).get(row, {}).get(c, "")
+                                        for c in record["columns"]]]
+                                 for row in record.get("as shown", {})]}
+            except Exception:  # noqa: BLE001 -- the fit is kept without it
+                pass
         if kind == "curve" and shown.get("curve_x") is not None:
             # The fitted function as drawn, so a kept curve fit is shown
             # as the smooth curve and not its values joined point to point.
@@ -14456,9 +14828,35 @@ class MainWindow(QMainWindow):
         self._store_fit(model["kind"], index)
         history = self._ensure_history(index)
         if history is not None:
-            io_history.add_event(history, f"Put kept fit “{model['name']}” back into the "
+            io_history.add_event(history, f"Re-plotted kept fit “{model['name']}” in the "
                                           f"{model['kind_label']} panel", kind="fit_model")
         self._draw_fit_model(model)
+        self._reveal_fit_advice(panel, model["kind"])
+
+    def _reveal_fit_advice(self, panel, kind: str) -> None:
+        """Open the panel's Fit section and scroll to its "What's next?"
+        (the advice box), or its results where it has none -- the second
+        half of the kept fit's "Re-plot and show “What's next?”"."""
+        result = self._csa_fit_result if kind == "csa" else getattr(panel, "result", None)
+        advice_box = getattr(panel, "advice_box", None)
+        if (advice_box is not None and isinstance(result, dict) and not result.get("advice")
+                and hasattr(panel, "make_advice")):
+            try:                    # a fit kept before advice existed: work it out now
+                result["advice"] = panel.make_advice(result)
+                advice_box.set_items(result["advice"])
+            except Exception:  # noqa: BLE001 -- advice is a help, never a reason to fail
+                pass
+        target = advice_box if advice_box is not None else (
+            self.csa_results_table if kind == "csa" else getattr(panel, "results_table", None))
+        if target is None:
+            return
+        self._open_fit_section_of(target)
+        parent = target.parentWidget()
+        while parent is not None and not isinstance(parent, QScrollArea):
+            parent = parent.parentWidget()
+        if parent is not None:
+            QApplication.processEvents()
+            parent.ensureWidgetVisible(target, 0, 40)
 
     def _rename_fit_model(self, index, model_id, name) -> None:
         models = self._fit_models(index)
@@ -17969,19 +18367,19 @@ class MainWindow(QMainWindow):
         # The spectrum's kept curve fits, here where they are made (the
         # same records as Fit ▸ Kept fit models, curve fits only).
         self.curve_fit_models_panel = FitModelsPanel(
-            models=lambda: [m for m in self._fit_models(self._selected_index())
+            models=lambda: [m for m in self._fit_models(self._fit_models_index())
                             if m.get("kind") == "curve"],
             keep=lambda: self._keep_curve_fits(),
-            show=lambda model_id: self._show_fit_model(self._selected_index(), model_id),
+            show=lambda model_id: self._show_fit_model(self._fit_models_index(), model_id),
             compare=lambda ids, residuals, components, layout="summary": self._compare_fit_models(
-                self._selected_index(), ids, residuals, components, "summary"),
-            restore=lambda model_id: self._restore_fit_model(self._selected_index(), model_id),
+                self._fit_models_index(), ids, residuals, components, "summary"),
+            restore=lambda model_id: self._restore_fit_model(self._fit_models_index(), model_id),
             rename=lambda model_id, name: self._rename_fit_model(
-                self._selected_index(), model_id, name),
-            delete=lambda model_id: self._delete_fit_model(self._selected_index(), model_id),
+                self._fit_models_index(), model_id, name),
+            delete=lambda model_id: self._delete_fit_model(self._fit_models_index(), model_id),
             can_restore=self._fit_model_restorable,
             recolour=lambda model_id, colour: self._recolour_fit_model(
-                self._selected_index(), model_id, colour))
+                self._fit_models_index(), model_id, colour))
         # Kept from the Fit plot box above, right under the plot controls.
         self.curve_fit_models_panel.keep_button.setVisible(False)
         self.curve_fit_models_group = QGroupBox("Kept curve fits")

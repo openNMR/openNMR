@@ -274,6 +274,9 @@ from .bms import run_bms, particles_to_array, build_box
 from ..core.fit_progress import (
     DEFAULT_MAX_ITERATIONS, FitNotConverged, iteration_limit, max_iterations, set_max_iterations,
 )
+# Fitted values as readable JSON (2026-10-08, round 3).
+from . import fit_values
+from .fit_values import load_fitted_values, save_fitted_values
 from .fit_advice import (
     GOOD_SIDEBANDS, MIN_SIDEBANDS, SIDEBAND_GUIDANCE, csa_span_ppm, sideband_count, sideband_note,
 )
@@ -439,4 +442,6 @@ __all__ = [
     "DEFAULT_MAX_ITERATIONS", "FitNotConverged", "iteration_limit", "max_iterations",
     "set_max_iterations", "GOOD_SIDEBANDS", "MIN_SIDEBANDS", "SIDEBAND_GUIDANCE",
     "csa_span_ppm", "sideband_count", "sideband_note",
+    # fitted values as readable JSON
+    "fit_values", "save_fitted_values", "load_fitted_values",
 ]

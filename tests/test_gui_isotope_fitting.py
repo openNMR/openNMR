@@ -184,9 +184,10 @@ def test_fit_panel_table_and_fit_with_a_linked_partner(qapp):
     assert fit["quality"]["r2"] > 0.995
     assert v[("Ti1", "C_Q")] == pytest.approx(4.0, abs=0.02)
     assert v[("Ti1", "delta_iso")] == pytest.approx(-800, abs=1)
-    labels = [panel.results_table.verticalHeaderItem(i).text()
-              for i in range(panel.results_table.rowCount())]
-    assert "Ti1 (49Ti): share (%)" in labels
+    t = panel.results_table
+    rows = [t.verticalHeaderItem(i).text() for i in range(t.rowCount())]
+    columns = [t.horizontalHeaderItem(c).text() for c in range(t.columnCount())]
+    assert "Ti1 (49Ti)" in rows and "Share (%)" in columns
     # fitted values back as the start keep the partner's nucleus and link
     panel.use_fitted_as_start()
     partner = panel.site_dicts[1]

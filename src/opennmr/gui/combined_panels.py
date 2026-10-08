@@ -1945,35 +1945,56 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
     # ---- results -----------------------------------------------------------
 
     def _report(self) -> None:
+        """The fitted values as a table -- a row per site (and one for
+        the spectrum's own MAS rate and baseline), a column per
+        parameter -- not a single column of "site: parameter" rows
+        (explicit user request, 2026-10-08: "Fitted values should be a
+        table (like they were previously), not a list")."""
         r = self.result
-        rows = []
+        cells: dict = {}                    # row -> {column: text}
+        columns: list = []
+
+        def put(row, column, text):
+            if column not in columns:
+                columns.append(column)
+            cells.setdefault(row, {})[column] = text
+
         for p in r["parameters"]:
-            if p["name"] == "mas_Hz":
-                label = _param_label("mas_Hz")
-            elif not p["label"]:
-                label = f"baseline {p['name']}"
+            if p["name"] == "mas_Hz" or not p["label"]:
+                row = SPECTRUM_ROW
+                column = (_param_label("mas_Hz") if p["name"] == "mas_Hz"
+                          else f"baseline {p['name']}")
             else:
-                label = f"{p['label']}: {_param_label(p['name'])}"
-            rows.append((label, self._fmt(float(p["value"]),
-                                          float(p["error"]) if p["error"] is not None else 0.0,
-                                          not p["free"])))
+                row, column = p["label"], _param_label(p["name"])
+            put(row, column, self._fmt(float(p["value"]),
+                                       float(p["error"]) if p["error"] is not None else 0.0,
+                                       not p["free"]))
         for site_label, d in r["derived"].items():
-            rows.append((f"{site_label}: share (%)", self._fmt(d["share_%"], d["share_%_err"], False)))
+            put(site_label, "Share (%)", self._fmt(d["share_%"], d["share_%_err"], False))
             if "P_Q" in d:
-                rows.append((f"{site_label}: P_Q (MHz)", self._fmt(d["P_Q"], d["P_Q_err"], False)))
+                put(site_label, "P_Q (MHz)", self._fmt(d["P_Q"], d["P_Q_err"], False))
             if "delta_cg" in d:
-                rows.append((f"{site_label}: CT c.o.g. (ppm)",
-                             self._fmt(d["delta_cg"], d["delta_cg_err"], False)))
+                put(site_label, "CT c.o.g. (ppm)",
+                    self._fmt(d["delta_cg"], d["delta_cg_err"], False))
+        # Sites first, in the fit's order; the spectrum's own row last.
+        row_names = [k for k in cells if k != SPECTRUM_ROW]
+        if SPECTRUM_ROW in cells:
+            row_names.append(SPECTRUM_ROW)
         t = self.results_table
         t.clear()
-        t.setColumnCount(1)
-        t.setHorizontalHeaderLabels(["Value"])
-        t.setRowCount(len(rows))
-        t.setVerticalHeaderLabels([label for label, _v in rows])
-        for i, (_label, text) in enumerate(rows):
-            item = QTableWidgetItem(text)
-            item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            t.setItem(i, 0, item)
+        t.setColumnCount(len(columns))
+        t.setHorizontalHeaderLabels(columns)
+        t.setRowCount(len(row_names))
+        t.setVerticalHeaderLabels(row_names)
+        for i, row in enumerate(row_names):
+            for j, column in enumerate(columns):
+                text = cells[row].get(column)
+                item = QTableWidgetItem("—" if text is None else text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if text is None:
+                    item.setToolTip(f"{column} does not apply to {row}.")
+                t.setItem(i, j, item)
+        t.resizeColumnsToContents()
         t.setVisible(True)
         q = r["quality"]
         head = r["log"].splitlines()

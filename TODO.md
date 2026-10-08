@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-08 round 3 (fitted values table + JSON, kept fits after Compare, live residuals, stacked crosshair, state folder setting): 20 new tests in `test_fit_values_kept_fits_crosshair_state_folder.py`. Related files only, as asked: 678 passed, 8 skipped, 0 failed. **Run the full suite locally before committing.***
+
 *2026-10-08 round 2 (maximum iterations, 3-5 sidebands guidance, contour scroll direction, Cmd/Ctrl+. crosshair): 34 new tests in `test_max_iterations_sidebands_contour_scroll.py`. Only related files were run, as asked (Py 3.13, PySide6 6.12.0): 1188 passed, 6 skipped, 0 failed. **Run the full suite locally before committing.***
 
 *2026-10-08 (one import for notebooks): 32 new tests in `test_notebook_single_import.py`. Only the related files were run, as asked (that file, test_accessibility, test_bloch_adiabatic, test_dnp_workflow, test_periodic_table; `--noconftest`, PySide6 not installed): 162 passed, 4 skipped (real-data tests), 0 failed; Py 3.10. **Run the full suite locally before committing.***
@@ -168,6 +170,25 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Fitted values as a table and as JSON; kept fits stay after Compare; live residuals; crosshair across a Compare stack; state folder in Settings (2026-10-08, round 3)
+
+**Asked:** (1) fitted values as a table, not a list; (2) "Put back in its panel" -> "Re-plot and show “What's next?”"; (3) a "Save the fitted values" button (values + errors, human-readable JSON) when a fit is done / when saving a state; (4) the crosshair across every compared spectrum, not just one; (5) kept fits vanished from Kept fits after Compare Ticked -- keep them, and add "Send to Open Experiments"; (6) switch residuals on/off without re-fitting; (7) Settings: default folder for openNMR states.
+
+**What was wrong:**
+- (1) Fit ▸ Combined Hamiltonian's results were one "Value" column with rows "Al1: C_Q (MHz)" etc. Now a row per site (+ "(spectrum)" for MAS rate/baseline) and a column per parameter, "—" where a parameter does not apply. Multi-spectrum's table (parameter × experiment) was left as it is.
+- (5) The fits had not been deleted: Kept fits followed the *selection*, and selecting a kept fit's Open experiment (e.g. in Compare) selected a spectrum with no kept fits of its own. `MainWindow._fit_models_index()` now resolves a fit experiment (`raw["fit_model_source"]`) back to its source spectrum; both FitModelsPanels use it; the panel says whose fits it lists ("Kept fits of …").
+
+**Built:**
+- `notebook/fit_values.py`: `parse_value_error`, `table_values`, `parameter_values` (exact numbers from `result["parameters"]` + `derived`), `fitted_values_record`, `save_fitted_values` / `load_fitted_values`. JSON: `values` {row: {column: {value, error, fixed}}} (full precision where the result has it, else parsed from the table), `as shown` (the table text), `quality`, `summary`, `report`. Exported from `opennmr.notebook`.
+- GUI: "Save the Fitted Values…" beside every "Keep This Fit…" (J, CSA, quadrupolar, Czjzek, combined, pNMR, isotropic); in Kept fits (button + right-click; several ticked -> one file, each fit under its name). Kept fits and stored fits now carry the values table as shown (`values_table`), so their values can be saved later. Save openNMR State has "Save the fitted values too" (default on) -> `fitted_values.json` in the state folder (every fit and kept fit of the ticked spectra). Default save folder: the state folder (below), then the last one used.
+- (2) `RESTORE_TEXT = "Re-plot and Show “What's Next?”"`; restoring now also opens that panel's Fit section and scrolls to its advice box (`_reveal_fit_advice`; advice worked out if the kept result predates it).
+- (4) `_ContourCrosshair(stack_axes=...)`: on a stacked Compare the vertical line runs through every row, the horizontal one marks only the row under the cursor (rows have their own y scales).
+- (5) "Send to Open Experiments" button (ticked, or the selected one); right-click item renamed to match.
+- (6) Residuals / Components of redraw the last Compare Ticked straight away (`FitModelsPanel._redraw_comparison`).
+- (7) Settings ▸ Saving: "Save openNMR states in" (+ Browse…, Reset, Show This Folder), saved as `state_folder`; `io_state.set_default_state_root` / `builtin_state_root` (user choice > `OPENNMR_STATES_DIR` > ~/Documents/openNMR/states).
+
+**Tests:** 20 new in `test_fit_values_kept_fits_crosshair_state_folder.py`; updated for the table layout: `test_gui_combined_fit.py` (3 asserts), `test_fit_mas_rate.py`, `test_gui_isotope_fitting.py`; `test_gui.py::test_settings_is_the_last_launcher_button` now expects Interface, Fitting, Saving, Default plot styles (it was failing since round 2's Fitting section -- not caught because round 2 ran only a `-k` subset of test_gui.py). Related files only, as asked (Py 3.13, PySide6 6.12.0): 26 GUI/fit/state files 633 passed, 5 skipped; `test_gui.py -k "state or ui_settings or ui_font or corrupt_ui or crosshair or keep or kept or fit_model or settings"` 45 passed, 3 skipped. 0 failed. **Run the full suite locally before committing.**
 
 ## Maximum iterations for every fit; 3-5 sidebands guidance; contour scroll direction; Cmd/Ctrl+. crosshair (2026-10-08, round 2)
 
