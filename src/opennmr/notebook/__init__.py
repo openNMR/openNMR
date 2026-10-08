@@ -251,6 +251,30 @@ from .diffusion import recorded_b_values, recorded_pfg_params
 from .bms_spectrum import generate_bms_spectrum_dict
 from .bms.io_utils import make_particle
 
+# ---------------------------------------------------------------------------
+# One-import convenience (2026-10-08): everything a notebook used to pull in
+# from half a dozen sub-packages is reachable from `import opennmr.notebook
+# as nmr` alone -- nmr.load(...), nmr.expand_pcov(...), nmr.pt.<...>, etc.
+# The short module aliases match the names the tutorial notebooks used
+# (pt, pf, dw, acc, bloch), so `pt.foo(...)` becomes `nmr.pt.foo(...)`, or
+# `from opennmr.notebook import *` restores the bare names exactly.
+# ---------------------------------------------------------------------------
+from ..io import load
+from .bridge import results_from_spectrum
+from .fitting import expand_pcov
+from .utils import find_isotope_info
+from ..plotting.accessibility import ordered_qualitative_colours
+from ..plotting import accessibility
+from ..simulate import bloch
+from . import periodic_table, pnmr_fit, bms
+from .bms import run_bms, particles_to_array, build_box
+
+pt = periodic_table
+pf = pnmr_fit
+dw = dnp_workflow
+acc = accessibility
+
+
 __all__ = [
     # utils
     "find_gamma", "NUC_label", "read_bruker_metadata", "read_bruker_fid",
@@ -397,4 +421,9 @@ __all__ = [
     "plot_vs_temperature", "plot_hendrickson_bray",
     "exchange_spectrum", "exchange_spectra_vs_temperature", "fit_exchange_spectra",
     "plot_exchange_stack", "plot_exchange_fit", "coalescence_temperature",
+    # one-import convenience: readers, helpers and module aliases
+    "load", "results_from_spectrum", "expand_pcov", "find_isotope_info",
+    "ordered_qualitative_colours", "run_bms", "particles_to_array", "build_box",
+    "periodic_table", "pt", "pnmr_fit", "pf", "dnp_workflow", "dw",
+    "accessibility", "acc", "bloch", "bms",
 ]

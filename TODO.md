@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-08 (one import for notebooks): 32 new tests in `test_notebook_single_import.py`. Only the related files were run, as asked (that file, test_accessibility, test_bloch_adiabatic, test_dnp_workflow, test_periodic_table; `--noconftest`, PySide6 not installed): 162 passed, 4 skipped (real-data tests), 0 failed; Py 3.10. **Run the full suite locally before committing.***
+
 *2026-10-07 round 2 (several nuclei on one spectrum: 47Ti/49Ti links, background nuclei): 33 new tests (23 + 10), `test_combined_hamiltonian.py`'s same-nucleus check rewritten. Every test file except `test_gui.py` was run file by file (Py 3.13, PySide6 6.11.2, matplotlib 3.11.2): 3629 passed, 130 skipped, 3 failed -- `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed` and `test_gui_export_scroll.py::test_an_export_never_contains_the_crosshair[False/True]`, pre-existing; **all three fixed in round 3** (+1 new Czjzek test). **`test_gui.py` was not completed** (over 50 min on the session's 2-CPU machine; stopped at the user's request) -- **run it locally before committing.***
 
 *2026-10-07 (DFT: G=0 fix, reference calibrations, ORCA/Gaussian): 26 new tests (12 + 10 + 4) and the 9 earlier GUI tests rewritten. Full suite: 3619 passed, 166 skipped, 1 failed (the pre-existing `test_czjzek.py::test_fit_warns_when_the_mean_efg_is_not_needed`); Py 3.13, PySide6 6.11.2, matplotlib 3.11.2. Seven tests crashed pytest-xdist workers and pass when run alone. **Run the full suite locally before committing.***
@@ -164,6 +166,14 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## One import for notebooks: everything via `import opennmr.notebook as nmr` (2026-10-08)
+
+**Asked:** the tutorial notebook needed ~20 import lines from `opennmr.io`, `opennmr.plotting.accessibility`, `opennmr.simulate.bloch`, `notebook.bridge`, `notebook.bms`, etc.; make `import opennmr.notebook as nmr` enough.
+
+**Built:** `notebook/__init__.py` now also exports `load` (from `opennmr.io`), `results_from_spectrum`, `expand_pcov`, `find_isotope_info`, `ordered_qualitative_colours`, `run_bms`, `particles_to_array`, `build_box`, and the modules `periodic_table`, `pnmr_fit`, `dnp_workflow`, `accessibility`, `bloch`, `bms` -- with the short aliases the notebooks used (`pt`, `pf`, `dw`, `acc`). All are added to `__all__`, so `from opennmr.notebook import *` gives the old bare names in one line. Everything from `jcoupling_fitting` was already exported. The same objects are re-exported, not wrapped (pinned by `test_notebook_single_import.py`, which also checks every `__all__` name resolves and is unique).
+- Not exported: `bms.run` (too generic a name at top level; use `nmr.bms.run`).
+- `periodic_table` and `bridge` are now imported with the package (both light: numpy/pandas only).
 
 ## Two long-standing test failures fixed: alternating exports, Czjzek "no mean EFG" (2026-10-07, round 3)
 
