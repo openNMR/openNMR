@@ -351,9 +351,13 @@ def _estimate_anisotropic(kind, x, y, mask, nucleus, settings, transitions, n_zc
         notes.append("The opposite sign of Δ fits almost as well (Δ ≈ "
                      f"{rival['size']:.4g} ppm, η ≈ {rival['eta']:.2f}): try both as starts "
                      "(Try starts) if the fit looks wrong.")
-    if kind == "csa" and abs(best["size"]) * settings["larmor_Hz"] / 1e6 < 0.5 * mas and mas:
-        notes.append("The anisotropy is small next to the spinning rate: few sidebands, so "
-                     "these values are rough.")
+    if kind == "csa" and mas:
+        from .fit_advice import sideband_count, sideband_note
+        said = sideband_note(sideband_count(best["size"], settings["larmor_Hz"] / 1e6, mas,
+                                            best["eta"]), "The site", mas)
+        if said is not None:
+            notes.append(said[1] + (" These starting values are rough."
+                                    if said[0] == "warn" else ""))
     return [site], notes, best
 
 

@@ -816,6 +816,10 @@ class MplCanvas(QWidget):
     pickModeChanged = Signal(bool)
     regionSelectModeChanged = Signal(bool)
     crosshairEnabledChanged = Signal(bool)
+    #: The contour right-click menu's "Scroll Up Shows More Contours"
+    #: was toggled -- MainWindow applies it to every canvas and saves it
+    #: (Settings ▸ Interface holds the same switch).
+    contourScrollDirectionChanged = Signal(bool)
 
     #: The user picked a different result to show from this canvas's
     #: own view switcher (see :meth:`set_view_switcher`), carrying that
@@ -890,7 +894,7 @@ class MplCanvas(QWidget):
         self._crosshair_button = self._add_toolbar_toggle(
             "Crosshair",
             "Show a cross following the cursor across the plot (and, on a 2D, "
-            "across both projection strips).",
+            "across both projection strips). Cmd/Ctrl+. toggles it.",
             self.set_crosshair_enabled,
             checked=True,
         )
@@ -1176,6 +1180,13 @@ class MplCanvas(QWidget):
         # every canvas shares one user preference, set uniformly by
         # MainWindow's Output tab, until changed again.
         self._contour_fraction = 0.25
+        # Which way a scroll over a contour body moves the levels. False
+        # (the long-standing default): scroll up raises the floor, so
+        # fewer contours ("zoom into the peaks"). True: scroll up lowers
+        # it, so more contours. Asked for because some users find the
+        # first counter-intuitive; one app-wide preference, set by
+        # MainWindow from Settings ▸ Interface or the contour menu.
+        self._contour_scroll_up_more = False
         # Diagonal-line overlay (plotting.plot_2d_contour's own
         # show_nQ_line/nQ params -- already existed in the backend,
         # just never wired to the GUI until this) -- y = n*x per value
@@ -2171,17 +2182,37 @@ class MplCanvas(QWidget):
             return None
         return float(y)
 
+    def set_contour_scroll_up_shows_more(self, up_shows_more: bool) -> None:
+        """Choose which way a scroll over a contour (2D or DOSY) moves
+        its levels: ``True`` -- scroll up shows *more* contours (lowers
+        the floor); ``False`` (default) -- scroll up shows fewer."""
+        self._contour_scroll_up_more = bool(up_shows_more)
+
+    def contour_scroll_up_shows_more(self) -> bool:
+        return self._contour_scroll_up_more
+
+    def _contour_scroll_step(self, event) -> float:
+        """Multiplier for the contour floor from one scroll click.
+        Above 1 raises the floor (fewer levels), below 1 lowers it."""
+        raise_floor = (event.button == "up") != self._contour_scroll_up_more
+        return self.CONTOUR_ZOOM_FACTOR if raise_floor else 1 / self.CONTOUR_ZOOM_FACTOR
+
     def _adjust_contour_levels(self, event) -> None:
-        """Scroll-up raises the contour floor (fewer, stronger-only
-        levels -- "zoom into the peaks"); scroll-down lowers it
-        (reveals weaker signals/noise). Redraws the whole contour
-        (~tens of ms, see plot_2d_contour) but preserves the current
-        pan/zoom."""
-        step = self.CONTOUR_ZOOM_FACTOR if event.button == "up" else 1 / self.CONTOUR_ZOOM_FACTOR
+        """By default scroll-up raises the contour floor (fewer,
+        stronger-only levels -- "zoom into the peaks") and scroll-down
+        lowers it (reveals weaker signals/noise); reversed when
+        :meth:`set_contour_scroll_up_shows_more` is on. Redraws the
+        whole contour (~tens of ms, see plot_2d_contour) but preserves
+        the current pan/zoom."""
+        step = self._contour_scroll_step(event)
         self._contour_factor = min(
             max(self._contour_factor * step, self._CONTOUR_FACTOR_MIN), self._CONTOUR_FACTOR_MAX,
         )
         self._redraw_contour(preserve_view=True)
+
+    def _on_contour_scroll_action_toggled(self, checked: bool) -> None:
+        self.set_contour_scroll_up_shows_more(checked)
+        self.contourScrollDirectionChanged.emit(bool(checked))
 
     def set_contour_levels(self, clevels: int, level_mode: str, power: float, factor: float | None = None) -> None:
         """Apply new contour-level settings from the right-click "Set
@@ -3615,6 +3646,13 @@ class MplCanvas(QWidget):
         clear_slices_action = None
         if self._contour_spectrum is not None:
             contour_levels_action = menu.addAction("Set Contour Levels…")
+            contour_scroll_action = menu.addAction("Scroll Up Shows More Contours")
+            contour_scroll_action.setCheckable(True)
+            contour_scroll_action.setChecked(self._contour_scroll_up_more)
+            contour_scroll_action.setToolTip(
+                "Off: scrolling up over the contour shows fewer levels (raises the "
+                "lowest one). On: scrolling up shows more. Also in Settings ▸ Interface.")
+            contour_scroll_action.toggled.connect(self._on_contour_scroll_action_toggled)
             extract_slice_action = menu.addAction("Extract Slice…")
             if self._contour_slices:
                 clear_slices_action = menu.addAction(
@@ -6792,8 +6830,8 @@ class MplCanvas(QWidget):
         """Scroll-up raises the DOSY's contour floor (fewer, stronger
         levels), scroll-down lowers it -- the same gesture and the same
         meaning as :meth:`_adjust_contour_levels` on a 2D, preserving
-        the current pan/zoom."""
-        step = self.CONTOUR_ZOOM_FACTOR if event.button == "up" else 1 / self.CONTOUR_ZOOM_FACTOR
+        the current pan/zoom. Follows the same scroll-direction choice."""
+        step = self._contour_scroll_step(event)
         self._dosy_factor = min(
             max(self._dosy_factor * step, self._DOSY_FACTOR_MIN), self._DOSY_FACTOR_MAX,
         )

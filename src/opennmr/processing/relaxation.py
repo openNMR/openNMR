@@ -52,6 +52,8 @@ from math import floor, log10
 import numpy as np
 from scipy.optimize import curve_fit
 
+from ..core import fit_progress as _fit_progress
+
 from .fitting import build_region_mask, estimate_baseline_robust, estimate_noise_level, extract_params_and_errors
 from ..core.spectrum import NMRSpectrum
 from . import relaxometry as _relaxometry
@@ -667,7 +669,7 @@ def describe_uncertainty(from_measurement_errors: bool, dof: int) -> dict:
 
 
 def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
-                    bounds=None, fixed=None, maxfev=20000, custom_model: dict | None = None) -> dict:
+                    bounds=None, fixed=None, maxfev=None, custom_model: dict | None = None) -> dict:
     """
     Fit a relaxation curve ``y(t)`` with a named model from
     :data:`RELAXATION_MODELS`, or an arbitrary user-supplied one.
@@ -782,9 +784,10 @@ def fit_relaxation(t, y, model: str = "inversion_recovery", y_err=None, p0=None,
     fit_kwargs = {"x_scale": "jac", **(spec.get("curve_fit_kwargs") or {})}
 
     def fit_once(start):
-        popt_, pcov_ = curve_fit(
+        popt_, pcov_ = _fit_progress.limited_curve_fit(
             wrapper, t, y, p0=start, bounds=(lo_free, hi_free),
-            sigma=sigma, absolute_sigma=sigma is not None, maxfev=maxfev, **fit_kwargs,
+            sigma=sigma, absolute_sigma=sigma is not None, max_iterations=maxfev,
+            label="The relaxation fit", **fit_kwargs,
         )
         r = (y - wrapper(t, *popt_)) / (sigma if sigma is not None else 1.0)
         return popt_, pcov_, float(np.sum(r ** 2))
@@ -872,7 +875,7 @@ def decay_fraction(y) -> float:
 
 def fit_relaxation_global(datasets, model: str = "exponential_decay", shared=(),
                           custom_model: dict | None = None, p0=None, bounds=None,
-                          fixed=None, maxfev=40000, labels=None) -> dict:
+                          fixed=None, maxfev=None, labels=None) -> dict:
     """Fit several curves **at once**, with some parameters tied
     across all of them and the rest free per curve.
 
@@ -1052,10 +1055,10 @@ def fit_relaxation_global(datasets, model: str = "exponential_decay", shared=(),
             pieces.append(func(data["t"], *[full[name] for name in param_names]))
         return np.concatenate(pieces)
 
-    popt_log, pcov_log = curve_fit(
+    popt_log, pcov_log = _fit_progress.limited_curve_fit(
         joint, x_concat, y_concat, p0=guess, bounds=(lower, upper),
         sigma=sigma_concat, absolute_sigma=sigma_concat is not None,
-        maxfev=maxfev, x_scale="jac",
+        max_iterations=maxfev, x_scale="jac", label="The global relaxation fit",
     )
     popt, pcov = _undo_log_space(popt_log, pcov_log, log_slots)
     perr = np.sqrt(np.diag(pcov))

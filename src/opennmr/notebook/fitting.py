@@ -523,9 +523,9 @@ def fit_spectrum(results, peak_defs, fit_regions=None, use_normalised=True, x_un
         if val < lo or val > hi:
             print("BAD INITIAL PARAMETER", i, "value=", val, "bounds=", lo, hi)
 
-    popt_free, pcov_free = curve_fit(
+    popt_free, pcov_free = _fit_progress.limited_curve_fit(
         _fit_progress.tracked(model_wrapper, y, n_free=int(is_free.sum())), x, y, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
-        maxfev=20000,
+        label="The spectral fit",
     )
 
     popt = reconstruct_full(p0, popt_free, is_free)

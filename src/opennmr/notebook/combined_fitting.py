@@ -225,7 +225,7 @@ def _linked_sources(dicts):
 def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=None,
                  mas_Hz=0.0, order="second", transitions="all", rotor_angle="magic",
                  n_zcw=None, fit_regions=None, baseline_regions=None, fit_baseline=False,
-                 estimate_amounts=True, max_nfev=2000, fit_mas=False, mas_window_Hz=500.0,
+                 estimate_amounts=True, max_nfev=None, fit_mas=False, mas_window_Hz=500.0,
                  mas_scan_points=41, mas_bounds_Hz=None, observe=None):
     """
     Fit Combined-Hamiltonian sites to a 1D spectrum.
@@ -456,9 +456,10 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
             return (np.sum(site_curves(ds, mas=mas), axis=0) + c0 + c1 * (x - x_ref))[mask]
         lo = np.array([r["lower"] for r in table])[which]
         hi = np.array([r["upper"] for r in table])[which]
-        popt, pcov = curve_fit(_fit_progress.tracked(model, y[mask], n_free=int(which.sum())),
-                               x[mask], y[mask], p0=p_all[which], bounds=(lo, hi),
-                               diff_step=1e-4, max_nfev=max_nfev, **kw)
+        popt, pcov = _fit_progress.limited_curve_fit(
+            _fit_progress.tracked(model, y[mask], n_free=int(which.sum())),
+            x[mask], y[mask], p0=p_all[which], bounds=(lo, hi),
+            diff_step=1e-4, max_iterations=max_nfev, label="The Combined Hamiltonian fit", **kw)
         p_all[which] = popt
         return pcov
 
@@ -574,6 +575,7 @@ def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_start
         raise ValueError(f"{len(combos)} starting points (max_starts={max_starts}); "
                          "use fewer values.")
     rows, best, best_start = [], None, None
+    last_limit = None
     screen = dict(fit_kwargs)
     if screen_n_zcw:
         screen["n_zcw"] = screen_n_zcw
@@ -586,6 +588,8 @@ def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_start
         try:
             fit = fit_combined(results, dicts, **screen)
         except (RuntimeError, ValueError) as exc:          # a start that does not converge
+            if isinstance(exc, _fit_progress.FitNotConverged):
+                last_limit = exc
             rows.append({"start": start_label, "r2": float("nan"), "chi2": float("inf"),
                          "error": str(exc)})
             continue
@@ -596,6 +600,9 @@ def fit_combined_multistart(results, sites, starts, screen_n_zcw=None, max_start
         if best is None or fit["quality"]["chi2"] < best["quality"]["chi2"]:
             best, best_start = fit, dicts
     if best is None:
+        if last_limit is not None:
+            # Every start ran out of iterations: say so, with what to try.
+            raise last_limit
         raise RuntimeError("No starting point converged.")
     if screen_n_zcw:
         _fit_progress.set_stage("refining the best start")

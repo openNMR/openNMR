@@ -488,7 +488,7 @@ def _seed_from(template, same_nucleus_previous, other_previous):
 # ============================================================
 
 def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=None, fixed=None,
-              bounds=None, seed="previous", joint=None, preset=None, max_nfev=400,
+              bounds=None, seed="previous", joint=None, preset=None, max_nfev=None,
               progress=None):
     """
     Fit Combined-Hamiltonian sites to several spectra, consistently.
@@ -682,15 +682,20 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
         return np.concatenate(out)
 
     if free.any():
-        solution = least_squares(_fit_progress.tracked_residuals(residuals, n_free=int(free.sum())),
-                                 p0[free], bounds=(lo, hi), x_scale="jac",
-                                 diff_step=1e-4, max_nfev=max_nfev)
+        # max_nfev: the iteration limit; None uses the app-wide one
+        # (2000 unless changed). Reaching it keeps the result, flagged.
+        solution = _fit_progress.limited_least_squares(
+            _fit_progress.tracked_residuals(residuals, n_free=int(free.sum())),
+            p0[free], bounds=(lo, hi), x_scale="jac", diff_step=1e-4,
+            max_iterations=max_nfev, raise_on_limit=False, label="The joint refinement")
         theta = solution.x
         J = solution.jac
         dof = max(solution.fun.size - int(free.sum()), 1)
         s2 = float(np.sum(solution.fun ** 2)) / dof
         cov = np.linalg.pinv(J.T @ J) * s2
-        if not solution.success:
+        if solution.not_converged is not None:
+            warnings.append(str(solution.not_converged))
+        elif not solution.success:
             warnings.append(f"The joint refinement stopped without converging ({solution.message})")
         chi2_red = s2
     else:

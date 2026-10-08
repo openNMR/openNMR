@@ -388,10 +388,10 @@ def fit_quadrupolar_spectrum(results, p0, I=None, nucleus=None, larmor_Hz=None, 
 
     # Relative steps sized to the physics: the default (~1.5e-8 of the
     # value) is below the powder pattern's own bin-to-bin roughness.
-    popt_free, pcov_free = curve_fit(_fit_progress.tracked(model, y_fit, n_free=int(is_free.sum())),
-                                     x_fit, y_fit, p0=p0_arr[is_free],
-                                     bounds=(lower[is_free], upper[is_free]),
-                                     diff_step=1e-4, maxfev=5000)
+    popt_free, pcov_free = _fit_progress.limited_curve_fit(
+        _fit_progress.tracked(model, y_fit, n_free=int(is_free.sum())),
+        x_fit, y_fit, p0=p0_arr[is_free], bounds=(lower[is_free], upper[is_free]),
+        diff_step=1e-4, label="The quadrupolar fit")
     popt = p0_arr.copy()
     popt[is_free] = popt_free
     unit = np.ones(len(popt))

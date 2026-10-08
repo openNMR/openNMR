@@ -269,6 +269,15 @@ from ..simulate import bloch
 from . import periodic_table, pnmr_fit, bms
 from .bms import run_bms, particles_to_array, build_box
 
+# Fitting limits and sideband guidance (2026-10-08): the app-wide maximum
+# number of iterations (2000 to start with) and the 3-5 sideband rule.
+from ..core.fit_progress import (
+    DEFAULT_MAX_ITERATIONS, FitNotConverged, iteration_limit, max_iterations, set_max_iterations,
+)
+from .fit_advice import (
+    GOOD_SIDEBANDS, MIN_SIDEBANDS, SIDEBAND_GUIDANCE, csa_span_ppm, sideband_count, sideband_note,
+)
+
 pt = periodic_table
 pf = pnmr_fit
 dw = dnp_workflow
@@ -426,4 +435,8 @@ __all__ = [
     "ordered_qualitative_colours", "run_bms", "particles_to_array", "build_box",
     "periodic_table", "pt", "pnmr_fit", "pf", "dnp_workflow", "dw",
     "accessibility", "acc", "bloch", "bms",
+    # fitting limits and sideband guidance
+    "DEFAULT_MAX_ITERATIONS", "FitNotConverged", "iteration_limit", "max_iterations",
+    "set_max_iterations", "GOOD_SIDEBANDS", "MIN_SIDEBANDS", "SIDEBAND_GUIDANCE",
+    "csa_span_ppm", "sideband_count", "sideband_note",
 ]

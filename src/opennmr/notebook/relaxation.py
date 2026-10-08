@@ -40,6 +40,8 @@ import matplotlib.pyplot as plt
 from math import floor, log10
 from scipy.optimize import curve_fit
 
+from ..core import fit_progress as _fit_progress
+
 from .utils import read_vdlist
 from .plotting import setup_plotting, apply_tick_style, apply_spine_style, save_figure
 from .fitting import build_region_mask, estimate_baseline_robust, estimate_noise_level, NMR2D_fit_slices
@@ -212,7 +214,7 @@ RELAXATION_MODELS = {
 # ============================================================
 
 def fit_relaxation(t, y, model="inversion_recovery", y_err=None, p0=None,
-                    bounds=None, fixed=None, maxfev=20000):
+                    bounds=None, fixed=None, maxfev=None):
     """
     Fit a relaxation curve ``y(t)`` with a named model from
     :data:`RELAXATION_MODELS`.
@@ -300,9 +302,10 @@ def fit_relaxation(t, y, model="inversion_recovery", y_err=None, p0=None,
     fit_kwargs = dict(spec.get("curve_fit_kwargs") or {})
 
     def fit_once(start):
-        popt_, pcov_ = curve_fit(
+        popt_, pcov_ = _fit_progress.limited_curve_fit(
             wrapper, t, y, p0=start, bounds=(lo_free, hi_free),
-            sigma=sigma, absolute_sigma=sigma is not None, maxfev=maxfev, **fit_kwargs,
+            sigma=sigma, absolute_sigma=sigma is not None, max_iterations=maxfev,
+            label="The relaxation fit", **fit_kwargs,
         )
         r = (y - wrapper(t, *popt_)) / (sigma if sigma is not None else 1.0)
         return popt_, pcov_, float(np.sum(r ** 2))

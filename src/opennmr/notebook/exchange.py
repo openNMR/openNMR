@@ -564,7 +564,7 @@ def _read_param(name, sites, hops, gauss):
 
 def fit_exchange_spectra(spectra, sites, hops, vary, larmor_MHz=None, nucleus=None, B0_T=None,
                          gauss_fwhm_ppm: float = 0.0, bounds=None, n_dist: int = 5,
-                         baseline: bool = True, max_nfev: int = 400) -> dict:
+                         baseline: bool = True, max_nfev: int | None = None) -> dict:
     """Fit one or more measured spectra (e.g. a VT series) with one
     exchange model.
 
@@ -590,7 +590,6 @@ def fit_exchange_spectra(spectra, sites, hops, vary, larmor_MHz=None, nucleus=No
     and ``log``.
     """
     import copy
-    from scipy.optimize import least_squares
 
     if not spectra:
         raise ValueError("Give at least one spectrum to fit.")
@@ -653,7 +652,12 @@ def fit_exchange_spectra(spectra, sites, hops, vary, larmor_MHz=None, nucleus=No
         out, *_ = models(x)
         return np.concatenate([(p[1] - m) / norm for p, (m, _c) in zip(prepared, out)])
 
-    sol = least_squares(residuals, x0, bounds=(lo, hi), x_scale="jac", max_nfev=max_nfev)
+    from ..core import fit_progress as _fit_progress
+    # max_nfev: the iteration limit; None uses the app-wide one (2000
+    # unless changed). Reaching it keeps the result, flagged, with advice.
+    sol = _fit_progress.limited_least_squares(residuals, x0, bounds=(lo, hi), x_scale="jac",
+                                              max_iterations=max_nfev, raise_on_limit=False,
+                                              label="The exchange fit")
     out, st, hp, extra = models(sol.x)
     n_pts = sum(p[1].size for p in prepared)
     n_free = len(vary) + len(prepared) * (2 if baseline else 1)
@@ -686,6 +690,8 @@ def fit_exchange_spectra(spectra, sites, hops, vary, larmor_MHz=None, nucleus=No
         if name.endswith("log10_k"):
             extra_txt = f"  (k = {10 ** v:.3g} s^-1)"
         lines.append(f"  {name} = {v:.6g} ± {e:.2g}{extra_txt}")
+    if sol.not_converged is not None:
+        lines.append(str(sol.not_converged))
     return {"params": params, "errors": errs, "sites": st, "hops": hp,
             "gauss_fwhm_ppm": extra["gauss_fwhm_ppm"], "fits": fits, "redchi": redchi,
             "success": bool(sol.success), "larmor_MHz": larmor, "log": "\n".join(lines)}

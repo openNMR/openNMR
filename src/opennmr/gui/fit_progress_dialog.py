@@ -45,6 +45,11 @@ def status_text(title: str, status) -> str:
     """The pop-up's lines for ``status`` (a FitStatus)."""
     head = title + (f" — {status.stage}" if status.stage else "")
     lines = [head, f"{status.evaluations:,} model evaluations, {_duration(status.elapsed)}"]
+    iterations = getattr(status, "iterations", None)
+    limit = getattr(status, "max_iterations", None)
+    if iterations is not None and limit:
+        lines.append(f"About {iterations:,} iterations of at most {limit:,} "
+                     f"(Settings ▸ Fitting)")
     if math.isfinite(status.best_cost):
         misfit = f"Misfit (sum of squared residuals): {status.best_cost:.4g}"
         if math.isfinite(status.relative):

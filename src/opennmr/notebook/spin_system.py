@@ -388,7 +388,7 @@ def fit_spin_system_spectrum(results, spins, couplings, B0_tesla=None, fwhm_Hz=1
                              lineshape="lorentzian", eta=0.0, fit_regions=None,
                              fixed=None, bounds=None, observe=None,
                              baseline_regions=None, baseline_sigma=2.5,
-                             baseline_max_iter=10, max_iterations=200):
+                             baseline_max_iter=10, max_iterations=None):
     """Fit a spin system's shifts, Js, linewidth and height to a spectrum.
 
     The baseline offset (b0) is fitted with everything else; its slope is
@@ -412,9 +412,13 @@ def fit_spin_system_spectrum(results, spins, couplings, B0_tesla=None, fwhm_Hz=1
         ``"fwhm (Hz)"``, ``"amplitude"``.
     bounds : dict, optional
         Parameter name -> (low, high).
-    max_iterations : int
+    max_iterations : int, optional
         Least-squares iterations allowed (each costs one model evaluation
-        plus one per free parameter). A fit that runs out raises.
+        plus one per free parameter). ``None`` (default) uses the app-wide
+        limit, :func:`opennmr.core.fit_progress.max_iterations` (2000 unless
+        changed). A fit that runs out raises
+        :class:`~opennmr.core.fit_progress.FitNotConverged`, whose message
+        says what to try next.
 
     Signs: unlike a first-order multiplet, a strongly coupled spectrum
     can depend on the *relative* signs of couplings (ABX, AA'XX'), so J is
@@ -528,11 +532,11 @@ def fit_spin_system_spectrum(results, spins, couplings, B0_tesla=None, fwhm_Hz=1
     # budget is in iterations' worth of work; tolerances are tight so a
     # converged fit is converged to far below any linewidth.
     n_free = int(is_free.sum())
-    popt_free, pcov_free = curve_fit(_fit_progress.tracked(model, y_fit, n_free=n_free),
-                                     x_fit, y_fit, p0=p0[is_free],
-                                     bounds=(lower[is_free], upper[is_free]),
-                                     diff_step=steps[is_free], max_nfev=max_iterations,
-                                     ftol=1e-12, xtol=1e-12, gtol=1e-12)
+    popt_free, pcov_free = _fit_progress.limited_curve_fit(
+        _fit_progress.tracked(model, y_fit, n_free=n_free),
+        x_fit, y_fit, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
+        diff_step=steps[is_free], max_iterations=max_iterations,
+        ftol=1e-12, xtol=1e-12, gtol=1e-12, label="The spin-system fit")
     del n_free
     popt = p0.copy()
     popt[is_free] = popt_free

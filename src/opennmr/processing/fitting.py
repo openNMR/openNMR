@@ -1178,9 +1178,9 @@ def fit_spectrum(spectrum: NMRSpectrum, peak_defs, fit_regions=None, use_normali
         full = reconstruct_full(p0, free_params, is_free)
         return build_model(x, full, peak_defs, x_ref)
 
-    popt_free, pcov_free = curve_fit(
+    popt_free, pcov_free = _fit_progress.limited_curve_fit(
         _fit_progress.tracked(model_wrapper, y, n_free=int(is_free.sum())), x, y, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
-        maxfev=20000,
+        label="The spectral fit",
     )
 
     popt = reconstruct_full(p0, popt_free, is_free)

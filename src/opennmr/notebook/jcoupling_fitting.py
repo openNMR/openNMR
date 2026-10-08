@@ -642,10 +642,10 @@ def fit_jcoupling_spectrum(results, p0, larmor_Hz=None, lineshape="lorentzian", 
     kinds = _param_kinds(labels, topologies)
     diff_step = _finite_diff_steps(p0_arr, kinds)[is_free]
 
-    popt_free, pcov_free = curve_fit(
+    popt_free, pcov_free = _fit_progress.limited_curve_fit(
         _fit_progress.tracked(model_wrapper, y_fit, n_free=int(is_free.sum())), x_fit, y_fit,
         p0=p0_arr[is_free],
-        bounds=(lower[is_free], upper[is_free]), maxfev=20000,
+        bounds=(lower[is_free], upper[is_free]), label="The J-coupling fit",
         diff_step=diff_step,
     )
 

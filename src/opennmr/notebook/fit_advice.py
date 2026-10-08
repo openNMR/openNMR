@@ -59,6 +59,66 @@ _UNITS = {"delta_iso": " ppm", "fwhm": " ppm", "aniso": " ppm", "C_Q": " MHz", "
 _PHYSICAL_LIMITS = ("asym", "eta_Q", "eta")
 
 
+#: Spinning sidebands an anisotropic pattern should span for an accurate
+#: fit: at least 3, better 5 (explicit user request, 2026-10-08: "for
+#: fitting any anisotropic interactions, it is sensible to have at least
+#: 3-5 sidebands for accuracy"). With fewer, the sideband intensities --
+#: which are all that carry the anisotropy under MAS -- are too few to
+#: pin Δ and η (or C_Q and η_Q) down, and they trade off with each other.
+MIN_SIDEBANDS = 3
+GOOD_SIDEBANDS = 5
+
+SIDEBAND_GUIDANCE = (
+    "For fitting any anisotropic interaction (CSA, quadrupolar, dipolar) under MAS, aim for "
+    f"at least {MIN_SIDEBANDS}–{GOOD_SIDEBANDS} spinning sidebands: they carry the anisotropy, "
+    "and with fewer the size and especially the asymmetry are poorly determined. Spin slower "
+    "if you can, keep every sideband inside the fit window, and check the MAS rate.")
+
+
+def csa_span_ppm(aniso, asym=0.0, convention="Haeberlen") -> float:
+    """Total width (span, largest minus smallest principal value) of a
+    CSA powder pattern, in ppm. Haeberlen: ``aniso`` = δ (the reduced
+    anisotropy), ``asym`` = η, span = |δ|(3 + η)/2. Herzfeld-Berger:
+    ``aniso`` is the span Ω itself."""
+    aniso = abs(float(aniso))
+    if str(convention or "Haeberlen").lower().startswith("herzfeld"):
+        return aniso
+    eta = min(max(abs(float(asym or 0.0)), 0.0), 1.0)
+    return aniso * (3.0 + eta) / 2.0
+
+
+def sideband_count(aniso, larmor_MHz, mas_Hz, asym=0.0, convention="Haeberlen") -> float:
+    """About how many spinning sidebands (centreband included) a CSA
+    pattern spreads over at ``mas_Hz``: its static width divided by the
+    spinning rate. ``inf`` for a static spectrum (no spinning), ``0`` for
+    no anisotropy. Compare with :data:`MIN_SIDEBANDS`/:data:`GOOD_SIDEBANDS`."""
+    mas_Hz = float(mas_Hz or 0.0)
+    if mas_Hz <= 0:
+        return float("inf")
+    width_Hz = csa_span_ppm(aniso, asym, convention) * abs(float(larmor_MHz))
+    return width_Hz / mas_Hz
+
+
+def sideband_note(n_sidebands, label="This site", mas_Hz=None):
+    """``(tone, text)`` on whether ``n_sidebands`` (from
+    :func:`sideband_count`) is enough to fit an anisotropy accurately, or
+    ``None`` when it is (at least :data:`GOOD_SIDEBANDS`, or static)."""
+    n = float(n_sidebands)
+    if not np.isfinite(n) or n >= GOOD_SIDEBANDS:
+        return None
+    at = f" at {float(mas_Hz) / 1e3:g} kHz MAS" if mas_Hz else ""
+    if n < MIN_SIDEBANDS:
+        return ("warn",
+                f"{label}'s anisotropic pattern spreads over only about {n:.1f} spinning "
+                f"sidebands{at}. For an accurate fit of an anisotropic interaction aim for at "
+                f"least {MIN_SIDEBANDS}–{GOOD_SIDEBANDS}: with fewer, Δ and especially η are "
+                "poorly determined. Spinning slower, or a static "
+                "spectrum, would pin them down.")
+    return ("note",
+            f"{label}'s pattern spreads over about {n:.1f} spinning sidebands{at}: enough to fit, "
+            f"though {GOOD_SIDEBANDS} or more would determine Δ and η more accurately.")
+
+
 def _name(label, name):
     base = _NAMES.get(name, f"J ({name})" if name.startswith("J") else name)
     return f"{base} of {label}" if label else base
@@ -325,6 +385,7 @@ def _site_info(fit):
         out.append({"label": d.get("label"), "kinds": kinds, "spin": d.get("spin"),
                     "delta_iso": delta, "fwhm": float(d.get("fwhm", 0.0)),
                     "lineshape": d.get("lineshape"), "aniso": csa.get("aniso"),
+                    "asym": csa.get("asym"),
                     "convention": csa.get("convention"), "C_Q": quad.get("C_Q"),
                     "eta_Q": quad.get("eta_Q"), "centre": centre,
                     "share": derived.get("share_%"), "share_err": derived.get("share_%_err"),
@@ -372,9 +433,21 @@ def _sideband_items(fit, sites, x, y, base, mask, sigma, larmor_MHz):
     dx = float(np.median(np.abs(np.diff(x))))
     total_sites = np.sum([np.asarray(c, float) for c in curves.values()], axis=0)
     shift_reported = False
+    count_notes = []
     for s in sites:
         if not s["kinds"] & {"csa", "quadrupolar"} or s["label"] not in curves:
             continue
+        # Too few sidebands to measure the anisotropy (3-5 at least). Worked
+        # out first, as a pattern with too few sidebands has none for the
+        # checks below; said after them, and only for a site whose sidebands
+        # do match (if they do not, its fitted anisotropy is not yet the one
+        # to count from).
+        if "csa" in s["kinds"] and s["aniso"] is not None:
+            n_sb = sideband_count(s["aniso"], larmor_MHz, mas, s.get("asym") or 0.0,
+                                  s.get("convention") or "Haeberlen")
+            said = sideband_note(n_sb, s["label"], mas)
+            if said is not None:
+                count_notes.append((s["label"], said))
         mine = np.asarray(curves[s["label"]], float)
         data_mine = y - base - (total_sites - mine)               # the data, others removed
         k_max = int(np.floor((x[mask].max() - x[mask].min()) / spacing)) + 1
@@ -468,16 +541,9 @@ def _sideband_items(fit, sites, x, y, base, mask, sigma, larmor_MHz):
                     "next", "note",
                     "Let the MAS rate vary: tick Free on the MAS rate row of the parameter "
                     "table (it may move by up to 500 Hz).", {"type": "free_mas"}))
-        # Too few sidebands to measure the anisotropy.
-        if "csa" in s["kinds"] and s["aniso"] is not None:
-            width_Hz = abs(float(s["aniso"])) * larmor_MHz
-            if width_Hz < 0.5 * mas:
-                out.append(_item(
-                    "tells", "note",
-                    f"{s['label']}'s anisotropy (about {width_Hz / 1e3:.1g} kHz) is small next to "
-                    f"the spinning rate ({mas / 1e3:g} kHz), so it has only weak sidebands: its "
-                    "Δ and especially η are hard to measure here. Spinning slower, or a static "
-                    "spectrum, would pin them down."))
+    if not shift_reported:
+        out += [_item("tells", tone, text) for label, (tone, text) in count_notes
+                if label not in flagged]
     return out, flagged
 
 

@@ -847,10 +847,10 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
         y_model_full = build_csa_model(x_sorted, full, n_sites, x_ref=x_ref, **sim_kwargs)
         return y_model_full[mask]
 
-    popt_free, pcov_free = curve_fit(
+    popt_free, pcov_free = _fit_progress.limited_curve_fit(
         _fit_progress.tracked(model_wrapper, y_fit, n_free=int(is_free.sum())), x_fit, y_fit,
         p0=p0_arr[is_free],
-        bounds=(lower[is_free], upper[is_free]), maxfev=20000,
+        bounds=(lower[is_free], upper[is_free]), label="The CSA fit",
     )
 
     popt = p0_arr.copy()
@@ -873,6 +873,15 @@ def fit_csa_spectrum(results, p0, convention="Haeberlen", static=True,
                                            fit_regions=fit_regions, x_ppm=x_sorted)
             if text and text not in warnings:
                 warnings.append(text)
+            # At least 3-5 sidebands for an accurate anisotropy.
+            from .fit_advice import sideband_count, sideband_note
+            label = labels[site_i] if labels and site_i < len(labels) else f"Site {site_i + 1}"
+            said = sideband_note(sideband_count(popt[site_i * 6 + 1], larmor_Hz / 1e6, mas_Hz,
+                                                popt[site_i * 6 + 2], convention),
+                                 label, mas_Hz)
+            if (said is not None and larmor_Hz and said[0] == "warn"
+                    and said[1] not in warnings):
+                warnings.append(said[1])
 
     fit_info = {
         "sim_kwargs": sim_kwargs,

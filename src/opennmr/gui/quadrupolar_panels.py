@@ -24,6 +24,7 @@ from ..core import registry as core_registry
 from ..io import serialize
 from . import panel_state
 from .widgets.field_input import link_field
+from .widgets.sideband_hint import sideband_hint_label
 from ..notebook import bridge as notebook_bridge
 from ..notebook import fitting as notebook_fitting
 from ..notebook import quadrupolar_fitting as qfit
@@ -140,6 +141,8 @@ class QuadrupolarFitPanel(QWidget):
         self.mas_spin.setToolTip("Spinning rate at the magic angle; read from the file (MASR) "
                                  "where recorded.")
         form.addRow("MAS rate:", self.mas_spin)
+        self.sideband_hint = sideband_hint_label()
+        form.addRow(self.sideband_hint)
 
         self.transitions_combo = QComboBox()
         self.transitions_combo.addItem("Central transition only", "ct")
@@ -318,6 +321,7 @@ class QuadrupolarFitPanel(QWidget):
 
     def _sync_controls(self) -> None:
         self.mas_spin.setEnabled(self.regime_combo.currentData() == "mas")
+        self.sideband_hint.setVisible(self.regime_combo.currentData() == "mas")
         self.sites_table.setColumnHidden(5, self.broadening_combo.currentData() != "pseudo_voigt")
         self._window_box.setVisible(self.window_combo.currentData() == "range")
         label = self._form.labelForField(self._window_box)

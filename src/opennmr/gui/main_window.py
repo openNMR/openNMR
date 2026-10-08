@@ -130,6 +130,8 @@ from .fit_display_panel import FitDisplayPanel
 from .fit_models_panel import FitModelsPanel
 from .curve_fit_plot_box import CurveFitPlotBox
 from .fit_progress_dialog import FitProgress
+from .widgets.sideband_hint import sideband_hint_label
+from ..core import fit_progress as core_fit_progress
 from ..notebook import fit_models as nb_fit_models
 from ..notebook.fitting import build_region_mask as nb_build_region_mask
 from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
@@ -1194,8 +1196,11 @@ class MainWindow(QMainWindow):
         self.crosshair_menu_action.setChecked(True)
         self.crosshair_menu_action.setToolTip(
             "Show a cross following the cursor across the plot (and, on a 2D, "
-            "across both projection strips). Also on each plot's own toolbar."
+            "across both projection strips). Also on each plot's own toolbar.\n"
+            "Shortcut: Cmd/Ctrl+. (full stop)."
         )
+        # Ctrl+. is Cmd+. on macOS (Qt maps Ctrl to Command there).
+        self.crosshair_menu_action.setShortcut(QKeySequence("Ctrl+."))
         self.crosshair_menu_action.toggled.connect(self._on_crosshair_toggled)
         view_menu.addAction(self.crosshair_menu_action)
 
@@ -5636,7 +5641,60 @@ class MainWindow(QMainWindow):
             "Plot Style, because they belong to the figure you export.")
         self.ui_theme_combo.currentIndexChanged.connect(self._on_ui_theme_changed)
         interface_form.addRow("Appearance:", self.ui_theme_combo)
+
+        # Contour scroll direction (explicit user request: scroll up
+        # giving *fewer* contours is counter-intuitive to some users).
+        self.contour_scroll_up_more_checkbox = QCheckBox("Scroll up shows more contours")
+        self.contour_scroll_up_more_checkbox.setToolTip(
+            "Scrolling over the body of a 2D or DOSY contour moves its lowest level.\n"
+            "Off (default): scroll up raises it -- fewer contours, strongest peaks only.\n"
+            "On: scroll up lowers it -- more contours, weaker signals appear.\n\n"
+            "Also in a contour's right-click menu.")
+        _up_more = bool(self._ui_settings.get("contour_scroll_up_shows_more", False))
+        self.contour_scroll_up_more_checkbox.setChecked(_up_more)
+        self.contour_scroll_up_more_checkbox.toggled.connect(self._on_contour_scroll_direction_toggled)
+        interface_form.addRow("2D contours:", self.contour_scroll_up_more_checkbox)
+        for _canvas in self._all_canvases():
+            _canvas.set_contour_scroll_up_shows_more(_up_more)
+            _canvas.contourScrollDirectionChanged.connect(self._on_contour_scroll_direction_toggled)
         layout.addWidget(CollapsibleSection("Interface", content=interface))
+
+        # --- Fitting -------------------------------------------------
+        # Explicit user request: a user-editable maximum number of
+        # iterations, 2000 to start with; a fit that reaches it says
+        # what to try next (core.fit_progress.FitNotConverged).
+        fitting = QWidget()
+        fitting_form = QFormLayout(fitting)
+        self.max_iterations_spin = QSpinBox()
+        self.max_iterations_spin.setRange(1, 1_000_000)
+        self.max_iterations_spin.setSingleStep(500)
+        self.max_iterations_spin.setGroupSeparatorShown(True)
+        self.max_iterations_spin.setToolTip(
+            "The most iterations any fit may take before it stops and reports that it has not "
+            "converged, with suggestions for what to try next.\n\n"
+            "One iteration is one trial step of the optimiser (the extra model evaluations "
+            "for its derivatives are not counted). "
+            f"Suggested: {core_fit_progress.DEFAULT_MAX_ITERATIONS:,}.")
+        saved_iterations = self._ui_settings.get("max_iterations")
+        try:
+            saved_iterations = core_fit_progress.max_iterations(saved_iterations)
+        except (TypeError, ValueError):
+            saved_iterations = core_fit_progress.DEFAULT_MAX_ITERATIONS
+        core_fit_progress.set_max_iterations(saved_iterations)
+        self.max_iterations_spin.setValue(saved_iterations)
+        self.max_iterations_spin.valueChanged.connect(self._on_max_iterations_changed)
+        iterations_row = QWidget()
+        iterations_layout = QHBoxLayout(iterations_row)
+        iterations_layout.setContentsMargins(0, 0, 0, 0)
+        iterations_layout.addWidget(self.max_iterations_spin, 1)
+        self.max_iterations_reset_button = QPushButton("Reset")
+        self.max_iterations_reset_button.setToolTip(
+            f"Back to the suggested {core_fit_progress.DEFAULT_MAX_ITERATIONS:,}.")
+        self.max_iterations_reset_button.clicked.connect(
+            lambda: self.max_iterations_spin.setValue(core_fit_progress.DEFAULT_MAX_ITERATIONS))
+        iterations_layout.addWidget(self.max_iterations_reset_button)
+        fitting_form.addRow("Maximum iterations:", iterations_row)
+        layout.addWidget(CollapsibleSection("Fitting", content=fitting))
 
         # --- Default plot styles --------------------------------------
         defaults = QWidget()
@@ -5818,6 +5876,28 @@ class MainWindow(QMainWindow):
         self.ui_font_size_spin.setValue(self._default_ui_point_size())
         self.ui_font_size_spin.blockSignals(blocked)
         self._apply_ui_font_size(None)
+
+    def _on_max_iterations_changed(self, value: int) -> None:
+        """Every fit from now on stops at ``value`` iterations; saved."""
+        core_fit_progress.set_max_iterations(int(value))
+        self._ui_settings["max_iterations"] = int(value)
+        self._save_ui_settings()
+
+    def _on_contour_scroll_direction_toggled(self, checked: bool) -> None:
+        """Settings' checkbox or a contour's right-click item: one
+        app-wide choice, applied to every canvas and saved."""
+        checked = bool(checked)
+        if self.contour_scroll_up_more_checkbox.isChecked() != checked:
+            self.contour_scroll_up_more_checkbox.blockSignals(True)
+            self.contour_scroll_up_more_checkbox.setChecked(checked)
+            self.contour_scroll_up_more_checkbox.blockSignals(False)
+        for canvas in self._all_canvases():
+            canvas.set_contour_scroll_up_shows_more(checked)
+        self._ui_settings["contour_scroll_up_shows_more"] = checked
+        self._save_ui_settings()
+        self.statusBar().showMessage(
+            "Scrolling up over a contour now shows "
+            + ("more contours." if checked else "fewer contours."), 5000)
 
     def _on_auto_apply_type_styles_toggled(self, checked: bool) -> None:
         self._ui_settings["auto_apply_type_styles"] = bool(checked)
@@ -16111,6 +16191,8 @@ class MainWindow(QMainWindow):
             "wrong or absent."
         )
         form.addRow("MAS rate:", self.csa_mas_spin)
+        self.csa_sideband_hint = sideband_hint_label()
+        form.addRow(self.csa_sideband_hint)
 
         self.csa_powder_combo = QComboBox()
         self.csa_powder_combo.addItem("ZCW", "zcw")
@@ -16393,6 +16475,7 @@ class MainWindow(QMainWindow):
         editable."""
         is_static = bool(self.csa_static_combo.currentData())
         self.csa_mas_spin.setEnabled(not is_static)
+        self.csa_sideband_hint.setVisible(not is_static)
         if spectrum is None:
             return
         # Re-seed whenever the experiment changes: MASR belongs to the

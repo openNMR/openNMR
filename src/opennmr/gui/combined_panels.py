@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from .fit_progress_dialog import FitProgress
 from .widgets.advice_box import AdviceBox
+from .widgets.sideband_hint import sideband_hint_label
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import panel_state
 from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
@@ -261,6 +262,8 @@ class CombinedHamiltonianPanel(QWidget):
         self.mas_spin = _spin_box(0.0, 200000.0, 10000.0, 0, " Hz", step=1000.0,
                                   tip="Spinning rate at the magic angle.")
         form.addRow("MAS rate:", self.mas_spin)
+        self.sideband_hint = sideband_hint_label()
+        form.addRow(self.sideband_hint)
         self.transitions_combo = QComboBox()
         self.transitions_combo.addItem("All transitions", "all")
         self.transitions_combo.addItem("Central transition only", "ct")
@@ -494,6 +497,7 @@ class CombinedHamiltonianPanel(QWidget):
 
     def _sync_controls(self):
         self.mas_spin.setEnabled(self.regime_combo.currentData() == "mas")
+        self.sideband_hint.setVisible(self.regime_combo.currentData() == "mas")
 
     def _on_panel_nucleus(self):
         self._sync_spin()
