@@ -11294,6 +11294,11 @@ class MainWindow(QMainWindow):
         result can be undone via :meth:`_on_revert_autophase_clicked`."""
         if self._phase_mode is None or self._phase_reference_full is None:
             return
+        # Full 2-D autophasing (every row of a 2-D, or every slice of a
+        # pseudo-2D) is a grid search over the whole block and can take
+        # minutes; ask first, and point at the quicker route.
+        if self._autophase_is_full_2d() and not self._confirm_full_2d_autophase():
+            return
         # Autophase reads the reference directly rather than going
         # through _apply_phase_preview, so it needs the same staleness
         # check -- otherwise it computes a phase from an array that no
@@ -11354,6 +11359,43 @@ class MainWindow(QMainWindow):
         # Session.preview()-based) content here, unlike a live phase
         # drag tick (see _apply_phase_preview's pseudo2d branch).
         self._refresh_processing_preview_if_active()
+
+    #: Text of the confirmation shown before a full 2-D autophase.
+    FULL_2D_AUTOPHASE_WARNING = (
+        "Warning: auto-phasing a 2-D spectrum can take a long time.\n\n"
+        "Consider extracting a single slice and applying its phase to the entire "
+        "dataset instead (right-click the contour \u25b8 Extract Slice \u25b8 "
+        "Keep for Phasing/Fitting, autophase it, then Apply Phase to Source 2D).\n\n"
+        "Would you still like to proceed with full 2-D autophasing?"
+    )
+
+    def _autophase_is_full_2d(self) -> bool:
+        """Whether Autophase, as the controls stand, would search the
+        whole 2-D block rather than one trace: any true 2-D, or a
+        pseudo-2D with "Apply to every slice" ticked. A pseudo-2D with
+        the box unticked phases the selected slice alone, which is
+        already the quick route, so it is not asked about."""
+        if self._phase_mode == "2d":
+            return True
+        return self._phase_mode == "pseudo2d" and self.apply_all_slices_checkbox.isChecked()
+
+    def _confirm_full_2d_autophase(self) -> bool:
+        """Ask before a full 2-D autophase (:attr:`FULL_2D_AUTOPHASE_
+        WARNING`); ``True`` to go ahead. *No* is the default button, so
+        an accidental Enter does not start a long search. Declining
+        leaves the phase untouched and says so in the status bar."""
+        reply = QMessageBox.question(
+            self, "Autophase a 2-D spectrum?", self.FULL_2D_AUTOPHASE_WARNING,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.statusBar().showMessage(
+                "Full 2-D autophase cancelled; phase unchanged. To phase from one slice: Extract "
+                "Slice \u25b8 Keep for Phasing/Fitting, autophase it, then Apply Phase to Source 2D.",
+                10000)
+            return False
+        return True
 
     #: Circular spread (degrees) of the per-slice optimal zero-order
     #: phase above which one shared phase cannot serve every slice.
@@ -15117,18 +15159,22 @@ class MainWindow(QMainWindow):
         self.bloch_tanh_kappa_spin = self._sim_spin(
             0.1, 1000.0, 20.0, 2, "", "tanh/tan frequency sweep, tan(κτ)/tan(κ): the value of tan κ.")
         form.addRow("tanh/tan tan κ:", self.bloch_tanh_kappa_spin)
+        # Any length (explicit user request, 2026-10-09: it stopped at
+        # 10 µs). 1 ns to 10 s; the time step follows (Time step: auto).
         self.bloch_duration_spin = self._sim_spin(
-            10.0, 100000.0, 1000.0, 0, " µs",
-            "Pulse duration. Also the time resolution: one point per µs, as the "
-            "hardware synthesises it.")
+            0.001, 1.0e7, 1000.0, 3, " µs",
+            "Pulse duration, 1 ns to 10 s (type e.g. 0.25 for 250 ns). With Time step on "
+            "auto the pulse is sampled at 1 µs from 100 µs up, as the X-Pulse hardware "
+            "synthesises it, and in at least 100 steps when shorter.")
+        self.bloch_duration_spin.setStepType(QAbstractSpinBox.StepType.AdaptiveDecimalStepType)
         form.addRow("Duration:", self.bloch_duration_spin)
         self.bloch_time_step_spin = self._sim_spin(
-            0.0, 10.0, 0.0, 4, " µs",
+            0.0, 1000.0, 0.0, 4, " µs",
             "Time resolution of the simulated pulse. Auto: 1 µs (the X-Pulse hardware's own "
-            "synthesis) unless a frequency sweep needs finer -- then the largest of 0.5, 0.25, "
-            "0.2, 0.1, … µs that keeps the phase ramp to ≤ 0.05 turn per step at the sweep's "
-            "edges (coarser ramps give wrong profiles). Set a value to match a spectrometer's "
-            "own shape resolution.")
+            "synthesis) unless something needs finer -- a frequency sweep (≤ 0.05 turn of phase "
+            "per step at the sweep's edges; coarser ramps give wrong profiles) or a pulse "
+            "shorter than 100 µs (at least 100 steps) -- then the largest of 0.5, 0.25, 0.2, "
+            "0.1, … µs that does. Set a value to match a spectrometer's own shape resolution.")
         self.bloch_time_step_spin.setSpecialValueText("auto")
         self.bloch_time_step_spin.setSingleStep(0.05)
         form.addRow("Time step:", self.bloch_time_step_spin)
@@ -15265,7 +15311,9 @@ class MainWindow(QMainWindow):
                     f"for Q₀ = {q:g} at the centre of the sweep")
         if mode == "flip":
             flip = self.bloch_flip_spin.value()
-            return (simulate_bloch.peak_b1_for_flip_angle(shape, duration_us, flip),
+            return (simulate_bloch.peak_b1_for_flip_angle(
+                        shape, duration_us, flip,
+                        time_step_us=self.bloch_time_step_spin.value() or None),
                     f"for a {flip:g}° flip on resonance")
         if mode == "b1":
             return self.bloch_b1_spin.value(), "as entered"
@@ -15427,6 +15475,8 @@ class MainWindow(QMainWindow):
         self.sim_csa_powder_combo = QComboBox()
         self.sim_csa_powder_combo.addItem("ZCW", "zcw")
         self.sim_csa_powder_combo.addItem("Rectangular (θ/φ)", "rectangular")
+        self.sim_csa_powder_combo.addItem("Lebedev", "lebedev")
+        self._add_powder_scheme_tip(self.sim_csa_powder_combo)
         form.addRow("Powder averaging:", self.sim_csa_powder_combo)
 
         self.sim_csa_orientations_spin = QSpinBox()
@@ -15824,6 +15874,8 @@ class MainWindow(QMainWindow):
         self.sim_quad_powder_combo = QComboBox()
         self.sim_quad_powder_combo.addItem("ZCW", "zcw")
         self.sim_quad_powder_combo.addItem("Rectangular (θ/φ)", "rectangular")
+        self.sim_quad_powder_combo.addItem("Lebedev", "lebedev")
+        self._add_powder_scheme_tip(self.sim_quad_powder_combo)
         form.addRow("Powder averaging:", self.sim_quad_powder_combo)
 
         self.sim_quad_orientations_spin = QSpinBox()
@@ -16595,6 +16647,7 @@ class MainWindow(QMainWindow):
         self.csa_powder_combo = QComboBox()
         self.csa_powder_combo.addItem("ZCW", "zcw")
         self.csa_powder_combo.addItem("Rectangular (θ/φ)", "rectangular")
+        self.csa_powder_combo.addItem("Lebedev", "lebedev")
         self.csa_powder_combo.setToolTip(
             "How crystallite orientations are sampled for the powder "
             "average.\n\n"
@@ -16602,6 +16655,7 @@ class MainWindow(QMainWindow):
             "matters because this loop — not the number of ppm points — is "
             "what every fit iteration costs."
         )
+        self._add_powder_scheme_tip(self.csa_powder_combo)
         form.addRow("Powder averaging:", self.csa_powder_combo)
 
         self.csa_orientations_spin = QSpinBox()
@@ -22654,23 +22708,48 @@ class MainWindow(QMainWindow):
             "convention": common["convention"], "spectrum_index": index, "row": row,
             # How the fit was set up -- what the report says it did.
             "sites": sites, "fit_regions": fit_regions, "static": static,
-            "mas_Hz": common.get("mas_Hz"), "scheme": scheme, "fit_n": fitting_n,
-            "render_n": self.csa_render_orientations_spin.value(),
+            "mas_Hz": common.get("mas_Hz"), "scheme": scheme,
+            "fit_n": self._powder_count(scheme, fitting_n),
+            "render_n": self._powder_count(scheme, self.csa_render_orientations_spin.value()),
         }
         self._draw_csa_fit()
         self._report_csa_fit()
         self._store_fit("csa", index)
         self._refresh_model_series_buttons()
 
+    #: Tooltip addition shared by every "Powder averaging" combo.
+    _POWDER_SCHEME_TIP = (
+        "ZCW: equal-weight points spread evenly over the sphere (Fibonacci sizes) -- the "
+        "all-round default, best for static powder lineshapes.\n\n"
+        "Lebedev: Lebedev–Laikov quadrature (6 to 5810 points, unequal weights), exact for "
+        "smooth functions of orientation up to a given rank. The most efficient choice for MAS "
+        "sideband patterns: ~300 points match a converged ZCW average where ZCW itself needs "
+        "~1500. Not for static lineshapes, which are histograms of frequencies -- there it "
+        "ripples more than ZCW at the same count. Orientations is rounded up to the next "
+        "Lebedev size (6, 14, 26, 38, 50, 74, 86, 110, 146, 170, 194, 230, 266, 302, 350, 434, "
+        "590, 770, 974, 1202, …, 5810).\n\n"
+        "Rectangular (θ/φ): a product grid, oversampling the poles; kept for comparison.")
+
+    def _add_powder_scheme_tip(self, combo) -> None:
+        existing = combo.toolTip()
+        combo.setToolTip((existing + "\n\n" if existing else "") + self._POWDER_SCHEME_TIP)
+
+    @staticmethod
+    def _powder_count(scheme: str, orientations: int) -> int:
+        """Orientations actually used: Lebedev and ZCW come in fixed sizes."""
+        if scheme in ("zcw", "lebedev"):
+            return notebook_simulations.powder_grid_size(scheme, int(orientations))
+        return int(orientations)
+
     @staticmethod
     def _csa_grid_kwargs(scheme: str, orientations: int) -> dict:
         """Powder-grid size expressed the way each scheme wants it.
 
-        ZCW takes a single orientation count; the rectangular grid
+        ZCW and Lebedev take a single (minimum) orientation count; the rectangular grid
         takes a θ/φ pair, so the count is split into roughly the 1:2
         ratio the simulator's own defaults use (θ over a hemisphere,
         φ over a full turn)."""
-        if scheme == "zcw":
+        if scheme in ("zcw", "lebedev"):
             return {"n_zcw": int(orientations)}
         n_theta = max(int(round((orientations / 2.0) ** 0.5)), 8)
         return {"n_theta": n_theta, "n_phi": 2 * n_theta}
@@ -22811,7 +22890,7 @@ class MainWindow(QMainWindow):
         larmor = info["sim_kwargs"].get("larmor_Hz")
         window_text = ("whole spectrum" if not window else
                        ", ".join(f"{hi:g} to {lo:g} ppm" for lo, hi in window))
-        scheme = "ZCW" if result.get("scheme") == "zcw" else "θ/φ grid"
+        scheme = {"zcw": "ZCW", "lebedev": "Lebedev"}.get(result.get("scheme"), "θ/φ grid")
         lines = [
             f"CSA fit report — {result['convention']}, {regime}"
             + (f" (Larmor {larmor / 1e6:.6g} MHz)" if larmor and not result.get("static", True) else "")

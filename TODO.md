@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-09 (2-D autophase warning, shaped pulses of any length, Lebedev powder grids): 57 new tests (8 + 33 + 16) in `test_full_2d_autophase_warning.py`, `test_bloch_any_duration.py`, `test_lebedev_powder.py`. Only related files, as asked (Py 3.13, PySide6 6.12.0, SciPy 1.18): the three new files; test_gui.py -k "autophase or phase" (84 passed, 11 skipped), -k "bloch or shaped_pulse", -k "simulate_csa or simulate_quad or powder or csa_fit or csa_report or zcw"; test_bloch_adiabatic, test_simulate, test_gui_adiabatic_tensors, test_gui_simulation_plots, test_gui_tensor_style, test_gui_fit_sim_state, test_notebook_single_import, test_combined_hamiltonian, test_csa_fitting, test_gui_csa, test_gui_multisite_sim, test_multisite_simulation, test_quadrupolar_simulation, test_series_fitting -- all passed, 0 failed. **Run the full suite locally before committing.***
+
 *2026-10-08 round 3 (fitted values table + JSON, kept fits after Compare, live residuals, stacked crosshair, state folder setting): 20 new tests in `test_fit_values_kept_fits_crosshair_state_folder.py`. Related files only, as asked: 678 passed, 8 skipped, 0 failed. **Run the full suite locally before committing.***
 
 *2026-10-08 round 2 (maximum iterations, 3-5 sidebands guidance, contour scroll direction, Cmd/Ctrl+. crosshair): 34 new tests in `test_max_iterations_sidebands_contour_scroll.py`. Only related files were run, as asked (Py 3.13, PySide6 6.12.0): 1188 passed, 6 skipped, 0 failed. **Run the full suite locally before committing.***
@@ -170,6 +172,18 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## 2-D autophase asks first; shaped pulses of any length; Lebedev powder grids (2026-10-09)
+
+**Asked:** (1) a Yes/No warning before autophasing 2-D data, suggesting a single slice instead; (2) the Bloch pulse simulator limited to ≥ 10 µs -- allow any length, and explain how the Mx/My/Mz plots are made; (3) Lebedev grids as an angular-sampling option. Only related tests to be run.
+
+**Built:**
+- (1) `MainWindow._autophase_is_full_2d()` (true 2-D, or pseudo-2D with "Apply to every slice") and `_confirm_full_2d_autophase()` -- `QMessageBox.question`, Yes/No, **No** the default; text in `MainWindow.FULL_2D_AUTOPHASE_WARNING`, naming the real route (Extract Slice ▸ Keep for Phasing/Fitting ▸ Autophase ▸ Apply Phase to Source 2D). Declining changes nothing and says so in the status bar. One slice of a pseudo-2D and 1-D are not asked. Edit ▸ Autophase goes through the same slot. **`tests/conftest.py` answers Yes automatically** (fixture `_confirm_full_2d_autophase`) so older tests that autophase 2-D data still run headless; tests about the question opt out with `@pytest.mark.full_2d_autophase_prompt`. The notebook readers' load-time `autophase=True` is not warned about (it is the default on every load; a warning there would be noise).
+- (2) Duration spin 0.001 µs – 10 s (3 decimals, adaptive steps); Time step max 1000 µs. `bloch.auto_time_step_us(sweep, duration)`: still 1 µs (X-Pulse hardware) for 100 µs – 100 ms without a sweep, but at least `MIN_AUTO_STEPS` = 100 steps below 100 µs (so a 0.25 µs pulse is 100 × 2.5 ns), and at most `MAX_AUTO_STEPS` = 100 000 for amplitude-modulated pulses over 100 ms (sweeps are never coarsened). `peak_b1_for_flip_angle(..., time_step_us=)` now integrates the shape on the same steps as the simulation (it used `round(duration)` 1 µs steps, i.e. one step below 1.5 µs). Plot time axis in ns / μs / ms / s by duration (`bloch.time_unit`).
+  - Measured: a 2 µs Gaussian at the old fixed 1 µs is two equal rectangles (a hard pulse), off by 0.65 M0 against a 1000-step reference; at 100 steps 0.008 M0 -- the same discretisation level a 100 µs pulse already had at 1 µs. A minimum of 1000 steps was considered and rejected: it would change every pulse under 1 ms, contradicting the hardware-faithful 1 µs default.
+- (3) `notebook.simulations.lebedev_angles(n_min)` (SciPy ≥ 1.15 `scipy.integrate.lebedev_rule`; 32 sizes, 6–5810; weights normalised to 1, not uniform; >5810 uses 5810 with a warning), `lebedev_sizes()`, `powder_grid_size(scheme, n)`; `get_powder_grid(powder_scheme='lebedev', n_zcw=...)` -- `n_zcw` is reused as the minimum count so no signature changed. "Lebedev" appended (not inserted) to the three Powder averaging combos, with a shared tooltip (`_POWDER_SCHEME_TIP`); the CSA fit report shows the orientation counts actually used. `pyproject.toml`: `scipy>=1.15`.
+  - Measured (CSA Δ = −120 ppm, η = 0.4, 3 kHz MAS at 100 MHz, vs ZCW 46368): Lebedev 302 → max error < 1e-5, ZCW 377 → 1.8e-4; Lebedev 110 ≈ ZCW 144. **Static** lineshapes (vs ZCW 196418, 4 ppm broadening): Lebedev 5810 → 0.047, ZCW 6765 → 0.016 -- Lebedev is worse for a histogram-type average, so it is not the default anywhere and the tooltip says so.
+  - Not done: Combined Hamiltonian / quadrupolar fit panels have no scheme choice (ZCW with octant symmetry); adding Lebedev there means adding a combo and passing `powder_scheme` through `combined_hamiltonian._powder`.
 
 ## Fitted values as a table and as JSON; kept fits stay after Compare; live residuals; crosshair across a Compare stack; state folder in Settings (2026-10-08, round 3)
 

@@ -115,7 +115,7 @@ from .simulations import (
     quadrupolar_static_spectrum, quadrupolar_mas_spectrum, quadrupolar_spectrum,
     quadrupolar_order_comparison, quadrupolar_transition_frequencies,
     quadrupolar_transition_table, quadrupolar_axis_limits, quadrupolar_nu_Q,
-    quadrupolar_ct_isotropic_shift_Hz, larmor_frequency_Hz, zcw_angles,
+    quadrupolar_ct_isotropic_shift_Hz, larmor_frequency_Hz, zcw_angles, lebedev_angles, powder_grid_size,
     spin_multiplet_pattern, jcoupling_group_pattern, combine_jcouplings,
     multiplet_lineshape, jcoupled_spectrum, multi_site_jcoupled_spectrum, element_isotopes,
 )
@@ -352,7 +352,7 @@ __all__ = [
     "quadrupolar_static_spectrum", "quadrupolar_mas_spectrum", "quadrupolar_spectrum",
     "quadrupolar_order_comparison", "quadrupolar_transition_frequencies",
     "quadrupolar_transition_table", "quadrupolar_axis_limits", "quadrupolar_nu_Q",
-    "quadrupolar_ct_isotropic_shift_Hz", "larmor_frequency_Hz", "zcw_angles",
+    "quadrupolar_ct_isotropic_shift_Hz", "larmor_frequency_Hz", "zcw_angles", "lebedev_angles", "powder_grid_size",
     "spin_multiplet_pattern", "jcoupling_group_pattern", "combine_jcouplings",
     "multiplet_lineshape", "jcoupled_spectrum", "multi_site_jcoupled_spectrum", "element_isotopes",
     # quadrupolar fitting

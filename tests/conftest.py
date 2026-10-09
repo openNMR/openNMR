@@ -89,3 +89,23 @@ def _delete_leftover_windows():
     app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
     gc.collect()
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "full_2d_autophase_prompt: let Autophase on a 2-D show its real "
+        "confirmation (tests patch QMessageBox.question themselves)")
+
+
+@pytest.fixture(autouse=True)
+def _confirm_full_2d_autophase(request, monkeypatch):
+    """Answer *Yes* to the "auto-phasing a 2-D spectrum can take a long
+    time" question, so tests written before it existed keep exercising
+    the full 2-D autophase -- an unanswered modal would hang a headless
+    run. Tests about the question itself opt out with
+    ``@pytest.mark.full_2d_autophase_prompt``."""
+    main_window = sys.modules.get("opennmr.gui.main_window")
+    if main_window is not None and request.node.get_closest_marker("full_2d_autophase_prompt") is None:
+        monkeypatch.setattr(main_window.MainWindow, "_confirm_full_2d_autophase", lambda self: True)
+    yield

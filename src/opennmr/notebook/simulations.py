@@ -26,6 +26,9 @@ plotted directly, e.g.::
 
 from math import comb
 
+import functools
+import warnings
+
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import fftconvolve
@@ -96,7 +99,8 @@ from .utils import find_isotope_info
 #     curve_fit's Jacobian -- try n_zcw in the low thousands there and
 #     compare against a converged rectangular grid. use_octant_symmetry
 #     is a rectangular-grid-only trick and is not combined with ZCW
-#     here; SOPHE/REPULSION sets are still not implemented.
+#     here; SOPHE/REPULSION sets are still not implemented. Lebedev
+#     grids (2026-10-09): powder_scheme='lebedev', see lebedev_angles().
 #
 # QUADRUPOLAR (2026-09-25): the per-crystallite loops and the
 # single-crystallite MAS propagator were replaced by one vectorised
@@ -335,6 +339,84 @@ def zcw_angles(n_min):
     return theta, phi, weights
 
 
+@functools.lru_cache(maxsize=None)
+def lebedev_sizes():
+    """``{n_points: degree}`` for every Lebedev-Laikov rule SciPy provides
+    (6 to 5810 points; degree 3 to 131)."""
+    from scipy.integrate import lebedev_rule
+    sizes = {}
+    for degree in range(3, 132, 2):
+        try:
+            x, _w = lebedev_rule(degree)
+        except (ValueError, NotImplementedError):   # not every odd degree has a rule
+            continue
+        sizes[int(x.shape[1])] = degree
+    return dict(sorted(sizes.items()))
+
+
+def lebedev_angles(n_min):
+    """
+    Lebedev-Laikov powder-orientation set: the smallest Lebedev rule with
+    at least ``n_min`` points (6, 14, 26, 38, 50, 74, 86, 110, ... 5810).
+
+    A Lebedev rule of degree L integrates every spherical harmonic up to
+    rank L exactly, with octahedral symmetry and positive, *unequal*
+    weights (Lebedev & Laikov, Dokl. Math. 59, 477 (1999); points and
+    weights from :func:`scipy.integrate.lebedev_rule`). That makes it
+    the most efficient set for a smooth function of orientation -- MAS
+    sideband intensities, relaxation or second-moment averages -- where
+    a few hundred points can do what ZCW needs thousands for. It is no
+    better than ZCW for a *static* powder lineshape, which is a
+    histogram of frequencies (discontinuous in orientation), so there
+    the orientation count, not the quadrature degree, sets the ripple.
+
+    Parameters
+    ----------
+    n_min : int
+        Minimum number of orientations. Above the largest rule (5810
+        points, degree 131) the largest is used and a warning is given.
+
+    Returns
+    -------
+    theta, phi : ndarray, shape (N,)
+        Polar and azimuthal angles in radians.
+    weights : ndarray, shape (N,)
+        Quadrature weights, normalised to sum to 1 (not uniform).
+    """
+    if n_min < 1:
+        raise ValueError("n_min must be >= 1.")
+    try:
+        from scipy.integrate import lebedev_rule
+    except ImportError as exc:                          # SciPy < 1.15
+        raise ImportError("Lebedev grids need SciPy 1.15 or newer "
+                          "(pip install --upgrade scipy).") from exc
+    sizes = lebedev_sizes()
+    larger = [n for n in sizes if n >= n_min]
+    if larger:
+        n_points = larger[0]
+    else:
+        n_points = max(sizes)
+        warnings.warn(f"The largest Lebedev grid has {n_points} orientations; using it "
+                      f"instead of the {int(n_min)} asked for. Use ZCW for more.",
+                      stacklevel=2)
+    x, w = lebedev_rule(sizes[n_points])
+    xx, yy, zz = x
+    theta = np.arccos(np.clip(zz, -1.0, 1.0))
+    phi = np.mod(np.arctan2(yy, xx), 2.0 * np.pi)
+    return theta, phi, w / w.sum()
+
+
+def powder_grid_size(powder_scheme, n):
+    """Orientations ``get_powder_grid`` actually uses when asked for ``n``
+    with ``powder_scheme`` 'zcw' or 'lebedev' (both come in fixed sizes)."""
+    if powder_scheme == 'lebedev':
+        sizes = lebedev_sizes()
+        return next((k for k in sizes if k >= n), max(sizes))
+    if powder_scheme == 'zcw':
+        return len(zcw_angles(int(n))[0])
+    return int(n)
+
+
 def get_powder_grid(n_theta, n_phi, powder_scheme='rectangular', n_zcw=None,
                      use_octant_symmetry=False):
     """
@@ -351,7 +433,11 @@ def get_powder_grid(n_theta, n_phi, powder_scheme='rectangular', n_zcw=None,
         ``powder_scheme='zcw'`` and ``n_zcw`` is not given explicitly,
         so swapping schemes at fixed n_theta/n_phi is a fair-ish
         like-for-like comparison rather than a silent count change).
-    powder_scheme : {'rectangular', 'zcw'}, optional
+    powder_scheme : {'rectangular', 'zcw', 'lebedev'}, optional
+        'lebedev' : the smallest Lebedev rule with at least ``n_zcw``
+        points (``lebedev_angles``; 6 to 5810, unequal weights) -- the
+        most efficient choice for smooth averages such as MAS sideband
+        intensities.
         'rectangular' (default -- unchanged behaviour): the (theta,
         phi) product grid via ``powder_orientations`` /
         ``powder_orientations_octant``.
@@ -365,8 +451,9 @@ def get_powder_grid(n_theta, n_phi, powder_scheme='rectangular', n_zcw=None,
         at negligible per-point cost, so ZCW's advantage there is
         smaller (though still real at high resolution).
     n_zcw : int, optional
-        Minimum ZCW orientation count (see ``zcw_angles``). Only used
-        when ``powder_scheme='zcw'``. Defaults to ``n_theta * n_phi``.
+        Minimum orientation count for ``powder_scheme='zcw'`` (see
+        ``zcw_angles``) or ``'lebedev'`` (see ``lebedev_angles``).
+        Defaults to ``n_theta * n_phi``.
     use_octant_symmetry : bool, optional
         Only consulted when ``powder_scheme='rectangular'``. ZCW
         already spans the full sphere efficiently -- the octant-folding
@@ -385,8 +472,12 @@ def get_powder_grid(n_theta, n_phi, powder_scheme='rectangular', n_zcw=None,
         if n_zcw is None:
             n_zcw = n_theta * n_phi
         return zcw_angles(n_zcw)
+    elif powder_scheme == 'lebedev':
+        if n_zcw is None:
+            n_zcw = n_theta * n_phi
+        return lebedev_angles(n_zcw)
     else:
-        raise ValueError("powder_scheme must be 'rectangular' or 'zcw'.")
+        raise ValueError("powder_scheme must be 'rectangular', 'zcw' or 'lebedev'.")
 
 
 def static_csa(csa, ppm_axis, n_theta=1500, n_phi=3000, use_octant_symmetry=True,

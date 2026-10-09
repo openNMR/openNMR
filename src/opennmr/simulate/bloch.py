@@ -1,8 +1,9 @@
 """Bloch simulation of shaped (selective) RF pulses.
 
 Ported from ``leonmr/bloch_sim.py`` (L. Gordon). A no-relaxation
-(T1 = T2 = infinity) hard-pulse-propagator simulator: each 1 us step of
-the shape is treated as a rectangular sub-pulse, and every isochromat
+(T1 = T2 = infinity) hard-pulse-propagator simulator: each time step of
+the shape (1 us by default, finer for short or swept pulses) is treated
+as a rectangular sub-pulse, and every isochromat
 is rotated about the instantaneous effective field (B1x, B1y, offset)
 by 2*pi*|Beff|*dt using Rodrigues' rotation formula. No relaxation, no
 gradients, one isochromat per offset -- 'offset' is a chemical-shift /
@@ -38,6 +39,12 @@ Changed from the original:
   stays at the hardware's 1 us whenever that is fine enough -- every
   sweep up to 100 kHz and every amplitude-modulated shape, so those
   results are unchanged. An explicit ``time_step_us`` is always honoured.
+* **Any duration** (explicit user request, 2026-10-09: the GUI stopped
+  at 10 us). Auto also gives every pulse at least
+  :data:`MIN_AUTO_STEPS` steps, so a sub-microsecond pulse is a shape
+  rather than one rectangle; pulses of 100 us and longer are unchanged.
+  :func:`peak_b1_for_flip_angle` integrates the shape on the same steps
+  the simulation uses.
 * **Adiabatic (frequency-swept) shapes** are new (explicit user request,
   2026-09-27): hyperbolic secant (HSn), WURST-n and tanh/tan -- see
   :func:`adiabatic_shape`. They are not added to :func:`generate_shape`,
@@ -444,19 +451,54 @@ _NICE_STEPS_US = (1.0, 0.5, 0.25, 0.2, 0.1, 0.05, 0.025, 0.02, 0.01, 0.005, 0.00
 MAX_STEPS = 5_000_000
 
 
-def auto_time_step_us(sweep_width_hz=None):
-    """The time step (us) for a pulse: 1 us (the X-Pulse hardware's own
-    resolution) unless a frequency sweep of ``sweep_width_hz`` needs a
-    finer one, in which case the largest of 0.5, 0.25, 0.2, 0.1, ... us
-    that keeps the phase ramp at the sweep's edges to at most
-    :data:`MAX_TURNS_PER_STEP` of a turn per step."""
-    if not sweep_width_hz or sweep_width_hz <= 0:
-        return 1.0
-    bound_us = MAX_TURNS_PER_STEP / (0.5 * float(sweep_width_hz)) * 1e6
+#: Fewest steps auto_time_step_us gives a pulse. Below 100 us the
+#: hardware's 1 us would leave a shaped pulse with a handful of steps (a
+#: 2 us Gaussian as two rectangles), and a piecewise-constant pulse of step
+#: dt also excites replicas of its profile at multiples of 1/dt -- for a
+#: microsecond pulse, inside the offsets it excites.
+MIN_AUTO_STEPS = 100
+
+#: Most steps auto_time_step_us gives an amplitude-modulated pulse (a
+#: frequency sweep is never coarsened: its phase ramp sets the step). Only
+#: pulses longer than 100 ms are affected.
+MAX_AUTO_STEPS = 100_000
+
+
+def _nice_step_at_most(bound_us):
     for step in _NICE_STEPS_US:
         if step <= bound_us * (1 + 1e-12):
             return step
+    # Below the table: keep going in the same 1-2-2.5-5 pattern, per decade.
+    decade = 10.0 ** np.floor(np.log10(bound_us))
+    for mantissa in (5.0, 2.5, 2.0, 1.0):
+        if mantissa * decade <= bound_us * (1 + 1e-12):
+            return mantissa * decade
     return bound_us
+
+
+def auto_time_step_us(sweep_width_hz=None, duration_us=None):
+    """The time step (us) for a pulse: 1 us (the X-Pulse hardware's own
+    resolution) unless something needs a finer one, in which case the
+    largest of 0.5, 0.25, 0.2, 0.1, ... us that satisfies it:
+
+    * a frequency sweep of ``sweep_width_hz`` keeps its phase ramp at the
+      sweep's edges to at most :data:`MAX_TURNS_PER_STEP` of a turn per
+      step;
+    * a pulse of ``duration_us`` gets at least :data:`MIN_AUTO_STEPS`
+      steps, so a pulse shorter than 100 us is still sampled as a shape.
+
+    An amplitude-modulated pulse longer than :data:`MAX_AUTO_STEPS` us is
+    given a coarser step, keeping it to that many steps. Pulses from
+    100 us to 100 ms without a sweep are at 1 us, as before."""
+    bound_us = 1.0
+    if sweep_width_hz and sweep_width_hz > 0:
+        bound_us = min(bound_us, MAX_TURNS_PER_STEP / (0.5 * float(sweep_width_hz)) * 1e6)
+    if duration_us and duration_us > 0:
+        duration_us = float(duration_us)
+        bound_us = min(bound_us, duration_us / MIN_AUTO_STEPS)
+        if not (sweep_width_hz and sweep_width_hz > 0) and duration_us / bound_us > MAX_AUTO_STEPS:
+            return duration_us / MAX_AUTO_STEPS
+    return _nice_step_at_most(bound_us)
 
 
 def n_steps_for(duration_us, time_step_us):
@@ -572,7 +614,7 @@ def adiabaticity(shape, duration_us, sweep_width_hz, peak_b1_hz, band=ADIABATIC_
     simulated profile (:func:`inverted_band_hz`) is what to trust.
 
     ``time_step_us``: as :func:`simulate_pulse` (default: auto)."""
-    step = time_step_us or auto_time_step_us(sweep_width_hz)
+    step = time_step_us or auto_time_step_us(sweep_width_hz, duration_us)
     n_steps = max(3, n_steps_for(duration_us, step))
     amp, _phase, freq = adiabatic_shape(shape, n_steps, duration_us, sweep_width_hz, **params)
     dt = duration_us * 1e-6 / n_steps
@@ -632,8 +674,9 @@ def simulate_pulse(shape, duration_us, peak_b1_hz, offsets_hz,
     duration_us: pulse duration [us].
     time_step_us: the shape's time resolution [us]. None (default): auto
         -- 1 us, the X-Pulse hardware's own synthesis, unless a frequency
-        sweep needs finer (:func:`auto_time_step_us`; several-MHz
-        adiabatic sweeps).
+        sweep (several-MHz adiabatic sweeps) or a pulse shorter than
+        100 us needs finer (:func:`auto_time_step_us`). Any duration
+        works: a 0.5 us pulse is simulated in 100 steps of 5 ns.
     peak_b1_hz: B1 at the shape's peak amplitude, as a nutation
         frequency [Hz]. See :func:`hard_pulse_to_b1_hz` and
         :func:`peak_b1_for_flip_angle`.
@@ -651,8 +694,11 @@ def simulate_pulse(shape, duration_us, peak_b1_hz, offsets_hz,
     to trust); and always 'time_step_us'.
     """
     if time_step_us is None or time_step_us <= 0:
-        time_step_us = auto_time_step_us(sweep_width_hz if is_adiabatic(shape) else None)
+        time_step_us = auto_time_step_us(sweep_width_hz if is_adiabatic(shape) else None,
+                                         duration_us)
     time_step_us = float(time_step_us)
+    if not duration_us or duration_us <= 0:
+        raise ValueError("simulate_pulse: the duration must be positive.")
     if duration_us < time_step_us:
         raise ValueError(f"simulate_pulse: duration_us too short (need >= {time_step_us:g} us).")
     n_steps = n_steps_for(duration_us, time_step_us)
@@ -718,7 +764,7 @@ def integration_factor(shape, n_steps=1000, burp_coeffs_A=None, burp_coeffs_B=No
 
 
 def peak_b1_for_flip_angle(shape, duration_us, flip_angle_deg,
-                           burp_coeffs_A=None, burp_coeffs_B=None):
+                           burp_coeffs_A=None, burp_coeffs_B=None, time_step_us=None):
     """Peak B1 [Hz] giving ``flip_angle_deg`` on resonance: a rotation of
     ``flip/360`` cycles, delivered by a shape whose average B1 is
     ``integration_factor`` times its peak, over ``duration_us``.
@@ -727,11 +773,16 @@ def peak_b1_for_flip_angle(shape, duration_us, flip_angle_deg,
     this is for: a sensible starting power. Band-selective shapes
     (EBURP2, REBURP) are designed for one particular flip, and their
     profile is only right at the power that gives it. An adiabatic
-    shape has no flip angle: see :func:`peak_b1_for_adiabaticity`."""
+    shape has no flip angle: see :func:`peak_b1_for_adiabaticity`.
+    ``time_step_us`` should match :func:`simulate_pulse`'s (None: auto)."""
     if is_adiabatic(shape):
         raise ValueError(f"{shape.upper()} is adiabatic: its effect does not scale with power the "
                          "way a flip angle does. Set its power by adiabaticity (Q) instead.")
-    n_steps = max(1, int(round(duration_us)))
+    # The same sampling simulate_pulse will use, so the flip is exact for
+    # the shape as simulated (1 us steps from 100 us up, finer below).
+    if time_step_us is None or time_step_us <= 0:
+        time_step_us = auto_time_step_us(None, duration_us)
+    n_steps = n_steps_for(duration_us, time_step_us)
     factor = integration_factor(shape, n_steps, burp_coeffs_A, burp_coeffs_B)
     if factor == 0:
         raise ValueError(f"Shape {shape} has no net on-resonance rotation.")
@@ -762,6 +813,20 @@ def frequency_unit(max_abs_hz):
     return 1.0, "Hz"
 
 
+def time_unit(duration_us):
+    """(scale in us, unit) to show times up to ``duration_us`` in: ns below
+    1 us, μs up to 10 ms, ms up to 10 s, s beyond -- so a 200 ns pulse's
+    axis reads 0-200 ns rather than 0-0.2 μs."""
+    d = abs(float(duration_us or 0.0))
+    if 0 < d < 1.0:
+        return 1e-3, "ns"
+    if d > 1e7:
+        return 1e6, "s"
+    if d > 1e4:
+        return 1e3, "ms"
+    return 1.0, "μs"
+
+
 #: The pulse's phase/frequency trace: Okabe–Ito vermilion, apart from
 #: the black amplitude for every kind of colour vision.
 _PHASE_COLOUR = "#D55E00"
@@ -779,8 +844,10 @@ def plot_pulse_simulation(sim, fig, title=None):
     ax_shape, ax_prof = fig.subplots(2, 1)
     has_power_sweep = len(sim["power_scales"]) > 1
 
-    ax_shape.plot(sim["time_us"], sim["amp_profile"], color='k', label='Amplitude (normalised)')
-    ax_shape.set_xlabel("Time / μs")
+    t_scale, t_unit = time_unit(sim.get("duration_us", sim["time_us"][-1] if len(sim["time_us"]) else 1.0))
+    time_axis = np.asarray(sim["time_us"], dtype=float) / t_scale
+    ax_shape.plot(time_axis, sim["amp_profile"], color='k', label='Amplitude (normalised)')
+    ax_shape.set_xlabel(f"Time / {t_unit}")
     ax_shape.set_ylabel("Amplitude (normalised)")
     ax_shape.set_ylim(-0.05, 1.05)
     ax_phase = ax_shape.twinx()
@@ -789,11 +856,11 @@ def plot_pulse_simulation(sim, fig, title=None):
         # little; its frequency sweep is what defines it.
         freq = np.asarray(sim["freq_profile_hz"])
         f_scale, f_unit = (1e6, "MHz") if np.max(np.abs(freq)) >= 1e6 else (1e3, "kHz")
-        ax_phase.plot(sim["time_us"], freq / f_scale, color=_PHASE_COLOUR,
+        ax_phase.plot(time_axis, freq / f_scale, color=_PHASE_COLOUR,
                       linestyle='--', label=f'Frequency [{f_unit}]')
         ax_phase.set_ylabel(f"RF offset / {f_unit}", color=_PHASE_COLOUR)
     else:
-        ax_phase.plot(sim["time_us"], sim["phase_profile_deg"], color=_PHASE_COLOUR,
+        ax_phase.plot(time_axis, sim["phase_profile_deg"], color=_PHASE_COLOUR,
                       linestyle='--', label='Phase [deg]')
         ax_phase.set_ylabel("Phase / deg", color=_PHASE_COLOUR)
     ax_phase.tick_params(axis='y', labelcolor=_PHASE_COLOUR)

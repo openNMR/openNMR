@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
-    "scipy",
+    "scipy>=1.15",  # scipy.integrate.lebedev_rule (Lebedev powder grids)
     "pandas",
     "matplotlib",
     "PySide6",

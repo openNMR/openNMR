@@ -136,7 +136,7 @@ def csa_model_full(x_ppm_sorted, d_iso, span_or_Delta, skew_or_eta, fwhm, eta=0.
         Powder-grid/FFT size and gamma-averaging options for the
         finite-MAS case. See
         :func:`nmrtools.simulations.finite_mas_csa_spectrum`.
-    powder_scheme : {'rectangular', 'zcw'}, optional
+    powder_scheme : {'rectangular', 'zcw', 'lebedev'}, optional
         Powder-averaging scheme, forwarded to the simulator (see
         :func:`nmrtools.simulations.get_powder_grid`). 'zcw'
         typically converges with far fewer orientations for the
