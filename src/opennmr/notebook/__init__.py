@@ -281,6 +281,14 @@ from .fit_advice import (
     GOOD_SIDEBANDS, MIN_SIDEBANDS, SIDEBAND_GUIDANCE, csa_span_ppm, sideband_count, sideband_note,
 )
 
+# Shearing and scaling of 2D spectra (MQMAS, STMAS, DAS, J-resolved,
+# PASS/MAT; 2026-10-11).
+from . import shearing
+from .shearing import (
+    make_shear_plan, shear_2d, estimate_shear, sideband_positions, isotropic_from_peak,
+    plot_shear_scan,
+)
+
 pt = periodic_table
 pf = pnmr_fit
 dw = dnp_workflow
@@ -444,4 +452,7 @@ __all__ = [
     "csa_span_ppm", "sideband_count", "sideband_note",
     # fitted values as readable JSON
     "fit_values", "save_fitted_values", "load_fitted_values",
+    # shearing and scaling of 2D spectra
+    "shearing", "make_shear_plan", "shear_2d", "estimate_shear", "sideband_positions",
+    "isotropic_from_peak", "plot_shear_scan",
 ]

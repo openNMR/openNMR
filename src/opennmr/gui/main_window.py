@@ -41,6 +41,7 @@ from .widgets.side_drawer import SideDrawer
 from .widgets.field_input import link_field
 from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
+from .shear_panel import ShearPanel
 from .compare_2d import Compare2DControls
 from ..notebook import notes as nb_notes
 from ..notebook import referencing as nb_referencing
@@ -19134,10 +19135,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Cleared the kept repeats.", 5000)
 
     def _build_advanced_processing_panel(self) -> QWidget:
-        """The "Adv. Proc." tile: VOCS and CPMG, each its own collapsible
-        section (explicit user request, 2026-09-24, when CPMG arrived).
-        CPMG is :class:`opennmr.gui.cpmg_panel.CpmgProcessingPanel`,
-        which follows the Open experiments selection."""
+        """The "Adv. Proc." tile: VOCS, CPMG and Shearing and Scaling
+        (2D), each its own collapsible section (explicit user request,
+        2026-09-24, when CPMG arrived; shearing 2026-10-11).
+        CPMG is :class:`opennmr.gui.cpmg_panel.CpmgProcessingPanel` and
+        shearing :class:`opennmr.gui.shear_panel.ShearPanel`; both
+        follow the Open experiments selection."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -19147,8 +19150,24 @@ class MainWindow(QMainWindow):
         self.cpmg_panel.spectrum_ready.connect(self._add_derived_spectrum)
         self.cpmg_section = CollapsibleSection("CPMG", content=self.cpmg_panel)
         layout.addWidget(self.cpmg_section)
+        # Shearing and scaling of 2D spectra (2026-10-11):
+        # gui/shear_panel.py over notebook/shearing.py.
+        self.shear_panel = ShearPanel()
+        self.shear_panel.result_ready.connect(self._add_shear_result)
+        self.shear_section = CollapsibleSection("Shearing and Scaling (2D)", content=self.shear_panel)
+        layout.addWidget(self.shear_section)
         layout.addStretch(1)
         return panel
+
+    def _add_shear_result(self, spectrum, label: str, description: str) -> int:
+        """A sheared/scaled 2D into the session, with the plan, the
+        routes used, any warnings and what F1 now reports written into
+        its history."""
+        index = self._add_derived_spectrum(spectrum, label)
+        history = self._ensure_history(index)
+        if history is not None:
+            io_history.add_event(history, description, kind="shear")
+        return index
 
     def _build_vocs_subtab(self) -> QWidget:
         """Variable Offset Cumulative Spectroscopy -- corrects a 1D
@@ -26046,6 +26065,7 @@ class MainWindow(QMainWindow):
             self.session.spectra[row] if 0 <= row < len(self.session) else None)
         if not 0 <= row < len(self.session):
             self.cpmg_panel.set_source(None)
+            self.shear_panel.set_source(None)
 
     def _on_notes_saved(self, spectrum, where: str) -> None:
         row = self._row_of_spectrum(spectrum)
@@ -26091,6 +26111,7 @@ class MainWindow(QMainWindow):
         # another procno, which has its own Bruker title).
         self.notes_editor.set_spectrum(spectrum)
         self.cpmg_panel.set_source(spectrum, self.session.label(row))
+        self.shear_panel.set_source(spectrum, self.session.label(row))
         meta = spectrum.metadata
 
         bits = [f"Vendor: {meta.vendor}", f"Nucleus: {meta.nucleus or '—'}"]

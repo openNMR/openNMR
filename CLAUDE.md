@@ -162,6 +162,18 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   from reference compounds (`notebook/dft_calibration.py`, σ_calc on δ_exp);
   pass them to `dft_sites(calibration=...)` -- do not add another
   referencing path. The VASP G=0 switch re-reads every file at once.
+- **Shearing and scaling of 2D spectra** (MQMAS, STMAS, DAS, J-resolved,
+  PASS/MAT, custom ratios or pathway coefficients) are
+  `notebook/shearing.py` (`make_shear_plan`, `shear_2d`, `estimate_shear`,
+  `sideband_positions`, `isotropic_from_peak`); Adv. Proc. ▸ Shearing and
+  Scaling (2D) is `gui/shear_panel.py`. Coefficients and kappas are in the
+  *displayed*-axis frame; F1's sense relative to the coherence is
+  `f1_sign`, measured by `estimate_shear` -- never flip a kappa's sign by
+  hand to "fix" a spectrum. Frequencies for the shear come from the FFT
+  bins (carrier-relative), never from a re-referenced ppm axis. A sheared
+  spectrum keeps the phase baked into its data as `baked_phase_f1/f2`
+  (the recorded/user phase keys are dropped), so it can be sheared again.
+  Derivation and checks: `SCRIPT_openNMR_Shearing_20261009.ipynb`.
 - **Correlation matrices** of any fit are `notebook/fit_correlation.py`
   (`correlation_input` adapts each fit shape; add an adapter there for a
   new kind of fit). The GUI draws them through
