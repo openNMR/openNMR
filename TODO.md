@@ -175,6 +175,18 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+## Reopened raw-FID spectra lost TopSpin's recorded phase (2026-10-11, bug)
+
+**Reported:** 23Na MQMAS (Na2CdFe(CN)6, expt 275, mp3qzfil, States-TPPI) looked right in TopSpin but in openNMR, opened "without doing anything", showed F2 absorption on one side of the ridge and inverted signal on the other.
+
+**What was wrong:** not the reader -- a fresh `read_2d` matches TopSpin's 2rr at +0.997. The experiment had an openNMR processing sidecar from an earlier session, and `MainWindow._saved_processing_read_kwargs` turned any saved `phase0`/`phase1` (even 0.0) into `autophase=False` ("only meaningful with autophase off"). In the reader's default `phase_mode="recorded"`, autophase=False does not mean "use my phase instead of an automatic one"; it switches TopSpin's recorded PHC0/PHC1 **off in both dimensions** (here F2 316°/−180°, F1 −67°/222°). Measured: reopened with phase 0 saved, −0.30 against TopSpin's 2rr; with the user's compensating 206.1°, +0.14 (the reported picture, reproduced exactly). The live view composes recorded + user, so the same saved state gave two different spectra (live vs reopened). `_current_phase_kwargs` (Process Indirect Dimension toggle, drift-correction reload) had the same `autophase=False`. Affects every raw-FID experiment reopened with a sidecar holding a phase key, 1D included -- not specific to 2D or to the shearing work.
+
+**Fix:** both keep autophase on (the reader then puts the user's phase on top of the recorded one, as the live view and the processing log say), except with Align Echo, where the reader replaces the recorded phase itself and would overwrite phase0. Now: reopen with phase 0 saved → +0.997; live recorded+206.1 vs reopened → identical (1.0000).
+
+**Note for the user's data:** expt 275's sidecar holds the 206.1° added to compensate; with the fix it reopens as recorded + 206.1° (inverted). Reset the phase (PH0 → 0) once.
+
+**Tests:** `tests/test_reopen_keeps_recorded_phase.py` (4; the real-data one needs the experiment copied to `test_data/23Na_MQMAS_275`). Three fail on the old code. Related files run: test_persistence, test_history, test_state_and_fit_models, test_full_2d_autophase_warning, test_gui_drift_and_sr_transfer, test_background_load, test_batch_relaxation, test_gui_fit_sim_state, test_bruker_raw_2d, test_bruker, and test_gui.py -k "phase or reopen or sidecar or saved or reload or indirect or reprocess or restore or progress or autophase" -- all passed except `test_main_window_saved_processing_is_folded_into_the_read_kwargs`, which asserted the bug itself (`autophase is False`, "a saved phase is an absolute choice"); its intent (the reader must not move the saved phase) holds with autophase on in "recorded" mode, so it now asserts that instead.
+
 ## Shearing and scaling of 2D spectra: MQMAS, STMAS, DAS, J-resolved, PASS/MAT, custom (2026-10-11)
 
 **Asked:** continuing `SCRIPT_openNMR_Shearing_20261009.ipynb` (step 1 done there: the shear parallel to t2 and its sign, checked numerically): shear and scale 2-D data with respect to t1 and/or t2, in notebook and GUI (Advanced Processing). The user was unsure how to get kappa (Grandinetti's a[1], a[2], b[1], b[2]) when different pulse sequences do different things, and the data may be solution (no sidebands) or solid (sidebands). Only related tests.

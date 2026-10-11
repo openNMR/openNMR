@@ -10744,9 +10744,14 @@ def test_main_window_saved_processing_is_folded_into_the_read_kwargs(qapp, tmp_p
     assert kwargs["fid_shift"] == 3
     assert kwargs["window"] == "exponential"
     assert kwargs["window_kwargs"] == {"lb": 7.0}
-    # A saved phase is an absolute choice, not a starting point for the
-    # reader's own autophase to move away from.
-    assert kwargs["autophase"] is False
+    # The saved phase is the user's own, on top of the file's recorded
+    # phase -- so autophase stays on: in the reader's "recorded" mode it
+    # never re-derives phase0, it only puts TopSpin's PHC0/PHC1
+    # underneath. This used to assert autophase=False, which switched the
+    # recorded phase off in both dimensions on every reopen (2026-10-11;
+    # see tests/test_reopen_keeps_recorded_phase.py).
+    assert kwargs.get("autophase", True) is True
+    assert kwargs.get("phase_mode", "recorded") == "recorded"
 
 
 def test_main_window_unsaved_processing_folds_nothing_into_the_read(qapp, tmp_path):
