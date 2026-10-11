@@ -314,7 +314,7 @@ def test_estimate_on_already_sheared_data():
     spec = make_2d(cryst, kappa_t2=-7 / 9)
     scan = sh.estimate_shear(spec, kappa_range=(-2, 2), n_coarse=81)
     assert abs(scan["kappa"]) < 0.06
-    assert "already be sheared" in scan["summary"]
+    assert "already sheared" in scan["summary"] and "split_t1=True" in scan["summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -577,3 +577,58 @@ def test_warns_when_rows_were_aligned_to_their_own_echo_tops():
     with pytest.warns(UserWarning, match="Align Echo"):
         out = sh.shear_2d(spec, sh.make_shear_plan("mqmas", spin=1.5, f1_sign=-1))
     assert any("Align Echo" in w for w in out.metadata.raw["shear"]["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Split-t1: the sequence shears (and scales) the data itself
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("spin,frac_mq,frac_ct", [(1.5, "9/16", "7/16"), (2.5, "12/31", "19/31")])
+def test_split_t1_plan(spin, frac_mq, frac_ct):
+    cs = sh.make_shear_plan("mqmas", spin=spin, split_t1=True)
+    assert cs.kappa_t2 == 0.0
+    assert cs.f1_cs_factor == pytest.approx(1.0)
+    assert cs.f1_qis_factor == pytest.approx(-10 / 17)
+    text = cs.describe()
+    assert frac_mq in text and frac_ct in text and "No shear" in text
+    uni = sh.make_shear_plan("mqmas", spin=spin, split_t1=True, convention="unified")
+    assert abs(uni.scale_f1) == pytest.approx(1.0)             # already in the unified scale
+    assert abs(uni.f1_cs_factor) == pytest.approx(17 / 8 if spin == 1.5 else 17 / 31)
+    with pytest.raises(ValueError):
+        sh.make_shear_plan("jres", split_t1=True)
+
+
+def _split_t1_crystallites(spin=1.5, sf=104.2, carrier=800.0):
+    """Split-t1 data: each crystallite evolves in t1 at the time-weighted
+    mix (nu_MQ - kappa nu_CT) / (1 + |kappa|) -- refocused crystallite by
+    crystallite by the sequence, not bin by bin."""
+    cryst, sites = two_site_mqmas(spin=spin, sf=sf, carrier=carrier)
+    k = sh.make_shear_plan("mqmas", spin=spin).kappa_t2
+    return [((nu1 - k * nu2) / (1 + abs(k)), nu2, w) for nu1, nu2, w in cryst], sites
+
+
+def test_split_t1_data_land_where_the_literature_says():
+    cryst, sites = _split_t1_crystallites()
+    spec = make_2d(cryst, sw1=10000.0)
+    spec.metadata.nucleus = spec.metadata.nucleus_indirect = "23Na"
+    scan = sh.estimate_shear(spec, kappa_range=(-2, 2), n_coarse=81)
+    assert abs(scan["kappa"]) < 0.06 and "split-t1" in scan["summary"]
+
+    for convention, a, b in (("cs", 1.0, -10 / 17), ("unified", 17 / 8, -5 / 4)):
+        out = sh.shear_2d(spec, sh.make_shear_plan("mqmas", spin=1.5, split_t1=True,
+                                                   convention=convention))
+        np.testing.assert_allclose(np.sort(np.abs(out.data).ravel()),
+                                   np.sort(np.abs(spec.data).ravel()))   # not sheared again
+        y, x = out.axes[0].ppm, out.axes[1].ppm
+        dppm = abs(y[1] - y[0])
+        for dcs, dqis, _ in sites:
+            cols = np.abs(x - (dcs + dqis)) < 30
+            got = y[int(np.argmax(np.abs(out.data[:, cols]).sum(axis=1)))]
+            assert got == pytest.approx(a * dcs + b * dqis, abs=1.5 * dppm)
+
+    # the ordinary (z-filter) plan on split-t1 data shears a second time: wrong
+    wrong = sh.shear_2d(spec, sh.make_shear_plan("mqmas", spin=1.5))
+    proj = np.abs(wrong.data).sum(axis=1)
+    right = np.abs(sh.shear_2d(spec, sh.make_shear_plan(
+        "mqmas", spin=1.5, split_t1=True)).data).sum(axis=1)
+    assert (proj > 0.5 * proj.max()).sum() > 3 * (right > 0.5 * right.max()).sum()

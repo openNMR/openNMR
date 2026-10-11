@@ -138,6 +138,13 @@ class ShearPanel(QWidget):
         das_row.addWidget(QLabel("/"))
         das_row.addWidget(self.das_theta2)
         quad_form.addRow("DAS angles (°):", das_row)
+        self.split_t1_check = QCheckBox("Acquired with split-t1 (already sheared)")
+        self.split_t1_check.setToolTip(
+            "Split-t1 sequences share t1 between the MQ (or satellite) coherence and the CT "
+            "so the anisotropy refocuses within t1: the data arrive sheared, in the unified "
+            "scaling. Ticked, nothing is sheared; F1 is only scaled and referenced. Assumes "
+            "the F1 dwell (IN0) is the whole t1 increment.")
+        quad_form.addRow(self.split_t1_check)
         self.second_shear_check = QCheckBox("Second shear: centre every F2 pattern on zero")
         self.second_shear_check.setToolTip(
             "Also shear parallel to t1, removing the isotropic part from F2, so each "
@@ -280,7 +287,7 @@ class ShearPanel(QWidget):
                   self.cs1_spin, self.a1_spin, self.a2_spin, self.b1_spin, self.b2_spin,
                   self.c1_spin, self.c2_spin, self.custom_scale_spin):
             w.valueChanged.connect(self._on_settings_changed)
-        for w in (self.second_shear_check, self.use_a_check, self.use_b_check):
+        for w in (self.second_shear_check, self.split_t1_check, self.use_a_check, self.use_b_check):
             w.toggled.connect(self._on_settings_changed)
         self.spin_combo.currentIndexChanged.connect(self._refill_orders)
         self._refill_orders()
@@ -343,7 +350,8 @@ class ShearPanel(QWidget):
                           pathway=self.pathway_combo.currentData(),
                           satellite=int(self.satellite_combo.currentData() or 1),
                           das_angles=(self.das_theta1.value(), self.das_theta2.value()),
-                          second_shear=self.second_shear_check.isChecked())
+                          second_shear=self.second_shear_check.isChecked(),
+                          split_t1=self.split_t1_check.isChecked() and exp in ("mqmas", "stmas"))
         elif exp == "custom_kappa":
             kwargs.update(kappa_t2=self.kappa_t2_spin.value(), kappa_t1=self.kappa_t1_spin.value(),
                           cs=(self.cs1_spin.value(), 1.0))
@@ -368,12 +376,21 @@ class ShearPanel(QWidget):
         self._scan = scan
         text = scan["summary"]
         top = scan["matches"][0] if scan["matches"] else None
+        already = (direction == "t2" and abs(scan["kappa"]) < 0.06 and scan["prominence"] >= 0.2
+                   and self.experiment() in ("mqmas", "stmas"))
+        if already:
+            self.split_t1_check.setChecked(True)
+            text += "\nSplit-t1 ticked: the data are already sheared."
+            top = None
+        elif direction == "t2" and self.split_t1_check.isChecked() and abs(scan["kappa"]) > 0.1:
+            self.split_t1_check.setChecked(False)
+            text += "\nSplit-t1 unticked: the data still need shearing."
         if top is not None and (direction == "t1" or top["relative"] < 0.05):
             self.f1_sign_combo.setCurrentIndex(self.f1_sign_combo.findData(top["f1_sign"]))
             text += f"\nF1 direction set to {'+1' if top['f1_sign'] > 0 else '−1'}."
         try:
             planned = self.plan()
-            if direction == "t2" and planned.kappa_t2 and abs(scan["kappa"] - planned.kappa_t2) > 0.05 * abs(planned.kappa_t2):
+            if direction == "t2" and planned.kappa_t2 and not already and abs(scan["kappa"] - planned.kappa_t2) > 0.05 * abs(planned.kappa_t2):
                 text += (f"\nThe chosen experiment's κ = {planned.kappa_t2:+.4f} differs from the "
                          f"measured {scan['kappa']:+.4f}: check the experiment, spin and MQ order.")
         except ValueError:
@@ -444,6 +461,8 @@ class ShearPanel(QWidget):
             visible = rows.get(text, True)
             if field is not None and field.widget() is self.second_shear_check:
                 visible = exp == "das"
+            if field is not None and field.widget() is self.split_t1_check:
+                visible = exp in ("mqmas", "stmas")
             for item in (label, field):
                 if item is None:
                     continue

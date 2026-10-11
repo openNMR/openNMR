@@ -173,6 +173,10 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   bins (carrier-relative), never from a re-referenced ppm axis. A sheared
   spectrum keeps the phase baked into its data as `baked_phase_f1/f2`
   (the recorded/user phase keys are dropped), so it can be sheared again.
+  Echo-antiecho needs no special handling (the decoder's conjugation gives
+  p and n opposite shears); Align Echo before shearing does break it, and
+  split-t1 data must use `split_t1=True` (no shear, effective-coefficient
+  referencing), never the ordinary plan.
   Derivation and checks: `SCRIPT_openNMR_Shearing_20261009.ipynb`.
 - **Correlation matrices** of any fit are `notebook/fit_correlation.py`
   (`correlation_input` adapts each fit shape; add an adapter there for a

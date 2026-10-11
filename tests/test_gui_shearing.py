@@ -133,3 +133,23 @@ def test_main_window_adv_proc_section(qapp):
     # removing everything leaves the panel without a source
     window.shear_panel.set_source(None)
     assert not window.shear_panel.shear_button.isEnabled()
+
+
+def test_split_t1_option(qapp):
+    from test_shearing import _split_t1_crystallites
+    cryst, _ = _split_t1_crystallites()
+    spec = make_2d(cryst, sw1=10000.0)
+    spec.metadata.nucleus = spec.metadata.nucleus_indirect = "23Na"
+    panel = ShearPanel()
+    panel.set_source(spec, "split")
+    assert panel.split_t1_check.isVisibleTo(panel)
+    panel.check_against_data()
+    assert panel.split_t1_check.isChecked()                  # recognised as already sheared
+    assert "Split-t1 ticked" in panel.check_label.text()
+    text = panel.plan_edit.toPlainText()
+    assert "No shear" in text and "9/16" in text and "10/17" in text
+    out = panel.shear()
+    assert out.metadata.raw["shear"]["plan"]["kappa_t2"] == 0.0
+    panel.experiment_combo.setCurrentIndex(panel.experiment_combo.findData("jres"))
+    assert not panel.split_t1_check.isVisibleTo(panel)
+    assert panel.plan().kappa_t1 == 1.0                       # split-t1 ignored off MQMAS/STMAS

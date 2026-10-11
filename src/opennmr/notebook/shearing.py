@@ -68,6 +68,17 @@ recombining (to 1e-15), while giving both the same kappa is wrong by
 the full scale of the data. What does break it is anything row-by-row
 before the shear, such as Align Echo (warned about).
 
+Split-t1
+--------
+Split-t1 sequences (Brown & Wimperis) share t1 between the MQ (or
+satellite) coherence, 1/(1 + |kappa|) of it, and the CT, |kappa|/(1 +
+|kappa|), so each crystallite's anisotropy refocuses within t1: the data
+arrive sheared and in the unified scaling. ``make_shear_plan(...,
+split_t1=True)`` therefore applies no shear and only scales/references
+F1 with the effective t1 coefficients (x_MQ - kappa x_CT)/(1 + |kappa|).
+Applying the ordinary plan to such data would shear it twice.
+:func:`estimate_shear` recognises such data (best kappa near zero).
+
 Conventions in this module
 --------------------------
 * Arrays are ``(F1, F2)``; frequency axes descend (high frequency at
@@ -405,6 +416,7 @@ def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
                     nucleus: str | None = None, mq_order: int = 3,
                     pathway: str = "echo", satellite: int = 1,
                     das_angles: tuple = (37.38, 79.19), second_shear: bool = False,
+                    split_t1: bool = False,
                     f1_sign: int = 1, convention=None,
                     kappa_t2: float | None = None, kappa_t1: float | None = None,
                     a: tuple | None = None, b: tuple | None = None,
@@ -430,6 +442,16 @@ def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
     second_shear : bool
         DAS only: also shear parallel to t1 so each site's F2 pattern is
         centred on zero (removes the isotropic part from F2).
+    split_t1 : bool
+        MQMAS/STMAS only: the data were acquired with a split-t1
+        sequence (Brown & Wimperis), in which t1 is shared between the
+        MQ (or satellite) coherence, for 1/(1 + |kappa|) of it, and the
+        CT, for |kappa|/(1 + |kappa|), so the anisotropy refocuses within
+        t1 and the spectrum arrives already sheared -- and already in the
+        unified scaling. No shear is applied; F1 is scaled and referenced
+        with the effective t1 coefficients
+        ``x_eff = (x_MQ - kappa x_CT) / (1 + |kappa|)``. Assumes the F1
+        dwell (Bruker IN0) is the whole t1 increment.
     f1_sign : +1 or -1
         +1 when F1 is displayed with the same sense as the t1
         coherence's frequency, -1 when reversed (receiver/quadrature
@@ -551,6 +573,24 @@ def make_shear_plan(experiment: str = "mqmas", *, spin: float | None = None,
                                  "so a shear parallel to t1 cannot remove it from F2.")
             k_t1 = b_c[1] / b1_after
 
+    if split_t1:
+        if exp not in ("mqmas", "stmas"):
+            raise ValueError("split_t1 applies to MQMAS and STMAS only.")
+        # The sequence has done the shear (and the unified scaling) itself:
+        # what evolves in F1 is the time-weighted mix of the two coherences.
+        f = 1.0 + abs(k_t2)
+        frac_mq, frac_ct = 1.0 / f, abs(k_t2) / f
+
+        def eff(pair):
+            return None if pair is None else ((pair[0] - k_t2 * pair[1]) / f, pair[1])
+        cs_c, qis_c = eff(cs_c), eff(qis_c)
+        notes.append(f"Split-t1: acquired already sheared (t1 shared {_frac(frac_mq)} "
+                     f"{'MQ' if exp == 'mqmas' else 'satellite'} : {_frac(frac_ct)} CT for "
+                     f"kappa = {_frac(k_t2)}), so no shear is applied; F1 is only scaled and "
+                     "referenced. This assumes the F1 dwell (IN0) is the whole t1 increment; "
+                     "if it is only the MQ part, use a custom F1 factor.")
+        label += " -- split-t1 acquisition"
+        a_c, k_t2 = None, 0.0
     if convention is None:
         convention = "cs"
     plan = ShearPlan(kappa_t2=k_t2, kappa_t1=k_t1, cs=cs_c, qis=qis_c, a=a_c, b=b_c,
@@ -1052,8 +1092,11 @@ def estimate_shear(spectrum, direction: str = "t2", *, kappa_range=(-4.0, 4.0),
         text.append("The scan is flat, so the data do not pin the ratio down (little "
                     "anisotropy, or noise); rely on the experiment's own value.")
     if abs(k_best) < 2 * step:
-        text.append("The best ratio is close to zero: the data may already be sheared "
-                    "(e.g. a split-t1 acquisition), in which case only scaling is needed.")
+        text.append("The best ratio is close to zero: the data look already sheared, as a "
+                    "split-t1 acquisition is -- choose split-t1 (make_shear_plan(..., "
+                    "split_t1=True)) so that F1 is only scaled and referenced, not sheared "
+                    "again. (The F1 direction cannot be read from a ridge that is already "
+                    "flat; if the sites come out in the wrong F1 order, use f1_sign = -1.)")
     if direction == "t1":
         m = matches[0]
         other = matches[1]
