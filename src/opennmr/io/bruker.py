@@ -1434,6 +1434,10 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # decode too, rather than silently reverting to plain
             # complex-per-row once F2's own controls change.
             "fn_mode": fn_mode,
+            # Whether each row was rolled to its own echo top. Recorded
+            # so a later step that relies on every row sharing one t2
+            # origin (shearing: notebook.shearing) can say it was not.
+            "align_echo": bool(align_echo),
             # F2's fully processed (pre-FFT) FID, one row per F1
             # position -- an optional GUI preview of FID-domain
             # processing; F1 isn't included (its own FFT, when not

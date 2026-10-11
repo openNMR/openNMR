@@ -501,3 +501,79 @@ def test_shear_and_unshear_round_trip_through_a_reversed_axis():
     z_src = src.data + 1j * src.data_imag
     expected = np.conj(z_src[::-1])           # F1 mirrored (and so conjugated)
     assert _rel_err(z_back, expected) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Echo-antiecho: p and n pathways need opposite shears in their own frames
+# ---------------------------------------------------------------------------
+
+def _ea_spectrum(cryst_echo, *, k_e=0.0, k_a=0.0, n1=48, n2=200, sw1=20000.0, sw2=50000.0,
+                 sf=104.2, carrier=800.0, align_echo=False):
+    """FnMODE-6 row pairs built pathway by pathway (row 2k: the echo,
+    evolving at nu1 in t1; row 2k+1: the antiecho, at -nu1), after
+    openNMR's F2 FFT, recombined by the reader's own decoder and F1
+    transformed. ``k_e``/``k_a`` shear each pathway in its own frame
+    before recombination (the reference)."""
+    from opennmr.processing.ft import decode_hypercomplex_f1
+    N1, N2 = 2 * n1, 2 * n2
+    t1, t2 = np.arange(n1) / sw1, np.arange(n2) / sw2
+    nu2b = _bins(N2, sw2)
+    E = np.zeros((n1, N2), complex)
+    A = np.zeros_like(E)
+    for nu1, nu2, w in cryst_echo:
+        f2 = np.zeros(N2, complex)
+        f2[:n2] = np.exp(-1j * TWO_PI * nu2 * t2) * np.exp(-t2 / 1.5e-3)
+        line = 0.5j * w * np.fft.fftshift(np.fft.fft(f2))[None, :] * np.exp(-t1 / 2e-3)[:, None]
+        E += line * np.exp(-1j * TWO_PI * np.outer(t1, nu1 - k_e * nu2b))
+        A += line * np.exp(-1j * TWO_PI * np.outer(t1, -nu1 - k_a * nu2b))
+    rows = np.empty((2 * n1, N2), complex)
+    rows[0::2], rows[1::2] = E, A
+    z = np.zeros((N1, N2), complex)
+    z[:n1] = decode_hypercomplex_f1(rows, 6)
+    S = np.fft.fftshift(np.fft.fft(z, axis=0), axes=0)
+    y = np.linspace(carrier + sw1 / 2, carrier - sw1 / 2, N1)
+    x = np.linspace(carrier + sw2 / 2, carrier - sw2 / 2, N2)
+    raw = {"fid_dt": 1 / sw2, "fid_dt_f1": 1 / sw1, "fn_mode": 6, "align_echo": align_echo}
+    meta = NMRMetadata(vendor="bruker", nucleus="23Na", nucleus_indirect="23Na", sfo1=sf,
+                       sfo1_indirect=sf, homonuclear=True, raw=raw)
+    return NMRSpectrum(data=S.real.copy(), data_imag=S.imag.copy(), metadata=meta,
+                       axes=[NMRAxis(kind="frequency", ppm=y / sf, hz=y),
+                             NMRAxis(kind="frequency", ppm=x / sf, hz=x)])
+
+
+def test_echo_antiecho_shearing_the_recombined_data_shears_p_and_n_oppositely():
+    cryst, sites = two_site_mqmas()
+    spec = _ea_spectrum(cryst)
+    scan = sh.estimate_shear(spec)
+    f1_sign = scan["matches"][0]["f1_sign"]
+    assert "3Q" in scan["matches"][0]["label"]
+    plan = sh.make_shear_plan("mqmas", spin=1.5, f1_sign=f1_sign)
+    out = sh.shear_2d(spec, plan)
+
+    # reference: each pathway sheared in its own frame (n with kappa, p with -kappa)
+    k = plan.kappa_t2
+    relabel = sh.make_shear_plan("custom_kappa", kappa_t2=0.0, cs=plan.cs, convention=plan.scale_f1)
+    ref = sh.shear_2d(_ea_spectrum(cryst, k_a=k, k_e=-k), relabel)
+    assert _rel_err(out.data, ref.data) < 1e-9
+    assert _rel_err(out.data_imag, ref.data_imag) < 1e-9
+
+    # giving both pathways the same kappa is not a small error
+    same = _ea_spectrum(cryst, k_a=k, k_e=k)
+    opposite = _ea_spectrum(cryst, k_a=k, k_e=-k)
+    assert _rel_err(same.data, opposite.data) > 0.3
+
+    # and the sites land at delta_CS - 10/17 delta_QIS
+    y, x = out.axes[0].ppm, out.axes[1].ppm
+    dppm = abs(y[1] - y[0])
+    for dcs, dqis, _ in sites:
+        cols = np.abs(x - (dcs + dqis)) < 30
+        got = y[int(np.argmax(np.abs(out.data[:, cols]).sum(axis=1)))]
+        assert got == pytest.approx(dcs - 10 / 17 * dqis, abs=1.5 * dppm)
+
+
+def test_warns_when_rows_were_aligned_to_their_own_echo_tops():
+    cryst, _ = two_site_mqmas()
+    spec = _ea_spectrum(cryst, align_echo=True)
+    with pytest.warns(UserWarning, match="Align Echo"):
+        out = sh.shear_2d(spec, sh.make_shear_plan("mqmas", spin=1.5, f1_sign=-1))
+    assert any("Align Echo" in w for w in out.metadata.raw["shear"]["warnings"])

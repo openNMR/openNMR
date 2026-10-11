@@ -53,6 +53,21 @@ shift of each F2 spectrum by ``-kappa_t1 * nu1`` (one per F1 row).
 the FFT bins, never from a re-referenced ppm axis (a ppm zero that is
 not the carrier would add ``kappa * nu_ref`` to every F1 position).
 
+Echo-antiecho and States data
+-----------------------------
+The echo (p) and antiecho (n) pathways evolve with opposite senses in
+t1, so in their raw frames they need opposite shears (kappa and
+-kappa). Shearing the *recombined* spectrum does exactly that: the
+recombination conjugates one pathway (openNMR's FnMODE 6 decode is
+``1j * (conj(p) - n)``, :func:`opennmr.processing.ft.decode_hypercomplex_f1`;
+States is the sum of the two), and the shear is linear, so one ramp on
+the combined data is one ramp on n and its conjugate on p. Checked in
+``tests/test_shearing.py`` from separate p and n rows through the real
+decoder: identical to shearing each with its own kappa and then
+recombining (to 1e-15), while giving both the same kappa is wrong by
+the full scale of the data. What does break it is anything row-by-row
+before the shear, such as Align Echo (warned about).
+
 Conventions in this module
 --------------------------
 * Arrays are ``(F1, F2)``; frequency axes descend (high frequency at
@@ -832,6 +847,14 @@ def shear_2d(spectrum, plan: ShearPlan, *, t1_0: float = 0.0, t2_0: float = 0.0,
     nu1 = _bin_offsets(n1, view["sw1"])
     nu2 = _bin_offsets(n2, view["sw2"])
 
+    if view["raw"].get("align_echo") and plan.kappa_t2:
+        warn_list.append(
+            "Each row was rolled to its own echo top (Align Echo) when this 2D was processed. "
+            "That moves every t1 increment -- and, with echo-antiecho data, the p- and "
+            "n-type rows differently -- by its own amount, which is a row-dependent shear of "
+            "its own; the shear here assumes every row shares one t2 origin. Reprocess "
+            "without Align Echo (use one F2 first-order phase for the echo delay) and shear "
+            "that.")
     if view["raw"].get("magnitude_mode"):
         warn_list.append("This spectrum is in magnitude mode: the shear interpolates a "
                          "non-phase-sensitive surface, so line shapes are approximate. "
