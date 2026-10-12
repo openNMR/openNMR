@@ -1374,6 +1374,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         #: 2026-10-06: "add a peak and see it appear, and change with each
         #: change in parameter"). Debounced; suspended while the panel is
         #: filled by code (restores, transfers) so it never overdraws a fit.
+        # Made before QWidget.__init__ (which add_site's refresh needs), so
+        # parented just after it: an orphan timer's connection held this
+        # panel -- and through its callbacks the whole MainWindow -- alive
+        # after the window was deleted (~10 MB per window in the tests).
         self._preview_timer = QTimer()
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(self.PREVIEW_DELAY_MS)
@@ -1391,6 +1395,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self._refreshing = False
         super().__init__(plot_spectrum=lambda _s: None, add_to_open=lambda *_a: None,
                          draw_sites=None, parent=parent, strong_coupling=strong_coupling)
+        self._preview_timer.setParent(self)
         self.refresh_parameter_table()
         for widget in (self.nucleus_combo, self.regime_combo, self.transitions_combo,
                        self.order_combo, self.window_combo, self.estimate_amounts_check,

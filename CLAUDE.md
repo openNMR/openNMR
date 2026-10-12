@@ -40,7 +40,7 @@ was already in progress, so start every session with the first section.
 
 ```
 pip install -e ".[test]"
-pytest                          # full suite, ~9 minutes
+pytest                          # full suite: long (~2,500 tests build a MainWindow)
 pytest tests/test_gui.py -k toolbar   # a subset while iterating
 ```
 
@@ -48,7 +48,13 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   synchronously; no display is needed. It also deletes every window a
   test leaves open, after each test -- without that, the suite's
   several hundred `MainWindow`s leak to ~13 GB and GitHub's runner kills
-  the job. Tests need not close their own windows.
+  the job. Tests need not close their own windows. **Parent every
+  QObject a window or panel makes** (`QTimer(self)`; a timer made before
+  `super().__init__` gets `setParent(self)` right after): a parentless
+  timer/thread outlives the window and keeps it alive through its
+  connections -- `tests/test_window_cleanup.py` fails if it does. A
+  cancelled CI run ("The operation was canceled" partway) is this leak
+  (out of memory) or the job's `timeout-minutes`.
 - Real instrument data lives in `test_data/`, which is **gitignored**.
   Tests that need it skip when it is absent, so a fresh clone runs the
   suite with those skipped. A new real-data test must do the same

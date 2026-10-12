@@ -26,7 +26,9 @@ concurrency:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The suite builds a MainWindow in ~2,500 tests (~1-4 s each), so on a
+    # hosted runner it takes well over the 30 minutes this was set to.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -46,5 +48,7 @@ jobs:
       - name: Install opennmr with test extras
         run: pip install -e ".[test]"
 
+      # --durations lists the slowest tests, so a run that creeps towards
+      # the limit shows where the time goes.
       - name: Run tests
-        run: pytest -q -rs
+        run: pytest -q -rs --durations=25

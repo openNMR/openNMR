@@ -177,6 +177,16 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+## CI cancelled partway through test_gui.py: MainWindows leaking again (2026-10-12, round 3)
+
+**Reported:** `git push upstream main` -> the Tests workflow stopped at 27 % (inside test_gui.py) with "Error: The operation was canceled."
+
+**What was wrong:** every MainWindow stayed in memory after conftest deleted it -- 10 MB retained per window (measured: 8 windows built and deleted, RSS growth / window), against ~0.6 MB when conftest's cleanup was written. Cause: `CombinedFitPanel._preview_timer = QTimer()` (the live-preview timer, 2026-10-06) is created before `QWidget.__init__` and so had no parent; it was never deleted, and its `timeout` connection (a lambda over the panel) kept the panel -- and through the panel's callbacks (bound MainWindow methods) the whole window -- alive. The window's C++ side was gone (`shiboken6.isValid` False) but the Python wrapper and everything it references stayed. objgraph found no Python chain to a module: the holder was the C++ connection. At ~700-800 windows that is the 7 GB of a private-repo runner, i.e. ~27 % of the suite -- the same symptom conftest's docstring describes for the original leak. The workflow's 30-minute limit was also too short: a MainWindow takes ~1-4 s to build and ~2,500 tests build one.
+
+**Fixed:** the timer is parented right after `super().__init__` (0.4 MB retained per window, window collected). `tests/test_window_cleanup.py` (3 tests: a deleted window is garbage-collected; the timer's parent; no parentless QTimer survives a window) -- the first and third fail without the fix. Workflow: `timeout-minutes: 120`, `--durations=25`. conftest docstring and CLAUDE.md say to parent every QObject.
+
+**Looked at, not changed:** building a MainWindow costs ~4 s on a 2-CPU machine, almost all Qt polishing widgets under the application stylesheet as they are added to layouts (~1,200 `addWidget`s); `QApplication.setStyleSheet` itself costs 3.5 s only when another window is still open. `widgets/wheel_guard.py`'s app-wide event filter sees ~130,000 events per construction (0.35 s). pytest-xdist on CI was not adopted: earlier rounds saw some tests crash xdist workers.
+
 ## Same CSA/quad/J for many peaks at once; hundreds of peaks simulated in seconds (2026-10-12, round 2)
 
 **Asked:** after exporting e.g. 1200 enumerated pNMR sites to CSA, Quad & J-coupling, give them all the same CSA/quad/J without going peak by peak -- select several peaks and apply.

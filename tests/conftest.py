@@ -72,8 +72,14 @@ def _delete_leftover_windows():
     freed. test_gui.py builds several hundred windows, and that piles up
     past the ~7 GB of a GitHub Actions runner, which then kills the job
     ("The operation was canceled") partway through the suite.
-    Deleting the C++ side drops those references; measured at ~0.6 MB
-    retained per window afterwards."""
+    Deleting the C++ side drops those references; measured at ~0.4 MB
+    retained per window afterwards -- *if* nothing outside the window
+    holds one of its objects. A parentless QObject (a ``QTimer()`` made
+    before ``QWidget.__init__``, a ``QThread()``) is not deleted with it,
+    and its signal connections keep the window alive: that brought the
+    leak back at ~10 MB per window in October 2026 (CombinedFitPanel's
+    preview timer). tests/test_window_cleanup.py checks a deleted window
+    is really freed."""
     yield
     if "PySide6.QtWidgets" not in sys.modules:
         return  # no Qt test has run -- nothing to clean up
