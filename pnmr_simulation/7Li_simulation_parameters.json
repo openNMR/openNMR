@@ -1,0 +1,38 @@
+{
+  "format": "opennmr.pnmr_simulation_parameters",
+  "version": 1,
+  "cif_filename": "C:\\Users\\quark\\OneDrive\\Documents\\openNMR\\toy.cif",
+  "atom_of_interest": "Li",
+  "sites_of_interest": null,
+  "ignore_species": [
+    "O"
+  ],
+  "ignore_sites": [],
+  "shell_bins": [
+    [
+      "NN",
+      0.0,
+      3.732
+    ]
+  ],
+  "shift_dict": {
+    "NN": {
+      "Li": 0.0,
+      "Mn": 250.0,
+      "Fe": -90.0
+    }
+  },
+  "nuclide": "7Li",
+  "B0_tesla": 11.7,
+  "offset_ppm": 0.0,
+  "gamma_MHz_per_T": null,
+  "broadening_sigma_ppm": 1.0,
+  "n_points": 8192,
+  "xlims": null,
+  "weight_by_occupancy": true,
+  "output_dir": "C:\\Users\\quark\\OneDrive\\Documents\\openNMR\\pnmr_simulation",
+  "BF1_MHz": 193.616865,
+  "SFO1_MHz": 193.616865,
+  "n_sites": 8,
+  "n_configurations": 72
+}

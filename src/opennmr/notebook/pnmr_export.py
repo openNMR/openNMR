@@ -217,7 +217,7 @@ def _with_labels(table, site_labels):
 
 def sites_from_pnmr_table(table, nucleus: str | None = None, broadening_sigma: float | None = None,
                           tolerance: float | None = None, which_rows: Iterable[int] | None = None,
-                          min_fraction: float = 0.01, max_sites: int = 64, site_labels=None,
+                          min_fraction: float = 0.01, max_sites: int | None = None, site_labels=None,
                           method: str = "probability", interactions=None,
                           return_notes: bool = False):
     """A pNMR simulation's shift table (``generate_spectrum_dict``'s, or
@@ -230,8 +230,10 @@ def sites_from_pnmr_table(table, nucleus: str | None = None, broadening_sigma: f
     configurations selected in the GUI -- grouped among themselves.
     ``min_fraction``: groups holding less than this fraction of the
     exported probability are left out (said in the notes, with how much
-    they held), and at most ``max_sites`` of the most probable are kept:
-    a site list of thousands of tiny groups is no use to add tensors to.
+    they held), and, given ``max_sites``, at most that many of the most
+    probable are kept. Hundreds of sites are fine: sites given the same
+    interactions are simulated once and shifted
+    (:func:`.combined_hamiltonian.broadened_sites`).
     ``broadening_sigma`` (ppm, Gaussian σ as the simulation's
     ``broadening``) sets each FWHM; it and ``nucleus`` are read from the
     table's recorded parameters when not given."""
@@ -261,7 +263,7 @@ def sites_from_pnmr_table(table, nucleus: str | None = None, broadening_sigma: f
     total = float(groups["group_p"].sum()) or 1.0
     order = np.argsort(-groups["group_p"].to_numpy(), kind="stable")
     keep = [int(i) for i in order if groups["group_p"].iloc[int(i)] / total >= min_fraction]
-    keep = keep[:max_sites] or [int(order[0])]
+    keep = (keep[:max_sites] if max_sites else keep) or [int(order[0])]
     keep.sort(key=lambda i: -float(groups["group_shift"].iloc[i]))      # high ppm first
     sites = []
     for k, i in enumerate(keep):
@@ -284,9 +286,9 @@ def sites_from_pnmr_table(table, nucleus: str | None = None, broadening_sigma: f
     dropped = len(groups) - len(keep)
     if dropped:
         held = 100.0 * (1.0 - sum(float(groups["group_p"].iloc[i]) for i in keep) / total)
-        notes.append(f"{dropped} group(s) below {100 * min_fraction:.3g} % each (or beyond "
-                     f"{max_sites} sites) left out; together they held {held:.3g} % of the "
-                     "intensity.")
+        beyond = f" (or beyond {max_sites} sites)" if max_sites else ""
+        notes.append(f"{dropped} group(s) below {100 * min_fraction:.3g} % each{beyond} left "
+                     f"out; together they held {held:.3g} % of the intensity.")
     if which_rows is not None:
         notes.append("Only the selected configurations were exported.")
     return sites, notes

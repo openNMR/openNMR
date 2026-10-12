@@ -126,7 +126,15 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   (Qt mnemonic); `CollapsibleSection` titles escape it themselves. pNMR's
   isotropic peaks go there through `notebook/pnmr_export.py` and the
   `gui/pnmr_export_row.py` row on both pNMR panels
-  (`MainWindow._export_pnmr_sites`). Its "Strongly coupled peaks" model
+  (`MainWindow._export_pnmr_sites`). Peaks are multi-select; "Copy to
+  Peaks ▾" gives the selected/all peaks the current peak's interactions
+  (`combined_hamiltonian.copy_interactions`). Sites with identical
+  interactions + broadening are simulated **once and shifted** to each
+  δiso (`broadened_sites`, used by `simulate_combined` and
+  `starting_model`; not yet by the fitters' per-site sticks cache). Code
+  that adds or changes many sites must use the panels' `bulk()` /
+  `add_sites()` -- the Fit panel rebuilt its parameter table per site
+  (6 min for 1200). Its "Strongly coupled peaks" model
   (`gui/combined_section.py`) is the J panel locked to spin-system mode. The old J-coupling,
   CSA/Dipolar and Quadrupolar panels are still built but sit in hidden
   hosts (`_retired_fit_host`, `_retired_sim_host`), because kept fits and

@@ -22,7 +22,6 @@ Simulate, plot, Keep and Send to Fit -- do the rest. The maths is
 
 from __future__ import annotations
 
-import copy
 import os
 
 from PySide6.QtCore import Qt
@@ -871,10 +870,10 @@ class DftSimulationPanel(CombinedHamiltonianPanel):
         self.site_dicts = []
         self._current = -1
         self.nucleus_combo.setCurrentText(model["nucleus"])
-        for d in copy.deepcopy(model["site_dicts"]):
-            CombinedHamiltonianPanel.add_site(self, d)
-        if self.site_dicts:
-            self.site_list.setCurrentRow(0)
+        with self.bulk():
+            CombinedHamiltonianPanel.add_sites(self, model["site_dicts"])
+            if self.site_dicts:
+                self.site_list.setCurrentRow(0)
         self._sync_spin()
         self._sync_controls()
 

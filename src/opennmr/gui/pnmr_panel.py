@@ -1398,8 +1398,16 @@ class PnmrSimulationPanel(QWidget):
         self.export_min_spin.setSuffix(" %")
         self.export_min_spin.setToolTip(
             "Leave out groups holding less than this share of the intensity (the log says how "
-            "much was left out). At most 64 sites are sent.")
+            "much was left out). 0 sends every group.")
         form.addRow("Leave out below:", self.export_min_spin)
+        self.export_max_spin = QSpinBox()
+        self.export_max_spin.setRange(1, 100000)
+        self.export_max_spin.setValue(2000)
+        self.export_max_spin.setSuffix(" sites")
+        self.export_max_spin.setToolTip(
+            "The most probable groups, at most this many. Hundreds are fine: peaks given the "
+            "same interactions (Copy to Peaks) are simulated once and shifted.")
+        form.addRow("At most:", self.export_max_spin)
         v.addLayout(form)
         self.send_sites_row = SendSitesRow(default_destination="simulate",
                                            selected_what="configurations")
@@ -1437,6 +1445,7 @@ class PnmrSimulationPanel(QWidget):
             sites, notes = pnmr_export.sites_from_pnmr_table(
                 table, nucleus=spectrum_dict.get("nuclide"), tolerance=tolerance,
                 which_rows=rows, min_fraction=self.export_min_spin.value() / 100.0,
+                max_sites=self.export_max_spin.value(),
                 site_labels=labels, return_notes=True)
         except ValueError as exc:
             QMessageBox.warning(self, "pNMR", str(exc))

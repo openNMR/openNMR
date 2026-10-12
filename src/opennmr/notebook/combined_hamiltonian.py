@@ -56,6 +56,7 @@ sphere is used automatically.
 """
 
 import copy
+import functools
 import json
 
 import numpy as np
@@ -91,6 +92,13 @@ def _rotation_zyz(alpha_deg, beta_deg, gamma_deg):
     return rz(a) @ ry(b) @ rz(g)
 
 
+@functools.lru_cache(maxsize=None)
+def _spin_of(nucleus: str) -> float:
+    """I of a nuclide (cached: a table look-up per site was a second for
+    1200 sites)."""
+    return float(find_isotope_info(nucleus)["spin"])
+
+
 class Site:
     """
     One observed site: a nucleus, an isotropic shift, and a list of
@@ -123,7 +131,7 @@ class Site:
     def __init__(self, nucleus, delta_iso=0.0, label=None, amount=1.0, fwhm=1.0,
                  lineshape="gaussian", eta=0.0, spin=None):
         self.nucleus = str(nucleus)
-        self.spin = float(spin) if spin is not None else float(find_isotope_info(nucleus)["spin"])
+        self.spin = float(spin) if spin is not None else _spin_of(self.nucleus)
         self.delta_iso = float(delta_iso)
         self.label = label or f"{self.nucleus} site"
         self.amount = float(amount)
@@ -297,6 +305,78 @@ class Site:
 
     def __repr__(self):
         return f"Site({self.describe()})"
+
+
+def copy_interactions(sites, source, targets=None, broadening=False):
+    """Give many sites one site's interactions -- e.g. one CSA to every
+    one of 1200 enumerated pNMR environments.
+
+    ``sites``: Site objects or dicts (each needs ``nucleus``); ``source``:
+    the index or label of the site to copy from; ``targets``: indices or
+    labels (default every other site). Each target's interactions are
+    replaced by copies of the source's; with ``broadening`` its FWHM,
+    lineshape and pseudo-Voigt fraction too. δiso, amount and label stay
+    each site's own. Skipped, and reported: a site linked to another
+    (it follows its parent); a quadrupolar coupling for a spin-1/2 site
+    or a site of another nucleus than the source's (C_Q scales with the
+    isotope's quadrupole moment -- use an isotope link for that).
+
+    Returns ``(sites, report)``: new Site objects (or dicts, as given) and
+    ``{"copied": [labels], "linked": [...], "no_quadrupolar": [...],
+    "text": "..."}``. Sites given the same interactions and broadening are
+    simulated once and shifted by :func:`simulate_combined`, so this is
+    cheap to simulate.
+
+        sites[0].add_csa(aniso=-450, asym=0.3)
+        sites, report = copy_interactions(sites, 0)
+    """
+    as_dicts = bool(sites) and all(isinstance(s, dict) for s in sites)
+    dicts = [copy.deepcopy(s) if isinstance(s, dict) else s.to_dict() for s in sites]
+    labels = [d.get("label") for d in dicts]
+
+    def index(key):
+        if isinstance(key, (int, np.integer)):
+            if not 0 <= int(key) < len(dicts):
+                raise ValueError(f"No site {key}: there are {len(dicts)}.")
+            return int(key)
+        if key in labels:
+            return labels.index(key)
+        raise ValueError(f"No site labelled {key!r}.")
+
+    src_i = index(source)
+    src = dicts[src_i]
+    rows = ([i for i in range(len(dicts)) if i != src_i] if targets is None
+            else sorted({index(t) for t in targets} - {src_i}))
+    copied, linked, no_quad = [], [], []
+    for i in rows:
+        d = dicts[i]
+        if d.get("link"):
+            linked.append(d.get("label"))
+            continue
+        inter = copy.deepcopy(src.get("interactions") or [])
+        if any(x["type"] == "quadrupolar" for x in inter):
+            spin = float(find_isotope_info(d["nucleus"])["spin"])
+            if spin < 1 or d["nucleus"] != src["nucleus"]:
+                inter = [x for x in inter if x["type"] != "quadrupolar"]
+                no_quad.append(d.get("label"))
+        d["interactions"] = inter
+        if broadening:
+            for key in ("fwhm", "lineshape", "eta"):
+                if key in src:
+                    d[key] = src[key]
+        copied.append(d.get("label"))
+    names = {"csa": "CSA", "quadrupolar": "quadrupolar coupling", "jcoupling": "J-coupling"}
+    kinds = [names[k] for k in ("quadrupolar", "csa", "jcoupling")
+             if any(x["type"] == k for x in src.get("interactions") or [])]
+    text = (f"{src.get('label')}'s {', '.join(kinds) or 'interactions (none: isotropic)'}"
+            + (" and broadening" if broadening else "") + f" copied to {len(copied)} site(s).")
+    if linked:
+        text += f" {len(linked)} linked site(s) skipped (they follow their parent)."
+    if no_quad:
+        text += (f" No quadrupolar coupling for {len(no_quad)} site(s) (spin-1/2 or another "
+                 "nucleus).")
+    report = {"copied": copied, "linked": linked, "no_quadrupolar": no_quad, "text": text}
+    return (dicts if as_dicts else [Site.from_dict(d) for d in dicts]), report
 
 
 def as_sites(sites):
@@ -578,9 +658,134 @@ def _broaden_site(site, comp, ppm_axis):
             for g, c in comp.items()}
 
 
+def shape_key(site, observe, order="second"):
+    """What a site's powder pattern depends on besides δiso and amount --
+    its interactions and broadening -- or None when the pattern cannot be
+    moved rigidly: a site of another nucleus (placed through frequency
+    ratios), or an exact quadrupolar treatment (whose Zeeman term carries
+    the shift). Sites with the same key differ only by an isotropic shift
+    and a scale, and an isotropic shift moves every transition, sideband
+    and J line by the same ppm (first and second order alike)."""
+    if site.nucleus != observe:
+        return None
+    if order == "exact" and site.get("quadrupolar"):
+        return None
+    order_of = {"quadrupolar": 0, "csa": 1, "jcoupling": 2}
+    inter = sorted(site.interactions, key=lambda i: (order_of.get(i["type"], 9),
+                                                     json.dumps(i, sort_keys=True, default=list)))
+    return (site.nucleus, float(site.spin),
+            json.dumps(inter, sort_keys=True, default=list),
+            float(site.fwhm), str(site.lineshape),
+            float(site.eta) if site.lineshape == "pseudo_voigt" else None)
+
+
+def shared_pattern_groups(sites, observe, order="second", min_fwhm=0.0):
+    """Indices of ``sites`` grouped by :func:`shape_key` -- each group of
+    two or more can be simulated once and shifted. Sites that cannot be
+    shared, or broadened by less than ``min_fwhm`` ppm (too sharp to move
+    by a fraction of a point without error), are each their own group."""
+    groups, alone = {}, []
+    for i, site in enumerate(sites):
+        key = shape_key(site, observe, order) if site.fwhm >= min_fwhm else None
+        if key is None:
+            alone.append([i])
+        else:
+            groups.setdefault(key, []).append(i)
+    return list(groups.values()) + alone
+
+
+def _shifted_group(sites, idx, ppm_axis, larmor_Hz, sim):
+    """The broadened spectra (per transition group, with each site's own
+    amount) of the sites ``idx``, which share one pattern: simulated once
+    at the first site's δiso on a grid extended to cover every shift, then
+    read off at each site's δiso. Integer-bin shifts reproduce a direct
+    simulation exactly; others are a cubic (Catmull-Rom) reading of the
+    broadened pattern, which is smooth on the grid (sites are shared only
+    when broadened by at least two points: ~1e-4 of the maximum)."""
+    ref = sites[idx[0]]
+    axis = np.asarray(ppm_axis, dtype=float)
+    n = axis.size
+    h = (axis[-1] - axis[0]) / (n - 1)
+    k = np.array([(sites[i].delta_iso - ref.delta_iso) / h for i in idx])
+    m0 = int(np.floor(np.min(-k))) - 1
+    m1 = int(np.ceil(n - 1 + np.max(-k))) + 1
+    m = np.arange(m0, m1 + 1)
+    ext = axis[0] + h * m
+    template = Site.from_dict({**ref.to_dict(), "amount": 1.0})
+    comp, powder = _site_sticks(template, ext, larmor_Hz, sim["mas_Hz"], sim["order"],
+                                sim["transitions"], sim["beta_r"], sim["n_zcw"],
+                                sim.get("n_gamma"), sim.get("n_time"),
+                                sim.get("max_n_time", 65536), sim.get("use_symmetry", True))
+    broadened = _broaden_site(template, comp, ext)
+    padded = {g: np.concatenate([[c[0]], c, [c[-1], c[-1]]]) for g, c in broadened.items()}
+    out = {}
+    for i, ki in zip(idx, k):
+        # Point j of this site is the template at index j - ki - m0
+        # = base + t, the same t for every j.
+        start = -ki - m0
+        base = int(np.floor(start + 1e-9))
+        t = start - base
+        if t < 1e-9:
+            out[i] = {g: sites[i].amount * c[base:base + n] for g, c in broadened.items()}
+            continue
+        w0 = 0.5 * (-t + 2 * t * t - t ** 3)
+        w1 = 0.5 * (2 - 5 * t * t + 3 * t ** 3)
+        w2 = 0.5 * (t + 4 * t * t - 3 * t ** 3)
+        w3 = 0.5 * (-t * t + t ** 3)
+        b = base + 1                                   # index into padded
+        out[i] = {g: sites[i].amount * (w0 * c[b - 1:b - 1 + n] + w1 * c[b:b + n]
+                                        + w2 * c[b + 1:b + 1 + n] + w3 * c[b + 2:b + 2 + n])
+                  for g, c in padded.items()}
+    return out, powder
+
+
+def broadened_sites(sites, ppm_axis, larmor_Hz, observe, sim, share=True):
+    """Every site's broadened spectrum on ``ppm_axis`` (a list, in order,
+    of ``{transition group: curve}`` with the site's amount), sharing one
+    simulation among sites with the same interactions and broadening
+    (:func:`shared_pattern_groups`) when the axis is uniform. ``sim``:
+    mas_Hz, order, transitions, beta_r, n_zcw, n_gamma, n_time,
+    max_n_time, use_symmetry. Returns ``(curves, powder by label, notes,
+    shared sets, shared sites)``."""
+    ppm_axis = np.asarray(ppm_axis, dtype=float)
+    axes = site_axes(sites, ppm_axis, larmor_Hz, observe)
+    uniform = ppm_axis.size > 2 and np.allclose(np.diff(ppm_axis), ppm_axis[1] - ppm_axis[0],
+                                                rtol=1e-6, atol=0.0)
+    groups = (shared_pattern_groups(sites, observe, sim["order"],
+                                    min_fwhm=2.0 * abs(ppm_axis[1] - ppm_axis[0]))
+              if share and uniform else [[i] for i in range(len(sites))])
+    out, used, notes, shared_sets, shared_sites = {}, {}, [], 0, 0
+    for idx in groups:
+        if len(idx) > 1:
+            curves, powder = _shifted_group(sites, idx, ppm_axis, larmor_Hz, sim)
+            out.update(curves)
+            for i in idx:
+                used[sites[i].label] = powder
+            shared_sets += 1
+            shared_sites += len(idx)
+            if not powder["octant"] and sim["use_symmetry"]:
+                notes.append(f"{len(idx)} sites sharing {sites[idx[0]].label}'s interactions: "
+                             "CSA not coincident with the EFG, so the full sphere was averaged "
+                             "(no octant symmetry)")
+            continue
+        i = idx[0]
+        site, (axis, nu0) = sites[i], axes[i]
+        comp, powder = _site_sticks(site, axis, nu0, sim["mas_Hz"], sim["order"],
+                                    sim["transitions"], sim["beta_r"], sim["n_zcw"],
+                                    sim.get("n_gamma"), sim.get("n_time"),
+                                    sim.get("max_n_time", 65536), sim.get("use_symmetry", True))
+        used[site.label] = powder
+        out[i] = _broaden_site(site, comp, axis)
+        if not powder["octant"] and sim.get("use_symmetry", True):
+            notes.append(f"{site.label}: CSA not coincident with the EFG, so the full sphere "
+                         "was averaged (no octant symmetry)")
+    return [out[i] for i in range(len(sites))], used, notes, shared_sets, shared_sites
+
+
 def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, order="second",
                       transitions="all", rotor_angle="magic", n_zcw=None, n_gamma=None,
-                      n_time=None, max_n_time=65536, use_symmetry=True, observe=None):
+                      n_time=None, max_n_time=65536, use_symmetry=True, observe=None,
+                      share_patterns=True):
     """
     Powder spectrum of one or more sites, each with any combination of
     CSA, quadrupolar and J interactions, static (``mas_Hz`` = 0) or
@@ -609,6 +814,10 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
         (see the module notes); otherwise the full sphere, with 8x as
         many for a static pattern so the density is the same.
     n_gamma, n_time, max_n_time : MAS sampling, as quadrupolar_mas_spectrum.
+    share_patterns : sites with the same interactions and broadening
+        (:func:`shape_key`) are simulated once and shifted to each one's
+        δiso -- hundreds of sites given one CSA cost one simulation. The
+        log says how many were shared. False simulates each site.
 
     Returns
     -------
@@ -647,16 +856,19 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     site_spectra, components = {}, {}
     notes = placement_notes(sites, observe, ppm_axis)
     used = {}
-    for site, (axis, nu0) in zip(sites, site_axes(sites, ppm_axis, larmor_Hz, observe)):
-        comp, powder = _site_sticks(site, axis, nu0, mas_Hz, order, transitions,
-                                    beta_r, n_zcw, n_gamma, n_time, max_n_time, use_symmetry)
-        used[site.label] = powder
-        broadened = _broaden_site(site, comp, axis)
-        components[site.label] = broadened
-        site_spectra[site.label] = np.sum(list(broadened.values()), axis=0)
-        if not powder["octant"] and use_symmetry:
-            notes.append(f"{site.label}: CSA not coincident with the EFG, so the full sphere "
-                         "was averaged (no octant symmetry)")
+    sim = {"mas_Hz": mas_Hz, "order": order, "transitions": transitions, "beta_r": beta_r,
+           "n_zcw": n_zcw, "n_gamma": n_gamma, "n_time": n_time, "max_n_time": max_n_time,
+           "use_symmetry": use_symmetry}
+    broadened, used, more, shared_sets, shared_sites = broadened_sites(
+        sites, ppm_axis, larmor_Hz, observe, sim, share=share_patterns)
+    notes += more
+    for i, site in enumerate(sites):
+        components[site.label] = broadened[i]
+        site_spectra[site.label] = np.sum(list(broadened[i].values()), axis=0)
+    if shared_sets:
+        notes.append(f"{shared_sites} sites in {shared_sets} set(s) with identical interactions "
+                     "and broadening: each set was simulated once and placed at each site's "
+                     "δiso (an isotropic shift moves the whole pattern rigidly).")
 
     total = np.sum(list(site_spectra.values()), axis=0)
     peak = float(np.max(total)) if total.size else 0.0
@@ -665,18 +877,64 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
                 "n_gamma": n_gamma, "use_symmetry": use_symmetry, "observe": observe}
     regime = ("static" if not mas_Hz else
               f"MAS {mas_Hz / 1e3:g} kHz" + ("" if rotor_angle == "magic" else f" at {rotor_angle}°"))
-    log_lines = [s.describe() for s in sites]
+    log_lines = sites_log(sites)
     log_lines.append(
         f"{regime}, nu0 = {larmor_Hz / 1e6:.7g} MHz, quadrupolar {order}-order"
         .replace("exact-order", "exact") + f", transitions {transitions}, "
-        + ", ".join(f"{k}: {v['orientations']} orientations"
-                    + (" (octant)" if v["octant"] else "") for k, v in used.items()) + ".")
+        + _orientations_text(used) + ".")
     log_lines += notes
     return {"x_ppm": ppm_axis, "real_spec": total,
             "normalised_real_spec": total / peak if peak > 0 else total,
             "sites": site_spectra, "components": components, "settings": settings,
             "site_dicts": [s.to_dict() for s in sites], "log": "\n".join(log_lines),
             "powder": used}
+
+
+#: More sites than this are summarised in the log, not listed one by one
+#: (every site is still in the result's ``site_dicts``).
+MAX_LOGGED_SITES = 24
+
+
+def sites_log(sites) -> list[str]:
+    """One line per site -- or, for many sites, a summary: how many, the
+    δiso and amount ranges, and each distinct set of interactions and
+    broadening with how many sites carry it."""
+    sites = as_sites(sites)
+    if len(sites) <= MAX_LOGGED_SITES:
+        return [s.describe() for s in sites]
+    shifts = np.array([s.delta_iso for s in sites])
+    amounts = np.array([s.amount for s in sites])
+    lines = [f"{len(sites)} sites ({', '.join(sorted({s.nucleus for s in sites}))}): δiso "
+             f"{shifts.min():.4g} to {shifts.max():.4g} ppm, amounts {amounts.min():.3g} to "
+             f"{amounts.max():.3g} (total {amounts.sum():.4g}); every site's values are in the "
+             "result's site_dicts (and the saved simulation)."]
+    sets = {}
+    for s in sites:
+        key = json.dumps([s.interactions, s.fwhm, s.lineshape, s.eta], sort_keys=True,
+                         default=list)
+        sets.setdefault(key, []).append(s)
+    for members in sets.values():
+        text = members[0].describe().split("; ", 1)
+        rest = text[1] if len(text) > 1 else ""
+        rest = "; ".join(b for b in rest.split("; ") if not b.startswith("amount "))
+        broad = (f"FWHM {members[0].fwhm:g} ppm {members[0].lineshape}")
+        lines.append(f"  {len(members)} site(s): "
+                     + (rest if rest else "isotropic") + f"; {broad}")
+    return lines
+
+
+def _orientations_text(used) -> str:
+    """'A: 4181 orientations (octant), B: ...' -- or, for many sites, one
+    line per distinct powder grid with how many sites used it."""
+    if len(used) <= 12:
+        return ", ".join(f"{k}: {v['orientations']} orientations"
+                         + (" (octant)" if v["octant"] else "") for k, v in used.items())
+    counts = {}
+    for v in used.values():
+        key = (v["orientations"], bool(v["octant"]))
+        counts[key] = counts.get(key, 0) + 1
+    return ", ".join(f"{c} sites: {o} orientations" + (" (octant)" if oc else "")
+                     for (o, oc), c in counts.items())
 
 
 def combined_axis_limits(sites, larmor_Hz, transitions="all", margin=0.15, n=2584, mas_Hz=0.0,
@@ -693,12 +951,17 @@ def combined_axis_limits(sites, larmor_Hz, transitions="all", margin=0.15, n=258
     theta, phi, _ = zcw_angles(n)
     b = np.stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta)], -1)
     lows, highs, fwhm = [], [], 0.0
+    spans = {}          # the range about δiso depends only on nucleus and interactions
     for site in sites:
         nu0 = larmor_Hz * frequency_ratio(site.nucleus, observe)[0]
-        nu, _ = _site_frequencies(site, nu0, b, _rows(site, transitions), "second")
-        j_ppm, _w = _j_lines(site, nu0)
-        ppm = site.delta_iso + nu / nu0 * 1e6
-        ends = to_observed_ppm([ppm.min() + j_ppm.min(), ppm.max() + j_ppm.max()],
+        key = (site.nucleus, json.dumps(site.interactions, sort_keys=True, default=list))
+        if key not in spans:
+            nu, _ = _site_frequencies(site, nu0, b, _rows(site, transitions), "second")
+            j_ppm, _w = _j_lines(site, nu0)
+            off = nu / nu0 * 1e6
+            spans[key] = (float(off.min() + j_ppm.min()), float(off.max() + j_ppm.max()))
+        lo_off, hi_off = spans[key]
+        ends = to_observed_ppm([site.delta_iso + lo_off, site.delta_iso + hi_off],
                                site.nucleus, observe)
         lows.append(float(ends[0]))
         highs.append(float(ends[1]))
@@ -763,6 +1026,10 @@ def sites_from_json(text):
     return [Site.from_dict(d) for d in json.loads(text)]
 
 
+#: More sites than this are not drawn one by one (the total is).
+MAX_SITE_CURVES = 12
+
+
 def plot_combined(result, nuclide="", show_sites=True, ax=None, pl_width=3.375,
                   pl_height=3.375, fontsize=12, font=None, linewidth=1.2, fname=None,
                   figure=None, xlims=None):
@@ -786,8 +1053,15 @@ def plot_combined(result, nuclide="", show_sites=True, ax=None, pl_width=3.375,
     # The total in black; the sites in a palette that is colour-blind
     # friendly for that many (measured -- accessibility.default_palette).
     ax.plot(x, result["real_spec"] / scale, color="#000000", lw=linewidth, label="Total")
-    if show_sites and len(result["sites"]) > 1:
-        colours = default_series_colours(len(result["sites"]))
+    n_sites = len(result["sites"])
+    if show_sites and n_sites > MAX_SITE_CURVES:
+        # Hundreds of dashed curves and a legend as long are unreadable:
+        # the total only, and say so.
+        ax.annotate(f"{n_sites} sites (total shown; each site is in the result)",
+                    xy=(0.02, 0.97), xycoords="axes fraction", va="top",
+                    fontsize=fontsize * 0.7, color="0.35")
+    elif show_sites and n_sites > 1:
+        colours = default_series_colours(n_sites)
         for i, (label, spec) in enumerate(result["sites"].items()):
             ax.plot(x, spec / scale, lw=linewidth * 0.9, ls=(0, (4, 2)),
                     color=colours[i], label=label)

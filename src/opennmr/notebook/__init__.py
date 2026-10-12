@@ -139,7 +139,7 @@ from .fit_models import (
 from .state import save_state, load_state, describe_state, saved_fit_models
 
 from .combined_hamiltonian import (
-    Site, simulate_combined, combined_axis_limits, combined_to_python,
+    Site, simulate_combined, combined_axis_limits, combined_to_python, copy_interactions,
     site_transition_frequencies, plot_combined, sites_to_json, sites_from_json,
     resolve_links,
 )
@@ -375,7 +375,7 @@ __all__ = [
     "quadrupolar_derived", "print_quadrupolar_fit_report", "NMR1dplot_with_quad_fit",
     "NMRQuadFitWorkflow",
     # combined Hamiltonian
-    "Site", "simulate_combined", "combined_axis_limits", "combined_to_python",
+    "Site", "simulate_combined", "combined_axis_limits", "combined_to_python", "copy_interactions",
     "site_transition_frequencies", "plot_combined", "sites_to_json", "sites_from_json",
     # combined-Hamiltonian fitting
     "fit_combined", "fit_combined_multistart", "print_combined_fit_report",

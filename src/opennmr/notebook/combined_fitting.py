@@ -63,7 +63,7 @@ import numpy as np
 from scipy.optimize import curve_fit, nnls
 
 from .fitting import build_region_mask, estimate_baseline_robust, fit_quality
-from .combined_hamiltonian import (Site, as_sites, _site_sticks, _broaden_site,
+from .combined_hamiltonian import (Site, as_sites, _site_sticks, _broaden_site, broadened_sites,
                                    simulate_combined, resolve_link_dicts, observed_nucleus,
                                    site_axes, placement_notes)
 from .simulations import quadrupolar_ct_isotropic_shift_Hz, QUADRUPOLAR_ORDERS
@@ -666,7 +666,6 @@ def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
     x_ref = float(np.mean(x[mask]))
     b0, b1, _ = estimate_baseline_robust(x, y, baseline_regions=baseline_regions, x_ref=x_ref)
     observe = _spectrum_nucleus(results, sites, observe, [])
-    axes = site_axes(sites, x, float(larmor_Hz), observe)
     dicts = [s.to_dict() for s in sites]
     owners = _amount_owners(dicts)
     for d in dicts:
@@ -675,12 +674,14 @@ def starting_model(results, sites, larmor_Hz=None, mas_Hz=0.0, order="second",
         if estimate_amounts:
             d["amount"] = 1.0
     dicts = resolve_link_dicts(dicts)
-    curves = []
-    for d, (axis, nu0) in zip(dicts, axes):
-        site = Site.from_dict(d)
-        comp, _p = _site_sticks(site, axis, nu0, mas_Hz, order, transitions, beta_r,
-                                int(n_zcw))
-        curves.append(np.sum(list(_broaden_site(site, comp, axis).values()), axis=0))
+    # Sites sharing interactions and broadening are simulated once and
+    # shifted (combined_hamiltonian.broadened_sites): hundreds of sites
+    # given one CSA preview as fast as one.
+    sim = {"mas_Hz": mas_Hz, "order": order, "transitions": transitions, "beta_r": beta_r,
+           "n_zcw": int(n_zcw)}
+    built, _used, _notes, _sets, _shared = broadened_sites(
+        [Site.from_dict(d) for d in dicts], x, float(larmor_Hz), observe, sim)
+    curves = [np.sum(list(b.values()), axis=0) for b in built]
     if estimate_amounts:
         keys, cols = _owner_columns(curves, owners)
         A = np.column_stack([c[mask] for c in cols])

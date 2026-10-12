@@ -11,6 +11,7 @@ the notebook code for the same simulation.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import time
 
@@ -230,6 +231,8 @@ class CombinedHamiltonianPanel(QWidget):
         self._send_to_fit = send_to_fit
         self._draw_sites = draw_sites
         self._seeded_for = None
+        #: > 0 while code changes many sites at once (see bulk()).
+        self._bulk = 0
         self.site_dicts: list[dict] = []
         self._current = -1
         self.result: dict | None = None
@@ -297,8 +300,18 @@ class CombinedHamiltonianPanel(QWidget):
         sites_layout = QHBoxLayout(sites_box)
         self.site_list = QListWidget()
         self.site_list.setMaximumHeight(110)
+        # Several peaks can be selected (Ctrl/Shift-click, Ctrl+A) to give
+        # them the current peak's interactions at once (explicit user
+        # request, 2026-10-12: 1200 enumerated pNMR sites, one CSA).
+        self.site_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.site_list.currentRowChanged.connect(self._on_site_selected)
-        sites_layout.addWidget(self.site_list, 1)
+        self.site_list.itemSelectionChanged.connect(self._sync_copy_controls)
+        left = QVBoxLayout()
+        left.addWidget(self.site_list, 1)
+        self.selection_label = QLabel("")
+        self.selection_label.setWordWrap(True)
+        left.addWidget(self.selection_label)
+        sites_layout.addLayout(left, 1)
         buttons = QVBoxLayout()
         self.add_site_button = QPushButton("Add peak")
         self.add_site_button.setToolTip("Add a peak (a site): an isotropic line, to which "
@@ -316,8 +329,28 @@ class CombinedHamiltonianPanel(QWidget):
             "It is placed on this spectrum by the IUPAC frequency ratios.")
         self.add_partner_button.clicked.connect(lambda: self.add_isotope_partner())
         self.add_partner_button.setVisible(self.OTHER_NUCLEI)
+        self.copy_button = QPushButton("Copy to Peaks ▾")
+        self.copy_button.setToolTip(
+            "Give other peaks this peak's interactions (CSA, quadrupolar, J) -- the selected "
+            "peaks (Ctrl/Shift-click, Ctrl+A for all) or every peak. Their own interactions are "
+            "replaced; δiso and amount are kept.")
+        self._copy_menu = QMenu(self)
+        for text, targets, broadening in (
+                ("Interactions → selected peaks", "selected", False),
+                ("Interactions → all peaks", "all", False),
+                ("Interactions and broadening → selected peaks", "selected", True),
+                ("Interactions and broadening → all peaks", "all", True)):
+            action = self._copy_menu.addAction(text)
+            action.triggered.connect(lambda _c=False, t=targets, br=broadening:
+                                     self.copy_interactions(t, broadening=br))
+        self._copy_menu.addSeparator()
+        clear = self._copy_menu.addAction("Remove all interactions from the selected peaks")
+        clear.triggered.connect(lambda _c=False: self.clear_interactions("selected"))
+        self._copy_menu.aboutToShow.connect(self._name_copy_actions)
+        self._copy_actions = [a for a in self._copy_menu.actions() if not a.isSeparator()]
+        self.copy_button.setMenu(self._copy_menu)
         for b in (self.add_site_button, self.duplicate_button, self.remove_site_button,
-                  self.add_partner_button):
+                  self.add_partner_button, self.copy_button):
             buttons.addWidget(b)
         buttons.addStretch(1)
         sites_layout.addLayout(buttons)
@@ -778,6 +811,128 @@ class CombinedHamiltonianPanel(QWidget):
                     "pv_eta_spin", "site_nucleus_combo", "link_combo", "own_amount_check",
                     "own_fwhm_check")
 
+    # ---- many sites at once ----------------------------------------------------------
+
+    @contextlib.contextmanager
+    def bulk(self):
+        """Changes to many sites, made by code: whatever is redrawn per
+        change (the fit's parameter table, the preview) is redrawn once,
+        at the end -- 1200 sites would otherwise take minutes."""
+        self._bulk += 1
+        try:
+            yield
+        finally:
+            self._bulk -= 1
+            if not self._bulk:
+                self._after_bulk()
+
+    def _after_bulk(self) -> None:
+        """Called once when the outermost bulk() ends (subclasses refresh)."""
+
+    def add_sites(self, sites) -> None:
+        """Append many sites in one go (one list update, one selection)."""
+        new = [copy.deepcopy(s) for s in sites]
+        if not new:
+            return
+        with self.bulk():
+            self.site_list.blockSignals(True)
+            for site in new:
+                self.site_dicts.append(site)
+                self.site_list.addItem(site["label"])
+            self.site_list.blockSignals(False)
+            self.site_list.setCurrentRow(len(self.site_dicts) - len(new))
+        self._sync_copy_controls()
+
+    def selected_rows(self) -> list[int]:
+        return sorted({self.site_list.row(i) for i in self.site_list.selectedItems()})
+
+    def _target_rows(self, targets) -> list[int]:
+        if targets == "all":
+            return list(range(len(self.site_dicts)))
+        if targets == "selected":
+            return self.selected_rows()
+        return sorted({int(r) for r in targets})
+
+    def copy_interactions(self, targets="selected", broadening: bool = False,
+                          source: int | None = None) -> dict:
+        """The source peak's (default: the current one's) interactions --
+        and, with ``broadening``, its FWHM, lineshape and L fraction -- onto
+        ``targets`` ('selected', 'all', or row numbers), replacing theirs.
+        δiso, amount and label are each peak's own. A peak linked to another
+        isotope's site follows that site and is skipped; a quadrupolar
+        coupling is not given to a spin-1/2 peak, nor to a peak of another
+        nucleus (C_Q depends on the isotope's quadrupole moment). Returns a
+        summary, also shown under the list."""
+        source = self._current if source is None else int(source)
+        if not 0 <= source < len(self.site_dicts):
+            return {"copied": 0, "text": "Select the peak to copy from first."}
+        rows = [r for r in self._target_rows(targets) if r != source]
+        if not rows:
+            text = ("Select the peaks to copy to (Ctrl/Shift-click; Ctrl+A for all), or use "
+                    "'→ all peaks'.")
+            self.selection_label.setText(text)
+            return {"copied": 0, "linked": [], "no_quadrupolar": [], "text": text}
+        # The notebook's copy_interactions, on the panel's dicts with their
+        # nuclei filled in; a linked source gives what it shows (its parent's).
+        dicts = [{**d, "nucleus": self.site_nucleus(d)} for d in self.site_dicts]
+        dicts[source] = {**(self._resolved(self.site_dicts[source]) or self.site_dicts[source]),
+                         "nucleus": self.site_nucleus(self.site_dicts[source])}
+        dicts[source].pop("link", None)
+        new, report = ch.copy_interactions(dicts, source, rows, broadening=broadening)
+        copied = set(report["copied"])
+        with self.bulk():
+            for r in rows:
+                site = self.site_dicts[r]
+                if site.get("label") not in copied:
+                    continue
+                site["interactions"] = new[r]["interactions"]
+                if broadening:
+                    for key in ("fwhm", "lineshape", "eta"):
+                        if key in new[r]:
+                            site[key] = new[r][key]
+            self._on_site_selected(self._current)
+        self.copy_status = report["text"]
+        self.selection_label.setText(report["text"])
+        return {**report, "copied": len(report["copied"])}
+
+    def clear_interactions(self, targets="selected") -> int:
+        """Make ``targets`` isotropic again (linked peaks skipped)."""
+        rows = self._target_rows(targets)
+        n = 0
+        with self.bulk():
+            for r in rows:
+                site = self.site_dicts[r]
+                if not site.get("link") and site["interactions"]:
+                    site["interactions"] = []
+                    n += 1
+            self._on_site_selected(self._current)
+        self.selection_label.setText(f"Interactions removed from {n} peak(s).")
+        return n
+
+    def _name_copy_actions(self) -> None:
+        """Name the source in the menu: the peak shown under Selected peak
+        (the last one clicked)."""
+        site = self.current_site()
+        name = site["label"] if site else "this peak"
+        texts = (f"{name}'s interactions → selected peaks",
+                 f"{name}'s interactions → all peaks",
+                 f"{name}'s interactions and broadening → selected peaks",
+                 f"{name}'s interactions and broadening → all peaks",
+                 "Remove all interactions from the selected peaks")
+        for action, text in zip(self._copy_actions, texts):
+            action.setText(text.replace("&", "&&"))
+
+    def _sync_copy_controls(self) -> None:
+        n = len(self.selected_rows())
+        total = len(self.site_dicts)
+        if total > 1:
+            self.selection_label.setText(
+                f"{n} of {total} peaks selected" + (" -- Copy to Peaks gives them the current "
+                                                    "peak's interactions." if n > 1 else "."))
+        else:
+            self.selection_label.setText("")
+        self.copy_button.setEnabled(total > 1)
+
     def get_state(self) -> dict:
         state = {"widgets": panel_state.capture_widgets(self, exclude=self._SITE_FIELDS),
                  "sites": copy.deepcopy(self.site_dicts), "current": self._current}
@@ -792,8 +947,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.site_list.blockSignals(False)
         self.site_dicts = []
         self._current = -1
-        for site in state.get("sites") or []:
-            self.add_site(site)
+        self.add_sites(state.get("sites") or [])
         current = int(state.get("current", 0) or 0)
         if self.site_dicts:
             self.site_list.setCurrentRow(min(max(current, 0), len(self.site_dicts) - 1))
@@ -1399,6 +1553,9 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
 
     # ---- keeping the parameter table in step with the sites --------------
 
+    def _after_bulk(self) -> None:
+        self.refresh_parameter_table()
+
     def add_site(self, site=None):
         out = super().add_site(site)
         self.refresh_parameter_table()
@@ -1475,7 +1632,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
     def refresh_parameter_table(self) -> None:
         """Rebuild the table from the sites, keeping each parameter's
         free/bounds/try choices by (site label, parameter)."""
-        if not hasattr(self, "parameter_table") or self._refreshing:
+        if not hasattr(self, "parameter_table") or self._refreshing or self._bulk:
             return
         self.schedule_preview()
         self._refreshing = True
@@ -1778,10 +1935,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.site_list.blockSignals(False)
         self.site_dicts = []
         self._current = -1
-        for site in dicts:
-            CombinedHamiltonianPanel.add_site(self, site)
-        if self.site_dicts:
-            self.site_list.setCurrentRow(0)
+        with self.bulk():
+            CombinedHamiltonianPanel.add_sites(self, list(dicts))
+            if self.site_dicts:
+                self.site_list.setCurrentRow(0)
 
     def undo_estimate(self) -> None:
         if self._before_estimate is None:
@@ -2053,10 +2210,9 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.site_list.blockSignals(False)
         self.site_dicts = []
         self._current = -1
-        for site in fitted:
-            CombinedHamiltonianPanel.add_site(self, site)
-        self.site_list.setCurrentRow(min(current, len(self.site_dicts) - 1))
-        self.refresh_parameter_table()
+        with self.bulk():
+            CombinedHamiltonianPanel.add_sites(self, fitted)
+            self.site_list.setCurrentRow(min(current, len(self.site_dicts) - 1))
 
     def set_start_from_simulation(self, site_dicts, settings: dict, nucleus: str) -> str:
         """Simulated sites as the starting model, with the simulation's
@@ -2072,10 +2228,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.site_list.blockSignals(False)
         self.site_dicts = []
         self._current = -1
-        for site in copy.deepcopy(list(site_dicts)):
-            CombinedHamiltonianPanel.add_site(self, site)
-        if self.site_dicts:
-            self.site_list.setCurrentRow(0)
+        with self.bulk():
+            CombinedHamiltonianPanel.add_sites(self, list(site_dicts))
+            if self.site_dicts:
+                self.site_list.setCurrentRow(0)
         for combo, key in ((self.regime_combo, "regime"), (self.order_combo, "order"),
                            (self.transitions_combo, "transitions")):
             index = combo.findData(settings.get(key))
