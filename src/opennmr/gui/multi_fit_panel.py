@@ -9,7 +9,7 @@ exactly as a notebook calls it. This panel collects:
 * **Experiments**, in the order to fit them (any order: 5, 302, 12, 2,
   49), each with its own nucleus, field, MAS rate, transitions, fit
   window and x value (temperature from ``TE``, or time from ``DATE``).
-* **Sites per nucleus** -- the Combined Hamiltonian site editor, one site
+* **Sites per nucleus** -- the CSA, Quad & J-coupling site editor, one site
   list per observed isotope; the same label is the same chemical site.
 * **Parameters**: each (site, parameter) with its scope (per experiment,
   per nucleus, global), free/fixed and bounds; the site amounts' scope;
@@ -85,7 +85,7 @@ def parse_expnos(text: str) -> list[str]:
 
 
 class _SiteEditor(CombinedHamiltonianPanel):
-    """The Combined Hamiltonian site editor without its setup rows or
+    """The CSA, Quad & J-coupling site editor without its setup rows or
     Simulate buttons -- the nucleus is set by the panel."""
 
     BLURB = ("Sites observed as the nucleus chosen above. Use the same label for the same "

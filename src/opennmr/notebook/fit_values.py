@@ -13,7 +13,7 @@ The file looks like::
 
     {
       "openNMR fitted values": 1,
-      "fit": "Combined Hamiltonian",
+      "fit": "CSA, Quad & J-coupling",
       "spectrum": "sample3/10",
       "saved": "2026-10-08T20:41:07",
       "quality": {"r2": 0.9991, "reduced_chi2": 1.04, ...},
@@ -122,7 +122,7 @@ def parameter_values(result: dict) -> dict:
     """Exact values ``{row: {column: {"value", "error", "fixed"}}}`` from a
     fit result that lists its parameters (``result["parameters"]``: dicts
     with ``label``, ``name``, ``value``, ``error``, ``free`` -- the
-    Combined-Hamiltonian, Czjzek and multi-spectrum fits) plus its
+    CSA, Quad & J-coupling, Czjzek and multi-spectrum fits) plus its
     derived quantities (``result["derived"]``: share, P_Q, CT c.o.g.).
     Empty if the result has neither."""
     out = {}

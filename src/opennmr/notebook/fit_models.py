@@ -41,7 +41,7 @@ import numpy as np
 KIND_LABELS = {
     "isotropic": "Isotropic peaks", "integration": "Integration", "jcoupling": "J-coupling",
     "csa": "CSA/Dipolar", "quadrupolar": "Quadrupolar", "czjzek": "Czjzek",
-    "combined": "Combined Hamiltonian", "curve": "Curve fit", "spectrum": "Spectral fit",
+    "combined": "CSA, Quad & J-coupling", "curve": "Curve fit", "spectrum": "Spectral fit",
 }
 
 #: Evidence scale for a BIC difference (Kass & Raftery 1995).

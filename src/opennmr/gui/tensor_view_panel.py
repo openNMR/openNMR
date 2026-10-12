@@ -1,6 +1,6 @@
 """
 "Tensor picture" controls for the Simulate panels (CSA, Quadrupolar,
-Combined Hamiltonian): draw the simulated site's tensors in 3D on the
+CSA, Quad & J-coupling): draw the simulated site's tensors in 3D on the
 Simulation plot, as its frequency surface or as tensor glyphs.
 
 The pictures are :mod:`opennmr.notebook.tensor_views`' own figures,

@@ -73,7 +73,7 @@ from .relaxation import (
 from . import relaxometry
 from .relaxometry import find_integration_regions, correlation_matrix
 # The correlation matrix of any fit -- relaxation, isotropic peaks,
-# Combined Hamiltonian, multi-spectrum (2026-10-06).
+# CSA, Quad & J-coupling, multi-spectrum (2026-10-06).
 # DFT-calculated tensors (CASTEP .magres, VASP OUTCAR) -> sites (2026-10-06).
 from . import dft_nmr
 from .dft_nmr import read_calculation, dft_sites, simulate_dft, plot_dft_tensors
@@ -182,6 +182,13 @@ from .dnp import (
 # The step-by-step DNP workflow (align, measure, profile / enhancement):
 # used as a module, dnp_workflow.align_spectra(...) etc.
 from . import dnp_workflow
+# Signal-to-noise with stated statistics, one or many spectra (Apply ▸
+# Signal-to-Noise; 2026-10-12): used as snr.signal_to_noise(...) etc.
+from . import snr
+from .snr import signal_to_noise, signal_to_noise_many, snr_report, plot_snr
+# pNMR (CIF) isotropic peaks -> CSA, Quad & J-coupling sites (2026-10-12).
+from . import pnmr_export
+from .pnmr_export import sites_from_pnmr_fit, sites_from_pnmr_table
 from .progress import (
     processing_log, processing_history, list_save_points, save_point_state,
     save_progress, load_progress, log_event, load_saved_spectrum,
@@ -193,7 +200,7 @@ from .csa_fitting import (
     print_csa_fit_report, NMR1dplot_with_csa_fit, NMRCSAFitWorkflow
 )
 
-# A CSA / quadrupolar / Combined-Hamiltonian fit of one slice, applied to
+# A CSA / quadrupolar / CSA, Quad & J-coupling fit of one slice, applied to
 # every slice of a pseudo-2D series (T1, T2...) -- see series_fitting.
 from .series_fitting import (
     model_components, fit_series_with_lineshapes, series_fit_report,
@@ -429,6 +436,9 @@ __all__ = [
     "print_enhancement_report", "field_sweep", "field_sweep_table", "field_sweep_to_csv",
     "field_sweep_report", "print_field_sweep_report", "plot_field_profile", "plot_sweep_spectra",
     "plot_enhancement_spectra",
+    # signal-to-noise; pNMR peaks -> CSA, Quad & J-coupling sites
+    "snr", "signal_to_noise", "signal_to_noise_many", "snr_report", "plot_snr",
+    "pnmr_export", "sites_from_pnmr_fit", "sites_from_pnmr_table",
     # tensor pictures
     "frequency_surface", "tensor_components", "transition_labels", "plot_tensors",
     "plot_tensor_surface", "plot_tensor_ellipsoids",

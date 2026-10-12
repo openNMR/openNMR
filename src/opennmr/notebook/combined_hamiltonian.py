@@ -1,5 +1,5 @@
 """
-Combined Hamiltonian: one site, any combination of interactions.
+CSA, Quad & J-coupling: one site, any combination of interactions.
 
 A :class:`Site` is an observed nucleus with an isotropic shift, to which
 interactions are *added* -- no function per combination::
@@ -12,7 +12,7 @@ interactions are *added* -- no function per combination::
                              transitions="ct", order="second")
 
 The same site can be written as a dict (``Site.to_dict`` /
-``Site.from_dict``) -- what the GUI's Simulate > Combined Hamiltonian
+``Site.from_dict``) -- what the GUI's Simulate > CSA, Quad & J-coupling
 section stores, and what the simulation's log records -- and
 :func:`combined_to_python` writes the Python that reproduces a GUI
 simulation in a notebook.

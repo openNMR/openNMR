@@ -491,7 +491,7 @@ def fit_multi(experiments, sites_by_nucleus, scopes=None, amounts=None, vary=Non
               bounds=None, seed="previous", joint=None, preset=None, max_nfev=None,
               progress=None):
     """
-    Fit Combined-Hamiltonian sites to several spectra, consistently.
+    Fit CSA, Quad & J-coupling sites to several spectra, consistently.
 
     Parameters
     ----------

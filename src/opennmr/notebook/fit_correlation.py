@@ -10,7 +10,7 @@ One function for every kind of fit openNMR makes:
 * isotropic peak fits -- a 1D fit or one slice of
   :func:`opennmr.processing.fitting.NMR2D_fit_slices` (``popt``, ``pcov``,
   ``is_free``, ``peak_defs``);
-* Combined-Hamiltonian fits (:func:`opennmr.notebook.combined_fitting.fit_combined`);
+* CSA, Quad & J-coupling fits (:func:`opennmr.notebook.combined_fitting.fit_combined`);
 * multi-spectrum fits (:func:`opennmr.notebook.multi_fitting.fit_multi`): the
   joint refinement's covariance, across every spectrum, or one spectrum's
   own fit in sequential mode.
@@ -42,7 +42,7 @@ ANNOTATE_UP_TO = 12
 
 _GREEK = {"beta": r"\beta", "tau": r"\tau", "tau_c": r"\tau_\mathrm{c}"}
 
-#: Spectral-fit parameter names (Combined Hamiltonian, multi-spectrum) as
+#: Spectral-fit parameter names (CSA, Quad & J-coupling, multi-spectrum) as
 #: symbols: italic quantity, upright subscripts (IUPAC).
 SPECTRAL_SYMBOLS = {
     "delta_iso": r"$\delta_\mathrm{iso}$",
@@ -226,7 +226,7 @@ def plot_correlation_matrix(fit, figure=None, ax=None, triangle="lower", annotat
 
     ``fit`` : any fit :func:`correlation_input` takes -- a relaxation or
     diffusion curve fit, an isotropic peak fit (1D or one slice), a
-    Combined-Hamiltonian fit, or :func:`multi_fit_correlation` of a
+    CSA, Quad & J-coupling fit, or :func:`multi_fit_correlation` of a
     multi-spectrum one.
     ``figure`` / ``ax`` : draw into this figure (cleared) or these axes;
     otherwise a new figure.

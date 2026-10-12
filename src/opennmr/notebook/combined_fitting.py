@@ -1,5 +1,5 @@
 """
-Fit spectra with Combined-Hamiltonian sites: any mix of CSA,
+Fit spectra with CSA, Quad & J-coupling sites: any mix of CSA,
 quadrupolar and J interactions per site, static or MAS -- the model of
 :mod:`opennmr.notebook.combined_hamiltonian`, fitted by least squares.
 
@@ -228,7 +228,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
                  estimate_amounts=True, max_nfev=None, fit_mas=False, mas_window_Hz=500.0,
                  mas_scan_points=41, mas_bounds_Hz=None, observe=None):
     """
-    Fit Combined-Hamiltonian sites to a 1D spectrum.
+    Fit CSA, Quad & J-coupling sites to a 1D spectrum.
 
     Parameters
     ----------
@@ -459,7 +459,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         popt, pcov = _fit_progress.limited_curve_fit(
             _fit_progress.tracked(model, y[mask], n_free=int(which.sum())),
             x[mask], y[mask], p0=p_all[which], bounds=(lo, hi),
-            diff_step=1e-4, max_iterations=max_nfev, label="The Combined Hamiltonian fit", **kw)
+            diff_step=1e-4, max_iterations=max_nfev, label="The CSA, Quad & J-coupling fit", **kw)
         p_all[which] = popt
         return pcov
 
@@ -519,7 +519,7 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
         mas_row = next(p for p in parameters if p["name"] == "mas_Hz")
         regime = (f"MAS {mas_Hz:.1f} ± {mas_row['error'] or 0.0:.1f} Hz (fitted; started at "
                   f"{mas_start:g} Hz, allowed {mas_row['lower']:g} to {mas_row['upper']:g} Hz)")
-    log = ("Combined-Hamiltonian fit: " + f"{regime}, nu0 = {larmor_Hz / 1e6:.7g} MHz, "
+    log = ("CSA, Quad & J-coupling fit: " + f"{regime}, nu0 = {larmor_Hz / 1e6:.7g} MHz, "
            f"quadrupolar {order}" + ("" if order == "exact" else "-order")
            + f", transitions {transitions}, {n_zcw} orientations, window "
            + ("whole spectrum" if fit_regions is None else

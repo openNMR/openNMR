@@ -53,10 +53,12 @@ from PySide6.QtWidgets import (
 
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import panel_state
+from ..notebook import pnmr_export
 from ..notebook import pnmr_simulator as pnmr
 from ..notebook.utils import compute_BF1_SFO1
 from ..plotting.accessibility import default_series_colours
 from .loader import background_load_enabled
+from .pnmr_export_row import SendSitesRow
 
 _SIGMA_TO_FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
 #: Rows of the shift table shown in the panel; the saved CSV has them all.
@@ -240,8 +242,12 @@ class PnmrSimulationPanel(QWidget):
 
     def __init__(self, simulation_canvas, show_simulation_view: Callable[[], None],
                  plot_spectrum: Callable[[NMRSpectrum], None],
-                 add_to_open: Callable[[NMRSpectrum, str], None], parent=None) -> None:
+                 add_to_open: Callable[[NMRSpectrum, str], None],
+                 export_sites: Callable | None = None, parent=None) -> None:
         super().__init__(parent)
+        #: ``export_sites(site_dicts, notes, nucleus, larmor_mhz, destination,
+        #: append, source)`` -- puts sites into CSA, Quad & J-coupling.
+        self._export_sites = export_sites
         self._canvas = simulation_canvas
         self._show_simulation_view = show_simulation_view
         self._plot_spectrum = plot_spectrum
@@ -269,6 +275,7 @@ class PnmrSimulationPanel(QWidget):
         layout.addWidget(self._build_shells_box())
         layout.addWidget(self._build_spectrum_box())
         layout.addWidget(self._build_plot_box())
+        layout.addWidget(self._build_export_box())
         layout.addWidget(self._build_log_box())
         self._refresh_state()
 
@@ -867,6 +874,10 @@ class PnmrSimulationPanel(QWidget):
         form.addRow(self.results_label)
         self.shift_table_view = QTableWidget(0, 0)
         self.shift_table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.shift_table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.shift_table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        #: The shift table's index label of each row shown (most probable first).
+        self._shown_index: list = []
         self.shift_table_view.verticalHeader().setVisible(False)
         self.shift_table_view.setMinimumHeight(140)
         self.shift_table_view.setVisible(False)
@@ -1105,6 +1116,7 @@ class PnmrSimulationPanel(QWidget):
 
     def _fill_table_view(self, table) -> None:
         shown = table.sort_values("p", ascending=False).head(_MAX_TABLE_ROWS)
+        self._shown_index = list(shown.index)
         view = self.shift_table_view
         view.clear()
         view.setColumnCount(len(shown.columns))
@@ -1359,6 +1371,87 @@ class PnmrSimulationPanel(QWidget):
     # ------------------------------------------------------------------
     # Log, and keeping later steps tied to the inputs that made them
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 6. Isotropic peaks -> CSA, Quad & J-coupling (2026-10-12)
+    # ------------------------------------------------------------------
+    def _build_export_box(self) -> QGroupBox:
+        box = QGroupBox("6. Add CSA, quadrupolar or J")
+        v = QVBoxLayout(box)
+        hint = QLabel("The peaks above are isotropic. Send them on as sites -- environments "
+                      "within the grouping tolerance become one site -- then add CSA, "
+                      "quadrupolar or J-coupling to each.")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+        form = QFormLayout()
+        self.export_tolerance_spin = QDoubleSpinBox()
+        self.export_tolerance_spin.setRange(0.0, 1000.0)
+        self.export_tolerance_spin.setDecimals(2)
+        self.export_tolerance_spin.setSuffix(" ppm")
+        self.export_tolerance_spin.setSpecialValueText("auto (smallest pathway shift)")
+        self.export_tolerance_spin.setToolTip(
+            "Environments closer than this become one site (as Fit ▸ pNMR groups them).")
+        form.addRow("Group within:", self.export_tolerance_spin)
+        self.export_min_spin = QDoubleSpinBox()
+        self.export_min_spin.setRange(0.0, 50.0)
+        self.export_min_spin.setDecimals(2)
+        self.export_min_spin.setValue(1.0)
+        self.export_min_spin.setSuffix(" %")
+        self.export_min_spin.setToolTip(
+            "Leave out groups holding less than this share of the intensity (the log says how "
+            "much was left out). At most 64 sites are sent.")
+        form.addRow("Leave out below:", self.export_min_spin)
+        v.addLayout(form)
+        self.send_sites_row = SendSitesRow(default_destination="simulate",
+                                           selected_what="configurations")
+        self.send_sites_row.exportRequested.connect(self.export_sites)
+        v.addWidget(self.send_sites_row)
+        return box
+
+    def _selected_table_rows(self) -> list[int]:
+        """Positions in the shift table of the rows selected in its view."""
+        if self._result is None:
+            return []
+        rows = sorted({i.row() for i in self.shift_table_view.selectionModel().selectedRows()})
+        labels = [self._shown_index[r] for r in rows if 0 <= r < len(self._shown_index)]
+        table = self._result[1]
+        return [int(p) for p in table.index.get_indexer(labels) if p >= 0]
+
+    def export_sites(self, which: str = "all") -> list[dict] | None:
+        """The enumerated environments, grouped, as sites in CSA, Quad &
+        J-coupling (:func:`notebook.pnmr_export.sites_from_pnmr_table`)."""
+        if self._result is None:
+            return None
+        spectrum_dict, table = self._result
+        rows = None
+        if which != "all":
+            rows = self._selected_table_rows()
+            if not rows:
+                QMessageBox.information(self, "pNMR", "Select one or more configurations in the "
+                                        "shift table first.")
+                return None
+        labels = None
+        if self._site_data is not None:
+            labels = [d.get("label") for d in self._site_data]
+        tolerance = self.export_tolerance_spin.value() or None
+        try:
+            sites, notes = pnmr_export.sites_from_pnmr_table(
+                table, nucleus=spectrum_dict.get("nuclide"), tolerance=tolerance,
+                which_rows=rows, min_fraction=self.export_min_spin.value() / 100.0,
+                site_labels=labels, return_notes=True)
+        except ValueError as exc:
+            QMessageBox.warning(self, "pNMR", str(exc))
+            return None
+        destination = self.send_sites_row.destination()
+        self._log(f"Exported {len(sites)} site(s) to "
+                  f"{'Fit' if destination == 'fit' else 'Simulate'} ▸ CSA, Quad & J-coupling"
+                  + (" (added)" if self.send_sites_row.append() else "") + ": "
+                  + ", ".join(s["label"] for s in sites) + ".\n  " + "\n  ".join(notes))
+        if self._export_sites is not None:
+            self._export_sites(sites, notes, spectrum_dict.get("nuclide"),
+                               spectrum_dict.get("BF1"), destination,
+                               self.send_sites_row.append(), "pNMR simulation")
+        return sites
+
     def _build_log_box(self) -> QGroupBox:
         box = QGroupBox("Log")
         v = QVBoxLayout(box)
@@ -1411,7 +1504,7 @@ class PnmrSimulationPanel(QWidget):
         running = self._running
         for w in (self.cif_browse_button, self.cif_drop, self.load_settings_button,
                   self.save_settings_button, self.plot_button, self.save_table_button,
-                  self.copy_code_button):
+                  self.copy_code_button, self.send_sites_row):
             w.setEnabled(not running)
         for box in (self._sites_box, self._shells_box):
             box.setEnabled(not running)
@@ -1440,6 +1533,7 @@ class PnmrSimulationPanel(QWidget):
         result_current = self._result is not None and signature == self._result_signature
         self.plot_button.setEnabled(result_current)
         self.save_table_button.setEnabled(self._result is not None)
+        self.send_sites_row.set_enabled(result_current, result_current)
         if self._result is not None and not result_current:
             self.plot_button.setToolTip("Inputs changed since the last enumeration -- "
                                         "press Enumerate sites again.")

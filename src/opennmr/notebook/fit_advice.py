@@ -359,7 +359,7 @@ def _join(parts):
 
 
 # ============================================================
-# Combined-Hamiltonian fits (one spectrum)
+# CSA, Quad & J-coupling fits (one spectrum)
 # ============================================================
 
 def _site_info(fit):

@@ -386,7 +386,7 @@ def estimate_start(results, kind, nucleus=None, larmor_Hz=None, mas_Hz=0.0, orde
 
     Returns a dict:
         ``sites`` -- site dicts, ready for :func:`fit_combined` (or
-        Fit ▸ Combined Hamiltonian);
+        Fit ▸ CSA, Quad & J-coupling);
         ``notes`` -- how each value was arrived at, in plain words;
         ``start_r2`` -- R² of the starting model (amounts by least
         squares), a check that the start is near the data;

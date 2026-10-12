@@ -989,7 +989,7 @@ def _model_combo() -> QComboBox:
     return combo
 
 
-#: The blurb of a J panel hosted in Combined Hamiltonian's strong-coupling
+#: The blurb of a J panel hosted in CSA, Quad & J-coupling's strong-coupling
 #: mode, where first-order J is an interaction of a peak instead.
 STRONG_COUPLING_BLURB = (
     "Strongly coupled peaks: every spin's shift and the J values between them, solved exactly "
@@ -1000,7 +1000,7 @@ STRONG_COUPLING_BLURB = (
 
 def lock_to_spin_system(panel) -> None:
     """Show a J panel as the exact spin-system model only: its first-order
-    mode is Combined Hamiltonian's J interaction now (explicit user request,
+    mode is CSA, Quad & J-coupling's J interaction now (explicit user request,
     2026-10-06: one Combined entry point for every interaction)."""
     panel.model_combo.setCurrentIndex(panel.model_combo.findData("spin_system"))
     panel.model_combo.setVisible(False)

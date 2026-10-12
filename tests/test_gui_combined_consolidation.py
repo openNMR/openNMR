@@ -1,4 +1,4 @@
-"""Fit and Simulate condensed into Combined Hamiltonian (explicit user
+"""Fit and Simulate condensed into CSA, Quad & J-coupling (explicit user
 request, 2026-10-06): peaks are added, interactions added to each, and
 every variant of each interaction stays reachable -- quadrupolar first
 order, second order and exact; J first order and strongly coupled
@@ -42,11 +42,11 @@ def _editor(panel, kind):
 def test_fit_and_simulate_offer_one_combined_entry_point(qapp):
     window = MainWindow()
     assert _titles(window, window._fitting_tab_index) == [
-        "Isotropic (Gauss/Lor)", "Integration", "Combined Hamiltonian",
+        "Isotropic (Gauss/Lor)", "Integration", "CSA, Quad & J-coupling",
         "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)", "Multi-spectrum",
         "Kept fit models", "Fit plot: components and colours"]
     assert _titles(window, window._simulations_tab_index) == [
-        "Combined Hamiltonian", "Czjzek distribution", "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
+        "CSA, Quad & J-coupling", "Czjzek distribution", "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
         "Diffusion (PFG)", "Shaped pulse (Bloch)", "pNMR (CIF)"]
     # The retired panels still exist (kept fits and saved states restore
     # through them), out of sight.

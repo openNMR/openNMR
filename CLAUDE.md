@@ -100,6 +100,14 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   "Field Sweep Profile", each a step-by-step `gui/dnp_panel.py`
   `DnpWorkflowPanel` over `notebook/dnp_workflow.py` (align on the
   reference line's shape, confirm, then measure). Not in Compare any more.
+- **Signal-to-noise** is Apply ▸ Signal-to-Noise (`_build_snr_section`,
+  `gui/snr_panel.py` over `notebook/snr.py`): signal and noise regions
+  typed or dragged on Compare, shared by default or per spectrum (marked
+  †, logged, and stated in the result). S/N = height / σ of the detrended
+  noise, with σ's uncertainty from the *independent* noise points
+  (`correlation_time`), a conservative 95 % interval, TopSpin's sino
+  (H/2σ), Ph. Eur. 2H/h, integral S/N and a detection threshold. Kept as
+  `fits["snr"]` through `_store_dnp`. Do not add another noise estimator.
 - **Dynamics** is Fit Curve, then two collapsible sections from
   `gui/dynamics_panels.py`: Relaxation vs Temperature (BPP / Arrhenius /
   Hendrickson-Bray; maths `notebook/vt_relaxation.py`) and Exchange
@@ -111,10 +119,15 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   Hover/click read-outs are `pnmr_fit.environments_at_shift`; plot extras go
   through `MplCanvas.show_slice_fit(..., overlay=)`, which redraws them on a
   restyle.
-- **Interactions** (CSA, quadrupolar, J) are Fit ▸ / Simulate ▸ Combined
-  Hamiltonian only (user request, 2026-10-06): add peaks, add interactions
-  to each. Its "Strongly coupled peaks" model (`gui/combined_section.py`)
-  is the J panel locked to spin-system mode. The old J-coupling,
+- **Interactions** (CSA, quadrupolar, J) are Fit ▸ / Simulate ▸ CSA, Quad &
+  J-coupling only (user request, 2026-10-06; named "Combined Hamiltonian"
+  until 2026-10-12 -- the code still calls it `combined`): add peaks, add
+  interactions to each. A "&" in a button's text must be written "&&"
+  (Qt mnemonic); `CollapsibleSection` titles escape it themselves. pNMR's
+  isotropic peaks go there through `notebook/pnmr_export.py` and the
+  `gui/pnmr_export_row.py` row on both pNMR panels
+  (`MainWindow._export_pnmr_sites`). Its "Strongly coupled peaks" model
+  (`gui/combined_section.py`) is the J panel locked to spin-system mode. The old J-coupling,
   CSA/Dipolar and Quadrupolar panels are still built but sit in hidden
   hosts (`_retired_fit_host`, `_retired_sim_host`), because kept fits and
   saved states restore through them. Do not give them menu sections again.

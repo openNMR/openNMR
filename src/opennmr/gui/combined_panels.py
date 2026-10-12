@@ -1,4 +1,4 @@
-"""Simulate > Combined Hamiltonian: sites with any mix of CSA,
+"""Simulate > CSA, Quad & J-coupling: sites with any mix of CSA,
 quadrupolar and J interactions, static or MAS.
 
 A list of sites on the left; the selected site's shift, amount and
@@ -425,7 +425,7 @@ class CombinedHamiltonianPanel(QWidget):
 
     def _build_actions(self, v) -> None:
         """The part below the site editor: for Simulate, the axis and
-        Simulate/Export; Fit > Combined Hamiltonian replaces it."""
+        Simulate/Export; Fit > CSA, Quad & J-coupling replaces it."""
         aform = QFormLayout()
         self.auto_axis_check = QCheckBox("Auto: frame every site")
         self.auto_axis_check.setChecked(True)
@@ -469,7 +469,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.python_button.setToolTip("Copy notebook code that reproduces this simulation.")
         self.python_button.clicked.connect(self.copy_python)
         self.to_fit_button = QPushButton("Send to Fit as Starting Values")
-        self.to_fit_button.setToolTip("Put these sites into Fit ▸ Combined Hamiltonian as the "
+        self.to_fit_button.setToolTip("Put these sites into Fit ▸ CSA, Quad & J-coupling as the "
                                       "starting model, with this regime, transitions and level "
                                       "of theory.")
         self.to_fit_button.setEnabled(self._send_to_fit is not None)
@@ -1059,7 +1059,7 @@ class CombinedHamiltonianPanel(QWidget):
                 result = ch.simulate_combined(sites, axis, **settings)
             elapsed = time.perf_counter() - started
         except (ValueError, KeyError) as exc:
-            QMessageBox.warning(self, "Combined Hamiltonian", str(exc))
+            QMessageBox.warning(self, "CSA, Quad & J-coupling", str(exc))
             return False
         nucleus = self.observed() or sites[0].nucleus
         self.result = {"result": result, "sites": sites, "settings": settings, "axis": axis}
@@ -1149,7 +1149,7 @@ def _describe_site(site: dict) -> str:
 
 
 # ============================================================================
-# Fit > Combined Hamiltonian
+# Fit > CSA, Quad & J-coupling
 # ============================================================================
 
 #: Parameter table columns.
@@ -1180,8 +1180,8 @@ def _parse_float(text: str):
 
 
 class CombinedFitPanel(CombinedHamiltonianPanel):
-    """Fit Combined-Hamiltonian sites to the selected spectrum: the same
-    site editor as Simulate > Combined Hamiltonian, plus a table of every
+    """Fit CSA, Quad & J-coupling sites to the selected spectrum: the same
+    site editor as Simulate > CSA, Quad & J-coupling, plus a table of every
     parameter -- start, free/fixed, bounds, and optional extra starting
     values for a multi-start fit -- and the result as a table.
 
@@ -1329,7 +1329,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.preview_button.setToolTip("Draw the starting model over the data now.")
         self.preview_button.clicked.connect(lambda: self.preview_now(quiet=False))
         preview_row.addWidget(self.preview_button)
-        self.fit_button = QPushButton("Fit Combined Hamiltonian")
+        self.fit_button = QPushButton("Fit CSA, Quad && J-coupling")
         self.fit_button.clicked.connect(self.fit)
         preview_row.addWidget(self.fit_button, 1)
         v.addLayout(preview_row)
@@ -1358,7 +1358,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.use_fitted_button = QPushButton("Use fitted values as start")
         self.use_fitted_button.clicked.connect(self.use_fitted_as_start)
         self.send_button = QPushButton("Open in Simulate")
-        self.send_button.setToolTip("Put the fitted sites into Simulate > Combined Hamiltonian.")
+        self.send_button.setToolTip("Put the fitted sites into Simulate > CSA, Quad & J-coupling.")
         self.send_button.clicked.connect(self._on_send)
         for b in (self.use_fitted_button, self.send_button):
             b.setEnabled(False)
@@ -1634,7 +1634,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             results = bridge.results_from_spectrum(spectrum, row=row)
             args = self.fit_arguments()
         except (ValueError, IndexError, KeyError) as exc:
-            QMessageBox.warning(self, "Combined Hamiltonian fit", str(exc))
+            QMessageBox.warning(self, "CSA, Quad & J-coupling fit", str(exc))
             return False
         self._preview_timer.stop()
         kwargs = dict(vary=args["vary"], bounds=args["bounds"] or None,
@@ -1642,7 +1642,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                       estimate_amounts=args["estimate_amounts"], **args["settings"])
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         started = time.perf_counter()
-        with FitProgress(self, "Combined Hamiltonian fit") as fit_progress_box:
+        with FitProgress(self, "CSA, Quad & J-coupling fit") as fit_progress_box:
             try:
                 if args["starts"]:
                     fit = cfit.fit_combined_multistart(
@@ -1652,7 +1652,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                     fit = cfit.fit_combined(results, args["sites"], **kwargs)
             except Exception as exc:  # noqa: BLE001 -- a fit that fails is an outcome, not a crash
                 QApplication.restoreOverrideCursor()
-                QMessageBox.warning(self, "Combined Hamiltonian fit", f"The fit did not succeed:\n\n{exc}")
+                QMessageBox.warning(self, "CSA, Quad & J-coupling fit", f"The fit did not succeed:\n\n{exc}")
                 return False
         if fit_progress_box.stopped:
             return False
@@ -1998,7 +1998,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         t.setVisible(True)
         q = r["quality"]
         head = r["log"].splitlines()
-        lines = [head[0].replace("Combined-Hamiltonian fit: ", "Combined-Hamiltonian fit — ")]
+        lines = [head[0].replace("CSA, Quad & J-coupling fit: ", "CSA, Quad & J-coupling fit — ")]
         lines += [line for line in head[1:] if line.startswith("Multi-start")]
         lines.append(f"R² {q['r2']:.5f}  ·  RMSE {q['rmse']:.3g}  ·  reduced χ² "
                      f"{q['reduced_chi2']:.3g}  ·  {r.get('elapsed', 0.0):.1f} s. |C_Q| reported "

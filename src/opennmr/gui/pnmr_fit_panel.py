@@ -56,9 +56,10 @@ from PySide6.QtWidgets import (
 
 from ..io import serialize
 from ..notebook import bridge
-from ..notebook import pnmr_fit
+from ..notebook import pnmr_export, pnmr_fit
 from ..notebook.pnmr_simulator import species_element
 from . import panel_state
+from .pnmr_export_row import SendSitesRow
 from .fit_progress_dialog import FitProgress
 
 #: The generate_spectrum_dict arguments that define the structural model
@@ -139,8 +140,12 @@ class PnmrFitPanel(QWidget):
                  open_model_setup: Callable[[], None], load_model_settings: Callable[[], None],
                  get_target: Callable, get_regions: Callable[[], list], canvas,
                  show_view: Callable[[], None], open_fit_display: Callable[[], None] | None = None,
-                 on_fitted: Callable[[], None] | None = None, parent=None) -> None:
+                 on_fitted: Callable[[], None] | None = None,
+                 export_sites: Callable | None = None, parent=None) -> None:
         super().__init__(parent)
+        #: ``export_sites(site_dicts, notes, nucleus, larmor_mhz, destination,
+        #: append, source)`` -- puts sites into CSA, Quad & J-coupling.
+        self._export_sites = export_sites
         self._model = model
         self._describe_model = describe_model
         self._open_model_setup = open_model_setup
@@ -646,7 +651,10 @@ class PnmrFitPanel(QWidget):
         self.results_peaks_table.setHorizontalHeaderLabels(self._PEAK_COLUMNS)
         self.results_peaks_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.results_peaks_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.results_peaks_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Several rows (Ctrl/Shift-click) for Export Selected; the first
+        # selected is the one whose environments are listed and outlined.
+        self.results_peaks_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
         self.results_peaks_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents)
         self.results_peaks_table.horizontalHeader().setStretchLastSection(True)
@@ -682,7 +690,49 @@ class PnmrFitPanel(QWidget):
         v.addLayout(row)
         #: Where the main window puts "Keep This Fit…" (right after it).
         self.keep_anchor = self.copy_code_button
+        # The fit's peaks are isotropic: send them on to have CSA,
+        # quadrupolar or J added (explicit user request, 2026-10-12).
+        self.send_sites_row = SendSitesRow(default_destination="fit", selected_what="peaks")
+        self.send_sites_row.exportRequested.connect(self.export_sites)
+        v.addWidget(self.send_sites_row)
         return box
+
+    def selected_peak_indices(self) -> list[int]:
+        model = self.results_peaks_table.selectionModel()
+        return sorted({index.row() for index in model.selectedRows()}) if model else []
+
+    def export_sites(self, which: str = "all") -> list[dict] | None:
+        """The fitted peaks (all, or the selected rows) as sites in CSA,
+        Quad & J-coupling (:func:`notebook.pnmr_export.sites_from_pnmr_fit`)."""
+        if not self.result:
+            return None
+        chosen = None if which == "all" else self.selected_peak_indices()
+        if which != "all" and not chosen:
+            QMessageBox.information(self, "pNMR", "Select one or more peaks in the table first.")
+            return None
+        spectrum = self.result.get("spectrum")
+        meta = getattr(spectrum, "metadata", None)
+        nucleus = getattr(meta, "nucleus", None) or self._model_nuclide()
+        try:
+            sites, notes = pnmr_export.sites_from_pnmr_fit(self.result, nucleus, which=chosen,
+                                                           return_notes=True)
+        except ValueError as exc:
+            QMessageBox.warning(self, "pNMR", str(exc))
+            return None
+        larmor = getattr(meta, "bf1", None) or getattr(meta, "sfo1", None)
+        destination = self.send_sites_row.destination()
+        self._log(f"Exported {len(sites)} site(s) to "
+                  f"{'Fit' if destination == 'fit' else 'Simulate'} ▸ CSA, Quad & J-coupling"
+                  + (" (added)" if self.send_sites_row.append() else "") + ": "
+                  + ", ".join(s["label"] for s in sites) + ".\n  " + "\n  ".join(notes))
+        if self._export_sites is not None:
+            self._export_sites(sites, notes, nucleus, larmor, destination,
+                               self.send_sites_row.append(), "pNMR fit")
+        return sites
+
+    def _model_nuclide(self) -> str | None:
+        settings = (self.result or {}).get("settings") or {}
+        return settings.get("nuclide")
 
     def _report(self) -> None:
         r = self.result
@@ -1125,3 +1175,4 @@ class PnmrFitPanel(QWidget):
         has = self.result is not None
         for w in (self.save_report_button, self.copy_code_button):
             w.setEnabled(has)
+        self.send_sites_row.set_enabled(has, has)

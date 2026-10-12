@@ -141,6 +141,7 @@ FIT_VALUES_FILE = "fitted_values.json"
 from ..notebook.fitting import build_region_mask as nb_build_region_mask
 from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
 from .dnp_panel import DnpWorkflowPanel
+from .snr_panel import SnrPanel
 from .tensor_view_panel import TensorViewControls
 from .periodic_table_panel import LarmorCalculatorPanel, PeriodicTableView
 from .loader import background_load_enabled
@@ -8803,11 +8804,11 @@ class MainWindow(QMainWindow):
     #: Readable names, for the log and the dialogs.
     _FIT_LABELS = {"csa": "CSA", "jcoupling": "J-coupling", "quadrupolar": "Quadrupolar",
                    "czjzek": "Czjzek",
-                   "combined": "Combined-Hamiltonian", "multi": "Multi-spectrum",
+                   "combined": "CSA, Quad & J-coupling", "multi": "Multi-spectrum",
                    "pnmr": "pNMR (CIF)"}
     _SIMULATION_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "jcoupling": "J-coupling",
                           "czjzek": "Czjzek distribution",
-                          "combined": "Combined Hamiltonian", "diffusion": "Diffusion (PFG)",
+                          "combined": "CSA, Quad & J-coupling", "diffusion": "Diffusion (PFG)",
                           "bloch": "Shaped pulse (Bloch)", "pnmr": "pNMR (CIF)"}
 
     def _fit_panels(self) -> dict:
@@ -13159,7 +13160,7 @@ class MainWindow(QMainWindow):
 
         self.fitting_status_label = QLabel(
             "Fit peak shapes (Isotropic), integrate a region (Integration), or build a model "
-            "in Combined Hamiltonian: add peaks, then add interactions to each -- chemical-shift "
+            "in CSA, Quad & J-coupling: add peaks, then add interactions to each -- chemical-shift "
             "anisotropy, quadrupolar (first order, second order or exact) or J-coupling (first "
             "order, or strongly coupled peaks solved exactly). "
             "To retain a fit for later use, click 'Keep This Fit'. You can see all "
@@ -13173,7 +13174,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(CollapsibleSection(
             "Integration", content=self._build_integration_subtab()))
         # One entry point for every interaction (explicit user request,
-        # 2026-10-06): Combined Hamiltonian, where peaks are added and
+        # 2026-10-06): CSA, Quad & J-coupling, where peaks are added and
         # interactions added to each. The single-interaction panels below
         # (J-coupling's first-order mode, CSA/Dipolar, Quadrupolar) are no
         # longer in the menu -- Combined does each of them, at every level
@@ -13220,7 +13221,7 @@ class MainWindow(QMainWindow):
             "Quadrupolar (Czjzek distribution)", content=self.czjzek_fit_panel)
         # Any mix of CSA, quadrupolar and J per site (explicit user
         # request); the fitter is notebook.combined_fitting, the model
-        # Simulate > Combined Hamiltonian's.
+        # Simulate > CSA, Quad & J-coupling's.
         self.combined_fit_panel = CombinedFitPanel(
             get_target=self._jcoupling_fit_target,
             get_regions=self._integration_regions,
@@ -13237,7 +13238,7 @@ class MainWindow(QMainWindow):
             self._with_model_series_box(self.combined_fit_panel, "combined"),
             self.jcoupling_fit_panel)
         self._combined_fit_section = CollapsibleSection(
-            "Combined Hamiltonian", content=self.combined_fit_model)
+            "CSA, Quad & J-coupling", content=self.combined_fit_model)
         layout.addWidget(self._combined_fit_section)
         layout.addWidget(self._czjzek_fit_section)
         # A spectrum against the environments a CIF and its bond-pathway
@@ -13254,7 +13255,8 @@ class MainWindow(QMainWindow):
             canvas=self.fit_canvas,
             show_view=self._raise_fit_canvas,
             open_fit_display=self._open_fit_display_options,
-            on_fitted=lambda: self._store_fit("pnmr"))
+            on_fitted=lambda: self._store_fit("pnmr"),
+            export_sites=self._export_pnmr_sites)
         self._pnmr_fit_section = CollapsibleSection("pNMR (CIF bond pathways)",
                                                     content=self.pnmr_fit_panel)
         layout.addWidget(self._pnmr_fit_section)
@@ -13351,8 +13353,41 @@ class MainWindow(QMainWindow):
         layout.addWidget(CollapsibleSection(
             "Imaging", content=self._build_imaging_subtab()))
         layout.addWidget(self._build_dnp_section())
+        layout.addWidget(self._build_snr_section())
         layout.addStretch(1)
         return tab
+
+    # -- Apply ▸ Signal-to-Noise (explicit user request, 2026-10-12) --------
+
+    def _build_snr_section(self) -> QWidget:
+        """Apply ▸ Signal-to-Noise: ``gui/snr_panel.py`` over
+        ``notebook/snr.py``. Spectra are Open experiments' 1D ones (as
+        DNP's); regions are dragged on the Compare view; results are kept
+        with each spectrum as ``fits["snr"]`` (its log and sidecar)."""
+        self.snr_panel = SnrPanel(spectra=self._dnp_spectra, selected=self._dnp_selected_rows,
+                                  draw=self._dnp_draw, arm=self._snr_arm, store=self._store_dnp,
+                                  style=self._dnp_style)
+        self._snr_section = CollapsibleSection("Signal-to-Noise", content=self.snr_panel)
+        self._snr_section.toggled.connect(lambda expanded: expanded and self.snr_panel.refresh())
+        self.compare_canvas.regionSelected.connect(
+            lambda lo, hi: self.snr_panel.armed and self.snr_panel.on_canvas_region(lo, hi))
+
+        def _released(_enabled):
+            if not self.compare_canvas._region_select_mode:
+                self.snr_panel.canvas_mode_released()
+        self.compare_canvas.regionSelectModeChanged.connect(_released)
+        model = self.spectrum_list.model()
+        for signal in (model.rowsInserted, model.rowsRemoved, model.modelReset):
+            signal.connect(lambda *_a: self.snr_panel.refresh())
+        return self._snr_section
+
+    def _snr_arm(self, mode) -> None:
+        if mode == "region":
+            self.compare_canvas.set_region_select_mode(True)
+            self.statusBar().showMessage(
+                "Signal-to-Noise: drag across the region on the Compare view.", 8000)
+        else:
+            self.compare_canvas.set_region_select_mode(False)
 
     def _build_simulations_panel(self) -> QWidget:
         """The "Simulations" launcher button -- the last of the seven,
@@ -13372,7 +13407,7 @@ class MainWindow(QMainWindow):
         both -- ``quadrupolar_spectrum``)."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        # Combined Hamiltonian is the one entry point for every interaction
+        # CSA, Quad & J-coupling is the one entry point for every interaction
         # (explicit user request, 2026-10-06; see _build_fitting_panel). The
         # CSA and Quadrupolar simulators are kept, hidden, for saved states
         # and the simulation history; J-coupling's spin-system mode is
@@ -13421,7 +13456,7 @@ class MainWindow(QMainWindow):
         self.combined_sim_model = CombinedModelSection(self.combined_sim_panel,
                                                        self.jcoupling_sim_panel)
         self._combined_sim_section = CollapsibleSection(
-            "Combined Hamiltonian", content=self.combined_sim_model)
+            "CSA, Quad & J-coupling", content=self.combined_sim_model)
         layout.addWidget(self._combined_sim_section)
         # DFT-calculated tensors (CASTEP / VASP) -> sites -> the Combined
         # Hamiltonian simulation (explicit user request, 2026-10-06);
@@ -13440,7 +13475,7 @@ class MainWindow(QMainWindow):
         self._dft_sim_section = CollapsibleSection("DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                                    content=self.dft_sim_panel)
         layout.addWidget(self._czjzek_sim_section)
-        # After Czjzek: Combined Hamiltonian and Czjzek stay together
+        # After Czjzek: CSA, Quad & J-coupling and Czjzek stay together
         # (test_gui_czjzek_display pins that order).
         layout.addWidget(self._dft_sim_section)
         # Code that used to open these sections opens Combined's instead.
@@ -13457,7 +13492,8 @@ class MainWindow(QMainWindow):
         self.pnmr_panel = PnmrSimulationPanel(
             self.simulation_canvas, self._show_simulation_view,
             plot_spectrum=lambda spectrum: self._on_panel_simulated("pnmr", spectrum),
-            add_to_open=self._add_derived_spectrum)
+            add_to_open=self._add_derived_spectrum,
+            export_sites=self._export_pnmr_sites)
         self._pnmr_sim_section = CollapsibleSection("pNMR (CIF)", content=self.pnmr_panel)
         layout.addWidget(self._pnmr_sim_section)
         layout.addStretch(1)
@@ -13547,7 +13583,7 @@ class MainWindow(QMainWindow):
             x[keep], np.asarray(result["y"])[keep], np.asarray(result["y_fit"])[keep],
             components=components, auto_hide_single=True,
             peak_labels=list(result["site_spectra"]),
-            title=result.get("title", "Combined-Hamiltonian fit"),
+            title=result.get("title", "CSA, Quad & J-coupling fit"),
             fit_label=result.get("fit_label", "Fit (total)"),
             spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
@@ -13639,7 +13675,7 @@ class MainWindow(QMainWindow):
             self._run_sidecar_save_now(index)
 
     def _send_combined_to_simulation(self, settings: dict, site_dicts: list, nucleus: str) -> None:
-        """Fitted sites into Simulate > Combined Hamiltonian, simulated
+        """Fitted sites into Simulate > CSA, Quad & J-coupling, simulated
         over an automatic axis."""
         panel = self.combined_sim_panel
         panel.nucleus_combo.setCurrentText(nucleus)
@@ -13661,7 +13697,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _link_panel_field(panel):
-        """Field (T) in front of a Combined-Hamiltonian-style panel's
+        """Field (T) in front of a CSA, Quad & J-coupling-style panel's
         Larmor box (its ``larmor_spin`` and ``nucleus_combo``)."""
         from PySide6.QtWidgets import QFormLayout
         for form in panel.findChildren(QFormLayout):
@@ -14025,7 +14061,7 @@ class MainWindow(QMainWindow):
 
     def _open_strong_coupling(self, where: str, site_dicts, nucleus: str,
                               larmor_mhz: float | None = None) -> None:
-        """Combined Hamiltonian ▸ a J interaction's "Strong coupling", or
+        """CSA, Quad & J-coupling ▸ a J interaction's "Strong coupling", or
         Add interaction ▸ J-coupling between peaks: the exact spin-system
         model, its spins seeded from the peaks when it has none yet."""
         panel = self.jcoupling_fit_panel if where == "fit" else self.jcoupling_sim_panel
@@ -14048,7 +14084,7 @@ class MainWindow(QMainWindow):
         notes = self.jcoupling_fit_panel.set_start_from_simulation(arguments)
         self.combined_fit_model.show_model("spin_system")
         self._open_fit_section_of(self.jcoupling_fit_panel)
-        self._report_transfer("Simulated spin system set as the Fit ▸ Combined Hamiltonian (strongly coupled peaks) start",
+        self._report_transfer("Simulated spin system set as the Fit ▸ CSA, Quad & J-coupling (strongly coupled peaks) start",
                               notes)
 
     def _send_combined_simulation_to_fit(self, site_dicts: list, settings: dict,
@@ -14057,8 +14093,55 @@ class MainWindow(QMainWindow):
         self.combined_fit_model.show_model("peaks")
         self._combined_fit_section.setExpanded(True)
         self._show_side_tab("Fit")
-        self._report_transfer("Simulated sites set as the Fit ▸ Combined Hamiltonian start",
+        self._report_transfer("Simulated sites set as the Fit ▸ CSA, Quad & J-coupling start",
                               notes)
+
+    def _export_pnmr_sites(self, site_dicts: list, notes: list, nucleus: str | None,
+                           larmor_mhz: float | None, destination: str, append: bool,
+                           source: str) -> str:
+        """pNMR's isotropic peaks (``notebook.pnmr_export`` site dicts)
+        into Simulate ▸ or Fit ▸ CSA, Quad & J-coupling, replacing or
+        added to the sites there (explicit user request, 2026-10-12). The
+        Simulate panel takes the pNMR nucleus and field; the Fit panel
+        keeps its spectrum's, and a mismatch is reported. Returns the
+        status text."""
+        fit = destination == "fit"
+        panel = self.combined_fit_panel if fit else self.combined_sim_panel
+        if not fit and nucleus:
+            panel.nucleus_combo.setCurrentText(nucleus)
+        # Panel site dicts carry no "nucleus" (absent = the panel's own).
+        new = [{k: v for k, v in d.items() if k != "nucleus"} for d in site_dicts]
+        existing = [dict(s) for s in panel.site_dicts] if append else []
+        taken = {s["label"] for s in existing}
+        for d in new:
+            base, k = d["label"], 2
+            while d["label"] in taken:
+                d["label"] = f"{base} ({k})"
+                k += 1
+            taken.add(d["label"])
+        sites = existing + new
+        extra = []
+        if fit:
+            check = panel.set_start_from_simulation(
+                sites, {"larmor_MHz": larmor_mhz} if larmor_mhz else {}, nucleus or "")
+            if check:
+                extra.append(check)
+            self.combined_fit_model.show_model("peaks")
+            self._combined_fit_section.setExpanded(True)
+            self._show_side_tab("Fit")
+        else:
+            if larmor_mhz:
+                panel.larmor_spin.setValue(float(larmor_mhz))
+            panel.set_state({"widgets": {}, "sites": sites, "current": len(existing)})
+            self.combined_sim_model.show_model("peaks")
+            self._combined_sim_section.setExpanded(True)
+            self._show_side_tab("Simulate")
+        where = "Fit" if fit else "Simulate"
+        what = (f"{len(new)} {source} site(s) {'added to' if append else 'set as'} the "
+                f"{where} ▸ CSA, Quad & J-coupling sites -- select one and add CSA, "
+                "quadrupolar or J")
+        self._report_transfer(what, "; ".join(extra))
+        return what
 
     def _send_czjzek_to_simulation(self, fitted: dict) -> None:
         self.czjzek_sim_panel.set_from_fit(fitted)
@@ -17478,7 +17561,7 @@ class MainWindow(QMainWindow):
                 "<ul style='margin-left:-20px'>"
                 "<li>Isotropic ▸ <i>Fit Spectrum</i>, or Integration ▸ <i>Integrate "
                 "Regions</i> — every slice in one go;</li>"
-                "<li>Combined Hamiltonian (any CSA, quadrupolar or J model) — fit one slice (the "
+                "<li>CSA, Quad &amp; J-coupling (any CSA, quadrupolar or J model) — fit one slice (the "
                 "strongest), then <i>Fit Every Slice with this Model</i> in its Pseudo-2D "
                 "series box.</li></ul>"),
         ("curve", "<b>Fit the recovery/decay on Dynamics ▸ Fit Curve</b>: "
@@ -24192,7 +24275,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     _MODEL_SERIES_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar",
-                            "combined": "Combined-Hamiltonian"}
+                            "combined": "CSA, Quad & J-coupling"}
 
     def _with_model_series_box(self, panel, kind: str) -> QWidget:
         holder = QWidget()
@@ -24220,7 +24303,7 @@ class MainWindow(QMainWindow):
         note.setTextFormat(Qt.TextFormat.RichText)
         note.setWordWrap(True)
         v.addWidget(note)
-        fit_button = QPushButton(f"Fit Every Slice with this {label} Model")
+        fit_button = QPushButton(f"Fit Every Slice with this {label.replace('&', '&&')} Model")
         fit_button.setToolTip(
             "Linear least squares of the fitted site lineshapes to each slice, within the "
             "same fit window: exact, fast, and well behaved on slices whose signal has "
@@ -24229,7 +24312,7 @@ class MainWindow(QMainWindow):
         fit_button.setEnabled(False)
         fit_button.clicked.connect(lambda _c=False, k=kind: self._on_model_series_clicked(k))
         v.addWidget(fit_button)
-        export_button = QPushButton(f"Export {label} Fit to Pseudo-2D…")
+        export_button = QPushButton(f"Export {label.replace('&', '&&')} Fit to Pseudo-2D…")
         export_button.setToolTip(
             "Stack every slice's fitted lineshape into a new pseudo-2D spectrum, to view or "
             "compare with the data. Available once every slice has been fitted.")

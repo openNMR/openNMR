@@ -2251,7 +2251,7 @@ def NMR2D_fit_relaxation(fits, model: str = "inversion_recovery", vdlist=None,
         raise ValueError("No fitted slices available.")
 
     # A lineshape-model series (notebook.series_fitting: CSA, quadrupolar
-    # or Combined-Hamiltonian sites applied to every slice) carries fitted
+    # or CSA, Quad & J-coupling sites applied to every slice) carries fitted
     # areas and amplitudes like a peak fit, under its own keys.
     model_fit = bool(fits[0].get("model_fit"))
     fitted_slices = "popt" in fits[0] or model_fit

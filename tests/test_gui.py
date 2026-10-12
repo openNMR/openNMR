@@ -7415,12 +7415,12 @@ def test_main_window_isotropic_integration_csa_are_separate_sections(qapp):
 
     peak_picking_section = _enclosing_collapsible_section(window.peak_table)
     integration_section = _enclosing_collapsible_section(window.region_table)
-    # CSA is an interaction of a Combined Hamiltonian peak since
+    # CSA is an interaction of a CSA, Quad & J-coupling peak since
     # 2026-10-06; the old CSA/Dipolar panel is kept, out of the menu.
     combined_section = _enclosing_collapsible_section(window.combined_fit_panel)
     assert peak_picking_section.title() == "Isotropic (Gauss/Lor)"
     assert integration_section.title() == "Integration"
-    assert combined_section.title() == "Combined Hamiltonian"
+    assert combined_section.title() == "CSA, Quad & J-coupling"
     assert _enclosing_collapsible_section(window.csa_sites_table) is None
     # Three genuinely separate sections, not one shared container.
     assert len({id(peak_picking_section), id(integration_section), id(combined_section)}) == 3
@@ -11267,10 +11267,10 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # (test_gui_multi_fit.py). Quadrupolar (Czjzek distribution) right
     # after Quadrupolar, and Fit plot display options at the very end
     # (test_gui_czjzek_display.py).
-    # Since 2026-10-06, Combined Hamiltonian holds every interaction (J,
+    # Since 2026-10-06, CSA, Quad & J-coupling holds every interaction (J,
     # CSA, quadrupolar), right after Integration
     # (test_gui_combined_consolidation.py).
-    assert titles == ["Isotropic (Gauss/Lor)", "Integration", "Combined Hamiltonian",
+    assert titles == ["Isotropic (Gauss/Lor)", "Integration", "CSA, Quad & J-coupling",
                       "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)",
                       "Multi-spectrum", "Kept fit models", "Fit plot: components and colours"]
 
@@ -11280,7 +11280,9 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     analysis = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
     # ... and DNP joined them (2026-09-30), with its two sub-sections.
-    assert analysis == ["eNMR", "Imaging", "DNP", "Enhancement", "Field Sweep Profile"]
+    # ... and Signal-to-Noise after it (2026-10-12).
+    assert analysis == ["eNMR", "Imaging", "DNP", "Enhancement", "Field Sweep Profile",
+                        "Signal-to-Noise"]
 
 
 def test_main_window_advanced_processing_is_its_own_top_level_button(qapp):
@@ -11363,7 +11365,7 @@ def test_main_window_applications_is_its_own_top_level_button(qapp):
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     sections = applications_tab.findChildren(CollapsibleSection)
     assert [s.title() for s in sections] == ["eNMR", "Imaging", "DNP", "Enhancement",
-                                             "Field Sweep Profile"]
+                                             "Field Sweep Profile", "Signal-to-Noise"]
 
     enmr_section = _enclosing_collapsible_section(window.enmr_voltage_label)
     imaging_section = _enclosing_collapsible_section(window.imaging_max_gradient_spin)
@@ -15484,9 +15486,9 @@ def test_main_window_simulations_is_its_own_top_level_button(qapp):
     # pNMR (CIF): the notebook's CIF shift simulation (test_gui_pnmr.py).
     # J-coupling first (test_gui_jcoupling.py); Czjzek distribution after
     # Quadrupolar (test_gui_czjzek_display.py).
-    # Since 2026-10-06 Combined Hamiltonian is the one interaction
+    # Since 2026-10-06 CSA, Quad & J-coupling is the one interaction
     # simulator; the CSA and Quadrupolar ones are kept out of the menu.
-    assert [s.title() for s in sections] == ["Combined Hamiltonian", "Czjzek distribution",
+    assert [s.title() for s in sections] == ["CSA, Quad & J-coupling", "Czjzek distribution",
                                              "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
                                              "Diffusion (PFG)", "Shaped pulse (Bloch)",
                                              "pNMR (CIF)"]
@@ -16110,8 +16112,8 @@ def test_simulations_tile_has_diffusion_and_bloch_sections(qapp):
     window = MainWindow()
     page = window.side_tabs.widget(window._simulations_tab_index)
     titles = [s.title() for s in page.findChildren(CollapsibleSection)]
-    # Combined Hamiltonian holds every interaction since 2026-10-06.
-    assert titles == ["Combined Hamiltonian", "Czjzek distribution",
+    # CSA, Quad & J-coupling holds every interaction since 2026-10-06.
+    assert titles == ["CSA, Quad & J-coupling", "Czjzek distribution",
                       "DFT tensors (CASTEP, VASP, ORCA, Gaussian)", "Diffusion (PFG)",
                       "Shaped pulse (Bloch)", "pNMR (CIF)"]
 

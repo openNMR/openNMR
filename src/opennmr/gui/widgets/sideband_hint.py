@@ -1,6 +1,6 @@
 """The "at least 3-5 spinning sidebands" reminder shown beside the MAS
 rate of every fit section that fits an anisotropic interaction (Fit ▸
-CSA, Combined Hamiltonian, Quadrupolar).
+CSA, CSA, Quad & J-coupling, Quadrupolar).
 
 Explicit user request (2026-10-08): "Indicate that, for fitting any
 anisotropic interactions, it is sensible to have at least 3-5 sidebands

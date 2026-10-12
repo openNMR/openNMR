@@ -13,7 +13,7 @@ by :mod:`opennmr.notebook.dft_calibration` (one reference: slope −1). The
 sample's element picks its calibration, so ¹H can use L-alanine while
 ²³Na uses NaCl in the same sample. Calibrations can be saved and reused.
 
-It *is* a Simulate ▸ Combined Hamiltonian panel with an import box on top:
+It *is* a Simulate ▸ CSA, Quad & J-coupling panel with an import box on top:
 the imported sites land in its site list, where they can be edited, and its
 own field, regime, MAS, transitions, level of theory and axis -- and its
 Simulate, plot, Keep and Send to Fit -- do the rest. The maths is

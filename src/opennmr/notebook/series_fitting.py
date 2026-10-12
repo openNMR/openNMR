@@ -1,7 +1,7 @@
 """
 Fit every slice of a pseudo-2D series with a lineshape model fitted to
 one slice -- T1/T2/T1rho (or any series) with CSA, quadrupolar,
-Czjzek (distributed quadrupolar) or Combined-Hamiltonian (mixed) sites.
+Czjzek (distributed quadrupolar) or CSA, Quad & J-coupling (mixed) sites.
 
 Explicit user request (2026-09-28): "When I try to fit T1/T2 pseudo-2d
 data using CSA or quad models (or mixed), I extract a slice, then fit
@@ -74,7 +74,7 @@ _trapezoid = getattr(np, "trapezoid", None) or np.trapz
 MODEL_KINDS = ("csa", "quadrupolar", "czjzek", "combined")
 
 _KIND_LABELS = {"csa": "CSA", "quadrupolar": "Quadrupolar", "czjzek": "Czjzek",
-                "combined": "Combined Hamiltonian"}
+                "combined": "CSA, Quad & J-coupling"}
 
 
 def model_components(kind: str, fit: dict, x=None):

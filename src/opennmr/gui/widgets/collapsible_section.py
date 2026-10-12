@@ -186,7 +186,8 @@ class CollapsibleSection(QWidget):
 
     def _sync_header_text(self) -> None:
         glyph = _EXPANDED_GLYPH if self._header.isChecked() else _COLLAPSED_GLYPH
-        text = f"{glyph} {self._title}"
+        # "&" would be a mnemonic in a QToolButton (and vanish): doubled to show.
+        text = f"{glyph} {self._title.replace('&', '&&')}"
         width = self.width() if self.isVisible() else 0
         metrics = self._header.fontMetrics()
         room = width - 16
