@@ -15,6 +15,7 @@ dependencies = [
     "matplotlib",
     "PySide6",
     "sympy",
+	"pymatgen",
 ]
 
 [project.optional-dependencies]
