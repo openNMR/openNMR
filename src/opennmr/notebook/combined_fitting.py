@@ -63,6 +63,7 @@ import numpy as np
 from scipy.optimize import curve_fit, nnls
 
 from .fitting import build_region_mask, estimate_baseline_robust, fit_quality
+from .combined_hamiltonian import csa_asymmetry_warning
 from .combined_hamiltonian import (Site, as_sites, _site_sticks, _broaden_site, broadened_sites,
                                    simulate_combined, resolve_link_dicts, observed_nucleus,
                                    site_axes, placement_notes)
@@ -357,6 +358,18 @@ def fit_combined(results, sites, vary=None, fixed=None, bounds=None, larmor_Hz=N
                 lo, hi = sbounds[d["label"]][name]
             lo, hi = min(lo, hi), max(lo, hi)
             value = _get(d, name)
+            if (name == "asym" and value < 0 and lo >= 0
+                    and _find(d, "csa")["convention"] == "Haeberlen"):
+                # Said in its own words (explicit user request, 2026-10-13),
+                # not refused. -η is the same principal values with x and y
+                # swapped, so a free fit starts from |η|.
+                warnings.append(f"{d['label']}: " + csa_asymmetry_warning(value, "Haeberlen")
+                                + (f" The fit started from η = {abs(value):g} (the same "
+                                   "principal values, x and y swapped)." if name in free_set
+                                   else ""))
+                if name in free_set:
+                    value = min(abs(value), hi)
+                    _set(d, name, value)
             if name in free_set and not lo <= value <= hi:
                 warnings.append(f"{d['label']}: {name} start {value:g} outside ({lo:g}, {hi:g}); "
                                 "moved inside")

@@ -261,6 +261,9 @@ def combined_simulation_html(result: dict, elapsed: float, warning: str = "",
            f"{_items(conditions(result.get('settings') or {}, result.get('powder')), muted)}</p>"]
     out.append(sites_html(sites, muted=muted))
     for note in result.get("notes") or []:
+        if str(note).startswith("⚠"):
+            out.append(_warning(str(note), warn))
+            continue
         out.append('<p style="margin-top:6px; margin-bottom:0px;">'
                    f'{_muted(_e(note), muted)}</p>')
     if warning:

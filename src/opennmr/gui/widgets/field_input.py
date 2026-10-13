@@ -19,19 +19,25 @@ Larmor box and ties them together:
   spectrum's SFO1, restoring a saved panel -- moves the field to match,
   so the two never disagree.
 
-The field box also shows the 1H frequency of that magnet ("400.13 MHz
-1H"), which is how spectrometers are usually named.
+Beside the field is the same magnet as its 1H frequency ("400.000 MHz
+1H"), which is how spectrometers are usually named -- an editable box
+since 2026-10-13 (explicit user request: "allow a user to choose the 1H
+frequency in MHz, as in the NMR Periodic Table"): type either, the other
+follows. Both accept typing freely (:class:`TypedDoubleSpinBox`).
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QAbstractSpinBox, QDoubleSpinBox, QHBoxLayout, QLabel, QWidget
+from PySide6.QtCore import QObject
+from PySide6.QtWidgets import QAbstractSpinBox, QHBoxLayout, QLabel, QWidget
 
 from ...notebook.utils import find_gamma
+from .typed_spinbox import TypedDoubleSpinBox
 
 #: A "400 MHz" magnet: the default when nothing better is known.
 DEFAULT_FIELD_T = 9.3947
+#: Highest field a field box takes (T): above today's 45 T hybrid magnets.
+MAX_FIELD_T = 50.0
 
 _GAMMA_1H = None
 
@@ -56,19 +62,45 @@ def _gamma_1h() -> float:
     return _GAMMA_1H
 
 
-class FieldSpinBox(QDoubleSpinBox):
-    """A spin box that says when the *user* changed it -- typing, the
-    arrow keys or its buttons -- as opposed to code setting it."""
+class FieldSpinBox(TypedDoubleSpinBox):
+    """A field box: typed freely, and says (``userEdited``) when the
+    *user* changed it -- typing, the arrow keys or its buttons -- as
+    opposed to code setting it."""
 
-    userEdited = Signal()
 
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.lineEdit().textEdited.connect(lambda _t: self.userEdited.emit())
+def proton_frequency_box(field_spin, parent=None) -> TypedDoubleSpinBox:
+    """A box for the same magnet as its 1H frequency (MHz), tied both ways
+    to ``field_spin`` (T): typing either sets the other. Editing it counts
+    as the user setting the field (``field_spin.userEdited``)."""
+    box = TypedDoubleSpinBox(parent)
+    box.setDecimals(3)
+    box.setRange(0.0, _gamma_1h() * field_spin.maximum() / 1e6)
+    box.setSingleStep(1.0)
+    box.setSuffix(" MHz ¹H")
+    box.setToolTip("The same magnet as its ¹H frequency -- how spectrometers are usually "
+                   "named (400 MHz = 9.3946 T). Type either this or the field.")
+    state = {"busy": False}
 
-    def stepBy(self, steps: int) -> None:  # noqa: N802 -- Qt override
-        super().stepBy(steps)
-        self.userEdited.emit()
+    def from_field(_v=None):
+        if state["busy"]:
+            return
+        box.blockSignals(True)
+        box.setValue(_gamma_1h() * field_spin.value() / 1e6)
+        box.blockSignals(False)
+
+    def to_field(_v=None):
+        state["busy"] = True
+        try:
+            field_spin.setValue(box.value() * 1e6 / _gamma_1h())
+        finally:
+            state["busy"] = False
+        if hasattr(field_spin, "userEdited"):
+            field_spin.userEdited.emit()
+
+    field_spin.valueChanged.connect(from_field)
+    box.valueChanged.connect(to_field)
+    from_field()
+    return box
 
 
 class FieldLink(QObject):
@@ -145,7 +177,7 @@ class FieldLink(QObject):
         self._update_label()
 
     def _update_label(self) -> None:
-        if self._proton_label is None:
+        if self._proton_label is None or not hasattr(self._proton_label, "setText"):
             return
         field = self.field_spin.value()
         self._proton_label.setText(f"{_gamma_1h() * field / 1e6:.2f} MHz ¹H" if field > 0 else "")
@@ -158,20 +190,23 @@ def link_field(form, larmor_spin, nucleus, nucleus_changed_signal=None, default_
     that fires when it changes. Returns the :class:`FieldLink` (its
     ``field_spin`` is the new box)."""
     field_spin = FieldSpinBox()
-    field_spin.setRange(0.0, 40.0)
-    field_spin.setDecimals(4)
+    field_spin.setRange(0.0, MAX_FIELD_T)
+    # Six decimals (1 µT), as the Periodic Table's: at four, a "400 MHz"
+    # magnet typed as ¹H would read back as 399.998 MHz.
+    field_spin.setDecimals(6)
     field_spin.setSingleStep(0.1)
     field_spin.setSuffix(" T")
     field_spin.setToolTip(
-        "The magnet's field, B0. The Larmor frequency below follows from it and the nucleus "
-        "(9.3947 T is a '400 MHz' spectrometer).")
-    proton = QLabel("")
-    proton.setToolTip("The ¹H frequency of this magnet -- how spectrometers are usually named.")
+        "The magnet's field, B0 -- or type its ¹H frequency in the box beside it. The Larmor "
+        "frequency below follows from it and the nucleus (9.3946 T is a '400 MHz' "
+        "spectrometer).")
     row = QWidget()
     h = QHBoxLayout(row)
     h.setContentsMargins(0, 0, 0, 0)
     h.addWidget(field_spin, 1)
-    h.addWidget(proton)
+    h.addWidget(QLabel("or"))
+    proton = proton_frequency_box(field_spin, parent=row)
+    h.addWidget(proton, 1)
 
     position, _role = form.getWidgetPosition(larmor_spin)
     form.insertRow(position, "Field B₀:", row)
@@ -185,8 +220,9 @@ def link_field(form, larmor_spin, nucleus, nucleus_changed_signal=None, default_
         "above (γ/2π × B0). Set by a selected spectrum's SFO1 where there is one -- the field "
         "then follows.")
 
-    link = FieldLink(field_spin, larmor_spin, nucleus, proton_label=proton, parent=row)
+    link = FieldLink(field_spin, larmor_spin, nucleus, parent=row)
     link.field_spin = field_spin
+    link.proton_spin = proton
     if nucleus_changed_signal is not None:
         nucleus_changed_signal.connect(lambda *_a: link.nucleus_changed())
     gamma = link.gamma()

@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 
 from ..notebook import periodic_table as pt
 from .widgets.collapsible_section import CollapsibleSection
+from .widgets.typed_spinbox import TypedDoubleSpinBox
 
 #: Accent (the website's teal) for search highlights and the selection.
 ACCENT = "#0f6b72"
@@ -682,17 +683,20 @@ class LarmorCalculatorPanel(QWidget):
         self.preset_combo.currentIndexChanged.connect(self._on_preset)
         form.addRow("Spectrometer:", self.preset_combo)
 
-        self.field_spin = QDoubleSpinBox()
+        # Typed freely (explicit user request, 2026-10-13: 30 T could only be
+        # reached with the up arrow -- Qt refused keystrokes on the way).
+        self.field_spin = TypedDoubleSpinBox()
         self.field_spin.setRange(0.0, 50.0)
         # Six decimals (1 µT): at four, a "400 MHz" magnet rounds to
         # 9.3946 T and reads back as 399.998 MHz.
         self.field_spin.setDecimals(6)
         self.field_spin.setSingleStep(0.1)
         self.field_spin.setSuffix(" T")
-        self.field_spin.setToolTip("B₀, the magnet's field.")
+        self.field_spin.setToolTip("B₀, the magnet's field (up to 50 T). Type a value and "
+                                   "press Enter, or use the arrows.")
         form.addRow("Field B₀:", self.field_spin)
 
-        self.proton_spin = QDoubleSpinBox()
+        self.proton_spin = TypedDoubleSpinBox()
         self.proton_spin.setRange(0.0, 2200.0)
         self.proton_spin.setDecimals(3)
         self.proton_spin.setSingleStep(1.0)

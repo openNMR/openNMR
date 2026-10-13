@@ -105,6 +105,13 @@ class InteractionEditor(QGroupBox):
                                   tip=CSA_ASYMMETRY_TIP)
             form.addRow("Δ or span:", self.aniso)
             form.addRow("η or skew:", self.asym)
+            # Out of range is said, not refused (explicit user request,
+            # 2026-10-13): a negative Haeberlen η is simulated as given.
+            self.asym_warning = QLabel("")
+            self.asym_warning.setWordWrap(True)
+            self.asym_warning.setStyleSheet(f"color: {report_format.WARN};")
+            self.asym_warning.setVisible(False)
+            form.addRow("", self.asym_warning)
             euler_box = QWidget()
             row = QHBoxLayout(euler_box)
             row.setContentsMargins(0, 0, 0, 0)
@@ -122,6 +129,7 @@ class InteractionEditor(QGroupBox):
             form.addRow("Euler angles:", euler_box)
             for w in (self.aniso, self.asym):
                 w.valueChanged.connect(self._write_csa)
+            self._sync_asym_warning()
         elif kind == "quadrupolar":
             self.cq = _spin_box(-1e4, 1e4, data["C_Q"], 4, " MHz",
                                 tip="C_Q = e²qQ/h. Its sign does not change a lineshape.")
@@ -185,6 +193,12 @@ class InteractionEditor(QGroupBox):
     def _write_csa(self, *_):
         self.data.update(convention=self.convention.currentData(), aniso=self.aniso.value(),
                          asym=self.asym.value(), euler=tuple(b.value() for b in self.euler))
+        self._sync_asym_warning()
+
+    def _sync_asym_warning(self) -> None:
+        message = ch.csa_asymmetry_warning(self.asym.value(), self.convention.currentData())
+        self.asym_warning.setText(f"⚠ {message}" if message else "")
+        self.asym_warning.setVisible(bool(message))
 
     def _on_treatment(self, index, panel):
         if self.treatment_combo.itemData(index) == "strong":

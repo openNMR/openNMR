@@ -218,6 +218,12 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   right-click for Free/Fixed/Limits; `set_cell_constraints`). The live
   preview and the fit redraw with `keep_zoom=True`
   (`MplCanvas.show_slice_fit`), so a zoom survives updates; Home resets.
+- **Field boxes** (any B0 in tesla) are `widgets/field_input.FieldSpinBox` /
+  `typed_spinbox.TypedDoubleSpinBox` (typed freely -- Qt's own refuses
+  keystrokes on the way to e.g. 30 T), with a ¹H-MHz partner from
+  `proton_frequency_box(field_spin)`; keep such partners out of panel
+  state (underscore attribute names). CSA asymmetry outside its physical
+  range is warned, never refused: `combined_hamiltonian.csa_asymmetry_warning`.
 - **Correlation matrices** of any fit are `notebook/fit_correlation.py`
   (`correlation_input` adapts each fit shape; add an adapter there for a
   new kind of fit). The GUI draws them through

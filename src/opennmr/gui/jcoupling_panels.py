@@ -28,6 +28,7 @@ from typing import Callable
 
 import numpy as np
 from .widgets.report_label import ReportLabel
+from .widgets.field_input import MAX_FIELD_T, FieldSpinBox, proton_frequency_box
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
@@ -1101,13 +1102,20 @@ class JCouplingSimulationPanel(QWidget):
         self.nucleus_combo.setToolTip("The observed nucleus -- sets the observe frequency that "
                                       "converts J (Hz) to ppm, and the axis label.")
         form.addRow("Observe:", self.nucleus_combo)
-        self.field_spin = QDoubleSpinBox()
-        self.field_spin.setRange(0.01, 40.0)
+        self.field_spin = FieldSpinBox()
+        self.field_spin.setRange(0.01, MAX_FIELD_T)
         self.field_spin.setDecimals(6)
         self.field_spin.setValue(9.3950)
         self.field_spin.setSuffix(" T")
-        self.field_spin.setToolTip("Magnet field. 9.395 T is a '400 MHz' spectrometer.")
-        form.addRow("Field:", self.field_spin)
+        self.field_spin.setToolTip("Magnet field -- or type its ¹H frequency beside it. "
+                                   "9.395 T is a '400 MHz' spectrometer.")
+        # Not saved separately: it is the field, in other units.
+        self._field_proton_spin = proton_frequency_box(self.field_spin, parent=self)
+        field_row = QHBoxLayout()
+        field_row.addWidget(self.field_spin, 1)
+        field_row.addWidget(QLabel("or"))
+        field_row.addWidget(self._field_proton_spin, 1)
+        form.addRow("Field:", field_row)
         self.frequency_label = QLabel("")
         form.addRow("", self.frequency_label)
         self.lineshape_combo, self.eta_spin = _lineshape_controls(form, self)

@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-13 round 2 (¹H MHz field in Simulate; field boxes typed freely; Haeberlen η < 0 warned): 10 new tests in `test_field_proton_typing_and_haeberlen_eta.py`. Every file but test_gui.py: 3102 passed, 110 skipped, 2 failed (pre-existing, `test_reopen_keeps_recorded_phase.py`); test_gui.py subset 24 passed. **Run the full suite locally before committing.***
+
 *2026-10-13 (Fit preview keeps the zoom; readable read-outs; Parameters one row per site; tanh/tan Bloch review + midpoint-phase fix): 22 new tests in `test_bloch_tanh_tan_review.py` and `test_gui_readable_reports_zoom_site_table.py`. Every file but test_gui.py: 3092 passed, 110 skipped, 2 failed (pre-existing, `test_reopen_keeps_recorded_phase.py`); test_gui.py subset 46 passed. **Run the full suite locally before committing.***
 
 *2026-10-12 (Apply ▸ Signal-to-Noise; pNMR sites to CSA, Quad & J-coupling; Combined Hamiltonian renamed): 40 new tests (18 + 9 + 7 + 6) in `test_snr.py`, `test_gui_snr.py`, `test_pnmr_export.py`, `test_gui_pnmr_export.py`; title assertions updated for the rename. Related files only (listed in that round): all passed, 0 failed. **Run the full suite locally before committing.***
@@ -178,6 +180,18 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Simulate: field as ¹H MHz; field boxes typed freely (30 T in the Periodic Table); Haeberlen η < 0 warned, not refused (2026-10-13, round 2)
+
+**Asked:** (1) In Simulate, let the field be chosen as the ¹H frequency in MHz, as in the NMR Periodic Table. (2) In the Periodic Table, allow typing a B0 above 20 T (30 T needed clicking the up arrow). (3) A negative Haeberlen η: rather than stopping it, say "negative values of eta in the Haeberlen model are physically incorrect. Please check the value entered"; Herzfeld-Berger skew of either sign is fine.
+
+**What was wrong with (2):** the box's range was already 0-50 T. The problem was Qt's QDoubleSpinBox validator, which refuses any keystroke whose intermediate text is invalid: "3" then "0" typed in front of "9.394641 T" is 309 T on the way (refused at the "0"); a digit typed at the end is one decimal too many at 6 decimals (refused). Only select-all-and-type worked, which nobody guesses.
+
+**Built:** `gui/widgets/typed_spinbox.py`, `TypedDoubleSpinBox`: accepts any number while typing (out of range / extra decimals kept as Intermediate), rounds to the shown decimals and clamps to the range on Enter or focus-out; arrows and setValue unchanged; `userEdited` signal. Used by the Periodic Table's field and ¹H boxes and every field box (`FieldSpinBox` now subclasses it; J-coupling and pNMR Simulate field boxes too). `widgets/field_input.proton_frequency_box(field_spin)`: a ¹H-MHz box tied both ways to a field box (editing it counts as the user setting the field). `link_field` now puts "[field T] or [¹H MHz]" on the Field B₀ row (replacing the read-only "400.13 MHz ¹H" label), field decimals 4 → 6 (else a typed 400 MHz reads back 399.998) and max 40 → 50 T (`MAX_FIELD_T`). The J-coupling and pNMR Simulate panels got the same box as `_field_proton_spin` (underscore: not captured by panel_state, so a restore cannot round the field through 3-decimal MHz).
+
+**Haeberlen η:** `combined_hamiltonian.csa_asymmetry_warning(asym, convention)` (η < 0 with the user's wording; η > 1; |skew| > 1 for Herzfeld-Berger) and `csa_warnings(sites)`. `Site.add_csa` accepts the value and issues a `UserWarning`; `simulate_combined` adds "⚠ <site>: …" to its notes/log (shown as a warning in the Simulate read-out); the CSA editor shows the warning live under "η or skew" (Haeberlen only). `fit_combined`: a negative Haeberlen start gets the same warning and, when free, starts from |η| (the same principal values with x and y swapped -- powder spectra agree to < 1 %, the ZCW grid's asymmetry); it was previously clipped silently to 0 with a generic "outside bounds" note.
+
+**Tests:** `test_field_proton_typing_and_haeberlen_eta.py` (10). Every file but test_gui.py: 3102 passed, 110 skipped, 2 failed (the same pre-existing `test_reopen_keeps_recorded_phase.py` pair as round 1); `test_gui.py -k "field or larmor or periodic or csa or simulate or combined or pnmr or jcoupling or quadrupolar or haeberlen or herzfeld or eta"`: 24 passed. The rest of test_gui.py not run. **Run the full suite locally before committing.**
 
 ## Fit preview keeps the zoom; readable result read-outs; Parameters one row per site; tanh/tan Bloch review (2026-10-13)
 

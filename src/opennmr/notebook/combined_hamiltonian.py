@@ -58,6 +58,7 @@ sphere is used automatically.
 import copy
 import functools
 import json
+import warnings
 
 import numpy as np
 
@@ -157,7 +158,10 @@ class Site:
         """Chemical-shift anisotropy. ``aniso``/``asym``: Delta/eta
         (Haeberlen) or span/skew (Herzfeld-Berger), ppm. ``euler``:
         (alpha, beta, gamma) degrees of the CSA frame in the EFG frame
-        (ignored without a quadrupolar interaction). One per site."""
+        (ignored without a quadrupolar interaction). One per site.
+
+        A Haeberlen eta outside 0..1 is accepted -- it is simulated as
+        given -- with a warning (:func:`csa_asymmetry_warning`)."""
         if self.get("csa"):
             raise ValueError(f"{self.label} already has a CSA; a site has one shielding tensor "
                              "(edit it, or remove it first).")
@@ -168,6 +172,9 @@ class Site:
             raise ValueError("euler must be (alpha, beta, gamma) in degrees.")
         self.interactions.append({"type": "csa", "aniso": float(aniso), "asym": float(asym),
                                   "convention": convention, "euler": euler})
+        message = csa_asymmetry_warning(asym, convention)
+        if message:
+            warnings.warn(f"{self.label}: {message}", UserWarning, stacklevel=2)
         return self
 
     def add_quadrupolar(self, C_Q, eta_Q=0.0):
@@ -862,6 +869,7 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
     broadened, used, more, shared_sets, shared_sites = broadened_sites(
         sites, ppm_axis, larmor_Hz, observe, sim, share=share_patterns)
     notes += more
+    notes += [f"⚠ {w}" for w in csa_warnings(sites)]
     for i, site in enumerate(sites):
         components[site.label] = broadened[i]
         site_spectra[site.label] = np.sum(list(broadened[i].values()), axis=0)
@@ -888,6 +896,46 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
             "sites": site_spectra, "components": components, "settings": settings,
             "site_dicts": [s.to_dict() for s in sites], "log": "\n".join(log_lines),
             "powder": used, "notes": list(notes)}
+
+
+def csa_asymmetry_warning(asym, convention="Haeberlen") -> str | None:
+    """The warning for a CSA asymmetry outside its physical range, or None.
+
+    Haeberlen's η = (δyy − δxx)/δzz lies between 0 and 1 by its ordering
+    of the principal axes (|δzz − δiso| ≥ |δxx − δiso| ≥ |δyy − δiso|);
+    Herzfeld-Berger's skew lies between −1 and +1, either sign being
+    physical. Values outside are not refused -- they are simulated as
+    given -- but said (explicit user request, 2026-10-13)."""
+    try:
+        value = float(asym)
+    except (TypeError, ValueError):
+        return None
+    if convention == "Haeberlen":
+        if value < 0:
+            return ("Negative values of η in the Haeberlen convention are physically "
+                    "incorrect (0 ≤ η ≤ 1). Please check the value entered.")
+        if value > 1:
+            return ("Values of η above 1 in the Haeberlen convention are physically incorrect "
+                    "(0 ≤ η ≤ 1). Please check the value entered.")
+    elif abs(value) > 1:
+        return ("Values of the skew beyond ±1 in the Herzfeld-Berger convention are physically "
+                "incorrect (−1 ≤ κ ≤ +1). Please check the value entered.")
+    return None
+
+
+def csa_warnings(sites) -> list[str]:
+    """"<label>: <warning>" for every site whose CSA asymmetry is outside
+    its physical range (see :func:`csa_asymmetry_warning`)."""
+    out = []
+    for site in sites:
+        d = site.to_dict() if hasattr(site, "to_dict") else site
+        for inter in d.get("interactions") or []:
+            if inter.get("type") == "csa":
+                message = csa_asymmetry_warning(inter.get("asym", 0.0),
+                                                inter.get("convention", "Haeberlen"))
+                if message:
+                    out.append(f"{d.get('label', 'site')}: {message}")
+    return out
 
 
 #: More sites than this are summarised in the log, not listed one by one
