@@ -27,6 +27,7 @@ from io import StringIO
 from typing import Callable
 
 import numpy as np
+from .widgets.report_label import ReportLabel
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
@@ -1161,7 +1162,7 @@ class JCouplingSimulationPanel(QWidget):
         self.simulate_button = QPushButton("Simulate")
         self.simulate_button.clicked.connect(self.simulate)
         v.addWidget(self.simulate_button)
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)
@@ -1597,7 +1598,7 @@ class JCouplingFitPanel(QWidget):
         self.fit_button.clicked.connect(self.fit)
         v.addWidget(self.fit_button)
 
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)

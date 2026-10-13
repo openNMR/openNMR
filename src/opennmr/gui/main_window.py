@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from PySide6.QtWidgets import QColorDialog
+from .widgets.report_label import ReportLabel
 from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.advice_box import AdviceBox
 from .widgets.side_drawer import SideDrawer
@@ -10866,7 +10867,7 @@ class MainWindow(QMainWindow):
         for spin in (self.sr_cal_spin, self.sfo1_cal_spin, self.sfo1_new_spin):
             spin.valueChanged.connect(lambda _v: self._refresh_sr_transfer())
 
-        self.sr_transfer_result_label = QLabel("")
+        self.sr_transfer_result_label = ReportLabel("")
         self.sr_transfer_result_label.setWordWrap(True)
         self.sr_transfer_result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         outer.addWidget(self.sr_transfer_result_label)
@@ -13569,9 +13570,11 @@ class MainWindow(QMainWindow):
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
-    def _draw_combined_fit(self, result: dict) -> None:
+    def _draw_combined_fit(self, result: dict, keep_zoom: bool = False) -> None:
         """Data, fit and (for several sites) each site on the Fit view,
-        over the fit window."""
+        over the fit window. ``keep_zoom``: keep the user's zoom on the
+        fit on show (the live preview and the fit that follows it; see
+        :meth:`MplCanvas.show_slice_fit`)."""
         x = np.asarray(result["x"])
         regions = result["settings"].get("fit_regions")
         keep = ((x >= min(min(r) for r in regions)) & (x <= max(max(r) for r in regions))
@@ -13585,7 +13588,8 @@ class MainWindow(QMainWindow):
             peak_labels=list(result["site_spectra"]),
             title=result.get("title", "CSA, Quad & J-coupling fit"),
             fit_label=result.get("fit_label", "Fit (total)"),
-            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
+            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None,
+            keep_zoom=keep_zoom)
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
@@ -15103,7 +15107,7 @@ class MainWindow(QMainWindow):
         compare_row.addStretch(1)
         layout.addLayout(compare_row)
 
-        self.sim_diffusion_summary_label = QLabel("")
+        self.sim_diffusion_summary_label = ReportLabel("")
         self.sim_diffusion_summary_label.setWordWrap(True)
         self.sim_diffusion_summary_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -15323,7 +15327,7 @@ class MainWindow(QMainWindow):
         run_button = QPushButton("Simulate Pulse")
         run_button.clicked.connect(self._run_bloch_simulation)
         layout.addWidget(run_button)
-        self.bloch_summary_label = QLabel("")
+        self.bloch_summary_label = ReportLabel("")
         self.bloch_summary_label.setWordWrap(True)
         layout.addWidget(self.bloch_summary_label)
 
@@ -15675,7 +15679,7 @@ class MainWindow(QMainWindow):
         self.sim_csa_simulate_button.clicked.connect(self._on_simulate_csa_clicked)
         layout.addWidget(self.sim_csa_simulate_button)
 
-        self.sim_csa_results_label = QLabel("")
+        self.sim_csa_results_label = ReportLabel("")
         self.sim_csa_results_label.setWordWrap(True)
         layout.addWidget(self.sim_csa_results_label)
         # The tensor being simulated, in 3D (explicit user request): the
@@ -16031,7 +16035,7 @@ class MainWindow(QMainWindow):
         self.sim_quad_simulate_button.clicked.connect(self._on_simulate_quadrupolar_clicked)
         layout.addWidget(self.sim_quad_simulate_button)
 
-        self.sim_quad_results_label = QLabel("")
+        self.sim_quad_results_label = ReportLabel("")
         self.sim_quad_results_label.setWordWrap(True)
         layout.addWidget(self.sim_quad_results_label)
         self.sim_quad_tensor_controls = TensorViewControls(self._quad_tensor_site,
@@ -16809,7 +16813,7 @@ class MainWindow(QMainWindow):
         # each value with its 1-sigma uncertainty rounded to the digits
         # it supports; Copy Table on right-click. The line above it says
         # how the fit was set up and anything to check before trusting it.
-        self.csa_results_label = QLabel("")
+        self.csa_results_label = ReportLabel("")
         self.csa_results_label.setWordWrap(True)
         self.csa_results_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -17389,7 +17393,7 @@ class MainWindow(QMainWindow):
         fit_button.clicked.connect(self._on_fit_spectrum_clicked)
         layout.addWidget(fit_button)
 
-        self.analysis_results_label = QLabel("")
+        self.analysis_results_label = ReportLabel("")
         self.analysis_results_label.setFont(QFontDatabase.systemFont(
             QFontDatabase.SystemFont.FixedFont))
         self.analysis_results_label.setTextInteractionFlags(
@@ -17523,7 +17527,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.addWidget(self._build_region_box())
 
-        self.integration_results_label = QLabel("")
+        self.integration_results_label = ReportLabel("")
         self.integration_results_label.setWordWrap(True)
         layout.addWidget(self.integration_results_label)
 
@@ -18307,7 +18311,7 @@ class MainWindow(QMainWindow):
         #
         # Monospaced for the same reason the other report labels are:
         # format_score_report aligns its columns with spaces.
-        self.score_results_label = QLabel("")
+        self.score_results_label = ReportLabel("")
         self.score_results_label.setWordWrap(True)
         self.score_results_label.setFont(QFontDatabase.systemFont(
             QFontDatabase.SystemFont.FixedFont))
@@ -18641,7 +18645,7 @@ class MainWindow(QMainWindow):
 
         # The DOSY summary, with the DOSY controls -- same move, same
         # reason as score_results_label.
-        self.dosy_results_label = QLabel("")
+        self.dosy_results_label = ReportLabel("")
         self.dosy_results_label.setWordWrap(True)
         self.dosy_results_label.setFont(QFontDatabase.systemFont(
             QFontDatabase.SystemFont.FixedFont))
@@ -18653,7 +18657,7 @@ class MainWindow(QMainWindow):
         # The across-peaks summary, above the per-peak report it
         # summarises. It used to print on the Peak Picking sub-tab --
         # see score_results_label for the cause the four shared.
-        self.curve_fit_summary_label = QLabel("")
+        self.curve_fit_summary_label = ReportLabel("")
         self.curve_fit_summary_label.setWordWrap(True)
         self.curve_fit_summary_label.setFont(QFontDatabase.systemFont(
             QFontDatabase.SystemFont.FixedFont))
@@ -18858,7 +18862,7 @@ class MainWindow(QMainWindow):
         repeat_row.addWidget(self.enmr_clear_repeats_button)
         layout.addLayout(repeat_row)
 
-        self.enmr_results_label = QLabel("")
+        self.enmr_results_label = ReportLabel("")
         self.enmr_results_label.setWordWrap(True)
         self.enmr_results_label.setFont(QFontDatabase.systemFont(
             QFontDatabase.SystemFont.FixedFont))

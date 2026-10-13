@@ -31,6 +31,7 @@ from ..notebook import fitting as notebook_fitting
 from ..notebook import quadrupolar_fitting as qfit
 from . import panel_state
 from .quadrupolar_panels import QuadrupolarFitPanel
+from .widgets.report_label import ReportLabel
 from .widgets.field_input import link_field
 
 #: Ask before a library build expected to take longer than this (s).
@@ -796,7 +797,7 @@ class CzjzekSimPanel(QWidget):
         buttons.addWidget(self.export_button)
         buttons.addWidget(self.to_fit_button)
         v.addLayout(buttons)
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)

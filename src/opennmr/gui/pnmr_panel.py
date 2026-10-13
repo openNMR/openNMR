@@ -41,6 +41,7 @@ import warnings
 from typing import Callable
 
 import numpy as np
+from .widgets.report_label import ReportLabel
 from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
@@ -553,7 +554,7 @@ class PnmrSimulationPanel(QWidget):
         self.shell_error_label.setWordWrap(True)
         self.shell_error_label.setStyleSheet("color: #C0392B;")
         v.addWidget(self.shell_error_label)
-        self.shell_summary_label = QLabel("")
+        self.shell_summary_label = ReportLabel("")
         self.shell_summary_label.setWordWrap(True)
         self.shell_summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.shell_summary_label)
@@ -868,7 +869,7 @@ class PnmrSimulationPanel(QWidget):
         self.progress_label = QLabel("")
         self.progress_label.setVisible(False)
         form.addRow(self.progress_label)
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow(self.results_label)

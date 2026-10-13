@@ -32,6 +32,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from .widgets.report_label import ReportLabel
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
@@ -362,7 +363,7 @@ class DnpWorkflowPanel(QWidget):
         row.addWidget(self.plot_button)
         row.addWidget(self.export_button)
         v.addLayout(row)
-        self.result_label = QLabel("")
+        self.result_label = ReportLabel("")
         self.result_label.setWordWrap(True)
         self.result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.result_label)
@@ -395,7 +396,7 @@ class DnpWorkflowPanel(QWidget):
         self.enh_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.enh_table.setMaximumHeight(160)
         v.addWidget(self.enh_table)
-        self.result_label = QLabel("")
+        self.result_label = ReportLabel("")
         self.result_label.setWordWrap(True)
         self.result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.result_label)

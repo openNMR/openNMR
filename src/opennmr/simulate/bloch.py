@@ -54,6 +54,13 @@ Changed from the original:
   routes them itself. Their power is set by an adiabaticity factor Q
   (:func:`peak_b1_for_adiabaticity`), not a flip angle, which they do
   not have.
+* **Swept phase at step midpoints** (2026-10-13 review of tanh/tan). The
+  phase of a swept shape is now its running integral to the *middle* of
+  each step, where the amplitude and frequency are sampled; the end of
+  the step was used before, half a step ahead, which put tanh/tan at
+  100 kHz / 1 us up to 0.04 out in Mz (WURST 0.014, HS 0.006). Checked
+  against an independent ODE solution in the frequency-modulated frame
+  (``tests/test_bloch_tanh_tan_review.py``); now within 0.004.
 """
 
 import numpy as np
@@ -523,7 +530,8 @@ def adiabatic_shape(shape, n_steps, duration_us, sweep_width_hz, **params):
     'TANH_TAN'); ``params`` override that shape's defaults there.
     ``amp`` is peak-normalised to 1; ``freq_hz`` is the RF frequency's
     offset from the carrier at each step (from -SW/2 to +SW/2), and
-    ``phase_deg`` its running integral, 360 deg x sum(freq x dt) --
+    ``phase_deg`` its running integral to the middle of each step,
+    360 deg x (sum(freq x dt) - freq x dt / 2) --
     which is how a frequency sweep is delivered as a phase-modulated
     shape, and how :func:`simulate_pulse` applies it. The phase is zero
     at the centre of the pulse."""
@@ -574,7 +582,12 @@ def adiabatic_shape(shape, n_steps, duration_us, sweep_width_hz, **params):
         freq = half * np.tan(kappa * tau) / tan_kappa
     peak = np.max(np.abs(amp))
     amp = amp / peak if peak > 0 else amp
-    turns = np.cumsum(freq) * dt
+    # Phase at each step's *midpoint* (where amp and freq are sampled):
+    # the running integral up to the end of the step minus half of that
+    # step. Taking the end-of-step value instead shifts the phase half a
+    # step ahead of the amplitude, which cost tanh/tan up to 0.04 in Mz at
+    # 1 us per step (2026-10-13 review; see test_bloch_adiabatic).
+    turns = (np.cumsum(freq) - 0.5 * freq) * dt
     turns -= np.interp(0.0, tau, turns)
     return amp, np.rad2deg(2.0 * np.pi * turns), freq
 

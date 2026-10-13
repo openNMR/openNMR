@@ -26,9 +26,11 @@ def test_shapes_sweep_from_minus_to_plus_half_the_sweep_width():
         assert freq[0] == pytest.approx(-SW / 2, rel=0.08)
         assert freq[-1] == pytest.approx(SW / 2, rel=0.08)
         assert np.all(np.diff(freq) > 0)
-        # The phase is the running integral of the frequency.
+        # The phase is the running integral of the frequency, taken from
+        # one step's midpoint to the next (trapezoid).
         dt = T_US * 1e-6 / 500
-        assert np.diff(np.deg2rad(phase)) == pytest.approx(2 * np.pi * freq[1:] * dt, abs=1e-9)
+        assert np.diff(np.deg2rad(phase)) == pytest.approx(
+            2 * np.pi * 0.5 * (freq[1:] + freq[:-1]) * dt, abs=1e-9)
 
 
 def test_hs1_frequency_is_the_classic_tanh_sweep():

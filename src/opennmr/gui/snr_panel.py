@@ -23,6 +23,7 @@ import math
 import re
 import time
 
+from .widgets.report_label import ReportLabel
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -274,7 +275,7 @@ class SnrPanel(QWidget):
             lambda _i: self.result is not None and self.calculate())
         form.addRow("Compare against:", self.reference_combo)
         v.addLayout(form)
-        self.result_label = QLabel("")
+        self.result_label = ReportLabel("")
         self.result_label.setWordWrap(True)
         self.result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.result_label)

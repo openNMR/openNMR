@@ -205,6 +205,19 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   split-t1 data must use `split_t1=True` (no shear, effective-coefficient
   referencing), never the ordinary plan.
   Derivation and checks: `SCRIPT_openNMR_Shearing_20261009.ipynb`.
+- **Result read-outs** (results/summary/preview labels) are
+  `widgets/report_label.py`'s `ReportLabel`: `setText(plain)` keeps the
+  plain report (`text()`, logs, copies, saves) and shows it laid out by
+  `gui/report_format.report_html`; `setReport(plain, html)` for a
+  purpose-made layout (Simulate/Fit ▸ CSA, Quad & J-coupling: a site table
+  with shared values said once, a metric row for fit quality). A new
+  result label should be a `ReportLabel`, not a QLabel of long sentences.
+- **Fit ▸ CSA, Quad & J-coupling's Parameters** have two layouts of the
+  same `constraints` ("Show:" combo): a row per parameter
+  (`parameter_table`) or a row per site (`site_parameter_table`,
+  right-click for Free/Fixed/Limits; `set_cell_constraints`). The live
+  preview and the fit redraw with `keep_zoom=True`
+  (`MplCanvas.show_slice_fit`), so a zoom survives updates; Home resets.
 - **Correlation matrices** of any fit are `notebook/fit_correlation.py`
   (`correlation_input` adapts each fit shape; add an adapter there for a
   new kind of fit). The GUI draws them through

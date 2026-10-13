@@ -44,6 +44,7 @@ from ..notebook import combined_fitting as cfit
 from ..notebook import combined_hamiltonian as ch
 from ..notebook import multi_fitting as mf
 from . import panel_state
+from .widgets.report_label import ReportLabel
 from .widgets.advice_box import AdviceBox
 from ..notebook import fit_advice
 from .combined_panels import CombinedHamiltonianPanel, _param_label
@@ -389,7 +390,7 @@ class MultiFitPanel(QWidget):
         v.addWidget(self.fit_button)
 
         # ---- results ----
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)

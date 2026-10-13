@@ -23,6 +23,7 @@ from .fit_progress_dialog import FitProgress
 from ..core import registry as core_registry
 from ..io import serialize
 from . import panel_state
+from .widgets.report_label import ReportLabel
 from .widgets.field_input import link_field
 from .widgets.sideband_hint import sideband_hint_label
 from ..notebook import bridge as notebook_bridge
@@ -230,7 +231,7 @@ class QuadrupolarFitPanel(QWidget):
         self.fit_button.clicked.connect(self.fit)
         v.addWidget(self.fit_button)
 
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)

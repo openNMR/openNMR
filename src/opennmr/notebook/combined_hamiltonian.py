@@ -887,7 +887,7 @@ def simulate_combined(sites, ppm_axis, larmor_Hz=None, B0_T=None, mas_Hz=0.0, or
             "normalised_real_spec": total / peak if peak > 0 else total,
             "sites": site_spectra, "components": components, "settings": settings,
             "site_dicts": [s.to_dict() for s in sites], "log": "\n".join(log_lines),
-            "powder": used}
+            "powder": used, "notes": list(notes)}
 
 
 #: More sites than this are summarised in the log, not listed one by one

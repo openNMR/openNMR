@@ -22,6 +22,7 @@ import os
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from .widgets.report_label import ReportLabel
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
@@ -131,7 +132,7 @@ class CpmgProcessingPanel(QWidget):
         check_button.setToolTip("Read the parameters and draw where the echoes will be cut.")
         check_button.clicked.connect(self.check_split)
         split_form.addRow(check_button)
-        self.summary_label = QLabel("")
+        self.summary_label = ReportLabel("")
         self.summary_label.setWordWrap(True)
         split_form.addRow(self.summary_label)
         layout.addWidget(split_box)

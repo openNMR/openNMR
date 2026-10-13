@@ -34,6 +34,7 @@ import re
 from typing import Callable
 
 import numpy as np
+from .widgets.report_label import ReportLabel
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -398,7 +399,7 @@ class VTRelaxationPanel(QWidget):
             actions.addWidget(b)
         layout.addLayout(actions)
 
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.results_label)
@@ -1048,7 +1049,7 @@ class ExchangeLineshapePanel(QWidget):
         fl.addWidget(self.fit_button)
         layout.addWidget(fit_box)
 
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.results_label)

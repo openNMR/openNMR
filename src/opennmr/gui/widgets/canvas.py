@@ -6489,7 +6489,7 @@ class MplCanvas(QWidget):
     def show_slice_fit(self, x, y_data, y_fit, components=None, peak_labels=None, title: str = "",
                         spectrum: NMRSpectrum | None = None, auto_hide_single: bool = False,
                         overlay=None, _keep_view: bool = False,
-                        fit_label: str = "Fit (total)") -> None:
+                        fit_label: str = "Fit (total)", keep_zoom: bool = False) -> None:
         """Plot one pseudo-2D slice's spectrum alongside its fitted
         (pseudo-Voigt) curve -- the intermediate per-slice spectral
         fit that feeds a relaxation/diffusion parameter fit
@@ -6530,8 +6530,18 @@ class MplCanvas(QWidget):
         is (annotations, markers -- e.g. pNMR environment labels). It is
         kept with the fit and drawn again whenever the fit is redrawn (a
         component-style or Plot Style change), and dropped when another
-        plot replaces the fit. It never stops the fit itself being shown."""
+        plot replaces the fit. It never stops the fit itself being shown.
+
+        ``keep_zoom``: a redraw of the same fit that is still being worked
+        on (the live preview of a starting model, then the fit itself) keeps
+        the user's zoom, if they zoomed or panned this fit and the zoomed
+        range still overlaps the new data -- explicit user request,
+        2026-10-13: "do not keep auto-zooming out on updating". Home still
+        returns to the full fit window (the natural view is recorded
+        again for the new Axes)."""
         previous_overlay = self._slice_fit_overlay
+        if keep_zoom and not _keep_view and self._slice_fit_zoom_to_keep(x):
+            _keep_view = True
         self._enter_plot_kind("1d")   # its saved default style (Plot Style ▸ Per-type)
         self._contour_spectrum = None
         self._contour_factor = None
@@ -6579,6 +6589,8 @@ class MplCanvas(QWidget):
         self._legend_visible = True
         self._apply_view_options()
         if view is not None:
+            # The new Axes' own limits are what Home goes back to.
+            self.note_natural_view()
             self.ax.set_xlim(view[0])
             self.ax.set_ylim(view[1])
         # Crosshairs here too: reading a value off this plot is
@@ -6590,6 +6602,23 @@ class MplCanvas(QWidget):
         self.draw_slice_fit_overlay()
         self.canvas.draw_idle()
         self.fitComponentsShown.emit(list(self._slice_fit_labels))
+
+    def _slice_fit_zoom_to_keep(self, x) -> bool:
+        """Whether a redraw of the fit on show should keep the view: a
+        spectral fit is on show, the user has zoomed or panned it (its
+        natural view was recorded and differs from the view now), and the
+        zoomed x-range still overlaps ``x``."""
+        if not self._slice_fit_active or self.ax is None or not self._home_limits:
+            return False
+        natural = self._home_limits.get(self.ax)
+        if natural is None:
+            return False
+        now = (self.ax.get_xlim(), self.ax.get_ylim())
+        if np.allclose(natural[0], now[0]) and np.allclose(natural[1], now[1]):
+            return False                      # back at Home: nothing to keep
+        lo, hi = sorted(now[0])
+        x = np.asarray(x, dtype=float)
+        return bool(x.size and np.nanmax(x) >= lo and np.nanmin(x) <= hi)
 
     def slice_fit_overlay(self):
         """The overlay drawn over the fit on show (see show_slice_fit), or None."""

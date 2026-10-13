@@ -11,6 +11,7 @@ own. Notebook equivalent: :func:`opennmr.notebook.batch_relaxation.NMR2D_relaxat
 from __future__ import annotations
 
 import numpy as np
+from .widgets.report_label import ReportLabel
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -123,7 +124,7 @@ class BatchRelaxationPanel(QWidget):
         run_row.addWidget(self.send_button)
         run_row.addWidget(self.csv_button)
         v.addLayout(run_row)
-        self.summary_label = QLabel("")
+        self.summary_label = ReportLabel("")
         self.summary_label.setWordWrap(True)
         self.summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.summary_label)

@@ -17,14 +17,17 @@ import time
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QBrush, QColor, QGuiApplication, QPalette
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMenu, QMessageBox,
-    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QListWidget, QMenu, QMessageBox, QPushButton, QSpinBox, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .fit_progress_dialog import FitProgress
+from .widgets.report_label import ReportLabel
+from . import report_format
 from .widgets.advice_box import AdviceBox
 from .widgets.sideband_hint import sideband_hint_label
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
@@ -490,7 +493,7 @@ class CombinedHamiltonianPanel(QWidget):
         self.simulate_button = QPushButton("Simulate")
         self.simulate_button.clicked.connect(self.simulate)
         v.addWidget(self.simulate_button)
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)
@@ -1232,7 +1235,11 @@ class CombinedHamiltonianPanel(QWidget):
         edge = max(abs(data[0]), abs(data[-1])) / (np.max(np.abs(data)) or 1.0)
         warn = ("\n⚠ Intensity at the axis edge is {:.0%} of the peak -- the pattern is "
                 "clipped; widen the axis.".format(edge)) if edge > 0.01 else ""
-        self.results_label.setText(f"Simulated in {elapsed:.2f} s.\n{result['log']}{warn}")
+        muted, warn_colour = self.results_label.colours()
+        self.results_label.setReport(
+            f"Simulated in {elapsed:.2f} s.\n{result['log']}{warn}",
+            report_format.combined_simulation_html(result, elapsed, warning=warn.strip(),
+                                                   muted=muted, warn=warn_colour))
         self.export_button.setEnabled(True)
         return True
 
@@ -1415,11 +1422,36 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         v.addWidget(self._build_estimate_box())
         box = QGroupBox("Parameters")
         box_layout = QVBoxLayout(box)
-        note = QLabel("Start values come from the sites above (and can be typed here). Untick "
-                      "Free to hold a value. Min/Max blank: the natural limits. Try starts: extra "
-                      "starting values, comma-separated -- every combination is fitted and the "
-                      "best kept (a static CSA is often multimodal).")
+        # Two layouts of the same constraints (explicit user request,
+        # 2026-10-13): a row per parameter (start, free, min, max, try
+        # starts side by side), or a row per site with a column per
+        # parameter, its free/fixed, limits and extra starts set by
+        # right-clicking a cell (or a selection of cells).
+        layout_row = QHBoxLayout()
+        layout_row.addWidget(QLabel("Show:"))
+        self.parameter_layout_combo = QComboBox()
+        self.parameter_layout_combo.addItem("One row per parameter", "parameters")
+        self.parameter_layout_combo.addItem("One row per site", "sites")
+        self.parameter_layout_combo.setToolTip(
+            "One row per parameter: start, Free, Min, Max and Try starts in columns.\n"
+            "One row per site: every parameter of a site on one row; right-click a cell "
+            "(or select several, e.g. a whole column) to free or fix it, or set its limits.")
+        self.parameter_layout_combo.currentIndexChanged.connect(
+            lambda _i: self._on_parameter_layout_changed())
+        layout_row.addWidget(self.parameter_layout_combo, 1)
+        box_layout.addLayout(layout_row)
+        self._parameter_note_text = {
+            "parameters": "Start values come from the sites above (and can be typed here). "
+                          "Untick Free to hold a value. Min/Max blank: the natural limits. Try "
+                          "starts: extra starting values, comma-separated -- every combination "
+                          "is fitted and the best kept (a static CSA is often multimodal).",
+            "sites": "Start values, a site per row (type to change them). Grey italic: held "
+                     "fixed. Tinted: limits or extra starts set. Right-click a cell -- or a "
+                     "selection, e.g. a column (click its header) -- to free, fix or set "
+                     "limits; hover for its settings."}
+        note = QLabel(self._parameter_note_text["parameters"])
         note.setWordWrap(True)
+        self.parameter_note = note
         box_layout.addWidget(note)
         self.parameter_table = QTableWidget(0, len(_P_HEADERS))
         self.parameter_table.setHorizontalHeaderLabels(list(_P_HEADERS))
@@ -1429,7 +1461,20 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.parameter_table.horizontalHeader().setStretchLastSection(True)
         self.parameter_table.setMinimumHeight(150)
         self.parameter_table.itemChanged.connect(self._on_parameter_edited)
-        box_layout.addWidget(self.parameter_table)
+        self.site_parameter_table = QTableWidget(0, 1)
+        self.site_parameter_table.verticalHeader().setVisible(False)
+        self.site_parameter_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.site_parameter_table.setMinimumHeight(150)
+        self.site_parameter_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.site_parameter_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.site_parameter_table.customContextMenuRequested.connect(self._on_site_table_menu)
+        self.site_parameter_table.itemChanged.connect(self._on_site_table_edited)
+        self.parameter_stack = QStackedWidget()
+        self.parameter_stack.addWidget(self.parameter_table)
+        self.parameter_stack.addWidget(self.site_parameter_table)
+        box_layout.addWidget(self.parameter_stack)
         v.addWidget(box)
 
         form = QFormLayout()
@@ -1492,10 +1537,10 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.fit_button.clicked.connect(self.fit)
         preview_row.addWidget(self.fit_button, 1)
         v.addLayout(preview_row)
-        self.preview_label = QLabel("")
+        self.preview_label = ReportLabel("")
         self.preview_label.setWordWrap(True)
         v.addWidget(self.preview_label)
-        self.results_label = QLabel("")
+        self.results_label = ReportLabel("")
         self.results_label.setWordWrap(True)
         self.results_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.results_label)
@@ -1634,10 +1679,30 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                              f"({start:g} Hz).")
         return {"fit_mas": True, "mas_bounds_Hz": (lo, hi)}
 
+    def parameter_layout(self) -> str:
+        """'parameters' (a row per parameter) or 'sites' (a row per site)."""
+        combo = getattr(self, "parameter_layout_combo", None)
+        return combo.currentData() if combo is not None else "parameters"
+
+    def set_parameter_layout(self, layout: str) -> None:
+        self.parameter_layout_combo.setCurrentIndex(
+            max(0, self.parameter_layout_combo.findData(layout)))
+
+    def _on_parameter_layout_changed(self) -> None:
+        layout = self.parameter_layout()
+        self.parameter_stack.setCurrentWidget(
+            self.site_parameter_table if layout == "sites" else self.parameter_table)
+        self.parameter_note.setText(self._parameter_note_text[layout])
+        self.refresh_parameter_table()
+
     def refresh_parameter_table(self) -> None:
-        """Rebuild the table from the sites, keeping each parameter's
-        free/bounds/try choices by (site label, parameter)."""
+        """Rebuild the table on show from the sites, keeping each
+        parameter's free/bounds/try choices by (site label, parameter)."""
         if not hasattr(self, "parameter_table") or self._refreshing or self._bulk:
+            return
+        if self.parameter_layout() == "sites":
+            self.schedule_preview()
+            self._refresh_site_parameter_table()
             return
         self.schedule_preview()
         self._refreshing = True
@@ -1688,6 +1753,250 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         finally:
             t.blockSignals(False)
             self._refreshing = False
+
+    # ---- the per-site layout ---------------------------------------------------
+
+    def _site_table_rows(self):
+        """[(row label, [(parameter, site dict or None)])] -- the sites,
+        then the spectrum's own row (the MAS rate) when it is shown."""
+        rows, order = [], {}
+        for site, name in self._parameter_rows():
+            if site["label"] not in order:
+                order[site["label"]] = len(rows)
+                rows.append((site["label"], []))
+            rows[order[site["label"]]][1].append((name, site))
+        if self._mas_row_shown():
+            rows.append((SPECTRUM_ROW, [("mas_Hz", None)]))
+        return rows
+
+    def _cell_constraint(self, label: str, name: str) -> dict:
+        return self.mas_constraint() if label == SPECTRUM_ROW else self._constraint(label, name)
+
+    def _cell_tooltip(self, label: str, name: str, site) -> str:
+        c = self._cell_constraint(label, name)
+        if label == SPECTRUM_ROW:
+            start = self.mas_spin.value()
+            lo, hi = start - MAS_WINDOW_HZ, start + MAS_WINDOW_HZ
+        else:
+            lo, hi = cfit._default_bounds(site, name)
+        lines = [f"{label} · {_param_label(name)}",
+                 "Free (varied in the fit)" if c["free"] else "Fixed (held at this value)",
+                 f"Min: {c['min'] or f'{lo:g} (natural)'}",
+                 f"Max: {c['max'] or f'{hi:g} (natural)'}"]
+        if label != SPECTRUM_ROW:
+            lines.append(f"Try starts: {c['try'] or 'none'}")
+        lines.append("Right-click to change.")
+        return "\n".join(lines)
+
+    def _refresh_site_parameter_table(self) -> None:
+        t = self.site_parameter_table
+        self._refreshing = True
+        t.blockSignals(True)
+        try:
+            rows = self._site_table_rows()
+            names: list[str] = []
+            for _label, cells in rows:
+                for name, _site in cells:
+                    if name not in names:
+                        names.append(name)
+            t.clear()
+            t.setColumnCount(1 + len(names))
+            t.setHorizontalHeaderLabels(["Site"] + [_param_label(n) for n in names])
+            t.setRowCount(len(rows))
+            pal = t.palette()
+            text_colour = pal.color(QPalette.ColorRole.Text)
+            base = pal.color(QPalette.ColorRole.Base)
+            muted = QColor(*(round(a + (b - a) * 0.45) for a, b in
+                             zip(text_colour.getRgb()[:3], base.getRgb()[:3])))
+            highlight = pal.color(QPalette.ColorRole.Highlight)
+            tint = QColor(*(round(b + (h - b) * 0.18) for b, h in
+                            zip(base.getRgb()[:3], highlight.getRgb()[:3])))
+            for r, (label, cells) in enumerate(rows):
+                head = QTableWidgetItem(label)
+                head.setFlags(head.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                font = head.font()
+                font.setBold(True)
+                head.setFont(font)
+                t.setItem(r, 0, head)
+                have = dict(cells)
+                for j, name in enumerate(names, start=1):
+                    if name not in have:
+                        blank = QTableWidgetItem("")
+                        blank.setFlags(Qt.ItemFlag.NoItemFlags)
+                        blank.setToolTip(f"{_param_label(name)} does not apply to {label}.")
+                        t.setItem(r, j, blank)
+                        continue
+                    site = have[name]
+                    c = self._cell_constraint(label, name)
+                    value = self.mas_spin.value() if site is None else cfit._get(site, name)
+                    item = QTableWidgetItem(f"{value:.6g}")
+                    item.setData(Qt.ItemDataRole.UserRole, (label, name))
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight
+                                          | Qt.AlignmentFlag.AlignVCenter)
+                    if not c["free"]:
+                        f = item.font()
+                        f.setItalic(True)
+                        item.setFont(f)
+                        item.setForeground(QBrush(muted))
+                    if c["min"] or c["max"] or c.get("try"):
+                        item.setBackground(QBrush(tint))
+                    item.setToolTip(self._cell_tooltip(label, name, site))
+                    t.setItem(r, j, item)
+        finally:
+            t.blockSignals(False)
+            self._refreshing = False
+
+    def selected_parameter_cells(self) -> list[tuple[str, str]]:
+        """(row label, parameter) of every selected per-site cell that is
+        a parameter (not a Site name or a blank)."""
+        out = []
+        for item in self.site_parameter_table.selectedItems():
+            key = item.data(Qt.ItemDataRole.UserRole)
+            if key and tuple(key) not in out:
+                out.append(tuple(key))
+        return out
+
+    def set_cell_constraints(self, cells, free=None, minimum=None, maximum=None,
+                             tries=None) -> None:
+        """Change the constraints of ``cells`` [(row label, parameter)]:
+        ``free`` True/False; ``minimum``/``maximum``/``tries`` strings
+        ("" clears; None leaves alone). Raises ValueError naming a value
+        that is not a number."""
+        for text, what in ((minimum, "Min"), (maximum, "Max")):
+            if text:
+                try:
+                    float(text)
+                except ValueError:
+                    raise ValueError(f"{what} must be a number (or blank for the natural "
+                                     f"limit), not {text!r}.") from None
+        if tries:
+            try:
+                [float(v) for v in tries.replace(";", ",").split(",") if v.strip()]
+            except ValueError:
+                raise ValueError("Try starts must be numbers separated by commas, not "
+                                 f"{tries!r}.") from None
+        for label, name in cells:
+            c = self._cell_constraint(label, name)
+            if free is not None:
+                c["free"] = bool(free)
+            if minimum is not None:
+                c["min"] = minimum.strip()
+            if maximum is not None:
+                c["max"] = maximum.strip()
+            if tries is not None and label != SPECTRUM_ROW:
+                c["try"] = tries.strip()
+        self.refresh_parameter_table()
+
+    def _ask_cell_limits(self, cells):
+        """A small dialog for Min, Max and Try starts of ``cells``;
+        returns {"minimum", "maximum", "tries"} or None (cancelled)."""
+        first = self._cell_constraint(*cells[0])
+        same = lambda key: (first.get(key, "") if all(  # noqa: E731
+            self._cell_constraint(*c).get(key, "") == first.get(key, "") for c in cells) else "")
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Limits and starts" if len(cells) == 1
+                              else f"Limits and starts ({len(cells)} cells)")
+        form = QFormLayout(dialog)
+        if len(cells) == 1:
+            form.addRow(QLabel(f"{cells[0][0]} · {_param_label(cells[0][1])}"))
+        boxes = {}
+        for key, title, tip in (("min", "Min:", "Blank: the natural limit."),
+                                ("max", "Max:", "Blank: the natural limit."),
+                                ("try", "Try starts:", "Extra starting values, comma-separated: "
+                                 "every combination is fitted and the best kept.")):
+            box = QLineEdit(same(key))
+            box.setPlaceholderText(tip)
+            box.setToolTip(tip)
+            if key == "try" and all(c[0] == SPECTRUM_ROW for c in cells):
+                box.setEnabled(False)
+            form.addRow(title, box)
+            boxes[key] = box
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return {"minimum": boxes["min"].text(), "maximum": boxes["max"].text(),
+                "tries": boxes["try"].text()}
+
+    def _on_site_table_menu(self, pos) -> None:
+        t = self.site_parameter_table
+        item = t.itemAt(pos)
+        if item is not None and not item.isSelected() and item.data(Qt.ItemDataRole.UserRole):
+            t.setCurrentItem(item)          # right-click on an unselected cell: that cell
+        cells = self.selected_parameter_cells()
+        menu = QMenu(t)
+        if not cells:
+            menu.addAction("Select a parameter's cell(s) first").setEnabled(False)
+            menu.exec(t.viewport().mapToGlobal(pos))
+            return
+        free_now = [self._cell_constraint(*c)["free"] for c in cells]
+        what = (f"{cells[0][0]} · {_param_label(cells[0][1])}" if len(cells) == 1
+                else f"{len(cells)} cells")
+        menu.addSection(what)
+        free_action = menu.addAction("Free (varied in the fit)")
+        free_action.setCheckable(True)
+        free_action.setChecked(all(free_now))
+        fix_action = menu.addAction("Fixed (held at its start)")
+        fix_action.setCheckable(True)
+        fix_action.setChecked(not any(free_now))
+        menu.addSeparator()
+        limits_action = menu.addAction("Limits and Starts…")
+        clear_action = menu.addAction("Clear Limits and Starts")
+        menu.addSeparator()
+        column_action = None
+        if len({name for _l, name in cells}) == 1:
+            column_action = menu.addAction(f"Select {_param_label(cells[0][1])} on Every Site")
+        chosen = menu.exec(t.viewport().mapToGlobal(pos))
+        try:
+            if chosen is free_action:
+                self.set_cell_constraints(cells, free=True)
+            elif chosen is fix_action:
+                self.set_cell_constraints(cells, free=False)
+            elif chosen is limits_action:
+                values = self._ask_cell_limits(cells)
+                if values is not None:
+                    self.set_cell_constraints(cells, **values)
+            elif chosen is clear_action:
+                self.set_cell_constraints(cells, minimum="", maximum="", tries="")
+            elif column_action is not None and chosen is column_action:
+                self.select_parameter_column(cells[0][1])
+        except ValueError as exc:
+            QMessageBox.warning(self, "Parameters", str(exc))
+
+    def select_parameter_column(self, name: str) -> None:
+        """Select ``name``'s cell on every site in the per-site table."""
+        t = self.site_parameter_table
+        t.clearSelection()
+        for r in range(t.rowCount()):
+            for j in range(1, t.columnCount()):
+                item = t.item(r, j)
+                key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+                if key and key[1] == name:
+                    item.setSelected(True)
+
+    def _on_site_table_edited(self, item) -> None:
+        key = item.data(Qt.ItemDataRole.UserRole)
+        if not key or self._refreshing:
+            return
+        label, name = key
+        try:
+            value = float(item.text())
+        except ValueError:
+            self.refresh_parameter_table()
+            return
+        if label == SPECTRUM_ROW:
+            self.mas_spin.setValue(value)
+            return
+        site = next((s for s in self.site_dicts if s["label"] == label), None)
+        if site is None:
+            return
+        cfit._set(site, name, value)
+        if site is self.current_site():
+            self._on_site_selected(self._current)       # show it in the site editor
+        self.schedule_preview()
 
     def _constraint(self, label: str, name: str) -> dict:
         per = self.constraints.setdefault(label, {})
@@ -1830,7 +2139,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         fit["advice"] = self.make_advice(fit)
         self.result = fit
         self._report()
-        self._draw_fit(fit)
+        self._draw_fit(fit, keep_zoom=True)
         self._sync_result_buttons()
         self._on_fitted()
         return True
@@ -1999,13 +2308,16 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
                      y_fit=guess["start"], title="Starting model (preview)",
                      fit_label="Starting model")
         self.preview = guess
-        self._draw_fit(guess)
+        self._draw_fit(guess, keep_zoom=True)
         amounts = ", ".join(f"{k} {v:.3g}" for k, v in guess["amounts"].items())
-        self.preview_label.setText(
+        estimated = self.estimate_amounts_check.isChecked()
+        muted, _warn = self.preview_label.colours()
+        self.preview_label.setReport(
             f"Preview: the model the fit starts from ({guess['n_zcw']:,} orientations; the "
             f"fit uses {cfit_n_zcw(self.settings()):,}). Amounts "
-            + ("estimated from the data" if self.estimate_amounts_check.isChecked()
-               else "as typed") + f": {amounts}.")
+            + ("estimated from the data" if estimated else "as typed") + f": {amounts}.",
+            report_format.combined_preview_html(guess["n_zcw"], cfit_n_zcw(self.settings()),
+                                                guess["amounts"], estimated, muted=muted))
         return True
 
     def _suspend_preview(self):
@@ -2162,11 +2474,16 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         head = r["log"].splitlines()
         lines = [head[0].replace("CSA, Quad & J-coupling fit: ", "CSA, Quad & J-coupling fit — ")]
         lines += [line for line in head[1:] if line.startswith("Multi-start")]
+        multi = [line for line in head[1:] if line.startswith("Multi-start")]
         lines.append(f"R² {q['r2']:.5f}  ·  RMSE {q['rmse']:.3g}  ·  reduced χ² "
                      f"{q['reduced_chi2']:.3g}  ·  {r.get('elapsed', 0.0):.1f} s. |C_Q| reported "
                      "(its sign is not in a lineshape).")
         lines += [f"⚠ {w}" for w in r["warnings"]]
-        self.results_label.setText("\n".join(lines))
+        has_quad = any(p["name"] in ("C_Q", "eta_Q") for p in r["parameters"])
+        muted, warn_colour = self.results_label.colours()
+        self.results_label.setReport("\n".join(lines), report_format.combined_fit_html(
+            [head[0]] + multi, q, r.get("elapsed", 0.0), warnings=r["warnings"],
+            has_quadrupolar=has_quad, muted=muted, warn=warn_colour))
         self.advice_box.set_items(r.get("advice") or [])
 
     def text_report(self) -> str:
@@ -2269,6 +2586,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
     def get_state(self) -> dict:
         state = super().get_state()
         state["widgets"].pop("parameter_table", None)  # rebuilt from the sites + constraints
+        state["widgets"].pop("site_parameter_table", None)
         state["constraints"] = copy.deepcopy(self.constraints)
         for site in self.site_dicts:
             bits = []
