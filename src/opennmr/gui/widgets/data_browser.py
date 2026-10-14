@@ -79,6 +79,9 @@ class DataBrowser(QWidget):
     spectrumActivated = Signal(str, str)
     #: Emitted when the user asks for a different root folder.
     browseRequested = Signal()
+    #: ``(path, vendor)``: right-click ▸ Proc Numbers… on a Bruker
+    #: experiment (explicit user request, 2026-10-14).
+    procnosRequested = Signal(str, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -144,6 +147,8 @@ class DataBrowser(QWidget):
         # `itemDoubleClicked` does none of that.
         self._tree.itemActivated.connect(self._on_item_activated)
         self._tree.itemExpanded.connect(self._describe_children)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self._tree, 1)
 
         self._status = QLabel("")
@@ -304,6 +309,28 @@ class DataBrowser(QWidget):
             self._emit_all(selected)
         else:
             self.spectrumActivated.emit(path, item.data(0, _VENDOR_ROLE))
+
+    def context_actions(self, item) -> list[tuple[str, object]]:
+        """What right-clicking ``item`` offers: ``[(text, callback)]``."""
+        path = item.data(0, _PATH_ROLE) if item is not None else None
+        if not path:
+            return []
+        vendor = item.data(0, _VENDOR_ROLE)
+        actions = [("Open", lambda: self.spectrumActivated.emit(path, vendor))]
+        if vendor == "bruker":
+            actions.append(("Proc Numbers…", lambda: self.procnosRequested.emit(path, vendor)))
+        return actions
+
+    def _on_context_menu(self, pos) -> None:
+        actions = self.context_actions(self._tree.itemAt(pos))
+        if not actions:
+            return
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        chosen = {menu.addAction(text): callback for text, callback in actions}
+        picked = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if picked in chosen:
+            chosen[picked]()
 
     def selected_paths(self) -> list[tuple[str, str]]:
         """Every selected experiment as ``(path, vendor)``, in tree

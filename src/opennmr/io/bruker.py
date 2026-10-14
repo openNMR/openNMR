@@ -1802,6 +1802,58 @@ def read_title(path: str, procno: int = 1) -> str | None:
     return text.replace("\r\n", "\n").replace("\r", "\n").rstrip()
 
 
+_WINDOW_NAMES = {0: "no window", 1: "EM", 2: "GM", 3: "SINE", 4: "QSINE", 5: "TRAP",
+                 6: "user", 7: "SINC", 8: "QSINC", 9: "TRAF", 10: "TRAFS"}
+
+
+def available_procnos(path: str) -> list[dict]:
+    """Every processing (``pdata/<n>``) of a Bruker experiment, in
+    order: ``{"procno", "title", "processed", "summary"}`` -- ``processed``
+    lists the processed-data files present (``1r``, ``2rr`` ...), and
+    ``summary`` says in a line what TopSpin did there (window, SI, phase,
+    and F1 for a 2D). Explicit user request, 2026-10-14: see and pick
+    the proc numbers on right-clicking an experiment. Empty when there is
+    no ``pdata`` folder."""
+    pdata = os.path.join(path, "pdata")
+    try:
+        names = os.listdir(pdata)
+    except OSError:
+        return []
+    out = []
+    for name in sorted((n for n in names if n.isdigit()), key=int):
+        folder = os.path.join(pdata, name)
+        if not os.path.isdir(folder):
+            continue
+        procno = int(name)
+        processed = [f for f in ("1r", "1i", "2rr", "2ri", "2ir", "2ii", "3rrr")
+                     if os.path.isfile(os.path.join(folder, f))]
+        bits = []
+        for proc2, label in ((False, ""), (True, "F1: ")):
+            if not os.path.isfile(os.path.join(folder, "proc2s" if proc2 else "procs")):
+                continue
+            try:
+                procs = _read_procs(path, procno, proc2=proc2)
+            except Exception:  # noqa: BLE001 -- a damaged procs must not hide the others
+                continue
+            try:
+                wdw = _WINDOW_NAMES.get(int(float(procs.get("WDW", 0))), str(procs.get("WDW")))
+            except (TypeError, ValueError):
+                wdw = str(procs.get("WDW"))
+            extra = ""
+            if wdw in ("EM", "GM") and procs.get("LB") not in (None, 0, 0.0):
+                extra = f" LB {float(procs['LB']):g}"
+            elif wdw in ("SINE", "QSINE") and procs.get("SSB") is not None:
+                extra = f" SSB {float(procs['SSB']):g}"
+            part = f"{label}{wdw}{extra}, SI {procs.get('SI', '?')}"
+            if not proc2 and procs.get("PHC0") is not None:
+                part += f", PHC0 {float(procs['PHC0']):.1f}°"
+            bits.append(part)
+        title = read_title(path, procno)
+        out.append({"procno": procno, "title": (title or "").splitlines()[0] if title else "",
+                    "processed": processed, "summary": "; ".join(bits)})
+    return out
+
+
 def write_title(path: str, procno: int, text: str) -> str:
     """Replace the TopSpin title of ``pdata/<procno>`` with ``text``, so
     TopSpin and openNMR show the same thing. Returns the file written.

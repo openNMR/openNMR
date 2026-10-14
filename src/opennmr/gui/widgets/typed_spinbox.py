@@ -136,3 +136,47 @@ class TypedSpinBox(QSpinBox):
             value = self.value()
         value = min(max(value, self.minimum()), self.maximum())
         return self.prefix() + self.textFromValue(value) + self.suffix()
+
+
+class LengthSpinBox(TypedDoubleSpinBox):
+    """A length kept in **inches** (``value()``, ``setValue``, signals --
+    what matplotlib's ``figsize`` takes and what saved styles hold),
+    shown and typed in inches or centimetres (:meth:`set_unit`). Explicit
+    user request, 2026-10-14: export size in cm, inches by default.
+
+    Only the display converts, so every caller, saved style and test that
+    deals in inches is unaffected by the choice."""
+
+    UNITS = {"in": 1.0, "cm": 2.54}
+
+    def __init__(self, parent=None, shown_decimals: int = 2) -> None:
+        super().__init__(parent)
+        self._unit = "in"
+        self._shown_decimals = shown_decimals
+        # Inches held finely enough that a typed centimetre value comes
+        # back as typed (8.5 cm -> 3.34646 in -> 8.50 cm).
+        self.setDecimals(6)
+        self.set_unit("in")
+
+    def unit(self) -> str:
+        return self._unit
+
+    def set_unit(self, unit: str) -> None:
+        if unit not in self.UNITS:
+            raise ValueError(f"unit must be one of {tuple(self.UNITS)}, not {unit!r}")
+        self._unit = unit
+        self.setSuffix(f" {unit}")
+        # One step = 0.1 in, or 0.5 cm.
+        self.setSingleStep(0.1 if unit == "in" else 0.5 / 2.54)
+        blocked = self.blockSignals(True)
+        value = self.value()
+        self.setValue(value)           # redraws the text in the new unit
+        self.lineEdit().setText(self.textFromValue(value) + self.suffix())
+        self.blockSignals(blocked)
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802 -- Qt override
+        return f"{value * self.UNITS[self._unit]:.{self._shown_decimals}f}"
+
+    def _parse(self, text: str):
+        shown = super()._parse(text)
+        return None if shown is None else shown / self.UNITS[self._unit]

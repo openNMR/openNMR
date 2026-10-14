@@ -7256,7 +7256,7 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
 
     def show_external_plot(self, draw, kind: str | None = None, hz_per_ppm: float | None = None,
-                           _keep_series: bool = False) -> None:
+                           _keep_series: bool = False, series_group: str | None = None) -> None:
         """A figure drawn by a notebook plotting function -- ``draw(figure)``
         receives this canvas's own (cleared) figure -- so the GUI shows
         exactly the figure a notebook call produces, rather than a second
@@ -7284,7 +7284,16 @@ class MplCanvas(QWidget):
         colours): renamed or recoloured there, and coloured from the
         series colour map once that is changed. A style change that only
         the draw can apply (colours, text size, the map colour scale)
-        redraws the figure, keeping the zoom."""
+        redraws the figure, keeping the zoom.
+
+        ``series_group``: a name for a family of figures that are redraws
+        of the same thing (``"snr"``: every S/N calculation). Names and
+        colours set on one survive the next of the same group, as they
+        do a restyle (explicit user report, 2026-10-14: "when computing
+        signal-to-noise, all plot styles disappear")."""
+        same_group = series_group is not None and series_group == getattr(
+            self, "_external_series_group", None)
+        self._external_series_group = series_group
         # Not an external plot any more until this one is drawn: the
         # plot-kind defaults applied just below call set_style, which
         # would otherwise redraw the *previous* figure.
@@ -7304,12 +7313,13 @@ class MplCanvas(QWidget):
         if kind is not None:
             self._enter_plot_kind(kind)
         self._clear_figure()
-        if not _keep_series:
+        if not _keep_series and not same_group:
             self._series.pop("external", None)
             self._external_palette = False
         draw(self.figure)
         self._external_plot = True
-        self._external_draw = {"draw": draw, "kind": kind, "hz_per_ppm": hz_per_ppm}
+        self._external_draw = {"draw": draw, "kind": kind, "hz_per_ppm": hz_per_ppm,
+                               "series_group": series_group}
         self._apply_external_series()
         for ax in self.figure.axes:
             if ax.get_legend() is not None:
@@ -7352,7 +7362,7 @@ class MplCanvas(QWidget):
             views, self._tensor_view_set = [], False
         keep = self.simulation_spectrum
         self.show_external_plot(info["draw"], kind=info["kind"], hz_per_ppm=info["hz_per_ppm"],
-                                _keep_series=True)
+                                _keep_series=True, series_group=info.get("series_group"))
         self.simulation_spectrum = keep
         threes = [ax for ax in self.figure.axes if getattr(ax, "name", "") == "3d"]
         if views and len(threes) == len(views):
@@ -7437,7 +7447,17 @@ class MplCanvas(QWidget):
         if not order:
             self._series.pop("external", None)
             return
+        seen_before = {entry.key for entry in self._series.get("external", [])}
         entries = self._assign_series("external", [(label, label, True) for label in order])
+        # A trace new to this figure takes the colour the Compare view
+        # gives the same spectrum, when one was chosen there -- an S/N or
+        # DNP plot of spectra styled in Compare keeps their colours.
+        compare_colours = {entry.label: entry.colour for entry in self._series.get("compare", [])
+                           if entry.colour_overridden}
+        for entry in entries:
+            if entry.key not in seen_before and entry.key in compare_colours:
+                entry.colour = compare_colours[entry.key]
+                entry.colour_overridden = True
         by_key = {entry.key: entry for entry in entries}
         for entry in entries:
             if not entry.colour_overridden and not self._external_palette and first_colour.get(entry.key):

@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-14 round 3 (proc-number checklist, S/N keeps plot styles, export size in cm, more optional sections): 11 new tests in `test_procnos_snr_styles_units_sections.py`. Related files only: 377 passed, 1 skipped; test_gui.py subset 49 passed, 14 skipped. **Run the full suite locally before committing.***
+
 *2026-10-14 round 2 (Settings: data folder, sections shown, click-and-drag; typed number boxes; S/N conventions and 2D S/N; TopSpin's 2D processing kept): 29 new tests (+1 real-data) in `test_settings_data_sections_drag.py`, `test_snr_conventions_2d.py`, `test_topspin_processing_2d.py`. Related files only, as asked: the 3 new files, the settings/canvas/S/N/DNP/pNMR/drift/multi-fit files (781 passed, 8 skipped), the Bruker reader/persistence/history/reopen/shearing/X-Pulse/JEOL files (464 passed, 47 skipped), test_gui.py -k "navigation or dpi or export or truncat or ... or state_folder" (112 passed; `test_settings_is_the_last_launcher_button` updated for the new sections) and -k "process_indirect or saved_processing or read_kwargs or reopen or settings_is or tdeff or truncat or recorded_phase or zero_phase or navigation_mode" (37 passed, 4 skipped); `test_reopen_keeps_recorded_phase.py` back to passing (it failed 2 of 4 on `cd8b7e4`). **Run the full suite locally before committing.***
 
 *2026-10-14 (Multi-spectrum: Keep Fits in Open Experiments; Copy sites from fixed): 7 new tests in `test_gui_multi_fit_keep_copy.py`. Related files only (multi-fit, kept fits, Compare transfers, fit advice, window cleanup, state; 15 files): 144 passed, 0 failed; test_gui.py -k "fit_model or kept or keep or compare_fit or multi": 30 passed, 2 skipped. **Run the full suite locally before committing.***
@@ -184,6 +186,21 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Proc numbers as a checklist, S/N keeps plot styles, export size in cm, more optional sections (2026-10-14, round 3)
+
+**Asked:** (1) Right-click an experiment -- in Open experiments or in the Open tab's browser -- to see and pick its proc numbers, "perhaps as a pop-up box with a checklist". (2) "When computing signal-to-noise, all plot styles disappear." (3) Settings: figure export size in cm or inches, inches by default. (4) Sections shown: also Czjzek (Fit and Simulate), eNMR and Imaging (Apply), and the whole Advanced Processing tile ("don't just keep the button and have nothing in there").
+
+**What was wrong with (2):** every S/N calculation redrew its figure through `show_external_plot`, which drops the external plot's series (names and colours set in Plot Style) on every new figure -- measured: a trace renamed and recoloured red came back with its own name and the palette colour after the next Calculate. The canvas style itself (text size, line widths) was already kept. Traces also never took the colours given to the same spectra in the Compare view.
+
+**Built:**
+- `io.bruker.available_procnos(path)` (each `pdata/<n>`: title, processed files present, a one-line summary of window/SI/PHC0 and F1); `gui/procno_dialog.ProcnoDialog` (checklist; already-open proc numbers ticked and locked; Tick/Untick All; "Open Ticked"); `MainWindow._choose_procnos(path, vendor)` opens each ticked one as its own experiment (`_load(..., extra_kwargs={"procno": n})`); Open experiments' right-click ▸ "Open Other Proc Numbers…" (beside the existing Change proc number…) and the browser's right-click ▸ "Proc Numbers…" (`DataBrowser.procnosRequested`, `context_actions`). `Session.index_for_path(..., procno=)` / `Session.procno(i)`: two proc numbers of one experiment are two spectra.
+  - **Sidecars are per experiment folder, not per proc number.** Found on the way: opening proc 2 would have read proc 1's saved openNMR processing (and its autosave overwritten it). `MainWindow._sidecar_belongs(path, procno)` (the metadata sidecar's `procno`): another proc number neither reads nor writes them; *Change proc number…* still moves them (`_owns_sidecar`). Its own openNMR processing is therefore **not saved to disk** -- noted, not solved.
+- `MplCanvas.show_external_plot(..., series_group=)`: figures of one group keep each other's series (S/N passes `"snr"` through `MainWindow._dnp_draw`); `_apply_external_series` gives a trace new to the figure the colour the Compare view set for the same spectrum.
+- `widgets/typed_spinbox.LengthSpinBox`: the value stays in **inches** (all callers, saved styles and figsize unchanged); only the display and typing convert. Settings ▸ Interface ▸ Export size in (`export_unit`, default "in"), `MainWindow._set_export_unit`.
+- `OPTIONAL_SECTIONS` += `czjzek` (`_czjzek_fit_section`, `_czjzek_sim_section`), `enmr` (`_enmr_section`), `imaging` (`_imaging_section`), `advanced` (`"tab:Adv. Proc."` -- a whole tile: its button, its page and its Window-menu entry Ctrl+7, via `_set_tile_shown`; if it is open when hidden, Open is shown). The Window menu is built after the Settings panel, so `_build_menu_bar` re-applies a saved hidden tile.
+
+Tests: `tests/test_procnos_snr_styles_units_sections.py` (11). Run, as asked, only the related files: the settings/S/N/canvas/procno-limits/background-load/persistence/DNP/TopSpin-2D/export/legend files (377 passed, 1 skipped) and test_gui.py -k "procno or window_menu or settings_is or numbered_panel or export or fig_width or fig_height or browser or external or dnp or czjzek or enmr or imaging or advanced" (49 passed, 14 skipped).
 
 ## Settings (data folder, sections shown, click-and-drag), typed number boxes, S/N conventions and 2D S/N, and TopSpin's 2D processing kept (2026-10-14, round 2)
 

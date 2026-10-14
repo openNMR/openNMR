@@ -40,7 +40,7 @@ from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.advice_box import AdviceBox
 from .widgets.side_drawer import SideDrawer
 from .widgets.field_input import link_field
-from .widgets.typed_spinbox import TypedSpinBox
+from .widgets.typed_spinbox import LengthSpinBox, TypedSpinBox
 from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
 from .shear_panel import ShearPanel
@@ -93,6 +93,7 @@ from . import data_directory
 from .. import _version
 from . import progress as progress_dialogs
 from . import state_dialog as state_dialogs
+from .procno_dialog import ProcnoDialog
 from ..processing import diffusion as processing_diffusion
 from ..processing import fitting as processing_fitting
 from ..processing import ilt as processing_ilt
@@ -1291,12 +1292,20 @@ class MainWindow(QMainWindow):
         # short labels. Each entry maps to its tile's own label -- when
         # the tiles were renamed ("Open", "Dynamics", ...) these lookups
         # silently stopped matching and every Panel entry did nothing.
+        #: tile label -> its Window-menu action (hidden with the tile; see
+        #: _set_tile_shown).
+        self._window_panel_actions = {}
         for shortcut_num, (label, tile) in enumerate(self._WINDOW_MENU_PANELS, start=1):
             action = QAction(label, self)
             action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
             action.triggered.connect(
                 lambda _checked=False, name=tile: self._show_side_tab(name))
             window_menu.addAction(action)
+            self._window_panel_actions[tile] = action
+        # The Settings panel (built before this menu) may have hidden a tile.
+        for key in (getattr(self, "_ui_settings", None) or {}).get("hidden_sections") or []:
+            if key in self.OPTIONAL_SECTIONS:
+                self._apply_section_shown(key, False)
 
         # Settings sits outside the numbered Panel shortcuts (Ctrl+1..8;
         # the views are Ctrl+Shift+1..6) so adding it renumbers nothing;
@@ -2006,6 +2015,8 @@ class MainWindow(QMainWindow):
         self.data_browser = DataBrowser()
         self.data_browser.browseRequested.connect(self._on_browse_folder_clicked)
         self.data_browser.spectrumActivated.connect(self._on_browser_spectrum_activated)
+        self.data_browser.procnosRequested.connect(
+            lambda path, vendor: self._choose_procnos(path, vendor))
         browser_layout.addWidget(self.data_browser)
         layout.addWidget(browser_box, 1)
 
@@ -2328,7 +2339,7 @@ class MainWindow(QMainWindow):
     def _dnp_selected_rows(self) -> list[int]:
         return sorted({self.spectrum_list.row(item) for item in self.spectrum_list.selectedItems()})
 
-    def _dnp_draw(self, draw, view: str) -> None:
+    def _dnp_draw(self, draw, view: str, series_group: str | None = None) -> None:
         """A DNP plot: one spectrum ("spectrum", a 1D plot) or several
         ("spectra", a comparison) on the Compare view, the profile on the
         Fit view (a curve) -- each announced as its kind, so it takes that
@@ -2339,7 +2350,7 @@ class MainWindow(QMainWindow):
         else:
             self._dnp_show_canvas(self.compare_canvas)
             self.compare_canvas.show_external_plot(
-                draw, kind="1d" if view == "spectrum" else "compare")
+                draw, kind="1d" if view == "spectrum" else "compare", series_group=series_group)
 
     def _dnp_style(self, which: str) -> dict:
         """The style the DNP plots draw with: the Compare view's for
@@ -2903,7 +2914,22 @@ class MainWindow(QMainWindow):
             kwargs["autophase"] = False
         return kwargs
 
-    def _initial_load_kwargs(self, path: str, vendor: str) -> dict:
+    @staticmethod
+    def _sidecar_belongs(path: str, procno) -> bool:
+        """Whether ``path``'s openNMR sidecars (one pair per experiment
+        folder) were written for proc number ``procno``. Another proc
+        number of the same experiment neither reads them nor overwrites
+        them -- it opens with its own TopSpin processing (2026-10-14,
+        with the proc-number checklist)."""
+        saved = io_persistence.load_metadata_sidecar(path)
+        if not saved:
+            return True
+        try:
+            return int(saved.get("procno") or 1) == int(procno or 1)
+        except (TypeError, ValueError):
+            return True
+
+    def _initial_load_kwargs(self, path: str, vendor: str, procno: int | None = None) -> dict:
         """The reader kwargs a *first* load of ``path`` should use,
         decided from its sidecars before any reading happens.
 
@@ -2923,7 +2949,8 @@ class MainWindow(QMainWindow):
             # re-reading -- cannot apply it afterwards. Only an
             # explicit saved choice is honoured; with none, the reader
             # follows the file's own recorded PH_mod as usual.
-            saved_processing = io_persistence.load_processing_sidecar(path, vendor=vendor) or {}
+            saved_processing = (io_persistence.load_processing_sidecar(path, vendor=vendor) or {}
+                                if self._sidecar_belongs(path, procno) else {})
             if "magnitude_override" in saved_processing:
                 add_kwargs["magnitude"] = bool(saved_processing["magnitude_override"])
             # Read the file already in its saved processing state --
@@ -2977,7 +3004,7 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 -- unreadable parameters: the old default
             return True, ""
 
-    def _load(self, path: str, vendor: str, preloaded=None) -> None:
+    def _load(self, path: str, vendor: str, preloaded=None, extra_kwargs: dict | None = None) -> None:
         # Decide the pseudo-2D treatment *before* the read, not after.
         # Every vendor reader sets metadata.source_path to exactly the
         # path handed to it, so this experiment's own saved preference
@@ -2996,7 +3023,10 @@ class MainWindow(QMainWindow):
         # readers this trace never measured. io.bruker._read_auto drops
         # `pseudo_2d` for the 1D branches, so passing it here is safe
         # without knowing yet whether `path` is 1D or 2D.
-        add_kwargs = self._initial_load_kwargs(path, vendor)
+        add_kwargs = self._initial_load_kwargs(path, vendor,
+                                               procno=(extra_kwargs or {}).get("procno"))
+        # e.g. {"procno": 2} from the proc-number checklist.
+        add_kwargs.update(extra_kwargs or {})
         try:
             if preloaded is not None:
                 # Already read, off the GUI thread (see gui.loader). The
@@ -3149,7 +3179,8 @@ class MainWindow(QMainWindow):
                 spectrum = self.session.spectra[index]
         saved_processing = io_persistence.load_processing_sidecar(
             spectrum.metadata.source_path, vendor=spectrum.metadata.vendor,
-        )
+        ) if self._sidecar_belongs(spectrum.metadata.source_path,
+                                   getattr(spectrum.metadata, "procno", None)) else None
         if saved_processing:
             spectrum.metadata.raw.update(saved_processing)
 
@@ -3615,6 +3646,12 @@ class MainWindow(QMainWindow):
         use_processed_action = None
         if spectrum.metadata.vendor == "bruker":
             procno_action = menu.addAction("Change proc number…")
+            procnos_action = menu.addAction("Open Other Proc Numbers…")
+            procnos_action.setToolTip("Every pdata/<n> of this experiment, as a checklist: "
+                                      "tick the ones to open alongside this one.")
+            procnos_action.triggered.connect(
+                lambda _c=False, i=index: self._choose_procnos(
+                    self.session._load_info[i]["path"], "bruker"))
             # Label says what the click will *do*, not the current
             # state -- a menu item that reads as a description is
             # ambiguous about whether clicking it toggles or confirms.
@@ -3782,6 +3819,40 @@ class MainWindow(QMainWindow):
             self._refresh_compare_view_if_active()
             self._schedule_sidecar_save(index)
 
+    def _run_procno_dialog(self, dialog) -> bool:
+        """Show the proc-number checklist; True if accepted. Its own
+        method so tests can answer it."""
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _choose_procnos(self, path: str, vendor: str = "bruker", preselect=()) -> list[int]:
+        """Proc numbers of the Bruker experiment ``path`` as a checklist
+        (explicit user request, 2026-10-14); open each one ticked that is
+        not open yet, as its own experiment. Returns their session rows."""
+        entries = io_bruker.available_procnos(path)
+        if not entries:
+            QMessageBox.information(self, "Proc numbers",
+                                    f"{path} has no pdata/<n> folders to choose from.")
+            return []
+        open_procnos = [e["procno"] for e in entries
+                        if self.session.index_for_path(path, vendor=vendor,
+                                                       procno=e["procno"]) is not None]
+        name = os.path.basename(path.rstrip("/\\"))
+        dialog = ProcnoDialog(name, entries, open_procnos=open_procnos, preselect=preselect,
+                              parent=self)
+        if not self._run_procno_dialog(dialog):
+            return []
+        rows = []
+        for procno in dialog.to_open():
+            self._load(path, vendor, extra_kwargs={"procno": procno})
+            index = self.session.index_for_path(path, vendor=vendor, procno=procno)
+            if index is not None:
+                rows.append(index)
+        if rows:
+            self.statusBar().showMessage(
+                f"Opened {name}: proc number{'s' if len(rows) > 1 else ''} "
+                + ", ".join(str(self.session.procno(r)) for r in rows) + ".", 6000)
+        return rows
+
     def _on_change_procno_action(self, index: int) -> None:
         current = self.session.spectra[index].metadata.procno or 1
         value, ok = QInputDialog.getInt(
@@ -3800,6 +3871,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
             QMessageBox.critical(self, "Failed to change proc number", str(exc))
             return
+        # This experiment's own row switched proc number: its sidecars
+        # follow it, as before (see _sidecar_belongs).
+        self.session.spectra[index].metadata.raw["_owns_sidecar"] = True
         self.spectrum_list.item(index).setText(self.session.label(index))
         if index == self._selected_index():
             self._on_selection_changed(index)
@@ -4659,17 +4733,17 @@ class MainWindow(QMainWindow):
         # size -- that is whatever Qt's layout happened to give the
         # widget, which is not a sensible default for a saved figure.
         fig_w, fig_h = self.canvas.default_export_size()
-        self.output_fig_width_spin = QDoubleSpinBox()
+        # Inches inside, shown in inches or cm (Settings ▸ Interface ▸
+        # Export size in; explicit user request, 2026-10-14).
+        self.output_fig_width_spin = LengthSpinBox()
         self.output_fig_width_spin.setRange(1.0, 40.0)
         self.output_fig_width_spin.setValue(float(fig_w))
-        self.output_fig_width_spin.setSuffix(" in")
         self.output_fig_width_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("Figure width:", self.output_fig_width_spin)
 
-        self.output_fig_height_spin = QDoubleSpinBox()
+        self.output_fig_height_spin = LengthSpinBox()
         self.output_fig_height_spin.setRange(1.0, 40.0)
         self.output_fig_height_spin.setValue(float(fig_h))
-        self.output_fig_height_spin.setSuffix(" in")
         self.output_fig_height_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("Figure height:", self.output_fig_height_spin)
 
@@ -5815,6 +5889,20 @@ class MainWindow(QMainWindow):
         self.drag_mode_combo.currentIndexChanged.connect(
             lambda _i: self._set_drag_mode(self.drag_mode_combo.currentData()))
         interface_form.addRow("Click and drag:", self.drag_mode_combo)
+        # Export size unit (explicit user request, 2026-10-14): inches
+        # by default. Display only -- sizes are kept in inches.
+        self.export_unit_combo = QComboBox()
+        self.export_unit_combo.addItem("inches", "in")
+        self.export_unit_combo.addItem("centimetres", "cm")
+        self.export_unit_combo.setToolTip(
+            "The unit Plot Style shows and takes for an exported figure's width and height. "
+            "Changing it converts the sizes; it does not change them.")
+        saved_unit = self._ui_settings.get("export_unit", "in")
+        self.export_unit_combo.setCurrentIndex(max(0, self.export_unit_combo.findData(saved_unit)))
+        self.export_unit_combo.currentIndexChanged.connect(
+            lambda _i: self._set_export_unit(self.export_unit_combo.currentData()))
+        interface_form.addRow("Export size in:", self.export_unit_combo)
+        self._set_export_unit(self.export_unit_combo.currentData(), save=False)
         self._set_drag_mode(self.drag_mode_combo.currentData(), save=False)
         layout.addWidget(CollapsibleSection("Interface", content=interface))
 
@@ -6175,13 +6263,37 @@ class MainWindow(QMainWindow):
                  ("_pnmr_fit_section", "_pnmr_sim_section")),
         "dnp": ("DNP (Apply ▸ DNP)", ("_dnp_section",)),
         "drift": ("Field drift correction (Process)", ("drift_section",)),
+        # Explicit user request, 2026-10-14 (second round).
+        "czjzek": ("Czjzek distribution (Fit and Simulate)",
+                   ("_czjzek_fit_section", "_czjzek_sim_section")),
+        "enmr": ("eNMR (Apply)", ("_enmr_section",)),
+        "imaging": ("Imaging (Apply)", ("_imaging_section",)),
+        # A whole launcher tile: "tab:<its label>" -- the tile, its page
+        # and its Window-menu entry go together, never an empty tile.
+        "advanced": ("Advanced Processing (the whole Adv. Proc. tile)", ("tab:Adv. Proc.",)),
     }
 
     def _apply_section_shown(self, key: str, shown: bool) -> None:
         for name in self.OPTIONAL_SECTIONS[key][1]:
+            if name.startswith("tab:"):
+                self._set_tile_shown(name[len("tab:"):], bool(shown))
+                continue
             section = getattr(self, name, None)
             if section is not None:
                 section.setVisible(bool(shown))
+
+    def _set_tile_shown(self, label: str, shown: bool) -> None:
+        """Show or hide a whole launcher tile: its button, its Window-menu
+        entry, and -- if it is open -- leave it for Open."""
+        for index in range(self.side_tabs.count()):
+            if self.side_tabs.tabText(index) == label:
+                if not shown and self.side_tabs.currentIndex() == index:
+                    self._show_side_tab("Open")
+                self.side_tabs.setTabVisible(index, shown)
+        action = getattr(self, "_window_panel_actions", {}).get(label)
+        if action is not None:
+            action.setVisible(shown)
+            action.setEnabled(shown)
 
     def _show_recorded_tdeff_f1(self, spectrum, is_genuine_2d: bool, n1_native: int) -> None:
         """Under Truncate F1: TopSpin's own F1 TDeff, in its units and in
@@ -6304,6 +6416,20 @@ class MainWindow(QMainWindow):
         core_fit_progress.set_max_iterations(int(value))
         self._ui_settings["max_iterations"] = int(value)
         self._save_ui_settings()
+
+    def _set_export_unit(self, unit: str, save: bool = True) -> None:
+        """Settings ▸ Interface ▸ Export size in: "in" (default) or "cm"
+        for Plot Style's figure width and height; remembered."""
+        unit = unit if unit in LengthSpinBox.UNITS else "in"
+        for spin in (self.output_fig_width_spin, self.output_fig_height_spin):
+            spin.set_unit(unit)
+        if self.export_unit_combo.currentData() != unit:
+            blocked = self.export_unit_combo.blockSignals(True)
+            self.export_unit_combo.setCurrentIndex(self.export_unit_combo.findData(unit))
+            self.export_unit_combo.blockSignals(blocked)
+        if save:
+            self._ui_settings["export_unit"] = unit
+            self._save_ui_settings()
 
     def _set_drag_mode(self, mode: str, save: bool = True) -> None:
         """Settings ▸ Interface ▸ Click and drag: ``"zoom"`` or ``"pan"``,
@@ -9180,6 +9306,14 @@ class MainWindow(QMainWindow):
         if index is None or index >= len(self.session):
             return
         spectrum = self.session.spectra[index]
+        # Another proc number of an experiment whose sidecars belong to
+        # the one first worked on: not written, so that one's saved
+        # processing is never overwritten (see _sidecar_belongs).
+        if (spectrum.metadata.vendor == "bruker"
+                and not spectrum.metadata.raw.get("_owns_sidecar")
+                and not self._sidecar_belongs(spectrum.metadata.source_path,
+                                              getattr(spectrum.metadata, "procno", None))):
+            return
         io_persistence.save_metadata_sidecar(spectrum)
         io_persistence.save_processing_sidecar(spectrum)
         # The same moment the state is persisted is the moment it is
@@ -13755,10 +13889,10 @@ class MainWindow(QMainWindow):
         "Analysis" tab it built) has been fully removed."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        layout.addWidget(CollapsibleSection(
-            "eNMR", content=self._build_enmr_subtab()))
-        layout.addWidget(CollapsibleSection(
-            "Imaging", content=self._build_imaging_subtab()))
+        self._enmr_section = CollapsibleSection("eNMR", content=self._build_enmr_subtab())
+        layout.addWidget(self._enmr_section)
+        self._imaging_section = CollapsibleSection("Imaging", content=self._build_imaging_subtab())
+        layout.addWidget(self._imaging_section)
         layout.addWidget(self._build_dnp_section())
         layout.addWidget(self._build_snr_section())
         layout.addStretch(1)
@@ -13771,8 +13905,10 @@ class MainWindow(QMainWindow):
         ``notebook/snr.py``. Spectra are Open experiments' 1D ones (as
         DNP's); regions are dragged on the Compare view; results are kept
         with each spectrum as ``fits["snr"]`` (its log and sidecar)."""
+        # Its own series group: names and colours set on an S/N plot
+        # survive the next calculation (explicit user report, 2026-10-14).
         self.snr_panel = SnrPanel(spectra=self._snr_spectra, selected=self._dnp_selected_rows,
-                                  draw=self._dnp_draw, arm=self._snr_arm, store=self._store_dnp,
+                                  draw=lambda draw, view: self._dnp_draw(draw, view, "snr"), arm=self._snr_arm, store=self._store_dnp,
                                   style=self._dnp_style)
         self._snr_section = CollapsibleSection("Signal-to-Noise", content=self.snr_panel)
         self._snr_section.toggled.connect(lambda expanded: expanded and self.snr_panel.refresh())

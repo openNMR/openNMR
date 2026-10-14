@@ -104,7 +104,10 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   "zoom" default; `MplCanvas.set_drag_mode`, shown by the toolbar's
   checked Pan/Zoom button -- a bare `MplCanvas` still defaults to pan),
   **Sections shown** (`hidden_sections`; `MainWindow.OPTIONAL_SECTIONS`
-  lists what can be hidden -- add a section there, never delete one),
+  lists what can be hidden -- add a section there, never delete one;
+  `"tab:<label>"` hides a whole launcher tile with its Window-menu entry),
+  **Export size in** (`export_unit`; `widgets/typed_spinbox.LengthSpinBox`
+  keeps inches inside, only the display converts -- never store cm),
   and the **default data folder** (`data_folder`, held app-wide in
   `gui/data_directory.py`; every "open data" dialog starts from
   `data_directory.start_directory()`).

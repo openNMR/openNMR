@@ -68,7 +68,8 @@ class Session:
             return None
         return os.path.realpath(os.path.normpath(path.rstrip("/")))
 
-    def index_for_path(self, path: str, vendor: str | None = None) -> int | None:
+    def index_for_path(self, path: str, vendor: str | None = None,
+                       procno: int | None = None) -> int | None:
         """The index of the already-loaded spectrum read from ``path``,
         or ``None``.
 
@@ -88,8 +89,21 @@ class Session:
                 continue
             if vendor is not None and info.get("vendor") != vendor:
                 continue
+            # ``procno``: only that processing of the experiment counts
+            # (two proc numbers of one experiment are two spectra).
+            if procno is not None and self.procno(index) != int(procno):
+                continue
             return index
         return None
+
+    def procno(self, index: int) -> int:
+        """The proc number spectrum ``index`` was read with (1 if none)."""
+        meta_procno = getattr(self.spectra[index].metadata, "procno", None)
+        value = self._load_info[index]["kwargs"].get("procno", meta_procno)
+        try:
+            return int(value) if value is not None else 1
+        except (TypeError, ValueError):
+            return 1
 
     def reload(self, index: int, **override_kwargs) -> NMRSpectrum:
         """Re-load spectrum ``index`` from its original path, with
