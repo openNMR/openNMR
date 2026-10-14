@@ -244,13 +244,20 @@ QProgressBar::chunk {{ border-radius: {max(radius - 2, 0)}px; }}
 
 
 def apply_theme(mode: str = "system", app: QApplication | None = None,
-                radius: int = RADIUS) -> str:
+                radius: int = RADIUS, stylesheet: bool = True) -> str:
     """Install the palette and stylesheet for ``mode``; return the
     concrete theme (``"light"``/``"dark"``) actually applied.
 
     Safe to call repeatedly -- switching themes at runtime is the point
     -- and it replaces only its own sheet, leaving any an embedding
     host had set.
+
+    ``stylesheet=False`` installs the style and palette only. MainWindow
+    does that before building its widgets -- so every widget measures
+    itself in the style it will be shown in -- and installs the sheet
+    once at the end, because a sheet present while thousands of widgets
+    are reparented into place re-polishes them over and over (startup
+    time; see MainWindow._apply_startup_ui).
     """
     app = app or QApplication.instance()
     if app is None:
@@ -300,6 +307,8 @@ def apply_theme(mode: str = "system", app: QApplication | None = None,
 
     # After setStyle, which resets the palette to the style's own.
     app.setPalette(_palette(resolved == "dark"))
+    if not stylesheet:
+        return resolved
 
     existing = app.styleSheet() or ""
     if _MARKER in existing:

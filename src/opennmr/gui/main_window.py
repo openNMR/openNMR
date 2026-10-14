@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction, QActionGroup, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence, QPalette, QPixmap,
 )
@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
     QVBoxLayout, QWidget,
 )
-from PySide6.QtWidgets import QColorDialog
+from PySide6.QtWidgets import QColorDialog, QLayout
 from .widgets.report_label import ReportLabel
 from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.advice_box import AdviceBox
@@ -390,17 +390,12 @@ class MainWindow(QMainWindow):
         # so it has to run before any canvas -- and therefore any
         # plot -- is created, not after.
         plotting.apply_default_font("Arial")
-        # The wheel scrolls panels; it never changes a value box it passes
-        # over (explicit user request -- see widgets/wheel_guard.py).
-        wheel_guard.install()
-        # Soften the square corners. Idempotent and applied here as
-        # well as in app.main(), so an embedded MainWindow (and the
-        # test suite, which never goes through main()) looks the same
-        # as the packaged app rather than only the shipped entry point
-        # being styled. See gui/style.py for why the sheet is as small
-        # as it is.
+        # The style and palette now, so every widget measures itself in
+        # the style it is shown in; the stylesheet, the saved theme and
+        # font size (and the wheel guard) at the end of __init__ -- see
+        # _apply_startup_ui for why not here.
         remember_system_theme()
-        apply_theme("system")
+        apply_theme("system", stylesheet=False)
         self.setWindowTitle("openNMR")
         self.resize(1100, 700)
         self.setAcceptDrops(True)  # drag a data folder straight in -- see dropEvent
@@ -964,10 +959,68 @@ class MainWindow(QMainWindow):
 
         self._build_menu_bar()
         self._build_status_bar()
+        # Theme, interface font size and wheel guard: once, now that every
+        # widget exists -- see _apply_startup_ui for why not earlier.
+        # Before the reflow, which measures widgets in their final style.
+        self._apply_startup_ui()
         # Every side panel reflows to the column's width (explicit user
         # request, 2026-09-30) -- see widgets/reflow.py. Last, once every
         # panel is built.
         self._make_side_panels_reflow()
+        # The wheel scrolls panels; it never changes a value box it passes
+        # over (explicit user request -- see widgets/wheel_guard.py).
+        # Nothing can receive a wheel event before the window is shown.
+        wheel_guard.install()
+
+    def _apply_startup_ui(self) -> None:
+        """Install the saved (or system) theme and interface font size.
+
+        **Deliberately the last thing __init__ does before the reflow,
+        not the first** (startup-time fix, 2026-10-13). With an
+        application stylesheet installed, Qt re-polishes a widget's
+        whole subtree every time it is reparented, and the window is
+        built bottom-up -- a finished panel goes into a scroll area,
+        then a stack, a splitter and the central widget -- so a sheet
+        installed first re-styled the deepest widgets many times over:
+        measured ~3.5 s of a ~7.5 s build. Installed once at the end it
+        costs ~0.6 s and the result is the same.
+
+        The style and palette are *not* deferred (they are installed at
+        the top of __init__, and cost little): widgets that cache their
+        first size hint -- combo boxes, section headers -- must measure
+        in the style they are shown in. The font size follows the sheet,
+        in the same order as a change made in Settings (see
+        style.refresh_fonts), which costs one more re-style only when a
+        size has been saved. Checked by comparing every widget's
+        geometry, font and colours against the old order
+        (tests/test_startup_time.py).
+
+        An embedding host or ``app.main()`` that installs a theme before
+        building the window still works; it only pays the old cost.
+        """
+        mode = self._ui_settings.get("ui_theme")
+        self._apply_ui_theme(mode if mode in style_module.THEME_MODES else "system")
+        # Layouts cache the sizes they last computed -- and keep each
+        # child's size hint separately, cleared only by updateGeometry --
+        # and those of panels not on screen were computed before the
+        # sheet's padding existed. The reflow below reads them to decide
+        # which rows wrap.
+        for widget in self.findChildren(QWidget):
+            widget.updateGeometry()
+        for layout in self.findChildren(QLayout):
+            layout.invalidate()
+        # ...and scroll areas re-read their content's size only when the
+        # layout requests just posted are delivered, so deliver them now --
+        # with the palette change, which otherwise reaches this window only
+        # once the event loop runs (a saved Dark theme read back as light
+        # until then).
+        for event_type in (QEvent.Type.ApplicationPaletteChange, QEvent.Type.PaletteChange,
+                           QEvent.Type.LayoutRequest):
+            QApplication.sendPostedEvents(None, event_type)
+        size = self._ui_settings.get("ui_font_size")
+        low, high = self.UI_FONT_SIZE_RANGE
+        if isinstance(size, (int, float)) and low <= size <= high:
+            self._apply_ui_font_size(size)
 
     def _build_status_bar(self) -> None:
         """Permanent context on the right of the status bar.
@@ -5890,7 +5943,6 @@ class MainWindow(QMainWindow):
                 blocked = self.ui_theme_combo.blockSignals(True)
                 self.ui_theme_combo.setCurrentIndex(index)
                 self.ui_theme_combo.blockSignals(blocked)
-            self._apply_ui_theme(mode)
 
         size = self._ui_settings.get("ui_font_size")
         low, high = self.UI_FONT_SIZE_RANGE
@@ -5898,7 +5950,8 @@ class MainWindow(QMainWindow):
             blocked = self.ui_font_size_spin.blockSignals(True)
             self.ui_font_size_spin.setValue(int(size))
             self.ui_font_size_spin.blockSignals(blocked)
-            self._apply_ui_font_size(size)
+        # The theme and font themselves are installed by _apply_startup_ui
+        # at the end of __init__ (startup time -- see there).
 
         # The curve-fit line the user last chose (Dynamics ▸ Fit plot).
         if isinstance(self._ui_settings.get("curve_fit_line"), dict):
