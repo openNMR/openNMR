@@ -1,8 +1,11 @@
 """
-Apply ▸ Signal-to-Noise: the S/N of one or more 1D spectra, with the
-statistics stated (explicit user request, 2026-10-12).
+Apply ▸ Signal-to-Noise: the S/N of one or more 1D or 2D spectra, with
+the statistics stated (explicit user request, 2026-10-12; 2D and the
+conventions side by side, 2026-10-14).
 
-1. **Spectra** -- tick the spectra (1D spectra in Open experiments).
+1. **Spectra** -- tick the spectra (1D and genuine 2D spectra in Open
+   experiments; a 2D's boxes take their F1 side from *Signal F1* /
+   *Noise F1*).
 2. **Regions** -- a signal region and a noise region, typed (``12, 8``;
    several noise windows separated by ``;``) or dragged on the plot.
    By default every spectrum uses the same regions. Tick *Different
@@ -94,7 +97,7 @@ class SnrPanel(QWidget):
     """Apply ▸ Signal-to-Noise (see the module docstring).
 
     Callbacks (from MainWindow): ``spectra()`` -> ``[{"label", "spectrum",
-    "index"}]`` (1D spectra in Open experiments); ``selected()`` -> the
+    "index"}]`` (1D and 2D spectra in Open experiments); ``selected()`` -> the
     session rows selected there; ``draw(draw, view)``: show
     ``draw(figure)`` on the Compare view (``"spectrum"`` one,
     ``"spectra"`` several); ``arm(mode)``: the Compare view's ``"region"``
@@ -130,8 +133,9 @@ class SnrPanel(QWidget):
         intro = QLabel(
             "Signal-to-noise of one or more spectra: a signal region (the line) and a noise "
             "region (no signal), typed or dragged on the plot. S/N = height above the noise "
-            "level / the noise standard deviation, with its uncertainty, and the conventions "
-            "of TopSpin (sino) and the Pharmacopoeia.")
+            "level / the noise standard deviation, with its uncertainty -- and the same "
+            "measurement by the other conventions (TopSpin's ×½, ×⅓, Pharmacopoeia, integral "
+            "or volume), side by side. 2D spectra: give the boxes' F1 sides too.")
         intro.setWordWrap(True)
         v.addWidget(intro)
         v.addWidget(self._build_spectra())
@@ -223,6 +227,23 @@ class SnrPanel(QWidget):
         row.addWidget(self.noise_edit, 1)
         row.addWidget(self.noise_drag_button)
         form.addRow("Noise (ppm):", row)
+        # 2D spectra: the boxes' F1 sides (explicit user request,
+        # 2026-10-14). Shared by every 2D; blank = all of F1.
+        self.signal_f1_edit = QLineEdit()
+        self.signal_f1_edit.setPlaceholderText("2D only -- blank: all of F1")
+        self.signal_f1_edit.setToolTip(
+            "For a 2D spectrum, the signal box is the F2 range above by this F1 range (ppm). "
+            "Blank: the whole of F1. Used by every 2D ticked.")
+        self.signal_f1_edit.editingFinished.connect(lambda: self._on_f1_typed("signal"))
+        form.addRow("Signal F1 (ppm):", self.signal_f1_edit)
+        self.noise_f1_edit = QLineEdit()
+        self.noise_f1_edit.setPlaceholderText("2D only -- blank: all of F1")
+        self.noise_f1_edit.setToolTip(
+            "For a 2D spectrum, the noise box(es) are the F2 windows above by this F1 range "
+            "(several: separate with ';'). Blank: the whole of F1. Pick a part with no peaks "
+            "and no t1 noise ridges.")
+        self.noise_f1_edit.editingFinished.connect(lambda: self._on_f1_typed("noise"))
+        form.addRow("Noise F1 (ppm):", self.noise_f1_edit)
         self.reset_own_button = QPushButton("Use the Shared Regions")
         self.reset_own_button.setToolTip("Drop this spectrum's own regions.")
         self.reset_own_button.clicked.connect(self.reset_own)
@@ -275,6 +296,20 @@ class SnrPanel(QWidget):
             lambda _i: self.result is not None and self.calculate())
         form.addRow("Compare against:", self.reference_combo)
         v.addLayout(form)
+        # The same measurement by each convention, side by side (explicit
+        # user request, 2026-10-14: "evaluate these values and present
+        # them to people to compare").
+        self.conventions_label = QLabel(
+            "Each convention, for the same height, area and noise (they differ by fixed factors "
+            "or by what is measured -- quote the convention with the number):")
+        self.conventions_label.setWordWrap(True)
+        self.conventions_label.setVisible(False)
+        v.addWidget(self.conventions_label)
+        self.conventions_table = QTableWidget(0, 0)
+        self.conventions_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.conventions_table.setVisible(False)
+        self.conventions_table.setMaximumHeight(260)
+        v.addWidget(self.conventions_table)
         self.result_label = ReportLabel("")
         self.result_label.setWordWrap(True)
         self.result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -483,6 +518,48 @@ class SnrPanel(QWidget):
         if self._current_region("noise") != ws:
             self._set_region("noise", ws)
 
+    #: Shared F1 windows for 2D spectra: None = all of F1.
+    shared_signal_f1: tuple[float, float] | None = None
+    shared_noise_f1: list[tuple[float, float]] | None = None
+
+    def set_f1_region(self, kind: str, value) -> None:
+        """The 2D boxes' F1 side, shared by every 2D: ``(a, b)`` (signal),
+        a list of such (noise), or None for all of F1."""
+        if value is not None:
+            if kind == "signal":
+                a, b = value
+                value = (max(float(a), float(b)), min(float(a), float(b)))
+            else:
+                if value and isinstance(value[0], (int, float)):
+                    value = [value]
+                value = [(max(float(a), float(b)), min(float(a), float(b))) for a, b in value]
+        if kind == "signal":
+            self.shared_signal_f1 = value
+            text = format_window(value) if value else ""
+        else:
+            self.shared_noise_f1 = value
+            text = format_windows(value) if value else ""
+        edit = self.signal_f1_edit if kind == "signal" else self.noise_f1_edit
+        blocked = edit.blockSignals(True)
+        edit.setText(text)
+        edit.blockSignals(blocked)
+        self._log(f"2D {kind} box, F1: " + (f"{text} ppm." if text else "all of F1."))
+        self._invalidate()
+        self._sync()
+
+    def _on_f1_typed(self, kind: str) -> None:
+        edit = self.signal_f1_edit if kind == "signal" else self.noise_f1_edit
+        text = edit.text().strip()
+        try:
+            value = (None if not text else
+                     parse_window(text) if kind == "signal" else parse_windows(text))
+        except ValueError as exc:
+            self.regions_status.setText(str(exc))
+            return
+        current = self.shared_signal_f1 if kind == "signal" else self.shared_noise_f1
+        if value != current:
+            self.set_f1_region(kind, value)
+
     def _current_region(self, kind):
         target = self._target()
         if target == SHARED:
@@ -618,7 +695,9 @@ class SnrPanel(QWidget):
             QMessageBox.information(self, "Signal-to-Noise", "Tick the spectra first (step 1).")
             return False
         spectra = [e["spectrum"] for e in self._entries]
-        regions = [{"signal": s, "noise": n} for s, n, _own in self.regions_for_entries()]
+        regions = [{"signal": s, "noise": n, "signal_f1": self.shared_signal_f1,
+                    "noise_f1": self.shared_noise_f1}
+                   for s, n, _own in self.regions_for_entries()]
         labels = self.labels()
         result = self.result if self._result_entries == self._entries else None
         kwargs = self._plot_kwargs()
@@ -653,6 +732,8 @@ class SnrPanel(QWidget):
             self.result = None
             self._result_entries = []
             self.result_label.setText("Regions changed: calculate again.")
+            self.conventions_table.setVisible(False)
+            self.conventions_label.setVisible(False)
             for r in range(self.spectra_table.rowCount()):
                 for c in range(3, len(self.COLUMNS)):
                     self.spectra_table.setItem(r, c, _item(""))
@@ -682,7 +763,8 @@ class SnrPanel(QWidget):
             shared_sig, shared_noise, regions, ref = self._arguments()
             result = snr.signal_to_noise_many(
                 [e["spectrum"] for e in self._entries], shared_sig, shared_noise,
-                labels=self.labels(), regions=regions or None, reference=ref, **self.settings())
+                labels=self.labels(), regions=regions or None, reference=ref,
+                **self._f1_kwargs(), **self.settings())
         except ValueError as exc:
             if explicit:
                 QMessageBox.warning(self, "Signal-to-Noise", str(exc))
@@ -691,6 +773,7 @@ class SnrPanel(QWidget):
         self.result = result
         self._result_entries = list(self._entries)
         self._fill_results()
+        self._fill_conventions()
         report = snr.snr_report(result)
         self.result_label.setText(report)
         self._log("Calculated S/N for " + ", ".join(self.labels()) + ".\n"
@@ -706,6 +789,44 @@ class SnrPanel(QWidget):
         self.calculated.emit()
         self._sync()
         return result
+
+    def _f1_kwargs(self) -> dict:
+        """The 2D F1 ranges, only when a 2D is ticked."""
+        if not any(getattr(e["spectrum"], "ndim", 1) == 2 for e in self._entries):
+            return {}
+        return {"signal_region_f1": self.shared_signal_f1,
+                "noise_region_f1": self.shared_noise_f1}
+
+    def conventions_rows(self) -> list[tuple[str, list[str]]]:
+        """[(convention "name: formula", [value per spectrum])] of the
+        last result -- what the conventions table shows."""
+        if self.result is None:
+            return []
+        rows = self.result["rows"]
+        names: dict[str, list] = {}
+        for j, r in enumerate(rows):
+            for c in snr.snr_conventions(r):
+                key = f"{c['name']}: {c['formula']}"
+                names.setdefault(key, ["—"] * len(rows))[j] = f"{c['value']:.4g}"
+        return list(names.items())
+
+    def _fill_conventions(self) -> None:
+        table = self.conventions_table
+        rows = self.conventions_rows()
+        about = {f"{key_name}: {formula}": text
+                 for _k, key_name, formula, text, _o in snr.CONVENTIONS}
+        table.clear()
+        table.setColumnCount(len(self.result["rows"]))
+        table.setHorizontalHeaderLabels([r["label"] for r in self.result["rows"]])
+        table.setRowCount(len(rows))
+        table.setVerticalHeaderLabels([name for name, _v in rows])
+        for i, (name, values) in enumerate(rows):
+            table.verticalHeaderItem(i).setToolTip(about.get(name, ""))
+            for j, text in enumerate(values):
+                table.setItem(i, j, _item(text, align_right=True))
+        table.resizeColumnsToContents()
+        self.conventions_table.setVisible(bool(rows))
+        self.conventions_label.setVisible(bool(rows))
 
     def _fill_results(self) -> None:
         rows = {id(e["spectrum"]): r for e, r in zip(self._result_entries, self.result["rows"])}
@@ -743,6 +864,13 @@ class SnrPanel(QWidget):
         for e, (sig, noise, own) in zip(self._result_entries, self.regions_for_entries()):
             inputs.append(f"{e['label']}: {snr.describe_regions(sig, noise)}"
                           + (" (OWN regions)" if own else ""))
+        f1 = self._f1_kwargs()
+        if f1:
+            inputs.append("2D boxes, F1: signal "
+                          + (format_window(f1["signal_region_f1"]) if f1["signal_region_f1"]
+                             else "all of F1") + "; noise "
+                          + (format_windows(f1["noise_region_f1"]) if f1["noise_region_f1"]
+                             else "all of F1"))
         record = {"label": "Signal-to-noise", "target": ", ".join(self.labels()),
                   "inputs_text": inputs, "report": report,
                   "result": {"table": snr.snr_table(result),
@@ -760,6 +888,7 @@ class SnrPanel(QWidget):
     def notebook_code(self) -> str:
         shared_sig, shared_noise, regions, ref = self._arguments()
         kwargs = dict(self.settings())
+        kwargs.update({k: v for k, v in self._f1_kwargs().items() if v is not None})
         if ref:
             kwargs["reference"] = ref
         return snr.snr_python(shared_sig, shared_noise, regions=regions or None,

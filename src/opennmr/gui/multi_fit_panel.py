@@ -43,7 +43,7 @@ from ..io import serialize
 from ..notebook import combined_fitting as cfit
 from ..notebook import combined_hamiltonian as ch
 from ..notebook import multi_fitting as mf
-from . import panel_state
+from . import data_directory, panel_state
 from .widgets.report_label import ReportLabel
 from .widgets.advice_box import AdviceBox
 from ..notebook import fit_advice
@@ -185,14 +185,21 @@ class MultiFitPanel(QWidget):
     ``resolve(key)`` -> (spectrum, label) or None;
     ``open_expnos(folder, expnos)`` -> keys, in the order given;
     ``draw_fit(fit)``, ``draw_trend(x, y, err, labels, xlabel, ylabel, title)``;
-    ``format_value_error(value, error, fixed)``; ``on_fitted()``.
+    ``format_value_error(value, error, fixed)``; ``on_fitted()``;
+    ``keep_fits(name)`` -> Open experiment rows: every experiment's fit
+    kept with its spectrum and listed in Open experiments, shown together
+    in Compare (None offers no button); ``site_sources()`` -> [(menu text,
+    nucleus, site dicts)]: other panels' site lists "Copy sites from"
+    offers besides this panel's other nuclei.
     A key is what identifies an experiment across sessions (see
     MainWindow._multi_key)."""
 
     def __init__(self, open_items, selected_keys, resolve, open_expnos, draw_fit, draw_trend,
                  format_value_error, on_fitted=None, parent=None, draw_quantities=None,
-                 draw_correlations=None) -> None:
+                 draw_correlations=None, keep_fits=None, site_sources=None) -> None:
         super().__init__(parent)
+        self._keep_fits = keep_fits
+        self._site_sources = site_sources
         #: ``draw_correlations(fit) -> bool``: a correlation matrix on the
         #: Fit view (notebook.fit_correlation); None offers none.
         self._draw_correlations = draw_correlations
@@ -351,13 +358,16 @@ class MultiFitPanel(QWidget):
         self.nucleus_combo.setToolTip("Each observed isotope has its own site list.")
         self.nucleus_combo.currentTextChanged.connect(self._on_nucleus_changed)
         srow.addWidget(self.nucleus_combo, 1)
-        self.copy_sites_button = QPushButton("Copy sites from ▾")
-        self.copy_sites_button.setToolTip(
-            "Start this nucleus's sites from another's: labels, δiso, amounts, widths and CSA "
-            "(and C_Q scaled by the quadrupole moments, when both are quadrupolar).")
+        # Qt draws the menu arrow itself: no "▾" in the text.
+        self.copy_sites_button = QPushButton("Copy sites from")
         self._copy_menu = QMenu(self)
         self._copy_menu.aboutToShow.connect(self._fill_copy_menu)
         self.copy_sites_button.setMenu(self._copy_menu)
+        self.copy_sites_button.setToolTip(
+            "Add another site list's sites to this nucleus's: another nucleus of these "
+            "experiments, or Fit / Simulate ▸ CSA, Quad & J-coupling. Labels, δiso, amounts, "
+            "widths and CSA are copied (C_Q scaled by the quadrupole moments, when both are "
+            "quadrupolar); a site whose label is already here is left as it is.")
         srow.addWidget(self.copy_sites_button)
         sl.addLayout(srow)
         self.site_editor = _SiteEditor(on_changed=self._on_sites_changed)
@@ -388,6 +398,17 @@ class MultiFitPanel(QWidget):
         self.fit_button = QPushButton("Fit All")
         self.fit_button.clicked.connect(self.fit)
         v.addWidget(self.fit_button)
+        # Keep every experiment's fit in Open experiments, to compare them
+        # on one plot like any other kept fit (explicit user request,
+        # 2026-10-14).
+        self.keep_fits_button = QPushButton("Keep Fits in Open Experiments…")
+        self.keep_fits_button.setToolTip(
+            "Keep each spectrum's fit with its spectrum (Fit ▸ Kept fit models) and list it in "
+            "Open experiments -- its data with the fit drawn over it -- then show them all "
+            "together in Compare.")
+        self.keep_fits_button.clicked.connect(lambda: self.keep_fits())
+        self.keep_fits_button.setVisible(keep_fits is not None)
+        v.addWidget(self.keep_fits_button)
 
         # ---- results ----
         self.results_label = ReportLabel("")
@@ -464,7 +485,7 @@ class MultiFitPanel(QWidget):
         for e in self.experiments[-1:]:
             if isinstance(e["key"], str) and os.path.isdir(e["key"]):
                 folder = os.path.dirname(e["key"].rstrip("/\\"))
-        dialog = ExpnoDialog(self, folder)
+        dialog = ExpnoDialog(self, folder or data_directory.default_data_directory())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -646,6 +667,7 @@ class MultiFitPanel(QWidget):
             self.site_editor.load(nucleus, copy.deepcopy(self.sites_by_nucleus.get(nucleus, [])))
         self.site_editor.setEnabled(bool(nucleus))
         self.refresh_parameter_table()
+        self._sync()
 
     def _on_sites_changed(self) -> None:
         if self._refreshing or self._editing_nucleus is None:
@@ -653,26 +675,74 @@ class MultiFitPanel(QWidget):
         self._save_editor()
         self.refresh_parameter_table()
 
+    def copy_sources(self) -> list:
+        """[(menu text, source nucleus, site dicts)] that "Copy sites
+        from" offers the nucleus being edited: this panel's other nuclei
+        that have sites, then other panels' site lists (``site_sources``).
+
+        Before 2026-10-14 the menu listed only this panel's other nuclei,
+        sites or not -- so for the usual one-nucleus series it was empty,
+        and the always-enabled button did nothing when clicked."""
+        target = self._editing_nucleus
+        if not target:
+            return []
+        self._save_editor()
+        out = [(f"{n} (this fit, {len(self.sites_by_nucleus[n])} "
+                f"site{'s' if len(self.sites_by_nucleus[n]) != 1 else ''})",
+                n, self.sites_by_nucleus[n])
+               for n in self.nuclei() if n != target and self.sites_by_nucleus.get(n)]
+        if self._site_sources is not None:
+            try:
+                extra = list(self._site_sources() or [])
+            except Exception:  # noqa: BLE001 -- another panel must never break this one
+                extra = []
+            out += [(text, n, dicts) for text, n, dicts in extra if n and dicts]
+        return out
+
     def _fill_copy_menu(self) -> None:
         self._copy_menu.clear()
-        for n in self.nuclei():
-            if n == self._editing_nucleus:
-                continue
-            action = self._copy_menu.addAction(n)
-            action.triggered.connect(lambda _c=False, src=n: self.copy_sites_from(src))
+        sources = self.copy_sources()
+        for text, nucleus, dicts in sources:
+            action = self._copy_menu.addAction(text)
+            action.triggered.connect(
+                lambda _c=False, src=nucleus, d=dicts, t=text: self._copy_and_say(src, d, t))
+        if not sources:
+            action = self._copy_menu.addAction(
+                "Nothing to copy yet -- add sites to another nucleus here, or to "
+                "Fit / Simulate ▸ CSA, Quad && J-coupling")
+            action.setEnabled(False)
 
-    def copy_sites_from(self, source: str) -> None:
-        """Start the nucleus being edited from ``source``'s sites."""
+    def _copy_and_say(self, source, dicts, text) -> None:
+        added = self.copy_sites_from(source, dicts)
+        if added == 0:
+            QMessageBox.information(
+                self, "Copy sites", f"Nothing copied from {text}: every one of its site labels "
+                f"is already in {self._editing_nucleus}'s list.")
+
+    def copy_sites_from(self, source: str, dicts=None) -> int:
+        """Add ``source``'s sites to the nucleus being edited (``dicts``:
+        a site list from elsewhere, observed as ``source``; default this
+        panel's own ``source`` list). Sites whose label is already there
+        are skipped. Returns how many were added."""
         target = self._editing_nucleus
-        if not target or source not in self.sites_by_nucleus:
-            return
+        if dicts is None:
+            dicts = self.sites_by_nucleus.get(source)
+        if not target or not dicts:
+            return 0
+        self._save_editor()
         q_src, q_dst = mf.quadrupole_moment(source), mf.quadrupole_moment(target)
         existing = {d["label"] for d in self.sites_by_nucleus.get(target, [])}
         out = list(self.sites_by_nucleus.get(target, []))
-        for d in self.sites_by_nucleus[source]:
-            if d["label"] in existing:
+        added = 0
+        for d in dicts:
+            # Another panel's isotope partners (a 49Ti beside 47Ti) are not
+            # sites of this nucleus; each nucleus here is its own spectrum.
+            if d.get("isotope") or d["label"] in existing:
                 continue
-            new = {k: copy.deepcopy(v) for k, v in d.items() if k != "interactions"}
+            existing.add(d["label"])
+            added += 1
+            new = {k: copy.deepcopy(v) for k, v in d.items()
+                   if k not in ("interactions", "link", "isotope", "nucleus", "spin")}
             new["interactions"] = []
             for i in d.get("interactions", []):
                 if i["type"] == "csa":
@@ -687,6 +757,8 @@ class MultiFitPanel(QWidget):
         finally:
             self._refreshing = False
         self.refresh_parameter_table()
+        self._sync()
+        return added
 
     def set_sites(self, nucleus: str, sites) -> None:
         """Programmatic: the sites for ``nucleus`` (Sites or dicts)."""
@@ -806,6 +878,10 @@ class MultiFitPanel(QWidget):
 
     def _sync(self) -> None:
         self.fit_button.setEnabled(bool(self.experiments))
+        self.keep_fits_button.setEnabled(self.keepable_count() > 0)
+        # Enabled once there is a nucleus to copy into; the menu, filled
+        # when it opens, lists what there is (or says there is nothing).
+        self.copy_sites_button.setEnabled(bool(self._editing_nucleus))
 
     # ---- fitting ----------------------------------------------------------
 
@@ -935,6 +1011,31 @@ class MultiFitPanel(QWidget):
         self._on_fitted()
         return True
 
+    # ---- keeping the fits -------------------------------------------------
+
+    def keepable_count(self) -> int:
+        """How many experiments of the result have their curves here (a
+        fit restored from one spectrum's save has only that one's)."""
+        if not self.result:
+            return 0
+        return sum(1 for f in self.result["experiments"] if f.get("x") is not None)
+
+    def keep_fits(self, name: str | None = None) -> list:
+        """Keep every experiment's fit (``keep_fits`` callback); asks for
+        a name unless given. Returns the Open experiment rows made."""
+        if self._keep_fits is None or not self.keepable_count():
+            QMessageBox.information(self, "Keep fits", "Run Fit All first -- there are no fits "
+                                    "to keep.")
+            return []
+        if name is None:
+            name, ok = QInputDialog.getText(
+                self, "Keep fits", "Name for these fits (each spectrum's is kept with it):",
+                text="Multi-spectrum fit")
+            if not ok:
+                return []
+        name = (name or "").strip() or "Multi-spectrum fit"
+        return self._keep_fits(name) or []
+
     # ---- results ----------------------------------------------------------
 
     def _result_rows(self):
@@ -1010,6 +1111,7 @@ class MultiFitPanel(QWidget):
                     self.show_combo.addItem(f"Correlations: {fit['label']}", ("corr", j))
         self.show_combo.blockSignals(False)
         self._fill_quantity_controls()
+        self._sync()
         try:
             self.advice_box.set_items(fit_advice.advise_multi_fit(r))
         except Exception:  # noqa: BLE001 -- advice must never sink a fit
@@ -1345,6 +1447,7 @@ class MultiFitPanel(QWidget):
         self.show_combo.clear()
         self.quantity_box.setVisible(False)
         self.advice_box.set_items([])
+        self._sync()
 
     def report_text_for(self, key) -> str:
         """What one experiment's log records: the summary and its column."""

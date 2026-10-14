@@ -98,7 +98,20 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   Notebook figures shown in the GUI go through
   `MplCanvas.show_external_plot(draw, kind)`.
 - **Settings** is a non-modal dialog (`_SettingsDialog`) hosting the
-  imaging controls; add further settings there.
+  imaging controls; add further settings there. The Settings tile's
+  panel (`_build_settings_panel`) holds the remembered interface choices
+  in `~/.opennmr/ui_settings.json`: **Click and drag** (`drag_mode`,
+  "zoom" default; `MplCanvas.set_drag_mode`, shown by the toolbar's
+  checked Pan/Zoom button -- a bare `MplCanvas` still defaults to pan),
+  **Sections shown** (`hidden_sections`; `MainWindow.OPTIONAL_SECTIONS`
+  lists what can be hidden -- add a section there, never delete one),
+  and the **default data folder** (`data_folder`, held app-wide in
+  `gui/data_directory.py`; every "open data" dialog starts from
+  `data_directory.start_directory()`).
+- **Number boxes users type long values into** (DPI, Truncate to,
+  zero-fill sizes) are `widgets/typed_spinbox.TypedSpinBox`: Qt's
+  QSpinBox refuses a keystroke whose intermediate value passes the
+  maximum, which read as "capped at three figures".
 - **Simulate** draws on its own `simulation_canvas` (plain matplotlib),
   shown only while that panel is open; the maths is in
   `opennmr.simulate` (ports of `leonmr` code).
@@ -112,7 +125,11 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   †, logged, and stated in the result). S/N = height / σ of the detrended
   noise, with σ's uncertainty from the *independent* noise points
   (`correlation_time`), a conservative 95 % interval, TopSpin's sino
-  (H/2σ), Ph. Eur. 2H/h, integral S/N and a detection threshold. Kept as
+  (H/2σ, and `sino_topspin` with TopSpin's own arithmetic), Ph. Eur.
+  2H/h, integral S/N and a detection threshold. 2D spectra:
+  `signal_to_noise_2d` (F2 × F1 boxes, plane-detrended noise, τ per
+  dimension). Every convention side by side: `snr.CONVENTIONS` /
+  `snr_conventions(result)` -- add a new convention there. Kept as
   `fits["snr"]` through `_store_dnp`. Do not add another noise estimator.
 - **Dynamics** is Fit Curve, then two collapsible sections from
   `gui/dynamics_panels.py`: Relaxation vs Temperature (BPP / Arrhenius /

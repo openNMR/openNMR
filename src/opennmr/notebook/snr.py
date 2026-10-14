@@ -234,6 +234,43 @@ def _trend_at(trend, x):
     return np.polynomial.polynomial.polyval((np.asarray(x, dtype=float) - centre) / half, coef)
 
 
+def topspin_noise(y) -> float:
+    """TopSpin's ``sino`` noise, from its published formula, for the
+    noise points ``y`` in spectrum order (N points, i = -n..n, n = (N-1)/2)::
+
+        noise² = [Σy² − ((Σy)² + 3·(Σ_{i=1..n} i·(y(i) − y(−i)))² / (N² − 1)) / N] / (N − 1)
+
+    As published, the second term removes a quarter of what a least-squares
+    straight line would (12 rather than 3 in the numerator), so on a
+    sloping baseline this σ is a little larger than the linear-detrended
+    σ openNMR uses; on flat noise the two agree to within (N−1)/(N−2).
+    Source: Bruker's TopSpin processing reference (``sino``), as
+    reproduced in the CCPN Analysis manual's Signal / Noise page."""
+    y = np.asarray(y, dtype=float)
+    n_points = y.size
+    if n_points < 3:
+        return float("nan")
+    if n_points % 2 == 0:                   # the formula needs a centre point
+        y = y[:-1]
+        n_points -= 1
+    n = (n_points - 1) // 2
+    i = np.arange(1, n + 1)
+    centre = n
+    slope_term = float(np.sum(i * (y[centre + i] - y[centre - i])))
+    total = float(np.sum(y))
+    value = (float(np.sum(y ** 2))
+             - (total ** 2 + 3.0 * slope_term ** 2 / (n_points ** 2 - 1)) / n_points) / (n_points - 1)
+    return float(math.sqrt(value)) if value > 0 else 0.0
+
+
+def _ordered_noise(x, y, windows) -> np.ndarray:
+    """The noise points in spectrum order, windows joined as TopSpin
+    would see one region (it has only one)."""
+    order = np.argsort(-np.asarray(x, dtype=float), kind="stable")
+    xs, ys = np.asarray(x)[order], np.asarray(y)[order]
+    return ys[_mask(xs, windows)]
+
+
 def correlation_time(residual_segments: Sequence[np.ndarray]) -> float:
     """τ = 1 + 2 Σ ρ_k, the noise's integrated autocorrelation time in
     points, summed while ρ_k stays positive (the initial positive
@@ -456,9 +493,19 @@ def signal_to_noise(spectrum, signal_region, noise_region, *, detrend: int = DEF
         area = area_sigma = integral_snr = float("nan")
 
     ns = info["ns"]
+    # TopSpin's sino, with its own arithmetic: maxval measured from zero
+    # (not from the noise level) and its published noise formula.
+    maxval = {"positive": float(np.max(ys)), "negative": float(-np.min(ys)),
+              "absolute": float(np.max(np.abs(ys)))}[sign]
+    sigma_topspin = topspin_noise(_ordered_noise(x, y, noise))
     return {
+        "ndim": 1,
         "label": label or "spectrum",
         "snr": float(snr), "snr_error": float(snr_error),
+        "sino_topspin": float(maxval / (2.0 * sigma_topspin)) if sigma_topspin > 0 else float("nan"),
+        "topspin_maxval": maxval, "topspin_noise": float(sigma_topspin),
+        "snr_3sigma": float(height / (3.0 * sigma)),
+        "integral_sino": float(integral_snr / 2.0),
         "snr_interval": (float(snr_interval[0]), float(snr_interval[1])),
         "confidence": float(confidence),
         "sino": float(height / (2.0 * sigma)),
@@ -478,6 +525,276 @@ def signal_to_noise(spectrum, signal_region, noise_region, *, detrend: int = DEF
         "detrend": order, "sign": sign, "offset": offset,
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# 2D spectra
+# ---------------------------------------------------------------------------
+
+def _xyz(spectrum):
+    """(F2 ppm, F1 ppm, real data[F1, F2], info) from a 2D spectrum."""
+    info = {"nucleus": None, "ns": None, "apodisation": None}
+    if isinstance(spectrum, (tuple, list)) and len(spectrum) == 3:
+        x2, x1, z = (np.asarray(v) for v in spectrum)
+        return x2.astype(float), x1.astype(float), np.real(z).astype(float), info
+    if getattr(spectrum, "ndim", None) != 2:
+        raise ValueError("A 2D signal-to-noise needs a 2D spectrum.")
+    x1 = np.asarray(spectrum.axes[0].ppm, dtype=float)
+    x2 = np.asarray(spectrum.axes[1].ppm, dtype=float)
+    z = np.real(np.asarray(spectrum.data))
+    meta = spectrum.metadata
+    info["nucleus"] = getattr(meta, "nucleus", None)
+    info["ns"] = _positive(getattr(meta, "ns", None))
+    raw = getattr(meta, "raw", None) or {}
+    if info["ns"] is None:
+        info["ns"] = _positive((raw.get("acqus") or {}).get("NS"))
+    info["apodisation"] = _apodisation(raw)
+    return x2, x1, z, info
+
+
+def _f1_windows(region, x1, what) -> list[tuple[float, float]]:
+    """F1 window(s); None = the whole F1 axis."""
+    if region is None:
+        return [(float(x1.max()), float(x1.min()))]
+    region = list(region)
+    if region and all(isinstance(v, (int, float, np.floating, np.integer)) for v in region):
+        return [_window(region, what)]
+    return [_window(w, what) for w in region]
+
+
+def _plane_detrend(u2, u1, z, order):
+    """Residual of ``z`` about a surface of total ``order`` in (u2, u1),
+    and a function giving the surface anywhere."""
+    def design(a, b):
+        cols = [np.ones_like(a)]
+        if order >= 1:
+            cols += [a, b]
+        if order >= 2:
+            cols += [a * a, a * b, b * b]
+        return np.column_stack(cols)
+    c2 = 0.5 * (u2.max() + u2.min()); h2 = 0.5 * (u2.max() - u2.min()) or 1.0
+    c1 = 0.5 * (u1.max() + u1.min()); h1 = 0.5 * (u1.max() - u1.min()) or 1.0
+    a, b = (u2 - c2) / h2, (u1 - c1) / h1
+    coef, *_ = np.linalg.lstsq(design(a, b), z, rcond=None)
+
+    def surface(p2, p1):
+        return design((np.atleast_1d(p2) - c2) / h2, (np.atleast_1d(p1) - c1) / h1) @ coef
+    return z - design(a, b) @ coef, surface, design(a, b).shape[1]
+
+
+def signal_to_noise_2d(spectrum, signal_region, noise_region, signal_region_f1=None,
+                       noise_region_f1=None, *, detrend: int = DEFAULT_DETREND,
+                       sign: str = "positive", offset: str = "mean", label: str | None = None,
+                       confidence: float = 0.95) -> dict:
+    """The signal-to-noise ratio of one 2D spectrum.
+
+    The signal and noise regions are boxes: an F2 range (``signal_region``,
+    ``noise_region``; several noise windows allowed) by an F1 range
+    (``signal_region_f1``, ``noise_region_f1``; None = all of F1). As in
+    1D, a surface (a plane by default) is removed from the noise before σ,
+    the height is the signal box's largest point above the noise level,
+    and the noise's correlation along each dimension (apodisation,
+    zero-filling, linear prediction) is measured so that the uncertainty
+    and the detection test use the *independent* points:
+    ``n_eff = n / (τ_F1 · τ_F2)``.
+
+    Reported conventions (all from the same height H and noise σ):
+    ``snr`` = H/σ; ``sino`` = H/(2σ), TopSpin's 1D factor; ``snr_3sigma`` =
+    H/(3σ); ``volume_snr`` = the box's volume over the noise on that
+    volume; ``volume_sino`` = half of it. See :func:`snr_conventions`.
+    """
+    from scipy.stats import chi2, norm
+
+    if sign not in _SIGNS:
+        raise ValueError(f"sign must be one of {_SIGNS}, not {sign!r}")
+    if offset not in _OFFSETS:
+        raise ValueError(f"offset must be one of {_OFFSETS}, not {offset!r}")
+    detrend = int(detrend)
+    if detrend < 0 or detrend > 2:
+        raise ValueError("detrend must be 0 (offset only), 1 (a plane) or 2 (quadratic) for 2D.")
+    x2, x1, z, info = _xyz(spectrum)
+    sig2 = normalise_signal_region(signal_region)
+    noise2 = normalise_noise_region(noise_region)
+    sig1 = _f1_windows(signal_region_f1, x1, "F1 signal")[0]
+    noise1 = _f1_windows(noise_region_f1, x1, "F1 noise")
+    for w2 in noise2:
+        for w1 in noise1:
+            if (w2[1] < sig2[0] and w2[0] > sig2[1]) and (w1[1] < sig1[0] and w1[0] > sig1[1]):
+                raise ValueError(
+                    f"The noise box F2 {_fmt_window(w2)} × F1 {_fmt_window(w1)} overlaps the "
+                    f"signal box F2 {_fmt_window(sig2)} × F1 {_fmt_window(sig1)}: noise must be "
+                    "measured where there is no signal.")
+    warnings: list[str] = []
+
+    # --- noise -----------------------------------------------------------
+    m2, m1 = _mask(x2, noise2), _mask(x1, noise1)
+    n_noise = int(m2.sum() * m1.sum())
+    if n_noise < MIN_NOISE_POINTS:
+        raise ValueError(f"The noise box holds {n_noise} point(s); at least {MIN_NOISE_POINTS} "
+                         "are needed (widen it).")
+    block = z[np.ix_(m1, m2)]
+    g1, g2 = np.meshgrid(x1[m1], x2[m2], indexing="ij")
+    residual_flat, surface, n_par = _plane_detrend(g2.ravel(), g1.ravel(), block.ravel(), detrend)
+    residual = residual_flat.reshape(block.shape)
+    dof = max(1, n_noise - n_par)
+    sigma = float(np.sqrt(np.sum(residual ** 2) / dof))
+    if not sigma > 0:
+        raise ValueError("The noise box is flat (σ = 0): is it a simulated or zeroed region?")
+    # Correlation along F2 (within each row, window by window) and along F1.
+    xs2, xs1 = x2[m2], x1[m1]
+    rows = [residual[r][_mask(xs2, [w])] for r in range(residual.shape[0]) for w in noise2]
+    cols = [residual[:, c][_mask(xs1, [w])] for c in range(residual.shape[1]) for w in noise1]
+    tau2 = correlation_time([s for s in rows if s.size > 2]) if any(s.size > 2 for s in rows) else 1.0
+    tau1 = correlation_time([s for s in cols if s.size > 2]) if any(s.size > 2 for s in cols) else 1.0
+    tau = tau1 * tau2
+    n_eff = max(2.0, n_noise / tau)
+    dof_eff = max(1.0, n_eff - n_par)
+    sigma_rel_err = 1.0 / math.sqrt(2.0 * dof_eff)
+    q_lo, q_hi = 0.5 * (1 - confidence), 0.5 * (1 + confidence)
+    sigma_lo = sigma * math.sqrt(dof_eff / chi2.ppf(q_hi, dof_eff))
+    sigma_hi = sigma * math.sqrt(dof_eff / chi2.ppf(q_lo, dof_eff))
+    noise_mean = float(np.mean(block))
+    if n_eff < MIN_INDEPENDENT_NOISE:
+        warnings.append(
+            f"Only ~{n_eff:.0f} independent noise points (of {n_noise}; τ_F2 = {tau2:.2g}, "
+            f"τ_F1 = {tau1:.2g}): σ is uncertain by ±{100 * sigma_rel_err:.0f} %. Widen the "
+            "noise box.")
+    z_limit = float(norm.ppf(0.5 * (1 + 0.99 ** (1.0 / n_eff))))
+    worst = np.unravel_index(int(np.argmax(np.abs(residual))), residual.shape)
+    if abs(residual[worst]) / sigma > z_limit:
+        warnings.append(
+            f"A point in the noise box at F2 {xs2[worst[1]]:.4g}, F1 {xs1[worst[0]]:.4g} ppm is "
+            f"{abs(residual[worst]) / sigma:.1f} σ from the trend -- more than pure noise reaches "
+            f"1 % of the time ({z_limit:.1f} σ). There may be signal, a t1 ridge or a spike there.")
+
+    # --- signal ----------------------------------------------------------
+    s2, s1 = _mask(x2, [sig2]), _mask(x1, [sig1])
+    n_sig = int(s2.sum() * s1.sum())
+    if n_sig < 1:
+        raise ValueError(f"The signal box F2 {_fmt_window(sig2)} × F1 {_fmt_window(sig1)} holds no "
+                         "points of this spectrum.")
+    box = z[np.ix_(s1, s2)]
+    b1, b2 = np.meshgrid(x1[s1], x2[s2], indexing="ij")
+    if offset == "mean":
+        level = np.full(box.shape, noise_mean)
+    elif offset == "trend":
+        level = surface(b2.ravel(), b1.ravel()).reshape(box.shape)
+    else:
+        level = np.zeros(box.shape)
+    above = box - level
+    if sign == "positive":
+        j = np.unravel_index(int(np.argmax(above)), above.shape)
+        height = float(above[j])
+    elif sign == "negative":
+        j = np.unravel_index(int(np.argmin(above)), above.shape)
+        height = float(-above[j])
+    else:
+        j = np.unravel_index(int(np.argmax(np.abs(above))), above.shape)
+        height = float(abs(above[j]))
+    position = (float(b2[j]), float(b1[j]))
+
+    snr = height / sigma
+    snr_error = math.sqrt(1.0 + (snr * sigma_rel_err) ** 2)
+    k95 = float(norm.ppf(q_hi))
+    snr_interval = ((height - k95 * sigma) / sigma_hi, (height + k95 * sigma) / sigma_lo)
+    n_sig_eff = max(1.0, n_sig / tau)
+    threshold = detection_threshold(n_sig_eff, sign, confidence)
+    detected = bool(snr > threshold)
+    if not detected:
+        warnings.append(
+            f"S/N {snr:.2g} is below {threshold:.2g}, the height pure noise reaches in this signal "
+            f"box {100 * (1 - confidence):.0f} % of the time (~{n_sig_eff:.0f} independent "
+            "points): no peak is detected here.")
+    elif snr < 10:
+        warnings.append(
+            "At S/N below ~10 the largest point is biased upwards by the noise on it; treat the "
+            "value as an upper estimate.")
+
+    # --- volume ----------------------------------------------------------
+    dx2 = float(np.mean(np.abs(np.diff(np.sort(x2[s2]))))) if s2.sum() > 1 else 0.0
+    dx1 = float(np.mean(np.abs(np.diff(np.sort(x1[s1]))))) if s1.sum() > 1 else 0.0
+    volume = float(np.sum(above) * dx2 * dx1)
+    if sign == "negative":
+        volume = -volume
+    volume_sigma = sigma * dx2 * dx1 * math.sqrt(n_sig * tau)
+    volume_snr = volume / volume_sigma if volume_sigma > 0 else float("nan")
+    if sign == "absolute":
+        volume_snr = abs(volume_snr)
+
+    ns = info["ns"]
+    return {
+        "ndim": 2,
+        "label": label or "spectrum",
+        "snr": float(snr), "snr_error": float(snr_error),
+        "snr_interval": (float(snr_interval[0]), float(snr_interval[1])),
+        "confidence": float(confidence),
+        "sino": float(height / (2.0 * sigma)),
+        "snr_3sigma": float(height / (3.0 * sigma)),
+        "volume_snr": float(volume_snr), "volume_sino": float(volume_snr / 2.0),
+        "volume": volume, "volume_sigma": float(volume_sigma),
+        "height": height, "position_ppm": position,
+        "noise_sigma": sigma, "noise_sigma_error": sigma * sigma_rel_err,
+        "noise_sigma_interval": (float(sigma_lo), float(sigma_hi)), "noise_mean": noise_mean,
+        "n_noise": n_noise, "n_noise_independent": float(n_eff),
+        "correlation_time": float(tau), "correlation_time_f2": float(tau2),
+        "correlation_time_f1": float(tau1),
+        "n_signal": n_sig, "n_signal_independent": float(n_sig_eff),
+        "detection_threshold": threshold, "detected": detected,
+        "ns": ns, "snr_per_sqrt_scan": float(snr / math.sqrt(ns)) if ns else None,
+        "nucleus": info["nucleus"], "apodisation": info["apodisation"],
+        "signal_region": sig2, "noise_region": noise2,
+        "signal_region_f1": sig1, "noise_region_f1": noise1,
+        "detrend": detrend, "sign": sign, "offset": offset,
+        "warnings": warnings,
+    }
+
+
+# ---------------------------------------------------------------------------
+# The conventions, side by side
+# ---------------------------------------------------------------------------
+
+#: Every convention reported, in the order shown: (key, name, formula,
+#: what it is). ``ndim`` restricts a row to 1D or 2D results.
+CONVENTIONS = (
+    ("snr", "RMS", "H / σ", "The height over the noise standard deviation. openNMR's main "
+     "value; comparable between programs that state it.", None),
+    ("sino", "×½ (TopSpin's factor)", "H / (2σ)", "TopSpin's sino convention: half the RMS "
+     "value. In 2D this applies TopSpin's 1D factor to the same H and σ.", None),
+    ("sino_topspin", "TopSpin sino, its own arithmetic", "maxval / (2·noise_TS)",
+     "maxval measured from zero (not from the noise level) and TopSpin's published noise "
+     "formula. Should match TopSpin's own sino on the same regions and processing.", 1),
+    ("snr_3sigma", "×⅓", "H / (3σ)", "One third of the RMS value: a 3σ noise level, as some "
+     "2D conventions quote. 1 means the peak just reaches the 3σ level.", None),
+    ("ph_eur", "Ph. Eur.", "2H / h", "European Pharmacopoeia: h is the noise's peak-to-peak "
+     "range, so this depends on how wide the noise region is.", 1),
+    ("integral_snr", "Integral", "area / σ_area", "The region's area over the noise on an "
+     "area that wide (σ·Δx·√(n·τ)): the better measure for broad lines.", 1),
+    ("integral_sino", "Integral ×½", "area / (2·σ_area)", "The integral value with TopSpin's "
+     "factor of 2.", 1),
+    ("volume_snr", "Volume", "V / σ_V", "The box's volume over the noise on a volume that "
+     "size (σ·ΔF2·ΔF1·√(n·τ_F2·τ_F1)).", 2),
+    ("volume_sino", "Volume ×½", "V / (2·σ_V)", "The volume value with TopSpin's factor of "
+     "2.", 2),
+)
+
+
+def snr_conventions(result: dict) -> list[dict]:
+    """The same measurement under each convention: ``[{"key", "name",
+    "formula", "value", "about"}]`` for one :func:`signal_to_noise` or
+    :func:`signal_to_noise_2d` result. These differ by fixed factors
+    (½, ⅓, 2) or by what is measured (height, area, volume), so a number
+    quoted without its convention cannot be compared."""
+    ndim = result.get("ndim", 1)
+    out = []
+    for key, name, formula, about, only in CONVENTIONS:
+        if only is not None and only != ndim:
+            continue
+        value = result.get(key)
+        if value is None:
+            continue
+        out.append({"key": key, "name": name, "formula": formula, "value": float(value),
+                    "about": about})
+    return out
 
 
 def _line_continues_past_edge(x, y, sig, j, n_sig, level, sign, k) -> bool:
@@ -538,8 +855,15 @@ def _per_spectrum_regions(regions, n, labels):
     return out
 
 
+def _is_2d(spectrum) -> bool:
+    if isinstance(spectrum, (tuple, list)):
+        return len(spectrum) == 3
+    return getattr(spectrum, "ndim", 1) == 2
+
+
 def signal_to_noise_many(spectra, signal_region=None, noise_region=None, *, labels=None,
-                         regions=None, reference: int = 0, **kwargs) -> dict:
+                         regions=None, reference: int = 0, signal_region_f1=None,
+                         noise_region_f1=None, **kwargs) -> dict:
     """:func:`signal_to_noise` of each spectrum, by default with the same
     regions for all; ``regions`` gives any spectrum its own (``{2:
     {"noise": (-40, -60)}}``, by index or label; a missing key falls back
@@ -550,6 +874,12 @@ def signal_to_noise_many(spectra, signal_region=None, noise_region=None, *, labe
     their S/N with its 1σ uncertainty, whether it differs from 1 at 95 %,
     and -- when both record a number of scans -- whether it is what
     √(NS ratio) predicts.
+
+    2D spectra (any mixture with 1D) go through :func:`signal_to_noise_2d`
+    with the F1 ranges ``signal_region_f1`` / ``noise_region_f1`` (None =
+    all of F1; a spectrum's own ``regions`` entry may give ``"signal_f1"``
+    / ``"noise_f1"``). A 2D is compared only with a reference of the same
+    dimension.
 
     Returns ``{"rows", "comparisons", "regions_differ", "differing",
     "shared_signal", "shared_noise", "notes", "reference"}``.
@@ -571,7 +901,13 @@ def signal_to_noise_many(spectra, signal_region=None, noise_region=None, *, labe
         noise = entry.get("noise") if entry.get("noise") is not None else shared_noise
         if sig is None or noise is None:
             raise ValueError(f"{labels[i]}: no signal or noise region (give shared ones, or its own).")
-        row = signal_to_noise(spectrum, sig, noise, label=labels[i], **kwargs)
+        if _is_2d(spectrum):
+            sig1 = entry.get("signal_f1") if entry.get("signal_f1") is not None else signal_region_f1
+            noise1 = entry.get("noise_f1") if entry.get("noise_f1") is not None else noise_region_f1
+            row = signal_to_noise_2d(spectrum, sig, noise, sig1, noise1, label=labels[i],
+                                     **kwargs)
+        else:
+            row = signal_to_noise(spectrum, sig, noise, label=labels[i], **kwargs)
         row["own_signal"] = (shared_sig is None or
                              normalise_signal_region(sig) != shared_sig)
         row["own_noise"] = (shared_noise is None or
@@ -581,6 +917,10 @@ def signal_to_noise_many(spectra, signal_region=None, noise_region=None, *, labe
     first = rows[0]
     regions_differ = any(r["signal_region"] != first["signal_region"]
                          or r["noise_region"] != first["noise_region"] for r in rows)
+    twod = [r for r in rows if r.get("ndim") == 2]
+    if twod and not regions_differ:
+        regions_differ = any(r["signal_region_f1"] != twod[0]["signal_region_f1"]
+                             or r["noise_region_f1"] != twod[0]["noise_region_f1"] for r in twod)
     if not regions_differ:
         differing = []
     elif shared_sig is not None and shared_noise is not None:
@@ -591,6 +931,11 @@ def signal_to_noise_many(spectra, signal_region=None, noise_region=None, *, labe
                      if r["signal_region"] != first["signal_region"]
                      or r["noise_region"] != first["noise_region"]]
 
+    if regions_differ and not differing:
+        def _key(r):
+            return (r["signal_region"], r["noise_region"], r.get("signal_region_f1"),
+                    r.get("noise_region_f1"))
+        differing = [r["label"] for r in rows if _key(r) != _key(first)]
     notes = []
     if regions_differ:
         notes.append(
@@ -608,6 +953,10 @@ def signal_to_noise_many(spectra, signal_region=None, noise_region=None, *, labe
         notes.append("The spectra were apodised differently (" + "; ".join(sorted(apod)) + "): "
                      "line broadening raises S/N, so the ratios include that, not only the "
                      "sample or the experiment.")
+    if twod and len(twod) < len(rows):
+        notes.append("1D and 2D spectra are listed together: each is compared only with "
+                     "spectra of its own dimension (a 2D's noise per point and its peak height "
+                     "are not on a 1D's scale).")
     taus = [r["correlation_time"] for r in rows]
     if max(taus) > 1.5 * min(taus):
         notes.append("The noise is correlated over different numbers of points "
@@ -619,7 +968,7 @@ def signal_to_noise_many(spectra, signal_region=None, noise_region=None, *, labe
     ref = rows[reference]
     comparisons = []
     for i, r in enumerate(rows):
-        if i == reference:
+        if i == reference or r.get("ndim", 1) != ref.get("ndim", 1):
             continue
         comparisons.append(compare_snr(r, ref))
     return {"rows": rows, "comparisons": comparisons, "regions_differ": bool(regions_differ),
@@ -661,7 +1010,51 @@ def _g(v, digits=3) -> str:
     return f"{v:.{digits}g}"
 
 
+def _conventions_lines(r: dict, indent: str) -> list[str]:
+    lines = [f"{indent}  The same measurement by each convention (they differ by fixed factors "
+             "or by what is measured -- quote the convention with the number):"]
+    for c in snr_conventions(r):
+        lines.append(f"{indent}    {c['name']}: {c['formula']} = {_g(c['value'], 4)}")
+    return lines
+
+
+def _row_report_2d(r: dict, indent: str = "") -> list[str]:
+    lo, hi = r["snr_interval"]
+    pct = f"{100 * r['confidence']:.0f} %"
+    surface = {0: "its mean removed", 1: "a plane removed", 2: "a quadratic surface removed"}[
+        r["detrend"]]
+    level = {"mean": "the noise box's mean level", "trend": "the noise box's surface",
+             "none": "zero"}[r["offset"]]
+    f2, f1 = r["position_ppm"]
+    lines = [
+        f"{indent}2D S/N {_g(r['snr'], 4)} ± {_g(r['snr_error'], 2)} ({pct} interval {_g(lo)} to "
+        f"{_g(hi)}, conservative) = height / σ_noise.",
+        f"{indent}  Signal box: F2 {_fmt_window(r['signal_region'])} × F1 "
+        f"{_fmt_window(r['signal_region_f1'])}; the peak at F2 {f2:.4g}, F1 {f1:.4g} ppm, height "
+        f"{_g(r['height'], 4)} above {level}.",
+        f"{indent}  Noise box: F2 " + " + ".join(_fmt_window(w) for w in r["noise_region"])
+        + " × F1 " + " + ".join(_fmt_window(w) for w in r["noise_region_f1"])
+        + f", {r['n_noise']} points (~{r['n_noise_independent']:.0f} independent; τ_F2 = "
+        f"{r['correlation_time_f2']:.2g}, τ_F1 = {r['correlation_time_f1']:.2g}), {surface}; σ = "
+        f"{_g(r['noise_sigma'], 4)} ± {100 * r['noise_sigma_error'] / r['noise_sigma']:.0f} %.",
+    ]
+    lines += _conventions_lines(r, indent)
+    lines.append(
+        f"{indent}  Detection: pure noise in this signal box would reach "
+        f"{_g(r['detection_threshold'])} σ {100 * (1 - r['confidence']):.0f} % of the time -- "
+        + ("the peak is detected." if r["detected"] else "NOT detected."))
+    if r.get("ns"):
+        lines.append(f"{indent}  NS = {r['ns']:g}: S/N per √scan {_g(r['snr_per_sqrt_scan'], 4)}.")
+    if r.get("apodisation"):
+        lines.append(f"{indent}  Apodisation (F2): {r['apodisation']}.")
+    for w in r["warnings"]:
+        lines.append(f"{indent}  ⚠ {w}")
+    return lines
+
+
 def _row_report(r: dict, indent: str = "") -> list[str]:
+    if r.get("ndim") == 2:
+        return _row_report_2d(r, indent)
     lo, hi = r["snr_interval"]
     pct = f"{100 * r['confidence']:.0f} %"
     order = {0: "its mean removed", 1: "a linear trend removed",
@@ -677,9 +1070,9 @@ def _row_report(r: dict, indent: str = "") -> list[str]:
         + f", {r['n_noise']} points (~{r['n_noise_independent']:.0f} independent, τ = "
         f"{r['correlation_time']:.2g}), {order}; σ = {_g(r['noise_sigma'], 4)} ± "
         f"{100 * r['noise_sigma_error'] / r['noise_sigma']:.0f} %.",
-        f"{indent}  Other conventions: TopSpin sino (H/2σ) {_g(r['sino'], 4)}; Ph. Eur. 2H/h "
-        f"{_g(r['ph_eur'], 4)} (h peak-to-peak; depends on the noise width); integral S/N "
-        f"{_g(r['integral_snr'], 4)}.",
+    ]
+    lines += _conventions_lines(r, indent)
+    lines += [
         f"{indent}  Detection: pure noise in this signal region would reach "
         f"{_g(r['detection_threshold'])} σ {100 * (1 - r['confidence']):.0f} % of the time -- "
         + ("the line is detected." if r["detected"] else "NOT detected."),
@@ -739,16 +1132,23 @@ def snr_table(result: dict) -> list[dict]:
     differing = set(result.get("differing") or [])
     out = []
     for r in rows:
+        conventions = {f"{c['name']} ({c['formula']})": c["value"] for c in snr_conventions(r)}
+        twod = r.get("ndim") == 2
         out.append({
-            "spectrum": r["label"], "S/N": r["snr"], "S/N error (1σ)": r["snr_error"],
+            "spectrum": r["label"],
+            "S/N": r["snr"], "S/N error (1σ)": r["snr_error"],
             "S/N low": r["snr_interval"][0], "S/N high": r["snr_interval"][1],
-            "sino (H/2σ)": r["sino"], "Ph. Eur. 2H/h": r["ph_eur"],
-            "integral S/N": r["integral_snr"], "height": r["height"],
-            "line (ppm)": r["position_ppm"], "noise σ": r["noise_sigma"],
+            "dimensions": r.get("ndim", 1), **conventions, "height": r["height"],
+            "line (ppm)": (f"{r['position_ppm'][0]:.4g}, {r['position_ppm'][1]:.4g}" if twod
+                           else r["position_ppm"]),
+            "noise σ": r["noise_sigma"],
             "noise points": r["n_noise"], "independent noise points": r["n_noise_independent"],
             "detected": r["detected"], "NS": r["ns"], "S/N per √scan": r["snr_per_sqrt_scan"],
             "signal region (ppm)": _fmt_window(r["signal_region"]),
             "noise region (ppm)": " + ".join(_fmt_window(w) for w in r["noise_region"]),
+            "signal F1 (ppm)": _fmt_window(r["signal_region_f1"]) if twod else "",
+            "noise F1 (ppm)": (" + ".join(_fmt_window(w) for w in r["noise_region_f1"])
+                               if twod else ""),
             "own regions": r["label"] in differing,
             "warnings": " | ".join(r["warnings"]),
         })
@@ -759,7 +1159,8 @@ def snr_to_csv(result: dict, path: str) -> None:
     import csv
     rows = snr_table(result)
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        fields = list(dict.fromkeys(k for row in rows for k in row))   # 1D and 2D rows differ
+        writer = csv.DictWriter(fh, fieldnames=fields, restval="")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -793,15 +1194,28 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
         rows = []
         for k, reg in enumerate(regions):
             reg = reg or {}
-            rows.append({"label": f"Spectrum {k + 1}",
-                         "signal_region": (normalise_signal_region(reg["signal"])
-                                           if reg.get("signal") is not None else None),
-                         "noise_region": (normalise_noise_region(reg["noise"])
-                                          if reg.get("noise") is not None else [])})
+            row = {"label": f"Spectrum {k + 1}",
+                   "signal_region": (normalise_signal_region(reg["signal"])
+                                     if reg.get("signal") is not None else None),
+                   "noise_region": (normalise_noise_region(reg["noise"])
+                                    if reg.get("noise") is not None else [])}
+            if reg.get("signal_f1") is not None:
+                row["signal_region_f1"] = normalise_signal_region(reg["signal_f1"])
+            if reg.get("noise_f1") is not None:
+                row["noise_region_f1"] = normalise_noise_region(reg["noise_f1"])
+            rows.append(row)
     if len(rows) != len(spectra):
         raise ValueError("Give the spectra the result was measured on (one each).")
     n = len(rows)
     labels = list(labels) if labels is not None else [r["label"] for r in rows]
+    if any(_is_2d(s) for s in spectra):
+        if figure is None:
+            cols = min(n, 3)
+            figure = plt.figure(figsize=(3.2 * cols, 3.0 * int(math.ceil(n / cols))))
+        else:
+            figure.clear()
+        return _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colour,
+                                noise_colour)
     if figure is None:
         figure = plt.figure(figsize=(3.375 * 1.6, 3.375 if n == 1 or mode == "overlay"
                                      else min(1.4 + 0.6 * n, 9.0)))
@@ -883,6 +1297,72 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
     if mode == "overlay" and 1 < n <= 12:
         ax.legend(frameon=False, fontsize=fontsize * 0.7)
     _spectrum_axes(ax, fontsize)
+    figure.tight_layout()
+    return figure
+
+
+def _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colour, noise_colour):
+    """One panel per spectrum -- a 2D as contours with its signal box
+    (green) and noise boxes (grey), a 1D as a line with its regions
+    shaded -- for a list that holds any 2D."""
+    from matplotlib.patches import Rectangle
+    from ..plotting.style import stack_colors
+    from .dnp import _nucleus_label, _spectrum_axes
+
+    n = len(rows)
+    cols = min(n, 3)
+    nrows = int(math.ceil(n / cols))
+    palette = stack_colors(n, cmap)
+    differing = set()
+    for i, (spectrum, r) in enumerate(zip(spectra, rows)):
+        ax = figure.add_subplot(nrows, cols, i + 1)
+        if _is_2d(spectrum):
+            x2, x1, z, info = _xyz(spectrum)
+            peak = float(np.max(np.abs(z))) or 1.0
+            floor = 5.0 * r["noise_sigma"] if "noise_sigma" in r else 0.05 * peak
+            floor = min(max(floor, 1e-6 * peak), 0.9 * peak)
+            levels = floor * (peak / floor) ** np.linspace(0, 1, 10)
+            ax.contour(x2, x1, z, levels=levels, colors=[palette[i]], linewidths=0.6)
+            ax.contour(x2, x1, z, levels=-levels[::-1], colors=["0.5"], linewidths=0.4)
+            boxes = []
+            whole_f1 = (float(x1.max()), float(x1.min()))
+            if r.get("signal_region") is not None:
+                boxes.append((signal_colour, r["signal_region"],
+                              r.get("signal_region_f1") or whole_f1))
+            for w2 in r.get("noise_region") or []:
+                for w1 in r.get("noise_region_f1") or [whole_f1]:
+                    boxes.append((noise_colour, w2, w1))
+            for colour, (a_hi, a_lo), (b_hi, b_lo) in boxes:
+                ax.add_patch(Rectangle((a_lo, b_lo), a_hi - a_lo, b_hi - b_lo, facecolor=colour,
+                                       alpha=0.18, edgecolor=colour, linewidth=0.8))
+            if "snr" in r:
+                f2, f1 = r["position_ppm"]
+                ax.plot([f2], [f1], marker="x", color="k", markersize=5, linestyle="none")
+                ax.annotate(f"S/N {r['snr']:.3g}", xy=(f2, f1), xytext=(4, 4),
+                            textcoords="offset points", fontsize=fontsize * 0.6)
+            ax.set_xlim(float(x2.max()), float(x2.min()))
+            ax.set_ylim(float(x1.max()), float(x1.min()))
+            ax.set_xlabel("F2 (ppm)", fontsize=fontsize * 0.8)
+            ax.set_ylabel("F1 (ppm)", fontsize=fontsize * 0.8)
+        else:
+            x, y, info = _xy(spectrum)
+            base = r.get("noise_mean", 0.0)
+            ax.plot(x, y - base, color=palette[i], linewidth=0.9)
+            if r.get("signal_region") is not None:
+                ax.axvspan(r["signal_region"][1], r["signal_region"][0], color=signal_colour,
+                           alpha=0.18, linewidth=0)
+            for w_hi, w_lo in r.get("noise_region") or []:
+                ax.axvspan(w_lo, w_hi, color=noise_colour, alpha=0.18, linewidth=0)
+            if "snr" in r:
+                ax.annotate(f"S/N {r['snr']:.3g}", xy=(0.02, 0.92), xycoords="axes fraction",
+                            fontsize=fontsize * 0.6)
+            ax.set_xlim(float(np.max(x)), float(np.min(x)))
+            ax.set_xlabel(f"{_nucleus_label(info.get('nucleus') or '')} shift (ppm)".strip(),
+                          fontsize=fontsize * 0.8)
+            _spectrum_axes(ax, fontsize * 0.8)
+        ax.set_title(labels[i], fontsize=fontsize * 0.7)
+        ax.tick_params(labelsize=fontsize * 0.6)
+    del differing
     figure.tight_layout()
     return figure
 

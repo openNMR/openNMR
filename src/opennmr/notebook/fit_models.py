@@ -42,6 +42,7 @@ KIND_LABELS = {
     "isotropic": "Isotropic peaks", "integration": "Integration", "jcoupling": "J-coupling",
     "csa": "CSA/Dipolar", "quadrupolar": "Quadrupolar", "czjzek": "Czjzek",
     "combined": "CSA, Quad & J-coupling", "curve": "Curve fit", "spectrum": "Spectral fit",
+    "multi": "Multi-spectrum fit",
 }
 
 #: Evidence scale for a BIC difference (Kass & Raftery 1995).

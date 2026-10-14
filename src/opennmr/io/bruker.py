@@ -733,7 +733,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             truncate: int | None = None,
             linear_predict_points: int = 0, linear_predict_order: int = 20,
             linear_predict_direction: str = "forward",
-            magnitude: bool | None = None) -> NMRSpectrum:
+            magnitude: bool | None = None, recorded_tdeff: bool = True) -> NMRSpectrum:
     """Read the raw ``fid`` and reprocess it using the parameters
     TopSpin itself recorded in ``procs`` (window, ``SI``, and --
     ``phase_mode="recorded"``, the default -- the phase TopSpin itself
@@ -802,10 +802,23 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     si = int(zero_fill) if zero_fill is not None else int(procs.get("SI", len(fid)))
     dt = 1.0 / sw
 
-    # Shift -> echo-align -> linear-predict (no truncate/TDeff concept
-    # for Bruker -- see processing.ft.prepare_fid's own docstring for
-    # the full step-ordering rationale, shared with X-Pulse's read_1d
-    # and the GUI's own live Processing-preview).
+    # TopSpin's own TDeff when no truncation was asked for (as read_2d;
+    # explicit user report, 2026-10-14): TD points (real + imaginary)
+    # of the raw FID, group delay included.
+    tdeff_points = None
+    if recorded_tdeff and truncate is None:
+        try:
+            td = int(float(acqus.get("TD", 0) or 0))
+            tdeff = int(float(procs.get("TDeff", 0) or 0))
+        except (TypeError, ValueError):
+            td = tdeff = 0
+        if 0 < tdeff < td:
+            removed = max(0, td // 2 - len(fid))
+            tdeff_points = truncate = max(1, min(len(fid), tdeff // 2 - removed))
+    # Shift -> echo-align -> linear-predict -> truncate -- see
+    # processing.ft.prepare_fid's own docstring for the full
+    # step-ordering rationale, shared with X-Pulse's read_1d and the
+    # GUI's own live Processing-preview.
     fid = processing_ft.prepare_fid(
         fid, fid_shift=fid_shift, align_echo_enabled=align_echo, echo_offset=echo_offset,
         truncate=truncate,
@@ -883,6 +896,7 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             "acqus": acqus, "procs": procs, "phase0": phase0, "phase1": phase1,
             _SR_RECORDED_KEY: _recorded_sr_hz(sf, obs),
             "recorded_phase0": recorded_f2[0], "recorded_phase1": recorded_f2[1],
+            **({"tdeff_f2_points": tdeff_points} if tdeff_points else {}),
             **({"recorded_phase_dropped":
                 "Echo alignment replaces TopSpin's recorded PHC0/PHC1 -- that phase "
                 "compensates for transforming from t=0 of an echo, which aligning "
@@ -969,9 +983,20 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             magnitude: bool | None = None,
             linear_predict_f1: bool | None = None,
             drift_correction: dict | None = None,
+            recorded_tdeff: bool = True,
             _raw_fid_cache: np.ndarray | None = None) -> NMRSpectrum:
     """Read the raw ``ser`` and reprocess it (F2 then F1) using the
     parameters TopSpin recorded in ``procs``/``proc2s``.
+
+    ``recorded_tdeff`` (default True): where ``truncate`` / ``truncate_f1``
+    are not given, use TopSpin's own ``TDeff`` -- the number of acquired
+    points it actually transforms (explicit user report, 2026-10-14:
+    Good_2D, an hCH with ``proc2s TDeff = 256`` of 1126, matched TopSpin's
+    2rr at 0.91 without it and 0.993 with it). ``TDeff`` counts TD
+    points: in F1, rows (two per increment for FnMODE 4/5/6); in F2,
+    real + imaginary points of the raw FID including the digital
+    filter's group delay. The values used are in ``metadata.raw``
+    (``tdeff_f2_points``, ``tdeff_f1_increments``). False: every point.
 
     ``drift_correction`` : a linear field-drift correction applied to
     the raw FIDs before anything else (Najbauer & Andreas, J. Magn.
@@ -1190,7 +1215,31 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
     # `data` reference. This one-line guard is exactly what the
     # pre-shared-prepare_fid code already did (three separate `if`s,
     # one per step) -- lost when they were combined into one call.
-    if fid_shift or align_echo or linear_predict_points:
+    # TopSpin's own TDeff (see the docstring), where no explicit
+    # truncation was asked for.
+    tdeff_f2_points = tdeff_f1_increments = None
+    if recorded_tdeff:
+        try:
+            td2 = int(float(acqus.get("TD", 0) or 0))
+            tdeff2 = int(float(procs.get("TDeff", 0) or 0))
+        except (TypeError, ValueError):
+            td2 = tdeff2 = 0
+        if truncate is None and 0 < tdeff2 < td2:
+            # Raw complex points cut by TDeff, less what the digital
+            # filter removal took off the front of each row.
+            removed = max(0, td2 // 2 - data.shape[1])
+            tdeff_f2_points = max(1, min(data.shape[1], tdeff2 // 2 - removed))
+            truncate = tdeff_f2_points
+        if not pseudo_2d and truncate_f1 is None:
+            try:
+                tdeff1 = int(float(proc2s.get("TDeff", 0) or 0))
+            except (TypeError, ValueError):
+                tdeff1 = 0
+            rows = data.shape[0]
+            if 0 < tdeff1 < rows:
+                tdeff_f1_increments = tdeff1 // 2 if fn_mode in (4, 5, 6) else tdeff1
+                truncate_f1 = max(1, tdeff_f1_increments)
+    if fid_shift or align_echo or linear_predict_points or truncate:
         # align_echo's own auto-truncation caps each row at its own
         # len(row) - ceil(echo_top) (see prepare_fid's docstring) --
         # fine for a single 1D FID, but here every row is independently
@@ -1427,6 +1476,9 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
                 "already does, so a zero-order phase was re-derived instead."}
                if recorded_phase_dropped_f2 else {}),
             "recorded_phase0_f1": recorded_f1[0], "recorded_phase1_f1": recorded_f1[1],
+            # TopSpin's TDeff, when it was used (see the docstring).
+            **({"tdeff_f2_points": tdeff_f2_points} if tdeff_f2_points else {}),
+            **({"tdeff_f1_increments": tdeff_f1_increments} if tdeff_f1_increments else {}),
             # F1's own hypercomplex encoding (see
             # processing.ft.decode_hypercomplex_f1) -- retrievable so a
             # live GUI recompute that redoes F1's FFT (any F2-only
@@ -2232,7 +2284,9 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     # EXSY benchmark -- see TODO.md's duplication-trace entry).
     # drift_correction likewise only means something for a ser (see
     # read_2d): a 1D's scans are summed before they are stored.
-    one_d_kwargs = {k: v for k, v in kwargs.items() if k not in ("pseudo_2d", "drift_correction")}
+    one_d_kwargs = {k: v for k, v in kwargs.items()
+                    if k not in ("pseudo_2d", "drift_correction", "truncate_f1", "zero_fill_f1",
+                                 "window_f1", "window_kwargs_f1", "linear_predict_f1")}
     if has_ser:
         try:
             return read_2d(path, **kwargs, _raw_fid_cache=raw_fid_cache)

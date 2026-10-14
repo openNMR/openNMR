@@ -251,7 +251,31 @@ def load_processing_sidecar(source_path: str, vendor: str | None = None) -> dict
         return None
     if vendor is not None and payload.get("opennmr_processing_version", 1) < 2:
         state = _migrate_v1_phase(state, vendor)
+    if vendor == "bruker" and not state.get(RECORDED_PHASE_USER_SET_KEY):
+        state = _drop_saved_recorded_phase(state)
     return state
+
+
+#: Set in ``metadata.raw`` (and so saved) when the user deliberately
+#: changed TopSpin's recorded phase (Zero Phase 0/1, Reset). Only then
+#: does a saved recorded phase win over the file's own.
+RECORDED_PHASE_USER_SET_KEY = "recorded_phase_user_set"
+
+
+def _drop_saved_recorded_phase(state: dict) -> dict:
+    """A Bruker experiment's recorded phase comes from its own ``procs``
+    / ``proc2s`` on every read; a saved copy that the user never set is
+    not kept (explicit user report, 2026-10-14: "the topspin processing
+    are not conserved in openNMR"). Measured on a 13C-1H hCH (Good_2D,
+    expno 28): its sidecar, written before the 2026-10-11 fix, held
+    ``recorded_phase0 = 0``, which replaced the file's PHC0 = 40.6 deg on
+    every reopen -- the spectrum opened unphased."""
+    dropped = {key: value for key, value in state.items()
+               if key not in _V1_STALE_RECORDED_PHASE_KEYS}
+    if len(dropped) != len(state):
+        dropped["_saved_recorded_phase_ignored"] = {
+            key: state[key] for key in _V1_STALE_RECORDED_PHASE_KEYS if key in state}
+    return dropped
 
 
 #: The recorded-phase keys dropped when reading a version-1 processing

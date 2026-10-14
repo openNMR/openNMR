@@ -340,6 +340,26 @@ class _Toolbar(NavigationToolbar2QT):
         if isinstance(owner, MplCanvas):
             owner._on_navigation_mode_changed()
 
+    def _update_buttons_checked(self) -> None:
+        """matplotlib checks Pan/Zoom only while its own tool is on. With
+        neither on, a plain drag still pans or zooms (the canvas's
+        default drag, :meth:`MplCanvas.set_drag_mode`), so that button is
+        shown checked too -- "it isn't obvious it's pan" (explicit user
+        report, 2026-10-14). A click mode (Pick, Select Region, Measure)
+        owns the drag instead, and then neither is checked."""
+        mode = getattr(self.mode, "name", str(self.mode or "")).upper()
+        owner = self.parent()
+        default = ""
+        # getattr: matplotlib may call this while the canvas is still
+        # being built, before its mode attributes exist.
+        if not self.mode and isinstance(owner, MplCanvas) and hasattr(owner, "_drag_mode") \
+                and not owner._click_mode_active():
+            default = owner.drag_mode()
+        if "pan" in self._actions:
+            self._actions["pan"].setChecked("PAN" in mode or default == "pan")
+        if "zoom" in self._actions:
+            self._actions["zoom"].setChecked("ZOOM" in mode or default == "zoom")
+
     def press_pan(self, event) -> None:
         owner = self.parent()
         if isinstance(owner, MplCanvas):
@@ -1022,6 +1042,11 @@ class MplCanvas(QWidget):
         self.canvas.installEventFilter(self)
 
         self._pan_start = None  # (x_pixel, y_pixel, xlim, ylim) while dragging
+        #: What a plain left-drag does with no toolbar tool or click mode
+        #: on: "pan" (this widget's default) or "zoom" (a box). MainWindow
+        #: sets every canvas from Settings ▸ Interface (default "zoom").
+        self._drag_mode = "pan"
+        self._zoom_start = None  # (x_pixel, y_pixel, Axes) during a box-zoom drag
         # The view a fresh plot drew, {Axes: (xlim, ylim)} -- what Home
         # returns to. Recorded lazily, the first time the view is about
         # to change (see note_natural_view); cleared by _clear_figure.
@@ -2052,10 +2077,15 @@ class MplCanvas(QWidget):
         toggling a mode off while parked on a strip shows the arrow
         until the next mouse move, which is one frame nobody sees.
         """
+        if event is None:
+            # Every mode setter lands here: keep the Pan/Zoom check marks
+            # on what a drag will now do.
+            self.toolbar._update_buttons_checked()
         if self.toolbar.mode:
             self._last_cursor_shape = None
             return
-        if self._pan_start is not None or self._region_select_start is not None:
+        if (self._pan_start is not None or self._region_select_start is not None
+                or self._zoom_start is not None):
             return
         if self._pick_mode or self._region_select_mode or self._measurement_mode:
             shape = Qt.CursorShape.CrossCursor
@@ -2867,6 +2897,9 @@ class MplCanvas(QWidget):
             for attr in ("_zoom_info", "_pan_info"):
                 if getattr(toolbar, attr, None) is not None:
                     setattr(toolbar, attr, None)
+        # This canvas's own box-zoom drag (the default drag) too.
+        self._zoom_start = None
+        self._pan_start = None
         draw_rectangle = getattr(self.canvas, "drawRectangle", None)
         if draw_rectangle is not None:
             draw_rectangle(None)
@@ -3206,7 +3239,60 @@ class MplCanvas(QWidget):
                 )
             return
         self.note_natural_view()
+        if self._drag_mode == "zoom" and getattr(event.inaxes, "name", "") != "3d":
+            self._zoom_start = (event.x, event.y, event.inaxes)
+            return
         self._pan_start = (event.x, event.y, event.inaxes.get_xlim(), event.inaxes.get_ylim(), event.inaxes)
+
+    # ---- the default drag: pan or box zoom ----------------------------------
+
+    DRAG_MODES = ("zoom", "pan")
+    #: A box narrower than this (pixels) along one axis zooms the other
+    #: axis only -- matplotlib's own zoom tool does the same.
+    _ZOOM_MIN_PX = 5
+
+    def drag_mode(self) -> str:
+        return self._drag_mode
+
+    def set_drag_mode(self, mode: str) -> None:
+        """What a plain left-drag does: ``"zoom"`` (draw a box, zoom to
+        it) or ``"pan"``. The toolbar shows it by checking that button."""
+        if mode not in self.DRAG_MODES:
+            raise ValueError(f"drag mode must be one of {self.DRAG_MODES}, not {mode!r}")
+        self._drag_mode = mode
+        self.toolbar._update_buttons_checked()
+
+    def _click_mode_active(self) -> bool:
+        return bool(getattr(self, "_pick_mode", False) or getattr(self, "_region_select_mode", False)
+                    or getattr(self, "_measurement_mode", False))
+
+    def _zoom_drag_to(self, event) -> None:
+        x0, y0, ax = self._zoom_start
+        self._zoom_start = None
+        try:
+            self.toolbar.remove_rubberband()
+        except Exception:  # noqa: BLE001 -- a stale rubber band must never block the zoom
+            pass
+        if event.x is None or event.y is None:
+            return
+        box = ax.bbox
+        x1 = min(max(event.x, box.x0), box.x1)
+        y1 = min(max(event.y, box.y0), box.y1)
+        wide, tall = abs(x1 - x0) >= self._ZOOM_MIN_PX, abs(y1 - y0) >= self._ZOOM_MIN_PX
+        if not (wide or tall):
+            return                      # a click, not a box
+        inv = ax.transData.inverted()
+        (dx0, dy0), (dx1, dy1) = inv.transform((x0, y0)), inv.transform((x1, y1))
+
+        def keep_direction(lim, a, b):
+            lo, hi = sorted((a, b))
+            return (hi, lo) if lim[0] > lim[1] else (lo, hi)
+
+        if wide:
+            ax.set_xlim(keep_direction(ax.get_xlim(), dx0, dx1))
+        if tall:
+            ax.set_ylim(keep_direction(ax.get_ylim(), dy0, dy1))
+        self.canvas.draw_idle()
 
     def _on_motion(self, event) -> None:
         self._ensure_crosshair()
@@ -3214,6 +3300,15 @@ class MplCanvas(QWidget):
         # and the cursor has to be resolved on every move, not only on
         # the ones that fall through to the end.
         self._refresh_cursor(event)
+        if self._zoom_start is not None and event.x is not None and event.y is not None:
+            x0, y0, ax = self._zoom_start
+            # The box is clipped to the Axes it started in, as
+            # matplotlib's own zoom tool clips it.
+            box = ax.bbox
+            x1 = min(max(event.x, box.x0), box.x1)
+            y1 = min(max(event.y, box.y0), box.y1)
+            self.toolbar.draw_rubberband(event, x0, y0, x1, y1)
+            return
         if self._region_select_start is not None and event.x is not None and self._region_select_ax is not None:
             # Pixel coordinates, not event.xdata directly -- like the
             # pan drag below, this needs to keep tracking smoothly even
@@ -3309,6 +3404,8 @@ class MplCanvas(QWidget):
 
     def _on_release(self, event) -> None:
         self._refit_3d_ticks_after_release(event)
+        if self._zoom_start is not None:
+            self._zoom_drag_to(event)
         if self._region_select_start is not None:
             end = self._region_select_start
             if event.xdata is not None:

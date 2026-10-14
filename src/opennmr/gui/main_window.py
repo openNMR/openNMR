@@ -40,6 +40,7 @@ from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.advice_box import AdviceBox
 from .widgets.side_drawer import SideDrawer
 from .widgets.field_input import link_field
+from .widgets.typed_spinbox import TypedSpinBox
 from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
 from .shear_panel import ShearPanel
@@ -88,6 +89,7 @@ from ..io import history as io_history
 from ..io import serialize as io_serialize
 from ..io import state as io_state
 from . import panel_state
+from . import data_directory
 from .. import _version
 from . import progress as progress_dialogs
 from . import state_dialog as state_dialogs
@@ -2311,6 +2313,18 @@ class MainWindow(QMainWindow):
         return [{"label": self.session.label(i), "spectrum": s, "index": i}
                 for i, s in enumerate(self.session.spectra) if s.ndim == 1]
 
+    def _snr_spectra(self) -> list[dict]:
+        """Apply ▸ Signal-to-Noise's list: every 1D spectrum and every
+        genuine 2D in Open experiments (a pseudo-2D series is measured a
+        slice at a time: keep a slice first)."""
+        out = []
+        for i, s in enumerate(self.session.spectra):
+            if s.ndim == 1:
+                out.append({"label": self.session.label(i), "spectrum": s, "index": i})
+            elif s.ndim == 2 and not s.is_pseudo_2d:
+                out.append({"label": f"{self.session.label(i)} (2D)", "spectrum": s, "index": i})
+        return out
+
     def _dnp_selected_rows(self) -> list[int]:
         return sorted({self.spectrum_list.row(item) for item in self.spectrum_list.selectedItems()})
 
@@ -2437,6 +2451,7 @@ class MainWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(
             self, "Open a data folder -- an experiment folder itself, or a "
                   "parent folder containing several",
+            data_directory.start_directory(),
             options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not directory:
@@ -2454,7 +2469,7 @@ class MainWindow(QMainWindow):
         -- the restrictive-filter half of the original revert, kept
         fixed regardless of dialog style."""
         paths, _selected_filter = QFileDialog.getOpenFileNames(
-            self, "Open one or more spectrum files",
+            self, "Open one or more spectrum files", data_directory.start_directory(),
             filter="All files (*);;NMR spectrum files (*.jdx *.dx *.jdf)",
             options=QFileDialog.Option.DontUseNativeDialog,
         )
@@ -2877,9 +2892,14 @@ class MainWindow(QMainWindow):
         if isinstance(drift, dict) and "start_hz" in drift:
             kwargs["drift_correction"] = {k: drift[k] for k in ("start_hz", "end_hz", "endpoint", "shifts_hz")
                                           if drift.get(k) is not None}
-        # phase0/phase1 are only meaningful with autophase off -- with
-        # it on the reader recomputes its own and ignores them.
-        if "phase0" in kwargs or "phase1" in kwargs:
+        # autophase stays on: in the reader's default "recorded" mode it
+        # means TopSpin's PHC0/PHC1 *with* phase0/phase1 on top. Off, it
+        # switches the recorded phase off in both dimensions -- the
+        # 2026-10-11 bug (tests/test_reopen_keeps_recorded_phase.py),
+        # found lost again on 2026-10-14 (Good_2D reopened unphased).
+        # Echo alignment is the exception: there the reader replaces the
+        # recorded phase with its own, so the saved one must be used as is.
+        if ("phase0" in kwargs or "phase1" in kwargs) and saved.get("live_align_echo"):
             kwargs["autophase"] = False
         return kwargs
 
@@ -2912,8 +2932,29 @@ class MainWindow(QMainWindow):
             # from the raw FID immediately afterwards.
             folded = self._saved_processing_read_kwargs(saved_processing)
             add_kwargs.update(folded)
+            # Settings ▸ Data: open without TopSpin's processing -- only
+            # for an experiment with no saved processing of its own
+            # (that is the user's, and always wins).
+            if not saved_processing and not self._topspin_processing_on_open():
+                add_kwargs.update(self.UNPROCESSED_READ_KWARGS)
 
         return add_kwargs
+
+    #: Reader kwargs for "open without TopSpin's processing": no recorded
+    #: phase, no window in either dimension, every acquired point.
+    UNPROCESSED_READ_KWARGS = {
+        "autophase": False, "recorded_tdeff": False,
+        "window": "exponential", "window_kwargs": {"lb": 0.0},
+        "window_f1": "exponential", "window_kwargs_f1": {"lb": 0.0},
+    }
+
+    def _topspin_processing_on_open(self) -> bool:
+        """Settings ▸ Data: open Bruker data with TopSpin's own processing
+        (recorded phase, window functions, TDeff) -- the default."""
+        settings = getattr(self, "_ui_settings", None)
+        if settings is None:
+            settings = self._load_ui_settings()
+        return bool(settings.get("topspin_processing_on_open", True))
 
     @staticmethod
     def _bruker_2d_default(path: str, saved: dict) -> tuple[bool, str]:
@@ -2975,6 +3016,12 @@ class MainWindow(QMainWindow):
         # straight to a reader that would reject an unknown keyword.
         if vendor == "bruker":
             spectrum.metadata.raw["_read_used_saved_processing"] = True
+            if add_kwargs.get("recorded_tdeff") is False:
+                # Opened without TopSpin's processing (Settings ▸ Data):
+                # the controls show it, so the first live rebuild keeps it.
+                spectrum.metadata.raw.setdefault("live_window", "none")
+                if spectrum.ndim == 2:
+                    spectrum.metadata.raw.setdefault("live_window_f1", "none")
             if spectrum.ndim == 2:
                 _pseudo, basis = self._bruker_2d_default(
                     path, io_persistence.load_metadata_sidecar(path) or {})
@@ -3417,7 +3464,8 @@ class MainWindow(QMainWindow):
         Deliberately does not load anything -- picking a folder to
         browse and choosing what to open from it are separate acts,
         which is the difference between this and Open Folder…."""
-        directory = QFileDialog.getExistingDirectory(self, "Choose a folder to browse")
+        directory = QFileDialog.getExistingDirectory(
+            self, "Choose a folder to browse", data_directory.start_directory())
         if not directory:
             return
         matches = self._scan_for_spectra(directory)
@@ -3830,9 +3878,28 @@ class MainWindow(QMainWindow):
             return
         phase0_f1 = spectrum.metadata.raw.get("phase0_f1")
         phase1_f1 = spectrum.metadata.raw.get("phase1_f1")
+        # The processing carries across (explicit user report,
+        # 2026-10-14: "When I toggle 'process indirect dimension' it
+        # erases the processing that I did before"): the window, its
+        # SSB/LB, truncation, zero-fill, LP, drift correction, as reader
+        # parameters; everything else (baseline, SR, fits, ...) into the
+        # new metadata below, then applied as on a reopen.
+        state = io_persistence.processing_state(spectrum)
+        read_kwargs = self._saved_processing_read_kwargs(state)
+        read_kwargs.update(self._current_phase_kwargs(spectrum))
+        if wants_pseudo_2d:
+            for key in ("truncate_f1", "zero_fill_f1", "window_f1", "window_kwargs_f1"):
+                read_kwargs.pop(key, None)
         try:
-            self.session.reload(index, pseudo_2d=wants_pseudo_2d, **self._current_phase_kwargs(spectrum))
+            self.session.reload(index, pseudo_2d=wants_pseudo_2d, **read_kwargs)
             new_spectrum = self.session.spectra[index]
+            for key, value in state.items():
+                # What the read produced wins (recorded phase, procs,
+                # TDeff, the new shape's own keys); the rest is the
+                # user's and comes across.
+                if key not in new_spectrum.metadata.raw and key not in ("pseudo_2d",):
+                    new_spectrum.metadata.raw[key] = copy.deepcopy(value)
+            new_spectrum.metadata.raw["_read_used_saved_processing"] = True
             # A deliberate choice: remembered, and it overrides the
             # automatic default next time (see _bruker_2d_default).
             new_spectrum.metadata.raw["pseudo_2d_chosen"] = True
@@ -3852,6 +3919,8 @@ class MainWindow(QMainWindow):
             self.process_indirect_button.blockSignals(False)
             return
         self._on_selection_changed(index)
+        # Baseline and referencing, applied as on a reopen.
+        self._apply_loaded_processing_sidecar(self.session.spectra[index], index)
         self._schedule_sidecar_save(index)
 
     def _on_magnitude_toggled(self, checked: bool) -> None:
@@ -4571,8 +4640,16 @@ class MainWindow(QMainWindow):
         export_form = QFormLayout(export_box)
         export_form.addRow(export_intro)
 
-        self.output_dpi_spin = QSpinBox()
-        self.output_dpi_spin.setRange(50, 1200)
+        # Typed freely and up to 4800 (explicit user request, 2026-10-14:
+        # "the DPI is limited to three figures"). Qt's own box refused a
+        # fourth digit typed onto a three-digit value whenever the result
+        # passed the old 1200 cap.
+        self.output_dpi_spin = TypedSpinBox()
+        self.output_dpi_spin.setRange(50, self.MAX_EXPORT_DPI)
+        self.output_dpi_spin.setToolTip(
+            "Dots per inch of an exported raster image (PNG, TIFF, JPEG). 300-600 suits most "
+            f"journals; up to {self.MAX_EXPORT_DPI} for line art. Vector formats (PDF, SVG, EPS) "
+            "are resolution-free, so this only affects any raster content inside them.")
         self.output_dpi_spin.setValue(int(self.canvas.figure.get_dpi()))
         self.output_dpi_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("DPI:", self.output_dpi_spin)
@@ -5633,6 +5710,10 @@ class MainWindow(QMainWindow):
     #: "user-level JSON dotfile" pattern as _PLOT_STYLE_CONFIG_PATH.
     _UI_SETTINGS_PATH = os.path.expanduser("~/.opennmr/ui_settings.json")
 
+    #: Highest export DPI offered. An 8-inch figure at 4800 dpi is 38,400
+    #: pixels across, inside matplotlib's 2^16-pixel limit per side.
+    MAX_EXPORT_DPI = 4800
+
     #: Allowed interface font sizes (points). Below 7 pt the panel text
     #: is unreadable; above 28 the side panel cannot fit a form row.
     UI_FONT_SIZE_RANGE = (7, 28)
@@ -5717,6 +5798,24 @@ class MainWindow(QMainWindow):
         for _canvas in self._all_canvases():
             _canvas.set_contour_scroll_up_shows_more(_up_more)
             _canvas.contourScrollDirectionChanged.connect(self._on_contour_scroll_direction_toggled)
+        # Click-and-drag on a plot (explicit user request, 2026-10-14:
+        # zoom by default; drag-to-pan was not obvious, its toolbar
+        # button not even checked). Remembered; shown on every plot's
+        # toolbar by the checked Pan/Zoom button.
+        self.drag_mode_combo = QComboBox()
+        self.drag_mode_combo.addItem("Zoom (draw a box)", "zoom")
+        self.drag_mode_combo.addItem("Pan (move the view)", "pan")
+        self.drag_mode_combo.setToolTip(
+            "What clicking and dragging on a plot does when no toolbar tool or click mode "
+            "(Pick, Select Region, Measure) is on. A box that is very thin in one direction "
+            "zooms the other axis only. The mouse wheel always zooms; the house resets.\n\n"
+            "The plot's toolbar shows the current choice: its Zoom or Pan button is checked.")
+        saved_drag = self._ui_settings.get("drag_mode", "zoom")
+        self.drag_mode_combo.setCurrentIndex(max(0, self.drag_mode_combo.findData(saved_drag)))
+        self.drag_mode_combo.currentIndexChanged.connect(
+            lambda _i: self._set_drag_mode(self.drag_mode_combo.currentData()))
+        interface_form.addRow("Click and drag:", self.drag_mode_combo)
+        self._set_drag_mode(self.drag_mode_combo.currentData(), save=False)
         layout.addWidget(CollapsibleSection("Interface", content=interface))
 
         # --- Fitting -------------------------------------------------
@@ -5755,6 +5854,84 @@ class MainWindow(QMainWindow):
         iterations_layout.addWidget(self.max_iterations_reset_button)
         fitting_form.addRow("Maximum iterations:", iterations_row)
         layout.addWidget(CollapsibleSection("Fitting", content=fitting))
+
+        # --- Sections shown ------------------------------------------
+        # Explicit user request (2026-10-14): hide the pNMR, DNP and field
+        # drift sections for anyone who never uses them; remembered, and
+        # one tick away from coming back.
+        sections = QWidget()
+        sections_layout = QVBoxLayout(sections)
+        sections_intro = QLabel("Untick a section to hide it. Nothing is lost: tick it again "
+                                "and it is back as it was.")
+        sections_intro.setWordWrap(True)
+        sections_layout.addWidget(sections_intro)
+        hidden = set(self._ui_settings.get("hidden_sections") or [])
+        self.section_shown_checkboxes = {}
+        for key, (label, _attrs) in self.OPTIONAL_SECTIONS.items():
+            box = QCheckBox(label)
+            box.setChecked(key not in hidden)
+            box.toggled.connect(lambda shown, k=key: self._set_section_shown(k, shown))
+            sections_layout.addWidget(box)
+            self.section_shown_checkboxes[key] = box
+            self._apply_section_shown(key, key not in hidden)
+        layout.addWidget(CollapsibleSection("Sections shown", content=sections))
+
+        # --- Data ----------------------------------------------------
+        # Explicit user request (2026-10-14): a default data folder that
+        # Open… (folder or files), Browse Folder…, Add by number… and the
+        # drift correction's dialogs start in -- they can still go
+        # anywhere -- and that the Open panel's browser shows at start-up.
+        data = QWidget()
+        data_form = QFormLayout(data)
+        data_directory.set_default_data_directory(self._ui_settings.get("data_folder") or "")
+        self.data_folder_edit = QLineEdit(data_directory.stored_default_data_directory())
+        self.data_folder_edit.setPlaceholderText("None -- dialogs start where they always did")
+        self.data_folder_edit.setToolTip(
+            "Where Open…, Open Files…, Browse Folder… and Multi-spectrum's Add by number… start "
+            "looking. You can still go anywhere from there. Type a folder or press Browse….")
+        self.data_folder_edit.editingFinished.connect(
+            lambda: self._set_data_folder(self.data_folder_edit.text()))
+        data_row = QWidget()
+        data_row_layout = QHBoxLayout(data_row)
+        data_row_layout.setContentsMargins(0, 0, 0, 0)
+        data_row_layout.addWidget(self.data_folder_edit, 1)
+        self.data_folder_browse_button = QPushButton("Browse…")
+        self.data_folder_browse_button.clicked.connect(self._on_browse_data_folder)
+        data_row_layout.addWidget(self.data_folder_browse_button)
+        self.data_folder_clear_button = QPushButton("Clear")
+        self.data_folder_clear_button.setToolTip("No default data folder.")
+        self.data_folder_clear_button.clicked.connect(lambda: self._set_data_folder(""))
+        data_row_layout.addWidget(self.data_folder_clear_button)
+        data_form.addRow("Default data folder:", data_row)
+        self.data_folder_browse_at_start_checkbox = QCheckBox(
+            "List its experiments in Open's browser at start-up")
+        self.data_folder_browse_at_start_checkbox.setToolTip(
+            "Fill the Open panel's data browser from the default data folder when openNMR "
+            "starts (nothing is loaded until you pick an experiment).")
+        self.data_folder_browse_at_start_checkbox.setChecked(
+            bool(self._ui_settings.get("data_folder_browse_at_start", True)))
+        self.data_folder_browse_at_start_checkbox.toggled.connect(
+            self._on_data_folder_browse_at_start_toggled)
+        data_form.addRow("", self.data_folder_browse_at_start_checkbox)
+        # Explicit user request (2026-10-14): TopSpin's own processing is
+        # kept on opening by default; this is the way to open without it.
+        self.topspin_processing_checkbox = QCheckBox(
+            "Open Bruker data with TopSpin's processing (phase, window, TDeff)")
+        self.topspin_processing_checkbox.setToolTip(
+            "On (default): a Bruker experiment opens as TopSpin processed it -- its recorded "
+            "PHC0/PHC1 in both dimensions, its window functions (WDW, SSB, LB, GB) and the "
+            "points it used (TDeff). Off: it opens unprocessed -- no phase, no window, every "
+            "acquired point -- to process from scratch.\n\nAn experiment you have already "
+            "processed in openNMR always opens as you left it.")
+        self.topspin_processing_checkbox.setChecked(self._topspin_processing_on_open())
+        self.topspin_processing_checkbox.toggled.connect(self._on_topspin_processing_toggled)
+        data_form.addRow("", self.topspin_processing_checkbox)
+        layout.addWidget(CollapsibleSection("Data", content=data))
+        if data_directory.default_data_directory() and \
+                self.data_folder_browse_at_start_checkbox.isChecked():
+            # After the window is up: a big folder's scan must not hold
+            # up start-up.
+            QTimer.singleShot(0, self, self._browse_default_data_folder)
 
         # --- Saving --------------------------------------------------
         # Explicit user request (2026-10-08): choose where openNMR states
@@ -5991,6 +6168,117 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"openNMR states will be saved in {used}", 8000)
         return used
 
+    #: Sections Settings ▸ Sections shown can hide: key -> (checkbox
+    #: text, the CollapsibleSection attributes it covers).
+    OPTIONAL_SECTIONS = {
+        "pnmr": ("pNMR (Fit ▸ pNMR bond pathways and Simulate ▸ pNMR (CIF))",
+                 ("_pnmr_fit_section", "_pnmr_sim_section")),
+        "dnp": ("DNP (Apply ▸ DNP)", ("_dnp_section",)),
+        "drift": ("Field drift correction (Process)", ("drift_section",)),
+    }
+
+    def _apply_section_shown(self, key: str, shown: bool) -> None:
+        for name in self.OPTIONAL_SECTIONS[key][1]:
+            section = getattr(self, name, None)
+            if section is not None:
+                section.setVisible(bool(shown))
+
+    def _show_recorded_tdeff_f1(self, spectrum, is_genuine_2d: bool, n1_native: int) -> None:
+        """Under Truncate F1: TopSpin's own F1 TDeff, in its units and in
+        increments, for a Bruker genuine 2D."""
+        proc2s = (spectrum.metadata.raw or {}).get("proc2s") or {}
+        try:
+            tdeff = int(float(proc2s.get("TDeff", 0) or 0))
+        except (TypeError, ValueError):
+            tdeff = 0
+        if not (is_genuine_2d and tdeff > 0):
+            self.tdeff_f1_recorded_label.setVisible(False)
+            return
+        fn_mode = (spectrum.metadata.raw or {}).get("fn_mode")
+        per = 2 if fn_mode in (4, 5, 6) else 1
+        incr = tdeff // per
+        text = (f"TopSpin: TDeff {tdeff} point{'s' if tdeff != 1 else ''}"
+                + (f" = {incr} increments" if per == 2 else "")
+                + ("  (every increment)" if incr >= n1_native else "")
+                + (" -- used by default." if incr < n1_native else "."))
+        self.tdeff_f1_recorded_label.setText(text)
+        self.tdeff_f1_recorded_label.setVisible(True)
+
+    def _set_section_shown(self, key: str, shown: bool) -> None:
+        """Show or hide one optional section (``OPTIONAL_SECTIONS``), and
+        remember it in ``hidden_sections``."""
+        shown = bool(shown)
+        self._apply_section_shown(key, shown)
+        box = self.section_shown_checkboxes.get(key)
+        if box is not None and box.isChecked() != shown:
+            box.blockSignals(True)
+            box.setChecked(shown)
+            box.blockSignals(False)
+        hidden = [k for k in (self._ui_settings.get("hidden_sections") or [])
+                  if k in self.OPTIONAL_SECTIONS and k != key]
+        if not shown:
+            hidden.append(key)
+        if hidden:
+            self._ui_settings["hidden_sections"] = sorted(hidden)
+        else:
+            self._ui_settings.pop("hidden_sections", None)
+        self._save_ui_settings()
+
+    def _section_shown(self, key: str) -> bool:
+        return key not in (self._ui_settings.get("hidden_sections") or [])
+
+    def _set_data_folder(self, folder: str) -> str:
+        """Settings ▸ Data: the default data folder (``""`` = none).
+        Saved; returns it. A file, or a folder that does not exist, is
+        refused with a message and the previous choice kept."""
+        folder = os.path.expanduser((folder or "").strip())
+        if folder and not os.path.isdir(folder):
+            QMessageBox.warning(self, "Default data folder",
+                                f"{folder} is not a folder that exists.")
+            folder = self._ui_settings.get("data_folder") or ""
+        data_directory.set_default_data_directory(folder)
+        if folder:
+            self._ui_settings["data_folder"] = folder
+        else:
+            self._ui_settings.pop("data_folder", None)
+        self._save_ui_settings()
+        if self.data_folder_edit.text() != folder:
+            self.data_folder_edit.setText(folder)
+        self.statusBar().showMessage(
+            f"Data dialogs will start in {folder}" if folder else "No default data folder.", 8000)
+        return folder
+
+    def _on_browse_data_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Default data folder",
+            data_directory.default_data_directory() or os.path.expanduser("~"),
+            options=QFileDialog.Option.DontUseNativeDialog)
+        if folder:
+            self._set_data_folder(folder)
+
+    def _on_topspin_processing_toggled(self, checked: bool) -> None:
+        self._ui_settings["topspin_processing_on_open"] = bool(checked)
+        self._save_ui_settings()
+        self.statusBar().showMessage(
+            "Bruker data will open with TopSpin's processing." if checked else
+            "Bruker data will open unprocessed (no phase, no window, every point) -- "
+            "experiments with saved openNMR processing still open as saved.", 8000)
+
+    def _on_data_folder_browse_at_start_toggled(self, checked: bool) -> None:
+        self._ui_settings["data_folder_browse_at_start"] = bool(checked)
+        self._save_ui_settings()
+
+    def _browse_default_data_folder(self) -> None:
+        """Point the Open panel's browser at the default data folder
+        (start-up, when Settings ▸ Data asks for it). Loads nothing."""
+        directory = data_directory.default_data_directory()
+        if not directory or not hasattr(self, "data_browser"):
+            return
+        matches = self._scan_for_spectra(directory)
+        self.data_browser.set_matches(
+            directory, matches,
+            truncated_at=self.SCAN_LIMIT if self._scan_was_truncated(matches) else None)
+
     def _on_browse_state_folder(self) -> None:
         start = io_state.default_state_root()
         while start and not os.path.isdir(start):
@@ -6016,6 +6304,20 @@ class MainWindow(QMainWindow):
         core_fit_progress.set_max_iterations(int(value))
         self._ui_settings["max_iterations"] = int(value)
         self._save_ui_settings()
+
+    def _set_drag_mode(self, mode: str, save: bool = True) -> None:
+        """Settings ▸ Interface ▸ Click and drag: ``"zoom"`` or ``"pan"``,
+        on every plot; remembered."""
+        mode = mode if mode in MplCanvas.DRAG_MODES else "zoom"
+        for canvas in self._all_canvases():
+            canvas.set_drag_mode(mode)
+        if self.drag_mode_combo.currentData() != mode:
+            self.drag_mode_combo.blockSignals(True)
+            self.drag_mode_combo.setCurrentIndex(self.drag_mode_combo.findData(mode))
+            self.drag_mode_combo.blockSignals(False)
+        if save:
+            self._ui_settings["drag_mode"] = mode
+            self._save_ui_settings()
 
     def _on_contour_scroll_direction_toggled(self, checked: bool) -> None:
         """Settings' checkbox or a contour's right-click item: one
@@ -6893,6 +7195,16 @@ class MainWindow(QMainWindow):
         self.fid_x_unit_combo.currentIndexChanged.connect(lambda _i: self._refresh_fid_display_preview())
         form.addRow("FID x-axis:", self.fid_x_unit_combo)
 
+        # For a genuine 2D, each dimension's controls under their own
+        # heading (explicit user report, 2026-10-14: "it is not obvious
+        # how to process only the direct or indirect dimensions" -- each
+        # has its own window, truncation and zero-fill: e.g. no window on
+        # 1H, QSINE 3 on 15N).
+        self.fid_f2_header = QLabel("<b>Direct dimension (F2)</b> -- window, truncation, "
+                                    "zero-fill, shift and linear prediction of each FID")
+        self.fid_f2_header.setWordWrap(True)
+        self.fid_f2_header.setVisible(False)
+        form.addRow(self.fid_f2_header)
         self.window_combo = QComboBox()
         self.window_combo.currentIndexChanged.connect(self._on_window_combo_changed)
         form.addRow("Window:", self.window_combo)
@@ -6953,13 +7265,13 @@ class MainWindow(QMainWindow):
         self.zero_fill_combo.currentIndexChanged.connect(self._on_zero_fill_combo_changed)
         form.addRow("Zero-fill to:", self.zero_fill_combo)
 
-        self.zero_fill_custom_spin = QSpinBox()
+        self.zero_fill_custom_spin = TypedSpinBox()
         self.zero_fill_custom_spin.setRange(1, 1 << 22)
         self.zero_fill_custom_spin.setVisible(False)
         self.zero_fill_custom_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Custom size:", self.zero_fill_custom_spin)
 
-        self.tdeff_spin = QSpinBox()
+        self.tdeff_spin = TypedSpinBox()   # typed freely: see widgets/typed_spinbox
         self.tdeff_spin.setRange(1, 1 << 20)
         self.tdeff_spin.setSuffix(" pts")
         self.tdeff_spin.setToolTip(
@@ -6974,7 +7286,9 @@ class MainWindow(QMainWindow):
             "With Align Echo on, this is additionally capped at the "
             "point the pre-echo portion wraps to, since truncating past "
             "that would keep the mirror-image tail alignment exists to "
-            "remove."
+            "remove.\n\n"
+            "Type any number: more than the points acquired becomes the "
+            "full FID when you press Enter or leave the box."
         )
         self.tdeff_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Truncate to:", self.tdeff_spin)
@@ -7077,21 +7391,37 @@ class MainWindow(QMainWindow):
         # would always be one selection stale here. Explicit user
         # feedback: F2 already had both (Truncate to/Zero-fill to,
         # above); F1 had neither, for either vendor.
-        self.tdeff_f1_spin = QSpinBox()
+        self.tdeff_f1_spin = TypedSpinBox()
         self.tdeff_f1_spin.setRange(1, 1 << 20)
-        self.tdeff_f1_spin.setSuffix(" pts")
+        # Increments, not TD points (explicit user report, 2026-10-14:
+        # 256 typed here meaning TopSpin's TDeff = 256 kept twice as much
+        # of a States-TPPI F1 as TopSpin does). The line below says what
+        # TopSpin's own TDeff is in these units.
+        self.tdeff_f1_spin.setSuffix(" increments")
         self.tdeff_f1_spin.setToolTip(
             "Truncate F1 (the indirect dimension) to this many "
             "increments before its own hypercomplex decode/FFT -- for "
             "States/States-TPPI/Echo-Antiecho data, a row *pair* per "
             "increment, so this never separates a real row from its "
-            "matching imaginary one. Defaults to every increment "
-            "actually present (no truncation)."
+            "matching imaginary one.\n\n"
+            "In increments, not TopSpin's TD points: TopSpin's TDeff = 256 "
+            "on a States/States-TPPI/Echo-Antiecho F1 is 128 increments here. "
+            "Defaults to TopSpin's own TDeff (the line below), else every "
+            "increment actually present."
         )
         self.tdeff_f1_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
+        self.fid_f1_header = QLabel("<b>Indirect dimension (F1)</b> -- set separately from F2; "
+                                    "used once F1 is transformed (Process Indirect Dimension)")
+        self.fid_f1_header.setWordWrap(True)
+        self.fid_f1_header.setVisible(False)
+        form.addRow(self.fid_f1_header)
         form.addRow("Truncate F1 to:", self.tdeff_f1_spin)
+        self.tdeff_f1_recorded_label = QLabel("")
+        self.tdeff_f1_recorded_label.setWordWrap(True)
+        self.tdeff_f1_recorded_label.setVisible(False)
+        form.addRow("", self.tdeff_f1_recorded_label)
 
-        self.zero_fill_f1_spin = QSpinBox()
+        self.zero_fill_f1_spin = TypedSpinBox()
         self.zero_fill_f1_spin.setRange(1, 1 << 20)
         self.zero_fill_f1_spin.setSuffix(" pts")
         self.zero_fill_f1_spin.setToolTip(
@@ -8065,6 +8395,10 @@ class MainWindow(QMainWindow):
             # above), so this must happen *before* the hypercomplex
             # decode just below, same ordering read_2d itself uses.
             live_truncate_f1 = spectrum.metadata.raw.get("live_truncate_f1")
+            if not isinstance(live_truncate_f1, int) or isinstance(live_truncate_f1, bool):
+                # No choice made here yet: TopSpin's TDeff, as the
+                # reader used it -- else this rebuild would undo it.
+                live_truncate_f1 = spectrum.metadata.raw.get("tdeff_f1_increments")
             if isinstance(live_truncate_f1, int) and not isinstance(live_truncate_f1, bool):
                 n1_native = data.shape[0] // 2 if fn_mode in (4, 5, 6) else data.shape[0]
                 if 0 < live_truncate_f1 < n1_native:
@@ -8555,6 +8889,8 @@ class MainWindow(QMainWindow):
             default_tdeff = min(saved_truncate, raw_length)
         else:
             recorded_tdeff = int(spectrum.metadata.raw.get("exp_params", {}).get("TDEFF", 0) or 0) if is_xpulse else 0
+            # Bruker: TopSpin's TDeff, as the reader used it.
+            recorded_tdeff = recorded_tdeff or int(spectrum.metadata.raw.get("tdeff_f2_points") or 0)
             recorded_tdeff = min(recorded_tdeff, raw_length) if recorded_tdeff else 0
             default_tdeff = recorded_tdeff if recorded_tdeff else raw_length
         self.tdeff_spin.setValue(max(1, default_tdeff))
@@ -8571,6 +8907,8 @@ class MainWindow(QMainWindow):
         # (re)set until *after* this method returns (see
         # _refresh_selection_display's own call order).
         is_genuine_2d = reprocessable and spectrum.ndim == 2 and not spectrum.is_pseudo_2d
+        self.fid_f2_header.setVisible(is_genuine_2d)
+        self.fid_f1_header.setVisible(is_genuine_2d)
         raw_fid_f1 = spectrum.metadata.raw.get("fid_raw") if is_genuine_2d else None
         fn_mode = spectrum.metadata.raw.get("fn_mode", 1)
         if raw_fid_f1 is not None and raw_fid_f1.ndim == 2:
@@ -8582,10 +8920,14 @@ class MainWindow(QMainWindow):
         self.tdeff_f1_spin.blockSignals(True)
         self.tdeff_f1_spin.setMaximum(max(1, n1_native))
         saved_truncate_f1 = raw.get("live_truncate_f1")
+        recorded_tdeff_f1 = raw.get("tdeff_f1_increments")
         if isinstance(saved_truncate_f1, int) and not isinstance(saved_truncate_f1, bool):
             default_tdeff_f1 = min(saved_truncate_f1, n1_native)
+        elif isinstance(recorded_tdeff_f1, int) and recorded_tdeff_f1 > 0:
+            default_tdeff_f1 = min(recorded_tdeff_f1, n1_native)
         else:
             default_tdeff_f1 = n1_native
+        self._show_recorded_tdeff_f1(spectrum, is_genuine_2d, n1_native)
         self.tdeff_f1_spin.setValue(max(1, default_tdeff_f1))
         self.tdeff_f1_spin.blockSignals(False)
 
@@ -10202,7 +10544,13 @@ class MainWindow(QMainWindow):
         phase1 = float(baked_in.get("phase1", 0.0))
         if not phase0 and not phase1:
             return {}
-        return {"phase0": phase0, "phase1": phase1, "pivot_frac": 0.5, "autophase": False}
+        kwargs = {"phase0": phase0, "phase1": phase1, "pivot_frac": 0.5}
+        # Autophase stays on (TopSpin's recorded phase underneath the
+        # user's), except with echo alignment -- see
+        # _saved_processing_read_kwargs.
+        if baked_in.get("align_echo") or baked_in.get("live_align_echo"):
+            kwargs["autophase"] = False
+        return kwargs
 
     def _reapply_phase_post_reload(self, spectrum) -> None:
         """Companion to :meth:`_current_phase_kwargs`: for the two
@@ -11284,6 +11632,9 @@ class MainWindow(QMainWindow):
             # it at its source.
             dim = self._phase_target_dim_key()
             spectrum.metadata.raw[io_bruker.RECORDED_PHASE_KEYS[dim][order]] = 0.0
+            # A deliberate change: kept over the file's own on reopen
+            # (io.persistence.load_processing_sidecar).
+            spectrum.metadata.raw[io_persistence.RECORDED_PHASE_USER_SET_KEY] = True
             spectrum.metadata.raw[io_bruker.USER_PHASE_KEYS[dim][order]] = 0.0
             # And any per-slice phase, for the same "zero means zero"
             # reason -- leaving the per-row table in place would zero
@@ -13327,6 +13678,8 @@ class MainWindow(QMainWindow):
             draw_correlations=self._draw_fit_view_correlation,
             format_value_error=self._format_value_error,
             on_fitted=self._store_multi_fit,
+            keep_fits=self._keep_multi_fits,
+            site_sources=self._multi_site_sources,
             draw_quantities=lambda draw: (self.fit_canvas.show_external_plot(draw, kind="curve"),
                                           self._raise_fit_canvas()))
         self._multi_fit_section = CollapsibleSection("Multi-spectrum", content=self.multi_fit_panel)
@@ -13418,7 +13771,7 @@ class MainWindow(QMainWindow):
         ``notebook/snr.py``. Spectra are Open experiments' 1D ones (as
         DNP's); regions are dragged on the Compare view; results are kept
         with each spectrum as ``fits["snr"]`` (its log and sidecar)."""
-        self.snr_panel = SnrPanel(spectra=self._dnp_spectra, selected=self._dnp_selected_rows,
+        self.snr_panel = SnrPanel(spectra=self._snr_spectra, selected=self._dnp_selected_rows,
                                   draw=self._dnp_draw, arm=self._snr_arm, store=self._store_dnp,
                                   style=self._dnp_style)
         self._snr_section = CollapsibleSection("Signal-to-Noise", content=self.snr_panel)
@@ -13730,6 +14083,95 @@ class MainWindow(QMainWindow):
                 "result": panel.result_state_for(key), "report": panel.report_text_for(key)}
             spectrum.metadata.raw["fits"] = fits
             self._run_sidecar_save_now(index)
+
+    def _multi_site_sources(self) -> list:
+        """Site lists Fit ▸ Multi-spectrum's "Copy sites from" offers
+        besides its own nuclei: Fit and Simulate ▸ CSA, Quad & J-coupling's
+        peaks, as (menu text, nucleus, site dicts)."""
+        out = []
+        for text, name in (("Fit ▸ CSA, Quad && J-coupling", "combined_fit_panel"),
+                           ("Simulate ▸ CSA, Quad && J-coupling", "combined_sim_panel")):
+            panel = getattr(self, name, None)
+            dicts = [d for d in (getattr(panel, "site_dicts", None) or []) if not d.get("isotope")]
+            nucleus = panel.nucleus_combo.currentText().strip() if panel is not None else ""
+            if dicts and nucleus:
+                n = len(dicts)
+                out.append((f"{text} ({nucleus}, {n} peak{'s' if n != 1 else ''})", nucleus,
+                            copy.deepcopy(dicts)))
+        return out
+
+    def _keep_multi_fits(self, name: str) -> list:
+        """Fit ▸ Multi-spectrum ▸ Keep Fits in Open Experiments (explicit
+        user request, 2026-10-14): each experiment's fit kept with its
+        spectrum as "name" (Kept fit models; restorable into the panel),
+        listed in Open experiments as its data with the fit over it, and
+        all of them superimposed in Compare -- as Kept fit models ▸
+        Compare does for one spectrum's fits. Returns the rows."""
+        panel = self.multi_fit_panel
+        result = panel.result
+        if not result:
+            return []
+        inputs = panel.get_state()
+        keys = result.get("keys") or []
+        rows, missing = [], []
+        for position, fit in enumerate(result["experiments"]):
+            key = keys[position] if position < len(keys) else None
+            index = self._multi_index(key) if key is not None else None
+            if fit.get("x") is None or index is None:
+                missing.append(fit.get("label") or f"spectrum {position + 1}")
+                continue
+            x = np.asarray(fit["x"], dtype=float)
+            curves = [np.asarray(c, dtype=float) for c in fit["site_spectra"].values()]
+            baseline = fit.get("baseline")
+            components = curves + [np.zeros_like(x) if baseline is None
+                                   else np.asarray(baseline, dtype=float)]
+            report = panel.report_text_for(key)
+            model = nb_fit_models.make_fit_model(
+                name, "multi", x, fit["y"], fit["y_fit"], components=components,
+                labels=list(fit["site_spectra"]),
+                n_free=sum(1 for p in fit["parameters"] if p.get("free")),
+                mask=fit.get("mask"), report=report, target=self.session.label(index),
+                x_label=self.fit_canvas.ax.get_xlabel() if self.fit_canvas.ax else "",
+                title=f"{name} -- {fit.get('label') or self.session.label(index)}",
+                panel_inputs=inputs, panel_result=panel.result_state_for(key))
+            models = self._fit_models(index)
+            model["id"] = max([m.get("id", 0) for m in models] + [0]) + 1
+            models.append(model)
+            stats = nb_fit_models.fit_statistics(model)
+            self._set_fit_models(index, models, event=(
+                f"Kept fit model “{name}” (multi-spectrum fit, spectrum {position + 1} of "
+                f"{len(result['experiments'])}; R² {stats['r2']:.5f})\n{report}"))
+            self._schedule_sidecar_save(index)
+            row = self._fit_model_experiment(index, model["id"])
+            if row is not None:
+                rows.append(row)
+        self._refresh_fit_model_panels()
+        if missing:
+            QMessageBox.information(
+                self, "Keep fits", "Not kept (its curves are not here -- run Fit All again to "
+                "keep it): " + ", ".join(missing) + ".")
+        if rows:
+            self._show_rows_superimposed_in_compare(rows)
+            self.statusBar().showMessage(
+                f"Kept “{name}” for {len(rows)} spectra, in Open experiments and superimposed in "
+                "Compare -- right-click an entry ▸ Fit Display… for its components, colours "
+                "and residual.", 10000)
+        return rows
+
+    def _show_rows_superimposed_in_compare(self, rows, layout: str = "overlay") -> None:
+        """Open experiment ``rows`` alone in Compare, ticked, stacked or
+        superimposed, and Compare shown."""
+        entries = [(r, None) for r in rows]
+        self._compare_pinned_entries = list(entries)
+        self._rebuild_compare_list(entries, preserve_previous=False)
+        for i in range(self.compare_list.count()):
+            self.compare_list.item(i).setCheckState(Qt.CheckState.Checked)
+        blocked = self.layout_mode_combo.blockSignals(True)
+        self.layout_mode_combo.setCurrentIndex(0 if layout == "stack" else 1)
+        self.layout_mode_combo.blockSignals(blocked)
+        self._update_compare_tab_visibility()
+        self._show_side_tab("Compare")
+        self._refresh_compare_view(switch_tab=True, force_render=True)
 
     def _send_combined_to_simulation(self, settings: dict, site_dicts: list, nucleus: str) -> None:
         """Fitted sites into Simulate > CSA, Quad & J-coupling, simulated
@@ -14938,17 +15380,7 @@ class MainWindow(QMainWindow):
                 rows.append(row)
         if not rows:
             return
-        entries = [(r, None) for r in rows]
-        self._compare_pinned_entries = list(entries)
-        self._rebuild_compare_list(entries, preserve_previous=False)
-        for i in range(self.compare_list.count()):
-            self.compare_list.item(i).setCheckState(Qt.CheckState.Checked)
-        blocked = self.layout_mode_combo.blockSignals(True)
-        self.layout_mode_combo.setCurrentIndex(0 if layout == "stack" else 1)
-        self.layout_mode_combo.blockSignals(blocked)
-        self._update_compare_tab_visibility()
-        self._show_side_tab("Compare")
-        self._refresh_compare_view(switch_tab=True, force_render=True)
+        self._show_rows_superimposed_in_compare(rows, layout)
         self.statusBar().showMessage(
             f"{len(rows)} kept fits in Compare ({'stacked' if layout == 'stack' else 'superimposed'})"
             " -- right-click an entry ▸ Fit Display… for its components, colours and residual.",
@@ -15008,7 +15440,8 @@ class MainWindow(QMainWindow):
             self.combined_fit_model.show_model(
                 "spin_system" if model["kind"] == "jcoupling" else "peaks")
         panel.restore_result(model["panel_result"], self.session.spectra[index])
-        self._store_fit(model["kind"], index)
+        if model["kind"] != "multi":   # a multi-spectrum fit is stored by _store_multi_fit
+            self._store_fit(model["kind"], index)
         history = self._ensure_history(index)
         if history is not None:
             io_history.add_event(history, f"Re-plotted kept fit “{model['name']}” in the "

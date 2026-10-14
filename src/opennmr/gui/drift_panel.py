@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..notebook import drift_correction as dc
+from . import data_directory
 
 _SAME_AS_BEFORE = "(the 'before' spectrum)"
 
@@ -330,7 +331,9 @@ class DriftCorrectionPanel(QWidget):
     def _default_folder(self) -> str:
         _index, spectrum = self._selected_spectrum()
         path = getattr(getattr(spectrum, "metadata", None), "source_path", None) if spectrum else None
-        return path if path and os.path.isdir(path) else ""
+        # The selected experiment itself is the likeliest one to correct;
+        # else the default data folder (Settings ▸ Data).
+        return path if path and os.path.isdir(path) else data_directory.start_directory()
 
     def write_dataset(self, source: str, destination: str | None = None) -> dc.DriftCorrectionResult:
         """Correct ``source`` into ``destination`` (``None``: next free
@@ -421,6 +424,7 @@ class NusConcatDialog(QDialog):
 
     def _add(self) -> None:
         start = self.list.item(self.list.count() - 1).text() if self.list.count() else self._start
+        start = start or data_directory.start_directory()
         path = QFileDialog.getExistingDirectory(self, "NUS block (EXPNO folder)", start)
         if path:
             self.add_source(path)
