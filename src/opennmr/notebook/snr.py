@@ -1165,6 +1165,114 @@ def snr_to_csv(result: dict, path: str) -> None:
         writer.writerows(rows)
 
 
+def _num(value, digits: int = 4) -> str:
+    if value is None:
+        return "—"
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{value:.{digits}g}" if math.isfinite(value) else "—"
+
+
+#: A convention's label in a narrow table: its formula, then whose it is.
+_SHORT_CONVENTION = {
+    "sino": "H/2σ  (TopSpin ×½)", "sino_topspin": "TopSpin sino", "snr_3sigma": "H/3σ",
+    "ph_eur": "2H/h  (Ph. Eur.)", "integral_snr": "Area/σ", "integral_sino": "Area/2σ",
+    "volume_snr": "Volume/σ", "volume_sino": "Volume/2σ",
+}
+
+
+def snr_summary(result: dict) -> list[dict]:
+    """The result as a compact table: one row per quantity, one value per
+    spectrum -- what Apply ▸ Signal-to-Noise shows (explicit user report,
+    2026-10-15: the full report was "really hard to see"; a table "easier
+    to read and something where you do not have to scroll lots").
+
+    Each row is ``{"name", "short", "detail", "about", "values": [str, ...],
+    "notes": [str, ...]}``: ``short`` the row's label in a narrow table
+    (a convention by its formula: ``H/2σ (TopSpin)``), ``detail`` the formula or
+    unit, ``about`` what it means, ``notes`` a per-spectrum explanation
+    (the warnings behind "2 warnings", say), "" where there is none. The
+    full sentences stay in :func:`snr_report`; nothing here is computed
+    that the report does not state."""
+    rows = result["rows"] if "rows" in result else [result]
+    n = len(rows)
+    blank = [""] * n
+    out = []
+
+    def add(name, detail, about, values, notes=None, short=None):
+        out.append({"name": name, "short": short or name, "detail": detail, "about": about,
+                    "values": list(values),
+                    "notes": list(notes) if notes is not None else list(blank)})
+
+    add("S/N", "H / σ  ± 1σ", "Height above the noise level over the noise standard deviation "
+        "(openNMR's main value), with its standard uncertainty.",
+        [f"{_num(r['snr'])} ± {_num(r['snr_error'], 2)}" for r in rows], short="S/N  (H/σ)")
+    add("95 % interval", "conservative", "The range the S/N lies in with 95 % confidence, "
+        "from the independent noise points.",
+        [f"{_num(r['snr_interval'][0], 3)} – {_num(r['snr_interval'][1], 3)}" for r in rows])
+    by_key: dict = {}
+    for j, r in enumerate(rows):
+        for c in snr_conventions(r):
+            if c["key"] == "snr":
+                continue
+            entry = by_key.setdefault(c["key"], {"name": c["name"], "detail": c["formula"],
+                                                 "short": _SHORT_CONVENTION.get(c["key"]),
+                                                 "about": c["about"], "values": ["—"] * n})
+            entry["values"][j] = _num(c["value"])
+    for key, _name, _formula, _about, _only in CONVENTIONS:
+        if key in by_key:
+            e = by_key[key]
+            add(e["name"], e["detail"], e["about"], e["values"], short=e["short"])
+    add("Noise σ", "± its uncertainty", "Standard deviation of the detrended noise region.",
+        [f"{_num(r['noise_sigma'], 3)} ± {_num(100 * r['noise_sigma_error'] / r['noise_sigma'], 2)} %"
+         if r.get("noise_sigma") else "—" for r in rows])
+    add("Line at", "ppm", "Where the measured height is (F2, F1 for a 2D).",
+        [(f"{_num(r['position_ppm'][0])}, {_num(r['position_ppm'][1])}"
+          if r.get("ndim") == 2 else _num(r["position_ppm"])) for r in rows])
+    add("Detected", "5 % false alarm", "Whether the line is above what pure noise in this "
+        "signal region would reach 5 % of the time.",
+        ["yes" if r["detected"] else "NO" for r in rows],
+        [f"threshold {_num(r.get('detection_threshold'), 3)} σ" for r in rows])
+    add("S/N per √scan", "S/N / √NS", "For comparing spectra recorded with different numbers "
+        "of scans.", [_num(r.get("snr_per_sqrt_scan")) for r in rows],
+        [f"NS = {_num(r.get('ns'), 6)}" if r.get("ns") else "" for r in rows])
+    comparisons = {c["label"]: c for c in result.get("comparisons") or []}
+    if comparisons:
+        ref_label = next(iter(comparisons.values()))["reference"]
+        values, notes = [], []
+        for r in rows:
+            c = comparisons.get(r["label"])
+            if c is None:
+                values.append("reference" if r["label"] == ref_label else "—")
+                notes.append("")
+                continue
+            values.append(f"{_num(c['ratio'], 3)} ± {_num(c['ratio_error'], 2)}"
+                          + (" *" if c.get("significant") else ""))
+            note = ("differs significantly (95 %)" if c.get("significant")
+                    else "not significantly different")
+            if c.get("expected_from_scans") is not None:
+                note += (f"; √(NS ratio) predicts {_num(c['expected_from_scans'], 3)}: "
+                         + ("consistent" if c.get("consistent_with_scans") else "NOT consistent"))
+            notes.append(note)
+        add(f"Ratio to {ref_label}", "S/N ÷ reference's", "Each S/N over the reference "
+            "spectrum's, ± 1σ; * = differs significantly (95 %).", values, notes,
+            short="Ratio to reference")
+    differing = set(result.get("differing") or [])
+    if differing:
+        add("Regions", "† own", "Which spectra used their own regions rather than the shared "
+            "ones.", ["own †" if r["label"] in differing else "shared" for r in rows],
+            [f"signal {_fmt_window(r['signal_region'])}; noise "
+             + " + ".join(_fmt_window(w) for w in r["noise_region"]) for r in rows])
+    add("Checks", "on the noise region", "Warnings about the regions and the noise (hover a "
+        "value, or see the full report).",
+        [("OK" if not r["warnings"] else f"{len(r['warnings'])} warning"
+          + ("s" if len(r["warnings"]) > 1 else "")) for r in rows],
+        ["\n".join(r["warnings"]) for r in rows])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Plot
 # ---------------------------------------------------------------------------
@@ -1172,7 +1280,8 @@ def snr_to_csv(result: dict, path: str) -> None:
 def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode: str = "stack",
              xlims=None, cmap: str = "black", fontsize: float = 12.0,
              signal_colour: str = "#009e73", noise_colour: str = "0.6", regions=None,
-             linewidth: float | None = None):
+             linewidth: float | None = None, names: str | None = None,
+             legend_fontsize: float | None = None, annotation_fontsize: float | None = None):
     """The spectra with each one's signal region (green) and noise region
     (grey) shaded in its own row, the measured line marked and its S/N
     written beside it. ``mode`` 'stack' (one row each) or 'overlay' (the
@@ -1182,7 +1291,13 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
     every other spectrum plot -- it was a fixed 0.9, so the traces
     thinned the moment S/N was shown; explicit user report 2026-10-15).
     ``xlims``: the view to draw (the GUI passes the view on screen, so
-    choosing a region does not zoom). Without a ``result``, ``regions`` -- one
+    choosing a region does not zoom). ``names``: how the spectra are named
+    -- ``"legend"``, ``"labels"`` (written on each row) or ``"none"``;
+    default labels for a stack, a legend for an overlay. ``legend_fontsize``
+    / ``annotation_fontsize`` (the S/N values): default ``0.7`` / ``0.6`` of
+    ``fontsize``; the GUI passes its legend size for both, so they match
+    every other plot's (explicit user report, 2026-10-15). Without a
+    ``result``, ``regions`` -- one
     ``{"signal": (a, b) or None, "noise": [(a, b), ...] or None}`` per
     spectrum -- are shaded as a preview. Returns the figure."""
     import matplotlib.pyplot as plt
@@ -1214,6 +1329,12 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
         raise ValueError("Give the spectra the result was measured on (one each).")
     n = len(rows)
     labels = list(labels) if labels is not None else [r["label"] for r in rows]
+    legend_fontsize = legend_fontsize or fontsize * 0.7
+    annotation_fontsize = annotation_fontsize or fontsize * 0.6
+    if names is None:
+        names = "labels" if mode == "stack" else "legend"
+    if names not in ("legend", "labels", "none"):
+        raise ValueError("names: 'legend', 'labels' or 'none'.")
     if any(_is_2d(s) for s in spectra):
         if figure is None:
             cols = min(n, 3)
@@ -1221,7 +1342,9 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
         else:
             figure.clear()
         return _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colour,
-                                noise_colour)
+                                noise_colour, linewidth=linewidth,
+                                title_fontsize=legend_fontsize,
+                                annotation_fontsize=annotation_fontsize)
     if figure is None:
         figure = plt.figure(figsize=(3.375 * 1.6, 3.375 if n == 1 or mode == "overlay"
                                      else min(1.4 + 0.6 * n, 9.0)))
@@ -1288,26 +1411,27 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
                     color=palette[i], markersize=4, linestyle="none")
             mark = " †" if labels[i] in differing else ""
             ax.annotate(f"S/N {r['snr']:.3g}{mark}", xy=(r["position_ppm"], ypk + off),
-                        xytext=(4, 2), textcoords="offset points", fontsize=fontsize * 0.6,
+                        xytext=(4, 2), textcoords="offset points", fontsize=annotation_fontsize,
                         color=palette[i])
-        if mode == "stack" and n > 1:
+        if names == "labels" and n > 1:
             # Above the row's noise (5σ when measured), not over the trace.
             above_noise = 5.0 * r["noise_sigma"] if "noise_sigma" in r else 0.15 * (hi - lo)
             ax.annotate(labels[i], xy=(0.0, off + min(above_noise, 0.5 * hi)),
                         xycoords=("axes fraction", "data"),
-                        xytext=(2, 3), textcoords="offset points", fontsize=fontsize * 0.6,
+                        xytext=(2, 3), textcoords="offset points", fontsize=legend_fontsize,
                         color=palette[i], clip_on=True)
     nucleus = rows[0].get("nucleus") or (data[0][2].get("nucleus") if data else "")
     ax.set_xlabel(f"{_nucleus_label(nucleus or '')} shift (ppm)".strip(), fontsize=fontsize)
     ax.set_xlim(hi_x, lo_x)
-    if mode == "overlay" and 1 < n <= 12:
-        ax.legend(frameon=False, fontsize=fontsize * 0.7)
+    if names == "legend" and 1 < n <= 12:
+        ax.legend(frameon=False, fontsize=legend_fontsize)
     _spectrum_axes(ax, fontsize)
     figure.tight_layout()
     return figure
 
 
-def _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colour, noise_colour):
+def _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colour, noise_colour,
+                     linewidth=None, title_fontsize=None, annotation_fontsize=None):
     """One panel per spectrum -- a 2D as contours with its signal box
     (green) and noise boxes (grey), a 1D as a line with its regions
     shaded -- for a list that holds any 2D."""
@@ -1345,7 +1469,7 @@ def _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colou
                 f2, f1 = r["position_ppm"]
                 ax.plot([f2], [f1], marker="x", color="k", markersize=5, linestyle="none")
                 ax.annotate(f"S/N {r['snr']:.3g}", xy=(f2, f1), xytext=(4, 4),
-                            textcoords="offset points", fontsize=fontsize * 0.6)
+                            textcoords="offset points", fontsize=annotation_fontsize)
             ax.set_xlim(float(x2.max()), float(x2.min()))
             ax.set_ylim(float(x1.max()), float(x1.min()))
             ax.set_xlabel("F2 (ppm)", fontsize=fontsize * 0.8)
@@ -1353,7 +1477,7 @@ def _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colou
         else:
             x, y, info = _xy(spectrum)
             base = r.get("noise_mean", 0.0)
-            ax.plot(x, y - base, color=palette[i])
+            ax.plot(x, y - base, color=palette[i], linewidth=linewidth)
             if r.get("signal_region") is not None:
                 ax.axvspan(r["signal_region"][1], r["signal_region"][0], color=signal_colour,
                            alpha=0.18, linewidth=0)
@@ -1361,12 +1485,12 @@ def _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colou
                 ax.axvspan(w_lo, w_hi, color=noise_colour, alpha=0.18, linewidth=0)
             if "snr" in r:
                 ax.annotate(f"S/N {r['snr']:.3g}", xy=(0.02, 0.92), xycoords="axes fraction",
-                            fontsize=fontsize * 0.6)
+                            fontsize=annotation_fontsize)
             ax.set_xlim(float(np.max(x)), float(np.min(x)))
             ax.set_xlabel(f"{_nucleus_label(info.get('nucleus') or '')} shift (ppm)".strip(),
                           fontsize=fontsize * 0.8)
             _spectrum_axes(ax, fontsize * 0.8)
-        ax.set_title(labels[i], fontsize=fontsize * 0.7)
+        ax.set_title(labels[i], fontsize=title_fontsize or fontsize * 0.7)
         ax.tick_params(labelsize=fontsize * 0.6)
     del differing
     figure.tight_layout()

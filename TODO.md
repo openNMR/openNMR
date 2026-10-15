@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-15 round 2 (S/N text at the legend size, S/N result table, Mac drag_zoom traceback): 8 new tests in `test_snr_display_and_drag_cleanup.py`. Related files only: 465 passed. **Run the full suite locally before committing.***
+
 *2026-10-15 (a 1D proc number of a 2D opens; S/N keeps the line width and the view): 6 new tests in `test_procno_1d_of_2d_and_snr_view.py`. Related files only: 174 passed, 20 skipped; test_gui.py -k "procno or processed" 5 passed. **Run the full suite locally before committing.***
 
 *2026-10-14 round 3 (proc-number checklist, S/N keeps plot styles, export size in cm, more optional sections): 11 new tests in `test_procnos_snr_styles_units_sections.py`. Related files only: 377 passed, 1 skipped; test_gui.py subset 49 passed, 14 skipped. **Run the full suite locally before committing.***
@@ -188,6 +190,24 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## S/N text at the legend's size, a readable S/N result table, the Mac drag_zoom traceback (2026-10-15, round 2)
+
+**Asked:** (1) "The legend label size when computing s/n changes compared to other legend label sizes (e.g., in compare or when showing just one spectrum) ... Same goes for the text that describes the s/n value." (2) "the 'Result' table when computing the s/n is really hard to see: you have to massively shrink the viewing window (and expand the left-hand menu) ... Happy for this to be a table, but just make it easier to read and something where you do not have to scroll lots". (3) A Mac user's terminal filled with `AttributeError: 'NoneType' object has no attribute 'button'` from matplotlib's `NavigationToolbar2.drag_zoom` (backend_bases.py:3289), cause unknown.
+
+**What was wrong:**
+- (1) Measured: Compare's legend was 16 pt (the canvas's `_legend_kwargs`); in a stack the S/N plot named its rows with its own text labels and wrote the S/N values at `fontsize*0.6` of a fixed 12, i.e. 7.2 pt, whatever Plot Style said. A legend-size change also did not redraw an external figure, so text only the draw makes could not follow it.
+- (2) The Result group was a conventions table with sentence-long row names ("TopSpin sino, its own arithmetic: maxval / (2·noise_TS)"), capped at 260 px with its own scroll bar, followed by the entire `snr_report` as a paragraph in the side panel.
+- (3) `MplCanvas._cancel_navigation_drag` (run by every figure rebuild) set the toolbar's `_zoom_info`/`_pan_info` to None but left the motion callback that matplotlib's press had connected (`info.cid` -> `drag_zoom`/`drag_pan`). Every later mouse move then raised. Reproduced exactly in a test. A second route: matplotlib's own `press_zoom` overwrites an unfinished `_zoom_info` (a second button mid-drag; Ctrl-click is the right button on a Mac trackpad), leaking the first callback in the same way.
+
+**Built:**
+- `snr.plot_snr(..., names="legend"|"labels"|"none", legend_fontsize=, annotation_fontsize=)` (notebook defaults unchanged). `SnrPanel._plot_kwargs` reads the Compare canvas's style at draw time: names as a real legend (so the canvas's legend sweep gives it Compare's size, frame, font and Show Legend) or on the rows when Plot Style says "labels", S/N values at the legend size. `MplCanvas.set_style` now redraws an external figure on `legend_fontsize`/`legend_style` too.
+- `snr.snr_summary(result)`: a row per quantity (S/N ± 1σ, 95 % interval, every other convention by formula -- "H/2σ (TopSpin ×½)", "2H/h (Ph. Eur.)", "Area/σ"... -- noise σ, line position, detected, S/N per √scan, ratio to the reference, own regions, checks), a value per spectrum, with notes. The panel shows it in `snr_panel.FitTable` (as tall as its rows, no inner vertical scroll; sideways scroll only if wider than the panel), a one-line status above (regions, warnings) and a hint (hover a row for formula and meaning). The sentences moved to **Full Report…** (`SnrReportDialog`, resizable, repeats the table unelided). `result_label` is now that dialog's label (same plain text); `conventions_table`/`conventions_label`/`_fill_conventions` are gone (`conventions_rows()` kept).
+- `_cancel_navigation_drag` disconnects the drag callback (and for a pan ends it and reconnects the toolbar's `mouse_move`, as `release_pan` does). `_Toolbar.press_zoom/press_pan` finish an unfinished drag first; `_Toolbar.drag_zoom/drag_pan` with no info are a no-op that disconnects themselves.
+
+**Not changed:** the S/N spectra table (step 1) still has its seven columns, which also scroll sideways in a narrow panel; the S/N plot is still one axes with offset traces.
+
+Tests: `tests/test_snr_display_and_drag_cleanup.py` (8; the drag test reproduces the Mac traceback on the old code); `test_snr_conventions_2d.py`'s GUI test now reads the result table. Only the related files, as asked: S/N, canvas, Compare tools, export, plot kinds, simulation plots, line styles, DNP, settings/drag, proc numbers, colour-bar gap (423 passed) and the two legend files (42 passed).
 
 ## A 1D proc number of a 2D opens; S/N keeps the plot style's line width and the view (2026-10-15)
 

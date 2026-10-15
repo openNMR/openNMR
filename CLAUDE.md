@@ -111,6 +111,11 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   and the **default data folder** (`data_folder`, held app-wide in
   `gui/data_directory.py`; every "open data" dialog starts from
   `data_directory.start_directory()`).
+- **Toolbar zoom/pan drags**: matplotlib's press connects a motion
+  callback whose id is in `_zoom_info.cid` / `_pan_info.cid`. Never set
+  those infos to None without disconnecting it (use
+  `MplCanvas._cancel_navigation_drag`): the orphan raises on every mouse
+  move (a Mac user's terminal, 2026-10-15).
 - **Number boxes users type long values into** (DPI, Truncate to,
   zero-fill sizes) are `widgets/typed_spinbox.TypedSpinBox`: Qt's
   QSpinBox refuses a keystroke whose intermediate value passes the
@@ -134,6 +139,11 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   dimension). Every convention side by side: `snr.CONVENTIONS` /
   `snr_conventions(result)` -- add a new convention there. Kept as
   `fits["snr"]` through `_store_dnp`. Do not add another noise estimator.
+  The panel's result is `snr.snr_summary(result)` (a row per quantity,
+  a column per spectrum) in a `FitTable` sized to its rows; the
+  sentences are under Full Report…. Its plot's text sizes come from the
+  Compare canvas's legend style, read at draw time -- never hard-code
+  a size there.
 - **Dynamics** is Fit Curve, then two collapsible sections from
   `gui/dynamics_panels.py`: Relaxation vs Temperature (BPP / Arrhenius /
   Hendrickson-Bray; maths `notebook/vt_relaxation.py`) and Exchange

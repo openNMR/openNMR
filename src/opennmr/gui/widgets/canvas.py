@@ -360,17 +360,59 @@ class _Toolbar(NavigationToolbar2QT):
         if "zoom" in self._actions:
             self._actions["zoom"].setChecked("ZOOM" in mode or default == "zoom")
 
+    # A drag's motion callback reads ``_zoom_info`` / ``_pan_info`` on
+    # every mouse move. matplotlib's own press overwrites an unfinished
+    # info without disconnecting the first callback (a second button
+    # pressed mid-drag -- Ctrl-click is the right button on a Mac
+    # trackpad), and that orphan then raised AttributeError on every
+    # later mouse move once the info was cleared (user report from a Mac,
+    # 2026-10-15). So: finish an unfinished drag before a new press, and
+    # make an orphaned callback a no-op that disconnects itself.
+
+    def _cancel_unfinished(self) -> None:
+        owner = self.parent()
+        if isinstance(owner, MplCanvas) and (getattr(self, "_zoom_info", None) is not None
+                                             or getattr(self, "_pan_info", None) is not None):
+            owner._cancel_navigation_drag()
+
     def press_pan(self, event) -> None:
         owner = self.parent()
         if isinstance(owner, MplCanvas):
             owner.note_natural_view()
+        self._cancel_unfinished()
         super().press_pan(event)
 
     def press_zoom(self, event) -> None:
         owner = self.parent()
         if isinstance(owner, MplCanvas):
             owner.note_natural_view()
+        self._cancel_unfinished()
         super().press_zoom(event)
+
+    def drag_zoom(self, event) -> None:
+        if getattr(self, "_zoom_info", None) is None:
+            self._drop_orphan_callback(self.drag_zoom)
+            return
+        super().drag_zoom(event)
+
+    def drag_pan(self, event) -> None:
+        if getattr(self, "_pan_info", None) is None:
+            self._drop_orphan_callback(self.drag_pan)
+            return
+        super().drag_pan(event)
+
+    def _drop_orphan_callback(self, method) -> None:
+        """Disconnect every motion callback bound to ``method`` (an
+        orphan whose drag already ended)."""
+        try:
+            callbacks = self.canvas.callbacks.callbacks.get("motion_notify_event", {})
+            for cid, ref in list(callbacks.items()):
+                func = ref()
+                if func is not None and getattr(func, "__func__", None) is method.__func__ \
+                        and getattr(func, "__self__", None) is self:
+                    self.canvas.mpl_disconnect(cid)
+        except Exception:  # noqa: BLE001 -- private matplotlib registry; a no-op is enough
+            pass
 
     def save_figure(self, *args) -> None:
         """Overridden so a saved figure is never silently missing
@@ -2891,12 +2933,37 @@ class MplCanvas(QWidget):
 
         Written defensively with ``getattr``: these are private
         matplotlib attributes, and a version that renames them should
-        degrade to doing nothing rather than crashing a redraw."""
+        degrade to doing nothing rather than crashing a redraw.
+
+        The press connected a motion callback (``drag_zoom`` /
+        ``drag_pan``, its id in the info's ``cid``) that reads the info
+        on every mouse move. Clearing the info without disconnecting it
+        left that callback live: every later mouse move raised
+        ``AttributeError: 'NoneType' object has no attribute 'button'``
+        in ``drag_zoom`` (user report from a Mac, 2026-10-15, a
+        traceback per mouse move on the command line). So this undoes
+        exactly what the press did -- disconnect the drag callback and,
+        for a pan, reconnect the toolbar's ordinary ``mouse_move`` as
+        ``release_pan`` does."""
         toolbar = getattr(self, "toolbar", None)
         if toolbar is not None:
+            mpl_canvas = getattr(toolbar, "canvas", None) or self.canvas
             for attr in ("_zoom_info", "_pan_info"):
-                if getattr(toolbar, attr, None) is not None:
-                    setattr(toolbar, attr, None)
+                info = getattr(toolbar, attr, None)
+                if info is None:
+                    continue
+                cid = getattr(info, "cid", None)
+                if cid is not None:
+                    mpl_canvas.mpl_disconnect(cid)
+                if attr == "_pan_info" and hasattr(toolbar, "mouse_move"):
+                    for ax in getattr(info, "axes", ()) or ():
+                        try:
+                            ax.end_pan()
+                        except Exception:  # noqa: BLE001 -- an Axes already torn down
+                            pass
+                    toolbar._id_drag = mpl_canvas.mpl_connect(
+                        "motion_notify_event", toolbar.mouse_move)
+                setattr(toolbar, attr, None)
         # This canvas's own box-zoom drag (the default drag) too.
         self._zoom_start = None
         self._pan_start = None
@@ -4845,10 +4912,12 @@ class MplCanvas(QWidget):
         # A figure drawn by someone else (Simulate, Apply ▸ DNP) reads
         # its colours and text sizes from style_settings() as it draws:
         # those live on artists only the draw makes, so it is redrawn.
+        # The legend's size and style too: the S/N plot writes its values
+        # and (optionally) its names at the legend's size (2026-10-15).
         if self._external_plot and self._external_draw is not None and any(
                 value is not None for value in (labelsize, font_family, compare_colormap, colorbar_gap,
                                                 map_colormap, tensor_style, trace_color,
-                                                linewidth)):
+                                                linewidth, legend_fontsize, legend_style)):
             self._redraw_external()
 
         # Everything except grid/legend is the same "apply the current

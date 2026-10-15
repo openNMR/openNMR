@@ -27,12 +27,13 @@ import re
 import time
 
 from .widgets.report_label import ReportLabel
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ..notebook import snr
@@ -85,6 +86,97 @@ def _item(text, align_right=False) -> QTableWidgetItem:
     if align_right:
         item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     return item
+
+
+def _elide(text: str, width: int = 16) -> str:
+    """A long spectrum name shortened in the middle (the full name is the
+    column's tooltip)."""
+    text = str(text)
+    if len(text) <= width:
+        return text
+    keep = width - 1
+    return text[: (keep + 1) // 2] + "…" + text[-(keep // 2):]
+
+
+class FitTable(QTableWidget):
+    """A table exactly as tall as its rows: no inner vertical scroll bar,
+    so the whole result shows at once (explicit user report, 2026-10-15:
+    the result "is really hard to see"). Wider than the panel, it scrolls
+    sideways, and its height allows for that scroll bar."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(0, 0, parent)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setAlternatingRowColors(True)
+        self.setWordWrap(False)
+        self.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft
+                                                  | Qt.AlignmentFlag.AlignVCenter)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+
+    def content_height(self) -> int:
+        rows = sum(self.rowHeight(i) for i in range(self.rowCount()))
+        height = rows + 2 * self.frameWidth()
+        if not self.horizontalHeader().isHidden():
+            height += self.horizontalHeader().sizeHint().height()
+        wide = self.verticalHeader().sizeHint().width() + self.horizontalHeader().length()
+        if wide + 2 * self.frameWidth() > self.width():
+            height += self.horizontalScrollBar().sizeHint().height()
+        return height
+
+    def sizeHint(self) -> QSize:
+        return QSize(super().sizeHint().width(), self.content_height())
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(super().minimumSizeHint().width(), self.content_height())
+
+    def refit(self) -> None:
+        self.resizeRowsToContents()
+        self.setFixedHeight(self.content_height())
+        self.updateGeometry()
+
+    def resizeEvent(self, event) -> None:                  # noqa: N802 -- Qt's name
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            height = self.content_height()
+            if height != self.height():
+                self.setFixedHeight(height)
+
+
+class SnrReportDialog(QDialog):
+    """The full S/N report -- the result table again (wide enough here for
+    many spectra), then every number in sentences, the checks and the
+    regions each spectrum used -- in its own resizable window rather than
+    a long paragraph squeezed into the side panel."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Signal-to-Noise: Full Report")
+        v = QVBoxLayout(self)
+        self.table = FitTable()
+        v.addWidget(self.table)
+        self.label = ReportLabel("")
+        self.label.setWordWrap(True)
+        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        holder = QWidget()
+        inner = QVBoxLayout(holder)
+        inner.addWidget(self.label)
+        inner.addStretch(1)
+        scroll.setWidget(holder)
+        v.addWidget(scroll, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self.copy_button = buttons.addButton("Copy", QDialogButtonBox.ButtonRole.ActionRole)
+        self.copy_button.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(self.label.text()))
+        buttons.rejected.connect(self.close)
+        v.addWidget(buttons)
+        self.resize(680, 620)
 
 
 def _g(value, digits=3) -> str:
@@ -302,25 +394,36 @@ class SnrPanel(QWidget):
             lambda _i: self.result is not None and self.calculate())
         form.addRow("Compare against:", self.reference_combo)
         v.addLayout(form)
-        # The same measurement by each convention, side by side (explicit
-        # user request, 2026-10-14: "evaluate these values and present
-        # them to people to compare").
-        self.conventions_label = QLabel(
-            "Each convention, for the same height, area and noise (they differ by fixed factors "
-            "or by what is measured -- quote the convention with the number):")
-        self.conventions_label.setWordWrap(True)
-        self.conventions_label.setVisible(False)
-        v.addWidget(self.conventions_label)
-        self.conventions_table = QTableWidget(0, 0)
-        self.conventions_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.conventions_table.setVisible(False)
-        self.conventions_table.setMaximumHeight(260)
-        v.addWidget(self.conventions_table)
-        self.result_label = ReportLabel("")
-        self.result_label.setWordWrap(True)
-        self.result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        v.addWidget(self.result_label)
+        # One compact table, a row per quantity and a column per spectrum
+        # (snr.snr_summary): the main S/N, every convention side by side
+        # (explicit user request, 2026-10-14: "evaluate these values and
+        # present them to people to compare"), the noise, detection,
+        # √scan and the comparison. It replaced a conventions table with
+        # sentence-long row names and the whole report as a paragraph, which
+        # needed a shrunk window and a widened panel to read (explicit
+        # user report, 2026-10-15). The sentences are under Full Report….
+        self.result_status = QLabel("")
+        self.result_status.setWordWrap(True)
+        v.addWidget(self.result_status)
+        self.result_table = FitTable()
+        self.result_table.setVisible(False)
+        v.addWidget(self.result_table)
+        self.result_hint = QLabel(
+            "Hover a row's name for its formula and meaning, a value for its notes. Quote the "
+            "convention with the number: they differ by fixed factors or by what is measured.")
+        self.result_hint.setWordWrap(True)
+        self.result_hint.setStyleSheet("color: palette(mid);")
+        self.result_hint.setVisible(False)
+        v.addWidget(self.result_hint)
+        self.report_dialog = SnrReportDialog(self)
+        #: The full report (plain text in ``text()``), shown by Full Report….
+        self.result_label = self.report_dialog.label
         row = QHBoxLayout()
+        self.report_button = QPushButton("Full Report…")
+        self.report_button.setToolTip("Every number in sentences, with the checks and the "
+                                      "regions each spectrum used, in its own window.")
+        self.report_button.clicked.connect(self.show_report)
+        row.addWidget(self.report_button)
         self.export_button = QPushButton("Export CSV…")
         self.export_button.clicked.connect(self._on_export)
         self.copy_report_button = QPushButton("Copy Report")
@@ -332,6 +435,13 @@ class SnrPanel(QWidget):
             row.addWidget(b)
         v.addLayout(row)
         return box
+
+    def show_report(self) -> None:
+        if self.result is None:
+            return
+        self.report_dialog.show()
+        self.report_dialog.raise_()
+        self.report_dialog.activateWindow()
 
     def _build_log(self) -> QGroupBox:
         box = QGroupBox("Log")
@@ -691,10 +801,23 @@ class SnrPanel(QWidget):
         self.show_spectra()
 
     def _plot_kwargs(self) -> dict:
+        """What the plot takes from the view's plot style: colours, and the
+        names and S/N values at the legend's text size, named by a legend
+        or on the traces as Plot Style says -- they were fixed fractions
+        of 12 pt, so smaller than every other plot's legend (explicit user
+        report, 2026-10-15). Read at draw time, so a Plot Style change
+        (which redraws the figure) reaches them too."""
         many = len(self._entries) > 1
         style = self._style("spectra" if many else "spectrum")
         cmap = (style.get("compare_colormap") if many else style.get("trace_color")) or "black"
-        return {"cmap": cmap}
+        kwargs = {"cmap": cmap}
+        size = style.get("legend_fontsize") or style.get("labelsize")
+        if size:
+            kwargs.update(fontsize=float(style.get("labelsize") or size),
+                          legend_fontsize=float(size), annotation_fontsize=float(size))
+        if style:
+            kwargs["names"] = "labels" if style.get("legend_style") == "labels" else "legend"
+        return kwargs
 
     def show_spectra(self) -> bool:
         if not self._entries:
@@ -706,7 +829,7 @@ class SnrPanel(QWidget):
                    for s, n, _own in self.regions_for_entries()]
         labels = self.labels()
         result = self.result if self._result_entries == self._entries else None
-        kwargs = self._plot_kwargs()
+        kwargs = {}
         view = self._view_limits() if self._view_limits is not None else None
         if view is not None:
             lo, hi = min(view), max(view)
@@ -720,10 +843,11 @@ class SnrPanel(QWidget):
                 kwargs["xlims"] = view
 
         def draw(figure):
+            style = {**self._plot_kwargs(), **kwargs}
             if result is not None:
-                snr.plot_snr(spectra, result, labels=labels, figure=figure, **kwargs)
+                snr.plot_snr(spectra, result, labels=labels, figure=figure, **style)
             else:
-                snr.plot_snr(spectra, regions=regions, labels=labels, figure=figure, **kwargs)
+                snr.plot_snr(spectra, regions=regions, labels=labels, figure=figure, **style)
         self._draw(draw, "spectra" if len(spectra) > 1 else "spectrum")
         return True
 
@@ -741,7 +865,8 @@ class SnrPanel(QWidget):
         self.target_combo.setEnabled(self.different_check.isChecked())
         self.reference_combo.setEnabled(n > 1)
         done = self.result is not None
-        for b in (self.export_button, self.copy_report_button, self.copy_code_button):
+        for b in (self.report_button, self.export_button, self.copy_report_button,
+                  self.copy_code_button):
             b.setEnabled(done)
 
     def _invalidate(self) -> None:
@@ -749,8 +874,9 @@ class SnrPanel(QWidget):
             self.result = None
             self._result_entries = []
             self.result_label.setText("Regions changed: calculate again.")
-            self.conventions_table.setVisible(False)
-            self.conventions_label.setVisible(False)
+            self.result_status.setText("Regions changed: calculate again.")
+            self.result_table.setVisible(False)
+            self.result_hint.setVisible(False)
             for r in range(self.spectra_table.rowCount()):
                 for c in range(3, len(self.COLUMNS)):
                     self.spectra_table.setItem(r, c, _item(""))
@@ -790,7 +916,7 @@ class SnrPanel(QWidget):
         self.result = result
         self._result_entries = list(self._entries)
         self._fill_results()
-        self._fill_conventions()
+        self._fill_summary()
         report = snr.snr_report(result)
         self.result_label.setText(report)
         self._log("Calculated S/N for " + ", ".join(self.labels()) + ".\n"
@@ -827,23 +953,63 @@ class SnrPanel(QWidget):
                 names.setdefault(key, ["—"] * len(rows))[j] = f"{c['value']:.4g}"
         return list(names.items())
 
-    def _fill_conventions(self) -> None:
-        table = self.conventions_table
-        rows = self.conventions_rows()
-        about = {f"{key_name}: {formula}": text
-                 for _k, key_name, formula, text, _o in snr.CONVENTIONS}
+    #: Summary values drawn in a warning colour (readable on light and dark).
+    _ALERT = QColor("#d35400")
+
+    def _fill_summary(self) -> None:
+        """The result table: :func:`snr.snr_summary`, a row per quantity
+        and a column per spectrum, as tall as its rows -- in the panel and
+        in Full Report…."""
+        summary = snr.snr_summary(self.result)
+        self._fill_summary_table(self.report_dialog.table, summary, elide=False)
+        self._fill_summary_table(self.result_table, summary)
+        self.result_table.setVisible(True)
+        self.result_hint.setVisible(True)
+        self.result_status.setText(self._status_line())
+
+    def _fill_summary_table(self, table, summary, elide: bool = True) -> None:
+        labels = [r["label"] for r in self.result["rows"]]
         table.clear()
-        table.setColumnCount(len(self.result["rows"]))
-        table.setHorizontalHeaderLabels([r["label"] for r in self.result["rows"]])
-        table.setRowCount(len(rows))
-        table.setVerticalHeaderLabels([name for name, _v in rows])
-        for i, (name, values) in enumerate(rows):
-            table.verticalHeaderItem(i).setToolTip(about.get(name, ""))
-            for j, text in enumerate(values):
-                table.setItem(i, j, _item(text, align_right=True))
-        table.resizeColumnsToContents()
-        self.conventions_table.setVisible(bool(rows))
-        self.conventions_label.setVisible(bool(rows))
+        table.setColumnCount(len(labels))
+        table.setRowCount(len(summary))
+        for j, label in enumerate(labels):
+            head = QTableWidgetItem(_elide(label) if elide else label)
+            head.setToolTip(label)
+            table.setHorizontalHeaderItem(j, head)
+        for i, row in enumerate(summary):
+            head = QTableWidgetItem(row["short"])
+            head.setToolTip(f"{row['name']}: {row['detail']}\n{row['about']}")
+            table.setVerticalHeaderItem(i, head)
+            for j, (text, note) in enumerate(zip(row["values"], row["notes"])):
+                item = _item(text, align_right=True)
+                if note:
+                    item.setToolTip(note)
+                if i == 0:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                if text == "NO" or (row["name"] == "Checks" and text != "OK"):
+                    item.setForeground(self._ALERT)
+                table.setItem(i, j, item)
+        head_font = table.verticalHeaderItem(0).font()
+        head_font.setBold(True)
+        table.verticalHeaderItem(0).setFont(head_font)
+        table.refit()
+
+    def _status_line(self) -> str:
+        """One line above the table: which regions, and any warnings."""
+        result = self.result
+        rows = result["rows"]
+        if result.get("regions_differ"):
+            text = ("Regions DIFFERED: " + ", ".join(result["differing"])
+                    + " used their own (†). See Full Report… for each one's.")
+        else:
+            text = "Same regions for every spectrum: " + snr.describe_regions(
+                rows[0]["signal_region"], rows[0]["noise_region"]) + "."
+        warned = sum(bool(r["warnings"]) for r in rows)
+        if warned:
+            text += f" {warned} spectrum{'s' if warned > 1 else ''} with warnings (Checks row)."
+        return text
 
     def _fill_results(self) -> None:
         rows = {id(e["spectrum"]): r for e, r in zip(self._result_entries, self.result["rows"])}

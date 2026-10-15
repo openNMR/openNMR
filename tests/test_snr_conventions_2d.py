@@ -179,8 +179,12 @@ def test_gui_measures_a_2d_and_shows_the_conventions_side_by_side(qapp, monkeypa
     assert row["ndim"] == 2 and row["signal_region_f1"] == (10.0, -4.0)
     names = [name for name, _values in p.conventions_rows()]
     assert names[:3] == ["RMS: H / σ", "×½ (TopSpin's factor): H / (2σ)", "×⅓: H / (3σ)"]
-    assert p.conventions_table.rowCount() == len(names) and not p.conventions_table.isHidden()
-    assert float(p.conventions_table.item(1, 0).text()) == pytest.approx(row["sino"], rel=1e-3)
+    # Shown in the result table (one row per quantity; row 2 is H/2σ).
+    table = p.result_table
+    shorts = [table.verticalHeaderItem(i).text() for i in range(table.rowCount())]
+    assert not table.isHidden() and "Volume/σ" in shorts and "Area/σ" not in shorts
+    i = shorts.index("H/2σ  (TopSpin ×½)")
+    assert float(table.item(i, 0).text()) == pytest.approx(row["sino"], rel=1e-3)
     assert "signal_region_f1=(10.0, -4.0)" in p.notebook_code()
     assert "2D boxes, F1" in "\n".join(
         str(v) for v in window.session.spectra[1].metadata.raw["fits"]["snr"]["inputs_text"])
