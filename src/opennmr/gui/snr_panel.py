@@ -203,8 +203,13 @@ class SnrPanel(QWidget):
     calculated = Signal()
 
     def __init__(self, spectra, selected, draw, arm, store, style=None, parent=None,
-                 view_limits=None) -> None:
+                 view_limits=None, colours=None) -> None:
         super().__init__(parent)
+        #: ``colours(entries)`` -> one colour (or None) per ticked
+        #: spectrum: the colour each has in Compare, so the S/N plot
+        #: draws it the same (explicit user report, 2026-10-15: "the
+        #: colour of the spectrum line changes"). None: the palette.
+        self._colours = colours
         #: ``view_limits()`` -> the (left, right) ppm the plot shows now,
         #: or None: the S/N plot is drawn in that view rather than zoomed
         #: to the regions (explicit user report, 2026-10-15: picking a
@@ -811,6 +816,10 @@ class SnrPanel(QWidget):
         style = self._style("spectra" if many else "spectrum")
         cmap = (style.get("compare_colormap") if many else style.get("trace_color")) or "black"
         kwargs = {"cmap": cmap}
+        if self._colours is not None and self._entries:
+            colours = list(self._colours(self._entries))
+            if any(c is not None for c in colours):
+                kwargs["colours"] = colours
         size = style.get("legend_fontsize") or style.get("labelsize")
         if size:
             kwargs.update(fontsize=float(style.get("labelsize") or size),

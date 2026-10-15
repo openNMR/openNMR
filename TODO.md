@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-15 round 3 (Magritek Spinsolve 1D/2D reader; S/N keeps Compare colours): 15 new tests in `test_magritek_1d_2d.py` and `test_snr_keeps_compare_colours.py`. Related files only: 164 passed, 26 skipped; test_gui.py subset 16 passed, 1 skipped. **Run the full suite locally before committing.***
+
 *2026-10-15 round 2 (S/N text at the legend size, S/N result table, Mac drag_zoom traceback): 8 new tests in `test_snr_display_and_drag_cleanup.py`. Related files only: 465 passed. **Run the full suite locally before committing.***
 
 *2026-10-15 (a 1D proc number of a 2D opens; S/N keeps the line width and the view): 6 new tests in `test_procno_1d_of_2d_and_snr_view.py`. Related files only: 174 passed, 20 skipped; test_gui.py -k "procno or processed" 5 passed. **Run the full suite locally before committing.***
@@ -190,6 +192,28 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Magritek (Spinsolve) 1D and 2D data read; S/N keeps each spectrum's Compare colour (2026-10-15, round 3)
+
+**Asked:** (1) "When doing the s/n calculation, the colour of the spectrum line changes; stop this from happening." (2) "enable Magritek data to be read -- example is given in ...\Example_Magritek_data; do not use nmrglue". Only the relevant tests, not the full suite.
+
+**What was wrong:**
+- (1) `plot_snr` coloured the spectra from a fresh palette sized to the spectra *ticked*: all three ticked matched Compare, but two of three gave the second the third's colour (#355f8d -> #22a884), and one spectrum got the plot's trace colour. The canvas carried over only colours *set* in Compare (`colour_overridden`), not those Compare took from its colour map.
+- (2) `io/spinsolve.py` read only PGSTE diffusion folders (`is_spinsolve_diffusion`). The example -- a Spinsolve Expert 2.01.04 COSY of isopropanol (80 MHz) with its 1D `PilotScan/` -- was unrecognised.
+
+**Measured against Spinsolve's own processed spectra** (`PilotScan/spectrum.pt1`, data at byte len-12n-8, ppm axis then complex float32; `cosySpectrum.pt2`, float32 magnitude 128 x 8192 from byte 3386; `cosyFID.pt2` is `data.2d` again):
+- 1D: first FID point x 0.5, FFT, `p0Phase` as exp(+i p0) -> residual 2e-7 (float32). **No window**: acqu.par `filter = "no"` although proc.par says `exp:0.5` (with it: 21 %); without the first-point halving: 2.2 % (a DC offset). ppm = FFT Hz / b1Freq + centerFreqPPM, to 1.4e-6 ppm. Spinsolve's own grid is one point from ours (compare at equal ppm). The real FID's first point is purely real (Spinsolve's time-domain autophase); `p0Phase` is applied on top of that, as Spinsolve does.
+- 2D COSY: sine-bell squared (`qsine`, SSB 0) in **both** dimensions, F1 inverted, magnitude: correlation 0.99998. proc.par writes `f1WindowFunction` twice and no `f2WindowFunction`; the second is F2's (F2 unwindowed: 0.898). F1 direction from the COSY diagonal, not from the .pt2: inverted, every diagonal peak is at F1 = F2 within one F1 point (4.741 -> 4.766, 1.153 -> 1.172 ppm); not inverted, at the mirror image (8.83). Reversing an FFT grid is a reflection about the carrier plus one point, so the reversed data's axis is the FFT axis negated and reversed (Spinsolve's stored F1 grid is one point from that; the diagonal says ours is right).
+
+**Built:**
+- `spinsolve.read_spinsolve_1d` / `read_spinsolve_2d` / `read_spinsolve_standard`, `is_spinsolve_standard` (acqu.par + data.1d or data.2d, no delayTimes.txt -- T1/T2 arrays still left unrecognised), `read_par_all` (keeps repeated keys), `_spinsolve_window` (`exp:x`, `sinebellsquared` checked; `sinebell` applied as sine SSB 0 with a note that it is unchecked; anything else not applied, with a note). Registered through `_detect`/`_read_auto`/`_peek_auto`, diffusion first. Both readers record Spinsolve's processing in the Processing tab's own keys (`live_window`, `live_ssb`, `live_zero_fill`, `live_window_f1`, `live_ssb_f1`, `live_zero_fill_f1`, `recorded_phase0`, `magnitude_mode`, 2D `fn_mode` 1 with `fid_dt_f1`), so the controls open on Spinsolve's settings and `_recompute_multi_row_data` / the 1D preview reproduce the read exactly. The first-point halving is in `fid_raw` (`first_point_scale` 0.5): the pipeline has no first-point control.
+- A 2D whose `f1FTType` is not `Complex` (an HSQC's States or echo/antiecho) is **refused with the reason**, not transformed by a guess; `p1Phase` is not applied (convention unverified) and says so in `spinsolve_notes`.
+- `MainWindow._scan_for_spectra` lists Spinsolve experiments directly inside a matched one (Spinsolve Expert keeps a 2D's `PilotScan/` inside it).
+- `snr.plot_snr(colours=)` (one per spectrum, None = palette); `SnrPanel(colours=)` <- `MainWindow._compare_colours_for(entries)`, which reads each spectrum's colour from the Compare plot's own series (set or palette).
+
+**Not yet seen, so not claimed:** other Spinsolve 2D types (HSQC, HMBC, JRES), zero-fill factors above 1, Spinsolve's first-order phase, and the standard (non-Expert) Spinsolve software's folder layout beyond `data.1d`/`acqu.par`/`proc.par`.
+
+Tests: `tests/test_magritek_1d_2d.py` (10; 2 need `test_data/Magritek_COSY`, the example folder copied in), `tests/test_snr_keeps_compare_colours.py` (5). Only the related files, as asked: Spinsolve/PFG, io registry, data browser and scan, JEOL/Varian, every S/N file and the two new ones (164 passed, 26 skipped -- the PGSTE real data is not here) and test_gui.py -k "scan_for_spectra or tdeff_spin_enabled_for_every or index_for_path_separates or spinsolve or fid_reprocessable or magnitude" (16 passed, 1 skipped).
 
 ## S/N text at the legend's size, a readable S/N result table, the Mac drag_zoom traceback (2026-10-15, round 2)
 

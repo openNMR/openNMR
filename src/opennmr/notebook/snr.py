@@ -1281,7 +1281,8 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
              xlims=None, cmap: str = "black", fontsize: float = 12.0,
              signal_colour: str = "#009e73", noise_colour: str = "0.6", regions=None,
              linewidth: float | None = None, names: str | None = None,
-             legend_fontsize: float | None = None, annotation_fontsize: float | None = None):
+             legend_fontsize: float | None = None, annotation_fontsize: float | None = None,
+             colours=None):
     """The spectra with each one's signal region (green) and noise region
     (grey) shaded in its own row, the measured line marked and its S/N
     written beside it. ``mode`` 'stack' (one row each) or 'overlay' (the
@@ -1296,12 +1297,15 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
     default labels for a stack, a legend for an overlay. ``legend_fontsize``
     / ``annotation_fontsize`` (the S/N values): default ``0.7`` / ``0.6`` of
     ``fontsize``; the GUI passes its legend size for both, so they match
-    every other plot's (explicit user report, 2026-10-15). Without a
+    every other plot's (explicit user report, 2026-10-15). ``colours``:
+    one colour (or None, for the ``cmap`` palette) per spectrum -- the GUI
+    passes each spectrum's colour in Compare, so measuring S/N on some of
+    them does not recolour them (explicit user report, 2026-10-15: "the
+    colour of the spectrum line changes"). Without a
     ``result``, ``regions`` -- one
     ``{"signal": (a, b) or None, "noise": [(a, b), ...] or None}`` per
     spectrum -- are shaded as a preview. Returns the figure."""
     import matplotlib.pyplot as plt
-    from ..plotting.style import stack_colors
     from .dnp import _nucleus_label, _spectrum_axes
 
     if result is not None:
@@ -1335,13 +1339,14 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
         names = "labels" if mode == "stack" else "legend"
     if names not in ("legend", "labels", "none"):
         raise ValueError("names: 'legend', 'labels' or 'none'.")
+    palette = _snr_palette(n, cmap, colours)
     if any(_is_2d(s) for s in spectra):
         if figure is None:
             cols = min(n, 3)
             figure = plt.figure(figsize=(3.2 * cols, 3.0 * int(math.ceil(n / cols))))
         else:
             figure.clear()
-        return _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colour,
+        return _plot_snr_panels(spectra, rows, labels, figure, palette, fontsize, signal_colour,
                                 noise_colour, linewidth=linewidth,
                                 title_fontsize=legend_fontsize,
                                 annotation_fontsize=annotation_fontsize)
@@ -1351,7 +1356,6 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
     else:
         figure.clear()
     ax = figure.add_subplot(111)
-    palette = stack_colors(n, cmap)
     data = [_xy(s) for s in spectra]
     edges = []
     for r in rows:
@@ -1430,19 +1434,30 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
     return figure
 
 
-def _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colour, noise_colour,
+def _snr_palette(n: int, cmap, colours=None) -> list:
+    """One colour per spectrum: ``colours[i]`` where given, else the
+    ``cmap`` palette's."""
+    from ..plotting.style import stack_colors
+    palette = list(stack_colors(n, cmap))
+    if colours is not None:
+        colours = list(colours)
+        if len(colours) != n:
+            raise ValueError(f"colours: give one per spectrum ({n}), or None for the palette.")
+        palette = [c if c is not None else p for c, p in zip(colours, palette)]
+    return palette
+
+
+def _plot_snr_panels(spectra, rows, labels, figure, palette, fontsize, signal_colour, noise_colour,
                      linewidth=None, title_fontsize=None, annotation_fontsize=None):
     """One panel per spectrum -- a 2D as contours with its signal box
     (green) and noise boxes (grey), a 1D as a line with its regions
     shaded -- for a list that holds any 2D."""
     from matplotlib.patches import Rectangle
-    from ..plotting.style import stack_colors
     from .dnp import _nucleus_label, _spectrum_axes
 
     n = len(rows)
     cols = min(n, 3)
     nrows = int(math.ceil(n / cols))
-    palette = stack_colors(n, cmap)
     differing = set()
     for i, (spectrum, r) in enumerate(zip(spectra, rows)):
         ax = figure.add_subplot(nrows, cols, i + 1)

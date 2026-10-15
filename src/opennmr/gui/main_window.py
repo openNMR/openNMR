@@ -2349,6 +2349,20 @@ class MainWindow(QMainWindow):
                 out.append({"label": f"{self.session.label(i)} (2D)", "spectrum": s, "index": i})
         return out
 
+    def _compare_colours_for(self, entries) -> list:
+        """Each entry's colour in Compare (``entries``: dicts with the
+        session ``"index"``), or None where Compare is not showing that
+        spectrum whole. Read from the Compare plot's own series, so a
+        colour set in Plot Style and one taken from the colour map both
+        carry over."""
+        by_index = {}
+        lookup = getattr(self, "_compare_series_entries", {}) or {}
+        for series in self.compare_canvas._series.get("compare", []):
+            entry = lookup.get(series.key)
+            if entry and len(entry) >= 1 and (len(entry) < 2 or entry[1] is None):
+                by_index.setdefault(entry[0], series.colour)
+        return [by_index.get(e.get("index")) for e in entries]
+
     def _dnp_selected_rows(self) -> list[int]:
         return sorted({self.spectrum_list.row(item) for item in self.spectrum_list.selectedItems()})
 
@@ -2655,6 +2669,20 @@ class MainWindow(QMainWindow):
                 derived = os.path.join(path, "opennmr_derived") if os.path.isdir(path) else None
                 if derived and os.path.isdir(derived) and depth < max_depth:
                     walk(derived, depth + 1)
+                if vendor == "spinsolve" and os.path.isdir(path):
+                    # Spinsolve Expert keeps a 2D's 1D reference scan
+                    # inside it (``PilotScan/``): an experiment of its
+                    # own, worth offering (2026-10-15, Magritek data).
+                    try:
+                        children = sorted(os.scandir(path), key=lambda e: cls._natural_sort_key(e.name))
+                    except OSError:
+                        children = []
+                    for child in children:
+                        if len(matches) >= max_matches:
+                            return
+                        if child.is_dir(follow_symlinks=False) and \
+                                io.spinsolve.is_spinsolve_standard(child.path):
+                            matches.append((child.path, "spinsolve"))
                 return
 
             if depth >= max_depth:
@@ -13923,7 +13951,7 @@ class MainWindow(QMainWindow):
         self.snr_panel = SnrPanel(spectra=self._snr_spectra, selected=self._dnp_selected_rows,
                                   draw=lambda draw, view: self._dnp_draw(draw, view, "snr"),
                                   view_limits=self._compare_view_ppm_limits, arm=self._snr_arm, store=self._store_dnp,
-                                  style=self._dnp_style)
+                                  style=self._dnp_style, colours=self._compare_colours_for)
         self._snr_section = CollapsibleSection("Signal-to-Noise", content=self.snr_panel)
         self._snr_section.toggled.connect(lambda expanded: expanded and self.snr_panel.refresh())
         self.compare_canvas.regionSelected.connect(

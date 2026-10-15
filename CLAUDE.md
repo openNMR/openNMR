@@ -23,10 +23,15 @@ was already in progress, so start every session with the first section.
 5. **Check `TODO.md`'s "What's next" section 0 before writing a
    reader or a PFG/diffusion feature.** Finished, tested modules are
    parked there unregistered so they cannot conflict with an in-flight
-   merge -- currently `io/spinsolve.py` (Magritek Spinsolve PGSTE) and
-   `io/bruker_pfg.py` (Bruker gradients without a `diff.xml`). They
-   are invisible to `grep` for GUI features because nothing calls them
-   yet, which is exactly how they get rebuilt from scratch by mistake.
+   merge. (`io/spinsolve.py` and `io/bruker_pfg.py`, once parked
+   there, have been wired in since 2026-09-23.)
+6. **Magritek / Spinsolve** is `io/spinsolve.py`: PGSTE diffusion
+   (`read_spectrum`) and plain 1D/2D (`read_spinsolve_1d/2d`, checked
+   against Spinsolve's own `spectrum.pt1`/`cosySpectrum.pt2`). Read
+   with this project's own code -- never nmrglue (user's instruction).
+   A Spinsolve 2D type other than F1 `Complex` is refused until an
+   example is checked; extend `_SPINSOLVE_WINDOWS` only with a window
+   verified against Spinsolve's output.
 
 ## After changing something
 
@@ -143,7 +148,8 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   a column per spectrum) in a `FitTable` sized to its rows; the
   sentences are under Full Report…. Its plot's text sizes come from the
   Compare canvas's legend style, read at draw time -- never hard-code
-  a size there.
+  a size there. Its spectra keep their Compare colours
+  (`MainWindow._compare_colours_for` -> `plot_snr(colours=)`).
 - **Dynamics** is Fit Curve, then two collapsible sections from
   `gui/dynamics_panels.py`: Relaxation vs Temperature (BPP / Arrhenius /
   Hendrickson-Bray; maths `notebook/vt_relaxation.py`) and Exchange

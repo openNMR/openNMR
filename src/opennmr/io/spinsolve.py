@@ -831,6 +831,420 @@ def peek(path: str, **_ignored) -> dict[str, Any]:
     }
 
 
+# ============================================================
+# Plain 1D and 2D experiments (Spinsolve / Spinsolve Expert)
+# ============================================================
+#
+# Explicit user request, 2026-10-15: "enable Magritek data to be read
+# ... do not use nmrglue". Built and checked against a Spinsolve Expert
+# COSY of isopropanol (80 MHz, software 2.01.04) and its 1D pilot scan,
+# whose folders hold:
+#
+# ``acqu.par``           acquisition: b1Freq (MHz), centerFreqPPM,
+#                        dwellTime (us), nrPnts, nrScans, nrSteps (2D),
+#                        bandwidth2 (kHz, F1), rxChannel(2), filter
+# ``proc.par``           Spinsolve's own processing (1D: p0Phase,
+#                        apodizationFunction, zeroFill; 2D: f1/f2 keys)
+# ``data.1d``            the FID: Prospa type 504 (time axis in ms +
+#                        complex float32)
+# ``data.2d``            the 2D FID: Prospa type 501, nrSteps x nrPnts
+# ``*.pt1`` / ``*.pt2``  Prospa *plot* exports (fid.pt1, spectrum.pt1,
+#                        cosyFID.pt2, cosySpectrum.pt2): the same data
+#                        as drawn, behind a plot-style header. Not read
+#                        for the spectrum -- only used here to check
+#                        that what this reader computes from the raw
+#                        FID is exactly what Spinsolve computed.
+#
+# What Spinsolve does, measured against those exports (not assumed):
+#
+# * 1D (``spectrum.pt1``): first FID point x 0.5, FFT, zero-order
+#   phase ``p0Phase`` -- complex residual 2e-7 of the spectrum, i.e.
+#   float32 rounding. **No apodization**, although proc.par says
+#   ``exp:0.5``: acqu.par's ``filter = "no"`` switches it off (with the
+#   window applied the residual is 21 %). Without the first-point
+#   halving the residual is 2.2 % (a DC offset).
+# * ppm = (FFT frequency, Hz) / b1Freq + centerFreqPPM: Spinsolve's
+#   own axis to 1.4e-6 ppm, the water line at 4.7393 ppm in both.
+# * ``p0Phase`` is exp(+i p0) on that spectrum -- the sense of this
+#   project's *recorded* phase slot (``recorded_phase0``), so it is
+#   stored there unchanged (fitted: -1.9336 deg; p0Phase -1.93359).
+# * 2D COSY (``cosySpectrum.pt2``, magnitude): sine-bell squared
+#   (``qsine``, SSB 0) in **both** dimensions, complex FFT in F2, then
+#   along t1, F1 **inverted** (``f1FTInvert = "yes"``), magnitude:
+#   correlation 0.99998. proc.par writes ``f1WindowFunction`` twice
+#   and no ``f2WindowFunction``; the second line is F2's (with F2
+#   unwindowed the correlation drops to 0.898). F1 inversion checked
+#   independently on the COSY diagonal: every diagonal peak at F1 = F2
+#   within one F1 point (4.741 -> 4.766, 1.153 -> 1.172 ppm), where
+#   without it they sit at the mirror image (8.83 ppm).
+#
+# How the 2D is laid out for the GUI: ``fn_mode`` 1 (one complex t1
+# point per row, Bruker's QF), so :meth:`MainWindow._recompute_multi_row_data`
+# rebuilds it exactly as read here -- per-row F2 window/zero-fill/FFT,
+# F1 window (``live_window_f1``), zero-fill, FFT, reversal, magnitude
+# (``magnitude_mode``). Reversing an FFT grid is a reflection about the
+# carrier *plus one point* (the grid runs +sw/2 ... -sw/2 + df), so the
+# reversed F1 axis is the FFT axis negated and reversed -- that, not the
+# FFT axis, is what puts the diagonal on F1 = F2.
+#
+# Only what has been checked is accepted: a 2D whose F1 transform is
+# not Spinsolve's plain ``Complex`` (an HSQC's States or echo/antiecho,
+# say) is refused with the reason, rather than transformed by a guess.
+# T1/T2 arrays (``delayTimes.txt`` without diffusion keys) are still
+# left alone -- see :func:`is_spinsolve_diffusion`.
+
+#: Spinsolve's window names -> (this project's window key, its kwargs,
+#: whether that equivalence was verified against Spinsolve's output).
+_SPINSOLVE_WINDOWS = {
+    "none": ("none", {}, True),
+    "sinebellsquared": ("qsine", {"ssb": 0.0}, True),
+    "sinebell": ("sine", {"ssb": 0.0}, False),
+}
+
+
+def read_par_all(path: str) -> dict[str, list[Any]]:
+    """Every value of every key in a ``.par`` file, in file order --
+    proc.par can repeat a key (a 2D's ``f1WindowFunction`` appears
+    twice, the second standing for F2's), which :func:`read_par`
+    collapses to the last."""
+    values: dict[str, list[Any]] = {}
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key:
+                values.setdefault(key, []).append(_coerce(value))
+    return values
+
+
+def _spinsolve_window(name) -> tuple[str, dict, str | None]:
+    """A Spinsolve window name (``"exp:0.5"``, ``"sinebellsquared"``,
+    ``"none"``) as ``(window key, kwargs, note or None)``. An unknown
+    one is not applied, and the note says so."""
+    text = str(name or "none").strip().lower()
+    match = re.fullmatch(r"exp(?:onential)?\s*:\s*([-+0-9.eE]+)", text)
+    if match:
+        return "exponential", {"lb": float(match.group(1))}, None
+    if text in _SPINSOLVE_WINDOWS:
+        key, kwargs, verified = _SPINSOLVE_WINDOWS[text]
+        note = None if verified else (
+            f"Spinsolve window {name!r} applied as {key} (SSB 0); this equivalence has not "
+            "been checked against Spinsolve's own output.")
+        return key, dict(kwargs), note
+    return "none", {}, f"Spinsolve window {name!r} is not recognised; no window applied."
+
+
+def _apply_window(fid: np.ndarray, dt: float, key: str, kwargs: dict) -> np.ndarray:
+    if key == "none":
+        return fid
+    return _ft.apodize(fid, dt, window=key, **kwargs)
+
+
+def _yes(value) -> bool:
+    return str(value).strip().lower() in ("yes", "true", "1", "on")
+
+
+def is_spinsolve_standard(path: str) -> bool:
+    """True for a Spinsolve folder holding a plain 1D (``data.1d``) or
+    2D (``data.2d``) experiment -- not an arrayed T1/T2/diffusion one
+    (those carry ``delayTimes.txt``)."""
+    if not os.path.isdir(path) or not os.path.isfile(os.path.join(path, "acqu.par")):
+        return False
+    if os.path.isfile(os.path.join(path, "delayTimes.txt")):
+        return False
+    return any(os.path.isfile(os.path.join(path, name)) for name in ("data.1d", "data.2d"))
+
+
+def _first_point_corrected(fid: np.ndarray) -> np.ndarray:
+    """Spinsolve's first-point correction: the t = 0 point halved (on
+    every row of a 2D). Measured on the 1D pilot scan: without it the
+    spectrum differs from Spinsolve's own by 2.2 % (a DC offset), with
+    it by 2e-7."""
+    out = np.array(fid, dtype=complex, copy=True)
+    out[..., 0] *= 0.5
+    return out
+
+
+def _spinsolve_axes(acqu: dict, proc: dict) -> tuple[float, float, float]:
+    """``(b1Freq MHz, carrier ppm, dwell s)``."""
+    b1 = float(acqu.get("b1Freq") or acqu.get("b1Freq1H") or 0.0)
+    if b1 <= 0:
+        raise ValueError("acqu.par has no b1Freq: the spectrometer frequency is needed for ppm.")
+    centre = acqu.get("centerFreqPPM", proc.get("ppmOffset", proc.get("f2PPMOffset", 0.0)))
+    dwell_us = float(acqu.get("dwellTime") or 0.0)
+    if dwell_us <= 0:
+        bandwidth_khz = float(acqu.get("bandwidth") or 0.0)
+        if bandwidth_khz <= 0:
+            raise ValueError("acqu.par gives neither dwellTime nor bandwidth.")
+        dwell_us = 1e3 / bandwidth_khz
+    return b1, float(centre or 0.0), dwell_us * 1e-6
+
+
+def _nucleus(acqu: dict, key: str = "rxChannel") -> str | None:
+    value = acqu.get(key)
+    if value:
+        return str(value)
+    nucleus = str(acqu.get("nucleus") or "")
+    return nucleus.split("-")[0] or None
+
+
+def _zero_fill_factor(value) -> int:
+    try:
+        factor = int(value or 1)
+    except (TypeError, ValueError):
+        factor = 1
+    return max(factor, 1)
+
+
+def read_spinsolve_1d(path: str, **_ignored):
+    """A Spinsolve 1D folder (``data.1d``) as Spinsolve itself processes
+    it -- see the section notes above for what was checked. The window
+    and zero-fill it used are stored as the Processing tab's own
+    settings, and its phase as the recorded phase, so every control
+    starts where Spinsolve left the spectrum and a rebuild from the raw
+    FID reproduces it."""
+    from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+
+    acqu = read_par(os.path.join(path, "acqu.par"))
+    proc_path = os.path.join(path, "proc.par")
+    proc = read_par(proc_path) if os.path.isfile(proc_path) else {}
+    prospa = read_prospa(os.path.join(path, "data.1d"))
+    if np.ndim(prospa.data) != 1 or not np.iscomplexobj(prospa.data):
+        raise ValueError(f"{path!r}: data.1d is not a complex 1D FID (Prospa type {prospa.data_type}).")
+    b1, centre, dt = _spinsolve_axes(acqu, proc)
+    if prospa.x is not None and prospa.x.size > 1:
+        # data.1d's own time axis (ms) must agree with acqu.par's dwell.
+        dt_file = float(prospa.x[1] - prospa.x[0]) * 1e-3
+        if abs(dt_file - dt) > 1e-3 * dt:
+            raise ValueError(f"{path!r}: data.1d's time axis ({dt_file * 1e6:g} us) disagrees with "
+                             f"acqu.par's dwellTime ({dt * 1e6:g} us).")
+    notes = []
+    fid_raw = _first_point_corrected(prospa.data)
+
+    # The window: acqu.par's "filter" says whether Spinsolve applied one
+    # at all; proc.par / acqu.par name it.
+    if _yes(acqu.get("filter", "no")):
+        window, window_kwargs, note = _spinsolve_window(
+            proc.get("apodizationFunction", acqu.get("filterType")))
+        if note:
+            notes.append(note)
+    else:
+        window, window_kwargs = "none", {}
+    factor = _zero_fill_factor(proc.get("zeroFill", acqu.get("zf", 1)))
+    n_fill = fid_raw.size * factor
+    filled = _ft.zero_fill(_apply_window(fid_raw, dt, window, window_kwargs), n_fill)
+    freq_hz, spectrum = _ft.fft_spectrum(filled, dt)
+    ppm = freq_hz / b1 + centre
+    ns = float(acqu.get("nrScans") or 1.0)
+    spectrum = spectrum / ns
+
+    phase_method = str(proc.get("phaseMethod", "")).lower()
+    magnitude = "magnitude" in phase_method
+    p0 = float(proc.get("p0Phase", 0.0) or 0.0)
+    p1 = float(proc.get("p1Phase", 0.0) or 0.0)
+    if p1:
+        # Not applied: no dataset with a first-order phase has been
+        # available to establish Spinsolve's p1 sense and pivot.
+        notes.append(f"Spinsolve's first-order phase (p1Phase {p1:g} deg, pivot "
+                     f"{proc.get('p1Pivot', 0)}) was not applied: its convention is not yet "
+                     "verified. Phase with the Phase controls.")
+    if not magnitude and p0:
+        from .bruker import apply_recorded_phase
+        spectrum = apply_recorded_phase(spectrum, p0, 0.0)
+    if magnitude:
+        spectrum = np.abs(spectrum)
+
+    raw = {
+        "acqu": acqu, "proc": proc, "title": str(acqu.get("expName") or ""),
+        "recorded_phase0": 0.0 if magnitude else p0, "recorded_phase1": 0.0,
+        "phase0": 0.0, "phase1": 0.0,
+        "fid": filled, "fid_raw": fid_raw, "fid_dt": dt,
+        "fid_original_length": int(prospa.data.size),
+        "first_point_scale": 0.5,
+        "live_window": window,
+        "live_lb": float(window_kwargs.get("lb", 0.0)),
+        "live_ssb": float(window_kwargs.get("ssb", 0.0)),
+        "live_zero_fill": int(n_fill),
+        "spinsolve_processing": (
+            f"Spinsolve's own: first point x 0.5, window {window}"
+            + (f" {window_kwargs}" if window_kwargs else "")
+            + (f", zero-fill x{factor}" if factor > 1 else "")
+            + (", magnitude" if magnitude else f", p0 {p0:g} deg") + "."),
+    }
+    if magnitude:
+        raw["magnitude_mode"] = "magnitude"
+    if notes:
+        raw["spinsolve_notes"] = notes
+    metadata = NMRMetadata(
+        vendor="spinsolve", nucleus=_nucleus(acqu), sfo1=b1,
+        bf1=b1 * (1.0 - centre * 1e-6), o1=centre * b1,
+        ns=acqu.get("nrScans"), source_path=path,
+        pulse_program=str(acqu.get("experiment") or "") or None,
+        raw=raw,
+    )
+    return NMRSpectrum(
+        data=np.real(spectrum), axes=[NMRAxis(kind="frequency", ppm=ppm, hz=ppm * b1)],
+        metadata=metadata, data_imag=None if magnitude else np.imag(spectrum),
+    )
+
+
+def read_spinsolve_2d(path: str, **_ignored):
+    """A Spinsolve 2D folder (``data.2d``, e.g. COSY) as Spinsolve
+    processes it -- see the section notes above. Windows, zero-fills
+    and magnitude mode are stored as the Processing tab's own F1/F2
+    settings, so the GUI's live rebuild reproduces this read."""
+    from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+
+    acqu = read_par(os.path.join(path, "acqu.par"))
+    proc_path = os.path.join(path, "proc.par")
+    proc_all = read_par_all(proc_path) if os.path.isfile(proc_path) else {}
+    proc = {key: values[-1] for key, values in proc_all.items()}
+    f1_type = str(proc.get("f1FTType", "Complex"))
+    if f1_type.lower() != "complex":
+        raise ValueError(
+            f"{path!r}: Spinsolve 2D with F1 transform {f1_type!r}. Only 'Complex' (as in COSY) "
+            "has been checked against Spinsolve's own processing; this one is not read rather "
+            "than transformed by a guess. Please send an example.")
+    prospa = read_prospa(os.path.join(path, "data.2d"))
+    rows = prospa.data
+    if rows.ndim != 2 or not np.iscomplexobj(rows):
+        raise ValueError(f"{path!r}: data.2d is not a complex 2D FID (Prospa type {prospa.data_type}).")
+    b1, centre, dt2 = _spinsolve_axes(acqu, proc)
+    sw1_khz = float(acqu.get("bandwidth2") or 0.0)
+    if sw1_khz <= 0:
+        raise ValueError(f"{path!r}: acqu.par has no bandwidth2 (F1 spectral width).")
+    dt1 = 1e-3 / sw1_khz
+    centre_f1 = float(proc.get("f1PPMOffset", centre))
+    b1_f1 = float(acqu.get("b1Freq2") or b1)
+    notes = []
+
+    # Windows: proc.par's second f1WindowFunction line stands for F2
+    # (see the section notes), unless an f2WindowFunction is written.
+    f1_windows = proc_all.get("f1WindowFunction", [])
+    f1_name = f1_windows[0] if f1_windows else proc.get("f1WindowFunction", "none")
+    if "f2WindowFunction" in proc_all:
+        f2_name = proc_all["f2WindowFunction"][-1]
+    elif len(f1_windows) >= 2:
+        f2_name = f1_windows[1]
+    else:
+        f2_name = "none"
+    w2, w2_kwargs, note2 = _spinsolve_window(f2_name)
+    w1, w1_kwargs, note1 = _spinsolve_window(f1_name)
+    notes += [n for n in (note2, note1) if n]
+    zf2 = _zero_fill_factor(proc.get("f2ZeroFill", 1))
+    zf1 = _zero_fill_factor(proc.get("f1ZeroFill", 1))
+    if zf2 > 1 or zf1 > 1:
+        notes.append("Spinsolve zero-fill factors above 1 are read as multiples of the "
+                     "acquired size; not yet checked against Spinsolve's own output.")
+    ns = float(acqu.get("nrScans") or 1.0)
+
+    fid_raw = _first_point_corrected(rows)
+    n2 = rows.shape[1] * zf2
+    f2_rows = _ft.zero_fill(_apply_window(fid_raw, dt2, w2, w2_kwargs), n2)
+    freq_hz2, data = _ft.fft_spectrum(f2_rows, dt2)
+    data = data / ns
+    ppm2 = freq_hz2 / b1 + centre
+    interferogram = data
+
+    # F1: window along t1, zero-fill, FFT, invert (f1FTInvert).
+    data = np.apply_along_axis(lambda col: _apply_window(col, dt1, w1, w1_kwargs), 0, data)
+    n1 = rows.shape[0] * zf1
+    data = np.apply_along_axis(lambda col: _ft.zero_fill(col, n1), 0, data)
+    freq_hz1, data = _ft.fft_spectrum(data.T, dt1)
+    data = data.T
+    invert = _yes(proc.get("f1FTInvert", "yes"))
+    if invert:
+        data = data[::-1, :]
+        freq_hz1 = -freq_hz1[::-1]          # the reversed grid's own frequencies
+    else:
+        notes.append("f1FTInvert = no: F1 not inverted. Only the inverted case has been "
+                     "checked (on a COSY diagonal).")
+    ppm1 = freq_hz1 / b1_f1 + centre_f1
+    magnitude = "magnitude" in str(proc.get("f1PhaseMethod", "")).lower() or \
+        "magnitude" in str(proc.get("f2PhaseMethod", "")).lower()
+    if magnitude:
+        data = np.abs(data)
+
+    raw = {
+        "acqu": acqu, "proc": proc, "title": str(acqu.get("expName") or ""),
+        "fn_mode": 1, "f1_quadrature_sign_flip": False,
+        "recorded_phase0": 0.0, "recorded_phase1": 0.0,
+        "recorded_phase0_f1": 0.0, "recorded_phase1_f1": 0.0,
+        "phase0": 0.0, "phase1": 0.0, "phase0_f1": 0.0, "phase1_f1": 0.0,
+        "fid": interferogram, "fid_raw": fid_raw, "fid_dt": dt2, "fid_dt_f1": dt1,
+        "fid_original_length": int(rows.shape[1]),
+        "first_point_scale": 0.5,
+        "live_window": w2, "live_lb": float(w2_kwargs.get("lb", 0.0)),
+        "live_ssb": float(w2_kwargs.get("ssb", 0.0)), "live_zero_fill": int(n2),
+        "live_window_f1": w1, "live_lb_f1": float(w1_kwargs.get("lb", 0.0)),
+        "live_ssb_f1": float(w1_kwargs.get("ssb", 0.0)), "live_zero_fill_f1": int(n1),
+        "spinsolve_processing": (
+            f"Spinsolve's own: first point x 0.5; F2 window {w2}, F1 window {w1}; F1 "
+            + ("inverted" if invert else "not inverted") + ("; magnitude" if magnitude else "")
+            + "."),
+    }
+    if magnitude:
+        raw["magnitude_mode"] = "magnitude"
+    if notes:
+        raw["spinsolve_notes"] = notes
+    nucleus2 = _nucleus(acqu)
+    nucleus1 = _nucleus(acqu, "rxChannel2") or nucleus2
+    metadata = NMRMetadata(
+        vendor="spinsolve", nucleus=nucleus2, nucleus_indirect=nucleus1,
+        sfo1=b1, sfo1_indirect=b1_f1, bf1=b1 * (1.0 - centre * 1e-6), o1=centre * b1,
+        ns=acqu.get("nrScans"), source_path=path, pseudo_2d=False,
+        homonuclear=(nucleus1 == nucleus2),
+        pulse_program=str(acqu.get("experiment") or "") or None,
+        raw=raw,
+    )
+    return NMRSpectrum(
+        data=np.real(data),
+        axes=[NMRAxis(kind="frequency", ppm=ppm1, hz=ppm1 * b1_f1),
+              NMRAxis(kind="frequency", ppm=ppm2, hz=ppm2 * b1)],
+        metadata=metadata, data_imag=None if magnitude else np.imag(data),
+    )
+
+
+def read_spinsolve_standard(path: str, **kwargs):
+    """A plain Spinsolve 1D or 2D folder (``data.2d`` wins when both
+    are present -- a 2D folder can also carry a 1D row)."""
+    if os.path.isfile(os.path.join(path, "data.2d")):
+        return read_spinsolve_2d(path, **kwargs)
+    return read_spinsolve_1d(path, **kwargs)
+
+
+def peek_standard(path: str, **_ignored) -> dict[str, Any]:
+    acqu = read_par(os.path.join(path, "acqu.par"))
+    two_d = os.path.isfile(os.path.join(path, "data.2d"))
+    n = int(acqu.get("nrPnts", 0) or 0)
+    return {
+        "vendor": "spinsolve", "ndim": 2 if two_d else 1,
+        "shape": (int(acqu.get("nrSteps", 0) or 0), n) if two_d else (n,),
+        "nucleus": _nucleus(acqu),
+        "nucleus_indirect": (_nucleus(acqu, "rxChannel2") or _nucleus(acqu)) if two_d else None,
+        "pseudo_2d": False,
+        "pulse_program": str(acqu.get("experiment") or "") or None,
+    }
+
+
+def _detect(path: str) -> bool:
+    return is_spinsolve_diffusion(path) or is_spinsolve_standard(path)
+
+
+def _read_auto(path: str, **kwargs):
+    if is_spinsolve_diffusion(path):
+        return read_spectrum(path, **kwargs)
+    return read_spinsolve_standard(path, **kwargs)
+
+
+def _peek_auto(path: str, **kwargs) -> dict[str, Any]:
+    if is_spinsolve_diffusion(path):
+        return peek(path, **kwargs)
+    return peek_standard(path, **kwargs)
+
+
 from . import base as _base  # noqa: E402 -- registration needs the functions above
 
-_base.register("spinsolve", is_spinsolve_diffusion, read_spectrum, peek=peek)
+_base.register("spinsolve", _detect, _read_auto, peek=_peek_auto)
