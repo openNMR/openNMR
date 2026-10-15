@@ -239,6 +239,18 @@ class Session:
         :meth:`reset`, which replace only its ``kwargs``."""
         return self._load_info[index]
 
+    def index_of_info(self, info) -> int | None:
+        """The index whose bookkeeping dict *is* ``info`` (identity), or
+        None. That dict moves with its spectrum on :meth:`swap` /
+        :meth:`remove` and survives :meth:`reload` / :meth:`reset` /
+        ``set_nucleus`` -- which all put a *new* spectrum object in the
+        slot -- so it is a stable handle on "this experiment" where the
+        spectrum object is not."""
+        for i, candidate in enumerate(self._load_info):
+            if candidate is info:
+                return i
+        return None
+
     def rebase(self, index: int, spectrum: NMRSpectrum, path: str, vendor: str) -> None:
         """Make spectrum ``index`` a disk-backed one read from ``path``
         -- a derived spectrum just saved as an openNMR dataset folder

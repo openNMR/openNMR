@@ -281,5 +281,15 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   After re-exporting one, run `python packaging/make_toolbar_icons.py`
   to regenerate `gui/resources/toolbar/`. The editable Affinity
   Designer sources are not in git.
+- **1D/Compare y-limits** come from the full-resolution data with Plot Style's
+  `baseline_gap` / `stack_gap` (`MplCanvas._fit_y_to_data`) -- never from the
+  downsampled line's autoscale, which drops dips beside spikes.
+- **Rows of a hypercomplex 2D** (FnMODE 4/5/6) carry F1's imaginary; `get_trace`
+  rebuilds F2's for a row by `ft.hilbert_imaginary`. Kept slices find their 2D via
+  `MainWindow._slice_parent_index` (identity, then `slice_parent_info`, then folder).
+- **Undo** (Edit ▸ Undo Last Processing Change, Ctrl+Alt+Z) is the processing
+  log's previous state (`_record_history` -> `undo_stack`), restored through
+  `_apply_restored_state`. New processing state only needs to be in the tracked
+  state to be undoable.
 - **Planned GUI work** (CSA fit/simulation split, view sidebar) is in
   the newest `TODO.md` rounds -- check there before starting any of it.

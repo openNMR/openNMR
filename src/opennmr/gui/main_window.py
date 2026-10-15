@@ -40,7 +40,7 @@ from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.advice_box import AdviceBox
 from .widgets.side_drawer import SideDrawer
 from .widgets.field_input import link_field
-from .widgets.typed_spinbox import LengthSpinBox, TypedSpinBox
+from .widgets.typed_spinbox import LengthSpinBox, TypedDoubleSpinBox, TypedSpinBox
 from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
 from .shear_panel import ShearPanel
@@ -307,6 +307,11 @@ def _launcher_icon(name: str) -> QIcon:
 #: accumulated phase (a joint-phased or heavily-multi-cycle-wrapped
 #: correction can genuinely exceed the previous +/-36000 cap).
 _PHASE_SPIN_RANGE = float("inf")
+
+#: Largest SR (Hz, either sign) the reference boxes take. Was 1 MHz;
+#: raised to 500 MHz on explicit user request (2026-10-15) -- some data
+#: arrive with a carrier set far from the nucleus's reference.
+SR_LIMIT_HZ = 5.0e8
 
 #: Phase 1's drag-sensitivity/step, relative to Phase 0's -- a linear
 #: (whole-spectrum) phase correction needs much bigger raw-degree
@@ -590,6 +595,9 @@ class MainWindow(QMainWindow):
         # final state, so the processing history does not take its
         # reference point too early (see _begin_history).
         self._history_suspended = False
+        # True while Undo restores an earlier state, so that restore is
+        # not itself pushed as a change to undo.
+        self._undoing = False
         # True while a restored simulation is being re-run, which is not
         # a new run to journal.
         self._journal_suspended = False
@@ -1177,6 +1185,18 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
         edit_menu = menu_bar.addMenu("&Edit")
+        # Undo the last processing change (explicit user request,
+        # 2026-10-15). Not Ctrl+Z: that toggles pan/zoom, at the user's
+        # earlier request (see toggle_nav_action below).
+        self.undo_action = QAction("&Undo Last Processing Change", self)
+        self.undo_action.setShortcut(QKeySequence("Ctrl+Alt+Z"))
+        self.undo_action.setToolTip(
+            "Put the selected spectrum back as it was before its last processing "
+            "change (a phase drag, a baseline, a window, a reference...). "
+            "Repeat to step further back.")
+        self.undo_action.triggered.connect(self._on_undo_clicked)
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addSeparator()
         remove_action = QAction("&Remove Selected Spectrum", self)
         remove_action.setShortcut(QKeySequence.StandardKey.Delete)
         # WidgetShortcut (rather than the QAction default, WindowShortcut)
@@ -1526,6 +1546,18 @@ class MainWindow(QMainWindow):
         # the sidecar, since neither a spectrum object nor a
         # within-session relationship is meaningful once reloaded.
         kept.metadata.raw["slice_parent"] = parent
+        # The parent object is replaced whenever the 2D is re-read
+        # (reprocess, reset, nucleus/mass edits, Full Resolution redraws
+        # after one), and the canvas may still hold the object it was
+        # showing before such a replacement. An identity-only link then
+        # silently lost "Apply Phase to Source 2D" -- an intermittent
+        # user report, 2026-10-15. So the link is also kept through the
+        # session's bookkeeping dict (stable across re-reads) and the
+        # parent's folder (a last resort, used only when unambiguous).
+        parent_index = self._live_parent_index(parent)
+        if parent_index is not None:
+            kept.metadata.raw["slice_parent_info"] = self.session.info(parent_index)
+        kept.metadata.raw["slice_parent_path"] = getattr(parent.metadata, "source_path", None)
         kept.metadata.raw["slice_axis"] = axis
         kept.metadata.raw["slice_index"] = slice_index
         self.spectrum_list.addItem(self.session.label(index))
@@ -1573,21 +1605,68 @@ class MainWindow(QMainWindow):
         """
         if spectrum is None:
             return None, None
-        parent = spectrum.metadata.raw.get("slice_parent")
-        axis = spectrum.metadata.raw.get("slice_axis")
-        if parent is None or axis not in ("f1", "f2"):
+        raw = spectrum.metadata.raw
+        axis = raw.get("slice_axis")
+        if axis not in ("f1", "f2"):
             return None, None
-        # Identity, not `in`/`.index()`: those compare with `==`, and
-        # NMRSpectrum is a dataclass holding numpy arrays, so equality
-        # returns an array and raises "truth value of an array with
-        # more than one element is ambiguous". Caught by the test for
-        # the removed-parent case.
-        if not any(candidate is parent for candidate in self.session.spectra):
+        index = self._slice_parent_index(spectrum)
+        if index is None:
             # The 2D was removed from the session since; nothing to
             # apply to, and holding a reference to it would be worse
             # than saying so.
             return None, None
+        parent = self.session.spectra[index]
+        # Re-point the cached object at the live one, so the next look-up
+        # (and _slice_parent_of) finds it by identity again.
+        raw["slice_parent"] = parent
         return parent, ("f2" if axis == "f1" else "f1")
+
+    def _live_parent_index(self, parent) -> int | None:
+        """Session index of ``parent`` by identity, else of the one
+        loaded experiment read from the same folder as it (a re-read
+        replaced the object), else None.
+
+        Identity, not `in`/`.index()`: those compare with `==`, and
+        NMRSpectrum is a dataclass holding numpy arrays, so equality
+        returns an array and raises "truth value of an array with more
+        than one element is ambiguous"."""
+        if parent is None:
+            return None
+        for i, candidate in enumerate(self.session.spectra):
+            if candidate is parent:
+                return i
+        return self._parent_index_by_path(getattr(parent.metadata, "source_path", None),
+                                          getattr(parent, "ndim", 2))
+
+    def _parent_index_by_path(self, path, ndim: int = 2) -> int | None:
+        """The *one* non-derived ``ndim``-D spectrum read from ``path``
+        (and the same proc number is not checked: two procnos of one
+        2D open at once are ambiguous, so None)."""
+        if not path:
+            return None
+        matches = [i for i, s in enumerate(self.session.spectra)
+                   if s.metadata.vendor != "derived" and s.ndim == ndim
+                   and s.metadata.source_path == path]
+        return matches[0] if len(matches) == 1 else None
+
+    def _slice_parent_index(self, spectrum) -> int | None:
+        """Where a kept slice's 2D is now: by the object, then by the
+        session's bookkeeping dict (survives a re-read), then by folder."""
+        raw = spectrum.metadata.raw
+        parent = raw.get("slice_parent")
+        for i, candidate in enumerate(self.session.spectra):
+            if parent is not None and candidate is parent:
+                return i
+        info = raw.get("slice_parent_info")
+        if info is not None:
+            i = self.session.index_of_info(info)
+            if i is not None and self.session.spectra[i].ndim == 2:
+                return i
+            return None          # that experiment was removed
+        if parent is None:
+            return None
+        return self._parent_index_by_path(raw.get("slice_parent_path")
+                                          or getattr(parent.metadata, "source_path", None))
 
     def _on_apply_slice_phase_to_source(self) -> None:
         """Push the phase dialled in on an extracted slice back into
@@ -4357,6 +4436,35 @@ class MainWindow(QMainWindow):
         self.output_tick_direction_combo.currentIndexChanged.connect(self._on_output_style_changed)
         style_form.addRow("Tick direction:", self.output_tick_direction_combo)
 
+        # Explicit user request (2026-10-15): a slice whose baseline sits
+        # below zero was drawn partly under the axis. Both are fractions
+        # of the trace's own height, shown as percentages.
+        self.output_baseline_gap_spin = QDoubleSpinBox()
+        self.output_baseline_gap_spin.setRange(0.0, 200.0)
+        self.output_baseline_gap_spin.setDecimals(1)
+        self.output_baseline_gap_spin.setSingleStep(1.0)
+        self.output_baseline_gap_spin.setSuffix(" %")
+        self.output_baseline_gap_spin.setValue(MplCanvas._BASELINE_GAP * 100.0)
+        self.output_baseline_gap_spin.setToolTip(
+            "Space between the lowest point of a 1D spectrum (or the bottom "
+            "spectrum of a Compare) and the axis line, as a percentage of the "
+            "trace's height. Measured from the trace's real minimum, so a "
+            "baseline below zero is never drawn under the axis.")
+        self.output_baseline_gap_spin.valueChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Gap below spectra:", self.output_baseline_gap_spin)
+
+        self.output_stack_gap_spin = QDoubleSpinBox()
+        self.output_stack_gap_spin.setRange(0.0, 200.0)
+        self.output_stack_gap_spin.setDecimals(1)
+        self.output_stack_gap_spin.setSingleStep(1.0)
+        self.output_stack_gap_spin.setSuffix(" %")
+        self.output_stack_gap_spin.setValue(MplCanvas._STACK_GAP * 100.0)
+        self.output_stack_gap_spin.setToolTip(
+            "Space between neighbouring spectra in a stacked Compare (and a "
+            "pseudo-2D's slices), as a percentage of each row's height.")
+        self.output_stack_gap_spin.valueChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Gap between stacked spectra:", self.output_stack_gap_spin)
+
         self.output_contour_fraction_spin = QSpinBox()
         self.output_contour_fraction_spin.setRange(1, 100)
         self.output_contour_fraction_spin.setValue(25)  # matches plotting.plot_2d_contour's own default (0.25)
@@ -4825,6 +4933,8 @@ class MainWindow(QMainWindow):
             "tick_length": self.output_tick_length_spin.value(),
             "tick_width": self.output_tick_width_spin.value(),
             "tick_direction": self.output_tick_direction_combo.currentData(),
+            "baseline_gap": self.output_baseline_gap_spin.value() / 100.0,
+            "stack_gap": self.output_stack_gap_spin.value() / 100.0,
             "map_colormap": self.output_map_colormap_combo.currentData(),
             "colorbar_gap": self.output_colorbar_gap_spin.value(),
             "minor_ticks": self.output_minor_ticks_checkbox.isChecked(),
@@ -5298,6 +5408,8 @@ class MainWindow(QMainWindow):
             (self.output_legend_linewidth_spin, settings["legend_linewidth"] or 0.0),
             (self.output_trace_label_slider, int(round(settings["trace_label_position"] * 100))),
             (self.output_line_scale_spin, settings.get("line_width_scale", 1.0)),
+            (self.output_baseline_gap_spin, 100.0 * float(settings.get("baseline_gap", MplCanvas._BASELINE_GAP))),
+            (self.output_stack_gap_spin, 100.0 * float(settings.get("stack_gap", MplCanvas._STACK_GAP))),
         ):
             widget.blockSignals(True)
             widget.setValue(value)
@@ -5520,6 +5632,12 @@ class MainWindow(QMainWindow):
             if isinstance(saved.get(key), (int, float)):
                 widget.blockSignals(True)
                 widget.setValue(saved[key])
+                widget.blockSignals(False)
+        for widget, key in ((self.output_baseline_gap_spin, "baseline_gap"),
+                             (self.output_stack_gap_spin, "stack_gap")):
+            if isinstance(saved.get(key), (int, float)):          # stored as a fraction
+                widget.blockSignals(True)
+                widget.setValue(100.0 * float(saved[key]))
                 widget.blockSignals(False)
         for check, key in ((self.output_minor_ticks_checkbox, "minor_ticks"),
                             (self.output_top_spine_checkbox, "top_spine"),
@@ -6335,6 +6453,34 @@ class MainWindow(QMainWindow):
         if action is not None:
             action.setVisible(shown)
             action.setEnabled(shown)
+
+    def _show_truncate_units(self, spectrum, n_points: int, shown: bool) -> None:
+        """Under Truncate to: how many points there are to truncate, in
+        the box's units (complex points, after the digital filter), set
+        against TopSpin's TD, which counts real *and* imaginary points
+        and includes the filter's. Typing TD's 1024 for a 512-complex
+        FID with a 78-point filter lands on the full 434 -- correct, but
+        unexplained it read as the box resetting itself (user report,
+        2026-10-15)."""
+        acqus = (spectrum.metadata.raw or {}).get("acqus") or {}
+        try:
+            td = int(float(acqus.get("TD", 0) or 0))
+        except (TypeError, ValueError):
+            td = 0
+        if not shown or n_points <= 0:
+            self.tdeff_units_label.setVisible(False)
+            return
+        text = f"of {n_points} complex points"
+        if td > 0 and spectrum.metadata.vendor == "bruker":
+            complex_td = td // 2
+            text += f" (TopSpin TD {td} = {complex_td} complex"
+            removed = complex_td - n_points
+            if removed > 0:
+                text += f", less {removed} for the digital filter"
+            text += ")"
+        text += ". Larger values mean the whole FID; to add points, use Zero-fill."
+        self.tdeff_units_label.setText(text)
+        self.tdeff_units_label.setVisible(True)
 
     def _show_recorded_tdeff_f1(self, spectrum, is_genuine_2d: bool, n1_native: int) -> None:
         """Under Truncate F1: TopSpin's own F1 TDeff, in its units and in
@@ -7435,6 +7581,7 @@ class MainWindow(QMainWindow):
         self.zero_fill_custom_spin = TypedSpinBox()
         self.zero_fill_custom_spin.setRange(1, 1 << 22)
         self.zero_fill_custom_spin.setVisible(False)
+        self.zero_fill_custom_spin.setKeyboardTracking(False)   # see tdeff_spin
         self.zero_fill_custom_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Custom size:", self.zero_fill_custom_spin)
 
@@ -7457,8 +7604,19 @@ class MainWindow(QMainWindow):
             "Type any number: more than the points acquired becomes the "
             "full FID when you press Enter or leave the box."
         )
+        # Applied on Enter / leaving the box, not per keystroke: typing
+        # "1024" reprocessed at 1, 10 and 102 points on the way, and a
+        # rebuild landing mid-typing rewrote the box under the cursor
+        # (user report, 2026-10-15: "typing 1024 resets to 424").
+        self.tdeff_spin.setKeyboardTracking(False)
         self.tdeff_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Truncate to:", self.tdeff_spin)
+        # What the box counts, beside TopSpin's TD (which counts real and
+        # imaginary points, and includes the digital filter's points).
+        self.tdeff_units_label = QLabel("")
+        self.tdeff_units_label.setWordWrap(True)
+        self.tdeff_units_label.setVisible(False)
+        form.addRow("", self.tdeff_units_label)
 
         self.align_echo_button = QPushButton("Align Echo")
         self.align_echo_button.setCheckable(True)
@@ -7559,6 +7717,7 @@ class MainWindow(QMainWindow):
         # feedback: F2 already had both (Truncate to/Zero-fill to,
         # above); F1 had neither, for either vendor.
         self.tdeff_f1_spin = TypedSpinBox()
+        self.tdeff_f1_spin.setKeyboardTracking(False)   # see tdeff_spin
         self.tdeff_f1_spin.setRange(1, 1 << 20)
         # Increments, not TD points (explicit user report, 2026-10-14:
         # 256 typed here meaning TopSpin's TDeff = 256 kept twice as much
@@ -7589,6 +7748,7 @@ class MainWindow(QMainWindow):
         form.addRow("", self.tdeff_f1_recorded_label)
 
         self.zero_fill_f1_spin = TypedSpinBox()
+        self.zero_fill_f1_spin.setKeyboardTracking(False)   # see tdeff_spin
         self.zero_fill_f1_spin.setRange(1, 1 << 20)
         self.zero_fill_f1_spin.setSuffix(" pts")
         self.zero_fill_f1_spin.setToolTip(
@@ -9051,6 +9211,7 @@ class MainWindow(QMainWindow):
         else:
             raw_length = 1 << 20
         self.tdeff_spin.setMaximum(raw_length)
+        self._show_truncate_units(spectrum, raw_length, reprocessable and raw_fid is not None)
         saved_truncate = raw.get("live_truncate")
         if isinstance(saved_truncate, int) and not isinstance(saved_truncate, bool):
             default_tdeff = min(saved_truncate, raw_length)
@@ -9790,6 +9951,7 @@ class MainWindow(QMainWindow):
         # starting data kept, so "as created" can be returned to exactly.
         if meta.vendor == "derived" and not io_history.savepoints(history):
             self._add_savepoint(index, name="As created", auto=True)
+        self._remember_undo_data(index)
         return history
 
     def _record_history(self, index: int) -> None:
@@ -9803,9 +9965,109 @@ class MainWindow(QMainWindow):
         if "history" not in info:
             self._begin_history(index)
             return
+        previous = info["history"].get("state")
         changes = io_history.record_state(info["history"], self._history_state(index))
         if changes:
+            if not self._undoing:
+                self._push_undo(index, previous)
             self._write_history(index)
+        self._remember_undo_data(index)
+
+    #: How many processing changes Undo can step back through, per spectrum.
+    UNDO_DEPTH = 30
+    #: Largest dataset (points) whose data are kept for Undo when it cannot
+    #: be recomputed from a raw FID (a kept slice, a derived spectrum).
+    UNDO_DATA_LIMIT = 4_000_000
+
+    def _remember_undo_data(self, index: int) -> None:
+        """A spectrum that cannot be rebuilt from its raw FID (a kept
+        slice, arithmetic, a simulation) has its phase *baked into its
+        data*, so its state alone cannot bring an earlier version back:
+        keep a copy of the data as last recorded, for the next undo
+        entry to carry."""
+        info = self._history_info(index)
+        spectrum = self.session.spectra[index]
+        if not isinstance(info, dict) or self._fid_reprocessable(spectrum):
+            return
+        if np.size(spectrum.data) > self.UNDO_DATA_LIMIT:
+            info["undo_data"] = None
+            return
+        info["undo_data"] = (
+            np.array(spectrum.data, copy=True),
+            None if spectrum.data_imag is None else np.array(spectrum.data_imag, copy=True),
+            copy.deepcopy(spectrum.axes))
+
+    def _push_undo(self, index: int, previous_state) -> None:
+        """Record the state (and, if needed, the data) a change just
+        replaced, so :meth:`_undo_last_change` can return to it."""
+        if not previous_state:
+            return
+        info = self._history_info(index)
+        spectrum = self.session.spectra[index]
+        entry = {"state": copy.deepcopy(previous_state), "snapshot": None}
+        if not self._fid_reprocessable(spectrum):
+            entry["snapshot"] = info.get("undo_data")
+            if entry["snapshot"] is None:
+                return          # nothing to rebuild the earlier data from
+        stack = info.setdefault("undo_stack", [])
+        stack.append(entry)
+        del stack[:-self.UNDO_DEPTH]
+
+    def can_undo(self, index: int | None = None) -> bool:
+        index = self._selected_index() if index is None else index
+        if index is None:
+            return False
+        info = self._history_info(index)
+        return isinstance(info, dict) and bool(info.get("undo_stack"))
+
+    def _undo_last_change(self, index: int) -> bool:
+        """Put spectrum ``index`` back as it was before its last recorded
+        processing change. One "change" is what the processing log calls
+        one: a burst of edits to the same controls (a whole phase drag),
+        recorded once they settle. Restored through the same path as Load
+        Progress (:meth:`_apply_restored_state`) -- a re-read plus the
+        earlier recipe, or the kept data for a spectrum with no raw FID --
+        and logged, so the log says what was undone. Returns whether
+        anything was undone."""
+        self._flush_pending_state(index)
+        info = self._history_info(index)
+        stack = info.get("undo_stack") if isinstance(info, dict) else None
+        if not stack:
+            return False
+        entry = stack.pop()
+        history = self._ensure_history(index)
+        processing, metadata = io_history.split_state(entry["state"])
+        snapshot = entry.get("snapshot")
+        if snapshot is not None:
+            data, data_imag, axes = snapshot
+            snapshot = (np.array(data, copy=True),
+                        None if data_imag is None else np.array(data_imag, copy=True),
+                        copy.deepcopy(axes))
+        self._undoing = True
+        try:
+            if history is not None:
+                io_history.add_event(history, "Undid the last change", kind="restored")
+            self._apply_restored_state(index, processing, metadata,
+                                       snapshot=snapshot, reread=snapshot is None)
+            self._run_sidecar_save_now(index)
+        finally:
+            self._undoing = False
+        self._write_history(index)
+        return True
+
+    def _on_undo_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            return
+        if not self._undo_last_change(index):
+            self.statusBar().showMessage(
+                "Nothing to undo for this spectrum (changes are recorded about a second "
+                "after you stop adjusting a control).", 6000)
+            return
+        left = len(self._history_info(index).get("undo_stack") or [])
+        self.statusBar().showMessage(
+            f"Undid the last change to {self.session.label(index)}"
+            + (f" ({left} more step{'s' if left != 1 else ''} back available)." if left else "."), 6000)
 
     def _write_history(self, index: int, raise_errors: bool = False) -> bool:
         """Write spectrum ``index``'s history and regenerate its text log,
@@ -11359,8 +11621,8 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(fields)
 
-        self.sr_shift_spin = QDoubleSpinBox()
-        self.sr_shift_spin.setRange(-1.0e6, 1.0e6)
+        self.sr_shift_spin = TypedDoubleSpinBox()   # typed freely (long values)
+        self.sr_shift_spin.setRange(-SR_LIMIT_HZ, SR_LIMIT_HZ)
         self.sr_shift_spin.setDecimals(4)
         self.sr_shift_spin.setSuffix(" Hz")
         form.addRow("SR (direct):", self.sr_shift_spin)
@@ -11372,8 +11634,8 @@ class MainWindow(QMainWindow):
         # frequency axis to reference -- hidden for 1D, and for a
         # pseudo-2D, whose indirect axis is an index (slice number),
         # not a frequency.
-        self.sr_shift_indirect_spin = QDoubleSpinBox()
-        self.sr_shift_indirect_spin.setRange(-1.0e6, 1.0e6)
+        self.sr_shift_indirect_spin = TypedDoubleSpinBox()   # typed freely (long values)
+        self.sr_shift_indirect_spin.setRange(-SR_LIMIT_HZ, SR_LIMIT_HZ)
         self.sr_shift_indirect_spin.setDecimals(4)
         self.sr_shift_indirect_spin.setSuffix(" Hz")
         self.sr_indirect_label = QLabel("SR (indirect):")
@@ -11418,8 +11680,8 @@ class MainWindow(QMainWindow):
         self.sr_cal_source_combo.activated.connect(self._on_sr_cal_source_chosen)
         form.addRow("Calibrated on:", self.sr_cal_source_combo)
 
-        self.sr_cal_spin = QDoubleSpinBox()
-        self.sr_cal_spin.setRange(-1.0e6, 1.0e6)
+        self.sr_cal_spin = TypedDoubleSpinBox()   # typed freely (long values)
+        self.sr_cal_spin.setRange(-SR_LIMIT_HZ, SR_LIMIT_HZ)
         self.sr_cal_spin.setDecimals(4)
         self.sr_cal_spin.setSuffix(" Hz")
         form.addRow("SR_cal:", self.sr_cal_spin)
@@ -21115,6 +21377,9 @@ class MainWindow(QMainWindow):
         if index is None or position is None:
             return
         spectrum = self.session.spectra[index]
+        if spectrum.ndim == 1:
+            self._calibrate_1d_shift_from_plot(spectrum, float(position[0]))
+            return
         if spectrum.ndim != 2:
             return
         clicked = {"f2": float(position[0]), "f1": float(position[1])}
@@ -21161,6 +21426,83 @@ class MainWindow(QMainWindow):
         for dim, value in updates.items():
             self._apply_reference_shift_hz(value, dim)
 
+    def _peak_top_near(self, spectrum, ppm: float, halfwidth_ppm: float) -> float | None:
+        """The shift of the largest point (by magnitude) of a 1D spectrum
+        within ``halfwidth_ppm`` of ``ppm``, or None if none lies there.
+        A right-click is rarely exactly on a peak's top; calibrating to
+        the click itself would carry the miss into the SR."""
+        x = np.asarray(spectrum.axis_values(0, unit="ppm"), dtype=float)
+        y = np.abs(np.real(np.asarray(spectrum.data, dtype=float)))
+        near = np.abs(x - ppm) <= halfwidth_ppm
+        if not np.any(near):
+            return None
+        idx = np.flatnonzero(near)
+        return float(x[idx[int(np.argmax(y[idx]))]])
+
+    def calibrate_1d_shift(self, measured_ppm: float, true_ppm: float) -> float | None:
+        """Set the direct SR so the point now at ``measured_ppm`` sits at
+        ``true_ppm``; the new SR (Hz), or None without a base frequency.
+        The notebook equivalent is a plain SR change: SR_new = SR + (δ_true
+        - δ_measured) × SF (MHz) -- the displayed axis already carries the
+        current SR, so the correction adds to it."""
+        index = self._selected_index()
+        if index is None:
+            return None
+        spectrum = self.session.spectra[index]
+        base_mhz = spectrum.metadata.sfo1
+        if not base_mhz:
+            return None
+        value = self._current_sr(spectrum, "f2") + (float(true_ppm) - float(measured_ppm)) * base_mhz
+        if abs(value) > SR_LIMIT_HZ:
+            QMessageBox.warning(
+                self, "Reference shift too large",
+                f"That needs an SR of {value:.1f} Hz, beyond ±{SR_LIMIT_HZ:.0f} Hz.")
+            return None
+        self._apply_reference_shift_hz(value, "f2")
+        return value
+
+    def _calibrate_1d_shift_from_plot(self, spectrum, clicked_ppm: float) -> None:
+        """Right-click ▸ Calibrate Shift Here (ppm)… on a 1D spectrum."""
+        lo, hi = sorted(self.canvas.ax.get_xlim())
+        peak = self._peak_top_near(spectrum, clicked_ppm, 0.01 * (hi - lo))
+        nucleus = spectrum.metadata.nucleus or "direct"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Calibrate Shift")
+        form = QFormLayout(dialog)
+        intro = QLabel(
+            f"Enter the true chemical shift ({nucleus}) of the peak under the cursor.\n"
+            "The reference (SR) is set so that peak lands there.")
+        intro.setWordWrap(True)
+        form.addRow(intro)
+        use_peak = QCheckBox(
+            f"Measure from the peak top nearest the cursor ({peak:.4f} ppm)" if peak is not None
+            else "Measure from the peak top nearest the cursor")
+        use_peak.setChecked(peak is not None)
+        use_peak.setEnabled(peak is not None)
+        use_peak.setToolTip(
+            f"Unticked, the cursor position itself ({clicked_ppm:.4f} ppm) is what moves to the "
+            "shift you type.")
+        form.addRow(use_peak)
+        spin = TypedDoubleSpinBox()
+        spin.setRange(-1.0e5, 1.0e5)
+        spin.setDecimals(4)
+        spin.setSuffix(" ppm")
+        spin.setValue(peak if peak is not None else clicked_ppm)
+        form.addRow("True shift:", spin)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        measured = peak if (peak is not None and use_peak.isChecked()) else clicked_ppm
+        value = self.calibrate_1d_shift(measured, spin.value())
+        if value is not None:
+            self.statusBar().showMessage(
+                f"Calibrated: {measured:.4f} ppm \u2192 {spin.value():.4f} ppm (SR {value:.2f} Hz).", 8000)
+
     def _on_reference_shift_from_plot(self) -> None:
         """Handles :attr:`MplCanvas.referenceShiftRequested`, the
         Spectrum plot's right-click "Set Reference Shift (Hz)…" --
@@ -21172,7 +21514,7 @@ class MainWindow(QMainWindow):
         spectrum = self.session.spectra[index]
         current_hz = self._current_sr(spectrum, "f2")
         value, ok = QInputDialog.getDouble(
-            self, "Reference shift", "SR (Hz):", current_hz, -1.0e6, 1.0e6, 4,
+            self, "Reference shift", "SR (Hz):", current_hz, -SR_LIMIT_HZ, SR_LIMIT_HZ, 4,
         )
         if ok:
             self._apply_reference_shift_hz(value)
@@ -25038,7 +25380,9 @@ class MainWindow(QMainWindow):
         Slice ▸ Keep), else None."""
         spectrum = self.session.spectra[index]
         raw = spectrum.metadata.raw or {}
-        parent, axis, row = raw.get("slice_parent"), raw.get("slice_axis"), raw.get("slice_index")
+        axis, row = raw.get("slice_axis"), raw.get("slice_index")
+        parent_index = self._slice_parent_index(spectrum) if raw.get("slice_parent") is not None else None
+        parent = self.session.spectra[parent_index] if parent_index is not None else None
         if parent is None or axis != "f1" or row is None:
             # The live link is not saved with a session (see
             # _on_slice_keep_requested), so a slice reopened later has
@@ -25047,10 +25391,7 @@ class MainWindow(QMainWindow):
             return self._find_parent_row_by_content(index)
         if not (parent.ndim == 2 and parent.is_pseudo_2d):
             return None
-        for i, candidate in enumerate(self.session.spectra):
-            if candidate is parent:           # identity: see _slice_phase_target
-                return i, int(row)
-        return None
+        return parent_index, int(row)
 
     def _find_parent_row_by_content(self, index: int):
         """``(parent index, 1-based row)`` of the pseudo-2D in the session

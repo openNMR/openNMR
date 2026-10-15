@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-15 round 4 (gaps below/between spectra, Truncate on Enter, kept slice keeps its 2D, Calibrate Shift on 1D, Hilbert F2 imaginary for hypercomplex rows, Undo): 21 new tests in `test_slice_gaps_truncate_calibrate_undo.py`. Related files only: 641 passed, 12 skipped. **Run the full suite locally before committing.***
+
 *2026-10-15 round 3 (Magritek Spinsolve 1D/2D reader; S/N keeps Compare colours): 15 new tests in `test_magritek_1d_2d.py` and `test_snr_keeps_compare_colours.py`. Related files only: 164 passed, 26 skipped; test_gui.py subset 16 passed, 1 skipped. **Run the full suite locally before committing.***
 
 *2026-10-15 round 2 (S/N text at the legend size, S/N result table, Mac drag_zoom traceback): 8 new tests in `test_snr_display_and_drag_cleanup.py`. Related files only: 465 passed. **Run the full suite locally before committing.***
@@ -192,6 +194,29 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Gaps below/between spectra; Truncate on Enter; kept slice keeps its 2D; Calibrate Shift on 1D; F2 phase of hypercomplex rows; Undo (2026-10-15, round 4)
+
+**Asked:** (1) an extracted slice whose baseline averages below zero is drawn partly under the axis (slice 68 of the Magritek COSY); make the gap between axis and bottom spectrum, and between compared spectra, Plot Style settings. (2) "Truncate to" on `Good_2D/28`: typing 1024 "resets to 424". (3) Intermittently, after switching full/partial resolution, extracting a slice and keeping it, "Apply Phase to Source 2D" is missing. (4) Right-click "Calibrate the shift" (type the true shift, SR updates); SR limits ±1 MHz -> ±500 MHz. (5) On extracted slices the phase drag "barely changes" the spectrum at ±90°. (6) Undo the last phase change / processing step. Only the relevant tests.
+
+**What was wrong:**
+- (1) 1D and Compare y-limits were matplotlib's autoscale of the *displayed* line, which is downsampled by keeping the largest-magnitude point per bin -- a bin holding a positive spike drops the negative dip beside it. Full Resolution then swapped the true data in without refitting y, so those dips were drawn under the axis. Not reproduced on the Magritek COSY as loaded here (it reads as magnitude data, all positive); the mechanism above is the one found.
+- (2) Typing reprocessed on every keystroke ("1", "10", "102" points), and a rebuild landing mid-typing rewrites the box under the cursor. Separately, the box counts *complex* points after the digital filter: `Good_2D/28` has TD 1024 (= 512 complex) less 78 filter points = 434, so 1024 correctly clamps to the whole FID (434 here). The exact "424" was not reproduced.
+- (3) A kept slice found its 2D only by object identity (`raw["slice_parent"] is ...`). Any re-read replaces the session's object (`Session.reload/reset/set_nucleus/set_mass/replace_data`), and the canvas may still hold the pre-re-read object when Keep is pressed: the link was lost, the button hidden.
+- (4) Calibrate-from-cursor existed only for 2D contours.
+- (5) A real bug in the physics, not the widget: for a hypercomplex 2D (FnMODE 4/5/6) `data_imag` is F1's imaginary (2ri) -- `_f2_quadrature_is_spent`. `get_trace` gave a *row* (an F2 trace) that F1 imaginary, so an F2 phase rotated the real row into F1's dispersion, near zero at an F1-absorptive row. The drag handle itself is right (0.2°/px; 450 px = 90°, checked).
+
+**Built:**
+- (1) `MplCanvas._fit_y_to_data` / `_data_y_range`: y-limits from each line's full-resolution data (`_opennmr_full_res`), with Plot Style ▸ **Gap below spectra** (`baseline_gap`, default 5 % of the trace's height = the old margin) and **Gap between stacked spectra** (`stack_gap`, default 5 %): show_spectrum (1D), stacked Compare (bottom row gets the axis gap, the others the stack gap; shared scale goes through the same function), overlay Compare, `autoscale_y`. Full Resolution refits an axes the user has not zoomed. Both keys are in `style_settings` / `_STYLE_KEYS`, so per-kind defaults and Save as default keep them.
+- (2) Truncate to, Truncate F1 to, Zero-fill F1 and Custom zero-fill: `setKeyboardTracking(False)` (applied on Enter / leaving the box). A line under Truncate to: "of 434 complex points (TopSpin TD 1024 = 512 complex, less 78 for the digital filter)" (`_show_truncate_units`, shown when a raw FID is cached).
+- (3) Kept slices also store `slice_parent_info` (the session's bookkeeping dict, which survives re-reads; `Session.index_of_info`) and `slice_parent_path`; `_slice_parent_index` resolves identity -> info -> unique folder match, and re-points `slice_parent` at the live object. Both new keys are blocklisted from the sidecar.
+- (4) Right-click ▸ **Calibrate Shift Here (ppm)…** on a 1D (ppm axis): measures from the peak top nearest the cursor (±1 % of the view; can be unticked), `MainWindow.calibrate_1d_shift(measured, true)`; SR_new = SR + (δ_true − δ_measured) × SF. SR boxes (direct, indirect, SR_cal, the right-click Hz dialog) are `TypedDoubleSpinBox` to ±`SR_LIMIT_HZ` = 5e8 Hz.
+- (5) `processing.ft.hilbert_imaginary` (TopSpin's `ht`; sign checked on a synthetic FID, 5e-16, and against TopSpin's own `2ir` of `Good_2D/28`, r = 0.999 on its strongest rows). `get_trace` uses it for a row of a hypercomplex 2D and records `raw["slice"]["imaginary"] = "hilbert"`; columns, QF and pseudo-2D rows keep the stored imaginary.
+- (6) Edit ▸ **Undo Last Processing Change** (Ctrl+Alt+Z -- Ctrl+Z is the pan/zoom toggle the user asked for earlier). `_record_history` pushes the state each logged change replaced (`info["undo_stack"]`, 30 deep); undo restores it through `_apply_restored_state` (re-read + recipe), or, for a spectrum with no raw FID (kept slices), from a data copy kept at each record (`undo_data`, up to 4M points). One step = one processing-log change (a whole drag, recorded once it settles). The undo is logged ("Undid the last change") and is not itself pushed.
+
+**Not done / to know:** a stacked Compare's gaps are per-row y-padding (rows still `hspace=0`), so "spacing" scales with each row's own height. Undo has no Redo. Undo granularity follows the log's debounce (~0.8 s), so two quick edits of different controls can be one step.
+
+**Tests:** 21 new in `test_slice_gaps_truncate_calibrate_undo.py` (each failed to import / failed on the previous code). Related files only, as asked: the new file 21 passed; slicing/VOCS/history/progress/SR/settings/window-cleanup/referencing 112 passed; canvas/Compare/export/legend/plot-kind/view/line-style files 396 passed; test_gui.py + test_series_fitting.py -k "slice or truncat or tdeff or reference or calibrat or sr_ or autoscale or full_res or downsampl" 112 passed, 12 skipped. Not run on Windows or with test_data/.
 
 ## Magritek (Spinsolve) 1D and 2D data read; S/N keeps each spectrum's Compare colour (2026-10-15, round 3)
 

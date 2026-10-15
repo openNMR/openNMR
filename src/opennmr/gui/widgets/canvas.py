@@ -747,6 +747,17 @@ class MplCanvas(QWidget):
     #: or "inout" (across it) -- matplotlib's own names. Global Plot
     #: Style option (explicit user request, 2026-10-01).
     _TICK_DIRECTION = "in"
+    #: Space between a 1D spectrum's lowest point and the axis line, and
+    #: above its highest point, as fractions of the trace's own height;
+    #: and the space between neighbouring traces of a stacked Compare.
+    #: Plot Style ▸ "Gap below spectra" / "Gap between stacked spectra"
+    #: (explicit user request, 2026-10-15: a slice whose baseline sits
+    #: below zero was drawn partly under the axis). 0.05 is matplotlib's
+    #: own margin, so the defaults draw what the autoscale used to --
+    #: but from the *full-resolution* data (see _fit_y_to_data).
+    _BASELINE_GAP = 0.05
+    _STACK_GAP = 0.05
+    _TOP_GAP = 0.05
     TICK_DIRECTIONS = (("In", "in"), ("Out", "out"), ("In and out", "inout"))
 
     #: Default **export** figure size, inches. Not applied to the live
@@ -1177,6 +1188,8 @@ class MplCanvas(QWidget):
         self._TICK_LENGTH = type(self)._TICK_LENGTH
         self._TICK_WIDTH = type(self)._TICK_WIDTH
         self._TICK_DIRECTION = type(self)._TICK_DIRECTION
+        self._baseline_gap = type(self)._BASELINE_GAP
+        self._stack_gap = type(self)._STACK_GAP
         self._grid_visible = False
         self._minor_ticks_visible = True
         #: Top/right spines on a "curve" plot (relaxation/diffusion
@@ -3763,6 +3776,14 @@ class MplCanvas(QWidget):
         if (self._contour_spectrum is not None and self._last_right_click_xy is not None
                 and self._axis_unit == "ppm"):
             calibrate_action = menu.addAction("Set Reference from Cursor (ppm)…")
+        elif (self._current_1d_spectrum is not None and self._last_right_click_xy is not None
+                and self._axis_unit == "ppm"):
+            # The same on a 1D (explicit user request, 2026-10-15): type
+            # the true shift of the peak under the cursor; SR follows.
+            calibrate_action = menu.addAction("Calibrate Shift Here (ppm)…")
+            calibrate_action.setToolTip(
+                "Type the true chemical shift of the peak under the cursor; "
+                "the reference (SR) is set so it lands there.")
 
         unit_actions = {}
         if (self._current_1d_spectrum is not None or self._contour_spectrum is not None
@@ -4724,6 +4745,8 @@ class MplCanvas(QWidget):
             "tick_direction": self._TICK_DIRECTION,
             "map_colormap": self._map_colormap,
             "colorbar_gap": self._colorbar_gap,
+            "baseline_gap": self._baseline_gap,
+            "stack_gap": self._stack_gap,
             "tensor_style": dict(self._tensor_style),
             "minor_ticks": self._minor_ticks_visible,
             "top_spine": self._top_spine_visible,
@@ -4761,7 +4784,8 @@ class MplCanvas(QWidget):
                   legend_fontsize=None, legend_framealpha=None, legend_facecolor=None,
                   legend_linewidth=None, legend_style=None,
                   trace_label_position=None, top_spine=None, right_spine=None,
-                  line_width_scale=None, line_overrides=None) -> None:
+                  line_width_scale=None, line_overrides=None,
+                  baseline_gap=None, stack_gap=None) -> None:
         """The Output tab's live style panel -- updates whichever of
         these aren't ``None``, both as the new per-instance default
         (every ``show_*`` method reads ``self._AXIS_LINEWIDTH`` etc.,
@@ -4801,6 +4825,15 @@ class MplCanvas(QWidget):
             tensor_style = {**carried, **(tensor_style or {})}
         if colorbar_gap is not None:
             self._colorbar_gap = float(colorbar_gap)
+        gaps_changed = False
+        if baseline_gap is not None and float(baseline_gap) != self._baseline_gap:
+            self._baseline_gap = max(0.0, float(baseline_gap))
+            gaps_changed = True
+        if stack_gap is not None and float(stack_gap) != self._stack_gap:
+            self._stack_gap = max(0.0, float(stack_gap))
+            gaps_changed = True
+        if gaps_changed:
+            self._refit_spectrum_y_limits()
         if map_colormap is not None:
             # "" from the combo is "each plot's own default".
             self._map_colormap = map_colormap or None
@@ -4979,6 +5012,7 @@ class MplCanvas(QWidget):
         "legend_fontsize", "legend_framealpha", "legend_facecolor",
         "legend_linewidth", "legend_style", "trace_label_position",
         "top_spine", "right_spine", "line_width_scale", "line_overrides",
+        "baseline_gap", "stack_gap",
     )
 
     def apply_style_defaults(self, style: dict) -> None:
@@ -5819,6 +5853,7 @@ class MplCanvas(QWidget):
             self.ax.lines[0].set_label(entry.label)
             self.ax.set_xlim(xmin, xmax)
             self.ax.invert_xaxis()
+            self._fit_y_to_data(self.ax)
             self.ax.set_xlabel(labeltext, fontsize=self._AXIS_LABELSIZE)
             self.ax.set_yticks([])
             plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
@@ -6287,7 +6322,14 @@ class MplCanvas(QWidget):
                                                width=self._TICK_WIDTH, minor=self._minor_ticks_visible, labelsize=self._AXIS_LABELSIZE)
                 else:
                     row_ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
-            if shared_scale:
+            self._draw_compare_fit_overlays(spectra, axes, [ax.lines[0] for ax in axes],
+                                            colors, [e.label for e in entries], normalize)
+            # Each row's limits from its own full-resolution data (fit
+            # overlays included), with Plot Style's gaps: below the
+            # bottom row the axis gap, below every other row the gap
+            # between stacked spectra.
+            shared_range = None
+            if shared_scale and not normalize:
                 # One y-range across every row, so a component carrying
                 # 10% of the signal is drawn a tenth as tall instead of
                 # filling its own row exactly like a 100% one.
@@ -6299,9 +6341,15 @@ class MplCanvas(QWidget):
                 # every trace but the strongest. It is right for a set
                 # of components resolved from one dataset, which do
                 # share a scale by construction.
-                self._apply_shared_row_scale(axes, spectra, normalize)
-            self._draw_compare_fit_overlays(spectra, axes, [ax.lines[0] for ax in axes],
-                                            colors, [e.label for e in entries], normalize)
+                # (A no-op when normalising: every trace already has the
+                # same peak, so there are no relative heights to show.)
+                ranges = [r for r in (self._data_y_range(a) for a in axes) if r is not None]
+                if ranges:
+                    shared_range = (min(r[0] for r in ranges), max(r[1] for r in ranges))
+            self._compare_shared_range = shared_range
+            for row_ax in axes:
+                self._fit_y_to_data(row_ax, y_range=shared_range, bottom_gap=(
+                    self._baseline_gap if row_ax is axes[-1] else self._stack_gap))
             if row_labels:
                 self._annotate_compare_rows(axes, row_labels, colors)
             axes[0].set_xlim(xmin, xmax)
@@ -6338,6 +6386,8 @@ class MplCanvas(QWidget):
                 line.set_color(entry.colour)
             self._draw_compare_fit_overlays(spectra, [self.ax] * len(spectra), data_lines,
                                             colors, [e.label for e in entries], normalize)
+            self._compare_shared_range = None
+            self._fit_y_to_data(self.ax)
             self.ax.set_yticks([])
             plotting.apply_spine_style(self.ax, top=False, right=False, bottom=True, left=False,
                                         linewidth=self._AXIS_LINEWIDTH)
@@ -7626,6 +7676,81 @@ class MplCanvas(QWidget):
         self.ax.lines[0].set_ydata(new_ydata)
         self.canvas.draw_idle()
 
+    @classmethod
+    def _data_y_range(cls, ax):
+        """``(lowest, highest)`` of every data line on ``ax``, read from
+        each line's **full-resolution** arrays where it has them.
+
+        The display downsampling keeps the largest-magnitude point of
+        each bin, so a bin holding a tall positive peak drops the small
+        negative dip beside it: an autoscale of the downsampled line
+        then sat its bottom above the true minimum, and switching to
+        Full Resolution (which swaps the data in place) drew that part
+        under the axis. None if nothing finite is plotted."""
+        lows, highs = [], []
+        for line in ax.get_lines():
+            if not line.get_visible() or line.get_gid() in (
+                    cls._BASELINE_PREVIEW_GID, cls._BASELINE_GHOST_GID):
+                continue
+            full = getattr(line, "_opennmr_full_res", None)
+            y = np.asarray(full[1] if full is not None else line.get_ydata(), dtype=float)
+            if y.ndim != 1 or y.size < 2:
+                continue
+            y = y[np.isfinite(y)]
+            if y.size:
+                lows.append(float(np.min(y)))
+                highs.append(float(np.max(y)))
+        if not lows:
+            return None
+        return min(lows), max(highs)
+
+    def _fit_y_to_data(self, ax, bottom_gap: float | None = None, y_range=None) -> None:
+        """Set ``ax``'s y-limits so the lowest point of what is plotted
+        sits ``bottom_gap`` (a fraction of the traces' height; default
+        Plot Style's "Gap below spectra") above the axis line, and the
+        highest ``_TOP_GAP`` below the top. Never leaves part of a
+        trace under the axis, whatever sign its baseline has."""
+        if y_range is None:
+            y_range = self._data_y_range(ax)
+        if y_range is None:
+            return
+        low, high = y_range
+        span = high - low
+        if not np.isfinite(span) or span <= 0:
+            span = abs(high) or 1.0
+        gap = self._baseline_gap if bottom_gap is None else bottom_gap
+        ax.set_ylim(low - gap * span, high + self._TOP_GAP * span)
+        ax._opennmr_fitted_ylim = ax.get_ylim()
+
+    def _refit_spectrum_y_limits(self, only_if_untouched: bool = False) -> None:
+        """Re-apply the gaps to whatever 1D spectrum / Compare is on
+        show (a gap changed, or Full Resolution swapped the data).
+        ``only_if_untouched``: leave an axes the user has zoomed alone."""
+        if self._plot_kind not in ("1d", "compare", "pseudo2d") or self._contour_spectrum is not None:
+            return
+        if self._compare_axes is not None:
+            axes = list(self._compare_axes)
+        elif self._current_1d_spectrum is not None or self._compare_kwargs_active():
+            axes = [self.ax]
+        else:
+            return
+        shared = None
+        if self._compare_axes is not None and getattr(self, "_compare_shared_range", None) is not None:
+            shared = self._compare_shared_range
+        for i, ax in enumerate(axes):
+            fitted = getattr(ax, "_opennmr_fitted_ylim", None)
+            if only_if_untouched and fitted is not None and tuple(ax.get_ylim()) != tuple(fitted):
+                continue
+            bottom = self._baseline_gap if ax is axes[-1] else self._stack_gap
+            self._fit_y_to_data(ax, bottom_gap=bottom, y_range=shared)
+        self.canvas.draw_idle()
+
+    def _compare_kwargs_active(self) -> bool:
+        """An overlay Compare (one axes) is showing."""
+        return (self._compare_axes is None and self._current_1d_spectrum is None
+                and bool(getattr(self, "_compare_spectra", None))
+                and self._plot_kind in ("compare", "pseudo2d"))
+
     def autoscale_y(self) -> None:
         """Refit the y (intensity) axis to the data actually plotted
         right now on the main line -- for after a *discrete* phase
@@ -7648,12 +7773,12 @@ class MplCanvas(QWidget):
         action should do."""
         if not self.ax.lines:
             return
-        y = self.ax.lines[0].get_ydata()
+        line = self.ax.lines[0]
+        full = getattr(line, "_opennmr_full_res", None)
+        y = np.asarray(full[1] if full is not None else line.get_ydata(), dtype=float)
         if len(y) == 0:
             return
-        ymin, ymax = float(np.min(y)), float(np.max(y))
-        pad = (ymax - ymin) * 0.05 or 1.0
-        self.ax.set_ylim(ymin - pad, ymax + pad)
+        self._fit_y_to_data(self.ax, y_range=(float(np.nanmin(y)), float(np.nanmax(y))))
         self.canvas.draw_idle()
 
     def _lines_for_export(self) -> list:
@@ -7717,6 +7842,8 @@ class MplCanvas(QWidget):
                 line.set_data(*plotting.downsample_1d(x_full, y_full))
         if self._contour_spectrum is not None:
             self.show_spectrum(self._contour_spectrum)
+        else:
+            self._refit_spectrum_y_limits(only_if_untouched=True)
         self.canvas.draw_idle()
 
     def export_full_resolution(self, save_fn) -> None:

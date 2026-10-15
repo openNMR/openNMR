@@ -919,6 +919,27 @@ def linear_predict(fid: np.ndarray, order: int = 20, n_predict: int = 8,
 # Hypercomplex indirect-dimension (F1) decoding
 # ============================================================
 
+def hilbert_imaginary(real: np.ndarray) -> np.ndarray:
+    """The imaginary (dispersion) partner of a real spectrum, rebuilt by
+    the Hilbert transform -- TopSpin's ``ht``.
+
+    For a causal FID transformed with :func:`fft_spectrum` the real and
+    imaginary parts are a Hilbert pair, so this is exact (to rounding)
+    when the FID was zero-filled to at least twice its length, and a
+    close approximation otherwise. The sign matches this module's own
+    spectra: checked on a synthetic FID (error 5e-16) and against
+    TopSpin's own ``2ir`` for a real hypercomplex 2D (Good_2D/28,
+    r = 0.999 on its strongest rows).
+
+    Used for a row of a hypercomplex 2D (:func:`opennmr.processing.slicing.get_trace`):
+    the stored imaginary part there is F1's, so phasing the row (an F2
+    phase) needs F2's, which the hypercomplex decode has consumed.
+    """
+    from scipy.signal import hilbert
+    real = np.asarray(real, dtype=float)
+    return -np.imag(hilbert(real, axis=-1))
+
+
 def decode_hypercomplex_f1(data: np.ndarray, fn_mode: int) -> np.ndarray:
     """Combine adjacent raw row-pairs along axis 0 into genuine complex
     F1 (indirect-dimension) points, per Bruker's ``FnMODE`` acquisition

@@ -17,12 +17,24 @@ from __future__ import annotations
 import numpy as np
 
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
+from .ft import hilbert_imaginary
 
 
 #: ``metadata.raw`` entries holding *acquisition* parameters (Bruker's
 #: acqus/acqu2s/acqu3s, X-Pulse's exp_params and JCAMP header) --
 #: copied onto an extracted trace, see :func:`get_trace`.
 _ACQUISITION_KEYS = ("acqus", "acqu2s", "acqu3s", "exp_params", "params")
+
+
+def _f2_quadrature_is_spent(spectrum: NMRSpectrum) -> bool:
+    """A genuine hypercomplex 2D (FnMODE 4/5/6), whose stored imaginary
+    part is F1's -- see ``MainWindow._f2_quadrature_is_spent``."""
+    raw = spectrum.metadata.raw or {}
+    try:
+        fn_mode = int(raw.get("fn_mode", 1))
+    except (TypeError, ValueError):
+        return False
+    return spectrum.ndim == 2 and not spectrum.is_pseudo_2d and fn_mode in (4, 5, 6)
 
 
 def get_trace(spectrum: NMRSpectrum, axis: str = "f1", index: int | None = None,
@@ -122,6 +134,17 @@ def get_trace(spectrum: NMRSpectrum, axis: str = "f1", index: int | None = None,
     y = np.asarray(y)
     if y_imag is not None:
         y_imag = np.asarray(y_imag)
+    # A row of a hypercomplex 2D (States, States-TPPI, Echo-Antiecho)
+    # runs along F2, but the imaginary part stored with the 2D is F1's
+    # (TopSpin's 2ri): the decode consumed F2's. Phasing the row with
+    # F1's imaginary is not a phase change at all -- at an F1-absorptive
+    # peak row 2ri is close to zero, so dragging the phase by 90 degrees
+    # barely changed the trace (user report, 2026-10-15). F2's imaginary
+    # is rebuilt from the row by the Hilbert transform instead.
+    imaginary_from = None
+    if axis == "f1" and y_imag is not None and _f2_quadrature_is_spent(spectrum):
+        y_imag = hilbert_imaginary(y)
+        imaginary_from = "hilbert"
 
     if window is not None and x_is_ppm:
         lo_w, hi_w = sorted(window)
@@ -152,6 +175,10 @@ def get_trace(spectrum: NMRSpectrum, axis: str = "f1", index: int | None = None,
         # Which dimension the trace runs along -- a column runs along F1.
         "dimension": "F2" if axis == "f1" else "F1",
     }
+    if imaginary_from:
+        # Said in the trace's own record, so a log or a reader of the
+        # metadata knows the imaginary part is reconstructed.
+        raw["slice"]["imaginary"] = imaginary_from
     metadata = NMRMetadata(
         vendor=spectrum.metadata.vendor, nucleus=nucleus, sfo1=sfo1,
         source_path=spectrum.metadata.source_path, procno=spectrum.metadata.procno,
