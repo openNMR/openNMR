@@ -1567,7 +1567,10 @@ def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float 
         axis_acqus_path = acqus_path
 
     real = np.fromfile(real_path, dtype="int32", count=-1).astype(np.float64)
-    imag = np.fromfile(imag_path, dtype="int32", count=-1).astype(np.float64)
+    # TopSpin's rser/rsc/proj into another proc number often keep only
+    # 1r: then there is no imaginary part (and no phasing of it here).
+    imag = (np.fromfile(imag_path, dtype="int32", count=-1).astype(np.float64)
+            if os.path.exists(imag_path) else None)
 
     axis_meta = parse_jcampdx_params(axis_acqus_path)
     acq_meta = parse_jcampdx_params(acqus_path)
@@ -1586,15 +1589,16 @@ def read_1d_processed(path: str, procno: int = 1, mass: float = 1.0, f1p: float 
 
     x_ppm, x_hz = _ppm_hz_axis(o1, sf, obs, sw, si)
     real = real * 2 ** nc_proc
-    imag = imag * 2 ** nc_proc
+    imag = imag * 2 ** nc_proc if imag is not None else None
 
     if f1p != 0 or f2p != 0:
         lo, hi = sorted((f1p, f2p))
         keep = (x_ppm >= lo) & (x_ppm <= hi)
-        x_ppm, x_hz, real, imag = x_ppm[keep], x_hz[keep], real[keep], imag[keep]
+        x_ppm, x_hz, real = x_ppm[keep], x_hz[keep], real[keep]
+        imag = imag[keep] if imag is not None else None
 
     real = real / mass / ns
-    imag = imag / mass / ns
+    imag = imag / mass / ns if imag is not None else None
 
     metadata = NMRMetadata(
         vendor="bruker", nucleus=nuc, sfo1=sf, bf1=obs, o1=o1, ns=ns, source_path=path, procno=procno,
@@ -1806,6 +1810,52 @@ _WINDOW_NAMES = {0: "no window", 1: "EM", 2: "GM", 3: "SINE", 4: "QSINE", 5: "TR
                  6: "user", 7: "SINC", 8: "QSINC", 9: "TRAF", 10: "TRAFS"}
 
 
+def _int_text(value) -> str:
+    try:
+        return f"{int(float(value))}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def procno_dimension(path: str, procno: int = 1) -> int | None:
+    """1 or 2: what ``pdata/<procno>`` of an experiment holds -- 2 when it
+    has ``proc2s`` (or ``2rr``), 1 when it has ``procs`` only (or ``1r``);
+    None when the folder is missing or says neither."""
+    folder = os.path.join(path, "pdata", str(procno))
+    if not os.path.isdir(folder):
+        return None
+    if any(os.path.exists(os.path.join(folder, f)) for f in ("proc2s", "2rr")):
+        return 2
+    if any(os.path.exists(os.path.join(folder, f)) for f in ("procs", "1r")):
+        return 1
+    return None
+
+
+def slice_dimension_of_procno(path: str, procno: int = 1) -> int:
+    """For a 1D proc number of a 2D: 1 when it lies along F2 (a row, or
+    an F2 projection), 2 along F1 (a column, or an F1 projection) --
+    decided from its own ``SF`` against each dimension's ``BF1`` (and,
+    when both dimensions are one nucleus, its ``SW_p`` against each
+    dimension's spectral width in Hz)."""
+    try:
+        procs = _read_procs(path, procno)
+        sf = float(procs.get("SF"))
+        acqus = parse_jcampdx_params(os.path.join(path, "acqus"))
+        acqu2s = parse_jcampdx_params(os.path.join(path, "acqu2s"))
+        bf2, bf1 = float(acqus.get("BF1")), float(acqu2s.get("BF1"))
+    except Exception:  # noqa: BLE001 -- unknown: the direct dimension, as before
+        return 1
+    if abs(bf1 - bf2) > 1e-3 * max(bf1, bf2):
+        return 2 if abs(sf - bf1) < abs(sf - bf2) else 1
+    try:
+        sw_p = float(procs.get("SW_p"))
+        sw2 = float(acqus.get("SW_h") or float(acqus.get("SW")) * bf2)
+        sw1 = float(acqu2s.get("SW_h") or float(acqu2s.get("SW")) * bf1)
+    except (TypeError, ValueError):
+        return 1
+    return 2 if abs(sw_p - sw1) < abs(sw_p - sw2) else 1
+
+
 def available_procnos(path: str) -> list[dict]:
     """Every processing (``pdata/<n>``) of a Bruker experiment, in
     order: ``{"procno", "title", "processed", "summary"}`` -- ``processed``
@@ -1844,13 +1894,16 @@ def available_procnos(path: str) -> list[dict]:
                 extra = f" LB {float(procs['LB']):g}"
             elif wdw in ("SINE", "QSINE") and procs.get("SSB") is not None:
                 extra = f" SSB {float(procs['SSB']):g}"
-            part = f"{label}{wdw}{extra}, SI {procs.get('SI', '?')}"
+            part = f"{label}{wdw}{extra}, SI {_int_text(procs.get('SI'))}"
             if not proc2 and procs.get("PHC0") is not None:
                 part += f", PHC0 {float(procs['PHC0']):.1f}°"
             bits.append(part)
         title = read_title(path, procno)
+        ndim = procno_dimension(path, procno)
+        if ndim == 1 and os.path.exists(os.path.join(path, "ser")):
+            bits.insert(0, "1D of this 2D (a row, column or projection)")
         out.append({"procno": procno, "title": (title or "").splitlines()[0] if title else "",
-                    "processed": processed, "summary": "; ".join(bits)})
+                    "processed": processed, "summary": "; ".join(bits), "ndim": ndim})
     return out
 
 
@@ -2324,6 +2377,26 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
         return spectrum
     has_ser = os.path.exists(os.path.join(path, "ser"))
     has_fid = os.path.exists(os.path.join(path, "fid"))
+    # A 1D proc number of a 2D -- a row, column or projection TopSpin
+    # wrote there (rser, rsc, proj): it has procs but no proc2s, so the
+    # 2D read below would fail on the missing proc2s (explicit user
+    # report, 2026-10-14: "[Errno 2] No such file ... pdata\\99389\\proc2s").
+    # Read as TopSpin processed it, on the axis of the dimension it is.
+    if has_ser and procno_dimension(path, kwargs.get("procno", 1)) == 1:
+        one_d = {k: v for k, v in kwargs.items()
+                 if k not in ("pseudo_2d", "drift_correction", "truncate_f1", "zero_fill_f1",
+                              "window_f1", "window_kwargs_f1", "linear_predict_f1")}
+        dimension = slice_dimension_of_procno(path, kwargs.get("procno", 1))
+        spectrum = read_1d_processed(
+            path, **_accepted(read_1d_processed, one_d),
+            heteronuclear_2d_slice=dimension != 1, slice_dimension=max(dimension, 2))
+        spectrum.metadata.raw["loaded_from_processed"] = (
+            f"pdata/{kwargs.get('procno', 1)} is a 1D processing of this 2D (a row, column or "
+            f"projection TopSpin wrote there"
+            + (", along F1" if dimension != 1 else ", along F2") + "): shown as TopSpin "
+            "processed it.")
+        spectrum.metadata.raw["procno_dimension"] = 1
+        return spectrum
     has_2rr = os.path.exists(os.path.join(path, "pdata", str(kwargs.get("procno", 1)), "2rr"))
     # `pseudo_2d` is meaningless for the 1D readers (neither accepts it),
     # but a caller can't know whether a given path is 1D or 2D without

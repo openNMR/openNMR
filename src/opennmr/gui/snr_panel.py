@@ -110,8 +110,14 @@ class SnrPanel(QWidget):
     #: A result was calculated (for tests and the main window).
     calculated = Signal()
 
-    def __init__(self, spectra, selected, draw, arm, store, style=None, parent=None) -> None:
+    def __init__(self, spectra, selected, draw, arm, store, style=None, parent=None,
+                 view_limits=None) -> None:
         super().__init__(parent)
+        #: ``view_limits()`` -> the (left, right) ppm the plot shows now,
+        #: or None: the S/N plot is drawn in that view rather than zoomed
+        #: to the regions (explicit user report, 2026-10-15: picking a
+        #: region zoomed in and the noise region was then off screen).
+        self._view_limits = view_limits
         self._spectra, self._selected = spectra, selected
         self._draw, self._arm, self._store = draw, arm, store
         self._style = style or (lambda _view: {})
@@ -701,6 +707,17 @@ class SnrPanel(QWidget):
         labels = self.labels()
         result = self.result if self._result_entries == self._entries else None
         kwargs = self._plot_kwargs()
+        view = self._view_limits() if self._view_limits is not None else None
+        if view is not None:
+            lo, hi = min(view), max(view)
+            edges = [v for s, n, _o in self.regions_for_entries()
+                     for w in ([s] if s else []) + list(n or []) for v in w]
+            # Kept unless a region lies wholly outside it (then the plot
+            # widens to show the regions, as before).
+            if not edges or all(lo <= min(w) and max(w) <= hi for s, n, _o in
+                                self.regions_for_entries()
+                                for w in ([s] if s else []) + list(n or [])):
+                kwargs["xlims"] = view
 
         def draw(figure):
             if result is not None:

@@ -2324,6 +2324,19 @@ class MainWindow(QMainWindow):
         return [{"label": self.session.label(i), "spectrum": s, "index": i}
                 for i, s in enumerate(self.session.spectra) if s.ndim == 1]
 
+    def _compare_view_ppm_limits(self):
+        """The (left, right) chemical-shift limits the Compare view shows
+        now, or None when it shows nothing with a shift axis. What the
+        S/N plot keeps when it redraws."""
+        canvas = self.compare_canvas
+        for ax in canvas.figure.axes:
+            label = ax.get_xlabel() or ""
+            if "ppm" in label or "shift" in label.lower():
+                left, right = ax.get_xlim()
+                if np.isfinite(left) and np.isfinite(right) and left != right:
+                    return float(left), float(right)
+        return None
+
     def _snr_spectra(self) -> list[dict]:
         """Apply ▸ Signal-to-Noise's list: every 1D spectrum and every
         genuine 2D in Open experiments (a pseudo-2D series is measured a
@@ -13908,7 +13921,8 @@ class MainWindow(QMainWindow):
         # Its own series group: names and colours set on an S/N plot
         # survive the next calculation (explicit user report, 2026-10-14).
         self.snr_panel = SnrPanel(spectra=self._snr_spectra, selected=self._dnp_selected_rows,
-                                  draw=lambda draw, view: self._dnp_draw(draw, view, "snr"), arm=self._snr_arm, store=self._store_dnp,
+                                  draw=lambda draw, view: self._dnp_draw(draw, view, "snr"),
+                                  view_limits=self._compare_view_ppm_limits, arm=self._snr_arm, store=self._store_dnp,
                                   style=self._dnp_style)
         self._snr_section = CollapsibleSection("Signal-to-Noise", content=self.snr_panel)
         self._snr_section.toggled.connect(lambda expanded: expanded and self.snr_panel.refresh())

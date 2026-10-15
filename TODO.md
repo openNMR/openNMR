@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-15 (a 1D proc number of a 2D opens; S/N keeps the line width and the view): 6 new tests in `test_procno_1d_of_2d_and_snr_view.py`. Related files only: 174 passed, 20 skipped; test_gui.py -k "procno or processed" 5 passed. **Run the full suite locally before committing.***
+
 *2026-10-14 round 3 (proc-number checklist, S/N keeps plot styles, export size in cm, more optional sections): 11 new tests in `test_procnos_snr_styles_units_sections.py`. Related files only: 377 passed, 1 skipped; test_gui.py subset 49 passed, 14 skipped. **Run the full suite locally before committing.***
 
 *2026-10-14 round 2 (Settings: data folder, sections shown, click-and-drag; typed number boxes; S/N conventions and 2D S/N; TopSpin's 2D processing kept): 29 new tests (+1 real-data) in `test_settings_data_sections_drag.py`, `test_snr_conventions_2d.py`, `test_topspin_processing_2d.py`. Related files only, as asked: the 3 new files, the settings/canvas/S/N/DNP/pNMR/drift/multi-fit files (781 passed, 8 skipped), the Bruker reader/persistence/history/reopen/shearing/X-Pulse/JEOL files (464 passed, 47 skipped), test_gui.py -k "navigation or dpi or export or truncat or ... or state_folder" (112 passed; `test_settings_is_the_last_launcher_button` updated for the new sections) and -k "process_indirect or saved_processing or read_kwargs or reopen or settings_is or tdeff or truncat or recorded_phase or zero_phase or navigation_mode" (37 passed, 4 skipped); `test_reopen_keeps_recorded_phase.py` back to passing (it failed 2 of 4 on `cd8b7e4`). **Run the full suite locally before committing.***
@@ -186,6 +188,22 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## A 1D proc number of a 2D opens; S/N keeps the plot style's line width and the view (2026-10-15)
+
+**Asked:** (1) "When loading a 2-d spectrum with several 1-d procnos, an error appears" -- `[Errno 2] No such file or directory: ...\2261\pdata\99389\proc2s`; "perhaps a check ... of the dimensionality before reading files such as the processing files". (2) S/N "all plot styles disappear ... still not fixed": "if you click drag, the line thickness changes, then when you have selected a region, you zoom in automatically, rather than maintaining the current view".
+
+**What was wrong:**
+- (1) `io.bruker._read_auto` takes the 2D path for any experiment with a `ser`, whatever the proc number; `read_2d` then reads that proc number's `proc2s`, which a 1D processing of a 2D (TopSpin's `rser`/`rsc`/`proj` into a new procno) does not have. `read_1d_processed` also assumed a `1i`, which such a procno often lacks.
+- (2) Measured on the Compare view: traces 1.5 wide (matplotlib's `lines.linewidth`, i.e. the plot style), the S/N plot redrew them at a hard-coded 0.9; the S/N plot always set its x-limits to the regions ±10 %, so arming a drag or choosing a region zoomed away from the user's view (20..-20 ppm became 88.5..-13.5). Last round's fix (names/colours kept across calculations) was real but not what was being seen.
+
+**Built:**
+- `io.bruker.procno_dimension(path, procno)` (2 with `proc2s`/`2rr`, 1 with `procs`/`1r` only), `slice_dimension_of_procno` (along F2 or F1, from the procno's `SF` against each dimension's `BF1`, or `SW_p` against each width when both are one nucleus). `_read_auto` reads a 1D procno of a `ser` with `read_1d_processed(..., heteronuclear_2d_slice=, slice_dimension=)` and says so in `loaded_from_processed`; `read_1d_processed` takes a missing `1i` (no imaginary part). `available_procnos` entries carry `ndim` and "1D of this 2D (a row, column or projection)"; SI printed as a whole number.
+- `snr.plot_snr(..., linewidth=None)` -- the style's width by default -- and the GUI passes the view on screen (`SnrPanel(view_limits=)`, `MainWindow._compare_view_ppm_limits`): kept unless a region lies wholly outside it, then widened to show the regions as before.
+
+**Not changed:** the S/N plot is still one axes with offset traces where Compare stacks one row per spectrum; names, colours, widths, text and view now carry over, the row layout does not.
+
+Tests: `tests/test_procno_1d_of_2d_and_snr_view.py` (6, one needs `test_data/Good_2D/28`). Only the related files, as asked: proc-number/S/N/Bruker-reader/TopSpin-2D/scan/background-load files (174 passed, 20 skipped) and test_gui.py -k "procno or processed" (5 passed).
 
 ## Proc numbers as a checklist, S/N keeps plot styles, export size in cm, more optional sections (2026-10-14, round 3)
 

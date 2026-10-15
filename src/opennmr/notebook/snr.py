@@ -1171,12 +1171,18 @@ def snr_to_csv(result: dict, path: str) -> None:
 
 def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode: str = "stack",
              xlims=None, cmap: str = "black", fontsize: float = 12.0,
-             signal_colour: str = "#009e73", noise_colour: str = "0.6", regions=None):
+             signal_colour: str = "#009e73", noise_colour: str = "0.6", regions=None,
+             linewidth: float | None = None):
     """The spectra with each one's signal region (green) and noise region
     (grey) shaded in its own row, the measured line marked and its S/N
     written beside it. ``mode`` 'stack' (one row each) or 'overlay' (the
     shading then shows the first spectrum's regions; differing regions
-    are drawn as outlines). Without a ``result``, ``regions`` -- one
+    are drawn as outlines). ``linewidth``: the traces' width (default:
+    matplotlib's ``lines.linewidth``, i.e. the plot style in force, as
+    every other spectrum plot -- it was a fixed 0.9, so the traces
+    thinned the moment S/N was shown; explicit user report 2026-10-15).
+    ``xlims``: the view to draw (the GUI passes the view on screen, so
+    choosing a region does not zoom). Without a ``result``, ``regions`` -- one
     ``{"signal": (a, b) or None, "noise": [(a, b), ...] or None}`` per
     spectrum -- are shaded as a preview. Returns the figure."""
     import matplotlib.pyplot as plt
@@ -1263,7 +1269,7 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
     differing = set((result or {}).get("differing") or [])
     for i, ((x, y, lo, hi, base), r) in enumerate(zip(traces, rows)):
         off = offsets[i]
-        ax.plot(x, y + off, color=palette[i], linewidth=0.9, label=labels[i])
+        ax.plot(x, y + off, color=palette[i], linewidth=linewidth, label=labels[i])
         windows = ([("signal", r["signal_region"])] if r.get("signal_region") is not None else [])
         windows += [("noise", w) for w in r.get("noise_region") or []]
         for kind, (w_hi, w_lo) in windows:
@@ -1347,7 +1353,7 @@ def _plot_snr_panels(spectra, rows, labels, figure, cmap, fontsize, signal_colou
         else:
             x, y, info = _xy(spectrum)
             base = r.get("noise_mean", 0.0)
-            ax.plot(x, y - base, color=palette[i], linewidth=0.9)
+            ax.plot(x, y - base, color=palette[i])
             if r.get("signal_region") is not None:
                 ax.axvspan(r["signal_region"][1], r["signal_region"][0], color=signal_colour,
                            alpha=0.18, linewidth=0)
