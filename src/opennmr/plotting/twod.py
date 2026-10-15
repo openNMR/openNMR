@@ -267,7 +267,7 @@ def _right_label_clearance(ax, fontsize: float) -> float:
 
 def _draw_slice_panel(ax, divider, spectrum, slices, *,
                       size, pad, offset_fraction, colours,
-                      font, fontsize, axis_label, linewidth):
+                      font, fontsize, axis_label, linewidth, bottom_gap=0.05):
     """Draw extracted slices beside a contour: a dashed line across the
     contour at each slice's own position, and the extracted traces
     stacked in a panel to the right, one colour per slice.
@@ -336,12 +336,13 @@ def _draw_slice_panel(ax, divider, spectrum, slices, *,
         ax, divider, entries, axis_kind=axis_kind, size=size, pad=pad,
         offset_fraction=offset_fraction, colours=colours, font=font,
         fontsize=fontsize, axis_label=axis_label, linewidth=linewidth,
+        bottom_gap=bottom_gap,
     )
 
 
 def _draw_traces_panel(ax, divider, entries, *, axis_kind,
                        size, pad, offset_fraction, colours,
-                       font, fontsize, axis_label, linewidth):
+                       font, fontsize, axis_label, linewidth, bottom_gap=0.05):
     """The panel half of :func:`_draw_slice_panel`, over already-extracted
     traces rather than over an :class:`NMRSpectrum`.
 
@@ -359,6 +360,12 @@ def _draw_traces_panel(ax, divider, entries, *, axis_kind,
     -- ``spec`` carrying the ``label``/``color`` the caller chose,
     ``position`` the coordinate on the *fixed* axis where the dashed
     marker goes.
+
+    ``bottom_gap`` : space between the lowest trace's lowest point and
+    the panel's axis line, as a fraction of that trace's height. Each
+    trace starts at its own minimum, so without it the bottom trace's
+    baseline lay *on* the axis line and could not be seen (user report,
+    2026-10-15).
     """
     if not entries:
         return None
@@ -439,7 +446,7 @@ def _draw_traces_panel(ax, divider, entries, *, axis_kind,
     # (Already automatic for a row panel via sharex, above.)
     if axis_kind != "f1":
         panel.set_xlim(ax.get_ylim())
-    panel.set_ylim(0.0, 1.0)
+    panel.set_ylim(-max(0.0, float(bottom_gap)) * slot * offset_fraction, 1.0)
     if axis_label:
         panel.set_xlabel(axis_label, fontsize=fontsize)
     panel.tick_params(axis="y", which="both", left=False, right=False,
@@ -681,6 +688,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
                      show_nQ_line=False, nQ=1, nQ_colors=None,
                      slices=None, slice_panel_size=1.0, slice_panel_pad=0.95,
                      slice_offset_fraction=0.85, slice_colors=None, slice_linewidth=2.0,
+                     slice_bottom_gap=0.05,
                      contour_linewidth: float = 0.8, insets=None,
                      f1_external=None, f2_external=None,
                      external_projection_color='crimson', projection_style=None,
@@ -1032,6 +1040,7 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
             size=slice_panel_size, pad=slice_panel_pad,
             offset_fraction=slice_offset_fraction, colours=slice_colors,
             font=font, fontsize=fontsize, linewidth=slice_linewidth,
+            bottom_gap=slice_bottom_gap,
             # The trace runs along the *other* dimension from the one
             # its slice fixes, so a row's panel carries the contour's
             # own x label and a column's its y label. User: "the axis

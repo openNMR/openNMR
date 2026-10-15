@@ -752,10 +752,12 @@ class MplCanvas(QWidget):
     #: and the space between neighbouring traces of a stacked Compare.
     #: Plot Style ▸ "Gap below spectra" / "Gap between stacked spectra"
     #: (explicit user request, 2026-10-15: a slice whose baseline sits
-    #: below zero was drawn partly under the axis). 0.05 is matplotlib's
-    #: own margin, so the defaults draw what the autoscale used to --
-    #: but from the *full-resolution* data (see _fit_y_to_data).
-    _BASELINE_GAP = 0.05
+    #: below zero was drawn partly under the axis), measured from the
+    #: *full-resolution* data (see _fit_y_to_data). The gap below is 10 %
+    #: by default -- twice matplotlib's margin -- so the baseline always
+    #: floats visibly clear of the axis line (follow-up the same day);
+    #: the extracted-slice panel beside a contour uses both too.
+    _BASELINE_GAP = 0.10
     _STACK_GAP = 0.05
     _TOP_GAP = 0.05
     TICK_DIRECTIONS = (("In", "in"), ("Out", "out"), ("In and out", "inout"))
@@ -1188,6 +1190,7 @@ class MplCanvas(QWidget):
         self._TICK_LENGTH = type(self)._TICK_LENGTH
         self._TICK_WIDTH = type(self)._TICK_WIDTH
         self._TICK_DIRECTION = type(self)._TICK_DIRECTION
+        self._double_click_resets = True
         self._baseline_gap = type(self)._BASELINE_GAP
         self._stack_gap = type(self)._STACK_GAP
         self._grid_visible = False
@@ -2732,8 +2735,13 @@ class MplCanvas(QWidget):
     def _slice_panel_kwargs(self) -> dict:
         """``slices`` override for
         :func:`opennmr.plotting.plot_2d_contour`, both call sites --
-        see :meth:`set_contour_slices`."""
-        return {"slices": self._contour_slices or None}
+        see :meth:`set_contour_slices`. The traces float above the
+        panel's axis line by Plot Style's "Gap below spectra" and are
+        spaced by its "Gap between stacked spectra" (both fractions of a
+        trace's height), as in a 1D and a stacked Compare."""
+        return {"slices": self._contour_slices or None,
+                "slice_bottom_gap": self._baseline_gap,
+                "slice_offset_fraction": 1.0 / (1.0 + max(0.0, self._stack_gap))}
 
     def set_slice_colour(self, position: int, colour: str) -> None:
         """Recolour one extracted slice, by its position in the list.
@@ -3261,6 +3269,23 @@ class MplCanvas(QWidget):
         # missing the attribute entirely (some existing tests' own
         # minimal doubles, built before this needed to handle the
         # non-fit-mode case too) must not raise AttributeError here.
+        if (event.button == 1 and getattr(event, "dblclick", False)
+                and self._double_click_resets and self.toolbar.mode == ""
+                and not self._click_mode_active() and event.inaxes is not None):
+            # Double-click: back to the full view (Settings ▸ Double-click
+            # resets the view; explicit user request, 2026-10-15). The
+            # first click of the pair already started a (zero-size, so
+            # no-op) zoom or pan; drop it. On a stacked Compare the first
+            # click also toggled a row's selection -- clear it, so a
+            # double-click never leaves a row tinted.
+            self._zoom_start = None
+            self._pan_start = None
+            self._compare_click_start = None
+            if self._compare_axes and self._selected_compare_index is not None:
+                self.set_compare_selection(None)
+                self.compareSelectionCleared.emit()
+            self.reset_view()
+            return
         if event.button == 3:
             # Which Axes the right-click landed in, for the context menu
             # (a projection strip gets its own style entry). Reset on
@@ -3333,6 +3358,13 @@ class MplCanvas(QWidget):
 
     def drag_mode(self) -> str:
         return self._drag_mode
+
+    def set_double_click_resets(self, on: bool) -> None:
+        """Whether a left double-click on a plot resets its view (Home)."""
+        self._double_click_resets = bool(on)
+
+    def double_click_resets(self) -> bool:
+        return self._double_click_resets
 
     def set_drag_mode(self, mode: str) -> None:
         """What a plain left-drag does: ``"zoom"`` (draw a box, zoom to
@@ -3587,6 +3619,8 @@ class MplCanvas(QWidget):
         self._selected_compare_index = None if self._selected_compare_index == index else index
         self._apply_compare_selection_highlight()
         self.canvas.draw_idle()
+        if self._selected_compare_index is None:
+            self.compareSelectionCleared.emit()     # the Compare list lets go too
 
     def _apply_compare_selection_highlight(self) -> None:
         """Tint whichever row is selected (if any) so it's obvious at
@@ -3620,6 +3654,10 @@ class MplCanvas(QWidget):
     #: chosen. The canvas knows the gesture happened; only MainWindow
     #: owns the dialog and the controls in it.
     plotStyleRequested = Signal()
+
+    #: A double-click cleared a stacked Compare row's selection, so the
+    #: Compare list can drop its current row too.
+    compareSelectionCleared = Signal()
 
     #: Emitted with the component labels after a fit view is drawn
     #: (:meth:`show_slice_fit`), so the component-display controls can
@@ -4834,6 +4872,8 @@ class MplCanvas(QWidget):
             gaps_changed = True
         if gaps_changed:
             self._refit_spectrum_y_limits()
+            if self._contour_spectrum is not None and self._contour_slices:
+                self._redraw_contour(preserve_view=True)
         if map_colormap is not None:
             # "" from the combo is "each plot's own default".
             self._map_colormap = map_colormap or None
@@ -6347,9 +6387,7 @@ class MplCanvas(QWidget):
                 if ranges:
                     shared_range = (min(r[0] for r in ranges), max(r[1] for r in ranges))
             self._compare_shared_range = shared_range
-            for row_ax in axes:
-                self._fit_y_to_data(row_ax, y_range=shared_range, bottom_gap=(
-                    self._baseline_gap if row_ax is axes[-1] else self._stack_gap))
+            self._fit_compare_rows(axes, shared_range)
             if row_labels:
                 self._annotate_compare_rows(axes, row_labels, colors)
             axes[0].set_xlim(xmin, xmax)
@@ -7704,7 +7742,8 @@ class MplCanvas(QWidget):
             return None
         return min(lows), max(highs)
 
-    def _fit_y_to_data(self, ax, bottom_gap: float | None = None, y_range=None) -> None:
+    def _fit_y_to_data(self, ax, bottom_gap: float | None = None, y_range=None,
+                       top_gap: float | None = None) -> None:
         """Set ``ax``'s y-limits so the lowest point of what is plotted
         sits ``bottom_gap`` (a fraction of the traces' height; default
         Plot Style's "Gap below spectra") above the axis line, and the
@@ -7719,7 +7758,8 @@ class MplCanvas(QWidget):
         if not np.isfinite(span) or span <= 0:
             span = abs(high) or 1.0
         gap = self._baseline_gap if bottom_gap is None else bottom_gap
-        ax.set_ylim(low - gap * span, high + self._TOP_GAP * span)
+        top = self._TOP_GAP if top_gap is None else top_gap
+        ax.set_ylim(low - gap * span, high + top * span)
         ax._opennmr_fitted_ylim = ax.get_ylim()
 
     def _refit_spectrum_y_limits(self, only_if_untouched: bool = False) -> None:
@@ -7737,13 +7777,28 @@ class MplCanvas(QWidget):
         shared = None
         if self._compare_axes is not None and getattr(self, "_compare_shared_range", None) is not None:
             shared = self._compare_shared_range
-        for i, ax in enumerate(axes):
-            fitted = getattr(ax, "_opennmr_fitted_ylim", None)
-            if only_if_untouched and fitted is not None and tuple(ax.get_ylim()) != tuple(fitted):
-                continue
-            bottom = self._baseline_gap if ax is axes[-1] else self._stack_gap
-            self._fit_y_to_data(ax, bottom_gap=bottom, y_range=shared)
+        if only_if_untouched:
+            axes = [ax for ax in axes
+                    if getattr(ax, "_opennmr_fitted_ylim", None) is None
+                    or tuple(ax.get_ylim()) == tuple(ax._opennmr_fitted_ylim)]
+        if self._compare_axes is not None:
+            self._fit_compare_rows(axes, shared, bottom_row=self._compare_axes[-1])
+        else:
+            for ax in axes:
+                self._fit_y_to_data(ax)
         self.canvas.draw_idle()
+
+    def _fit_compare_rows(self, axes, shared_range=None, bottom_row=None) -> None:
+        """Each stacked row's limits: the axis gap below the bottom row,
+        the stack gap below every other. On a shared scale every row must
+        also span the same range, so a row with the smaller gap below
+        takes the difference above -- equal scales, gaps kept."""
+        bottom_row = axes[-1] if bottom_row is None and axes else bottom_row
+        widest = max(self._baseline_gap, self._stack_gap)
+        for ax in axes:
+            gap = self._baseline_gap if ax is bottom_row else self._stack_gap
+            top = self._TOP_GAP + (widest - gap if shared_range is not None else 0.0)
+            self._fit_y_to_data(ax, bottom_gap=gap, y_range=shared_range, top_gap=top)
 
     def _compare_kwargs_active(self) -> bool:
         """An overlay Compare (one axes) is showing."""
@@ -7879,6 +7934,12 @@ class MplCanvas(QWidget):
                                if ln.get_visible()]
             for ln in crosshair_lines:
                 ln.set_visible(False)
+        # Likewise the tint on a selected stacked-Compare row: it marks
+        # which row the scroll-zoom targets, and is no part of a figure.
+        selected_row = self._selected_compare_index if self._compare_axes else None
+        if selected_row is not None:
+            self._selected_compare_index = None
+            self._apply_compare_selection_highlight()
         swapped = []
         for line in self._lines_for_export():
             full_data = getattr(line, "_opennmr_full_res", None)
@@ -7923,6 +7984,9 @@ class MplCanvas(QWidget):
         try:
             save_fn()
         finally:
+            if selected_row is not None:
+                self._selected_compare_index = selected_row
+                self._apply_compare_selection_highlight()
             if swapped:
                 for line, x, y in swapped:
                     line.set_data(x, y)

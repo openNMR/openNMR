@@ -191,6 +191,30 @@ class _ExperimentDropList(QListWidget):
     def _acceptable(self, event) -> bool:
         return event.mimeData().hasFormat(self._MIME) and event.source() is not self
 
+    def clear_current(self) -> None:
+        """No current row, nothing selected -- emits ``currentRowChanged(-1)``,
+        which takes the highlight off the Compare plot."""
+        self.clearSelection()
+        self.setCurrentRow(-1)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        # A click on the list's blank space deselects, so the row tinted
+        # on the Compare plot can be let go of from the list too (explicit
+        # user request, 2026-10-15). Qt's own single-selection list keeps
+        # its current row on such a click.
+        if self.itemAt(event.position().toPoint()) is None:
+            self.clear_current()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        if event.key() == Qt.Key.Key_Escape and self.currentRow() >= 0:
+            self.clear_current()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def dragEnterEvent(self, event) -> None:  # noqa: N802 -- Qt override
         if self._acceptable(event):
             event.setDropAction(Qt.DropAction.CopyAction)
@@ -1171,6 +1195,17 @@ class MainWindow(QMainWindow):
             "point -- the contents of its opennmr_log.txt.")
         self.show_log_action.triggered.connect(self._on_show_log_clicked)
         file_menu.addAction(self.show_log_action)
+        # Explicit user request (2026-10-15): start an experiment over --
+        # delete openNMR's files beside the data and re-read it as the
+        # vendor's files alone say. Asks first; cannot be undone.
+        self.clear_history_action = QAction("Clear All &History…", self)
+        self.clear_history_action.setToolTip(
+            "Delete the selected experiment's openNMR files (opennmr_history.json, "
+            "opennmr_log.txt, opennmr_metadata.json, opennmr_processing.json and its save "
+            "points) and re-open it without any earlier processing. Its data files are not "
+            "touched. Cannot be undone.")
+        self.clear_history_action.triggered.connect(self._on_clear_history_clicked)
+        file_menu.addAction(self.clear_history_action)
         self.simulation_history_action = QAction("Simulation &History…", self)
         self.simulation_history_action.setToolTip(
             "Every simulation run, with its inputs -- restore any of them into its "
@@ -2245,6 +2280,7 @@ class MainWindow(QMainWindow):
         self.compare_list.setPalette(compare_list_palette)
         self.compare_list.itemChanged.connect(lambda _item: self._refresh_compare_view_if_active())
         self.compare_list.currentRowChanged.connect(self._on_compare_list_current_row_changed)
+        self.compare_canvas.compareSelectionCleared.connect(self.compare_list.clear_current)
         self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
         layout.addWidget(self.compare_list, 1)
@@ -6048,6 +6084,17 @@ class MainWindow(QMainWindow):
         self.drag_mode_combo.currentIndexChanged.connect(
             lambda _i: self._set_drag_mode(self.drag_mode_combo.currentData()))
         interface_form.addRow("Click and drag:", self.drag_mode_combo)
+        # Double-click a plot to return to its full view (explicit user
+        # request, 2026-10-15). On by default; off leaves the view as it
+        # is. Remembered.
+        self.double_click_reset_checkbox = QCheckBox("Double-click a plot to reset its view")
+        self.double_click_reset_checkbox.setToolTip(
+            "On: a double-click on any plot zooms back out to its full view, as the "
+            "house button does. Off: double-clicking leaves the view as it is.")
+        self.double_click_reset_checkbox.setChecked(
+            bool(self._ui_settings.get("double_click_reset", True)))
+        self.double_click_reset_checkbox.toggled.connect(self._set_double_click_reset)
+        interface_form.addRow("Double-click:", self.double_click_reset_checkbox)
         # Export size unit (explicit user request, 2026-10-14): inches
         # by default. Display only -- sizes are kept in inches.
         self.export_unit_combo = QComboBox()
@@ -6063,6 +6110,7 @@ class MainWindow(QMainWindow):
         interface_form.addRow("Export size in:", self.export_unit_combo)
         self._set_export_unit(self.export_unit_combo.currentData(), save=False)
         self._set_drag_mode(self.drag_mode_combo.currentData(), save=False)
+        self._set_double_click_reset(self.double_click_reset_checkbox.isChecked(), save=False)
         layout.addWidget(CollapsibleSection("Interface", content=interface))
 
         # --- Fitting -------------------------------------------------
@@ -6616,6 +6664,20 @@ class MainWindow(QMainWindow):
             self.export_unit_combo.blockSignals(blocked)
         if save:
             self._ui_settings["export_unit"] = unit
+            self._save_ui_settings()
+
+    def _set_double_click_reset(self, on: bool, save: bool = True) -> None:
+        """Settings ▸ Interface ▸ Double-click: reset the view, on every
+        plot; remembered as ``double_click_reset``."""
+        on = bool(on)
+        for canvas in self._all_canvases():
+            canvas.set_double_click_resets(on)
+        if self.double_click_reset_checkbox.isChecked() != on:
+            blocked = self.double_click_reset_checkbox.blockSignals(True)
+            self.double_click_reset_checkbox.setChecked(on)
+            self.double_click_reset_checkbox.blockSignals(blocked)
+        if save:
+            self._ui_settings["double_click_reset"] = on
             self._save_ui_settings()
 
     def _set_drag_mode(self, mode: str, save: bool = True) -> None:
@@ -10613,6 +10675,104 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Couldn't restore", str(exc))
             return
         self.statusBar().showMessage("Restored.", 5000)
+
+    def _on_clear_history_clicked(self) -> None:
+        index = self._selected_index()
+        if index is None:
+            QMessageBox.information(self, "Nothing selected",
+                                    "Select a spectrum in Open experiments to clear its history.")
+            return
+        spectrum = self.session.spectra[index]
+        on_disk = self._history_on_disk(spectrum)
+        files = io_history.experiment_files(spectrum.metadata.source_path) if on_disk else []
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Clear all history")
+        if on_disk:
+            listing = "\n".join("  " + os.path.basename(path) for path in files) or "  (none written yet)"
+            box.setText(f"Clear all history of {self.session.label(index)}?")
+            box.setInformativeText(
+                "This permanently deletes openNMR's files in the experiment folder:\n"
+                f"{listing}\n\n"
+                "Every save point, the processing log, and all processing, referencing, fits "
+                "and analysis kept for it are lost, and it is re-opened as its data files "
+                "alone say. The data files themselves are not touched.\n\n"
+                "This cannot be undone (Undo and Load Progress cannot bring it back).")
+        else:
+            box.setText(f"Clear the history of {self.session.label(index)}?")
+            box.setInformativeText(
+                "It has no folder of its own, so this forgets its in-memory log, save points "
+                "and undo steps. Its data stay as they are now. This cannot be undone.")
+        keep_notes = QCheckBox("Keep its title and notes")
+        keep_notes.setChecked(True)
+        if on_disk:
+            box.setCheckBox(keep_notes)
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel)
+        clear_button = box.addButton("Clear All History", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not clear_button:
+            return
+        try:
+            deleted = self._clear_all_history(index, keep_notes=keep_notes.isChecked())
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
+            QMessageBox.critical(self, "Couldn't clear the history", str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Cleared the history of {self.session.label(index)}"
+            + (f" ({len(deleted)} file{'s' if len(deleted) != 1 else ''} deleted)." if deleted else "."),
+            8000)
+
+    def _clear_all_history(self, index: int, keep_notes: bool = True) -> list[str]:
+        """Forget everything openNMR kept for spectrum ``index``: delete its
+        files beside the data (:func:`opennmr.io.history.clear_experiment_files`),
+        drop the in-memory log, save points and undo steps, and re-read the
+        experiment as a first open of it now would (no saved processing,
+        the reader's own nuclei). Returns the deleted paths."""
+        spectrum = self.session.spectra[index]
+        # Nothing pending may write the old state back after the delete.
+        if self._sidecar_save_timer.isActive():
+            self._sidecar_save_timer.stop()
+        self._sidecar_save_pending_index = None
+        if self._live_reprocess_timer.isActive():
+            self._live_reprocess_timer.stop()
+        on_disk = self._history_on_disk(spectrum)
+        deleted = (io_history.clear_experiment_files(spectrum.metadata.source_path, keep_notes=keep_notes)
+                   if on_disk else [])
+        info = self._history_info(index)
+        for key in ("history", "snapshots", "undo_stack", "undo_data", "history_error"):
+            info.pop(key, None)
+        if self._current_analysis_index == index:
+            self._current_analysis_index = None
+        if on_disk:
+            path = spectrum.metadata.source_path
+            vendor = self.session.info(index).get("vendor") or spectrum.metadata.vendor
+            current = self.session.get_load_kwargs(index)
+            procno = current.get("procno", getattr(spectrum.metadata, "procno", None))
+            kwargs = self._initial_load_kwargs(path, vendor, procno)
+            for key in ("procno", "use_processed"):
+                if key in current:
+                    kwargs[key] = current[key]
+            self._history_suspended = True
+            try:
+                spectrum = self.session.reset(index, keep_overrides=False, **kwargs)
+                spectrum.metadata.raw.setdefault("baseline_correct", False)
+                spectrum.metadata.raw.setdefault("baseline_method", "linear")
+                self._original_load_kwargs[index] = dict(self.session.get_load_kwargs(index))
+                self.spectrum_list.item(index).setText(self.session.label(index))
+                if index == self._selected_index():
+                    self._on_selection_changed(index)
+                else:
+                    self._select_single_row(index)
+            finally:
+                self._history_suspended = False
+        # Re-selecting schedules a save of the (now fresh) state; nothing
+        # has changed yet, so leave the folder clean until something does.
+        if self._sidecar_save_timer.isActive() and self._sidecar_save_pending_index == index:
+            self._sidecar_save_timer.stop()
+            self._sidecar_save_pending_index = None
+        self._begin_history(index)
+        return deleted
 
     def _on_show_log_clicked(self) -> None:
         index = self._selected_index()

@@ -287,6 +287,11 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 - **Rows of a hypercomplex 2D** (FnMODE 4/5/6) carry F1's imaginary; `get_trace`
   rebuilds F2's for a row by `ft.hilbert_imaginary`. Kept slices find their 2D via
   `MainWindow._slice_parent_index` (identity, then `slice_parent_info`, then folder).
+- **Double-click** a plot resets its view (`MplCanvas.set_double_click_resets`,
+  Settings ▸ Interface, `double_click_reset`). **File ▸ Clear All History…** is
+  `io.history.clear_experiment_files` + `MainWindow._clear_all_history`.
+- The extracted-slice panel takes the same gaps (`slice_bottom_gap`,
+  `slice_offset_fraction` from `_slice_panel_kwargs`).
 - **Undo** (Edit ▸ Undo Last Processing Change, Ctrl+Alt+Z) is the processing
   log's previous state (`_record_history` -> `undo_stack`), restored through
   `_apply_restored_state`. New processing state only needs to be in the tracked

@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-15 round 5 (slice panel floats above its axis, 10 % default gap; double-click resets the view; File ▸ Clear All History; Compare list deselects on blank click/Escape, no tint in exports): 14 new tests in `test_slice_panel_dblclick_clear_history_compare.py`. Related files only: 478 passed, 5 skipped. **Run the full suite locally before committing.***
+
 *2026-10-15 round 4 (gaps below/between spectra, Truncate on Enter, kept slice keeps its 2D, Calibrate Shift on 1D, Hilbert F2 imaginary for hypercomplex rows, Undo): 21 new tests in `test_slice_gaps_truncate_calibrate_undo.py`. Related files only: 641 passed, 12 skipped. **Run the full suite locally before committing.***
 
 *2026-10-15 round 3 (Magritek Spinsolve 1D/2D reader; S/N keeps Compare colours): 15 new tests in `test_magritek_1d_2d.py` and `test_snr_keeps_compare_colours.py`. Related files only: 164 passed, 26 skipped; test_gui.py subset 16 passed, 1 skipped. **Run the full suite locally before committing.***
@@ -194,6 +196,22 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Slices float above the axis; double-click resets the view; Clear All History; Compare list lets go (2026-10-15, round 5)
+
+**Asked:** (1) the extracted-slice panel beside a 2D (screenshot of the Magritek COSY, two slices) still drew the bottom slice's baseline *on* the x-axis line -- "spectra should always float above it". (2) Double-click a plot to zoom out / reset, switchable in Settings. (3) "Clear all history" on a spectrum, with warnings: delete opennmr_history / opennmr_log / opennmr_metadata / opennmr_processing in the experiment folder so it no longer starts from the previous processing. (4) In Compare, a row selected in the "Comparing n spectra" list stays tinted (yellow) on the plot and in exports; clicking the list's blank space should let go. Only the relevant tests.
+
+**What was wrong:**
+- (1) Round 4's gaps reached the 1D view and Compare, not the panel: `_draw_traces_panel` shifts each trace to start at its own minimum, slots stacked from 0, and `panel.set_ylim(0, 1)` -- so the lowest trace's lowest point was exactly the panel's bottom spine.
+- (4) Qt's single-selection list keeps its current row on a click in empty space, and nothing else cleared it; the tint is drawn on the row's Axes patch, so it went into an export.
+
+**Built:**
+- (1) `bottom_gap` on `_draw_slice_panel` / `_draw_traces_panel` (`plot_2d_contour(slice_bottom_gap=0.05)`; DOSY's panel gets the default): the panel's y-limit starts `bottom_gap` × trace height below 0. The GUI passes Plot Style's **Gap below spectra** and spaces the traces by **Gap between stacked spectra** (`slice_offset_fraction = 1/(1 + stack_gap)`; was a fixed 0.85, i.e. a ~18 % gap -- set the stack gap to 18 % for the old spacing). A gap change redraws the contour. Default gap below spectra raised from 5 % to **10 %** of the trace height (1D, Compare, slice panel), so the baseline is clearly off the axis.
+- (2) Settings ▸ Interface ▸ **Double-click a plot to reset its view** (`double_click_reset` in ui_settings.json, on by default; `MplCanvas.set_double_click_resets`). A left double-click in an Axes (no toolbar tool or Pick/Region/Measure mode on) drops the first click's zero-size zoom/pan and calls `reset_view()` (Home). On a stacked Compare it also clears the row selection the first click toggled.
+- (3) File ▸ **Clear All History…**: a warning listing the files that will be deleted, "Keep its title and notes" (on by default; notes live in opennmr_metadata.json), Cancel as default. `io.history.clear_experiment_files(source_path, keep_notes=True)` (notebook-usable; `experiment_files` lists them) deletes the four files, `.tmp` leftovers and `opennmr_savepoints/`; never the vendor's files. `MainWindow._clear_all_history` stops pending sidecar saves, drops the in-memory log / save points / undo steps, re-reads with the kwargs a first open would now use (`_initial_load_kwargs`, keeping procno / use_processed) and the reader's own nuclei (`Session.reset(keep_overrides=False)`), and starts a fresh history (nothing written until something changes). A derived spectrum (no folder) only loses its in-memory history.
+- (4) `_ExperimentDropList`: a click in blank space, or Escape, clears the current row (`clear_current` -> `currentRowChanged(-1)` -> no tint). Un-selecting a row on the plot, or a double-click there, emits `MplCanvas.compareSelectionCleared` and the list lets go too. `export_full_resolution` hides the tint for the save and restores it.
+
+**Tests:** 14 new in `test_slice_panel_dblclick_clear_history_compare.py`. Two existing tests changed with the behaviour, not loosened: `test_plotting_twod.py::test_plot_2d_contour_slice_panel_spreads_traces_evenly_over_the_panel` (panel y-limit now starts below 0 by the gap), and `test_gui_canvas.py::test_compare_stack_shared_scale_shows_relative_heights` *caught a real fault* -- with unequal axis/stack gaps the shared-scale rows had unequal ranges; fixed in `_fit_compare_rows` (a row with the smaller gap below takes the difference above). Related files only, as asked: plotting 2D/fit, round-4 file, view/modes, settings, Compare measure/tools, history, progress, export: 219 passed; test_gui_canvas.py + test_gui.py -k "compare or slice or contour or dosy or double or history or progress": 259 passed, 5 skipped.
 
 ## Gaps below/between spectra; Truncate on Enter; kept slice keeps its 2D; Calibrate Shift on 1D; F2 phase of hypercomplex rows; Undo (2026-10-15, round 4)
 

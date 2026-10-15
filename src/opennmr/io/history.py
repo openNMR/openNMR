@@ -105,6 +105,56 @@ def snapshot_dir(source_path: str) -> str:
     return os.path.join(folder, prefix + SNAPSHOT_DIRNAME)
 
 
+def experiment_files(source_path: str) -> list[str]:
+    """Every file openNMR keeps beside ``source_path`` that exists now:
+    the history (``opennmr_history.json``), its text log
+    (``opennmr_log.txt``), the metadata and processing sidecars
+    (``opennmr_metadata.json``, ``opennmr_processing.json``) and the
+    save points' data folder (``opennmr_savepoints``)."""
+    candidates = [history_path(source_path), log_path(source_path),
+                  persistence.metadata_sidecar_path(source_path),
+                  persistence.processing_sidecar_path(source_path),
+                  snapshot_dir(source_path)]
+    found = [path for path in candidates if os.path.exists(path)]
+    found += [path + ".tmp" for path in candidates[:4] if os.path.exists(path + ".tmp")]
+    return found
+
+
+def clear_experiment_files(source_path: str, keep_notes: bool = True) -> list[str]:
+    """Delete openNMR's own files beside ``source_path`` (see
+    :func:`experiment_files`), so the experiment opens next time as the
+    vendor's files alone say -- no earlier processing, referencing,
+    analysis, log or save points. The vendor's own files are never
+    touched. Returns what was deleted.
+
+    ``keep_notes`` : the title/notes typed for the experiment live in
+    ``opennmr_metadata.json`` too; kept (that file rewritten holding
+    only them) unless this is False.
+
+    Works from a notebook as from the GUI (File ▸ Clear All History…)::
+
+        from opennmr.io import history
+        history.clear_experiment_files(r"C:/data/my_expt/3")
+    """
+    import shutil
+
+    if not source_path or not os.path.exists(source_path):
+        raise FileNotFoundError(f"No such experiment: {source_path!r}")
+    notes = None
+    if keep_notes:
+        notes = (persistence._read_json(persistence.metadata_sidecar_path(source_path)) or {}).get("notes")
+    deleted = []
+    for path in experiment_files(source_path):
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        deleted.append(path)
+    if isinstance(notes, str) and notes.strip():
+        persistence.save_notes_sidecar(source_path, notes)
+    return deleted
+
+
 # ============================================================
 # The tracked state
 # ============================================================

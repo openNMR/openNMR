@@ -541,7 +541,10 @@ def test_plot_2d_contour_slice_panel_spreads_traces_evenly_over_the_panel():
     fig, ax, panels = twod.plot_2d_contour(spectrum, slices=slices)
 
     panel = panels["slices"]
-    assert panel.get_ylim() == pytest.approx((0.0, 1.0))
+    # Below 0: the bottom trace floats above the panel's axis line by
+    # slice_bottom_gap (5 %) of its own height (user report, 2026-10-15:
+    # its baseline lay on the axis).
+    assert panel.get_ylim() == pytest.approx((-0.05 * (1 / 3 * 0.85), 1.0))
     baselines = sorted(float(np.min(line.get_ydata())) for line in panel.lines)
     np.testing.assert_allclose(baselines, [0.0, 1 / 3, 2 / 3], atol=1e-9)
 

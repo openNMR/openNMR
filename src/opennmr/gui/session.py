@@ -118,7 +118,7 @@ class Session:
         self.spectra[index] = spectrum
         return spectrum
 
-    def reset(self, index: int, **kwargs) -> NMRSpectrum:
+    def reset(self, index: int, keep_overrides: bool = True, **kwargs) -> NMRSpectrum:
         """Re-load spectrum ``index`` from its original path with
         exactly ``kwargs`` -- *replacing* the remembered load kwargs
         entirely, unlike :meth:`reload`'s merge. For a GUI "Reset"
@@ -129,7 +129,7 @@ class Session:
         since."""
         info = self._load_info[index]
         info["kwargs"] = dict(kwargs)
-        spectrum = self._load_with(index, info["kwargs"])
+        spectrum = self._load_with(index, info["kwargs"], keep_overrides=keep_overrides)
         self.spectra[index] = spectrum
         return spectrum
 
@@ -145,7 +145,7 @@ class Session:
         kwargs = {**self._load_info[index]["kwargs"], **override_kwargs}
         return self._load_with(index, kwargs)
 
-    def _load_with(self, index: int, kwargs: dict) -> NMRSpectrum:
+    def _load_with(self, index: int, kwargs: dict, keep_overrides: bool = True) -> NMRSpectrum:
         info = self._load_info[index]
         old_meta = self.spectra[index].metadata
         reload_kwargs = dict(kwargs)
@@ -169,6 +169,9 @@ class Session:
         if old_meta.vendor == "bruker" and cached is not None:
             reload_kwargs["_raw_fid_cache"] = cached
         spectrum = io.load(info["path"], vendor=info["vendor"], **reload_kwargs)
+        if not keep_overrides:
+            # The reader's own nuclei (Clear All History: as if opened anew).
+            return spectrum
         spectrum.metadata = dataclasses.replace(
             spectrum.metadata, nucleus=old_meta.nucleus, nucleus_indirect=old_meta.nucleus_indirect,
         )
