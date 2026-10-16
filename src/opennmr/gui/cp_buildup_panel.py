@@ -59,9 +59,15 @@ class CpBuildupPanel(QWidget):
     calculated = Signal()
     fitted = Signal()
 
-    def __init__(self, spectra, draw, arm, store, style=None, parent=None) -> None:
+    def __init__(self, spectra, draw, arm, store, style=None, parent=None,
+                 show_spectrum=None, highlight=None, has_plot=None) -> None:
         super().__init__(parent)
         self._spectra, self._draw, self._arm, self._store = spectra, draw, arm, store
+        #: ``show_spectrum(spectrum)``: put one spectrum on the Compare view,
+        #: in its own plot style; ``highlight(regions)``: shade ``[(name, lo,
+        #: hi)]`` on what Compare shows, without redrawing it; ``has_plot()``:
+        #: whether Compare shows a spectrum to drag on (switching to it).
+        self._show_spectrum, self._highlight, self._has_plot = show_spectrum, highlight, has_plot
         self._style = style or (lambda _view: {})
         self._entries: list[dict] = []
         #: id(spectrum) -> typed contact time text, kept across refreshes.
@@ -376,6 +382,7 @@ class CpBuildupPanel(QWidget):
 
     def _on_regions_edited(self) -> None:
         """Regions changed: the curves and fits no longer match them."""
+        self._show_regions()
         if self.series_list:
             self.series_list, self.fits = [], {}
             self._fill_fit_regions()
@@ -406,6 +413,26 @@ class CpBuildupPanel(QWidget):
         _name, lo, hi = self.regions()[0]
         return lo, hi
 
+    def _valid_regions(self) -> list:
+        try:
+            return self.regions()
+        except ValueError:
+            return [(n, lo, hi) for n, lo, hi in self._partial_regions()]
+
+    def _partial_regions(self):
+        t = self.region_table
+        for r in range(t.rowCount()):
+            a = _number(t.item(r, 1).text() if t.item(r, 1) else "")
+            b = _number(t.item(r, 2).text() if t.item(r, 2) else "")
+            if a is not None and b is not None and a != b:
+                name = (t.item(r, 0).text().strip() if t.item(r, 0) else "") or f"Region {r + 1}"
+                yield name, min(a, b), max(a, b)
+
+    def _show_regions(self) -> None:
+        """Shade the regions on the plot as it is -- no redraw."""
+        if self._highlight is not None:
+            self._highlight(self._valid_regions())
+
     def show_reference(self) -> bool:
         entry = self._reference_entry()
         if entry is None:
@@ -415,10 +442,12 @@ class CpBuildupPanel(QWidget):
             QMessageBox.warning(self, "CP Build-up", "Choose a reference or tick a spectrum.")
             return False
         spectrum, label = entry["spectrum"], entry["label"]
-        try:
-            regions = self.regions()
-        except ValueError:
-            regions = []            # nothing (valid) yet: the spectrum alone, to drag on
+        if self._show_spectrum is not None:
+            # The ordinary spectrum plot, in the Compare view's own style.
+            self._show_spectrum(spectrum)
+            self._show_regions()
+            return True
+        regions = self._valid_regions()
 
         def draw(figure):
             from ..plotting.accessibility import ordered_qualitative_colours
@@ -440,11 +469,17 @@ class CpBuildupPanel(QWidget):
         # The reference first, so there is a spectrum to drag on -- the
         # drag used to land on whatever Compare held, often nothing (user
         # report, 2026-10-16).
-        if on and not self.show_reference():
-            self.drag_button.blockSignals(True)
-            self.drag_button.setChecked(False)
-            self.drag_button.blockSignals(False)
-            return
+        # Drag on the plot as it is -- its style, view and traces kept
+        # (user report, 2026-10-16); the reference only when Compare shows
+        # no spectrum at all.
+        if on:
+            has_plot = self._has_plot() if self._has_plot is not None else False
+            if not has_plot and not self.show_reference():
+                self.drag_button.blockSignals(True)
+                self.drag_button.setChecked(False)
+                self.drag_button.blockSignals(False)
+                return
+            self._show_regions()
         self.armed = bool(on)
         self._arm("region" if on else None)
 
@@ -453,8 +488,7 @@ class CpBuildupPanel(QWidget):
         lo, hi = sorted((float(lo), float(hi)))
         if lo == hi:
             return
-        self.add_region(hi=hi, lo=lo)
-        self.show_reference()
+        self.add_region(hi=hi, lo=lo)      # shades it (no redraw)
         if self.armed:
             self._arm("region")     # redrawing must not drop the drag mode
 

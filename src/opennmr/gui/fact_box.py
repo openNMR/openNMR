@@ -1,17 +1,21 @@
 """Cmd/Ctrl+E: a random fact, from a list the user keeps themselves.
 
 Explicit user request (2026-10-16), reachable **only** by the shortcut --
-no menu item, button or tooltip mentions it. The facts are not shipped with
-openNMR: the user's choice, since the lists they come from (QI, No Such
-Thing As A Fish) are their authors' own wording. They live in a plain text
-file, one fact per line, in ``~/.opennmr/facts.txt`` (``OPENNMR_FACTS_FILE``
-overrides the path); blank lines and lines starting with ``#`` are skipped.
+no menu item, button or tooltip mentions it.
+
+The facts are a built-in list, ``resources/facts.dat`` (zlib-compressed
+UTF-8, one fact per line, so not plain text in an install), built by
+``packaging/fetch_facts.py`` from the No Such Thing As A Fish master fact
+list and QI's "1,339 facts" page (the user's choice of sources). A user may
+add their own in ``~/.opennmr/facts.txt`` (``OPENNMR_FACTS_FILE`` overrides
+the path), one per line; blank lines and ``#`` lines are skipped.
 """
 
 from __future__ import annotations
 
 import os
 import random
+import zlib
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QPushButton, QVBoxLayout
@@ -20,6 +24,30 @@ _TEMPLATE = """\
 # openNMR facts -- Cmd/Ctrl+E shows one of these at random.
 # One fact per line. Lines starting with # and blank lines are skipped.
 """
+
+
+#: The built-in list (see packaging/fetch_facts.py).
+BUILTIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "facts.dat")
+
+
+def builtin_facts(path: str | None = None) -> list[str]:
+    """The built-in facts; [] when the list has not been built."""
+    try:
+        with open(path or BUILTIN_PATH, "rb") as handle:
+            text = zlib.decompress(handle.read()).decode("utf-8")
+    except (OSError, zlib.error, UnicodeDecodeError):
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def all_facts() -> list[str]:
+    """Built-in facts and the user's own, without repeats."""
+    seen, out = set(), []
+    for fact in builtin_facts() + read_facts():
+        if fact not in seen:
+            seen.add(fact)
+            out.append(fact)
+    return out
 
 
 def facts_path() -> str:
@@ -85,12 +113,11 @@ class FactDialog(QDialog):
     def show_fact(self) -> str | None:
         """Read the file afresh (so edits show at once) and show a fact, or
         say where the file is when it holds none."""
-        facts = read_facts()
+        facts = all_facts()
         self.current = pick_fact(facts, self.current)
         if self.current is None:
-            path = ensure_facts_file()
             self.fact_label.setText(
-                f"No facts yet. Add some to\n{path}\none per line, then press Another.")
+                f"No facts yet. Add some to\n{facts_path()}\none per line, then press Another.")
         else:
             self.fact_label.setText(self.current)
         return self.current

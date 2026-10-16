@@ -1773,6 +1773,48 @@ class MplCanvas(QWidget):
             span.set_gid(self._REGION_PATCH_GID)
         self.canvas.draw_idle()
 
+    def set_highlight_regions(self, regions, key: str = "highlight") -> None:
+        """Shade named x ranges on whatever this canvas shows now -- every
+        row of a Compare stack, or the one plot -- **without redrawing
+        it**: the view, the plot style and the traces stay exactly as they
+        are (explicit user report, 2026-10-16: CP Build-up's Drag on Plot
+        redrew a plain figure, losing the styling and the zoom).
+
+        ``regions``: ``[(name, lo, hi), ...]``; ``key`` tags this set, so a
+        new call replaces it and leaves other shading alone. Each region
+        has its own colour and its name along the top of the plot."""
+        from ...plotting.accessibility import ordered_qualitative_colours
+        gid = f"highlight:{key}"
+        for ax in self.figure.axes:
+            for artist in list(ax.patches) + list(ax.texts):
+                if artist.get_gid() == gid:
+                    artist.remove()
+        axes = [a for a in (self._compare_axes or []) if a in self.figure.axes]
+        if not axes and self.ax is not None and self.ax in self.figure.axes:
+            axes = [self.ax]
+        if not axes:
+            return
+        colours = ordered_qualitative_colours("okabe_ito")
+        import matplotlib.transforms as mtransforms
+        for k, (name, lo, hi) in enumerate(regions):
+            colour = colours[k % len(colours)]
+            for ax in axes:
+                span = ax.axvspan(lo, hi, color=colour, alpha=0.2, lw=0, zorder=0)
+                span.set_gid(gid)
+            top = axes[0]
+            label = top.text(0.5 * (lo + hi), 1.0, str(name), color=colour, fontsize=9,
+                             ha="center", va="bottom", clip_on=False,
+                             transform=mtransforms.blended_transform_factory(
+                                 top.transData, top.transAxes))
+            label.set_gid(gid)
+        self.canvas.draw_idle()
+
+    def has_spectrum_plot(self) -> bool:
+        """Whether a spectrum (1D, or Compare rows) is on show here."""
+        return bool(self._compare_axes or self._current_1d_spectrum is not None
+                    or (self._compare_spectra and not getattr(self, "_external_plot", None)
+                        and self._contour_spectrum is None))
+
     def _update_region_select_patch(self, x_current: float) -> None:
         self._clear_region_select_patch()
         lo, hi = sorted((self._region_select_start, x_current))

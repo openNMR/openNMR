@@ -202,3 +202,34 @@ def test_ctrl_l_toggles_width_mode_on_every_plot_and_stays_in_step(qapp):
     assert not window.measurement_menu_action.isChecked()
     action.trigger()
     assert not any(c._width_mode for c in window._measurement_canvases())
+
+
+
+def test_drag_on_plot_keeps_the_compare_plot_its_style_and_view(qapp, _dialogs):
+    """Regions are shaded on the Compare plot as it is: no redraw, so the
+    traces, styling and zoom stay (user report, 2026-10-16)."""
+    window, panel, rows = _cp_window()
+    window.spectrum_list.clearSelection()
+    for i in rows[:2]:
+        window.spectrum_list.item(i).setSelected(True)
+    window._refresh_compare_view(switch_tab=True, force_render=True)
+    canvas = window.compare_canvas
+    axes_before = list(canvas.figure.axes)
+    lines_before = [l for ax in axes_before for l in ax.get_lines()]
+    canvas._compare_axes[0].set_xlim(130.0, 30.0)                  # the user's zoom
+    panel.drag_button.setChecked(True)
+    assert canvas._region_select_mode
+    for lo, hi in ((90.0, 110.0), (45.0, 55.0), (60.0, 65.0)):
+        canvas.regionSelected.emit(lo, hi)
+    assert len(panel.regions()) == 3 and panel.armed and canvas._region_select_mode
+    assert canvas.figure.axes == axes_before                        # nothing redrawn
+    assert [l for ax in canvas.figure.axes for l in ax.get_lines()] == lines_before
+    assert canvas._compare_axes[0].get_xlim() == pytest.approx((130.0, 30.0))
+    shaded = [p for ax in canvas._compare_axes for p in ax.patches if p.get_gid() == "highlight:cp"]
+    assert len(shaded) == 3 * len(canvas._compare_axes)
+    # removing a region takes its shading away, still without a redraw
+    panel.region_table.selectRow(2)
+    panel.remove_selected_regions()
+    shaded = [p for ax in canvas._compare_axes for p in ax.patches if p.get_gid() == "highlight:cp"]
+    assert len(shaded) == 2 * len(canvas._compare_axes)
+    assert canvas.figure.axes == axes_before

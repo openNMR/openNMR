@@ -14419,7 +14419,10 @@ class MainWindow(QMainWindow):
         ``fits["cp_buildup"]``."""
         self.cp_buildup_panel = CpBuildupPanel(
             spectra=self._dnp_spectra, draw=self._dnp_draw, arm=self._cp_arm,
-            store=self._store_dnp, style=self._dnp_style)
+            store=self._store_dnp, style=self._dnp_style,
+            show_spectrum=self._cp_show_spectrum,
+            highlight=lambda regions: self.compare_canvas.set_highlight_regions(regions, "cp"),
+            has_plot=self._cp_has_plot)
         self._cp_buildup_section = CollapsibleSection("CP Build-up", content=self.cp_buildup_panel)
         self._cp_buildup_section.toggled.connect(
             lambda expanded: expanded and self.cp_buildup_panel.refresh())
@@ -14435,9 +14438,22 @@ class MainWindow(QMainWindow):
             signal.connect(lambda *_a: self.cp_buildup_panel.refresh())
         return self._cp_buildup_section
 
+    def _cp_show_spectrum(self, spectrum) -> None:
+        """CP Build-up's reference on Compare, as an ordinary spectrum plot
+        (the Compare view's plot style, not a plain figure)."""
+        self._dnp_show_canvas(self.compare_canvas)
+        self.compare_canvas.show_spectrum(spectrum)
+
+    def _cp_has_plot(self) -> bool:
+        """Switch to Compare (rendering it if it is stale) and say whether it
+        shows a spectrum to drag the CP regions on."""
+        self._dnp_show_canvas(self.compare_canvas)
+        if getattr(self, "_compare_view_stale", False):
+            self._render_compare_view_if_stale()
+        return self.compare_canvas.has_spectrum_plot()
+
     def _cp_arm(self, mode) -> None:
         if mode == "region":
-            self._dnp_show_canvas(self.compare_canvas)
             self.compare_canvas.set_region_select_mode(True)
             self.statusBar().showMessage(
                 "CP Build-up: drag across the region on the Compare view.", 8000)

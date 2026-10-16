@@ -42,7 +42,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"opennmr.gui" = ["resources/*.png", "resources/toolbar/*.png"]
+"opennmr.gui" = ["resources/*.png", "resources/toolbar/*.png", "resources/*.dat"]
 "opennmr.topspin" = ["resources/*.py"]
 
 [tool.pytest.ini_options]
