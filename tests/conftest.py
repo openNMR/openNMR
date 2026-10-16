@@ -54,6 +54,8 @@ def _isolate_interface_settings(tmp_path, monkeypatch):
     # Simulation runs are journalled (io.history.record_simulation) in
     # the simulations folder; never the real ~/Documents during tests.
     monkeypatch.setenv("OPENNMR_SIMULATIONS_DIR", str(tmp_path / "simulations"))
+    # Cmd/Ctrl+E's fact list: never the user's own ~/.opennmr/facts.txt.
+    monkeypatch.setenv("OPENNMR_FACTS_FILE", str(tmp_path / "facts.txt"))
     main_window = sys.modules.get("opennmr.gui.main_window")
     if main_window is not None:
         monkeypatch.setattr(main_window.MainWindow, "_UI_SETTINGS_PATH",

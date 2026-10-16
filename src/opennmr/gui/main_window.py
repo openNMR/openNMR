@@ -1460,6 +1460,14 @@ class MainWindow(QMainWindow):
             "F1 on a 2D); marked as an estimate where peaks overlap.")
         self.width_menu_action.toggled.connect(self._on_width_toggle_clicked)
         analysis_menu.addAction(self.width_menu_action)
+        # Cmd/Ctrl+E: a random fact (explicit user request, 2026-10-16) --
+        # on the window only, in no menu, by design.
+        self._fact_action = QAction(self)
+        self._fact_action.setShortcut(QKeySequence("Ctrl+E"))
+        self._fact_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._fact_action.triggered.connect(self._show_fact)
+        self.addAction(self._fact_action)
+        self._fact_dialog = None
 
         analysis_menu.addSeparator()
         dosy_menu_action = QAction("&DOSY Map (ILT)…", self)
@@ -21288,6 +21296,14 @@ class MainWindow(QMainWindow):
             )
         else:
             self.statusBar().clearMessage()
+
+    def _show_fact(self) -> None:
+        from .fact_box import FactDialog
+        if self._fact_dialog is None:
+            self._fact_dialog = FactDialog(self)
+        self._fact_dialog.show_fact()
+        self._fact_dialog.show()
+        self._fact_dialog.raise_()
 
     def _on_width_toggle_clicked(self, enabled: bool) -> None:
         """Width mode on or off on every canvas (Cmd/Ctrl+L), as Measure."""
