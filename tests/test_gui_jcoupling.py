@@ -40,7 +40,9 @@ def test_sections_are_where_asked(qapp):  # noqa: F811
     window = MainWindow()
     fit = _titles(window, "Fit")
     assert "J-coupling" not in fit and "CSA/Dipolar" not in fit
-    assert fit.index("Integration") + 1 == fit.index("CSA, Quad & J-coupling")
+    # Integration moved to its own Integrate tile (2026-10-16).
+    assert "Integration" not in fit
+    assert fit.index("Isotropic (Gauss/Lor)") + 1 == fit.index("CSA, Quad & J-coupling")
     assert _titles(window, "Simulate")[0] == "CSA, Quad & J-coupling"
     for model, panel in ((window.combined_fit_model, window.jcoupling_fit_panel),
                          (window.combined_sim_model, window.jcoupling_sim_panel)):

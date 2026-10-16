@@ -1155,6 +1155,9 @@ class MplCanvas(QWidget):
         self._trace_label_artists: list = []
         #: True while the figure is one drawn by show_external_plot.
         self._external_plot = False
+        #: Right-click "… Plot Options…" entries, by what is on show (see
+        #: register_plot_options): owner -> (label, tooltip, callback).
+        self._plot_options: dict = {}
         #: What show_external_plot was last given -- ``{"draw", "kind",
         #: "hz_per_ppm"}`` -- so a style change can redraw it (a colour
         #: map or a font size lives on artists only the draw makes).
@@ -3146,8 +3149,10 @@ class MplCanvas(QWidget):
         self._trace_label_artists = []
         self._external_plot = False
         self._external_draw = None
+        self.plot_owner = None
         self._cancel_navigation_drag()
         self.figure.clear()
+        self.figureCleared.emit()
 
     def _remove_crosshair(self) -> None:
         """Tear the crosshair down while its Axes stay alive -- see
@@ -3771,6 +3776,39 @@ class MplCanvas(QWidget):
     #: rebuild.
     simulation_spectrum = None
 
+    #: The figure was cleared for a new plot (emitted before it is
+    #: drawn): a listener that depends on what is on show re-checks once
+    #: the event loop is back (QTimer.singleShot(0, ...)).
+    figureCleared = Signal()
+
+    #: Who drew the figure on show, for its right-click plot options
+    #: (``register_plot_options``): set by the drawer after drawing,
+    #: cleared by every rebuild, kept through a restyle's redraw.
+    plot_owner = None
+
+    def register_plot_options(self, owner: str, label: str, callback, tooltip: str = "") -> None:
+        """Offer ``label`` on the right-click menu, beside Plot Style…,
+        while the plot on show is ``owner``'s -- the plot's own display
+        options (explicit user request, 2026-10-16: formatting a plot is
+        a right-click on it, not a section of the side panel).
+
+        Owners set by the canvas itself: ``"curve_fit"`` (a relaxation/
+        diffusion curve fit is on show) and ``"fit_components"`` (a
+        spectral fit with components). Others are named by whoever draws
+        (``canvas.plot_owner = owner`` after drawing)."""
+        self._plot_options[owner] = (label, tooltip, callback)
+
+    def current_plot_owners(self) -> list:
+        """The owners whose plot options apply to what is on show."""
+        owners = []
+        if self.plot_owner:
+            owners.append(self.plot_owner)
+        if self._curve_fit_shown is not None or self._curve_fits_shown:
+            owners.append("curve_fit")
+        if self._slice_fit_active and self._slice_fit_labels:
+            owners.append("fit_components")
+        return [o for o in owners if o in self._plot_options]
+
     #: Emitted after a style setting was changed from this canvas's own
     #: right-click menu (e.g. a curve plot's Top/Right Spine), so the
     #: Plot Style controls can re-read it.
@@ -3821,6 +3859,12 @@ class MplCanvas(QWidget):
         style_action = menu.addAction("Plot Style…")
         style_action.setToolTip("Line width, fonts, ticks, colours and export settings for this plot.")
         style_action.triggered.connect(self.plotStyleRequested.emit)
+        for owner in self.current_plot_owners():
+            label, tooltip, callback = self._plot_options[owner]
+            options_entry = menu.addAction(label)
+            if tooltip:
+                options_entry.setToolTip(tooltip)
+            options_entry.triggered.connect(lambda _c=False, cb=callback: cb())
         if self._external_plot and self._plot_kind == "tensor":
             tensor_action = menu.addAction("Tensor Plot Style…")
             tensor_action.setToolTip("Colour map, colour bar, principal axes, colours, opacity "
@@ -3844,7 +3888,7 @@ class MplCanvas(QWidget):
                                    "with other fits later (Fit ▸ Kept fit models).")
             keep_action.triggered.connect(self.keepFitRequested.emit)
         # Fit views: quick component display, on the plot itself. The
-        # full controls (highlight, colours) are Fit ▸ Fit plot.
+        # full controls (highlight, colours) are right-click ▸ Fit Plot: Components and Colours…
         if self._slice_fit_active and self._slice_fit_labels:
             comp_menu = menu.addMenu("Components")
             style = self._fit_component_style
@@ -4352,7 +4396,7 @@ class MplCanvas(QWidget):
         :meth:`_apply_view_options`, which is for a fresh rebuild."""
         self._remove_trace_labels()
         if self._external_plot:
-            # A notebook figure (Apply ▸ DNP) names its own traces;
+            # A notebook figure (Integrate ▸ DNP) names its own traces;
             # only its legend's style is this canvas's business.
             if restyle:
                 self._restyle_existing_legends()
@@ -5073,7 +5117,7 @@ class MplCanvas(QWidget):
                                                self._BASELINE_GHOST_GID):
                         line.set_color(trace_color)
 
-        # A figure drawn by someone else (Simulate, Apply ▸ DNP) reads
+        # A figure drawn by someone else (Simulate, Integrate ▸ DNP) reads
         # its colours and text sizes from style_settings() as it draws:
         # those live on artists only the draw makes, so it is redrawn.
         # The legend's size and style too: the S/N plot writes its values
@@ -7509,7 +7553,7 @@ class MplCanvas(QWidget):
         receives this canvas's own (cleared) figure -- so the GUI shows
         exactly the figure a notebook call produces, rather than a second
         drawing of the same thing that could drift from it. Used by
-        Apply ▸ DNP (``opennmr.notebook.dnp_workflow``'s plots).
+        Integrate ▸ DNP (``opennmr.notebook.dnp_workflow``'s plots).
 
         ``kind`` : the plot kind to announce first (``"curve"`` for a
         profile, ``"compare"`` for overlaid spectra), so its saved default
@@ -7609,9 +7653,11 @@ class MplCanvas(QWidget):
         if self._tensor_view_set:
             views, self._tensor_view_set = [], False
         keep = self.simulation_spectrum
+        owner = self.plot_owner
         self.show_external_plot(info["draw"], kind=info["kind"], hz_per_ppm=info["hz_per_ppm"],
                                 _keep_series=True, series_group=info.get("series_group"))
         self.simulation_spectrum = keep
+        self.plot_owner = owner
         threes = [ax for ax in self.figure.axes if getattr(ax, "name", "") == "3d"]
         if views and len(threes) == len(views):
             for ax, (elev, azim) in zip(threes, views):

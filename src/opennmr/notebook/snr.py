@@ -1,7 +1,7 @@
 """
 Signal-to-noise ratios of 1D spectra, with the statistics stated.
 
-Apply ▸ Signal-to-Noise in the GUI calls these functions exactly as a
+Integrate ▸ Signal-to-Noise in the GUI calls these functions exactly as a
 notebook does (explicit user request, 2026-10-12: "enable the
 calculation of the signal to noise ... across one (or more) spectra ...
 ensure that statistically reasonable statements are made, and that it
@@ -1185,7 +1185,7 @@ _SHORT_CONVENTION = {
 
 def snr_summary(result: dict) -> list[dict]:
     """The result as a compact table: one row per quantity, one value per
-    spectrum -- what Apply ▸ Signal-to-Noise shows (explicit user report,
+    spectrum -- what Integrate ▸ Signal-to-Noise shows (explicit user report,
     2026-10-15: the full report was "really hard to see"; a table "easier
     to read and something where you do not have to scroll lots").
 

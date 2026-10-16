@@ -47,7 +47,7 @@ def _spectrum(height, seed, ns=16):
 def _load(window, heights=(40.0, 80.0), ns=(16, 64)):
     for k, (h, n) in enumerate(zip(heights, ns)):
         window._add_derived_spectrum(_spectrum(h, k, n), f"snr{k}")
-    window._show_side_tab("Apply")
+    window._show_side_tab("Integrate")
     window._snr_section.setExpanded(True)
     p = window.snr_panel
     p.refresh()
@@ -55,11 +55,11 @@ def _load(window, heights=(40.0, 80.0), ns=(16, 64)):
     return p
 
 
-def test_section_sits_in_apply_after_dnp(window):
+def test_section_sits_in_integrate_after_dnp(window):
+    # Apply until 2026-10-16; the Integrate tile since.
     from opennmr.gui.widgets.collapsible_section import CollapsibleSection
     side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
-    tab = window.side_tabs.widget(side.index("Applications") if "Applications" in side
-                                  else side.index("Apply"))
+    tab = window.side_tabs.widget(side.index("Integrate"))
     titles = [s.title() for s in tab.findChildren(CollapsibleSection)]
     # CP Build-up (2026-10-16) follows it.
     assert titles.index("DNP") < titles.index("Signal-to-Noise") < titles.index("CP Build-up")

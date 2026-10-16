@@ -95,7 +95,7 @@ def test_fit_curve_with_nothing_measured_names_both_ways(qapp, _dialogs):
     window._on_fit_curve_button_clicked()
     kind, (title, text) = _dialogs[-1]
     assert kind == "information" and title == "Nothing to fit yet"
-    assert "Integrate Regions" in text and "Fit Spectrum" in text
+    assert "Integrate" in text and "regions" in text and "Fit Spectrum" in text
     assert "Add at least one peak" not in text
 
 

@@ -34,6 +34,7 @@ import re
 from typing import Callable
 
 import numpy as np
+from .plot_options_dialog import PlotOptionsDialog
 from .widgets.report_label import ReportLabel
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
@@ -171,6 +172,11 @@ class VTRelaxationPanel(QWidget):
         self.comparison = None
         self._build()
         self._sync()
+        if canvas is not None and hasattr(canvas, "register_plot_options"):
+            canvas.register_plot_options(
+                "vt", "Relaxation vs Temperature Plot…", self.plot_options_dialog.open_options,
+                "Which axes (ln T or ln R against 1000/T, 1/k_BT or T), the temperature axis "
+                "on top, and each process shown.")
 
     # ---------------------------------------------------------------- UI
     def _build(self) -> None:
@@ -377,7 +383,16 @@ class VTRelaxationPanel(QWidget):
         pform.addRow("x axis:", self.x_axis_combo)
         pform.addRow("Top axis:", self.top_axis_combo)
         pform.addRow(self.components_check)
-        layout.addWidget(plot_box)
+        # On the plot's right-click menu, not in the panel (explicit user
+        # request, 2026-10-16).
+        self.plot_box = plot_box
+        self.plot_options_dialog = PlotOptionsDialog(
+            "Relaxation vs Temperature: plot", plot_box, self)
+        hint = QLabel("Plot axes and processes: right-click the plot ▸ "
+                      "Relaxation vs Temperature Plot…")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: palette(mid);")
+        layout.addWidget(hint)
 
         actions = QHBoxLayout()
         self.plot_button = QPushButton("Plot Data")
@@ -665,6 +680,7 @@ class VTRelaxationPanel(QWidget):
         if self.canvas is None:
             return
         _show(self.canvas, draw, "curve")
+        self.canvas.plot_owner = "vt"
         self.show_view()
 
     def plot_data(self) -> None:
@@ -1005,9 +1021,20 @@ class ExchangeLineshapePanel(QWidget):
         self.nodes_spin.setToolTip("Minimum grid points per distributed shift or barrier (over ±4 s.d.); "
                                    "a shift distribution gets as many more as its line needs to be smooth.")
         sim.addRow("Distribution points:", self.nodes_spin)
-        self.fast_limit_check = QCheckBox("Mark the fully narrowed position")
-        sim.addRow(self.fast_limit_check)
         layout.addLayout(sim)
+        # The plot's own option, on its right-click menu (2026-10-16).
+        self.fast_limit_check = QCheckBox("Mark the fully narrowed position")
+        self.fast_limit_check.setToolTip("A line at the shift every site's line merges to "
+                                         "in the fast-exchange limit, on the simulated stack.")
+        self.fast_limit_check.toggled.connect(lambda _on: self._redraw_stack())
+        options = QWidget()
+        QVBoxLayout(options).addWidget(self.fast_limit_check)
+        self.plot_options_dialog = PlotOptionsDialog("Exchange Lineshape: plot", options, self)
+        if self.canvas is not None and hasattr(self.canvas, "register_plot_options"):
+            self.canvas.register_plot_options(
+                "exchange_stack", "Exchange Lineshape Plot…",
+                self.plot_options_dialog.open_options,
+                "Mark the fully narrowed position on the simulated stack.")
 
         actions = QHBoxLayout()
         self.simulate_button = QPushButton("Simulate")
@@ -1207,16 +1234,8 @@ class ExchangeLineshapePanel(QWidget):
             QMessageBox.warning(self, "Cannot simulate", str(exc))
             return None
         self.results = results
-        nucleus = self.nucleus_edit.text().strip()
-        mark = self.fast_limit_check.isChecked()
-        if self.canvas is not None:
-            size = _text_size(self.canvas)
-            _show(self.canvas,
-                  lambda fig: ex.plot_exchange_stack(results, ax=fig.add_subplot(111),
-                                                     nucleus=nucleus, show_fast_limit=mark,
-                                                     text_size=size),
-                  "compare", hz_per_ppm=larmor)
-            self.show_view()
+        self._stack_drawn = (results, self.nucleus_edit.text().strip(), larmor)
+        self._redraw_stack(raise_view=True)
         self._log(results[0]["log"].splitlines()[0].split(" at ")[0]
                   + f" at {len(results)} temperature(s): "
                   + ", ".join(f"{r['T_K']:g}" for r in results) + " K.")
@@ -1237,6 +1256,26 @@ class ExchangeLineshapePanel(QWidget):
             f"Fully narrowed line at {results[-1]['fast_limit_ppm']:.2f} ppm at "
             f"{results[-1]['T_K']:g} K." + (" " + "; ".join(info) + "." if info else ""))
         return results
+
+    def _redraw_stack(self, raise_view: bool = False) -> None:
+        """The simulated stack, as last simulated, with the current plot
+        options -- only while it is the plot on show (or on a new one)."""
+        drawn = getattr(self, "_stack_drawn", None)
+        if self.canvas is None or drawn is None:
+            return
+        if not raise_view and getattr(self.canvas, "plot_owner", None) != "exchange_stack":
+            return
+        results, nucleus, larmor = drawn
+        mark = self.fast_limit_check.isChecked()
+        size = _text_size(self.canvas)
+        _show(self.canvas,
+              lambda fig: ex.plot_exchange_stack(results, ax=fig.add_subplot(111),
+                                                 nucleus=nucleus, show_fast_limit=mark,
+                                                 text_size=size),
+              "compare", hz_per_ppm=larmor)
+        self.canvas.plot_owner = "exchange_stack"
+        if raise_view:
+            self.show_view()
 
     def fit_selected(self) -> dict | None:
         spectra = self.get_spectra() or []

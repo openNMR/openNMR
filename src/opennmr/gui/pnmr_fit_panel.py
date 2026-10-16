@@ -898,7 +898,7 @@ class PnmrFitPanel(QWidget):
         row = QHBoxLayout()
         self.components_button = QPushButton("Components and colours…")
         self.components_button.setToolTip("Show, hide or highlight peaks, fill, colours "
-                                           "(Fit ▸ Fit plot section).")
+                                           "(right-click the fit ▸ Fit Plot: Components and Colours…).")
         self.components_button.clicked.connect(
             lambda: self._open_fit_display() if self._open_fit_display else None)
         row.addWidget(self.components_button)

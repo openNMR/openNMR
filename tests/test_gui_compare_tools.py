@@ -238,9 +238,10 @@ def test_arithmetic_with_one_spectrum_says_why(window):
 # DNP: Apply ▸ DNP, two sub-sections (2026-09-30)
 # ----------------------------------------------------------------------
 
-def test_dnp_is_in_apply_with_two_sub_sections(window):
+def test_dnp_is_in_integrate_with_two_sub_sections(window):
+    # Apply ▸ DNP until 2026-10-16; Integrate ▸ DNP since.
     page = window.side_tabs.widget(
-        [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())].index("Apply"))
+        [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())].index("Integrate"))
     dnp = window._dnp_section
     assert dnp.title() == "DNP" and page.isAncestorOf(dnp) and not dnp.isExpanded()
     inner = [s.title() for s in dnp.findChildren(CollapsibleSection)]

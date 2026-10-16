@@ -1,5 +1,5 @@
 """
-Apply ▸ DNP: a field-sweep profile and enhancement factors, step by step
+Integrate ▸ DNP: a field-sweep profile and enhancement factors, step by step
 (explicit user request, 2026-09-30: the old Compare ▸ DNP boxes did not
 make clear what to do).
 

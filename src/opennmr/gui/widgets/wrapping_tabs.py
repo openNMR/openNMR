@@ -31,7 +31,7 @@ from __future__ import annotations
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
-    QButtonGroup, QLabel, QLayout, QSizePolicy, QStackedWidget, QToolButton,
+    QButtonGroup, QHBoxLayout, QLabel, QLayout, QSizePolicy, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -294,6 +294,28 @@ class WrappingTabWidget(QWidget):
         self._bar.setVisible(visible)
         self._heading.setVisible(not visible and show_heading)
         self._heading.setText(self.tabText(self.currentIndex()))
+
+    def setCornerWidget(self, widget: QWidget) -> None:  # noqa: N802
+        """Put ``widget`` at the right-hand end of the strip, beside the
+        tab buttons (``QTabWidget.setCornerWidget``'s top-right corner):
+        controls for the page on show, by the page rather than in a side
+        panel -- e.g. the Fit view's peak browser."""
+        layout = self._layout()
+        index = layout.indexOf(self._bar)
+        if index < 0:
+            raise RuntimeError("The tab strip has been taken; it has no corner.")
+        layout.removeWidget(self._bar)
+        holder = QWidget(self)
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self._bar, 1)
+        row.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
+        layout.insertWidget(index, holder)
+        self._corner = widget
+
+    def cornerWidget(self) -> QWidget | None:  # noqa: N802
+        return getattr(self, "_corner", None)
 
     def isTabBarVisible(self) -> bool:  # noqa: N802
         return not self._bar.isHidden()

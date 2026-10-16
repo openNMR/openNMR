@@ -101,7 +101,7 @@ def _cp_window():
         amp = float(cpb.cp_is(np.array([t]), 50, 400, 4000)[0])
         spectrum.data = spectrum.data + amp / (1 + ((ppm - 50.0) / 1.0) ** 2)
         window._add_derived_spectrum(spectrum, f"cp{k}")
-    window._show_side_tab("Apply")
+    window._show_side_tab("Integrate")
     window._cp_buildup_section.setExpanded(True)
     panel = window.cp_buildup_panel
     panel.refresh()

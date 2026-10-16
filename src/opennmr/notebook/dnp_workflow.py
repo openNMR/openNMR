@@ -1,7 +1,7 @@
 """
 DNP, step by step: field profiles and enhancement factors from spectra
 that are **aligned first, then measured** (explicit user request,
-2026-09-30). The GUI's Apply ▸ DNP sections call these functions in the
+2026-09-30). The GUI's Integrate ▸ DNP sections call these functions in the
 same order a notebook does::
 
     from opennmr.notebook import dnp_workflow as dw

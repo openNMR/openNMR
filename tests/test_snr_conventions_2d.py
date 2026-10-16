@@ -160,7 +160,7 @@ def test_gui_measures_a_2d_and_shows_the_conventions_side_by_side(qapp, monkeypa
                       metadata=NMRMetadata(vendor="test", nucleus="1H", ns=4))
     window._add_derived_spectrum(one, "one")
     window._add_derived_spectrum(_two_d_spectrum(), "two")
-    window._show_side_tab("Apply")
+    window._show_side_tab("Integrate")
     window._snr_section.setExpanded(True)
     p = window.snr_panel
     p.refresh()

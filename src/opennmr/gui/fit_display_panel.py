@@ -1,4 +1,5 @@
-"""Fit ▸ Fit plot: how fitted components are drawn.
+"""Fit plot: how fitted components are drawn -- right-click a fit ▸ Fit Plot:
+Components and Colours… (a section of the Fit tile until 2026-10-16).
 
 Show every component, none, or only chosen ones (the others as faint
 outlines); fill them or draw lines only; set each one's line and fill
@@ -58,7 +59,8 @@ class FitDisplayPanel(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         intro = QLabel(intro or
                        "How fitted components are drawn on the Fit and Spectral Fit views, and "
-                       "in exported figures. Also on the plot's right-click menu ▸ Components.")
+                       "in exported figures. Quick choices are also on the plot's right-click "
+                       "menu ▸ Components.")
         intro.setWordWrap(True)
         v.addWidget(intro)
 

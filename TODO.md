@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-16 round 3 (Integrate tile with DNP, S/N and CP Build-up; selecting a region integrates it; plot formatting on the plot's right-click menu; Fit Curve's peak browser by the plot; Dynamics ▸ Regularisation, a port of the MATLAB_RELAX_ALGORITHM Tikhonov scripts): 24 new tests in `test_regularisation.py` and `test_integrate_tile_plot_options_regularisation.py`. Related files only: 710 passed, 1 skipped, 1 failed (`test_main_window_fit_spectrum_amplitude_bound_regions_caps_the_fit`, which fails identically on the code before this round). **Run the full suite locally before committing.***
+
 *2026-10-16 (Compare per scan / per scan × mass and RG; click-a-peak FWHM in 1D/2D with overlap estimates; Fit-view Measure in ppm and Hz; several fit ranges; Apply ▸ CP Build-up): 42 new tests in `test_compare_width_ranges_cp.py`. Related files only: 896 passed, 7 skipped. **Run the full suite locally before committing.***
 
 *2026-10-15 round 5 (slice panel floats above its axis, 10 % default gap; double-click resets the view; File ▸ Clear All History; Compare list deselects on blank click/Escape, no tint in exports): 14 new tests in `test_slice_panel_dblclick_clear_history_compare.py`. Related files only: 478 passed, 5 skipped. **Run the full suite locally before committing.***
@@ -198,6 +200,27 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Integrate tile; select = integrate; plot options on right-click; peak browser by the plot; Tikhonov regularisation (2026-10-16, round 3)
+
+**Asked:** (1) Integrate as its own toolbar tile, with CP Build-up, DNP enhancement and the signal-to-noise calculator moved in. (2) "Fit plot: components and colours" into the right-click plot styles; likewise the formatting of the Dynamics plots. (3) Port the MATLAB regularisation scripts (`C:\Users\quark\OneDrive\Documents\NMR\MATLAB_RELAX_ALGORITHM`) into Dynamics, as their own section. (4) No ⌘ symbol on Integrate; merge Select Regions and Integrate so any selected region is integrated. (5) Dynamics: the button moving between fits by the plot, not in the left panel. Only the relevant tests.
+
+**Built:**
+- Integrate tile after Fit (`_build_integrate_panel`; icon `launcher_integrate.png`, drawn for it): Integration Regions, DNP, Signal-to-Noise, CP Build-up. Apply keeps eNMR and Imaging. Fit loses its Integration section. Window ▸ Integration is Ctrl+5; tiles after it moved up one; Periodic Table (tenth) has no number key.
+- One "Select and Integrate Regions from Plot" button (Ctrl/Cmd+I, no ⌘ in the label); the Integrate Regions button and menu entry are gone. A dragged, typed (delegate `commitData` -- not the table refilled on reselection), removed or auto-found region re-integrates at once (`_auto_integrate_regions`, quiet: problems go to the results line). The results line now gives each region's integral ± error and share (first/last slice for a series).
+- `MplCanvas.register_plot_options` / `plot_owner` + `gui/plot_options_dialog.PlotOptionsDialog`: right-click ▸ Fit Plot: Components and Colours…, Curve Fit Plot… (fit line, all peaks, normalise, uncertainty band), Relaxation vs Temperature Plot… (axes, top axis, processes), Exchange Lineshape Plot… (fully narrowed mark, now redraws the stack), Regularisation Plot…. Hints in the panels say where they went. Keep This Curve Fit… stays in the panel.
+- Fit Curve's "View curve fit (peak #)" ◀ ▶ is the plot views' strip corner (`WrappingTabWidget.setCornerWidget`), shown while the Fit view shows a curve fit.
+- `notebook/regularisation.py` (exported from `opennmr.notebook`: `regularise`, `regularise_2d`, plots, report, CSV): kernels T2 (CPMG), T1 IR, T1 SR, diffusion; 2D Kronecker kernels (T1-T2 IR/SR, T2-T2, D-T2); `csvd`, `tikhonov` (with prior), `errestik` + `etanutik` exactly as the MATLAB; the |x|-prior iterations; NNLS comparison; log means, peaks with shares, cumulative ("porosity"); `subsample` (the 2D scripts' Step after / Step); `static_gradient_b` in SI. Dynamics ▸ Regularisation (`gui/regularisation_panel.py`): data from Fit Curve's last result (per peak, seconds or s/m²) or text files (two columns for 1D; matrix + two lists for 2D); copy notebook code; CSV export.
+
+**Checked:** the original .m files run in GNU Octave 8.4 on the same data give the same λ (2.3739214616367033), x and NNLS solution to 1e-12 -- embedded in `test_regularisation.py`.
+
+**Found, and said in the result's notes rather than hidden:**
+- The |x|-prior iterations weaken the regularisation as they go (iterated Tikhonov tends to the unregularised solution): on a two-population T2 test, 0 iterations gives one peak, 10 gives two, 1000+ sharpens them further. The iteration count is a second regularisation parameter.
+- With fewer points than grid points (e.g. 16 IR delays, 60 T1 values) `errestik`'s λ minimum falls to ~1e-9, in round-off (Octave and Python then pick *different* tiny λ with the same x): the result is effectively unregularised. A note says so. The new non-negative solver (NNLS on [A; λI], λ from the L-curve corner, offset free in sign) recovers that case correctly.
+- `Tikhonov_Diffusion_PGSE.m` computes b with an unexplained factor 1.5 and 6.28 for 2π; not ported -- use openNMR's own b-values (`processing.diffusion.b_value`, Fit Curve's Values) and the diffusion kernel.
+- Hansen's `tikhonov` with a prior drops the prior's part outside A's row space; kept, so MATLAB results reproduce.
+
+**Not done:** 2D data straight from an openNMR pseudo-2D (only text files, as the scripts read); a full-size 2D problem is refused above 40 million kernel entries -- thin the echo train.
 
 ## Multi-spectrum: all sites on one graph; faster Open State; CP Build-up drag fixed + several regions (2026-10-16, round 2)
 

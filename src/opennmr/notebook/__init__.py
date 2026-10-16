@@ -95,6 +95,16 @@ from .exchange import (
     exchange_spectrum, exchange_spectra_vs_temperature, fit_exchange_spectra,
     plot_exchange_stack, plot_exchange_fit, coalescence_temperature,
 )
+# Tikhonov regularisation: T1/T2/D distributions and T1-T2, T2-T2, D-T2
+# maps (a port of the MATLAB_RELAX_ALGORITHM scripts) -- Dynamics ▸
+# Regularisation in the GUI.
+from . import regularisation
+from .regularisation import (
+    regularise, regularise_2d, plot_regularisation, plot_regularisation_2d,
+    static_gradient_b, subsample as regularisation_subsample,
+    suggest_range as regularisation_grid_range,
+    report as regularisation_report, to_csv as regularisation_to_csv,
+)
 # Referencing across nuclei, and linear field-drift correction
 # (Najbauer & Andreas, J. Magn. Reson. 305 (2019) 1-4) -- Process ▸
 # Reference and Process ▸ Field Drift Correction in the GUI.
@@ -182,7 +192,7 @@ from .dnp import (
 # The step-by-step DNP workflow (align, measure, profile / enhancement):
 # used as a module, dnp_workflow.align_spectra(...) etc.
 from . import dnp_workflow
-# Signal-to-noise with stated statistics, one or many spectra (Apply ▸
+# Signal-to-noise with stated statistics, one or many spectra (Integrate ▸
 # Signal-to-Noise; 2026-10-12): used as snr.signal_to_noise(...) etc.
 from . import snr
 from .snr import signal_to_noise, signal_to_noise_many, snr_report, plot_snr
@@ -466,6 +476,11 @@ __all__ = [
     "plot_vs_temperature", "plot_hendrickson_bray",
     "exchange_spectrum", "exchange_spectra_vs_temperature", "fit_exchange_spectra",
     "plot_exchange_stack", "plot_exchange_fit", "coalescence_temperature",
+    # dynamics: Tikhonov regularisation (distributions and 2D maps)
+    "regularisation", "regularise", "regularise_2d", "plot_regularisation",
+    "plot_regularisation_2d", "static_gradient_b", "regularisation_subsample",
+    "regularisation_grid_range",
+    "regularisation_report", "regularisation_to_csv",
     # one-import convenience: readers, helpers and module aliases
     "load", "results_from_spectrum", "expand_pcov", "find_isotope_info",
     "ordered_qualitative_colours", "run_bms", "particles_to_array", "build_box",

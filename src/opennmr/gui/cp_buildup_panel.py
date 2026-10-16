@@ -1,5 +1,5 @@
 """
-Apply ▸ CP Build-up: integrate a region across a variable-contact-time
+Integrate ▸ CP Build-up: integrate a region across a variable-contact-time
 series and fit the CP kinetics (explicit user request, 2026-10-16). The
 maths is :mod:`opennmr.notebook.cp_buildup` (models from Kolodziejski &
 Klinowski, Chem. Rev. 2002, 102, 613), which a notebook calls the same way.

@@ -136,6 +136,8 @@ from .arithmetic_panel import ArithmeticPanel
 from .fit_display_panel import FitDisplayPanel
 from .fit_models_panel import FitModelsPanel
 from .curve_fit_plot_box import CurveFitPlotBox
+from .plot_options_dialog import PlotOptionsDialog
+from .regularisation_panel import RegularisationPanel
 from .fit_progress_dialog import FitProgress
 from .widgets.sideband_hint import sideband_hint_label
 from ..core import fit_progress as core_fit_progress
@@ -845,7 +847,8 @@ class MainWindow(QMainWindow):
         # builders read widgets made by earlier ones -- and then *added*
         # in the toolbar order below. The toolbar order is the user's
         # (explicit request, 2026-09-27): "Open, Process, Compare, Fit,
-        # Simulate, Dynamics, Adv. Proc., Apply, Settings". Every
+        # Simulate, Dynamics, Adv. Proc., Apply, Settings" -- with
+        # Integrate after Fit since 2026-10-16. Every
         # ``_*_tab_index`` is taken from addTab, so it follows the order.
         open_panel = self._scrollable(self._build_load_save_compare_panel())
         processing_panel = self._scrollable(self._build_processing_tab())
@@ -859,6 +862,10 @@ class MainWindow(QMainWindow):
         dynamics_panel = self._scrollable(self._build_relaxation_panel())
         # eNMR and Imaging (see _build_applications_panel).
         applications_panel = self._scrollable(self._build_applications_panel())
+        # Integrate (explicit user request, 2026-10-16): the integration
+        # regions (built with the Fit panel, above), DNP, Signal-to-Noise
+        # and CP Build-up -- everything that measures areas.
+        integrate_panel = self._scrollable(self._build_integrate_panel())
         # Compare: its own tile (explicit user request), out of Open.
         compare_panel = self._scrollable(self._build_compare_panel())
         # Forward-simulate powder patterns etc. and export them to Open
@@ -872,6 +879,8 @@ class MainWindow(QMainWindow):
             compare_panel, "Compare", icon=_launcher_icon("launcher_comparison.png"))
         self._fitting_tab_index = tabs.addTab(
             fitting_panel, "Fit", icon=_launcher_icon("launcher_fitting.png"))
+        self._integrate_tab_index = tabs.addTab(
+            integrate_panel, "Integrate", icon=_launcher_icon("launcher_integrate.png"))
         self._simulations_tab_index = tabs.addTab(
             simulations_panel, "Simulate", icon=_launcher_icon("launcher_simulations.png"))
         tabs.addTab(dynamics_panel, "Dynamics", icon=_launcher_icon("launcher_relaxation.png"))
@@ -1359,7 +1368,10 @@ class MainWindow(QMainWindow):
         self._window_panel_actions = {}
         for shortcut_num, (label, tile) in enumerate(self._WINDOW_MENU_PANELS, start=1):
             action = QAction(label, self)
-            action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
+            # Nine number keys: a tenth tile (Periodic Table, since
+            # Integrate joined) has its menu entry but no Ctrl+number.
+            if shortcut_num <= 9:
+                action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
             action.triggered.connect(
                 lambda _checked=False, name=tile: self._show_side_tab(name))
             window_menu.addAction(action)
@@ -1425,11 +1437,8 @@ class MainWindow(QMainWindow):
         analysis_menu.addAction(clear_peaks_menu_action)
 
         analysis_menu.addSeparator()
-        integrate_regions_menu_action = QAction("&Integrate Regions", self)
-        integrate_regions_menu_action.triggered.connect(self._on_integrate_regions_clicked)
-        analysis_menu.addAction(integrate_regions_menu_action)
-
-        self.select_region_menu_action = QAction("Select &Region from Plot", self)
+        # One entry: a selected region is integrated at once (2026-10-16).
+        self.select_region_menu_action = QAction("Select and Integrate &Regions from Plot", self)
         self.select_region_menu_action.setCheckable(True)
         self.select_region_menu_action.setShortcut(QKeySequence("Ctrl+I"))
         self.select_region_menu_action.toggled.connect(self.select_region_button.setChecked)
@@ -2424,7 +2433,7 @@ class MainWindow(QMainWindow):
             lambda expanded: expanded and self.arithmetic_panel.refresh())
         layout.addWidget(self._arithmetic_section)
 
-        # DNP moved to Apply ▸ DNP (explicit user request, 2026-09-30) --
+        # DNP moved to Integrate ▸ DNP (explicit user request, 2026-09-30) --
         # see _build_dnp_section.
 
         # The arithmetic table holds a widget per row, so it is rebuilt
@@ -2445,7 +2454,7 @@ class MainWindow(QMainWindow):
         self.compare_list.model().rowsRemoved.connect(_refresh_compare_tools)
         return tab
 
-    # -- Apply ▸ DNP (and the Compare list's entries for Arithmetic) -----
+    # -- Integrate ▸ DNP (and the Compare list's entries for Arithmetic) -----
 
     def _dnp_entries(self) -> list[dict]:
         """The 1D spectra checked in the Compare list, in list order, as
@@ -2473,7 +2482,7 @@ class MainWindow(QMainWindow):
                             getattr(self, "dnp_enhancement_panel", None)) if p is not None]
 
     def _dnp_spectra(self) -> list[dict]:
-        """Every 1D spectrum in Open experiments, for Apply ▸ DNP."""
+        """Every 1D spectrum in Open experiments, for Integrate ▸ DNP."""
         return [{"label": self.session.label(i), "spectrum": s, "index": i}
                 for i, s in enumerate(self.session.spectra) if s.ndim == 1]
 
@@ -2491,7 +2500,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _snr_spectra(self) -> list[dict]:
-        """Apply ▸ Signal-to-Noise's list: every 1D spectrum and every
+        """Integrate ▸ Signal-to-Noise's list: every 1D spectrum and every
         genuine 2D in Open experiments (a pseudo-2D series is measured a
         slice at a time: keep a slice first)."""
         out = []
@@ -2565,7 +2574,7 @@ class MainWindow(QMainWindow):
                 panel.on_canvas_region(lo, hi)
 
     def _build_dnp_section(self) -> QWidget:
-        """Apply ▸ DNP: "Enhancement" and "Field Sweep Profile", each a
+        """Integrate ▸ DNP: "Enhancement" and "Field Sweep Profile", each a
         step-by-step DnpWorkflowPanel (explicit user request, 2026-09-30:
         moved here from Compare, and rebuilt around aligning the spectra
         before measuring them)."""
@@ -2593,7 +2602,7 @@ class MainWindow(QMainWindow):
         model = self.spectrum_list.model()
         for signal in (model.rowsInserted, model.rowsRemoved, model.modelReset):
             signal.connect(lambda *_a: [p.refresh() for p in self._dnp_panels()])
-        #: The DNP section of the Apply tile.
+        #: The DNP section of the Integrate tile.
         self._dnp_section = CollapsibleSection("DNP", content=body)
         return self._dnp_section
 
@@ -6506,14 +6515,15 @@ class MainWindow(QMainWindow):
     OPTIONAL_SECTIONS = {
         "pnmr": ("pNMR (Fit ▸ pNMR bond pathways and Simulate ▸ pNMR (CIF))",
                  ("_pnmr_fit_section", "_pnmr_sim_section")),
-        "dnp": ("DNP (Apply ▸ DNP)", ("_dnp_section",)),
+        "dnp": ("DNP (Integrate ▸ DNP)", ("_dnp_section",)),
         "drift": ("Field drift correction (Process)", ("drift_section",)),
         # Explicit user request, 2026-10-14 (second round).
         "czjzek": ("Czjzek distribution (Fit and Simulate)",
                    ("_czjzek_fit_section", "_czjzek_sim_section")),
         "enmr": ("eNMR (Apply)", ("_enmr_section",)),
         "imaging": ("Imaging (Apply)", ("_imaging_section",)),
-        "cp_buildup": ("CP Build-up (Apply)", ("_cp_buildup_section",)),
+        "cp_buildup": ("CP Build-up (Integrate)", ("_cp_buildup_section",)),
+        "regularisation": ("Regularisation (Dynamics)", ("_regularisation_section",)),
         # A whole launcher tile: "tab:<its label>" -- the tile, its page
         # and its Window-menu entry go together, never an empty tile.
         "advanced": ("Advanced Processing (the whole Adv. Proc. tile)", ("tab:Adv. Proc.",)),
@@ -8152,6 +8162,7 @@ class MainWindow(QMainWindow):
             self._refresh_compare_view(switch_tab=False, force_render=True)
 
     def _on_canvas_tab_changed(self, _index: int) -> None:
+        self._sync_curve_peak_bar()
         if self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
             self._refresh_processing_preview_if_active()
             return
@@ -9221,6 +9232,7 @@ class MainWindow(QMainWindow):
         self._refresh_peak_markers()
         self._sync_open_experiments_visibility(index)
         self._sync_periodic_table_view(index)
+        self._sync_curve_peak_bar()
         if index != self._simulations_tab_index:
             # The Simulation plot shows nothing about the data; don't
             # leave it up (or in the tab bar) once Simulations is left.
@@ -14094,6 +14106,7 @@ class MainWindow(QMainWindow):
         ("Processing", "Process"),
         ("Compare", "Compare"),
         ("Fitting", "Fit"),
+        ("Integration", "Integrate"),
         ("Simulations", "Simulate"),
         ("Relaxation", "Dynamics"),
         ("Advanced Processing", "Adv. Proc."),
@@ -14208,7 +14221,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.fit_workflow_guide)
 
         self.fitting_status_label = QLabel(
-            "Fit peak shapes (Isotropic), integrate a region (Integration), or build a model "
+            "Fit peak shapes (Isotropic), or build a model "
             "in CSA, Quad & J-coupling: add peaks, then add interactions to each -- chemical-shift "
             "anisotropy, quadrupolar (first order, second order or exact) or J-coupling (first "
             "order, or strongly coupled peaks solved exactly). "
@@ -14220,8 +14233,10 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(CollapsibleSection(
             "Isotropic (Gauss/Lor)", content=self._build_peak_picking_subtab()))
-        layout.addWidget(CollapsibleSection(
-            "Integration", content=self._build_integration_subtab()))
+        # Region integration is built here, with the rest of the Fit
+        # tile's widgets (builders after this one read them), but shown
+        # on its own Integrate tile (explicit user request, 2026-10-16).
+        self._integration_content = self._build_integration_subtab()
         # One entry point for every interaction (explicit user request,
         # 2026-10-06): CSA, Quad & J-coupling, where peaks are added and
         # interactions added to each. The single-interaction panels below
@@ -14354,12 +14369,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._fit_models_section)
         # How fitted components are drawn (explicit user request: show,
         # hide or highlight components, fill or not, their colours).
+        # On the fit's right-click menu, beside Plot Style… (explicit user
+        # request, 2026-10-16: it "should just be part of the right-click
+        # plot styles"), not a section of this tile.
         self.fit_display_panel = FitDisplayPanel([self.fit_canvas, self.spectral_fit_canvas])
-        self._fit_display_section = CollapsibleSection(
-            "Fit plot: components and colours", content=self.fit_display_panel)
-        layout.addWidget(self._fit_display_section)
+        self._fit_display_dialog = PlotOptionsDialog(
+            "Fit plot: components and colours", self.fit_display_panel, self)
         for canvas in (self.fit_canvas, self.spectral_fit_canvas):
             canvas.fitDisplayOptionsRequested.connect(self._open_fit_display_options)
+            canvas.register_plot_options(
+                "fit_components", "Fit Plot: Components and Colours…",
+                self._open_fit_display_options,
+                "Show, hide or highlight the fitted components, fill them or not, and their "
+                "colours.")
             canvas.keepFitRequested.connect(lambda c=canvas: self._keep_shown_fit(canvas=c))
         # A "Keep This Fit…" in every fit section, beside its results
         # (explicit user request, 2026-09-30: keeping a fit should not
@@ -14403,16 +14425,31 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._enmr_section)
         self._imaging_section = CollapsibleSection("Imaging", content=self._build_imaging_subtab())
         layout.addWidget(self._imaging_section)
+        layout.addStretch(1)
+        return tab
+
+    def _build_integrate_panel(self) -> QWidget:
+        """The "Integrate" launcher button (explicit user request,
+        2026-10-16: "move to its own new menu, with the CP, DNP
+        enhancement, signal-to-noise calculator moved in"). The
+        integration regions first -- a region dragged or typed is
+        integrated at once -- then DNP, Signal-to-Noise and CP Build-up,
+        moved from Apply."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        self._integration_section = CollapsibleSection(
+            "Integration Regions", content=self._integration_content)
+        layout.addWidget(self._integration_section)
         layout.addWidget(self._build_dnp_section())
         layout.addWidget(self._build_snr_section())
         layout.addWidget(self._build_cp_buildup_section())
         layout.addStretch(1)
         return tab
 
-    # -- Apply ▸ CP Build-up (explicit user request, 2026-10-16) -----------
+    # -- Integrate ▸ CP Build-up (explicit user request, 2026-10-16) -----------
 
     def _build_cp_buildup_section(self) -> QWidget:
-        """Apply ▸ CP Build-up: ``gui/cp_buildup_panel.py`` over
+        """Integrate ▸ CP Build-up: ``gui/cp_buildup_panel.py`` over
         ``notebook/cp_buildup.py``. Spectra are Open experiments' 1D ones;
         the region is typed or dragged on Compare; the curve and its fit
         are drawn on the Fit view; the fit is kept with the spectra as
@@ -14460,10 +14497,10 @@ class MainWindow(QMainWindow):
         else:
             self.compare_canvas.set_region_select_mode(False)
 
-    # -- Apply ▸ Signal-to-Noise (explicit user request, 2026-10-12) --------
+    # -- Integrate ▸ Signal-to-Noise (explicit user request, 2026-10-12) --------
 
     def _build_snr_section(self) -> QWidget:
-        """Apply ▸ Signal-to-Noise: ``gui/snr_panel.py`` over
+        """Integrate ▸ Signal-to-Noise: ``gui/snr_panel.py`` over
         ``notebook/snr.py``. Spectra are Open experiments' 1D ones (as
         DNP's); regions are dragged on the Compare view; results are kept
         with each spectrum as ``fits["snr"]`` (its log and sidecar)."""
@@ -16208,10 +16245,9 @@ class MainWindow(QMainWindow):
             self._set_fit_models(index, rest, event=f"Kept fit “{gone[0]['name']}” deleted")
 
     def _open_fit_display_options(self) -> None:
-        """Right-click ▸ Components ▸ Colours and highlighting…: the Fit
-        tile's Fit plot section, opened."""
-        self._show_side_tab("Fit")
-        self._fit_display_section.setExpanded(True)
+        """Right-click ▸ Fit Plot: Components and Colours… (or Components ▸
+        Colours and highlighting…): its window, opened."""
+        self._fit_display_dialog.open_options()
 
     def _show_simulation_view(self) -> None:
         """Simulate's own figures draw on their own Simulation plot, shown
@@ -17653,8 +17689,35 @@ class MainWindow(QMainWindow):
         self._exchange_section = CollapsibleSection(
             "Exchange Lineshape (Ion Hopping)", content=self.exchange_panel)
         layout.addWidget(self._exchange_section)
+        # Tikhonov regularisation, its own section (explicit user request,
+        # 2026-10-16: the MATLAB_RELAX_ALGORITHM scripts); maths
+        # notebook.regularisation, drawn on the Fit view.
+        self.regularisation_panel = RegularisationPanel(
+            canvas=self.fit_canvas, show_view=self._raise_fit_canvas,
+            curve_series=self._regularisation_series)
+        self._regularisation_section = CollapsibleSection(
+            "Regularisation (T₁/T₂/D distributions, 2D maps)", content=self.regularisation_panel)
+        self._regularisation_section.toggled.connect(
+            lambda expanded: expanded and self.regularisation_panel.refresh())
+        layout.addWidget(self._regularisation_section)
         layout.addStretch(1)
         return container
+
+    def _regularisation_series(self) -> list[dict]:
+        """Fit Curve's last result, one entry per peak, for Dynamics ▸
+        Regularisation: the series it fitted (seconds or s/m², excluded
+        points already gone) and a kernel guessed from its model."""
+        results = getattr(self, "_relaxation_fit_results", None) or []
+        if self._is_diffusion_fit():
+            kernel = "diffusion"
+        else:
+            key = str(self.relaxation_model_combo.currentData() or "")
+            kernel = ("t1_ir" if "inversion" in key else
+                      "t1_sr" if "recovery" in key else "t2")
+        return [{"label": r.get("peak_label") or f"Peak {k + 1}",
+                 "x": np.asarray(r["t"], dtype=float), "y": np.asarray(r["y"], dtype=float),
+                 "kernel": kernel}
+                for k, r in enumerate(results) if "t" in r and "y" in r]
 
     @staticmethod
     def _spectrum_temperature_K(spectrum) -> float | None:
@@ -18540,7 +18603,7 @@ class MainWindow(QMainWindow):
         self.amplitude_bound_regions_checkbox = QCheckBox("Bound peak amplitudes by region integrals")
         self.amplitude_bound_regions_checkbox.setToolTip(
             "For each peak whose starting shift falls inside one of the "
-            "Integration regions (Integration section), cap its amplitude using that "
+            "Integration regions (Integrate tile), cap its amplitude using that "
             "region's own raw (unfitted) integral -- converted via the "
             "peak's lineshape/FWHM -- instead of leaving it unbounded "
             "above. Recomputed fresh per slice, so it tracks a genuinely "
@@ -18765,10 +18828,11 @@ class MainWindow(QMainWindow):
         ("select", "<b>Select the pseudo-2D</b> in Open experiments and phase it on "
                    "<i>Process</i>. To phase or fit one slice on its own: right-click the "
                    "contour ▸ Extract Slice, then <i>Keep for Phasing/Fitting</i>."),
-        ("fit", "<b>Measure every slice on Fit</b>, one way:"
+        ("fit", "<b>Measure every slice on Fit or Integrate</b>, one way:"
                 "<ul style='margin-left:-20px'>"
-                "<li>Isotropic ▸ <i>Fit Spectrum</i>, or Integration ▸ <i>Integrate "
-                "Regions</i> — every slice in one go;</li>"
+                "<li>Fit ▸ Isotropic ▸ <i>Fit Spectrum</i>, or drag regions on "
+                "<i>Integrate</i> (each is integrated as it is drawn) — every slice in one "
+                "go;</li>"
                 "<li>CSA, Quad &amp; J-coupling (any CSA, quadrupolar or J model) — fit one slice (the "
                 "strongest), then <i>Fit Every Slice with this Model</i> in its Pseudo-2D "
                 "series box.</li></ul>"),
@@ -19590,7 +19654,14 @@ class MainWindow(QMainWindow):
         # follow, not precede, what they configure/what's fit before
         # them" principle the Fit Curve button's own position above
         # already follows relative to its settings.
-        relax_fit_row = QHBoxLayout()
+        # By the plot, not in this panel (explicit user request,
+        # 2026-10-16: "the button that moves between different slices
+        # [should] live by the plot view, rather than in the menu on the
+        # left pane"): at the right-hand end of the plot views' strip,
+        # shown while the Fit view shows a curve fit (_sync_curve_peak_bar).
+        self.curve_peak_bar = QWidget()
+        relax_fit_row = QHBoxLayout(self.curve_peak_bar)
+        relax_fit_row.setContentsMargins(0, 0, 0, 0)
         relax_fit_row.addWidget(QLabel("View curve fit (peak #):"))
         self.view_relaxation_peak_spin = QSpinBox()
         self.view_relaxation_peak_spin.setMinimum(1)
@@ -19604,8 +19675,18 @@ class MainWindow(QMainWindow):
         peak_spin_row, self.relaxation_peak_prev_button, self.relaxation_peak_next_button = (
             self._spin_with_step_buttons(self.view_relaxation_peak_spin)
         )
+        self.relaxation_peak_prev_button.setToolTip("Previous peak's curve fit")
+        self.relaxation_peak_next_button.setToolTip("Next peak's curve fit")
         relax_fit_row.addLayout(peak_spin_row)
-        layout.addLayout(relax_fit_row)
+        self.canvas_tabs.setCornerWidget(self.curve_peak_bar)
+        self.curve_peak_bar.setVisible(False)
+        # Re-checked once the new plot is drawn (a parented timer: it dies
+        # with the window, never firing into a deleted one).
+        self._curve_peak_bar_timer = QTimer(self)
+        self._curve_peak_bar_timer.setSingleShot(True)
+        self._curve_peak_bar_timer.setInterval(0)
+        self._curve_peak_bar_timer.timeout.connect(self._sync_curve_peak_bar)
+        self.fit_canvas.figureCleared.connect(self._curve_peak_bar_timer.start)
 
         # --- Slices used in fits ----------------------------------
         # The direct, non-right-click way to drop a bad point, and the
@@ -19662,14 +19743,32 @@ class MainWindow(QMainWindow):
         self.relaxation_uncertainty_checkbox.stateChanged.connect(
             lambda _s: self._display_relaxation_peak(self.view_relaxation_peak_spin.value() - 1),
         )
-        layout.addWidget(self.relaxation_uncertainty_checkbox)
 
-        # How the fit is drawn, all peaks together, and keeping it
-        # (explicit user request, 2026-09-30) -- gui/curve_fit_plot_box.py.
-        self.curve_fit_plot_box = CurveFitPlotBox()
+        # How the fit is drawn, all peaks together (explicit user request,
+        # 2026-09-30) -- gui/curve_fit_plot_box.py -- with the band above:
+        # on the Fit view's right-click ▸ Curve Fit Plot… (explicit user
+        # request, 2026-10-16: formatting a Dynamics plot is a right-click
+        # on it). Keeping the fit stays here.
+        self.curve_fit_plot_box = CurveFitPlotBox(keep_in_box=False)
         self.curve_fit_plot_box.changed.connect(self._on_curve_fit_plot_changed)
         self.curve_fit_plot_box.keepRequested.connect(lambda: self._keep_curve_fits())
-        layout.addWidget(self.curve_fit_plot_box)
+        curve_plot_options = QWidget()
+        curve_plot_layout = QVBoxLayout(curve_plot_options)
+        curve_plot_layout.setContentsMargins(0, 0, 0, 0)
+        curve_plot_layout.addWidget(self.curve_fit_plot_box)
+        curve_plot_layout.addWidget(self.relaxation_uncertainty_checkbox)
+        self._curve_fit_plot_dialog = PlotOptionsDialog(
+            "Curve fit plot", curve_plot_options, self)
+        self.fit_canvas.register_plot_options(
+            "curve_fit", "Curve Fit Plot…", self._curve_fit_plot_dialog.open_options,
+            "The selected peak or all peaks together (normalised or not), the fit line's "
+            "colour, style and width, and the uncertainty band.")
+        curve_plot_hint = QLabel("Plot options (all peaks, fit line, uncertainty band): "
+                                 "right-click the plot ▸ Curve Fit Plot…")
+        curve_plot_hint.setWordWrap(True)
+        curve_plot_hint.setStyleSheet("color: palette(mid);")
+        layout.addWidget(curve_plot_hint)
+        layout.addWidget(self.curve_fit_plot_box.keep_button)
 
         # The data behind the plot, not just the fitted parameters --
         # the report already gives those. Explicit user request: "I
@@ -20580,8 +20679,8 @@ class MainWindow(QMainWindow):
             "Set a max gradient to turn the Spectrum tab's Hz axis "
             "into a real position axis (right-click -> Axis Units -> "
             "mm). For T2-by-integration across an imaging series, "
-            "switch to mm here, then use Integration Regions on the "
-            "Fitting tab's Integration section as usual -- no separate workflow."
+            "switch to mm here, then drag Integration Regions on the "
+            "Integrate tile as usual -- no separate workflow."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -20892,12 +20991,20 @@ class MainWindow(QMainWindow):
         region_button_row.addWidget(clear_regions_button)
         region_layout.addLayout(region_button_row)
 
-        self.select_region_button = QPushButton("Select Region from Plot (⌘I)")
+        # Selecting and integrating are one step (explicit user request,
+        # 2026-10-16: "merge the 'select regions' and 'integrate' buttons,
+        # so that any region selected is automatically integrated"). A
+        # region typed into the table, removed, or found automatically
+        # is integrated the same way.
+        self.select_region_button = QPushButton("Select and Integrate Regions from Plot")
         self.select_region_button.setCheckable(True)
         self.select_region_button.setToolTip(
-            "While active, drag across the Spectrum plot to add a row "
-            "here spanning the dragged x-range, instead of typing it "
-            "in. Toggle from anywhere with Cmd/Ctrl+I too."
+            "While on, drag across the Spectrum plot: each dragged range is added "
+            "to the table and every region is integrated at once -- the selected "
+            "1D spectrum, or every slice of a pseudo-2D series. Typing, removing or "
+            "finding regions re-integrates too.\n\n"
+            "Also Analysis ▸ Select and Integrate Regions from Plot (Ctrl+I; "
+            "Cmd+I on macOS)."
         )
         self.select_region_button.toggled.connect(self._on_select_region_toggled)
         region_layout.addWidget(self.select_region_button)
@@ -20915,7 +21022,7 @@ class MainWindow(QMainWindow):
             "broad feature below the threshold is left out: check the shaded regions. "
             "For a relaxation curve the regions only need to be the same on every slice, "
             "which they are.")
-        self.auto_regions_button.clicked.connect(lambda: self._on_auto_regions_clicked())
+        self.auto_regions_button.clicked.connect(self._on_find_regions_button_clicked)
         auto_row.addWidget(self.auto_regions_button, 1)
         self.auto_region_threshold_spin = QDoubleSpinBox()
         self.auto_region_threshold_spin.setRange(0.01, 1000.0)
@@ -20953,16 +21060,14 @@ class MainWindow(QMainWindow):
         region_layout.addLayout(rule_row)
         self._auto_regions_note = ""
         self.region_table.itemChanged.connect(self._on_region_table_hand_edited)
-
-        integrate_button = QPushButton("Integrate Regions")
-        integrate_button.setToolTip(
-            "Step 1, alternative to Fit Spectrum: integrate each "
-            "region above across the current selection -- a plain 1D "
-            "spectrum, or every slice of a pseudo-2D series -- ready "
-            "for Fit Curve without needing a peak fit at all."
-        )
-        integrate_button.clicked.connect(self._on_integrate_regions_clicked)
-        region_layout.addWidget(integrate_button)
+        # A cell the user finished editing (commitData fires for a user's
+        # edit only -- not for the table being refilled on reselecting a
+        # spectrum, which must not integrate anything).
+        self.region_table.itemDelegate().commitData.connect(
+            lambda _editor: self._auto_integrate_regions())
+        # activated, not currentIndexChanged: a user's choice only.
+        self.integration_method_combo.activated.connect(
+            lambda _i: self._auto_integrate_regions())
 
         return region_box
 
@@ -20983,6 +21088,12 @@ class MainWindow(QMainWindow):
         # by hand it would no longer be true.
         if not getattr(self, "_filling_auto_regions", False):
             self._auto_regions_note = ""
+
+    def _on_find_regions_button_clicked(self) -> None:
+        """Find Regions Automatically, then integrate what it found."""
+        found = self._on_auto_regions_clicked()
+        if found and found.get("regions"):
+            self._auto_integrate_regions()
 
     def _on_auto_regions_clicked(self, quiet: bool = False) -> dict | None:
         """Fill the region table from a threshold
@@ -21045,10 +21156,12 @@ class MainWindow(QMainWindow):
         if row >= 0:
             self.region_table.removeRow(row)
         self._sync_region_shading()
+        self._auto_integrate_regions()
 
     def _on_clear_regions_clicked(self) -> None:
         self.region_table.setRowCount(0)
         self._sync_region_shading()
+        self._auto_integrate_regions()
 
     def _read_region_defs(self) -> list[tuple[float, float]]:
         regions = []
@@ -21097,7 +21210,15 @@ class MainWindow(QMainWindow):
         redraw that canvas; the region *definitions* themselves are
         unaffected and stay correct for fitting/integration regardless."""
         self.canvas.set_regions(
-            self._read_region_defs() if self._fitting_tab_active() else [])
+            self._read_region_defs() if self._regions_tab_active() else [])
+
+    def _regions_tab_active(self) -> bool:
+        """Integration regions are shaded on the Integrate tile, where they
+        are made, and on Fit, whose spectral fit can use them."""
+        if getattr(self, "side_tabs", None) is None:
+            return False
+        return self.side_tabs.currentIndex() in (
+            getattr(self, "_fitting_tab_index", -1), getattr(self, "_integrate_tab_index", -1))
 
     def _refresh_peak_markers(self) -> None:
         """Reflect the peak table's current contents as triangle
@@ -21136,27 +21257,44 @@ class MainWindow(QMainWindow):
 
     def _on_region_selected(self, lo: float, hi: float) -> None:
         self._add_region_row(lo, hi)
+        self._auto_integrate_regions()
 
-    def _on_integrate_regions_clicked(self) -> None:
+    def _auto_integrate_regions(self) -> None:
+        """Integrate every region now, quietly: a problem goes to the
+        results line, not a dialog (it runs on every drag and edit)."""
+        if not self._read_region_defs():
+            if hasattr(self, "integration_results_label"):
+                self.integration_results_label.setText(
+                    "No regions: drag across the spectrum (Select and Integrate Regions "
+                    "from Plot) or type one into the table.")
+            return
+        self._on_integrate_regions_clicked(quiet=True)
+
+    def _on_integrate_regions_clicked(self, quiet: bool = False) -> None:
         index = self._selected_index()
         if index is None:
             return
         spectrum = self.session.spectra[index]
+
+        def problem(title, text, critical=False):
+            if quiet:
+                self.integration_results_label.setText(text)
+            elif critical:
+                QMessageBox.critical(self, title, text)
+            else:
+                QMessageBox.information(self, title, text)
+
         if spectrum.ndim == 2 and not spectrum.is_pseudo_2d:
-            QMessageBox.information(
-                self, "Not supported",
-                "Region integration isn't available for a conventional 2D spectrum yet -- "
-                "select a 1D spectrum or a pseudo-2D series.",
-            )
+            problem("Not supported",
+                    "Region integration isn't available for a conventional 2D spectrum yet -- "
+                    "select a 1D spectrum or a pseudo-2D series.")
             return
         regions = self._read_region_defs()
         if not regions:
-            QMessageBox.critical(
-                self, "Integrate failed",
-                "Add at least one region to integrate.\n\n"
-                "The region table belongs to the selected spectrum — regions "
-                "drawn on another one are still there, on that one.",
-            )
+            problem("Integrate failed",
+                    "Add at least one region to integrate.\n\n"
+                    "The region table belongs to the selected spectrum — regions "
+                    "drawn on another one are still there, on that one.", critical=True)
             return
 
         try:
@@ -21175,7 +21313,7 @@ class MainWindow(QMainWindow):
                 method=self.integration_method_combo.currentData())
             results = integrated["rows"]
         except Exception as exc:  # noqa: BLE001 -- surfaced to the user, not swallowed
-            QMessageBox.critical(self, "Integrate failed", str(exc))
+            problem("Integrate failed", f"Integration failed: {exc}", critical=True)
             return
 
         self._show_integration_results(spectrum, results, len(regions))
@@ -23621,6 +23759,7 @@ class MainWindow(QMainWindow):
         self.integration_results_label.setText(
             f"Integrated {len(results)} slice(s) across {n_regions} region(s) by the "
             f"{rule.lower()} rule -- ready for Fit Curve (Value source: Integrated region)."
+            + "".join("\n" + line for line in self._integration_summary_lines(results))
             + (f"\nRegions found automatically: {found}" if found else "")
         )
         # Integrating regions produces region integrals, so point the
@@ -23629,6 +23768,33 @@ class MainWindow(QMainWindow):
         region_index = self.value_source_combo.findData("region")
         if region_index >= 0:
             self.value_source_combo.setCurrentIndex(region_index)
+
+    def _integration_summary_lines(self, results: list[dict]) -> list[str]:
+        """One line per region: its integral (± its error) and share, for a
+        1D spectrum, or for a series its first and last slice's."""
+        if not results:
+            return []
+        regions = results[0].get("regions") or []
+        lines = []
+        for k, (lo, hi) in enumerate(regions):
+            def cell(entry):
+                ints = entry.get("integrals")
+                if ints is None or k >= len(ints):
+                    return "—"
+                errs = entry.get("integral_errors")
+                err = float(errs[k]) if errs is not None and k < len(errs) else None
+                text = self._format_value_error(float(ints[k]), err)
+                norm = entry.get("integrals_norm")
+                if norm is not None and k < len(norm) and len(regions) > 1:
+                    text += f" ({float(norm[k]):.1f} %)"
+                return text
+            span = f"{min(lo, hi):.4g} to {max(lo, hi):.4g}"
+            if len(results) == 1:
+                lines.append(f"Region {k + 1} ({span}): {cell(results[0])}")
+            else:
+                lines.append(f"Region {k + 1} ({span}): slice 1 {cell(results[0])}; "
+                             f"slice {len(results)} {cell(results[-1])}")
+        return lines
 
     def _on_seed_mode_changed(self, _index: int) -> None:
         """The anchor only exists for the mode that pins a lineshape."""
@@ -23811,6 +23977,9 @@ class MainWindow(QMainWindow):
         # driven _update_fit_tab_visibility check alone wouldn't show it.
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+        # Regularisation offers the series just fitted.
+        if self._regularisation_section.isExpanded():
+            self.regularisation_panel.refresh()
 
         if persist_to is not None:
             persist_to.metadata.raw["relaxation_fit_results"] = results
@@ -25976,6 +26145,22 @@ class MainWindow(QMainWindow):
         self._fit_canvas_owner = "relaxation"
         return True
 
+    def _sync_curve_peak_bar(self) -> None:
+        """The peak browser by the plot: shown while the Fit view is on
+        show with a peak's curve fit (or its correlations)."""
+        bar = getattr(self, "curve_peak_bar", None)
+        if bar is None:
+            return
+        spin = self.view_relaxation_peak_spin
+        shown = self.fit_canvas.shown_fit() or {}
+        correlations = getattr(self, "curve_fit_correlation_button", None)
+        on_show = (shown.get("kind") == "curve"
+                   or (correlations is not None and correlations.isChecked()
+                       and getattr(self, "_fit_canvas_owner", None) == "relaxation"
+                       and not self.fit_canvas.plot_owner))
+        bar.setVisible(bool(spin.isEnabled() and on_show
+                            and self.canvas_tabs.currentWidget() is self.fit_canvas))
+
     def _display_relaxation_peak(self, index: int) -> None:
         """Show peak ``index`` (0-based) of :attr:`_relaxation_fit_results`
         in the Fit tab, with an uncertainty band if the checkbox for it
@@ -26023,6 +26208,7 @@ class MainWindow(QMainWindow):
         # directions matter: the owner has to be *set* by every writer,
         # not only read by one of them.
         self._fit_canvas_owner = "relaxation"
+        self._sync_curve_peak_bar()
 
         # The full report, not a single line: this panel sits directly
         # under the plotted curve, which is exactly where someone is
@@ -26057,6 +26243,7 @@ class MainWindow(QMainWindow):
             fit_curves=[self._relaxation_fit_curve(r) for r in results],
             fit_style=box.fit_style(), normalise=box.normalise())
         self._fit_canvas_owner = "relaxation"
+        self._sync_curve_peak_bar()
         self.relaxation_fit_params_label.setText("\n\n".join(
             processing_relaxation.format_relaxation_report(
                 r, title=r.get("peak_label") or f"Peak {k + 1}", width=58)
@@ -26326,7 +26513,7 @@ class MainWindow(QMainWindow):
                     self, "Nothing to fit yet",
                     "Fit Curve fits a value per slice, and none has been measured for this "
                     "spectrum. Measure every slice on Fit first, either way:\n\n"
-                    "• Integration: draw one or more regions, then Integrate Regions;\n"
+                    "• Integrate: drag one or more regions (each is integrated as it is drawn);\n"
                     "• Isotropic: add peaks, then Fit Spectrum.")
                 return
         with FitProgress(self, "Spectral fit") as fit_progress_box:

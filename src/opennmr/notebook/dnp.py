@@ -1,7 +1,7 @@
 """
 DNP: enhancement factors and field-sweep profiles.
 
-Two measurements, each available from a notebook. (The GUI's Apply ▸
+Two measurements, each available from a notebook. (The GUI's Integrate ▸
 DNP sections use the step-by-step :mod:`opennmr.notebook.dnp_workflow`
 since 2026-09-30 -- align, confirm, then measure -- which builds on the
 measuring functions here.)

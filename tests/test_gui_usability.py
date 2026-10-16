@@ -26,8 +26,9 @@ def qapp():
 
 
 # "Periodic Table" just before Settings: explicit user request, 2026-09-28.
-TOOLBAR = ["Open", "Process", "Compare", "Fit", "Simulate", "Dynamics", "Adv. Proc.", "Apply",
-           "Periodic Table", "Settings"]
+# Integrate after Fit: explicit user request, 2026-10-16.
+TOOLBAR = ["Open", "Process", "Compare", "Fit", "Integrate", "Simulate", "Dynamics", "Adv. Proc.",
+           "Apply", "Periodic Table", "Settings"]
 
 
 def test_toolbar_order(qapp):
@@ -46,7 +47,8 @@ def test_ctrl_number_opens_the_nth_toolbar_button(qapp):
     for n, (label, tile) in enumerate(MainWindow._WINDOW_MENU_PANELS, start=1):
         assert TOOLBAR[n - 1] == tile
         action = next(a for a in window.findChildren(QAction) if a.text() == label)
-        assert action.shortcut() == QKeySequence(f"Ctrl+{n}")
+        # Nine number keys; a tenth tile has none.
+        assert action.shortcut() == (QKeySequence(f"Ctrl+{n}") if n <= 9 else QKeySequence())
 
 
 def test_every_panel_opens_with_its_sections_collapsed(qapp):

@@ -1,5 +1,5 @@
 """
-Apply ▸ Signal-to-Noise: the S/N of one or more 1D or 2D spectra, with
+Integrate ▸ Signal-to-Noise: the S/N of one or more 1D or 2D spectra, with
 the statistics stated (explicit user request, 2026-10-12; 2D and the
 conventions side by side, 2026-10-14).
 
@@ -186,7 +186,7 @@ def _g(value, digits=3) -> str:
 
 
 class SnrPanel(QWidget):
-    """Apply ▸ Signal-to-Noise (see the module docstring).
+    """Integrate ▸ Signal-to-Noise (see the module docstring).
 
     Callbacks (from MainWindow): ``spectra()`` -> ``[{"label", "spectrum",
     "index"}]`` (1D and 2D spectra in Open experiments); ``selected()`` -> the

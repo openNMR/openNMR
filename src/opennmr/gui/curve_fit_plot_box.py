@@ -1,5 +1,6 @@
-"""Dynamics ▸ Fit Curve ▸ Fit plot: how a relaxation/diffusion curve fit
-is drawn, and keeping it (explicit user request, 2026-09-30).
+"""How a relaxation/diffusion curve fit is drawn, and keeping it (explicit
+user request, 2026-09-30) -- the Fit view's right-click ▸ Curve Fit Plot…
+since 2026-10-16 (formatting a plot is a right-click on it).
 
 * **Show**: the selected peak (the spin box above browses peaks) or every
   peak together, each in its own colour-blind-safe colour, optionally
@@ -40,7 +41,10 @@ class CurveFitPlotBox(QGroupBox):
     changed = Signal()
     keepRequested = Signal()
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, keep_in_box: bool = True) -> None:
+        """``keep_in_box=False``: the Keep button is made but left for the
+        caller to place (the box itself lives in the plot's right-click
+        Curve Fit Plot… window, the Keep button beside the fit)."""
         super().__init__("Fit plot", parent)
         self._colour = DEFAULTS["colour"]
         form = QFormLayout(self)
@@ -91,7 +95,8 @@ class CurveFitPlotBox(QGroupBox):
             "models).")
         self.keep_button.setEnabled(False)
         self.keep_button.clicked.connect(self.keepRequested.emit)
-        form.addRow(self.keep_button)
+        if keep_in_box:
+            form.addRow(self.keep_button)
         self._sync()
 
     # ---- values -------------------------------------------------------------

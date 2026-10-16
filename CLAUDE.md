@@ -79,10 +79,32 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 
 - **Toolbar**: one row of launcher tiles (`self.tile_bar`, taken from
   `side_tabs`, a `WrappingTabWidget`), in the user's order: Open,
-  Process, Compare, Fit, Simulate, Dynamics, Adv. Proc., Apply,
+  Process, Compare, Fit, Integrate, Simulate, Dynamics, Adv. Proc., Apply,
   Periodic Table, Settings. Panels are *built* in an older order (builders read each
   other's widgets) and *added* in this one -- see `__init__`. Ctrl+1..9
-  (`_WINDOW_MENU_PANELS`) follow the toolbar order.
+  (`_WINDOW_MENU_PANELS`) follow the toolbar order; a tenth tile gets its
+  Window-menu entry but no number key.
+- **Integrate** (`_build_integrate_panel`, since 2026-10-16): Integration
+  Regions (built with the Fit panel as `_integration_content`, shown here),
+  then DNP, Signal-to-Noise and CP Build-up (moved from Apply, which keeps
+  eNMR and Imaging). There is no Integrate button: a region dragged (Select
+  and Integrate Regions from Plot, Ctrl/Cmd+I), typed (the delegate's
+  `commitData` -- a user's edit only, never the table being refilled on
+  reselection), removed or found automatically is integrated at once by
+  `_auto_integrate_regions`, which reports problems in the results line, not
+  a dialog. `_on_integrate_regions_clicked()` (no argument) still shows
+  dialogs; batch relaxation calls it. Regions are shaded on Fit and Integrate
+  (`_regions_tab_active`).
+- **A plot's own display options are on its right-click menu**, beside Plot
+  Style… (user request, 2026-10-16), never a section of a side panel:
+  `MplCanvas.register_plot_options(owner, label, callback)`, shown while the
+  plot on show is `owner`'s -- `canvas.plot_owner = owner` after drawing
+  (cleared by every rebuild, kept through a restyle); "curve_fit" and
+  "fit_components" are recognised by the canvas itself. The options widget
+  lives in a `gui/plot_options_dialog.PlotOptionsDialog` (non-modal, owned by
+  the panel). Fit plot: components and colours, Curve Fit Plot (with the
+  uncertainty band), Relaxation vs Temperature Plot, Exchange Lineshape Plot
+  and Regularisation Plot work this way.
 - **Periodic Table** (`gui/periodic_table_panel.py`, maths in
   `notebook/periodic_table.py`): its tile's panel is the Larmor
   calculator; the table replaces the plot through `self.plot_stack`
@@ -128,11 +150,11 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 - **Simulate** draws on its own `simulation_canvas` (plain matplotlib),
   shown only while that panel is open; the maths is in
   `opennmr.simulate` (ports of `leonmr` code).
-- **DNP** is Apply ▸ DNP (`_build_dnp_section`): "Enhancement" and
+- **DNP** is Integrate ▸ DNP (`_build_dnp_section`; Apply ▸ DNP until 2026-10-16): "Enhancement" and
   "Field Sweep Profile", each a step-by-step `gui/dnp_panel.py`
   `DnpWorkflowPanel` over `notebook/dnp_workflow.py` (align on the
   reference line's shape, confirm, then measure). Not in Compare any more.
-- **Signal-to-noise** is Apply ▸ Signal-to-Noise (`_build_snr_section`,
+- **Signal-to-noise** is Integrate ▸ Signal-to-Noise (`_build_snr_section`,
   `gui/snr_panel.py` over `notebook/snr.py`): signal and noise regions
   typed or dragged on Compare, shared by default or per spectrum (marked
   †, logged, and stated in the result). S/N = height / σ of the detrended
@@ -150,11 +172,26 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   Compare canvas's legend style, read at draw time -- never hard-code
   a size there. Its spectra keep their Compare colours
   (`MainWindow._compare_colours_for` -> `plot_snr(colours=)`).
-- **Dynamics** is Fit Curve, then two collapsible sections from
-  `gui/dynamics_panels.py`: Relaxation vs Temperature (BPP / Arrhenius /
-  Hendrickson-Bray; maths `notebook/vt_relaxation.py`) and Exchange
-  Lineshape (ion hopping, Bloch-McConnell; `notebook/exchange.py`, the
-  successor to Euan's XReSpecs script). Both draw on the Fit view.
+- **Dynamics** is Fit Curve, then collapsible sections: Relaxation vs
+  Temperature (BPP / Arrhenius / Hendrickson-Bray; maths
+  `notebook/vt_relaxation.py`) and Exchange Lineshape (ion hopping,
+  Bloch-McConnell; `notebook/exchange.py`, the successor to Euan's XReSpecs
+  script), both `gui/dynamics_panels.py`, and Regularisation
+  (`gui/regularisation_panel.py` over `notebook/regularisation.py`). All draw
+  on the Fit view. Fit Curve's peak browser (`curve_peak_bar`, ◀ peak # ▶)
+  is the plot views' strip corner (`WrappingTabWidget.setCornerWidget`),
+  shown while the Fit view shows a curve fit (`_sync_curve_peak_bar`).
+- **Regularisation** (Tikhonov ILT; T1/T2/D distributions and T1-T2,
+  T2-T2, D-T2 maps) is `notebook/regularisation.py`, a port of the user's
+  MATLAB_RELAX_ALGORITHM scripts (Hansen's `csvd`/`tikhonov`, Rodriguez's
+  `errestik`/`etanutik`), checked number for number against the MATLAB
+  files run in Octave (`tests/test_regularisation.py`). Keep that
+  equivalence: the "matlab" solver must still reproduce those numbers. The
+  |x|-prior iterations weaken the smoothing as they go (iterations are a
+  second regularisation parameter), and with fewer points than grid points
+  the error estimate's λ falls into round-off -- both are said in the
+  result's notes. `processing/ilt.py` (DOSY, NNLS + L-curve) is separate and
+  diffusion-only; do not merge them without checking DOSY's numbers.
 - **pNMR fit** is Fit ▸ pNMR (CIF bond pathways) (`gui/pnmr_fit_panel.py` over
   `notebook/pnmr_fit.py`). Its structural model is Simulate ▸ pNMR (CIF)'s
   (`PnmrSimulationPanel.fit_model_kwargs()`) -- never add a second copy.
@@ -264,9 +301,10 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   (`correlation_input` adapts each fit shape; add an adapter there for a
   new kind of fit). The GUI draws them through
   `MainWindow._show_correlation_matrix(canvas, fit)`.
-- **Quantify** is one page: Peaks, Integration Regions, then the
-  Spectral Fitting section (`_build_spectral_fit_section`). Whether the
-  fit uses the regions is two explicit checkboxes there.
+- **Quantify** is one page: Peaks, then the Spectral Fitting section
+  (`_build_spectral_fit_section`); the Integration Regions it can use are
+  made on the Integrate tile. Whether the fit uses the regions is two
+  explicit checkboxes there.
 - **Analyse's and Simulate's sub-panels** live in `analysis_sub_tabs`
   and `simulate_sub_tabs`, `WrappingTabWidget`s
   (`gui/widgets/wrapping_tabs.py`) with their strips hidden. A
@@ -307,7 +345,7 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 - **Fit windows with several ranges**: `notebook/fit_ranges.parse_ppm_ranges`,
   `widgets/ranges_edit.PpmRangesEdit` ("Several ppm ranges" in the Fit window combos;
   Multi-spectrum's Window column). Gaps are shaded by `MainWindow._fit_gap_overlay`.
-- **CP Build-up** is Apply ▸ CP Build-up (`gui/cp_buildup_panel.py` over
+- **CP Build-up** is Integrate ▸ CP Build-up (`gui/cp_buildup_panel.py` over
   `notebook/cp_buildup.py`; models are Kolodziejski & Klinowski, Chem. Rev. 2002, eqs
   9, 10, 11, 28 -- keep the equation numbers in any new model).
 - **Planned GUI work** (CSA fit/simulation split, view sidebar) is in

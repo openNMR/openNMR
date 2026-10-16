@@ -7427,7 +7427,8 @@ def test_main_window_isotropic_integration_csa_are_separate_sections(qapp):
     # 2026-10-06; the old CSA/Dipolar panel is kept, out of the menu.
     combined_section = _enclosing_collapsible_section(window.combined_fit_panel)
     assert peak_picking_section.title() == "Isotropic (Gauss/Lor)"
-    assert integration_section.title() == "Integration"
+    # On its own Integrate tile since 2026-10-16.
+    assert integration_section.title() == "Integration Regions"
     assert combined_section.title() == "CSA, Quad & J-coupling"
     assert _enclosing_collapsible_section(window.csa_sites_table) is None
     # Three genuinely separate sections, not one shared container.
@@ -8117,12 +8118,18 @@ def test_main_window_view_curve_fit_row_sits_below_fit_curve_settings(qapp):
     # button that produces it, not above -- it used to sit between
     # Peaks and Fit Spectrum's own result, implying (wrongly) that it
     # was part of step 1.
+    # Since 2026-10-16 the browser is by the plot (the plot views'
+    # strip corner) and the uncertainty band is on the plot's right-click
+    # Curve Fit Plot… window -- neither precedes Fit Curve in the panel.
     window = MainWindow()
     fit_curve_settings_box = window.fit_type_combo.parentWidget()
-    tab = window.relaxation_uncertainty_checkbox.parentWidget()
-    assert tab is fit_curve_settings_box.parentWidget()  # both direct children of the same tab layout
+    tab = fit_curve_settings_box.parentWidget()
+    assert not tab.isAncestorOf(window.view_relaxation_peak_spin)
+    assert window.canvas_tabs.cornerWidget().isAncestorOf(window.view_relaxation_peak_spin)
+    assert window._curve_fit_plot_dialog.isAncestorOf(window.relaxation_uncertainty_checkbox)
+    keep = window.curve_fit_plot_box.keep_button
     layout = tab.layout()
-    assert layout.indexOf(fit_curve_settings_box) < layout.indexOf(window.relaxation_uncertainty_checkbox)
+    assert layout.indexOf(fit_curve_settings_box) < layout.indexOf(keep)
 
 
 def test_main_window_analysis_tab_labels_renamed_for_clarity(qapp):
@@ -8138,9 +8145,10 @@ def test_main_window_analysis_tab_labels_renamed_for_clarity(qapp):
     fitting_tab = window.side_tabs.widget(window._fitting_tab_index)
     relaxation_tab = window.side_tabs.widget(side.index("Relaxation"))
     wanted = ("Spectrum fit (slice #):", "View curve fit (peak #):")
+    # The curve-fit browser is by the plot since 2026-10-16.
     labels = [
         child.text()
-        for parent in (fitting_tab, relaxation_tab)
+        for parent in (fitting_tab, relaxation_tab, window.curve_peak_bar)
         for child in parent.findChildren(QLabel) if child.text() in wanted
     ]
     assert set(labels) == set(wanted)
@@ -11278,19 +11286,24 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     # Since 2026-10-06, CSA, Quad & J-coupling holds every interaction (J,
     # CSA, quadrupolar), right after Integration
     # (test_gui_combined_consolidation.py).
-    assert titles == ["Isotropic (Gauss/Lor)", "Integration", "CSA, Quad & J-coupling",
+    # 2026-10-16: Integration to its own Integrate tile, and the Fit plot
+    # options to the fit's right-click menu.
+    assert titles == ["Isotropic (Gauss/Lor)", "CSA, Quad & J-coupling",
                       "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)",
-                      "Multi-spectrum", "Kept fit models", "Fit plot: components and colours"]
+                      "Multi-spectrum", "Kept fit models"]
 
     # eNMR/Imaging moved off this tab entirely, to their own
     # "Applications" button (see
     # test_main_window_applications_is_its_own_top_level_button).
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     analysis = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
-    # ... and DNP joined them (2026-09-30), with its two sub-sections.
-    # ... and Signal-to-Noise after it (2026-10-12), then CP Build-up (2026-10-16).
-    assert analysis == ["eNMR", "Imaging", "DNP", "Enhancement", "Field Sweep Profile",
-                        "Signal-to-Noise", "CP Build-up"]
+    # DNP (2026-09-30), Signal-to-Noise (2026-10-12) and CP Build-up joined
+    # them, then moved to Integrate with the integration regions (2026-10-16).
+    assert analysis == ["eNMR", "Imaging"]
+    integrate_tab = window.side_tabs.widget(side.index("Integration"))
+    assert [s.title() for s in integrate_tab.findChildren(CollapsibleSection)] == [
+        "Integration Regions", "DNP", "Enhancement", "Field Sweep Profile",
+        "Signal-to-Noise", "CP Build-up"]
 
 
 def test_main_window_advanced_processing_is_its_own_top_level_button(qapp):
@@ -15970,9 +15983,10 @@ def test_numbered_panel_shortcuts_are_unchanged_by_settings(qapp):
     window = MainWindow()
     window_menu = _menu_by_title(window, "Window")
     shortcuts = {a.text(): a.shortcut().toString() for a in window_menu.actions()}
-    # Ctrl+n is the n-th toolbar button.
-    assert [shortcuts[name] for name in ("Load/Save", "Processing", "Compare", "Simulations")] == \
-        ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+5"]
+    # Ctrl+n is the n-th toolbar button (Integrate, fifth, since 2026-10-16).
+    assert [shortcuts[name] for name in ("Load/Save", "Processing", "Compare", "Integration",
+                                         "Simulations")] == \
+        ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+5", "Ctrl+6"]
     assert "Ctrl+," not in [v for k, v in shortcuts.items() if k != "Settings…"]
 
 

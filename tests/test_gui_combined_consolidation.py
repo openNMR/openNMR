@@ -42,9 +42,9 @@ def _editor(panel, kind):
 def test_fit_and_simulate_offer_one_combined_entry_point(qapp):
     window = MainWindow()
     assert _titles(window, window._fitting_tab_index) == [
-        "Isotropic (Gauss/Lor)", "Integration", "CSA, Quad & J-coupling",
+        "Isotropic (Gauss/Lor)", "CSA, Quad & J-coupling",
         "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)", "Multi-spectrum",
-        "Kept fit models", "Fit plot: components and colours"]
+        "Kept fit models"]
     assert _titles(window, window._simulations_tab_index) == [
         "CSA, Quad & J-coupling", "Czjzek distribution", "DFT tensors (CASTEP, VASP, ORCA, Gaussian)",
         "Diffusion (PFG)", "Shaped pulse (Bloch)", "pNMR (CIF)"]

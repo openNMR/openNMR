@@ -203,7 +203,10 @@ def test_right_click_components_menu(window, monkeypatch):
     assert canvas.fit_component_style()["show"] == "none"
     assert window.fit_display_panel.show_combo.currentData() == "none"
     actions["Colours and highlighting…"].trigger()
-    assert window._fit_display_section.isExpanded()
+    assert window._fit_display_dialog.isVisible()       # a right-click window now (2026-10-16)
+    window._fit_display_dialog.hide()
+    actions["Fit Plot: Components and Colours…"].trigger()
+    assert window._fit_display_dialog.isVisible()
 
 
 def test_quadrupolar_single_site_now_shows_with_all(window):
@@ -264,7 +267,8 @@ def test_czjzek_sections_are_where_expected(window):
     assert fit_titles.index("Quadrupolar (Czjzek distribution)") == \
         fit_titles.index("CSA, Quad & J-coupling") + 1
     assert "Quadrupolar" not in fit_titles
-    assert "Fit plot: components and colours" in fit_titles
+    # The Fit plot options are a right-click window since 2026-10-16.
+    assert "Fit plot: components and colours" not in fit_titles
     sim_titles = [s.title() for s in pages["Simulate"].findChildren(CollapsibleSection)]
     assert sim_titles.index("Czjzek distribution") == sim_titles.index("CSA, Quad & J-coupling") + 1
 

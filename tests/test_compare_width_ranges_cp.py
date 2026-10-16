@@ -432,7 +432,7 @@ def test_cp_panel_end_to_end(window):
     for k, t in enumerate(T):
         window._add_derived_spectrum(_cp_spectrum(t, rg=2.0), f"cp{k}")
     window._add_derived_spectrum(_cp_spectrum(8000.0), "ref")
-    window._show_side_tab("Apply")
+    window._show_side_tab("Integrate")
     window._cp_buildup_section.setExpanded(True)
     panel = window.cp_buildup_panel
     panel.refresh()

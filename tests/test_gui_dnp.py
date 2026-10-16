@@ -41,7 +41,7 @@ def _load(window, heights=None, panel="sweep"):
     spectra = _sweep(FIELDS, ERRORS, heights=heights)
     for k, s in enumerate(spectra):
         window._add_derived_spectrum(s, f"s{k}")
-    window._show_side_tab("Apply")
+    window._show_side_tab("Integrate")
     window._dnp_section.setExpanded(True)
     section = window._dnp_sweep_section if panel == "sweep" else window._dnp_enhancement_section
     section.setExpanded(True)
