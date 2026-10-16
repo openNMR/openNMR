@@ -63,60 +63,27 @@ def test_built_in_list_is_compressed_and_merged_with_the_users(tmp_path, monkeyp
     assert fact_box.all_facts() == ["Built-in one", "Built-in two", "Mine"]
 
 
-def _fetch_facts():
+def _edit_facts():
     import importlib.util
     import pathlib
-    path = pathlib.Path(__file__).resolve().parents[1] / "packaging" / "fetch_facts.py"
-    spec = importlib.util.spec_from_file_location("fetch_facts", path)
+    path = pathlib.Path(__file__).resolve().parents[1] / "packaging" / "edit_facts.py"
+    spec = importlib.util.spec_from_file_location("edit_facts", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def test_fetch_facts_reads_the_fact_column_of_every_sheet():
-    import io
-    import zipfile
-    ff = _fetch_facts()
-    ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
-    shared = (f'<sst {ns}><si><t>Episode</t></si><si><t>Fact</t></si>'
-              '<si><r><t>Octopuses have </t></r><r><t>three hearts.</t></r></si></sst>')
-    def sheet(rows):
-        body = "".join(f'<row r="{i + 1}">{r}</row>' for i, r in enumerate(rows))
-        return f'<worksheet {ns}><sheetData>{body}</sheetData></worksheet>'
-    s1 = sheet(['<c r="B1" t="s"><v>0</v></c><c r="D1" t="s"><v>1</v></c>',
-                '<c r="B2"><v>599</v></c><c r="D2" t="s"><v>2</v></c>'])
-    s2 = sheet(['<c r="D1" t="inlineStr"><is><t>Fact</t></is></c>',
-                '<c r="D2" t="inlineStr"><is><t>A snail can sleep for three years.</t></is></c>'])
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("xl/sharedStrings.xml", shared)
-        z.writestr("xl/worksheets/sheet1.xml", s1)
-        z.writestr("xl/worksheets/sheet2.xml", s2)
-    assert ff.facts_from_xlsx(buf.getvalue()) == ["Octopuses have three hearts.",
-                                                   "A snail can sleep for three years."]
 
 
-def test_fetch_facts_reads_the_claim_after_each_qi_label_not_the_citation():
-    ff = _fetch_facts()
-    page = ("<h3>Page 2, Position 2</h3><p>The &quot;Eiffel Tower&quot; grows in summer.</p>"
-            "<p><a href='https://sources.qi.com/x'>https://example.org/eiffel</a></p>"
-            "<div>Page 2, Position 3: Bananas are berries but strawberries are not.</div>"
-            "<p>www.example.org/bananas</p>")
-    assert ff.facts_from_qi(page) == ['The "Eiffel Tower" grows in summer.',
-                                      "Bananas are berries but strawberries are not."]
-    assert ff.tidy(["a", "Same fact here, twice.", "same fact here, twice."]) == \
-        ["Same fact here, twice."]
-
-
-def test_fetch_facts_output_is_what_the_app_reads(tmp_path, monkeypatch):
-    ff = _fetch_facts()
+def test_edit_facts_output_is_what_the_app_reads(tmp_path, monkeypatch):
+    ff = _edit_facts()
     out = tmp_path / "facts.dat"
     ff.write(["One fact for the list.", "Two facts for the list."], str(out))
     assert fact_box.builtin_facts(str(out)) == ["One fact for the list.", "Two facts for the list."]
 
 
 def test_facts_dat_round_trips_through_an_editable_text_file(tmp_path):
-    ff = _fetch_facts()
+    ff = _edit_facts()
     dat, txt = tmp_path / "facts.dat", tmp_path / "facts.txt"
     ff.write(["First fact, long enough.", "Second fact, long enough."], str(dat))
     assert ff.export_text(str(txt), str(dat)) == 2

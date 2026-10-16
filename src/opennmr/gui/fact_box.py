@@ -4,9 +4,10 @@ Explicit user request (2026-10-16), reachable **only** by the shortcut --
 no menu item, button or tooltip mentions it.
 
 The facts are a built-in list, ``resources/facts.dat`` (zlib-compressed
-UTF-8, one fact per line, so not plain text in an install), built by
-``packaging/fetch_facts.py`` from the No Such Thing As A Fish master fact
-list and QI's "1,339 facts" page (the user's choice of sources). A user may
+UTF-8, one fact per line, so not plain text in an install), curated by
+hand from the No Such Thing As A Fish master fact list and QI's "1,339
+facts" page (the user's choice of sources); edit it with
+``packaging/edit_facts.py --export`` / ``--import``. A user may
 add their own in ``~/.opennmr/facts.txt`` (``OPENNMR_FACTS_FILE`` overrides
 the path), one per line; blank lines and ``#`` lines are skipped.
 """
@@ -26,7 +27,7 @@ _TEMPLATE = """\
 """
 
 
-#: The built-in list (see packaging/fetch_facts.py).
+#: The built-in list (see packaging/edit_facts.py).
 BUILTIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "facts.dat")
 
 
