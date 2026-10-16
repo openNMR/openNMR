@@ -194,6 +194,7 @@ from .peak_width import peak_fwhm, peak_fwhm_2d, spectrum_peak_fwhm, spectrum_pe
 from .fit_ranges import parse_ppm_ranges
 from .cp_buildup import (
     contact_time_us, cp_series, fit_cp_buildup, cp_report, plot_cp_buildup,
+    cp_series_regions, plot_cp_buildups,
 )
 # pNMR (CIF) isotropic peaks -> CSA, Quad & J-coupling sites (2026-10-12).
 from . import pnmr_export
@@ -452,7 +453,7 @@ __all__ = [
     "intensity_scaling", "scale_for_comparison", "peak_width", "peak_fwhm", "peak_fwhm_2d",
     "spectrum_peak_fwhm", "spectrum_peak_fwhm_2d", "fit_ranges", "parse_ppm_ranges",
     "cp_buildup", "contact_time_us", "cp_series", "fit_cp_buildup", "cp_report",
-    "plot_cp_buildup",
+    "plot_cp_buildup", "cp_series_regions", "plot_cp_buildups",
     # tensor pictures
     "frequency_surface", "tensor_components", "transition_labels", "plot_tensors",
     "plot_tensor_surface", "plot_tensor_ellipsoids",

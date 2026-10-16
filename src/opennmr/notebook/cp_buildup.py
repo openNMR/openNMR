@@ -459,3 +459,61 @@ def plot_cp_buildup(series: dict, fit: dict | None = None, ax=None, time_unit: s
     ax.set_xlim(left=0)
     ax.legend(frameon=False)
     return ax
+
+
+def cp_series_regions(spectra, regions, contact_times, names=None, **kwargs) -> list[dict]:
+    """:func:`cp_series` for several regions at once (explicit user request,
+    2026-10-16: "as many integral regions as they so choose"): one series
+    per ``(lo, hi)`` region, each with its ``"name"`` (default "Region 1",
+    ...). Keyword arguments are :func:`cp_series`'s."""
+    regions = list(regions)
+    if not regions:
+        raise ValueError("Add at least one region.")
+    names = list(names) if names is not None else [f"Region {i + 1}" for i in range(len(regions))]
+    out = []
+    for name, region in zip(names, regions):
+        try:
+            series = cp_series(spectra, region, contact_times, **kwargs)
+        except ValueError as exc:
+            raise ValueError(f"{name}: {exc}") from None
+        series["name"] = name
+        out.append(series)
+    return out
+
+
+def plot_cp_buildups(series_list, fits=None, ax=None, time_unit: str = "auto", figure=None,
+                     colours=None):
+    """Several regions' build-up curves on one Axes, each in its own colour
+    with its fit (``fits``: {series name: fit}) as a line of the same
+    colour. Returns the Axes."""
+    if ax is None:
+        if figure is not None:
+            ax = figure.add_subplot(111)
+        else:
+            import matplotlib.pyplot as plt
+            _fig, ax = plt.subplots(figsize=(5, 3.5))
+    if colours is None:
+        from ..plotting.accessibility import ordered_qualitative_colours
+        colours = ordered_qualitative_colours("okabe_ito")
+    fits = fits or {}
+    t_all = np.concatenate([np.asarray(s["t_us"], float) for s in series_list]) \
+        if series_list else np.array([])
+    if time_unit == "auto":
+        time_unit = "ms" if t_all.size and float(np.max(t_all)) >= 10000 else "µs"
+    scale = 1e-3 if time_unit == "ms" else 1.0
+    for k, series in enumerate(series_list):
+        colour = colours[k % len(colours)]
+        name = series.get("name") or f"Region {k + 1}"
+        ax.errorbar(np.asarray(series["t_us"]) * scale, series["y"], yerr=series.get("y_err"),
+                    fmt="o", ms=5, capsize=2, color=colour, label=name, zorder=3)
+        fit = fits.get(name)
+        if fit is not None:
+            ax.plot(np.asarray(fit["curve_t"]) * scale, fit["curve_y"], "-", color=colour, lw=1.5,
+                    label=f"{name}: fit ({fit['equation']})", zorder=2)
+    ax.set_xlabel(f"Contact time ({time_unit})")
+    if series_list:
+        ax.set_ylabel(series_list[0].get("unit", "Integral"))
+    ax.axhline(0.0, color="0.6", lw=0.6, zorder=1)
+    ax.set_xlim(left=0)
+    ax.legend(frameon=False)
+    return ax

@@ -1007,7 +1007,8 @@ class MplCanvas(QWidget):
             "Width",
             "Peak width: click on a peak and its full width at half maximum is drawn and "
             "given in ppm and Hz (along F2 and F1 on a 2D). Where peaks overlap the value "
-            "is marked as an estimate -- fit the peaks for a reliable width.",
+            "is marked as an estimate -- fit the peaks for a reliable width. Cmd/Ctrl+L toggles "
+            "this from anywhere.",
             self.set_width_mode,
             checked=False,
         )

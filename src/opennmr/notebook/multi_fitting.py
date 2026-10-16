@@ -1262,3 +1262,81 @@ def plot_parameter_trend(result, label, name, ax=None, xlabel="x"):
         ax.set_xticklabels(labs, rotation=45, ha="right")
     ax.set_ylabel(f"{label}: {_pname(name)}")
     return ax
+
+
+def parameter_sites(result, name):
+    """The site labels that have parameter ``name`` (per experiment), in
+    the order they first appear."""
+    seen = []
+    for row in multi_fit_table(result):
+        if row["name"] == name and row["label"] not in seen:
+            seen.append(row["label"])
+    return seen
+
+
+def trend_parameter_names(result):
+    """Parameter names that at least one site has along the experiments
+    (shift, width, ...), in the order they first appear -- what can be
+    plotted for all sites at once."""
+    names = []
+    for row in multi_fit_table(result):
+        if row["label"] and row["name"] not in names:
+            names.append(row["name"])
+    return names
+
+
+def plot_parameter_trends(result, name, labels=None, ax=None, xlabel="x", x_values=None,
+                          colours=None, fontsize=None):
+    """One parameter of **every site** (or the ``labels`` given) along the
+    experiments, each site its own series with 1σ error bars, on one Axes
+    (explicit user request, 2026-10-16: "allow the shifts/widths/peak
+    properties of all sites to be plotted on the same graph").
+
+    Against x when every experiment has an x value (``x_values``, one per
+    experiment, replaces the fit's own); otherwise in fitting order, with
+    the experiments named on the axis. Returns the Axes."""
+    import matplotlib.pyplot as plt
+    if ax is None:
+        _fig, ax = plt.subplots()
+    labels = list(labels) if labels else parameter_sites(result, name)
+    if not labels:
+        raise ValueError(f"No site has the parameter {name!r}.")
+    if colours is None:
+        from ..plotting.accessibility import ordered_qualitative_colours
+        colours = ordered_qualitative_colours("okabe_ito")
+    experiments = [fit["label"] for fit in result["experiments"]]
+    if x_values is None:
+        x_values = [fit.get("x_value") for fit in result["experiments"]]
+    use_x = all(v is not None for v in x_values)
+    by_experiment = {}
+    for row in multi_fit_table(result):
+        if row["name"] == name:
+            by_experiment[(row["label"], row["experiment"])] = row
+    drawn = 0
+    for k, label in enumerate(labels):
+        xs, vs, es = [], [], []
+        for j, exp in enumerate(experiments):
+            row = by_experiment.get((label, exp))
+            if row is None:
+                continue
+            xs.append(float(x_values[j]) if use_x else j)
+            vs.append(row["value"])
+            es.append(row["error"] if row["error"] is not None else np.nan)
+        if not xs:
+            continue
+        xs, vs, es = (np.asarray(a, dtype=float) for a in (xs, vs, es))
+        order = np.argsort(xs)
+        ax.errorbar(xs[order], vs[order], yerr=np.nan_to_num(es[order]), fmt="o-", capsize=3,
+                    markersize=5, linewidth=1.2, label=label, color=colours[k % len(colours)])
+        drawn += 1
+    if not drawn:
+        raise ValueError(f"No site has the parameter {name!r} in any experiment.")
+    if use_x:
+        ax.set_xlabel(xlabel, fontsize=fontsize)
+    else:
+        ax.set_xticks(range(len(experiments)))
+        ax.set_xticklabels(experiments, rotation=45, ha="right")
+        ax.set_xlabel("Experiment", fontsize=fontsize)
+    ax.set_ylabel(_pname(name), fontsize=fontsize)
+    ax.legend(frameon=False)
+    return ax

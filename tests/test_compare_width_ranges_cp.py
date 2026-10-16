@@ -441,8 +441,7 @@ def test_cp_panel_end_to_end(window):
     panel.time_parameter_edit.setText("P15")
     assert panel.read_contact_times() == len(T)
     panel.set_reference(next(r for r, e in enumerate(panel._entries) if str(e["label"]).startswith("ref")))
-    panel.region_hi_spin.setValue(110.0)
-    panel.region_lo_spin.setValue(90.0)
+    panel.add_region(hi=110.0, lo=90.0)
     assert panel.integrate()
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
     assert np.allclose(np.sort(panel.series["t_us"]), T)
@@ -465,8 +464,7 @@ def test_cp_panel_typed_times_and_fixed_parameter(window):
     panel.set_checked(rows)
     for r, t in zip(rows, T[:8]):
         panel.set_contact_time(r, float(t))
-    panel.region_hi_spin.setValue(110.0)
-    panel.region_lo_spin.setValue(90.0)
+    panel.add_region(hi=110.0, lo=90.0)
     assert panel.integrate()
     panel.set_parameter("T1rho_I", start=4000.0, fixed=True)
     assert panel.run_fit()

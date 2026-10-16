@@ -163,10 +163,13 @@ def test_gui_plots_any_quantity_against_x(qapp, _dialogs):
     for key in ("delta_iso", "centre_of_mass", "fwhm_Hz", "integral", "height"):
         assert key in keys
     assert panel.quantity_labels() == ["A", "B"]          # the window is offered, unticked
-    # No x yet: said so, nothing drawn.
+    # No x yet: plotted in fitting order, the experiments named on the axis
+    # (was refused until 2026-10-16).
     panel.quantity_combo.setCurrentIndex(panel.quantity_combo.findData("fwhm_Hz"))
-    assert not panel.plot_quantity()
-    assert "x value" in _dialogs[-1][1]
+    assert panel.plot_quantity()
+    ax = window.fit_canvas.figure.axes[0]
+    assert [t.get_text().split(" ")[0] for t in ax.get_xticklabels()] == ["T0", "T1", "T2", "T3"]
+    assert "fitting order" in panel.quantity_note_label.text()
     # x after the fit: from the acquisition parameters (TE), then plotted.
     panel.fill_x_values("te")
     assert panel.plot_x_values() == list(TEMPS)

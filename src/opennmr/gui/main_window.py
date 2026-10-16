@@ -779,6 +779,7 @@ class MainWindow(QMainWindow):
         for _canvas in self._measurement_canvases():
             _canvas.measurementModeChanged.connect(self._on_canvas_measurement_mode_changed)
             _canvas.peakWidthMeasured.connect(self._on_peak_width_measured)
+            _canvas.widthModeChanged.connect(self._on_canvas_width_mode_changed)
             _canvas.crosshairEnabledChanged.connect(self._on_canvas_crosshair_changed)
         self.canvas.pickModeChanged.connect(self._on_canvas_pick_mode_changed)
         self.canvas.regionSelectModeChanged.connect(self._on_canvas_region_select_mode_changed)
@@ -1448,6 +1449,17 @@ class MainWindow(QMainWindow):
         )
         self.measurement_menu_action.toggled.connect(self._on_measurement_toggle_clicked)
         analysis_menu.addAction(self.measurement_menu_action)
+        # Width mode (click a peak for its FWHM) from the keyboard, like
+        # Measure (explicit user request, 2026-10-16: "ctrl/cmd+L"). Qt maps
+        # Ctrl to Cmd on macOS. Ctrl+Shift+L stays Load Progress.
+        self.width_menu_action = QAction("Measure Peak &Width (FWHM)", self)
+        self.width_menu_action.setCheckable(True)
+        self.width_menu_action.setShortcut(QKeySequence("Ctrl+L"))
+        self.width_menu_action.setToolTip(
+            "Click a peak to label its full width at half maximum in ppm and Hz (along F2 and "
+            "F1 on a 2D); marked as an estimate where peaks overlap.")
+        self.width_menu_action.toggled.connect(self._on_width_toggle_clicked)
+        analysis_menu.addAction(self.width_menu_action)
 
         analysis_menu.addSeparator()
         dosy_menu_action = QAction("&DOSY Map (ILT)…", self)
@@ -10440,7 +10452,15 @@ class MainWindow(QMainWindow):
             if (entry["kind"] == "experiment" and entry["source_available"]
                     and not (entry.get("prefer_copy") and entry["spectrum"] is not None)):
                 before = len(self.session)
-                self._load(source["path"], source.get("vendor") or io.detect_vendor(source["path"]))
+                # Read with the saved load settings (proc number, pseudo-2D
+                # ...) straight away. Without them the experiment's default
+                # proc number was read first -- for a 1D proc number of a 2D,
+                # the whole 2D (a 486 MB EXSY ser, transformed in full) --
+                # only to be re-read as the saved one just after, once per
+                # entry: why "exsy_CdHCF" took so long to open (user report,
+                # 2026-10-16).
+                self._load(source["path"], source.get("vendor") or io.detect_vendor(source["path"]),
+                           extra_kwargs=dict(source.get("load_kwargs") or {}))
                 if len(self.session) > before:
                     index = len(self.session) - 1
                     kwargs = dict(self.session.get_load_kwargs(index))
@@ -21268,6 +21288,24 @@ class MainWindow(QMainWindow):
             )
         else:
             self.statusBar().clearMessage()
+
+    def _on_width_toggle_clicked(self, enabled: bool) -> None:
+        """Width mode on or off on every canvas (Cmd/Ctrl+L), as Measure."""
+        for canvas in self._measurement_canvases():
+            canvas.set_width_mode(enabled)
+        if enabled:
+            self.statusBar().showMessage(
+                "Peak width: click on a peak. Cmd/Ctrl+L to finish.", 5000)
+        else:
+            self.statusBar().clearMessage()
+
+    def _on_canvas_width_mode_changed(self, enabled: bool) -> None:
+        """One canvas's Width changed (its toolbar button, or another mode
+        took over): keep the menu item and every canvas in step."""
+        if self.width_menu_action.isChecked() != enabled:
+            self.width_menu_action.setChecked(enabled)
+        for canvas in self._measurement_canvases():
+            canvas.set_width_mode(enabled)
 
     def _on_crosshair_toggled(self, enabled: bool) -> None:
         """Show or hide the cursor crosshair on every canvas, keeping

@@ -8,8 +8,10 @@ Klinowski, Chem. Rev. 2002, 102, 613), which a notebook calls the same way.
    each its contact time: typed in the table (µs), or read from a pulse
    programme parameter (``P15``, as VOCS reads ``P1``). Choose a
    reference (ideally direct excitation; any spectrum will do).
-2. **Region** -- typed, or dragged on the plot (Show Reference first).
-   Integrate draws the build-up curve on the Fit view.
+2. **Regions** -- as many as wanted (explicit user request, 2026-10-16):
+   typed in the table, or dragged on the reference spectrum (Drag on Plot
+   shows it, and every drag adds a region until it is switched off).
+   Integrate draws one build-up curve per region on the Fit view.
 3. **Fit** -- a model, starting values (read off the data, editable),
    any parameter fixed; the result with errors, the contact time of
    maximum signal, warnings and advice. Kept with the spectra (their log
@@ -23,7 +25,7 @@ import math
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
+    QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -66,8 +68,9 @@ class CpBuildupPanel(QWidget):
         self._times: dict[int, str] = {}
         self._checked: set[int] = set()
         self.armed = False
-        self.series: dict | None = None
-        self.fit: dict | None = None
+        #: One series per region (cp_series_regions), and the fits by name.
+        self.series_list: list[dict] = []
+        self.fits: dict[str, dict] = {}
         self._series_indices: list[int] = []
 
         v = QVBoxLayout(self)
@@ -130,32 +133,39 @@ class CpBuildupPanel(QWidget):
     def _build_region(self) -> QGroupBox:
         box = QGroupBox("2. Region and integration")
         v = QVBoxLayout(box)
-        form = QFormLayout()
-        row = QHBoxLayout()
-        self.region_hi_spin, self.region_lo_spin = QDoubleSpinBox(), QDoubleSpinBox()
-        for spin, value in ((self.region_hi_spin, 10.0), (self.region_lo_spin, 0.0)):
-            spin.setRange(-1e5, 1e5)
-            spin.setDecimals(3)
-            spin.setSuffix(" ppm")
-            spin.setValue(value)
-            spin.setKeyboardTracking(False)
-        row.addWidget(self.region_hi_spin)
-        row.addWidget(QLabel("to"))
-        row.addWidget(self.region_lo_spin)
-        form.addRow("Region:", row)
+        self.region_table = QTableWidget(0, 3)
+        self.region_table.setHorizontalHeaderLabels(["Name", "From (ppm)", "To (ppm)"])
+        self.region_table.verticalHeader().setVisible(False)
+        rh = self.region_table.horizontalHeader()
+        rh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        rh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        rh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.region_table.setMinimumHeight(90)
+        self.region_table.setToolTip("Each region gets its own build-up curve and fit. Type the "
+                                     "limits, or drag them on the plot; rename freely.")
+        self.region_table.itemChanged.connect(lambda _i: self._on_regions_edited())
+        v.addWidget(self.region_table)
         buttons = QHBoxLayout()
+        self.add_region_button = QPushButton("Add Region")
+        self.add_region_button.clicked.connect(lambda: self.add_region())
+        self.remove_region_button = QPushButton("Remove")
+        self.remove_region_button.setToolTip("Remove the selected region(s).")
+        self.remove_region_button.clicked.connect(self.remove_selected_regions)
         self.show_reference_button = QPushButton("Show Reference")
         self.show_reference_button.setToolTip("Draw the reference (or the first ticked spectrum) "
-                                              "with the region on the Compare view.")
+                                              "with the regions on the Compare view.")
         self.show_reference_button.clicked.connect(self.show_reference)
         self.drag_button = QPushButton("Drag on Plot")
         self.drag_button.setCheckable(True)
-        self.drag_button.setToolTip("Drag across the region on the Compare view.")
+        self.drag_button.setToolTip("Shows the reference spectrum; each drag across it adds a "
+                                    "region. Click again to stop.")
         self.drag_button.toggled.connect(self._on_drag_toggled)
-        buttons.addWidget(self.show_reference_button)
-        buttons.addWidget(self.drag_button)
+        for b in (self.add_region_button, self.remove_region_button, self.show_reference_button,
+                  self.drag_button):
+            buttons.addWidget(b)
         buttons.addStretch(1)
-        form.addRow("", buttons)
+        v.addLayout(buttons)
+        form = QFormLayout()
         self.baseline_combo = QComboBox()
         self.baseline_combo.addItem("Local (fitted just outside the region)", "local")
         self.baseline_combo.addItem("None (spectrum as it is)", "none")
@@ -195,6 +205,11 @@ class CpBuildupPanel(QWidget):
             "⅓ for CH₂). Equation numbers from Kolodziejski & Klinowski, Chem. Rev. 2002.")
         self.model_combo.currentIndexChanged.connect(lambda _i: self._rebuild_parameters())
         form.addRow("Model:", self.model_combo)
+        self.fit_region_combo = QComboBox()
+        self.fit_region_combo.setToolTip("The region whose curve the starting values and Fit "
+                                         "refer to. Fit All Regions fits every one.")
+        self.fit_region_combo.currentIndexChanged.connect(lambda _i: self._on_fit_region_changed())
+        form.addRow("Region:", self.fit_region_combo)
         v.addLayout(form)
         self.parameter_table = QTableWidget(0, 5)
         self.parameter_table.setHorizontalHeaderLabels(
@@ -210,8 +225,13 @@ class CpBuildupPanel(QWidget):
         self.estimate_button.clicked.connect(self.estimate_start)
         self.fit_button = QPushButton("Fit")
         self.fit_button.clicked.connect(self.run_fit)
+        self.fit_all_button = QPushButton("Fit All Regions")
+        self.fit_all_button.setToolTip("Every region with this model: starting values read off "
+                                       "each region's own data; Fixed values held for all.")
+        self.fit_all_button.clicked.connect(self.fit_all)
         row.addWidget(self.estimate_button)
         row.addWidget(self.fit_button)
+        row.addWidget(self.fit_all_button)
         row.addStretch(1)
         v.addLayout(row)
         self.fit_results_label = ReportLabel("")
@@ -325,10 +345,65 @@ class CpBuildupPanel(QWidget):
     # ------------------------------------------------------------------
     # region
     # ------------------------------------------------------------------
+    def add_region(self, hi: float | None = None, lo: float | None = None,
+                   name: str | None = None) -> int:
+        """Append a region (``hi``/``lo`` in ppm; blank to type them).
+        Returns its row."""
+        t = self.region_table
+        r = t.rowCount()
+        used = {t.item(i, 0).text() for i in range(r) if t.item(i, 0)}
+        if name is None:
+            k = r + 1
+            while f"Region {k}" in used:
+                k += 1
+            name = f"Region {k}"
+        t.blockSignals(True)
+        try:
+            t.insertRow(r)
+            t.setItem(r, 0, QTableWidgetItem(name))
+            t.setItem(r, 1, QTableWidgetItem("" if hi is None else f"{hi:.4g}"))
+            t.setItem(r, 2, QTableWidgetItem("" if lo is None else f"{lo:.4g}"))
+        finally:
+            t.blockSignals(False)
+        self._on_regions_edited()
+        return r
+
+    def remove_selected_regions(self) -> None:
+        rows = sorted({i.row() for i in self.region_table.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.region_table.removeRow(r)
+        self._on_regions_edited()
+
+    def _on_regions_edited(self) -> None:
+        """Regions changed: the curves and fits no longer match them."""
+        if self.series_list:
+            self.series_list, self.fits = [], {}
+            self._fill_fit_regions()
+            self.series_label.setText("Regions changed: Integrate and Plot again.")
+
+    def regions(self) -> list[tuple[str, float, float]]:
+        """``[(name, lo, hi)]`` in table order; ValueError naming a bad row."""
+        out = []
+        t = self.region_table
+        for r in range(t.rowCount()):
+            name = (t.item(r, 0).text().strip() if t.item(r, 0) else "") or f"Region {r + 1}"
+            a = _number(t.item(r, 1).text() if t.item(r, 1) else "")
+            b = _number(t.item(r, 2).text() if t.item(r, 2) else "")
+            if a is None or b is None:
+                raise ValueError(f"{name}: give both limits in ppm.")
+            if a == b:
+                raise ValueError(f"{name}: the region has no width.")
+            out.append((name, min(a, b), max(a, b)))
+        if not out:
+            raise ValueError("Add at least one region (Add Region, or Drag on Plot).")
+        names = [n for n, _lo, _hi in out]
+        if len(set(names)) != len(names):
+            raise ValueError("Give every region its own name.")
+        return out
+
     def region(self) -> tuple[float, float]:
-        lo, hi = sorted((self.region_lo_spin.value(), self.region_hi_spin.value()))
-        if lo == hi:
-            raise ValueError("The region has no width.")
+        """The first region's (lo, hi)."""
+        _name, lo, hi = self.regions()[0]
         return lo, hi
 
     def show_reference(self) -> bool:
@@ -340,14 +415,20 @@ class CpBuildupPanel(QWidget):
             QMessageBox.warning(self, "CP Build-up", "Choose a reference or tick a spectrum.")
             return False
         spectrum, label = entry["spectrum"], entry["label"]
-        lo, hi = self.region()
+        try:
+            regions = self.regions()
+        except ValueError:
+            regions = []            # nothing (valid) yet: the spectrum alone, to drag on
 
         def draw(figure):
+            from ..plotting.accessibility import ordered_qualitative_colours
+            colours = ordered_qualitative_colours("okabe_ito")
             ax = figure.add_subplot(111)
             x = spectrum.axes[0].ppm
             ax.plot(x, spectrum.data, color=self._style("spectrum").get("trace_color") or "black",
                     lw=1.0, label=str(label))
-            ax.axvspan(lo, hi, color="#0072b2", alpha=0.15, lw=0, label="CP region")
+            for k, (name, lo, hi) in enumerate(regions):
+                ax.axvspan(lo, hi, color=colours[k % len(colours)], alpha=0.2, lw=0, label=name)
             ax.set_xlim(float(np.max(x)), float(np.min(x)))
             ax.set_xlabel(f"{spectrum.metadata.nucleus or ''} shift (ppm)".strip())
             ax.set_yticks([])
@@ -356,15 +437,26 @@ class CpBuildupPanel(QWidget):
         return True
 
     def _on_drag_toggled(self, on: bool) -> None:
+        # The reference first, so there is a spectrum to drag on -- the
+        # drag used to land on whatever Compare held, often nothing (user
+        # report, 2026-10-16).
+        if on and not self.show_reference():
+            self.drag_button.blockSignals(True)
+            self.drag_button.setChecked(False)
+            self.drag_button.blockSignals(False)
+            return
         self.armed = bool(on)
         self._arm("region" if on else None)
 
     def on_canvas_region(self, lo: float, hi: float) -> None:
+        """A drag on the plot: a new region. Stays armed for the next one."""
         lo, hi = sorted((float(lo), float(hi)))
-        self.region_lo_spin.setValue(lo)
-        self.region_hi_spin.setValue(hi)
-        self.drag_button.setChecked(False)
+        if lo == hi:
+            return
+        self.add_region(hi=hi, lo=lo)
         self.show_reference()
+        if self.armed:
+            self._arm("region")     # redrawing must not drop the drag mode
 
     def canvas_mode_released(self) -> None:
         if self.drag_button.isChecked():
@@ -393,8 +485,10 @@ class CpBuildupPanel(QWidget):
             return False
         ref = self._reference_entry()
         try:
-            self.series = cpb.cp_series(
-                [self._entries[r]["spectrum"] for r in rows], self.region(), times,
+            regions = self.regions()
+            series_list = cpb.cp_series_regions(
+                [self._entries[r]["spectrum"] for r in rows], [(lo, hi) for _n, lo, hi in regions],
+                times, names=[n for n, _lo, _hi in regions],
                 reference=ref["spectrum"] if ref else None,
                 labels=[self._entries[r]["label"] for r in rows],
                 baseline=self.baseline_combo.currentData(), divide_rg=self.rg_check.isChecked(),
@@ -402,31 +496,78 @@ class CpBuildupPanel(QWidget):
         except ValueError as exc:
             QMessageBox.warning(self, "CP Build-up", str(exc))
             return False
+        self.series_list, self.fits = series_list, {}
         self._series_indices = [self._entries[r].get("index") for r in rows]
         if ref is not None:
             self._series_indices.append(ref.get("index"))
-        self.fit = None
         self.fit_results_label.setText("")
         self.advice_box.set_items([])
-        lines = [f"{len(rows)} spectra, contact times {self.series['t_us'].min():g} to "
-                 f"{self.series['t_us'].max():g} µs; y = {self.series['unit']}."]
-        if self.series["reference"] is not None:
-            lines.append(f"Reference integral: {self.series['reference']['integral']:.4g} ± "
-                         f"{self.series['reference']['error']:.2g}.")
-        lines += [f"Note: {n}" for n in self.series["notes"]]
+        first = series_list[0]
+        lines = [f"{len(rows)} spectra, {len(series_list)} region(s), contact times "
+                 f"{first['t_us'].min():g} to {first['t_us'].max():g} µs; y = {first['unit']}."]
+        for series in series_list:
+            if series["reference"] is not None:
+                lines.append(f"{series['name']}: reference integral "
+                             f"{series['reference']['integral']:.4g} ± "
+                             f"{series['reference']['error']:.2g}.")
+        notes = []
+        for series in series_list:
+            notes += [n for n in series["notes"] if n not in notes]
+        lines += [f"Note: {n}" for n in notes]
         self.series_label.setText("\n".join(lines))
+        self._fill_fit_regions()
         self._draw_curve()
         self.estimate_start()
         self.calculated.emit()
         return True
 
+    # the region the fit controls act on --------------------------------
+    def _fill_fit_regions(self) -> None:
+        current = self.fit_region_combo.currentText()
+        self.fit_region_combo.blockSignals(True)
+        self.fit_region_combo.clear()
+        for series in self.series_list:
+            self.fit_region_combo.addItem(series["name"])
+        i = self.fit_region_combo.findText(current)
+        self.fit_region_combo.setCurrentIndex(i if i >= 0 else 0)
+        self.fit_region_combo.blockSignals(False)
+
+    def _on_fit_region_changed(self) -> None:
+        self.estimate_start()
+        fit = self.fit
+        if fit is not None:
+            self.fit_results_label.setText(cpb.cp_report(fit, self.series))
+            self.advice_box.set_items(fit_advice.advise_cp_buildup(fit))
+
+    def set_fit_region(self, name: str) -> None:
+        i = self.fit_region_combo.findText(name)
+        if i < 0:
+            raise KeyError(name)
+        self.fit_region_combo.setCurrentIndex(i)
+
+    @property
+    def series(self) -> dict | None:
+        """The series of the region chosen under Fit (the first by default)."""
+        if not self.series_list:
+            return None
+        name = self.fit_region_combo.currentText()
+        return next((s for s in self.series_list if s["name"] == name), self.series_list[0])
+
+    @property
+    def fit(self) -> dict | None:
+        series = self.series
+        return self.fits.get(series["name"]) if series is not None else None
+
     def _draw_curve(self) -> None:
-        series, fit = self.series, self.fit
+        series_list, fits = list(self.series_list), dict(self.fits)
 
         def draw(figure):
             style = self._style("profile")
-            cpb.plot_cp_buildup(series, fit, figure=figure,
-                                colour=style.get("trace_color") or "black")
+            if len(series_list) == 1:
+                cpb.plot_cp_buildup(series_list[0], fits.get(series_list[0]["name"]),
+                                    figure=figure, colour=style.get("trace_color") or "black")
+            else:
+                cpb.plot_cp_buildups(series_list, fits, figure=figure)
         self._draw(draw, "profile")
 
     # ------------------------------------------------------------------
@@ -493,10 +634,29 @@ class CpBuildupPanel(QWidget):
         self._rebuild_parameters(start)
 
     def run_fit(self) -> bool:
+        """Fit the region chosen under Fit, with the table's values."""
         if self.series is None and not self.integrate():
             return False
+        return self._fit_region(self.series, use_table_starts=True)
+
+    def fit_all(self) -> bool:
+        """Fit every region: starting values from each region's own data,
+        the table's Fixed values and limits held for all."""
+        if not self.series_list and not self.integrate():
+            return False
+        ok = True
+        for series in list(self.series_list):
+            ok = self._fit_region(series, use_table_starts=False, quiet=True) and ok
+        self._on_fit_region_changed()
+        if not ok:
+            QMessageBox.warning(self, "CP Build-up", "Some regions could not be fitted: see the "
+                                "report of each (choose it under Region).")
+        return ok
+
+    def _fit_region(self, series: dict, use_table_starts: bool, quiet: bool = False) -> bool:
         values = self._parameter_values()
-        start = {n: v["start"] for n, v in values.items() if v["start"] is not None}
+        start = {n: v["start"] for n, v in values.items()
+                 if v["start"] is not None and (use_table_starts or v["fixed"])}
         fixed = {}
         for n, v in values.items():
             if v["fixed"]:
@@ -511,30 +671,44 @@ class CpBuildupPanel(QWidget):
                 bounds[n] = (v["lower"] if v["lower"] is not None else -np.inf,
                              v["upper"] if v["upper"] is not None else np.inf)
         try:
-            self.fit = cpb.fit_cp_buildup(self.series["t_us"], self.series["y"], self.model(),
-                                          start=start, fixed=fixed, bounds=bounds,
-                                          y_err=self.series["y_err"])
+            fit = cpb.fit_cp_buildup(series["t_us"], series["y"], self.model(),
+                                     start=start, fixed=fixed, bounds=bounds,
+                                     y_err=series["y_err"])
         except ValueError as exc:
-            QMessageBox.warning(self, "CP Build-up", str(exc))
+            if not quiet:
+                QMessageBox.warning(self, "CP Build-up", f"{series['name']}: {exc}")
             return False
-        report = cpb.cp_report(self.fit, self.series)
-        self.fit_results_label.setText(report)
-        self.advice_box.set_items(fit_advice.advise_cp_buildup(self.fit))
+        self.fits[series["name"]] = fit
+        if series is self.series:
+            self.fit_results_label.setText(cpb.cp_report(fit, series))
+            self.advice_box.set_items(fit_advice.advise_cp_buildup(fit))
         self._draw_curve()
-        record = {"label": "CP build-up", "target": ", ".join(map(str, self.series["labels"])),
-                  "inputs_text": (f"region {self.series['region'][1]:g} to "
-                                  f"{self.series['region'][0]:g} ppm; model {self.model()}; "
-                                  f"baseline {self.series['baseline']}; RG divided: "
-                                  f"{'yes' if self.series['divide_rg'] else 'no'}"),
-                  "report": report,
-                  "result": {"model": self.model(), "params": self.fit["params"],
-                             "errors": self.fit["errors"], "fixed": self.fit["fixed"],
-                             "t_us": self.series["t_us"].tolist(), "y": self.series["y"].tolist(),
-                             "y_err": self.series["y_err"].tolist(),
-                             "r_squared": self.fit["r_squared"],
-                             "t_max_us": self.fit["t_max_us"]}}
-        indices = [i for i in self._series_indices if i is not None]
-        if indices:
-            self._store("cp_buildup", record, indices)
+        self._store_fits()
         self.fitted.emit()
         return True
+
+    def _store_fits(self) -> None:
+        """Keep every fitted region with the spectra (their log and sidecar)."""
+        indices = [i for i in self._series_indices if i is not None]
+        if not indices or not self.fits:
+            return
+        by_name = {s["name"]: s for s in self.series_list}
+        reports, results, regions = [], {}, []
+        for name, fit in self.fits.items():
+            series = by_name.get(name)
+            if series is None:
+                continue
+            lo, hi = series["region"]
+            regions.append(f"{name} {hi:g} to {lo:g} ppm")
+            reports.append(f"[{name}]\n" + cpb.cp_report(fit, series))
+            results[name] = {"model": fit["model"], "region_ppm": [lo, hi],
+                             "params": fit["params"], "errors": fit["errors"],
+                             "fixed": fit["fixed"], "t_us": series["t_us"].tolist(),
+                             "y": series["y"].tolist(), "y_err": series["y_err"].tolist(),
+                             "r_squared": fit["r_squared"], "t_max_us": fit["t_max_us"]}
+        first = self.series_list[0]
+        record = {"label": "CP build-up", "target": ", ".join(map(str, first["labels"])),
+                  "inputs_text": ("; ".join(regions) + f"; baseline {first['baseline']}; "
+                                  f"RG divided: {'yes' if first['divide_rg'] else 'no'}"),
+                  "report": "\n\n".join(reports), "result": results}
+        self._store("cp_buildup", record, indices)

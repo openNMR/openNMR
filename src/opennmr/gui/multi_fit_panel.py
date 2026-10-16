@@ -1100,6 +1100,14 @@ class MultiFitPanel(QWidget):
         self.show_combo.clear()
         for j, fit in enumerate(r["experiments"]):
             self.show_combo.addItem(f"Fit: {fit['label']}", ("fit", j))
+        # Every site's shift / width / ... on one graph (explicit user
+        # request, 2026-10-16), before the one-site trends.
+        for name in mf.trend_parameter_names(r):
+            sites = mf.parameter_sites(r, name)
+            if len(sites) > 1:
+                title = _param_label(name) if name not in ("share_%", "P_Q", "delta_cg") else \
+                    {"share_%": "share (%)", "P_Q": "P_Q (MHz)", "delta_cg": "CT c.o.g. (ppm)"}[name]
+                self.show_combo.addItem(f"Trend, all sites: {title}", ("trends", name))
         for label, key, _cells in rows:
             self.show_combo.addItem(f"Trend: {label}", ("trend", key))
         # Parameter correlations (explicit user request, 2026-10-06): the
@@ -1145,11 +1153,39 @@ class MultiFitPanel(QWidget):
             fit["spectrum"] = got[0] if got else None
             self._draw_fit(fit)
             return
+        if what[0] == "trends":
+            self.plot_all_sites(what[1])
+            return
         label, name = what[1]
         xs, vs, es, labs = mf.parameter_trend(self.result, label, name)
         rows = {row[1]: row for row in self._result_rows()}
         title = rows[(label, name)][0] if (label, name) in rows else f"{label}: {name}"
         self._draw_trend(xs, vs, es, labs, self.result.get("x_label", "x"), title, title)
+
+    def plot_all_sites(self, name: str) -> bool:
+        """Parameter ``name`` of every site on one graph on the Fit view:
+        against the x value column when every experiment has one, else in
+        fitting order."""
+        if not self.result:
+            return False
+        x_values = self.plot_x_values()
+        if any(v is None for v in x_values):
+            x_values = None
+        xlabel = self.x_label_edit.text().strip() or self.result.get("x_label", "x")
+
+        def draw(figure):
+            ax = figure.add_subplot(111)
+            mf.plot_parameter_trends(self.result, name, ax=ax, xlabel=xlabel, x_values=x_values)
+        try:
+            if self._draw_quantities is not None:
+                self._draw_quantities(draw)
+            else:
+                import matplotlib.figure
+                draw(matplotlib.figure.Figure())
+        except ValueError as exc:
+            QMessageBox.information(self, "Multi-spectrum fit", str(exc))
+            return False
+        return True
 
     # ---- fitted quantities against x ---------------------------------------
 
@@ -1268,12 +1304,14 @@ class MultiFitPanel(QWidget):
         labels = self.quantity_labels()
         x_values = self.plot_x_values()
         problem = None
+        in_order = False
         if key is None or not labels:
             problem = "Choose a quantity and tick at least one peak."
         elif any(x is None for x in x_values):
-            missing = [f["label"] for f, x in zip(self.result["experiments"], x_values) if x is None]
-            problem = ("Every experiment needs a numeric x value -- fill the x value column "
-                       "(type, or 'x value from'). Missing: " + ", ".join(missing) + ".")
+            # No x for some experiments: plot in fitting order, the
+            # experiments named on the axis, rather than refusing (2026-10-16).
+            in_order = True
+            x_values = list(range(len(x_values)))
         if problem:
             self.quantity_note_label.setText(problem)
             if not quiet:
@@ -1284,9 +1322,16 @@ class MultiFitPanel(QWidget):
                       x_transform=self.quantity_x_combo.currentData(),
                       y_transform=self.quantity_y_combo.currentData())
 
+        if in_order:
+            kwargs.update(x_transform="x", xlabel="Experiment")
+
         def draw(figure):
             ax = figure.add_subplot(111)
             mf.plot_quantity_trend(self.result, key, ax=ax, **kwargs)
+            if in_order:
+                ax.set_xticks(range(len(x_values)))
+                ax.set_xticklabels([f["label"] for f in self.result["experiments"]],
+                                   rotation=45, ha="right")
         try:
             if self._draw_quantities is not None:
                 self._draw_quantities(draw)
@@ -1300,7 +1345,9 @@ class MultiFitPanel(QWidget):
             return False
         definition = mf._QUANTITY_DEFINITIONS.get(key)
         self.quantity_note_label.setText(
-            f"{mf.quantity_title(key)} against {xlabel}"
+            f"{mf.quantity_title(key)} against "
+            + ("the experiments, in fitting order (fill the x value column to plot against x)"
+               if in_order else xlabel)
             + (f" -- {definition}." if definition else "."))
         return True
 

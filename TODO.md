@@ -199,6 +199,22 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
 
+## Multi-spectrum: all sites on one graph; faster Open State; CP Build-up drag fixed + several regions (2026-10-16, round 2)
+
+**Asked:** (1) Multi-spectrum: plot a shift/width/... of all sites on one graph. (2) Opening the state `exsy_CdHCF.opennmr` is slow. (3) CP Build-up: Drag on Plot led to a blank Compare plot; allow any number of integral regions. Only relevant tests, quickly.
+
+**What was wrong / found:**
+- (1) "Plot a fitted quantity against x" already overlays several peaks, but refused to plot until every experiment had an x value; the Show menu's trends were one site each.
+- (2) The state holds three 1D proc numbers (99360/99389/99542) of the 2D EXSY expno 2261 (ser 486 MB). `_open_state` called `_load(path)` with **no** load settings, so each entry first read the experiment's default proc number -- the full 2D, transformed -- then re-read the saved proc number in `_apply_restored_state`. Three full 2D reads per open.
+- (3) Drag on Plot armed region-select on Compare without drawing anything there.
+
+**Built:**
+- `multi_fitting.plot_parameter_trends(result, name, ...)`, `parameter_sites`, `trend_parameter_names`: one parameter of every site on one Axes, against x if every experiment has one, else in fitting order (experiments on the axis). Show menu: "Trend, all sites: <parameter>" for every parameter two or more sites share (`MultiFitPanel.plot_all_sites`). The quantity box now plots in fitting order when x is missing (and says so) instead of refusing.
+- `_open_state` passes `source["load_kwargs"]` to `_load(extra_kwargs=...)`: the saved proc number is the first read. Not measured on the real data here (Qt-free reader only in this session): expected from minutes to seconds. A genuine 2D entry is still read twice (`_load`, then `session.reset` in `_apply_restored_state`) -- the next thing to remove if states of 2Ds are slow.
+- CP Build-up: a region table (Name, From, To; Add Region / Remove). Drag on Plot draws the reference (or first ticked spectrum) on Compare with the regions shaded, then arms; every drag adds a region and re-arms until the button is switched off. Integrate makes one curve per region (`cp_buildup.cp_series_regions`, drawn together by `plot_cp_buildups`); the Fit box has a Region selector, Fit (that region, table's starting values) and Fit All Regions (each region's own starting values, the table's Fixed values for all). Every fitted region kept in `fits["cp_buildup"]` (report sections per region).
+
+**Tests:** 8 new in `test_multifit_sites_cp_regions_state_load.py`; `test_multi_fit_quantities.py::test_gui_plots_any_quantity_against_x` updated (no x now plots in order rather than refusing); CP tests use `add_region`. Related files: 176 passed + test_gui.py -k "state or multi_fit or procno" 13 passed, 1 skipped.
+
 ## Compare per scan / per scan × mass (+ RG); click-a-peak FWHM; Fit-view Measure in ppm and Hz; several fit ranges; Apply ▸ CP Build-up (2026-10-16)
 
 **Asked:** (1) Compare 1D spectra normalised by NS only, or by NS × sample mass. (2) Click a peak (1D and 2D) for its FWHM, with a warning that values are estimates where peaks overlap. (3) Measure on the Fit view gave a bare number (read as ppm): give ppm and Hz. (4) Fit a model to several selected ranges only (e.g. 5-10 and 12-30 ppm, not 10-12). (5) Apply ▸ CP build-up curves: reference spectrum, integrate a region across the series, plot against contact time (from a pulse-programme parameter such as P15, or typed in µs), fit with starting values for T_IS, T1ρ etc. User supplied Kolodziejski & Klinowski, Chem. Rev. 2002, 102, 613 for the models. Only the relevant tests.
