@@ -113,3 +113,16 @@ def test_fetch_facts_output_is_what_the_app_reads(tmp_path, monkeypatch):
     out = tmp_path / "facts.dat"
     ff.write(["One fact for the list.", "Two facts for the list."], str(out))
     assert fact_box.builtin_facts(str(out)) == ["One fact for the list.", "Two facts for the list."]
+
+
+def test_facts_dat_round_trips_through_an_editable_text_file(tmp_path):
+    ff = _fetch_facts()
+    dat, txt = tmp_path / "facts.dat", tmp_path / "facts.txt"
+    ff.write(["First fact, long enough.", "Second fact, long enough."], str(dat))
+    assert ff.export_text(str(txt), str(dat)) == 2
+    assert txt.read_text(encoding="utf-8").splitlines() == ["First fact, long enough.",
+                                                           "Second fact, long enough."]
+    txt.write_text("# a comment\nFirst fact, long enough.\n\nA new fact I typed in.\n",
+                   encoding="utf-8")
+    assert ff.import_text(str(txt), str(dat)) == 2
+    assert fact_box.builtin_facts(str(dat)) == ["First fact, long enough.", "A new fact I typed in."]

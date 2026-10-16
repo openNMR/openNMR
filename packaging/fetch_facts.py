@@ -3,6 +3,12 @@ run by hand; not part of the app).
 
     python packaging/fetch_facts.py            # fetch, parse, write
     python packaging/fetch_facts.py --dry-run  # fetch and parse, show samples
+    python packaging/fetch_facts.py --export facts.txt   # facts.dat -> editable text
+    python packaging/fetch_facts.py --import facts.txt   # edited text -> facts.dat
+
+To edit the list: --export it to a text file (one fact per line), change it
+in any editor, then --import it back. Blank lines and lines starting with #
+are dropped on import.
 
 Reads the two lists the Cmd/Ctrl+E box draws from (explicit user request,
 2026-10-16) and writes them, one fact per line, zlib-compressed, to
@@ -155,10 +161,41 @@ def write(facts: list[str], path: str = OUT) -> None:
         handle.write(zlib.compress("\n".join(facts).encode("utf-8"), 9))
 
 
+def read(path: str = OUT) -> list[str]:
+    with open(path, "rb") as handle:
+        text = zlib.decompress(handle.read()).decode("utf-8")
+    return [line for line in text.splitlines() if line.strip()]
+
+
+def export_text(text_path: str, path: str = OUT) -> int:
+    facts = read(path)
+    with open(text_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(facts) + "\n")
+    return len(facts)
+
+
+def import_text(text_path: str, path: str = OUT) -> int:
+    with open(text_path, encoding="utf-8-sig") as handle:
+        lines = [line.strip() for line in handle.read().splitlines()]
+    facts = [line for line in lines if line and not line.startswith("#")]
+    write(facts, path)
+    return len(facts)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--dry-run", action="store_true", help="parse and show, write nothing")
+    parser.add_argument("--export", metavar="TEXT_FILE",
+                        help="write facts.dat out as an editable text file, one fact per line")
+    parser.add_argument("--import", dest="import_", metavar="TEXT_FILE",
+                        help="replace facts.dat with this text file, one fact per line")
     args = parser.parse_args(argv)
+    if args.export:
+        print(f"Wrote {export_text(args.export)} facts to {args.export}")
+        return 0
+    if args.import_:
+        print(f"Wrote {import_text(args.import_)} facts to {OUT}")
+        return 0
     found = {}
     for name, url, parse in (("No Such Thing As A Fish sheet", SHEET_XLSX, facts_from_xlsx),
                              ("QI 1,339 facts", QI_URL, lambda b: facts_from_qi(

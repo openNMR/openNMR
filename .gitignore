@@ -20,3 +20,7 @@ Claude outputs/
 
 # Simulation output (large data files) -- kept locally, not committed.
 /bms_simulation/
+
+# Editable copy of the Cmd/Ctrl+E fact list (packaging/fetch_facts.py --export/--import);
+# only the compressed src/opennmr/gui/resources/facts.dat is committed.
+/facts.txt
