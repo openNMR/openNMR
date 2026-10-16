@@ -2,6 +2,15 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# Qt's offscreen platform does not find Windows' own fonts ("QFontDatabase:
+# Cannot find font directory ... Qt no longer ships fonts"), and lays text
+# out with fallback metrics -- side panels then measured far wider than
+# on screen (test_gui_reflow failed only on Windows, 2026-10-16).
+if os.name == "nt":
+    _fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    if os.path.isdir(_fonts):
+        os.environ.setdefault("QT_QPA_FONTDIR", _fonts)
+
 # When another Qt binding (e.g. PyQt6) is also installed in this
 # environment, its Qt plugins can shadow PySide6's own -- at a
 # different Qt version, which then fails to load at all ("Could not
@@ -49,6 +58,15 @@ def _isolate_interface_settings(tmp_path, monkeypatch):
     if main_window is not None:
         monkeypatch.setattr(main_window.MainWindow, "_UI_SETTINGS_PATH",
                             str(tmp_path / "ui_settings.json"))
+        # The saved per-type styles, Plot Style config and probe config too:
+        # read from the real ~/.opennmr they made results depend on whoever
+        # ran the tests (a saved default changed what Plot Style showed --
+        # test_per_type_default_follows_the_plot_on_show, 2026-10-16), and
+        # a test that saves one would overwrite the user's own.
+        for attr, name in (("_FIGURE_STYLES_PATH", "figure_styles.json"),
+                           ("_PLOT_STYLE_CONFIG_PATH", "plot_style.json"),
+                           ("_PROBE_CONFIG_PATH", "probe_config.json")):
+            monkeypatch.setattr(main_window.MainWindow, attr, str(tmp_path / name))
     app = None
     font = None
     if "PySide6.QtWidgets" in sys.modules:
@@ -114,4 +132,46 @@ def _confirm_full_2d_autophase(request, monkeypatch):
     main_window = sys.modules.get("opennmr.gui.main_window")
     if main_window is not None and request.node.get_closest_marker("full_2d_autophase_prompt") is None:
         monkeypatch.setattr(main_window.MainWindow, "_confirm_full_2d_autophase", lambda self: True)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_blocking_dialogs(monkeypatch):
+    """Never let a test wait on a dialog nobody can answer.
+
+    Under the offscreen platform a real ``QMessageBox.critical`` (or a file
+    or input dialog) never returns: an error the code reports that way
+    froze the whole run instead of failing one test (2026-10-16: a curve-fit
+    export failing on Windows hung at ``QMessageBox.critical``). Here every
+    such dialog returns at once -- message boxes are printed to stderr, so
+    the failing test's output says what the dialog said; file and input
+    dialogs return "cancelled". A test that wants a particular answer
+    patches the dialog itself, which overrides this."""
+    if "PySide6.QtWidgets" not in sys.modules:
+        yield
+        return
+    from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
+
+    def _box(kind):
+        def show(*args, **kwargs):
+            title = args[1] if len(args) > 1 else kwargs.get("title", "")
+            text = args[2] if len(args) > 2 else kwargs.get("text", "")
+            print(f"[QMessageBox.{kind}] {title}: {text}", file=sys.stderr)
+            if kind == "question":
+                default = args[4] if len(args) > 4 else kwargs.get("defaultButton")
+                return default if default not in (None, QMessageBox.StandardButton.NoButton) \
+                    else QMessageBox.StandardButton.No
+            return QMessageBox.StandardButton.Ok
+        return staticmethod(show)
+
+    for kind in ("critical", "warning", "information", "question"):
+        monkeypatch.setattr(QMessageBox, kind, _box(kind))
+    for name in ("getSaveFileName", "getOpenFileName"):
+        monkeypatch.setattr(QFileDialog, name, staticmethod(lambda *a, **k: ("", "")))
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(lambda *a, **k: ([], "")))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
+    for name in ("getText", "getItem"):
+        monkeypatch.setattr(QInputDialog, name, staticmethod(lambda *a, **k: ("", False)))
+    for name in ("getDouble", "getInt"):
+        monkeypatch.setattr(QInputDialog, name, staticmethod(lambda *a, **k: (0, False)))
     yield

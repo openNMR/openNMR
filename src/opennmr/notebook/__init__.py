@@ -186,6 +186,15 @@ from . import dnp_workflow
 # Signal-to-Noise; 2026-10-12): used as snr.signal_to_noise(...) etc.
 from . import snr
 from .snr import signal_to_noise, signal_to_noise_many, snr_report, plot_snr
+# 2026-10-16: intensities per scan / per gram / per RG (Compare ▸ Normalize),
+# click-to-measure peak widths, several fit ranges, CP build-up curves.
+from . import intensity_scaling, peak_width, fit_ranges, cp_buildup
+from .intensity_scaling import scale_for_comparison
+from .peak_width import peak_fwhm, peak_fwhm_2d, spectrum_peak_fwhm, spectrum_peak_fwhm_2d
+from .fit_ranges import parse_ppm_ranges
+from .cp_buildup import (
+    contact_time_us, cp_series, fit_cp_buildup, cp_report, plot_cp_buildup,
+)
 # pNMR (CIF) isotropic peaks -> CSA, Quad & J-coupling sites (2026-10-12).
 from . import pnmr_export
 from .pnmr_export import sites_from_pnmr_fit, sites_from_pnmr_table
@@ -439,6 +448,11 @@ __all__ = [
     # signal-to-noise; pNMR peaks -> CSA, Quad & J-coupling sites
     "snr", "signal_to_noise", "signal_to_noise_many", "snr_report", "plot_snr",
     "pnmr_export", "sites_from_pnmr_fit", "sites_from_pnmr_table",
+    # comparison scaling, peak widths, fit ranges, CP build-up (2026-10-16)
+    "intensity_scaling", "scale_for_comparison", "peak_width", "peak_fwhm", "peak_fwhm_2d",
+    "spectrum_peak_fwhm", "spectrum_peak_fwhm_2d", "fit_ranges", "parse_ppm_ranges",
+    "cp_buildup", "contact_time_us", "cp_series", "fit_cp_buildup", "cp_report",
+    "plot_cp_buildup",
     # tensor pictures
     "frequency_surface", "tensor_components", "transition_labels", "plot_tensors",
     "plot_tensor_surface", "plot_tensor_ellipsoids",

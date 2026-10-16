@@ -897,6 +897,12 @@ class MplCanvas(QWidget):
     #: or the crosshair, so MainWindow can keep the matching menu item
     #: (and every other canvas) in step. Emitted on a real change only.
     measurementModeChanged = Signal(bool)
+    #: A peak width (FWHM) measured by a click in Width mode: the
+    #: :mod:`opennmr.notebook.peak_width` result plus ``summary``,
+    #: ``kind`` ("1d"/"2d") and ``spectrum`` (its label); or ``{"error":
+    #: message}`` when there is no peak to measure there.
+    peakWidthMeasured = Signal(dict)
+    widthModeChanged = Signal(bool)
     #: Click-to-pick / drag-to-select switched on or off -- including
     #: *by the canvas*, when another interaction mode takes over (see
     #: _release_other_modes), so the button that started it can uncheck.
@@ -992,6 +998,17 @@ class MplCanvas(QWidget):
             "mm while the axis is displayed in mm). Cmd/Ctrl+D toggles "
             "this from anywhere.",
             self.set_measurement_mode,
+            checked=False,
+        )
+        # Click a peak for its full width at half maximum (explicit user
+        # request, 2026-10-16), 1D and 2D; an estimate, said so, where
+        # peaks overlap -- notebook.peak_width.
+        self._width_button = self._add_toolbar_toggle(
+            "Width",
+            "Peak width: click on a peak and its full width at half maximum is drawn and "
+            "given in ppm and Hz (along F2 and F1 on a 2D). Where peaks overlap the value "
+            "is marked as an estimate -- fit the peaks for a reliable width.",
+            self.set_width_mode,
             checked=False,
         )
 
@@ -1307,6 +1324,7 @@ class MplCanvas(QWidget):
         self._pick_mode = False
         self._region_select_mode = False
         self._measurement_mode = False
+        self._width_mode = False
         # The Qt cursor shape currently set on the canvas, so
         # _refresh_cursor can skip a setCursor that would change
         # nothing -- it runs on every mouse move, alongside a blitted
@@ -1584,6 +1602,8 @@ class MplCanvas(QWidget):
             self.set_region_select_mode(False)
         if keep != "measure" and self._measurement_mode:
             self.set_measurement_mode(False)
+        if keep != "width" and getattr(self, "_width_mode", False):
+            self.set_width_mode(False)
         if keep != "nav" and self.toolbar.mode:
             # The base-class toggles, not _Toolbar's overrides: this is
             # the canvas releasing the tool, not the user choosing one.
@@ -1627,6 +1647,8 @@ class MplCanvas(QWidget):
             # Crosshair and Measure are exclusive (explicit user
             # request): the most recently chosen one wins.
             self.set_measurement_mode(False)
+        if enabled and getattr(self, "_width_mode", False):
+            self.set_width_mode(False)
         self._crosshair_enabled = enabled
         self._sync_toggle(getattr(self, "_crosshair_button", None), enabled)
         if not enabled:
@@ -1656,6 +1678,25 @@ class MplCanvas(QWidget):
             self.clear_measurements()
         if changed:
             self.measurementModeChanged.emit(enabled)
+
+    def set_width_mode(self, enabled: bool) -> None:
+        """Toggle Width mode: while on, a click on a peak measures its
+        FWHM (:meth:`_measure_width_at`). Releases the other click modes
+        and the Crosshair, as Measure does; switching it off clears the
+        width annotations."""
+        enabled = bool(enabled)
+        changed = enabled != self._width_mode
+        if enabled:
+            self._release_other_modes(keep="width")
+            if self._crosshair_enabled:
+                self.set_crosshair_enabled(False)
+        self._width_mode = enabled
+        self._sync_toggle(getattr(self, "_width_button", None), enabled)
+        self._refresh_cursor()
+        if not enabled:
+            self.clear_measurements()
+        if changed:
+            self.widthModeChanged.emit(enabled)
 
     def set_view_switcher(self, entries: list[tuple[str, str]], current: str | None = None) -> None:
         """Populate the "Showing:" switcher with ``(key, label)`` pairs
@@ -2145,7 +2186,8 @@ class MplCanvas(QWidget):
         if (self._pan_start is not None or self._region_select_start is not None
                 or self._zoom_start is not None):
             return
-        if self._pick_mode or self._region_select_mode or self._measurement_mode:
+        if (self._pick_mode or self._region_select_mode or self._measurement_mode
+                or getattr(self, "_width_mode", False)):
             shape = Qt.CursorShape.CrossCursor
         else:
             strip = self._scroll_strip_at(event)
@@ -3322,6 +3364,7 @@ class MplCanvas(QWidget):
         if (
             self._compare_axes and event.button == 1 and self.toolbar.mode == ""
             and not self._pick_mode and not self._region_select_mode and not self._measurement_mode
+            and not self._width_mode
             and event.x is not None and event.y is not None
         ):
             self._compare_click_start = (event.x, event.y, event.inaxes)
@@ -3342,6 +3385,10 @@ class MplCanvas(QWidget):
                 self._record_measurement_point(
                     event.inaxes, float(event.xdata), float(event.ydata)
                 )
+            return
+        if self._width_mode:
+            if event.xdata is not None and event.ydata is not None:
+                self._measure_width_at(event.inaxes, float(event.xdata), float(event.ydata))
             return
         self.note_natural_view()
         if self._drag_mode == "zoom" and getattr(event.inaxes, "name", "") != "3d":
@@ -3376,7 +3423,8 @@ class MplCanvas(QWidget):
 
     def _click_mode_active(self) -> bool:
         return bool(getattr(self, "_pick_mode", False) or getattr(self, "_region_select_mode", False)
-                    or getattr(self, "_measurement_mode", False))
+                    or getattr(self, "_measurement_mode", False)
+                    or getattr(self, "_width_mode", False))
 
     def _zoom_drag_to(self, event) -> None:
         x0, y0, ax = self._zoom_start
@@ -8128,6 +8176,239 @@ class MplCanvas(QWidget):
             out["mm"] = delta_hz / hz_per_mm
         return out
 
+    def _slice_fit_hz_per_ppm(self) -> float | None:
+        """MHz (Hz per ppm) behind the fit on show: the fitted spectrum's
+        own axis, else its SFO1, else the ``hz_per_ppm`` the caller gave."""
+        args = getattr(self, "_slice_fit_args", None) or {}
+        given = args.get("hz_per_ppm")
+        spectrum = args.get("spectrum")
+        if spectrum is not None:
+            try:
+                axis = spectrum.axes[-1]
+                if axis.ppm is not None and axis.hz is not None and len(axis.ppm) > 1:
+                    span_ppm = float(axis.ppm[-1] - axis.ppm[0])
+                    span_hz = float(axis.hz[-1] - axis.hz[0])
+                    if span_ppm and span_hz:
+                        return abs(span_hz / span_ppm)
+            except (AttributeError, IndexError, TypeError):
+                pass
+            if spectrum.metadata.sfo1:
+                return float(spectrum.metadata.sfo1)
+        return float(given) if given else None
+
+    def _slice_fit_delta(self, ax, dx: float) -> dict | None:
+        """A separation on a show_slice_fit plot in ppm and (when the field
+        is known) Hz; None when ``ax`` is not such a plot."""
+        if not getattr(self, "_slice_fit_active", False) or ax is not self.ax:
+            return None
+        out = {"ppm": abs(float(dx))}
+        mhz = self._slice_fit_hz_per_ppm()
+        if mhz:
+            out["hz"] = out["ppm"] * mhz
+            out["khz"] = out["hz"] / 1000.0
+        return out
+
+    # ---- peak width (FWHM) by a click -----------------------------------
+
+    _WIDTH_COLOR = "tab:purple"
+    _WIDTH_ESTIMATE_COLOR = "tab:orange"
+
+    @staticmethod
+    def _display_values(axis, unit: str):
+        """``axis`` in the display ``unit`` (ppm, hz, khz), or None."""
+        if axis is None or getattr(axis, "kind", None) != "frequency":
+            return None
+        if unit == "ppm":
+            return None if axis.ppm is None else np.asarray(axis.ppm, dtype=float)
+        if unit in ("hz", "khz") and axis.hz is not None:
+            hz = np.asarray(axis.hz, dtype=float)
+            return hz / 1000.0 if unit == "khz" else hz
+        return None
+
+    def _width_targets(self, ax):
+        """What a Width click in ``ax`` measures: ``("2d", spectrum)``,
+        ``("1d", [(label, ppm, y, hz_per_ppm, display_x)])`` or
+        ``(None, reason)``."""
+        unit = self._axis_unit
+        if getattr(self, "_slice_fit_active", False) and ax is self.ax:
+            args = self._slice_fit_args or {}
+            x = np.asarray(args.get("x"), dtype=float)
+            y = np.asarray(args.get("y_data"), dtype=float)
+            return "1d", [("fit data", x, y, self._slice_fit_hz_per_ppm(), x)]
+        if self._compare_axes and ax in self._compare_axes:
+            i = self._compare_axes.index(ax)
+            spectra = [(i, self._compare_spectra[i])] if i < len(self._compare_spectra) else []
+        elif self._compare_spectra and self._contour_spectrum is None \
+                and self._current_1d_spectrum is None and ax is self.ax \
+                and not getattr(self, "_external_plot", None):
+            spectra = list(enumerate(self._compare_spectra))         # overlay
+        elif self._contour_spectrum is not None:
+            spectrum = self._contour_spectrum
+            if ax is not self.ax:
+                return None, "Click on the 2D map itself (not a projection)."
+            if spectrum.is_pseudo_2d:
+                return None, ("A pseudo-2D's rows are not one peak in 2D: keep a slice and "
+                              "measure it as a 1D.")
+            return "2d", spectrum
+        elif self._current_1d_spectrum is not None:
+            spectra = [(0, self._current_1d_spectrum)]
+        else:
+            return None, "Width works on a spectrum, a Compare view or a spectral fit."
+        labels = [entry.label for entry in self._series.get("compare", [])]
+        out = []
+        for i, spectrum in spectra:
+            if spectrum.ndim != 1:
+                continue
+            axis = spectrum.axes[0]
+            display = self._display_values(axis, unit)
+            if display is None or axis.ppm is None:
+                return None, ("Switch the axis to ppm or Hz to measure a width "
+                              f"(it is in {unit}).")
+            label = labels[i] if self._compare_spectra and i < len(labels) else \
+                _spectrum_label(spectrum)
+            out.append((label, np.asarray(axis.ppm, dtype=float),
+                        np.asarray(spectrum.data, dtype=float),
+                        self._axis_hz_per_ppm(axis), display))
+        if not out:
+            return None, "No 1D spectrum here to measure."
+        return "1d", out
+
+    def _plotted_scale(self, ax, display_x, y):
+        """``(a, b, residual)`` with plotted ≈ a·y + b for the drawn line
+        of this data (normalised or offset as it was drawn), or None."""
+        order = np.argsort(display_x)
+        dx, dy = display_x[order], y[order]
+        best = None
+        for line in ax.get_lines():
+            if line.get_gid() or len(line.get_xdata()) < 5:
+                continue
+            lx = np.asarray(line.get_xdata(), dtype=float)
+            ly = np.asarray(line.get_ydata(), dtype=float)
+            ok = np.isfinite(lx) & np.isfinite(ly) & (lx >= dx[0]) & (lx <= dx[-1])
+            if np.count_nonzero(ok) < 5:
+                continue
+            yi = np.interp(lx[ok], dx, dy)
+            A = np.vstack([yi, np.ones_like(yi)]).T
+            (a, b), *_ = np.linalg.lstsq(A, ly[ok], rcond=None)
+            span = float(np.ptp(ly[ok])) or 1.0
+            res = float(np.sqrt(np.mean((A @ (a, b) - ly[ok]) ** 2))) / span
+            if best is None or res < best[2]:
+                best = (float(a), float(b), res)
+        return best
+
+    def _to_display(self, ppm_value, ppm, display):
+        order = np.argsort(ppm)
+        return float(np.interp(ppm_value, ppm[order], display[order]))
+
+    def _measure_width_at(self, ax, x: float, y: float) -> None:
+        """Width mode's click: the FWHM of the peak there, drawn as a
+        double arrow at half height (a cross on a 2D) and reported through
+        :attr:`peakWidthMeasured`."""
+        from ...notebook import peak_width
+
+        kind, target = self._width_targets(ax)
+        if kind is None:
+            self.peakWidthMeasured.emit({"error": target})
+            return
+        try:
+            if kind == "2d":
+                result = self._measure_width_2d(ax, target, x, y)
+            else:
+                result = self._measure_width_1d(ax, target, x, y)
+        except ValueError as exc:
+            self.peakWidthMeasured.emit({"error": f"No width measured: {exc}"})
+            return
+        self.peakWidthMeasured.emit(result)
+
+    def _measure_width_1d(self, ax, candidates, x, y) -> dict:
+        from ...notebook import peak_width
+
+        # The trace nearest the click (an overlay holds several).
+        best = None
+        for label, ppm, data, mhz, display in candidates:
+            order = np.argsort(display)
+            click_ppm = float(np.interp(x, display[order], ppm[order]))
+            scale = self._plotted_scale(ax, display, data)
+            if scale is None:
+                distance = 0.0
+            else:
+                plotted = scale[0] * float(np.interp(x, display[order], data[order])) + scale[1]
+                distance = abs(plotted - y)
+            if best is None or distance < best[0]:
+                best = (distance, label, ppm, data, mhz, display, click_ppm, scale)
+        _d, label, ppm, data, mhz, display, click_ppm, scale = best
+        result = peak_width.peak_fwhm(ppm, data, click_ppm, hz_per_ppm=mhz)
+        left = result["left"] if result["left"] is not None else result["position"] - result["fwhm"] / 2
+        right = result["right"] if result["right"] is not None else result["position"] + result["fwhm"] / 2
+        if result["left"] is None and result["right"] is not None:
+            left = result["right"] - result["fwhm"]
+        if result["right"] is None and result["left"] is not None:
+            right = result["left"] + result["fwhm"]
+        x_l, x_r = (self._to_display(v, ppm, display) for v in (left, right))
+        y_half = (scale[0] * result["half_height"] + scale[1]) if scale and scale[2] < 0.05 else y
+        summary = peak_width.fwhm_summary(result, label)
+        self._draw_width_annotation(ax, [((x_l, y_half), (x_r, y_half))],
+                                    self._width_text(result), result["estimate"])
+        result.update(kind="1d", spectrum=label, summary=summary)
+        return result
+
+    def _measure_width_2d(self, ax, spectrum, x, y) -> dict:
+        from ...notebook import peak_width
+
+        unit = self._axis_unit
+        a1, a2 = spectrum.axes
+        d1, d2 = self._display_values(a1, unit), self._display_values(a2, unit)
+        if d1 is None:
+            d1 = self._display_values(a1, "ppm")
+        if d2 is None or d1 is None or a1.ppm is None or a2.ppm is None:
+            raise ValueError(f"switch the axes to ppm or Hz (they are in {unit}).")
+        p1, p2 = np.asarray(a1.ppm, dtype=float), np.asarray(a2.ppm, dtype=float)
+        o1, o2 = np.argsort(d1), np.argsort(d2)
+        f1_click = float(np.interp(y, d1[o1], p1[o1]))
+        f2_click = float(np.interp(x, d2[o2], p2[o2]))
+        result = peak_width.spectrum_peak_fwhm_2d(spectrum, f2_click, f1_click)
+        r2, r1 = result["f2"], result["f1"]
+        y0 = self._to_display(result["f1_position"], p1, d1)
+        x0 = self._to_display(result["f2_position"], p2, d2)
+        h2 = 0.5 * r2["fwhm"]
+        h1 = 0.5 * r1["fwhm"]
+        segments = [((self._to_display(r2["position"] - h2, p2, d2), y0),
+                     (self._to_display(r2["position"] + h2, p2, d2), y0)),
+                    ((x0, self._to_display(r1["position"] - h1, p1, d1)),
+                     (x0, self._to_display(r1["position"] + h1, p1, d1)))]
+        text = "F2 " + self._width_text(r2) + "\nF1 " + self._width_text(r1)
+        self._draw_width_annotation(ax, segments, text, result["estimate"])
+        label = _spectrum_label(spectrum)
+        result.update(kind="2d", spectrum=label, summary=(
+            f"{label}: F2 {peak_width.fwhm_summary(r2)}; F1 {peak_width.fwhm_summary(r1)}"))
+        return result
+
+    @staticmethod
+    def _width_text(result) -> str:
+        text = f"FWHM {result['fwhm']:.4g} {result.get('unit', 'ppm')}"
+        if result.get("fwhm_hz") is not None:
+            text += f" / {result['fwhm_hz']:.4g} Hz"
+        if result.get("estimate"):
+            text += " (estimate: overlap)"
+        return text
+
+    def _draw_width_annotation(self, ax, segments, text: str, estimate: bool) -> None:
+        colour = self._WIDTH_ESTIMATE_COLOR if estimate else self._WIDTH_COLOR
+        for (xa, ya), (xb, yb) in segments:
+            arrow = ax.annotate(
+                "", xy=(xb, yb), xytext=(xa, ya), xycoords="data", textcoords="data",
+                arrowprops=dict(arrowstyle="|-|", color=colour, linewidth=1.4,
+                                shrinkA=0, shrinkB=0, mutation_scale=4),
+                annotation_clip=False, zorder=60)
+            self._measurement_artists.append(arrow)
+        (xa, ya), (xb, yb) = segments[0]
+        label = ax.text(
+            (xa + xb) / 2.0, max(ya, yb), text, color=colour, fontsize=10, ha="center",
+            va="bottom", zorder=61, clip_on=False,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor=colour, alpha=0.9))
+        self._measurement_artists.append(label)
+        self.canvas.draw_idle()
+
     def _axis_hz_per_ppm(self, axis) -> float | None:
         """Hz per ppm on ``axis``: from its own ppm and Hz arrays when it
         has both, else from the SFO1 of the spectrum it belongs to (a
@@ -8225,7 +8506,14 @@ class MplCanvas(QWidget):
 
         x_axis, y_axis = self._measurement_axes_for(ax)
         dx_raw, dy_raw = abs(x2 - x1), abs(y2 - y1)
-        if self._external_plot and x_axis is None and y_axis is None:
+        slice_fit_deltas = self._slice_fit_delta(ax, dx_raw)
+        if slice_fit_deltas is not None:
+            # A fit drawn by show_slice_fit: x is always ppm (whatever the
+            # display unit), with Hz from the fitted spectrum's field --
+            # it used to come back as a bare number (explicit user report,
+            # 2026-10-16: "does not give the units ... only ppm").
+            dx_units, dy_units = slice_fit_deltas, {}
+        elif self._external_plot and x_axis is None and y_axis is None:
             # A figure drawn elsewhere (Simulate): its axis labels say
             # what the axes are in.
             dx_units = self._external_delta(ax.xaxis, dx_raw)

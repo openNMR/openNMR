@@ -47,7 +47,7 @@ def test_rendered_plugin_holds_paths_exactly(tmp_path):
     for node in ast.parse(block).body:
         settings[node.targets[0].id] = ast.literal_eval(node.value)
     assert settings == {"COMMAND": [odd, "-m", "opennmr.gui.app"],
-                        "PATH_PREPEND": ["/a b/bin"], "ICON": "/x/logo.png"}
+                        "PATH_PREPEND": ["/a b/bin"], "ICON": str(Path("/x/logo.png"))}
     assert install.PLUGIN_MARK in text
     assert text.isascii()  # safe for Jython whatever the file encoding
 

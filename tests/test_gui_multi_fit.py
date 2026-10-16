@@ -254,9 +254,11 @@ def test_bad_inputs_are_named(qapp, _dialogs):
     assert not panel.fit(show_progress=False)
     assert "Add at least one 27Al site" in _dialogs[-1][1]
     panel.set_sites("27Al", [_al()])
-    panel.experiment_table.item(0, _E_WINDOW).setText("10 to 20")
+    # "10 to 20" (and several ranges) are valid since 2026-10-16; a lone
+    # limit is not.
+    panel.experiment_table.item(0, _E_WINDOW).setText("10 to")
     assert not panel.fit(show_progress=False)
-    assert "Window must be 'low, high'" in _dialogs[-1][1]
+    assert "Window must be ppm ranges" in _dialogs[-1][1]
 
 
 def test_panel_state_round_trips(qapp):

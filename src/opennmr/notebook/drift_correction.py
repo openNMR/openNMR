@@ -726,7 +726,7 @@ def concatenate_nus_datasets(sources: Sequence[str], destination: str, overwrite
     _copy_experiment(sources[0], destination, overwrite)
     np.concatenate(blocks).tofile(os.path.join(destination, "ser"))
     nus = np.concatenate(lists)
-    with open(os.path.join(destination, "nuslist"), "w") as handle:
+    with open(os.path.join(destination, "nuslist"), "w", encoding="ascii") as handle:
         for row in nus:
             handle.write(" ".join(str(int(v)) for v in row) + "\n")
     total = int(nus.shape[0])

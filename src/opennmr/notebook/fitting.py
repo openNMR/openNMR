@@ -1212,7 +1212,7 @@ def NMRFitWorkflow(datapath, peak_defs, procno=1, fit_regions=None, baseline_reg
             for i, comp in enumerate(components):
                 columns[f"component_{i + 1}"] = comp
 
-        with open(csv_filename, "w", newline="") as outfile:
+        with open(csv_filename, "w", newline="", encoding="utf-8") as outfile:
             writer = csv.writer(outfile)
             writer.writerow(columns.keys())
             for i in range(len(x_fit)):

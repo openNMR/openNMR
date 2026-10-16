@@ -30,6 +30,7 @@ from .widgets.report_label import ReportLabel
 from . import report_format
 from .widgets.advice_box import AdviceBox
 from .widgets.sideband_hint import sideband_hint_label
+from .widgets.ranges_edit import PpmRangesEdit
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import panel_state
 from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
@@ -1429,6 +1430,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         for box in (self.larmor_spin, self.mas_spin, self.orientations_spin, self.window_lo_spin,
                     self.window_hi_spin, self.preview_orientations_spin):
             box.valueChanged.connect(lambda *_a: self.schedule_preview())
+        self.window_ranges_edit.editingFinished.connect(self.schedule_preview)
 
     # ---- the part below the site editor ----------------------------------
 
@@ -1496,12 +1498,17 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         self.window_combo.addItem("Whole spectrum", "all")
         self.window_combo.addItem("Integration regions", "regions")
         self.window_combo.addItem("A ppm range", "range")
+        # Several ranges, with gaps left out (explicit user request,
+        # 2026-10-16). Appended: saved states keep their indices.
+        self.window_combo.addItem("Several ppm ranges", "ranges")
         self.window_combo.currentIndexChanged.connect(lambda _i: self._sync_fit_controls())
         form.addRow("Fit window:", self.window_combo)
         self.window_lo_spin = _spin_box(-1e6, 1e6, -200.0, 2, " ppm")
         self.window_hi_spin = _spin_box(-1e6, 1e6, 200.0, 2, " ppm")
         form.addRow("Window low:", self.window_lo_spin)
         form.addRow("Window high:", self.window_hi_spin)
+        self.window_ranges_edit = PpmRangesEdit()
+        form.addRow("Ranges (ppm):", self.window_ranges_edit)
         self._fit_form = form
         self.fit_baseline_check = QCheckBox("Fit the baseline too")
         self.fit_baseline_check.setToolTip("Otherwise a linear baseline is estimated from the "
@@ -1614,6 +1621,8 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         manual = self.window_combo.currentData() == "range"
         self._fit_form.setRowVisible(self.window_lo_spin, manual)
         self._fit_form.setRowVisible(self.window_hi_spin, manual)
+        self._fit_form.setRowVisible(self.window_ranges_edit,
+                                     self.window_combo.currentData() == "ranges")
 
     # ---- keeping the parameter table in step with the sites --------------
 
@@ -2065,6 +2074,8 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
         if mode == "range":
             lo, hi = self.window_lo_spin.value(), self.window_hi_spin.value()
             return [(min(lo, hi), max(lo, hi))]
+        if mode == "ranges":
+            return self.window_ranges_edit.ranges()
         regions = self._get_regions() or None
         if not regions:
             raise ValueError("Fit window is 'Integration regions', but there are none -- draw "

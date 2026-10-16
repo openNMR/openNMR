@@ -103,7 +103,7 @@ def _write_json(path: str, payload: dict) -> None:
     # a crash or concurrent read mid-write never observes a truncated/
     # half-written sidecar file.
     tmp_path = path + ".tmp"
-    with open(tmp_path, "w") as f:
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
     os.replace(tmp_path, path)
 

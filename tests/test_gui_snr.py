@@ -61,7 +61,9 @@ def test_section_sits_in_apply_after_dnp(window):
     tab = window.side_tabs.widget(side.index("Applications") if "Applications" in side
                                   else side.index("Apply"))
     titles = [s.title() for s in tab.findChildren(CollapsibleSection)]
-    assert titles[-1] == "Signal-to-Noise" and titles.index("DNP") < titles.index("Signal-to-Noise")
+    # CP Build-up (2026-10-16) follows it.
+    assert titles.index("DNP") < titles.index("Signal-to-Noise") < titles.index("CP Build-up")
+    assert titles[-1] == "CP Build-up"
 
 
 def test_parse_typed_regions():

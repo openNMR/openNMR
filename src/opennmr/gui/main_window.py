@@ -53,6 +53,8 @@ from ..notebook import series_fitting as nb_series_fitting
 from ..notebook import fit_advice as nb_fit_advice
 from ..notebook import relaxometry as nb_relaxometry
 from ..notebook import fit_correlation as nb_fit_correlation
+from ..notebook import intensity_scaling
+from ..notebook import fit_ranges as nb_fit_ranges
 from PySide6.QtGui import QColor
 
 
@@ -146,6 +148,7 @@ from ..notebook.fitting import build_region_mask as nb_build_region_mask
 from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
 from .dnp_panel import DnpWorkflowPanel
 from .snr_panel import SnrPanel
+from .cp_buildup_panel import CpBuildupPanel
 from .tensor_view_panel import TensorViewControls
 from .periodic_table_panel import LarmorCalculatorPanel, PeriodicTableView
 from .loader import background_load_enabled
@@ -726,6 +729,8 @@ class MainWindow(QMainWindow):
         #: Compare series key -> its Compare-list entry (session index,
         #: slice), so a name typed in Plot Style can reach the spectrum.
         self._compare_series_entries: dict = {}
+        #: The last Width-mode result (any plot), for tests and the log.
+        self.last_peak_width: dict | None = None
         self.fit_canvas = MplCanvas()
         self.fit_canvas.fitPointExcludeRequested.connect(self._on_fit_point_exclude_requested)
         self.fit_canvas.fitPointsResetRequested.connect(self._on_fit_points_reset_requested)
@@ -773,6 +778,7 @@ class MainWindow(QMainWindow):
         # own signal when pushing state back, so this does not loop.
         for _canvas in self._measurement_canvases():
             _canvas.measurementModeChanged.connect(self._on_canvas_measurement_mode_changed)
+            _canvas.peakWidthMeasured.connect(self._on_peak_width_measured)
             _canvas.crosshairEnabledChanged.connect(self._on_canvas_crosshair_changed)
         self.canvas.pickModeChanged.connect(self._on_canvas_pick_mode_changed)
         self.canvas.regionSelectModeChanged.connect(self._on_canvas_region_select_mode_changed)
@@ -2066,7 +2072,7 @@ class MainWindow(QMainWindow):
         Compare' -- this should be the same as the Data and Compare
         tabs combined." "Browse a folder" stays permanently visible at
         the top (also explicit: "at the top"); "Selected spectrum" and
-        "Open experiments/compare" are :class:`CollapsibleSection`\ s
+        "Open experiments/compare" are :class:`CollapsibleSection` sections
         below it -- the latter folding the *entire* old Compare tab in
         underneath the open-experiments list, since they're one
         dropdown now, not two side-by-side tabs.
@@ -2326,17 +2332,29 @@ class MainWindow(QMainWindow):
         compare_form.addRow("Layout:", self.layout_mode_combo)
 
         self.compare_normalize_combo = QComboBox()
-        self.compare_normalize_combo.addItems(["None", "Max intensity", "By sample mass"])
+        # Same order as before ("None" was always per scan), so saved
+        # states and indices keep their meaning (explicit user request,
+        # 2026-10-16: per scan, or per scan × sample mass).
+        self.compare_normalize_combo.addItems(
+            ["Per scan (÷ NS)", "Max intensity", "Per scan and sample mass (÷ NS × mass)"])
         self.compare_normalize_combo.setToolTip(
-            "None: as loaded (already per-scan -- every importer divides "
-            "by NS). Max intensity: each spectrum scaled to its own peak "
-            "height, for shape comparison regardless of concentration. "
-            "By sample mass: divided by the mass set via the spectrum "
-            "list's right-click \"Set sample mass…\" -- spectra with "
-            "no mass set are skipped."
+            "Per scan: intensity per scan. Bruker, Varian, Spinsolve and X-Pulse data "
+            "are divided by NS when loaded; JEOL data are not, so they are divided by "
+            "their recorded number of scans here. Max intensity: each spectrum scaled "
+            "to its own peak height, for shape comparison. Per scan and sample mass: "
+            "per scan, then divided by the mass set via the spectrum list's "
+            "right-click \"Set sample mass…\" -- spectra with no mass are skipped."
         )
         self.compare_normalize_combo.currentIndexChanged.connect(lambda _i: self._on_compare_controls_changed())
         compare_form.addRow("Normalize:", self.compare_normalize_combo)
+        self.compare_rg_check = QCheckBox("Also divide by receiver gain (RG)")
+        self.compare_rg_check.setToolTip(
+            "No reader divides by the receiver gain, so spectra recorded with different "
+            "RG are not comparable in absolute intensity. Tick to divide each by its RG "
+            "(Bruker's linear RG; spectra without one are left as they are and named in "
+            "the status line).")
+        self.compare_rg_check.toggled.connect(lambda _on: self._on_compare_controls_changed())
+        compare_form.addRow("", self.compare_rg_check)
 
         layout.addLayout(compare_form)
 
@@ -6475,6 +6493,7 @@ class MainWindow(QMainWindow):
                    ("_czjzek_fit_section", "_czjzek_sim_section")),
         "enmr": ("eNMR (Apply)", ("_enmr_section",)),
         "imaging": ("Imaging (Apply)", ("_imaging_section",)),
+        "cp_buildup": ("CP Build-up (Apply)", ("_cp_buildup_section",)),
         # A whole launcher tile: "tab:<its label>" -- the tile, its page
         # and its Window-menu entry go together, never an empty tile.
         "advanced": ("Advanced Processing (the whole Adv. Proc. tile)", ("tab:Adv. Proc.",)),
@@ -7248,22 +7267,19 @@ class MainWindow(QMainWindow):
         skipped_ndim = len(rows_and_candidates) - len(rows_and_1d)
 
         norm_mode = ["none", "max", "mass"][self.compare_normalize_combo.currentIndex()]
-        plot_rows: list[int] = []
-        plot_spectra: list = []
-        skipped_mass: list = []
-        if norm_mode == "mass":
-            # Only `data` (the real part actually plotted here) needs
-            # scaling -- these copies are used for this one comparison
-            # plot and discarded, never stored back into the session.
-            for row, s in rows_and_1d:
-                if not s.metadata.mass:
-                    skipped_mass.append(s)
-                    continue
-                plot_rows.append(row)
-                plot_spectra.append(dataclasses.replace(s, data=s.data / s.metadata.mass))
-        else:
-            plot_rows = [row for row, _s in rows_and_1d]
-            plot_spectra = [s for _row, s in rows_and_1d]
+        # Copies scaled for this comparison only, never stored back into
+        # the session: per scan (JEOL divided by its scans, the others are
+        # per scan already), per gram, and optionally per unit RG --
+        # notebook.intensity_scaling, as a notebook does it.
+        scaled = intensity_scaling.scale_for_comparison(
+            [s for _row, s in rows_and_1d],
+            mode={"none": "per_scan", "max": "max", "mass": "per_scan_mass"}[norm_mode],
+            divide_rg=self.compare_rg_check.isChecked(),
+            labels=[self.compare_list.item(row).text().split(" · ")[0] for row, _s in rows_and_1d])
+        plot_rows = [rows_and_1d[i][0] for i in scaled["kept"]]
+        plot_spectra = list(scaled["spectra"])
+        skipped_mass = [rows_and_1d[i][1] for i, _why in scaled["skipped"]]
+        self._compare_scaling_notes = list(scaled["notes"])
 
         # compare_list's own row index -> position among what's actually
         # plotted (checked rows only, minus anything just filtered out
@@ -7287,6 +7303,7 @@ class MainWindow(QMainWindow):
             bits.append(f"{skipped_ndim} skipped (not 1D).")
         if skipped_mass:
             bits.append(f"{len(skipped_mass)} skipped (no sample mass set).")
+        bits.extend(self._compare_scaling_notes)
         self.compare_status_label.setText(" ".join(bits))
 
         mode = ("stack", "overlay", "heatmap")[self.layout_mode_combo.currentIndex()]
@@ -7337,9 +7354,9 @@ class MainWindow(QMainWindow):
     #: What the heatmap's colour scale means, per Normalize choice --
     #: written on the colour bar, so the figure says it without the GUI.
     _COMPARE_HEATMAP_SCALE_LABELS = {
-        "none": "Intensity (a.u.)",
+        "none": "Intensity per scan (a.u.)",
         "max": "Intensity / own maximum",
-        "mass": "Intensity per gram (a.u. g$^{-1}$)",
+        "mass": "Intensity per scan per gram (a.u. g$^{-1}$)",
     }
 
     def _show_compare_heatmap(self, spectra: list, rows: list[int], norm_mode: str,
@@ -7357,7 +7374,9 @@ class MainWindow(QMainWindow):
         try:
             self.compare_canvas.show_1d_heatmap(
                 spectra, normalize=(norm_mode == "max"), row_labels=labels,
-                colorbar_label=self._COMPARE_HEATMAP_SCALE_LABELS[norm_mode],
+                colorbar_label=intensity_scaling.intensity_label(
+                    {"none": "per_scan", "max": "max", "mass": "per_scan_mass"}[norm_mode],
+                    self.compare_rg_check.isChecked()),
                 first_row_on_top=True)
         except ValueError as exc:
             # e.g. no ppm range common to every checked spectrum
@@ -14358,8 +14377,44 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._imaging_section)
         layout.addWidget(self._build_dnp_section())
         layout.addWidget(self._build_snr_section())
+        layout.addWidget(self._build_cp_buildup_section())
         layout.addStretch(1)
         return tab
+
+    # -- Apply ▸ CP Build-up (explicit user request, 2026-10-16) -----------
+
+    def _build_cp_buildup_section(self) -> QWidget:
+        """Apply ▸ CP Build-up: ``gui/cp_buildup_panel.py`` over
+        ``notebook/cp_buildup.py``. Spectra are Open experiments' 1D ones;
+        the region is typed or dragged on Compare; the curve and its fit
+        are drawn on the Fit view; the fit is kept with the spectra as
+        ``fits["cp_buildup"]``."""
+        self.cp_buildup_panel = CpBuildupPanel(
+            spectra=self._dnp_spectra, draw=self._dnp_draw, arm=self._cp_arm,
+            store=self._store_dnp, style=self._dnp_style)
+        self._cp_buildup_section = CollapsibleSection("CP Build-up", content=self.cp_buildup_panel)
+        self._cp_buildup_section.toggled.connect(
+            lambda expanded: expanded and self.cp_buildup_panel.refresh())
+        self.compare_canvas.regionSelected.connect(
+            lambda lo, hi: self.cp_buildup_panel.armed and self.cp_buildup_panel.on_canvas_region(lo, hi))
+
+        def _released(_enabled):
+            if not self.compare_canvas._region_select_mode:
+                self.cp_buildup_panel.canvas_mode_released()
+        self.compare_canvas.regionSelectModeChanged.connect(_released)
+        model = self.spectrum_list.model()
+        for signal in (model.rowsInserted, model.rowsRemoved, model.modelReset):
+            signal.connect(lambda *_a: self.cp_buildup_panel.refresh())
+        return self._cp_buildup_section
+
+    def _cp_arm(self, mode) -> None:
+        if mode == "region":
+            self._dnp_show_canvas(self.compare_canvas)
+            self.compare_canvas.set_region_select_mode(True)
+            self.statusBar().showMessage(
+                "CP Build-up: drag across the region on the Compare view.", 8000)
+        else:
+            self.compare_canvas.set_region_select_mode(False)
 
     # -- Apply ▸ Signal-to-Noise (explicit user request, 2026-10-12) --------
 
@@ -14553,7 +14608,8 @@ class MainWindow(QMainWindow):
             x[keep], result["y"][keep], result["y_fit"][keep],
             components=components, peak_labels=list(result["info"]["labels"]),
             title="J-coupling fit",
-            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
+            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None,
+            overlay=self._fit_gap_overlay(regions))
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
@@ -14572,7 +14628,8 @@ class MainWindow(QMainWindow):
             x[keep], result["y"][keep], result["y_fit"][keep], components=components,
             peak_labels=list(result["info"]["labels"]),
             title=result.get("title", "Quadrupolar fit"), auto_hide_single=True,
-            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None)
+            spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None,
+            overlay=self._fit_gap_overlay(regions))
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
 
@@ -14595,9 +14652,26 @@ class MainWindow(QMainWindow):
             title=result.get("title", "CSA, Quad & J-coupling fit"),
             fit_label=result.get("fit_label", "Fit (total)"),
             spectrum=spectrum if spectrum is not None and spectrum.ndim == 1 else None,
-            keep_zoom=keep_zoom)
+            keep_zoom=keep_zoom, overlay=self._fit_gap_overlay(regions))
         self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.fit_canvas), True)
         self.canvas_tabs.setCurrentWidget(self.fit_canvas)
+
+    #: gid of the shading over the parts of a fit's span left out of it.
+    FIT_GAP_GID = "fit_excluded_gap"
+
+    def _fit_gap_overlay(self, regions):
+        """An ``overlay(ax)`` shading the gaps between a fit's ranges (left
+        out of the fit, e.g. 10-12 ppm of '5 to 10, 12 to 30'), or None
+        when there are none -- so the plot shows what was fitted."""
+        gaps = nb_fit_ranges.excluded_gaps(regions) if regions and len(regions) > 1 else []
+        if not gaps:
+            return None
+
+        def overlay(ax):
+            for i, (lo, hi) in enumerate(gaps):
+                ax.axvspan(lo, hi, color="0.5", alpha=0.15, lw=0, zorder=0,
+                           gid=self.FIT_GAP_GID, label="Not fitted" if i == 0 else None)
+        return overlay
 
     # ---- Fit > Multi-spectrum: the main-window side -----------------------
 
@@ -21250,6 +21324,20 @@ class MainWindow(QMainWindow):
                    if result.get("spectra") else "")
         self.statusBar().showMessage(f"Measurement{between}:  {result['summary']}")
 
+    def _on_peak_width_measured(self, result: dict) -> None:
+        """A Width-mode click (any plot): the FWHM in the status bar, with
+        the overlap warning when it is an estimate (explicit user request,
+        2026-10-16). The plot carries the same numbers."""
+        if "error" in result:
+            self.statusBar().showMessage(f"Peak width: {result['error']}", 8000)
+            return
+        message = f"Peak width -- {result['summary']}"
+        if result.get("estimate"):
+            message += ("  WARNING: an estimate, because of overlap with neighbouring peak(s); "
+                        "fit the peaks for a reliable width.")
+        self.statusBar().showMessage(message)
+        self.last_peak_width = result
+
     def _peak_pick_slice_index(self) -> int:
         return int(self.peak_slice_spin.value())
 
@@ -23015,7 +23103,7 @@ class MainWindow(QMainWindow):
         entry["max_gradient_g_per_cm"] = {**self._probe_axis_gradients(probe), axis: float(value)}
         config[probe] = entry
         os.makedirs(os.path.dirname(self._PROBE_CONFIG_PATH), exist_ok=True)
-        with open(self._PROBE_CONFIG_PATH, "w") as handle:
+        with open(self._PROBE_CONFIG_PATH, "w", encoding="utf-8") as handle:
             json.dump(config, handle, indent=2)
         QMessageBox.information(
             self, "Saved",
@@ -25031,7 +25119,7 @@ class MainWindow(QMainWindow):
             text = processing_relaxation.curve_fit_to_csv(
                 self._relaxation_fit_results, x_label=x_label, x_scale=scale,
                 value_label=value_label)
-            with open(path, "w", newline="") as handle:
+            with open(path, "w", newline="", encoding="utf-8") as handle:
                 handle.write(text)
         except Exception as exc:  # noqa: BLE001 -- surfaced, not swallowed
             QMessageBox.critical(self, "Export failed", str(exc))

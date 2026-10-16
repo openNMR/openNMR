@@ -246,7 +246,8 @@ def test_heatmap_reports_the_common_ppm_range(heatmap_window):
 
 
 @pytest.mark.parametrize("norm_index, label", [
-    (0, "Intensity (a.u.)"), (1, "Intensity / own maximum")])
+    # "per scan" since 2026-10-16: the scale says it (Normalize ▸ Per scan).
+    (0, "Intensity per scan (a.u.)"), (1, "Intensity / own maximum")])
 def test_heatmap_colour_bar_says_what_the_scale_means(heatmap_window, qapp, norm_index, label):
     window = heatmap_window
     window.compare_normalize_combo.setCurrentIndex(norm_index)

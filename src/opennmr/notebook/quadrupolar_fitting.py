@@ -769,7 +769,7 @@ def NMRQuadFitWorkflow(datapath, p0=None, procno=1, I=None, nucleus=None, larmor
                                           fig_name=fig_name, save_format=save_format,
                                           **plot_kwargs)
     if save_csv:
-        with open(csv_filename, "w", newline="") as f:
+        with open(csv_filename, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             header = ["x_ppm", "y", "y_fit"] + [f"{l}_component" for l in info["labels"]] + ["baseline"]
             writer.writerow(header)

@@ -23,7 +23,10 @@ dependencies = [
 # it. It stays here because the reader/filter/window replacements are
 # pinned by tests that compare against it byte-for-byte, which is the
 # only reason those replacements can be trusted.
-test = ["pytest", "nmrglue", "pymatgen"]
+# pytest-xdist: run in parallel (pytest -n 8); pytest-timeout: a test that
+# hangs fails after [tool.pytest.ini_options] timeout instead of freezing
+# the run (2026-10-16).
+test = ["pytest", "pytest-xdist", "pytest-timeout", "nmrglue", "pymatgen"]
 # CIF-based pNMR simulation (notebook.pnmr_simulator, Simulate > pNMR (CIF)).
 pnmr = ["pymatgen"]
 build = ["pyinstaller"]
@@ -41,3 +44,8 @@ where = ["src"]
 [tool.setuptools.package-data]
 "opennmr.gui" = ["resources/*.png", "resources/toolbar/*.png"]
 "opennmr.topspin" = ["resources/*.py"]
+
+[tool.pytest.ini_options]
+# Seconds before one test is stopped and reported as failed (pytest-timeout).
+# Generous: the slowest real fits take a minute or two on a laptop.
+timeout = 900

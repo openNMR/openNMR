@@ -479,6 +479,11 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
             "header": header, "params": params, "phase0": phase0, "phase1": phase1,
             "solvent": solvent_param["value"] if solvent_param else None,
             "title": header["title"], "comment": header["comment"],
+            # Unlike the other readers, JEOL data are NOT divided by the
+            # number of scans here (intensities match nmrglue's); Compare's
+            # per-scan modes divide by total_scans/scans instead
+            # (notebook.intensity_scaling).
+            "per_scan": False,
             # The fully processed (pre-FFT) FID -- an optional GUI
             # preview of what FID-domain processing actually did.
             "fid": fid, "fid_dt": dt, "fid_original_length": original_length,

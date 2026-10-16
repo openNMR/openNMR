@@ -1380,7 +1380,7 @@ def NMRCSAFitWorkflow(datapath, p0, procno=1, convention="Haeberlen", static=Tru
                 columns[f"{label}_component"] = comp
             columns["baseline"] = components[-1]
 
-        with open(csv_filename, "w", newline="") as outfile:
+        with open(csv_filename, "w", newline="", encoding="utf-8") as outfile:
             writer = csv.writer(outfile)
             writer.writerow(columns.keys())
             for i in range(len(x_fit)):

@@ -2631,6 +2631,14 @@ class _FakeAction(str):
     QAction API the real menu code calls on what ``addAction``
     returns."""
 
+    class _Signal:
+        def connect(self, *_args, **_kwargs) -> None:
+            pass
+
+    #: The menu code connects some actions straight away (e.g. "Open Other
+    #: Proc Numbers…", 2026-10-14); a real menu is never shown here.
+    triggered = _Signal()
+
     def setToolTip(self, _text) -> None:
         pass
 
@@ -11280,9 +11288,9 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     analysis = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
     # ... and DNP joined them (2026-09-30), with its two sub-sections.
-    # ... and Signal-to-Noise after it (2026-10-12).
+    # ... and Signal-to-Noise after it (2026-10-12), then CP Build-up (2026-10-16).
     assert analysis == ["eNMR", "Imaging", "DNP", "Enhancement", "Field Sweep Profile",
-                        "Signal-to-Noise"]
+                        "Signal-to-Noise", "CP Build-up"]
 
 
 def test_main_window_advanced_processing_is_its_own_top_level_button(qapp):
@@ -11365,7 +11373,8 @@ def test_main_window_applications_is_its_own_top_level_button(qapp):
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     sections = applications_tab.findChildren(CollapsibleSection)
     assert [s.title() for s in sections] == ["eNMR", "Imaging", "DNP", "Enhancement",
-                                             "Field Sweep Profile", "Signal-to-Noise"]
+                                             "Field Sweep Profile", "Signal-to-Noise",
+                                             "CP Build-up"]
 
     enmr_section = _enclosing_collapsible_section(window.enmr_voltage_label)
     imaging_section = _enclosing_collapsible_section(window.imaging_max_gradient_spin)

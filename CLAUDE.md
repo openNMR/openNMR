@@ -296,5 +296,19 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   log's previous state (`_record_history` -> `undo_stack`), restored through
   `_apply_restored_state`. New processing state only needs to be in the tracked
   state to be undoable.
+- **Comparable intensities** are `notebook/intensity_scaling.py`: Bruker, Varian,
+  Spinsolve and X-Pulse readers divide by NS at load; **JEOL does not**
+  (`raw["per_scan"] = False`, divided by `total_scans`/`scans` when compared). No reader
+  divides by RG (`receiver_gain`: Bruker linear RG only). Compare ▸ Normalize and CP
+  Build-up both go through `comparison_factors` -- do not divide by NS anywhere else.
+- **Width** (canvas toolbar, every plot): click a peak for its FWHM,
+  `notebook/peak_width.py` (`peak_fwhm`, `peak_fwhm_2d`); overlap gives `estimate=True`
+  and the word ESTIMATE on the plot and in the status bar.
+- **Fit windows with several ranges**: `notebook/fit_ranges.parse_ppm_ranges`,
+  `widgets/ranges_edit.PpmRangesEdit` ("Several ppm ranges" in the Fit window combos;
+  Multi-spectrum's Window column). Gaps are shaded by `MainWindow._fit_gap_overlay`.
+- **CP Build-up** is Apply ▸ CP Build-up (`gui/cp_buildup_panel.py` over
+  `notebook/cp_buildup.py`; models are Kolodziejski & Klinowski, Chem. Rev. 2002, eqs
+  9, 10, 11, 28 -- keep the equation numbers in any new model).
 - **Planned GUI work** (CSA fit/simulation split, view sidebar) is in
   the newest `TODO.md` rounds -- check there before starting any of it.

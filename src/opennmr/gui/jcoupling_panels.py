@@ -28,6 +28,7 @@ from typing import Callable
 
 import numpy as np
 from .widgets.report_label import ReportLabel
+from .widgets.ranges_edit import PpmRangesEdit
 from .widgets.field_input import MAX_FIELD_T, FieldSpinBox, proton_frequency_box
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication
@@ -1579,6 +1580,7 @@ class JCouplingFitPanel(QWidget):
         self.window_combo.addItem("Range (ppm)", "range")
         self.window_combo.addItem("Integration regions", "regions")
         self.window_combo.addItem("Whole spectrum", "all")
+        self.window_combo.addItem("Several ppm ranges", "ranges")
         self.window_combo.setToolTip(
             "Which part of the spectrum the fit sees. Around the sites: each site's starting "
             "multiplet plus a margin -- the usual choice, as other peaks in the window would "
@@ -1598,6 +1600,8 @@ class JCouplingFitPanel(QWidget):
         window_row.addWidget(QLabel("to"))
         window_row.addWidget(self.window_hi_spin)
         form.addRow("Range:", window_box)
+        self.window_ranges_edit = PpmRangesEdit()
+        form.addRow("Ranges (ppm):", self.window_ranges_edit)
         self._window_box, self._window_form = window_box, form
         self.window_combo.currentIndexChanged.connect(lambda _i: self._sync_window())
         v.addLayout(form)
@@ -1664,6 +1668,8 @@ class JCouplingFitPanel(QWidget):
     def _sync_window(self) -> None:
         self._window_form.setRowVisible(self._window_box,
                                         self.window_combo.currentData() == "range")
+        self._window_form.setRowVisible(self.window_ranges_edit,
+                                        self.window_combo.currentData() == "ranges")
 
     # ---- saved state (processing log / Load Progress) ------------------
 
@@ -1754,6 +1760,8 @@ class JCouplingFitPanel(QWidget):
         if mode == "range":
             lo, hi = self.window_lo_spin.value(), self.window_hi_spin.value()
             return ("range", [(min(lo, hi), max(lo, hi))])
+        if mode == "ranges":
+            return ("ranges", self.window_ranges_edit.ranges())
         if mode == "regions":
             regions = self._get_regions()
             if not regions:
@@ -1769,6 +1777,8 @@ class JCouplingFitPanel(QWidget):
         if mode == "range":
             lo, hi = self.window_lo_spin.value(), self.window_hi_spin.value()
             return [(min(lo, hi), max(lo, hi))]
+        if mode == "ranges":
+            return self.window_ranges_edit.ranges()
         if mode == "regions":
             regions = self._get_regions()
             if not regions:

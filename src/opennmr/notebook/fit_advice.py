@@ -1462,6 +1462,46 @@ def advise_multi_fit(result, per_experiment=2):
 _MARK = {"good": "✓", "note": "•", "warn": "⚠"}
 
 
+def advise_cp_buildup(fit):
+    """Advice on a :func:`opennmr.notebook.cp_buildup.fit_cp_buildup`
+    result: the fit's own warnings, the quality of the fit and which model
+    to try next (Kolodziejski & Klinowski 2002: it is not possible to say
+    in advance which model fits a given site best)."""
+    items = []
+    if not fit:
+        return items
+    for w in fit.get("warnings", []):
+        tone = "note" if w.startswith("λ =") else "warn"
+        items.append(_item("tells", tone, w))
+    r2 = fit.get("r_squared")
+    t = np.asarray(fit.get("t", []), float)
+    n_free = len(fit.get("free_names") or [])
+    if t.size and t.size < n_free + 3:
+        items.append(_item("tells", "warn", f"Only {t.size} contact times for {n_free} fitted "
+                           "parameters: the errors are themselves uncertain."))
+    if r2 is not None and np.isfinite(r2):
+        if r2 >= 0.995:
+            items.append(_item("tells", "good", f"The curve follows the points closely (R² = {r2:.4f})."))
+        elif r2 < 0.98:
+            items.append(_item("tells", "warn", f"R² = {r2:.3f}: the model misses the shape of the "
+                               "build-up."))
+    model = fit.get("model")
+    if model == "is" and r2 is not None and r2 < 0.99:
+        items.append(_item("next", "note", "Try the I–I*–S model (eq 28) for a protonated "
+                           "carbon (CH, CH₂), whose fast initial rise then slow approach is "
+                           "not one exponential; or two I–S components for two overlapping sites."))
+    if model == "rise":
+        items.append(_item("next", "note", "If the signal falls at long contact times, use the "
+                           "classical I–S model (eq 10), which includes T1ρ."))
+    if fit.get("t_max_us") is None and model != "rise":
+        items.append(_item("next", "note", "Record longer contact times so the decay (T1ρ) is "
+                           "sampled."))
+    if t.size and fit.get("t_max_us") is not None and np.count_nonzero(t < fit["t_max_us"]) < 3:
+        items.append(_item("next", "note", "Fewer than three contact times before the maximum: "
+                           "add short contact times to define T_IS."))
+    return items
+
+
 def advice_text(items):
     """The advice as plain text: what the fit tells you, then what to
     try next -- for reports, logs and notebooks."""

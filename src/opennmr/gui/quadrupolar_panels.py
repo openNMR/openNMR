@@ -26,6 +26,7 @@ from . import panel_state
 from .widgets.report_label import ReportLabel
 from .widgets.field_input import link_field
 from .widgets.sideband_hint import sideband_hint_label
+from .widgets.ranges_edit import PpmRangesEdit
 from ..notebook import bridge as notebook_bridge
 from ..notebook import fitting as notebook_fitting
 from ..notebook import quadrupolar_fitting as qfit
@@ -175,6 +176,7 @@ class QuadrupolarFitPanel(QWidget):
         self.window_combo.addItem("Whole spectrum", "all")
         self.window_combo.addItem("Range (ppm)", "range")
         self.window_combo.addItem("Integration regions", "regions")
+        self.window_combo.addItem("Several ppm ranges", "ranges")
         self.window_combo.setToolTip("The part of the spectrum the fit sees. Keep the whole "
                                      "pattern (and, under MAS, its sidebands) inside it.")
         self.window_combo.currentIndexChanged.connect(lambda _i: self._sync_controls())
@@ -192,6 +194,8 @@ class QuadrupolarFitPanel(QWidget):
         row.addWidget(QLabel("to"))
         row.addWidget(self.window_hi_spin)
         form.addRow("Range:", self._window_box)
+        self.window_ranges_edit = PpmRangesEdit()
+        form.addRow("Ranges (ppm):", self.window_ranges_edit)
         self._form = form
 
         self.fit_baseline_check = QCheckBox("Fit the baseline too")
@@ -328,6 +332,8 @@ class QuadrupolarFitPanel(QWidget):
         label = self._form.labelForField(self._window_box)
         if label is not None:
             label.setVisible(self.window_combo.currentData() == "range")
+        self._form.setRowVisible(self.window_ranges_edit,
+                                 self.window_combo.currentData() == "ranges")
 
     def spin(self) -> float | None:
         return core_registry.find_spin(self.nucleus_combo.currentText().strip())
@@ -496,6 +502,8 @@ class QuadrupolarFitPanel(QWidget):
         if mode == "range":
             lo, hi = self.window_lo_spin.value(), self.window_hi_spin.value()
             return [(min(lo, hi), max(lo, hi))]
+        if mode == "ranges":
+            return self.window_ranges_edit.ranges()
         return self._get_regions() or None
 
     def _settings(self):

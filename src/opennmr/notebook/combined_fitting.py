@@ -982,7 +982,7 @@ def NMRCombinedFitWorkflow(datapath, sites, procno=1, show_plot=True, show_repor
         fit["figure"], fit["axes"] = plot_combined_fit(fit, fname=fname)
     if save_csv:
         m = fit["mask"]
-        with open(save_csv, "w", newline="") as f:
+        with open(save_csv, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["x_ppm", "y", "y_fit"] + list(fit["site_spectra"]) + ["baseline"])
             for i in np.flatnonzero(m):

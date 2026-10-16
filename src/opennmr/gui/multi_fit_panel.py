@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from ..core.acquisition import acquisition_constants
 from ..io import serialize
+from ..notebook import fit_ranges
 from ..notebook import combined_fitting as cfit
 from ..notebook import combined_hamiltonian as ch
 from ..notebook import multi_fitting as mf
@@ -246,7 +247,7 @@ class MultiFitPanel(QWidget):
         self.experiment_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.experiment_table.setMinimumHeight(130)
         self.experiment_table.setToolTip(
-            "Edit MAS, Transitions (all, ct or st), Window ('lo, hi' in ppm; blank = whole "
+            "Edit MAS, Transitions (all, ct or st), Window ('lo, hi' in ppm, or several: '5 to 10, 12 to 30'; blank = whole "
             "spectrum) and the x value. Nucleus and ν0 come from the data.")
         self.experiment_table.itemChanged.connect(self._on_experiment_edited)
         bl.addWidget(self.experiment_table)
@@ -922,12 +923,13 @@ class MultiFitPanel(QWidget):
         for e in self.experiments:
             window = None
             if e["window"]:
+                # One range ('low, high') or several ('5 to 10, 12 to 30':
+                # explicit user request, 2026-10-16) -- notebook.fit_ranges.
                 try:
-                    lo, hi = (float(v) for v in e["window"].replace(";", ",").split(","))
-                except ValueError:
-                    raise ValueError(f"{e['label']}: Window must be 'low, high' in ppm "
-                                     "(or blank).") from None
-                window = [(min(lo, hi), max(lo, hi))]
+                    window = fit_ranges.parse_ppm_ranges(e["window"])
+                except ValueError as exc:
+                    raise ValueError(f"{e['label']}: Window must be ppm ranges such as "
+                                     f"'10, 50' or '5 to 10, 12 to 30' (or blank). {exc}") from None
             x = None
             if str(e["x"]).strip():
                 try:
