@@ -448,7 +448,7 @@ def _draw_traces_panel(ax, divider, entries, *, axis_kind,
         panel.set_xlim(ax.get_ylim())
     panel.set_ylim(-max(0.0, float(bottom_gap)) * slot * offset_fraction, 1.0)
     if axis_label:
-        panel.set_xlabel(axis_label, fontsize=fontsize)
+        panel.set_xlabel(_italic_label(axis_label), fontsize=fontsize)
     panel.tick_params(axis="y", which="both", left=False, right=False,
                       labelleft=False, labelright=False)
     panel.tick_params(axis="x", which="both", labelsize=fontsize)
@@ -852,11 +852,11 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     ax.set_axes_locator(divider.new_locator(nx=0, ny=0))
     divider.set_aspect(square_aspect)
 
-    ax.set_xlabel(labeltextx, fontsize=fontsize)
+    ax.set_xlabel(_italic_label(labeltextx), fontsize=fontsize)
     if pseudo2d:
         ax.set_yticks([])
     else:
-        ax.set_ylabel(labeltexty, fontsize=fontsize)
+        ax.set_ylabel(_italic_label(labeltexty), fontsize=fontsize)
 
     ax.tick_params(
         axis='both', which='both', direction=tick_dir, labelsize=fontsize,
@@ -1264,11 +1264,11 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
         if label is not None:
             ax.plot([], [], color=colour, label=label)
 
-    ax.set_xlabel(labeltextx, fontsize=fontsize)
+    ax.set_xlabel(_italic_label(labeltextx), fontsize=fontsize)
     if pseudo2d:
         ax.set_yticks([])
     else:
-        ax.set_ylabel(labeltexty, fontsize=fontsize)
+        ax.set_ylabel(_italic_label(labeltexty), fontsize=fontsize)
 
     ax.tick_params(
         axis='both', which='both', direction=tick_dir, labelsize=fontsize,
@@ -1356,3 +1356,9 @@ def overlay_plot(spectra: list[NMRSpectrum], contour_fraction_x=0.25, contour_fr
             save_figure(fig, fig_name=fig_name, save_format=save_format)
 
     return fig, ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

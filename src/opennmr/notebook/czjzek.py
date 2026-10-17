@@ -1212,8 +1212,8 @@ def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, 
                              rasterized=True)
     # Symbols italic, subscripts upright (IUPAC). \mathit is needed: the
     # package's mathtext.default is "regular", which sets letters upright.
-    ax_map.set_xlabel(CQ_LABEL + " (MHz)", fontsize=fontsize)
-    ax_map.set_ylabel(ETAQ_LABEL, fontsize=fontsize)
+    ax_map.set_xlabel(_italic_label(CQ_LABEL + " (MHz)"), fontsize=fontsize)
+    ax_map.set_ylabel(_italic_label(ETAQ_LABEL), fontsize=fontsize)
     ax_map.set_xlim(cq_edges[0], cq_edges[-1])
     ax_map.set_ylim(0, 1)
     apply_tick_style(ax_map, labelsize=fontsize * 0.9)
@@ -1278,7 +1278,7 @@ def plot_czjzek_distribution(sites, spectrum=None, layout="right", figure=None, 
                          linewidth=1.5)
         ax_spec.set_xlim(float(np.max(x)), float(np.min(x)))
         ax_spec.set_yticks([])
-        ax_spec.set_xlabel(xlabel or spectrum.get("xlabel") or "Shift (ppm)", fontsize=fontsize)
+        ax_spec.set_xlabel(_italic_label(xlabel or spectrum.get("xlabel") or "Shift (ppm)"), fontsize=fontsize)
         apply_spine_style(ax_spec, top=False, right=False, bottom=True, left=False)
         apply_tick_style(ax_spec, axis="x", labelsize=fontsize * 0.9)
     figure.czjzek_axes = {"map": ax_map, "spectrum": ax_spec, "colorbar": cbar_ax}
@@ -1325,3 +1325,9 @@ def plot_czjzek_fit(results, popt, pcov, fit_info, layout="right", site=None, fi
                          "components": [c[mask] for c in comps], "labels": fit_info["labels"],
                          "xlabel": xlabel},
         layout=layout, figure=figure, component_style=component_style, **kwargs)
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

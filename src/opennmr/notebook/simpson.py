@@ -857,7 +857,7 @@ def SIMPSONplot_1d_stack(spectra, labels=None, linestyles=None, colours=None,
     else:
         ax.set_xlim(xlims[0], xlims[1])
 
-    ax.set_xlabel(xlabel if xlabel is not None else labeltext)
+    ax.set_xlabel(_italic_label(xlabel if xlabel is not None else labeltext))
     apply_spine_style(ax, top=False, right=False, bottom=True, left=False)
     ax.set_yticks([])
     apply_tick_style(ax, direction=tick_dir, length=tick_length, width=tick_width,
@@ -913,12 +913,12 @@ def SIMPSONplot_shape(path, duration_us=None, pl_width=3.375, pl_height=2.5,
 
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
     ax1.plot(x, shape['amplitude'], color='black', linewidth=1.2)
-    ax1.set_ylabel('Amplitude')
+    ax1.set_ylabel(_italic_label('Amplitude'))
     apply_spine_style(ax1, top=False, right=False)
 
     ax2.plot(x, shape['phase'], color='black', linewidth=1.2)
-    ax2.set_ylabel('Phase (\u00b0)')
-    ax2.set_xlabel(xlabel)
+    ax2.set_ylabel(_italic_label('Phase (\u00b0)'))
+    ax2.set_xlabel(_italic_label(xlabel))
     apply_spine_style(ax2, top=False, right=False)
 
     fig.set_figheight(pl_height)
@@ -1001,8 +1001,8 @@ def SIMPSONplot_fid(fid, apodization=None, apod_params=None, show_imag=True,
             ax.plot(t_us, real_a, color='C0', linewidth=1.0,
                     label='apodized (real)')
 
-    ax.set_xlabel('Time (\u00b5s)')
-    ax.set_ylabel('Intensity')
+    ax.set_xlabel(_italic_label('Time (\u00b5s)'))
+    ax.set_ylabel(_italic_label('Intensity'))
     apply_spine_style(ax, top=False, right=False)
     apply_tick_style(ax, direction=tick_dir, length=tick_length, width=tick_width,
                       pad=tick_pad)
@@ -1072,8 +1072,8 @@ def SIMPSONplot_fid_series(series, y='magnitude', xlabel=None, ylabel=None,
     ax.plot(series['x'], yvals, color=color, marker=marker, linestyle=linestyle,
             linewidth=1.2)
 
-    ax.set_xlabel(xlabel if xlabel is not None else (series.get('xlabel') or 'x'))
-    ax.set_ylabel(ylabel if ylabel is not None else y.capitalize())
+    ax.set_xlabel(_italic_label(xlabel if xlabel is not None else (series.get('xlabel') or 'x')))
+    ax.set_ylabel(_italic_label(ylabel if ylabel is not None else y.capitalize()))
     apply_spine_style(ax, top=False, right=False)
     apply_tick_style(ax, direction=tick_dir, length=tick_length, width=tick_width,
                       pad=tick_pad)
@@ -1086,3 +1086,9 @@ def SIMPSONplot_fid_series(series, y='magnitude', xlabel=None, ylabel=None,
         save_figure(fig, fig_name=fig_name, save_format=save_format)
 
     return fig, ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

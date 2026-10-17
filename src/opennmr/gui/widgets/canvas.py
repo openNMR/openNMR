@@ -967,6 +967,12 @@ class MplCanvas(QWidget):
         self.figure.draw = self._draw_with_line_styles
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvasQTAgg(self.figure)
+        # Every save (Save Figure, the toolbar, a style template preview)
+        # goes through print_figure: vector formats are made safe for
+        # Illustrator there (plotting.vector_export; user report,
+        # 2026-10-17: a fit's components vanished from PDF/SVG opened in
+        # Illustrator, which drops paths of more than ~32k points).
+        self.canvas.print_figure = self._print_figure_vector_safe
         self.toolbar = _Toolbar(self.canvas, self)
 
         layout = QVBoxLayout(self)
@@ -2951,6 +2957,7 @@ class MplCanvas(QWidget):
         for ax in self.figure.get_axes():
             ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
             ax.yaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+            self._italicise_axis_labels(ax.xaxis, ax.yaxis)
             if ax.get_title():
                 ax.title.set_fontsize(self._AXIS_LABELSIZE)
             ax.tick_params(axis="both", which="both", labelsize=self._AXIS_LABELSIZE)
@@ -4208,6 +4215,7 @@ class MplCanvas(QWidget):
                 # Tick labels the same size as the axis labels (user
                 # request, 2026-10-01), as on every other plot.
                 ax.tick_params(labelsize=self._AXIS_LABELSIZE)
+                self._italicise_axis_labels(ax.xaxis, ax.yaxis, ax.zaxis)
                 for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
                     axis.label.set_fontsize(self._AXIS_LABELSIZE)
                     # Clear of the (now full-size) tick labels at any size.
@@ -4235,6 +4243,7 @@ class MplCanvas(QWidget):
                 ax.tick_params(which="both", length=0)
             ax.xaxis.label.set_fontsize(self._AXIS_LABELSIZE)
             ax.yaxis.label.set_fontsize(self._AXIS_LABELSIZE)
+            self._italicise_axis_labels(ax.xaxis, ax.yaxis)
             if ax.get_title():
                 ax.title.set_fontsize(self._AXIS_LABELSIZE)
             self._apply_title_and_font(ax)
@@ -4247,6 +4256,7 @@ class MplCanvas(QWidget):
                 child.tick_params(which="major", length=self._TICK_LENGTH,
                                   width=self._TICK_WIDTH, labelsize=self._AXIS_LABELSIZE)
                 child.tick_params(which="both", direction=self._TICK_DIRECTION)
+                self._italicise_axis_labels(child.xaxis, child.yaxis)
                 for axis in (child.xaxis, child.yaxis):
                     axis.label.set_fontsize(self._AXIS_LABELSIZE)
                     if self._font_family:
@@ -4335,6 +4345,22 @@ class MplCanvas(QWidget):
         if match and not self._NOT_A_UNIT.match(match.group("u")):
             return f"{match.group('q')} ({match.group('u')})"
         return text
+
+    @staticmethod
+    def _italicise_axis_labels(*axes) -> None:
+        """Quantity symbols in axis labels italic, every plot the canvas
+        shows (user request, 2026-10-17): "T (K)" -> "$T$ (K)", "T₁" ->
+        "$T_1$" (plotting.labels.italicise_symbols; words, units and
+        existing mathtext untouched)."""
+        from ...plotting.labels import italicise_symbols
+        for axis in axes:
+            try:
+                old = axis.label.get_text()
+                new = italicise_symbols(old)
+                if new != old:
+                    axis.label.set_text(new)
+            except Exception:  # noqa: BLE001 -- styling must never stop a plot drawing
+                pass
 
     def _restyle_external_axis_labels(self) -> None:
         """A figure drawn elsewhere writes its own axis labels; Plot
@@ -4835,6 +4861,43 @@ class MplCanvas(QWidget):
 
     # -- Lines: widths and styles of every line on the plot -------------
 
+    def _math_in_font_family(self):
+        """A context for drawing in which the maths in labels ($^{13}$C,
+        $T_1$) is set in Plot Style's font family too, not in matplotlib's
+        DejaVu -- for a named face (user request, 2026-10-17: more
+        typefaces); a generic family or Default leaves maths as it was."""
+        import contextlib
+
+        import matplotlib
+        from matplotlib.text import Text
+
+        from ...notebook import fonts as nb_fonts
+        family = self._font_family
+        named = bool(family) and family not in nb_fonts.GENERIC_FAMILIES
+        if not named and not getattr(self, "_math_family_applied", False):
+            return contextlib.nullcontext()
+        default_math = matplotlib.rcParams["mathtext.fontset"]
+        try:
+            for text in self.figure.findobj(Text):
+                if "$" in (text.get_text() or ""):
+                    text.set_math_fontfamily("custom" if named else default_math)
+        except Exception:  # noqa: BLE001 -- styling must never stop a plot drawing
+            return contextlib.nullcontext()
+        self._math_family_applied = named
+        if not named:
+            return contextlib.nullcontext()
+        rc = {k: v for k, v in nb_fonts.font_rc(family).items() if k.startswith("mathtext.")}
+        rc.pop("mathtext.fontset", None)
+        return matplotlib.rc_context(rc)
+
+    def _print_figure_vector_safe(self, filename, *args, **kwargs):
+        from ...plotting import vector_export
+        save = FigureCanvasQTAgg.print_figure.__get__(self.canvas)
+        if vector_export.is_vector(filename, kwargs.get("format")):
+            with vector_export.vector_safe(self.figure):
+                return save(filename, *args, **kwargs)
+        return save(filename, *args, **kwargs)
+
     def _draw_with_line_styles(self, renderer) -> None:
         """The figure's own draw, with Plot Style's line widths and
         styles applied first. A draw-time pass rather than a setting
@@ -4849,7 +4912,8 @@ class MplCanvas(QWidget):
             keys = tuple(info["key"] for info in plotting.lines.data_lines(self.figure))
         except Exception:  # noqa: BLE001 -- styling must never stop a plot drawing
             keys = self._line_keys_seen
-        Figure.draw(self.figure, renderer)
+        with self._math_in_font_family():
+            Figure.draw(self.figure, renderer)
         if keys != self._line_keys_seen:
             self._line_keys_seen = keys
             # After this paint, not inside it: a listener rebuilds widgets.

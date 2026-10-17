@@ -240,9 +240,9 @@ def plot_offset_series(series: dict, style: str = "bars", ax=None, colour=None,
         ax.plot(sky.axes[0].ppm, sky.data, "-", color="0.4", lw=0.8, zorder=1)
     ax.axhline(0.0, color="0.6", lw=0.6, zorder=0)
     nucleus = series.get("nucleus")
-    ax.set_xlabel(f"{series.get('channel', 'O2')} offset"
-                  + (f", {_pretty(nucleus)} shift" if nucleus else "") + " (ppm)")
-    ax.set_ylabel(series.get("unit", "integral"))
+    ax.set_xlabel(_italic_label(f"{series.get('channel', 'O2')} offset"
+                  + (f", {_pretty(nucleus)} shift" if nucleus else "") + " (ppm)"))
+    ax.set_ylabel(_italic_label(series.get("unit", "integral")))
     if x.size:
         span = float(np.ptp(x)) or 1.0
         ax.set_xlim(float(x.max()) + 0.05 * span + width, float(x.min()) - 0.05 * span - width)
@@ -267,3 +267,9 @@ def offset_report(series: dict) -> str:
         lines.append(f"  {p:10.4g} ppm   {v:.6g} ± {e:.2g}   {lab}")
     lines += series.get("notes") or []
     return "\n".join(lines)
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

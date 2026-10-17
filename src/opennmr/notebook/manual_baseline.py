@@ -380,9 +380,15 @@ def plot_manual_baseline(x, y, fit_or_baseline, regions=None, ax=None, show_corr
     if show_corrected:
         ax.plot(x, y - baseline, color=colors[2], lw=1.0, label="corrected")
     ax.set_xlim(max(x), min(x))    # NMR convention: shift increases to the left
-    ax.set_xlabel(xlabel)
+    ax.set_xlabel(_italic_label(xlabel))
     ax.set_yticks([])
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.legend(frameon=False)
     return ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

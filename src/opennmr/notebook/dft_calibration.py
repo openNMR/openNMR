@@ -573,7 +573,7 @@ def plot_calibration(cal, figure=None, residuals: bool = True, annotate: bool = 
     ylo, yhi = float(min(y.min(), line(xs).min())), float(max(y.max(), line(xs).max()))
     ypad = 0.1 * (yhi - ylo) if yhi > ylo else 1.0
     ax.set_ylim(ylo - ypad, yhi + ypad)
-    ax.set_ylabel(r"$\mathit{\sigma}_\mathrm{calc}$ (ppm)", fontsize=fontsize)
+    ax.set_ylabel(_italic_label(r"$\mathit{\sigma}_\mathrm{calc}$ (ppm)"), fontsize=fontsize)
     # The line runs corner to corner; its numbers go in an empty corner.
     if cal["slope"] < 0:
         pos = (0.03, 0.04, "left", "bottom")
@@ -588,12 +588,12 @@ def plot_calibration(cal, figure=None, residuals: bool = True, annotate: bool = 
         axr.scatter(x, r, s=marker_size * 0.7, color=color, edgecolor="none")
         lim = max(float(np.max(np.abs(r))) * 1.3, 0.05)
         axr.set_ylim(-lim, lim)
-        axr.set_ylabel(r"$\mathit{\delta}_\mathrm{calc} - \mathit{\delta}_\mathrm{exp}$"
-                       "\n(ppm)", fontsize=fontsize * 0.85)
-        axr.set_xlabel(xlabel, fontsize=fontsize)
+        axr.set_ylabel(_italic_label(r"$\mathit{\delta}_\mathrm{calc} - \mathit{\delta}_\mathrm{exp}$"
+                       "\n(ppm)"), fontsize=fontsize * 0.85)
+        axr.set_xlabel(_italic_label(xlabel), fontsize=fontsize)
         plt.setp(ax.get_xticklabels(), visible=False)
     else:
-        ax.set_xlabel(xlabel, fontsize=fontsize)
+        ax.set_xlabel(_italic_label(xlabel), fontsize=fontsize)
     if annotate:
         _place_labels(ax, list(zip(x, y)), [p["name"] for p in pts], fontsize * 0.72,
                       avoid_line=line)
@@ -660,3 +660,9 @@ def shift_table(sample, calibrations) -> list[dict]:
         rows.append({"label": a["label"], "element": a["species"], "sigma_iso": sigma,
                      "delta_iso": delta, "delta_err": shift_uncertainty(cal, delta)})
     return rows
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

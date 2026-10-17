@@ -997,12 +997,12 @@ def NMR1dplot_with_jcoupling_fit(results, popt, fit_info, fit_regions=None,
                       pad=tick_pad, num_ticks=tick_number, axis='x')
 
     if xlabel is not None:
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel(_italic_label(xlabel))
     else:
         NUC = results.get('nuclide', 'unknown')
         SFO1 = results.get('SFO1', 0)
         nucgamma = find_gamma(NUC, field=field, SFO1=SFO1)
-        ax.set_xlabel(NUC_label(nucgamma['Nuclide'], x_unit='ppm'))
+        ax.set_xlabel(_italic_label(NUC_label(nucgamma['Nuclide'], x_unit='ppm')))
 
     ax.legend()
     fig.set_figheight(pl_height)
@@ -1157,3 +1157,9 @@ def NMRJCouplingFitWorkflow(datapath, p0, procno=1, larmor_Hz=None,
         "x": x_fit, "y": y_fit_data, "y_fit": y_model,
         "components": components, "figure": fig, "axes": ax,
     }
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

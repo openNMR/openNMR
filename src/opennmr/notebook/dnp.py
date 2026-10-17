@@ -1018,11 +1018,11 @@ def plot_field_profile(result: dict, quantity: str = "intensity", normalise=None
         label = _value_label(result, q, normalise)
         if exponent:
             label = label.replace("(a.u.)", f"(10$^{{{exponent}}}$ a.u.)")
-        ax.set_ylabel(label, fontsize=fontsize)
+        ax.set_ylabel(_italic_label(label), fontsize=fontsize)
         apply_spine_style(ax, top=show_top_spine, right=show_right_spine, bottom=True, left=True)
         apply_tick_style(ax, labelsize=fontsize * 0.9)
         ax.tick_params(which="both", top=show_top_spine, right=show_right_spine)
-    axes[-1].set_xlabel(_field_label(field_unit, relative), fontsize=fontsize)
+    axes[-1].set_xlabel(_italic_label(_field_label(field_unit, relative)), fontsize=fontsize)
     figure.tight_layout()
     return figure
 
@@ -1075,7 +1075,7 @@ def plot_sweep_spectra(spectra, result: dict | None = None, aligned: bool = Fals
             ax.axvspan(st["region_Hz"][0] / 1e3, st["region_Hz"][1] / 1e3, color="0.85", zorder=0)
         if st["peak_Hz"] is not None:
             ax.axvline(st["peak_Hz"] / 1e3, color="0.4", linewidth=0.8, linestyle="--", zorder=0)
-    ax.set_xlabel("Offset from carrier (kHz)" + (" , aligned on the line" if aligned else ""),
+    ax.set_xlabel(_italic_label("Offset from carrier (kHz)" + (" , aligned on the line" if aligned else "")),
                   fontsize=fontsize)
     ax.invert_xaxis()
     if xlim_khz is not None:
@@ -1098,7 +1098,7 @@ def _spectrum_axes(ax, fontsize: float) -> None:
     apply_spine_style(ax, top=False, right=False, bottom=True, left=False)
     apply_tick_style(ax, axis="x", labelsize=fontsize * 0.9)
     ax.set_yticks([])
-    ax.set_ylabel("")
+    ax.set_ylabel(_italic_label(""))
     ax.tick_params(axis="y", which="both", left=False, right=False,
                    labelleft=False, labelright=False)
     ax.tick_params(axis="x", which="both", top=False, labeltop=False)
@@ -1182,8 +1182,8 @@ def plot_enhancement_spectra(spectrum_1: NMRSpectrum, spectrum_2: NMRSpectrum,
                                 linewidth=1.0)
     handles, names = ax.get_legend_handles_labels()
     ax.legend(handles[::-1], names[::-1], frameon=False, fontsize=fontsize * 0.8)
-    ax.set_xlabel({"ppm": "δ (ppm)", "hz": "Frequency (Hz)",
-                   "offset": "Offset from carrier (kHz)"}[unit], fontsize=fontsize)
+    ax.set_xlabel(_italic_label({"ppm": "δ (ppm)", "hz": "Frequency (Hz)",
+                   "offset": "Offset from carrier (kHz)"}[unit]), fontsize=fontsize)
     ax.invert_xaxis()
     if xlim is not None:
         ax.set_xlim(max(xlim), min(xlim))
@@ -1191,3 +1191,9 @@ def plot_enhancement_spectra(spectrum_1: NMRSpectrum, spectrum_2: NMRSpectrum,
     _spectrum_axes(ax, fontsize)
     figure.tight_layout()
     return figure
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

@@ -1068,12 +1068,12 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
 
     divider = make_axes_locatable(ax)
 
-    ax.set_xlabel(labeltextx, fontsize=fontsize)
+    ax.set_xlabel(_italic_label(labeltextx), fontsize=fontsize)
 
     if pseudo2d:
         ax.set_yticks([])
     else:
-        ax.set_ylabel(labeltexty, fontsize=fontsize)
+        ax.set_ylabel(_italic_label(labeltexty), fontsize=fontsize)
 
     ax.tick_params(
         axis='both', which='both', direction=tick_dir, labelsize=fontsize,
@@ -1704,12 +1704,12 @@ def NMR2D_overlay_plot(datasets, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, h
 
     divider = make_axes_locatable(ax)
 
-    ax.set_xlabel(labeltextx, fontsize=fontsize)
+    ax.set_xlabel(_italic_label(labeltextx), fontsize=fontsize)
 
     if pseudo2d:
         ax.set_yticks([])
     else:
-        ax.set_ylabel(labeltexty, fontsize=fontsize)
+        ax.set_ylabel(_italic_label(labeltexty), fontsize=fontsize)
 
     ax.tick_params(
         axis='both', which='both', direction=tick_dir, labelsize=fontsize,
@@ -2561,12 +2561,12 @@ def NMR2D_plot_slices(slices, mode="rows", fits=None, show_fits=False,
 
     label_nuclide = traces[0].get("nuclide")
     if xlabel is not None:
-        ax.set_xlabel(xlabel, fontsize=fontsize)
+        ax.set_xlabel(_italic_label(xlabel), fontsize=fontsize)
     elif x_is_ppm and label_nuclide:
         nucgamma = find_gamma(label_nuclide, field=field, SFO1=traces[0].get("SFO1", 0))
-        ax.set_xlabel(NUC_label(nucgamma['Nuclide'], x_unit='ppm'), fontsize=fontsize)
+        ax.set_xlabel(_italic_label(NUC_label(nucgamma['Nuclide'], x_unit='ppm')), fontsize=fontsize)
     elif not x_is_ppm:
-        ax.set_xlabel("Slice number", fontsize=fontsize)
+        ax.set_xlabel(_italic_label("Slice number"), fontsize=fontsize)
 
     ax.set_title(f"Extracted {mode}")
 
@@ -3040,8 +3040,8 @@ def _plot_integral_curves(curves, ax, xlabel="Slice position", ylabel="Integral"
         else:
             ax.plot(x, y, marker='o', linestyle='-', label=label)
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
+    ax.set_xlabel(_italic_label(xlabel))
+    ax.set_ylabel(_italic_label(ylabel))
     ax.set_title(title)
 
     if xlims is not None:
@@ -3057,3 +3057,9 @@ def _plot_integral_curves(curves, ax, xlabel="Slice position", ylabel="Integral"
         ax.legend()
 
     return ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

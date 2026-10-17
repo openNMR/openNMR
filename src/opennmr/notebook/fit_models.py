@@ -354,9 +354,9 @@ def plot_fit_comparison(models, figure=None, residuals=True, show_components=Non
     ax.legend(frameon=False, fontsize=fontsize * 0.8)
     label = x_label or first.get("x_label") or ("Shift (ppm)" if not curve else "x")
     last = rax if rax is not None else ax
-    last.set_xlabel(label, fontsize=fontsize)
+    last.set_xlabel(_italic_label(label), fontsize=fontsize)
     if curve and first.get("y_label"):
-        ax.set_ylabel(first["y_label"], fontsize=fontsize)
+        ax.set_ylabel(_italic_label(first["y_label"]), fontsize=fontsize)
     for a in (ax, rax):
         if a is None:
             continue
@@ -367,7 +367,7 @@ def plot_fit_comparison(models, figure=None, residuals=True, show_components=Non
             apply_spine_style(a, top=False, right=False, bottom=True, left=True)
         apply_tick_style(a, labelsize=fontsize * 0.9, axis="x" if not curve else "both")
     if rax is not None:
-        rax.set_ylabel("Residuals", fontsize=fontsize * 0.8)
+        rax.set_ylabel(_italic_label("Residuals"), fontsize=fontsize * 0.8)
         ax.tick_params(labelbottom=False)
     if reverse_x:
         lo, hi = float(np.min(x0)), float(np.max(x0))
@@ -419,7 +419,7 @@ def _plot_fit_stack(models, figure, residuals, colours, fontsize, x_label, data_
         else:
             ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
     first = models[0]
-    axes[-1].set_xlabel(x_label or first.get("x_label") or ("Shift (ppm)" if not curve else "x"),
+    axes[-1].set_xlabel(_italic_label(x_label or first.get("x_label") or ("Shift (ppm)" if not curve else "x")),
                         fontsize=fontsize)
     if reverse_x:
         x0 = np.asarray(first["x"], dtype=float)
@@ -428,3 +428,9 @@ def _plot_fit_stack(models, figure, residuals, colours, fontsize, x_label, data_
     figure.fit_comparison_axes = {"rows": axes}
     _tight(figure)
     return figure
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

@@ -868,7 +868,7 @@ def plot_aligned_spectra(aligned, labels=None, mode: str = "stack", normalise: b
     if peak_ppm is not None:
         ax.axvline(peak_ppm, color="0.4", linewidth=0.8, linestyle="--", zorder=0)
     nucleus = dnp._nucleus_label(getattr(aligned[0].metadata, "nucleus", "")) if aligned else ""
-    ax.set_xlabel((f"{nucleus} shift (ppm)" + (", aligned" if aligned_axis else "")).strip(),
+    ax.set_xlabel(_italic_label((f"{nucleus} shift (ppm)" + (", aligned" if aligned_axis else "")).strip()),
                   fontsize=fontsize)
     if xlims is not None:
         ax.set_xlim(hi_x, lo_x)
@@ -936,14 +936,20 @@ def plot_field_profile(profile: dict, quantity: str = "both", relative: bool = F
             label = f"ε ({name.lower()}, ON/OFF)"
         else:
             label = f"1 − ON/OFF ({name.lower()})"
-        ax.set_ylabel(label.strip(), fontsize=fontsize)
+        ax.set_ylabel(_italic_label(label.strip()), fontsize=fontsize)
         apply_spine_style(ax, top=show_top_spine, right=show_right_spine, bottom=True, left=True)
         apply_tick_style(ax, labelsize=fontsize * 0.9)
         ax.tick_params(which="both", top=show_top_spine, right=show_right_spine)
     from matplotlib.ticker import MaxNLocator
-    axes[-1].set_xlabel(xlabel, fontsize=fontsize)
+    axes[-1].set_xlabel(_italic_label(xlabel), fontsize=fontsize)
     axes[-1].ticklabel_format(axis="x", useOffset=False)
     # B0 in T carries six or seven digits: few ticks, or they collide.
     axes[-1].xaxis.set_major_locator(MaxNLocator(nbins=4 if not relative else 6))
     figure.tight_layout()
     return figure
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

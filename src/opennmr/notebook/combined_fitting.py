@@ -961,10 +961,11 @@ def plot_combined_fit(fit, nuclide=None, show_sites=True, show_residual=True, xl
     lo, hi = (min(xlims), max(xlims)) if xlims else (x[m].min(), x[m].max())
     ax.set_xlim(hi, lo)
     nuclide = nuclide or fit.get("nuclide")
-    last.set_xlabel(NUC_label(nuclide, x_unit="ppm") if nuclide else "Shift (ppm)",
+    last.set_xlabel(_italic_label(NUC_label(nuclide, x_unit="ppm") if nuclide else "Shift (ppm)"),
                     fontsize=fontsize)
     if fname:
-        fig.savefig(fname, dpi=300, bbox_inches="tight")
+        from ..plotting.vector_export import save_vector_safe  # Illustrator-safe vectors
+        save_vector_safe(fig, fname, dpi=300, bbox_inches="tight")
     return fig, ax
 
 
@@ -989,3 +990,9 @@ def NMRCombinedFitWorkflow(datapath, sites, procno=1, show_plot=True, show_repor
                 w.writerow([fit["x"][i], fit["y"][i], fit["y_fit"][i]]
                            + [c[i] for c in fit["site_spectra"].values()] + [fit["baseline"][i]])
     return fit
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

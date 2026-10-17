@@ -1086,12 +1086,12 @@ def plot_quantity_trend(result, key, labels=None, x_values=None, xlabel="x",
     if not drawn:
         raise ValueError("Nothing to plot: every experiment needs a numeric x value, and the "
                          "chosen peaks must have this quantity.")
-    ax.set_xlabel(X_TRANSFORMS[x_transform][0].format(xlabel), fontsize=fontsize)
+    ax.set_xlabel(_italic_label(X_TRANSFORMS[x_transform][0].format(xlabel)), fontsize=fontsize)
     ylabel = quantity_title(key)
     if y_transform != "as is":
         ylabel = {"ln": f"ln[{ylabel}]", "log10": f"log10[{ylabel}]"}.get(
             y_transform, f"{quantity_title(key, with_unit=False)} ({y_transform})")
-    ax.set_ylabel(ylabel, fontsize=fontsize)
+    ax.set_ylabel(_italic_label(ylabel), fontsize=fontsize)
     if drawn > 1:
         ax.legend(frameon=False)
     return ax
@@ -1238,9 +1238,9 @@ def plot_multi_fit(result, figure=None, show_sites=True, xlims="window"):
         ax.set_title(f"{fit['label']} ({fit['nucleus']})", fontsize=9, loc="left")
     try:
         from .utils import NUC_label
-        axes[-1].set_xlabel(NUC_label(fits[-1]["nucleus"]))
+        axes[-1].set_xlabel(_italic_label(NUC_label(fits[-1]["nucleus"])))
     except Exception:  # noqa: BLE001 -- a label must not sink a plot
-        axes[-1].set_xlabel("δ (ppm)")
+        axes[-1].set_xlabel(_italic_label("δ (ppm)"))
     axes[0].legend(fontsize=7, loc="upper right")
     figure.tight_layout()
     return figure
@@ -1255,12 +1255,12 @@ def plot_parameter_trend(result, label, name, ax=None, xlabel="x"):
         _fig, ax = plt.subplots()
     if all(x is not None for x in xs):
         ax.errorbar(xs, vs, yerr=np.nan_to_num(es), fmt="o-", color="black", capsize=3)
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel(_italic_label(xlabel))
     else:
         ax.errorbar(range(len(vs)), vs, yerr=np.nan_to_num(es), fmt="o-", color="black", capsize=3)
         ax.set_xticks(range(len(vs)))
         ax.set_xticklabels(labs, rotation=45, ha="right")
-    ax.set_ylabel(f"{label}: {_pname(name)}")
+    ax.set_ylabel(_italic_label(f"{label}: {_pname(name)}"))
     return ax
 
 
@@ -1332,11 +1332,17 @@ def plot_parameter_trends(result, name, labels=None, ax=None, xlabel="x", x_valu
     if not drawn:
         raise ValueError(f"No site has the parameter {name!r} in any experiment.")
     if use_x:
-        ax.set_xlabel(xlabel, fontsize=fontsize)
+        ax.set_xlabel(_italic_label(xlabel), fontsize=fontsize)
     else:
         ax.set_xticks(range(len(experiments)))
         ax.set_xticklabels(experiments, rotation=45, ha="right")
-        ax.set_xlabel("Experiment", fontsize=fontsize)
-    ax.set_ylabel(_pname(name), fontsize=fontsize)
+        ax.set_xlabel(_italic_label("Experiment"), fontsize=fontsize)
+    ax.set_ylabel(_italic_label(_pname(name)), fontsize=fontsize)
     ax.legend(frameon=False)
     return ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

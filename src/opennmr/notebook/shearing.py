@@ -1217,8 +1217,8 @@ def plot_shear_scan(scan: dict, ax=None, *, show_matches: int = 4, fontsize: flo
         ax.annotate(f"{m['kappa']:+.3f}", (m["kappa"], 0.02), xycoords=("data", "axes fraction"),
                     rotation=90, fontsize=fontsize * 0.7, color="0.35", ha="right", va="bottom")
     sub = "t_2" if scan["direction"] == "t2" else "t_1"
-    ax.set_xlabel(fr"$\kappa^{{({sub})}}$", fontsize=fontsize)
-    ax.set_ylabel("Projection sharpness (norm.)", fontsize=fontsize)
+    ax.set_xlabel(_italic_label(fr"$\kappa^{{({sub})}}$"), fontsize=fontsize)
+    ax.set_ylabel(_italic_label("Projection sharpness (norm.)"), fontsize=fontsize)
     ax.tick_params(labelsize=fontsize * 0.9)
     ax.legend(frameon=False, fontsize=fontsize * 0.8)
     return ax
@@ -1253,3 +1253,9 @@ def plot_sideband_markers(ax, positions: list[dict], centre_f1: float, centre_f2
         ax.annotate(f"{p['k']},{p['j']}", (x, y), textcoords="offset points", xytext=(3, 3),
                     fontsize=fontsize, color=color)
     return ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

@@ -1121,8 +1121,15 @@ def plot_combined(result, nuclide="", show_sites=True, ax=None, pl_width=3.375,
         shown = (x >= lo) & (x <= hi)
         top = max(float(np.max(result["real_spec"][shown])) / scale, 1e-12)
         ax.set_ylim(-0.03 * top, 1.05 * top)
-    ax.set_xlabel(NUC_label(nuclide, x_unit="ppm") if nuclide else "Shift (ppm)",
+    ax.set_xlabel(_italic_label(NUC_label(nuclide, x_unit="ppm") if nuclide else "Shift (ppm)"),
                   fontsize=fontsize)
     if fname:
-        fig.savefig(fname, dpi=300, bbox_inches="tight")
+        from ..plotting.vector_export import save_vector_safe  # Illustrator-safe vectors
+        save_vector_safe(fig, fname, dpi=300, bbox_inches="tight")
     return ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

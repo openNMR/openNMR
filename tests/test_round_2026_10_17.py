@@ -417,6 +417,37 @@ def test_vt_regions_recover_two_barriers():
     assert len(ax.lines) >= 3
 
 
+def test_a_region_too_small_for_bpp_gets_an_arrhenius_line():
+    # User report (2026-10-17): two regions, one fitted line -- the second
+    # region held two points, too few for BPP's three free parameters, and
+    # its failure only showed in the results table.
+    import matplotlib
+    matplotlib.use("Agg")
+    T = np.array([283.3, 291.0, 299.0, 302.0, 304.5, 306.0, 308.0, 309.5, 311.0])
+    tau = vt.correlation_time(T, 1e-13, 0.40)
+    rate = vt.relaxation_rate(T, 61.4, 1e-13, 0.40, 1e8)
+    d = vt.vt_dataset(T, 1.0 / rate, larmor_MHz=61.4)
+    assert np.all(tau > 0)
+    result = vt.fit_vt_regions(d, [{"T_range": (297, 311)}, {"T_range": (283, 297)}],
+                               per_dataset_amplitude=True)
+    first, second = result["fits"]
+    assert "error" not in first and "error" not in second
+    assert second["kind"] == "arrhenius" and "Arrhenius" in second["model_choice"]
+    assert second["params"]["Ea_eV"] > 0
+    fig, ax = vt.plot_arrhenius_regions(result, d)
+    drawn = [ln for ln in ax.lines if ln.get_linestyle() in ("-", "--")]
+    assert len(drawn) >= 2                                   # one line per region
+    texts = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert any("Region 1" in t for t in texts) and any("Region 2" in t for t in texts)
+    # a region that cannot be fitted at all is named in the legend
+    result = vt.fit_vt_regions(d, [{"T_range": (297, 311)}, {"T_range": (250, 260)}])
+    fig, ax = vt.plot_arrhenius_regions(result, d)
+    assert any("not fitted" in t.get_text() for t in ax.get_legend().get_texts())
+    # and a model can be forced
+    forced = vt.fit_vt_regions(d, [{"T_range": (297, 311), "model": "arrhenius"}])
+    assert forced["fits"][0]["kind"] == "arrhenius"
+
+
 def test_bpp_regions_in_the_gui(qapp):
     window = MainWindow()
     panel = window.vt_relaxation_panel

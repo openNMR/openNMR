@@ -937,8 +937,8 @@ def NMR2D_plot_relaxation(fit_results, show_series=None, annotate=False,
                 fontsize=0.8 * style['fontsize'], color=data_colour,
             )
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
+    ax.set_xlabel(_italic_label(xlabel))
+    ax.set_ylabel(_italic_label(ylabel))
 
     if logplot:
         if logplot == 'x':
@@ -1225,3 +1225,9 @@ def NMR2D_relaxation_workflow(datapath, procno=1,
         "figure": fig, "axes": ax,
         "slices_figure": fig_slices, "slices_axes": ax_slices,
     }
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

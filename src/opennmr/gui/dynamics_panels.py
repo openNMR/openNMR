@@ -375,12 +375,19 @@ class VTRelaxationPanel(QWidget):
             "drawn over its own range only.")
         regions_blurb.setWordWrap(True)
         rv.addWidget(regions_blurb)
-        self.regions_table = QTableWidget(0, 4)
-        self.regions_table.setHorizontalHeaderLabels(["Name", "From (K)", "To (K)", "Processes"])
+        self.regions_table = QTableWidget(0, 5)
+        self.regions_table.setHorizontalHeaderLabels(
+            ["Name", "From (K)", "To (K)", "Processes", "Model"])
         self.regions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.regions_table.verticalHeader().setVisible(False)
         self.regions_table.setMinimumHeight(80)
-        self.regions_table.setToolTip("Temperatures in kelvin, whatever the table above uses.")
+        self.regions_table.setToolTip(
+            "Temperatures in kelvin, whatever the table above uses.\n\n"
+            "Model: BPP (the model above), Arrhenius line (a straight line through "
+            "ln(rate) against 1/k_BT -- the right model for one flank, and the only one "
+            "a region of two or three points can support), or Auto: BPP when the region "
+            "has at least two more points than BPP has free parameters, else the line. "
+            "A region that cannot be fitted is named on the plot with the reason.")
         rv.addWidget(self.regions_table)
         region_buttons = QHBoxLayout()
         self.add_region_button = QPushButton("Add Region")
@@ -884,7 +891,7 @@ class VTRelaxationPanel(QWidget):
 
     # ------------------------------------------------- temperature regions
     def add_region(self, lo: float | None = None, hi: float | None = None,
-                   processes: int = 1, name: str | None = None) -> None:
+                   processes: int = 1, name: str | None = None, model: str = "auto") -> None:
         t = self.regions_table
         r = t.rowCount()
         if lo is None or hi is None:
@@ -898,6 +905,12 @@ class VTRelaxationPanel(QWidget):
         for c, text in enumerate((name or f"Region {r + 1}", f"{lo:g}", f"{hi:g}",
                                   f"{int(processes)}")):
             t.setItem(r, c, QTableWidgetItem(text))
+        combo = QComboBox()
+        for text, key in (("Auto", "auto"), ("BPP", "bpp"), ("Arrhenius line", "arrhenius")):
+            combo.addItem(text, key)
+        index = combo.findData(model)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        t.setCellWidget(r, 4, combo)
 
     def remove_selected_regions(self) -> None:
         rows = sorted({i.row() for i in self.regions_table.selectedIndexes()}, reverse=True)
@@ -921,8 +934,10 @@ class VTRelaxationPanel(QWidget):
             n = int(_float(cells[3], 1) or 1)
             if not 1 <= n <= 3:
                 raise ValueError(f"Region row {r + 1}: 1 to 3 processes.")
+            combo = self.regions_table.cellWidget(r, 4)
             out.append({"label": cells[0] or f"Region {r + 1}", "T_range": (lo, hi),
-                        "n_processes": n})
+                        "n_processes": n,
+                        "model": combo.currentData() if combo is not None else "auto"})
         if not out:
             raise ValueError("Add at least one temperature region.")
         return out
@@ -957,7 +972,13 @@ class VTRelaxationPanel(QWidget):
                 if name.startswith("Ea_eV"):
                     note = (note + "; " if note else "") + f"{v * 96.485:.1f} kJ/mol"
                 self._result_row(f"{label}: {name}", v, fit["errors"].get(name), note)
+            self._result_row(f"{label}: model", float("nan"), None, fit.get("model_choice", ""))
         ok = [f for f in result["fits"] if "error" not in f]
+        failed = [f for f in result["fits"] if "error" in f]
+        if failed:
+            QMessageBox.warning(
+                self, "Temperature regions",
+                "\n".join(f"{f['region_label']}: not fitted -- {f['error']}" for f in failed))
         self.results_label.setText(
             f"{len(ok)} of {len(result['fits'])} region(s) fitted, each separately"
             + (": " + "; ".join(

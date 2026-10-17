@@ -219,7 +219,7 @@ def test_tables_csv_report_and_plots(tmp_path):
     fig = MF.plot_multi_fit(result)
     assert len(fig.axes) == 2
     ax = MF.plot_parameter_trend(result, "Al1", "C_Q", xlabel="T (K)")
-    assert ax.get_xlabel() == "T (K)"
+    assert ax.get_xlabel() == "$T$ (K)"
 
 
 def test_bad_inputs_are_named():

@@ -77,6 +77,7 @@ from ..notebook import csa_fitting as notebook_csa
 from ..notebook import simulations as notebook_simulations
 from ..notebook.simulations import CSA_ANISOTROPY_TIP, CSA_ASYMMETRY_TIP
 from ..notebook import manual_baseline as nb_manual_baseline
+from ..notebook import fonts as nb_fonts
 from .manual_baseline_box import ManualBaselineBox
 from ..notebook import diffusion as notebook_diffusion
 from ..notebook import fitting as notebook_fitting
@@ -4468,22 +4469,33 @@ class MainWindow(QMainWindow):
         style_form.addRow("Font size:", self.output_fontsize_spin)
 
         # --- Font family ------------------------------------------
-        # Offered as matplotlib's own generic families rather than a
-        # list of installed faces: a generic name resolves to something
-        # real on every machine, where a specific one silently falls
-        # back (with a warning nobody sees) on a machine that lacks it
-        # -- and a figure exported from one laptop should not come out
-        # in a different face on another.
+        # matplotlib's generic families first (they resolve to something
+        # on every machine), then every face matplotlib can draw with on
+        # this one (explicit user request, 2026-10-17: more typefaces),
+        # each shown in itself. notebook.fonts lists the same faces, so a
+        # notebook and the GUI agree. A named face saved on another
+        # computer that lacks it is kept and marked (see
+        # _sync_output_style_controls), not silently swapped.
         self.output_font_family_combo = QComboBox()
         self.output_font_family_combo.addItem("Default", "")
-        for family in ("sans-serif", "serif", "monospace", "cursive", "fantasy"):
+        for family in nb_fonts.GENERIC_FAMILIES:
             self.output_font_family_combo.addItem(family, family)
+        self.output_font_family_combo.insertSeparator(self.output_font_family_combo.count())
+        for family in nb_fonts.available_fonts():
+            self.output_font_family_combo.addItem(family, family)
+            self.output_font_family_combo.setItemData(
+                self.output_font_family_combo.count() - 1, QFont(family), Qt.ItemDataRole.FontRole)
+        self.output_font_family_combo.setMaxVisibleItems(20)
         self._narrow_combo(self.output_font_family_combo)
         self.output_font_family_combo.setToolTip(
             "Font family for every piece of text on the plot — title, axis "
-            "labels, tick labels and the legend.\n\n"
-            "Generic families only, so a figure looks the same wherever it is "
-            "opened; “Default” leaves matplotlib's own choice alone."
+            "labels, tick labels, the legend, and the maths in labels (¹³C, T₁).\n\n"
+            "The generic families (sans-serif, serif, ...) look the same wherever "
+            "the figure is made; a named face is one installed on this computer. "
+            "Saved PDFs embed it, so the text stays editable in Illustrator; SVGs "
+            "keep the letters as outlines, so they look the same without the font. "
+            "Type a name's first letters to jump to it. “Default” leaves "
+            "matplotlib's own choice alone."
         )
         self.output_font_family_combo.currentIndexChanged.connect(self._on_output_style_changed)
         style_form.addRow("Font family:", self.output_font_family_combo)
@@ -5628,6 +5640,13 @@ class MainWindow(QMainWindow):
         self.output_legend_checkbox.blockSignals(False)
         self.output_font_family_combo.blockSignals(True)
         family = self.output_font_family_combo.findData(settings["font_family"] or "")
+        if family < 0 and settings["font_family"]:
+            # A face saved on a computer that has it, opened on one that
+            # does not: shown as it is (matplotlib falls back), not
+            # silently replaced by another.
+            self.output_font_family_combo.addItem(
+                f"{settings['font_family']} (not installed here)", settings["font_family"])
+            family = self.output_font_family_combo.count() - 1
         if family >= 0:
             self.output_font_family_combo.setCurrentIndex(family)
         self.output_font_family_combo.blockSignals(False)

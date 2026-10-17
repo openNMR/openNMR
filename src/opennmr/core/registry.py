@@ -282,7 +282,7 @@ def NUC_label(NUC, x_unit='ppm', style='brackets', template=None):
 
     if style == 'slash':
         labeltext = (
-            r'$\mathregular{\delta} \,\, (' + superscript_slash + r'$'
+            r'$\delta \,\, (' + superscript_slash + r'$'
             + NUCalpha + ") / " + x_unit
         )
     elif style == 'brackets':

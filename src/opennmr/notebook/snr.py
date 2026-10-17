@@ -1425,7 +1425,7 @@ def plot_snr(spectra, result: dict | None = None, labels=None, figure=None, mode
                         xytext=(2, 3), textcoords="offset points", fontsize=legend_fontsize,
                         color=palette[i], clip_on=True)
     nucleus = rows[0].get("nucleus") or (data[0][2].get("nucleus") if data else "")
-    ax.set_xlabel(f"{_nucleus_label(nucleus or '')} shift (ppm)".strip(), fontsize=fontsize)
+    ax.set_xlabel(_italic_label(f"{_nucleus_label(nucleus or '')} shift (ppm)".strip()), fontsize=fontsize)
     ax.set_xlim(hi_x, lo_x)
     if names == "legend" and 1 < n <= 12:
         ax.legend(frameon=False, fontsize=legend_fontsize)
@@ -1487,8 +1487,8 @@ def _plot_snr_panels(spectra, rows, labels, figure, palette, fontsize, signal_co
                             textcoords="offset points", fontsize=annotation_fontsize)
             ax.set_xlim(float(x2.max()), float(x2.min()))
             ax.set_ylim(float(x1.max()), float(x1.min()))
-            ax.set_xlabel("F2 (ppm)", fontsize=fontsize * 0.8)
-            ax.set_ylabel("F1 (ppm)", fontsize=fontsize * 0.8)
+            ax.set_xlabel(_italic_label("F2 (ppm)"), fontsize=fontsize * 0.8)
+            ax.set_ylabel(_italic_label("F1 (ppm)"), fontsize=fontsize * 0.8)
         else:
             x, y, info = _xy(spectrum)
             base = r.get("noise_mean", 0.0)
@@ -1502,7 +1502,7 @@ def _plot_snr_panels(spectra, rows, labels, figure, palette, fontsize, signal_co
                 ax.annotate(f"S/N {r['snr']:.3g}", xy=(0.02, 0.92), xycoords="axes fraction",
                             fontsize=annotation_fontsize)
             ax.set_xlim(float(np.max(x)), float(np.min(x)))
-            ax.set_xlabel(f"{_nucleus_label(info.get('nucleus') or '')} shift (ppm)".strip(),
+            ax.set_xlabel(_italic_label(f"{_nucleus_label(info.get('nucleus') or '')} shift (ppm)".strip()),
                           fontsize=fontsize * 0.8)
             _spectrum_axes(ax, fontsize * 0.8)
         ax.set_title(labels[i], fontsize=title_fontsize or fontsize * 0.7)
@@ -1530,3 +1530,9 @@ def snr_python(signal_region, noise_region, regions=None, labels=None, **kwargs)
     lines.append("print(snr.snr_report(result))")
     lines.append("snr.plot_snr(spectra, result" + (", labels=labels" if labels else "") + ")")
     return "\n".join(lines)
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

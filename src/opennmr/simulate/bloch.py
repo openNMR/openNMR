@@ -860,8 +860,8 @@ def plot_pulse_simulation(sim, fig, title=None):
     t_scale, t_unit = time_unit(sim.get("duration_us", sim["time_us"][-1] if len(sim["time_us"]) else 1.0))
     time_axis = np.asarray(sim["time_us"], dtype=float) / t_scale
     ax_shape.plot(time_axis, sim["amp_profile"], color='k', label='Amplitude (normalised)')
-    ax_shape.set_xlabel(f"Time / {t_unit}")
-    ax_shape.set_ylabel("Amplitude (normalised)")
+    ax_shape.set_xlabel(_italic_label(f"Time / {t_unit}"))
+    ax_shape.set_ylabel(_italic_label("Amplitude (normalised)"))
     ax_shape.set_ylim(-0.05, 1.05)
     ax_phase = ax_shape.twinx()
     if "freq_profile_hz" in sim:
@@ -871,11 +871,11 @@ def plot_pulse_simulation(sim, fig, title=None):
         f_scale, f_unit = (1e6, "MHz") if np.max(np.abs(freq)) >= 1e6 else (1e3, "kHz")
         ax_phase.plot(time_axis, freq / f_scale, color=_PHASE_COLOUR,
                       linestyle='--', label=f'Frequency [{f_unit}]')
-        ax_phase.set_ylabel(f"RF offset / {f_unit}", color=_PHASE_COLOUR)
+        ax_phase.set_ylabel(_italic_label(f"RF offset / {f_unit}"), color=_PHASE_COLOUR)
     else:
         ax_phase.plot(time_axis, sim["phase_profile_deg"], color=_PHASE_COLOUR,
                       linestyle='--', label='Phase [deg]')
-        ax_phase.set_ylabel("Phase / deg", color=_PHASE_COLOUR)
+        ax_phase.set_ylabel(_italic_label("Phase / deg"), color=_PHASE_COLOUR)
     ax_phase.tick_params(axis='y', labelcolor=_PHASE_COLOUR)
     ax_shape.set_title("Pulse shape")
 
@@ -896,8 +896,8 @@ def plot_pulse_simulation(sim, fig, title=None):
         ax_prof.plot(offsets, sim["My"][pi], color=colors[pi],
                      linestyle=':', alpha=0.7, label='My' + label_suffix)
     ax_prof.axhline(0, color='gray', linewidth=0.5)
-    ax_prof.set_xlabel(f"Offset / {o_unit}")
-    ax_prof.set_ylabel("Magnetisation (M0=1)")
+    ax_prof.set_xlabel(_italic_label(f"Offset / {o_unit}"))
+    ax_prof.set_ylabel(_italic_label("Magnetisation (M0=1)"))
     ax_prof.set_ylim(-1.05, 1.05)
     ax_prof.set_title("Excitation profile (no relaxation)")
     ax_prof.legend(fontsize=8, ncol=3 if has_power_sweep else 1)
@@ -906,3 +906,9 @@ def plot_pulse_simulation(sim, fig, title=None):
         fig.suptitle(title)
     fig.tight_layout()
     return ax_shape, ax_prof
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

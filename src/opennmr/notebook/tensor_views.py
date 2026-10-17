@@ -226,9 +226,9 @@ def _finish_3d(ax, extent, fontsize, unit_label, style=None):
     for setter in (ax.set_xlim, ax.set_ylim, ax.set_zlim):
         setter(-extent, extent)
     ax.set_box_aspect((1, 1, 1))
-    ax.set_xlabel(f"x ({unit_label})", fontsize=fontsize * 0.85, labelpad=2)
-    ax.set_ylabel(f"y ({unit_label})", fontsize=fontsize * 0.85, labelpad=2)
-    ax.set_zlabel(f"z ({unit_label})", fontsize=fontsize * 0.85, labelpad=2)
+    ax.set_xlabel(_italic_label(f"x ({unit_label})"), fontsize=fontsize * 0.85, labelpad=2)
+    ax.set_ylabel(_italic_label(f"y ({unit_label})"), fontsize=fontsize * 0.85, labelpad=2)
+    ax.set_zlabel(_italic_label(f"z ({unit_label})"), fontsize=fontsize * 0.85, labelpad=2)
     # Tick labels the same size as the axis labels (user request, 2026-10-01).
     ax.tick_params(labelsize=fontsize * 0.85, pad=0)
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
@@ -541,7 +541,7 @@ def plot_tensor_surface(site, larmor_Hz=None, transition=None, order="second",
     figure.tensor_mappable = mappable
     if look["colorbar"]:
         bar = figure.colorbar(mappable, ax=ax, shrink=0.65, pad=0.08)
-        bar.set_label("δ − δ$_{iso}$ (ppm)" if relative_to == "iso" else "δ (ppm)",
+        bar.set_label(_italic_label("δ − δ$_{iso}$ (ppm)" if relative_to == "iso" else "δ (ppm)"),
                       fontsize=fontsize * 0.85)
         bar.ax.tick_params(labelsize=fontsize * 0.85)
         bar.formatter.set_useOffset(False)
@@ -680,3 +680,9 @@ def plot_tensors(site, larmor_Hz=None, style="surface", **kwargs):
                   if k in ("figure", "fontsize", "tensor_style", "frame")}
         return plot_tensor_ellipsoids(site, **kwargs)
     raise ValueError("style must be 'surface' or 'ellipsoid'.")
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

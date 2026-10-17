@@ -211,3 +211,97 @@ def label_traces(ax, lines=None, names=None, position: float = 0.02, fontsize=No
         text._opennmr_trace_label = True
         texts.append(text)
     return texts
+
+
+# ----------------------------------------------------------------------
+# Quantity symbols in italics (explicit user request, 2026-10-17: "any
+# algebraic parameter name (T for temperature, T_1 ...) needs to have the
+# letter italicised"). IUPAC: a quantity's symbol is italic; numbers,
+# units and descriptive subscripts (iso, EFG, max) are upright.
+# ----------------------------------------------------------------------
+
+import re as _re
+
+_GREEK = {"α": r"\alpha", "β": r"\beta", "γ": r"\gamma", "δ": r"\delta", "ε": r"\epsilon",
+          "η": r"\eta", "θ": r"\theta", "κ": r"\kappa", "λ": r"\lambda",
+          "ν": r"\nu", "ρ": r"\rho", "σ": r"\sigma", "τ": r"\tau", "φ": r"\phi",
+          "χ": r"\chi", "ω": r"\omega", "Δ": r"\Delta", "Γ": r"\Gamma", "Ω": r"\Omega"}
+_SUBSCRIPT_DIGITS = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+_SYMBOL_CHARS = "A-Za-z" + "".join(_GREEK)
+_SUB = "₀₁₂₃₄₅₆₇₈₉"
+#: A label that starts with a symbol: one letter (Δ may lead), Unicode
+#: subscript digits and an optional ρ, then a unit in brackets, a slash,
+#: "=", or nothing -- "T (K)", "t (min)", "T₁ρ (ms)", "δ / ppm", "D".
+_LEADING = _re.compile(
+    rf"^(?P<sym>Δ?[{_SYMBOL_CHARS}])(?P<sub>[{_SUB}]*ρ?)(?P<rest>(?:\s*[(/=].*)?)$")
+#: A symbol with Unicode subscript digits anywhere: "ln(T₁)", "R₂ fit".
+_INLINE = _re.compile(rf"(?<![{_SYMBOL_CHARS}\\$])(?P<sym>[A-Z])(?P<sub>[{_SUB}]+ρ?)"
+                      rf"(?![{_SYMBOL_CHARS}])")
+#: Upright text followed by a mathtext subscript: "x$_{EFG}$", "δ$_{xx}$".
+_SPLIT = _re.compile(rf"(?<![{_SYMBOL_CHARS}\\$])(?P<sym>[{_SYMBOL_CHARS}])\$_\{{(?P<sub>[^{{}}$]*)\}}\$")
+
+
+def _symbol(sym: str) -> str:
+    return "".join(_GREEK.get(ch, ch) for ch in sym)
+
+
+def _subscript(sub: str) -> str:
+    """``"₁ρ"`` -> ``"_{1\\rho}"``; a word (iso, EFG, max) upright."""
+    sub = sub.translate(_SUBSCRIPT_DIGITS).replace("ρ", r"\rho")
+    if not sub:
+        return ""
+    if _re.fullmatch(r"[A-Za-z]{2,}", sub) and sub.lower() not in ("xx", "yy", "zz", "xy",
+                                                                     "xz", "yz", "ij"):
+        return rf"_{{\mathrm{{{sub}}}}}"
+    return f"_{{{sub}}}"
+
+
+def italicise_symbols(text) -> str:
+    """``text`` with its quantity symbols in italic mathtext:
+
+    * a label that *is* a symbol and unit -- ``"T (K)"`` -> ``"$T$ (K)"``,
+      ``"T₁ρ (ms)"`` -> ``"$T_{1\\rho}$ (ms)"``, ``"δ (ppm)"`` ->
+      ``"$\\delta$ (ppm)"``;
+    * a symbol with Unicode subscripts anywhere -- ``"ln(T₁)"``;
+    * an upright letter before a mathtext subscript -- ``"δ$_{iso}$"`` ->
+      ``"$\\delta_{\\mathrm{iso}}$"``.
+
+    Words, units and existing mathtext are left alone ("Delay (s)" stays
+    as it is), so it is safe to pass any axis label through. Non-strings
+    come back unchanged."""
+    if not isinstance(text, str) or not text.strip():
+        return text
+    if "$" not in text:
+        m = _LEADING.match(text)
+        if m:
+            return f"${_symbol(m['sym'])}{_subscript(m['sub'])}$" + _outside(m["rest"])
+    out = _SPLIT.sub(lambda m: f"${_symbol(m['sym'])}{_subscript(m['sub'])}$", text)
+    if out.count("$") % 2:
+        return text                 # unbalanced: not ours to touch
+    parts = out.split("$")
+    first = _LEADING.match(parts[0]) if parts[0] else None
+    if first and first["rest"]:
+        # "D ($\mathregular{m^2 s^{-1}}$)": a symbol before a mathtext unit
+        parts[0] = (f"${_symbol(first['sym'])}{_subscript(first['sub'])}$"
+                    + _outside(first["rest"]))
+        return "$".join([parts[0]] + [_outside(p) if i % 2 == 0 else p
+                                      for i, p in enumerate(parts[1:], start=1)])
+    return "$".join(_outside(p) if i % 2 == 0 else p for i, p in enumerate(parts))
+
+
+#: A Greek letter standing alone in plain text: "δ − ...", "τ fit".
+_LONE_GREEK = _re.compile(rf"(?<![{_SYMBOL_CHARS}\\])(?P<g>[{''.join(_GREEK)}])"
+                          rf"(?![{_SYMBOL_CHARS}])")
+
+
+#: Reciprocal temperature: "1000/T (K)", "1/T".
+_RECIPROCAL = _re.compile(rf"(?P<pre>(?<![0-9.])(?:1000|100|10|1)/)(?P<sym>T)(?![{_SYMBOL_CHARS}])")
+
+
+def _outside(segment: str) -> str:
+    """Symbols in a stretch of plain (non-mathtext) label text."""
+    segment = _RECIPROCAL.sub(lambda mm: f"{mm['pre']}${mm['sym']}$", segment)
+    segment = _INLINE.sub(lambda mm: f"${_symbol(mm['sym'])}{_subscript(mm['sub'])}$", segment)
+    pieces = segment.split("$")
+    return "$".join(_LONE_GREEK.sub(lambda g: f"${_GREEK[g['g']]}$", p) if i % 2 == 0 else p
+                    for i, p in enumerate(pieces))

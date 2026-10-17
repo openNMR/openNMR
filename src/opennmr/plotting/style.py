@@ -447,7 +447,9 @@ def apply_default_font(font='Arial'):
     plt.rcParams['mathtext.rm'] = font
     plt.rcParams['mathtext.it'] = f'{font}:italic'
     plt.rcParams['mathtext.bf'] = f'{font}:bold'
-    plt.rcParams['mathtext.default'] = 'regular'
+    # Italic: a quantity's symbol ($T$, $T_1$) is italic (IUPAC; user
+    # request, 2026-10-17). Descriptive subscripts are \mathrm where used.
+    plt.rcParams['mathtext.default'] = 'it'
 
 
 def setup_plotting(font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
@@ -775,7 +777,10 @@ def save_figure(fig, fig_name='nmr_plot', save_format='png', dpi=300):
     root, ext = os.path.splitext(fig_name)
     path = fig_name if ext.lower().lstrip('.') in VALID_SAVE_FORMATS else f"{fig_name}.{save_format}"
 
-    fig.savefig(path, dpi=dpi)
+    # Vector formats thinned for Illustrator and fonts embedded as
+    # TrueType (plotting.vector_export, 2026-10-17).
+    from .vector_export import save_vector_safe
+    save_vector_safe(fig, path, dpi=dpi)
     return path
 
 

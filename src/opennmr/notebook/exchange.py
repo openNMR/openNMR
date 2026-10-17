@@ -771,11 +771,11 @@ def plot_exchange_stack(results, ax=None, offset: float = 1.1, colours=None,
     ax.set_xlim(xlim if xlim is not None else (float(np.max(ppm)), float(np.min(ppm))))
     if nucleus:
         try:
-            ax.set_xlabel(NUC_label(nucleus))
+            ax.set_xlabel(_italic_label(NUC_label(nucleus)))
         except Exception:  # noqa: BLE001 -- a label is not worth failing a plot over
-            ax.set_xlabel(f"δ {nucleus} (ppm)")
+            ax.set_xlabel(_italic_label(f"δ {nucleus} (ppm)"))
     else:
-        ax.set_xlabel(r"$\delta$ (ppm)")
+        ax.set_xlabel(_italic_label(r"$\delta$ (ppm)"))
     ax.yaxis.set_visible(False)
     for side in ("left", "right", "top"):
         ax.spines[side].set_visible(False)
@@ -815,11 +815,11 @@ def plot_exchange_fit(fit, ax=None, offset: float = 1.1, nucleus: str | None = N
     ax.set_xlim(hi, lo)
     if nucleus:
         try:
-            ax.set_xlabel(NUC_label(nucleus))
+            ax.set_xlabel(_italic_label(NUC_label(nucleus)))
         except Exception:  # noqa: BLE001
-            ax.set_xlabel(f"δ {nucleus} (ppm)")
+            ax.set_xlabel(_italic_label(f"δ {nucleus} (ppm)"))
     else:
-        ax.set_xlabel(r"$\delta$ (ppm)")
+        ax.set_xlabel(_italic_label(r"$\delta$ (ppm)"))
     ax.yaxis.set_visible(False)
     for side in ("left", "right", "top"):
         ax.spines[side].set_visible(False)
@@ -846,3 +846,9 @@ def exchange_notebook_code(sites, hops, temperatures, larmor_MHz, gauss_fwhm_ppm
         "    print(r['log'])",
         f"fig, ax = plot_exchange_stack(results, nucleus={nucleus!r})",
     ])
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

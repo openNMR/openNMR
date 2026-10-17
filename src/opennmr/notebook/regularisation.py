@@ -703,15 +703,15 @@ def plot_regularisation(result, fig=None, time_unit="ms", colour="#0072B2",
         ax.semilogx(grid, result["nnls_amplitudes"], color="0.5", linewidth=0.8,
                     linestyle=":", label="NNLS (no regularisation)")
         ax.legend()
-    ax.set_xlabel(f"{result['axis']} ({unit})")
-    ax.set_ylabel("Amplitude")
+    ax.set_xlabel(_italic_label(f"{result['axis']} ({unit})"))
+    ax.set_ylabel(_italic_label("Amplitude"))
     ax.set_title(f"{result['axis']} distribution")
     i = 1
     if show_cumulative:
         ax = axes[i]
         ax.semilogx(grid, result["cumulative"], color=colour, linewidth=linewidth)
-        ax.set_xlabel(f"{result['axis']} ({unit})")
-        ax.set_ylabel("Cumulative amplitude")
+        ax.set_xlabel(_italic_label(f"{result['axis']} ({unit})"))
+        ax.set_ylabel(_italic_label("Cumulative amplitude"))
         ax.set_title("Cumulative")
         i += 1
     xs = result["x"] if result["kernel"] == "diffusion" else result["x"] / scale
@@ -721,8 +721,8 @@ def plot_regularisation(result, fig=None, time_unit="ms", colour="#0072B2",
     order = np.argsort(xs)
     ax.plot(xs[order], result["y_fit"][order], color=fit_colour, linewidth=linewidth,
             label="Fit")
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Intensity")
+    ax.set_xlabel(_italic_label(xlabel))
+    ax.set_ylabel(_italic_label("Intensity"))
     ax.set_title("Data and fit")
     ax.legend()
     i += 1
@@ -730,8 +730,8 @@ def plot_regularisation(result, fig=None, time_unit="ms", colour="#0072B2",
         ax = axes[i]
         ax.plot(xs, result["residuals"], "o", color=fit_colour, markersize=markersize * 0.8)
         ax.axhline(0.0, color="0.5", linewidth=0.8)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("Residual")
+        ax.set_xlabel(_italic_label(xlabel))
+        ax.set_ylabel(_italic_label("Residual"))
         ax.set_title("Residuals")
     fig.tight_layout()
     return fig
@@ -764,8 +764,8 @@ def plot_regularisation_2d(result, fig=None, time_unit="ms", cmap="viridis", lev
                linewidths=0.4)
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel(f"{result['axis1']} ({u1})")
-    ax.set_ylabel(f"{result['axis2']} ({u2})")
+    ax.set_xlabel(_italic_label(f"{result['axis1']} ({u1})"))
+    ax.set_ylabel(_italic_label(f"{result['axis2']} ({u2})"))
     times = result["kernel1"] != "diffusion" and result["kernel2"] != "diffusion"
     if show_diagonal is None:
         show_diagonal = times
@@ -790,3 +790,9 @@ def notebook_code(result_kwargs: dict) -> str:
             f"result = nmr.regularise(x, y, {args})\n"
             "print(nmr.regularisation_report(result))\n"
             "nmr.plot_regularisation(result)")
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

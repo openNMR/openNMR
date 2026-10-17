@@ -135,7 +135,7 @@ def plot_1d_stack(spectra: list[NMRSpectrum], ax=None, fig=None, color: str = "b
     else:
         ax.set_xlim(xlims[0], xlims[1])
 
-    ax.set_xlabel(xlabel if xlabel is not None else labeltext)
+    ax.set_xlabel(_italic_label(xlabel if xlabel is not None else labeltext))
     apply_spine_style(ax, top=False, right=False, bottom=True, left=False)
     ax.set_yticks([])
     apply_tick_style(ax, direction=tick_dir, length=tick_length, width=tick_width,
@@ -229,7 +229,7 @@ def plot_1d_heatmap(spectra: list[NMRSpectrum], ax=None, fig=None, x_unit: str =
     else:
         ax.set_xlim(xlims[0], xlims[1])
 
-    ax.set_xlabel(xlabel if xlabel is not None else labeltext)
+    ax.set_xlabel(_italic_label(xlabel if xlabel is not None else labeltext))
     ax.invert_xaxis()
 
     apply_spine_style(ax, top=False, right=False, bottom=True, left=True)
@@ -253,7 +253,7 @@ def plot_1d_heatmap(spectra: list[NMRSpectrum], ax=None, fig=None, x_unit: str =
         ax.tick_params(axis="y", which="minor", length=0)
 
     if ylabel is not None:
-        ax.set_ylabel(ylabel)
+        ax.set_ylabel(_italic_label(ylabel))
 
     if colorbar:
         cbar = fig.colorbar(im, ax=ax)
@@ -268,3 +268,9 @@ def plot_1d_heatmap(spectra: list[NMRSpectrum], ax=None, fig=None, x_unit: str =
             save_figure(fig, fig_name=fig_name, save_format=save_format)
 
     return fig, ax, im
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

@@ -991,12 +991,12 @@ def NMR1dplot_with_fit(results, popt, peak_defs, fit_regions=None, x_unit='ppm',
                       pad=tick_pad, num_ticks=tick_number, axis='x')
 
     if xlabel is not None:
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel(_italic_label(xlabel))
     else:
         NUC = results.get('nuclide', 'unknown')
         SFO1 = results.get('SFO1', 0)
         nucgamma = find_gamma(NUC, field=field, SFO1=SFO1)
-        ax.set_xlabel(NUC_label(nucgamma['Nuclide'], x_unit=x_unit))
+        ax.set_xlabel(_italic_label(NUC_label(nucgamma['Nuclide'], x_unit=x_unit)))
 
     ax.legend()
     fig.set_figheight(pl_height)
@@ -1742,8 +1742,8 @@ def NMR2D_plot_integrals(fits, mode="rows", x_axis="shift", normalised=False,
         else:
             ax.plot(x, y, marker="o", linestyle="-", label=label, color=colour)
 
-    ax.set_xlabel(xlabel if xlabel is not None else xlabel_default)
-    ax.set_ylabel(ylabel if ylabel is not None else ("Peak integral (%)" if normalised else "Peak integral"))
+    ax.set_xlabel(_italic_label(xlabel if xlabel is not None else xlabel_default))
+    ax.set_ylabel(_italic_label(ylabel if ylabel is not None else ("Peak integral (%)" if normalised else "Peak integral")))
 
     if xlims is not None:
         ax.set_xlim(xlims)
@@ -1911,3 +1911,9 @@ def NMR2D_workflow(datapath, peak_defs=None, procno=1,
         output["columns"] = process_direction("columns", columns, column_shifts, column_width)
 
     return output
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

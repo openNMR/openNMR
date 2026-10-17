@@ -716,7 +716,7 @@ def NMR1dplot_with_quad_fit(results, popt, fit_info, fit_regions=None, show_comp
         except Exception:  # noqa: BLE001 -- a label must not sink a plot
             pass
         xlabel = NUC_label(nuc, x_unit="ppm") if nuc else "Shift (ppm)"
-    last.set_xlabel(xlabel)
+    last.set_xlabel(_italic_label(xlabel))
     fig.set_figwidth(style["pl_width"])
     fig.set_figheight(style["pl_height"] * (1.25 if rax is not None else 1.0))
     if save_fig:
@@ -779,3 +779,9 @@ def NMRQuadFitWorkflow(datapath, p0=None, procno=1, I=None, nucleus=None, larmor
             "derived": quadrupolar_derived(popt, pcov, info), "x": x[mask], "y": y[mask],
             "y_fit": y_fit[mask], "components": [c[mask] for c in comps], "report": report,
             "figure": fig, "axes": ax}
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

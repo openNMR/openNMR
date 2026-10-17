@@ -1258,6 +1258,21 @@ def fit_spectrum(spectrum: NMRSpectrum, peak_defs, fit_regions=None, use_normali
 
     lower, upper = build_bounds(peak_defs, positive_intensity=positive_intensity,
                                  allow_negative_intensity=allow_negative_intensity)
+    # A width with no upper limit of its own is capped at twice the whole
+    # spectrum's span: no lineshape is broader than that, and without a
+    # cap a fit whose amplitude is pinned at a bound (amplitude_bound_
+    # regions, a manual limit) widens the peak forever towards a flat
+    # line and never converges -- seen as "did not converge within 2,000
+    # iterations" where the capped amplitude was the right answer
+    # (2026-10-17).
+    span = float(np.ptp(x_full)) if np.size(x_full) > 1 else 0.0
+    if span > 0:
+        index = 0
+        for peak in peak_defs:
+            step = 3 if peak["type"] in ["gaussian", "lorentzian"] else 4
+            if not np.isfinite(upper[index + 1]):
+                upper[index + 1] = 2.0 * span
+            index += step
     lower = np.append(lower, [-np.inf, -np.inf])
     upper = np.append(upper, [np.inf, np.inf])
 
@@ -1279,10 +1294,29 @@ def fit_spectrum(spectrum: NMRSpectrum, peak_defs, fit_regions=None, use_normali
         full = reconstruct_full(p0, free_params, is_free)
         return build_model(x, full, peak_defs, x_ref)
 
-    popt_free, pcov_free = _fit_progress.limited_curve_fit(
-        _fit_progress.tracked(model_wrapper, y, n_free=int(is_free.sum())), x, y, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
-        label="The spectral fit",
-    )
+    try:
+        popt_free, pcov_free = _fit_progress.limited_curve_fit(
+            _fit_progress.tracked(model_wrapper, y, n_free=int(is_free.sum())), x, y, p0=p0[is_free], bounds=(lower[is_free], upper[is_free]),
+            label="The spectral fit",
+        )
+    except _fit_progress.FitNotConverged as exc:
+        # One retry from the best point reached, with each parameter
+        # scaled by its own sensitivity (x_scale="jac"). A parameter
+        # pinned at a bound (an amplitude capped by amplitude_bound_
+        # regions) leaves the others creeping along a nearly flat
+        # direction, which unscaled TRF crawls along until the limit
+        # (2026-10-17). Only a fit that failed is retried, so every
+        # converging fit is exactly as before; if the retry fails too,
+        # the original report stands.
+        start = p0[is_free] if exc.best_params is None or len(exc.best_params) != int(is_free.sum()) \
+            else np.clip(exc.best_params, lower[is_free], upper[is_free])
+        try:
+            popt_free, pcov_free = _fit_progress.limited_curve_fit(
+                _fit_progress.tracked(model_wrapper, y, n_free=int(is_free.sum())), x, y, p0=start,
+                bounds=(lower[is_free], upper[is_free]), label="The spectral fit", x_scale="jac",
+            )
+        except _fit_progress.FitNotConverged:
+            raise exc from None
 
     popt = reconstruct_full(p0, popt_free, is_free)
 

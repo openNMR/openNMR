@@ -176,7 +176,10 @@ def setup_plotting(font='Arial', fontsize=12, pl_width=3.375, pl_height=3.375,
     plt.rcParams['mathtext.rm'] = font        # regular
     plt.rcParams['mathtext.it'] = f'{font}:italic'
     plt.rcParams['mathtext.bf'] = f'{font}:bold'
-    plt.rcParams['mathtext.default'] = 'regular'  # avoids italicising bare mathtext text like 'mix'
+    # Italic, as IUPAC sets a quantity's symbol ($T$, $T_1$, $\delta$; user
+    # request, 2026-10-17 -- 'regular' had set them upright). Descriptive
+    # subscripts are written \mathrm{...} where they occur (iso, EFG).
+    plt.rcParams['mathtext.default'] = 'it'
 
     params = {
         'legend.fontsize': 'large',
@@ -349,7 +352,8 @@ def save_figure(fig, fig_name='nmr_plot', save_format='png', dpi=300):
     else:
         path = f"{fig_name}.{save_format}"
 
-    fig.savefig(path, dpi=dpi)
+    from ..plotting.vector_export import save_vector_safe  # Illustrator-safe vectors
+    save_vector_safe(fig, path, dpi=dpi)
 
     return path
 
@@ -443,7 +447,8 @@ def _save_spectrum_figure(fig, fname, default_dir, default_name):
     if not fname:
         return
     out_path = os.path.join(default_dir or ".", default_name) if fname is True else fname
-    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    from ..plotting.vector_export import save_vector_safe  # Illustrator-safe vectors
+    save_vector_safe(fig, out_path, dpi=300, bbox_inches="tight")
 
 
 def plot_spectrum_dict(spectrum_dict, ax=None, axis="ppm", channel="real",
@@ -491,7 +496,7 @@ def plot_spectrum_dict(spectrum_dict, ax=None, axis="ppm", channel="real",
         ax.invert_xaxis()
 
     nuclide = spectrum_dict.get("nuclide", "")
-    ax.set_xlabel(NUC_label(nuclide, x_unit=axis), fontsize=fontsize)
+    ax.set_xlabel(_italic_label(NUC_label(nuclide, x_unit=axis)), fontsize=fontsize)
 
     if label is not None:
         ax.legend(fontsize=fontsize * 0.85)
@@ -697,7 +702,7 @@ def plot_quadrupolar_orders(comparison, nuclide="", components=None, show_differ
     else:
         label_ax = ax
 
-    label_ax.set_xlabel(NUC_label(nuclide, x_unit="ppm") if nuclide else "Shift (ppm)",
+    label_ax.set_xlabel(_italic_label(NUC_label(nuclide, x_unit="ppm") if nuclide else "Shift (ppm)"),
                         fontsize=fontsize)
     if xlims == 'default':
         if invert_x:
@@ -705,5 +710,12 @@ def plot_quadrupolar_orders(comparison, nuclide="", components=None, show_differ
     else:
         ax.set_xlim(max(xlims), min(xlims)) if invert_x else ax.set_xlim(min(xlims), max(xlims))
     if fname:
-        fig.savefig(fname, dpi=300, bbox_inches="tight")
+        from ..plotting.vector_export import save_vector_safe  # Illustrator-safe vectors
+        save_vector_safe(fig, fname, dpi=300, bbox_inches="tight")
     return ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

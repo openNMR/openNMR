@@ -118,7 +118,7 @@ def test_plot_and_table(series):
     ax = matplotlib.figure.Figure().add_subplot(111)
     mf.plot_quantity_trend(series, "fwhm_Hz", labels=["A", "B"], xlabel="T (K)",
                            x_transform="1000_over", ax=ax)
-    assert ax.get_xlabel() == "1000/T (K)" and ax.get_ylabel() == "Linewidth (FWHM) (Hz)"
+    assert ax.get_xlabel() == "1000/$T$ (K)" and ax.get_ylabel() == "Linewidth (FWHM) (Hz)"
     assert [t.get_text() for t in ax.get_legend().get_texts()] == ["A", "B"]
     xs = ax.lines[0].get_xdata()
     assert list(xs) == pytest.approx(sorted(1000.0 / np.array(TEMPS)))
@@ -176,7 +176,7 @@ def test_gui_plots_any_quantity_against_x(qapp, _dialogs):
     assert panel.plot_quantity()
     ax = window.fit_canvas.figure.axes[0]
     assert window.canvas_tabs.currentWidget() is window.fit_canvas
-    assert ax.get_xlabel() == "T (K)" and ax.get_ylabel() == "Linewidth (FWHM) (Hz)"
+    assert ax.get_xlabel() == "$T$ (K)" and ax.get_ylabel() == "Linewidth (FWHM) (Hz)"
     a_line = next(c for c in ax.containers if c.get_label() == "A").lines[0]
     assert list(a_line.get_xdata()) == list(TEMPS)
     assert list(a_line.get_ydata()) == pytest.approx([80, 64, 48, 32], rel=0.03)
@@ -186,7 +186,7 @@ def test_gui_plots_any_quantity_against_x(qapp, _dialogs):
     panel.set_quantity_labels(["A"])
     assert panel.plot_quantity()
     ax = window.fit_canvas.figure.axes[0]
-    assert ax.get_xlabel() == "1000/T (K)" and ax.get_ylabel().startswith("ln[")
+    assert ax.get_xlabel() == "1000/$T$ (K)" and ax.get_ylabel().startswith("ln[")
     assert "Centre" not in panel.quantity_note_label.text()
     csv = panel.quantity_csv().splitlines()
     assert csv[0].startswith("experiment,T (K),A: Linewidth")

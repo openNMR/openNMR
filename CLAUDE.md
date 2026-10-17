@@ -261,6 +261,13 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   steppable; stepping one makes it `manual_*`. Spline modes: `spline_auto`,
   `spline_points` (`baseline_spline_x`, `fitting.spline_through_points`),
   `spline` (smoothing, binned to ≤400 candidates -- never fit thousands).
+- **Fonts**: `notebook/fonts.py` lists faces; Plot Style offers them; maths follows a named
+  face at draw time. **Vector saves** go through `plotting/vector_export.vector_safe`
+  (Illustrator drops paths over ~32k points; fonts embedded as TrueType) -- save new
+  figures with `save_vector_safe`, never a bare `fig.savefig`.
+- **Italic symbols**: `mathtext.default` is `"it"`; plain labels pass through
+  `plotting.labels.italicise_symbols` (canvas restyle; `_italic_label` round every
+  `set_xlabel`). Write descriptive subscripts `\mathrm{...}`.
 - **Offset Tracker** (Integrate; `gui/offset_tracker_panel.py` over
   `notebook/offset_tracker.py`): integrals against O2/O3 in ppm (O/BF), the
   skyline kept as a derived 1D of the pulsed nucleus.

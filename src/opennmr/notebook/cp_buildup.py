@@ -453,8 +453,8 @@ def plot_cp_buildup(series: dict, fit: dict | None = None, ax=None, time_unit: s
     if fit is not None:
         ax.plot(np.asarray(fit["curve_t"]) * scale, fit["curve_y"], "-",
                 color=fit_colour or "#d55e00", lw=1.5, label=f"Fit ({fit['equation']})", zorder=2)
-    ax.set_xlabel(f"Contact time ({time_unit})")
-    ax.set_ylabel(series.get("unit", "Integral"))
+    ax.set_xlabel(_italic_label(f"Contact time ({time_unit})"))
+    ax.set_ylabel(_italic_label(series.get("unit", "Integral")))
     ax.axhline(0.0, color="0.6", lw=0.6, zorder=1)
     ax.set_xlim(left=0)
     ax.legend(frameon=False)
@@ -510,10 +510,16 @@ def plot_cp_buildups(series_list, fits=None, ax=None, time_unit: str = "auto", f
         if fit is not None:
             ax.plot(np.asarray(fit["curve_t"]) * scale, fit["curve_y"], "-", color=colour, lw=1.5,
                     label=f"{name}: fit ({fit['equation']})", zorder=2)
-    ax.set_xlabel(f"Contact time ({time_unit})")
+    ax.set_xlabel(_italic_label(f"Contact time ({time_unit})"))
     if series_list:
-        ax.set_ylabel(series_list[0].get("unit", "Integral"))
+        ax.set_ylabel(_italic_label(series_list[0].get("unit", "Integral")))
     ax.axhline(0.0, color="0.6", lw=0.6, zorder=1)
     ax.set_xlim(left=0)
     ax.legend(frameon=False)
     return ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

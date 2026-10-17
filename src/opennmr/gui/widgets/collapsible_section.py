@@ -28,9 +28,11 @@ working state on every switch would undo what they had just set up.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QSizePolicy, QStyle, QStyleOptionToolButton, QToolButton, QVBoxLayout, QWidget,
+)
 
 #: Prepended to the header text to show expanded/collapsed state.
 #: Plain-text glyphs rather than QToolButton's own arrow-icon (via
@@ -49,6 +51,37 @@ _COLLAPSED_GLYPH = "▸"   # ▸
 #: so the titles keep their lead when the interface font is scaled up
 #: or down (Settings ▸ Interface), instead of being overtaken by it.
 HEADER_FONT_SCALE = 1.25
+
+
+class _HeaderButton(QToolButton):
+    """The section's title button, whose height depends only on its font
+    and number of lines -- never on which characters the title holds.
+
+    A title with a character the interface font lacks (T₁, ₂, ...) is
+    drawn with a fallback font whose line is taller, so that one header
+    came out 32 px against everyone else's 31 on Windows (the
+    ``test_section_headers_get_the_sheets_padding`` failure, 2026-10-17).
+    The height is measured on a reference title instead."""
+
+    _REFERENCE = f"{_COLLAPSED_GLYPH} Ag"
+
+    def _reference_height(self) -> int:
+        lines = self.text().count("\n") + 1
+        option = QStyleOptionToolButton()
+        self.initStyleOption(option)
+        text = "\n".join([self._REFERENCE] * lines)
+        option.text = text
+        contents = self.fontMetrics().size(Qt.TextFlag.TextShowMnemonic, text)
+        return self.style().sizeFromContents(
+            QStyle.ContentsType.CT_ToolButton, option, contents, self).height()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        hint = super().sizeHint()
+        return QSize(hint.width(), self._reference_height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        hint = super().minimumSizeHint()
+        return QSize(hint.width(), self._reference_height())
 
 
 class CollapsibleSection(QWidget):
@@ -75,7 +108,7 @@ class CollapsibleSection(QWidget):
         self._title = title
         self._content: QWidget | None = None
 
-        self._header = QToolButton(self)
+        self._header = _HeaderButton(self)
         self._header.setCheckable(True)
         self._header.setChecked(expanded)
         self._header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)

@@ -37,7 +37,7 @@ def test_notebook_plots_every_site_of_a_parameter_on_one_axes(series):
     a = ax.containers[0].lines[0]
     assert list(a.get_xdata()) == [280.0, 300.0, 320.0, 340.0]       # against x (the fit's own)
     assert list(a.get_ydata()) == pytest.approx([0.20, 0.16, 0.12, 0.08], rel=0.05)
-    assert ax.get_xlabel() == "T (K)" and ax.get_ylabel() == "fwhm (ppm)"
+    assert ax.get_xlabel() == "$T$ (K)" and ax.get_ylabel() == "fwhm (ppm)"
 
 
 def test_without_x_the_sites_are_plotted_in_fitting_order(series):

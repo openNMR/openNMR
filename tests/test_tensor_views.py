@@ -138,7 +138,7 @@ def test_surface_plot_is_equal_aspect_with_a_signed_colour_bar():
     fig, _notes = tv.plot_tensor_surface(site, relative_to="iso", figure=plt.figure())
     ax = fig.axes[0]
     assert ax.get_xlim() == ax.get_ylim() == ax.get_zlim()
-    assert "δ" in fig.axes[1].get_ylabel()                              # the colour bar
+    assert r"\delta" in fig.axes[1].get_ylabel()                       # the colour bar (italic δ)
     assert "13C" in fig._suptitle.get_text()
 
 

@@ -134,5 +134,11 @@ def plot_attenuation(curves: list[dict], ax, labels: list[str] | None = None) ->
         ax.set_xlim(0, max_gradient * 1.25)
     ax.set_ylim(-0.02, 1.02)
     ax.legend(loc="upper right", frameon=False, fontsize=8)
-    ax.set_xlabel("Gradient strength, $g$ / T m$^{-1}$")
-    ax.set_ylabel("Intensity, $I/I_0$")
+    ax.set_xlabel(_italic_label("Gradient strength, $g$ / T m$^{-1}$"))
+    ax.set_ylabel(_italic_label("Intensity, $I/I_0$"))
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

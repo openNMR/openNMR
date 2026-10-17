@@ -104,12 +104,12 @@ def plot_1d_with_fit(fit_result: dict, x_unit: str = "ppm", show_components: boo
                       pad=tick_pad, num_ticks=tick_number, axis="x")
 
     if xlabel is not None:
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel(_italic_label(xlabel))
     else:
         spectrum = fit_result.get("slice")
         if spectrum is not None:
             nucgamma = find_gamma(spectrum.metadata.nucleus, field=field, SFO1=spectrum.metadata.sfo1)
-            ax.set_xlabel(NUC_label(nucgamma["Nuclide"], x_unit=x_unit))
+            ax.set_xlabel(_italic_label(NUC_label(nucgamma["Nuclide"], x_unit=x_unit)))
 
     ax.legend()
 
@@ -237,8 +237,8 @@ def plot_2d_integrals(fits: list[dict], mode: str = "rows", x_axis: str = "shift
         else:
             ax.plot(x, y, marker="o", linestyle="-", label=label, color=colour)
 
-    ax.set_xlabel(xlabel if xlabel is not None else xlabel_default)
-    ax.set_ylabel(ylabel if ylabel is not None else ("Peak integral (%)" if normalised else "Peak integral"))
+    ax.set_xlabel(_italic_label(xlabel if xlabel is not None else xlabel_default))
+    ax.set_ylabel(_italic_label(ylabel if ylabel is not None else ("Peak integral (%)" if normalised else "Peak integral")))
 
     if xlims is not None:
         ax.set_xlim(xlims)
@@ -431,8 +431,8 @@ def plot_relaxation(fit_results: list[dict], show_series=None, annotate: bool = 
                 fontsize=0.8 * fontsize, color=data_colour,
             )
 
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
+    ax.set_xlabel(_italic_label(xlabel))
+    ax.set_ylabel(_italic_label(ylabel))
 
     if logplot:
         if logplot == "x":
@@ -614,8 +614,8 @@ def plot_dosy(dosy: dict, ax=None, fig=None, contour_ax=None, projection_ax=None
                                linewidths=rings)
 
     contour_ax.set_yscale("log")
-    contour_ax.set_xlabel(xlabel, fontsize=fontsize)
-    contour_ax.set_ylabel(ylabel, fontsize=fontsize)
+    contour_ax.set_xlabel(_italic_label(xlabel), fontsize=fontsize)
+    contour_ax.set_ylabel(_italic_label(ylabel), fontsize=fontsize)
     contour_ax.set_xlim(*(ppm_lims if ppm_lims else (float(np.max(ppm)), float(np.min(ppm)))))
     contour_ax.set_ylim(*(d_lims if d_lims else _dosy_d_limits(z, d_grid, factor)))
     contour_ax.tick_params(
@@ -812,8 +812,8 @@ def overlay_dosy(dosy_maps, labels=None, colours=None, ax=None, fig=None,
             contour_ax.plot([], [], color=colour, label=labels[index])
 
     contour_ax.set_yscale("log")
-    contour_ax.set_xlabel(xlabel, fontsize=fontsize)
-    contour_ax.set_ylabel(ylabel, fontsize=fontsize)
+    contour_ax.set_xlabel(_italic_label(xlabel), fontsize=fontsize)
+    contour_ax.set_ylabel(_italic_label(ylabel), fontsize=fontsize)
 
     joined_ppm = np.concatenate(all_ppm)
     contour_ax.set_xlim(*(ppm_lims if ppm_lims
@@ -916,7 +916,7 @@ def plot_score_components(result: dict, ppm, ax=None, fig=None, reference=None,
                               edgecolor="none", alpha=0.85))
 
     ax.set_yticks([])
-    ax.set_xlabel(xlabel)
+    ax.set_xlabel(_italic_label(xlabel))
     ax.set_xlim(*(xlims if xlims else (float(np.max(ppm)), float(np.min(ppm)))))
     apply_tick_style(ax, axis="x", direction=tick_dir, length=tick_length, width=tick_width)
     apply_spine_style(ax, top=False, right=False, left=False, bottom=True)
@@ -938,3 +938,9 @@ def _score_component_label(result: dict, index: int) -> str:
     else:
         value = format_time_value(result["T"][index])
     return f"{index + 1}: {value}  ({share * 100:.0f}%)"
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

@@ -130,12 +130,13 @@ def test_axis_label_style_reaches_tensor_and_simulation_figures(qapp):  # noqa: 
     canvas = window.simulation_canvas
     canvas.set_style(axis_label_style="slash")
     ax3d = [ax for ax in canvas.figure.axes if ax.name == "3d"][0]
-    assert ax3d.get_xlabel() == "x / ppm" and ax3d.get_zlabel() == "z / ppm"
+    # Coordinates are quantity symbols, so italic (2026-10-17).
+    assert ax3d.get_xlabel() == "$x$ / ppm" and ax3d.get_zlabel() == "$z$ / ppm"
     bar = [ax for ax in canvas.figure.axes if ax.name != "3d"][0]
     assert bar.get_ylabel().endswith("/ ppm")
     canvas.set_style(axis_label_style="brackets")
     ax3d = [ax for ax in canvas.figure.axes if ax.name == "3d"][0]
-    assert ax3d.get_xlabel() == "x (ppm)"
+    assert ax3d.get_xlabel() == "$x$ (ppm)"
     # The Bloch plot writes "Time / μs": brackets puts it in brackets,
     # and a qualifier that is not a unit is left alone.
     window._run_bloch_simulation()
@@ -203,7 +204,7 @@ def test_label_style_change_keeps_the_tensor_gridlines(qapp):  # noqa: F811
     combo.setCurrentIndex(combo.findData("slash"))
     ax = _ax3d(canvas)
     assert ax._draw_grid
-    assert ax.get_xlabel() == "x / ppm"
+    assert ax.get_xlabel() == "$x$ / ppm"
 
 
 def test_tensor_gridlines_are_optional(qapp):  # noqa: F811

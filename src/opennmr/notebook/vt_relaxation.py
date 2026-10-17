@@ -831,22 +831,72 @@ def compare_vt_models(datasets, models, **kwargs) -> list:
     return fits
 
 
+def _region_points(datasets, lo, hi):
+    chosen = []
+    for d in datasets:
+        T = np.asarray(d["T_K"])
+        keep = (T >= lo) & (T <= hi)
+        if keep.any():
+            part = dict(d)
+            for key in ("T_K", "value", "error"):
+                if part.get(key) is not None:
+                    part[key] = np.asarray(part[key])[keep]
+            chosen.append(part)
+    return chosen
+
+
+def _bpp_free_count(n_datasets, kwargs) -> int:
+    """Free parameters a BPP fit of ``n_datasets`` would have."""
+    model = VTModel(kwargs.get("mechanism", "dipolar"), int(kwargs.get("n_processes", 1)),
+                    bool(kwargs.get("asymmetric", False)), bool(kwargs.get("background", False)),
+                    kwargs.get("law", "arrhenius"), kwargs.get("spin"), kwargs.get("eta", 0.0),
+                    bool(kwargs.get("per_dataset_amplitude", False)))
+    names = model.param_names(n_datasets)
+    return len([n for n in names if n not in (kwargs.get("fixed") or {})])
+
+
+def _arrhenius_region(chosen, label, lo, hi) -> dict:
+    """One Arrhenius line per dataset in the region (a straight flank)."""
+    lines, parts = [], []
+    for d in chosen:
+        err = d.get("error")
+        err = None if err is None or np.all(~np.isfinite(err)) else err
+        res = fit_arrhenius(d["T_K"], d["value"], err, is_rate=d["quantity"] == "linewidth")
+        res["label"] = d["label"]
+        lines.append(res)
+        parts.append(f"{d['label']}: Ea = {_fmt(res['Ea_eV'], res['Ea_err_eV'])} eV "
+                     f"({res['n_points']} points, {res['flank']} flank)")
+    params = {("Ea_eV" if len(lines) == 1 else f"Ea_eV ({r['label']})"): r["Ea_eV"] for r in lines}
+    errors = {("Ea_eV" if len(lines) == 1 else f"Ea_eV ({r['label']})"): r["Ea_err_eV"]
+              for r in lines}
+    return {"kind": "arrhenius", "region_label": label, "T_range": (lo, hi), "lines": lines,
+            "params": params, "errors": errors, "fixed": {}, "datasets": chosen,
+            "quantity": chosen[0]["quantity"], "model_text": "Arrhenius line",
+            "n_points": int(sum(r["n_points"] for r in lines)), "redchi": float("nan"),
+            "log": "; ".join(parts)}
+
+
 def fit_vt_regions(datasets, regions, **kwargs) -> dict:
     """Fit separate temperature regions with separate models -- e.g.
-    one process with barrier Ea₁ from 200 to 260 K and a different one
-    with Ea₂ from 300 to 400 K (explicit user request, 2026-10-17).
+    one process with barrier Ea1 from 200 to 260 K and a different one
+    with Ea2 from 300 to 400 K (explicit user request, 2026-10-17).
 
     ``regions`` : list of dicts, each with ``"T_range"`` ``(T_lo, T_hi)``
-    in K and optionally ``"label"`` and any :func:`fit_vt_relaxation`
-    keyword (``n_processes``, ``asymmetric``, ``background``, ``fixed``,
-    ...) overriding ``kwargs`` for that region. Every region is an
-    independent fit to the points inside it (from every dataset that has
-    points there); nothing is shared between regions.
+    in K, optionally ``"label"``, ``"model"`` -- ``"bpp"``,
+    ``"arrhenius"`` (a straight line through ln(rate) against 1/kBT, per
+    dataset: the right model for one flank) or ``"auto"`` (the default:
+    BPP when the region has at least two more points than BPP has free
+    parameters, else the Arrhenius line) -- and any
+    :func:`fit_vt_relaxation` keyword (``n_processes``, ``asymmetric``,
+    ``fixed``, ...) overriding ``kwargs`` for that region. Every region
+    is an independent fit to the points inside it; nothing is shared.
 
-    Returns ``{"fits": [fit, ...], "regions": [...], "log": str}``; each
-    fit is :func:`fit_vt_relaxation`'s, with ``"region_label"`` and
-    ``"T_range"`` added, or ``{"error": message, ...}`` when a region
-    could not be fitted (the others still are)."""
+    Returns ``{"fits": [...], "regions": [...], "log": str}``; a BPP fit
+    is :func:`fit_vt_relaxation`'s with ``"kind": "bpp"``, an Arrhenius
+    one has ``"kind": "arrhenius"`` and ``"lines"``; every fit has
+    ``"region_label"``, ``"T_range"`` and ``"model_choice"`` (why that
+    model). A region that could not be fitted is ``{"error": message}``
+    (the others still are)."""
     if isinstance(datasets, dict):
         datasets = [datasets]
     if not regions:
@@ -858,34 +908,44 @@ def fit_vt_regions(datasets, regions, **kwargs) -> dict:
             raise ValueError(f"Region {k + 1} has no T_range.")
         lo, hi = sorted(map(float, region.pop("T_range")))
         label = str(region.pop("label", "") or f"Region {k + 1}")
-        chosen = []
-        for d in datasets:
-            keep = (np.asarray(d["T_K"]) >= lo) & (np.asarray(d["T_K"]) <= hi)
-            if keep.any():
-                part = dict(d)
-                for key in ("T_K", "value", "error"):
-                    if part.get(key) is not None:
-                        part[key] = np.asarray(part[key])[keep]
-                chosen.append(part)
+        choice = str(region.pop("model", "auto") or "auto").lower()
+        chosen = _region_points(datasets, lo, hi)
         kw = dict(kwargs)
         kw.pop("T_range", None)
         kw.update(region)
+        n_points = int(sum(np.asarray(d["T_K"]).size for d in chosen))
         try:
             if not chosen:
                 raise ValueError(f"no points between {lo:g} and {hi:g} K")
-            fit = fit_vt_relaxation(chosen, **kw)
+            if choice not in ("auto", "bpp", "arrhenius"):
+                raise ValueError(f"model must be 'auto', 'bpp' or 'arrhenius', not {choice!r}")
+            n_free = _bpp_free_count(len(chosen), kw)
+            if choice == "auto":
+                use_bpp = chosen[0]["quantity"] != "linewidth" and n_points >= n_free + 2
+                why = (f"BPP ({n_points} points for {n_free} free parameters)" if use_bpp else
+                       f"Arrhenius line: {n_points} points cannot determine BPP's {n_free} "
+                       f"free parameters with any left over")
+            else:
+                use_bpp = choice == "bpp"
+                why = "BPP (chosen)" if use_bpp else "Arrhenius line (chosen)"
+            if use_bpp:
+                fit = fit_vt_relaxation(chosen, **kw)
+                fit["kind"] = "bpp"
+            else:
+                fit = _arrhenius_region(chosen, label, lo, hi)
         except (ValueError, RuntimeError) as exc:
             fits.append({"error": str(exc), "region_label": label, "T_range": (lo, hi),
-                         "model_text": label})
-            lines.append(f"{label} ({lo:g}–{hi:g} K): not fitted -- {exc}")
+                         "model_text": label, "n_points": n_points})
+            lines.append(f"{label} ({lo:g}-{hi:g} K): not fitted -- {exc}")
             continue
         fit["region_label"] = label
         fit["T_range"] = (lo, hi)
+        fit["model_choice"] = why
         fits.append(fit)
         Eas = ", ".join(f"{n} = {_fmt(v, fit['errors'].get(n))} eV"
                         for n, v in fit["params"].items() if n.startswith("Ea_eV"))
-        lines.append(f"{label} ({lo:g}–{hi:g} K, {fit['n_points']} points): "
-                     f"{fit['model_text']}; {Eas}; reduced χ² {fit['redchi']:.3g}")
+        chi = f"; reduced chi2 {fit['redchi']:.3g}" if np.isfinite(fit.get("redchi", np.nan)) else ""
+        lines.append(f"{label} ({lo:g}-{hi:g} K, {fit['n_points']} points): {why}; {Eas}{chi}")
     return {"fits": fits, "regions": regions, "log": "\n".join(lines)}
 
 
@@ -893,13 +953,17 @@ def plot_arrhenius_regions(result, datasets, y_axis="ln_time", x_axis="1000/T", 
                            show_components=True, ax=None, colours=None, markersize=5.0,
                            linewidth=1.2, text_size="small"):
     """Every dataset's points (all temperatures) with each region's
-    fitted curve drawn over its own temperature range only -- one line
-    style per region -- and each region's Ea listed. ``result`` is
-    :func:`fit_vt_regions`'s. Returns ``(fig, ax)``."""
+    fitted curve drawn over its own temperature range only, one line
+    style per region, and a legend naming each region with its Ea. A
+    region that could not be fitted is named there with the reason, so
+    it never just goes missing. ``result`` is :func:`fit_vt_regions`'s.
+    Returns ``(fig, ax)``."""
+    from matplotlib.lines import Line2D
+
+    from ..plotting.accessibility import default_series_colours, series_colours
     fig, ax = plot_arrhenius(datasets=datasets, y_axis=y_axis, x_axis=x_axis, top_axis=None,
                              ax=ax, colours=colours, markersize=markersize,
-                             linewidth=linewidth, text_size=text_size)
-    from ..plotting.accessibility import default_series_colours, series_colours
+                             linewidth=linewidth, text_size=text_size, show_legend=False)
     fx, _inv, _xl = _x_transform(x_axis)
     data = [datasets] if isinstance(datasets, dict) else list(datasets)
     n = len(data)
@@ -909,34 +973,54 @@ def plot_arrhenius_regions(result, datasets, y_axis="ln_time", x_axis="1000/T", 
         colours = series_colours(n, colours)
     labels = [d["label"] for d in data]
     styles = ["-", "--", "-.", ":"]
-    lines = []
+    handles = []
+    if n > 1:
+        markers = "osD^v<>"
+        for i, d in enumerate(data):
+            handles.append(Line2D([], [], color=colours[i % len(colours)], ls="none",
+                                  marker=markers[i % len(markers)], ms=markersize,
+                                  mfc="none" if i else colours[i % len(colours)],
+                                  label=d["label"]))
     for k, fit in enumerate(result["fits"]):
-        if "error" in fit:
-            continue
+        style = styles[k % len(styles)]
         lo, hi = fit["T_range"]
+        if "error" in fit:
+            handles.append(Line2D([], [], ls="none", label=f"{fit['region_label']} "
+                                  f"({lo:g}-{hi:g} K): not fitted, {fit['error']}"))
+            continue
         fy, _yl, _log = _y_transform(y_axis, fit["quantity"])
-        for i, d in enumerate(fit["datasets"]):
-            c = colours[labels.index(d["label"]) % len(colours)] if d["label"] in labels \
-                else colours[i % len(colours)]
-            T_lo = max(lo, float(np.min(d["T_K"])) * 0.97)
-            T_hi = min(hi, float(np.max(d["T_K"])) * 1.03)
-            T_c = 1.0 / np.linspace(1.0 / T_lo, 1.0 / T_hi, 200)
-            _T, total, parts = evaluate_vt_fit(fit, T_K=T_c, dataset=i, components=True)
-            ax.plot(fx(T_c), fy(1.0 / total), styles[k % len(styles)], color=c, lw=linewidth,
-                    zorder=2)
-            if show_components and len(parts) > 1:
+        curves = []
+        if fit.get("kind") == "arrhenius":
+            for res in fit["lines"]:
+                T_lo = max(lo, float(np.min(res["T_K"])))
+                T_hi = min(hi, float(np.max(res["T_K"])))
+                T_c = 1.0 / np.linspace(1.0 / T_lo, 1.0 / T_hi, 50)
+                rate = np.exp(res["ln_A"] + res["slope"] / (K_B_EV * T_c))
+                curves.append((res["label"], T_c, rate, []))
+        else:
+            for i, d in enumerate(fit["datasets"]):
+                T_lo = max(lo, float(np.min(d["T_K"])))
+                T_hi = min(hi, float(np.max(d["T_K"])))
+                T_c = 1.0 / np.linspace(1.0 / T_lo, 1.0 / T_hi, 200)
+                _T, total, parts = evaluate_vt_fit(fit, T_K=T_c, dataset=i, components=True)
+                curves.append((d["label"], T_c, total, parts if len(parts) > 1 else []))
+        for name, T_c, total, parts in curves:
+            c = colours[labels.index(name) % len(colours)] if name in labels else "0.2"
+            ax.plot(fx(T_c), fy(1.0 / total), style, color=c, lw=linewidth, zorder=2)
+            if show_components:
                 for part in parts:
                     good = part > 0
                     ax.plot(fx(T_c[good]), fy(1.0 / part[good]), ":", color=c,
                             lw=0.8 * linewidth, alpha=0.7, zorder=1)
-        Eas = [(n_, v) for n_, v in fit["params"].items() if n_.startswith("Ea_eV")]
-        values = ", ".join(_fmt(v, fit["errors"].get(n_)) for n_, v in Eas)
-        lines.append(f"{fit['region_label']} ({styles[k % len(styles)]}): "
-                     + r"$E_\mathregular{a}$" + f" = {values} eV")
-    if lines:
-        ax.text(0.03, 0.97, "\n".join(lines), transform=ax.transAxes, va="top", ha="left",
-                fontsize=text_size, zorder=5,
-                bbox=dict(boxstyle="square,pad=0.15", fc="white", ec="none", alpha=0.85))
+        values = ", ".join(_fmt(v, fit["errors"].get(n_)) for n_, v in fit["params"].items()
+                           if n_.startswith("Ea_eV"))
+        handles.append(Line2D([], [], color="0.2" if n > 1 else colours[0], ls=style,
+                              lw=linewidth,
+                              label=f"{fit['region_label']}: " + r"$E_\mathregular{a}$"
+                              + f" = {values} eV"
+                              + (" (Arrhenius)" if fit.get("kind") == "arrhenius" else "")))
+    if handles:
+        ax.legend(handles=handles, frameon=False, fontsize=text_size, loc="best")
     _add_top_axis(ax, x_axis, top_axis)
     fig.tight_layout()
     return fig, ax
@@ -1190,7 +1274,7 @@ def _add_top_axis(ax, x_axis, top_axis):
         fwd, inv = to_T, to_T
         label = r"$T$ (K)"
     sec = ax.secondary_xaxis("top", functions=(fwd, inv))
-    sec.set_xlabel(label)
+    sec.set_xlabel(_italic_label(label))
     # Round-number temperatures across the visible range.
     lo, hi = sorted(ax.get_xlim())
     Ts = np.sort(fwd(np.array([max(lo, 1e-9), hi])))
@@ -1293,8 +1377,8 @@ def plot_arrhenius(fit=None, datasets=None, y_axis="ln_time", x_axis="1000/T", t
             lo_y, hi_y = float(allv.min()), float(allv.max())
             pad = 0.08 * (hi_y - lo_y or 1.0)
             ax.set_ylim(lo_y - pad, hi_y + pad)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
+    ax.set_xlabel(_italic_label(xlabel))
+    ax.set_ylabel(_italic_label(ylabel))
     if fit is not None and annotate_Ea:
         Eas = [(n_, v) for n_, v in fit["params"].items() if n_.startswith("Ea_eV")]
         text = "\n".join(
@@ -1351,8 +1435,8 @@ def plot_vs_temperature(datasets=None, fit=None, temperature_unit="K", log_y=Tru
             ax.plot(T_c[order] + shift, 1.0 / total[order], "-", color=c, lw=linewidth)
     if log_y:
         ax.set_yscale("log")
-    ax.set_xlabel(r"$T$ (°C)" if shift else r"$T$ (K)")
-    ax.set_ylabel(rf"${sym}$ (Hz)" if q == "linewidth" else rf"${sym}$ (s)")
+    ax.set_xlabel(_italic_label(r"$T$ (°C)" if shift else r"$T$ (K)"))
+    ax.set_ylabel(_italic_label(rf"${sym}$ (Hz)" if q == "linewidth" else rf"${sym}$ (s)"))
     _style_axes(ax)
     if n > 1:
         ax.legend(frameon=False, fontsize="small")
@@ -1385,8 +1469,8 @@ def plot_hendrickson_bray(fit, ax=None, temperature_unit="K", colour=None, unit=
             color=c, lw=linewidth, zorder=2)
     if show_onset and np.isfinite(fit.get("T_onset_K", np.nan)):
         ax.axvline(fit["T_onset_K"] + shift, color="0.5", lw=0.8, ls=":")
-    ax.set_xlabel(r"$T$ (°C)" if shift else r"$T$ (K)")
-    ax.set_ylabel(rf"$\Delta\nu$ ({unit})")
+    ax.set_xlabel(_italic_label(r"$T$ (°C)" if shift else r"$T$ (K)"))
+    ax.set_ylabel(_italic_label(rf"$\Delta\nu$ ({unit})"))
     ax.text(0.97, 0.97, rf"$E_\mathregular{{a}}$ = {_fmt(p['Ea_eV'], fit['errors']['Ea_eV'])} eV",
             transform=ax.transAxes, ha="right", va="top", fontsize=text_size)
     _style_axes(ax)
@@ -1431,3 +1515,9 @@ def vt_notebook_code(datasets, fit_kwargs=None, plot_kwargs=None, hendrickson=Fa
               "print(fit['log'])",
               f"fig, ax = plot_arrhenius(fit{', ' + pk if pk else ''})"]
     return "\n".join(lines)
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)

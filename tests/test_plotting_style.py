@@ -565,7 +565,8 @@ def test_apply_default_font_sets_family_and_mathtext():
         assert plt.rcParams["mathtext.rm"] == "Arial"
         assert plt.rcParams["mathtext.it"] == "Arial:italic"
         assert plt.rcParams["mathtext.bf"] == "Arial:bold"
-        assert plt.rcParams["mathtext.default"] == "regular"
+        # Symbols italic since 2026-10-17 (IUPAC).
+        assert plt.rcParams["mathtext.default"] == "it"
     finally:
         plt.rcdefaults()
 

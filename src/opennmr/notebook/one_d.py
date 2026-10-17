@@ -702,7 +702,7 @@ def NMR1dplot(data_paths, mass=[1], procno=[1], colour='black', f1p=0, f2p=0,
         xmin, xmax = min(xlims), max(xlims)
         ax.set_xlim(xmin, xmax)
 
-    ax.set_xlabel(xlabel if xlabel is not None else labeltext, fontsize=fontsize)
+    ax.set_xlabel(_italic_label(xlabel if xlabel is not None else labeltext), fontsize=fontsize)
     apply_spine_style(ax, top=False, right=False, bottom=True, left=False)
     ax.set_yticks([])
     apply_tick_style(ax, direction=tick_dir, length=tick_length, width=tick_width,
@@ -1013,7 +1013,7 @@ def NMR1dheatmap(data_paths, mass=[1], procno=[1], f1p=0, f2p=0,
     else:
         ax.set_xlim(min(xlims), max(xlims))
 
-    ax.set_xlabel(xlabel if xlabel is not None else labeltext, fontsize=fontsize)
+    ax.set_xlabel(_italic_label(xlabel if xlabel is not None else labeltext), fontsize=fontsize)
     ax.invert_xaxis()
 
     apply_spine_style(ax, top=False, right=False, bottom=True, left=True)
@@ -1044,7 +1044,7 @@ def NMR1dheatmap(data_paths, mass=[1], procno=[1], f1p=0, f2p=0,
         ax.tick_params(axis='y', which='minor', length=0)
 
     if ylabel is not None:
-        ax.set_ylabel(ylabel, fontsize=fontsize)
+        ax.set_ylabel(_italic_label(ylabel), fontsize=fontsize)
 
     if colorbar:
         if ax.get_axes_locator() is not None:
@@ -1965,7 +1965,7 @@ def CPMGplot(results, colour='black', xlims='default', xlabel=None,
 
     nucgamma = find_gamma(results['nuclide'], SFO1=results['SFO1'])
     labeltext = NUC_label(nucgamma['Nuclide'], x_unit=x_unit)
-    ax.set_xlabel(xlabel if xlabel is not None else labeltext, fontsize=fontsize)
+    ax.set_xlabel(_italic_label(xlabel if xlabel is not None else labeltext), fontsize=fontsize)
 
     if xlims == 'default':
         ax.set_xlim(x[0], x[-1])
@@ -1988,3 +1988,9 @@ def CPMGplot(results, colour='black', xlims='default', xlabel=None,
             save_figure(fig, fig_name=fig_name, save_format=save_format)
 
     return fig, ax
+
+
+def _italic_label(text):
+    """Quantity symbols italic (plotting.labels.italicise_symbols)."""
+    from opennmr.plotting.labels import italicise_symbols
+    return italicise_symbols(text)
