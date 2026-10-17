@@ -7,6 +7,7 @@ Dynamics ▸ Regularisation (the MATLAB_RELAX_ALGORITHM scripts)."""
 import numpy as np
 import pytest
 from PySide6.QtWidgets import QLineEdit, QMessageBox, QPushButton
+from PySide6.QtGui import QKeySequence
 
 from opennmr.core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from opennmr.gui.main_window import MainWindow
@@ -91,10 +92,10 @@ def test_integrate_tile_sits_after_fit_and_holds_the_area_tools(qapp):  # noqa: 
     fit_page = window.side_tabs.widget(window._fitting_tab_index)
     assert not fit_page.isAncestorOf(window.region_table)
     assert not window._integration_section.isExpanded()     # sections start collapsed
-    # Window ▸ Integration opens it; the numbered shortcuts stop at nine.
+    # Window ▸ Integration opens it; the tenth tile is Ctrl+0 (2026-10-17).
     window._window_panel_actions["Integrate"].trigger()
     assert window.side_tabs.currentIndex() == window._integrate_tab_index
-    assert window._window_panel_actions["Periodic Table"].shortcut().isEmpty()
+    assert window._window_panel_actions["Periodic Table"].shortcut() == QKeySequence("Ctrl+0")
 
 
 def test_one_select_and_integrate_button_without_the_command_symbol(qapp):  # noqa: F811

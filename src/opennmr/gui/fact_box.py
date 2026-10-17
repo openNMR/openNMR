@@ -1,4 +1,4 @@
-"""Cmd/Ctrl+E: a random fact, from a list the user keeps themselves.
+"""Cmd/Ctrl+B: a random fact, from a list the user keeps themselves.
 
 Explicit user request (2026-10-16), reachable **only** by the shortcut --
 no menu item, button or tooltip mentions it.
@@ -22,7 +22,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QPushButton, QVBoxLayout
 
 _TEMPLATE = """\
-# openNMR facts -- Cmd/Ctrl+E shows one of these at random.
+# openNMR facts -- Cmd/Ctrl+B shows one of these at random.
 # One fact per line. Lines starting with # and blank lines are skipped.
 """
 

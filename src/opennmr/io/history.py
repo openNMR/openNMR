@@ -211,6 +211,7 @@ _BASELINE_METHODS = {
     "linear": "linear", "polynomial": "polynomial", "sinusoidal": "sinusoidal",
     "spline": "smoothing spline", "whittaker": "Whittaker (arPLS)",
     "spline_auto": "cubic spline (automatic points)",
+    "spline_points": "cubic spline (points chosen on the plot)",
     "manual_polynomial": "manual Ax⁴+Bx³+Cx²+Dx+E", "manual_sine": "manual A·sin(Bx+C)+D",
 }
 
@@ -225,7 +226,9 @@ _HIDDEN_KEYS = frozenset({
     # Facts the readers record about the file itself (re-read on every
     # load, never a user choice) -- listing them would read as if
     # something had been done.
-    "fid_dt", "fid_dt_f1", "fid_original_length", "fn_mode", "is_diffusion",
+    "fid_dt", "fid_dt_f1", "fid_original_length",
+    # Zero-fill's own box value; the FFT size used is live_zero_fill.
+    "live_zero_fill_choice", "fn_mode", "is_diffusion",
     "gradient_relative", "recorded_phase0", "recorded_phase1", "recorded_phase0_f1",
     "recorded_phase1_f1", "window_unsupported_f1", "xdim_f1", "xdim_f2",
     "f1_quadrature_sign_flip", "origin", "origin_vendor", "dataset_label",
@@ -327,6 +330,8 @@ KEY_INFO: dict[str, tuple[str, object]] = {
     "baseline_correct": ("Baseline correction", _onoff),
     "baseline_method": ("Baseline method", lambda v: _BASELINE_METHODS.get(v, str(v))),
     "baseline_degree": ("Baseline polynomial degree", lambda v: str(int(v))),
+    "baseline_spline_x": ("Baseline spline points", lambda v: (
+        ", ".join(f"{float(p):.4g}" for p in v) + " ppm") if v else "none"),
     "baseline_lam": ("Baseline smoothing (λ)", lambda v: _num(v, 4)),
     "baseline_smoothing": ("Baseline smoothing", lambda v: _num(v, 4)),
     "baseline_period": ("Baseline period", lambda v: _num(v, 4)),

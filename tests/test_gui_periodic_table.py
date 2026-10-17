@@ -47,11 +47,11 @@ def test_table_replaces_the_plot_only_on_its_tile(window, qapp):
     assert window.plot_stack.currentWidget() is window.periodic_table_view
 
 
-def test_ctrl_9_opens_the_periodic_table(window):
+def test_ctrl_0_opens_the_periodic_table(window):
     window._show_side_tab("Open")
     action = next(a for a in window.findChildren(type(window.settings_menu_action))
                   if a.text() == "NMR Periodic Table")
-    assert action.shortcut().toString() == "Ctrl+9"
+    assert action.shortcut().toString() == "Ctrl+0"
     action.trigger()
     assert window.side_tabs.tabText(window.side_tabs.currentIndex()) == "Periodic Table"
 

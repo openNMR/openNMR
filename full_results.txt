@@ -1,0 +1,443 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.7, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\quark\OneDrive\Documents\openNMR
+configfile: pyproject.toml
+plugins: timeout-2.4.0, xdist-3.8.0
+timeout: 900.0s
+timeout method: thread
+timeout func_only: False
+created: 8/8 workers
+8 workers [4469 items]
+
+ss..s...s...s...s.s.....................s.s..s................s..s...... [  1%]
+............s..........s...............s................................ [  3%]
+.................................................................s...... [  4%]
+........................................................................ [  6%]
+..........................................................ssssssss...... [  8%]
+........s....................s.......................................... [  9%]
+..........................................sssss...ss..s................. [ 11%]
+...................sssss......sssss....................................s [ 12%]
+s..................sss....................................sss........... [ 14%]
+........................................................................ [ 16%]
+......................ssssssssss........................................ [ 17%]
+...s.sssssss.ss...s..................................................... [ 19%]
+........................................................................ [ 20%]
+........................................................................ [ 22%]
+........................................................................ [ 24%]
+.........F.....................F........................................ [ 25%]
+........................................................................ [ 27%]
+..................................sssss...........................s..... [ 28%]
+.............ssssssssss................................................. [ 30%]
+......s................................................................. [ 32%]
+........................ssss............F............................... [ 33%]
+..............................s.......s.......s.......s.......s.......ss [ 35%]
+ss.......................................sssssss....s....sssss....s..... [ 37%]
+.................sssssss.ssss..................F........................ [ 38%]
+...........................................s............................ [ 40%]
+........................................................................ [ 41%]
+....................sss................................................. [ 43%]
+........................................................................ [ 45%]
+........................................................................ [ 46%]
+......................F................................................. [ 48%]
+...............................................F..ss.................... [ 49%]
+........................................................................ [ 51%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+.............sssss...................................................... [ 56%]
+...................................................................ss... [ 57%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 62%]
+........................................................................ [ 64%]
+........................................................................ [ 66%]
+........................................................................ [ 67%]
+........................................................................ [ 69%]
+...........................s............................................ [ 70%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 77%]
+..................................................s..................... [ 78%]
+........................................................................ [ 80%]
+.........................F.............................................. [ 82%]
+........................................................................ [ 83%]
+........................................................................ [ 85%]
+........................................................................ [ 86%]
+..........................................................sssssssss..... [ 88%]
+........................................................................ [ 90%]
+........................................................................ [ 91%]
+................s.s.s.s.s.s.s............s.............................. [ 93%]
+........................................................................ [ 95%]
+........................................................................ [ 96%]
+.........ss...s.s..ss..s..ss....s.s.........s........................... [ 98%]
+...F.................................................................... [ 99%]
+.....                                                                    [100%]
+================================== FAILURES ===================================
+_________ test_main_window_fitting_tab_has_three_collapsible_sections _________
+[gw3] win32 -- Python 3.14.7 C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+qapp = <PySide6.QtWidgets.QApplication(0x219f5c2e490) at 0x00000219FC35EB80>
+
+    def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
+        # "Fitting spectra should be its own tab" -- Peak Picking and
+        # Integration were sub-tabs of Analysis sitting beside Curve
+        # Fitting, which put a prerequisite and its consumer at the same
+        # level and hid the order between them. Later folded into three
+        # independent collapsible sections of one "Fitting" launcher
+        # button (replacing the standalone "Spectral Fitting" tab this
+        # test used to check for) -- explicit user request, also pulling
+        # in CSA (renamed "CSA/Dipolar"), previously a fourth Analysis
+        # sub-tab.
+        window = MainWindow()
+        side = _side_tab_names(window)
+        assert "Fitting" in side
+        assert "Spectral Fitting" not in side
+        assert "Analysis" not in side
+        # Step 1 (measure) before step 2 (Relaxation's curve fit).
+        assert side.index("Fitting") < side.index("Relaxation")
+    
+        fitting_tab = window.side_tabs.widget(window._fitting_tab_index)
+        sections = fitting_tab.findChildren(CollapsibleSection)
+        titles = [s.title() for s in sections]
+        # J-coupling between Integration and CSA/Dipolar (test_gui_jcoupling.py);
+        # Quadrupolar (test_gui_quadrupolar_fit.py), then Combined
+        # Hamiltonian (test_gui_combined_fit.py), Multi-spectrum last
+        # (test_gui_multi_fit.py). Quadrupolar (Czjzek distribution) right
+        # after Quadrupolar, and Fit plot display options at the very end
+        # (test_gui_czjzek_display.py).
+        # Since 2026-10-06, CSA, Quad & J-coupling holds every interaction (J,
+        # CSA, quadrupolar), right after Integration
+        # (test_gui_combined_consolidation.py).
+        # 2026-10-16: Integration to its own Integrate tile, and the Fit plot
+        # options to the fit's right-click menu.
+        assert titles == ["Isotropic (Gauss/Lor)", "CSA, Quad & J-coupling",
+                          "Quadrupolar (Czjzek distribution)", "pNMR (CIF bond pathways)",
+                          "Multi-spectrum", "Kept fit models"]
+    
+        # eNMR/Imaging moved off this tab entirely, to their own
+        # "Applications" button (see
+        # test_main_window_applications_is_its_own_top_level_button).
+        applications_tab = window.side_tabs.widget(side.index("Applications"))
+        analysis = [s.title() for s in applications_tab.findChildren(CollapsibleSection)]
+        # DNP (2026-09-30), Signal-to-Noise (2026-10-12) and CP Build-up joined
+        # them, then moved to Integrate with the integration regions (2026-10-16).
+        assert analysis == ["eNMR", "Imaging"]
+        integrate_tab = window.side_tabs.widget(side.index("Integration"))
+>       assert [s.title() for s in integrate_tab.findChildren(CollapsibleSection)] == [
+            "Integration Regions", "DNP", "Enhancement", "Field Sweep Profile",
+            "Signal-to-Noise", "CP Build-up"]
+E       AssertionError: assert ['Integration...uild-up', ...] == ['Integration...'CP Build-up']
+E         
+E         Left contains one more item: [0m[33m'[39;49;00m[33mOffset Tracker (HMQC / J-resolved, O2/O3)[39;49;00m[33m'[39;49;00m[90m[39;49;00m
+E         Use -v to get more diff
+
+tests\test_gui.py:11305: AssertionError
+---------------------------- Captured stderr call -----------------------------
+This plugin does not support propagateSizeHints()
+__________ test_main_window_applications_is_its_own_top_level_button __________
+[gw3] win32 -- Python 3.14.7 C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+qapp = <PySide6.QtWidgets.QApplication(0x219f5c2e490) at 0x00000219FC35EB80>
+
+    def test_main_window_applications_is_its_own_top_level_button(qapp):
+        # Explicit user request: "this is where the eNMR and Imaging
+        # sections (currently in the 'Analysis' tab) should go; eNMR and
+        # Imaging should be their own separate collapsable sections" --
+        # the last of the seven launcher buttons, and the point at which
+        # the old combined "Analysis" tab (and its analysis_sub_tabs
+        # strip) is fully retired: nothing is built from it any more.
+        window = MainWindow()
+        side = _side_tab_names(window)
+        assert "Applications" in side
+        assert "Analysis" not in side
+        assert not hasattr(window, "analysis_sub_tabs")
+        # Last of the seven, right after Relaxation.
+        assert side.index("Relaxation") < side.index("Applications")
+    
+        applications_tab = window.side_tabs.widget(side.index("Applications"))
+        sections = applications_tab.findChildren(CollapsibleSection)
+>       assert [s.title() for s in sections] == ["eNMR", "Imaging", "DNP", "Enhancement",
+                                                 "Field Sweep Profile", "Signal-to-Noise",
+                                                 "CP Build-up"]
+E       AssertionError: assert ['eNMR', 'Imaging'] == ['eNMR', 'Ima...o-Noise', ...]
+E         
+E         Right contains 5 more items, first extra item: [0m[33m'[39;49;00m[33mDNP[39;49;00m[33m'[39;49;00m[90m[39;49;00m
+E         Use -v to get more diff
+
+tests\test_gui.py:11389: AssertionError
+---------------------------- Captured stderr call -----------------------------
+This plugin does not support propagateSizeHints()
+_____ test_main_window_fit_spectrum_amplitude_bound_regions_caps_the_fit ______
+[gw4] win32 -- Python 3.14.7 C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+qapp = <PySide6.QtWidgets.QApplication(0x2172406be60) at 0x000002172E60A200>
+
+    def test_main_window_fit_spectrum_amplitude_bound_regions_caps_the_fit(qapp):
+        # Fitting-wizard roadmap item: "bounding possibly from integrals."
+        # End-to-end through the real GUI call path (_on_fit_spectrum_clicked
+        # -> _fit_peaks -> NMR2D_fit_slices), not just the backend function
+        # directly (already covered in test_fitting.py). Region (4.95, 5.05)
+        # is deliberately narrower than the true peak's own support
+        # (fwhm=0.2) -- captures only a fraction of its true area, so
+        # checking the box should visibly cap the fitted amplitude below
+        # what the exact same fit finds unconstrained.
+        x0, fwhm, true_A = 5.0, 0.2, 2.0
+        window = MainWindow()
+        _load_spectrum_directly(window, _make_1d_peak_spectrum(x0=x0, fwhm=fwhm, amplitude=true_A))
+        window._add_peak_row(shift=x0, fwhm=fwhm, eta=0.0)
+        window._add_region_row(4.95, 5.05)
+    
+        window._on_fit_spectrum_clicked()
+        unconstrained_A = window.session.spectra[0].metadata.raw["slice_fit_results"][0]["popt"][2]
+        assert unconstrained_A == pytest.approx(true_A, rel=1e-2)
+    
+        window.amplitude_bound_regions_checkbox.setChecked(True)
+        window._on_fit_spectrum_clicked()
+        bounded_A = window.session.spectra[0].metadata.raw["slice_fit_results"][0]["popt"][2]
+>       assert bounded_A < unconstrained_A
+E       assert np.float64(2.0000000000032947) < np.float64(2.0000000000032947)
+
+tests\test_gui.py:6956: AssertionError
+---------------------------- Captured stderr call -----------------------------
+This plugin does not support propagateSizeHints()\n[QMessageBox.critical] Fit failed: The spectral fit did not converge within the maximum of 2,000 iterations.\n\nWhat to try next:\n\u2022 It was still improving (the misfit had come down to 92.8 % of its starting value), so it may only need longer: raise the maximum number of iterations (Settings \u25b8 Fitting in the app; max_iterations= or set_max_iterations() in a notebook), e.g. to 4000.\n\u2022 Start closer to the answer: check the starting values against the spectrum (shift, width, anisotropy), or fit a simpler model first and start the full model from its result.\n\u2022 Free fewer parameters (4 are free now): fix or link the ones the data cannot pin down (e.g. \u03b7 with weak sidebands, Euler angles, a minor site's width), fit, then free them one at a time.\n\u2022 Check the limits: a parameter pushing against a bound can stall a fit -- widen that bound, or fix the parameter if the bound is physical.\n\u2022 Check the data: phase and baseline errors, or a fit window that cuts off part of the signal (sidebands included), leave no clean minimum to converge to.\n\u2022 Try several starting points (multi-start), in case this one sits in a poor local minimum.
+____________ test_canvas_shrinks_labels_rather_than_clipping_them _____________
+[gw1] win32 -- Python 3.14.7 C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+qapp = <PySide6.QtWidgets.QApplication(0x2d31b5b6ac0) at 0x000002D321C9E500>
+
+    def test_canvas_shrinks_labels_rather_than_clipping_them(qapp):
+        # User request for "better safeguards to ensure that the axis
+        # labels don't get cut off... maybe some kind of warning or push to
+        # resize the font". tight_layout alone reserves room only when the
+        # figure is big enough and quietly gives up when it is not -- and a
+        # GUI canvas is sized by the window, so that is an ordinary state.
+        #
+        # The size is chosen so the full-size x label is *wider than the
+        # figure itself*: no layout engine can fit it, so a shrink is forced
+        # by geometry alone. An earlier version used 1.4 x 0.9 in, which
+        # relied on tight_layout giving up there -- true on matplotlib 3.10,
+        # but 3.11's tight_layout fits the 16 pt label into that figure, so
+        # nothing needed shrinking and the test failed on CI's fresh install.
+        # The precondition below keeps that from silently recurring.
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        from opennmr.plotting import clipped_labels
+    
+        canvas = MplCanvas()
+        canvas.figure.set_size_inches(1.1, 0.9)
+        canvas.show_spectrum(_make_1d())
+    
+        probe = Figure(dpi=canvas.figure.dpi)
+        full = probe.text(0, 0, canvas.ax.get_xlabel(), fontsize=canvas._AXIS_LABELSIZE)
+        full_width = full.get_window_extent(FigureCanvasAgg(probe).get_renderer()).width
+>       assert full_width > canvas.figure.bbox.width, (
+            "test premise broken: the full-size label now fits this figure, "
+            "so choose a smaller one"
+        )
+E       AssertionError: test premise broken: the full-size label now fits this figure, so choose a smaller one
+E       assert np.float64(109.0) > np.float64(110.00000000000001)
+E        +  where np.float64(110.00000000000001) = <matplotlib.transforms.TransformedBbox object at 0x000002D32C11DBD0>.width
+E        +    where <matplotlib.transforms.TransformedBbox object at 0x000002D32C11DBD0> = <Figure size 110x90 with 1 Axes>.bbox
+E        +      where <Figure size 110x90 with 1 Axes> = <opennmr.gui.widgets.canvas.MplCanvas(0x2d32f9b8830) at 0x000002D3341A8280>.figure
+
+tests\test_gui_canvas.py:2428: AssertionError
+-------------------------- Captured stderr teardown ---------------------------
+RuntimeError: Signal source has been deleted
+___________________________ test_section_placement ____________________________
+[gw1] win32 -- Python 3.14.7 C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+qapp = <PySide6.QtWidgets.QApplication(0x2d31b5b6ac0) at 0x000002D321C9E500>
+
+    def test_section_placement(qapp):
+        window = MainWindow()
+        tab = window.side_tabs.widget(window._fitting_tab_index)
+        titles = [s.title() for s in tab.findChildren(CollapsibleSection)]
+        # The last fitting method; only kept fits and the plot display follow it.
+>       assert titles[-3:] == ["Multi-spectrum", "Kept fit models", "Fit plot: components and colours"]
+E       AssertionError: assert ['pNMR (CIF b...t fit models'] == ['Multi-spect... and colours']
+E         
+E         At index 0 diff: [0m[33m'[39;49;00m[33mpNMR (CIF bond pathways)[39;49;00m[33m'[39;49;00m[90m[39;49;00m != [0m[33m'[39;49;00m[33mMulti-spectrum[39;49;00m[33m'[39;49;00m[90m[39;49;00m
+E         Use -v to get more diff
+
+tests\test_gui_multi_fit.py:90: AssertionError
+---------------------------- Captured stderr call -----------------------------
+This plugin does not support propagateSizeHints()
+_______________ test_open_experiments_list_sits_under_the_tiles _______________
+[gw7] win32 -- Python 3.14.7 C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+qapp = <PySide6.QtWidgets.QApplication(0x138e672c0a0) at 0x00000138ED443400>
+
+    def test_open_experiments_list_sits_under_the_tiles(qapp):
+        window = MainWindow()
+        assert window.open_experiments_box.isAncestorOf(window.spectrum_list)
+        assert window.left_splitter.indexOf(window.side_tabs) == 0
+>       assert window.left_splitter.indexOf(window.open_experiments_box) == 1
+E       assert -1 == 1
+E        +  where -1 = <built-in method indexOf of PySide6.QtWidgets.QSplitter object at 0x0000013882239D40>(<PySide6.QtWidgets.QGroupBox(0x1388675f690) at 0x00000138F2CBD240>)
+E        +    where <built-in method indexOf of PySide6.QtWidgets.QSplitter object at 0x0000013882239D40> = <PySide6.QtWidgets.QSplitter(0x138ede98ff0) at 0x0000013882239D40>.indexOf
+E        +      where <PySide6.QtWidgets.QSplitter(0x138ede98ff0) at 0x0000013882239D40> = <opennmr.gui.main_window.MainWindow(0x138f7a71d70) at 0x00000138BFD80D80>.left_splitter
+E        +    and   <PySide6.QtWidgets.QGroupBox(0x1388675f690) at 0x00000138F2CBD240> = <opennmr.gui.main_window.MainWindow(0x138f7a71d70) at 0x00000138BFD80D80>.open_experiments_box
+
+tests\test_gui.py:16282: AssertionError
+---------------------------- Captured stderr call -----------------------------
+This plugin does not support propagateSizeHints()
+__________________ test_section_sits_in_integrate_after_dnp ___________________
+[gw3] win32 -- Python 3.14.7 C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+window = <opennmr.gui.main_window.MainWindow(0x219836e7400) at 0x00000219871F7340>
+
+    def test_section_sits_in_integrate_after_dnp(window):
+        # Apply until 2026-10-16; the Integrate tile since.
+        from opennmr.gui.widgets.collapsible_section import CollapsibleSection
+        side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
+        tab = window.side_tabs.widget(side.index("Integrate"))
+        titles = [s.title() for s in tab.findChildren(CollapsibleSection)]
+        # CP Build-up (2026-10-16) follows it.
+        assert titles.index("DNP") < titles.index("Signal-to-Noise") < titles.index("CP Build-up")
+>       assert titles[-1] == "CP Build-up"
+E       AssertionError: assert 'Offset Track...olved, O2/O3)' == 'CP Build-up'
+E         
+E         [0m[91m- CP Build-up[39;49;00m[90m[39;49;00m
+E         [92m+ Offset Tracker (HMQC / J-resolved, O2/O3)[39;49;00m[90m[39;49;00m
+
+tests\test_gui_snr.py:66: AssertionError
+---------------------------- Captured stderr setup ----------------------------
+This plugin does not support propagateSizeHints()
+_________________ test_section_headers_get_the_sheets_padding _________________
+[gw6] win32 -- Python 3.14.7 C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\python.exe
+
+qapp = <PySide6.QtWidgets.QApplication(0x1aed5abe1a0) at 0x000001AEDC708100>
+
+    def test_section_headers_get_the_sheets_padding(qapp):
+        """Built before the sheet, measured after it: a collapsed section's
+        header on a panel not on screen must still be its full styled height
+        once shown (it came out 26 px instead of 32 when layouts kept the
+        pre-sheet sizes)."""
+        window = MainWindow()
+        window.resize(1400, 900)
+        window.show()
+        heights = set()
+        for index in range(window.side_tabs.count()):
+            window.side_tabs.setCurrentIndex(index)
+            qapp.processEvents()
+            for section in window.findChildren(CollapsibleSection):
+                if section.isVisible() and "\n" not in section._header.text():
+                    heights.add(section._header.height())
+>       assert len(heights) == 1, heights        # one height, whichever panel
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: {31, 32}
+E       assert 2 == 1
+E        +  where 2 = len({31, 32})
+
+tests\test_startup_time.py:189: AssertionError
+---------------------------- Captured stderr call -----------------------------
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+============================== warnings summary ===============================
+tests/test_gui.py::test_main_window_baseline_correct_spline_method_persists_across_reselection
+  C:\Users\quark\OneDrive\Documents\openNMR\src\opennmr\processing\fitting.py:859: UserWarning: 
+  A theoretically impossible result was found during the iteration
+  process for finding a smoothing spline with fp = s: s too small.
+  There is an approximation returned but the corresponding weighted sum
+  of squared residuals does not satisfy the condition abs(fp-s)/s < tol.
+    return UnivariateSpline(xb, yb, k=k, s=s, ext=3)
+
+tests/test_gui.py: 16 warnings
+  C:\Users\quark\OneDrive\Documents\openNMR\src\opennmr\plotting\twod.py:981: UserWarning: Attempting to set identical low and high ylims makes transformation singular; automatically expanding.
+    ax_f2.set_ylim([np.min(f2_projection) * 0.9, np.max(f2_projection) * proj_scale])
+
+tests/test_integrate_tile_plot_options_regularisation.py::test_regularisation_from_fit_curve_and_from_files
+tests/test_integrate_tile_plot_options_regularisation.py::test_regularisation_from_fit_curve_and_from_files
+tests/test_regularisation.py::test_report_csv_and_plots
+  C:\Users\quark\OneDrive\Documents\openNMR\src\opennmr\notebook\regularisation.py:736: UserWarning: Glyph 8322 (\N{SUBSCRIPT TWO}) missing from font(s) Arial.
+    fig.tight_layout()
+
+tests/test_integrate_tile_plot_options_regularisation.py::test_regularisation_from_fit_curve_and_from_files
+tests/test_integrate_tile_plot_options_regularisation.py::test_regularisation_from_fit_curve_and_from_files
+  C:\Users\quark\OneDrive\Documents\openNMR\src\opennmr\gui\widgets\canvas.py:4852: UserWarning: Glyph 8321 (\N{SUBSCRIPT ONE}) missing from font(s) Arial.
+    Figure.draw(self.figure, renderer)
+
+tests/test_one_d.py::test_inset_rejects_figure_level_keys[save_fig]
+  C:\Users\quark\OneDrive\Documents\openNMR\src\opennmr\notebook\one_d.py:583: RuntimeWarning: More than 20 figures have been opened. Figures created through the pyplot interface (`matplotlib.pyplot.figure`) are retained until explicitly closed and may consume too much memory. (To control this warning, see the rcParam `figure.max_open_warning`). Consider using `matplotlib.pyplot.close()`.
+    fig, ax = plt.subplots()
+
+tests/test_gui_pnmr.py: 3 warnings
+tests/test_pnmr_export.py: 2 warnings
+tests/test_pnmr_fit.py: 13 warnings
+tests/test_pnmr_simulator.py: 34 warnings
+  C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pymatgen\io\cif.py:1062: UserWarning: No _symmetry_equiv_pos_as_xyz type key found. Spacegroup from _symmetry_space_group_name_H-M used.
+    self.symmetry_operations = self.get_symops(data)  # type:ignore[assignment]
+
+tests/test_gui_pnmr.py: 1 warning
+tests/test_pnmr_export.py: 2 warnings
+tests/test_pnmr_fit.py: 9 warnings
+tests/test_pnmr_simulator.py: 20 warnings
+  C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pymatgen\io\cif.py:1347: UserWarning: Cannot determine chemical composition from CIF! could not convert string to float: '-'
+    if struct := self._get_structure(data, primitive, symmetrized, check_occu=check_occu):
+
+tests/test_gui_pnmr.py: 1 warning
+tests/test_pnmr_export.py: 2 warnings
+tests/test_pnmr_fit.py: 9 warnings
+tests/test_pnmr_simulator.py: 20 warnings
+  C:\Users\quark\OneDrive\Documents\openNMR\src\opennmr\notebook\pnmr_simulator.py:104: UserWarning: Issues encountered while parsing CIF: No _symmetry_equiv_pos_as_xyz type key found. Spacegroup from _symmetry_space_group_name_H-M used.
+    structures = parser.parse_structures(primitive=False)
+
+tests/test_pnmr_fit.py: 4 warnings
+tests/test_pnmr_simulator.py: 14 warnings
+tests/test_gui_pnmr.py: 2 warnings
+  C:\Users\quark\OneDrive\Documents\openNMR\src\opennmr\notebook\pnmr_simulator.py:104: UserWarning: Issues encountered while parsing CIF: No _symmetry_equiv_pos_as_xyz type key found. Spacegroup from _symmetry_space_group_name_H-M used.
+  Skipping relative stoichiometry check because CIF does not contain formula keys.
+    structures = parser.parse_structures(primitive=False)
+
+tests/test_pnmr_simulator.py::test_equivalent_sites_share_one_enumeration
+tests/test_pnmr_simulator.py::test_shared_enumeration_matches_the_long_way
+tests/test_pnmr_simulator.py::test_fast_broadening_equals_one_gaussian_per_row
+tests/test_pnmr_simulator.py::test_estimate_matches_the_run
+  C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pymatgen\io\cif.py:1821: UserWarning: Site labels are not unique, which is not compliant with the CIF spec (https://www.iucr.org/__data/iucr/cifdic_html/1/cif_core.dic/Iatom_site_label.html):`['Na1_1', 'Na1_2', 'Na1_3', 'Na1_4', 'Na1_5', 'Na1_6', 'Na1_7', 'Na1_8', 'X1b_1', 'X1b_1', 'X1b_2', 'X1b_2', 'X1b_3', 'X1b_3', 'X1b_4', 'X1b_4', 'X1b_5', 'X1b_5', 'X1b_6', 'X1b_6', 'X1b_7', 'X1b_7', 'X1b_8', 'X1b_8']`.
+    return str(CifWriter(structure, **kwargs))
+
+tests/test_pnmr_simulator.py::test_equivalent_sites_share_one_enumeration
+tests/test_pnmr_simulator.py::test_shared_enumeration_matches_the_long_way
+tests/test_pnmr_simulator.py::test_fast_broadening_equals_one_gaussian_per_row
+tests/test_pnmr_simulator.py::test_estimate_matches_the_run
+  C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pymatgen\io\cif.py:1825: UserWarning: Site labels are not unique, which is not compliant with the CIF spec (https://www.iucr.org/__data/iucr/cifdic_html/1/cif_core.dic/Iatom_site_label.html):`['Na1_1', 'Na1_2', 'Na1_3', 'Na1_4', 'Na1_5', 'Na1_6', 'Na1_7', 'Na1_8', 'X1b_1', 'X1b_1', 'X1b_2', 'X1b_2', 'X1b_3', 'X1b_3', 'X1b_4', 'X1b_4', 'X1b_5', 'X1b_5', 'X1b_6', 'X1b_6', 'X1b_7', 'X1b_7', 'X1b_8', 'X1b_8']`.
+    CifWriter(structure, **kwargs).write_file(filename)
+
+tests/test_pnmr_simulator.py::test_unknown_nuclide_fails_before_any_work
+  C:\Users\quark\OneDrive\Documents\openNMR\src\opennmr\notebook\utils.py:365: UserWarning: Isotope string '99Xx' not recognised, please input a string of format e.g., '1H' or '27Al' and ensure it is an NMR active nuclide.
+    nucgamma = find_gamma(nuclide, field='', SFO1='')
+
+tests/test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log
+  C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pymatgen\io\cif.py:1821: UserWarning: Site labels are not unique, which is not compliant with the CIF spec (https://www.iucr.org/__data/iucr/cifdic_html/1/cif_core.dic/Iatom_site_label.html):`['Na1_1', 'Na1_2', 'Na1_3', 'Na1_4', 'Na1_5', 'Na1_6', 'Na1_7', 'Na1_8', 'Na1_9', 'Na1_10', 'Na1_11', 'Na1_12', 'Na1_13', 'Na1_14', 'Na1_15', 'Na1_16', 'Na1_17', 'Na1_18', 'Na2_1', 'Na2_2', 'Na2_3', 'Na2_4', 'Na2_5', 'Na2_6', 'Na2_7', 'Na2_8', 'Na2_9', 'Na2_10', 'Na2_11', 'Na2_12', 'Na2_13', 'Na2_14', 'Na2_15', 'Na2_16', 'Na2_17', 'Na2_18', 'M1b_1', 'M1b_1', 'M1b_2', 'M1b_2', 'M1b_3', 'M1b_3', 'M1b_4', 'M1b_4', 'M1b_5', 'M1b_5', 'M1b_6', 'M1b_6', 'M1b_7', 'M1b_7', 'M1b_8', 'M1b_8', 'M1b_9', 'M1b_9', 'M1b_10', 'M1b_10', 'M1b_11', 'M1b_11', 'M1b_12', 'M1b_12', 'M1b_13', 'M1b_13', 'M1b_14', 'M1b_14', 'M1b_15', 'M1b_15', 'M1b_16', 'M1b_16', 'M1b_17', 'M1b_17', 'M1b_18', 'M1b_18', 'Fe1_1', 'Fe1_2', 'Fe1_3', 'Fe1_4', 'Fe1_5', 'Fe1_6', 'Fe1_7', 'Fe1_8', 'Fe1_9', 'Fe1_10', 'Fe1_11', 'Fe1_12', 'Fe1_13', 'Fe1_14', 'Fe1_15', 'Fe1_16', 'Fe1_17', 'Fe1_18']`.
+    return str(CifWriter(structure, **kwargs))
+
+tests/test_gui_pnmr.py::test_a_long_label_list_is_not_dumped_into_the_log
+  C:\Users\quark\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\pymatgen\io\cif.py:1825: UserWarning: Site labels are not unique, which is not compliant with the CIF spec (https://www.iucr.org/__data/iucr/cifdic_html/1/cif_core.dic/Iatom_site_label.html):`['Na1_1', 'Na1_2', 'Na1_3', 'Na1_4', 'Na1_5', 'Na1_6', 'Na1_7', 'Na1_8', 'Na1_9', 'Na1_10', 'Na1_11', 'Na1_12', 'Na1_13', 'Na1_14', 'Na1_15', 'Na1_16', 'Na1_17', 'Na1_18', 'Na2_1', 'Na2_2', 'Na2_3', 'Na2_4', 'Na2_5', 'Na2_6', 'Na2_7', 'Na2_8', 'Na2_9', 'Na2_10', 'Na2_11', 'Na2_12', 'Na2_13', 'Na2_14', 'Na2_15', 'Na2_16', 'Na2_17', 'Na2_18', 'M1b_1', 'M1b_1', 'M1b_2', 'M1b_2', 'M1b_3', 'M1b_3', 'M1b_4', 'M1b_4', 'M1b_5', 'M1b_5', 'M1b_6', 'M1b_6', 'M1b_7', 'M1b_7', 'M1b_8', 'M1b_8', 'M1b_9', 'M1b_9', 'M1b_10', 'M1b_10', 'M1b_11', 'M1b_11', 'M1b_12', 'M1b_12', 'M1b_13', 'M1b_13', 'M1b_14', 'M1b_14', 'M1b_15', 'M1b_15', 'M1b_16', 'M1b_16', 'M1b_17', 'M1b_17', 'M1b_18', 'M1b_18', 'Fe1_1', 'Fe1_2', 'Fe1_3', 'Fe1_4', 'Fe1_5', 'Fe1_6', 'Fe1_7', 'Fe1_8', 'Fe1_9', 'Fe1_10', 'Fe1_11', 'Fe1_12', 'Fe1_13', 'Fe1_14', 'Fe1_15', 'Fe1_16', 'Fe1_17', 'Fe1_18']`.
+    CifWriter(structure, **kwargs).write_file(filename)
+
+tests/test_text_files_are_utf8.py::test_every_text_write_names_its_encoding
+  <unknown>:390: SyntaxWarning: "\m" is an invalid escape sequence. Such sequences will not work in the future. Did you mean "\\m"? A raw string is also an option.
+
+tests/test_text_files_are_utf8.py::test_every_text_write_names_its_encoding
+  <unknown>:421: SyntaxWarning: "\m" is an invalid escape sequence. Such sequences will not work in the future. Did you mean "\\m"? A raw string is also an option.
+
+tests/test_two_d.py::test_inset_rejects_figure_level_keys[fig]
+  C:\Users\quark\OneDrive\Documents\openNMR\src\opennmr\notebook\two_d.py:1054: RuntimeWarning: More than 20 figures have been opened. Figures created through the pyplot interface (`matplotlib.pyplot.figure`) are retained until explicitly closed and may consume too much memory. (To control this warning, see the rcParam `figure.max_open_warning`). Consider using `matplotlib.pyplot.close()`.
+    fig, ax = plt.subplots()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_gui.py::test_main_window_fitting_tab_has_three_collapsible_sections
+FAILED tests/test_gui.py::test_main_window_applications_is_its_own_top_level_button
+FAILED tests/test_gui.py::test_main_window_fit_spectrum_amplitude_bound_regions_caps_the_fit
+FAILED tests/test_gui_canvas.py::test_canvas_shrinks_labels_rather_than_clipping_them
+FAILED tests/test_gui_multi_fit.py::test_section_placement - AssertionError: ...
+FAILED tests/test_gui.py::test_open_experiments_list_sits_under_the_tiles - a...
+FAILED tests/test_gui_snr.py::test_section_sits_in_integrate_after_dnp - Asse...
+FAILED tests/test_startup_time.py::test_section_headers_get_the_sheets_padding
+=== 8 failed, 4289 passed, 172 skipped, 173 warnings in 4095.70s (1:08:15) ====

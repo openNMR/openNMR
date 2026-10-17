@@ -61,9 +61,9 @@ def test_section_sits_in_integrate_after_dnp(window):
     side = [window.side_tabs.tabText(i) for i in range(window.side_tabs.count())]
     tab = window.side_tabs.widget(side.index("Integrate"))
     titles = [s.title() for s in tab.findChildren(CollapsibleSection)]
-    # CP Build-up (2026-10-16) follows it.
+    # CP Build-up (2026-10-16), then the Offset Tracker (2026-10-17), follow it.
     assert titles.index("DNP") < titles.index("Signal-to-Noise") < titles.index("CP Build-up")
-    assert titles[-1] == "CP Build-up"
+    assert titles[-1] == "Offset Tracker (HMQC / J-resolved, O2/O3)"
 
 
 def test_parse_typed_regions():

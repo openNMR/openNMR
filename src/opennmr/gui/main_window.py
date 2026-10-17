@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 
 import numpy as np
-from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction, QActionGroup, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence, QPalette, QPixmap,
 )
@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QAbstractSpinBox, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
-    QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
+    QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolButton,
     QVBoxLayout, QWidget,
 )
 from PySide6.QtWidgets import QColorDialog, QLayout
@@ -151,6 +151,7 @@ from .czjzek_panels import CzjzekFitPanel, CzjzekSimPanel
 from .dnp_panel import DnpWorkflowPanel
 from .snr_panel import SnrPanel
 from .cp_buildup_panel import CpBuildupPanel
+from .offset_tracker_panel import OffsetTrackerPanel
 from .tensor_view_panel import TensorViewControls
 from .periodic_table_panel import LarmorCalculatorPanel, PeriodicTableView
 from .loader import background_load_enabled
@@ -171,6 +172,34 @@ _RESOURCES_DIR = os.path.join(os.path.dirname(__file__), "resources")
 #: a longer drop-down is harder to use, not more capable. Anything
 #: beyond it can still be typed.
 _QUAD_NUCLIDE_CHOICES = 24
+
+
+class _PhaseFocusWatcher(QObject):
+    """Watches clicks and focus in the Process panel: inside the Phase
+    section the pivot line shows, on any other Process control it goes
+    (user request, 2026-10-17). Clicks elsewhere (the plot, the list)
+    leave it as it is, so zooming in to phase keeps the line."""
+
+    _TYPES = (QEvent.Type.MouseButtonPress, QEvent.Type.FocusIn)
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+
+    def eventFilter(self, obj, event):  # noqa: N802 -- Qt override
+        try:
+            if event.type() in self._TYPES and isinstance(obj, QWidget):
+                window = self._window
+                panel = getattr(window, "_processing_panel_widget", None)
+                content = getattr(window, "_phase_section_content", None)
+                if panel is not None and content is not None and panel.isAncestorOf(obj):
+                    section = getattr(window, "phase_section", None)
+                    inside = (obj is content or content.isAncestorOf(obj)
+                              or (section is not None and section.isAncestorOf(obj)))
+                    window._set_phase_controls_active(inside)
+        except RuntimeError:   # the window is being deleted
+            pass
+        return False
 
 
 class _ExperimentDropList(QListWidget):
@@ -935,11 +964,35 @@ class MainWindow(QMainWindow):
         # splitter, so the user can trade list height for panel height.
         self.left_splitter = QSplitter(Qt.Orientation.Vertical)
         self.left_splitter.addWidget(tabs)
-        self.left_splitter.addWidget(self.open_experiments_box)
+        # Open experiments can be minimised to a strip, as Title / notes
+        # can (user request, 2026-10-17): View ▸ Open Experiments,
+        # Ctrl/Cmd+E, or a click on the strip. Remembered.
+        self.open_experiments_panel = QWidget()
+        panel_layout = QVBoxLayout(self.open_experiments_panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+        self.open_experiments_toggle = QToolButton()
+        self.open_experiments_toggle.setCheckable(True)
+        self.open_experiments_toggle.setAutoRaise(True)
+        self.open_experiments_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.open_experiments_toggle.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                                   QSizePolicy.Policy.Fixed)
+        self.open_experiments_toggle.toggled.connect(self._set_open_experiments_open)
+        panel_layout.addWidget(self.open_experiments_toggle)
+        panel_layout.addWidget(self.open_experiments_box, 1)
+        self.left_splitter.addWidget(self.open_experiments_panel)
         self.left_splitter.setChildrenCollapsible(False)
         self.left_splitter.setStretchFactor(0, 3)
         self.left_splitter.setStretchFactor(1, 1)
         self.left_splitter.setSizes([560, 180])
+        self._open_experiments_open = True
+        self._open_experiments_sizes = None
+        list_model = self.spectrum_list.model()
+        for signal in (list_model.rowsInserted, list_model.rowsRemoved, list_model.modelReset):
+            signal.connect(lambda *_a: self._update_open_experiments_toggle_text())
+        self._set_open_experiments_open(
+            bool((getattr(self, "_ui_settings", None) or {}).get("open_experiments_open", True)),
+            remember=False)
         self._sync_open_experiments_visibility(tabs.currentIndex())
 
         # The plot, with the Title / notes panel opening from the
@@ -1290,6 +1343,15 @@ class MainWindow(QMainWindow):
             "Show or hide the selected experiment's title and notes, at the right of the plot.")
         self.notes_drawer_action.triggered.connect(self.notes_drawer.setOpen)
         view_menu.addAction(self.notes_drawer_action)
+        # Ctrl/Cmd+E (user request, 2026-10-17; the fact box moved to +B).
+        self.open_experiments_action = QAction("Open &Experiments", self)
+        self.open_experiments_action.setCheckable(True)
+        self.open_experiments_action.setChecked(self._open_experiments_open)
+        self.open_experiments_action.setShortcut(QKeySequence("Ctrl+E"))
+        self.open_experiments_action.setToolTip(
+            "Show the list of open experiments, or minimise it to a strip.")
+        self.open_experiments_action.triggered.connect(self._set_open_experiments_open)
+        view_menu.addAction(self.open_experiments_action)
         view_menu.addSeparator()
         pan_action = QAction("&Pan Mode", self)
         pan_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
@@ -1340,8 +1402,11 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
         home_action = QAction("Reset &View", self)
-        home_action.setShortcut(QKeySequence("Ctrl+0"))
-        home_action.setToolTip("Reset pan/zoom back to the full spectrum.")
+        # Ctrl+Shift+H ("home"): Ctrl/Cmd+0 opens the NMR Periodic Table
+        # since 2026-10-17 (user request). Double-click and the plot's
+        # Home button also reset the view.
+        home_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        home_action.setToolTip("Reset pan/zoom back to the full spectrum (or double-click the plot).")
         home_action.triggered.connect(self._reset_navigation_view)
         view_menu.addAction(home_action)
 
@@ -1368,10 +1433,12 @@ class MainWindow(QMainWindow):
         self._window_panel_actions = {}
         for shortcut_num, (label, tile) in enumerate(self._WINDOW_MENU_PANELS, start=1):
             action = QAction(label, self)
-            # Nine number keys: a tenth tile (Periodic Table, since
-            # Integrate joined) has its menu entry but no Ctrl+number.
+            # Nine number keys, then Ctrl/Cmd+0 for the tenth tile (the
+            # NMR Periodic Table; user request, 2026-10-17).
             if shortcut_num <= 9:
                 action.setShortcut(QKeySequence(f"Ctrl+{shortcut_num}"))
+            elif shortcut_num == 10:
+                action.setShortcut(QKeySequence("Ctrl+0"))
             action.triggered.connect(
                 lambda _checked=False, name=tile: self._show_side_tab(name))
             window_menu.addAction(action)
@@ -1469,10 +1536,11 @@ class MainWindow(QMainWindow):
             "F1 on a 2D); marked as an estimate where peaks overlap.")
         self.width_menu_action.toggled.connect(self._on_width_toggle_clicked)
         analysis_menu.addAction(self.width_menu_action)
-        # Cmd/Ctrl+E: a random fact (explicit user request, 2026-10-16) --
-        # on the window only, in no menu, by design.
+        # Cmd/Ctrl+B: a random fact (explicit user request, 2026-10-16;
+        # Ctrl+E until 2026-10-17, which now shows/hides Open experiments)
+        # -- on the window only, in no menu, by design.
         self._fact_action = QAction(self)
-        self._fact_action.setShortcut(QKeySequence("Ctrl+E"))
+        self._fact_action.setShortcut(QKeySequence("Ctrl+B"))
         self._fact_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self._fact_action.triggered.connect(self._show_fact)
         self.addAction(self._fact_action)
@@ -2318,7 +2386,12 @@ class MainWindow(QMainWindow):
         self.compare_canvas.compareSelectionCleared.connect(self.compare_list.clear_current)
         self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
-        layout.addWidget(self.compare_list, 1)
+        # A box of about ten rows, not the whole tile's height (user
+        # report, 2026-10-17: "a little big"); it scrolls past that, and
+        # the tile's spare height goes below the controls instead.
+        self.compare_list.setMinimumHeight(4 * self._compare_list_row_height())
+        self.compare_list.setMaximumHeight(10 * self._compare_list_row_height())
+        layout.addWidget(self.compare_list)
 
         # Checking a long list one row at a time is the slow path
         # everything downstream depends on (Fit Curve, VOCS Sum, the
@@ -2404,7 +2477,11 @@ class MainWindow(QMainWindow):
             "on every checkbox/control change; this is just an explicit, "
             "always-available way to do the same thing on demand."
         )
-        compare_plot_button.clicked.connect(self._refresh_compare_view)
+        # A lambda: clicked(bool) passed False straight into switch_tab,
+        # so the button redrew but never showed the Compare view (user
+        # report, 2026-10-17: "Plot appears to not do anything").
+        compare_plot_button.clicked.connect(lambda _checked=False: self._on_compare_plot_clicked())
+        self.compare_plot_button = compare_plot_button
         compare_action_row.addWidget(compare_plot_button)
         compare_fit_curve_button = QPushButton("Fit Curve…")
         compare_fit_curve_button.setToolTip(
@@ -2452,7 +2529,13 @@ class MainWindow(QMainWindow):
         self.compare_list.itemChanged.connect(_refresh_compare_tools)
         self.compare_list.model().rowsInserted.connect(_refresh_compare_tools)
         self.compare_list.model().rowsRemoved.connect(_refresh_compare_tools)
+        layout.addStretch(1)
         return tab
+
+    def _compare_list_row_height(self) -> int:
+        """One row of the Compare list, in pixels (its font's line
+        spacing plus the item padding the styles add)."""
+        return self.compare_list.fontMetrics().lineSpacing() + 6
 
     # -- Integrate ▸ DNP (and the Compare list's entries for Arithmetic) -----
 
@@ -3374,10 +3457,19 @@ class MainWindow(QMainWindow):
             if saved_metadata.get("mass_g") is not None:
                 self.session.set_mass(index, saved_metadata["mass_g"])
                 spectrum = self.session.spectra[index]
-            if saved_metadata.get("nucleus"):
+            # The nucleus only from this proc number's own sidecar. The
+            # sidecar is one per experiment folder, so a 1D proc number of
+            # a 2D (an F1 column from rsc) took the 2D's F2 nucleus from
+            # it, over the reader's correct F1 one (user report,
+            # 2026-10-17: right axis, wrong nucleus in the label).
+            nucleus_is_ours = self._sidecar_belongs(
+                spectrum.metadata.source_path, getattr(spectrum.metadata, "procno", None)) and (
+                spectrum.metadata.raw.get("procno_dimension") != 1
+                or saved_metadata.get("nucleus_indirect") is None)
+            if saved_metadata.get("nucleus") and nucleus_is_ours:
                 self.session.set_nucleus(index, saved_metadata["nucleus"])
                 spectrum = self.session.spectra[index]
-            if saved_metadata.get("nucleus_indirect"):
+            if saved_metadata.get("nucleus_indirect") and nucleus_is_ours:
                 self.session.set_nucleus(index, saved_metadata["nucleus_indirect"], indirect=True)
                 spectrum = self.session.spectra[index]
         saved_processing = io_persistence.load_processing_sidecar(
@@ -6524,6 +6616,16 @@ class MainWindow(QMainWindow):
         "imaging": ("Imaging (Apply)", ("_imaging_section",)),
         "cp_buildup": ("CP Build-up (Integrate)", ("_cp_buildup_section",)),
         "regularisation": ("Regularisation (Dynamics)", ("_regularisation_section",)),
+        # Explicit user request, 2026-10-17.
+        "pseudo2d_guide": ("How to fit pseudo-2D data (Fit and Dynamics)",
+                           ("_fit_guide_host", "_curve_guide_host")),
+        "offset_tracker": ("Offset tracker: HMQC / J-resolved O2/O3 series (Integrate)",
+                           ("_offset_tracker_section",)),
+        "dft": ("DFT tensors (Simulate)", ("_dft_sim_section",)),
+        "batch_pseudo2d": ("Batch pseudo-2D (e.g. at every temperature) (Dynamics)",
+                           ("_batch_relaxation_section",)),
+        "bpp": ("Relaxation vs Temperature (BPP) (Dynamics)", ("_vt_relaxation_section",)),
+        "exchange": ("Exchange lineshape (Dynamics)", ("_exchange_section",)),
         # A whole launcher tile: "tab:<its label>" -- the tile, its page
         # and its Window-menu entry go together, never an empty tile.
         "advanced": ("Advanced Processing (the whole Adv. Proc. tile)", ("tab:Adv. Proc.",)),
@@ -6575,7 +6677,8 @@ class MainWindow(QMainWindow):
             if removed > 0:
                 text += f", less {removed} for the digital filter"
             text += ")"
-        text += ". Larger values mean the whole FID; to add points, use Zero-fill."
+        text += (". A larger value keeps the whole FID and pads it with zeros to that many "
+                 "points (the FFT size grows to match if Zero-fill's is smaller).")
         self.tdeff_units_label.setText(text)
         self.tdeff_units_label.setVisible(True)
 
@@ -7260,6 +7363,15 @@ class MainWindow(QMainWindow):
 
     def _on_compare_controls_changed(self) -> None:
         self._refresh_compare_view_if_active()
+
+    def _on_compare_plot_clicked(self) -> None:
+        """Compare ▸ Plot: draw the comparison and show the Compare view."""
+        self._update_compare_tab_visibility()
+        self._refresh_compare_view(switch_tab=True, force_render=True)
+        index = self.canvas_tabs.indexOf(self.compare_canvas)
+        if index >= 0 and self.compare_list.count() > 0:
+            self.canvas_tabs.setTabVisible(index, True)
+            self.canvas_tabs.setCurrentWidget(self.compare_canvas)
 
     def _refresh_compare_view_if_active(self, switch_tab: bool = True) -> None:
         if self.compare_list.count() > 0:
@@ -8027,9 +8139,24 @@ class MainWindow(QMainWindow):
         self.zero_fill_custom_spin.setVisible(self.zero_fill_combo.currentData() is None)
         self._on_fid_processing_control_changed()
 
-    def _zero_fill_value(self) -> int:
+    def _zero_fill_choice(self) -> int:
+        """The FFT size picked in Zero-fill to (or Custom size)."""
         data = self.zero_fill_combo.currentData()
         return data if data is not None else self.zero_fill_custom_spin.value()
+
+    def _zero_fill_value(self) -> int:
+        """The FFT size actually used: Zero-fill's choice, or Truncate
+        to's value when that is set past the acquired points and is the
+        larger (user request, 2026-10-17: Truncate to could not go above
+        the points acquired once zero-filled). Points past the acquired
+        FID are zeros, added after the window, so the window's shape is
+        that of the acquired FID either way."""
+        size = self._zero_fill_choice()
+        acquired = getattr(self, "_truncate_acquired_points", None)
+        tdeff = self.tdeff_spin.value() if self.tdeff_spin.isEnabled() else 0
+        if acquired and tdeff > acquired:
+            return max(size, tdeff)
+        return size
 
     def _set_zero_fill_value(self, value: int) -> None:
         idx = self.zero_fill_combo.findData(value)
@@ -8061,6 +8188,14 @@ class MainWindow(QMainWindow):
         ``fid_raw`` cached to reprocess from, unlike an unsupported
         window)."""
         if spectrum.metadata.raw.get("read_2d_shape_guess_failed"):
+            return False
+        # A 1D proc number of a 2D (a row/column TopSpin wrote with rser,
+        # rsc or proj): the experiment's ser is the 2D's, not this
+        # spectrum's FID. Treating it as reprocessable sent every phase
+        # change to a rebuild that could not happen, so only Autophase
+        # (which redraws in full) showed anything (user report,
+        # 2026-10-17). It is phased as the processed data it is.
+        if spectrum.metadata.raw.get("procno_dimension") == 1:
             return False
         if spectrum.metadata.vendor in ("xpulse", "varian", "jeol", "spinsolve"):
             return True
@@ -8103,7 +8238,7 @@ class MainWindow(QMainWindow):
         echo_top = (processing_ft.find_echo_top(fid, offset=self.echo_offset_spin.value())
                     if self.align_echo_button.isChecked() else None)
         self.fid_canvas.show_fid(
-            fid, dt, title=title, window_envelope=envelope, tdeff_index=tdeff or None, echo_top_index=echo_top,
+            fid, dt, title=title, window_envelope=envelope, tdeff_index=(tdeff if 0 < tdeff <= len(fid) else None), echo_top_index=echo_top,
             mode=self.fid_display_combo.currentData(), x_unit=self.fid_x_unit_combo.currentData(),
         )
         if switch_tab:
@@ -8582,7 +8717,7 @@ class MainWindow(QMainWindow):
             # when F1 gained its interferogram panel -- returned
             # without one, so the Phase 1 pivot vanished from the F1
             # view the moment that panel appeared.
-            self.processing_preview_canvas.set_pivot_marker(self.pivot_spin.value())
+            self.processing_preview_canvas.set_pivot_marker(self._pivot_marker_ppm())
             self.processing_preview_canvas.canvas.draw_idle()
             return
 
@@ -8602,7 +8737,7 @@ class MainWindow(QMainWindow):
         else:
             canvas.update_data(trace)
         canvas.ax.set_title(f"F2 column {self._phase_2d_slice_index} (phase preview)")
-        canvas.set_pivot_marker(self.pivot_spin.value())
+        canvas.set_pivot_marker(self._pivot_marker_ppm())
         canvas.canvas.draw_idle()
 
     @staticmethod
@@ -9125,7 +9260,7 @@ class MainWindow(QMainWindow):
                     if self.align_echo_button.isChecked() else None)
                 self.processing_preview_canvas.show_processing_preview(
                     fid, dt, slice_spectrum, title=title, window_envelope=envelope,
-                    tdeff_index=tdeff or None, echo_top_index=echo_top,
+                    tdeff_index=(tdeff if 0 < tdeff <= len(fid) else None), echo_top_index=echo_top,
                     fid_mode=self.fid_display_combo.currentData(),
                     fid_x_unit=self.fid_x_unit_combo.currentData(),
                     preserve_view=preserve_view,
@@ -9188,18 +9323,29 @@ class MainWindow(QMainWindow):
         if spectrum.ndim == 2 and not spectrum.is_pseudo_2d and self.dim_combo.currentIndex() != 0:
             self._show_2d_indirect_processing_preview(spectrum)
             return
+        if not self._fid_reprocessable(spectrum) and spectrum.ndim == 1:
+            # Processed data (no raw FID): the preview *is* the spectrum,
+            # which _apply_phase_preview has just phased -- redraw it in
+            # place, keeping the zoom. It used to return here, so a phase
+            # change never reached this view (user report, 2026-10-17).
+            self.processing_preview_canvas.update_data(spectrum)
+            self.processing_preview_canvas.set_pivot_marker(self._pivot_marker_ppm())
+            return
         try:
             computed = self._compute_processing_preview(spectrum)
         except Exception:  # noqa: BLE001 -- best-effort live preview, see _show_processing_preview
             return
         if computed is None:
+            # No raw FID cached after all: show the phased spectrum itself.
+            if spectrum.ndim == 1:
+                self.processing_preview_canvas.update_data(spectrum)
             return
         _fid, _dt, preview_spectrum, _title = computed
         updated = self.processing_preview_canvas.update_processing_preview_spectrum(preview_spectrum)
         if not updated:
             self._show_processing_preview(spectrum, index, switch_tab=False)
             return
-        self.processing_preview_canvas.set_pivot_marker(self.pivot_spin.value())
+        self.processing_preview_canvas.set_pivot_marker(self._pivot_marker_ppm())
 
     def _update_processing_preview_tab_visibility(self, spectrum) -> None:
         """Show the Processing Preview canvas tab only for a spectrum
@@ -9207,7 +9353,36 @@ class MainWindow(QMainWindow):
         gate as ``fid_processing_box`` (see
         :meth:`_refresh_fid_processing_controls`)."""
         index = self.canvas_tabs.indexOf(self.processing_preview_canvas)
-        self.canvas_tabs.setTabVisible(index, spectrum is not None and self._fid_reprocessable(spectrum))
+        # On the Process tile it is always there (user request,
+        # 2026-10-17: "on going into Process, ALWAYS load the Processing
+        # view"): for data with no raw FID it shows the spectrum itself,
+        # which is what Phase and Baseline act on.
+        self.canvas_tabs.setTabVisible(
+            index, spectrum is not None and (self._fid_reprocessable(spectrum) or self._on_process_tile()))
+
+    def _pivot_marker_ppm(self):
+        """Where the Phase 1 pivot line goes, or ``None`` once the user
+        has clicked a Process control outside Phase (see
+        :meth:`_set_phase_controls_active`)."""
+        if getattr(self, "_phase_clicked_away", False):
+            return None
+        return self.pivot_spin.value()
+
+    def _set_phase_controls_active(self, active: bool) -> None:
+        """Phase is (``True``) or is no longer (``False``) what the user
+        is working with: show or hide the pivot line on both views."""
+        away = not active
+        if away == getattr(self, "_phase_clicked_away", False):
+            return
+        self._phase_clicked_away = away
+        marker = self._pivot_marker_ppm() if self._on_process_tile() else None
+        for canvas in (self.canvas, self.processing_preview_canvas):
+            canvas.set_pivot_marker(marker)
+
+    def _on_process_tile(self) -> bool:
+        tabs = getattr(self, "side_tabs", None)
+        return (tabs is not None and getattr(self, "_processing_tab_index", None) is not None
+                and tabs.currentIndex() == self._processing_tab_index)
 
     def _on_side_tab_changed(self, index: int) -> None:
         """Entering the Processing (left) tab switches the canvas over
@@ -9239,15 +9414,20 @@ class MainWindow(QMainWindow):
             if self.canvas_tabs.currentWidget() is self.simulation_canvas:
                 self.canvas_tabs.setCurrentWidget(self.canvas)
             self.canvas_tabs.setTabVisible(self.canvas_tabs.indexOf(self.simulation_canvas), False)
+        selected = self._selected_index()
+        spectrum = self.session.spectra[selected] if selected is not None else None
         if index != self._processing_tab_index:
             self.canvas.set_pivot_marker(None)
             self.processing_preview_canvas.set_pivot_marker(None)
             if self.canvas_tabs.currentWidget() is self.processing_preview_canvas:
                 self.canvas_tabs.setCurrentWidget(self.canvas)
+            self._update_processing_preview_tab_visibility(spectrum)
             return
-        selected = self._selected_index()
-        spectrum = self.session.spectra[selected] if selected is not None else None
-        if spectrum is not None and self._fid_reprocessable(spectrum):
+        # Always the Processing view on entering Process (user request,
+        # 2026-10-17), whatever view was showing and whether or not the
+        # data have a raw FID to reprocess.
+        if spectrum is not None:
+            self._update_processing_preview_tab_visibility(spectrum)
             self._show_processing_preview(spectrum, selected, switch_tab=True)
 
     def _update_fit_tab_visibility(self, spectrum) -> None:
@@ -9323,11 +9503,17 @@ class MainWindow(QMainWindow):
             raw_length = int(np.asarray(spectrum.data).shape[-1])
         else:
             raw_length = 1 << 20
-        self.tdeff_spin.setMaximum(raw_length)
+        # Past the acquired points is allowed: the FID is then padded with
+        # zeros to that many points (user request, 2026-10-17), and the
+        # FFT size grows to match if Zero-fill's is smaller -- see
+        # _zero_fill_value. Up to Zero-fill's largest custom size.
+        self._truncate_acquired_points = raw_length if (reprocessable and raw_fid is not None) else None
+        self.tdeff_spin.setMaximum(max(raw_length, self.zero_fill_custom_spin.maximum())
+                                   if self._truncate_acquired_points else raw_length)
         self._show_truncate_units(spectrum, raw_length, reprocessable and raw_fid is not None)
         saved_truncate = raw.get("live_truncate")
         if isinstance(saved_truncate, int) and not isinstance(saved_truncate, bool):
-            default_tdeff = min(saved_truncate, raw_length)
+            default_tdeff = min(saved_truncate, self.tdeff_spin.maximum())
         else:
             recorded_tdeff = int(spectrum.metadata.raw.get("exp_params", {}).get("TDEFF", 0) or 0) if is_xpulse else 0
             # Bruker: TopSpin's TDeff, as the reader used it.
@@ -9468,7 +9654,9 @@ class MainWindow(QMainWindow):
         # found via a live-recompute round trip silently shrinking a
         # conventional 2D's own F2 dimension down to its F1 row count).
         f2_length = spectrum.data.shape[-1]
-        default_zero_fill = raw.get("live_zero_fill", f2_length)
+        # The box's own choice, not the FFT size Truncate to may have
+        # raised it to (see _zero_fill_value).
+        default_zero_fill = raw.get("live_zero_fill_choice", raw.get("live_zero_fill", f2_length))
         self._set_zero_fill_value(default_zero_fill)
 
     def _resolve_window_kwargs(self) -> tuple[str | None, dict | None]:
@@ -9520,6 +9708,7 @@ class MainWindow(QMainWindow):
             "live_gb": self.gb_spin.value(),
             "live_ssb": self.ssb_spin.value(),
             "live_zero_fill": self._zero_fill_value(),
+            "live_zero_fill_choice": self._zero_fill_choice(),
             "live_fid_shift": self.fid_shift_spin.value(),
             "live_align_echo": self.align_echo_button.isChecked(),
             "live_echo_offset": self.echo_offset_spin.value(),
@@ -11337,6 +11526,11 @@ class MainWindow(QMainWindow):
     def _build_processing_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        self._processing_panel_widget = tab
+        # The Phase 1 pivot line shows while Phase is being worked with,
+        # and goes once the user clicks any other Process control (user
+        # request, 2026-10-17: it lingered after phasing then baseline).
+        self._phase_clicked_away = False
 
         self.processing_status_label = QLabel(
             "Select a spectrum to adjust its phase, baseline and referencing."
@@ -11582,6 +11776,7 @@ class MainWindow(QMainWindow):
         self.baseline_method_combo.addItem("Whittaker", "whittaker")
         self.baseline_method_combo.addItem("Manual: Ax⁴+Bx³+Cx²+Dx+E", "manual_polynomial")
         self.baseline_method_combo.addItem("Manual: A·sin(Bx+C)+D", "manual_sine")
+        self.baseline_method_combo.addItem("Cubic spline (points chosen on the plot)", "spline_points")
         self.baseline_method_combo.setToolTip(
             "Cubic spline (automatic points): finds the baseline itself, "
             "anywhere in the spectrum (a stretch counts as baseline when it "
@@ -11618,7 +11813,51 @@ class MainWindow(QMainWindow):
         )
         self._narrow_combo(self.baseline_method_combo)
         self.baseline_method_combo.currentIndexChanged.connect(self._on_baseline_correct_options_changed)
+        # What users see since 2026-10-17 (user request): one entry per
+        # kind of baseline. Polynomial and Sinusoidal are the automatic
+        # fit and its coefficients together (adjusting a coefficient
+        # makes it hand-set); Spline is automatic points, points chosen
+        # on the plot, or the smoothing spline. baseline_method_combo
+        # above still holds the exact method (and is what is saved), but
+        # is no longer shown.
+        self.baseline_family_combo = QComboBox()
+        for text, key in (("Linear", "linear"), ("Polynomial", "polynomial"),
+                          ("Sinusoidal", "sinusoidal"), ("Spline", "spline"),
+                          ("Whittaker", "whittaker")):
+            self.baseline_family_combo.addItem(text, key)
+        self.baseline_family_combo.setToolTip(
+            "Linear, Polynomial, Sinusoidal: fitted automatically to the spectrum's "
+            "edges (or to baseline regions you choose below). The fit's coefficients "
+            "are shown underneath -- step any of them with ▲/▼ (or type) to adjust "
+            "the baseline by hand from where the fit left it; \"Fit automatically\" "
+            "goes back.\n\n"
+            "Spline: a cubic spline through baseline points -- placed automatically "
+            "wherever the spectrum is baseline, or chosen by clicking on the plot.\n\n"
+            "Whittaker: a penalised smooth curve fitted to the whole spectrum, pushed "
+            "down under the peaks -- no edge assumption, so the one to use on a "
+            "crowded spectrum or one with signal at an edge.")
+        self._narrow_combo(self.baseline_family_combo)
+        self.baseline_family_combo.currentIndexChanged.connect(self._on_baseline_family_changed)
+        baseline_options_row.addWidget(self.baseline_family_combo)
         baseline_options_row.addWidget(self.baseline_method_combo)
+        self.baseline_method_combo.setVisible(False)
+        self.baseline_method_combo.currentIndexChanged.connect(
+            lambda _i: self._sync_baseline_family_from_method())
+        self.baseline_spline_mode_combo = QComboBox()
+        for text, key in (("automatic points", "spline_auto"),
+                          ("points chosen on the plot", "spline_points"),
+                          ("smoothing spline (edges)", "spline")):
+            self.baseline_spline_mode_combo.addItem(text, key)
+        self.baseline_spline_mode_combo.setToolTip(
+            "Automatic points: found wherever the spectrum is baseline (no rougher "
+            "than the noise), one per stretch; the nodes are drawn on the preview.\n"
+            "Points chosen on the plot: click where the baseline is; each point sits "
+            "at the spectrum's local median there, so it follows re-phasing and every "
+            "slice of a series.\n"
+            "Smoothing spline (edges): through the first and last 5 % of the spectrum.")
+        self.baseline_spline_mode_combo.currentIndexChanged.connect(
+            self._on_baseline_spline_mode_changed)
+        baseline_options_row.addWidget(self.baseline_spline_mode_combo)
 
         self.baseline_degree_spin = QSpinBox()
         self.baseline_degree_spin.setRange(1, 12)
@@ -11737,6 +11976,41 @@ class MainWindow(QMainWindow):
         baseline_options_row.addWidget(self.baseline_points_spin)
         baseline_form.addRow("Baseline method:", baseline_options_row)
 
+        # Spline ▸ points chosen on the plot (user request, 2026-10-17).
+        self.baseline_spline_points_box = QWidget()
+        points_layout = QVBoxLayout(self.baseline_spline_points_box)
+        points_layout.setContentsMargins(0, 0, 0, 0)
+        points_buttons = QHBoxLayout()
+        self.baseline_pick_points_button = QPushButton("Pick points on plot")
+        self.baseline_pick_points_button.setCheckable(True)
+        self.baseline_pick_points_button.setToolTip(
+            "While on, each click on the Processing preview adds a baseline point there "
+            "(clicking an existing point removes it). Zoom and the plot's style are "
+            "left as they are.")
+        self.baseline_pick_points_button.toggled.connect(self._on_baseline_pick_points_toggled)
+        self.baseline_auto_points_button = QPushButton("Start from automatic")
+        self.baseline_auto_points_button.setToolTip(
+            "Fill the list with the points the automatic spline would use, to move, "
+            "add or remove from.")
+        self.baseline_auto_points_button.clicked.connect(self._on_baseline_points_from_auto)
+        self.baseline_undo_point_button = QPushButton("Undo")
+        self.baseline_undo_point_button.setToolTip("Remove the last point added.")
+        self.baseline_undo_point_button.clicked.connect(self._on_baseline_undo_point)
+        self.baseline_clear_points_button = QPushButton("Clear")
+        self.baseline_clear_points_button.clicked.connect(self._on_baseline_clear_points)
+        for button in (self.baseline_pick_points_button, self.baseline_auto_points_button,
+                       self.baseline_undo_point_button, self.baseline_clear_points_button):
+            points_buttons.addWidget(button)
+        points_buttons.addStretch(1)
+        points_layout.addLayout(points_buttons)
+        self.baseline_points_label = QLabel("")
+        self.baseline_points_label.setWordWrap(True)
+        points_layout.addWidget(self.baseline_points_label)
+        self._baseline_points_history: list = []
+        baseline_form.addRow(self.baseline_spline_points_box)
+        self.processing_preview_canvas.peakPicked.connect(self._on_baseline_point_picked)
+        self.processing_preview_canvas.pickModeChanged.connect(self._on_preview_pick_mode_changed)
+
         # --- Manual baseline: the user's own model -------------------
         # Explicit user request: "make a baseline manually" by fitting
         # A x^4 + B x^3 + C x^2 + D x + E or A sin(B x + C) + D, and
@@ -11747,6 +12021,7 @@ class MainWindow(QMainWindow):
         self.baseline_manual_box = ManualBaselineBox()
         self.baseline_manual_box.regionsEdited.connect(self._on_manual_baseline_regions_edited)
         self.baseline_manual_box.paramsEdited.connect(self._on_manual_baseline_params_edited)
+        self.baseline_manual_box.autoRequested.connect(self._on_baseline_auto_requested)
         self.baseline_manual_box.fixedChanged.connect(self._on_manual_baseline_fixed_changed)
         self.baseline_manual_box.refitToggled.connect(self._on_manual_baseline_refit_toggled)
         self.baseline_manual_box.fitRequested.connect(self._on_manual_baseline_fit_clicked)
@@ -11785,7 +12060,13 @@ class MainWindow(QMainWindow):
         phase_section_layout.setContentsMargins(0, 0, 0, 0)
         phase_section_layout.addWidget(self.dimension_box)
         phase_section_layout.addWidget(phase_box)
-        layout.addWidget(CollapsibleSection("Phase", content=phase_section_content))
+        self.phase_section = CollapsibleSection("Phase", content=phase_section_content)
+        self._phase_section_content = phase_section_content
+        self.phase_section.toggled.connect(
+            lambda expanded: self._set_phase_controls_active(bool(expanded)))
+        layout.addWidget(self.phase_section)
+        self._phase_focus_watcher = _PhaseFocusWatcher(self)
+        QApplication.instance().installEventFilter(self._phase_focus_watcher)
         self.baseline_section = CollapsibleSection("Baseline", content=self.baseline_box)
         layout.addWidget(self.baseline_section)
 
@@ -12630,6 +12911,15 @@ class MainWindow(QMainWindow):
         }
         if kwargs["method"] == "spline_auto":
             kwargs["n_points"] = raw.get("baseline_points")
+        if kwargs["method"] == "spline_points":
+            kwargs["node_x"] = [float(v) for v in raw.get("baseline_spline_x") or []]
+        if kwargs["method"] in ("linear", "polynomial", "sinusoidal"):
+            # The baseline regions typed or dragged under the coefficients
+            # count for the automatic fits too (2026-10-17): with none, the
+            # spectrum's edges, as before.
+            regions = raw.get("baseline_manual_regions") or None
+            if regions:
+                kwargs["baseline_regions"] = [tuple(r) for r in regions]
         model = MainWindow._manual_baseline_model_of(kwargs["method"])
         if model is not None:
             kwargs.update(MainWindow._manual_baseline_kwargs(raw, model))
@@ -12669,10 +12959,236 @@ class MainWindow(QMainWindow):
         """``(index, spectrum, model)`` when a spectrum is selected and a
         manual method is chosen, else ``None``."""
         index = self._selected_index()
-        model = self._manual_baseline_model_of(self.baseline_method_combo.currentData())
+        model = self._coefficient_model_of(self.baseline_method_combo.currentData())
         if index is None or model is None:
             return None
         return index, self.session.spectra[index], model
+
+    @staticmethod
+    def _coefficient_model_of(method) -> str | None:
+        """The manual model whose coefficients the box shows for
+        ``method``: the manual methods' own, and since 2026-10-17 the
+        automatic Linear/Polynomial (``"polynomial"``) and Sinusoidal
+        (``"sine"``) fits' too."""
+        return (MainWindow._manual_baseline_model_of(method)
+                or {"linear": "polynomial", "polynomial": "polynomial",
+                    "sinusoidal": "sine"}.get(method))
+
+    #: Exact method -> the Baseline method entry it is shown under.
+    _BASELINE_FAMILY_OF = {
+        "linear": "linear", "polynomial": "polynomial", "manual_polynomial": "polynomial",
+        "sinusoidal": "sinusoidal", "manual_sine": "sinusoidal", "spline": "spline",
+        "spline_auto": "spline", "spline_points": "spline", "whittaker": "whittaker",
+    }
+
+    def _set_baseline_method(self, method: str) -> None:
+        index = self.baseline_method_combo.findData(method)
+        if index >= 0 and index != self.baseline_method_combo.currentIndex():
+            self.baseline_method_combo.setCurrentIndex(index)
+
+    def _on_baseline_family_changed(self, _index: int) -> None:
+        family = self.baseline_family_combo.currentData()
+        if self._BASELINE_FAMILY_OF.get(self.baseline_method_combo.currentData()) == family:
+            return
+        self._set_baseline_method(
+            self.baseline_spline_mode_combo.currentData() if family == "spline" else family)
+
+    def _on_baseline_spline_mode_changed(self, _index: int) -> None:
+        if self.baseline_family_combo.currentData() == "spline":
+            self._set_baseline_method(self.baseline_spline_mode_combo.currentData())
+
+    def _sync_baseline_family_from_method(self) -> None:
+        """Show the exact method's entry (after a restore, a test, or a
+        coefficient edit turning a fit into a hand-set one)."""
+        method = self.baseline_method_combo.currentData()
+        family = self._BASELINE_FAMILY_OF.get(method, "linear")
+        for combo, value in ((self.baseline_family_combo, family),
+                             (self.baseline_spline_mode_combo,
+                              method if family == "spline" else None)):
+            if value is None:
+                continue
+            index = combo.findData(value)
+            if index >= 0 and index != combo.currentIndex():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+
+    def _to_hand_set_baseline(self, model: str, values) -> None:
+        """An automatic fit's coefficients were edited (or fitted to
+        regions): from now on they are the baseline, as a manual one."""
+        index = self._selected_index()
+        if index is None:
+            return
+        raw = self.session.spectra[index].metadata.raw
+        raw[self._manual_key(model, "params")] = [float(v) for v in values]
+        raw["baseline_manual_refit"] = False
+        self.baseline_manual_box.set_manual()
+        self._set_baseline_method("manual_" + model)
+
+    def _on_baseline_auto_requested(self) -> None:
+        """\"Fit automatically\": back to this family's automatic fit."""
+        method = self.baseline_method_combo.currentData()
+        self._set_baseline_method({"manual_polynomial": "polynomial",
+                                   "manual_sine": "sinusoidal"}.get(method, method))
+
+    @staticmethod
+    def _manual_baseline_scales(model: str, x, y) -> dict:
+        """A 100 % step for each coefficient (ManualBaselineBox.set_scales):
+        the trace's intensity range for offsets and amplitudes, that range
+        over |x|^n for the x^n terms, a full period over the spectrum for
+        B and π for the sine's phase."""
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        y_range = float(np.ptp(y)) if y.size else 1.0
+        y_range = y_range if y_range > 0 else 1.0
+        x_max = float(np.max(np.abs(x))) if x.size else 1.0
+        x_max = x_max if x_max > 0 else 1.0
+        span = float(np.ptp(x)) if x.size else 1.0
+        span = span if span > 0 else 1.0
+        if model == "polynomial":
+            return {"A": y_range / x_max ** 4, "B": y_range / x_max ** 3,
+                    "C": y_range / x_max ** 2, "D": y_range / x_max, "E": y_range}
+        return {"A": y_range, "B": 2 * np.pi / span, "C": np.pi, "D": y_range}
+
+    # ---- Spline ▸ points chosen on the plot (2026-10-17) -----------------
+
+    def _baseline_points_context(self):
+        index = self._selected_index()
+        if index is None or self.baseline_method_combo.currentData() != "spline_points":
+            return None
+        return index, self.session.spectra[index]
+
+    def _update_baseline_points_label(self, spectrum=None) -> None:
+        if not hasattr(self, "baseline_points_label"):
+            return
+        points = (spectrum.metadata.raw.get("baseline_spline_x") or []) if spectrum is not None else []
+        if len(points) >= 2:
+            text = (f"{len(points)} points: " + ", ".join(f"{p:.4g}" for p in sorted(points))
+                    + " ppm. Each sits at the spectrum's local median there.")
+        elif points:
+            text = "1 point: click at least one more where the spectrum is baseline."
+        else:
+            text = ("No points yet: “Pick points on plot” and click where the spectrum is "
+                    "baseline (at least two), or “Start from automatic”.")
+        self.baseline_points_label.setText(text)
+
+    def _set_baseline_points(self, index, spectrum, points, remember: bool = True) -> None:
+        raw = spectrum.metadata.raw
+        if remember:
+            self._baseline_points_history.append(list(raw.get("baseline_spline_x") or []))
+            del self._baseline_points_history[:-50]
+        raw["baseline_spline_x"] = sorted(float(p) for p in points)
+        self._update_baseline_points_label(spectrum)
+        self._after_manual_baseline_change(index, spectrum)
+
+    def _on_baseline_pick_points_toggled(self, checked: bool) -> None:
+        if checked and self.canvas_tabs.indexOf(self.processing_preview_canvas) >= 0:
+            # Picked on the Processing preview, where the overlay is.
+            index = self.canvas_tabs.indexOf(self.processing_preview_canvas)
+            self.canvas_tabs.setTabVisible(index, True)
+            if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
+                self.canvas_tabs.setCurrentWidget(self.processing_preview_canvas)
+                self._refresh_processing_preview_if_active(preserve_view=True)
+        self.processing_preview_canvas.set_pick_mode(checked)
+
+    def _on_preview_pick_mode_changed(self, enabled: bool) -> None:
+        button = self.baseline_pick_points_button
+        if button.isChecked() != enabled:
+            button.blockSignals(True)
+            button.setChecked(enabled)
+            button.blockSignals(False)
+
+    def _on_baseline_point_picked(self, ppm: float) -> None:
+        """A click on the Processing preview while picking points: add a
+        point there, or remove the one clicked on (within 1 % of the
+        view's width)."""
+        if not self.baseline_pick_points_button.isChecked():
+            return
+        context = self._baseline_points_context()
+        if context is None:
+            return
+        index, spectrum = context
+        points = list(spectrum.metadata.raw.get("baseline_spline_x") or [])
+        try:
+            lo, hi = sorted(self.processing_preview_canvas._pivot_marker_ax.get_xlim())
+            tolerance = 0.01 * (hi - lo)
+        except Exception:  # noqa: BLE001 -- no axes: exact matches only
+            tolerance = 0.0
+        near = [p for p in points if abs(p - ppm) <= tolerance]
+        if near:
+            closest = min(near, key=lambda p: abs(p - ppm))
+            points.remove(closest)
+        else:
+            points.append(float(ppm))
+        self._set_baseline_points(index, spectrum, points)
+
+    def _on_baseline_points_from_auto(self) -> None:
+        context = self._baseline_points_context()
+        if context is None:
+            return
+        index, spectrum = context
+        source = self._manual_baseline_source(spectrum)
+        if source is None:
+            self.baseline_points_label.setText(
+                "Could not find the uncorrected trace -- untick Baseline Correct first.")
+            return
+        x, y = source
+        try:
+            auto = processing_fitting.auto_spline_baseline(
+                x, y, n_points=spectrum.metadata.raw.get("baseline_points"))
+        except Exception as exc:  # noqa: BLE001 -- reported, not raised
+            self.baseline_points_label.setText(f"No automatic points: {exc}")
+            return
+        self._set_baseline_points(index, spectrum, list(auto["nodes_x"]))
+
+    def _on_baseline_undo_point(self) -> None:
+        context = self._baseline_points_context()
+        if context is None or not self._baseline_points_history:
+            return
+        index, spectrum = context
+        self._set_baseline_points(index, spectrum, self._baseline_points_history.pop(),
+                                  remember=False)
+
+    def _on_baseline_clear_points(self) -> None:
+        context = self._baseline_points_context()
+        if context is not None:
+            self._set_baseline_points(*context, [])
+
+    def _refresh_baseline_coefficients(self) -> None:
+        """Step sizes from the trace shown and, for an automatic fit,
+        the fit's own coefficients in the box."""
+        box = getattr(self, "baseline_manual_box", None)
+        index = self._selected_index()
+        if box is None or index is None or box.isHidden():
+            return
+        spectrum = self.session.spectra[index]
+        raw = spectrum.metadata.raw
+        method = raw.get("baseline_method", "linear")
+        try:
+            source = self._manual_baseline_source(spectrum)
+        except Exception:  # noqa: BLE001 -- best-effort display
+            source = None
+        if source is None:
+            return
+        x, y = source
+        box.set_scales(self._manual_baseline_scales(box.model, x, y))
+        if method not in ("linear", "polynomial", "sinusoidal"):
+            return
+        regions = raw.get("baseline_manual_regions") or None
+        try:
+            auto = processing_ft.automatic_baseline_as_manual(
+                x, y, method, baseline_regions=[tuple(r) for r in regions] if regions else None,
+                degree=int(raw.get("baseline_degree", 2) or 2),
+                n_harmonics=int(raw.get("baseline_harmonics", 1) or 1),
+                period=raw.get("baseline_period"))
+        except Exception:  # noqa: BLE001 -- best-effort display
+            return
+        if auto["model"] != box.model:
+            return
+        what = {"linear": "straight line",
+                "polynomial": f"degree {int(raw.get('baseline_degree', 2) or 2)}",
+                "sinusoidal": f"{int(raw.get('baseline_harmonics', 1) or 1)} harmonic(s)"}[method]
+        box.show_automatic(auto["params"], auto["exact"], what)
 
     def _after_manual_baseline_change(self, index, spectrum) -> None:
         self._schedule_sidecar_save(index)
@@ -12731,6 +13247,10 @@ class MainWindow(QMainWindow):
         if context is None:
             return
         index, spectrum, model = context
+        if self._manual_baseline_model_of(self.baseline_method_combo.currentData()) is None:
+            # An automatic fit's coefficient was stepped or typed: the
+            # baseline is hand-set from here, starting from the fit.
+            self._to_hand_set_baseline(model, values)
         raw = spectrum.metadata.raw
         raw[self._manual_key(model, "params")] = [float(v) for v in values]
         # A hand-set coefficient has to be what is subtracted, not
@@ -12840,6 +13360,8 @@ class MainWindow(QMainWindow):
             box.status_label.setText(f"Fit failed: {exc}")
             return
         values = [fit["params"][n] for n in names]
+        if self._manual_baseline_model_of(self.baseline_method_combo.currentData()) is None:
+            self._to_hand_set_baseline(model, values)
         box.set_params(values, fit["errors"])
         raw = spectrum.metadata.raw
         raw[self._manual_key(model, "params")] = values
@@ -12869,6 +13391,10 @@ class MainWindow(QMainWindow):
         box.refit_check.setChecked(kwargs["manual_refit"])
         box.refit_check.blockSignals(False)
         box.status_label.setText("")
+        if self._manual_baseline_model_of(raw.get("baseline_method")) is not None:
+            box.set_manual()
+        self._sync_baseline_family_from_method()
+        self._update_baseline_points_label(spectrum)
 
     #: Canvases the baseline overlay is drawn on. Both, because the
     #: Spectrum tab is where a 1D is looked at and the Processing
@@ -12939,7 +13465,7 @@ class MainWindow(QMainWindow):
         if index is not None and self.session.spectra[index].metadata.vendor == "derived":
             show = False
         manual_regions = None
-        if (index is not None and self._manual_baseline_model_of(
+        if (index is not None and self._coefficient_model_of(
                 self.session.spectra[index].metadata.raw.get("baseline_method")) is not None
                 and self.session.spectra[index].metadata.vendor != "derived"):
             manual_regions = self.session.spectra[index].metadata.raw.get("baseline_manual_regions")
@@ -12995,11 +13521,21 @@ class MainWindow(QMainWindow):
                     nodes = (auto["nodes_x"], np.asarray(auto["nodes_y"]) / scale)
                 except Exception:  # noqa: BLE001 -- best-effort overlay
                     nodes = None
+            elif kwargs["method"] == "spline_points":
+                # The user's own points, at the heights the spline uses.
+                try:
+                    fitted_to = uncorrected if uncorrected is not None else np.real(data)
+                    chosen = processing_fitting.spline_through_points(
+                        ppm, fitted_to, kwargs.get("node_x"))
+                    nodes = (chosen["nodes_x"], np.asarray(chosen["nodes_y"]) / scale)
+                except Exception:  # noqa: BLE001 -- best-effort overlay (under two points)
+                    nodes = None
             canvas.set_baseline_preview(
                 ppm, baseline / scale,
                 uncorrected=(None if uncorrected is None or not show_ghost
                              else uncorrected / scale),
                 nodes=nodes)
+        self._refresh_baseline_coefficients()
 
     #: Polynomial degree above which a fit starts oscillating between
     #: its own candidate points rather than following the baseline --
@@ -13067,6 +13603,10 @@ class MainWindow(QMainWindow):
             # finding too little baseline to place nodes across the
             # spectrum (a crowded spectrum, or one broad hump).
             notes += self._auto_spline_warnings(spectrum)
+        elif method == "spline_points":
+            # The user's own points: nothing assumed about the edges.
+            if len(spectrum.metadata.raw.get("baseline_spline_x") or []) < 2:
+                notes.append("choose at least two points on the plot for the spline")
         elif spectrum.ndim >= 1:
             # Every other method assumes the spectrum's own edges are
             # baseline. That is a checkable claim, not a caveat.
@@ -13206,9 +13746,17 @@ class MainWindow(QMainWindow):
         self.baseline_harmonics_spin.setVisible(method == "sinusoidal")
         self.baseline_period_spin.setVisible(method == "sinusoidal")
         self.baseline_points_spin.setVisible(method == "spline_auto")
+        if hasattr(self, "baseline_spline_mode_combo"):
+            self.baseline_spline_mode_combo.setVisible(
+                self._BASELINE_FAMILY_OF.get(method) == "spline")
+            self.baseline_spline_points_box.setVisible(method == "spline_points")
+            if method != "spline_points" and self.baseline_pick_points_button.isChecked():
+                self.baseline_pick_points_button.setChecked(False)
         if hasattr(self, "baseline_manual_box"):
-            model = self._manual_baseline_model_of(method)
+            model = self._coefficient_model_of(method)
             self.baseline_manual_box.setVisible(model is not None)
+            if self._manual_baseline_model_of(method) is not None:
+                self.baseline_manual_box.set_manual()
             if model is not None and model != self.baseline_manual_box.model:
                 self.baseline_manual_box.set_model(model)
                 index = self._selected_index()
@@ -13538,6 +14086,7 @@ class MainWindow(QMainWindow):
         # pause. Real user report: "The indirect phasing sort of
         # bounces like there is a mismatch to the current and read
         # phases."
+        self._phase_clicked_away = False
         applied0, applied1 = self._phase_reference_delta_applied
         phase0 = self.phase0_spin.value() - applied0
         phase1 = self.phase1_spin.value() - applied1
@@ -13572,7 +14121,7 @@ class MainWindow(QMainWindow):
                 # shows stale data -- only the tab *switch* itself is
                 # guarded.
                 self.canvas.update_data(spectrum)
-            self.canvas.set_pivot_marker(self.pivot_spin.value())
+            self.canvas.set_pivot_marker(self._pivot_marker_ppm())
             if self.canvas_tabs.currentWidget() is not self.processing_preview_canvas:
                 self.canvas_tabs.setCurrentWidget(self.canvas)
             else:
@@ -14096,8 +14645,59 @@ class MainWindow(QMainWindow):
     _TILES_WITHOUT_OPEN_EXPERIMENTS = ("Simulate", "Periodic Table")
 
     def _sync_open_experiments_visibility(self, index: int) -> None:
-        self.open_experiments_box.setVisible(
-            self.side_tabs.tabText(index) not in self._TILES_WITHOUT_OPEN_EXPERIMENTS)
+        allowed = self.side_tabs.tabText(index) not in self._TILES_WITHOUT_OPEN_EXPERIMENTS
+        panel = getattr(self, "open_experiments_panel", None)
+        if panel is not None:
+            panel.setVisible(allowed)
+        self.open_experiments_box.setVisible(allowed and getattr(self, "_open_experiments_open", True))
+
+    def _set_open_experiments_open(self, open_: bool, remember: bool = True) -> None:
+        """Show Open experiments in full, or minimise it to its strip."""
+        open_ = bool(open_)
+        toggle = self.open_experiments_toggle
+        if toggle.isChecked() != open_:
+            toggle.blockSignals(True)
+            toggle.setChecked(open_)
+            toggle.blockSignals(False)
+        action = getattr(self, "open_experiments_action", None)
+        if action is not None and action.isChecked() != open_:
+            action.blockSignals(True)
+            action.setChecked(open_)
+            action.blockSignals(False)
+        was_open = getattr(self, "_open_experiments_open", True)
+        if was_open and not open_:
+            self._open_experiments_sizes = self.left_splitter.sizes()
+        self._open_experiments_open = open_
+        toggle.setArrowType(Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow)
+        self._update_open_experiments_toggle_text()
+        allowed = self.side_tabs.tabText(self.side_tabs.currentIndex()) \
+            not in self._TILES_WITHOUT_OPEN_EXPERIMENTS
+        self.open_experiments_box.setVisible(open_ and allowed)
+        panel = self.open_experiments_panel
+        if open_:
+            panel.setMaximumHeight(16777215)
+            if self._open_experiments_sizes and not was_open:
+                self.left_splitter.setSizes(self._open_experiments_sizes)
+        else:
+            panel.setMaximumHeight(toggle.sizeHint().height() + 2)
+        if remember and hasattr(self, "_ui_settings"):
+            self._ui_settings["open_experiments_open"] = open_
+            self._save_ui_settings()
+
+    def _update_open_experiments_toggle_text(self) -> None:
+        toggle = getattr(self, "open_experiments_toggle", None)
+        if toggle is None:
+            return
+        try:
+            count = self.spectrum_list.count()
+        except RuntimeError:     # the window is being deleted
+            return
+        if getattr(self, "_open_experiments_open", True):
+            toggle.setText("Hide open experiments")
+            toggle.setToolTip("Minimise the list to this strip (Ctrl/Cmd+E).")
+        else:
+            toggle.setText(f"Open experiments ({count})")
+            toggle.setToolTip("Show the list of open experiments (Ctrl/Cmd+E).")
 
     #: Window > Panel entries: (menu label, launcher tile label), in
     #: tile order, so Ctrl+n opens the n-th toolbar button.
@@ -14218,7 +14818,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         self.fit_workflow_guide = self._build_t1t2_workflow_guide("fit")
-        layout.addWidget(self.fit_workflow_guide)
+        self._fit_guide_host = self._guide_behind_button(self.fit_workflow_guide)
+        layout.addWidget(self._fit_guide_host)
 
         self.fitting_status_label = QLabel(
             "Fit peak shapes (Isotropic), or build a model "
@@ -14443,8 +15044,46 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_dnp_section())
         layout.addWidget(self._build_snr_section())
         layout.addWidget(self._build_cp_buildup_section())
+        layout.addWidget(self._build_offset_tracker_section())
         layout.addStretch(1)
         return tab
+
+    def _build_offset_tracker_section(self) -> QWidget:
+        """Integrate ▸ Offset Tracker (explicit user request, 2026-10-17):
+        ``gui/offset_tracker_panel.py`` over ``notebook/offset_tracker.py``.
+        Integrals of one region against the O2/O3 offset (1D HMQC /
+        J-resolved series), drawn on the Fit view; the skyline is kept in
+        Open experiments as a derived spectrum."""
+        self.offset_tracker_panel = OffsetTrackerPanel(
+            spectra=self._dnp_spectra, draw=self._dnp_draw, arm=self._offset_tracker_arm,
+            show_spectrum=self._cp_show_spectrum,
+            highlight=lambda regions: self.compare_canvas.set_highlight_regions(regions, "offset"),
+            keep=self._add_arithmetic_result)
+        self._offset_tracker_section = CollapsibleSection(
+            "Offset Tracker (HMQC / J-resolved, O2/O3)", content=self.offset_tracker_panel)
+        self._offset_tracker_section.toggled.connect(
+            lambda expanded: expanded and self.offset_tracker_panel.refresh())
+        self.compare_canvas.regionSelected.connect(
+            lambda lo, hi: self.offset_tracker_panel.armed
+            and self.offset_tracker_panel.on_canvas_region(lo, hi))
+
+        def _released(_enabled):
+            if not self.compare_canvas._region_select_mode:
+                self.offset_tracker_panel.canvas_mode_released()
+        self.compare_canvas.regionSelectModeChanged.connect(_released)
+        model = self.spectrum_list.model()
+        for signal in (model.rowsInserted, model.rowsRemoved, model.modelReset):
+            signal.connect(lambda *_a: self._offset_tracker_section.isExpanded()
+                           and self.offset_tracker_panel.refresh())
+        return self._offset_tracker_section
+
+    def _offset_tracker_arm(self, mode) -> None:
+        if mode == "region":
+            self.compare_canvas.set_region_select_mode(True)
+            self.statusBar().showMessage(
+                "Offset Tracker: drag across the region on the Compare view.", 8000)
+        else:
+            self.compare_canvas.set_region_select_mode(False)
 
     # -- Integrate ▸ CP Build-up (explicit user request, 2026-10-16) -----------
 
@@ -18842,6 +19481,28 @@ class MainWindow(QMainWindow):
                   "“Fit Curve settings” names it."),
     )
 
+    def _guide_behind_button(self, guide: QWidget) -> QWidget:
+        """``guide`` behind a "How to fit pseudo-2D data" button, shown
+        and hidden by it (user request, 2026-10-17: a button, not a
+        drop-down; the Next/Back button stays inside). Settings ▸
+        Sections shown can hide the whole thing ("pseudo2d_guide")."""
+        host = QWidget()
+        v = QVBoxLayout(host)
+        v.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("How to fit pseudo-2D data")
+        button.setCheckable(True)
+        button.setToolTip("Show or hide the steps from a pseudo-2D series to T1/T2 (or D).")
+        guide.setVisible(False)
+        button.toggled.connect(guide.setVisible)
+        row = QHBoxLayout()
+        row.addWidget(button)
+        row.addStretch(1)
+        v.addLayout(row)
+        v.addWidget(guide)
+        host.toggle_button = button
+        guide.show_button = button
+        return host
+
     def _build_t1t2_workflow_guide(self, here: str) -> QWidget:
         """A framed "how to" for T1/T2 from a pseudo-2D series, with the
         step ``here`` ("fit" or "curve") marked, and a button to the
@@ -18882,7 +19543,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
 
         self.relaxation_workflow_guide = self._build_t1t2_workflow_guide("curve")
-        layout.addWidget(self.relaxation_workflow_guide)
+        self._curve_guide_host = self._guide_behind_button(self.relaxation_workflow_guide)
+        layout.addWidget(self._curve_guide_host)
 
         self.analysis_status_label = QLabel(
             "Fit a curve to the per-spectrum intensities from the "

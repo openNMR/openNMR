@@ -109,6 +109,19 @@ class CpBuildupPanel(QWidget):
                                       "contact time in µs -- or read them from a parameter below.")
         self.spectra_table.itemChanged.connect(self._on_item_changed)
         v.addWidget(self.spectra_table)
+        # Explicit user request, 2026-10-17.
+        tick_row = QHBoxLayout()
+        self.tick_all_button = QPushButton("Tick All")
+        self.tick_all_button.setToolTip("Use every spectrum listed.")
+        self.tick_all_button.clicked.connect(
+            lambda: self.set_checked(range(self.spectra_table.rowCount())))
+        self.untick_all_button = QPushButton("Untick All")
+        self.untick_all_button.setToolTip("Use none of them (then tick the ones you want).")
+        self.untick_all_button.clicked.connect(lambda: self.set_checked([]))
+        tick_row.addWidget(self.tick_all_button)
+        tick_row.addWidget(self.untick_all_button)
+        tick_row.addStretch(1)
+        v.addLayout(tick_row)
         row = QHBoxLayout()
         row.addWidget(QLabel("Contact time from parameter:"))
         self.time_parameter_edit = QLineEdit("P15")
@@ -171,6 +184,17 @@ class CpBuildupPanel(QWidget):
             buttons.addWidget(b)
         buttons.addStretch(1)
         v.addLayout(buttons)
+        # Which spectrum the regions are dragged on (user report,
+        # 2026-10-17: only the first experiment could be used).
+        drag_row = QHBoxLayout()
+        drag_row.addWidget(QLabel("Drag on:"))
+        self.drag_on_combo = QComboBox()
+        self.drag_on_combo.setToolTip(
+            "The spectrum shown for Drag on Plot: the Compare view as it is, the "
+            "reference, or any spectrum listed above. Choosing one shows it at once.")
+        self.drag_on_combo.activated.connect(lambda _i: self._on_drag_on_chosen())
+        drag_row.addWidget(self.drag_on_combo, 1)
+        v.addLayout(drag_row)
         form = QFormLayout()
         self.baseline_combo = QComboBox()
         self.baseline_combo.addItem("Local (fitted just outside the region)", "local")
@@ -282,6 +306,38 @@ class CpBuildupPanel(QWidget):
         i = self.reference_combo.findData(current)
         self.reference_combo.setCurrentIndex(i if i >= 0 else 0)
         self.reference_combo.blockSignals(False)
+        chosen = self.drag_on_combo.currentData()
+        self.drag_on_combo.blockSignals(True)
+        self.drag_on_combo.clear()
+        self.drag_on_combo.addItem("The plot as it is (else the reference)", None)
+        for e in self._entries:
+            self.drag_on_combo.addItem(str(e["label"]), id(e["spectrum"]))
+        i = self.drag_on_combo.findData(chosen)
+        self.drag_on_combo.setCurrentIndex(i if i >= 0 else 0)
+        self.drag_on_combo.blockSignals(False)
+
+    def _drag_entry(self):
+        key = self.drag_on_combo.currentData()
+        return next((e for e in self._entries if id(e["spectrum"]) == key), None)
+
+    def show_spectrum_for_drag(self, entry) -> bool:
+        """Put ``entry``'s spectrum on the plot (its own style) with the
+        regions shaded, to drag regions on."""
+        if entry is None:
+            return False
+        if self._show_spectrum is not None:
+            self._show_spectrum(entry["spectrum"])
+            self._show_regions()
+            return True
+        return False
+
+    def _on_drag_on_chosen(self) -> None:
+        entry = self._drag_entry()
+        if entry is None:
+            return
+        self.show_spectrum_for_drag(entry)
+        if self.armed:
+            self._arm("region")     # the redraw must not drop the drag mode
 
     def _on_item_changed(self, item) -> None:
         r = item.row()
@@ -473,6 +529,12 @@ class CpBuildupPanel(QWidget):
         # (user report, 2026-10-16); the reference only when Compare shows
         # no spectrum at all.
         if on:
+            entry = self._drag_entry()
+            if entry is not None and self.show_spectrum_for_drag(entry):
+                self._show_regions()
+                self.armed = True
+                self._arm("region")
+                return
             has_plot = self._has_plot() if self._has_plot is not None else False
             if not has_plot and not self.show_reference():
                 self.drag_button.blockSignals(True)

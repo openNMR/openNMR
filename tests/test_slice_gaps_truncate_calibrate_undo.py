@@ -138,11 +138,13 @@ def test_truncate_does_not_reprocess_per_keystroke(qapp, tmp_path, monkeypatch):
     assert calls == []                       # nothing while typing
     QTest.keyClick(box.lineEdit(), Qt.Key.Key_Return)
     assert box.value() == 40 and len(calls) == 1
-    # Past the FID's length means the whole FID, and the label says why.
+    # Past the FID's length: the whole FID, padded with zeros to that many
+    # points (2026-10-17), and the label says so.
     box.lineEdit().selectAll()
     QTest.keyClicks(box.lineEdit(), "1024")
     QTest.keyClick(box.lineEdit(), Qt.Key.Key_Return)
-    assert box.value() == box.maximum() == 64
+    assert box.value() == 1024
+    assert window._zero_fill_value() >= 1024
     assert not window.tdeff_units_label.isHidden()
     assert "of 64 complex points" in window.tdeff_units_label.text()
 

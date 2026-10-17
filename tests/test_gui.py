@@ -3309,7 +3309,8 @@ def test_main_window_tdeff_spin_enabled_for_every_reprocessable_vendor(qapp, tmp
     assert window.tdeff_spin.isEnabled() is True
     # And its maximum is a real point count, not an arbitrary ceiling
     # the user would have to count down from.
-    assert 1 < window.tdeff_spin.maximum() < (1 << 20)
+    # (Since 2026-10-17 the box may go past it, padding with zeros.)
+    assert 1 < (window._truncate_acquired_points or window.tdeff_spin.maximum()) < (1 << 20)
 
 
 @pytest.mark.parametrize("dataset", ["bruker_T2/11", "bruker_PFG/150"])
@@ -3328,8 +3329,8 @@ def test_main_window_tdeff_spin_enabled_for_a_real_bruker_pseudo_2d(qapp, datase
     assert window.tdeff_spin.isEnabled() is True
     # Prefilled with the real per-FID point count, so stepping down
     # trims from a meaningful place.
-    assert window.tdeff_spin.value() == window.tdeff_spin.maximum()
-    assert window.tdeff_spin.maximum() == spectrum.metadata.raw["fid_raw"].shape[-1]
+    assert window.tdeff_spin.value() == window._truncate_acquired_points
+    assert window._truncate_acquired_points == spectrum.metadata.raw["fid_raw"].shape[-1]
 
 
 def test_main_window_tdeff_spin_disabled_when_there_is_no_raw_fid(qapp, tmp_path):
@@ -3352,7 +3353,7 @@ def test_main_window_tdeff_spin_defaults_to_full_raw_fid_length_when_no_tdeff_re
     window._load(str(path), vendor="xpulse")
     index = window._selected_index()
     raw_length = len(window.session.spectra[index].metadata.raw["fid_raw"])
-    assert window.tdeff_spin.maximum() == raw_length
+    assert window._truncate_acquired_points == raw_length
     assert window.tdeff_spin.value() == raw_length
 
 
@@ -3374,7 +3375,7 @@ def test_main_window_tdeff_spin_maximum_uses_per_fid_length_not_array_step_count
     spectrum = window.session.spectra[index]
 
     assert spectrum.metadata.raw["fid_raw"].shape == (16, 4)
-    assert window.tdeff_spin.maximum() == 4
+    assert window._truncate_acquired_points == 4
     assert window.tdeff_spin.isEnabled() is True
 
 
@@ -11303,7 +11304,7 @@ def test_main_window_fitting_tab_has_three_collapsible_sections(qapp):
     integrate_tab = window.side_tabs.widget(side.index("Integration"))
     assert [s.title() for s in integrate_tab.findChildren(CollapsibleSection)] == [
         "Integration Regions", "DNP", "Enhancement", "Field Sweep Profile",
-        "Signal-to-Noise", "CP Build-up"]
+        "Signal-to-Noise", "CP Build-up", "Offset Tracker (HMQC / J-resolved, O2/O3)"]
 
 
 def test_main_window_advanced_processing_is_its_own_top_level_button(qapp):
@@ -11385,9 +11386,8 @@ def test_main_window_applications_is_its_own_top_level_button(qapp):
 
     applications_tab = window.side_tabs.widget(side.index("Applications"))
     sections = applications_tab.findChildren(CollapsibleSection)
-    assert [s.title() for s in sections] == ["eNMR", "Imaging", "DNP", "Enhancement",
-                                             "Field Sweep Profile", "Signal-to-Noise",
-                                             "CP Build-up"]
+    # DNP, Signal-to-Noise and CP Build-up moved to Integrate (2026-10-16).
+    assert [s.title() for s in sections] == ["eNMR", "Imaging"]
 
     enmr_section = _enclosing_collapsible_section(window.enmr_voltage_label)
     imaging_section = _enclosing_collapsible_section(window.imaging_max_gradient_spin)
@@ -16278,7 +16278,9 @@ def test_open_experiments_list_sits_under_the_tiles(qapp):
     window = MainWindow()
     assert window.open_experiments_box.isAncestorOf(window.spectrum_list)
     assert window.left_splitter.indexOf(window.side_tabs) == 0
-    assert window.left_splitter.indexOf(window.open_experiments_box) == 1
+    # In a panel with its minimise strip since 2026-10-17.
+    assert window.left_splitter.indexOf(window.open_experiments_panel) == 1
+    assert window.open_experiments_panel.isAncestorOf(window.open_experiments_box)
     assert not window.side_tabs.isAncestorOf(window.spectrum_list)
 
 

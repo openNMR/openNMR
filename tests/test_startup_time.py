@@ -179,14 +179,17 @@ def test_section_headers_get_the_sheets_padding(qapp):
     window = MainWindow()
     window.resize(1400, 900)
     window.show()
-    heights = set()
+    heights = {}
     for index in range(window.side_tabs.count()):
         window.side_tabs.setCurrentIndex(index)
         qapp.processEvents()
         for section in window.findChildren(CollapsibleSection):
             if section.isVisible() and "\n" not in section._header.text():
-                heights.add(section._header.height())
-    assert len(heights) == 1, heights        # one height, whichever panel
+                heights.setdefault(section._header.height(), set()).add(
+                    (window.side_tabs.tabText(index), section.title()))
+    # One height, whichever panel; on failure, which sections differ.
+    assert len(heights) == 1, {h: sorted(s)[:6] for h, s in heights.items()
+                               if len(s) < 10} or sorted(heights)
 
 
 def test_wheel_still_scrolls_past_a_value_box(qapp):

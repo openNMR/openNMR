@@ -2419,7 +2419,9 @@ def test_canvas_shrinks_labels_rather_than_clipping_them(qapp):
     from opennmr.plotting import clipped_labels
 
     canvas = MplCanvas()
-    canvas.figure.set_size_inches(1.1, 0.9)
+    # 0.9 in wide: at 1.1 in Windows' Arial made the label 109 px against
+    # a 110 px figure, breaking the premise below (2026-10-17).
+    canvas.figure.set_size_inches(0.9, 0.9)
     canvas.show_spectrum(_make_1d())
 
     probe = Figure(dpi=canvas.figure.dpi)

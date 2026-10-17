@@ -3359,8 +3359,12 @@ class MplCanvas(QWidget):
         # missing the attribute entirely (some existing tests' own
         # minimal doubles, built before this needed to handle the
         # non-fit-mode case too) must not raise AttributeError here.
+        # Also with the toolbar's Zoom or Pan button down (user report,
+        # 2026-10-17: zoom, then double-click, and the view stayed) --
+        # only the click modes (Measure, Width, picking, regions), where
+        # two quick clicks are real input, keep a double-click.
         if (event.button == 1 and getattr(event, "dblclick", False)
-                and self._double_click_resets and self.toolbar.mode == ""
+                and self._double_click_resets
                 and not self._click_mode_active() and event.inaxes is not None):
             # Double-click: back to the full view (Settings ▸ Double-click
             # resets the view; explicit user request, 2026-10-15). The
@@ -3371,6 +3375,10 @@ class MplCanvas(QWidget):
             self._zoom_start = None
             self._pan_start = None
             self._compare_click_start = None
+            # The toolbar's own zoom/pan press from these clicks: drop it,
+            # rubber band and all, so its release cannot zoom afterwards.
+            if self.toolbar.mode != "":
+                self._cancel_navigation_drag()
             if self._compare_axes and self._selected_compare_index is not None:
                 self.set_compare_selection(None)
                 self.compareSelectionCleared.emit()

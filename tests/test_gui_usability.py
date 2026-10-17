@@ -47,8 +47,8 @@ def test_ctrl_number_opens_the_nth_toolbar_button(qapp):
     for n, (label, tile) in enumerate(MainWindow._WINDOW_MENU_PANELS, start=1):
         assert TOOLBAR[n - 1] == tile
         action = next(a for a in window.findChildren(QAction) if a.text() == label)
-        # Nine number keys; a tenth tile has none.
-        assert action.shortcut() == (QKeySequence(f"Ctrl+{n}") if n <= 9 else QKeySequence())
+        # Nine number keys, then Ctrl+0 for the tenth (2026-10-17).
+        assert action.shortcut() == QKeySequence(f"Ctrl+{n % 10}")
 
 
 def test_every_panel_opens_with_its_sections_collapsed(qapp):

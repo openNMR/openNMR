@@ -1,4 +1,4 @@
-"""Cmd/Ctrl+E: a random fact from the user's own list (~/.opennmr/facts.txt),
+"""Cmd/Ctrl+B: a random fact from the user's own list (~/.opennmr/facts.txt),
 reachable only by the shortcut (explicit user request, 2026-10-16)."""
 import random
 
@@ -26,12 +26,12 @@ def test_never_the_same_fact_twice_running():
     assert fact_box.pick_fact([], None, rng) is None
 
 
-def test_ctrl_e_shows_a_fact_and_is_in_no_menu(qapp, tmp_path, monkeypatch):
+def test_ctrl_b_shows_a_fact_and_is_in_no_menu(qapp, tmp_path, monkeypatch):
     path = tmp_path / "facts.txt"
     monkeypatch.setenv("OPENNMR_FACTS_FILE", str(path))
     window = MainWindow()
     action = window._fact_action
-    assert action.shortcut() == QKeySequence("Ctrl+E")
+    assert action.shortcut() == QKeySequence("Ctrl+B")
     # only the shortcut: no menu, toolbar or button carries it
     for menu_action in window.menuBar().actions():
         menu = menu_action.menu()

@@ -66,8 +66,12 @@ def test_a_bad_region_is_reported_not_raised(qapp):
 # ---- controls -----------------------------------------------------------------
 
 def test_manual_controls_show_only_for_manual_methods(qapp):
-    window = _window_with(0.0 * PPM, method="linear")
+    # Since 2026-10-17 the coefficients also show for the automatic
+    # Linear/Polynomial/Sinusoidal fits; Whittaker and Spline have none.
+    window = _window_with(0.0 * PPM, method="whittaker")
     assert window.baseline_manual_box.isHidden()
+    window.baseline_method_combo.setCurrentIndex(window.baseline_method_combo.findData("linear"))
+    assert not window.baseline_manual_box.isHidden()
     window.baseline_method_combo.setCurrentIndex(
         window.baseline_method_combo.findData("manual_sine"))
     box = window.baseline_manual_box
@@ -254,7 +258,7 @@ def test_state_is_restored_per_spectrum(qapp):
     window.baseline_manual_box.fit_button.click()
     _load_spectrum_directly(window, _spectrum_1d(0.0 * PPM))     # second spectrum, selected
     assert window.baseline_method_combo.currentData() == "linear"
-    assert window.baseline_manual_box.isHidden()
+    assert window.baseline_family_combo.currentData() == "linear"
     window._select_single_row(0)
     assert window.baseline_method_combo.currentData() == "manual_sine"
     box = window.baseline_manual_box

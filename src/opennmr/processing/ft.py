@@ -612,7 +612,8 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
                      degree: int = 2, n_harmonics: int = 1, period: float | None = None,
                      lam: float | None = None, asymmetry: float | None = None,
                      diff_order: int = 2, manual_params=None, manual_fixed=None,
-                     manual_refit: bool = False, n_points: int | None = None) -> np.ndarray:
+                     manual_refit: bool = False, n_points: int | None = None,
+                     node_x=None) -> np.ndarray:
     """The baseline :func:`baseline_correct` would subtract, returned
     instead of subtracted.
 
@@ -632,9 +633,13 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
     from .fitting import (
         estimate_baseline_polynomial, estimate_baseline_sinusoidal,
         estimate_baseline_spline, estimate_baseline_whittaker, auto_spline_baseline,
-        evaluate_baseline_sinusoidal,
+        evaluate_baseline_sinusoidal, spline_through_points,
     )
     freq = np.asarray(freq, dtype=float)
+    if method == "spline_points":
+        # Through the points the user chose on the plot (node_x, ppm),
+        # each at the trace's own local median height.
+        return spline_through_points(freq, np.real(spectrum), node_x)["baseline"]
     if method in ("manual_polynomial", "manual_sine"):
         # The user's own model (see notebook.manual_baseline):
         # evaluated from the recorded coefficients as they stand, or --
@@ -693,8 +698,64 @@ def compute_baseline(freq: np.ndarray, spectrum: np.ndarray,
         return evaluate_baseline_sinusoidal(coeffs, fitted_period, freq)
     raise ValueError(
         "method must be 'linear', 'polynomial', 'sinusoidal', 'spline', 'spline_auto', "
-        f"'whittaker', 'manual_polynomial' or 'manual_sine', got {method!r}"
+        f"'spline_points', 'whittaker', 'manual_polynomial' or 'manual_sine', got {method!r}"
     )
+
+
+def automatic_baseline_as_manual(freq: np.ndarray, spectrum: np.ndarray, method: str = "polynomial",
+                                 baseline_regions=None, frac: float = 0.05, sigma: float = 2.5,
+                                 max_iter: int = 10, degree: int = 2, n_harmonics: int = 1,
+                                 period: float | None = None) -> dict:
+    """An automatic Linear/Polynomial/Sinusoidal baseline written as the
+    manual model's coefficients (Process ▸ Baseline: the automatic fit
+    and its coefficients in one place, user request 2026-10-17), so they
+    can be shown and then adjusted by hand from where the fit left them.
+
+    Same candidate points and estimators as :func:`compute_baseline`.
+
+    - ``"linear"``/``"polynomial"`` -> ``{"model": "polynomial", "params":
+      [A, B, C, D, E]}`` for ``A x^4 + B x^3 + C x^2 + D x + E`` (x in ppm):
+      exact up to degree 4; a higher degree is approximated by the
+      least-squares quartic through its curve (``"exact": False``).
+    - ``"sinusoidal"`` -> ``{"model": "sine", "params": [A, B, C, D]}`` for
+      ``A sin(B x + C) + D``: exact with one harmonic; with more, the
+      first harmonic only (``"exact": False``).
+
+    Also returns ``"baseline"``, the automatic curve itself."""
+    from .fitting import (
+        estimate_baseline_polynomial, estimate_baseline_sinusoidal, evaluate_baseline_sinusoidal,
+    )
+    freq = np.asarray(freq, dtype=float)
+    y = np.real(np.asarray(spectrum))
+    if baseline_regions is None:
+        min_edge_points = min(5, max(1, len(freq) // 2))
+        frac = max(frac, min_edge_points / len(freq))
+    if method in ("linear", "polynomial"):
+        deg = 1 if method == "linear" else int(degree)
+        coeffs, x_ref = estimate_baseline_polynomial(
+            freq, y, baseline_regions=baseline_regions, frac=frac, sigma=sigma,
+            max_iter=max_iter, degree=deg)
+        curve = np.polyval(coeffs, freq - x_ref)
+        if deg <= 4:
+            # p(x - x_ref) expanded in powers of x.
+            absolute = np.poly1d(coeffs)(np.poly1d([1.0, -float(x_ref)])).coeffs
+            params = [0.0] * (5 - len(absolute)) + [float(c) for c in absolute]
+            exact = True
+        else:
+            params = [float(c) for c in np.polyfit(freq, curve, 4)]
+            exact = False
+        return {"model": "polynomial", "params": params, "exact": exact, "baseline": curve}
+    if method == "sinusoidal":
+        coeffs, fitted_period = estimate_baseline_sinusoidal(
+            freq, y, baseline_regions=baseline_regions, frac=frac, sigma=sigma,
+            max_iter=max_iter, n_harmonics=n_harmonics, period=period)
+        curve = evaluate_baseline_sinusoidal(coeffs, fitted_period, freq)
+        a0, a1, b1 = (float(c) for c in coeffs[:3])
+        # a1 cos(wx) + b1 sin(wx) = A sin(wx + C)
+        params = [float(np.hypot(a1, b1)), float(2 * np.pi / fitted_period),
+                  float(np.arctan2(a1, b1)), a0]
+        return {"model": "sine", "params": params, "exact": len(coeffs) <= 3, "baseline": curve}
+    raise ValueError(f"no manual form for the {method!r} baseline")
 
 
 def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
@@ -704,7 +765,8 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
                       degree: int = 2, n_harmonics: int = 1, period: float | None = None,
                       lam: float | None = None, asymmetry: float | None = None,
                       diff_order: int = 2, manual_params=None, manual_fixed=None,
-                      manual_refit: bool = False, n_points: int | None = None) -> np.ndarray:
+                      manual_refit: bool = False, n_points: int | None = None,
+                      node_x=None) -> np.ndarray:
     """Subtract a robust baseline fit to the real part, via
     :mod:`opennmr.processing.fitting`'s baseline estimators -- the same
     ones ``fit_spectrum`` already uses to hold a baseline fixed under a
@@ -807,7 +869,7 @@ def baseline_correct(freq: np.ndarray, spectrum: np.ndarray,
         max_iter=max_iter, method=method, smoothing=smoothing, degree=degree,
         n_harmonics=n_harmonics, period=period, lam=lam, asymmetry=asymmetry,
         diff_order=diff_order, manual_params=manual_params, manual_fixed=manual_fixed,
-        manual_refit=manual_refit, n_points=n_points,
+        manual_refit=manual_refit, n_points=n_points, node_x=node_x,
     )
 
 

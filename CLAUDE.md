@@ -113,8 +113,16 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 - **Collapsible sections** (`widgets/collapsible_section.py`) start
   collapsed. Code that sends the user to one opens it with
   `setExpanded(True)`.
-- **Open experiments** (`open_experiments_box`) sit under the side tabs
-  in `left_splitter`, on every tile but Simulate.
+- **Open experiments** (`open_experiments_box`, inside
+  `open_experiments_panel` with its strip `open_experiments_toggle`) sit
+  under the side tabs in `left_splitter`, on every tile but Simulate and
+  Periodic Table; minimised to the strip by View ▸ Open Experiments
+  (Ctrl/Cmd+E) or a click, remembered (`open_experiments_open`).
+- **Shortcuts** (2026-10-17): Ctrl/Cmd+1..9 then 0 are the tiles (0 = NMR
+  Periodic Table); Reset View is Ctrl/Cmd+Shift+H; facts Ctrl/Cmd+B.
+- **Buttons whose slot takes an optional first argument** must connect
+  through a lambda: `clicked(bool)` passes `False` into it (Compare ▸ Plot
+  never switched view; BPP Import CSV opened the file `False`).
 - **Title / notes** open from a strip at the window's right edge
   (`self.notes_drawer`, `widgets/side_drawer.py`; View ▸ Title / Notes,
   Ctrl/Cmd+T), closed by default. Not under Open experiments any more.
@@ -246,6 +254,18 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
 - **Baselines**: `"spline_auto"` (`processing.fitting.auto_spline_baseline`)
   finds baseline anywhere by the Golotvin–Williams test; it shares
   `_baseline_kwargs` with every other method (`baseline_points` raw key).
+  Since 2026-10-17 the menu is `baseline_family_combo` (Linear, Polynomial,
+  Sinusoidal, Spline, Whittaker); the hidden `baseline_method_combo` holds
+  the exact saved method. Polynomial/Sinusoidal = automatic fit + its
+  coefficients (`ft.automatic_baseline_as_manual`) in `ManualBaselineBox`,
+  steppable; stepping one makes it `manual_*`. Spline modes: `spline_auto`,
+  `spline_points` (`baseline_spline_x`, `fitting.spline_through_points`),
+  `spline` (smoothing, binned to ≤400 candidates -- never fit thousands).
+- **Offset Tracker** (Integrate; `gui/offset_tracker_panel.py` over
+  `notebook/offset_tracker.py`): integrals against O2/O3 in ppm (O/BF), the
+  skyline kept as a derived 1D of the pulsed nucleus.
+- **BPP temperature regions**: `vt_relaxation.fit_vt_regions` /
+  `plot_arrhenius_regions` -- each region an independent fit.
 - **Relaxometry extras** (three-exponential models, threshold regions,
   trapezoid/Simpson, correlation matrices) are `processing/relaxometry.py`,
   shared by *both* relaxation fitters (`processing/relaxation.py`, the GUI's,

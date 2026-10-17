@@ -628,6 +628,63 @@ def find_baseline_points(x, y, half_window=None, threshold=3.0, min_run=None,
     return base
 
 
+def _natural_spline_curve(xs, nx, ny):
+    """A natural cubic spline through nodes ``(nx, ny)`` (ascending),
+    evaluated on ascending ``xs``, continued past the outer nodes as
+    straight lines with the spline's end slopes. Two nodes: a line."""
+    from scipy.interpolate import CubicSpline
+    nx = np.asarray(nx, dtype=float)
+    ny = np.asarray(ny, dtype=float)
+    if len(nx) == 2:
+        slope = (ny[1] - ny[0]) / (nx[1] - nx[0])
+        return ny[0] + slope * (xs - nx[0])
+    spline = CubicSpline(nx, ny, bc_type="natural")
+    deriv = spline.derivative()
+    left = ny[0] + float(deriv(nx[0])) * (xs - nx[0])
+    right = ny[-1] + float(deriv(nx[-1])) * (xs - nx[-1])
+    return np.where(xs < nx[0], left, np.where(xs > nx[-1], right, spline(xs)))
+
+
+def spline_through_points(x, y, node_x, half_width=None):
+    """A cubic-spline baseline through points the user chose
+    (Process ▸ Baseline ▸ Spline ▸ points chosen on the plot; user
+    request, 2026-10-17).
+
+    Only the *positions* ``node_x`` (ppm) are the user's: each node's
+    height is the median of the trace within ``half_width`` points of it
+    (default: 0.25 % of the spectrum, at least 3 points), read from
+    whatever trace is being corrected -- so the same points serve every
+    slice of a series and survive re-phasing. The curve is that of
+    :func:`auto_spline_baseline` (natural cubic, straight past the end
+    nodes). Nodes outside the spectrum are dropped; nodes closer than a
+    point apart are merged.
+
+    Returns ``{"baseline", "nodes_x", "nodes_y"}``. Raises ``ValueError``
+    with fewer than two usable points."""
+    x = np.asarray(x, dtype=float)
+    y = np.real(np.asarray(y, dtype=float))
+    order = np.argsort(x)
+    xs, ys = x[order], y[order]
+    n = xs.size
+    hw = int(half_width) if half_width else max(3, int(round(0.0025 * n)))
+    picks = sorted(float(v) for v in (node_x or []) if xs[0] <= float(v) <= xs[-1])
+    nx, ny, last = [], [], None
+    for value in picks:
+        i = int(np.clip(np.searchsorted(xs, value), 0, n - 1))
+        if last is not None and i == last:
+            continue
+        last = i
+        lo, hi = max(0, i - hw), min(n, i + hw + 1)
+        nx.append(float(xs[i]))
+        ny.append(float(np.median(ys[lo:hi])))
+    if len(nx) < 2:
+        raise ValueError("Choose at least two baseline points on the plot.")
+    curve = _natural_spline_curve(xs, nx, ny)
+    out = np.empty_like(curve)
+    out[order] = curve
+    return {"baseline": out, "nodes_x": np.asarray(nx), "nodes_y": np.asarray(ny)}
+
+
 def auto_spline_baseline(x, y, n_points=None, half_window=None, threshold=3.0):
     """A cubic-spline baseline through points placed automatically on the
     signal-free parts of the spectrum (explicit user request, 2026-10-06).
@@ -700,6 +757,36 @@ def auto_spline_baseline(x, y, n_points=None, half_window=None, threshold=3.0):
     return {"baseline": out, "nodes_x": nx, "nodes_y": ny, "baseline_points": mask}
 
 
+#: Most candidate points a smoothing-spline baseline is fitted through
+#: (see :func:`estimate_baseline_spline`).
+_SPLINE_MAX_NODES = 400
+
+
+def _bin_medians(x, y, max_points):
+    """``(x, y)`` (ascending ``x``) cut to at most ``max_points``: each
+    output point is the median of a run of consecutive inputs. Returned
+    unchanged when already short enough."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if x.size <= max_points:
+        return x, y
+    cuts = np.linspace(0, x.size, max_points + 1).astype(int)
+    xs = np.array([np.median(x[a:b]) for a, b in zip(cuts[:-1], cuts[1:]) if b > a])
+    ys = np.array([np.median(y[a:b]) for a, b in zip(cuts[:-1], cuts[1:]) if b > a])
+    xs, idx = np.unique(xs, return_index=True)
+    return xs, ys[idx]
+
+
+def _robust_noise(y):
+    """Noise σ of ``y`` from its point-to-point differences (MAD), which a
+    slow baseline trend barely affects."""
+    y = np.asarray(y, dtype=float)
+    if y.size < 3:
+        return float(np.std(y))
+    d = np.diff(y)
+    return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2.0))
+
+
 def estimate_baseline_spline(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
                               max_iter=10, smoothing=None) -> UnivariateSpline:
     """Robustly estimate a smooth (not necessarily linear) baseline as
@@ -760,12 +847,26 @@ def estimate_baseline_spline(x, y, baseline_regions=None, frac=0.05, sigma=2.5,
     if len(x_base) < 4:
         raise ValueError("Not enough points available for baseline estimation.")
 
+    # At most _SPLINE_MAX_NODES candidates, each the median of a run of
+    # neighbours (user report, 2026-10-17: Spline froze openNMR on an
+    # ordinary 1D). The 5 % edges of a 64k spectrum are ~6,500 points,
+    # and FITPACK's knot search is far worse than linear in them; a
+    # median of each run also keeps a stray spike out of the fit.
+    x_base, y_base = _bin_medians(x_base, y_base, _SPLINE_MAX_NODES)
+
     def _fit(xb, yb, s):
         k = 3 if len(xb) > 3 else 1  # cubic once there are enough points, else linear
         return UnivariateSpline(xb, yb, k=k, s=s, ext=3)
 
     keep = np.ones(len(y_base), dtype=bool)
-    spline = _fit(x_base, y_base, smoothing if smoothing is not None else len(x_base))
+    # The first fit's s from the points' own noise, as in the loop below.
+    # It used to be len(x) alone -- right only for unit-variance noise, so
+    # on real intensities (~1e4-1e7) it asked FITPACK to all but
+    # interpolate every point: a very slow knot search, then a curve that
+    # swung wildly between the two edges.
+    noise0 = _robust_noise(y_base)
+    spline = _fit(x_base, y_base, smoothing if smoothing is not None
+                  else len(x_base) * max(noise0, np.finfo(float).tiny) ** 2)
 
     for _ in range(max_iter):
         residual = y_base - spline(x_base)

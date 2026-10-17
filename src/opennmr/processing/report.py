@@ -52,6 +52,7 @@ _BASELINE_NAMES = {
     "whittaker": "an asymmetrically reweighted Whittaker smoother",
     "spline_auto": ("a natural cubic spline through automatically placed nodes "
                     "(baseline recognised by the Golotvin–Williams noise test)"),
+    "spline_points": "a natural cubic spline through baseline points chosen by hand",
     "manual_polynomial": "a manual polynomial baseline",
     "manual_sine": "a manual sinusoidal baseline",
 }
@@ -125,6 +126,9 @@ def _baseline_phrase(raw: dict) -> str | None:
         described = f"a degree-{degree} polynomial fit"
     if method in ("manual_polynomial", "manual_sine"):
         described = _manual_baseline_description(raw, method.split("_", 1)[1])
+    if method == "spline_points":
+        points = raw.get("baseline_spline_x") or []
+        described += (" at " + ", ".join(f"{_number(p)}" for p in points) + " ppm") if points else ""
     return f"the baseline was corrected using {described}"
 
 

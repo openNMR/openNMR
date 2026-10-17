@@ -14,17 +14,29 @@ Workflow the layout follows, top to bottom:
    preview with "Pick on plot" -- shaded green there;
 2. "Fit to regions" fills in the coefficients (any can be ticked
    "fix" to hold it, e.g. A = B = 0 for a quadratic);
-3. edit any coefficient by hand; the dashed overlay follows at once;
+3. edit any coefficient by hand -- typed, or stepped with the ▲/▼
+   buttons, the Up/Down keys or the mouse wheel, by the step chosen in
+   "Step" (a fraction of a scale set from the spectrum, so a step is a
+   visible change whatever the units); the dashed overlay follows;
 4. "Baseline Correct" (above) subtracts it.
+
+Since 2026-10-17 the box is also shown for the automatic Linear,
+Polynomial and Sinusoidal fits, holding the fit's own coefficients
+(:meth:`ManualBaselineBox.show_automatic`): stepping or typing one turns
+the baseline into a hand-set one starting from the fit, and "Fit
+automatically" goes back.
 """
 from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import Signal
+import math
+
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
-    QCheckBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from ..notebook.manual_baseline import MANUAL_BASELINE_EQUATIONS, MANUAL_BASELINE_PARAMS
@@ -82,6 +94,53 @@ def _short(value: float) -> str:
     return f"{float(value):.6g}"
 
 
+def _short_step(value: float, step: float) -> str:
+    """``value`` with enough figures that one ``step`` shows."""
+    value = float(value)
+    if value == 0.0:
+        return "0"
+    digits = 6
+    if step > 0:
+        digits = max(6, int(math.ceil(math.log10(abs(value) / step))) + 3)
+    return f"{value:.{min(digits, 15)}g}"
+
+
+#: "Step" choices: a fraction of each coefficient's scale (see
+#: :meth:`ManualBaselineBox.set_scales`).
+STEP_FRACTIONS = (("Fine (0.1 %)", 0.001), ("Small (1 %)", 0.01), ("Medium (10 %)", 0.1),
+                  ("Large (100 %)", 1.0))
+
+
+class StepLineEdit(QLineEdit):
+    """A number box stepped by the Up/Down keys and the mouse wheel
+    (Shift: ten steps), as well as typed. ``stepRequested`` carries
+    +1/-1 (times ten with Shift); the box does not change itself, so the
+    owner decides the step size."""
+
+    stepRequested = Signal(int)
+
+    def keyPressEvent(self, event):  # noqa: N802 -- Qt override
+        key = event.key()
+        if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            sign = 1 if key == Qt.Key.Key_Up else -1
+            many = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.stepRequested.emit(sign * (10 if many else 1))
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def wheelEvent(self, event):  # noqa: N802 -- Qt override
+        # Only with focus, so scrolling the panel past it changes nothing.
+        if not self.hasFocus():
+            event.ignore()
+            return
+        delta = event.angleDelta().y()
+        if delta:
+            many = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.stepRequested.emit((1 if delta > 0 else -1) * (10 if many else 1))
+        event.accept()
+
+
 class ManualBaselineBox(QWidget):
     """Regions, coefficients and actions for a manual baseline."""
 
@@ -95,11 +154,16 @@ class ManualBaselineBox(QWidget):
     fitRequested = Signal()
     pickToggled = Signal(bool)
     clearRequested = Signal()
+    #: "Fit automatically": back to the automatic fit of this family.
+    autoRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._model = "polynomial"
         self._params_dirty = False
+        self._automatic = False
+        #: name -> the size of a 100 % step (see set_scales).
+        self._scales: dict[str, float] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -133,35 +197,68 @@ class ManualBaselineBox(QWidget):
         region_buttons.addStretch(1)
         layout.addLayout(region_buttons)
 
+        step_row = QHBoxLayout()
+        step_row.addWidget(QLabel("Step:"))
+        self.step_combo = QComboBox()
+        for text, fraction in STEP_FRACTIONS:
+            self.step_combo.addItem(text, fraction)
+        self.step_combo.setCurrentIndex(1)
+        self.step_combo.setToolTip(
+            "How far one ▲/▼ click (or Up/Down key, or wheel notch) moves a "
+            "coefficient: a fraction of a scale taken from the spectrum -- its "
+            "intensity range for an offset or amplitude, that range over the "
+            "ppm width (to the power) for a slope or curvature, π for a phase. "
+            "Hold Shift for ten steps at once.")
+        step_row.addWidget(self.step_combo)
+        step_row.addStretch(1)
+        layout.addLayout(step_row)
+
         grid = QGridLayout()
         grid.addWidget(QLabel("Coefficient"), 0, 0)
         grid.addWidget(QLabel("Value"), 0, 1)
-        grid.addWidget(QLabel("± (fit)"), 0, 2)
-        grid.addWidget(QLabel("Fix"), 0, 3)
+        grid.addWidget(QLabel("± (fit)"), 0, 3)
+        grid.addWidget(QLabel("Fix"), 0, 4)
         self.param_labels: dict[str, QLabel] = {}
         self.param_edits: dict[str, QLineEdit] = {}
+        self.step_buttons: dict[str, tuple[QToolButton, QToolButton]] = {}
         self.error_labels: dict[str, QLabel] = {}
         self.fix_checks: dict[str, QCheckBox] = {}
         validator = QDoubleValidator(self)
         validator.setNotation(QDoubleValidator.Notation.ScientificNotation)
         for row, name in enumerate(_ALL_NAMES, start=1):
             label = QLabel(f"{name}:")
-            edit = QLineEdit("0")
+            edit = StepLineEdit("0")
             edit.setValidator(validator)
             # Only a real edit counts: editingFinished also fires on a
             # plain focus change, which must not switch "Refit" off.
             edit.textEdited.connect(self._mark_params_dirty)
             edit.editingFinished.connect(self._on_param_edited)
+            edit.stepRequested.connect(lambda steps, n=name: self.step(n, steps))
+            arrows = QWidget()
+            arrows_layout = QHBoxLayout(arrows)
+            arrows_layout.setContentsMargins(0, 0, 0, 0)
+            arrows_layout.setSpacing(1)
+            up, down = QToolButton(), QToolButton()
+            up.setArrowType(Qt.ArrowType.UpArrow)
+            down.setArrowType(Qt.ArrowType.DownArrow)
+            for button, sign in ((up, 1), (down, -1)):
+                button.setAutoRepeat(True)
+                button.setToolTip(f"{'Raise' if sign > 0 else 'Lower'} {name} by one step "
+                                  f"(see Step; Shift-click: ten steps).")
+                button.clicked.connect(lambda _c=False, n=name, s=sign: self._on_arrow(n, s))
+                arrows_layout.addWidget(button)
             error = QLabel("")
             fix = QCheckBox()
             fix.setToolTip(f"Hold {name} at the value in its box when fitting.")
             fix.toggled.connect(lambda _c: self.fixedChanged.emit(self.fixed()))
             grid.addWidget(label, row, 0)
             grid.addWidget(edit, row, 1)
-            grid.addWidget(error, row, 2)
-            grid.addWidget(fix, row, 3)
+            grid.addWidget(arrows, row, 2)
+            grid.addWidget(error, row, 3)
+            grid.addWidget(fix, row, 4)
             self.param_labels[name] = label
             self.param_edits[name] = edit
+            self.step_buttons[name] = (up, down)
             self.error_labels[name] = error
             self.fix_checks[name] = fix
         layout.addLayout(grid)
@@ -174,6 +271,12 @@ class ManualBaselineBox(QWidget):
             "holding any ticked “Fix” coefficients. Fills in the boxes above.")
         self.fit_button.clicked.connect(self.fitRequested)
         actions.addWidget(self.fit_button)
+        self.auto_button = QPushButton("Fit automatically")
+        self.auto_button.setToolTip(
+            "Back to the automatic fit (the method's own baseline points and "
+            "settings above), dropping the coefficients set here.")
+        self.auto_button.clicked.connect(self.autoRequested)
+        actions.addWidget(self.auto_button)
         actions.addStretch(1)
         layout.addLayout(actions)
 
@@ -208,8 +311,11 @@ class ManualBaselineBox(QWidget):
             for widget in (self.param_labels[name], self.param_edits[name],
                            self.error_labels[name], self.fix_checks[name]):
                 widget.setVisible(shown)
+            for button in self.step_buttons[name]:
+                button.setVisible(shown)
             if shown:
-                self.param_edits[name].setToolTip(_PARAM_TIPS[model][name])
+                self.param_edits[name].setToolTip(
+                    _PARAM_TIPS[model][name] + " ▲/▼, Up/Down or the wheel step it.")
 
     def regions(self) -> list[tuple[float, float]]:
         return parse_regions(self.regions_edit.text())
@@ -249,6 +355,64 @@ class ManualBaselineBox(QWidget):
             check.blockSignals(True)
             check.setChecked(bool(flags[i]) if flags is not None and i < len(flags) else False)
             check.blockSignals(False)
+
+    # ---- automatic fit / stepping ---------------------------------------
+    @property
+    def automatic(self) -> bool:
+        """Whether the boxes show an automatic fit's coefficients."""
+        return self._automatic
+
+    def show_automatic(self, values, exact: bool = True, what: str = "") -> None:
+        """Show an automatic fit's coefficients (not a hand edit: no
+        signal). ``exact`` False says the boxes only approximate it."""
+        self._automatic = True
+        self.set_params(values)
+        self.auto_button.setVisible(False)
+        self.status_label.setText(
+            f"Fitted automatically{(' (' + what + ')') if what else ''}"
+            + ("" if exact else "; the boxes show the nearest curve of this form")
+            + ". Change any coefficient (▲/▼ or type) to adjust it by hand from here.")
+
+    def set_manual(self) -> None:
+        """The boxes hold hand-set (or fitted-to-regions) coefficients."""
+        self._automatic = False
+        self.auto_button.setVisible(True)
+
+    def set_scales(self, scales: dict) -> None:
+        """``{name: size of a 100 % step}``, from the spectrum shown."""
+        self._scales = {k: float(v) for k, v in (scales or {}).items()
+                        if v is not None and math.isfinite(float(v)) and float(v) > 0}
+
+    def step_size(self, name: str) -> float:
+        """One step of ``name`` at the chosen Step."""
+        fraction = float(self.step_combo.currentData() or 0.01)
+        scale = self._scales.get(name)
+        if scale is None:
+            text = self.param_edits[name].text().strip().replace("−", "-")
+            try:
+                scale = abs(float(text)) or 1.0
+            except ValueError:
+                scale = 1.0
+        return scale * fraction
+
+    def step(self, name: str, steps: int) -> None:
+        """Move ``name`` by ``steps`` steps and report it as a hand edit."""
+        edit = self.param_edits[name]
+        try:
+            value = float(edit.text().strip().replace("−", "-") or 0.0)
+        except ValueError:
+            value = 0.0
+        value += steps * self.step_size(name)
+        if abs(value) < 1e-12 * max(1.0, self.step_size(name)):
+            value = 0.0
+        edit.setText(_short_step(value, self.step_size(name)))
+        self._params_dirty = True
+        self._on_param_edited()
+
+    def _on_arrow(self, name: str, sign: int) -> None:
+        from PySide6.QtWidgets import QApplication
+        many = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        self.step(name, sign * (10 if many else 1))
 
     # ---- handlers -------------------------------------------------------
     def _on_regions_edited(self) -> None:

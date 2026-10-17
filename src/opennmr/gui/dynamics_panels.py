@@ -234,16 +234,13 @@ class VTRelaxationPanel(QWidget):
         self.table.setToolTip(
             "One row per measurement. Rows with the same Series name and Larmor frequency "
             "form one dataset. ± is the 1σ uncertainty of the value (optional; with it "
-            "the fit is weighted). Paste a block copied from a spreadsheet with Paste.")
+            "the fit is weighted). Or Import CSV… a table of them.")
         layout.addWidget(self.table)
 
         buttons = QHBoxLayout()
         for text, slot, tip in (
                 ("Add row", self.add_row, "Add an empty row."),
                 ("Remove", self.remove_selected_rows, "Remove the selected rows."),
-                ("Paste", self.paste_from_clipboard,
-                 "Append rows from the clipboard: columns T, value[, ±[, Larmor MHz[, series]]], "
-                 "tab- or comma-separated."),
                 ("Import CSV…", self.import_csv,
                  "Columns T, value and optionally error, larmor_MHz, label (header row needed)."),
                 ("From Fit Curve", self.add_from_curve_fit,
@@ -252,8 +249,15 @@ class VTRelaxationPanel(QWidget):
                 ("Clear", self.clear_rows, "Remove every row.")):
             b = QPushButton(text)
             b.setToolTip(tip)
-            b.clicked.connect(slot)
+            # A lambda: clicked(bool) passed False as Import CSV's path, so
+            # pandas was asked to read the file "False" (user report,
+            # 2026-10-17: "Invalid file path or buffer object type: <class
+            # 'bool'>"), and Paste read False as its text. Paste is gone
+            # (user request); paste_from_clipboard stays for scripts.
+            b.clicked.connect(lambda _checked=False, s=slot: s())
             buttons.addWidget(b)
+            if text == "Import CSV…":
+                self.import_button = b
         layout.addLayout(buttons)
 
         # Model
@@ -359,6 +363,38 @@ class VTRelaxationPanel(QWidget):
         trange.addWidget(self.t_hi_spin)
         trange.addStretch(1)
         layout.addLayout(trange)
+
+        # Several temperature regions, each its own fit (explicit user
+        # request, 2026-10-17): e.g. one process from 200 to 260 K and a
+        # different one, with its own barrier, from 300 to 400 K.
+        self.regions_box = QGroupBox("Temperature regions (fitted separately)")
+        rv = QVBoxLayout(self.regions_box)
+        regions_blurb = QLabel(
+            "Each region is fitted on its own, to the points inside it, with the model above "
+            "and its own number of processes -- so each gets its own Ea and τ₀. Its curve is "
+            "drawn over its own range only.")
+        regions_blurb.setWordWrap(True)
+        rv.addWidget(regions_blurb)
+        self.regions_table = QTableWidget(0, 4)
+        self.regions_table.setHorizontalHeaderLabels(["Name", "From (K)", "To (K)", "Processes"])
+        self.regions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.regions_table.verticalHeader().setVisible(False)
+        self.regions_table.setMinimumHeight(80)
+        self.regions_table.setToolTip("Temperatures in kelvin, whatever the table above uses.")
+        rv.addWidget(self.regions_table)
+        region_buttons = QHBoxLayout()
+        self.add_region_button = QPushButton("Add Region")
+        self.add_region_button.clicked.connect(lambda _c=False: self.add_region())
+        self.remove_region_button = QPushButton("Remove")
+        self.remove_region_button.clicked.connect(lambda _c=False: self.remove_selected_regions())
+        self.fit_regions_button = QPushButton("Fit Regions")
+        self.fit_regions_button.setToolTip("Fit every region listed, each separately.")
+        self.fit_regions_button.clicked.connect(lambda _c=False: self.run_region_fits())
+        for b in (self.add_region_button, self.remove_region_button, self.fit_regions_button):
+            region_buttons.addWidget(b)
+        region_buttons.addStretch(1)
+        rv.addLayout(region_buttons)
+        layout.addWidget(self.regions_box)
 
         # Plot
         plot_box = QGroupBox("Plot")
@@ -702,6 +738,13 @@ class VTRelaxationPanel(QWidget):
         self._log(f"Plotted {sum(d['T_K'].size for d in data)} point(s) in {len(data)} dataset(s).")
 
     def redraw(self) -> None:
+        if (self.fit is None and getattr(self, "_last_draw", None)
+                and self._last_draw[0] == "regions"):
+            pk = self.plot_kwargs()
+            result, data = self._last_draw[1]
+            self._draw(lambda fig: vt.plot_arrhenius_regions(result, data,
+                                                             ax=fig.add_subplot(111), **pk))
+            return
         if self.fit is not None:
             pk = self.plot_kwargs()
             fit = self.fit
@@ -838,6 +881,95 @@ class VTRelaxationPanel(QWidget):
                         label=f"Arrhenius, Ea = {res['Ea_eV']:.3f} eV")
             self._draw(draw)
         return res
+
+    # ------------------------------------------------- temperature regions
+    def add_region(self, lo: float | None = None, hi: float | None = None,
+                   processes: int = 1, name: str | None = None) -> None:
+        t = self.regions_table
+        r = t.rowCount()
+        if lo is None or hi is None:
+            # Default: the next stretch of the data's temperatures, else 200-400 K.
+            try:
+                temps = np.concatenate([d["T_K"] for d in self.datasets()])
+                lo, hi = float(np.min(temps)), float(np.max(temps))
+            except (ValueError, KeyError):
+                lo, hi = 200.0, 400.0
+        t.insertRow(r)
+        for c, text in enumerate((name or f"Region {r + 1}", f"{lo:g}", f"{hi:g}",
+                                  f"{int(processes)}")):
+            t.setItem(r, c, QTableWidgetItem(text))
+
+    def remove_selected_regions(self) -> None:
+        rows = sorted({i.row() for i in self.regions_table.selectedIndexes()}, reverse=True)
+        if not rows and self.regions_table.rowCount():
+            rows = [self.regions_table.rowCount() - 1]
+        for r in rows:
+            self.regions_table.removeRow(r)
+
+    def regions(self) -> list:
+        """The regions table as :func:`vt_relaxation.fit_vt_regions` takes
+        them. Raises ValueError naming a bad row."""
+        out = []
+        for r in range(self.regions_table.rowCount()):
+            cells = [(self.regions_table.item(r, c).text() if self.regions_table.item(r, c)
+                      else "").strip() for c in range(4)]
+            if not any(cells):
+                continue
+            lo, hi = _float(cells[1]), _float(cells[2])
+            if lo is None or hi is None or lo == hi:
+                raise ValueError(f"Region row {r + 1}: needs two different temperatures (K).")
+            n = int(_float(cells[3], 1) or 1)
+            if not 1 <= n <= 3:
+                raise ValueError(f"Region row {r + 1}: 1 to 3 processes.")
+            out.append({"label": cells[0] or f"Region {r + 1}", "T_range": (lo, hi),
+                        "n_processes": n})
+        if not out:
+            raise ValueError("Add at least one temperature region.")
+        return out
+
+    def run_region_fits(self) -> dict | None:
+        data = self._datasets_or_warn()
+        if data is None:
+            return None
+        if self.quantity == "linewidth":
+            QMessageBox.information(self, "Temperature regions",
+                                    "Regions are for BPP fits of T₁, T₂ or T₁ρ.")
+            return None
+        try:
+            regions = self.regions()
+            kw = self.fit_kwargs()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Check the regions", str(exc))
+            return None
+        kw.pop("T_range", None)
+        kw.pop("n_processes", None)
+        result = vt.fit_vt_regions(data, regions, **kw)
+        self.region_fits = result
+        self.fit = self.hb_fit = None
+        self.results_table.setRowCount(0)
+        for fit in result["fits"]:
+            label = fit["region_label"]
+            if "error" in fit:
+                self._result_row(label, float("nan"), None, fit["error"])
+                continue
+            for name, v in fit["params"].items():
+                note = "fixed" if name in fit["fixed"] else ""
+                if name.startswith("Ea_eV"):
+                    note = (note + "; " if note else "") + f"{v * 96.485:.1f} kJ/mol"
+                self._result_row(f"{label}: {name}", v, fit["errors"].get(name), note)
+        ok = [f for f in result["fits"] if "error" not in f]
+        self.results_label.setText(
+            f"{len(ok)} of {len(result['fits'])} region(s) fitted, each separately"
+            + (": " + "; ".join(
+                f"{f['region_label']} Ea = "
+                + ", ".join(f"{v:.3f}" for n, v in f["params"].items() if n.startswith("Ea_eV"))
+                + " eV" for f in ok) if ok else "") + ".")
+        self._log(result["log"])
+        self._last_draw = ("regions", (result, data))
+        pk = self.plot_kwargs()
+        self._draw(lambda fig: vt.plot_arrhenius_regions(result, data, ax=fig.add_subplot(111),
+                                                         **pk))
+        return result
 
     def _result_row(self, name, value, error, note) -> None:
         r = self.results_table.rowCount()
