@@ -15071,8 +15071,10 @@ class MainWindow(QMainWindow):
         """Integrate ▸ Offset Tracker (explicit user request, 2026-10-17):
         ``gui/offset_tracker_panel.py`` over ``notebook/offset_tracker.py``.
         Integrals of one region against the O2/O3 offset (1D HMQC /
-        J-resolved series), drawn on the Fit view; the skyline is kept in
-        Open experiments as a derived spectrum."""
+        J-resolved series), drawn on the Fit view as bars, vertical lines or
+        peaks (Gaussian/Lorentzian/pseudo-Voigt of a chosen width centred on
+        each offset; 2026-10-18); what is drawn is kept in Open experiments
+        as a derived spectrum."""
         self.offset_tracker_panel = OffsetTrackerPanel(
             spectra=self._dnp_spectra, draw=self._dnp_draw, arm=self._offset_tracker_arm,
             show_spectrum=self._cp_show_spectrum,

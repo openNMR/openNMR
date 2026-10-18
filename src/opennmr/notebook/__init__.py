@@ -89,7 +89,7 @@ from .arithmetic import combine_spectra, combine_spectra_as_results
 from .vt_relaxation import (
     vt_dataset, load_vt_csv, fit_vt_relaxation, compare_vt_models, fit_arrhenius,
     hendrickson_bray, fit_hendrickson_bray, waugh_fedin_Ea, plot_arrhenius,
-    plot_vs_temperature, plot_hendrickson_bray,
+    plot_vs_temperature, plot_hendrickson_bray, fit_vt_regions, plot_arrhenius_regions,
 )
 from .exchange import (
     exchange_spectrum, exchange_spectra_vs_temperature, fit_exchange_spectra,
@@ -316,6 +316,19 @@ from .shearing import (
     plot_shear_scan,
 )
 
+# Offset Tracker (Integrate ▸ Offset Tracker; 2026-10-17, lineshapes
+# 2026-10-18): integrals of an HMQC / J-resolved series against O2/O3, and
+# what is drawn (bars, lines, peaks at the offsets) kept as a spectrum.
+from . import offset_tracker
+from .offset_tracker import (
+    offset_series, offset_report, plot_offset_series, skyline_spectrum, sideband_pattern,
+    sideband_spectrum, stick_spectrum, pattern_spectrum,
+)
+# Typefaces for figures (2026-10-17).
+from . import fonts
+from .fonts import available_fonts, font_samples, plot_font_samples, use_font
+from ..plotting.vector_export import save_vector_safe
+
 pt = periodic_table
 pf = pnmr_fit
 dw = dnp_workflow
@@ -473,7 +486,7 @@ __all__ = [
     # dynamics: relaxation vs temperature and exchange lineshapes
     "vt_dataset", "load_vt_csv", "fit_vt_relaxation", "compare_vt_models", "fit_arrhenius",
     "hendrickson_bray", "fit_hendrickson_bray", "waugh_fedin_Ea", "plot_arrhenius",
-    "plot_vs_temperature", "plot_hendrickson_bray",
+    "plot_vs_temperature", "plot_hendrickson_bray", "fit_vt_regions", "plot_arrhenius_regions",
     "exchange_spectrum", "exchange_spectra_vs_temperature", "fit_exchange_spectra",
     "plot_exchange_stack", "plot_exchange_fit", "coalescence_temperature",
     # dynamics: Tikhonov regularisation (distributions and 2D maps)
@@ -495,4 +508,10 @@ __all__ = [
     # shearing and scaling of 2D spectra
     "shearing", "make_shear_plan", "shear_2d", "estimate_shear", "sideband_positions",
     "isotropic_from_peak", "plot_shear_scan",
+    # Offset Tracker (HMQC / J-resolved series against O2/O3)
+    "offset_tracker", "offset_series", "offset_report", "plot_offset_series", "skyline_spectrum",
+    "sideband_pattern", "sideband_spectrum", "stick_spectrum", "pattern_spectrum",
+    # typefaces and Illustrator-safe vector saves
+    "fonts", "available_fonts", "font_samples", "plot_font_samples", "use_font",
+    "save_vector_safe",
 ]

@@ -501,7 +501,7 @@ def test_offset_tracker_panel_reads_integrates_and_keeps(qapp):
     panel.tick_all_button.click()
     assert panel.read_offsets() == 17
     panel.set_region(5, -5)
-    panel.style_combo.setCurrentIndex(panel.style_combo.findData("triangles"))
+    panel.style_combo.setCurrentIndex(panel.style_combo.findData("lineshape"))
     series = panel.integrate()
     assert series is not None and len(series["y"]) == 17
     n = len(window.session)

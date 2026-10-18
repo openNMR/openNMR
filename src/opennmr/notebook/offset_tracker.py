@@ -6,9 +6,15 @@ request, 2026-10-17).
 
 Each spectrum is integrated over the same region of the observed (X)
 spectrum, and the integrals are plotted against the Y offset in ppm, as
-bars, stems or triangles. The bars' skyline can be kept as a spectrum
-of Y (:func:`skyline_spectrum`), which can then be fitted like any other
-1D spectrum (CSA, quadrupolar, ...).
+bars, vertical lines ("stems") or a lineshape -- a Gaussian, Lorentzian
+or pseudo-Voigt of one chosen width centred on every offset, its height
+the integral there (2026-10-18; it replaced the triangles). With the
+offsets placed on Y's MAS sidebands, that lineshape is a picture of Y's
+MAS spectrum: one peak per sideband (or the centreband). Whatever is
+drawn can be kept as a spectrum of Y (:func:`pattern_spectrum`:
+:func:`skyline_spectrum` for bars, :func:`stick_spectrum` for vertical
+lines, :func:`sideband_spectrum` for the lineshape), which can then be
+fitted like any other 1D spectrum (CSA, quadrupolar, ...).
 
 The offset in ppm is ``O2 / BF2`` (Hz / MHz) -- the offset from the
 channel's basic frequency, which is 0 ppm of that nucleus when the
@@ -21,6 +27,11 @@ Notebook use::
     series = ot.offset_series(spectra, region=(10, -10), channel="O2")
     ot.plot_offset_series(series, style="bars")
     y_spectrum = ot.skyline_spectrum(series)
+    # one Gaussian of 2 kHz FWHM per offset, drawn and kept as a spectrum
+    ot.plot_offset_series(series, style="lineshape", lineshape="gaussian",
+                          fwhm=2000, width_unit="Hz")
+    y_mas = ot.pattern_spectrum(series, style="lineshape", lineshape="gaussian",
+                                fwhm=2000, width_unit="Hz")
 """
 from __future__ import annotations
 
@@ -31,14 +42,32 @@ import numpy as np
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 from . import intensity_scaling
 from .dnp import region_integral
+from .fitting import gaussian, lorentzian, pseudo_voigt
 
 #: The channels a pulsed offset can be read from, and the acqus keys
 #: that go with them: (offset, basic frequency, nucleus).
 CHANNELS = {"O2": ("O2", "BF2", "NUC2"), "O3": ("O3", "BF3", "NUC3"),
             "O4": ("O4", "BF4", "NUC4")}
 
-#: How the integrals are drawn.
-STYLES = ("bars", "stems", "triangles")
+#: How the integrals are drawn (and kept): bars (the skyline), vertical
+#: lines, or a lineshape centred on every offset. "triangles" was
+#: replaced by "lineshape" on 2026-10-18 (user request).
+STYLES = ("bars", "stems", "lineshape")
+
+#: The lineshapes a "lineshape" pattern can use, with their display names.
+#: Definitions are notebook.fitting's (``eta`` = Lorentzian fraction).
+LINESHAPES = {"gaussian": "Gaussian", "lorentzian": "Lorentzian",
+              "pseudo_voigt": "Pseudo-Voigt"}
+
+#: Units a lineshape width can be given in.
+WIDTH_UNITS = ("ppm", "Hz", "kHz")
+
+#: Fewest grid points across one FWHM of a kept lineshape: fewer and the
+#: peaks' heights and widths are misrepresented, so the grid is enlarged.
+MIN_POINTS_PER_FWHM = 10
+
+#: Largest grid a kept spectrum is given.
+MAX_POINTS = 262144
 
 
 def _acqus(spectrum: NMRSpectrum) -> dict:
@@ -105,6 +134,7 @@ def offset_series(spectra, region, channel: str = "O2", offsets_ppm=None, labels
     lo, hi = sorted(float(v) for v in region)
     rows, notes = [], []
     nuclei, bfs = set(), set()
+    rg_divided = []
     for spectrum, label, given in zip(spectra, labels, offsets_ppm):
         if spectrum.ndim != 1:
             raise ValueError(f"{label} is not a 1D spectrum (keep a slice first).")
@@ -132,6 +162,7 @@ def offset_series(spectra, region, channel: str = "O2", offsets_ppm=None, labels
         r = region_integral(spectrum, lo, hi, baseline=baseline)
         scale = intensity_scaling.comparison_factors(spectrum, "per_scan", divide_rg)
         notes.extend(f"{label}: {n}." for n in scale["notes"])
+        rg_divided.append(bool(divide_rg) and scale.get("rg") is not None)
         rows.append({"label": label, "ppm": ppm + float(ppm_shift), "hz": hz,
                      "y": r["value"] * scale["factor"],
                      "err": abs(r["error"] * scale["factor"])})
@@ -143,7 +174,13 @@ def offset_series(spectra, region, channel: str = "O2", offsets_ppm=None, labels
         notes.append("The pulsed channel's basic frequency differs across the series.")
     y = np.array([r["y"] for r in rows], float)
     e = np.array([r["err"] for r in rows], float)
-    unit = "integral per scan" + (" per unit RG" if divide_rg else "") + " (a.u.)"
+    # "per unit RG" only when every spectrum's RG was known and divided out
+    # (2026-10-18: the label claimed it even when no RG was recorded).
+    if divide_rg and rg_divided and not all(rg_divided):
+        notes.append("Receiver gain divided out of only some spectra: their integrals are "
+                     "not on one scale.")
+    unit = "integral per scan" + (" per unit RG" if rg_divided and all(rg_divided) else "") \
+        + " (a.u.)"
     if normalise and y.size and np.max(np.abs(y)) > 0:
         m = float(np.max(np.abs(y)))
         y, e = y / m, e / m
@@ -195,30 +232,290 @@ def skyline_spectrum(series: dict, n_points: int = 2048, shape: str = "steps",
         data = np.interp(grid, x, y, left=0.0, right=0.0)
     else:
         raise ValueError("shape must be 'steps' or 'linear'")
+    return _derived_spectrum(series, grid, data, label or "offset skyline",
+                             {"style": "bars", "shape": shape},
+                             {"skyline_offsets_ppm": [float(v) for v in x],
+                              "skyline_integrals": [float(v) for v in y],
+                              "skyline_region": list(series.get("region") or ()),
+                              "skyline_shape": shape})
+
+
+# ---- lineshapes and sticks at the offsets (2026-10-18) -------------------------
+
+def _sorted_offsets(series: dict):
+    x = np.asarray(series["offset_ppm"], float)
+    y = np.asarray(series["y"], float)
+    if x.size < 1:
+        raise ValueError("The series has no offsets.")
+    order = np.argsort(x)
+    return x[order], y[order]
+
+
+def _spacing(x: np.ndarray) -> float:
+    """Smallest non-zero spacing of the offsets (1 ppm for a single one)."""
+    d = np.diff(np.unique(x))
+    return float(d.min()) if d.size else 1.0
+
+
+def offset_spacing(series: dict) -> dict:
+    """The offsets' spacing: ``{"ppm", "hz", "uniform"}`` -- the smallest
+    spacing in ppm and Hz (Hz needs the channel's BF, else None), and
+    whether every step is that spacing (to 0.1 %). When the offsets were
+    placed on the pulsed nucleus's spinning sidebands, a uniform spacing
+    in Hz is the MAS rate."""
+    x, _y = _sorted_offsets(series)
+    ppm = _spacing(x)
+    d = np.diff(np.unique(x))
+    uniform = bool(d.size) and bool(np.allclose(d, ppm, rtol=1e-3, atol=0.0))
+    bf = series.get("bf_MHz")
+    return {"ppm": ppm, "hz": ppm * bf if bf else None, "uniform": uniform}
+
+
+def fwhm_in_ppm(series: dict, fwhm: float, width_unit: str = "ppm") -> float:
+    """A width given in ``width_unit`` ('ppm', 'Hz' or 'kHz') in ppm of
+    the pulsed nucleus. Hz/kHz need the channel's basic frequency
+    (``series["bf_MHz"]``, read from BF2/BF3/BF4)."""
+    unit = str(width_unit).strip().lower()
+    try:
+        value = float(fwhm)
+    except (TypeError, ValueError):
+        raise ValueError(f"The width must be a number, got {fwhm!r}.") from None
+    if not (np.isfinite(value) and value > 0):
+        raise ValueError(f"The width (FWHM) must be above zero, got {fwhm!r}.")
+    if unit == "ppm":
+        return value
+    if unit in ("hz", "khz"):
+        bf = series.get("bf_MHz")
+        if not bf:
+            raise ValueError("A width in Hz needs the pulsed channel's basic frequency (BF), "
+                             "which this series does not record: give the width in ppm.")
+        return value * (1000.0 if unit == "khz" else 1.0) / float(bf)
+    raise ValueError(f"width_unit must be one of {WIDTH_UNITS}, got {width_unit!r}")
+
+
+def default_fwhm_ppm(series: dict) -> float:
+    """A starting width: a quarter of the smallest spacing of the offsets,
+    so neighbouring peaks barely overlap (a Gaussian falls to 10^-5 of its
+    height at the next offset)."""
+    x, _y = _sorted_offsets(series)
+    return 0.25 * _spacing(x)
+
+
+def peak_profile(x, centre: float, fwhm: float, lineshape: str = "gaussian",
+                 eta: float = 0.5, height: float = 1.0) -> np.ndarray:
+    """One peak of ``lineshape`` ('gaussian', 'lorentzian' or
+    'pseudo_voigt') at ``centre``, of full width at half maximum ``fwhm``
+    and of maximum ``height`` (x, centre and fwhm in the same unit).
+    ``eta`` (pseudo-Voigt only) is the Lorentzian fraction, 0 to 1. The
+    shapes are :mod:`opennmr.notebook.fitting`'s, so a fit with the same
+    lineshape reproduces them."""
+    x = np.asarray(x, float)
+    key = str(lineshape).lower().replace("-", "_").replace(" ", "_")
+    if key == "gaussian":
+        return gaussian(x, centre, fwhm, height)
+    if key == "lorentzian":
+        return lorentzian(x, centre, fwhm, height)
+    if key == "pseudo_voigt":
+        eta = float(eta)
+        if not 0.0 <= eta <= 1.0:
+            raise ValueError(f"eta (the Lorentzian fraction) must be 0 to 1, got {eta:g}.")
+        return pseudo_voigt(x, centre, fwhm, height, eta)
+    raise ValueError(f"lineshape must be one of {tuple(LINESHAPES)}, got {lineshape!r}")
+
+
+def _tail_widths(lineshape: str, eta: float) -> float:
+    """FWHMs beyond the outermost peaks for the grid to reach: a Gaussian
+    is below 10^-10 of its height at 3 FWHM; a Lorentzian only falls to
+    0.25 % at 10 FWHM, so it is given 10."""
+    key = str(lineshape).lower().replace("-", "_")
+    if key == "gaussian" or (key == "pseudo_voigt" and float(eta) == 0.0):
+        return 3.0
+    return 10.0
+
+
+def sideband_pattern(series: dict, lineshape: str = "gaussian", fwhm: float | None = None,
+                     width_unit: str = "ppm", eta: float = 0.5, x=None,
+                     n_points: int | None = None, pad: float | None = None,
+                     components: bool = False) -> dict:
+    """A peak of ``lineshape`` centred on every offset, its height the
+    integral there, all of one width (``fwhm`` in ``width_unit``; None ->
+    :func:`default_fwhm_ppm`), summed -- with the offsets on the pulsed
+    nucleus's sidebands, its MAS spectrum: a peak per sideband. Only the
+    type and the width are chosen; the positions are the offsets.
+
+    ``x``: ppm values to evaluate on (else a descending grid reaching
+    ``pad`` ppm beyond the outermost offsets -- by default half a spacing
+    plus 3 FWHM for a Gaussian, 10 for a Lorentzian or pseudo-Voigt).
+    ``n_points``: points of that grid (default 4096); it is enlarged so a
+    FWHM spans at least :data:`MIN_POINTS_PER_FWHM` points (at most
+    :data:`MAX_POINTS`), and the notes say so.
+
+    Returns ``{"ppm", "y", "fwhm_ppm", "fwhm_hz", "lineshape", "eta",
+    "offsets_ppm", "heights", "components" (n_offsets x n_points, if
+    asked), "notes"}``. A note warns when the peaks overlap enough that
+    the summed curve at an offset exceeds its integral by over 1 % of the
+    largest."""
+    offsets, heights = _sorted_offsets(series)
+    key = str(lineshape).lower().replace("-", "_").replace(" ", "_")
+    if key not in LINESHAPES:
+        raise ValueError(f"lineshape must be one of {tuple(LINESHAPES)}, got {lineshape!r}")
+    w = default_fwhm_ppm(series) if fwhm is None else fwhm_in_ppm(series, fwhm, width_unit)
+    notes = []
+    if x is None:
+        spacing = _spacing(offsets)
+        if pad is None:
+            pad = 0.5 * spacing + _tail_widths(key, eta) * w
+        lo, hi = float(offsets[0] - pad), float(offsets[-1] + pad)
+        n = int(n_points or 4096)
+        needed = int(np.ceil((hi - lo) / w * MIN_POINTS_PER_FWHM)) + 1
+        if needed > n:
+            if needed > MAX_POINTS:
+                notes.append(f"The width ({w:.4g} ppm) is narrow for the {hi - lo:.4g} ppm range: "
+                             f"{MAX_POINTS} points give {(MAX_POINTS - 1) * w / (hi - lo):.1f} "
+                             "points per FWHM, so the peaks are under-sampled.")
+                n = MAX_POINTS
+            else:
+                notes.append(f"Grid enlarged from {n} to {needed} points so that one FWHM "
+                             f"spans at least {MIN_POINTS_PER_FWHM} points.")
+                n = needed
+        grid = np.linspace(hi, lo, n)
+    else:
+        grid = np.asarray(x, float)
+    comps = np.array([peak_profile(grid, c, w, key, eta, h) for c, h in zip(offsets, heights)])
+    total = comps.sum(axis=0) if comps.size else np.zeros_like(grid)
+    if offsets.size > 1:
+        at = np.array([peak_profile(offsets, c, w, key, eta, h)
+                       for c, h in zip(offsets, heights)]).sum(axis=0)
+        scale = float(np.max(np.abs(heights))) or 1.0
+        excess = float(np.max(np.abs(at - heights))) / scale
+        if excess > 0.01:
+            notes.append(f"The peaks overlap: at an offset the summed curve differs from that "
+                         f"offset's integral by up to {100 * excess:.1f} % of the largest "
+                         f"(FWHM {w:.4g} ppm, smallest spacing {_spacing(offsets):.4g} ppm). "
+                         "Narrow the width for heights equal to the integrals.")
+    bf = series.get("bf_MHz")
+    out = {"ppm": grid, "y": total, "fwhm_ppm": w, "fwhm_hz": w * bf if bf else None,
+           "lineshape": key, "eta": float(eta) if key == "pseudo_voigt" else None,
+           "offsets_ppm": offsets, "heights": heights, "notes": notes}
+    if components:
+        out["components"] = comps
+    return out
+
+
+def sideband_spectrum(series: dict, lineshape: str = "gaussian", fwhm: float | None = None,
+                      width_unit: str = "ppm", eta: float = 0.5, n_points: int = 4096,
+                      pad: float | None = None, label: str | None = None) -> NMRSpectrum:
+    """:func:`sideband_pattern` as a 1D spectrum of the pulsed nucleus
+    (vendor "derived"; its nucleus and BF, so Hz axes and Hz fits work),
+    to keep in Open experiments and fit. ``metadata.raw["offset_pattern"]``
+    records the offsets, integrals, lineshape, width and notes.
+
+    The width is the one chosen, not a measured linewidth: fit it fixed
+    (or read a fitted width as this choice). The relative heights are the
+    filtered integrals, which also carry the selective pulse's excitation
+    profile and the transfer efficiency at each offset."""
+    pat = sideband_pattern(series, lineshape=lineshape, fwhm=fwhm, width_unit=width_unit,
+                           eta=eta, n_points=n_points, pad=pad)
+    return _derived_spectrum(
+        series, pat["ppm"], pat["y"], label or f"offset {LINESHAPES[pat['lineshape']]} pattern",
+        {"style": "lineshape", "lineshape": pat["lineshape"], "fwhm_ppm": pat["fwhm_ppm"],
+         "fwhm_hz": pat["fwhm_hz"], "eta": pat["eta"], "notes": list(pat["notes"])})
+
+
+def stick_spectrum(series: dict, n_points: int = 4096, pad: float = 0.5,
+                   label: str | None = None) -> NMRSpectrum:
+    """The vertical lines as a 1D spectrum: each offset's integral at one
+    grid point, zero elsewhere (``pad`` spacings beyond the outermost
+    offsets). With evenly spaced offsets the grid step divides the
+    spacing exactly, so every line sits on its offset; otherwise each
+    goes to the nearest point and ``raw["offset_pattern"]
+    ["max_displacement_ppm"]`` says how far that moved it. Offsets that
+    share a point are added."""
+    x, y = _sorted_offsets(series)
+    spacing = _spacing(x)
+    span = float(x[-1] - x[0]) + 2.0 * pad * spacing
+    m = max(1, int(np.ceil((int(n_points) - 1) * spacing / span)))
+    step = spacing / m
+    edge = int(np.ceil(pad * spacing / step))           # whole steps, so offsets land on points
+    hi = float(x[-1]) + edge * step
+    n = int(round((float(x[-1] - x[0])) / step)) + 2 * edge + 1
+    grid = hi - step * np.arange(n)                     # descending
+    idx = np.clip(np.rint((hi - x) / step).astype(int), 0, n - 1)
+    data = np.zeros(n)
+    np.add.at(data, idx, y)
+    moved = float(np.max(np.abs(grid[idx] - x))) if x.size else 0.0
+    notes = []
+    if moved > 1e-9 * max(abs(spacing), 1.0):
+        notes.append(f"Uneven offsets: lines moved to the nearest grid point, by at most "
+                     f"{moved:.3g} ppm.")
+    return _derived_spectrum(series, grid, data, label or "offset sticks",
+                             {"style": "stems", "max_displacement_ppm": moved, "notes": notes})
+
+
+def pattern_spectrum(series: dict, style: str = "lineshape", n_points: int = 4096,
+                     shape: str = "steps", lineshape: str = "gaussian",
+                     fwhm: float | None = None, width_unit: str = "ppm", eta: float = 0.5,
+                     label: str | None = None) -> NMRSpectrum:
+    """What :func:`plot_offset_series` draws with ``style``, as a 1D
+    spectrum to keep and fit: 'bars' -> :func:`skyline_spectrum`
+    (``shape``), 'stems' -> :func:`stick_spectrum`, 'lineshape' ->
+    :func:`sideband_spectrum` (``lineshape``, ``fwhm``, ``width_unit``,
+    ``eta``)."""
+    if style == "bars":
+        return skyline_spectrum(series, n_points=n_points, shape=shape, label=label)
+    if style == "stems":
+        return stick_spectrum(series, n_points=n_points, label=label)
+    if style == "lineshape":
+        return sideband_spectrum(series, lineshape=lineshape, fwhm=fwhm, width_unit=width_unit,
+                                 eta=eta, n_points=n_points, label=label)
+    raise ValueError(_style_error(style))
+
+
+def _style_error(style) -> str:
+    text = f"style must be one of {STYLES}, got {style!r}"
+    if style == "triangles":
+        text += " ('triangles' was replaced by 'lineshape' on 2026-10-18)"
+    return text
+
+
+def _derived_spectrum(series: dict, grid, data, label: str, pattern: dict,
+                      extra_raw: dict | None = None) -> NMRSpectrum:
+    """A kept 1D spectrum of the pulsed nucleus on ``grid`` (ppm,
+    descending), recording how it was made in ``raw["offset_pattern"]``."""
+    grid = np.asarray(grid, float)
+    data = np.asarray(data, float)
+    x, y = _sorted_offsets(series)
     bf = series.get("bf_MHz")
     axis = NMRAxis(kind="frequency", ppm=grid, hz=grid * bf if bf else None)
-    meta = NMRMetadata(
-        vendor="derived", nucleus=series.get("nucleus"), sfo1=bf, bf1=bf,
-        source_path=label or "offset skyline",
-        raw={"skyline_offsets_ppm": [float(v) for v in x],
-             "skyline_integrals": [float(v) for v in y],
-             "skyline_region": list(series.get("region") or ()),
-             "skyline_shape": shape})
-    return NMRSpectrum(data=data, axes=[axis], metadata=meta,
-                       data_imag=np.zeros_like(data))
+    record = {"offsets_ppm": [float(v) for v in x], "integrals": [float(v) for v in y],
+              "region": list(series.get("region") or ()), "channel": series.get("channel")}
+    record.update(pattern)
+    raw = {"offset_pattern": record}
+    raw.update(extra_raw or {})
+    meta = NMRMetadata(vendor="derived", nucleus=series.get("nucleus"), sfo1=bf, bf1=bf,
+                       source_path=label, raw=raw)
+    return NMRSpectrum(data=data, axes=[axis], metadata=meta, data_imag=np.zeros_like(data))
 
 
 def plot_offset_series(series: dict, style: str = "bars", ax=None, colour=None,
                        width: float | None = None, show_skyline: bool = False,
-                       markersize: float = 7.0, linewidth: float = 1.2, text_size="small"):
+                       markersize: float = 7.0, linewidth: float = 1.2, text_size="small",
+                       lineshape: str = "gaussian", fwhm: float | None = None,
+                       width_unit: str = "ppm", eta: float = 0.5,
+                       show_components: bool = False):
     """The integrals against the offset (ppm of the pulsed nucleus):
-    ``style`` 'bars', 'stems' (vertical lines with a dot) or 'triangles'
-    (vertical lines with a triangle). The x axis runs high to low ppm,
-    as a spectrum of that nucleus does. ``show_skyline`` draws the bars'
-    outline. Returns ``(fig, ax)``."""
+    ``style`` 'bars', 'stems' (vertical lines with a dot) or 'lineshape'
+    -- a ``lineshape`` ('gaussian', 'lorentzian', 'pseudo_voigt' with
+    Lorentzian fraction ``eta``) of FWHM ``fwhm`` (in ``width_unit``;
+    None -> a quarter of the smallest spacing) centred on every offset,
+    its height the integral, summed (:func:`sideband_pattern`);
+    ``show_components`` adds each peak, dashed. ``width`` is the bars'
+    width (ppm). The x axis runs high to low ppm, as a spectrum of that
+    nucleus does. ``show_skyline`` draws the bars' outline. Returns
+    ``(fig, ax)``."""
     import matplotlib.pyplot as plt
     if style not in STYLES:
-        raise ValueError(f"style must be one of {STYLES}")
+        raise ValueError(_style_error(style))
     x = np.asarray(series["offset_ppm"], float)
     y = np.asarray(series["y"], float)
     if ax is None:
@@ -226,15 +523,26 @@ def plot_offset_series(series: dict, style: str = "bars", ax=None, colour=None,
     else:
         fig = ax.figure
     colour = colour or "black"
+    spacing = _spacing(np.sort(x)) if x.size else 1.0
     if width is None:
-        width = 0.8 * (float(np.min(np.diff(np.sort(x)))) if np.unique(x).size > 1 else 1.0)
+        width = 0.8 * spacing
+    lo_x, hi_x = (float(x.min()), float(x.max())) if x.size else (0.0, 1.0)
+    margin = 0.05 * (float(np.ptp(x)) or 1.0) + width
     if style == "bars":
         ax.bar(x, y, width=width, color=colour, edgecolor=colour, linewidth=0.5, zorder=2)
-    else:
+    elif style == "stems":
         ax.vlines(x, 0.0, y, color=colour, lw=linewidth, zorder=2)
-        marker = "o" if style == "stems" else "^"
-        ax.plot(x, y, marker, color=colour, ms=markersize if style == "triangles"
-                else 0.7 * markersize, ls="none", zorder=3)
+        ax.plot(x, y, "o", color=colour, ms=0.7 * markersize, ls="none", zorder=3)
+    else:
+        pat = sideband_pattern(series, lineshape=lineshape, fwhm=fwhm, width_unit=width_unit,
+                               eta=eta, components=show_components)
+        if show_components:
+            for comp in pat["components"]:
+                ax.plot(pat["ppm"], comp, "--", color=colour, lw=0.6 * linewidth, alpha=0.6,
+                        zorder=1)
+        ax.plot(pat["ppm"], pat["y"], "-", color=colour, lw=linewidth, zorder=2)
+        lo_x, hi_x = float(pat["ppm"].min()), float(pat["ppm"].max())
+        margin = 0.0
     if show_skyline and x.size > 1:
         sky = skyline_spectrum(series, n_points=4096)
         ax.plot(sky.axes[0].ppm, sky.data, "-", color="0.4", lw=0.8, zorder=1)
@@ -244,8 +552,7 @@ def plot_offset_series(series: dict, style: str = "bars", ax=None, colour=None,
                   + (f", {_pretty(nucleus)} shift" if nucleus else "") + " (ppm)"))
     ax.set_ylabel(_italic_label(series.get("unit", "integral")))
     if x.size:
-        span = float(np.ptp(x)) or 1.0
-        ax.set_xlim(float(x.max()) + 0.05 * span + width, float(x.min()) - 0.05 * span - width)
+        ax.set_xlim(hi_x + margin, lo_x - margin)
     fig.tight_layout()
     return fig, ax
 
@@ -265,6 +572,16 @@ def offset_report(series: dict) -> str:
                 and series.get("bf_MHz") else "") + ":"]
     for lab, p, v, e in zip(series["labels"], series["offset_ppm"], series["y"], series["y_err"]):
         lines.append(f"  {p:10.4g} ppm   {v:.6g} ± {e:.2g}   {lab}")
+    if len(series["offset_ppm"]) > 1:
+        sp = offset_spacing(series)
+        if sp["uniform"]:
+            line = f"Offsets evenly spaced by {sp['ppm']:.6g} ppm"
+            if sp["hz"]:
+                line += (f" ({sp['hz']:.6g} Hz): if they were placed on the sidebands, "
+                         "that is the MAS rate.")
+            lines.append(line if line.endswith(".") else line + ".")
+        else:
+            lines.append(f"Offsets unevenly spaced (smallest step {sp['ppm']:.6g} ppm).")
     lines += series.get("notes") or []
     return "\n".join(lines)
 

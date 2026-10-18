@@ -269,8 +269,11 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   `plotting.labels.italicise_symbols` (canvas restyle; `_italic_label` round every
   `set_xlabel`). Write descriptive subscripts `\mathrm{...}`.
 - **Offset Tracker** (Integrate; `gui/offset_tracker_panel.py` over
-  `notebook/offset_tracker.py`): integrals against O2/O3 in ppm (O/BF), the
-  skyline kept as a derived 1D of the pulsed nucleus.
+  `notebook/offset_tracker.py`): integrals against O2/O3 in ppm (O/BF), drawn as
+  bars, vertical lines or peaks (Gaussian/Lorentzian/pseudo-Voigt, user type and
+  width, centred on the offsets -- the MAS spectrum when they sit on sidebands);
+  what is drawn is kept as a derived 1D of the pulsed nucleus
+  (`pattern_spectrum`). "triangles" was removed on 2026-10-18.
 - **BPP temperature regions**: `vt_relaxation.fit_vt_regions` /
   `plot_arrhenius_regions` -- each region an independent fit.
 - **Relaxometry extras** (three-exponential models, threshold regions,
