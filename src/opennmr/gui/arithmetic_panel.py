@@ -283,7 +283,7 @@ class ArithmeticPanel(QWidget):
             return None
         ops, factors = self.terms()
         if not any(factors):
-            self.status_label.setText("Every factor is zero -- the result would be empty.")
+            self.status_label.setText("Every factor is zero: the result would be empty.")
             return None
         common_range = self.range_combo.currentData()
         x_unit = self.unit_combo.currentData()

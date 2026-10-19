@@ -54,8 +54,8 @@ class BatchRelaxationPanel(QWidget):
 
         v = QVBoxLayout(self)
         blurb = QLabel(
-            "Fit a whole set of pseudo-2D series in one go -- e.g. one T₁ measurement per "
-            "temperature, at one field or several. Set up one series by hand first (process it, "
+            "Fit a whole set of pseudo-2D series in one go (e.g. one T₁ measurement per "
+            "temperature, at one field or several). Set up one series by hand first (process it, "
             "add its peaks or regions, choose the model and its delays), select it, then add "
             "the others here: each is processed and measured the same way and fitted, and "
             "every peak's T₁/T₂ goes to Relaxation vs Temperature with its temperature and "
@@ -83,7 +83,7 @@ class BatchRelaxationPanel(QWidget):
         self.add_selected_button.clicked.connect(self.add_selected)
         self.add_expnos_button = QPushButton("Add by number…")
         self.add_expnos_button.setToolTip("Open experiments of one dataset folder by number "
-                                          "(e.g. 10-25).")
+                                          "(e.g., 10-25).")
         self.add_expnos_button.clicked.connect(self._on_add_expnos)
         self.remove_button = QPushButton("Remove")
         self.remove_button.clicked.connect(self.remove_selected)
@@ -101,8 +101,8 @@ class BatchRelaxationPanel(QWidget):
                                   "setting does)", "own")
         self.delays_combo.addItem("The reference's values, for every series", "reference")
         self.delays_combo.setToolTip(
-            "Own: with Values on Auto or a list file, each series' delays come from its own "
-            "folder (vdlist/vclist) -- right when the series differ. The reference's: every "
+            "Own: with Values on Auto or a list file: each series' delays come from its own "
+            "folder (vdlist/vclist). The reference's: every "
             "series gets the reference's delays, written out.")
         form.addRow("Delays:", self.delays_combo)
         self.send_check = QCheckBox("Send the results to Relaxation vs Temperature when done")
@@ -135,7 +135,7 @@ class BatchRelaxationPanel(QWidget):
     def refresh_reference(self) -> None:
         ref = self._reference()
         self.reference_label.setText(
-            f"Reference (set up by hand): <b>{ref[1]}</b> -- the series selected in Open "
+            f"Reference (set up by hand): <b>{ref[1]}</b>, the series selected in Open "
             "experiments." if ref else
             "Reference: select the pseudo-2D series you have set up in Open experiments.")
 
@@ -279,7 +279,7 @@ class BatchRelaxationPanel(QWidget):
         lines = [f"Fitted {done} of {len(self.entries)} series"
                  + (f"; {failed} failed (see Status)" if failed else "") + "."]
         if self.rows:
-            lines.append(f"{len(self.rows)} value(s) in {len(groups)} group(s) -- each peak at "
+            lines.append(f"{len(self.rows)} value(s) in {len(groups)} group(s), each peak at "
                          "each field: " + (", ".join(f"{f:g} MHz" for f in fields) or
                                            "field unknown") + ".")
         if missing_T:
