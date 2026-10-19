@@ -497,6 +497,49 @@ def _derived_spectrum(series: dict, grid, data, label: str, pattern: dict,
     return NMRSpectrum(data=data, axes=[axis], metadata=meta, data_imag=np.zeros_like(data))
 
 
+def _draw_series(ax, series: dict, style: str, colour, y0: float = 0.0, width=None,
+                 markersize: float = 7.0, linewidth: float = 1.2, lineshape: str = "gaussian",
+                 fwhm=None, width_unit: str = "ppm", eta: float = 0.5,
+                 show_components: bool = False, show_skyline: bool = False):
+    """Draw one series on ``ax`` with its zero line at ``y0``. Returns
+    ``(lo_x, hi_x, margin)``: the x range drawn and the margin to leave."""
+    x = np.asarray(series["offset_ppm"], float)
+    y = np.asarray(series["y"], float)
+    spacing = _spacing(np.sort(x)) if x.size else 1.0
+    if width is None:
+        width = 0.8 * spacing
+    lo_x, hi_x = (float(x.min()), float(x.max())) if x.size else (0.0, 1.0)
+    margin = 0.05 * (float(np.ptp(x)) or 1.0) + width
+    if style == "bars":
+        ax.bar(x, y, width=width, bottom=y0, color=colour, edgecolor=colour, linewidth=0.5,
+               zorder=2)
+    elif style == "stems":
+        ax.vlines(x, y0, y + y0, color=colour, lw=linewidth, zorder=2)
+        ax.plot(x, y + y0, "o", color=colour, ms=0.7 * markersize, ls="none", zorder=3)
+    else:
+        pat = sideband_pattern(series, lineshape=lineshape, fwhm=fwhm, width_unit=width_unit,
+                               eta=eta, components=show_components)
+        if show_components:
+            for comp in pat["components"]:
+                ax.plot(pat["ppm"], np.asarray(comp) + y0, "--", color=colour,
+                        lw=0.6 * linewidth, alpha=0.6, zorder=1)
+        ax.plot(pat["ppm"], pat["y"] + y0, "-", color=colour, lw=linewidth, zorder=2)
+        lo_x, hi_x = float(pat["ppm"].min()), float(pat["ppm"].max())
+        margin = 0.0
+    if show_skyline and x.size > 1:
+        sky = skyline_spectrum(series, n_points=4096)
+        ax.plot(sky.axes[0].ppm, np.asarray(sky.data) + y0, "-", color="0.4", lw=0.8, zorder=1)
+    ax.axhline(y0, color="0.6", lw=0.6, zorder=0)
+    return lo_x, hi_x, margin
+
+
+def _axis_labels(ax, series: dict, ylabel: str | None = None):
+    nucleus = series.get("nucleus")
+    ax.set_xlabel(_italic_label(f"{series.get('channel', 'O2')} offset"
+                  + (f", {_pretty(nucleus)} shift" if nucleus else "") + " (ppm)"))
+    ax.set_ylabel(_italic_label(ylabel or series.get("unit", "integral")))
+
+
 def plot_offset_series(series: dict, style: str = "bars", ax=None, colour=None,
                        width: float | None = None, show_skyline: bool = False,
                        markersize: float = 7.0, linewidth: float = 1.2, text_size="small",
@@ -512,47 +555,154 @@ def plot_offset_series(series: dict, style: str = "bars", ax=None, colour=None,
     ``show_components`` adds each peak, dashed. ``width`` is the bars'
     width (ppm). The x axis runs high to low ppm, as a spectrum of that
     nucleus does. ``show_skyline`` draws the bars' outline. Returns
-    ``(fig, ax)``."""
+    ``(fig, ax)``. For several regions on one plot see
+    :func:`plot_offset_series_regions`."""
     import matplotlib.pyplot as plt
     if style not in STYLES:
         raise ValueError(_style_error(style))
     x = np.asarray(series["offset_ppm"], float)
-    y = np.asarray(series["y"], float)
     if ax is None:
         fig, ax = plt.subplots(figsize=(4.0, 3.0))
     else:
         fig = ax.figure
     colour = colour or "black"
-    spacing = _spacing(np.sort(x)) if x.size else 1.0
-    if width is None:
-        width = 0.8 * spacing
-    lo_x, hi_x = (float(x.min()), float(x.max())) if x.size else (0.0, 1.0)
-    margin = 0.05 * (float(np.ptp(x)) or 1.0) + width
-    if style == "bars":
-        ax.bar(x, y, width=width, color=colour, edgecolor=colour, linewidth=0.5, zorder=2)
-    elif style == "stems":
-        ax.vlines(x, 0.0, y, color=colour, lw=linewidth, zorder=2)
-        ax.plot(x, y, "o", color=colour, ms=0.7 * markersize, ls="none", zorder=3)
-    else:
-        pat = sideband_pattern(series, lineshape=lineshape, fwhm=fwhm, width_unit=width_unit,
-                               eta=eta, components=show_components)
-        if show_components:
-            for comp in pat["components"]:
-                ax.plot(pat["ppm"], comp, "--", color=colour, lw=0.6 * linewidth, alpha=0.6,
-                        zorder=1)
-        ax.plot(pat["ppm"], pat["y"], "-", color=colour, lw=linewidth, zorder=2)
-        lo_x, hi_x = float(pat["ppm"].min()), float(pat["ppm"].max())
-        margin = 0.0
-    if show_skyline and x.size > 1:
-        sky = skyline_spectrum(series, n_points=4096)
-        ax.plot(sky.axes[0].ppm, sky.data, "-", color="0.4", lw=0.8, zorder=1)
-    ax.axhline(0.0, color="0.6", lw=0.6, zorder=0)
-    nucleus = series.get("nucleus")
-    ax.set_xlabel(_italic_label(f"{series.get('channel', 'O2')} offset"
-                  + (f", {_pretty(nucleus)} shift" if nucleus else "") + " (ppm)"))
-    ax.set_ylabel(_italic_label(series.get("unit", "integral")))
+    lo_x, hi_x, margin = _draw_series(
+        ax, series, style, colour, 0.0, width=width, markersize=markersize, linewidth=linewidth,
+        lineshape=lineshape, fwhm=fwhm, width_unit=width_unit, eta=eta,
+        show_components=show_components, show_skyline=show_skyline)
+    _axis_labels(ax, series)
     if x.size:
         ax.set_xlim(hi_x + margin, lo_x - margin)
+    fig.tight_layout()
+    return fig, ax
+
+
+#: How several regions share one plot.
+ARRANGEMENTS = ("stacked", "superimposed")
+
+
+def region_name(series: dict) -> str:
+    """'5 to -5 ppm' for a series' region (its own ``name`` if it has one)."""
+    if series.get("name"):
+        return str(series["name"])
+    lo, hi = series["region"]
+    return f"{hi:g} to {lo:g} ppm"
+
+
+def offset_series_regions(spectra, regions, names=None, **kwargs) -> list[dict]:
+    """:func:`offset_series` for each of several ``regions`` (a list of
+    ``(lo, hi)`` ppm pairs) of the same spectra, so the integrals of
+    every region are against the same offsets. ``names``: one per region
+    (default '<hi> to <lo> ppm'). ``kwargs`` are :func:`offset_series`'s
+    (channel, offsets_ppm, labels, baseline, divide_rg, ppm_shift,
+    normalise). Returns one series per region, each with a ``name``."""
+    spectra = list(spectra)
+    regions = [tuple(float(v) for v in r) for r in regions]
+    if not regions:
+        raise ValueError("No regions given.")
+    if names is not None and len(names) != len(regions):
+        raise ValueError(f"{len(regions)} regions but {len(names)} names.")
+    out = []
+    for i, region in enumerate(regions):
+        series = offset_series(spectra, region, **kwargs)
+        series["name"] = str(names[i]) if names is not None else region_name(series)
+        out.append(series)
+    return out
+
+
+def plot_offset_series_regions(series_list, style: str = "bars", arrangement: str = "stacked",
+                               ax=None, colours=None, scale_each: bool = False,
+                               gap: float = 0.15, show_legend: bool = True,
+                               width: float | None = None, show_skyline: bool = False,
+                               markersize: float = 7.0, linewidth: float = 1.2,
+                               lineshape: str = "gaussian", fwhm: float | None = None,
+                               width_unit: str = "ppm", eta: float = 0.5,
+                               show_components: bool = False):
+    """The integrals of several regions against the offsets on one plot.
+
+    ``arrangement``: 'superimposed' (all on one baseline, one colour per
+    region, with a legend) or 'stacked' (each region on its own baseline,
+    the first at the top, named at its left; ``gap`` is the free space
+    between neighbours as a fraction of the tallest one; the y axis has
+    no numbers, as the baselines are shifted for clarity).
+
+    ``scale_each`` divides every region by its own largest |integral|, so
+    regions of very different size can be compared in shape (the y axis
+    then reads 'relative to each region's largest'); without it all share
+    one scale. ``colours``: one per region (default a colour-blind-friendly
+    palette). ``style`` and the lineshape arguments are
+    :func:`plot_offset_series`'s. Returns ``(fig, ax)``."""
+    import matplotlib.pyplot as plt
+    if style not in STYLES:
+        raise ValueError(_style_error(style))
+    if arrangement not in ARRANGEMENTS:
+        raise ValueError(f"arrangement must be one of {ARRANGEMENTS}, got {arrangement!r}")
+    series_list = list(series_list)
+    if not series_list:
+        raise ValueError("No series to plot.")
+    n = len(series_list)
+    if colours is None:
+        # The palette Compare shades the regions in, so a region has the
+        # same colour on both views.
+        from opennmr.plotting.accessibility import ordered_qualitative_colours
+        palette = ordered_qualitative_colours("okabe_ito")
+        colours = [palette[i % len(palette)] for i in range(n)]
+    if len(colours) < n:
+        raise ValueError(f"{n} regions but {len(colours)} colours.")
+    drawn = []
+    for series in series_list:
+        y = np.asarray(series["y"], float)
+        if scale_each and y.size and np.max(np.abs(y)) > 0:
+            m = float(np.max(np.abs(y)))
+            series = dict(series, y=y / m, y_err=np.asarray(series["y_err"], float) / m)
+        drawn.append(series)
+    kw = dict(width=width, markersize=markersize, linewidth=linewidth, lineshape=lineshape,
+              fwhm=fwhm, width_unit=width_unit, eta=eta, show_components=show_components,
+              show_skyline=show_skyline)
+
+    def extent(series):
+        y = np.asarray(series["y"], float)
+        if style == "lineshape":
+            pat = sideband_pattern(series, lineshape=lineshape, fwhm=fwhm, width_unit=width_unit,
+                                   eta=eta)
+            y = np.concatenate([y, np.asarray(pat["y"], float)])
+        return float(min(y.min(), 0.0)), float(max(y.max(), 0.0))
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(4.0, 3.0 if arrangement == "superimposed"
+                                        else 1.2 + 0.9 * n))
+    else:
+        fig = ax.figure
+    bases = [0.0] * n
+    if arrangement == "stacked" and n > 1:
+        ext = [extent(s) for s in drawn]
+        step = (max(e[1] for e in ext) - min(e[0] for e in ext)) * (1.0 + float(gap))
+        if step <= 0:
+            step = 1.0
+        bases = [(n - 1 - i) * step for i in range(n)]
+    lo_x, hi_x, margin = np.inf, -np.inf, 0.0
+    for i, series in enumerate(drawn):
+        a, b, m = _draw_series(ax, series, style, colours[i], bases[i], **kw)
+        lo_x, hi_x, margin = min(lo_x, a), max(hi_x, b), max(margin, m)
+        if arrangement == "stacked":
+            ax.annotate(region_name(series_list[i]), xy=(0.01, bases[i]),
+                        xycoords=ax.get_yaxis_transform(), xytext=(0, 3),
+                        textcoords="offset points", ha="left", va="bottom",
+                        color=colours[i], fontsize="small")
+        else:
+            ax.plot([], [], "-", color=colours[i], lw=max(linewidth, 2.0),
+                    label=region_name(series_list[i]))
+    ref = series_list[0]
+    ylabel = ("relative to each region's largest" if scale_each
+              else ref.get("unit", "integral"))
+    if arrangement == "stacked" and n > 1:
+        ylabel += " (regions shifted)"
+        ax.set_yticks([])
+    _axis_labels(ax, ref, ylabel)
+    if lo_x <= hi_x:
+        ax.set_xlim(hi_x + margin, lo_x - margin)
+    if arrangement == "superimposed" and show_legend and n > 1:
+        ax.legend(frameon=False, fontsize="small")
     fig.tight_layout()
     return fig, ax
 

@@ -19,7 +19,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTableWidget,
+    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -55,7 +55,10 @@ class OffsetTrackerPanel(QWidget):
         self._checked: set[int] = set()
         self._offsets: dict[int, str] = {}
         self.armed = False
-        self.series: dict | None = None
+        self.series: dict | None = None        # the (first) region plotted
+        self._regions: list[tuple[float, float]] = []   # every region, in the order added
+        self._results: dict[tuple[float, float], dict] = {}    # region -> its series
+        self._plotted: list[tuple[float, float]] = []   # the regions on the plot now
         self.pattern: dict | None = None       # the last lineshape pattern drawn
         self._fwhm_user_set = False            # the width was chosen, not defaulted
 
@@ -150,20 +153,45 @@ class OffsetTrackerPanel(QWidget):
         region.addWidget(self.to_edit)
         region.addWidget(QLabel("ppm"))
         region.addStretch(1)
-        form.addRow("Integrate:", region)
+        form.addRow("Region:", region)
         self.drag_on_combo = QComboBox()
         self.drag_on_combo.setToolTip("The spectrum shown to drag the region on -- any of them.")
         form.addRow("Drag on:", self.drag_on_combo)
         v.addLayout(form)
         buttons = QHBoxLayout()
+        self.add_region_button = QPushButton("Add Region")
+        self.add_region_button.setToolTip(
+            "Add the region typed above to the list. Every region in the list is integrated "
+            "over all the ticked spectra.")
+        self.add_region_button.clicked.connect(lambda _c=False: self.add_typed_region())
+        buttons.addWidget(self.add_region_button)
         self.drag_button = QPushButton("Drag on Plot")
         self.drag_button.setCheckable(True)
-        self.drag_button.setToolTip("Shows the spectrum chosen in Drag on; drag across it to "
-                                    "set the region.")
+        self.drag_button.setToolTip("Shows the spectrum chosen in Drag on; every drag across it "
+                                    "adds a region to the list (switch off to stop).")
         self.drag_button.toggled.connect(self._on_drag_toggled)
         buttons.addWidget(self.drag_button)
         buttons.addStretch(1)
         v.addLayout(buttons)
+        v.addWidget(QLabel("Regions (select to plot):"))
+        self.regions_list = QListWidget()
+        self.regions_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.regions_list.setMinimumHeight(80)
+        self.regions_list.setToolTip(
+            "Every region is integrated automatically (once two spectra are ticked). Select "
+            "one to plot its integral against the offset; select several (Ctrl/Shift-click) "
+            "to plot them together.")
+        self.regions_list.itemSelectionChanged.connect(self._show_region)
+        v.addWidget(self.regions_list)
+        list_buttons = QHBoxLayout()
+        self.remove_region_button = QPushButton("Remove Selected")
+        self.remove_region_button.clicked.connect(lambda _c=False: self.remove_selected_regions())
+        self.clear_regions_button = QPushButton("Clear Regions")
+        self.clear_regions_button.clicked.connect(lambda _c=False: self.clear_regions())
+        list_buttons.addWidget(self.remove_region_button)
+        list_buttons.addWidget(self.clear_regions_button)
+        list_buttons.addStretch(1)
+        v.addLayout(list_buttons)
         opts = QFormLayout()
         self.baseline_combo = QComboBox()
         self.baseline_combo.addItem("Local (fitted just outside the region)", "local")
@@ -256,17 +284,43 @@ class OffsetTrackerPanel(QWidget):
         keep_row.addWidget(self.shape_combo)
         keep_row.addWidget(self.points_spin)
         form.addRow("Kept spectrum:", keep_row)
+        self.arrangement_combo = QComboBox()
+        self.arrangement_combo.addItem("Stacked (one baseline each)", "stacked")
+        self.arrangement_combo.addItem("Superimposed (one baseline)", "superimposed")
+        self.arrangement_combo.setToolTip(
+            "How several regions share one plot: stacked, each on its own baseline with its "
+            "name beside it, or superimposed in different colours with a legend.")
+        self.arrangement_combo.currentIndexChanged.connect(lambda _i: self.redraw())
+        form.addRow("Several regions:", self.arrangement_combo)
+        self.scale_each_check = QCheckBox("Scale each region to its own largest")
+        self.scale_each_check.setToolTip(
+            "Divide each region by its largest integral, to compare shapes when the regions "
+            "differ greatly in size. Off: all share one scale.")
+        self.scale_each_check.toggled.connect(lambda _c: self.redraw())
+        form.addRow("", self.scale_each_check)
         v.addLayout(form)
         buttons = QHBoxLayout()
         self.integrate_button = QPushButton("Integrate and Plot")
+        self.integrate_button.setToolTip(
+            "Integrate every region, then plot the selected one(s) (the first if none is "
+            "selected).")
         self.integrate_button.clicked.connect(lambda _c=False: self.integrate())
+        self.plot_selected_button = QPushButton("Plot Selected")
+        self.plot_selected_button.setToolTip("Plot the region(s) selected in the list.")
+        self.plot_selected_button.clicked.connect(lambda _c=False: self.plot_regions())
+        self.plot_all_button = QPushButton("Plot All Regions")
+        self.plot_all_button.setToolTip("Plot every region together, stacked or superimposed "
+                                        "as chosen above.")
+        self.plot_all_button.clicked.connect(lambda _c=False: self.plot_regions(all_regions=True))
         self.keep_button = QPushButton("Keep in Open Experiments")
         self.keep_button.setToolTip(
             "Add what is drawn (bars, vertical lines or peaks) as a 1D spectrum of the pulsed "
             "nucleus to Open experiments, to fit in Fit (CSA, quadrupolar, ...) like any other "
-            "spectrum.")
+            "spectrum. With several regions plotted, one spectrum is kept for each.")
         self.keep_button.clicked.connect(lambda _c=False: self.keep_pattern())
         buttons.addWidget(self.integrate_button)
+        buttons.addWidget(self.plot_selected_button)
+        buttons.addWidget(self.plot_all_button)
         buttons.addWidget(self.keep_button)
         buttons.addStretch(1)
         v.addLayout(buttons)
@@ -460,10 +514,100 @@ class OffsetTrackerPanel(QWidget):
         key = self.drag_on_combo.currentData()
         return next((e for e in self._entries if id(e["spectrum"]) == key), None)
 
+    @staticmethod
+    def _key(lo: float, hi: float) -> tuple[float, float]:
+        return (min(float(lo), float(hi)), max(float(lo), float(hi)))
+
+    @staticmethod
+    def _region_text(key) -> str:
+        return f"{key[1]:g} to {key[0]:g} ppm"
+
+    def regions(self) -> list[tuple[float, float]]:
+        """Every region in the list, as ``(lo, hi)`` ppm, in the order added."""
+        return list(self._regions)
+
+    def selected_regions(self) -> list[tuple[float, float]]:
+        rows = sorted(self.regions_list.row(i) for i in self.regions_list.selectedItems())
+        return [self._regions[r] for r in rows if 0 <= r < len(self._regions)]
+
     def _show_region(self) -> None:
-        if self._highlight is not None:
-            region = self.region()
-            self._highlight([("region", region[0], region[1])] if region else [])
+        """Shade every region on Compare (the selected ones named, so they
+        can be told apart from the rest) and the typed one."""
+        if self._highlight is None:
+            return
+        chosen = set(self.selected_regions())
+        shaded = [(f"R{i + 1}" + (" (selected)" if key in chosen else ""), key[0], key[1])
+                  for i, key in enumerate(self._regions)]
+        typed = self.region()
+        if typed and typed not in self._regions:
+            shaded.append(("typed region", typed[0], typed[1]))
+        self._highlight(shaded)
+
+    def _refresh_regions_list(self, select=()) -> None:
+        select = set(select)
+        self.regions_list.blockSignals(True)
+        try:
+            self.regions_list.clear()
+            for key in self._regions:
+                series = self._results.get(key)
+                text = self._region_text(key)
+                if series is not None:
+                    text += f"   ({len(series['y'])} spectra integrated)"
+                item = QListWidgetItem(text)
+                self.regions_list.addItem(item)
+                if key in select:
+                    item.setSelected(True)
+        finally:
+            self.regions_list.blockSignals(False)
+        self._show_region()
+
+    def add_region(self, lo: float, hi: float, select: bool = True) -> bool:
+        """Add a region (ppm of the observed nucleus) to the list and
+        integrate it with the others. False if it is empty or already there."""
+        if float(lo) == float(hi):
+            return False
+        key = self._key(lo, hi)
+        if key in self._regions:
+            return False
+        self._regions.append(key)
+        self._compute(quiet=True)
+        self._refresh_regions_list(select=[key] if select else self.selected_regions())
+        return True
+
+    def add_typed_region(self) -> bool:
+        """Add the region typed in the two boxes."""
+        typed = self.region()
+        if typed is None:
+            QMessageBox.warning(self, "Offset Tracker", "Give the region to integrate (two "
+                                "different ppm values), or drag it on the plot.")
+            return False
+        return self.add_region(*typed)
+
+    def remove_selected_regions(self) -> None:
+        gone = set(self.selected_regions())
+        self._regions = [k for k in self._regions if k not in gone]
+        for k in gone:
+            self._results.pop(k, None)
+        self._plotted = [k for k in self._plotted if k not in gone]
+        if not self._plotted:
+            self.series = None
+        self._refresh_regions_list()
+
+    def clear_regions(self) -> None:
+        self._regions, self._results, self._plotted = [], {}, []
+        self.series = None
+        self._refresh_regions_list()
+
+    def on_canvas_region(self, lo: float, hi: float) -> None:
+        """A drag on Compare: another region (the typed boxes follow it)."""
+        if lo == hi:
+            return
+        self.from_edit.setText(f"{max(lo, hi):.6g}")
+        self.to_edit.setText(f"{min(lo, hi):.6g}")
+        if not self.add_region(float(lo), float(hi)):
+            self._show_region()
+        if self.armed:
+            self._arm("region")
 
     def _on_drag_toggled(self, on: bool) -> None:
         if on:
@@ -480,13 +624,6 @@ class OffsetTrackerPanel(QWidget):
         self.armed = bool(on)
         self._arm("region" if on else None)
 
-    def on_canvas_region(self, lo: float, hi: float) -> None:
-        if lo == hi:
-            return
-        self.set_region(float(lo), float(hi))
-        if self.armed:
-            self._arm("region")
-
     def canvas_mode_released(self) -> None:
         if self.drag_button.isChecked():
             self.drag_button.blockSignals(True)
@@ -495,41 +632,103 @@ class OffsetTrackerPanel(QWidget):
         self.armed = False
 
     # ------------------------------------------------------------------
-    def integrate(self) -> dict | None:
+    def _gather(self, quiet: bool):
+        """The ticked spectra, their offsets and the integration options, or
+        None (with the reason shown, unless ``quiet``)."""
         rows = self.checked_rows()
         if len(rows) < 2:
-            QMessageBox.warning(self, "Offset Tracker", "Tick at least two spectra.")
-            return None
-        region = self.region()
-        if region is None:
-            QMessageBox.warning(self, "Offset Tracker", "Give the region to integrate (two "
-                                "different ppm values), or drag it on the plot.")
+            if not quiet:
+                QMessageBox.warning(self, "Offset Tracker", "Tick at least two spectra.")
+            else:
+                self.spectra_status.setText("Tick at least two spectra to integrate the regions.")
             return None
         offsets = []
         for r in rows:
             item = self.spectra_table.item(r, _C_OFFSET)
             offsets.append(_number(item.text()) if item and item.text().strip() else None)
+        return rows, offsets
+
+    def _compute(self, quiet: bool = False) -> bool:
+        """Integrate every region over the ticked spectra into ``_results``."""
+        gathered = self._gather(quiet)
+        if gathered is None or not self._regions:
+            self._results = {}
+            return False
+        rows, offsets = gathered
         shift = _number(self.shift_edit.text()) or 0.0
         try:
-            series = ot.offset_series(
-                [self._entries[r]["spectrum"] for r in rows], region,
+            series_list = ot.offset_series_regions(
+                [self._entries[r]["spectrum"] for r in rows], self._regions,
                 channel=self.channel_combo.currentData(), offsets_ppm=offsets,
                 labels=[self._entries[r]["label"] for r in rows],
                 baseline=self.baseline_combo.currentData(), divide_rg=self.rg_check.isChecked(),
                 ppm_shift=shift, normalise=self.normalise_check.isChecked())
         except ValueError as exc:
-            QMessageBox.warning(self, "Offset Tracker", str(exc))
+            self._results = {}
+            if quiet:
+                self.spectra_status.setText(str(exc))
+            else:
+                QMessageBox.warning(self, "Offset Tracker", str(exc))
+            return False
+        self._results = dict(zip(self._regions, series_list))
+        return True
+
+    def integrate(self) -> dict | None:
+        """Integrate every region (the typed one too, if it is not yet in
+        the list) and plot the selected one(s) -- the first if none is
+        selected. Returns the first plotted region's series."""
+        typed = self.region()
+        if typed is not None and typed not in self._regions:
+            self._regions.append(typed)
+        if not self._regions:
+            QMessageBox.warning(self, "Offset Tracker", "Give the region to integrate (two "
+                                "different ppm values), or drag it on the plot.")
             return None
-        self.series = series
+        if not self._compute(quiet=False):
+            self._refresh_regions_list(select=self.selected_regions())
+            return None
+        wanted = self.selected_regions() or [self._regions[0]]
+        self._refresh_regions_list(select=wanted)
+        return self._plot(wanted)
+
+    def plot_regions(self, all_regions: bool = False) -> dict | None:
+        """Plot the selected regions, or every region, from a fresh integration."""
+        if not self._regions:
+            typed = self.region()
+            if typed is None:
+                QMessageBox.warning(self, "Offset Tracker", "Add a region first.")
+                return None
+            self._regions.append(typed)
+        if not self._compute(quiet=False):
+            return None
+        chosen = list(self._regions) if all_regions else (self.selected_regions()
+                                                          or [self._regions[0]])
+        self._refresh_regions_list(select=chosen)
+        return self._plot(chosen)
+
+    def _plot(self, keys) -> dict | None:
+        keys = [k for k in keys if k in self._results]
+        if not keys:
+            return None
+        self._plotted = keys
+        self.series = self._results[keys[0]]
         self._default_width()
-        self.result_label.setText(ot.offset_report(series))
+        self.result_label.setText("\n\n".join(
+            (f"[{self._region_text(k)}]\n" if len(keys) > 1 else "") + ot.offset_report(self._results[k])
+            for k in keys))
         self.redraw()
-        return series
+        return self.series
 
     def redraw(self) -> None:
-        series = self.series
-        if series is None:
+        keys = [k for k in self._plotted if k in self._results]
+        if keys:
+            series_list = [self._results[k] for k in keys]
+            self.series = series_list[0]
+        elif self.series is not None:         # a series set directly (a notebook-style use)
+            series_list = [self.series]
+        else:
             return
+        series = self.series
         style = self.style()
         sky = self.skyline_check.isChecked()
         kwargs = {}
@@ -546,10 +745,17 @@ class OffsetTrackerPanel(QWidget):
                     + (f" ({p['fwhm_hz']:.4g} Hz)" if p["fwhm_hz"] else "")
                     + (f", η {p['eta']:.3g}" if p["eta"] is not None else "") + ".")
             self.pattern_label.setText(" ".join([text] + list(p["notes"])))
+        arrangement = self.arrangement_combo.currentData()
+        scale_each = self.scale_each_check.isChecked()
 
         def draw(figure):
             ax = figure.add_subplot(111)
-            ot.plot_offset_series(series, style=style, ax=ax, show_skyline=sky, **kwargs)
+            if len(series_list) == 1:
+                ot.plot_offset_series(series, style=style, ax=ax, show_skyline=sky, **kwargs)
+            else:
+                ot.plot_offset_series_regions(series_list, style=style, arrangement=arrangement,
+                                              scale_each=scale_each, ax=ax, show_skyline=sky,
+                                              **kwargs)
         self._draw(draw, "profile")
 
     def skyline(self):
@@ -559,19 +765,22 @@ class OffsetTrackerPanel(QWidget):
         return ot.skyline_spectrum(self.series, n_points=self.points_spin.value(),
                                    shape=self.shape_combo.currentData())
 
-    def pattern_spectrum(self):
-        """What is drawn, as a spectrum of the pulsed nucleus."""
-        if self.series is None:
+    def pattern_spectrum(self, series: dict | None = None):
+        """What is drawn, as a spectrum of the pulsed nucleus (for ``series``,
+        default the first region plotted)."""
+        series = series or self.series
+        if series is None:
             return None
         style = self.style()
         kwargs = self._lineshape_kwargs() if style == "lineshape" else {}
-        return ot.pattern_spectrum(self.series, style=style, n_points=self.points_spin.value(),
+        return ot.pattern_spectrum(series, style=style, n_points=self.points_spin.value(),
                                    shape=self.shape_combo.currentData(), **kwargs)
 
-    def _kept_description(self, spectrum) -> tuple[str, str]:
-        lo, hi = self.series["region"]
-        who = self.series.get("nucleus") or self.series["channel"]
-        n = len(self.series["y"])
+    def _kept_description(self, spectrum, series: dict | None = None) -> tuple[str, str]:
+        series = series or self.series
+        lo, hi = series["region"]
+        who = series.get("nucleus") or series["channel"]
+        n = len(series["y"])
         style = self.style()
         rec = spectrum.metadata.raw.get("offset_pattern", {})
         if style == "lineshape":
@@ -589,7 +798,7 @@ class OffsetTrackerPanel(QWidget):
             label = f"Skyline: {who} offsets, {hi:g} to {lo:g} ppm"
             how = f"the bars' skyline ({self.shape_combo.currentText().lower()})"
         description = (f"Offset Tracker: integrals of {lo:g} to {hi:g} ppm in {n} spectra "
-                       f"against the {self.series['channel']} offset, kept as {how}; "
+                       f"against the {series['channel']} offset, kept as {how}; "
                        f"{spectrum.data.size} points.")
         return label, description
 
@@ -599,25 +808,34 @@ class OffsetTrackerPanel(QWidget):
 
     def keep_pattern(self):
         """Keep what is drawn (bars, vertical lines or peaks) in Open
-        experiments as a 1D spectrum of the pulsed nucleus."""
+        experiments as a 1D spectrum of the pulsed nucleus -- one per
+        region when several are plotted. Returns the first one kept."""
         if self.series is None and self.integrate() is None:
             return None
-        try:
-            spectrum = self.pattern_spectrum()
-        except ValueError as exc:
-            QMessageBox.warning(self, "Offset Tracker", str(exc))
-            return None
-        if not spectrum.metadata.nucleus:
-            # Offsets typed for data that do not record the channel: ask.
-            from PySide6.QtWidgets import QInputDialog
-            nucleus, ok = QInputDialog.getText(
-                self, "Offset Tracker", "Nucleus of the pulsed channel (e.g. 1H, 27Al):")
-            if not ok or not nucleus.strip():
-                return None
-            spectrum.metadata.nucleus = nucleus.strip()
-        label, description = self._kept_description(spectrum)
-        if self._keep is not None:
-            self._keep(spectrum, label, description)
-        self.result_label.setText(self.result_label.text()
-                                  + f"\nKept as “{label}” in Open experiments.")
-        return spectrum
+        keys = [k for k in self._plotted if k in self._results] or [self._key(*self.series["region"])]
+        first, nucleus_answer = None, None
+        for key in keys:
+            series = self._results.get(key, self.series)
+            try:
+                spectrum = self.pattern_spectrum(series)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Offset Tracker", str(exc))
+                return first
+            if not spectrum.metadata.nucleus:
+                # Offsets typed for data that do not record the channel: ask (once).
+                if nucleus_answer is None:
+                    from PySide6.QtWidgets import QInputDialog
+                    nucleus, ok = QInputDialog.getText(
+                        self, "Offset Tracker",
+                        "Nucleus of the pulsed channel (e.g. 1H, 27Al):")
+                    if not ok or not nucleus.strip():
+                        return first
+                    nucleus_answer = nucleus.strip()
+                spectrum.metadata.nucleus = nucleus_answer
+            label, description = self._kept_description(spectrum, series)
+            if self._keep is not None:
+                self._keep(spectrum, label, description)
+            self.result_label.setText(self.result_label.text()
+                                      + f"\nKept as “{label}” in Open experiments.")
+            first = first or spectrum
+        return first

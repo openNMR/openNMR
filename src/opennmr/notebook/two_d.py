@@ -48,6 +48,7 @@ from .plotting import (
     apply_tick_style, apply_spine_style, save_figure,
 )
 from .one_d import NMR1dimport
+from ..plotting.style import draw_positive_contours
 
 
 # ============================================================
@@ -1057,14 +1058,8 @@ def NMR2Dplotter(dataset, procno=1, f1l=0.0, f1r=0.0, f2l=0.0, f2r=0.0, homonucl
 
     # ----- contour -----
 
-    if colour_spectra:
-        masked_spectrum = np.ma.masked_where(contour_spectrum <= 0, contour_spectrum)
-        ax.contour(
-            contour_x, contour_y, masked_spectrum,
-            levels=thresvec, cmap=get_contour_cmap(colour_spectra), norm=LogNorm(),
-        )
-    else:
-        ax.contour(contour_x, contour_y, contour_spectrum, colors='black', levels=thresvec)
+    draw_positive_contours(ax, contour_x, contour_y, contour_spectrum, thresvec, colour_spectra,
+                           default_colour='black')
 
     divider = make_axes_locatable(ax)
 

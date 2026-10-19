@@ -1270,6 +1270,11 @@ class MplCanvas(QWidget):
         #: forwarded. Explicit user request: "DOSY (all 2D?) line width
         #: should be editable on contour".
         self._contour_linewidth = self._CONTOUR_LINEWIDTH_DEFAULT
+        #: Colour of the positive 2D contours: ``None`` (black), a colour
+        #: map name (the colour follows the contour's height), a single
+        #: colour, or a list of colours. See
+        #: :func:`opennmr.plotting.style.resolve_contour_colouring`.
+        self._contour_colour = None
         # Export-only DPI/figure-size -- see set_export_settings's own
         # docstring for why these never touch the live figure directly.
         self._export_dpi: float | None = None
@@ -3283,6 +3288,7 @@ class MplCanvas(QWidget):
             xlims=xlims, ylims=ylims,
             **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
             **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
+            colour_spectra=self._contour_colour,
             **self._external_projection_kwargs(), **self._projection_style_kwargs(),
         )
         self._apply_current_axis_style()
@@ -3732,6 +3738,10 @@ class MplCanvas(QWidget):
         self.canvas.draw_idle()
         if self._selected_compare_index is None:
             self.compareSelectionCleared.emit()     # the Compare list lets go too
+        else:
+            # The Compare list takes the same row as its current one, so
+            # Move Up/Down (and the arrow keys) act on what was clicked.
+            self.compareRowSelected.emit(int(self._selected_compare_index))
 
     def _apply_compare_selection_highlight(self) -> None:
         """Tint whichever row is selected (if any) so it's obvious at
@@ -3769,6 +3779,9 @@ class MplCanvas(QWidget):
     #: A double-click cleared a stacked Compare row's selection, so the
     #: Compare list can drop its current row too.
     compareSelectionCleared = Signal()
+    #: Emitted with the plotted-row position when a click on the stacked
+    #: Compare plot selects a row (the list follows; see MainWindow).
+    compareRowSelected = Signal(int)
 
     #: Emitted with the component labels after a fit view is drawn
     #: (:meth:`show_slice_fit`), so the component-display controls can
@@ -5001,6 +5014,7 @@ class MplCanvas(QWidget):
             "compare_colormap": self._compare_colormap,
             "trace_color": self._trace_color,
             "contour_linewidth": self._contour_linewidth,
+            "contour_colour": self._contour_colour or "",
             "contour_clevels": self._contour_clevels,
             "contour_level_mode": self._contour_level_mode,
             "contour_power": self._contour_power,
@@ -5022,7 +5036,7 @@ class MplCanvas(QWidget):
 
     def set_style(self, *, linewidth=None, labelsize=None, tick_length=None, tick_width=None,
                   tick_direction=None, map_colormap=None, tensor_style=None, colorbar_gap=None, minor_ticks=None, grid=None, legend_loc=None, compare_colormap=None,
-                  trace_color=None, contour_linewidth=None, contour_clevels=None,
+                  trace_color=None, contour_linewidth=None, contour_colour=None, contour_clevels=None,
                   contour_level_mode=None, contour_power=None,
                   title_visible=None, font_family=None, axis_label_style=None,
                   axis_label_template=None, legend_frameon=None,
@@ -5167,7 +5181,18 @@ class MplCanvas(QWidget):
             self._contour_power = float(contour_power)
         if contour_linewidth is not None:
             self._contour_linewidth = contour_linewidth
-        if (contour_linewidth is not None or contour_clevels is not None
+        colour_changed = False
+        if contour_colour is not None:
+            # "" = back to black (None = leave as it is). Validated here so a typo is an
+            # error at the call, not a blank plot.
+            from ...plotting.style import resolve_contour_colouring
+            resolve_contour_colouring(contour_colour)
+            if isinstance(contour_colour, list):
+                contour_colour = list(contour_colour)
+            new_colour = None if (isinstance(contour_colour, str) and contour_colour in ("", "default")) else contour_colour
+            colour_changed = new_colour != self._contour_colour
+            self._contour_colour = new_colour
+        if (contour_linewidth is not None or colour_changed or contour_clevels is not None
                 or contour_level_mode is not None or contour_power is not None):
             # Rebuild: a contour's line width and its levels both live
             # on the QuadContourSet matplotlib builds, so neither can
@@ -5253,7 +5278,7 @@ class MplCanvas(QWidget):
     _STYLE_KEYS = (
         "linewidth", "labelsize", "tick_length", "tick_width", "tick_direction", "map_colormap",
         "tensor_style", "colorbar_gap", "minor_ticks", "grid",
-        "legend_loc", "compare_colormap", "trace_color", "contour_linewidth",
+        "legend_loc", "compare_colormap", "trace_color", "contour_linewidth", "contour_colour",
         "contour_clevels", "contour_level_mode", "contour_power", "title_visible",
         "font_family", "axis_label_style", "axis_label_template", "legend_frameon",
         "legend_fontsize", "legend_framealpha", "legend_facecolor",
@@ -5288,7 +5313,11 @@ class MplCanvas(QWidget):
             self._contour_power = self._CONTOUR_POWER_DEFAULT = float(values["contour_power"])
         if "contour_linewidth" in values:
             self._contour_linewidth = float(values["contour_linewidth"])
-        for key in ("contour_clevels", "contour_level_mode", "contour_power", "contour_linewidth"):
+        if "contour_colour" in values:
+            colour = values["contour_colour"]
+            self._contour_colour = None if colour in ("", "default") else colour
+        for key in ("contour_clevels", "contour_level_mode", "contour_power", "contour_linewidth",
+                    "contour_colour"):
             values.pop(key, None)
         if values.get("axis_label_style") not in (None, "brackets", "slash"):
             values.pop("axis_label_style")
@@ -6137,6 +6166,7 @@ class MplCanvas(QWidget):
                 xlims=xlims, ylims=ylims,
                 **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
                 **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
+                colour_spectra=self._contour_colour,
                 **self._external_projection_kwargs(), **self._projection_style_kwargs(),
             )
             self._apply_current_axis_style()
@@ -6857,6 +6887,7 @@ class MplCanvas(QWidget):
             show_projections=projections, square_aspect=True,
             fontsize=self._AXIS_LABELSIZE, tick_length=self._TICK_LENGTH,
             tick_width=self._TICK_WIDTH, contour_linewidth=self._contour_linewidth,
+            colour_spectra=self._contour_colour,
             **levels, **self._contour_fraction_kwargs(), **self._nq_line_kwargs())
         self.ax = axes[0]
         if link_axes and n > 1:

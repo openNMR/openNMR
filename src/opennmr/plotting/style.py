@@ -712,6 +712,62 @@ def get_contour_cmap(name, max_luminance: float = None):
     return readable_cmap(base, max_luminance)
 
 
+def resolve_contour_colouring(spec):
+    """Turn a user's contour-colour choice into what to draw with.
+
+    ``spec`` is one of
+
+    * ``None`` / ``""`` / ``"default"`` -- no choice made: ``("default", None)``,
+      and the caller keeps its own default colour (black, or a
+      per-spectrum colour in an overlay);
+    * a name in :data:`CONTOUR_CMAP_NAMES` -- the contour *height* is
+      coloured by that map: ``("cmap", colormap)``;
+    * one matplotlib colour (``"crimson"``, ``"#1b6ca8"``, an RGB
+      tuple) -- every positive contour in that colour:
+      ``("colors", [colour])``;
+    * a list/tuple of colours -- the lowest level takes the first colour,
+      the next the second and so on, cycling if there are fewer
+      colours than levels: ``("colors", [..])``.
+
+    Anything else raises ``ValueError`` saying what is accepted, rather
+    than silently drawing in black.
+    """
+    if spec is None or (isinstance(spec, str) and spec.strip().lower() in ("", "default")):
+        return "default", None
+    if isinstance(spec, str) and spec in CONTOUR_CMAP_NAMES:
+        return "cmap", get_contour_cmap(spec)
+    if cl.is_color_like(spec):
+        return "colors", [spec]
+    if isinstance(spec, (list, tuple)) and len(spec) > 0 and all(cl.is_color_like(c) for c in spec):
+        return "colors", list(spec)
+    raise ValueError(
+        f"Unknown contour colour {spec!r}. Give a colour (e.g. 'crimson' or '#1b6ca8'), "
+        f"a list of colours, or a colour map for height-coded contours, one of: "
+        f"{sorted(CONTOUR_CMAP_NAMES)}"
+    )
+
+
+def draw_positive_contours(ax, x, y, data, levels, spec=None, *, default_colour="black",
+                           linewidths=None):
+    """Draw the positive-going contours of ``data`` on ``ax`` in the
+    colouring ``spec`` asks for (see :func:`resolve_contour_colouring`).
+
+    The one place this decision is made, so the GUI's contour, the
+    notebook's ``NMR2Dplotter`` and the overlay/inset helpers cannot
+    disagree about it. A colour map needs strictly positive data (it
+    uses a log scale), so non-positive points are masked for it only.
+    """
+    from matplotlib.colors import LogNorm
+
+    kind, value = resolve_contour_colouring(spec)
+    kw = {} if linewidths is None else {"linewidths": linewidths}
+    if kind == "cmap":
+        masked = np.ma.masked_where(data <= 0, data)
+        return ax.contour(x, y, masked, levels=levels, cmap=value, norm=LogNorm(), **kw)
+    colours = value if kind == "colors" else default_colour
+    return ax.contour(x, y, data, levels=levels, colors=colours, **kw)
+
+
 def readable_cmap(cmap, max_luminance: float = None):
     """``cmap`` resampled over only its usable colours -- the reusable
     core of :func:`get_contour_cmap`, for any colormap rather than only

@@ -323,6 +323,7 @@ from . import offset_tracker
 from .offset_tracker import (
     offset_series, offset_report, plot_offset_series, skyline_spectrum, sideband_pattern,
     sideband_spectrum, stick_spectrum, pattern_spectrum,
+    offset_series_regions, plot_offset_series_regions,
 )
 # Typefaces for figures (2026-10-17).
 from . import fonts
@@ -511,6 +512,7 @@ __all__ = [
     # Offset Tracker (HMQC / J-resolved series against O2/O3)
     "offset_tracker", "offset_series", "offset_report", "plot_offset_series", "skyline_spectrum",
     "sideband_pattern", "sideband_spectrum", "stick_spectrum", "pattern_spectrum",
+    "offset_series_regions", "plot_offset_series_regions",
     # typefaces and Illustrator-safe vector saves
     "fonts", "available_fonts", "font_samples", "plot_font_samples", "use_font",
     "save_vector_safe",

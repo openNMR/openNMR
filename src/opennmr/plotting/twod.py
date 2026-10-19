@@ -26,7 +26,8 @@ from mpl_toolkits.axes_grid1.axes_divider import AxesDivider
 from ..core.registry import find_gamma, NUC_label
 from ..core.spectrum import NMRSpectrum
 from ..processing.slicing import get_trace
-from .style import setup_plotting, get_stack_colormap, get_contour_cmap, downsample_2d, save_figure
+from .style import (setup_plotting, get_stack_colormap, get_contour_cmap, downsample_2d, save_figure,
+                    draw_positive_contours)
 
 
 # Absolute ceiling on how many points are handed to matplotlib's
@@ -577,12 +578,9 @@ def draw_insets(parent_ax, spectra, insets, *, colours=None, factor=0.07, clevel
             data = region.data
             if (max_x, max_y) != (len(x), len(y)):
                 data, x, y = downsample_2d(data, x, y, max_points_x=max_x, max_points_y=max_y)
-            if len(spectra) == 1 and colour_spectra:
-                masked = np.ma.masked_where(data <= 0, data)
-                ax.contour(x, y, masked, levels=levels, cmap=get_contour_cmap(colour_spectra),
-                           norm=LogNorm(), linewidths=contour_linewidth)
-            else:
-                ax.contour(x, y, data, levels=levels, colors=[colour], linewidths=contour_linewidth)
+            draw_positive_contours(ax, x, y, data, levels,
+                                   colour_spectra if len(spectra) == 1 else None,
+                                   default_colour=colour, linewidths=contour_linewidth)
             if negative is not None and len(spectra) == 1:
                 ax.contour(x, y, data, levels=sorted(negative), colors=NEGATIVE_CONTOUR_COLOUR,
                            linewidths=contour_linewidth)
@@ -805,14 +803,8 @@ def plot_2d_contour(spectrum: NMRSpectrum, contour_fraction_x=0.25, contour_frac
     elif fig is None:
         fig = ax.figure
 
-    if colour_spectra:
-        masked = np.ma.masked_where(contour_data <= 0, contour_data)
-        ax.contour(contour_x, contour_y, masked, levels=thresvec,
-                   cmap=get_contour_cmap(colour_spectra), norm=LogNorm(),
-                   linewidths=contour_linewidth)
-    else:
-        ax.contour(contour_x, contour_y, contour_data, colors='black', levels=thresvec,
-                   linewidths=contour_linewidth)
+    draw_positive_contours(ax, contour_x, contour_y, contour_data, thresvec, colour_spectra,
+                           default_colour='black', linewidths=contour_linewidth)
 
     if neg_thresvec is not None:
         # Negative-going signal (dispersive phase error, an artifact,

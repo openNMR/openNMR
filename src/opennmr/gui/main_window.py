@@ -203,6 +203,40 @@ class _PhaseFocusWatcher(QObject):
         return False
 
 
+class _CompareArrowKeys(QObject):
+    """Up/Down arrow keys reorder the highlighted Compare spectrum.
+
+    Installed on the Compare list and on the Compare plot. While a
+    spectrum is highlighted (clicked in the plot or selected in the
+    list) a plain Up or Down moves it one place earlier/later in the
+    plot order -- the same as Move Up / Move Down. With nothing
+    highlighted the keys are left alone (so the list still scrolls).
+    Shift/Ctrl/Alt + arrow are never taken, so extended selection and
+    OS shortcuts keep working.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+
+    def eventFilter(self, obj, event):  # noqa: N802 -- Qt override
+        if event.type() != QEvent.Type.KeyPress:
+            return False
+        key = event.key()
+        if key not in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            return False
+        if event.modifiers() & (Qt.KeyboardModifier.ShiftModifier
+                                | Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.AltModifier
+                                | Qt.KeyboardModifier.MetaModifier):
+            return False
+        window = self._window
+        if window.compare_list.currentRow() < 0:
+            return False
+        window._on_move_compare_item(-1 if key == Qt.Key.Key_Up else 1)
+        return True
+
+
 class _ExperimentDropList(QListWidget):
     """The Compare list, accepting experiments dragged in from the Open
     experiments list (explicit user request).
@@ -2385,6 +2419,11 @@ class MainWindow(QMainWindow):
         self.compare_list.itemChanged.connect(lambda _item: self._refresh_compare_view_if_active())
         self.compare_list.currentRowChanged.connect(self._on_compare_list_current_row_changed)
         self.compare_canvas.compareSelectionCleared.connect(self.compare_list.clear_current)
+        self.compare_canvas.compareRowSelected.connect(self._on_compare_plot_row_selected)
+        # Up/Down reorder the highlighted spectrum, from the list or the plot.
+        self._compare_arrow_keys = _CompareArrowKeys(self)
+        self.compare_list.installEventFilter(self._compare_arrow_keys)
+        self.compare_canvas.canvas.installEventFilter(self._compare_arrow_keys)
         self.compare_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.compare_list.customContextMenuRequested.connect(self._on_compare_list_context_menu)
         # A box of about ten rows, not the whole tile's height (user
@@ -4967,6 +5006,32 @@ class MainWindow(QMainWindow):
         self.output_contour_linewidth_spin.valueChanged.connect(self._on_output_style_changed)
         style_form.addRow("Contour line width:", self.output_contour_linewidth_spin)
 
+        # Colour of the 2D contours (explicit user request, 2026-10-19:
+        # the notebook's colour_spectra had no GUI counterpart). Black is
+        # the default; a single colour of the user's choosing; or a colour
+        # map, whose colour follows the height of each contour. No colour
+        # bar: the aim is a coloured contour, not a calibrated scale.
+        self.output_contour_colour_combo = QComboBox()
+        self.output_contour_colour_combo.addItem("Black (default)", "")
+        from ..plotting.style import CONTOUR_CMAP_NAMES
+        for name in CONTOUR_CMAP_NAMES:
+            self.output_contour_colour_combo.addItem(f"{name} (colour by height)", name)
+        self.output_contour_colour_combo.setToolTip(
+            "Colour of the positive contours of a 2D spectrum.\n\n"
+            "Black is the default. Pick \"Custom…\" for one colour of your own, or a "
+            "colour map to colour each contour by its height. Negative contours keep "
+            "their own teal. The same choice is colour_spectra in the notebook.")
+        self.output_contour_colour_button = QPushButton("Custom…")
+        self.output_contour_colour_button.setToolTip("Draw every contour in one colour you choose.")
+        self.output_contour_colour_button.clicked.connect(self._on_pick_custom_contour_colour)
+        contour_colour_row = QWidget()
+        contour_colour_layout = QHBoxLayout(contour_colour_row)
+        contour_colour_layout.setContentsMargins(0, 0, 0, 0)
+        contour_colour_layout.addWidget(self.output_contour_colour_combo, 1)
+        contour_colour_layout.addWidget(self.output_contour_colour_button)
+        self.output_contour_colour_combo.currentIndexChanged.connect(self._on_output_style_changed)
+        style_form.addRow("Contour colour:", contour_colour_row)
+
         # --- Extracted slices, one row each ------------------------
         # Explicit user request: extracted slices beside a 2D "should
         # be able to either take a colour from the standard compare
@@ -5129,6 +5194,7 @@ class MainWindow(QMainWindow):
             "right_spine": self.output_right_spine_checkbox.isChecked(),
             "grid": self.output_grid_checkbox.isChecked(),
             "contour_linewidth": self.output_contour_linewidth_spin.value(),
+            "contour_colour": self.output_contour_colour_combo.currentData() or "",
             "title_visible": self.output_title_checkbox.isChecked(),
             "font_family": self.output_font_family_combo.currentData(),
             "axis_label_style": self.output_axis_label_style_combo.currentData(),
@@ -5464,6 +5530,31 @@ class MainWindow(QMainWindow):
             canvas.set_style(**kwargs)
         self._refresh_style_scope_label()
 
+    def _set_custom_contour_colour(self, colour: str, *, signals: bool = True) -> None:
+        """Make ``colour`` (one matplotlib colour) the 'Custom' entry of
+        the contour-colour combo and select it."""
+        combo = self.output_contour_colour_combo
+        blocked = combo.blockSignals(not signals)
+        try:
+            index = combo.findData(colour)
+            if index < 0:
+                # One custom entry, kept at position 1 and replaced on a new pick.
+                if combo.count() > 1 and combo.itemData(1, Qt.ItemDataRole.ToolTipRole) == "Custom":
+                    combo.removeItem(1)
+                combo.insertItem(1, f"Custom {colour}", colour)
+                combo.setItemData(1, "Custom", Qt.ItemDataRole.ToolTipRole)
+                index = 1
+            combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(blocked)
+
+    def _on_pick_custom_contour_colour(self) -> None:
+        current = self.output_contour_colour_combo.currentData() or ""
+        initial = QColor(current) if current.startswith("#") else QColor("#000000")
+        chosen = QColorDialog.getColor(initial, self, "Contour colour")
+        if chosen.isValid():
+            self._set_custom_contour_colour(chosen.name())
+
     def _on_output_export_settings_changed(self, *_args) -> None:
         kwargs = self._current_output_export_kwargs()
         for canvas in self._style_target_canvases():
@@ -5614,6 +5705,16 @@ class MainWindow(QMainWindow):
             self.output_map_colormap_combo.blockSignals(True)
             self.output_map_colormap_combo.setCurrentIndex(map_index)
             self.output_map_colormap_combo.blockSignals(False)
+        contour_colour = settings.get("contour_colour") or ""
+        if isinstance(contour_colour, str):
+            if self.output_contour_colour_combo.findData(contour_colour) < 0 and contour_colour:
+                self._set_custom_contour_colour(contour_colour, signals=False)
+            else:
+                colour_index = self.output_contour_colour_combo.findData(contour_colour)
+                if colour_index >= 0:
+                    self.output_contour_colour_combo.blockSignals(True)
+                    self.output_contour_colour_combo.setCurrentIndex(colour_index)
+                    self.output_contour_colour_combo.blockSignals(False)
         mode_index = self.output_contour_mode_combo.findData(settings["contour_level_mode"])
         if mode_index >= 0:
             self.output_contour_mode_combo.blockSignals(True)
@@ -5843,6 +5944,15 @@ class MainWindow(QMainWindow):
                 check.blockSignals(False)
         if isinstance(saved.get("compare_colormap"), str):
             self._select_series_colormap(saved["compare_colormap"])
+        saved_contour_colour = saved.get("contour_colour")
+        if isinstance(saved_contour_colour, str):
+            if self.output_contour_colour_combo.findData(saved_contour_colour) >= 0 or not saved_contour_colour:
+                self.output_contour_colour_combo.blockSignals(True)
+                self.output_contour_colour_combo.setCurrentIndex(
+                    max(0, self.output_contour_colour_combo.findData(saved_contour_colour)))
+                self.output_contour_colour_combo.blockSignals(False)
+            elif saved_contour_colour.startswith("#"):
+                self._set_custom_contour_colour(saved_contour_colour, signals=False)
         direction_index = self.output_tick_direction_combo.findData(saved.get("tick_direction"))
         if direction_index >= 0:
             self.output_tick_direction_combo.blockSignals(True)
@@ -6013,7 +6123,7 @@ class MainWindow(QMainWindow):
         what is on screen now, contour included."""
         canvas.apply_style_defaults(style)
         if redraw:
-            contour = {k: style[k] for k in ("contour_linewidth", "contour_clevels",
+            contour = {k: style[k] for k in ("contour_linewidth", "contour_colour", "contour_clevels",
                                               "contour_level_mode", "contour_power")
                        if style.get(k) is not None}
             if contour:
@@ -7266,6 +7376,16 @@ class MainWindow(QMainWindow):
         finally:
             self.compare_list.blockSignals(blocked)
         self._refresh_compare_view_if_active()
+
+    def _on_compare_plot_row_selected(self, position: int) -> None:
+        """A click on a spectrum in the Compare plot: make the matching
+        list row current, so Move Up / Move Down and the arrow keys act
+        on it exactly as if it had been clicked in the list."""
+        for row, plotted in self._compare_plot_row_positions.items():
+            if plotted == position:
+                if self.compare_list.currentRow() != row:
+                    self.compare_list.setCurrentRow(row)
+                return
 
     def _on_move_compare_item(self, delta: int) -> None:
         """Reorders rows within the Compare tab's own list -- this is
