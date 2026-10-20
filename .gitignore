@@ -24,3 +24,17 @@ Claude outputs/
 # Editable copy of the Cmd/Ctrl+E fact list (packaging/edit_facts.py --export/--import);
 # only the compressed src/opennmr/gui/resources/facts.dat is committed.
 /facts.txt
+
+# Working notes, drafts and old tutorial versions -- kept locally, not tracked.
+/CLAUDE.md
+/TODO.md
+/imp.txt
+/full_results.txt
+/notes_from_Euan.txt
+/*.patch
+/DOC_openNMR_Brief_Intro_*.docx
+/PDF_openNMR_Brief_Intro_*.pdf
+/SCRIPT_openNMR_Tutorial_20260902.ipynb
+/SCRIPT_openNMR_Tutorial_20260917.ipynb
+/SCRIPT_openNMR_Tutorial_20261002.ipynb
+/SCRIPT_openNMR_Shearing_20261009.ipynb
