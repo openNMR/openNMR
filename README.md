@@ -1,5 +1,3 @@
-![openNMR](assets/openNMR_logo_banner.png)
-
 Vendor-agnostic NMR import, processing, plotting, and a desktop GUI.
 
 Every vendor importer reads raw acquisition data (not a vendor's own

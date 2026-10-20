@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,15 +7,25 @@ name = "opennmr"
 version = "0.1.0"
 description = "Vendor-agnostic NMR import, processing, plotting, and GUI"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Euan Bassey" }, { name = "Leo Gordon" }]  
+keywords = ["NMR", "solid-state NMR", "spectroscopy", "fitting"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Intended Audience :: Science/Research",
+]
 dependencies = [
     "numpy",
     "scipy>=1.15",  # scipy.integrate.lebedev_rule (Lebedev powder grids)
     "pandas",
     "matplotlib",
-    "PySide6",
+    "PySide6-Essentials",
     "sympy",
-	"pymatgen",
+    "pymatgen",
 ]
 
 [project.optional-dependencies]
@@ -28,7 +38,6 @@ dependencies = [
 # the run (2026-10-16).
 test = ["pytest", "pytest-xdist", "pytest-timeout", "nmrglue", "pymatgen"]
 # CIF-based pNMR simulation (notebook.pnmr_simulator, Simulate > pNMR (CIF)).
-pnmr = ["pymatgen"]
 build = ["pyinstaller"]
 
 [project.scripts]
