@@ -16,9 +16,10 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QListWidget,
-    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from ..plotting.twod import INSET_CORNERS
 
 _CORNERS = tuple(INSET_CORNERS)
@@ -78,7 +79,7 @@ class InsetDialog(QDialog):
         self.corner_combo = QComboBox()
         self.corner_combo.addItems(_CORNERS)
         form.addRow("Corner:", self.corner_combo)
-        self.size_spin = QSpinBox()
+        self.size_spin = TypedSpinBox()
         self.size_spin.setRange(10, 90)
         self.size_spin.setSuffix(" %")
         self.size_spin.setToolTip("Side of the (square) inset, as a percentage of the plot.")

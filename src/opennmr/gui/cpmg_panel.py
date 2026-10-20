@@ -22,6 +22,7 @@ import os
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from .widgets.typed_spinbox import TypedSpinBox
 from .widgets.report_label import ReportLabel
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QPalette
@@ -97,7 +98,7 @@ class CpmgProcessingPanel(QWidget):
         self.first_auto_check.setToolTip(
             "Find the first acquired (non-zero) point of the raw FID and add the offset. "
             "Untick to give the first point yourself if the split lands in the wrong place.")
-        self.first_point_spin = QSpinBox()
+        self.first_point_spin = TypedSpinBox()
         self.first_point_spin.setRange(0, 100_000_000)
         self.first_point_spin.setEnabled(False)
         self.first_point_spin.setToolTip("Index of the first point of the echo train in the raw FID.")
@@ -105,23 +106,23 @@ class CpmgProcessingPanel(QWidget):
         first_row.addWidget(self.first_auto_check)
         first_row.addWidget(self.first_point_spin, 1)
         split_form.addRow("First point:", first_row)
-        self.first_offset_spin = QSpinBox()
+        self.first_offset_spin = TypedSpinBox()
         self.first_offset_spin.setRange(0, 100_000)
         self.first_offset_spin.setValue(20)
         self.first_offset_spin.setToolTip("Auto only: points added past the first non-zero point.")
         split_form.addRow("Auto offset (points):", self.first_offset_spin)
-        self.safety_spin = QSpinBox()
+        self.safety_spin = TypedSpinBox()
         self.safety_spin.setRange(0, 100_000)
         self.safety_spin.setValue(10)
         self.safety_spin.setToolTip(
             "Points kept back from the blanking at each end of every echo -- guards "
             "against blanking artefacts at the echo edges.")
         split_form.addRow("Safety (points):", self.safety_spin)
-        self.cutout_spin = QSpinBox()
+        self.cutout_spin = TypedSpinBox()
         self.cutout_spin.setRange(0, 1_000_000)
         self.cutout_spin.setToolTip("Leave out this many echoes at the start of the train.")
         split_form.addRow("Skip first echoes:", self.cutout_spin)
-        self.echoes_added_spin = QSpinBox()
+        self.echoes_added_spin = TypedSpinBox()
         self.echoes_added_spin.setRange(0, 1_000_000)
         self.echoes_added_spin.setSpecialValueText("All")
         self.echoes_added_spin.setToolTip(
@@ -151,7 +152,7 @@ class CpmgProcessingPanel(QWidget):
         self.apodize_check = QCheckBox("Apodise the co-added echo")
         self.apodize_check.setChecked(True)
         proc_form.addRow(self.apodize_check)
-        self.apod_zero_spin = QSpinBox()
+        self.apod_zero_spin = TypedSpinBox()
         self.apod_zero_spin.setRange(0, 100_000)
         self.apod_zero_spin.setValue(20)
         self.apod_zero_spin.setToolTip("Exact zeros at each end of the window.")
@@ -170,7 +171,7 @@ class CpmgProcessingPanel(QWidget):
         proc_form.addRow("Window alpha:", self.apod_alpha_spin)
         for widget in (self.apod_zero_spin, self.apod_shape_spin, self.apod_alpha_spin):
             self.apodize_check.toggled.connect(widget.setEnabled)
-        self.zero_fill_spin = QSpinBox()
+        self.zero_fill_spin = TypedSpinBox()
         self.zero_fill_spin.setRange(0, 1 << 24)
         self.zero_fill_spin.setSpecialValueText("Auto")
         self.zero_fill_spin.setToolTip(
@@ -287,7 +288,7 @@ class CpmgProcessingPanel(QWidget):
     # --- internals ----------------------------------------------------
     @staticmethod
     def _index_spin(value: int, array: str, tip: str) -> QSpinBox:
-        spin = QSpinBox()
+        spin = TypedSpinBox()
         spin.setRange(0, 63)
         spin.setPrefix(array.lower())
         spin.setValue(value)

@@ -16,9 +16,10 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
-    QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from .fit_progress_dialog import FitProgress
 from ..core import registry as core_registry
 from ..io import serialize
@@ -205,7 +206,7 @@ class QuadrupolarFitPanel(QWidget):
             "baseline at the ends (the report warns when the pattern reaches the window edge).")
         form.addRow("", self.fit_baseline_check)
 
-        self.orientations_spin = QSpinBox()
+        self.orientations_spin = TypedSpinBox()
         self.orientations_spin.setRange(0, 200000)
         self.orientations_spin.setSingleStep(1000)
         self.orientations_spin.setSpecialValueText("auto")
@@ -215,7 +216,7 @@ class QuadrupolarFitPanel(QWidget):
             "8× denser than a whole-sphere set). Auto: 28,657 static, 4,181 MAS. Too few leaves "
             "powder ripple that the fit absorbs into a larger FWHM.")
         form.addRow("Orientations (fitting):", self.orientations_spin)
-        self.render_orientations_spin = QSpinBox()
+        self.render_orientations_spin = TypedSpinBox()
         self.render_orientations_spin.setRange(100, 500000)
         self.render_orientations_spin.setSingleStep(5000)
         self.render_orientations_spin.setValue(4181)

@@ -764,7 +764,8 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
     ``WDW``/``LB``/``SSB`` with one of :data:`opennmr.processing.ft`'s
     generic window functions instead (``None``, the default, keeps
     TopSpin's own choice). ``zero_fill`` similarly overrides the
-    recorded ``SI`` (``None`` keeps it).
+    recorded ``SI`` (``None`` keeps it; ``0`` means do not zero-fill:
+    the FFT is as long as the FID that goes into it).
 
     ``fid_shift``/``align_echo``/``linear_predict_points`` : applied to
     the raw FID, in that order, before windowing -- see
@@ -839,6 +840,8 @@ def read_1d(path: str, procno: int = 1, mass: float = 1.0, f1p: float = 0.0, f2p
             # output just because this one recorded window isn't
             # understood yet; the FID is simply left unwindowed.
             window_unsupported_note = str(exc)
+    if zero_fill == 0:
+        si = len(fid)       # zero_fill=0: do not zero-fill (GUI: None)
     fid = processing_ft.zero_fill(fid, si)
 
     _, spectrum = processing_ft.fft_spectrum(fid, dt)
@@ -1301,6 +1304,8 @@ def read_2d(path: str, procno: int = 1, homonuclear: bool = False, pseudo_2d: bo
             # abandoning it; the same WDW code applies to every row,
             # so this fails (or doesn't) for the whole batch at once.
             window_unsupported_note = str(exc)
+    if zero_fill == 0:
+        si2 = fid_f2.shape[-1]      # zero_fill=0: do not zero-fill (GUI: None)
     fid_f2 = processing_ft.zero_fill(fid_f2, si2)
     _, spectrum = processing_ft.fft_spectrum(fid_f2, 1.0 / sw)
 

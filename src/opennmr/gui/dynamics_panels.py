@@ -34,6 +34,7 @@ import re
 from typing import Callable
 
 import numpy as np
+from .widgets.typed_spinbox import TypedSpinBox
 from .plot_options_dialog import PlotOptionsDialog
 from .widgets.report_label import ReportLabel
 from PySide6.QtCore import Qt
@@ -41,7 +42,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QMessageBox, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -288,7 +289,7 @@ class VTRelaxationPanel(QWidget):
         quad.addStretch(1)
         self.quad_label = QLabel("Spin, asymmetry:")
         mform.addRow(self.quad_label, self.quad_row)
-        self.processes_spin = QSpinBox()
+        self.processes_spin = TypedSpinBox()
         self.processes_spin.setRange(1, 3)
         self.processes_spin.setToolTip(
             "Independent motions, each with its own τ₀ and Ea; their rates add. Use "
@@ -328,12 +329,12 @@ class VTRelaxationPanel(QWidget):
         fixed_row.addWidget(names_button)
         mform.addRow("Fixed:", fixed_row)
         search = QHBoxLayout()
-        self.starts_spin = QSpinBox()
+        self.starts_spin = TypedSpinBox()
         self.starts_spin.setRange(1, 256)
         self.starts_spin.setValue(24)
         self.starts_spin.setToolTip("Deterministic starting points: BPP surfaces have several "
                                     "minima, especially with more than one process.")
-        self.bootstrap_spin = QSpinBox()
+        self.bootstrap_spin = TypedSpinBox()
         self.bootstrap_spin.setRange(0, 2000)
         self.bootstrap_spin.setSingleStep(100)
         self.bootstrap_spin.setToolTip("Residual-bootstrap refits for 16–84 % intervals that do "
@@ -1168,7 +1169,7 @@ class ExchangeLineshapePanel(QWidget):
         self.gauss_spin.setToolTip("Gaussian broadening of the whole spectrum (FWHM), applied "
                                    "exactly (Voigt lines).")
         sim.addRow("Gaussian broadening:", self.gauss_spin)
-        self.nodes_spin = QSpinBox()
+        self.nodes_spin = TypedSpinBox()
         self.nodes_spin.setRange(1, 15)
         self.nodes_spin.setValue(7)
         self.nodes_spin.setToolTip("Minimum grid points per distributed shift or barrier (over ±4 s.d.); "

@@ -448,7 +448,7 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
             phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5, phase0_inc: float = 0.1,
             phase1_max: float = 20.0, phase1_improvement: float = 0.15,
             phase_penalty: str = "magnitude", verbose: bool = False,
-            timegrid_warning: bool = False) -> NMRSpectrum:
+            timegrid_warning: bool = False, drift_shift_hz: float = 0.0) -> NMRSpectrum:
     """Import an X-Pulse JCAMP-DX FID and process it (apodize,
     zero-fill, FFT, phase, baseline-correct) into an
     :class:`NMRSpectrum`.
@@ -520,6 +520,16 @@ def read_1d(path: str, *, window: str = "exponential", window_kwargs: dict | Non
     sfo1_hz = float(params.get("$SFO1", 1.0)) * 1e6
     sf_hz = float(params.get("$SF", 1.0)) * 1e6
     o1_hz = float(params.get("$O1", 1.0))
+
+    if drift_shift_hz:
+        # One step of an arrayed series (read_array) undoing the field
+        # drift at the time it was acquired: the same direct-dimension
+        # phase ramp as notebook.drift_correction.correct_pseudo_2d_fids
+        # (openNMR's FID convention: exp(-i 2 pi shift t); positive =
+        # peaks move left). Both fid and fid_raw carry it, so the GUI's live
+        # reprocessing -- which rebuilds from fid_raw -- keeps it.
+        fid = fid * np.exp(-2j * np.pi * float(drift_shift_hz) * np.arange(len(fid)) * dt)
+        fid_raw = fid
 
     # is True checked ahead of isinstance(..., int): bool is an int
     # subclass in Python, so isinstance(True, int) is True -- checking
@@ -1341,12 +1351,24 @@ def read_array(path: str, **kwargs) -> NMRSpectrum:
     if not array_dirs:
         raise ValueError(f"No array#/ subfolders found under {path!r}.")
 
+    # Field-drift correction (``drift_correction={"start_hz":, "end_hz":}``;
+    # see notebook.drift_correction): step i of N is shifted back by its
+    # share of the drift, before anything else happens to its FID.
+    drift_request = kwargs.pop("drift_correction", None)
+    drift_shifts = None
+    if drift_request:
+        from ..notebook import drift_correction as _dc
+        drift_shifts = _dc.pseudo_2d_shifts(len(array_dirs), drift_request)
+
     slices = []
-    for step, array_dir in array_dirs:
+    for position, (step, array_dir) in enumerate(array_dirs):
         jdx_path = _find_array_step_jdx(array_dir)
         if jdx_path is None:
             raise ValueError(f"No .jdx/.dx file found directly under {array_dir!r} (step {step}).")
-        slices.append(read_1d(jdx_path, **kwargs))
+        step_kwargs = dict(kwargs)
+        if drift_shifts is not None:
+            step_kwargs["drift_shift_hz"] = float(drift_shifts[position])
+        slices.append(read_1d(jdx_path, **step_kwargs))
 
     n_points = len(slices[0].data)
     if any(len(s.data) != n_points for s in slices):
@@ -1380,6 +1402,8 @@ def read_array(path: str, **kwargs) -> NMRSpectrum:
             "fid": fid_stack,
             "fid_raw": fid_raw_stack,
             "gradient_relative": _read_gradient_relative(path),
+            **({"drift_correction": _dc.pseudo_2d_record(len(slices), drift_request, "X-Pulse")}
+               if drift_request else {}),
             # The coil the series was actually run on -- see
             # _gradient_axis_from_params for why it matters. Taken from
             # the first step's own header: every step of one arrayed
@@ -1451,6 +1475,12 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     single file reads as one 1D spectrum (:func:`read_1d`)."""
     if os.path.isdir(path):
         return read_array(path, **kwargs)
+    # A single file is no pseudo-2D series: nothing for drift correction
+    # to act on (a genuine NTUPLES 2D also has an indirect dimension this
+    # does not correct, so it is refused rather than half-done).
+    if kwargs.pop("drift_correction", None) and _is_ntuples_2d_file(path):
+        from ..notebook import drift_correction as _dc
+        raise ValueError(_dc.NOT_SUPPORTED_MESSAGE)
     if _is_ntuples_2d_file(path):
         # read_2d's own kwarg set is a strict subset of read_1d's
         # (no fid_shift/align_echo/linear_predict/truncate -- see its

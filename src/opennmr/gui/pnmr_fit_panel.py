@@ -51,9 +51,10 @@ from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QToolTip, QVBoxLayout, QWidget,
+    QPushButton, QTableWidget, QTableWidgetItem, QToolTip, QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from ..io import serialize
 from ..notebook import bridge
 from ..notebook import pnmr_export, pnmr_fit
@@ -869,14 +870,14 @@ class PnmrFitPanel(QWidget):
         self.annotate_check.toggled.connect(self.redraw)
         form.addRow(self.annotate_check)
         label_row = QHBoxLayout()
-        self.max_labels_spin = QSpinBox()
+        self.max_labels_spin = TypedSpinBox()
         self.max_labels_spin.setRange(1, 200)
         self.max_labels_spin.setValue(8)
         self.max_labels_spin.setPrefix("largest ")
         self.max_labels_spin.setSuffix(" peaks")
         self.max_labels_spin.setToolTip("Label only this many peaks, the largest by area.")
         self.max_labels_spin.valueChanged.connect(self.redraw)
-        self.label_size_spin = QSpinBox()
+        self.label_size_spin = TypedSpinBox()
         self.label_size_spin.setRange(4, 30)
         self.label_size_spin.setValue(8)
         self.label_size_spin.setSuffix(" pt")

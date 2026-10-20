@@ -19,10 +19,11 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTableWidget,
+    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from ..notebook import offset_tracker as ot
 from .widgets.report_label import ReportLabel
 from .widgets.typed_spinbox import TypedDoubleSpinBox
@@ -270,7 +271,7 @@ class OffsetTrackerPanel(QWidget):
         self.skyline_check = QCheckBox("Show the skyline (the bars' outline)")
         self.skyline_check.toggled.connect(lambda _c: self.redraw())
         form.addRow("", self.skyline_check)
-        self.points_spin = QSpinBox()
+        self.points_spin = TypedSpinBox()
         self.points_spin.setRange(64, 65536)
         self.points_spin.setValue(4096)
         self.points_spin.setToolTip(

@@ -390,8 +390,14 @@ def zero_fill(fid: np.ndarray, n: int) -> np.ndarray:
     """Zero-fill (or truncate) ``fid`` to length ``n`` along its last
     axis -- a single 1D FID (the common case) or a batch stacked along
     a leading axis, matching :func:`apodize`/:func:`fft_spectrum`'s own
-    ``shape[-1]`` convention rather than assuming 1D input."""
+    ``shape[-1]`` convention rather than assuming 1D input.
+
+    ``n=0`` (or ``None``) means *do not zero-fill*: ``fid`` is returned
+    unchanged -- the GUI's "None (do not zero-fill)" choice, for the
+    notebook (``zero_fill=0`` in the readers)."""
     length = fid.shape[-1]
+    if not n:
+        return fid
     if n <= length:
         return fid[..., :n]
     pad_width = [(0, 0)] * (fid.ndim - 1) + [(0, n - length)]

@@ -667,6 +667,96 @@ def correct_spectrum_fids(fid_raw: np.ndarray, setup: BrukerDriftSetup, start_hz
 
 
 # ----------------------------------------------------------------------
+# Any vendor's pseudo-2D (one spectrum per row, acquired in row order)
+# ----------------------------------------------------------------------
+
+#: Vendors whose readers take ``drift_correction=`` for a pseudo-2D series
+#: (X-Pulse arrays, Varian arrayed 2D, Spinsolve PGSTE). Bruker is separate:
+#: it also does genuine 2D/3D/4D, from its own acquisition parameters.
+PSEUDO_2D_VENDORS = ("xpulse", "varian", "spinsolve")
+
+NOT_SUPPORTED_MESSAGE = (
+    "Drift correction needs a Bruker 2D/pseudo-2D read from its raw ser, or a pseudo-2D series "
+    "(one spectrum per row, acquired in order) from X-Pulse, Varian or Spinsolve. A genuine 2D "
+    "from another vendor also has an indirect dimension to correct, which needs that vendor's "
+    "acquisition order -- not available yet. For Bruker data, use Write Corrected Bruker Dataset…"
+)
+
+
+def drift_support(spectrum) -> tuple[bool, str]:
+    """Whether :func:`correct_pseudo_2d_fids`/the readers' ``drift_correction``
+    can correct ``spectrum``, and if not, why (the message the GUI shows)."""
+    vendor = getattr(spectrum.metadata, "vendor", None)
+    if spectrum.ndim != 2:
+        return False, ("Drift correction needs a 2D or pseudo-2D spectrum. For 3D/4D or NUS data, "
+                       "write a corrected dataset instead.")
+    if vendor == "bruker":
+        if spectrum.metadata.raw.get("fid_raw") is None:
+            return False, ("The selected spectrum cannot be corrected here: that needs a Bruker 2D or "
+                           "pseudo-2D read from its raw ser. For 3D/4D or NUS data, write a corrected "
+                           "dataset instead.")
+        return True, ""
+    if vendor in PSEUDO_2D_VENDORS and spectrum.is_pseudo_2d:
+        return True, ""
+    return False, NOT_SUPPORTED_MESSAGE
+
+
+def pseudo_2d_shifts(n_rows: int, request: dict) -> np.ndarray:
+    """The per-row shifts (Hz) a ``drift_correction`` request describes:
+    its explicit ``shifts_hz``, else the linear ``start_hz`` -> ``end_hz``
+    ramp over ``n_rows`` rows (see :func:`drift_profile`)."""
+    shifts = request.get("shifts_hz")
+    if shifts is not None:
+        shifts = np.asarray(shifts, dtype=float).ravel()
+        if shifts.size != n_rows:
+            raise ValueError(f"{shifts.size} shifts given for {n_rows} rows.")
+        return shifts
+    start = float(request.get("start_hz", 0.0))
+    end = float(request.get("end_hz", start))
+    return drift_profile(n_rows, start, end, endpoint=bool(request.get("endpoint", True)))
+
+
+def pseudo_2d_record(n_rows: int, request: dict, vendor: str = "") -> dict:
+    """The ``metadata.raw["drift_correction"]`` record for a pseudo-2D
+    correction (same keys as Bruker's)."""
+    start = float(request.get("start_hz", 0.0))
+    end = float(request.get("end_hz", start))
+    shifts = request.get("shifts_hz")
+    return {"start_hz": start, "end_hz": end, "endpoint": bool(request.get("endpoint", True)),
+            "n_points": int(n_rows), "custom_shifts": shifts is not None,
+            "description": (f"pseudo-2D{f' ({vendor})' if vendor else ''}, {n_rows} rows -- "
+                            "direct-dimension correction only (no evolution dimension)"),
+            "notes": [], "citation": CITATION}
+
+
+def correct_pseudo_2d_fids(fid_rows, dt_s: float, start_hz: float = 0.0, end_hz: float | None = None,
+                           shifts_hz: Sequence[float] | None = None, endpoint: bool = True) -> np.ndarray:
+    """Correct the FIDs of a pseudo-2D from **any vendor** for linear field
+    drift, row by row in acquisition order.
+
+    ``fid_rows`` : complex ``(n_rows, n_points)`` array of FIDs as openNMR
+    transforms them (``metadata.raw["fid_raw"]`` -- for Bruker that is the
+    conjugate of the ``ser``, and this is the convention used here).
+    ``dt_s`` : dwell time per complex point (``metadata.raw["fid_dt"]``).
+    ``start_hz``/``end_hz`` : the shift of the first/last row, Hz of the
+    detected nucleus, ``reference - observed`` (positive moves peaks
+    left); or ``shifts_hz``, one per row.
+
+    A pseudo-2D's rows are separate experiments, not an evolution time, so
+    only the direct-dimension phase ramp ``exp(i 2 pi shift t)`` applies.
+    Returns a new array. In the readers this is what
+    ``drift_correction={"start_hz": ..., "end_hz": ...}`` does for
+    X-Pulse, Varian and Spinsolve series."""
+    rows = np.atleast_2d(np.asarray(fid_rows, dtype=np.complex128))
+    request = {"start_hz": start_hz, "end_hz": start_hz if end_hz is None else end_hz,
+               "endpoint": endpoint, "shifts_hz": shifts_hz}
+    shifts = pseudo_2d_shifts(rows.shape[0], request)
+    dims = [IndirectDim(name="F1", n=rows.shape[0], kind="none")]
+    return apply_drift_correction(rows, shifts, 1.0 / float(dt_s), dims, None, 0, None,
+                                  group_delay=0.0, convention="opennmr")
+
+
+# ----------------------------------------------------------------------
 # NUS block concatenation (concatenate_ser_nuslist)
 # ----------------------------------------------------------------------
 

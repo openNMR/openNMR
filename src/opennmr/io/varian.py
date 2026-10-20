@@ -204,7 +204,8 @@ def read_2d(path: str, mass: float = 1.0, pseudo_2d: bool | None = None,
             autophase: bool = True, phase_mode: str = "apc0",
             phase0: float = 0.0, phase1: float = 0.0, pivot_frac: float = 0.5, phase0_inc: float = 0.1,
             phase1_max: float = 20.0, phase1_improvement: float = 0.15,
-            phase_penalty: str = "magnitude") -> NMRSpectrum:
+            phase_penalty: str = "magnitude",
+            drift_correction: dict | None = None) -> NMRSpectrum:
     """Read a Varian/Agilent 2D FID directory.
 
     **Preliminary**: correctly assembling Varian's States-hypercomplex
@@ -252,6 +253,19 @@ def read_2d(path: str, mass: float = 1.0, pseudo_2d: bool | None = None,
     tof = _procpar_value(procpar, "tof", default=0.0)
     nucleus = _normalize_nucleus(_procpar_value(procpar, "tn", default=None, cast=str))
     ns = _procpar_value(procpar, "nt", default=1.0)
+
+    # Linear field-drift correction of the raw FIDs, row by row in
+    # acquisition order (``drift_correction={"start_hz":, "end_hz":}``;
+    # see notebook.drift_correction). Rows are separate experiments, so
+    # only the direct-dimension correction applies.
+    drift_record = None
+    if drift_correction:
+        from ..notebook import drift_correction as _dc
+        fid_f1 = _dc.correct_pseudo_2d_fids(
+            fid_f1, dt, start_hz=drift_correction.get("start_hz", 0.0),
+            end_hz=drift_correction.get("end_hz"), shifts_hz=drift_correction.get("shifts_hz"),
+            endpoint=bool(drift_correction.get("endpoint", True)))
+        drift_record = _dc.pseudo_2d_record(fid_f1.shape[0], drift_correction, "Varian")
 
     # fid_shift/align_echo/linear_predict are all 1D-only too -- same
     # per-row reasoning as apodize/zero_fill/fft_spectrum below.
@@ -326,6 +340,7 @@ def read_2d(path: str, mass: float = 1.0, pseudo_2d: bool | None = None,
         raw={
             "procpar": procpar, "phase0": phase0, "phase1": phase1,
             "fid": fid_f2, "fid_dt": dt,
+            **({"drift_correction": drift_record} if drift_record is not None else {}),
         },
     )
 
@@ -356,6 +371,7 @@ def _read_auto(path: str, **kwargs) -> NMRSpectrum:
     ni = _procpar_value(procpar, "ni", default=1, cast=int)
     if ni and ni > 1:
         return read_2d(path, **kwargs)
+    kwargs.pop("drift_correction", None)      # a 1D has no series to correct
     return read_1d(path, **kwargs)
 
 

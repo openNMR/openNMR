@@ -28,10 +28,11 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSpinBox,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton,
     QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
+from .typed_spinbox import TypedSpinBox
 from ...core.registry import find_gamma, NUC_label
 from ...notebook import fit_display
 from ...core.spectrum import NMRAxis, NMRSpectrum
@@ -5433,7 +5434,7 @@ class MplCanvas(QWidget):
         dialog.setWindowTitle("Set Contour Levels")
         form = QFormLayout(dialog)
 
-        clevels_spin = QSpinBox()
+        clevels_spin = TypedSpinBox()
         clevels_spin.setRange(2, 200)
         clevels_spin.setValue(self._contour_clevels)
         form.addRow("Number of contours:", clevels_spin)
@@ -5552,7 +5553,7 @@ class MplCanvas(QWidget):
             )
         form.addRow("Axis:", axis_combo)
 
-        index_spin = QSpinBox()
+        index_spin = TypedSpinBox()
         index_spin.setRange(1, n_f1)
 
         def _default_index(axis: str) -> int:
@@ -6209,7 +6210,7 @@ class MplCanvas(QWidget):
             labeltext = self._chemical_shift_label(spectrum, x_unit="ppm")
             self._ppm_label = labeltext
             self.ax.lines[0].set_label(entry.label)
-            self.ax.set_xlim(xmin, xmax)
+            plotting.safe_xlim(self.ax, xmin, xmax)
             self.ax.invert_xaxis()
             self._fit_y_to_data(self.ax)
             self.ax.set_xlabel(labeltext, fontsize=self._AXIS_LABELSIZE)
@@ -6486,7 +6487,7 @@ class MplCanvas(QWidget):
 
         xmin, xmax, labeltext = plotting.plot_1d(spec_ax, spectrum, full_resolution=False)
         labeltext = self._chemical_shift_label(spectrum, x_unit="ppm")
-        spec_ax.set_xlim(xmin, xmax)
+        plotting.safe_xlim(spec_ax, xmin, xmax)
         spec_ax.invert_xaxis()
         spec_ax.set_xlabel(labeltext, fontsize=self._AXIS_LABELSIZE)
         spec_ax.set_yticks([])
@@ -6711,7 +6712,7 @@ class MplCanvas(QWidget):
             self._fit_compare_rows(axes, shared_range)
             if row_labels:
                 self._annotate_compare_rows(axes, row_labels, colors)
-            axes[0].set_xlim(xmin, xmax)
+            plotting.safe_xlim(axes[0], xmin, xmax)
             axes[0].invert_xaxis()
             axes[-1].set_xlabel(labeltext, fontsize=self._AXIS_LABELSIZE)
             self.figure.subplots_adjust(hspace=0.0)
@@ -7184,7 +7185,7 @@ class MplCanvas(QWidget):
         else:
             xlabel = self._unit_label("Shift", "ppm")
         xmin, xmax = float(np.min(x)), float(np.max(x))
-        self.ax.set_xlim(xmin, xmax)
+        plotting.safe_xlim(self.ax, xmin, xmax)
         self.ax.invert_xaxis()
         self.ax.set_xlabel(xlabel, fontsize=self._AXIS_LABELSIZE)
         self.ax.set_yticks([])
