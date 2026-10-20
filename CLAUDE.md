@@ -132,6 +132,10 @@ pytest tests/test_gui.py -k toolbar   # a subset while iterating
   (`~/.opennmr/figure_styles.json`; "curve" falls back to "1d").
   Notebook figures shown in the GUI go through
   `MplCanvas.show_external_plot(draw, kind)`.
+- **Welcome wizard** (`gui/welcome_wizard.py`, Help ▸ Welcome to openNMR…): shown by
+  `MainWindow.maybe_show_welcome()` from `app.main` only, when `welcome_seen_version` differs
+  from the running version. It reads and writes the Settings panel's own widgets -- a new
+  setting worth offering at first run gets a control there, never its own copy of the logic.
 - **Settings** is a non-modal dialog (`_SettingsDialog`) hosting the
   imaging controls; add further settings there. The Settings tile's
   panel (`_build_settings_panel`) holds the remembered interface choices

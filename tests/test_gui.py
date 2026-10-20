@@ -509,7 +509,7 @@ def _menu_by_title(window, title):
 def test_main_window_has_file_edit_window_menus(qapp):
     window = MainWindow()
     titles = [action.text().replace("&", "") for action in window.menuBar().actions()]
-    assert titles == ["File", "Edit", "View", "Window", "Analysis", "Fitting"]
+    assert titles == ["File", "Edit", "View", "Window", "Analysis", "Fitting", "Help"]
 
 
 def test_main_window_menu_open_action_triggers_open_dialog(qapp, monkeypatch):

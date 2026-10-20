@@ -17,6 +17,7 @@ os.environ.setdefault(
     "QT_PLUGIN_PATH", os.path.join(os.path.dirname(PySide6.__file__), "Qt", "plugins"),
 )
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
@@ -39,6 +40,9 @@ def main() -> int:
         app.setWindowIcon(QIcon(_LOGO_PATH))
     window = MainWindow()
     window.show()
+    # First run of this version: the Welcome tour of the settings (skippable;
+    # Help > Welcome to openNMR brings it back).
+    QTimer.singleShot(0, window.maybe_show_welcome)
     return app.exec()
 
 

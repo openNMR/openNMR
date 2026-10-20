@@ -1162,6 +1162,43 @@ class MainWindow(QMainWindow):
         if isinstance(size, (int, float)) and low <= size <= high:
             self._apply_ui_font_size(size)
 
+    # ---- Welcome wizard / Help ------------------------------------------------
+    def _open_website(self) -> None:
+        from PySide6.QtGui import QDesktopServices
+        from .welcome_wizard import WEBSITE_URL
+        QDesktopServices.openUrl(QUrl(WEBSITE_URL))
+
+    def welcome_pending(self) -> bool:
+        """Whether this version of openNMR has not yet shown the Welcome
+        wizard (a first run, or a newly installed/updated version)."""
+        return self._ui_settings.get("welcome_seen_version") != _version.__version__
+
+    def maybe_show_welcome(self) -> bool:
+        """Open the Welcome wizard if it has not been shown for this
+        version. Called once by ``app.main`` after the window is up --
+        never from the constructor, so tests and embedding hosts are not
+        interrupted. Returns whether it opened."""
+        if not self.welcome_pending():
+            return False
+        self.show_welcome()
+        return True
+
+    def show_welcome(self):
+        """Help ▸ Welcome to openNMR…: the settings tour (also shown on
+        first run). Remembered as seen as soon as it opens, so a crash or
+        a closed window never brings it back."""
+        from .welcome_wizard import WelcomeWizard
+        self._ui_settings["welcome_seen_version"] = _version.__version__
+        self._save_ui_settings()
+        dialog = getattr(self, "_welcome_dialog", None)
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+        dialog = self._welcome_dialog = WelcomeWizard(self)
+        dialog.setModal(True)
+        dialog.open()
+        return dialog
+
     def _build_status_bar(self) -> None:
         """Permanent context on the right of the status bar.
 
@@ -1656,6 +1693,19 @@ class MainWindow(QMainWindow):
         self._rebuild_model_menu()
 
         fitting_menu.aboutToShow.connect(self._sync_fitting_menu_checks)
+
+        help_menu = menu_bar.addMenu("&Help")
+        welcome_action = QAction("&Welcome to openNMR…", self)
+        welcome_action.setToolTip("The short tour of the settings that opens the first time "
+                                  "openNMR is run.")
+        welcome_action.triggered.connect(lambda _checked=False: self.show_welcome())
+        help_menu.addAction(welcome_action)
+        website_action = QAction("openNMR &website (in progress)", self)
+        website_action.triggered.connect(lambda _checked=False: self._open_website())
+        help_menu.addAction(website_action)
+        self.help_menu = help_menu
+        self.welcome_action = welcome_action
+        self.website_action = website_action
 
     def _rebuild_model_menu(self) -> None:
         self._model_menu.clear()
@@ -6715,7 +6765,21 @@ class MainWindow(QMainWindow):
         colours from export colours first; one setting cannot serve
         both.
         """
-        return style_module.apply_theme(mode)
+        resolved = style_module.apply_theme(mode)
+        self._polish_option_dialogs()
+        return resolved
+
+    def _polish_option_dialogs(self) -> None:
+        """Polish the plot-option pop-ups (Fit plot components and colours,
+        Curve Fit plot, the Dynamics plots') so their controls take the
+        theme now. They are built hidden and may be opened much later; a
+        widget the stylesheet has never polished keeps the palette it was
+        built with, so under a saved Dark theme their combo boxes came up
+        light (``test_saved_dark_theme_is_applied_not_overridden_by_system``;
+        found 2026-10-20, present before that day's changes). A handful of
+        dialogs, so the start-up cost is small."""
+        for dialog in self.findChildren(PlotOptionsDialog):
+            dialog.ensurePolished()
 
     def _apply_saved_ui_settings(self) -> None:
         mode = self._ui_settings.get("ui_theme")
@@ -21906,7 +21970,9 @@ class MainWindow(QMainWindow):
         region_button_row = QHBoxLayout()
         add_region_button = QPushButton("Add Region")
         add_region_button.clicked.connect(lambda: self._add_region_row())
-        remove_region_button = QPushButton("Remove Region")
+        remove_region_button = self.remove_region_button = QPushButton("Remove Region")
+        remove_region_button.setToolTip(
+            "Remove the region you clicked in the table (or the selected or ticked ones).")
         remove_region_button.clicked.connect(self._on_remove_region_clicked)
         clear_regions_button = QPushButton("Clear All")
         clear_regions_button.setToolTip("Remove every row from the region table.")
@@ -22224,10 +22290,38 @@ class MainWindow(QMainWindow):
         dialog.activateWindow()
         return dialog
 
-    def _on_remove_region_clicked(self) -> None:
-        row = self.region_table.currentRow()
-        if row >= 0:
-            self.region_table.removeRow(row)
+    def _regions_to_remove(self) -> list[int]:
+        """Rows Remove Region acts on: the selected rows plus the current
+        one; failing that the ticked ones; failing that the only row (a
+        table of one needs no selecting). Dragging a region on the plot
+        refills the table with no current row, which used to make the
+        button do nothing."""
+        table = self.region_table
+        rows = {index.row() for index in table.selectedIndexes()}
+        if table.currentRow() >= 0:
+            rows.add(table.currentRow())
+        if not rows:
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                if item is not None and item.checkState() == Qt.CheckState.Checked:
+                    rows.add(row)
+        if not rows and table.rowCount() == 1:
+            rows.add(0)
+        return sorted(rows)
+
+    def _on_remove_region_clicked(self, *_args) -> None:
+        rows = self._regions_to_remove()
+        if not rows:
+            if hasattr(self, "integration_results_label"):
+                self.integration_results_label.setText(
+                    "Click the region to remove in the table (or tick it), then press Remove Region.")
+            return
+        blocked = self.region_table.blockSignals(True)
+        try:
+            for row in reversed(rows):
+                self.region_table.removeRow(row)
+        finally:
+            self.region_table.blockSignals(blocked)
         self._sync_region_shading()
         self._auto_integrate_regions()
 

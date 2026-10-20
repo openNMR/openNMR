@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-20 round 2 (Welcome wizard + Help menu; Remove Region fixed): 11 new tests in `test_welcome_wizard.py`. **Not run by Claude; run them locally.***
+
 *2026-10-20 (Stored integrals; kept-fit component colours carried into Compare; 2-D Compare crosshair / y scroll / link / Hz+ppm measurements / a spectrum against itself; standalone 2-D inset; sectioned Plot Style): 22 new tests in `test_round_2026_10_20.py`. **Claude could not run any tests this round (the user runs them locally); run the files listed in the round, then the full suite, before committing.***
 
 *2026-10-17 (Compare Plot and box; Ctrl+0/B/E; Processing view always; pivot line; Truncate past TD; slice proc number phase and nucleus; merged, steppable baselines and a spline that no longer freezes; BPP Import CSV and temperature regions; Offset Tracker): 35 new tests in `test_round_2026_10_17.py`; related files only (see the round). **Run the full suite locally before committing.***
@@ -204,6 +206,20 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Welcome wizard, Help menu, Remove Region (2026-10-20, round 2)
+
+**Asked:** (1) Integrate ▸ Integration Regions ▸ Remove Region did nothing. (2) A friendly, skippable "Welcome to openNMR" wizard on first launch, walking through the Settings (layout, design...), not shown again once seen, but re-openable from a new Help menu, which also links to https://opennmr.github.io/ (in progress).
+
+**Wrong / built:**
+- Remove Region acted only on `currentRow()`. Dragging a region on the plot (or Auto-find) refills the table with no current row, and the new tick boxes (2026-10-20) made "tick, then Remove" the obvious gesture, so the button did nothing. It now removes the selected rows plus the current one; failing that the ticked rows; failing that the only row; otherwise it says what to do in the results line. I could not reproduce the user's exact click path, so this is the most likely cause, not a confirmed one.
+- `gui/welcome_wizard.py` `WelcomeWizard(window)`: 6 pages (Welcome, Appearance, Mouse and plots, Layout/sections, Data and fitting, All set). It owns no settings: each page reads the Settings panel's widgets and *Apply and start* writes back into them, so their handlers apply and persist as usual. *Skip and get started* changes nothing.
+- `MainWindow.maybe_show_welcome()` is called by `app.main` (never the constructor, so tests and embedding hosts are not interrupted). `welcome_seen_version` in `ui_settings.json` is set when the wizard *opens*, so a crash never brings it back. It shows again when `opennmr._version.__version__` changes (a new install/update); with the version still 0.1.0 that means once, until it is bumped. To make it first-launch-only forever, compare against presence of the key instead.
+- Help ▸ Welcome to openNMR… (`show_welcome`), Help ▸ openNMR website (in progress).
+
+- Found while testing: `test_saved_dark_theme_is_applied_not_overridden_by_system` was already failing before this round (checked on 86b5e17). The hidden `PlotOptionsDialog`s (Fit components and colours, Curve Fit plot) were never polished, so their combos kept the light palette under a saved Dark theme; `ensurePolished()` on them fixed it in a diagnostic. `MainWindow._polish_option_dialogs()` now does that in `_apply_ui_theme` (start-up and theme changes). New test `test_hidden_option_dialogs_take_the_saved_dark_theme`. The menu-list and FakeWindow tests were updated for the Help menu and `maybe_show_welcome`.
+
+**Tests:** `tests/test_welcome_wizard.py`. Related: `test_gui.py -k "region or settings"`, `test_integrate_tile_plot_options_regularisation.py`, `test_round_2026_10_20.py`.
 
 ## Stored integrals; kept-fit colours in Compare; 2-D Compare fixes; 2-D inset; sectioned Plot Style (2026-10-20)
 

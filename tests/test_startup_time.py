@@ -119,6 +119,9 @@ def test_app_main_leaves_the_theme_to_the_window(qapp, monkeypatch):
         def show(self):
             pass
 
+        def maybe_show_welcome(self):
+            pass
+
     monkeypatch.setattr(app_module, "MainWindow", FakeWindow)
     monkeypatch.setattr(app_module, "QApplication", lambda argv: qapp)
     monkeypatch.setattr(type(qapp), "exec", lambda self: 0)
@@ -134,6 +137,19 @@ def test_saved_dark_theme_is_applied_not_overridden_by_system(qapp, restore_syst
     assert window.ui_theme_combo.currentData() == "dark"
     assert _is_dark(window)
     assert all(_is_dark(w) for w in window.findChildren(QComboBox)[:50])
+
+
+def test_hidden_option_dialogs_take_the_saved_dark_theme(qapp, restore_system_theme):
+    """The plot-option pop-ups are built hidden; their controls used to keep
+    the light palette until first shown."""
+    from opennmr.gui.plot_options_dialog import PlotOptionsDialog
+    _save_ui_settings({"ui_theme": "dark"})
+    window = MainWindow()
+    dialogs = window.findChildren(PlotOptionsDialog)
+    assert dialogs
+    for dialog in dialogs:
+        for combo in dialog.findChildren(QComboBox):
+            assert _is_dark(combo)
 
 
 def test_saved_light_theme_is_applied(qapp, restore_system_theme):
