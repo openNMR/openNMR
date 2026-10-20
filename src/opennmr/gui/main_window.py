@@ -6701,6 +6701,18 @@ class MainWindow(QMainWindow):
         defaults_layout.addWidget(open_style_button)
         layout.addWidget(CollapsibleSection("Default plot styles", content=defaults))
 
+        # --- Updates -------------------------------------------------
+        # Settings ▸ Updates (gui/update_panel.py over opennmr.update):
+        # find out whether a newer openNMR exists and, for a pip install,
+        # upgrade to it from here (opennmr.update_install).
+        from .update_panel import UpdatesPanel, schedule_startup_check
+        self.updates_panel = UpdatesPanel(
+            self._ui_settings, save=self._save_ui_settings,
+            notify=lambda text: self.statusBar().showMessage(text, 15000), parent=self)
+        self.updates_section = CollapsibleSection("Updates", content=self.updates_panel)
+        layout.addWidget(self.updates_section)
+        schedule_startup_check(self.updates_panel)
+
         layout.addStretch(1)
         self._refresh_settings_type_rows()
         return panel
