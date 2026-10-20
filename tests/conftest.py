@@ -30,6 +30,11 @@ os.environ.setdefault(
 # exercises the threaded path deliberately, driving the event loop.
 os.environ.setdefault("OPENNMR_BACKGROUND_LOAD", "0")
 
+# No update check at start-up under test: a MainWindow is built
+# thousands of times, and none of them should touch the network.
+# tests/test_gui_updates.py drives the check with a patched source.
+os.environ.setdefault("OPENNMR_UPDATE_CHECK", "0")
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -56,6 +61,9 @@ def _isolate_interface_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENNMR_SIMULATIONS_DIR", str(tmp_path / "simulations"))
     # Cmd/Ctrl+E's fact list: never the user's own ~/.opennmr/facts.txt.
     monkeypatch.setenv("OPENNMR_FACTS_FILE", str(tmp_path / "facts.txt"))
+    # The update helper's log and result (read, and removed, when Settings
+    # opens): never the user's own, which a test run would otherwise consume.
+    monkeypatch.setenv("OPENNMR_STATE_DIR", str(tmp_path / "update_state"))
     main_window = sys.modules.get("opennmr.gui.main_window")
     if main_window is not None:
         monkeypatch.setattr(main_window.MainWindow, "_UI_SETTINGS_PATH",
