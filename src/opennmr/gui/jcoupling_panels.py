@@ -27,6 +27,7 @@ from io import StringIO
 from typing import Callable
 
 import numpy as np
+from .widgets.typed_spinbox import TypedSpinBox
 from .widgets.report_label import ReportLabel
 from .widgets.ranges_edit import PpmRangesEdit
 from .widgets.field_input import MAX_FIELD_T, FieldSpinBox, proton_frequency_box
@@ -35,7 +36,7 @@ from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
     QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMenu, QMessageBox, QPushButton,
-    QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .fit_progress_dialog import FitProgress
@@ -1158,7 +1159,7 @@ class JCouplingSimulationPanel(QWidget):
             spin.setSuffix(" ppm")
         axis.addRow("Axis min:", self.ppm_min_spin)
         axis.addRow("Axis max:", self.ppm_max_spin)
-        self.points_spin = QSpinBox()
+        self.points_spin = TypedSpinBox()
         self.points_spin.setRange(0, 1 << 21)
         self.points_spin.setSpecialValueText("auto")
         self.points_spin.setValue(0)

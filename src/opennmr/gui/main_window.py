@@ -40,6 +40,7 @@ from .widgets.notes_editor import ExperimentNotesEditor
 from .widgets.advice_box import AdviceBox
 from .widgets.side_drawer import SideDrawer
 from .widgets.field_input import link_field
+from .numeric_locale import use_decimal_point
 from .widgets.typed_spinbox import LengthSpinBox, TypedDoubleSpinBox, TypedSpinBox
 from .widgets import wheel_guard
 from .cpmg_panel import CpmgProcessingPanel
@@ -54,6 +55,8 @@ from ..notebook import fit_advice as nb_fit_advice
 from ..notebook import relaxometry as nb_relaxometry
 from ..notebook import fit_correlation as nb_fit_correlation
 from ..notebook import intensity_scaling
+from ..notebook import slice_phase
+from ..notebook import drift_correction as nb_drift_correction
 from ..notebook import fit_ranges as nb_fit_ranges
 from PySide6.QtGui import QColor
 
@@ -477,9 +480,18 @@ _WINDOW_ITEMS = [
 #: 1024 specifically), rather than an arbitrary integer spinbox.
 _ZERO_FILL_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
 
+#: The zero-fill combo's "None (do not zero-fill)" choice. Never a size
+#: itself: :meth:`MainWindow._zero_fill_value` turns it into the length of
+#: the FID actually transformed. 0 is also what ``processing.ft.zero_fill``
+#: reads as "leave the FID as it is" in the notebook.
+_NO_ZERO_FILL = 0
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
+        # Full stop as the decimal point in every number box, whatever the
+        # computer's regional settings (numeric_locale).
+        use_decimal_point()
         super().__init__()
         # Compare entries the user dragged in from Open experiments --
         # kept through selection-driven rebuilds of the Compare list.
@@ -4581,7 +4593,7 @@ class MainWindow(QMainWindow):
         self.output_linewidth_spin.valueChanged.connect(self._on_output_style_changed)
         style_form.addRow("Axis/spine linewidth:", self.output_linewidth_spin)
 
-        self.output_fontsize_spin = QSpinBox()
+        self.output_fontsize_spin = TypedSpinBox()
         self.output_fontsize_spin.setRange(6, 40)
         self.output_fontsize_spin.setValue(MplCanvas._AXIS_LABELSIZE)
         self.output_fontsize_spin.valueChanged.connect(self._on_output_style_changed)
@@ -4600,10 +4612,36 @@ class MainWindow(QMainWindow):
         for family in nb_fonts.GENERIC_FAMILIES:
             self.output_font_family_combo.addItem(family, family)
         self.output_font_family_combo.insertSeparator(self.output_font_family_combo.count())
+        # Each face is previewed in itself -- but only if Qt itself knows
+        # it. matplotlib also lists faces Qt cannot load (macOS fonts that
+        # are not installed locally, e.g. "Athelas"); asking Qt for one
+        # makes it rebuild its whole font-alias table ("Populating font
+        # family aliases took 80 ms. Replace uses of missing font family
+        # 'Athelas'", seen in a user's terminal, 2026-10-20). Those stay in
+        # the list, drawn in the menu font.
+        qt_families = set(QFontDatabase.families())
+        # matplotlib's own bundled faces (DejaVu ...) are not system fonts, so
+        # Qt does not know them until they are loaded from the files.
+        try:
+            from pathlib import Path
+            from matplotlib import font_manager, get_data_path
+            bundled_dir = Path(get_data_path()) / "fonts" / "ttf"
+            loaded = set()
+            for entry in font_manager.fontManager.ttflist:
+                if (entry.name not in qt_families and entry.fname not in loaded
+                        and Path(entry.fname).parent == bundled_dir):
+                    loaded.add(entry.fname)
+                    QFontDatabase.addApplicationFont(str(entry.fname))
+            if loaded:
+                qt_families = set(QFontDatabase.families())
+        except Exception:            # previews are cosmetic -- never block the window
+            pass
         for family in nb_fonts.available_fonts():
             self.output_font_family_combo.addItem(family, family)
-            self.output_font_family_combo.setItemData(
-                self.output_font_family_combo.count() - 1, QFont(family), Qt.ItemDataRole.FontRole)
+            if family in qt_families:
+                self.output_font_family_combo.setItemData(
+                    self.output_font_family_combo.count() - 1, QFont(family),
+                    Qt.ItemDataRole.FontRole)
         self.output_font_family_combo.setMaxVisibleItems(20)
         self._narrow_combo(self.output_font_family_combo)
         self.output_font_family_combo.setToolTip(
@@ -4673,7 +4711,7 @@ class MainWindow(QMainWindow):
         # and the Relaxation tab's DOSY levels box set. Explicit user
         # request: "change number of contour levels directly (linked to
         # the other boxes where it might be used)".
-        self.output_contour_levels_spin = QSpinBox()
+        self.output_contour_levels_spin = TypedSpinBox()
         self.output_contour_levels_spin.setRange(2, 200)
         self.output_contour_levels_spin.setValue(MplCanvas._CONTOUR_CLEVELS_DEFAULT)
         self.output_contour_levels_spin.setToolTip(
@@ -4771,7 +4809,7 @@ class MainWindow(QMainWindow):
         self.output_stack_gap_spin.valueChanged.connect(self._on_output_style_changed)
         style_form.addRow("Gap between stacked spectra:", self.output_stack_gap_spin, section="Compare")
 
-        self.output_contour_fraction_spin = QSpinBox()
+        self.output_contour_fraction_spin = TypedSpinBox()
         self.output_contour_fraction_spin.setRange(1, 100)
         self.output_contour_fraction_spin.setValue(25)  # matches plotting.plot_2d_contour's own default (0.25)
         self.output_contour_fraction_spin.setSuffix("%")
@@ -4796,7 +4834,7 @@ class MainWindow(QMainWindow):
         self.output_nq_line_checkbox.toggled.connect(self._on_nq_line_changed)
         style_form.addRow(self.output_nq_line_checkbox, section="2-D")
 
-        self.output_nq_value_spin = QSpinBox()
+        self.output_nq_value_spin = TypedSpinBox()
         self.output_nq_value_spin.setRange(1, 8)
         self.output_nq_value_spin.setValue(1)
         self.output_nq_value_spin.setEnabled(False)
@@ -4872,7 +4910,7 @@ class MainWindow(QMainWindow):
         self.output_legend_frame_checkbox.toggled.connect(self._on_legend_appearance_changed)
         style_form.addRow(self.output_legend_frame_checkbox, section="Legend")
 
-        self.output_legend_fontsize_spin = QSpinBox()
+        self.output_legend_fontsize_spin = TypedSpinBox()
         self.output_legend_fontsize_spin.setRange(0, 40)
         self.output_legend_fontsize_spin.setValue(0)
         self.output_legend_fontsize_spin.setSpecialValueText("Match axes")
@@ -6377,7 +6415,7 @@ class MainWindow(QMainWindow):
         # --- Interface ------------------------------------------------
         interface = QWidget()
         interface_form = QFormLayout(interface)
-        self.ui_font_size_spin = QSpinBox()
+        self.ui_font_size_spin = TypedSpinBox()
         self.ui_font_size_spin.setRange(*self.UI_FONT_SIZE_RANGE)
         self.ui_font_size_spin.setSuffix(" pt")
         self.ui_font_size_spin.setValue(self._default_ui_point_size())
@@ -6479,7 +6517,7 @@ class MainWindow(QMainWindow):
         # what to try next (core.fit_progress.FitNotConverged).
         fitting = QWidget()
         fitting_form = QFormLayout(fitting)
-        self.max_iterations_spin = QSpinBox()
+        self.max_iterations_spin = TypedSpinBox()
         self.max_iterations_spin.setRange(1, 1_000_000)
         self.max_iterations_spin.setSingleStep(500)
         self.max_iterations_spin.setGroupSeparatorShown(True)
@@ -6700,6 +6738,18 @@ class MainWindow(QMainWindow):
         open_style_button.clicked.connect(self._on_plot_style_clicked)
         defaults_layout.addWidget(open_style_button)
         layout.addWidget(CollapsibleSection("Default plot styles", content=defaults))
+
+        # --- Updates -------------------------------------------------
+        # Settings ▸ Updates (gui/update_panel.py over opennmr.update):
+        # find out whether a newer openNMR exists and, for a pip install,
+        # upgrade to it from here (opennmr.update_install).
+        from .update_panel import UpdatesPanel, schedule_startup_check
+        self.updates_panel = UpdatesPanel(
+            self._ui_settings, save=self._save_ui_settings,
+            notify=lambda text: self.statusBar().showMessage(text, 15000), parent=self)
+        self.updates_section = CollapsibleSection("Updates", content=self.updates_panel)
+        layout.addWidget(self.updates_section)
+        schedule_startup_check(self.updates_panel)
 
         layout.addStretch(1)
         self._refresh_settings_type_rows()
@@ -8047,13 +8097,23 @@ class MainWindow(QMainWindow):
         form.addRow("Sine-bell shift (SSB):", self.ssb_spin)
 
         self.zero_fill_combo = QComboBox()
+        # Explicit user request (2026-10-20): "do not zero fill" as a
+        # choice of its own, rather than having to type the number of
+        # points acquired. Data _NO_ZERO_FILL (0) is resolved to that
+        # number by _zero_fill_value, so it follows Truncate to / linear
+        # prediction and never reaches a reader as a size.
+        self.zero_fill_combo.addItem("None (do not zero-fill)", _NO_ZERO_FILL)
         for size in _ZERO_FILL_SIZES:
             self.zero_fill_combo.addItem(f"{size // 1024}k ({size} pts)", size)
         self.zero_fill_combo.addItem("Custom…", None)
         self.zero_fill_combo.setToolTip(
             "FFT size -- zero-fills (or truncates) the FID to this many "
             "points. Defaults to the nearest standard size at or above "
-            "2x the acquired points."
+            "2x the acquired points.\n\n"
+            "None (do not zero-fill): the FFT is exactly as long as the FID "
+            "going into it -- the points acquired, or Truncate to's, plus "
+            "any linear-prediction points. In Custom, type 2k, 8k, 16k… for "
+            "2048, 8192, 16384…"
         )
         self.zero_fill_combo.currentIndexChanged.connect(self._on_zero_fill_combo_changed)
         form.addRow("Zero-fill to:", self.zero_fill_combo)
@@ -8148,7 +8208,7 @@ class MainWindow(QMainWindow):
         self.fid_shift_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("FID shift:", self.fid_shift_spin)
 
-        self.linear_predict_points_spin = QSpinBox()
+        self.linear_predict_points_spin = TypedSpinBox()
         self.linear_predict_points_spin.setRange(0, 1 << 16)
         self.linear_predict_points_spin.setToolTip(
             "Extend (Forward) or reconstruct (Backward, see the "
@@ -8161,7 +8221,7 @@ class MainWindow(QMainWindow):
         self.linear_predict_points_spin.valueChanged.connect(lambda _v: self._on_fid_processing_control_changed())
         form.addRow("Linear-predict points:", self.linear_predict_points_spin)
 
-        self.linear_predict_order_spin = QSpinBox()
+        self.linear_predict_order_spin = TypedSpinBox()
         self.linear_predict_order_spin.setRange(1, 1000)
         self.linear_predict_order_spin.setValue(20)
         self.linear_predict_order_spin.setToolTip("Linear-prediction model order (only used when points > 0).")
@@ -8411,6 +8471,18 @@ class MainWindow(QMainWindow):
         size = self._zero_fill_choice()
         acquired = getattr(self, "_truncate_acquired_points", None)
         tdeff = self.tdeff_spin.value() if self.tdeff_spin.isEnabled() else 0
+        if size == _NO_ZERO_FILL:
+            # Do not zero-fill: transform exactly what is there -- the
+            # FID as truncated (or padded, if Truncate to went past the
+            # acquired points), plus whatever linear prediction adds.
+            length = tdeff if tdeff > 0 else (acquired or 0)
+            if not length:
+                index = self._selected_index()
+                if index is not None:
+                    length = int(np.asarray(self.session.spectra[index].data).shape[-1])
+            if length:
+                return length + int(self.linear_predict_points_spin.value())
+            return _NO_ZERO_FILL        # nothing open: zero_fill(fid, 0) leaves a FID alone
         if acquired and tdeff > acquired:
             return max(size, tdeff)
         return size
@@ -11827,7 +11899,7 @@ class MainWindow(QMainWindow):
         self.dimension_box = QWidget()
         dim_form = QFormLayout(self.dimension_box)
 
-        self.slice_spin = QSpinBox()
+        self.slice_spin = TypedSpinBox()
         self.slice_spin.setMinimum(1)
         self.slice_spin.setToolTip(
             "Which pseudo-2D slice (1-based, matching TopSpin's own "
@@ -11984,6 +12056,28 @@ class MainWindow(QMainWindow):
             "that offers joint phasing."
         )
         autophase_row.addWidget(self.autophase_joint_checkbox)
+
+        # Explicit user request (2026-10-20): per-slice independent
+        # autophasing as an option of its own -- "do not use the phase of
+        # slice 1 to then apply to slice 2" -- not something that only
+        # "Apply to every slice" (which also decides whether a phase
+        # *drag* is shared by all slices) could bring about.
+        self.autophase_each_slice_checkbox = QCheckBox("Each slice independently")
+        self.autophase_each_slice_checkbox.setToolTip(
+            "Pseudo-2D only. Autophase finds a phase for every slice on its "
+            "own and applies it to that slice alone -- no slice's phase is "
+            "taken from, or applied to, another. Works whatever “Apply to "
+            "every slice” says (that box only decides whether dragging the "
+            "phase moves every slice together). With “1st-order” ticked, each "
+            "slice also gets its own Phase 1 where it helps.\n\n"
+            "Unticked, Autophase phases the selected slice alone.\n\n"
+            "Not for an inversion-recovery series: its slices change sign on "
+            "purpose, and phasing each independently would flip the negative "
+            "ones positive. Phase one slice and apply it to all instead.\n\n"
+            "Notebook: opennmr.notebook.autophase_slices(spectrum)."
+        )
+        self.autophase_each_slice_checkbox.setVisible(False)    # shown for a pseudo-2D
+        autophase_row.addWidget(self.autophase_each_slice_checkbox)
         form.addRow(autophase_row)
 
         self.revert_autophase_button = QPushButton("Revert Autophase")
@@ -12116,7 +12210,7 @@ class MainWindow(QMainWindow):
             self._on_baseline_spline_mode_changed)
         baseline_options_row.addWidget(self.baseline_spline_mode_combo)
 
-        self.baseline_degree_spin = QSpinBox()
+        self.baseline_degree_spin = TypedSpinBox()
         self.baseline_degree_spin.setRange(1, 12)
         self.baseline_degree_spin.setValue(2)
         # Prefixed, not labelled: this row now holds one control per
@@ -12185,7 +12279,7 @@ class MainWindow(QMainWindow):
         # data-derived period. Explicit user request: "add some
         # controllable options to adjust the polynomial and sinusoidal
         # baselines".
-        self.baseline_harmonics_spin = QSpinBox()
+        self.baseline_harmonics_spin = TypedSpinBox()
         self.baseline_harmonics_spin.setRange(1, 8)
         self.baseline_harmonics_spin.setValue(1)
         self.baseline_harmonics_spin.setPrefix("harmonics ")
@@ -12218,7 +12312,7 @@ class MainWindow(QMainWindow):
 
         # Automatic cubic spline (user request, 2026-10-06): how many
         # stretches the baseline is split into, one node per stretch.
-        self.baseline_points_spin = QSpinBox()
+        self.baseline_points_spin = TypedSpinBox()
         self.baseline_points_spin.setRange(0, 200)
         self.baseline_points_spin.setValue(0)
         self.baseline_points_spin.setPrefix("points ")
@@ -12914,7 +13008,7 @@ class MainWindow(QMainWindow):
         freq_ppm = self._phase_freq_ppm
         spread = None
         if self._phase_mode == "pseudo2d":
-            if self.apply_all_slices_checkbox.isChecked():
+            if self.apply_all_slices_checkbox.isChecked() or self.autophase_each_slice_checkbox.isChecked():
                 # "Every slice", automatically: each row's own phase0,
                 # not one shared value broadcast over rows that may
                 # disagree about theirs. Applies and records in place
@@ -12978,7 +13072,8 @@ class MainWindow(QMainWindow):
         already the quick route, so it is not asked about."""
         if self._phase_mode == "2d":
             return True
-        return self._phase_mode == "pseudo2d" and self.apply_all_slices_checkbox.isChecked()
+        return self._phase_mode == "pseudo2d" and (
+            self.apply_all_slices_checkbox.isChecked() or self.autophase_each_slice_checkbox.isChecked())
 
     def _confirm_full_2d_autophase(self) -> bool:
         """Ask before a full 2-D autophase (:attr:`FULL_2D_AUTOPHASE_
@@ -13048,8 +13143,8 @@ class MainWindow(QMainWindow):
             return
         message = (
             f"Slices disagree about their phase (spanning ~{spread:.0f}°) — this slice is now "
-            f"phased, but the others need their own. Tick “Apply to every slice” and Autophase "
-            f"again to phase each slice independently."
+            f"phased, but the others need their own. Tick “Each slice independently” (or "
+            f"“Apply to every slice”) and Autophase again to phase each slice independently."
         )
         # Deliberately **not** a modal dialog. Autophase is a
         # one-keystroke action a user may repeat while trying settings,
@@ -14156,28 +14251,18 @@ class MainWindow(QMainWindow):
         if not (spectrum.ndim == 2 and spectrum.is_pseudo_2d and spectrum.data_imag is not None):
             return
 
-        freq_ppm = spectrum.axis_values(-1, "ppm")
-        complex_data = spectrum.complex_data
-        phased = np.empty_like(complex_data)
-        found = []
-        for row in range(complex_data.shape[0]):
-            # A coarser grid than apc0's own 0.1 deg default -- run
-            # once per slice, so this stays quick across a series with
-            # many slices rather than needing a progress indicator.
-            phase0 = processing_ft.apc0(complex_data[row], freq_ppm, phase0_inc=0.5)
-            found.append(phase0)
-            phased[row] = processing_ft.apply_phase(complex_data[row], freq_ppm, phase0, 0.0)
-
-        spectrum.data = np.real(phased)
-        spectrum.data_imag = np.imag(phased)
-        # Recorded, not just applied. Each row's correction is measured
-        # against the data as it stands, so it adds to whatever that
-        # row already carried -- and recording it is what lets the
-        # Processing tab's preview, a reprocess and the next session
-        # all reproduce this result instead of quietly reverting to the
+        # The notebook's own function: one implementation for both. It
+        # phases each row on its own (zero-order, or with the "1st-order"
+        # box ticked also first-order where that demonstrably helps),
+        # applies it in place and records it per slice -- recorded, not
+        # just applied, because each row's correction is measured against
+        # the data as it stands, and recording it is what lets the
+        # Processing tab's preview, a reprocess and the next session all
+        # reproduce this result instead of quietly reverting to the
         # shared phase.
-        for row, phase0 in enumerate(found):
-            self._add_slice_phase(spectrum, row, phase0, 0.0)
+        slice_phase.autophase_slices(
+            spectrum, joint=self.autophase_joint_checkbox.isChecked(),
+            pivot_ppm=self.pivot_spin.value())
         self._schedule_sidecar_save(index)
         # The underlying data has genuinely changed -- re-anchor the
         # Phase controls to it (same as a fresh selection), rather than
@@ -14575,14 +14660,7 @@ class MainWindow(QMainWindow):
         unwrapped, for the same reasons
         :meth:`_commit_pending_phase_to_metadata` gives for the
         dataset-wide pair."""
-        n_rows = spectrum.data.shape[0]
-        for key, delta, wrap in zip(cls._SLICE_PHASE_KEYS, (delta0, delta1), (True, False)):
-            values = list(spectrum.metadata.raw.get(key) or ())
-            values = (values + [0.0] * n_rows)[:n_rows]
-            if 0 <= row < n_rows:
-                total = float(values[row]) + float(delta)
-                values[row] = total % 360.0 if wrap else total
-            spectrum.metadata.raw[key] = values
+        slice_phase.add_slice_phase(spectrum, row, delta0, delta1)
 
     def _commit_pending_phase_to_metadata(self) -> None:
         """Fold the phase delta currently showing in the Phase 0/Phase 1
@@ -15030,6 +15108,7 @@ class MainWindow(QMainWindow):
             self.phase0_handle, self.phase0_spin, self.phase0_current_display,
             self.phase1_handle, self.phase1_spin, self.phase1_current_display,
             self.pivot_spin, self.pivot_slider, self.autophase_joint_checkbox,
+            self.autophase_each_slice_checkbox,
             self.baseline_correct_button, self.baseline_method_combo, self.baseline_smoothing_spin,
             self.baseline_points_spin, self.baseline_manual_box,
         ):
@@ -17518,7 +17597,7 @@ class MainWindow(QMainWindow):
             "shape's naive bandwidth (4/duration), the original's default.")
         self.bloch_offset_spin.setSpecialValueText("auto")
         sweep_form.addRow("± Offset:", self.bloch_offset_spin)
-        self.bloch_n_offsets_spin = QSpinBox()
+        self.bloch_n_offsets_spin = TypedSpinBox()
         self.bloch_n_offsets_spin.setRange(3, 5001)
         self.bloch_n_offsets_spin.setValue(401)
         self.bloch_n_offsets_spin.setToolTip("Number of offsets across the sweep.")
@@ -17773,7 +17852,7 @@ class MainWindow(QMainWindow):
         self._add_powder_scheme_tip(self.sim_csa_powder_combo)
         form.addRow("Powder averaging:", self.sim_csa_powder_combo)
 
-        self.sim_csa_orientations_spin = QSpinBox()
+        self.sim_csa_orientations_spin = TypedSpinBox()
         self.sim_csa_orientations_spin.setRange(50, 500000)
         self.sim_csa_orientations_spin.setSingleStep(500)
         self.sim_csa_orientations_spin.setValue(4000)
@@ -17868,7 +17947,7 @@ class MainWindow(QMainWindow):
         self.sim_csa_sites.changed.connect(self._sync_sim_csa_axis)
         self._sync_sim_csa_axis()
 
-        self.sim_csa_points_spin = QSpinBox()
+        self.sim_csa_points_spin = TypedSpinBox()
         self.sim_csa_points_spin.setRange(64, 1 << 20)
         self.sim_csa_points_spin.setValue(4096)
         axis_form.addRow("Axis points:", self.sim_csa_points_spin)
@@ -18172,7 +18251,7 @@ class MainWindow(QMainWindow):
         self._add_powder_scheme_tip(self.sim_quad_powder_combo)
         form.addRow("Powder averaging:", self.sim_quad_powder_combo)
 
-        self.sim_quad_orientations_spin = QSpinBox()
+        self.sim_quad_orientations_spin = TypedSpinBox()
         self.sim_quad_orientations_spin.setRange(50, 500000)
         self.sim_quad_orientations_spin.setSingleStep(500)
         self.sim_quad_orientations_spin.setValue(4000)
@@ -18224,7 +18303,7 @@ class MainWindow(QMainWindow):
         for spin in (self.sim_quad_ppm_min_spin, self.sim_quad_ppm_max_spin):
             spin.valueChanged.connect(lambda _v: self.sim_quad_auto_axis_check.setChecked(False))
 
-        self.sim_quad_points_spin = QSpinBox()
+        self.sim_quad_points_spin = TypedSpinBox()
         self.sim_quad_points_spin.setRange(64, 1 << 20)
         self.sim_quad_points_spin.setValue(4096)
         form.addRow("Axis points:", self.sim_quad_points_spin)
@@ -18979,7 +19058,7 @@ class MainWindow(QMainWindow):
         self._add_powder_scheme_tip(self.csa_powder_combo)
         form.addRow("Powder averaging:", self.csa_powder_combo)
 
-        self.csa_orientations_spin = QSpinBox()
+        self.csa_orientations_spin = TypedSpinBox()
         self.csa_orientations_spin.setRange(50, 200000)
         self.csa_orientations_spin.setSingleStep(500)
         self.csa_orientations_spin.setValue(320)
@@ -18991,7 +19070,7 @@ class MainWindow(QMainWindow):
         )
         form.addRow("Orientations (fitting):", self.csa_orientations_spin)
 
-        self.csa_render_orientations_spin = QSpinBox()
+        self.csa_render_orientations_spin = TypedSpinBox()
         self.csa_render_orientations_spin.setRange(20, 500000)
         self.csa_render_orientations_spin.setSingleStep(20)
         self.csa_render_orientations_spin.setValue(320)
@@ -19364,7 +19443,7 @@ class MainWindow(QMainWindow):
         peak_slice_layout = QHBoxLayout(self.peak_slice_row)
         peak_slice_layout.setContentsMargins(0, 0, 0, 0)
         peak_slice_layout.addWidget(QLabel("Pick on slice:"))
-        self.peak_slice_spin = QSpinBox()
+        self.peak_slice_spin = TypedSpinBox()
         self.peak_slice_spin.setRange(1, 1)
         # Wraps, per explicit user request: "if there's a box with a
         # number, pressing down on the lowest should cycle back to the
@@ -19504,7 +19583,7 @@ class MainWindow(QMainWindow):
         anchor_row = QHBoxLayout()
         self.anchor_slice_label = QLabel("Anchor slice:")
         anchor_row.addWidget(self.anchor_slice_label)
-        self.anchor_slice_spin = QSpinBox()
+        self.anchor_slice_spin = TypedSpinBox()
         self.anchor_slice_spin.setMinimum(1)
         self.anchor_slice_spin.setValue(1)
         self.anchor_slice_spin.setToolTip(
@@ -19646,7 +19725,7 @@ class MainWindow(QMainWindow):
         # below is Fit Curve's per-peak relaxation/diffusion result.
         slice_fit_row = QHBoxLayout()
         slice_fit_row.addWidget(QLabel("Spectrum fit (slice #):"))
-        self.view_slice_fit_spin = QSpinBox()
+        self.view_slice_fit_spin = TypedSpinBox()
         self.view_slice_fit_spin.setMinimum(1)
         self.view_slice_fit_spin.setEnabled(False)
         self.view_slice_fit_spin.setToolTip(
@@ -19942,7 +20021,7 @@ class MainWindow(QMainWindow):
 
         # --- Generalised N-component diffusion ---------------------
         self.diffusion_components_row_label = QLabel("Components:")
-        self.diffusion_components_spin = QSpinBox()
+        self.diffusion_components_spin = TypedSpinBox()
         self.diffusion_components_spin.setRange(1, 6)
         self.diffusion_components_spin.setValue(2)
         self.diffusion_components_spin.setToolTip(
@@ -20015,7 +20094,7 @@ class MainWindow(QMainWindow):
         # convention, and the user's: "you can make e.g. a vdlist that
         # is 24 points long and then set the F1 TD to be 10 and you
         # will just use the first 10 values." 0 means every slice.
-        self.slice_limit_spin = QSpinBox()
+        self.slice_limit_spin = TypedSpinBox()
         self.slice_limit_spin.setRange(0, 100000)
         self.slice_limit_spin.setValue(0)
         self.slice_limit_spin.setSpecialValueText("all")
@@ -20652,7 +20731,7 @@ class MainWindow(QMainWindow):
         relax_fit_row = QHBoxLayout(self.curve_peak_bar)
         relax_fit_row.setContentsMargins(0, 0, 0, 0)
         relax_fit_row.addWidget(QLabel("View curve fit (peak #):"))
-        self.view_relaxation_peak_spin = QSpinBox()
+        self.view_relaxation_peak_spin = TypedSpinBox()
         self.view_relaxation_peak_spin.setMinimum(1)
         self.view_relaxation_peak_spin.setEnabled(False)
         self.view_relaxation_peak_spin.setToolTip(
@@ -20835,7 +20914,7 @@ class MainWindow(QMainWindow):
         self.dosy_display_box = QGroupBox("DOSY map display")
         dosy_form = QFormLayout(self.dosy_display_box)
 
-        self.dosy_levels_spin = QSpinBox()
+        self.dosy_levels_spin = TypedSpinBox()
         self.dosy_levels_spin.setRange(1, 64)
         self.dosy_levels_spin.setValue(MplCanvas._DOSY_CLEVELS_DEFAULT)
         self.dosy_levels_spin.setToolTip(
@@ -22940,10 +23019,9 @@ class MainWindow(QMainWindow):
         if index is None:
             return "Select a spectrum first."
         spectrum = self.session.spectra[index]
-        if spectrum.metadata.vendor != "bruker" or spectrum.ndim != 2 \
-                or spectrum.metadata.raw.get("fid_raw") is None:
-            return ("Drift correction here needs a Bruker 2D or pseudo-2D read from its raw ser. "
-                    "Use Write Corrected Bruker Dataset… for other data.")
+        supported, why = nb_drift_correction.drift_support(spectrum)
+        if not supported:
+            return why
         if request is None and not spectrum.metadata.raw.get("drift_correction"):
             return None
         self._commit_pending_phase_to_metadata()
@@ -28992,6 +29070,7 @@ class MainWindow(QMainWindow):
         self.slice_prev_button.setVisible(is_pseudo2d)
         self.slice_next_button.setVisible(is_pseudo2d)
         self.apply_all_slices_checkbox.setVisible(is_pseudo2d)
+        self.autophase_each_slice_checkbox.setVisible(is_pseudo2d)
         self.dim_row_label.setVisible(is_2d)
         self.dim_combo.setVisible(is_2d)
 
@@ -29185,7 +29264,7 @@ class _DosySettingsDialog(QDialog):
         self.d_max_spin.setSuffix(" m²/s")
         form.addRow("D to:", self.d_max_spin)
 
-        self.n_grid_spin = QSpinBox()
+        self.n_grid_spin = TypedSpinBox()
         self.n_grid_spin.setRange(16, 512)
         self.n_grid_spin.setValue(128)
         self.n_grid_spin.setToolTip("Points on the (log-spaced) diffusion axis.")
@@ -29408,7 +29487,7 @@ class _ScoreSettingsDialog(QDialog):
         self.method_combo.currentIndexChanged.connect(self._on_method_changed)
         form.addRow("Method:", self.method_combo)
 
-        self.components_spin = QSpinBox()
+        self.components_spin = TypedSpinBox()
         self.components_spin.setRange(1, 8)
         self.components_spin.setValue(max(1, suggested))
         self.components_spin.setToolTip(

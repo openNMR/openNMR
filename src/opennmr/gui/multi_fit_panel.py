@@ -34,10 +34,11 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMenu,
-    QMessageBox, QProgressDialog, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QMessageBox, QProgressDialog, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from ..core.acquisition import acquisition_constants
 from ..io import serialize
 from ..notebook import fit_ranges
@@ -322,7 +323,7 @@ class MultiFitPanel(QWidget):
         self.order_combo.addItem("Exact (diagonalization)", "exact")
         self.order_combo.addItem("First-order only", "first")
         form.addRow("Quadrupolar theory:", self.order_combo)
-        self.orientations_spin = QSpinBox()
+        self.orientations_spin = TypedSpinBox()
         self.orientations_spin.setRange(0, 500000)
         self.orientations_spin.setSingleStep(500)
         self.orientations_spin.setSpecialValueText("auto")
@@ -340,7 +341,7 @@ class MultiFitPanel(QWidget):
             "Fitted in each spectrum's own fit, starting from its MAS (Hz) column; a joint "
             "refinement then holds each at its fitted value. The recorded rate is often a "
             "little off, and the sidebands are very sensitive to it. Off by default.")
-        self.mas_window_spin = QSpinBox()
+        self.mas_window_spin = TypedSpinBox()
         self.mas_window_spin.setRange(1, 20000)
         self.mas_window_spin.setValue(500)
         self.mas_window_spin.setSuffix(" Hz")

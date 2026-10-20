@@ -715,7 +715,8 @@ def is_spinsolve_diffusion(path: str) -> bool:
 
 def read_spectrum(path: str, source: str = "data.2d",
                   line_broadening: float | None = None,
-                  zero_fill: int | None = None, **_ignored):
+                  zero_fill: int | None = None, drift_correction: dict | None = None,
+                  **_ignored):
     """Read a Spinsolve PGSTE folder as a pseudo-2D
     :class:`~opennmr.core.spectrum.NMRSpectrum` (one row per gradient
     step), processed exactly as :meth:`SpinsolvePFG.spectra` does --
@@ -756,6 +757,16 @@ def read_spectrum(path: str, source: str = "data.2d",
     from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
 
     pfg = read_spinsolve_pfg(path, source=source)
+    drift_record = None
+    if drift_correction:
+        # Linear field-drift correction of the raw FIDs, step by step in
+        # acquisition order (see notebook.drift_correction).
+        from ..notebook import drift_correction as _dc
+        pfg.fid = _dc.correct_pseudo_2d_fids(
+            pfg.fid, pfg.dwell, start_hz=drift_correction.get("start_hz", 0.0),
+            end_hz=drift_correction.get("end_hz"), shifts_hz=drift_correction.get("shifts_hz"),
+            endpoint=bool(drift_correction.get("endpoint", True)))
+        drift_record = _dc.pseudo_2d_record(pfg.fid.shape[0], drift_correction, "Spinsolve")
     applied_lb = pfg.display_line_broadening() if line_broadening is None else float(line_broadening)
     applied_zf = int(pfg.acqu.get("zeroFill", 1) or 1) if zero_fill is None else int(zero_fill)
     spec = pfg.spectra(line_broadening=applied_lb, zero_fill=applied_zf)
@@ -806,6 +817,7 @@ def read_spectrum(path: str, source: str = "data.2d",
             "fid_dt": pfg.dwell,
             "reference_fit": pfg.reference_fit,
             "acqu": pfg.acqu,
+            **({"drift_correction": drift_record} if drift_record is not None else {}),
         },
     )
     return NMRSpectrum(
@@ -1211,6 +1223,11 @@ def read_spinsolve_standard(path: str, **kwargs):
     """A plain Spinsolve 1D or 2D folder (``data.2d`` wins when both
     are present -- a 2D folder can also carry a 1D row)."""
     if os.path.isfile(os.path.join(path, "data.2d")):
+        if kwargs.get("drift_correction"):
+            # A genuine 2D has an indirect dimension that a direct-only
+            # correction would leave uncorrected: refuse rather than half-do it.
+            from ..notebook import drift_correction as _dc
+            raise ValueError(_dc.NOT_SUPPORTED_MESSAGE)
         return read_spinsolve_2d(path, **kwargs)
     return read_spinsolve_1d(path, **kwargs)
 

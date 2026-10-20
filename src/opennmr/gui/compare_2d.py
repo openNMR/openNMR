@@ -19,9 +19,10 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-    QListWidget, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QListWidget, QPushButton, QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from ..plotting.twod import INSET_CORNERS, MAX_OVERLAY_SPECTRA
 
 LAYOUTS = (("Overlay", "overlay"), ("Side by side: row", "row"),
@@ -68,7 +69,7 @@ class Compare2DControls(QGroupBox):
             "Takes effect at once.")
         self.link_check.toggled.connect(self.link_toggled)
         form.addRow(self.link_check)
-        self.copies_spin = QSpinBox()
+        self.copies_spin = TypedSpinBox()
         self.copies_spin.setRange(1, 4)
         self.copies_spin.setValue(1)
         self.copies_spin.setToolTip(
@@ -88,7 +89,7 @@ class Compare2DControls(QGroupBox):
         self.floor_spin.setSuffix(" %")
         self.floor_spin.setToolTip("Lowest contour, as a percentage of each spectrum's own maximum.")
         form.addRow("Lowest contour:", self.floor_spin)
-        self.levels_spin = QSpinBox()
+        self.levels_spin = TypedSpinBox()
         self.levels_spin.setRange(2, 40)
         self.levels_spin.setValue(7)
         form.addRow("Contour levels:", self.levels_spin)
@@ -127,7 +128,7 @@ class Compare2DControls(QGroupBox):
         self.corner_combo = QComboBox()
         self.corner_combo.addItems(_CORNERS)
         edit_form.addRow("Corner:", self.corner_combo)
-        self.size_spin = QSpinBox()
+        self.size_spin = TypedSpinBox()
         self.size_spin.setRange(10, 90)
         self.size_spin.setSuffix(" %")
         self.size_spin.setToolTip("Side of the (square) inset, as a percentage of the panel.")

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from .fit_progress_dialog import FitProgress
 from .widgets.report_label import ReportLabel
 from . import report_format
@@ -164,7 +165,7 @@ class InteractionEditor(QGroupBox):
             self.partner.setToolTip("Coupling partner. Its spin and natural abundance come from "
                                     "the nuclide table (a low-abundance partner gives satellites).")
             self.partner.currentTextChanged.connect(self._write_partner)
-            self.n = QSpinBox()
+            self.n = TypedSpinBox()
             self.n.setRange(1, 20)
             self.n.setValue(int(data["n"]))
             self.n.setToolTip("Number of equivalent partner nuclei with this J.")
@@ -301,7 +302,7 @@ class CombinedHamiltonianPanel(QWidget):
                                     "first order, which is exact to ~1e-6 of their size.")
         self.order_combo.currentIndexChanged.connect(self._sync_theory_combos)
         form.addRow("Quadrupolar theory:", self.order_combo)
-        self.orientations_spin = QSpinBox()
+        self.orientations_spin = TypedSpinBox()
         self.orientations_spin.setRange(0, 500000)
         self.orientations_spin.setSingleStep(2000)
         self.orientations_spin.setSpecialValueText("auto")
@@ -489,7 +490,7 @@ class CombinedHamiltonianPanel(QWidget):
             box.valueChanged.connect(lambda _v: self.auto_axis_check.setChecked(False))
         aform.addRow("Axis min:", self.ppm_min_spin)
         aform.addRow("Axis max:", self.ppm_max_spin)
-        self.points_spin = QSpinBox()
+        self.points_spin = TypedSpinBox()
         self.points_spin.setRange(64, 1 << 20)
         self.points_spin.setValue(8192)
         aform.addRow("Axis points:", self.points_spin)
@@ -1528,7 +1529,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             "interactions and settings change -- the fit's own first step: same window, "
             "held baseline and amounts.")
         form.addRow("", self.preview_check)
-        self.preview_orientations_spin = QSpinBox()
+        self.preview_orientations_spin = TypedSpinBox()
         self.preview_orientations_spin.setRange(0, 500000)
         self.preview_orientations_spin.setSingleStep(500)
         self.preview_orientations_spin.setSpecialValueText("auto")
@@ -1538,7 +1539,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             "the converged shape, fast enough to follow each change). The fit itself uses "
             "Orientations above.")
         form.addRow("Preview orientations:", self.preview_orientations_spin)
-        self.screen_orientations_spin = QSpinBox()
+        self.screen_orientations_spin = TypedSpinBox()
         self.screen_orientations_spin.setRange(0, 500000)
         self.screen_orientations_spin.setSingleStep(500)
         self.screen_orientations_spin.setSpecialValueText("off")
@@ -2193,7 +2194,7 @@ class CombinedFitPanel(CombinedHamiltonianPanel):
             self.estimate_kind_combo.addItem(text, key)
         self.estimate_kind_combo.currentIndexChanged.connect(lambda _i: self._sync_estimate())
         form.addRow("Model:", self.estimate_kind_combo)
-        self.estimate_peaks_spin = QSpinBox()
+        self.estimate_peaks_spin = TypedSpinBox()
         self.estimate_peaks_spin.setRange(1, 50)
         self.estimate_peaks_spin.setValue(8)
         self.estimate_peaks_spin.setToolTip("At most this many peaks, tallest first.")

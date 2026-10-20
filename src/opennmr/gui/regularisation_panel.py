@@ -17,10 +17,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
     QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from ..notebook import regularisation as reg
 from .plot_options_dialog import PlotOptionsDialog
 from .widgets.report_label import ReportLabel
@@ -80,7 +81,7 @@ class _GridRow(QWidget):
         for edit in (self.low, self.high):
             edit.setMaximumWidth(90)
         self.unit = QComboBox()
-        self.points = QSpinBox()
+        self.points = TypedSpinBox()
         self.points.setRange(4, 1000)
         self.points.setValue(n)
         self.points.setSuffix(" pts")
@@ -200,7 +201,7 @@ class RegularisationPanel(QWidget):
             "Non-negative: the same functional with x ≥ 0 imposed exactly.")
         self.solver_combo.currentIndexChanged.connect(self._sync)
         form.addRow("Solver:", self.solver_combo)
-        self.iterations_spin = QSpinBox()
+        self.iterations_spin = TypedSpinBox()
         self.iterations_spin.setRange(0, 100000)
         self.iterations_spin.setValue(100)
         self.iterations_spin.setToolTip("The scripts' \"Number of Fitting iterations\". Keep it "
@@ -270,8 +271,8 @@ class RegularisationPanel(QWidget):
         self.file_button = QPushButton("Choose…")
         self.file_button.clicked.connect(self._choose_file_1d)
         self.file_name_label = QLabel("no file")
-        self.x_column_spin = QSpinBox()
-        self.y_column_spin = QSpinBox()
+        self.x_column_spin = TypedSpinBox()
+        self.y_column_spin = TypedSpinBox()
         for spin, value in ((self.x_column_spin, 1), (self.y_column_spin, 2)):
             spin.setRange(1, 99)
             spin.setValue(value)
@@ -353,10 +354,10 @@ class RegularisationPanel(QWidget):
         form.addRow("Indirect kernel:", self.kernel2_combo)
         form.addRow("Indirect grid:", self.grid2_row)
         thin = QHBoxLayout()
-        self.keep_first_spin = QSpinBox()
+        self.keep_first_spin = TypedSpinBox()
         self.keep_first_spin.setRange(0, 100000)
         self.keep_first_spin.setValue(0)
-        self.step_spin = QSpinBox()
+        self.step_spin = TypedSpinBox()
         self.step_spin.setRange(1, 1000)
         self.step_spin.setValue(1)
         thin.addWidget(QLabel("all of the first"))
@@ -385,7 +386,7 @@ class RegularisationPanel(QWidget):
         self.cmap_combo = QComboBox()
         for name in ("viridis", "magma", "cividis", "Blues", "Greys"):
             self.cmap_combo.addItem(name, name)
-        self.levels_spin = QSpinBox()
+        self.levels_spin = TypedSpinBox()
         self.levels_spin.setRange(2, 40)
         self.levels_spin.setValue(6)
         self.projections_check = QCheckBox("Projections on the map")

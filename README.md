@@ -21,6 +21,28 @@ arrayed/PFG experiments), Varian/Agilent (`fid`/`procpar`), JEOL Delta
   cleanly in a GUI canvas as well as standalone notebook figures.
 - `opennmr.gui` — PySide6 desktop shell.
 
+## Install from PyPI
+
+```
+pip install opennmr
+opennmr-gui
+```
+
+Python 3.12 or newer. The same package serves a notebook (`from opennmr
+import notebook`) and the GUI.
+
+### Updating
+
+Settings ▸ Updates shows the installed version and checks PyPI when you
+press **Check for Updates** (a check at start-up is off unless you turn it
+on). When a newer version exists, **Update to X and restart** closes
+openNMR, upgrades it with pip in the same Python environment, and opens it
+again; nothing is shown while it runs. If the new version does not start,
+the old one is put back, and Settings ▸ Updates says so the next time.
+Details are kept in `~/.opennmr/update.log`. Where pip may not change the
+environment (a system Python, say), the button is not offered and the
+command to run yourself is shown instead: `pip install --upgrade opennmr`.
+
 ## Install (editable, into an existing environment)
 
 ```

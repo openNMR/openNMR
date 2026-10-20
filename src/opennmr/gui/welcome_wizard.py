@@ -15,8 +15,10 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QLineEdit, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
+
+from .widgets.typed_spinbox import TypedSpinBox
 
 WEBSITE_URL = "https://opennmr.github.io/"
 
@@ -111,7 +113,7 @@ class WelcomeWizard(QDialog):
         form = QFormLayout()
         self.theme_combo = _copy_combo(w.ui_theme_combo)
         form.addRow("Appearance:", self.theme_combo)
-        self.font_spin = QSpinBox()
+        self.font_spin = TypedSpinBox()
         self.font_spin.setRange(w.ui_font_size_spin.minimum(), w.ui_font_size_spin.maximum())
         self.font_spin.setSuffix(" pt")
         self.font_spin.setValue(w.ui_font_size_spin.value())
@@ -188,7 +190,7 @@ class WelcomeWizard(QDialog):
         self.state_folder_edit = QLineEdit(w.state_folder_edit.text())
         form.addRow("Save states in:", self._with_browse(self.state_folder_edit,
                                                          "Folder for saved openNMR states"))
-        self.iterations_spin = QSpinBox()
+        self.iterations_spin = TypedSpinBox()
         self.iterations_spin.setRange(w.max_iterations_spin.minimum(), w.max_iterations_spin.maximum())
         self.iterations_spin.setSingleStep(500)
         self.iterations_spin.setGroupSeparatorShown(True)
@@ -246,6 +248,7 @@ class WelcomeWizard(QDialog):
         if self.current_page() >= self.page_count - 1:
             self.apply()
             self.accept()
+            self.list_data_folder()
             return
         self.stack.setCurrentIndex(self.current_page() + 1)
         self._update_buttons()
@@ -253,6 +256,23 @@ class WelcomeWizard(QDialog):
     def skip(self) -> None:
         """Close without changing anything."""
         self.reject()
+
+    def list_data_folder(self) -> bool:
+        """Once the wizard has closed, list the chosen default data folder
+        in Open's browser straight away -- previously it only appeared the
+        next time openNMR started (explicit user request, 2026-10-20).
+        Honours the "List its experiments in Open's browser" tick, as
+        start-up does; loads nothing. Returns whether a listing was
+        scheduled."""
+        from PySide6.QtCore import QTimer
+        from . import data_directory
+        w = self.window_
+        if not (data_directory.default_data_directory() and self.browse_at_start_check.isChecked()):
+            return False
+        # After the dialog is gone: a big folder's scan must not hold the
+        # wizard on screen.
+        QTimer.singleShot(0, w, w._browse_default_data_folder)
+        return True
 
     # ---- applying --------------------------------------------------------
     def apply(self) -> None:

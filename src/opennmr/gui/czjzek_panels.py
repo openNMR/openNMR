@@ -19,9 +19,10 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QMessageBox,
-    QProgressDialog, QPushButton, QSpinBox, QTableWidgetItem, QVBoxLayout, QWidget,
+    QProgressDialog, QPushButton, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from .fit_progress_dialog import FitProgress
 from ..core import registry as core_registry
 from ..core.spectrum import NMRAxis, NMRMetadata, NMRSpectrum
@@ -246,7 +247,7 @@ class CzjzekFitPanel(QuadrupolarFitPanel):
         grid = QWidget()
         g = QHBoxLayout(grid)
         g.setContentsMargins(0, 0, 0, 0)
-        self.grid_cq_spin, self.grid_eta_spin = QSpinBox(), QSpinBox()
+        self.grid_cq_spin, self.grid_eta_spin = TypedSpinBox(), TypedSpinBox()
         for spin, lo, hi, value, text in ((self.grid_cq_spin, 8, 400, 64, "CQ cells"),
                                           (self.grid_eta_spin, 4, 100, 20, "ηQ cells")):
             spin.setRange(lo, hi)
@@ -763,7 +764,7 @@ class CzjzekSimPanel(QWidget):
         grid = QWidget()
         g = QHBoxLayout(grid)
         g.setContentsMargins(0, 0, 0, 0)
-        self.grid_cq_spin, self.grid_eta_spin = QSpinBox(), QSpinBox()
+        self.grid_cq_spin, self.grid_eta_spin = TypedSpinBox(), TypedSpinBox()
         for spin, lo, hi, value, text in ((self.grid_cq_spin, 4, 400, SIM_GRID_DEFAULT[0], "CQ cells"),
                                           (self.grid_eta_spin, 2, 100, SIM_GRID_DEFAULT[1], "ηQ cells")):
             spin.setRange(lo, hi)

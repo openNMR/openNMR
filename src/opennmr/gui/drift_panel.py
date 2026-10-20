@@ -232,12 +232,9 @@ class DriftCorrectionPanel(QWidget):
         index, spectrum = self._selected_spectrum()
         can_apply = False
         if spectrum is None:
-            text = "Select a Bruker 2D or pseudo-2D in Open experiments to correct it here."
-        elif spectrum.metadata.vendor != "bruker" or spectrum.ndim != 2 \
-                or spectrum.metadata.raw.get("fid_raw") is None:
-            text = ("The selected spectrum cannot be corrected here: that needs a Bruker 2D or "
-                    "pseudo-2D read from its raw ser. For 3D/4D or NUS data, write a corrected "
-                    "dataset instead.")
+            text = "Select a 2D or pseudo-2D in Open experiments to correct it here (Bruker, or an X-Pulse, Varian or Spinsolve series)."
+        elif not dc.drift_support(spectrum)[0]:
+            text = dc.drift_support(spectrum)[1]
         else:
             record = spectrum.metadata.raw.get("drift_correction")
             text = (f"Corrected: {record['start_hz']:+.3f} → {record['end_hz']:+.3f} Hz over "

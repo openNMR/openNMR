@@ -109,8 +109,12 @@ from .regularisation import (
 # (Najbauer & Andreas, J. Magn. Reson. 305 (2019) 1-4) -- Process ▸
 # Reference and Process ▸ Field Drift Correction in the GUI.
 from .referencing import transfer_sr, transfer_sr_between
+# Phase each slice of a pseudo-2D on its own -- Process ▸ Phase ▸ "Autophase each
+# slice independently" in the GUI.
+from .slice_phase import autophase_slices
 from .drift_correction import (
     correct_bruker_dataset, concatenate_nus_datasets, measure_drift_hz, drift_profile,
+    correct_pseudo_2d_fids,
 )
 from .manual_baseline import (
     fit_manual_baseline, evaluate_manual_baseline, manual_baseline_correct,

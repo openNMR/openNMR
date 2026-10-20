@@ -22,12 +22,16 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
+from .numeric_locale import use_decimal_point
 from .style import remember_system_theme
 
 _LOGO_PATH = os.path.join(os.path.dirname(__file__), "resources", "logo.png")
 
 
 def main() -> int:
+    # Before any widget: numbers are written 1.5, never 1,5, whatever the
+    # computer's regional settings (see numeric_locale).
+    use_decimal_point()
     app = QApplication(sys.argv)
     # Before apply_theme, which overrides both the palette and the
     # colour scheme it would otherwise be read back from.

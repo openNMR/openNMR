@@ -41,6 +41,7 @@ import warnings
 from typing import Callable
 
 import numpy as np
+from .widgets.typed_spinbox import TypedSpinBox
 from .widgets.report_label import ReportLabel
 from .widgets.field_input import MAX_FIELD_T, FieldSpinBox, proton_frequency_box
 from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, Signal, Slot
@@ -49,7 +50,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QSpinBox,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -829,7 +829,7 @@ class PnmrSimulationPanel(QWidget):
         form.addRow("Axis min:", self.ppm_min_spin)
         form.addRow("Axis max:", self.ppm_max_spin)
         self._axis_form = form
-        self.points_spin = QSpinBox()
+        self.points_spin = TypedSpinBox()
         self.points_spin.setRange(256, 1 << 20)
         self.points_spin.setValue(8192)
         self.points_spin.valueChanged.connect(lambda _v: self._refresh_state())
@@ -1409,7 +1409,7 @@ class PnmrSimulationPanel(QWidget):
             "Leave out groups holding less than this share of the intensity (the log says how "
             "much was left out). 0 sends every group.")
         form.addRow("Leave out below:", self.export_min_spin)
-        self.export_max_spin = QSpinBox()
+        self.export_max_spin = TypedSpinBox()
         self.export_max_spin.setRange(1, 100000)
         self.export_max_spin.setValue(2000)
         self.export_max_spin.setSuffix(" sites")

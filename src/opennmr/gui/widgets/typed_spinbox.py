@@ -18,15 +18,43 @@ same flaw: with "999" in Process ▸ Truncate to, typing a fourth digit
 makes 9,99x -- refused when over the FID's length -- so the box seemed
 capped at three figures; the export DPI box likewise (explicit user
 report, 2026-10-14).
+
+**"k" shorthand** (explicit user request, 2026-10-20), as in TopSpin's
+SI/TD boxes: in any whole-number box, ``2k`` is read as 2048, ``8k`` as
+8192, ``16k`` as 16384 -- the power of two nearest the number of
+thousands typed (:func:`expand_k`). It is read when the entry is
+committed (Enter, Tab, leaving the box), like any other typed number.
+The decimal boxes ignore it: a power of two means nothing for a
+frequency or a shift.
 """
 
 from __future__ import annotations
+
+import math
+import re
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox
 
 _PARTIAL = {"", "-", "+", ".", "-.", "+.", ","}
+
+_K_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?|[.,]\d+)\s*[kK]\s*$")
+
+
+def expand_k(text: str) -> int | None:
+    """``"2k"`` -> 2048, ``"8K"`` -> 8192, ``"16k"`` -> 16384: the power
+    of two nearest ``number x 1000``, nearest on a logarithmic scale
+    (so ``3k`` -- 3000, between 2048 and 4096 -- gives 4096, and ``2.5k``
+    gives 2048). ``None`` if ``text`` is not a number followed by ``k``
+    (or is zero)."""
+    match = _K_RE.match(str(text))
+    if not match:
+        return None
+    thousands = float(match.group(1).replace(",", "."))
+    if thousands <= 0:
+        return None
+    return 1 << max(0, int(round(math.log2(thousands * 1000.0))))
 
 
 class TypedDoubleSpinBox(QDoubleSpinBox):
@@ -108,14 +136,30 @@ class TypedSpinBox(QSpinBox):
         return t.strip().replace(",", "").replace(" ", "")
 
     def _parse(self, text: str):
+        t = self._number_text(text)
         try:
-            return int(self._number_text(text))
+            return int(t)
         except ValueError:
-            return None
+            return expand_k(t)           # "2k" -> 2048 (None if not that either)
+
+    def _is_special(self, text: str) -> bool:
+        special = self.specialValueText()
+        return bool(special) and str(text).strip() == special.strip()
 
     def validate(self, text: str, pos: int):  # noqa: D401 -- Qt override
+        # A box with special text ("Auto", "all", ...) shows it for its
+        # minimum: it must stay valid, and typing towards it must not be
+        # refused (the override would otherwise hide Qt's own handling).
+        special = self.specialValueText()
+        if special:
+            if self._is_special(text):
+                return QValidator.State.Acceptable, text, pos
+            if text and special.lower().startswith(str(text).strip().lower()):
+                return QValidator.State.Intermediate, text, pos
         t = self._number_text(text)
         if t in ("", "-", "+"):
+            return QValidator.State.Intermediate, text, pos
+        if re.fullmatch(r"\d*[.,]\d*", t):                # "2." / "2.5": heading for "2.5k"
             return QValidator.State.Intermediate, text, pos
         value = self._parse(text)
         if value is None:
@@ -125,16 +169,28 @@ class TypedSpinBox(QSpinBox):
         return QValidator.State.Intermediate, text, pos        # typed past a limit: keep it
 
     def valueFromText(self, text: str) -> int:  # noqa: N802 -- Qt override
+        if self._is_special(text):
+            return self.minimum()
         value = self._parse(text)
         if value is None:
-            return self.value()
+            try:                            # "12.6" typed in a whole-number box
+                value = int(round(float(self._number_text(text).replace(",", "."))))
+            except ValueError:
+                return self.value()
         return min(max(value, self.minimum()), self.maximum())
 
     def fixup(self, text: str) -> str:
+        if self._is_special(text):
+            return self.specialValueText()
         value = self._parse(text)
         if value is None:
-            value = self.value()
+            try:                            # "12.6" typed in a whole-number box
+                value = int(round(float(self._number_text(text).replace(",", "."))))
+            except ValueError:
+                value = self.value()
         value = min(max(value, self.minimum()), self.maximum())
+        if value == self.minimum() and self.specialValueText():
+            return self.specialValueText()
         return self.prefix() + self.textFromValue(value) + self.suffix()
 
 

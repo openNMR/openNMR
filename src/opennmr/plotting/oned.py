@@ -25,6 +25,28 @@ from .style import (
 )
 
 
+def safe_xlim(ax, xmin: float, xmax: float, pad: float | None = None) -> tuple[float, float]:
+    """``ax.set_xlim(xmin, xmax)`` that copes with a zero-width range.
+
+    A spectrum with a single point (or an axis whose ends coincide)
+    gives ``xmin == xmax``, and matplotlib then warns "Attempting to set
+    identical low and high xlims makes transformation singular" on every
+    redraw (seen in a user's terminal, 2026-10-20). The range is opened
+    symmetrically about the value instead -- by ``pad`` (default: 0.5, or
+    5 % of the value if that is larger) -- so the point is drawn in the
+    middle of a sensible axis. Non-finite ends leave the limits alone.
+    Returns the limits set."""
+    import numpy as np
+    xmin, xmax = float(xmin), float(xmax)
+    if not (np.isfinite(xmin) and np.isfinite(xmax)):
+        return ax.get_xlim()
+    if xmin == xmax:
+        width = pad if pad is not None else max(0.5, 0.05 * abs(xmin))
+        xmin, xmax = xmin - width, xmax + width
+    ax.set_xlim(xmin, xmax)
+    return xmin, xmax
+
+
 def plot_1d(ax, spectrum: NMRSpectrum, x_unit: str = "ppm", normalize: bool = True,
             color: str = "black", y_offset: float = 0.0, linewidth: float = 1.5,
             field: str = "", full_resolution: bool = False) -> tuple[float, float, str]:
@@ -131,7 +153,7 @@ def plot_1d_stack(spectra: list[NMRSpectrum], ax=None, fig=None, color: str = "b
         y_base += y_scale * (1 + y_offset)
 
     if xlims == "default":
-        ax.set_xlim(xmin, xmax)
+        safe_xlim(ax, xmin, xmax)
     else:
         ax.set_xlim(xlims[0], xlims[1])
 

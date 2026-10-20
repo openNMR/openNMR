@@ -21,9 +21,10 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView,
-    QLabel, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .widgets.typed_spinbox import TypedSpinBox
 from ..core.spectrum import NMRAxis, NMRSpectrum
 from ..notebook import arithmetic as nb_arithmetic
 from ..notebook.bridge import results_from_spectrum
@@ -169,7 +170,7 @@ class ArithmeticPanel(QWidget):
             "The axis the spectra are lined up on. ppm is field-independent, so it is right "
             "for spectra recorded at different fields or carriers; Hz assumes one SFO1.")
         options.addRow("Align on:", self.unit_combo)
-        self.points_spin = QSpinBox()
+        self.points_spin = TypedSpinBox()
         self.points_spin.setRange(0, 4_194_304)
         self.points_spin.setSingleStep(1024)
         self.points_spin.setSpecialValueText("Auto (finest input)")

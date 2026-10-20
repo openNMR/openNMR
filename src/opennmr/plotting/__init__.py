@@ -15,7 +15,7 @@ from .accessibility import (
 from .labels import label_problem, safe_label, label_traces, set_legend_linewidth
 from . import lines
 from .lines import LINESTYLES, data_lines, apply_line_styles, normalise_linestyle, linestyle_name
-from .oned import plot_1d, plot_1d_stack, plot_1d_heatmap
+from .oned import plot_1d, plot_1d_stack, plot_1d_heatmap, safe_xlim
 from .twod import (plot_2d_contour, multi_plot, overlay_plot, draw_insets, inset_bounds, crop_2d,
                    projection_line_kwargs, PROJECTION_STYLE_KEYS)
 from .fit import (plot_1d_with_fit, plot_2d_integrals, plot_relaxation, plot_dosy,
@@ -32,7 +32,7 @@ __all__ = [
     "describe_accessibility", "max_safe_series", "friendly_palettes", "series_palette_names",
     "series_colours", "trace_colour_presets", "ordered_qualitative_colours", "is_qualitative",
     "ACCESSIBLE_QUALITATIVE_PALETTES", "PALETTE_DISPLAY_NAMES",
-    "plot_1d", "plot_1d_stack", "plot_1d_heatmap",
+    "plot_1d", "plot_1d_stack", "plot_1d_heatmap", "safe_xlim",
     "plot_2d_contour", "multi_plot", "overlay_plot", "draw_insets", "inset_bounds", "crop_2d",
     "plot_1d_with_fit", "plot_2d_integrals", "plot_relaxation", "plot_dosy", "overlay_dosy",
     "plot_score_components",
