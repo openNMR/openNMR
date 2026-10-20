@@ -143,6 +143,7 @@ from .fit_progress_dialog import FitProgress
 from .widgets.sideband_hint import sideband_hint_label
 from ..core import fit_progress as core_fit_progress
 from ..notebook import fit_models as nb_fit_models
+from ..notebook import stored_integrals as nb_stored_integrals
 from ..notebook import fit_values as nb_fit_values
 
 #: Written into a saved openNMR state when "Save the fitted values too" is ticked.
@@ -1982,6 +1983,21 @@ class MainWindow(QMainWindow):
         elif hasattr(current, "toolbar"):
             current.toolbar.home()
 
+    def _on_open_inset_dialog(self):
+        """Plot Style ▸ 2-D ▸ Inset…: insets of the single 2D contour on
+        the plot being styled (its own window)."""
+        from .inset_dialog import InsetDialog
+        current = self.canvas_tabs.currentWidget()
+        canvas = current if isinstance(current, MplCanvas) else self.canvas
+        dialog = getattr(self, "_inset_dialog", None)
+        if dialog is None or dialog.canvas is not canvas:
+            dialog = self._inset_dialog = InsetDialog(canvas, self)
+        dialog.refresh()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
     def _on_plot_style_clicked(self) -> None:
         """View ▸ Plot Style… (and the right-click menu's own entry) --
         the style and export controls for whichever plot is showing.
@@ -2506,6 +2522,8 @@ class MainWindow(QMainWindow):
         self.compare_2d_controls = Compare2DControls()
         self.compare_2d_controls.changed.connect(self._on_compare_controls_changed)
         self.compare_2d_controls.add_inset_requested.connect(self._on_add_compare_inset)
+        self.compare_2d_controls.link_toggled.connect(
+            lambda on: self.compare_canvas.set_panels_linked(on))
         self.compare_2d_controls.setVisible(False)
         layout.addWidget(self.compare_2d_controls)
 
@@ -4491,8 +4509,20 @@ class MainWindow(QMainWindow):
         self.style_scope_label.setWordWrap(True)
         layout.addWidget(self.style_scope_label)
 
-        style_box = QGroupBox("Core styling")
-        style_form = QFormLayout(style_box)
+        # Collapsible sections (user request, 2026-10-20: one long list
+        # broken up): Core styling (text, lines, ticks, colours), Legend,
+        # Compare (gaps) and 2-D, then the lists of series and lines, Export
+        # and Per-type defaults. Every control keeps its attribute name; a
+        # row is placed in a section by ``section=`` on its addRow.
+        style_box = QWidget()
+        style_box_layout = QVBoxLayout(style_box)
+        style_box_layout.setContentsMargins(0, 0, 0, 0)
+        style_form = _SectionedForm(style_box_layout)
+        style_form.add_section("Core styling", expanded=True)
+        style_form.add_section("Legend")
+        style_form.add_section("Compare")
+        style_form.add_section("2-D")
+        self.style_sections = style_form.sections
 
         self.output_linewidth_spin = QDoubleSpinBox()
         self.output_linewidth_spin.setRange(0.1, 10.0)
@@ -4603,7 +4633,7 @@ class MainWindow(QMainWindow):
             "of them moves the others."
         )
         self.output_contour_levels_spin.valueChanged.connect(self._on_contour_levels_changed)
-        style_form.addRow("Contour levels:", self.output_contour_levels_spin)
+        style_form.addRow("Contour levels:", self.output_contour_levels_spin, section="2-D")
 
         # **How the levels are spaced, beside how many there are.**
         # The count alone decides nothing about whether a weak peak
@@ -4623,7 +4653,7 @@ class MainWindow(QMainWindow):
         )
         self.output_contour_mode_combo.currentIndexChanged.connect(
             lambda _i: self._on_contour_scaling_changed())
-        style_form.addRow("Contour scaling:", self.output_contour_mode_combo)
+        style_form.addRow("Contour scaling:", self.output_contour_mode_combo, section="2-D")
 
         self.output_contour_power_spin = QDoubleSpinBox()
         self.output_contour_power_spin.setRange(0.1, 10.0)
@@ -4636,7 +4666,7 @@ class MainWindow(QMainWindow):
         )
         self.output_contour_power_spin.valueChanged.connect(
             lambda _v: self._on_contour_scaling_changed())
-        style_form.addRow("Contour power:", self.output_contour_power_spin)
+        style_form.addRow("Contour power:", self.output_contour_power_spin, section="2-D")
 
         self.output_tick_length_spin = QDoubleSpinBox()
         self.output_tick_length_spin.setRange(0.0, 20.0)
@@ -4677,7 +4707,7 @@ class MainWindow(QMainWindow):
             "trace's height. Measured from the trace's real minimum, so a "
             "baseline below zero is never drawn under the axis.")
         self.output_baseline_gap_spin.valueChanged.connect(self._on_output_style_changed)
-        style_form.addRow("Gap below spectra:", self.output_baseline_gap_spin)
+        style_form.addRow("Gap below spectra:", self.output_baseline_gap_spin, section="Compare")
 
         self.output_stack_gap_spin = QDoubleSpinBox()
         self.output_stack_gap_spin.setRange(0.0, 200.0)
@@ -4689,7 +4719,7 @@ class MainWindow(QMainWindow):
             "Space between neighbouring spectra in a stacked Compare (and a "
             "pseudo-2D's slices), as a percentage of each row's height.")
         self.output_stack_gap_spin.valueChanged.connect(self._on_output_style_changed)
-        style_form.addRow("Gap between stacked spectra:", self.output_stack_gap_spin)
+        style_form.addRow("Gap between stacked spectra:", self.output_stack_gap_spin, section="Compare")
 
         self.output_contour_fraction_spin = QSpinBox()
         self.output_contour_fraction_spin.setRange(1, 100)
@@ -4703,7 +4733,7 @@ class MainWindow(QMainWindow):
             "at true resolution regardless of this."
         )
         self.output_contour_fraction_spin.valueChanged.connect(self._on_contour_fraction_changed)
-        style_form.addRow("2D downsample:", self.output_contour_fraction_spin)
+        style_form.addRow("2D downsample:", self.output_contour_fraction_spin, section="2-D")
 
         self.output_nq_line_checkbox = QCheckBox("Show diagonal (nQ) line")
         self.output_nq_line_checkbox.setToolTip(
@@ -4714,14 +4744,14 @@ class MainWindow(QMainWindow):
             "parameters -- this is the GUI wiring for it."
         )
         self.output_nq_line_checkbox.toggled.connect(self._on_nq_line_changed)
-        style_form.addRow(self.output_nq_line_checkbox)
+        style_form.addRow(self.output_nq_line_checkbox, section="2-D")
 
         self.output_nq_value_spin = QSpinBox()
         self.output_nq_value_spin.setRange(1, 8)
         self.output_nq_value_spin.setValue(1)
         self.output_nq_value_spin.setEnabled(False)
         self.output_nq_value_spin.valueChanged.connect(self._on_nq_line_changed)
-        style_form.addRow("Diagonal n:", self.output_nq_value_spin)
+        style_form.addRow("Diagonal n:", self.output_nq_value_spin, section="2-D")
 
         self.output_grid_checkbox = QCheckBox("Show grid")
         self.output_grid_checkbox.toggled.connect(self._on_output_style_changed)
@@ -4763,7 +4793,7 @@ class MainWindow(QMainWindow):
             "\"Name traces with\" below."
         )
         self.output_legend_checkbox.toggled.connect(self._on_output_legend_changed)
-        style_form.addRow(self.output_legend_checkbox)
+        style_form.addRow(self.output_legend_checkbox, section="Legend")
 
         self.output_legend_loc_combo = QComboBox()
         self.output_legend_loc_combo.addItems([
@@ -4771,7 +4801,7 @@ class MainWindow(QMainWindow):
         ])
         self._narrow_combo(self.output_legend_loc_combo)
         self.output_legend_loc_combo.currentIndexChanged.connect(self._on_output_legend_changed)
-        style_form.addRow("Legend position:", self.output_legend_loc_combo)
+        style_form.addRow("Legend position:", self.output_legend_loc_combo, section="Legend")
 
         # --- Legend appearance ------------------------------------
         # Defaults: frameless, at the axis label size. Explicit user
@@ -4790,7 +4820,7 @@ class MainWindow(QMainWindow):
             "data the legend is labelling."
         )
         self.output_legend_frame_checkbox.toggled.connect(self._on_legend_appearance_changed)
-        style_form.addRow(self.output_legend_frame_checkbox)
+        style_form.addRow(self.output_legend_frame_checkbox, section="Legend")
 
         self.output_legend_fontsize_spin = QSpinBox()
         self.output_legend_fontsize_spin.setRange(0, 40)
@@ -4801,7 +4831,7 @@ class MainWindow(QMainWindow):
             "font size above, so the two cannot drift apart."
         )
         self.output_legend_fontsize_spin.valueChanged.connect(self._on_legend_appearance_changed)
-        style_form.addRow("Legend font size:", self.output_legend_fontsize_spin)
+        style_form.addRow("Legend font size:", self.output_legend_fontsize_spin, section="Legend")
 
         self.output_legend_alpha_spin = QDoubleSpinBox()
         self.output_legend_alpha_spin.setRange(0.0, 1.0)
@@ -4812,14 +4842,14 @@ class MainWindow(QMainWindow):
             "How opaque the legend's background box is. Needs the frame on."
         )
         self.output_legend_alpha_spin.valueChanged.connect(self._on_legend_appearance_changed)
-        style_form.addRow("Legend background alpha:", self.output_legend_alpha_spin)
+        style_form.addRow("Legend background alpha:", self.output_legend_alpha_spin, section="Legend")
 
         self.legend_color_button = QPushButton("Legend background…")
         self.legend_color_button.setToolTip(
             "The legend box's own fill colour. Needs the frame on."
         )
         self.legend_color_button.clicked.connect(self._on_legend_color_clicked)
-        style_form.addRow("Legend background:", self.legend_color_button)
+        style_form.addRow("Legend background:", self.legend_color_button, section="Legend")
 
         # Legend key line width: explicit user request (2026-09-28) --
         # the matplotlib way is legend.get_lines()[i].set_linewidth(w);
@@ -4835,7 +4865,7 @@ class MainWindow(QMainWindow):
             "Thickness of the coloured lines inside the legend, independent of the "
             "spectra's own line width. \"Match traces\" draws them as the traces are.")
         self.output_legend_linewidth_spin.valueChanged.connect(self._on_legend_appearance_changed)
-        style_form.addRow("Legend line width:", self.output_legend_linewidth_spin)
+        style_form.addRow("Legend line width:", self.output_legend_linewidth_spin, section="Legend")
 
         # Names written on the traces instead of a legend: explicit user
         # request (2026-09-28) -- "the titles of the spectra appear just
@@ -4852,7 +4882,7 @@ class MainWindow(QMainWindow):
         self._narrow_combo(self.output_legend_style_combo)
         self.output_legend_style_combo.currentIndexChanged.connect(
             self._on_legend_appearance_changed)
-        style_form.addRow("Name traces with:", self.output_legend_style_combo)
+        style_form.addRow("Name traces with:", self.output_legend_style_combo, section="Legend")
 
         position_row = QWidget()
         position_layout = QHBoxLayout(position_row)
@@ -4869,7 +4899,7 @@ class MainWindow(QMainWindow):
         self.output_trace_label_slider.valueChanged.connect(self._on_legend_appearance_changed)
         position_layout.addWidget(self.output_trace_label_slider, 1)
         position_layout.addWidget(QLabel("Right"))
-        style_form.addRow("Label position:", position_row)
+        style_form.addRow("Label position:", position_row, section="Legend")
         self._sync_legend_frame_controls()
 
         # --- Accessible palettes -----------------------------------
@@ -4921,7 +4951,7 @@ class MainWindow(QMainWindow):
             "unless right-click ▸ Tensor Plot Style… sets one of their own. \"Plot's own\" "
             "keeps each one's (colour-blind-friendly) default.")
         self.output_map_colormap_combo.currentIndexChanged.connect(self._on_output_style_changed)
-        style_form.addRow("Map colour scale:", self.output_map_colormap_combo)
+        style_form.addRow("Map colour scale:", self.output_map_colormap_combo, section="2-D")
         # Explicit user request (2026-10-01): "a way to control the
         # spacing between the colourbar and the heatmap (or ... the
         # surface plots of the tensors)".
@@ -4938,7 +4968,7 @@ class MainWindow(QMainWindow):
             "bar. \"Auto\" keeps each picture's own spacing. Notebook: "
             "opennmr.plotting.set_colorbar_gap(fig, points).")
         self.output_colorbar_gap_spin.valueChanged.connect(self._on_output_style_changed)
-        style_form.addRow("Colour bar gap:", self.output_colorbar_gap_spin)
+        style_form.addRow("Colour bar gap:", self.output_colorbar_gap_spin, section="2-D")
 
         self.series_accessibility_label = QLabel("")
         self.series_accessibility_label.setWordWrap(True)
@@ -5004,7 +5034,7 @@ class MainWindow(QMainWindow):
             "were never one control."
         )
         self.output_contour_linewidth_spin.valueChanged.connect(self._on_output_style_changed)
-        style_form.addRow("Contour line width:", self.output_contour_linewidth_spin)
+        style_form.addRow("Contour line width:", self.output_contour_linewidth_spin, section="2-D")
 
         # Colour of the 2D contours (explicit user request, 2026-10-19:
         # the notebook's colour_spectra had no GUI counterpart). Black is
@@ -5030,7 +5060,16 @@ class MainWindow(QMainWindow):
         contour_colour_layout.addWidget(self.output_contour_colour_combo, 1)
         contour_colour_layout.addWidget(self.output_contour_colour_button)
         self.output_contour_colour_combo.currentIndexChanged.connect(self._on_output_style_changed)
-        style_form.addRow("Contour colour:", contour_colour_row)
+        style_form.addRow("Contour colour:", contour_colour_row, section="2-D")
+
+        # An inset of a zoomed region of the 2D on show, without Compare;
+        # its controls are in a pop-up so this panel stays as short as it is.
+        self.output_inset_button = QPushButton("Inset of a zoomed region…")
+        self.output_inset_button.setToolTip(
+            "Add a zoomed inset of part of the 2D spectrum on show (zoom in, then add it), "
+            "with its region, corner, size and lowest contour. Opens its own window.")
+        self.output_inset_button.clicked.connect(lambda: self._on_open_inset_dialog())
+        style_form.addRow(self.output_inset_button, section="2-D")
 
         # --- Extracted slices, one row each ------------------------
         # Explicit user request: extracted slices beside a 2D "should
@@ -5102,9 +5141,9 @@ class MainWindow(QMainWindow):
         lines_layout.addWidget(self.reset_lines_button)
         layout.addWidget(self.lines_group)
 
-        layout.addWidget(style_box)
+        layout.insertWidget(1, style_box)      # the sections first, then the lists below
 
-        export_box = QGroupBox("Export settings")
+        export_box = QWidget()
         export_intro = QLabel(
             "Applies only to File > Save Figure As... -- never to the "
             "live view here, which Qt's own window layout already "
@@ -5148,9 +5187,10 @@ class MainWindow(QMainWindow):
         self.output_fig_height_spin.valueChanged.connect(self._on_output_export_settings_changed)
         export_form.addRow("Figure height:", self.output_fig_height_spin)
 
-        layout.addWidget(export_box)
+        self.style_sections["Export"] = CollapsibleSection("Export", content=export_box)
+        layout.addWidget(self.style_sections["Export"])
 
-        template_box = QGroupBox("Per-type defaults")
+        template_box = QWidget()
         template_layout = QVBoxLayout(template_box)
         template_intro = QLabel(
             "Save the current styling above as the default for one "
@@ -5173,7 +5213,9 @@ class MainWindow(QMainWindow):
         template_button_row.addWidget(save_template_button)
         template_button_row.addWidget(load_template_button)
         template_layout.addLayout(template_button_row)
-        layout.addWidget(template_box)
+        self.style_sections["Per-type defaults"] = CollapsibleSection(
+            "Per-type defaults", content=template_box)
+        layout.addWidget(self.style_sections["Per-type defaults"])
 
         layout.addStretch(1)
         return tab
@@ -7689,10 +7731,19 @@ class MainWindow(QMainWindow):
         controls = self.compare_2d_controls
         labels = [self.session.label(row) for row, _c in rows_and_candidates]
         spectra = [c for _row, c in rows_and_candidates]
+        # "Panels per spectrum": the same spectrum more than once, so
+        # different regions of it can be compared side by side.
+        copies = controls.copies()
+        if copies > 1:
+            labels = [f"{label} ({k + 1})" for label in labels for k in range(copies)]
+            spectra = [spectrum for spectrum in spectra for _ in range(copies)]
         n = len(spectra)
         controls.set_panel_count(n)
         layout = controls.layout_key()
         note = ""
+        if layout == "overlay" and copies > 1:
+            note = " An overlay of a spectrum on itself shows nothing new: shown side by side."
+            layout = "row" if n <= 3 else "grid"
         if layout == "overlay":
             try:
                 if not 2 <= n <= plotting.twod.MAX_OVERLAY_SPECTRA:
@@ -7786,6 +7837,9 @@ class MainWindow(QMainWindow):
         factor = self.compare_2d_controls.plot_options()["factor"]
         spectra = [self._resolve_compare_entry(e) for _r, e in self._compare_checked_rows_and_entries()]
         spectra = [s for s in spectra if s is not None and s.ndim == 2]
+        copies = self.compare_2d_controls.copies()
+        if copies > 1:
+            spectra = [s for s in spectra for _ in range(copies)]
         if panel is not None and panel < len(spectra):
             spectra = [spectra[panel]]
         ratios = []
@@ -15112,7 +15166,11 @@ class MainWindow(QMainWindow):
         # On the fit's right-click menu, beside Plot Style… (explicit user
         # request, 2026-10-16: it "should just be part of the right-click
         # plot styles"), not a section of this tile.
-        self.fit_display_panel = FitDisplayPanel([self.fit_canvas, self.spectral_fit_canvas])
+        self.fit_display_panel = FitDisplayPanel(
+            [self.fit_canvas, self.spectral_fit_canvas],
+            on_change=self._on_fit_component_style_changed)
+        for canvas in (self.fit_canvas, self.spectral_fit_canvas):
+            canvas.styleEditedFromMenu.connect(self._on_fit_component_style_changed)
         self._fit_display_dialog = PlotOptionsDialog(
             "Fit plot: components and colours", self.fit_display_panel, self)
         for canvas in (self.fit_canvas, self.spectral_fit_canvas):
@@ -15670,6 +15728,7 @@ class MainWindow(QMainWindow):
                 title=f"{name} -- {fit.get('label') or self.session.label(index)}",
                 panel_inputs=inputs, panel_result=panel.result_state_for(key))
             models = self._fit_models(index)
+            model["component_style"] = self._component_colour_style()
             model["id"] = max([m.get("id", 0) for m in models] + [0]) + 1
             models.append(model)
             stats = nb_fit_models.fit_statistics(model)
@@ -16766,6 +16825,7 @@ class MainWindow(QMainWindow):
             model["curve_x"] = np.asarray(shown["curve_x"], dtype=float)
             model["curve_y"] = np.asarray(shown["curve_y"], dtype=float)
         models = self._fit_models(index)
+        model["component_style"] = self._component_colour_style()
         model["id"] = max([m.get("id", 0) for m in models] + [0]) + 1
         models.append(model)
         stats = nb_fit_models.fit_statistics(model)
@@ -16786,7 +16846,64 @@ class MainWindow(QMainWindow):
         model = self._fit_model_by_id(index, model_id)
         self._draw_fit_model(model)
 
+    #: The Fit-view component-style keys a kept fit remembers and Compare
+    #: starts from: each component's line (stroke) and fill colours, and
+    #: whether and how it is filled.
+    _COMPONENT_COLOUR_KEYS = ("line_colours", "fill_colours", "fill", "fill_alpha", "line_width")
+
+    def _component_colour_style(self) -> dict:
+        """The Fit view's component colours (stroke and fill) as they are
+        now -- what a fit kept now carries into Compare."""
+        style = self.fit_canvas.fit_component_style()
+        return {key: (dict(style[key]) if isinstance(style[key], dict) else style[key])
+                for key in self._COMPONENT_COLOUR_KEYS}
+
+    def _model_colour_style(self, model) -> dict:
+        """The component colours Compare starts a kept fit's entry from:
+        the ones kept with it, else the Fit view's current ones (a fit
+        kept before colours were kept with it)."""
+        kept = model.get("component_style")
+        base = self._component_colour_style()
+        if isinstance(kept, dict):
+            base.update({k: kept[k] for k in self._COMPONENT_COLOUR_KEYS if k in kept})
+        return base
+
+    def _on_fit_component_style_changed(self, *_args) -> None:
+        """Components recoloured on the Fit view (its Fit Display panel or
+        right-click menu): the kept fit on show remembers them, and so does
+        its Open experiment, so Compare draws it the same (the last change
+        wins; Fit Display… on the Compare entry can still change it there)."""
+        shown = getattr(self, "_shown_fit_model", None)
+        if not shown:
+            return
+        model_id, when = shown
+        colours = self._component_colour_style()
+        for index, spectrum in enumerate(self.session.spectra):
+            entries = (spectrum.metadata.raw or {}).get("fit_models") or []
+            for entry in entries:
+                if entry.get("id") != model_id or entry.get("time") != when:
+                    continue
+                models = self._fit_models(index)
+                for model in models:
+                    if model.get("id") == model_id and model.get("time") == when:
+                        # Only while that fit is still what the Fit view shows.
+                        title = (getattr(self.fit_canvas, "_slice_fit_args", None) or {}).get("title")
+                        if not self.fit_canvas._slice_fit_active or title != model.get("name"):
+                            return
+                        model["component_style"] = colours
+                        self._set_fit_models(index, models)
+                        found = self._find_fit_model_experiment(self.session.label(index), model)
+                        if found is not None:
+                            raw = self.session.spectra[found].metadata.raw
+                            old = raw.get("fit_model_view") or {}
+                            raw["fit_model_view"] = nb_fit_models.fit_view(
+                                {**old, "style": {**(old.get("style") or {}), **colours}})
+                            self._refresh_compare_view_if_active(switch_tab=False)
+                        return
+
     def _draw_fit_model(self, model) -> None:
+        self._shown_fit_model = (None if model["kind"] == "curve"
+                                 else (model.get("id"), model.get("time")))
         if model["kind"] == "curve":
             curve = ((model["curve_x"], model["curve_y"])
                      if model.get("curve_x") is not None else None)
@@ -16866,14 +16983,19 @@ class MainWindow(QMainWindow):
         if found is None:
             x = np.asarray(model["x"], dtype=float)
             sfo1 = float(source.metadata.sfo1 or 0.0)
+            # The components keep the colours (stroke and fill) they had on
+            # the Fit view when the fit was kept, so Compare draws them the
+            # same; a style the caller gives (components shown, say) wins.
+            view = dict(view or {"fit_colour": model.get("colour")})
+            view["style"] = {"show_baseline": False, **self._model_colour_style(model),
+                             **(view.get("style") or {})}
             spectrum = NMRSpectrum(
                 np.asarray(model["y"], dtype=float),
                 [NMRAxis(kind="frequency", ppm=x, hz=x * sfo1 if sfo1 else None)],
                 NMRMetadata(vendor="derived", nucleus=source.metadata.nucleus,
                             sfo1=source.metadata.sfo1, mass=source.metadata.mass,
                             raw={"fit_model": nb_fit_models.encode_fit_model(model),
-                                 "fit_model_view": nb_fit_models.fit_view(view or {
-                                     "fit_colour": model.get("colour")}),
+                                 "fit_model_view": nb_fit_models.fit_view(view),
                                  "fit_model_source": {"spectrum": source_label,
                                                       "id": model.get("id"),
                                                       "time": model.get("time")}}))
@@ -21861,6 +21983,37 @@ class MainWindow(QMainWindow):
             "error bar is propagated through the rule's own weights.")
         rule_row.addWidget(self.integration_method_combo, 1)
         region_layout.addLayout(rule_row)
+
+        # Keeping integrals (explicit user request, 2026-10-20): tick the
+        # regions (the box beside each Low value), store them in the
+        # Stored integrals table, and view or save that table.
+        self.stored_integrals = nb_stored_integrals.get_stored_integrals()
+        self._stored_integrals_dialog = None
+        tick_row = QHBoxLayout()
+        tick_row.addWidget(QLabel("Regions to store:"))
+        self.tick_all_regions_button = QPushButton("Tick All")
+        self.tick_all_regions_button.clicked.connect(lambda: self._set_regions_ticked(True))
+        self.untick_all_regions_button = QPushButton("Untick All")
+        self.untick_all_regions_button.clicked.connect(lambda: self._set_regions_ticked(False))
+        tick_row.addWidget(self.tick_all_regions_button)
+        tick_row.addWidget(self.untick_all_regions_button)
+        tick_row.addStretch(1)
+        region_layout.addLayout(tick_row)
+        self.store_integrals_button = QPushButton("Store integral in “Stored integrals”")
+        self.store_integrals_button.setToolTip(
+            "Keep the integral of every ticked region (tick the box beside its Low value): its "
+            "minimum, maximum and midpoint, the absolute integral, this experiment's name and a "
+            "note you type (e.g. “500 us contact time”). A pseudo-2D series stores one row per "
+            "slice. Saved in a file openNMR keeps, so it is there next session too.")
+        self.store_integrals_button.clicked.connect(lambda: self._on_store_integrals_clicked())
+        region_layout.addWidget(self.store_integrals_button)
+        self.view_stored_integrals_button = QPushButton("View Stored Integral Table")
+        self.view_stored_integrals_button.setToolTip(
+            "Open the table of stored integrals: edit notes, delete rows, and save it as a CSV, "
+            "JSON or text file.")
+        self.view_stored_integrals_button.clicked.connect(
+            lambda: self._on_view_stored_integrals_clicked())
+        region_layout.addWidget(self.view_stored_integrals_button)
         self._auto_regions_note = ""
         self.region_table.itemChanged.connect(self._on_region_table_hand_edited)
         # A cell the user finished editing (commitData fires for a user's
@@ -21951,8 +22104,125 @@ class MainWindow(QMainWindow):
         row = self.region_table.rowCount()
         self.region_table.insertRow(row)
         for col, value in enumerate((lo, hi)):
-            self.region_table.setItem(row, col, QTableWidgetItem(f"{value:.{digits}g}"))
+            self.region_table.setItem(row, col, self._region_item(f"{value:.{digits}g}", col == 0))
         self._sync_region_shading()
+
+    @staticmethod
+    def _region_item(text: str, tickable: bool = False) -> QTableWidgetItem:
+        """A region-table cell; the first one carries the tick box that
+        chooses the regions *Store integral* keeps."""
+        item = QTableWidgetItem(text)
+        if tickable:
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+        return item
+
+    def _set_regions_ticked(self, ticked: bool) -> None:
+        """Tick (or untick) every region."""
+        state = Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked
+        blocked = self.region_table.blockSignals(True)
+        try:
+            for row in range(self.region_table.rowCount()):
+                item = self.region_table.item(row, 0)
+                if item is not None:
+                    item.setCheckState(state)
+        finally:
+            self.region_table.blockSignals(blocked)
+
+    def _ticked_region_indices(self) -> list[int]:
+        """Indices, among the valid regions (the order of
+        :meth:`_read_region_defs`, hence of the integration results), of
+        the ticked rows."""
+        out, k = [], 0
+        for row in range(self.region_table.rowCount()):
+            lo_item, hi_item = self.region_table.item(row, 0), self.region_table.item(row, 1)
+            if lo_item is None or hi_item is None:
+                continue
+            try:
+                float(lo_item.text()), float(hi_item.text())
+            except ValueError:
+                continue
+            if lo_item.checkState() == Qt.CheckState.Checked:
+                out.append(k)
+            k += 1
+        return out
+
+    def store_ticked_integrals(self, notes: str = "") -> list[dict]:
+        """Keep the integrals of the ticked regions in the Stored
+        integrals table (:mod:`opennmr.notebook.stored_integrals`): their
+        minimum, maximum and midpoint, absolute integral (and error), the
+        experiment, and ``notes``. A pseudo-2D series stores one row per
+        slice. Integrates first when the results are missing or belong to
+        other regions. Returns the records stored (``[]`` with a message
+        in the results line when there is nothing to store)."""
+        index = self._selected_index()
+        if index is None:
+            self.integration_results_label.setText("Select a spectrum first.")
+            return []
+        which = self._ticked_region_indices()
+        if not which:
+            self.integration_results_label.setText(
+                "Tick the regions to keep (the box beside each Low value), then store them.")
+            return []
+        spectrum = self.session.spectra[index]
+        regions = self._read_region_defs()
+
+        def current():
+            results = spectrum.metadata.raw.get("slice_fit_results") or []
+            if not results or results[0].get("integrals") is None:
+                return None
+            found = list(results[0].get("regions") or [])
+            if len(found) != len(regions) or any(
+                    abs(a[0] - b[0]) > 1e-9 or abs(a[1] - b[1]) > 1e-9
+                    for a, b in zip(found, regions)):
+                return None
+            return results
+
+        results = current()
+        if results is None:
+            self._on_integrate_regions_clicked(quiet=True)
+            results = current()
+        if results is None:
+            self.integration_results_label.setText(
+                "These regions could not be integrated, so nothing was stored.")
+            return []
+        added = self.stored_integrals.add_from_results(
+            self.session.label(index), results, regions, which, notes=notes)
+        if hasattr(self, "_stored_integrals_dialog") and self._stored_integrals_dialog is not None:
+            self._stored_integrals_dialog.refresh()
+        history = self._ensure_history(index)
+        if history is not None and added:
+            io_history.add_event(
+                history, f"Stored {len(added)} integral(s) ({len(which)} region(s)) in Stored "
+                f"integrals" + (f": {notes}" if notes else ""), kind="integration")
+        self.integration_results_label.setText(
+            f"Stored {len(added)} integral(s) in Stored integrals "
+            f"({len(self.stored_integrals)} in the table).")
+        self.statusBar().showMessage(f"Stored {len(added)} integral(s).", 5000)
+        return added
+
+    def _on_store_integrals_clicked(self) -> None:
+        """The "Store integral" button: ask for a note, then store."""
+        if not self._ticked_region_indices():
+            self.store_ticked_integrals()     # says what to do, in the results line
+            return
+        notes, ok = QInputDialog.getText(
+            self, "Store integral", "Note for these integrals (optional, e.g. “500 us contact time”):")
+        if ok:
+            self.store_ticked_integrals(notes.strip())
+
+    def _on_view_stored_integrals_clicked(self):
+        """Open (or raise) the Stored integrals table."""
+        from .stored_integrals_dialog import StoredIntegralsDialog
+        dialog = getattr(self, "_stored_integrals_dialog", None)
+        if dialog is None:
+            dialog = self._stored_integrals_dialog = StoredIntegralsDialog(
+                self.stored_integrals, self)
+        dialog.refresh()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
 
     def _on_remove_region_clicked(self) -> None:
         row = self.region_table.currentRow()
@@ -27868,7 +28138,7 @@ class MainWindow(QMainWindow):
                 row = self.region_table.rowCount()
                 self.region_table.insertRow(row)
                 for col, value in enumerate((lo, hi)):
-                    self.region_table.setItem(row, col, QTableWidgetItem(value))
+                    self.region_table.setItem(row, col, self._region_item(value, col == 0))
             self.fit_type_combo.setCurrentIndex(state["fit_type"])
             self._populate_fit_model_combo()
             self.relaxation_model_combo.setCurrentIndex(self._saved_model_index(state))
@@ -28653,6 +28923,34 @@ class MainWindow(QMainWindow):
         self._capture_phase_reference()
 
 
+class _SectionedForm:
+    """A stand-in for one ``QFormLayout`` that spreads its rows over
+    collapsible sections: ``addRow(..., section="Legend")`` puts the row in
+    that section (default: the first one made). Plot Style's controls were
+    one long form; this keeps each control's code as it was and only says
+    where it is shown."""
+
+    def __init__(self, parent_layout) -> None:
+        self._parent_layout = parent_layout
+        self.sections: dict = {}
+        self._forms: dict = {}
+        self._default = None
+
+    def add_section(self, title: str, expanded: bool = False) -> None:
+        body = QWidget()
+        form = QFormLayout(body)
+        form.setContentsMargins(0, 0, 0, 0)
+        section = CollapsibleSection(title, content=body, expanded=expanded)
+        self._parent_layout.addWidget(section)
+        self.sections[title] = section
+        self._forms[title] = form
+        if self._default is None:
+            self._default = title
+
+    def addRow(self, *args, section: str | None = None) -> None:  # noqa: N802 -- QFormLayout's name
+        self._forms[section or self._default].addRow(*args)
+
+
 class _PlotStyleDialog(QDialog):
     """A window around the plot-style panel.
 
@@ -28668,7 +28966,8 @@ class _PlotStyleDialog(QDialog):
     def __init__(self, parent, panel: QWidget) -> None:
         super().__init__(parent)
         self.setWindowTitle("Plot style")
-        self.resize(420, 640)
+        # Wide enough for the longest row without a sideways scroll.
+        self.resize(max(540, panel.sizeHint().width() + 40), 700)
         layout = QVBoxLayout(self)
 
         scroll = QScrollArea()

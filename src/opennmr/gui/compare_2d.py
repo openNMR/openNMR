@@ -39,12 +39,16 @@ class Compare2DControls(QGroupBox):
 
     changed = Signal()
     add_inset_requested = Signal()
+    #: The "Link panels" box was ticked or cleared: applied to the plot at
+    #: once, without redrawing it (a redraw would put back the full view).
+    link_toggled = Signal(bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__("2D spectra", parent)
         self._insets: list[dict] = []
         self._panel_count = 1
         self._loading = False
+        self._copies_seen = False
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -56,10 +60,24 @@ class Compare2DControls(QGroupBox):
             f"(2-{MAX_OVERLAY_SPECTRA} spectra with the same nuclei). Side by side: one "
             f"panel each. An overlay that isn't possible is shown side by side, with the reason.")
         form.addRow("Layout:", self.layout_combo)
-        self.link_check = QCheckBox("Link zoom across panels")
+        self.link_check = QCheckBox("Link panels (zoom and scroll together)")
         self.link_check.setChecked(True)
-        self.link_check.setToolTip("Side by side: every panel shows the same region; zooming one zooms all.")
+        self.link_check.setToolTip(
+            "Side by side: linked panels show the same region, and zooming, panning or scrolling "
+            "an axis on one does the same on all. Unlinked, only the panel you act on moves. "
+            "Takes effect at once.")
+        self.link_check.toggled.connect(self.link_toggled)
         form.addRow(self.link_check)
+        self.copies_spin = QSpinBox()
+        self.copies_spin.setRange(1, 4)
+        self.copies_spin.setValue(1)
+        self.copies_spin.setToolTip(
+            "Show each checked spectrum this many times, side by side, to compare different "
+            "regions of the same spectrum: with 2 or more the panels are unlinked so each can be "
+            "zoomed on its own (tick Link panels to move them together again). An overlay of a "
+            "spectrum on itself would show nothing, so these are drawn side by side.")
+        self.copies_spin.valueChanged.connect(self._on_copies_changed)
+        form.addRow("Panels per spectrum:", self.copies_spin)
         self.projections_check = QCheckBox("Projections on each panel")
         self.projections_check.setToolTip("Side by side: F1/F2 (positive) projections beside each panel.")
         form.addRow(self.projections_check)
@@ -136,10 +154,10 @@ class Compare2DControls(QGroupBox):
 
         for widget in (self.layout_combo, self.corner_combo, self.panel_combo):
             widget.currentIndexChanged.connect(self._on_edit)
-        for widget in (self.link_check, self.projections_check, self.mark_check):
+        for widget in (self.projections_check, self.mark_check):
             widget.toggled.connect(self._on_edit)
-        for widget in (self.floor_spin, self.levels_spin, self.f2_from, self.f2_to, self.f1_from,
-                       self.f1_to, self.size_spin, self.inset_floor_spin):
+        for widget in (self.floor_spin, self.levels_spin, self.copies_spin, self.f2_from,
+                       self.f2_to, self.f1_from, self.f1_to, self.size_spin, self.inset_floor_spin):
             widget.valueChanged.connect(self._on_edit)
         self.set_panel_count(1)
         self._refresh_list()
@@ -147,6 +165,18 @@ class Compare2DControls(QGroupBox):
     # --- public -------------------------------------------------------
     def layout_key(self) -> str:
         return self.layout_combo.currentData()
+
+    def copies(self) -> int:
+        """Panels each checked spectrum is drawn in (to compare regions of
+        one spectrum with itself)."""
+        return self.copies_spin.value()
+
+    def _on_copies_changed(self, value: int) -> None:
+        # Comparing two regions of one spectrum needs panels that zoom
+        # separately: the first time copies are asked for, unlink.
+        if value > 1 and self.link_check.isChecked() and not self._copies_seen:
+            self.link_check.setChecked(False)
+        self._copies_seen = value > 1
 
     def plot_options(self) -> dict:
         return {"factor": self.floor_spin.value() / 100.0, "clevels": self.levels_spin.value()}

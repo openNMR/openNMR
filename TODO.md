@@ -2,6 +2,8 @@
 
 ## Where things stand (2026-09-21)
 
+*2026-10-20 (Stored integrals; kept-fit component colours carried into Compare; 2-D Compare crosshair / y scroll / link / Hz+ppm measurements / a spectrum against itself; standalone 2-D inset; sectioned Plot Style): 22 new tests in `test_round_2026_10_20.py`. **Claude could not run any tests this round (the user runs them locally); run the files listed in the round, then the full suite, before committing.***
+
 *2026-10-17 (Compare Plot and box; Ctrl+0/B/E; Processing view always; pivot line; Truncate past TD; slice proc number phase and nucleus; merged, steppable baselines and a spline that no longer freezes; BPP Import CSV and temperature regions; Offset Tracker): 35 new tests in `test_round_2026_10_17.py`; related files only (see the round). **Run the full suite locally before committing.***
 
 *2026-10-16 round 3 (Integrate tile with DNP, S/N and CP Build-up; selecting a region integrates it; plot formatting on the plot's right-click menu; Fit Curve's peak browser by the plot; Dynamics ▸ Regularisation, a port of the MATLAB_RELAX_ALGORITHM Tikhonov scripts): 24 new tests in `test_regularisation.py` and `test_integrate_tile_plot_options_regularisation.py`. Related files only: 710 passed, 1 skipped, 1 failed (`test_main_window_fit_spectrum_amplitude_bound_regions_caps_the_fit`, which fails identically on the code before this round). **Run the full suite locally before committing.***
@@ -202,6 +204,20 @@ Older, area-grouped sections at the end of this file. **Swept 2026-09-07** -- fo
 ## How this file is organised
 
 Newest first. Each entry is one round of work: what the user asked, what was actually wrong, what was measured, and -- where it matters -- what was tried and rejected, so a later session does not repeat it. The area-grouped sections at the end predate that convention.
+
+## Stored integrals; kept-fit colours in Compare; 2-D Compare fixes; 2-D inset; sectioned Plot Style (2026-10-20)
+
+**Asked:** (1) recoloured fit components (stroke and fill) were lost when kept fits went to Compare. (2) 2-D Compare: measurements gave a bare delta (want x and y in Hz and ppm); no crosshair; scroll zoomed x but not y; link/unlink of panels; compare a dataset with itself. (3) The 2-D inset (zoomed region) was only in Compare: put it behind a button in Plot Style. (4) Plot Style tidied into collapsible sections. (5) Stored integrals: tick regions, store them with a note, view and save the table (csv/json/txt).
+
+**Wrong / built:**
+- Colours: a kept fit's Open experiment view started from `{"show_baseline": False}`, so it never inherited the Fit canvas colours. Kept models now carry `component_style` (`_component_colour_style`); `_fit_model_experiment` seeds the view from it; editing colours on the Fit view updates the kept fit on show (`_on_fit_component_style_changed`). Last change wins; Fit Display… on the Compare entry still edits per entry. Fits kept earlier take the current Fit-view colours.
+- 2-D panels: `_crosshair_ready` was False for side-by-side panels; the y-strip hit test existed only for a single contour, so panel body scroll squashed F1; panel measurements had no axis lookup. Crosshair is mirrored in all panels when their spans match, else only in the hovered one. Measurements give `Δx = a ppm / b Hz`. Linking is live (`set_panels_linked`, `Compare2DControls.link_toggled`), not only at draw time.
+- Same dataset against itself: Compare entries are `(row, slice)` keys, so duplicates are impossible; "Panels per spectrum" (1-4) draws the same spectrum in several panels (unlinked the first time so each can show a different region). Tried and rejected: duplicate list entries.
+- Inset: `MplCanvas.set_contour_insets / contour_insets / contour_view_region`, `gui/inset_dialog.InsetDialog` (zoom, Add inset from the current zoom). Limits are in the displayed units; insets are dropped when another spectrum is shown.
+- Plot Style: `_SectionedForm` (Core styling open; Legend, Compare, 2-D, Export, Per-type defaults collapsed), dialog slightly wider.
+- Stored integrals: `notebook/stored_integrals.py` (`StoredIntegrals`, `get_stored_integrals`; file `~/.opennmr/stored_integrals.json` or `$OPENNMR_STORED_INTEGRALS`), `gui/stored_integrals_dialog.py`; tick box on each region's Low cell, Tick/Untick all, Store, View Stored Integral Table. A series stores one row per slice. Tick state is not saved with a state file. Do not name a notebook export like its submodule (it shadows it): the function is `get_stored_integrals`.
+
+**Tests:** `tests/test_round_2026_10_20.py`. Not run by Claude. To run: that file, then `test_compare_2d.py`, `test_compare_cross_measure.py`, `test_gui_compare_tools.py`, `test_gui_canvas.py`, `test_gui_round4_fits.py`, `test_fit_values_kept_fits_crosshair_state_folder.py`, `test_state_and_fit_models.py`, `test_gui_multi_fit_keep_copy.py`, `test_integrate_tile_plot_options_regularisation.py`, `test_line_styles.py`, `test_notebook_single_import.py`, `test_window_cleanup.py`, and `test_gui.py -k "style or region or integrat or compare"`.
 
 ## Compare: click-then-move and arrow keys; 2D contour colour; Offset Tracker with several regions (2026-10-19)
 

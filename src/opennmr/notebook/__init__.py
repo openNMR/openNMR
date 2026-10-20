@@ -168,6 +168,7 @@ from .spin_system import (
 )
 
 from .notes import experiment_notes, set_experiment_notes, notes_location, notes_first_line
+from .stored_integrals import StoredIntegrals, get_stored_integrals
 from .multi_fitting import (
     make_experiment, fit_multi, default_scopes, multi_fit_table, multi_fit_to_csv,
     parameter_trend, print_multi_fit_report, plot_multi_fit, plot_parameter_trend,
@@ -456,6 +457,8 @@ __all__ = [
     "NMRJCouplingFitWorkflow", "jcoupling_chemist_notation",
     # notes
     "experiment_notes", "set_experiment_notes", "notes_location", "notes_first_line",
+    # stored_integrals (integrals kept across spectra and sessions)
+    "StoredIntegrals", "get_stored_integrals",
     # multi_fitting (one set of sites across several spectra)
     "make_experiment", "fit_multi", "default_scopes", "multi_fit_table", "multi_fit_to_csv",
     "parameter_trend", "print_multi_fit_report", "plot_multi_fit", "plot_parameter_trend",

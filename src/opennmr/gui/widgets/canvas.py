@@ -95,7 +95,8 @@ class _ContourCrosshair:
     touching the lines' position or visibility -- see there.
     """
 
-    def __init__(self, canvas, ax, f1_ax, f2_ax, toolbar, stack_axes=None, **lineprops) -> None:
+    def __init__(self, canvas, ax, f1_ax, f2_ax, toolbar, stack_axes=None, panel_axes=None,
+                 **lineprops) -> None:
         """``stack_axes``: the rows of a stacked Compare (one shared x
         axis). The vertical line then runs through every row, whichever
         one the cursor is over, and the horizontal one marks the row under
@@ -107,11 +108,19 @@ class _ContourCrosshair:
         self._toolbar = toolbar
         stack = [a for a in (stack_axes or []) if a is not None]
         self._stacked = len(stack) > 1
-        self.axes = tuple(dict.fromkeys(a for a in (ax, f1_ax, f2_ax, *stack) if a is not None))
+        # Side-by-side 2D panels (Compare): the crosshair goes in every
+        # panel, at the same position, while their x and y spans match,
+        # and in the panel under the cursor alone when they do not.
+        panels = [a for a in (panel_axes or []) if a is not None]
+        self._panels = tuple(panels) if len(panels) > 1 else ()
+        self.axes = tuple(dict.fromkeys(
+            a for a in (ax, f1_ax, f2_ax, *stack, *self._panels) if a is not None))
         self._background = None
-        self._vline_axes = list(dict.fromkeys(a for a in (ax, f2_ax, *stack) if a is not None))
+        self._vline_axes = list(dict.fromkeys(
+            a for a in (ax, f2_ax, *stack, *self._panels) if a is not None))
         self._vlines = [self._guide(a, "v", lineprops) for a in self._vline_axes]
-        self._hline_axes = list(dict.fromkeys(a for a in (ax, f1_ax, *stack) if a is not None))
+        self._hline_axes = list(dict.fromkeys(
+            a for a in (ax, f1_ax, *stack, *self._panels) if a is not None))
         self._hlines = [self._guide(a, "h", lineprops) for a in self._hline_axes]
         self._cid_motion = canvas.mpl_connect("motion_notify_event", self._onmove)
         self._cid_draw = canvas.mpl_connect("draw_event", self._on_draw)
@@ -186,6 +195,21 @@ class _ContourCrosshair:
     def _on_draw(self, event) -> None:
         self._background = self._canvas.copy_from_bbox(self._canvas.figure.bbox)
 
+    def panels_match(self) -> bool:
+        """Whether every side-by-side panel shows the same x and y span
+        right now (so one position means the same thing in each)."""
+        if not self._panels:
+            return True
+
+        def same(a, b) -> bool:
+            tol = 1e-9 * max(abs(a[1] - a[0]), abs(b[1] - b[0]), 1e-300)
+            return abs(a[0] - b[0]) <= tol + 1e-6 * abs(a[1] - a[0]) \
+                and abs(a[1] - b[1]) <= tol + 1e-6 * abs(a[1] - a[0])
+
+        first = self._panels[0]
+        fx, fy = first.get_xlim(), first.get_ylim()
+        return all(same(p.get_xlim(), fx) and same(p.get_ylim(), fy) for p in self._panels[1:])
+
     def _hide(self) -> None:
         """Take the crosshair off screen when the cursor leaves the
         plot -- **by blitting the cached background back, not by
@@ -241,14 +265,16 @@ class _ContourCrosshair:
             # position onto an unset background instead is what
             # actually caused "filling the contour and not going away".
             self._canvas.draw()
-        for line in self._vlines:
+        only_here = bool(self._panels) and not self.panels_match()
+        for ax, line in zip(self._vline_axes, self._vlines):
             line.set_xdata((event.xdata, event.xdata))
-            line.set_visible(True)
+            line.set_visible(not only_here or ax is event.inaxes)
         for ax, line in zip(self._hline_axes, self._hlines):
             # In a stack each row has its own intensity scale: the
             # horizontal line belongs only to the row under the cursor.
             line.set_ydata((event.ydata, event.ydata))
-            line.set_visible(not self._stacked or ax is event.inaxes)
+            line.set_visible((not self._stacked or ax is event.inaxes)
+                             and (not only_here or ax is event.inaxes))
         self._canvas.restore_region(self._background)
         for ax, line in zip(self._vline_axes, self._vlines):
             ax.draw_artist(line)
@@ -1469,6 +1495,14 @@ class MplCanvas(QWidget):
         self._overlay_kwargs: dict = {}
         self._panel_axes: list = []
         self._panel_home_limits: list = []
+        self._panel_spectra: list = []
+        #: Zoomed insets of the single 2D contour on show (Plot Style ▸ 2D ▸
+        #: Inset…): :func:`opennmr.plotting.twod.draw_insets` specs, in the
+        #: displayed axis units.
+        self._contour_insets: list = []
+        self._panels_linked = False
+        self._panels_link_y = False
+        self._panels_busy = False
         self._overlay_labels: list | None = None
         # The DOSY map currently shown (processing.ilt.dosy_map's own
         # output) and its contour floor, mirroring _contour_spectrum/
@@ -1927,7 +1961,7 @@ class MplCanvas(QWidget):
         on_x_strip = strip is not None and strip[0] == "x"
         on_y_strip = strip is not None and strip[0] == "y"
         strip_ax = strip[1] if strip is not None else self.ax
-        if on_x_strip:
+        if on_x_strip or (on_y_strip and self._panel_axes):
             ax = strip_ax
         else:
             ax = event.inaxes if event.inaxes is not None else (self.ax if on_y_strip else None)
@@ -1944,6 +1978,11 @@ class MplCanvas(QWidget):
             return
 
         factor = 1 / self.ZOOM_FACTOR if event.button == "up" else self.ZOOM_FACTOR
+
+        if self._panel_axes and not on_x_strip and not on_y_strip and ax in self._panel_axes:
+            # The body of a Compare 2D panel has no intensity axis to rescale
+            # (it used to squash F1); its two axes are zoomed from their strips.
+            return
 
         if on_x_strip:
             x = self._data_x_at(ax, event)
@@ -2189,6 +2228,17 @@ class MplCanvas(QWidget):
         # plain 1D shows no y ticks at all, so it has no y strip and
         # falls through here to None -- which is correct both ways:
         # nothing to zoom, and so no arrow promising one.
+        # Compare's 2D panels (and an overlay) have F1 strips of their own:
+        # the one on the right of whichever panel the cursor is beside. Checked
+        # before the single contour's, whose Axes would otherwise claim
+        # everything to the right of the first panel.
+        if self._panel_axes:
+            if event.inaxes is not None:
+                return None
+            beside = [ax for ax in self._panel_axes if self._hovering_y_axis(ax, event)]
+            if beside:
+                return ("y", max(beside, key=lambda ax: ax.get_window_extent().x1))
+            return None
         has_levels = self._contour_factor is not None or self._dosy_result is not None
         if has_levels and self.ax is not None and self._hovering_y_axis(self.ax, event):
             return ("y", self.ax)
@@ -3140,6 +3190,8 @@ class MplCanvas(QWidget):
         # "Add inset from zoom".
         self._panel_axes = []
         self._panel_home_limits = []
+        self._panel_spectra = []
+        self._panels_linked = False
         # A DOSY's own state describes Axes about to be destroyed. The
         # redraw path re-sets it immediately afterwards; every other
         # view leaves it cleared, which is what makes "is this a DOSY?"
@@ -3207,8 +3259,9 @@ class MplCanvas(QWidget):
             return
         self._crosshair = _ContourCrosshair(
             self.canvas, self.ax, self._proj_axes.get("f1"), self._proj_axes.get("f2"),
-            self.toolbar, stack_axes=self._compare_axes, color="0.35", linewidth=0.8,
-            linestyle="--",
+            self.toolbar, stack_axes=self._compare_axes,
+            panel_axes=self._panel_axes if len(self._panel_axes) > 1 else None,
+            color="0.35", linewidth=0.8, linestyle="--",
         )
 
     def _projection_intensity_limits(self) -> dict:
@@ -3288,7 +3341,7 @@ class MplCanvas(QWidget):
             xlims=xlims, ylims=ylims,
             **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
             **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
-            colour_spectra=self._contour_colour,
+            colour_spectra=self._contour_colour, insets=self._contour_insets or None,
             **self._external_projection_kwargs(), **self._projection_style_kwargs(),
         )
         self._apply_current_axis_style()
@@ -3305,6 +3358,35 @@ class MplCanvas(QWidget):
         # the bottom. Real user report: "the x-axis label got cut off".
         self._apply_layout()
         self.canvas.draw_idle()
+
+    def contour_insets(self) -> list[dict]:
+        """Copies of the insets drawn on the 2D contour on show."""
+        return [dict(spec) for spec in self._contour_insets]
+
+    def set_contour_insets(self, specs) -> None:
+        """Draw zoomed insets (:func:`opennmr.plotting.twod.draw_insets`
+        specs: ``xlims``, ``ylims``, ``corner``, ``size``, ``factor``,
+        ``mark_inset``) on the single 2D contour on show, keeping its view.
+        Raises ``ValueError`` (and keeps the old insets) for a region with
+        no data in it."""
+        old = self._contour_insets
+        self._contour_insets = [dict(spec) for spec in (specs or [])]
+        if self._contour_spectrum is None:
+            return
+        try:
+            self._redraw_contour(preserve_view=True)
+        except ValueError:
+            self._contour_insets = old
+            self._redraw_contour(preserve_view=True)
+            raise
+
+    def contour_view_region(self):
+        """``(xlims, ylims)`` of the 2D contour's current view (displayed
+        units), or ``None`` when no single 2D contour is on show."""
+        if self._contour_spectrum is None or self.ax is None:
+            return None
+        return (tuple(float(v) for v in self.ax.get_xlim()),
+                tuple(float(v) for v in self.ax.get_ylim()))
 
     def reset_view(self) -> None:
         """Back to the view a fresh load gives -- limits *and* layout.
@@ -6150,6 +6232,8 @@ class MplCanvas(QWidget):
             # place, a selection change hands over a new object.
             same_spectrum = self._contour_spectrum is spectrum
             self._contour_spectrum = spectrum
+            if not same_spectrum:
+                self._contour_insets = []        # a region of another spectrum
             if not same_spectrum or self._contour_factor is None:
                 self._contour_factor = self._CONTOUR_FACTOR_DEFAULT
                 self._contour_clevels = self._CONTOUR_CLEVELS_DEFAULT
@@ -6166,7 +6250,7 @@ class MplCanvas(QWidget):
                 xlims=xlims, ylims=ylims,
                 **self._contour_fraction_kwargs(), **self._nq_line_kwargs(),
                 **self._slice_panel_kwargs(), **self._contour_style_kwargs(),
-                colour_spectra=self._contour_colour,
+                colour_spectra=self._contour_colour, insets=self._contour_insets or None,
                 **self._external_projection_kwargs(), **self._projection_style_kwargs(),
             )
             self._apply_current_axis_style()
@@ -6858,6 +6942,7 @@ class MplCanvas(QWidget):
         self._apply_layout()
         self._panel_axes = [self.ax]
         self._panel_home_limits = [(self.ax.get_xlim(), self.ax.get_ylim())]
+        self._panel_spectra = list(spectra)
         self.canvas.draw_idle()
 
     def show_2d_panels(self, spectra: list[NMRSpectrum], labels: list[str] | None = None,
@@ -6890,44 +6975,75 @@ class MplCanvas(QWidget):
             colour_spectra=self._contour_colour,
             **levels, **self._contour_fraction_kwargs(), **self._nq_line_kwargs())
         self.ax = axes[0]
-        if link_axes and n > 1:
-            xs = [lim for ax in axes for lim in ax.get_xlim()]
-            same_f1 = len({bool(sp.is_pseudo_2d) for sp in spectra}) == 1
-            for ax in axes:
-                ax.set_xlim(max(xs), min(xs))
-            if same_f1:
-                ys = [lim for ax in axes for lim in ax.get_ylim()]
-                pseudo = spectra[0].is_pseudo_2d
-                for ax in axes:
-                    ax.set_ylim((min(ys), max(ys)) if pseudo else (max(ys), min(ys)))
-            self._link_panel_limits(axes, link_y=same_f1)
+        same_f1 = len({bool(sp.is_pseudo_2d) for sp in spectra}) == 1
+        self._panel_spectra = list(spectra)
+        self._panels_link_y = same_f1
+        self._panels_linked = bool(link_axes and n > 1)
+        if self._panels_linked:
+            self._unify_panel_limits(axes, spectra)
+        if n > 1:
+            self._link_panel_limits(axes)
         self._panel_axes = list(axes)
         self._panel_home_limits = [(ax.get_xlim(), ax.get_ylim()) for ax in axes]
-        self._crosshair_ready = False
+        # A crosshair here too (Compare 2D): in every panel while their
+        # spans match, in the panel under the cursor alone otherwise.
+        self._crosshair_ready = True
         self._apply_layout()
         self.canvas.draw_idle()
 
     @staticmethod
-    def _link_panel_limits(axes, link_y: bool) -> None:
-        """Zoom/pan on one panel applies to all (see show_2d_panels)."""
-        busy = {"on": False}
-
-        def _follow(source, which):
-            if busy["on"]:
-                return
-            busy["on"] = True
-            try:
-                limits = source.get_xlim() if which == "x" else source.get_ylim()
-                for other in axes:
-                    if other is not source:
-                        (other.set_xlim if which == "x" else other.set_ylim)(limits)
-            finally:
-                busy["on"] = False
-
+    def _unify_panel_limits(axes, spectra) -> None:
+        """Every panel on the range they all span (x always; y when they
+        share the kind of F1 axis)."""
+        xs = [lim for ax in axes for lim in ax.get_xlim()]
         for ax in axes:
-            ax.callbacks.connect("xlim_changed", lambda a: _follow(a, "x"))
-            if link_y:
-                ax.callbacks.connect("ylim_changed", lambda a: _follow(a, "y"))
+            ax.set_xlim(max(xs), min(xs))
+        if len({bool(sp.is_pseudo_2d) for sp in spectra}) == 1:
+            ys = [lim for ax in axes for lim in ax.get_ylim()]
+            pseudo = spectra[0].is_pseudo_2d
+            for ax in axes:
+                ax.set_ylim((min(ys), max(ys)) if pseudo else (max(ys), min(ys)))
+
+    def panels_linked(self) -> bool:
+        """Whether zooming or panning one Compare 2D panel moves them all."""
+        return bool(self._panels_linked)
+
+    def set_panels_linked(self, linked: bool) -> None:
+        """Link the side-by-side 2D panels (a zoom, pan or axis scroll on
+        one is applied to all) or unlink them (only the one acted on
+        moves). Takes effect at once, without redrawing; linking puts every
+        panel on the first one's current view."""
+        linked = bool(linked) and len(self._panel_axes) > 1
+        if linked and not self._panels_linked and self._panel_axes:
+            first = self._panel_axes[0]
+            self._panels_linked = True
+            self._follow_panel_limits(first, "x")
+            if self._panels_link_y:
+                self._follow_panel_limits(first, "y")
+            self.canvas.draw_idle()
+        self._panels_linked = linked
+
+    def _follow_panel_limits(self, source, which: str) -> None:
+        if not self._panels_linked or self._panels_busy:
+            return
+        self._panels_busy = True
+        try:
+            if which == "y" and not self._panels_link_y:
+                return
+            limits = source.get_xlim() if which == "x" else source.get_ylim()
+            for other in self._panel_axes:
+                if other is not source:
+                    (other.set_xlim if which == "x" else other.set_ylim)(limits)
+        finally:
+            self._panels_busy = False
+
+    def _link_panel_limits(self, axes) -> None:
+        """Connect the panels' limit callbacks once per draw; whether they
+        follow each other is :meth:`set_panels_linked`'s flag, so the link
+        can be switched without redrawing."""
+        for ax in axes:
+            ax.callbacks.connect("xlim_changed", lambda a: self._follow_panel_limits(a, "x"))
+            ax.callbacks.connect("ylim_changed", lambda a: self._follow_panel_limits(a, "y"))
 
     def zoomed_2d_region(self):
         """``(panel, xlims, ylims)`` of the 2D overlay/panel the user has
@@ -8301,6 +8417,10 @@ class MplCanvas(QWidget):
         # the spectrum view". Checked first, because a Compare stack
         # can be shown while _contour_spectrum/_current_1d_spectrum
         # still hold something from a previous view.
+        if self._panel_axes and self._panel_spectra and ax in self._panel_axes:
+            # A Compare 2D panel (or overlay, drawn on the first spectrum's axes).
+            panel = self._panel_spectra[min(self._panel_axes.index(ax), len(self._panel_spectra) - 1)]
+            return panel.axes[1], (None if panel.is_pseudo_2d else panel.axes[0])
         if self._compare_axes and self._compare_spectra and ax in self._compare_axes:
             position = self._compare_axes.index(ax)
             if position < len(self._compare_spectra):
@@ -8615,7 +8735,8 @@ class MplCanvas(QWidget):
                 span_hz = float(hz[-1] - hz[0])
                 if span_ppm and span_hz:
                     return abs(span_hz / span_ppm)
-        candidates = [self._current_1d_spectrum, self._contour_spectrum, *(self._compare_spectra or [])]
+        candidates = [self._current_1d_spectrum, self._contour_spectrum,
+                      *(self._compare_spectra or []), *(self._panel_spectra or [])]
         for spectrum in candidates:
             if spectrum is None:
                 continue
@@ -8626,6 +8747,32 @@ class MplCanvas(QWidget):
                     mhz = meta.sfo1_indirect if indirect else meta.sfo1
                     return float(mhz) if mhz else None
         return None
+
+    def _delta_ppm_hz(self, axis, delta_ppm: float) -> dict:
+        """A separation given in ppm (how Compare's 2D panels are drawn),
+        as ``{"ppm", "hz", "khz"}``; ``{}`` for an axis with no frequency
+        scale (a pseudo-2D's slice index). Hz needs the axis's field."""
+        if axis is None or getattr(axis, "kind", None) != "frequency":
+            return {}
+        out = {"ppm": abs(float(delta_ppm))}
+        hz_per_ppm = self._axis_hz_per_ppm(axis)
+        if hz_per_ppm:
+            out["hz"] = out["ppm"] * hz_per_ppm
+            out["khz"] = out["hz"] / 1000.0
+        return out
+
+    @staticmethod
+    def _format_ppm_hz(label: str, deltas: dict, raw: float) -> str:
+        """``Δx = 0.5000 ppm / 250.00 Hz`` -- always both units where the
+        axis has them, never a bare number labelled as nothing."""
+        parts = []
+        if "ppm" in deltas:
+            parts.append(f"{deltas['ppm']:.4f} ppm")
+        if "hz" in deltas:
+            parts.append(f"{deltas['hz']:.2f} Hz")
+        if not parts:
+            return f"Δ{label} = {raw:.4g}" + (" slices" if label == "y" else "")
+        return f"Δ{label} = " + " / ".join(parts)
 
     def _format_delta(self, label: str, deltas: dict, raw: float) -> str:
         """One axis's separation, every applicable unit in one string --
@@ -8705,6 +8852,10 @@ class MplCanvas(QWidget):
             # it used to come back as a bare number (explicit user report,
             # 2026-10-16: "does not give the units ... only ppm").
             dx_units, dy_units = slice_fit_deltas, {}
+        elif self._panel_axes and ax in self._panel_axes and x_axis is not None:
+            # Compare's 2D panels are drawn in ppm whatever the display unit:
+            # both separations in ppm and Hz.
+            dx_units, dy_units = self._delta_ppm_hz(x_axis, dx_raw), self._delta_ppm_hz(y_axis, dy_raw)
         elif self._external_plot and x_axis is None and y_axis is None:
             # A figure drawn elsewhere (Simulate): its axis labels say
             # what the axes are in.
@@ -8713,6 +8864,19 @@ class MplCanvas(QWidget):
         else:
             dx_units = self._delta_in_units(x_axis, dx_raw)
             dy_units = self._delta_in_units(y_axis, dy_raw)
+
+        if self._panel_axes and ax in self._panel_axes and x_axis is not None:
+            parts = [self._format_ppm_hz("x", dx_units, dx_raw)]
+            if dy_raw:
+                parts.append(self._format_ppm_hz("y", dy_units, dy_raw))
+            summary = "   ".join(parts)
+            self._draw_measurement_annotation(ax, x1, y1, x2, y2, summary)
+            self.measurementCompleted.emit({
+                "display_unit": "ppm",
+                "x1": float(x1), "x2": float(x2), "y1": float(y1), "y2": float(y2),
+                "dx_display": float(dx_raw), "dy_display": float(dy_raw),
+                "dx": dx_units, "dy": dy_units, "summary": summary})
+            return
 
         parts = [self._format_delta("x", dx_units, dx_raw)]
         # A y separation is only worth reporting when there is one: on
