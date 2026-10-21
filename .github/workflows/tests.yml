@@ -27,8 +27,8 @@ jobs:
   pytest:
     runs-on: ubuntu-latest
     # The suite builds a MainWindow in ~2,500 tests (~1-4 s each), so on a
-    # hosted runner it takes well over the 30 minutes this was set to.
-    timeout-minutes: 120
+    # hosted runner it takes well over the 30 minutes this was first set to.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -51,4 +51,10 @@ jobs:
       # --durations lists the slowest tests, so a run that creeps towards
       # the limit shows where the time goes.
       - name: Run tests
+        env:
+          # One BLAS/OpenMP thread per xdist worker: otherwise each worker
+          # spawns a thread per core and they fight over the same CPUs.
+          OMP_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
         run: pytest -q -rs --durations=25 -n auto
