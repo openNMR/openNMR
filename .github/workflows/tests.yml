@@ -51,4 +51,4 @@ jobs:
       # --durations lists the slowest tests, so a run that creeps towards
       # the limit shows where the time goes.
       - name: Run tests
-        run: pytest -q -rs --durations=25
+        run: pytest -q -rs --durations=25 -n auto
