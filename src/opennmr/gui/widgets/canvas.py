@@ -27,7 +27,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from matplotlib.figure import Figure
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+    QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton,
     QStyle, QToolButton, QVBoxLayout, QWidget,
 )
@@ -936,6 +936,15 @@ class MplCanvas(QWidget):
     pickModeChanged = Signal(bool)
     regionSelectModeChanged = Signal(bool)
     crosshairEnabledChanged = Signal(bool)
+    #: The crosshair's colour or line width was changed from its toolbar
+    #: button's right-click menu -- MainWindow applies it to every canvas
+    #: and saves it (Settings ▸ Interface holds the same two controls).
+    crosshairStyleChanged = Signal(str, float)
+
+    #: What the crosshair looks like unless the user has chosen otherwise.
+    DEFAULT_CROSSHAIR_COLOR = "0.35"
+    DEFAULT_CROSSHAIR_WIDTH = 0.8
+    CROSSHAIR_WIDTH_RANGE = (0.1, 6.0)
     #: The contour right-click menu's "Scroll Up Shows More Contours"
     #: was toggled -- MainWindow applies it to every canvas and saves it
     #: (Settings ▸ Interface holds the same switch).
@@ -1020,10 +1029,14 @@ class MplCanvas(QWidget):
         self._crosshair_button = self._add_toolbar_toggle(
             "Crosshair",
             "Show a cross following the cursor across the plot (and, on a 2D, "
-            "across both projection strips). Cmd/Ctrl+. toggles it.",
+            "across both projection strips). Cmd/Ctrl+. toggles it. Right-click "
+            "for its colour and line width.",
             self.set_crosshair_enabled,
             checked=True,
         )
+        self._crosshair_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._crosshair_button.customContextMenuRequested.connect(
+            self._on_crosshair_button_menu)
         self._measure_button = self._add_toolbar_toggle(
             "Measure",
             "Measure a separation: click two points on the plot and the "
@@ -1389,6 +1402,9 @@ class MplCanvas(QWidget):
         # Whether the crosshair is wanted at all -- the Crosshair toggle
         # on this canvas's own toolbar. On by default.
         self._crosshair_enabled = True
+        # Crosshair appearance (see set_crosshair_style).
+        self._crosshair_color = self.DEFAULT_CROSSHAIR_COLOR
+        self._crosshair_width = self.DEFAULT_CROSSHAIR_WIDTH
         self._region_select_start: float | None = None  # x-data value of the drag's own start
         self._region_select_ax = None  # axes the current region-select drag started on
         self._region_select_patch = None  # the live rubber-band axvspan, redrawn every motion tick
@@ -1706,6 +1722,71 @@ class MplCanvas(QWidget):
             self.canvas.draw_idle()
         if changed:
             self.crosshairEnabledChanged.emit(enabled)
+
+    def crosshair_style(self) -> tuple[str, float]:
+        """``(colour, line width in points)`` of the crosshair."""
+        return self._crosshair_color, self._crosshair_width
+
+    def set_crosshair_style(self, color=None, linewidth=None) -> None:
+        """Change the crosshair's colour and/or line width. ``None``
+        leaves that one as it is. Any matplotlib colour is accepted
+        (name, ``#rrggbb``, grey level as a string); a colour matplotlib
+        cannot read, or a width outside :attr:`CROSSHAIR_WIDTH_RANGE`,
+        is ignored rather than raised, so a stale saved setting can
+        never stop a plot from drawing.
+
+        A live crosshair is dropped, not edited: it is recreated, with
+        the new style, by the next mouse move (see
+        :meth:`_ensure_crosshair`), which is also how it survives every
+        figure rebuild."""
+        if color is not None:
+            color = str(color)
+            if matplotlib.colors.is_color_like(color):
+                self._crosshair_color = color
+        if linewidth is not None:
+            try:
+                width = float(linewidth)
+            except (TypeError, ValueError):
+                width = float("nan")
+            lo, hi = self.CROSSHAIR_WIDTH_RANGE
+            if lo <= width <= hi:
+                self._crosshair_width = width
+        if self._crosshair is not None:
+            self._remove_crosshair()
+            self.canvas.draw_idle()
+
+    def reset_crosshair_style(self) -> None:
+        self.set_crosshair_style(self.DEFAULT_CROSSHAIR_COLOR, self.DEFAULT_CROSSHAIR_WIDTH)
+
+    def _on_crosshair_button_menu(self, pos) -> None:
+        """Right-click on the Crosshair button: colour, line width,
+        reset. The choice is emitted (not applied here) so that every
+        plot changes together and it is remembered."""
+        menu = QMenu(self._crosshair_button)
+        colour_action = menu.addAction("Colour…")
+        width_action = menu.addAction("Line width…")
+        menu.addSeparator()
+        reset_action = menu.addAction("Reset to default")
+        chosen = menu.exec(self._crosshair_button.mapToGlobal(pos))
+        color, width = self.crosshair_style()
+        if chosen is colour_action:
+            from PySide6.QtGui import QColor
+            picked = QColorDialog.getColor(
+                QColor(matplotlib.colors.to_hex(color)), self, "Crosshair colour")
+            if picked.isValid():
+                color = picked.name()
+        elif chosen is width_action:
+            lo, hi = self.CROSSHAIR_WIDTH_RANGE
+            value, ok = QInputDialog.getDouble(
+                self, "Crosshair line width", "Line width (points):", width, lo, hi, 2)
+            if ok:
+                width = value
+        elif chosen is reset_action:
+            color, width = self.DEFAULT_CROSSHAIR_COLOR, self.DEFAULT_CROSSHAIR_WIDTH
+        else:
+            return
+        self.set_crosshair_style(color, width)
+        self.crosshairStyleChanged.emit(*self.crosshair_style())
 
     def set_measurement_mode(self, enabled: bool) -> None:
         """Toggle measurement mode: while on, clicking two points on
@@ -3262,7 +3343,7 @@ class MplCanvas(QWidget):
             self.canvas, self.ax, self._proj_axes.get("f1"), self._proj_axes.get("f2"),
             self.toolbar, stack_axes=self._compare_axes,
             panel_axes=self._panel_axes if len(self._panel_axes) > 1 else None,
-            color="0.35", linewidth=0.8, linestyle="--",
+            color=self._crosshair_color, linewidth=self._crosshair_width, linestyle="--",
         )
 
     def _projection_intensity_limits(self) -> dict:
@@ -7149,6 +7230,15 @@ class MplCanvas(QWidget):
         returns to the full fit window (the natural view is recorded
         again for the new Axes)."""
         previous_overlay = self._slice_fit_overlay
+        # Only a redraw of *this same fit* (a component-style or Plot
+        # Style change, which passes ``_keep_view`` itself) carries its
+        # overlay over. A new fit that merely keeps the zoom
+        # (``keep_zoom``) brings its own overlay -- or none. It used to
+        # inherit the previous one whenever the zoom was kept, so the
+        # grey "Not fitted" shading of a several-range fit stayed on
+        # after the next fit used one range or the whole spectrum
+        # (reported 2026-10-21).
+        redraw_of_same_fit = bool(_keep_view)
         if keep_zoom and not _keep_view and self._slice_fit_zoom_to_keep(x):
             _keep_view = True
         self._enter_plot_kind("1d")   # its saved default style (Plot Style ▸ Per-type)
@@ -7207,7 +7297,7 @@ class MplCanvas(QWidget):
         self._crosshair_ready = True
         self._apply_layout()
         self._slice_fit_overlay = overlay if overlay is not None else (
-            previous_overlay if _keep_view else None)
+            previous_overlay if redraw_of_same_fit else None)
         self.draw_slice_fit_overlay()
         self.canvas.draw_idle()
         self.fitComponentsShown.emit(list(self._slice_fit_labels))

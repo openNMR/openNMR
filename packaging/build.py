@@ -89,19 +89,60 @@ def _fix_qt_plugins() -> None:
     PyInstaller collected sidesteps the mismatch entirely, regardless
     of why its own collection picked the wrong one."""
     import PySide6
-    import shutil
 
     source_plugins = os.path.join(os.path.dirname(PySide6.__file__), "Qt", "plugins")
-    if not os.path.isdir(source_plugins):
-        return
+    sync_qt_plugins(DIST_DIR, source_plugins)
 
-    for root, dirs, _files in os.walk(DIST_DIR):
-        if os.path.basename(root) == "PySide6" and "Qt" in dirs:
-            bundled_plugins = os.path.join(root, "Qt", "plugins")
-            if os.path.isdir(bundled_plugins):
-                print(f"Re-syncing Qt plugins: {bundled_plugins}")
-                shutil.rmtree(bundled_plugins)
-                shutil.copytree(source_plugins, bundled_plugins)
+
+def sync_qt_plugins(dist_dir: str, source_plugins: str) -> list[str]:
+    """Replace every bundled ``PySide6/Qt/plugins`` under *dist_dir* with a
+    copy of *source_plugins*; return the real directories that were synced.
+
+    Symlinks are resolved rather than removed: inside a macOS ``.app``
+    PyInstaller keeps the real files in ``Contents/Frameworks`` and
+    leaves symlinks to them under ``Contents/Resources``.
+    ``shutil.rmtree`` refuses to run on a symlink ("Cannot call rmtree
+    on a symbolic link"), which broke the 0.3.0 macOS CI build. Each real
+    directory is synced once, so a link and its target are not handled
+    twice, and a dangling link is skipped."""
+    import shutil
+
+    if not os.path.isdir(source_plugins):
+        return []
+
+    synced: list[str] = []
+    seen: set[str] = set()
+    for root, dirs, _files in os.walk(dist_dir):
+        if os.path.basename(root) != "PySide6" or "Qt" not in dirs:
+            continue
+        bundled = os.path.join(root, "Qt", "plugins")
+        if not os.path.isdir(bundled):  # follows links; False if dangling
+            continue
+        target = os.path.realpath(bundled)
+        if target in seen:
+            continue
+        seen.add(target)
+        print(f"Re-syncing Qt plugins: {bundled}"
+              + (f" -> {target}" if target != os.path.abspath(bundled) else ""))
+        shutil.rmtree(target)
+        shutil.copytree(source_plugins, target)
+        synced.append(target)
+    return synced
+
+
+def _resign_macos_app() -> None:
+    """Re-apply an ad-hoc signature to the ``.app`` after the plugin
+    swap: PyInstaller signed the bundle before ``_fix_qt_plugins`` changed
+    files inside it, and an invalid seal makes arm64 macOS kill the app."""
+    if not sys.platform.startswith("darwin"):
+        return
+    import subprocess
+
+    app = os.path.join(DIST_DIR, "opennmr.app")
+    if os.path.isdir(app):
+        subprocess.run(
+            ["codesign", "--force", "--deep", "--sign", "-", app], check=False
+        )
 
 
 def main() -> int:
@@ -149,6 +190,7 @@ def main() -> int:
     print(f"Building opennmr for {sys.platform}...")
     PyInstaller.__main__.run(args)
     _fix_qt_plugins()
+    _resign_macos_app()
     print(f"Done -- see {DIST_DIR}")
     return 0
 
