@@ -282,7 +282,10 @@ def vocs_sum(spectra: list[NMRSpectrum], pulse: str = "P1", npoints: int = 16384
     real choice.
 
     Returns ``"slices"`` (each input weighted, for plotting the
-    parts), ``"ppm"`` (common axis), ``"vocs_sum"`` (the composite),
+    parts), ``"ppm"`` (common axis), ``"vocs_sum"`` (the composite) and
+    ``"vocs_sum_imag"`` (its imaginary partner, summed the same way, so
+    the composite can be phased; ``"imag_rebuilt"`` flags the inputs
+    whose imaginary part had to be rebuilt by a Hilbert transform),
     ``"interpolated_slices"`` (the weighted inputs on the common
     axis), ``"weight"`` (``sum(w_i ** 2)``, the coverage -- its own
     flatness is the diagnostic for whether the offsets tile the range),
@@ -304,11 +307,30 @@ def vocs_sum(spectra: list[NMRSpectrum], pulse: str = "P1", npoints: int = 16384
         return f(ppm_common)
 
     numerator = np.zeros(npoints)
+    numerator_imag = np.zeros(npoints)
+    imag_rebuilt = []
     coverage = np.zeros(npoints)
     for spectrum in spectra:
         ppm = spectrum.axis_values(0, "ppm")
         weight = _profile_for(spectrum, pulse, window_filter)
         numerator += _onto_common(ppm, np.asarray(spectrum.data, dtype=float) * weight)
+        # The imaginary part is weighted and summed exactly as the real
+        # one is -- the weight is a real number, so the sum stays a
+        # complex spectrum and can be phased and baseline-corrected
+        # afterwards. Without it the sum had no imaginary part at all
+        # and the Process controls were switched off for it (reported
+        # 2026-10-21). An input that kept none (read from already-
+        # processed data) contributes its Hilbert partner instead,
+        # which is exact for a spectrum zero-filled to twice its
+        # FID length and a close approximation otherwise.
+        if spectrum.data_imag is not None:
+            imag = np.asarray(spectrum.data_imag, dtype=float)
+            imag_rebuilt.append(False)
+        else:
+            from .ft import hilbert_imaginary
+            imag = hilbert_imaginary(spectrum.data)
+            imag_rebuilt.append(True)
+        numerator_imag += _onto_common(ppm, imag * weight)
         # sum(w**2), which is what the bare sum's own response to a
         # flat spectrum is -- so its peak is the scale factor to remove.
         coverage += _onto_common(ppm, weight ** 2)
@@ -320,6 +342,7 @@ def vocs_sum(spectra: list[NMRSpectrum], pulse: str = "P1", npoints: int = 16384
     # alone rather than raising.
     plateau = float(coverage.max())
     combined = numerator / plateau if plateau > 0 else numerator
+    combined_imag = numerator_imag / plateau if plateau > 0 else numerator_imag
 
     # The individually weighted inputs, for plotting the parts
     # alongside the composite -- same S*w the numerator is built from,
@@ -336,6 +359,8 @@ def vocs_sum(spectra: list[NMRSpectrum], pulse: str = "P1", npoints: int = 16384
         "slices": corrected,
         "ppm": ppm_common,
         "vocs_sum": combined,
+        "vocs_sum_imag": combined_imag,
+        "imag_rebuilt": imag_rebuilt,
         "interpolated_slices": interpolated,
         "weight": coverage,
         "plateau": plateau,

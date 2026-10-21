@@ -21,6 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 
+import matplotlib.colors
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
@@ -99,6 +100,7 @@ from . import data_directory
 from .. import _version
 from . import progress as progress_dialogs
 from . import state_dialog as state_dialogs
+from .pulse_sequence_dialog import ClickableLabel, PulseSequenceDialog
 from .procno_dialog import ProcnoDialog
 from ..processing import diffusion as processing_diffusion
 from ..processing import fitting as processing_fitting
@@ -1227,10 +1229,12 @@ class MainWindow(QMainWindow):
         the cursor belongs on the plot, not here -- the crosshair and
         the measurement readout already own that.
         """
-        self._status_experiment = QLabel("")
+        self._status_experiment = ClickableLabel("")
         self._status_experiment.setToolTip(
-            "The selected experiment: nucleus, size and pulse programme."
+            "The selected experiment: nucleus, size and pulse programme. "
+            "Double-click to see the pulse sequence."
         )
+        self._status_experiment.doubleClicked.connect(self._show_pulse_sequence)
         self._status_session = QLabel("")
         self._status_session.setToolTip("How many spectra are open in this session.")
         bar = self.statusBar()
@@ -1262,7 +1266,9 @@ class MainWindow(QMainWindow):
                 else f"{spectrum.ndim}D")
         bits.append(f"{kind} {'x'.join(str(int(n)) for n in shape)}")
         basis = spectrum.metadata.raw.get("pseudo_2d_basis") if spectrum.ndim == 2 else None
-        self._status_experiment.setToolTip(f"Opened as {basis}." if basis else "")
+        self._status_experiment.setToolTip(
+            (f"Opened as {basis}. " if basis else "")
+            + "Double-click to see the pulse sequence.")
         if spectrum.metadata.pulse_program:
             bits.append(str(spectrum.metadata.pulse_program))
         self._status_experiment.setText("  ·  ".join(bits))
@@ -4057,6 +4063,10 @@ class MainWindow(QMainWindow):
         override_action = menu.addAction("Override nucleus…")
         suggest_action = menu.addAction("Suggest nucleus (500 MHz console / 100 MHz magnet)…")
         mass_action = menu.addAction("Set sample mass…")
+        pulse_sequence_action = menu.addAction("Show Pulse Sequence…")
+        pulse_sequence_action.setToolTip(
+            "The pulse programme drawn as pulses, delays, gradients and decoupling "
+            "(also: double-click its name at the bottom right).")
         procno_action = None
         use_processed_action = None
         if spectrum.metadata.vendor == "bruker":
@@ -4108,6 +4118,8 @@ class MainWindow(QMainWindow):
             self._on_override_nucleus_action(index)
         elif chosen is suggest_action:
             self._on_suggest_nucleus_action(index)
+        elif chosen is pulse_sequence_action:
+            self._show_pulse_sequence(index)
         elif chosen is mass_action:
             self._on_set_mass_action(index)
         elif procno_action is not None and chosen is procno_action:
@@ -4238,6 +4250,29 @@ class MainWindow(QMainWindow):
         """Show the proc-number checklist; True if accepted. Its own
         method so tests can answer it."""
         return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _show_pulse_sequence(self, index=None) -> None:
+        """The pulse-sequence viewer for an open experiment (right-click ▸
+        Show Pulse Sequence…, or double-click the programme name at the
+        bottom right). One window, re-used: asking again for another
+        experiment shows that one in it."""
+        if not isinstance(index, int) or isinstance(index, bool):
+            index = self._selected_index()
+        if index is None or not (0 <= index < len(self.session.spectra)):
+            self.statusBar().showMessage("Select an experiment to see its pulse sequence.", 5000)
+            return
+        spectrum = self.session.spectra[index]
+        dialog = getattr(self, "_pulse_sequence_dialog", None)
+        if dialog is None or not dialog.isVisible():
+            dialog = PulseSequenceDialog(spectrum, settings=self._ui_settings,
+                                         save_settings=self._save_ui_settings, parent=self)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+            self._pulse_sequence_dialog = dialog
+        else:
+            dialog.set_spectrum(spectrum)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _choose_procnos(self, path: str, vendor: str = "bruker", preselect=()) -> list[int]:
         """Proc numbers of the Bruker experiment ``path`` as a checklist
@@ -6493,6 +6528,38 @@ class MainWindow(QMainWindow):
             bool(self._ui_settings.get("double_click_reset", True)))
         self.double_click_reset_checkbox.toggled.connect(self._set_double_click_reset)
         interface_form.addRow("Double-click:", self.double_click_reset_checkbox)
+        # Crosshair appearance (explicit user request, 2026-10-21): colour
+        # and line width, here and in the right-click menu of every plot's
+        # Crosshair button. Remembered; applied to every plot.
+        crosshair_row = QWidget()
+        crosshair_row_layout = QHBoxLayout(crosshair_row)
+        crosshair_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.crosshair_colour_button = QPushButton()
+        self.crosshair_colour_button.setToolTip("Colour of the cursor crosshair on every plot.")
+        self.crosshair_colour_button.clicked.connect(self._on_crosshair_colour_clicked)
+        crosshair_row_layout.addWidget(self.crosshair_colour_button)
+        self.crosshair_width_spin = TypedDoubleSpinBox()
+        self.crosshair_width_spin.setRange(*MplCanvas.CROSSHAIR_WIDTH_RANGE)
+        self.crosshair_width_spin.setDecimals(2)
+        self.crosshair_width_spin.setSingleStep(0.1)
+        self.crosshair_width_spin.setSuffix(" pt")
+        self.crosshair_width_spin.setToolTip("Line width of the cursor crosshair on every plot.")
+        self.crosshair_width_spin.valueChanged.connect(self._on_crosshair_width_changed)
+        crosshair_row_layout.addWidget(self.crosshair_width_spin)
+        self.crosshair_style_reset_button = QPushButton("Reset")
+        self.crosshair_style_reset_button.setToolTip("Back to the default crosshair.")
+        self.crosshair_style_reset_button.clicked.connect(
+            lambda _checked=False: self._set_crosshair_style(
+                MplCanvas.DEFAULT_CROSSHAIR_COLOR, MplCanvas.DEFAULT_CROSSHAIR_WIDTH))
+        crosshair_row_layout.addWidget(self.crosshair_style_reset_button)
+        interface_form.addRow("Crosshair:", crosshair_row)
+        for _canvas in self._all_canvases():
+            _canvas.crosshairStyleChanged.connect(
+                lambda color, width: self._set_crosshair_style(color, width))
+        self._set_crosshair_style(
+            self._ui_settings.get("crosshair_color", MplCanvas.DEFAULT_CROSSHAIR_COLOR),
+            self._ui_settings.get("crosshair_width", MplCanvas.DEFAULT_CROSSHAIR_WIDTH),
+            save=False)
         # Export size unit (explicit user request, 2026-10-14): inches
         # by default. Display only -- sizes are kept in inches.
         self.export_unit_combo = QComboBox()
@@ -6916,6 +6983,10 @@ class MainWindow(QMainWindow):
         "advanced": ("Advanced Processing (the whole Adv. Proc. tile)", ("tab:Adv. Proc.",)),
     }
 
+    #: The optional sections that live on the Apply tile. With none of
+    #: them shown the tile has nothing on it, so it is hidden too.
+    APPLY_TILE_SECTIONS = ("enmr", "imaging")
+
     def _apply_section_shown(self, key: str, shown: bool) -> None:
         for name in self.OPTIONAL_SECTIONS[key][1]:
             if name.startswith("tab:"):
@@ -6924,6 +6995,23 @@ class MainWindow(QMainWindow):
             section = getattr(self, name, None)
             if section is not None:
                 section.setVisible(bool(shown))
+        if key in self.APPLY_TILE_SECTIONS:
+            self._refresh_apply_tile()
+
+    def _refresh_apply_tile(self) -> None:
+        """Show the Apply tile (its button and Window-menu entry) only
+        while at least one of its sections -- eNMR, Imaging -- is
+        switched on in Settings; hide it when none is (explicit user
+        request, 2026-10-21), and bring it back when either returns.
+        Read from the sections themselves, not from the saved list, which
+        is updated only after the sections are."""
+        sections = [getattr(self, name, None)
+                    for key in self.APPLY_TILE_SECTIONS
+                    for name in self.OPTIONAL_SECTIONS[key][1]]
+        sections = [section for section in sections if section is not None]
+        if not sections:
+            return
+        self._set_tile_shown("Apply", any(not section.isHidden() for section in sections))
 
     def _set_tile_shown(self, label: str, shown: bool) -> None:
         """Show or hide a whole launcher tile: its button, its Window-menu
@@ -7116,6 +7204,39 @@ class MainWindow(QMainWindow):
         if save:
             self._ui_settings["double_click_reset"] = on
             self._save_ui_settings()
+
+    def _set_crosshair_style(self, color, width, save: bool = True) -> None:
+        """Settings ▸ Interface ▸ Crosshair, or a plot's Crosshair-button
+        menu: colour and line width on every plot; remembered as
+        ``crosshair_color`` / ``crosshair_width``. A value the canvas
+        rejects (a colour matplotlib cannot read, a width outside its
+        range) leaves that part as it was."""
+        for canvas in self._all_canvases():
+            canvas.set_crosshair_style(color, width)
+        color, width = self._all_canvases()[0].crosshair_style()
+        swatch = QColor(matplotlib.colors.to_hex(color))
+        self.crosshair_colour_button.setText(swatch.name())
+        text_colour = "#000000" if swatch.lightness() > 128 else "#ffffff"
+        self.crosshair_colour_button.setStyleSheet(
+            f"background-color: {swatch.name()}; color: {text_colour};")
+        blocked = self.crosshair_width_spin.blockSignals(True)
+        self.crosshair_width_spin.setValue(width)
+        self.crosshair_width_spin.blockSignals(blocked)
+        if save:
+            self._ui_settings["crosshair_color"] = color
+            self._ui_settings["crosshair_width"] = width
+            self._save_ui_settings()
+
+    def _on_crosshair_colour_clicked(self) -> None:
+        color, width = self._all_canvases()[0].crosshair_style()
+        picked = QColorDialog.getColor(
+            QColor(matplotlib.colors.to_hex(color)), self, "Crosshair colour")
+        if picked.isValid():
+            self._set_crosshair_style(picked.name(), width)
+
+    def _on_crosshair_width_changed(self, value: float) -> None:
+        color, _width = self._all_canvases()[0].crosshair_style()
+        self._set_crosshair_style(color, value)
 
     def _set_drag_mode(self, mode: str, save: bool = True) -> None:
         """Settings ▸ Interface ▸ Click and drag: ``"zoom"`` or ``"pan"``,
@@ -22016,8 +22137,17 @@ class MainWindow(QMainWindow):
         axis = NMRAxis(kind="frequency", ppm=result["ppm"],
                         hz=result["ppm"] * ref.metadata.sfo1 if ref.metadata.sfo1 else None)
         metadata = dataclasses.replace(ref.metadata, raw={})
-        combined = NMRSpectrum(data=result["vocs_sum"], axes=[axis], metadata=metadata)
+        # With its imaginary part, so the sum can be phased and baseline-
+        # corrected like any other spectrum (Phase and Baseline are
+        # switched off for a spectrum that has none).
+        combined = NMRSpectrum(data=result["vocs_sum"], axes=[axis], metadata=metadata,
+                               data_imag=result["vocs_sum_imag"])
         self._add_derived_spectrum(combined, f"VOCS sum ({len(stack)} spectra)")
+        rebuilt = sum(bool(flag) for flag in result["imag_rebuilt"])
+        if rebuilt:
+            self.statusBar().showMessage(
+                f"{rebuilt} of {len(stack)} spectra kept no imaginary part, so theirs was rebuilt "
+                "by a Hilbert transform; phase the sum with that in mind.", 10000)
 
     def _build_region_box(self) -> QGroupBox:
         """Integration regions -- the "most basic" way to turn a
